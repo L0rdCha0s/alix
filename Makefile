@@ -4,41 +4,66 @@ LD       := x86_64-elf-ld
 OBJCOPY  := x86_64-elf-objcopy
 QEMU     := qemu-system-x86_64
 
-CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
-          -m64 -mno-red-zone -mgeneral-regs-only -Wall -Wextra -Iinclude
+SRC_DIR     := src
+ARCH_DIR    := $(SRC_DIR)/arch/x86
+KERNEL_DIR  := $(SRC_DIR)/kernel
+DRIVER_DIR  := $(SRC_DIR)/drivers
+INCLUDE_DIR := include
+OBJDIR      := build
 
-STAGE2_OBJS := stage2.o kernel.o console.o serial.o keyboard.o vfs.o libc.o \
-                idt.o interrupts.o timer.o mouse.o video.o
+CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
+          -m64 -mno-red-zone -mgeneral-regs-only -Wall -Wextra -I$(INCLUDE_DIR)
+
+BOOT_SRC    := $(ARCH_DIR)/boot.asm
+STAGE2_SRC  := $(ARCH_DIR)/stage2.asm
+STAGE2_LD   := $(ARCH_DIR)/stage2.ld
+
+C_SOURCES := \
+	$(wildcard $(KERNEL_DIR)/*.c) \
+	$(wildcard $(DRIVER_DIR)/*.c) \
+	$(wildcard $(ARCH_DIR)/*.c)
+
+C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
+
+STAGE2_OBJ := $(OBJDIR)/arch/x86/stage2.o
+STAGE2_OBJS := $(STAGE2_OBJ) $(C_OBJECTS)
+
+BOOT_BIN   := $(OBJDIR)/boot.bin
+STAGE2_ELF := $(OBJDIR)/stage2.elf
+STAGE2_BIN := $(OBJDIR)/stage2.bin
 
 all: os.img
 
-boot.bin: boot.asm
-	$(NASM) -f bin -o $@ $<
-
-stage2.o: stage2.asm
-	$(NASM) -f elf64 -o $@ $<
-
-%.o: %.c
+$(OBJDIR)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-stage2.elf: $(STAGE2_OBJS) stage2.ld
-	$(LD) -nostdlib -T stage2.ld -o $@ $(STAGE2_OBJS)
+$(STAGE2_OBJ): $(STAGE2_SRC)
+	@mkdir -p $(dir $@)
+	$(NASM) -f elf64 -o $@ $<
 
-stage2.bin: stage2.elf
+$(BOOT_BIN): $(BOOT_SRC)
+	@mkdir -p $(dir $@)
+	$(NASM) -f bin -o $@ $<
+
+$(STAGE2_ELF): $(STAGE2_OBJS) $(STAGE2_LD)
+	$(LD) -nostdlib -T $(STAGE2_LD) -o $@ $(STAGE2_OBJS)
+
+$(STAGE2_BIN): $(STAGE2_ELF)
 	$(OBJCOPY) -O binary $< $@
 
 # 1.44MB **floppy/drive** image (NOT an ISO/CD)
-os.img: boot.bin stage2.bin
+os.img: $(BOOT_BIN) $(STAGE2_BIN)
 	@# Create a 1.44MB floppy image
 	dd if=/dev/zero of=$@ bs=512 count=2880 2>/dev/null
-	dd if=boot.bin   of=$@ conv=notrunc 2>/dev/null
-	dd if=stage2.bin of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
+	dd if=$(BOOT_BIN)   of=$@ conv=notrunc 2>/dev/null
+	dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
 
 # Optional: small HDD-style image (no partition table, boots from LBA0 directly)
-hdd.img: boot.bin stage2.bin
+hdd.img: $(BOOT_BIN) $(STAGE2_BIN)
 	dd if=/dev/zero of=$@ bs=1M count=16 2>/dev/null
-	dd if=boot.bin   of=$@ conv=notrunc 2>/dev/null
-	dd if=stage2.bin of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
+	dd if=$(BOOT_BIN)   of=$@ conv=notrunc 2>/dev/null
+	dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
 
 run: os.img
 	$(QEMU) -fda os.img -boot a -no-reboot -serial mon:stdio
@@ -47,5 +72,4 @@ run-hdd: hdd.img
 	$(QEMU) -drive file=hdd.img,format=raw,if=ide -no-reboot -serial mon:stdio
 
 clean:
-	rm -f boot.bin stage2.bin stage2.o stage2.elf \
-	      $(STAGE2_OBJS) os.img hdd.img
+	rm -rf $(OBJDIR) os.img hdd.img
