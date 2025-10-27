@@ -2,4 +2,5 @@
 *.elf
 *.img
 *.ld
+*.log
 

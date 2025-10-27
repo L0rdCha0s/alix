@@ -26,7 +26,12 @@ static const char shift_map[128] = {
 
 static bool read_scancode(uint8_t *code)
 {
-    if ((inb(KBD_STATUS) & 0x01) == 0)
+    uint8_t status = inb(KBD_STATUS);
+    if ((status & 0x01) == 0)
+    {
+        return false;
+    }
+    if ((status & 0x20) != 0)
     {
         return false;
     }

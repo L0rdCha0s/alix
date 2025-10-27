@@ -45,7 +45,16 @@ static bool last_left_down = false;
 static uint64_t last_click_tick = 0;
 static bool logged_first_mouse = false;
 
+#define BACKBUFFER_ADDR 0x0000000000200000ULL
+static uint16_t *backbuffer = (uint16_t *)(uintptr_t)BACKBUFFER_ADDR;
+
 #define VGA_FONT_BYTES 8192
+
+static bool dirty_active = false;
+static int dirty_x0 = 0;
+static int dirty_y0 = 0;
+static int dirty_x1 = 0;
+static int dirty_y1 = 0;
 
 static bool vga_font_saved = false;
 static uint8_t saved_font[VGA_FONT_BYTES];
@@ -107,6 +116,9 @@ static uint8_t vga_seq_read(uint8_t index);
 static void vga_seq_write(uint8_t index, uint8_t value);
 static uint8_t vga_gc_read(uint8_t index);
 static void vga_gc_write(uint8_t index, uint8_t value);
+static void dirty_reset(void);
+static void mark_dirty_rect(int x, int y, int width, int height);
+static void dirty_flush(void);
 static void windows_reset(void);
 static void window_draw(const window_t *win);
 static void windows_draw_all(void);
@@ -114,12 +126,14 @@ static int window_bring_to_front(int index);
 static int window_hit_test(int x, int y);
 static int window_title_hit_test(int x, int y);
 static void window_ensure_inside(window_t *win);
+static void window_get_bounds(const window_t *win, int *x, int *y, int *width, int *height);
+static void window_mark_dirty(const window_t *win);
 static void draw_rect(int x, int y, int width, int height, uint16_t color);
 static void draw_rect_outline(int x, int y, int width, int height, uint16_t color);
 static void draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
 static void draw_char(int x, int y, char c, uint16_t fg, uint16_t bg);
 static void video_draw_scene(void);
-static void window_create_at(int x, int y);
+static int window_create_at(int x, int y);
 static void format_window_title(char *buffer, size_t capacity, int id);
 
 void video_init(void)
@@ -224,17 +238,13 @@ static void video_hw_disable(void)
 
 static void video_clear_background(void)
 {
-    if (!framebuffer)
-    {
-        return;
-    }
     uint16_t color = color_background ? color_background : make_color(0xFF, 0x80, 0x20);
     for (int y = 0; y < VIDEO_HEIGHT; ++y)
     {
-        int offset = y * VIDEO_WIDTH;
+        uint16_t *row = &backbuffer[y * VIDEO_WIDTH];
         for (int x = 0; x < VIDEO_WIDTH; ++x)
         {
-            framebuffer[offset + x] = color;
+            row[x] = color;
         }
     }
 }
@@ -316,7 +326,7 @@ static void cursor_draw(void)
 
 static void draw_rect(int x, int y, int width, int height, uint16_t color)
 {
-    if (!framebuffer || width <= 0 || height <= 0)
+    if (width <= 0 || height <= 0)
     {
         return;
     }
@@ -338,17 +348,17 @@ static void draw_rect(int x, int y, int width, int height, uint16_t color)
 
     for (int row = y0; row < y1; ++row)
     {
-        int offset = row * VIDEO_WIDTH + x0;
+        uint16_t *dst = &backbuffer[row * VIDEO_WIDTH + x0];
         for (int col = x0; col < x1; ++col)
         {
-            framebuffer[offset++] = color;
+            *dst++ = color;
         }
     }
 }
 
 static void draw_rect_outline(int x, int y, int width, int height, uint16_t color)
 {
-    if (!framebuffer || width <= 0 || height <= 0)
+    if (width <= 0 || height <= 0)
     {
         return;
     }
@@ -361,11 +371,6 @@ static void draw_rect_outline(int x, int y, int width, int height, uint16_t colo
 
 static void draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
 {
-    if (!framebuffer)
-    {
-        return;
-    }
-
     unsigned char ch = (unsigned char)c;
     size_t glyph_offset = (size_t)ch * 32;
     if (glyph_offset + FONT_HEIGHT > VGA_FONT_BYTES)
@@ -390,7 +395,7 @@ static void draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
                 continue;
             }
             uint16_t color = (bits & (0x80 >> col)) ? fg : bg;
-            framebuffer[dst_y * VIDEO_WIDTH + dst_x] = color;
+            backbuffer[dst_y * VIDEO_WIDTH + dst_x] = color;
         }
     }
 }
@@ -422,6 +427,99 @@ static void video_draw_scene(void)
 {
     video_clear_background();
     windows_draw_all();
+}
+
+static void dirty_reset(void)
+{
+    dirty_active = false;
+    dirty_x0 = dirty_y0 = 0;
+    dirty_x1 = dirty_y1 = 0;
+}
+
+static void mark_dirty_rect(int x, int y, int width, int height)
+{
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > VIDEO_WIDTH) x1 = VIDEO_WIDTH;
+    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+
+    if (x0 >= x1 || y0 >= y1)
+    {
+        return;
+    }
+
+    if (!dirty_active)
+    {
+        dirty_active = true;
+        dirty_x0 = x0;
+        dirty_y0 = y0;
+        dirty_x1 = x1;
+        dirty_y1 = y1;
+        return;
+    }
+
+    if (x0 < dirty_x0) dirty_x0 = x0;
+    if (y0 < dirty_y0) dirty_y0 = y0;
+    if (x1 > dirty_x1) dirty_x1 = x1;
+    if (y1 > dirty_y1) dirty_y1 = y1;
+}
+
+static void dirty_flush(void)
+{
+    if (!dirty_active || !framebuffer)
+    {
+        return;
+    }
+
+    for (int y = dirty_y0; y < dirty_y1; ++y)
+    {
+        volatile uint16_t *dst = &framebuffer[y * VIDEO_WIDTH + dirty_x0];
+        uint16_t *src = &backbuffer[y * VIDEO_WIDTH + dirty_x0];
+        for (int x = dirty_x0; x < dirty_x1; ++x)
+        {
+            *dst++ = *src++;
+        }
+    }
+
+    dirty_reset();
+}
+
+static void window_get_bounds(const window_t *win, int *x, int *y, int *width, int *height)
+{
+    if (!win || !win->used)
+    {
+        if (x) *x = 0;
+        if (y) *y = 0;
+        if (width) *width = 0;
+        if (height) *height = 0;
+        return;
+    }
+
+    int bx = win->x - WINDOW_BORDER;
+    int by = win->y - WINDOW_BORDER;
+    int bw = win->width + WINDOW_BORDER * 2;
+    int bh = win->height + WINDOW_BORDER * 2;
+
+    if (x) *x = bx;
+    if (y) *y = by;
+    if (width) *width = bw;
+    if (height) *height = bh;
+}
+
+static void window_mark_dirty(const window_t *win)
+{
+    int x, y, w, h;
+    window_get_bounds(win, &x, &y, &w, &h);
+    if (w <= 0 || h <= 0)
+    {
+        return;
+    }
+    mark_dirty_rect(x, y, w, h);
 }
 
 static void windows_reset(void)
@@ -539,15 +637,16 @@ static void window_draw(const window_t *win)
                       color_window_border);
 }
 
-static void window_create_at(int x, int y)
+static int window_create_at(int x, int y)
 {
     if (window_count >= MAX_WINDOWS)
     {
         video_log("window_create_at: max windows reached");
-        return;
+        return -1;
     }
 
-    window_t *win = &windows[window_count];
+    int index = window_count;
+    window_t *win = &windows[index];
     win->used = true;
     win->width = 600;
     win->height = 400;
@@ -558,6 +657,10 @@ static void window_create_at(int x, int y)
     window_ensure_inside(win);
 
     window_count++;
+
+    window_mark_dirty(win);
+
+    return index;
 }
 
 static int window_bring_to_front(int index)
@@ -635,9 +738,12 @@ bool video_enter_mode(void)
     color_window_body = make_color(0xF0, 0xF0, 0xF0);
 
     windows_reset();
+    dirty_reset();
+    mark_dirty_rect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
     video_draw_scene();
+    dirty_flush();
 
-    uint16_t sample = framebuffer ? framebuffer[(VIDEO_WIDTH * VIDEO_HEIGHT) / 2] : 0;
+    uint16_t sample = backbuffer[(VIDEO_WIDTH * VIDEO_HEIGHT) / 2];
     video_log_hex("Sample pixel mid-screen: 0x", sample);
     cursor_x = VIDEO_WIDTH / 2;
     cursor_y = VIDEO_HEIGHT / 2;
@@ -672,6 +778,7 @@ void video_exit_mode(void)
     video_active = false;
     exit_requested = false;
     cursor_has_backup = false;
+    dirty_reset();
     video_log("video mode exited");
 }
 
@@ -687,6 +794,7 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     }
 
     cursor_restore();
+    dirty_reset();
 
     cursor_x += dx;
     cursor_y += dy;
@@ -695,8 +803,6 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     if (cursor_y < 0) cursor_y = 0;
     if (cursor_x > VIDEO_WIDTH - 1) cursor_x = VIDEO_WIDTH - 1;
     if (cursor_y > VIDEO_HEIGHT - 1) cursor_y = VIDEO_HEIGHT - 1;
-
-    bool needs_redraw = false;
 
     bool pressed_edge = left_pressed && !last_left_down;
     bool released_edge = !left_pressed && last_left_down;
@@ -717,25 +823,36 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
             int title_index = window_title_hit_test(cursor_x, cursor_y);
             if (title_index >= 0)
             {
+                window_t before = windows[title_index];
                 int front_index = window_bring_to_front(title_index);
-                dragging_window = front_index;
-                drag_offset_x = cursor_x - windows[front_index].x;
-                drag_offset_y = cursor_y - windows[front_index].y;
-                needs_redraw = (front_index != title_index);
+                if (front_index >= 0)
+                {
+                    window_mark_dirty(&before);
+                    window_mark_dirty(&windows[front_index]);
+                    dragging_window = front_index;
+                    drag_offset_x = cursor_x - windows[front_index].x;
+                    drag_offset_y = cursor_y - windows[front_index].y;
+                }
             }
             else
             {
                 int body_index = window_hit_test(cursor_x, cursor_y);
                 if (body_index >= 0)
                 {
+                    window_t before = windows[body_index];
                     int front_index = window_bring_to_front(body_index);
-                    dragging_window = -1;
-                    needs_redraw = (front_index != body_index);
+                    if (front_index >= 0)
+                    {
+                        window_mark_dirty(&before);
+                        window_mark_dirty(&windows[front_index]);
+                        dragging_window = -1;
+                    }
                 }
                 else
                 {
-                    window_create_at(cursor_x, cursor_y);
-                    needs_redraw = true;
+                    int created = window_create_at(cursor_x, cursor_y);
+                    (void)created;
+                    dragging_window = -1;
                 }
             }
         }
@@ -748,22 +865,23 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     if (left_pressed && dragging_window >= 0 && dragging_window < window_count)
     {
         window_t *win = &windows[dragging_window];
+        window_t old_pos = *win;
         int new_x = cursor_x - drag_offset_x;
         int new_y = cursor_y - drag_offset_y;
-        int old_x = win->x;
-        int old_y = win->y;
         win->x = new_x;
         win->y = new_y;
         window_ensure_inside(win);
-        if (win->x != old_x || win->y != old_y)
+        if (win->x != old_pos.x || win->y != old_pos.y)
         {
-            needs_redraw = true;
+            window_mark_dirty(&old_pos);
+            window_mark_dirty(win);
         }
     }
 
-    if (needs_redraw)
+    if (dirty_active)
     {
         video_draw_scene();
+        dirty_flush();
     }
 
     cursor_draw();
