@@ -4,9 +4,9 @@
 #include "serial.h"
 
 
-#define VFS_MAX_NODES      128
+#define VFS_MAX_NODES      64
 #define VFS_NAME_MAX       32
-#define VFS_FILE_CAPACITY  2048
+#define VFS_FILE_CAPACITY  512
 
 struct vfs_node
 {

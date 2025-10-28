@@ -476,6 +476,12 @@ void kernel_main(void)
     serial_write_hex64(*(uint64_t *)&__bss_start);
     serial_write_string(" bsse=");
     serial_write_hex64((uint64_t)&__bss_end);
+    uintptr_t bss_len = (uintptr_t)(&__bss_end - &__bss_start);
+    serial_write_string(" bssl=");
+    serial_write_hex64(bss_len);
+    *root_addr = 0;
+    serial_write_string(" root_after=");
+    serial_write_hex64(*root_addr);
     serial_write_char('\n');
     serial_write_string(" r-1=");
     serial_write_hex64((uint64_t)vfs_root());

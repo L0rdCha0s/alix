@@ -338,16 +338,6 @@ long_entry:
   mov rdi, __bss_start
   mov rcx, __bss_end
   sub rcx, rdi
-  mov rdx, rcx
-  mov rsi, rdi
-  mov rdi, rsi
-  call serial_write_hex64
-  mov rdi, __bss_end
-  call serial_write_hex64
-  mov rdi, rdx
-  call serial_write_hex64
-  mov edi, 0x0A
-  call serial_write_char
 
   ; emit 'd' after computing rcx
   mov dx, COM1+5
@@ -382,7 +372,11 @@ long_entry:
   mov al, 'B'
   out dx, al
   call vfs_debug_root_storage_address
-  mov rdi, [rax]
+  mov rbx, rax
+  mov rdi, rbx
+  call serial_write_hex64
+  mov qword [rbx], 0
+  mov rdi, [rbx]
   call serial_write_hex64
   mov edi, 0x0A
   call serial_write_char
