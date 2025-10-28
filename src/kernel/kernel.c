@@ -245,6 +245,11 @@ static bool shell_cmd_mkdir(shell_state_t *shell, const char *path)
 static bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *path)
 {
     vfs_node_t *target = NULL;
+
+    serial_write_string("Trying path..\n");
+    serial_write_string(path);
+    serial_write_string("...");
+
     if (!path || *path == '\0')
     {
         target = shell->cwd;
@@ -254,8 +259,11 @@ static bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *
         target = vfs_resolve(shell->cwd, path);
     }
 
+    serial_write_string("In shell command ls\n");
+
     if (!target)
     {
+        serial_write_string("Path not found\n");
         shell_print_error("path not found");
         return false;
     }
@@ -279,7 +287,11 @@ static bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *
 
 static void shell_process_line(shell_state_t *shell, char *buffer)
 {
+    serial_write_string("Hello2!\n");
     char *line = trim_whitespace(buffer);
+    serial_write_string("Command is: \n");
+    serial_write_string(line);
+    serial_write_string("\n");
     if (*line == '\0')
     {
         return;
@@ -344,6 +356,8 @@ static void shell_process_line(shell_state_t *shell, char *buffer)
         }
     }
 
+    serial_write_string("Looking for matching command..\n");
+
     if (strcmp(line, "echo") == 0)
     {
         shell_cmd_echo(&output, args);
@@ -368,6 +382,7 @@ static void shell_process_line(shell_state_t *shell, char *buffer)
     }
     else if (strcmp(line, "ls") == 0)
     {
+        serial_write_string("It's ls!\n");
         shell_cmd_ls(shell, &output, args);
     }
     else if (strcmp(line, "start_video") == 0)
@@ -461,7 +476,6 @@ void kernel_main(void)
     serial_write_char('S');
     /* Ensure the first prompt is visible even if prior logs scrolled */
     serial_write_string("\r\n> ");
-    console_write("\n> ");
 
     shell_state_t shell = { .cwd = vfs_root() };
     char input[INPUT_CAPACITY];
@@ -470,7 +484,9 @@ void kernel_main(void)
     {
         shell_print_prompt();
         size_t len = cli_read_line(input, INPUT_CAPACITY);
-        (void)len;
+        serial_write_string("Hello!");
+        console_write("Hello!");
+        // (void)len;
         shell_process_line(&shell, input);
         rtl8139_poll();
     }

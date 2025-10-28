@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include "vfs.h"
 #include "libc.h"
+#include "serial.h"
+
 
 #define VFS_MAX_NODES      128
 #define VFS_NAME_MAX       32
@@ -142,6 +144,7 @@ static void copy_name(char *dst, const char *src)
 
 static vfs_node_t *resolve_node(vfs_node_t *cwd, const char *path)
 {
+    serial_write_string("Going into resolve_node..\n");
     if (!path || !*path)
     {
         return cwd;
@@ -265,6 +268,7 @@ vfs_node_t *vfs_root(void)
 
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
 {
+    serial_write_string("In vfs_resolve..\n");
     return resolve_node(cwd ? cwd : root, path);
 }
 
