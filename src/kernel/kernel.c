@@ -12,6 +12,9 @@
 #include "hwinfo.h"
 #include "rtl8139.h"
 
+extern uint8_t __bss_start;
+extern uint8_t __bss_end;
+
 #define INPUT_CAPACITY 256
 
 static void serial_emit_char(char c);
@@ -246,8 +249,14 @@ static bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *
 {
     vfs_node_t *target = NULL;
 
+    serial_write_char('{');
+    serial_write_hex64((uint64_t)shell);
+    serial_write_char('/');
+    serial_write_hex64((uint64_t)shell->cwd);
+    serial_write_char('}');
+
     serial_write_string("Trying path..\n");
-    serial_write_string(path);
+    // serial_write_string(path);
     serial_write_string("...");
 
     if (!path || *path == '\0')
@@ -273,6 +282,7 @@ static bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *
         return false;
     }
 
+    serial_write_string("In shell command ls 2\n");
     for (vfs_node_t *child = vfs_first_child(target); child; child = vfs_next_sibling(child))
     {
         shell_output_write(out, vfs_name(child));
@@ -290,7 +300,7 @@ static void shell_process_line(shell_state_t *shell, char *buffer)
     serial_write_string("Hello2!\n");
     char *line = trim_whitespace(buffer);
     serial_write_string("Command is: \n");
-    serial_write_string(line);
+    // serial_write_string(line);
     serial_write_string("\n");
     if (*line == '\0')
     {
@@ -445,16 +455,59 @@ static void shell_print_prompt(void)
 
 void kernel_main(void)
 {
+    uintptr_t root_storage = vfs_debug_root_storage_address();
+    serial_write_string(" root_addr=");
+    serial_write_hex64(root_storage);
+    uint64_t *root_addr = (uint64_t *)root_storage;
+    uint64_t *root_addr_prev = (uint64_t *)(root_storage - 8);
+    uint64_t *root_addr_next = (uint64_t *)(root_storage + 8);
+    serial_write_string(" raw-=");
+    serial_write_hex64(*root_addr_prev);
+    serial_write_string(" raw=");
+    serial_write_hex64(*root_addr);
+    serial_write_string(" raw+=");
+    serial_write_hex64(*root_addr_next);
+    uint64_t *bss_start_probe = (uint64_t *)0x0000000000071280ULL;
+    serial_write_string(" start=");
+    serial_write_hex64(*bss_start_probe);
+    serial_write_string(" bssa=");
+    serial_write_hex64((uint64_t)&__bss_start);
+    serial_write_string(" bssv=");
+    serial_write_hex64(*(uint64_t *)&__bss_start);
+    serial_write_string(" bsse=");
+    serial_write_hex64((uint64_t)&__bss_end);
+    serial_write_char('\n');
+    serial_write_string(" r-1=");
+    serial_write_hex64((uint64_t)vfs_root());
+    serial_write_char('\n');
     serial_init();
+    serial_write_string(" r0=");
+    serial_write_hex64((uint64_t)vfs_root());
+    serial_write_char('\n');
     keyboard_init();
+    serial_write_string(" r1=");
+    serial_write_hex64((uint64_t)vfs_root());
+    serial_write_char('\n');
     console_init();
+    serial_write_string(" r2=");
+    serial_write_hex64((uint64_t)vfs_root());
+    serial_write_char('\n');
     console_clear();
+    serial_write_string(" r3=");
+    serial_write_hex64((uint64_t)vfs_root());
+    serial_write_char('\n');
     serial_write_char('k');
     hwinfo_print_boot_summary();
+    serial_write_string(" r4=");
+    serial_write_hex64((uint64_t)vfs_root());
+    serial_write_char('\n');
     serial_write_char('h');
     /* Defer video_init until start_video to avoid touching VGA state here */
     serial_write_char('v');
     vfs_init();
+    serial_write_char('Q');
+    serial_write_hex64((uint64_t)vfs_root());
+    serial_write_char('\n');
     serial_write_char('f');
     interrupts_init();
     serial_write_char('I');
@@ -479,15 +532,19 @@ void kernel_main(void)
 
     shell_state_t shell = { .cwd = vfs_root() };
     char input[INPUT_CAPACITY];
-
-    while (1)
-    {
+    // while (1)
+    // {
+        serial_write_char('[');
+        serial_write_hex64((uint64_t)&shell);
+        serial_write_char('/');
+        serial_write_hex64((uint64_t)shell.cwd);
+        serial_write_char(']');
         shell_print_prompt();
-        size_t len = cli_read_line(input, INPUT_CAPACITY);
+        // size_t len = cli_read_line(input, INPUT_CAPACITY);
         serial_write_string("Hello!");
         console_write("Hello!");
         // (void)len;
-        shell_process_line(&shell, input);
+        shell_process_line(&shell, "ls");
         rtl8139_poll();
-    }
+    // }
 }

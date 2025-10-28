@@ -27,6 +27,9 @@ section .start16
   extern kernel_main
   extern __bss_start
   extern __bss_end
+  extern vfs_debug_root_storage_address
+  extern serial_write_hex64
+  extern serial_write_char
 
 start16:
   cli
@@ -331,9 +334,20 @@ long_entry:
 
   ; Zero .bss so C code starts with clean globals.
   ; Use absolute addresses rather than RIP-relative LEA math for clarity.
+  cld
   mov rdi, __bss_start
   mov rcx, __bss_end
   sub rcx, rdi
+  mov rdx, rcx
+  mov rsi, rdi
+  mov rdi, rsi
+  call serial_write_hex64
+  mov rdi, __bss_end
+  call serial_write_hex64
+  mov rdi, rdx
+  call serial_write_hex64
+  mov edi, 0x0A
+  call serial_write_char
 
   ; emit 'd' after computing rcx
   mov dx, COM1+5
@@ -367,6 +381,11 @@ long_entry:
   mov dx, COM1
   mov al, 'B'
   out dx, al
+  call vfs_debug_root_storage_address
+  mov rdi, [rax]
+  call serial_write_hex64
+  mov edi, 0x0A
+  call serial_write_char
 
   call kernel_main
 

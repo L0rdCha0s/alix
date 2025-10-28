@@ -75,9 +75,12 @@ run: os.img
 	$(QEMU) -fda os.img -boot a -no-reboot -monitor none -serial stdio \
 		-netdev user,id=n0 -device rtl8139,netdev=n0
 
+QEMU_DEBUG_LOG ?= qemu-debug.log
+QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
+
 run-hdd: hdd.img
 	$(QEMU) -drive file=hdd.img,format=raw,if=ide -no-reboot -monitor none -serial stdio \
-		-netdev user,id=n0 -device rtl8139,netdev=n0
+		$(QEMU_DEBUG_FLAGS) -netdev user,id=n0 -device rtl8139,netdev=n0 
 
 clean:
 	rm -rf $(OBJDIR) os.img hdd.img

@@ -4,6 +4,8 @@
 
 #define COM1 0x3F8
 
+static const uint64_t CANONICAL_MASK = 0xFFFF800000000000ULL;
+
 static int serial_transmit_ready(void)
 {
     return (inb(COM1 + 5) & 0x20) != 0;
@@ -33,8 +35,43 @@ void serial_write_char(char c)
     outb(COM1, (uint8_t)c);
 }
 
+void serial_write_hex64(uint64_t v)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    for (int shift = 60; shift >= 0; shift -= 4)
+    {
+        serial_write_char(hex[(v >> shift) & 0xF]);
+    }
+}
+
+static bool is_canonical(uint64_t addr)
+{
+    uint64_t mask = addr & CANONICAL_MASK;
+    return mask == 0 || mask == CANONICAL_MASK;
+}
+
 void serial_write_string(const char *s)
 {
+    if (!s)
+    {
+        return;
+    }
+
+    uint64_t addr = (uint64_t)s;
+    if (!is_canonical(addr))
+    {
+        serial_write_char('!');
+        serial_write_hex64(addr);
+        serial_write_char('@');
+        uint64_t ret = (uint64_t)__builtin_return_address(0);
+        serial_write_hex64(ret);
+        serial_write_char('\n');
+        for (;;)
+        {
+            __asm__ volatile ("hlt");
+        }
+    }
+
     size_t len = strlen(s);
     for (size_t i = 0; i < len; ++i)
     {

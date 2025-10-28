@@ -55,6 +55,9 @@ static vfs_node_t *vfs_alloc_node(void)
             nodes[i].next_sibling = NULL;
             nodes[i].parent = NULL;
             nodes[i].name[0] = '\0';
+            serial_write_char('A');
+            serial_write_hex64((uint64_t)&nodes[i]);
+            serial_write_char('\n');
             return &nodes[i];
         }
     }
@@ -144,7 +147,7 @@ static void copy_name(char *dst, const char *src)
 
 static vfs_node_t *resolve_node(vfs_node_t *cwd, const char *path)
 {
-    serial_write_string("Going into resolve_node..\n");
+    serial_write_char('1');
     if (!path || !*path)
     {
         return cwd;
@@ -251,13 +254,51 @@ void vfs_init(void)
         vfs_zero_node(&nodes[i]);
     }
 
-    root = vfs_alloc_node();
+    serial_write_char('Z');
+    for (int i = 0; i < 8; ++i)
+    {
+        uint8_t byte = ((uint8_t *)&nodes[0])[i];
+        static const char hex[] = "0123456789ABCDEF";
+        serial_write_char(hex[(byte >> 4) & 0xF]);
+        serial_write_char(hex[byte & 0xF]);
+    }
+    serial_write_char('\n');
+
+    serial_write_char('U');
+    serial_write_hex64((uint64_t)root);
+    serial_write_char('\n');
+    vfs_node_t *node = vfs_alloc_node();
+    serial_write_char('N');
+    serial_write_hex64((uint64_t)node);
+    serial_write_char('\n');
+    root = node;
+    serial_write_char('0');
+    serial_write_hex64((uint64_t)root);
+    serial_write_char('\n');
+    root = (vfs_node_t *)0x12345678ULL;
+    serial_write_char('1');
+    serial_write_hex64((uint64_t)root);
+    serial_write_char('\n');
+    root = node;
+    serial_write_char('B');
+    static const char hex[] = "0123456789ABCDEF";
+    uint8_t *root_bytes = (uint8_t *)&root;
+    for (int i = 0; i < 8; ++i)
+    {
+        uint8_t byte = root_bytes[i];
+        serial_write_char(hex[(byte >> 4) & 0xF]);
+        serial_write_char(hex[byte & 0xF]);
+    }
+    serial_write_char('\n');
     if (root)
     {
         root->is_dir = true;
         root->parent = NULL;
         root->name[0] = '/';
         root->name[1] = '\0';
+        serial_write_char('R');
+        serial_write_hex64((uint64_t)root);
+        serial_write_char('\n');
     }
 }
 
@@ -268,7 +309,6 @@ vfs_node_t *vfs_root(void)
 
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
 {
-    serial_write_string("In vfs_resolve..\n");
     return resolve_node(cwd ? cwd : root, path);
 }
 
@@ -416,14 +456,24 @@ const char *vfs_name(const vfs_node_t *node)
 
 vfs_node_t *vfs_first_child(vfs_node_t *dir)
 {
+    serial_write_char('3');
     if (!dir || !dir->is_dir)
     {
+        serial_write_char('4');
         return NULL;
     }
+
+    serial_write_char('5');
     return dir->first_child;
 }
 
 vfs_node_t *vfs_next_sibling(vfs_node_t *node)
 {
+    serial_write_char('6');
     return node ? node->next_sibling : NULL;
+}
+
+uintptr_t vfs_debug_root_storage_address(void)
+{
+    return (uintptr_t)&root;
 }
