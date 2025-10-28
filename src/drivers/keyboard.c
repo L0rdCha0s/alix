@@ -1,10 +1,5 @@
-#define KBD_DEBUG 1
-
 #include "keyboard.h"
 #include "io.h"
-#if KBD_DEBUG
-#include "serial.h"
-#endif
 
 #define KBD_STATUS 0x64
 #define KBD_DATA   0x60
@@ -33,19 +28,6 @@ static char shift_map[128] = {
     0
 };
 
-#if KBD_DEBUG
-static void log_scancode(uint8_t value)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    serial_write_char('[');
-    serial_write_char(hex[(value >> 4) & 0xF]);
-    serial_write_char(hex[value & 0xF]);
-    serial_write_char(']');
-}
-#else
-static inline void log_scancode(uint8_t value) { (void)value; }
-#endif
-
 static bool read_scancode(uint8_t *code)
 {
     uint8_t status = inb(KBD_STATUS);
@@ -73,11 +55,6 @@ static void keyboard_reset_state(void)
     while (read_scancode(&discard))
     {
     }
-#if KBD_DEBUG
-    serial_write_char('<');
-    serial_write_char('R');
-    serial_write_char('>');
-#endif
 }
 
 void keyboard_init(void)
@@ -92,7 +69,8 @@ bool keyboard_try_read(char *out_char)
     {
         return false;
     }
-    log_scancode(scancode);
+
+    bool keypad_enter = false;
 
     if (scancode == 0xE0)
     {
@@ -106,7 +84,14 @@ bool keyboard_try_read(char *out_char)
     if (extended_code_pending)
     {
         extended_code_pending = 0;
-        /* Ignore extended-key prefixes for now. */
+        if (scancode == 0x1C)
+        {
+            keypad_enter = true;
+        }
+        else
+        {
+            /* Ignore other extended-key prefixes for now. */
+        }
     }
 
     if (scancode == 0x2A)
@@ -131,14 +116,6 @@ bool keyboard_try_read(char *out_char)
         return false;
     }
 
-#if KBD_DEBUG
-    serial_write_char('{');
-    serial_write_char(left_shift_pressed ? 'L' : 'l');
-    serial_write_char(right_shift_pressed ? 'R' : 'r');
-    serial_write_char(caps_lock_enabled ? 'C' : 'c');
-    serial_write_char('}');
-#endif
-
     bool shift_active = (left_shift_pressed | right_shift_pressed) != 0;
     char base = normal_map[scancode];
     if (base == 0)
@@ -155,6 +132,10 @@ bool keyboard_try_read(char *out_char)
             char shifted = shift_map[scancode];
             ch = (shifted != 0) ? shifted : (char)(base - ('a' - 'A'));
         }
+    }
+    else if (keypad_enter)
+    {
+        ch = '\n';
     }
     else if (shift_active)
     {
