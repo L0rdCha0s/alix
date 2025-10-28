@@ -6,6 +6,18 @@
 #include "types.h"
 #include <stddef.h>
 
+#define E820_STORAGE_PHYS   ((uintptr_t)0x00008000)
+#define E820_MAX_ENTRIES    64
+#define E820_ENTRY_SIZE     24
+
+typedef struct
+{
+    uint64_t base;
+    uint64_t length;
+    uint32_t type;
+    uint32_t attr;
+} __attribute__((packed)) e820_entry_t;
+
 typedef struct
 {
     char vendor[13];
@@ -15,6 +27,8 @@ typedef struct
     uint32_t bus_mhz;
 } cpu_info_t;
 
+static e820_entry_t g_e820[E820_MAX_ENTRIES];
+static uint32_t g_e820_count = 0;
 static cpu_info_t g_cpu_info;
 
 static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
@@ -123,6 +137,26 @@ static void append_hex(char *buffer, size_t *index, size_t capacity, uint64_t va
     buffer[*index] = '\0';
 }
 
+static void load_e820(void)
+{
+    volatile uint16_t *count_ptr = (volatile uint16_t *)E820_STORAGE_PHYS;
+    uint32_t count = (uint32_t)(*count_ptr);
+    if (count > E820_MAX_ENTRIES)
+    {
+        count = E820_MAX_ENTRIES;
+    }
+    volatile const uint8_t *entry_bytes = (volatile const uint8_t *)(E820_STORAGE_PHYS + 4);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        volatile const e820_entry_t *src = (volatile const e820_entry_t *)(entry_bytes + (i * E820_ENTRY_SIZE));
+        g_e820[i].base = src->base;
+        g_e820[i].length = src->length;
+        g_e820[i].type = src->type;
+        g_e820[i].attr = src->attr;
+    }
+    g_e820_count = count;
+}
+
 static void query_cpu(void)
 {
     uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
@@ -169,8 +203,60 @@ static void query_cpu(void)
     }
 }
 
-/* E820 memory map code removed for bring-up; keep boot summary focused
-   on CPU and PCI only. */
+static uint64_t total_usable_bytes(void)
+{
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < g_e820_count; ++i)
+    {
+        if (g_e820[i].type == 1)
+        {
+            total += g_e820[i].length;
+        }
+    }
+    return total;
+}
+
+static uint64_t total_physical_bytes(void)
+{
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < g_e820_count; ++i)
+    {
+        total += g_e820[i].length;
+    }
+    return total;
+}
+
+static void log_memory_summary(void)
+{
+    if (g_e820_count == 0)
+    {
+        log_dual_line("  RAM: (no E820 entries)");
+        return;
+    }
+
+    uint64_t usable = total_usable_bytes();
+    uint64_t total = total_physical_bytes();
+    uint64_t usable_mib = usable / (1024ULL * 1024ULL);
+    uint64_t total_mib = total / (1024ULL * 1024ULL);
+
+    char line[160];
+    size_t idx = 0;
+    append_text(line, &idx, sizeof(line), "  RAM: ");
+    append_decimal(line, &idx, sizeof(line), usable_mib);
+    append_text(line, &idx, sizeof(line), " MiB usable");
+    if (total_mib > usable_mib)
+    {
+        append_text(line, &idx, sizeof(line), " / ");
+        append_decimal(line, &idx, sizeof(line), total_mib);
+        append_text(line, &idx, sizeof(line), " MiB total");
+    }
+    append_text(line, &idx, sizeof(line), " (E820 entries: ");
+    append_decimal(line, &idx, sizeof(line), g_e820_count);
+    append_char(line, &idx, sizeof(line), ')');
+    log_dual_line(line);
+
+    /* Keep bring-up quiet: omit per-entry E820 dump for now. */
+}
 
 static void log_cpu_summary(void)
 {
@@ -293,11 +379,13 @@ static void log_pci_devices(void)
 
 void hwinfo_print_boot_summary(void)
 {
+    load_e820();
     query_cpu();
 
     log_dual_line("");
     log_dual_line("Hardware summary:");
     log_cpu_summary();
+    log_memory_summary();
     log_pci_devices();
     log_dual_line("");
 }

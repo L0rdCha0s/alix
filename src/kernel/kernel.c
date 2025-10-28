@@ -15,16 +15,6 @@
 #define INPUT_CAPACITY 256
 
 static void serial_emit_char(char c);
-static void serial_write_hex64(uint64_t v)
-{
-    for (int i = 15; i >= 0; --i)
-    {
-        uint8_t nib = (uint8_t)((v >> (i * 4)) & 0xF);
-        char ch = (nib < 10) ? (char)('0' + nib) : (char)('A' + (nib - 10));
-        serial_write_char(ch);
-    }
-}
-/* debug helper removed */
 
 typedef struct
 {
@@ -334,6 +324,14 @@ static void shell_process_line(shell_state_t *shell, char *buffer)
         args = trim_whitespace(cursor);
     }
 
+    for (char *p = line; *p; ++p)
+    {
+        if (*p >= 'A' && *p <= 'Z')
+        {
+            *p = (char)(*p + ('a' - 'A'));
+        }
+    }
+
     shell_output_t output;
     shell_output_init_console(&output);
 
@@ -426,11 +424,8 @@ static void shell_process_line(shell_state_t *shell, char *buffer)
 
 static void shell_print_prompt(void)
 {
-    /* Avoid string literals during early bring-up. */
-    console_putc('>');
-    console_putc(' ');
-    serial_emit_char('>');
-    serial_emit_char(' ');
+    console_write("> ");
+    serial_write_string("> ");
 }
 
 void kernel_main(void)
@@ -452,33 +447,25 @@ void kernel_main(void)
     serial_write_char('T');
 
     /* Network init deferred until after CLI is up */
-    // rtl8139_init();
-    // serial_write_char('N');
+    rtl8139_init();
+    serial_write_char('N');
     /* Defer mouse listener + streaming until graphics mode */
     serial_write_char('m');
     serial_write_char('E'); /* before enabling */
     interrupts_enable();
     serial_write_char('e'); /* after enabling */
+    rtl8139_poll();
 
-
-    /* Emit a simple banner. Also exercise .rodata by printing a literal. */
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, start_video.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, start_video.\r\n");
     serial_write_char('S');
-    const char *rt = " RODATA TEST ";
-    serial_write_char(' ');
-    serial_write_char('[');
-    serial_write_hex64((uint64_t)(uintptr_t)rt);
-    serial_write_char(']');
-    serial_write_char(' ');
-    for (const char *p = rt; *p; ++p) { serial_emit_char(*p); }
-    serial_emit_char('\n');
-    const char msg[] = { 'S','h','e','l','l',' ','r','e','a','d','y','\0' };
-    for (size_t i = 0; msg[i]; ++i) { console_putc(msg[i]); serial_emit_char(msg[i]); }
-    console_putc('\n'); serial_emit_char('\n');
+    /* Ensure the first prompt is visible even if prior logs scrolled */
+    serial_write_string("\r\n> ");
+    console_write("\n> ");
 
     shell_state_t shell = { .cwd = vfs_root() };
     char input[INPUT_CAPACITY];
 
-        serial_write_char('L');
     while (1)
     {
         shell_print_prompt();

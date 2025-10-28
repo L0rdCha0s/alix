@@ -4,7 +4,10 @@
 #define KBD_STATUS 0x64
 #define KBD_DATA   0x60
 
-static bool shift_pressed = false;
+static bool left_shift_pressed = false;
+static bool right_shift_pressed = false;
+static bool caps_lock_enabled = false;
+static bool extended_code_pending = false;
 
 /* Place key maps in .data, not .rodata, to avoid early-rodata issues */
 static char normal_map[128] = {
@@ -42,7 +45,10 @@ static bool read_scancode(uint8_t *code)
 
 void keyboard_init(void)
 {
-    shift_pressed = false;
+    left_shift_pressed = false;
+    right_shift_pressed = false;
+    caps_lock_enabled = false;
+    extended_code_pending = false;
 }
 
 bool keyboard_try_read(char *out_char)
@@ -53,12 +59,35 @@ bool keyboard_try_read(char *out_char)
         return false;
     }
 
+    if (scancode == 0xE0)
+    {
+        extended_code_pending = true;
+        return false;
+    }
+
     bool released = (scancode & 0x80) != 0;
     scancode &= 0x7F;
 
-    if (scancode == 0x2A || scancode == 0x36)
+    if (extended_code_pending)
     {
-        shift_pressed = !released;
+        extended_code_pending = false;
+        /* Ignore extended keys for now; no state to toggle. */
+    }
+
+    if (scancode == 0x2A)
+    {
+        left_shift_pressed = !released;
+        return false;
+    }
+    if (scancode == 0x36)
+    {
+        right_shift_pressed = !released;
+        return false;
+    }
+
+    if (scancode == 0x3A && !released)
+    {
+        caps_lock_enabled = !caps_lock_enabled;
         return false;
     }
 
@@ -67,7 +96,32 @@ bool keyboard_try_read(char *out_char)
         return false;
     }
 
-    char ch = shift_pressed ? shift_map[scancode] : normal_map[scancode];
+    bool shift_active = left_shift_pressed || right_shift_pressed;
+    char base = normal_map[scancode];
+    if (base == 0)
+    {
+        return false;
+    }
+
+    char ch = base;
+    if (base >= 'a' && base <= 'z')
+    {
+        bool make_upper = shift_active ^ caps_lock_enabled;
+        if (make_upper)
+        {
+            char shifted = shift_map[scancode];
+            ch = (shifted != 0) ? shifted : (char)(base - ('a' - 'A'));
+        }
+    }
+    else if (shift_active)
+    {
+        char shifted = shift_map[scancode];
+        if (shifted != 0)
+        {
+            ch = shifted;
+        }
+    }
+
     if (ch == 0)
     {
         return false;
