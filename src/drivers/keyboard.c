@@ -1,13 +1,18 @@
+#define KBD_DEBUG 1
+
 #include "keyboard.h"
 #include "io.h"
+#if KBD_DEBUG
+#include "serial.h"
+#endif
 
 #define KBD_STATUS 0x64
 #define KBD_DATA   0x60
 
-static bool left_shift_pressed = false;
-static bool right_shift_pressed = false;
-static bool caps_lock_enabled = false;
-static bool extended_code_pending = false;
+static uint8_t left_shift_pressed = 0;
+static uint8_t right_shift_pressed = 0;
+static uint8_t caps_lock_enabled = 0;
+static uint8_t extended_code_pending = 0;
 
 /* Place key maps in .data, not .rodata, to avoid early-rodata issues */
 static char normal_map[128] = {
@@ -28,6 +33,19 @@ static char shift_map[128] = {
     0
 };
 
+#if KBD_DEBUG
+static void log_scancode(uint8_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    serial_write_char('[');
+    serial_write_char(hex[(value >> 4) & 0xF]);
+    serial_write_char(hex[value & 0xF]);
+    serial_write_char(']');
+}
+#else
+static inline void log_scancode(uint8_t value) { (void)value; }
+#endif
+
 static bool read_scancode(uint8_t *code)
 {
     uint8_t status = inb(KBD_STATUS);
@@ -43,12 +61,28 @@ static bool read_scancode(uint8_t *code)
     return true;
 }
 
+static void keyboard_reset_state(void)
+{
+    left_shift_pressed = 0;
+    right_shift_pressed = 0;
+    caps_lock_enabled = 0;
+    extended_code_pending = 0;
+
+    /* Drain any outstanding scancodes the firmware may have queued. */
+    uint8_t discard;
+    while (read_scancode(&discard))
+    {
+    }
+#if KBD_DEBUG
+    serial_write_char('<');
+    serial_write_char('R');
+    serial_write_char('>');
+#endif
+}
+
 void keyboard_init(void)
 {
-    left_shift_pressed = false;
-    right_shift_pressed = false;
-    caps_lock_enabled = false;
-    extended_code_pending = false;
+    keyboard_reset_state();
 }
 
 bool keyboard_try_read(char *out_char)
@@ -58,10 +92,11 @@ bool keyboard_try_read(char *out_char)
     {
         return false;
     }
+    log_scancode(scancode);
 
     if (scancode == 0xE0)
     {
-        extended_code_pending = true;
+        extended_code_pending = 1;
         return false;
     }
 
@@ -70,24 +105,24 @@ bool keyboard_try_read(char *out_char)
 
     if (extended_code_pending)
     {
-        extended_code_pending = false;
-        /* Ignore extended keys for now; no state to toggle. */
+        extended_code_pending = 0;
+        /* Ignore extended-key prefixes for now. */
     }
 
     if (scancode == 0x2A)
     {
-        left_shift_pressed = !released;
+        left_shift_pressed = released ? 0 : 1;
         return false;
     }
     if (scancode == 0x36)
     {
-        right_shift_pressed = !released;
+        right_shift_pressed = released ? 0 : 1;
         return false;
     }
 
     if (scancode == 0x3A && !released)
     {
-        caps_lock_enabled = !caps_lock_enabled;
+        caps_lock_enabled ^= 1;
         return false;
     }
 
@@ -96,7 +131,15 @@ bool keyboard_try_read(char *out_char)
         return false;
     }
 
-    bool shift_active = left_shift_pressed || right_shift_pressed;
+#if KBD_DEBUG
+    serial_write_char('{');
+    serial_write_char(left_shift_pressed ? 'L' : 'l');
+    serial_write_char(right_shift_pressed ? 'R' : 'r');
+    serial_write_char(caps_lock_enabled ? 'C' : 'c');
+    serial_write_char('}');
+#endif
+
+    bool shift_active = (left_shift_pressed | right_shift_pressed) != 0;
     char base = normal_map[scancode];
     if (base == 0)
     {
@@ -106,7 +149,7 @@ bool keyboard_try_read(char *out_char)
     char ch = base;
     if (base >= 'a' && base <= 'z')
     {
-        bool make_upper = shift_active ^ caps_lock_enabled;
+        bool make_upper = shift_active ^ (caps_lock_enabled != 0);
         if (make_upper)
         {
             char shifted = shift_map[scancode];
