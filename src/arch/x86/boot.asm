@@ -1,10 +1,18 @@
 ; boot.asm — 16‑bit boot sector (LBA load) — NASM syntax
 ; Assembled with: nasm -f bin -o boot.bin boot.asm
 
+%ifndef STAGE2_SEG
 %define STAGE2_SEG     0x1000        ; load segment for stage2 (phys 0x10000)
+%endif
+%ifndef STAGE2_OFF
 %define STAGE2_OFF     0x0000
+%endif
+%ifndef STAGE2_LBA
 %define STAGE2_LBA     1             ; start right after boot sector
-%define STAGE2_SECTORS 128           ; adjust if stage2 grows beyond 64 KiB
+%endif
+%ifndef STAGE2_SECTORS
+%define STAGE2_SECTORS 128           ; placeholder, overridden by build
+%endif
 
 BITS 16
 ORG 0x7C00
