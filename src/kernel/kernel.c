@@ -11,9 +11,20 @@
 #include "video.h"
 #include "hwinfo.h"
 #include "rtl8139.h"
-#include "hwinfo.h"
 
 #define INPUT_CAPACITY 256
+
+static void serial_emit_char(char c);
+static void serial_write_hex64(uint64_t v)
+{
+    for (int i = 15; i >= 0; --i)
+    {
+        uint8_t nib = (uint8_t)((v >> (i * 4)) & 0xF);
+        char ch = (nib < 10) ? (char)('0' + nib) : (char)('A' + (nib - 10));
+        serial_write_char(ch);
+    }
+}
+/* debug helper removed */
 
 typedef struct
 {
@@ -71,7 +82,7 @@ static size_t cli_read_line(char *buffer, size_t capacity)
         if (c == '\n')
         {
             console_putc('\n');
-            serial_write_string("\r\n");
+            serial_emit_char('\n');
             buffer[len] = '\0';
             return len;
         }
@@ -115,6 +126,18 @@ static void serial_emit_char(char c)
         serial_write_char('\r');
     }
     serial_write_char(c);
+}
+
+/* Minimal, dependency-free writer to both VGA and serial. Avoids strlen
+   or other helpers in case rodata or libc gets upset during bring-up. */
+static void write_both(const char *s)
+{
+    if (!s) { return; }
+    for (const char *p = s; *p; ++p)
+    {
+        console_putc(*p);
+        serial_emit_char(*p);
+    }
 }
 
 static void shell_output_init_console(shell_output_t *out)
@@ -171,13 +194,9 @@ static bool shell_output_write(shell_output_t *out, const char *text)
 
 static void shell_print_error(const char *msg)
 {
-    console_write("Error: ");
-    console_write(msg);
-    console_putc('\n');
-
-    serial_write_string("Error: ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    write_both("Error: ");
+    write_both(msg);
+    write_both("\n");
 }
 
 static bool shell_cmd_echo(shell_output_t *out, const char *args)
@@ -407,8 +426,11 @@ static void shell_process_line(shell_state_t *shell, char *buffer)
 
 static void shell_print_prompt(void)
 {
-    console_write("> ");
-    serial_write_string("> ");
+    /* Avoid string literals during early bring-up. */
+    console_putc('>');
+    console_putc(' ');
+    serial_emit_char('>');
+    serial_emit_char(' ');
 }
 
 void kernel_main(void)
@@ -428,25 +450,35 @@ void kernel_main(void)
     serial_write_char('I');
     timer_init(100);
     serial_write_char('T');
-    rtl8139_init();
-    serial_write_char('N');
+
+    /* Network init deferred until after CLI is up */
+    // rtl8139_init();
+    // serial_write_char('N');
     /* Defer mouse listener + streaming until graphics mode */
     serial_write_char('m');
     serial_write_char('E'); /* before enabling */
     interrupts_enable();
     serial_write_char('e'); /* after enabling */
-    rtl8139_poll();
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, start_video.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, start_video.\r\n");
+
+    /* Emit a simple banner. Also exercise .rodata by printing a literal. */
     serial_write_char('S');
-    /* Ensure the first prompt is visible even if prior logs scrolled */
-    serial_write_string("\r\n> ");
-    console_write("\n> ");
+    const char *rt = " RODATA TEST ";
+    serial_write_char(' ');
+    serial_write_char('[');
+    serial_write_hex64((uint64_t)(uintptr_t)rt);
+    serial_write_char(']');
+    serial_write_char(' ');
+    for (const char *p = rt; *p; ++p) { serial_emit_char(*p); }
+    serial_emit_char('\n');
+    const char msg[] = { 'S','h','e','l','l',' ','r','e','a','d','y','\0' };
+    for (size_t i = 0; msg[i]; ++i) { console_putc(msg[i]); serial_emit_char(msg[i]); }
+    console_putc('\n'); serial_emit_char('\n');
 
     shell_state_t shell = { .cwd = vfs_root() };
     char input[INPUT_CAPACITY];
 
+        serial_write_char('L');
     while (1)
     {
         shell_print_prompt();

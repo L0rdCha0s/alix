@@ -24,14 +24,13 @@ SECTIONS
     *(.text*)
   }
 
-  .rodata ALIGN(16) :
-  {
-    *(.rodata*)
-  }
-
+  /* Merge rodata into data so all literals live in a plain RW segment.
+     This avoids early-boot issues with accessing .rodata before any
+     higher-half or relocation scheme exists. */
   .data ALIGN(16) :
   {
     *(.data*)
+    *(.rodata*)
   }
 
   .bss ALIGN(16) :

@@ -54,13 +54,7 @@ start16:
   mov bl, 0x07
   int 0x10
 
-  call detect_memory_e820
-
-  ; indicate after E820
-  mov dx, 0
-  mov ah, 0x01
-  mov al, 'E'
-  int 0x14
+  ; (E820 memory map collection removed for bring-up simplicity)
 
   ; Enable A20 using port 0x92
   in   al, 0x92
@@ -97,64 +91,13 @@ gdt:
 tss_descriptor:
   dq 0
   dq 0
+gdt_end:
 
 gdt_ptr:
   dw gdt_end - gdt - 1
   dq gdt
 
-gdt_end:
-
-; ----------------------------------------------------------------------
-; BIOS E820 memory map collection (16-bit real mode)
-; Stores count (dword) at physical 0x00050000 followed by entries (24 bytes each)
-; Keep in .start16 so a near call can reach it while in real mode.
-; ----------------------------------------------------------------------
-
-%define MEMMAP_SEG      0x0800
-%define MEMMAP_OFFSET   0x0000
-%define MEMMAP_MAX      64
-%define MEMMAP_ENTRY_SZ 24
-
-BITS 16
-detect_memory_e820:
-  pusha
-  push ds
-  push es
-
-  mov ax, MEMMAP_SEG
-  mov ds, ax
-  mov es, ax
-  xor di, di
-  mov dword [es:di], 0        ; zero count
-  add di, 4                   ; leave space for count
-
-  xor ebx, ebx
-  mov bp, MEMMAP_MAX
-
-.e820_loop:
-  mov eax, 0xE820
-  mov edx, 0x534D4150         ; 'SMAP'
-  mov ecx, MEMMAP_ENTRY_SZ    ; 24 bytes
-  ; ES:DI already points to the next slot
-  int 0x15
-  jc .e820_done
-  cmp eax, 0x534D4150
-  jne .e820_done
-
-  ; one more entry collected
-  inc dword [es:MEMMAP_OFFSET]
-  add di, MEMMAP_ENTRY_SZ
-
-  dec bp
-  jz .e820_done
-  test ebx, ebx               ; continuation value
-  jne .e820_loop
-
-.e820_done:
-  pop es
-  pop ds
-  popa
-  ret
+; (E820 memory map collection removed)
 
 ALIGN 16
 tss64:
@@ -386,9 +329,10 @@ long_entry:
   mov al, 'c'
   out dx, al
 
-  ; Zero .bss so C code starts with clean globals
-  lea rdi, [rel __bss_start]
-  lea rcx, [rel __bss_end]
+  ; Zero .bss so C code starts with clean globals.
+  ; Use absolute addresses rather than RIP-relative LEA math for clarity.
+  mov rdi, __bss_start
+  mov rcx, __bss_end
   sub rcx, rdi
 
   ; emit 'd' after computing rcx

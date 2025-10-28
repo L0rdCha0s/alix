@@ -147,18 +147,21 @@ void mouse_on_irq(uint8_t byte)
 
 void mouse_poll(void)
 {
+    /* Drain ONLY PS/2 aux (mouse) bytes so they don't clog the buffer.
+       Leave keyboard bytes untouched for keyboard_try_read(). */
     while (1)
     {
         uint8_t status = inb(KBD_STATUS);
         if ((status & 0x01) == 0)
         {
+            break; /* no data pending */
+        }
+        if ((status & 0x20) == 0)
+        {
+            /* Keyboard byte pending: do not consume it here. */
             break;
         }
         uint8_t data = inb(KBD_DATA);
-        if ((status & 0x20) == 0)
-        {
-            continue; /* keyboard data */
-        }
         mouse_process_byte(data);
     }
 }
