@@ -3,6 +3,7 @@
 #include "serial.h"
 #include "io.h"
 #include "libc.h"
+#include "interrupts.h"
 
 #define RTL_VENDOR_ID 0x10EC
 #define RTL_DEVICE_ID 0x8139
@@ -118,6 +119,7 @@ void rtl8139_init(void)
     }
 
     g_rtl_present = true;
+    interrupts_enable_irq(11);
 
     serial_write_string("rtl8139: found at bus ");
     rtl8139_log_hex8(g_device.bus);

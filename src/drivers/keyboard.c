@@ -1,5 +1,6 @@
 #include "keyboard.h"
 #include "io.h"
+#include "interrupts.h"
 
 #define KBD_STATUS 0x64
 #define KBD_DATA   0x60
@@ -60,6 +61,7 @@ static void keyboard_reset_state(void)
 void keyboard_init(void)
 {
     keyboard_reset_state();
+    interrupts_enable_irq(1);
 }
 
 bool keyboard_try_read(char *out_char)

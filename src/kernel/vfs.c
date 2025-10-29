@@ -4,9 +4,10 @@
 #include "serial.h"
 
 
-#define VFS_MAX_NODES      64
+#define VFS_POOL_BASE      0x0000000001000000ULL /* 16 MiB, safely past firmware/VGA */
+#define VFS_MAX_NODES      512
 #define VFS_NAME_MAX       32
-#define VFS_FILE_CAPACITY  512
+#define VFS_FILE_CAPACITY  4096
 
 struct vfs_node
 {
@@ -21,7 +22,9 @@ struct vfs_node
     char data[VFS_FILE_CAPACITY];
 };
 
-static struct vfs_node nodes[VFS_MAX_NODES];
+#define VFS_POOL_SIZE      (sizeof(struct vfs_node) * VFS_MAX_NODES)
+
+static struct vfs_node *const nodes = (struct vfs_node *)VFS_POOL_BASE;
 static vfs_node_t *root = NULL;
 
 static void vfs_zero_node(vfs_node_t *node)
@@ -249,6 +252,7 @@ static bool split_parent_and_name(vfs_node_t *cwd, const char *path, vfs_node_t 
 
 void vfs_init(void)
 {
+    memset(nodes, 0, VFS_POOL_SIZE);
     for (size_t i = 0; i < VFS_MAX_NODES; ++i)
     {
         vfs_zero_node(&nodes[i]);

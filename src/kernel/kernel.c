@@ -279,7 +279,6 @@ static bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *
         return false;
     }
 
-    serial_write_string("In shell command ls 2\n");
     for (vfs_node_t *child = vfs_first_child(target); child; child = vfs_next_sibling(child))
     {
         shell_output_write(out, vfs_name(child));
@@ -294,11 +293,7 @@ static bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *
 
 static void shell_process_line(shell_state_t *shell, char *buffer)
 {
-    serial_write_string("Hello2!\n");
     char *line = trim_whitespace(buffer);
-    serial_write_string("Command is: \n");
-    // serial_write_string(line);
-    serial_write_string("\n");
     if (*line == '\0')
     {
         return;

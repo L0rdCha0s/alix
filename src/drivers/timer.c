@@ -1,5 +1,6 @@
 #include "timer.h"
 #include "io.h"
+#include "interrupts.h"
 
 #define PIT_CHANNEL0 0x40
 #define PIT_COMMAND  0x43
@@ -17,6 +18,7 @@ void timer_init(uint32_t frequency_hz)
     outb(PIT_COMMAND, 0x36);
     outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
+    interrupts_enable_irq(0);
 }
 
 void timer_on_tick(void)

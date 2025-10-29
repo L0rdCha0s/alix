@@ -11,6 +11,9 @@
 #define PIC2_DATA    0xA1
 #define PIC_EOI      0x20
 
+static uint8_t pic1_mask = 0xFF;
+static uint8_t pic2_mask = 0xFF;
+
 struct interrupt_frame
 {
     uint64_t rip;
@@ -35,8 +38,10 @@ static void pic_remap(void)
 static void pic_set_masks(void)
 {
     /* Bring-up: mask all IRQ lines initially so STI returns cleanly. */
-    outb(PIC1_DATA, 0xFF);
-    outb(PIC2_DATA, 0xFF);
+    pic1_mask = 0xFF;
+    pic2_mask = 0xFF;
+    outb(PIC1_DATA, pic1_mask);
+    outb(PIC2_DATA, pic2_mask);
 }
 
 static void pic_send_eoi(uint8_t irq)
@@ -79,6 +84,24 @@ void interrupts_init(void)
     idt_load();
     pic_remap();
     pic_set_masks();
+}
+
+void interrupts_enable_irq(uint8_t irq)
+{
+    if (irq < 8)
+    {
+        pic1_mask &= (uint8_t)~(1u << irq);
+        outb(PIC1_DATA, pic1_mask);
+    }
+    else
+    {
+        uint8_t line = (uint8_t)(irq - 8);
+        pic2_mask &= (uint8_t)~(1u << line);
+        outb(PIC2_DATA, pic2_mask);
+        /* ensure cascade line is enabled */
+        pic1_mask &= (uint8_t)~(1u << 2);
+        outb(PIC1_DATA, pic1_mask);
+    }
 }
 
 void interrupts_enable(void)

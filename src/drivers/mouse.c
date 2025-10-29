@@ -1,6 +1,7 @@
 #include "mouse.h"
 #include "io.h"
 #include "serial.h"
+#include "interrupts.h"
 
 #define KBD_STATUS 0x64
 #define KBD_COMMAND 0x64
@@ -10,6 +11,7 @@ static mouse_listener_t g_listener = 0;
 static uint8_t packet[3];
 static uint8_t packet_index = 0;
 static int mouse_irq_log_count = 0;
+static int mouse_irq_byte_log = 0;
 
 static void mouse_log(const char *msg)
 {
@@ -101,6 +103,7 @@ void mouse_init(void)
     packet_index = 0;
     mouse_irq_log_count = 0;
     mouse_log("mouse_init: streaming enabled");
+    interrupts_enable_irq(12);
 }
 
 void mouse_reset_debug_counter(void)
@@ -141,6 +144,15 @@ void mouse_on_irq(uint8_t byte)
     {
         //mouse_log("mouse IRQ data incoming");
         mouse_irq_log_count++;
+    }
+    if (mouse_irq_byte_log < 32)
+    {
+        serial_write_string("mouse irq byte=0x");
+        static const char hex[] = "0123456789ABCDEF";
+        serial_write_char(hex[(byte >> 4) & 0xF]);
+        serial_write_char(hex[byte & 0xF]);
+        serial_write_string("\r\n");
+        mouse_irq_byte_log++;
     }
     mouse_process_byte(byte);
 }
