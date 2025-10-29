@@ -3,12 +3,15 @@ CC       := x86_64-elf-gcc
 LD       := x86_64-elf-ld
 OBJCOPY  := x86_64-elf-objcopy
 QEMU     := qemu-system-x86_64
+HOST_CC  ?= cc
 
 SRC_DIR     := src
 ARCH_DIR    := $(SRC_DIR)/arch/x86
 KERNEL_DIR  := $(SRC_DIR)/kernel
 DRIVER_DIR  := $(SRC_DIR)/drivers
 ATK_DIR     := $(SRC_DIR)/atk
+NET_DIR     := $(SRC_DIR)/net
+SBIN_DIR    := $(SRC_DIR)/sbin
 INCLUDE_DIR := include
 OBJDIR      := build
 
@@ -24,7 +27,9 @@ C_SOURCES := \
 	$(wildcard $(KERNEL_DIR)/*.c) \
 	$(wildcard $(DRIVER_DIR)/*.c) \
 	$(wildcard $(ATK_DIR)/*.c) \
-	$(wildcard $(ARCH_DIR)/*.c)
+	$(wildcard $(NET_DIR)/*.c) \
+	$(wildcard $(ARCH_DIR)/*.c) \
+	$(wildcard $(SBIN_DIR)/*.c)
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 
@@ -40,6 +45,7 @@ all: os.img
 $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
 
 $(STAGE2_OBJ): $(STAGE2_SRC)
 	@mkdir -p $(dir $@)
@@ -80,7 +86,17 @@ QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
 
 run-hdd: hdd.img
 	$(QEMU) -drive file=hdd.img,format=raw,if=ide -no-reboot -monitor none -serial stdio \
-		$(QEMU_DEBUG_FLAGS) -netdev user,id=n0 -device rtl8139,netdev=n0 
+		$(QEMU_DEBUG_FLAGS) -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 \
+		-object filter-dump,id=n0dump,netdev=n0,queue=all,file=qemu-net.pcap \
+		-device rtl8139,netdev=n0,mac=52:54:00:12:34:56
 
 clean:
 	rm -rf $(OBJDIR) os.img hdd.img
+
+tests/dhcp_packet_test: tests/dhcp_packet_test.c
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -o $@ $<
+
+test-dhcp: tests/dhcp_packet_test
+	./tests/dhcp_packet_test
+
+.PHONY: all run run-hdd clean test-dhcp
