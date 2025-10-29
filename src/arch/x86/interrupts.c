@@ -4,6 +4,7 @@
 #include "mouse.h"
 #include "types.h"
 #include "rtl8139.h"
+#include "serial.h"
 
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
@@ -13,6 +14,7 @@
 
 static uint8_t pic1_mask = 0xFF;
 static uint8_t pic2_mask = 0xFF;
+static int irq12_log_count = 0;
 
 struct interrupt_frame
 {
@@ -70,9 +72,33 @@ __attribute__((interrupt)) static void irq11_handler(struct interrupt_frame *fra
 __attribute__((interrupt)) static void irq12_handler(struct interrupt_frame *frame)
 {
     (void)frame;
+    uint8_t status = inb(0x64);
+    if (irq12_log_count < 16)
+    {
+        serial_write_string("irq12 status=0x");
+        static const char hex[] = "0123456789ABCDEF";
+        serial_write_char(hex[(status >> 4) & 0xF]);
+        serial_write_char(hex[status & 0xF]);
+        serial_write_string("\r\n");
+    }
+    if ((status & 0x20) == 0)
+    {
+        pic_send_eoi(12);
+        irq12_log_count++;
+        return;
+    }
     uint8_t data = inb(0x60);
+    if (irq12_log_count < 16)
+    {
+        serial_write_string("irq12 data=0x");
+        static const char hex[] = "0123456789ABCDEF";
+        serial_write_char(hex[(data >> 4) & 0xF]);
+        serial_write_char(hex[data & 0xF]);
+        serial_write_string("\r\n");
+    }
     mouse_on_irq(data);
     pic_send_eoi(12);
+    irq12_log_count++;
 }
 
 void interrupts_init(void)
@@ -88,6 +114,7 @@ void interrupts_init(void)
 
 void interrupts_enable_irq(uint8_t irq)
 {
+    static int log_count = 0;
     if (irq < 8)
     {
         pic1_mask &= (uint8_t)~(1u << irq);
@@ -101,6 +128,21 @@ void interrupts_enable_irq(uint8_t irq)
         /* ensure cascade line is enabled */
         pic1_mask &= (uint8_t)~(1u << 2);
         outb(PIC1_DATA, pic1_mask);
+    }
+    if (log_count < 8)
+    {
+        serial_write_string("PIC masks: PIC1=0x");
+        static const char hex[] = "0123456789ABCDEF";
+        serial_write_char(hex[(pic1_mask >> 4) & 0xF]);
+        serial_write_char(hex[pic1_mask & 0xF]);
+        serial_write_string(" PIC2=0x");
+        serial_write_char(hex[(pic2_mask >> 4) & 0xF]);
+        serial_write_char(hex[pic2_mask & 0xF]);
+        serial_write_string(" irq=");
+        serial_write_char(hex[(irq >> 4) & 0xF]);
+        serial_write_char(hex[irq & 0xF]);
+        serial_write_string("\r\n");
+        log_count++;
     }
 }
 

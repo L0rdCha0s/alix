@@ -12,6 +12,8 @@ static uint8_t packet[3];
 static uint8_t packet_index = 0;
 static int mouse_irq_log_count = 0;
 static int mouse_irq_byte_log = 0;
+static int mouse_poll_log = 0;
+static int mouse_packet_log = 0;
 
 static void mouse_log(const char *msg)
 {
@@ -109,11 +111,18 @@ void mouse_init(void)
 void mouse_reset_debug_counter(void)
 {
     mouse_irq_log_count = 0;
+    mouse_irq_byte_log = 0;
+    mouse_poll_log = 0;
     mouse_log("mouse debug counter reset");
 }
 
 static void mouse_process_byte(uint8_t byte)
 {
+    if (byte == 0xFA || byte == 0xAA)
+    {
+        packet_index = 0;
+        return;
+    }
     if ((packet_index == 0) && ((byte & 0x08) == 0))
     {
         return; /* sync */
@@ -131,6 +140,15 @@ static void mouse_process_byte(uint8_t byte)
     int dy = (int8_t)packet[2];
     bool left = (packet[0] & 0x01) != 0;
     //mouse_log_packet(dx, dy, left, packet[0]);
+    if (mouse_packet_log < 16)
+    {
+        serial_write_string("mouse packet dx=");
+        serial_write_hex64((uint64_t)(int64_t)dx);
+        serial_write_string(" dy=");
+        serial_write_hex64((uint64_t)(int64_t)dy);
+        serial_write_string(left ? " left=1\r\n" : " left=0\r\n");
+        mouse_packet_log++;
+    }
 
     if (g_listener)
     {
@@ -168,12 +186,23 @@ void mouse_poll(void)
         {
             break; /* no data pending */
         }
+        uint8_t data = inb(KBD_DATA);
         if ((status & 0x20) == 0)
         {
-            /* Keyboard byte pending: do not consume it here. */
-            break;
+            if (mouse_poll_log < 8)
+            {
+                serial_write_string("mouse_poll draining keyboard status=0x");
+                static const char hex[] = "0123456789ABCDEF";
+                serial_write_char(hex[(status >> 4) & 0xF]);
+                serial_write_char(hex[status & 0xF]);
+                serial_write_string(" data=0x");
+                serial_write_char(hex[(data >> 4) & 0xF]);
+                serial_write_char(hex[data & 0xF]);
+                serial_write_string("\r\n");
+                mouse_poll_log++;
+            }
+            continue;
         }
-        uint8_t data = inb(KBD_DATA);
         mouse_process_byte(data);
     }
 }
