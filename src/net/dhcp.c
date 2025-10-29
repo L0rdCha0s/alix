@@ -217,10 +217,10 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
     {
         g_offer_addr = yiaddr;
         g_server_id = server_id;
+        g_state = DHCP_WAIT_ACK;
         if (dhcp_send_request())
         {
             serial_write_string("dhcp: sent request\r\n");
-            g_state = DHCP_WAIT_ACK;
         }
         else
         {

@@ -1,6 +1,7 @@
 #include <stddef.h>
 
 #include "net/interface.h"
+#include "net/route.h"
 
 #include "libc.h"
 
@@ -16,6 +17,7 @@ void net_if_init(void)
         memset(&g_interfaces[i], 0, sizeof(net_interface_t));
     }
     g_interface_count = 0;
+    net_route_init();
 }
 
 static net_interface_t *net_if_allocate(void)
@@ -120,6 +122,19 @@ void net_if_set_ipv4(net_interface_t *iface, uint32_t addr, uint32_t netmask, ui
     iface->ipv4_addr = addr;
     iface->ipv4_netmask = netmask;
     iface->ipv4_gateway = gateway;
+
+    if (gateway != 0)
+    {
+        net_route_set_default(iface, gateway);
+    }
+    else
+    {
+        net_interface_t *default_iface = NULL;
+        if (net_route_get_default(&default_iface, NULL) && default_iface == iface)
+        {
+            net_route_clear_default();
+        }
+    }
 }
 
 void net_if_set_tx_handler(net_interface_t *iface, bool (*handler)(net_interface_t *, const uint8_t *, size_t))

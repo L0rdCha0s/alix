@@ -84,17 +84,19 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
         send_len = 60;
     }
 
-    if (!net_if_send(iface, buffer, send_len))
-    {
-        return false;
-    }
-
     g_pending.active = true;
     g_pending.received = false;
     g_pending.identifier = identifier;
     g_pending.sequence = sequence;
     g_pending.send_tick = timer_ticks();
     memset(&g_pending.reply, 0, sizeof(g_pending.reply));
+
+    if (!net_if_send(iface, buffer, send_len))
+    {
+        g_pending.active = false;
+        return false;
+    }
+
     return true;
 }
 

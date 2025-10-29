@@ -3,9 +3,11 @@
 #include "net/arp.h"
 #include "net/icmp.h"
 #include "net/interface.h"
+#include "net/route.h"
 #include "rtl8139.h"
 #include "timer.h"
 #include "libc.h"
+#include <stddef.h>
 
 static const char *skip_ws(const char *cursor);
 static bool read_token(const char **cursor, char *out, size_t capacity);
@@ -16,37 +18,52 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     (void)shell;
     const char *cursor = args ? args : "";
 
+    char token1[32];
+    char token2[32];
     char iface_name[NET_IF_NAME_MAX];
     char ip_token[32];
+    bool have_iface = false;
 
-    if (!read_token(&cursor, iface_name, sizeof(iface_name)) ||
-        !read_token(&cursor, ip_token, sizeof(ip_token)))
+    if (!read_token(&cursor, token1, sizeof(token1)))
     {
-        shell_print_error("Usage: ping <iface> <ip>");
+        shell_print_error("Usage: ping [iface] <ip>");
         return false;
+    }
+
+    if (!read_token(&cursor, token2, sizeof(token2)))
+    {
+        size_t ip_len = strlen(token1);
+        if (ip_len == 0 || ip_len >= sizeof(ip_token))
+        {
+            shell_print_error("invalid IPv4 address");
+            return false;
+        }
+        memcpy(ip_token, token1, ip_len + 1);
+    }
+    else
+    {
+        have_iface = true;
+        size_t name_len = strlen(token1);
+        if (name_len == 0 || name_len >= NET_IF_NAME_MAX)
+        {
+            shell_print_error("invalid interface name");
+            return false;
+        }
+        memcpy(iface_name, token1, name_len + 1);
+
+        size_t ip_len = strlen(token2);
+        if (ip_len == 0 || ip_len >= sizeof(ip_token))
+        {
+            shell_print_error("invalid IPv4 address");
+            return false;
+        }
+        memcpy(ip_token, token2, ip_len + 1);
     }
 
     cursor = skip_ws(cursor);
     if (*cursor != '\0')
     {
-        shell_print_error("Usage: ping <iface> <ip>");
-        return false;
-    }
-
-    net_interface_t *iface = net_if_by_name(iface_name);
-    if (!iface || !iface->present)
-    {
-        shell_print_error("interface not found");
-        return false;
-    }
-    if (!iface->link_up)
-    {
-        shell_print_error("interface is down");
-        return false;
-    }
-    if (iface->ipv4_addr == 0)
-    {
-        shell_print_error("interface has no IPv4 address");
+        shell_print_error("Usage: ping [iface] <ip>");
         return false;
     }
 
@@ -57,9 +74,43 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         return false;
     }
 
+    net_interface_t *requested_iface = NULL;
+    if (have_iface)
+    {
+        requested_iface = net_if_by_name(iface_name);
+        if (!requested_iface || !requested_iface->present)
+        {
+            shell_print_error("interface not found");
+            return false;
+        }
+        if (!requested_iface->link_up)
+        {
+            shell_print_error("interface is down");
+            return false;
+        }
+        if (requested_iface->ipv4_addr == 0)
+        {
+            shell_print_error("interface has no IPv4 address");
+            return false;
+        }
+    }
+
     char target_str[32];
     char source_str[32];
     net_format_ipv4(target_ip, target_str);
+    net_interface_t *iface = requested_iface;
+    uint32_t next_hop_ip = target_ip;
+    if (!net_route_next_hop(iface, target_ip, &iface, &next_hop_ip))
+    {
+        shell_print_error("no route to host");
+        return false;
+    }
+    if (!iface || !iface->present || !iface->link_up || iface->ipv4_addr == 0)
+    {
+        shell_print_error("no route to host");
+        return false;
+    }
+
     net_format_ipv4(iface->ipv4_addr, source_str);
 
     shell_output_write(out, "PING ");
@@ -69,7 +120,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     shell_output_write(out, ":\n");
 
     uint8_t target_mac[6];
-    bool have_mac = net_arp_lookup(target_ip, target_mac);
+    bool have_mac = net_arp_lookup(next_hop_ip, target_mac);
     uint32_t frequency = timer_frequency();
     if (frequency == 0)
     {
@@ -82,7 +133,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     if (!have_mac)
     {
         shell_output_write(out, "  Resolving ARP...\n");
-        if (!net_arp_send_request(iface, target_ip))
+        if (!net_arp_send_request(iface, next_hop_ip))
         {
             shell_print_error("failed to send ARP request");
             return false;
@@ -92,7 +143,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         while (timer_ticks() - start < timeout_ticks)
         {
             rtl8139_poll();
-            if (net_arp_lookup(target_ip, target_mac))
+            if (net_arp_lookup(next_hop_ip, target_mac))
             {
                 have_mac = true;
                 break;

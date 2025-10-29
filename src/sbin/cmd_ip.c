@@ -4,10 +4,12 @@
 
 #include "net/arp.h"
 #include "net/interface.h"
+#include "net/route.h"
 #include "libc.h"
 
 static bool ip_handle_link(shell_output_t *out, const char *args);
 static bool ip_handle_addr(shell_output_t *out, const char *args);
+static bool ip_handle_route(shell_output_t *out, const char *args);
 static bool ip_addr_show(shell_output_t *out, const char *args);
 static bool ip_addr_set(shell_output_t *out, const char *args);
 static void ip_print_interface(shell_output_t *out, const net_interface_t *iface);
@@ -18,6 +20,9 @@ static bool parse_prefix(const char *text, unsigned *prefix_out);
 static uint32_t netmask_from_prefix(unsigned prefix);
 static int prefix_from_netmask(uint32_t netmask);
 static uint32_t broadcast_from_ipv4(uint32_t addr, uint32_t netmask);
+static bool ip_route_show(shell_output_t *out);
+static bool ip_route_set_default(shell_output_t *out, const char *args);
+static bool ip_route_clear_default(shell_output_t *out);
 
 bool shell_cmd_ip(shell_state_t *shell, shell_output_t *out, const char *args)
 {
@@ -44,7 +49,14 @@ bool shell_cmd_ip(shell_state_t *shell, shell_output_t *out, const char *args)
         return ip_handle_addr(out, cursor);
     }
 
-    shell_print_error("Usage: ip (link|addr) [args]");
+    if (strncmp(cursor, "route", 5) == 0)
+    {
+        cursor += 5;
+        cursor = skip_ws(cursor);
+        return ip_handle_route(out, cursor);
+    }
+
+    shell_print_error("Usage: ip (link|addr|route) [args]");
     return false;
 }
 
@@ -281,6 +293,180 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
 
     ip_print_interface(out, iface);
     return true;
+}
+
+static bool ip_handle_route(shell_output_t *out, const char *args)
+{
+    const char *cursor = skip_ws(args ? args : "");
+    const char *cmd_start = cursor;
+    while (*cursor && *cursor != ' ' && *cursor != '\t')
+    {
+        ++cursor;
+    }
+
+    size_t cmd_len = (size_t)(cursor - cmd_start);
+    if (cmd_len == 0)
+    {
+        shell_print_error("Usage: ip route (show|set|clear) ...");
+        return false;
+    }
+
+    if (cmd_len == 4 && strncmp(cmd_start, "show", 4) == 0)
+    {
+        cursor = skip_ws(cursor);
+        if (*cursor != '\0')
+        {
+            shell_print_error("Usage: ip route show");
+            return false;
+        }
+        return ip_route_show(out);
+    }
+
+    if (cmd_len == 3 && strncmp(cmd_start, "set", 3) == 0)
+    {
+        return ip_route_set_default(out, cursor);
+    }
+
+    if (cmd_len == 5 && strncmp(cmd_start, "clear", 5) == 0)
+    {
+        cursor = skip_ws(cursor);
+        if (*cursor != '\0')
+        {
+            shell_print_error("Usage: ip route clear");
+            return false;
+        }
+        return ip_route_clear_default(out);
+    }
+
+    shell_print_error("Usage: ip route (show|set|clear) ...");
+    return false;
+}
+
+static bool ip_route_show(shell_output_t *out)
+{
+    net_interface_t *iface = NULL;
+    uint32_t gateway = 0;
+    if (!net_route_get_default(&iface, &gateway) || !iface)
+    {
+        return shell_output_write(out, "No default route configured\n");
+    }
+
+    char gw_buf[32];
+    net_format_ipv4(gateway, gw_buf);
+    shell_output_write(out, "default via ");
+    shell_output_write(out, gw_buf);
+    shell_output_write(out, " dev ");
+    shell_output_write(out, iface->name);
+    shell_output_write(out, "\n");
+    return true;
+}
+
+static bool ip_route_set_default(shell_output_t *out, const char *args)
+{
+    const char *cursor = skip_ws(args);
+    const char *token = cursor;
+    while (*cursor && *cursor != ' ' && *cursor != '\t')
+    {
+        ++cursor;
+    }
+    size_t token_len = (size_t)(cursor - token);
+    if (token_len == 0 || strncmp(token, "default", token_len) != 0)
+    {
+        shell_print_error("Usage: ip route set default <iface> <gateway>");
+        return false;
+    }
+
+    cursor = skip_ws(cursor);
+    if (*cursor == '\0')
+    {
+        shell_print_error("Usage: ip route set default <iface> <gateway>");
+        return false;
+    }
+
+    char name[NET_IF_NAME_MAX];
+    size_t name_len = 0;
+    while (cursor[name_len] && cursor[name_len] != ' ' && cursor[name_len] != '\t')
+    {
+        ++name_len;
+    }
+    if (name_len == 0 || name_len >= NET_IF_NAME_MAX)
+    {
+        shell_print_error("invalid interface name");
+        return false;
+    }
+    memcpy(name, cursor, name_len);
+    name[name_len] = '\0';
+    cursor += name_len;
+
+    net_interface_t *iface = net_if_by_name(name);
+    if (!iface || !iface->present)
+    {
+        shell_print_error("interface not found");
+        return false;
+    }
+
+    cursor = skip_ws(cursor);
+    if (*cursor == '\0')
+    {
+        shell_print_error("Usage: ip route set default <iface> <gateway>");
+        return false;
+    }
+
+    char gateway_token[32];
+    size_t gateway_len = 0;
+    while (cursor[gateway_len] && cursor[gateway_len] != ' ' && cursor[gateway_len] != '\t')
+    {
+        ++gateway_len;
+    }
+    if (gateway_len == 0 || gateway_len >= sizeof(gateway_token))
+    {
+        shell_print_error("invalid gateway address");
+        return false;
+    }
+    memcpy(gateway_token, cursor, gateway_len);
+    gateway_token[gateway_len] = '\0';
+    cursor += gateway_len;
+    cursor = skip_ws(cursor);
+    if (*cursor != '\0')
+    {
+        shell_print_error("Usage: ip route set default <iface> <gateway>");
+        return false;
+    }
+
+    uint32_t gateway = 0;
+    if (!net_parse_ipv4(gateway_token, &gateway))
+    {
+        shell_print_error("invalid gateway address");
+        return false;
+    }
+
+    if (!net_route_set_default(iface, gateway))
+    {
+        shell_print_error("failed to set default route");
+        return false;
+    }
+
+    char gw_buf[32];
+    net_format_ipv4(gateway, gw_buf);
+    shell_output_write(out, "default via ");
+    shell_output_write(out, gw_buf);
+    shell_output_write(out, " dev ");
+    shell_output_write(out, iface->name);
+    shell_output_write(out, "\n");
+    return true;
+}
+
+static bool ip_route_clear_default(shell_output_t *out)
+{
+    net_interface_t *iface = NULL;
+    bool had_route = net_route_get_default(&iface, NULL);
+    if (!had_route)
+    {
+        return shell_output_write(out, "No default route configured\n");
+    }
+
+    net_route_clear_default();
+    return shell_output_write(out, "default route cleared\n");
 }
 
 static void ip_print_interface(shell_output_t *out, const net_interface_t *iface)
