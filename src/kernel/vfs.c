@@ -472,8 +472,3 @@ vfs_node_t *vfs_next_sibling(vfs_node_t *node)
     serial_write_char('6');
     return node ? node->next_sibling : NULL;
 }
-
-uintptr_t vfs_debug_root_storage_address(void)
-{
-    return (uintptr_t)&root;
-}

@@ -27,8 +27,6 @@ section .start16
   extern kernel_main
   extern __bss_start
   extern __bss_end
-  extern vfs_debug_root_storage_address
-  extern serial_write_hex64
   extern serial_write_char
 
 start16:
@@ -371,15 +369,6 @@ long_entry:
   mov dx, COM1
   mov al, 'B'
   out dx, al
-  call vfs_debug_root_storage_address
-  mov rbx, rax
-  mov rdi, rbx
-  call serial_write_hex64
-  mov qword [rbx], 0
-  mov rdi, [rbx]
-  call serial_write_hex64
-  mov edi, 0x0A
-  call serial_write_char
 
   call kernel_main
 

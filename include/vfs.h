@@ -17,6 +17,5 @@ const char *vfs_data(const vfs_node_t *file, size_t *size);
 const char *vfs_name(const vfs_node_t *node);
 vfs_node_t *vfs_first_child(vfs_node_t *dir);
 vfs_node_t *vfs_next_sibling(vfs_node_t *node);
-uintptr_t vfs_debug_root_storage_address(void);
 
 #endif
