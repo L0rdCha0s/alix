@@ -10,6 +10,42 @@ static uint8_t right_shift_pressed = 0;
 static uint8_t caps_lock_enabled = 0;
 static uint8_t extended_code_pending = 0;
 
+#define KBD_BUFFER_SIZE 64
+static uint8_t scancode_buffer[KBD_BUFFER_SIZE];
+static size_t buffer_head = 0;
+static size_t buffer_tail = 0;
+
+static bool buffer_empty(void)
+{
+    return buffer_head == buffer_tail;
+}
+
+static bool buffer_full(void)
+{
+    return ((buffer_head + 1) % KBD_BUFFER_SIZE) == buffer_tail;
+}
+
+static void buffer_push(uint8_t code)
+{
+    if (buffer_full())
+    {
+        return;
+    }
+    scancode_buffer[buffer_head] = code;
+    buffer_head = (buffer_head + 1) % KBD_BUFFER_SIZE;
+}
+
+static bool buffer_pop(uint8_t *code)
+{
+    if (buffer_empty())
+    {
+        return false;
+    }
+    *code = scancode_buffer[buffer_tail];
+    buffer_tail = (buffer_tail + 1) % KBD_BUFFER_SIZE;
+    return true;
+}
+
 /* Place key maps in .data, not .rodata, to avoid early-rodata issues */
 static char normal_map[128] = {
     0,   27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b','\t',
@@ -31,6 +67,10 @@ static char shift_map[128] = {
 
 static bool read_scancode(uint8_t *code)
 {
+    if (buffer_pop(code))
+    {
+        return true;
+    }
     uint8_t status = inb(KBD_STATUS);
     if ((status & 0x01) == 0)
     {
@@ -50,6 +90,8 @@ static void keyboard_reset_state(void)
     right_shift_pressed = 0;
     caps_lock_enabled = 0;
     extended_code_pending = 0;
+    buffer_head = 0;
+    buffer_tail = 0;
 
     /* Drain any outstanding scancodes the firmware may have queued. */
     uint8_t discard;
@@ -155,4 +197,9 @@ bool keyboard_try_read(char *out_char)
 
     *out_char = ch;
     return true;
+}
+
+void keyboard_buffer_push(uint8_t scancode)
+{
+    buffer_push(scancode);
 }

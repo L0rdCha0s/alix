@@ -2,6 +2,7 @@
 #include "io.h"
 #include "serial.h"
 #include "interrupts.h"
+#include "keyboard.h"
 
 #define KBD_STATUS 0x64
 #define KBD_COMMAND 0x64
@@ -201,6 +202,7 @@ void mouse_poll(void)
                 serial_write_string("\r\n");
                 mouse_poll_log++;
             }
+            keyboard_buffer_push(data);
             continue;
         }
         mouse_process_byte(data);
