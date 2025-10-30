@@ -1,6 +1,8 @@
 #include "net/arp.h"
 
 #include "libc.h"
+#include "serial.h"
+#include "net/dhcp.h"
 
 #define ARP_CACHE_SIZE 8
 
@@ -18,7 +20,10 @@ static uint32_t read_be32(const uint8_t *p);
 static void write_be16(uint8_t *p, uint16_t value);
 static void write_be32(uint8_t *p, uint32_t value);
 static void net_arp_store(uint32_t ip, const uint8_t mac[6]);
-static void net_arp_send_reply(net_interface_t *iface, const uint8_t *target_mac, uint32_t target_ip);
+static void net_arp_send_reply(net_interface_t *iface, const uint8_t *target_mac, uint32_t target_ip, uint32_t source_ip);
+static bool net_arp_send_generic(net_interface_t *iface, const uint8_t *dest_mac,
+                                 const uint8_t *target_mac, uint32_t target_ip,
+                                 uint32_t source_ip, uint16_t opcode);
 
 void net_arp_flush(void)
 {
@@ -57,25 +62,11 @@ bool net_arp_send_request(net_interface_t *iface, uint32_t target_ip)
     uint8_t buffer[60];
     memset(buffer, 0, sizeof(buffer));
 
-    uint8_t *eth = buffer;
-    uint8_t *arp = buffer + 14;
-
-    memset(eth, 0xFF, 6);
-    memcpy(eth + 6, iface->mac, 6);
-    eth[12] = 0x08;
-    eth[13] = 0x06;
-
-    write_be16(arp + 0, 0x0001); /* Ethernet */
-    write_be16(arp + 2, 0x0800); /* IPv4 */
-    arp[4] = 6;
-    arp[5] = 4;
-    write_be16(arp + 6, 0x0001); /* request */
-    memcpy(arp + 8, iface->mac, 6);
-    write_be32(arp + 14, iface->ipv4_addr);
-    memset(arp + 18, 0x00, 6);
-    write_be32(arp + 24, target_ip);
-
-    return net_if_send(iface, buffer, sizeof(buffer));
+    uint8_t broadcast[6];
+    memset(broadcast, 0xFF, sizeof(broadcast));
+    uint8_t zero_mac[6] = {0};
+    uint32_t source_ip = iface->ipv4_addr;
+    return net_arp_send_generic(iface, broadcast, zero_mac, target_ip, source_ip, 0x0001);
 }
 
 void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length)
@@ -118,9 +109,29 @@ void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         return;
     }
 
-    if (opcode == 0x0001 && iface->ipv4_addr != 0 && target_ip == iface->ipv4_addr)
+    if (opcode == 0x0001)
     {
-        net_arp_send_reply(iface, sender_mac, sender_ip);
+        bool respond = false;
+        uint32_t reply_ip = iface->ipv4_addr;
+        if (iface->ipv4_addr != 0 && target_ip == iface->ipv4_addr)
+        {
+            respond = true;
+        }
+        else if (net_dhcp_claims_ip(iface, target_ip))
+        {
+            respond = true;
+            reply_ip = target_ip;
+        }
+
+        if (respond)
+        {
+            serial_write_string("arp: replying for ip ");
+            char ipbuf[32];
+            net_format_ipv4(reply_ip, ipbuf);
+            serial_write_string(ipbuf);
+            serial_write_string("\r\n");
+            net_arp_send_reply(iface, sender_mac, sender_ip, reply_ip);
+        }
     }
 }
 
@@ -157,11 +168,37 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
     memcpy(g_cache[0].mac, mac, 6);
 }
 
-static void net_arp_send_reply(net_interface_t *iface, const uint8_t *target_mac, uint32_t target_ip)
+void net_arp_announce(net_interface_t *iface, uint32_t ip)
+{
+    if (!iface || ip == 0)
+    {
+        return;
+    }
+
+    /* RFC 5227: Gratuitous ARP is commonly a broadcast **request**
+    with sender and target IP both set to 'ip' and target MAC zero. */
+    uint8_t broadcast[6]; memset(broadcast, 0xFF, sizeof(broadcast));
+    uint8_t zero_mac[6] = {0};
+    net_arp_send_generic(iface, broadcast, zero_mac, ip, ip, 0x0001);
+}
+
+static void net_arp_send_reply(net_interface_t *iface, const uint8_t *target_mac, uint32_t target_ip, uint32_t source_ip)
 {
     if (!iface || !target_mac)
     {
         return;
+    }
+
+    net_arp_send_generic(iface, target_mac, target_mac, target_ip, source_ip, 0x0002);
+}
+
+static bool net_arp_send_generic(net_interface_t *iface, const uint8_t *dest_mac,
+                                 const uint8_t *target_mac, uint32_t target_ip,
+                                 uint32_t source_ip, uint16_t opcode)
+{
+    if (!iface || !dest_mac)
+    {
+        return false;
     }
 
     uint8_t buffer[60];
@@ -170,7 +207,7 @@ static void net_arp_send_reply(net_interface_t *iface, const uint8_t *target_mac
     uint8_t *eth = buffer;
     uint8_t *arp = buffer + 14;
 
-    memcpy(eth, target_mac, 6);
+    memcpy(eth, dest_mac, 6);
     memcpy(eth + 6, iface->mac, 6);
     eth[12] = 0x08;
     eth[13] = 0x06;
@@ -179,13 +216,13 @@ static void net_arp_send_reply(net_interface_t *iface, const uint8_t *target_mac
     write_be16(arp + 2, 0x0800);
     arp[4] = 6;
     arp[5] = 4;
-    write_be16(arp + 6, 0x0002); /* reply */
+    write_be16(arp + 6, opcode);
     memcpy(arp + 8, iface->mac, 6);
-    write_be32(arp + 14, iface->ipv4_addr);
+    write_be32(arp + 14, source_ip);
     memcpy(arp + 18, target_mac, 6);
     write_be32(arp + 24, target_ip);
 
-    net_if_send(iface, buffer, sizeof(buffer));
+    return net_if_send(iface, buffer, sizeof(buffer));
 }
 
 static uint16_t read_be16(const uint8_t *p)

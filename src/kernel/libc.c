@@ -83,3 +83,21 @@ int strncmp(const char *a, const char *b, size_t n)
     }
     return 0;
 }
+
+int memcmp(const void *a, const void *b, size_t count)
+{
+    const uint8_t *pa = (const uint8_t *)a;
+    const uint8_t *pb = (const uint8_t *)b;
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        uint8_t va = pa[i];
+        uint8_t vb = pb[i];
+        if (va != vb)
+        {
+            // Return difference of the first differing bytes (unsigned comparison)
+            return (int)va - (int)vb;
+        }
+    }
+    return 0;
+}

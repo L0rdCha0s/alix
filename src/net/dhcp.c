@@ -4,6 +4,7 @@
 
 #include "serial.h"
 #include "libc.h"
+#include "net/arp.h"
 
 #define DHCP_OP_REQUEST 1
 #define DHCP_OP_REPLY   2
@@ -42,6 +43,9 @@ static net_interface_t *g_active_iface = NULL;
 static uint32_t g_xid = 0x12345678U;
 static uint32_t g_offer_addr = 0;
 static uint32_t g_server_id = 0;
+static uint32_t g_prev_xid = 0;
+static uint8_t g_server_mac[6];
+static bool g_have_server_mac = false;
 
 static bool dhcp_send_discover(void);
 static bool dhcp_send_request(void);
@@ -66,8 +70,11 @@ bool net_dhcp_acquire(net_interface_t *iface)
     serial_write_string("\r\n");
 
     g_active_iface = iface;
+    g_prev_xid = g_xid;
     g_offer_addr = 0;
     g_server_id = 0;
+    g_have_server_mac = false;
+    memset(g_server_mac, 0, sizeof(g_server_mac));
     g_xid += 0x01020304U; /* change transaction id */
     net_if_set_ipv4(iface, 0, 0, 0);
     g_state = DHCP_WAIT_OFFER;
@@ -78,6 +85,31 @@ bool net_dhcp_acquire(net_interface_t *iface)
         return false;
     }
     serial_write_string("dhcp: discover sent\r\n");
+    return true;
+}
+
+bool net_dhcp_in_progress(void)
+{
+    return g_state != DHCP_IDLE;
+}
+
+bool net_dhcp_claims_ip(net_interface_t *iface, uint32_t ip)
+{
+    return iface && iface == g_active_iface && g_state == DHCP_WAIT_ACK && g_offer_addr == ip;
+}
+
+static bool mac_is_sane(const uint8_t mac[6])
+{
+    if (!mac) return false;
+    // Reject multicast/broadcast, all-zeros/all-FF, or our own MAC.
+    if ((mac[0] & 1) != 0) return false;
+    bool all0 = true, allf = true;
+    for (int i = 0; i < 6; ++i) {
+        if (mac[i] != 0x00) all0 = false;
+        if (mac[i] != 0xFF) allf = false;
+    }
+    if (all0 || allf) return false;
+    if (g_active_iface && memcmp(mac, g_active_iface->mac, 6) == 0) return false;
     return true;
 }
 
@@ -131,10 +163,18 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         return;
     }
     uint32_t xid = read_be32(dhcp + 4);
-    if (xid != g_xid)
+    bool xid_current = (xid == g_xid);
+    bool xid_previous = (!xid_current && g_prev_xid != 0 && xid == g_prev_xid);
+    if (!xid_current && !xid_previous)
     {
         serial_write_string("dhcp: transaction id mismatch\r\n");
         return;
+    }
+    if (xid_previous)
+    {
+        /* Accept late response for previous transaction. */
+        g_xid = xid;
+        g_state = DHCP_WAIT_ACK;
     }
 
     uint8_t message_type = 0;
@@ -217,10 +257,17 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
     {
         g_offer_addr = yiaddr;
         g_server_id = server_id;
+        memcpy(g_server_mac, frame + 6, 6); /* source MAC of offer */
+        g_have_server_mac = mac_is_sane(g_server_mac);
+        /* Try to learn the server's L2 via ARP as well (more reliable). */
+        if (g_server_id != 0) {
+            net_arp_send_request(iface, g_server_id);
+        }
         g_state = DHCP_WAIT_ACK;
         if (dhcp_send_request())
         {
             serial_write_string("dhcp: sent request\r\n");
+            net_arp_announce(iface, g_offer_addr);
         }
         else
         {
@@ -249,6 +296,9 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         serial_write_string("\r\n");
         g_state = DHCP_IDLE;
         g_active_iface = NULL;
+        g_prev_xid = 0;
+        g_offer_addr = 0;
+        g_have_server_mac = false;
     }
 }
 
@@ -259,7 +309,13 @@ static bool dhcp_send_discover(void)
 
 static bool dhcp_send_request(void)
 {
-    return dhcp_send_message(DHCP_MSG_REQUEST, g_offer_addr, g_server_id);
+    bool success = dhcp_send_message(DHCP_MSG_REQUEST, g_offer_addr, g_server_id);
+    if (!success)
+    {
+        g_state = DHCP_IDLE;
+        g_active_iface = NULL;
+    }
+    return success;
 }
 
 static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t server_id)
@@ -277,8 +333,34 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
     uint8_t *udp = ip + 20;
     uint8_t *dhcp = udp + 8;
 
+    bool broadcast = true;
+    uint32_t dest_ip = 0xFFFFFFFFU;
+    const uint8_t *dest_mac = NULL;
+    uint8_t resolved_mac[6];
+    if (msg_type == DHCP_MSG_REQUEST && server_id != 0)
+    {
+        /* Prefer an ARP-resolved L2, then fall back to the DHCP source MAC
+           if (and only if) it looks sane. Otherwise, broadcast. */
+        if (net_arp_lookup(server_id, resolved_mac) && mac_is_sane(resolved_mac)) {
+            broadcast = false;
+            dest_ip = server_id;
+            dest_mac = resolved_mac;
+        } else if (g_have_server_mac && mac_is_sane(g_server_mac)) {
+            broadcast = false;
+            dest_ip = server_id;
+            dest_mac = g_server_mac;
+        }
+    }
+
     /* Ethernet header */
-    memset(eth, 0xFF, 6);
+    if (dest_mac)
+    {
+        memcpy(eth, dest_mac, 6);
+    }
+    else
+    {
+        memset(eth, 0xFF, 6);
+    }
     memcpy(eth + 6, g_active_iface->mac, 6);
     eth[12] = 0x08;
     eth[13] = 0x00;
@@ -296,7 +378,7 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
     dhcp[3] = 0;
     write_be32(dhcp + 4, g_xid);
     write_be16(dhcp + 8, 0);
-    write_be16(dhcp + 10, 0x8000);
+    write_be16(dhcp + 10, broadcast ? 0x8000 : 0x0000); /* BOOTP flags */
     write_be32(dhcp + 12, 0);
     write_be32(dhcp + 16, 0);
     write_be32(dhcp + 20, 0);
@@ -345,7 +427,7 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
     ip[8] = 64;
     ip[9] = 17; /* UDP */
     write_be32(ip + 12, 0);
-    write_be32(ip + 16, 0xFFFFFFFFU);
+    write_be32(ip + 16, dest_ip);
     write_be16(ip + 10, 0); /* checksum zero before calculation */
     uint16_t checksum = ip_checksum(ip, 20);
     write_be16(ip + 10, checksum);
@@ -381,6 +463,12 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
         serial_write_string("dhcp: failed to transmit frame\r\n");
         return false;
     }
+
+    if (!broadcast && msg_type == DHCP_MSG_REQUEST && g_offer_addr != 0)
+    {
+        net_arp_announce(g_active_iface, g_offer_addr);
+    }
+
     return true;
 }
 

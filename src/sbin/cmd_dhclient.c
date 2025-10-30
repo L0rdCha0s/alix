@@ -2,6 +2,8 @@
 
 #include "net/interface.h"
 #include "net/dhcp.h"
+#include "rtl8139.h"
+#include "timer.h"
 #include "libc.h"
 
 bool shell_cmd_dhclient(shell_state_t *shell, shell_output_t *out, const char *args)
@@ -39,5 +41,35 @@ bool shell_cmd_dhclient(shell_state_t *shell, shell_output_t *out, const char *a
     shell_output_write(out, "DHCP discovery started for ");
     shell_output_write(out, name);
     shell_output_write(out, "\n");
+
+    uint64_t start = timer_ticks();
+    uint64_t timeout = timer_frequency() * 5; /* wait up to ~5 seconds */
+    while (net_dhcp_in_progress())
+    {
+        rtl8139_poll();
+        if (iface->ipv4_addr != 0)
+        {
+            break;
+        }
+        uint64_t elapsed = timer_ticks() - start;
+        if (timeout != 0 && elapsed >= timeout)
+        {
+            break;
+        }
+    }
+
+    if (iface->ipv4_addr != 0)
+    {
+        char ipbuf[32];
+        net_format_ipv4(iface->ipv4_addr, ipbuf);
+        shell_output_write(out, "DHCP lease acquired: ");
+        shell_output_write(out, ipbuf);
+        shell_output_write(out, "\n");
+    }
+    else
+    {
+        shell_output_write(out, "DHCP still in progress...\n");
+    }
+
     return true;
 }

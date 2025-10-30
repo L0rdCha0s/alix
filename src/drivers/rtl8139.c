@@ -261,7 +261,7 @@ static void rtl8139_handle_receive(void)
         uint16_t length = rtl8139_buffer_read16(offset + 2);
         if ((packet_status & 0x01U) == 0 || length == 0)
         {
-            rtl8139_log("dropping invalid packet");
+            //rtl8139_log("dropping invalid packet");
             rtl8139_dump_state("rx invalid");
         }
         else if (g_log_rx_count < 8)
