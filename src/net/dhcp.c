@@ -5,6 +5,7 @@
 #include "serial.h"
 #include "libc.h"
 #include "net/arp.h"
+#include "net/route.h"
 
 #define DHCP_OP_REQUEST 1
 #define DHCP_OP_REPLY   2
@@ -284,6 +285,10 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
             subnet_mask = 0xFFFFFF00U;
         }
         net_if_set_ipv4(iface, yiaddr, subnet_mask, router);
+        if (router != 0)
+        {
+            net_route_set_default(iface, router);
+        }
         serial_write_string("dhcp: lease acquired. address=");
         net_format_ipv4(yiaddr, ipbuf);
         serial_write_string(ipbuf);
