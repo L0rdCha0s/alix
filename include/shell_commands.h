@@ -12,5 +12,7 @@ bool shell_cmd_start_video(shell_state_t *shell, shell_output_t *out, const char
 bool shell_cmd_net_mac(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_dhclient(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_alloc1m(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_free(shell_state_t *shell, shell_output_t *out, const char *args);
 
 #endif

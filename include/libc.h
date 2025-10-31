@@ -11,4 +11,9 @@ size_t strlen(const char *str);
 int strcmp(const char *a, const char *b);
 int strncmp(const char *a, const char *b, size_t n);
 
+void *malloc(size_t size);
+void free(void *ptr);
+void *calloc(size_t count, size_t size);
+void *realloc(void *ptr, size_t size);
+
 #endif

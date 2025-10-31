@@ -5,6 +5,7 @@
 #include "interrupts.h"
 #include "timer.h"
 #include "hwinfo.h"
+#include "heap.h"
 #include "rtl8139.h"
 #include "shell.h"
 #include "net/interface.h"
@@ -15,6 +16,8 @@ void kernel_main(void)
     keyboard_init();
     console_init();
     console_clear();
+
+    heap_init();
 
     serial_write_char('k');
     hwinfo_print_boot_summary();

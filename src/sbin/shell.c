@@ -78,8 +78,8 @@ void shell_main(void)
     shell_state_t shell = { .cwd = vfs_root() };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, dhclient, start_video.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, dhclient, start_video.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, dhclient, start_video, alloc1m, free.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, dhclient, start_video, alloc1m, free.\r\n");
 
     while (1)
     {
@@ -101,6 +101,8 @@ static const shell_command_t g_commands[] = {
     { "dhclient",    shell_cmd_dhclient },
     { "start_video", shell_cmd_start_video },
     { "net_mac",     shell_cmd_net_mac },
+    { "alloc1m",     shell_cmd_alloc1m },
+    { "free",        shell_cmd_free },
 };
 
 static void shell_process_line(shell_state_t *shell, char *buffer)
