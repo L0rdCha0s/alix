@@ -46,7 +46,6 @@ $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-
 $(STAGE2_OBJ): $(STAGE2_SRC)
 	@mkdir -p $(dir $@)
 	$(NASM) -f elf64 -o $@ $<
@@ -77,28 +76,48 @@ hdd.img: $(BOOT_BIN) $(STAGE2_BIN)
 	dd if=$(BOOT_BIN)   of=$@ conv=notrunc 2>/dev/null
 	dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
 
-run: os.img
-	$(QEMU) -fda os.img -boot a -no-reboot -monitor none -serial stdio \
-		-netdev user,id=n0 -device rtl8139,netdev=n0
-
-QEMU_DEBUG_LOG ?= qemu-debug.log
+QEMU_DEBUG_LOG   ?= qemu-debug.log
 QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
+HOMEBREW_PREFIX  := $(shell brew --prefix)
 
-# --- choose networking backend: vmnet-shared (macOS) or user (slirp)
+# --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)
 NET_BACKEND ?= vmnet-shared
 
-# Common NIC + optional packet capture
+# Packet capture (works for all backends)
 NETDUMP := -object filter-dump,id=n0dump,netdev=n0,queue=all,file=qemu-net.pcap
+
+# Backend-specific NETDEV flags
 NETDEV_user := -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15
-NETDEV_vmnet-shared := -netdev vmnet-shared,id=n0
 
-# Resolve NETDEV flags for chosen backend
-NETDEV := $(NETDEV_$(NET_BACKEND))
+# Defaults
+QEMU_NET_PREFIX :=
+NETDEV := $(NETDEV_user)
 
-# Device (keep your RTL8139 + MAC)
+# vmnet-shared via socket_vmnet (rootless): wrap QEMU and use fd=3
+ifeq ($(NET_BACKEND),vmnet-shared)
+  VMNET_SOCKET ?= $(HOMEBREW_PREFIX)/var/run/socket_vmnet
+  QEMU_NET_PREFIX := $(HOMEBREW_PREFIX)/opt/socket_vmnet/bin/socket_vmnet_client $(VMNET_SOCKET)
+  NETDEV := -netdev socket,id=n0,fd=3
+endif
+
+# vmnet-bridged via socket_vmnet (rootless): choose interface with VMNET_BRIDGE=en0/en1/...
+ifeq ($(NET_BACKEND),vmnet-bridged)
+  VMNET_BRIDGE ?= en0
+  VMNET_SOCKET ?= $(HOMEBREW_PREFIX)/var/run/socket_vmnet.bridged.$(VMNET_BRIDGE)
+  QEMU_NET_PREFIX := $(HOMEBREW_PREFIX)/opt/socket_vmnet/bin/socket_vmnet_client $(VMNET_SOCKET)
+  NETDEV := -netdev socket,id=n0,fd=3
+endif
+
+# Device (keep RTL8139 + MAC)
 NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
 
+run: os.img
+	$(QEMU_NET_PREFIX) \
+	$(QEMU) -fda os.img -boot a -no-reboot -monitor none -serial stdio \
+		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
+
 run-hdd: hdd.img
+	$(QEMU_NET_PREFIX) \
 	$(QEMU) -drive file=hdd.img,format=raw,if=ide -no-reboot -monitor none -serial stdio \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 

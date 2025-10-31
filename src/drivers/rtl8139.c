@@ -46,8 +46,11 @@
 #define RTL_RCR_MXDMA_UNLIMITED (7U << RTL_RCR_MXDMA_SHIFT)
 #define RTL_RCR_RBLEN_8K (0U << 11)
 
-#define RTL_RCR_DEFAULT (RTL_RCR_AAP | RTL_RCR_APM | RTL_RCR_AB | RTL_RCR_AM | \
+// Remove AAP (promisc) and AM (all multicast)
+#define RTL_RCR_DEFAULT ( \
+    RTL_RCR_APM | RTL_RCR_AB | \
     RTL_RCR_WRAP | RTL_RCR_MXDMA_UNLIMITED | RTL_RCR_RBLEN_8K)
+
 
 /* RX ring in the 8139 is 8 KiB plus a 16-byte header. We keep an
    additional safety tail for convenient linear reads across the wrap,
@@ -248,97 +251,114 @@ bool rtl8139_get_mac(uint8_t mac_out[6])
 static void rtl8139_handle_receive(void)
 {
     rtl8139_dump_state("rx poll");
-    /* Some environments occasionally report RX_EMPTY=0 with no valid
-       descriptors available, which could spin forever. Put a hard
-       safety cap on how many iterations we perform in one poll to
-       prevent the kernel from stalling before the shell starts. */
+
+    // Safety cap so we never spin forever if RX_EMPTY flickers
     int safety = 4096;
+
     while ((inb(g_io_base + RTL_REG_CR) & RTL_CR_RX_EMPTY) == 0 && safety-- > 0)
     {
         uint32_t offset = g_rx_offset;
-        uint16_t packet_status = rtl8139_buffer_read16(offset);
-        uint16_t length = rtl8139_buffer_read16(offset + 2);
-        if ((packet_status & 0x01U) == 0 || length == 0)
-        {
-            //rtl8139_log("dropping invalid packet");
+
+        // Descriptor header in ring: [status:16][length:16][payload...][CRC(4)]
+        uint16_t rsr   = rtl8139_buffer_read16(offset + 0);
+        uint16_t rxlen = rtl8139_buffer_read16(offset + 2);   // includes CRC
+        bool ok = (rsr & 0x0001U) && rxlen >= 8 && rxlen <= (RTL_RX_RING_SIZE - 16);
+
+        if (!ok) {
             rtl8139_dump_state("rx invalid");
+            goto advance_ring;
         }
-        else if (g_log_rx_count < 8)
+
+        uint16_t frame_len = (uint16_t)(rxlen - 4);  // strip CRC
+        if (frame_len > 9216) {                      // jumbo/garbage guard
+            goto advance_ring;
+        }
+
+        // Peek first up to 18 bytes to decide whether we care (VLAN-aware)
+        uint8_t hdr[18];
         {
-            ++g_log_rx_count;
-            serial_write_string("rtl8139: rx len=0x");
-            rtl8139_log_hex16(length);
-            serial_write_string(" data=");
-            uint16_t preview = (length < 6) ? length : 6;
-            for (uint16_t i = 0; i < preview; ++i)
-            {
-                uint8_t byte = rtl8139_buffer_read8(offset + 4 + i);
-                rtl8139_log_hex8(byte);
-                if (i + 1 != preview)
-                {
-                    serial_write_char(' ');
+            uint32_t start = (offset + 4) & (RTL_RX_RING_SIZE - 1);
+            uint32_t first = (frame_len < sizeof(hdr)) ? frame_len : (uint32_t)sizeof(hdr);
+            uint32_t head  = RTL_RX_RING_SIZE - start;
+            uint32_t n0    = (first <= head) ? first : head;
+            memcpy(hdr,                &g_rx_buffer[start], n0);
+            if (first > n0) memcpy(hdr + n0, &g_rx_buffer[0], first - n0);
+        }
+
+        if (frame_len >= 14) {
+            uint16_t eth_type = (uint16_t)((hdr[12] << 8) | hdr[13]);
+            uint32_t l2_off = 14;
+
+            // If VLAN tagged (0x8100), drop for now (stack not parsing 802.1Q yet).
+            // (If you want to support it later, parse inner EtherType at bytes 16/17
+            //  and keep l2_off = 18, but then your upper stack must understand VLAN.)
+            if (eth_type == 0x8100) {
+                goto advance_ring;
+            }
+
+            // Optional early filtering: only accept IPv4 and ARP currently.
+            if (!(eth_type == 0x0800 || eth_type == 0x0806)) {
+                goto advance_ring;
+            }
+
+            // Copy only frames we’ll actually process
+            if (frame_len > sizeof(g_rx_frame)) {
+                serial_write_string("rtl8139: frame too large for buffer\r\n");
+                goto advance_ring;
+            }
+
+            // Linearize the frame into g_rx_frame
+            rtl8139_copy_packet(offset, g_rx_frame, frame_len);
+
+            // Light logging + IP/TCP/UDP port logging guarded by proto
+            serial_write_string("rtl8139: rx frame eth_type=0x");
+            rtl8139_log_hex16(eth_type);
+            serial_write_string(" len=0x");
+            rtl8139_log_hex16(frame_len);
+            serial_write_string("\r\n");
+
+            if (eth_type == 0x0800 && frame_len >= l2_off + 20) {
+                uint8_t ihl = (uint8_t)(g_rx_frame[l2_off] & 0x0F);
+                size_t ip_hlen = (size_t)ihl * 4;
+                if (frame_len >= l2_off + ip_hlen) {
+                    uint8_t proto = g_rx_frame[l2_off + 9];
+                    serial_write_string("rtl8139: ip proto=0x");
+                    rtl8139_log_hex16(proto);
+
+                    if ((proto == 6 /*TCP*/ || proto == 17 /*UDP*/) &&
+                        frame_len >= l2_off + ip_hlen + 4)
+                    {
+                        uint16_t sport = (uint16_t)((g_rx_frame[l2_off + ip_hlen + 0] << 8) |
+                                                    g_rx_frame[l2_off + ip_hlen + 1]);
+                        uint16_t dport = (uint16_t)((g_rx_frame[l2_off + ip_hlen + 2] << 8) |
+                                                    g_rx_frame[l2_off + ip_hlen + 3]);
+                        serial_write_string(" src_port=0x");
+                        rtl8139_log_hex16(sport);
+                        serial_write_string(" dst_port=0x");
+                        rtl8139_log_hex16(dport);
+                    }
+                    serial_write_string("\r\n");
                 }
             }
-            serial_write_string("\r\n");
-        }
 
-        if (g_iface && length >= 4)
-        {
-            uint16_t frame_len = (uint16_t)(length - 4);
-            if (frame_len > 0 && frame_len <= sizeof(g_rx_frame))
-            {
-                rtl8139_copy_packet(offset, g_rx_frame, frame_len);
-
-                if (frame_len >= 14)
-                {
-                    uint16_t eth_type = (uint16_t)((g_rx_frame[12] << 8) | g_rx_frame[13]);
-                    serial_write_string("rtl8139: rx frame eth_type=0x");
-                    rtl8139_log_hex16(eth_type);
-                    serial_write_string(" len=0x");
-                    rtl8139_log_hex16(frame_len);
-                    serial_write_string("\r\n");
-
-                    if (eth_type == 0x0800 && frame_len >= 38)
-                    {
-                        uint8_t ihl = (uint8_t)(g_rx_frame[14] & 0x0F);
-                        size_t ip_header_len = (size_t)ihl * 4;
-                        if (14 + ip_header_len + 8 <= frame_len)
-                        {
-                            uint8_t proto = g_rx_frame[23];
-                            uint16_t src_port = (uint16_t)((g_rx_frame[14 + ip_header_len] << 8) | g_rx_frame[15 + ip_header_len]);
-                            uint16_t dst_port = (uint16_t)((g_rx_frame[16 + ip_header_len] << 8) | g_rx_frame[17 + ip_header_len]);
-                            serial_write_string("rtl8139: ip proto=0x");
-                            rtl8139_log_hex16(proto);
-                            serial_write_string(" src_port=0x");
-                            rtl8139_log_hex16(src_port);
-                            serial_write_string(" dst_port=0x");
-                            rtl8139_log_hex16(dst_port);
-                            serial_write_string("\r\n");
-                        }
-                    }
-                }
-                net_arp_handle_frame(g_iface, g_rx_frame, frame_len);
+            // Hand off to upper layers (full Ethernet frame)
+            if (g_iface) {
+                net_arp_handle_frame(g_iface,  g_rx_frame, frame_len);
                 net_dhcp_handle_frame(g_iface, g_rx_frame, frame_len);
                 net_icmp_handle_frame(g_iface, g_rx_frame, frame_len);
             }
-            else
-            {
-                serial_write_string("rtl8139: frame too large for buffer\r\n");
-            }
         }
 
-        /* Hardware ring wraps at 8 KiB. Advance and wrap accordingly. */
-        uint32_t advance = (uint32_t)((length + 4 + 3) & ~3U);
-        uint32_t next = g_rx_offset + advance;
-        while (next >= RTL_RX_RING_SIZE)
+        advance_ring:
         {
-            next -= RTL_RX_RING_SIZE;
+            // Advance ring: descriptor(4) + data + CRC(4), then DWORD align
+            uint32_t advance = (uint32_t)((rxlen + 4 + 3) & ~3U);
+            g_rx_offset = (g_rx_offset + advance) & (RTL_RX_RING_SIZE - 1);
+            outw(g_io_base + RTL_REG_CAPR, (uint16_t)((g_rx_offset - 16) & 0xFFFF));
         }
-        g_rx_offset = next;
-
-        outw(g_io_base + RTL_REG_CAPR, (uint16_t)((g_rx_offset - 16) & 0xFFFF));
     }
 }
+
 
 static uint16_t rtl8139_buffer_read16(uint32_t offset)
 {
@@ -354,12 +374,14 @@ static uint8_t rtl8139_buffer_read8(uint32_t offset)
 
 static void rtl8139_copy_packet(uint32_t offset, uint8_t *dest, uint16_t len)
 {
-    uint32_t start = (offset + 4) % RTL_RX_RING_SIZE;
-    for (uint16_t i = 0; i < len; ++i)
-    {
-        dest[i] = g_rx_buffer[(start + i) % RTL_RX_RING_SIZE];
-    }
+    uint32_t start = (offset + 4) & (RTL_RX_RING_SIZE - 1); // skip status/length
+    uint32_t head  = RTL_RX_RING_SIZE - start;
+    uint32_t n0    = (len <= head) ? len : head;
+
+    memcpy(dest,                &g_rx_buffer[start], n0);
+    if (len > n0) memcpy(dest + n0, &g_rx_buffer[0], len - n0);
 }
+
 
 
 static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t len)
