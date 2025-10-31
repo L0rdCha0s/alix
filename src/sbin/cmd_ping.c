@@ -4,6 +4,7 @@
 #include "net/icmp.h"
 #include "net/interface.h"
 #include "net/route.h"
+#include "net/dns.h"
 #include "rtl8139.h"
 #include "timer.h"
 #include "libc.h"
@@ -26,7 +27,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
     if (!read_token(&cursor, token1, sizeof(token1)))
     {
-        return shell_output_error(out, "Usage: ping [iface] <ip>");
+        return shell_output_error(out, "Usage: ping [iface] <host>");
     }
 
     if (!read_token(&cursor, token2, sizeof(token2)))
@@ -34,7 +35,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         size_t ip_len = strlen(token1);
         if (ip_len == 0 || ip_len >= sizeof(ip_token))
         {
-            return shell_output_error(out, "invalid IPv4 address");
+            return shell_output_error(out, "invalid host");
         }
         memcpy(ip_token, token1, ip_len + 1);
     }
@@ -51,7 +52,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         size_t ip_len = strlen(token2);
         if (ip_len == 0 || ip_len >= sizeof(ip_token))
         {
-            return shell_output_error(out, "invalid IPv4 address");
+            return shell_output_error(out, "invalid host");
         }
         memcpy(ip_token, token2, ip_len + 1);
     }
@@ -59,13 +60,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     cursor = skip_ws(cursor);
     if (*cursor != '\0')
     {
-        return shell_output_error(out, "Usage: ping [iface] <ip>");
-    }
-
-    uint32_t target_ip = 0;
-    if (!net_parse_ipv4(ip_token, &target_ip))
-    {
-        return shell_output_error(out, "invalid IPv4 address");
+        return shell_output_error(out, "Usage: ping [iface] <host>");
     }
 
     net_interface_t *requested_iface = NULL;
@@ -86,6 +81,20 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         }
     }
 
+    uint32_t target_ip = 0;
+    bool resolved_host = false;
+    if (!net_parse_ipv4(ip_token, &target_ip))
+    {
+        shell_output_write(out, "Resolving ");
+        shell_output_write(out, ip_token);
+        shell_output_write(out, "...\n");
+        if (!net_dns_resolve_ipv4(ip_token, requested_iface, &target_ip))
+        {
+            return shell_output_error(out, "unable to resolve host");
+        }
+        resolved_host = true;
+    }
+
     char target_str[32];
     char source_str[32];
     net_format_ipv4(target_ip, target_str);
@@ -103,7 +112,17 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     net_format_ipv4(iface->ipv4_addr, source_str);
 
     shell_output_write(out, "PING ");
-    shell_output_write(out, target_str);
+    if (resolved_host)
+    {
+        shell_output_write(out, ip_token);
+        shell_output_write(out, " (");
+        shell_output_write(out, target_str);
+        shell_output_write(out, ")");
+    }
+    else
+    {
+        shell_output_write(out, target_str);
+    }
     shell_output_write(out, " from ");
     shell_output_write(out, source_str);
     shell_output_write(out, ":\n");

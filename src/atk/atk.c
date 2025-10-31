@@ -229,6 +229,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
             if (!state->desktop_drag_moved && inside)
             {
                 atk_button_invoke(state->pressed_desktop_button);
+                result.redraw = true;
             }
         }
         state->pressed_desktop_button = NULL;

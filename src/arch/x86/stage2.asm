@@ -1,7 +1,7 @@
 ; stage2.asm — sets up long mode and jumps to C kernel at 0x00010000
 
 %define STAGE2_BASE   0x0000000000010000
-%define STACK_TOP     0x0000000000090000
+%define STACK_TOP     0x0000000000200000 ; 2 MiB: safely past stage2 .bss and below our paging structures
 ; Define a dedicated kernel heap region well above the VFS pool (16 MiB)
 ; This keeps dynamic allocations from overlapping the in-memory filesystem
 %define KERNEL_HEAP_BASE 0x0000000002000000 ; 32 MiB

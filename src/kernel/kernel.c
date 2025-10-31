@@ -9,6 +9,8 @@
 #include "rtl8139.h"
 #include "shell.h"
 #include "net/interface.h"
+#include "net/tcp.h"
+#include "net/dns.h"
 
 void kernel_main(void)
 {
@@ -34,6 +36,8 @@ void kernel_main(void)
     serial_write_char('T');
 
     net_if_init();
+    net_dns_init();
+    net_tcp_init();
 
     rtl8139_init();
     serial_write_char('N');

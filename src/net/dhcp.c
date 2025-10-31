@@ -6,6 +6,7 @@
 #include "libc.h"
 #include "net/arp.h"
 #include "net/route.h"
+#include "net/dns.h"
 
 #define DHCP_OP_REQUEST 1
 #define DHCP_OP_REPLY   2
@@ -22,6 +23,7 @@
 #define DHCP_OPTION_MESSAGE     53
 #define DHCP_OPTION_SERVER_ID   54
 #define DHCP_OPTION_PARAM_LIST  55
+#define DHCP_OPTION_DNS         6
 #define DHCP_OPTION_END         255
 
 #define DHCP_MSG_DISCOVER 1
@@ -182,6 +184,8 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
     uint32_t subnet_mask = 0;
     uint32_t router = 0;
     uint32_t server_id = 0;
+    uint32_t dns_servers[NET_DNS_MAX_SERVERS];
+    size_t dns_count = 0;
 
     const uint8_t *options = dhcp + 240;
     const uint8_t *udp_end = udp + udp_len;
@@ -230,6 +234,16 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
                 if (opt_len >= 4)
                 {
                     router = read_be32(opt);
+                }
+                break;
+            case DHCP_OPTION_DNS:
+                for (size_t idx = 0; idx + 3 < opt_len && dns_count < NET_DNS_MAX_SERVERS; idx += 4)
+                {
+                    uint32_t dns_ip = read_be32(opt + idx);
+                    if (dns_ip != 0)
+                    {
+                        dns_servers[dns_count++] = dns_ip;
+                    }
                 }
                 break;
             default:
@@ -298,6 +312,10 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         if (router != 0)
         {
             net_arp_send_request(iface, router);
+        }
+        if (dns_count > 0)
+        {
+            net_dns_set_servers(dns_servers, dns_count);
         }
         serial_write_string("dhcp: lease acquired. address=");
         net_format_ipv4(yiaddr, ipbuf);
