@@ -8,7 +8,6 @@
 bool shell_cmd_start_video(shell_state_t *shell, shell_output_t *out, const char *args)
 {
     (void)shell;
-    (void)out;
     (void)args;
 
     serial_write_string("Starting video mode...\r\n");
@@ -24,6 +23,5 @@ bool shell_cmd_start_video(shell_state_t *shell, shell_output_t *out, const char
         return true;
     }
 
-    shell_print_error("video init failed");
-    return false;
+    return shell_output_error(out, "video init failed");
 }

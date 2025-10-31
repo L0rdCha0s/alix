@@ -56,8 +56,7 @@ bool shell_cmd_ip(shell_state_t *shell, shell_output_t *out, const char *args)
         return ip_handle_route(out, cursor);
     }
 
-    shell_print_error("Usage: ip (link|addr|route) [args]");
-    return false;
+    return shell_output_error(out, "Usage: ip (link|addr|route) [args]");
 }
 
 static bool ip_handle_link(shell_output_t *out, const char *args)
@@ -98,8 +97,7 @@ static bool ip_handle_addr(shell_output_t *out, const char *args)
     size_t cmd_len = (size_t)(cursor - cmd_start);
     if (cmd_len == 0)
     {
-        shell_print_error("Usage: ip addr (show|set) ...");
-        return false;
+        return shell_output_error(out, "Usage: ip addr (show|set) ...");
     }
 
     if (cmd_len == 4 && strncmp(cmd_start, "show", 4) == 0)
@@ -111,8 +109,7 @@ static bool ip_handle_addr(shell_output_t *out, const char *args)
         return ip_addr_set(out, cursor);
     }
 
-    shell_print_error("Usage: ip addr (show|set) ...");
-    return false;
+    return shell_output_error(out, "Usage: ip addr (show|set) ...");
 }
 
 static bool ip_addr_show(shell_output_t *out, const char *args)
@@ -120,8 +117,7 @@ static bool ip_addr_show(shell_output_t *out, const char *args)
     const char *cursor = skip_ws(args);
     if (*cursor == '\0')
     {
-        shell_print_error("Usage: ip addr show <iface>");
-        return false;
+        return shell_output_error(out, "Usage: ip addr show <iface>");
     }
 
     size_t name_len = 0;
@@ -131,8 +127,7 @@ static bool ip_addr_show(shell_output_t *out, const char *args)
     }
     if (name_len == 0 || name_len >= NET_IF_NAME_MAX)
     {
-        shell_print_error("invalid interface name");
-        return false;
+        return shell_output_error(out, "invalid interface name");
     }
 
     char name[NET_IF_NAME_MAX];
@@ -142,15 +137,13 @@ static bool ip_addr_show(shell_output_t *out, const char *args)
     cursor = skip_ws(cursor);
     if (*cursor != '\0')
     {
-        shell_print_error("Usage: ip addr show <iface>");
-        return false;
+        return shell_output_error(out, "Usage: ip addr show <iface>");
     }
 
     net_interface_t *iface = net_if_by_name(name);
     if (!iface)
     {
-        shell_print_error("interface not found");
-        return false;
+        return shell_output_error(out, "interface not found");
     }
 
     ip_print_interface(out, iface);
@@ -162,8 +155,7 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
     const char *cursor = skip_ws(args);
     if (*cursor == '\0')
     {
-        shell_print_error("Usage: ip addr set <iface> <addr>[/prefix] [netmask]");
-        return false;
+        return shell_output_error(out, "Usage: ip addr set <iface> <addr>[/prefix] [netmask]");
     }
 
     size_t name_len = 0;
@@ -173,8 +165,7 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
     }
     if (name_len == 0 || name_len >= NET_IF_NAME_MAX)
     {
-        shell_print_error("invalid interface name");
-        return false;
+        return shell_output_error(out, "invalid interface name");
     }
 
     char name[NET_IF_NAME_MAX];
@@ -185,15 +176,13 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
     net_interface_t *iface = net_if_by_name(name);
     if (!iface)
     {
-        shell_print_error("interface not found");
-        return false;
+        return shell_output_error(out, "interface not found");
     }
 
     cursor = skip_ws(cursor);
     if (*cursor == '\0')
     {
-        shell_print_error("Usage: ip addr set <iface> <addr>[/prefix] [netmask]");
-        return false;
+        return shell_output_error(out, "Usage: ip addr set <iface> <addr>[/prefix] [netmask]");
     }
 
     char addr_token[32];
@@ -204,8 +193,7 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
     }
     if (addr_len == 0 || addr_len >= sizeof(addr_token))
     {
-        shell_print_error("invalid IPv4 address");
-        return false;
+        return shell_output_error(out, "invalid IPv4 address");
     }
     memcpy(addr_token, cursor, addr_len);
     addr_token[addr_len] = '\0';
@@ -232,13 +220,11 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
         unsigned prefix = 0;
         if (!net_parse_ipv4(addr_token, &addr_value))
         {
-            shell_print_error("invalid IPv4 address");
-            return false;
+            return shell_output_error(out, "invalid IPv4 address");
         }
         if (!parse_prefix(prefix_text, &prefix))
         {
-            shell_print_error("invalid prefix length");
-            return false;
+            return shell_output_error(out, "invalid prefix length");
         }
         netmask_value = netmask_from_prefix(prefix);
         netmask_set = true;
@@ -247,8 +233,7 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
     {
         if (!net_parse_ipv4(addr_token, &addr_value))
         {
-            shell_print_error("invalid IPv4 address");
-            return false;
+            return shell_output_error(out, "invalid IPv4 address");
         }
     }
 
@@ -257,8 +242,7 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
     {
         if (*cursor == '\0')
         {
-            shell_print_error("Usage: ip addr set <iface> <addr>[/prefix] [netmask]");
-            return false;
+            return shell_output_error(out, "Usage: ip addr set <iface> <addr>[/prefix] [netmask]");
         }
         char mask_token[32];
         size_t mask_len = 0;
@@ -268,15 +252,13 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
         }
         if (mask_len == 0 || mask_len >= sizeof(mask_token))
         {
-            shell_print_error("invalid netmask");
-            return false;
+            return shell_output_error(out, "invalid netmask");
         }
         memcpy(mask_token, cursor, mask_len);
         mask_token[mask_len] = '\0';
         if (!net_parse_ipv4(mask_token, &netmask_value))
         {
-            shell_print_error("invalid netmask");
-            return false;
+            return shell_output_error(out, "invalid netmask");
         }
         cursor += mask_len;
         cursor = skip_ws(cursor);
@@ -284,8 +266,7 @@ static bool ip_addr_set(shell_output_t *out, const char *args)
 
     if (*cursor != '\0')
     {
-        shell_print_error("Usage: ip addr set <iface> <addr>[/prefix] [netmask]");
-        return false;
+        return shell_output_error(out, "Usage: ip addr set <iface> <addr>[/prefix] [netmask]");
     }
 
     net_if_set_ipv4(iface, addr_value, netmask_value, iface->ipv4_gateway);
@@ -307,8 +288,7 @@ static bool ip_handle_route(shell_output_t *out, const char *args)
     size_t cmd_len = (size_t)(cursor - cmd_start);
     if (cmd_len == 0)
     {
-        shell_print_error("Usage: ip route (show|set|clear) ...");
-        return false;
+        return shell_output_error(out, "Usage: ip route (show|set|clear) ...");
     }
 
     if (cmd_len == 4 && strncmp(cmd_start, "show", 4) == 0)
@@ -316,8 +296,7 @@ static bool ip_handle_route(shell_output_t *out, const char *args)
         cursor = skip_ws(cursor);
         if (*cursor != '\0')
         {
-            shell_print_error("Usage: ip route show");
-            return false;
+            return shell_output_error(out, "Usage: ip route show");
         }
         return ip_route_show(out);
     }
@@ -332,14 +311,12 @@ static bool ip_handle_route(shell_output_t *out, const char *args)
         cursor = skip_ws(cursor);
         if (*cursor != '\0')
         {
-            shell_print_error("Usage: ip route clear");
-            return false;
+            return shell_output_error(out, "Usage: ip route clear");
         }
         return ip_route_clear_default(out);
     }
 
-    shell_print_error("Usage: ip route (show|set|clear) ...");
-    return false;
+    return shell_output_error(out, "Usage: ip route (show|set|clear) ...");
 }
 
 static bool ip_route_show(shell_output_t *out)
@@ -372,15 +349,13 @@ static bool ip_route_set_default(shell_output_t *out, const char *args)
     size_t token_len = (size_t)(cursor - token);
     if (token_len == 0 || strncmp(token, "default", token_len) != 0)
     {
-        shell_print_error("Usage: ip route set default <iface> <gateway>");
-        return false;
+        return shell_output_error(out, "Usage: ip route set default <iface> <gateway>");
     }
 
     cursor = skip_ws(cursor);
     if (*cursor == '\0')
     {
-        shell_print_error("Usage: ip route set default <iface> <gateway>");
-        return false;
+        return shell_output_error(out, "Usage: ip route set default <iface> <gateway>");
     }
 
     char name[NET_IF_NAME_MAX];
@@ -391,8 +366,7 @@ static bool ip_route_set_default(shell_output_t *out, const char *args)
     }
     if (name_len == 0 || name_len >= NET_IF_NAME_MAX)
     {
-        shell_print_error("invalid interface name");
-        return false;
+        return shell_output_error(out, "invalid interface name");
     }
     memcpy(name, cursor, name_len);
     name[name_len] = '\0';
@@ -401,15 +375,13 @@ static bool ip_route_set_default(shell_output_t *out, const char *args)
     net_interface_t *iface = net_if_by_name(name);
     if (!iface || !iface->present)
     {
-        shell_print_error("interface not found");
-        return false;
+        return shell_output_error(out, "interface not found");
     }
 
     cursor = skip_ws(cursor);
     if (*cursor == '\0')
     {
-        shell_print_error("Usage: ip route set default <iface> <gateway>");
-        return false;
+        return shell_output_error(out, "Usage: ip route set default <iface> <gateway>");
     }
 
     char gateway_token[32];
@@ -420,8 +392,7 @@ static bool ip_route_set_default(shell_output_t *out, const char *args)
     }
     if (gateway_len == 0 || gateway_len >= sizeof(gateway_token))
     {
-        shell_print_error("invalid gateway address");
-        return false;
+        return shell_output_error(out, "invalid gateway address");
     }
     memcpy(gateway_token, cursor, gateway_len);
     gateway_token[gateway_len] = '\0';
@@ -429,21 +400,18 @@ static bool ip_route_set_default(shell_output_t *out, const char *args)
     cursor = skip_ws(cursor);
     if (*cursor != '\0')
     {
-        shell_print_error("Usage: ip route set default <iface> <gateway>");
-        return false;
+        return shell_output_error(out, "Usage: ip route set default <iface> <gateway>");
     }
 
     uint32_t gateway = 0;
     if (!net_parse_ipv4(gateway_token, &gateway))
     {
-        shell_print_error("invalid gateway address");
-        return false;
+        return shell_output_error(out, "invalid gateway address");
     }
 
     if (!net_route_set_default(iface, gateway))
     {
-        shell_print_error("failed to set default route");
-        return false;
+        return shell_output_error(out, "failed to set default route");
     }
 
     char gw_buf[32];

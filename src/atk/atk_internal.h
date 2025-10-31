@@ -37,6 +37,10 @@ typedef struct
     char title[32];
     atk_list_t buttons;
     atk_list_node_t *list_node;
+    atk_list_t children;
+    atk_list_t text_inputs;
+    void *user_context;
+    void (*on_destroy)(void *context);
 } atk_window_priv_t;
 
 typedef struct
@@ -53,7 +57,7 @@ typedef struct
     uint16_t desktop_icon_text;
 } atk_theme_t;
 
-typedef struct
+typedef struct atk_state
 {
     atk_list_t windows;
     int next_window_id;
@@ -71,6 +75,8 @@ typedef struct
     int desktop_drag_offset_y;
     bool desktop_drag_moved;
 
+    atk_widget_t *focused_input;
+
     atk_theme_t theme;
     bool exit_requested;
 } atk_state_t;
@@ -78,6 +84,8 @@ typedef struct
 extern const atk_class_t ATK_WIDGET_CLASS;
 extern const atk_class_t ATK_BUTTON_CLASS;
 extern const atk_class_t ATK_WINDOW_CLASS;
+extern const atk_class_t ATK_LABEL_CLASS;
+extern const atk_class_t ATK_TEXT_INPUT_CLASS;
 
 atk_state_t *atk_state_get(void);
 

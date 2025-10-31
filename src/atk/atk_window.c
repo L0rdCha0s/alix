@@ -1,8 +1,11 @@
 #include "atk_window.h"
 
+#include <stddef.h>
 #include "libc.h"
 #include "serial.h"
 #include "video.h"
+#include "atk/atk_label.h"
+#include "atk/atk_text_input.h"
 
 static void atk_log(const char *msg);
 static void format_window_title(char *buffer, size_t capacity, int id);
@@ -45,6 +48,7 @@ void atk_window_reset_all(atk_state_t *state)
     state->drag_offset_y = 0;
     state->pressed_window_button_window = 0;
     state->pressed_window_button = 0;
+    state->focused_input = NULL;
 }
 
 void atk_window_draw_all(const atk_state_t *state)
@@ -160,6 +164,34 @@ atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py)
     return 0;
 }
 
+atk_widget_t *atk_window_text_input_at(atk_widget_t *window, int px, int py)
+{
+    if (!window || !window->used)
+    {
+        return NULL;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return NULL;
+    }
+
+    ATK_LIST_FOR_EACH_REVERSE(node, &priv->text_inputs)
+    {
+        atk_widget_t *input = (atk_widget_t *)node->value;
+        if (!input || !input->used)
+        {
+            continue;
+        }
+        if (atk_text_input_hit_test(input, window->x, window->y, px, py))
+        {
+            return input;
+        }
+    }
+    return NULL;
+}
+
 void atk_window_mark_dirty(const atk_widget_t *window)
 {
     int x, y, w, h;
@@ -218,7 +250,11 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     }
 
     atk_list_init(&priv->buttons);
+    atk_list_init(&priv->children);
+    atk_list_init(&priv->text_inputs);
     priv->list_node = 0;
+    priv->user_context = NULL;
+    priv->on_destroy = NULL;
 
     window->used = true;
     window->width = 600;
@@ -293,6 +329,17 @@ void atk_window_close(atk_state_t *state, atk_widget_t *window)
         priv->list_node = 0;
     }
 
+    if (state->focused_input && state->focused_input->parent == window)
+    {
+        atk_text_input_focus(state, NULL);
+    }
+
+    if (priv && priv->on_destroy && priv->user_context)
+    {
+        priv->on_destroy(priv->user_context);
+        priv->user_context = NULL;
+    }
+
     window_destroy(window);
 }
 
@@ -304,6 +351,23 @@ const char *atk_window_title(const atk_widget_t *window)
         return "";
     }
     return priv->title;
+}
+
+void atk_window_set_context(atk_widget_t *window, void *context, void (*on_destroy)(void *context))
+{
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return;
+    }
+    priv->user_context = context;
+    priv->on_destroy = on_destroy;
+}
+
+void *atk_window_context(const atk_widget_t *window)
+{
+    const atk_window_priv_t *priv = window_priv(window);
+    return priv ? priv->user_context : NULL;
 }
 
 static void atk_log(const char *msg)
@@ -358,12 +422,25 @@ static void window_draw(const atk_state_t *state, const atk_widget_t *window)
                             window->height,
                             theme->window_border);
 
-    ATK_LIST_FOR_EACH(node, &priv->buttons)
+    ATK_LIST_FOR_EACH(node, &priv->children)
     {
-        atk_widget_t *btn = (atk_widget_t *)node->value;
-        if (btn && btn->used)
+        atk_widget_t *child = (atk_widget_t *)node->value;
+        if (!child || !child->used)
         {
-            atk_button_draw(state, btn, window->x, window->y);
+            continue;
+        }
+
+        if (atk_widget_is_a(child, &ATK_BUTTON_CLASS))
+        {
+            atk_button_draw(state, child, window->x, window->y);
+        }
+        else if (atk_widget_is_a(child, &ATK_LABEL_CLASS))
+        {
+            atk_label_draw(state, child);
+        }
+        else if (atk_widget_is_a(child, &ATK_TEXT_INPUT_CLASS))
+        {
+            atk_text_input_draw(state, child);
         }
     }
 }
@@ -467,9 +544,17 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
                          false,
                          action,
                          context);
-    atk_list_node_t *node = atk_list_push_back(&priv->buttons, btn);
-    if (!node)
+    atk_list_node_t *child_node = atk_list_push_back(&priv->children, btn);
+    if (!child_node)
     {
+        atk_widget_destroy(btn);
+        return 0;
+    }
+
+    atk_list_node_t *button_node = atk_list_push_back(&priv->buttons, btn);
+    if (!button_node)
+    {
+        atk_list_remove(&priv->children, child_node);
         atk_widget_destroy(btn);
         return 0;
     }
@@ -477,7 +562,7 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
     atk_button_priv_t *btn_priv = (atk_button_priv_t *)atk_widget_priv(btn, &ATK_BUTTON_CLASS);
     if (btn_priv)
     {
-        btn_priv->list_node = node;
+        btn_priv->list_node = button_node;
     }
 
     return btn;
@@ -526,6 +611,34 @@ static void button_destroy_value(void *value)
     atk_widget_destroy(widget);
 }
 
+static void window_child_destroy(void *value)
+{
+    atk_widget_t *widget = (atk_widget_t *)value;
+    if (!widget)
+    {
+        return;
+    }
+
+    if (atk_widget_is_a(widget, &ATK_BUTTON_CLASS))
+    {
+        button_destroy_value(widget);
+    }
+    else if (atk_widget_is_a(widget, &ATK_LABEL_CLASS))
+    {
+        atk_label_destroy(widget);
+        atk_widget_destroy(widget);
+    }
+    else if (atk_widget_is_a(widget, &ATK_TEXT_INPUT_CLASS))
+    {
+        atk_text_input_destroy(widget);
+        atk_widget_destroy(widget);
+    }
+    else
+    {
+        atk_widget_destroy(widget);
+    }
+}
+
 static void window_destroy(atk_widget_t *window)
 {
     if (!window)
@@ -536,8 +649,12 @@ static void window_destroy(atk_widget_t *window)
     atk_window_priv_t *priv = window_priv_mut(window);
     if (priv)
     {
-        atk_list_clear(&priv->buttons, button_destroy_value);
+        atk_list_clear(&priv->children, window_child_destroy);
+        atk_list_clear(&priv->buttons, NULL);
+        atk_list_clear(&priv->text_inputs, NULL);
         priv->list_node = 0;
+        priv->user_context = NULL;
+        priv->on_destroy = NULL;
     }
 
     atk_widget_destroy(window);

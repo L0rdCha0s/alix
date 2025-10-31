@@ -26,8 +26,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
     if (!read_token(&cursor, token1, sizeof(token1)))
     {
-        shell_print_error("Usage: ping [iface] <ip>");
-        return false;
+        return shell_output_error(out, "Usage: ping [iface] <ip>");
     }
 
     if (!read_token(&cursor, token2, sizeof(token2)))
@@ -35,8 +34,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         size_t ip_len = strlen(token1);
         if (ip_len == 0 || ip_len >= sizeof(ip_token))
         {
-            shell_print_error("invalid IPv4 address");
-            return false;
+            return shell_output_error(out, "invalid IPv4 address");
         }
         memcpy(ip_token, token1, ip_len + 1);
     }
@@ -46,16 +44,14 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         size_t name_len = strlen(token1);
         if (name_len == 0 || name_len >= NET_IF_NAME_MAX)
         {
-            shell_print_error("invalid interface name");
-            return false;
+            return shell_output_error(out, "invalid interface name");
         }
         memcpy(iface_name, token1, name_len + 1);
 
         size_t ip_len = strlen(token2);
         if (ip_len == 0 || ip_len >= sizeof(ip_token))
         {
-            shell_print_error("invalid IPv4 address");
-            return false;
+            return shell_output_error(out, "invalid IPv4 address");
         }
         memcpy(ip_token, token2, ip_len + 1);
     }
@@ -63,15 +59,13 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     cursor = skip_ws(cursor);
     if (*cursor != '\0')
     {
-        shell_print_error("Usage: ping [iface] <ip>");
-        return false;
+        return shell_output_error(out, "Usage: ping [iface] <ip>");
     }
 
     uint32_t target_ip = 0;
     if (!net_parse_ipv4(ip_token, &target_ip))
     {
-        shell_print_error("invalid IPv4 address");
-        return false;
+        return shell_output_error(out, "invalid IPv4 address");
     }
 
     net_interface_t *requested_iface = NULL;
@@ -80,18 +74,15 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         requested_iface = net_if_by_name(iface_name);
         if (!requested_iface || !requested_iface->present)
         {
-            shell_print_error("interface not found");
-            return false;
+            return shell_output_error(out, "interface not found");
         }
         if (!requested_iface->link_up)
         {
-            shell_print_error("interface is down");
-            return false;
+            return shell_output_error(out, "interface is down");
         }
         if (requested_iface->ipv4_addr == 0)
         {
-            shell_print_error("interface has no IPv4 address");
-            return false;
+            return shell_output_error(out, "interface has no IPv4 address");
         }
     }
 
@@ -102,13 +93,11 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     uint32_t next_hop_ip = target_ip;
     if (!net_route_next_hop(iface, target_ip, &iface, &next_hop_ip))
     {
-        shell_print_error("no route to host");
-        return false;
+        return shell_output_error(out, "no route to host");
     }
     if (!iface || !iface->present || !iface->link_up || iface->ipv4_addr == 0)
     {
-        shell_print_error("no route to host");
-        return false;
+        return shell_output_error(out, "no route to host");
     }
 
     net_format_ipv4(iface->ipv4_addr, source_str);
@@ -135,8 +124,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         shell_output_write(out, "  Resolving ARP...\n");
         if (!net_arp_send_request(iface, next_hop_ip))
         {
-            shell_print_error("failed to send ARP request");
-            return false;
+            return shell_output_error(out, "failed to send ARP request");
         }
 
         uint64_t start = timer_ticks();
@@ -169,8 +157,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
     if (!net_icmp_send_echo(iface, target_mac, target_ip, identifier, sequence, payload_len))
     {
-        shell_print_error("failed to send ICMP echo request");
-        return false;
+        return shell_output_error(out, "failed to send ICMP echo request");
     }
 
     uint64_t send_tick = timer_ticks();

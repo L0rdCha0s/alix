@@ -11,6 +11,10 @@ struct shell_output
 {
     bool to_file;
     vfs_node_t *file;
+    bool to_buffer;
+    char *buffer;
+    size_t length;
+    size_t capacity;
 };
 
 struct shell_state
@@ -21,8 +25,15 @@ struct shell_state
 void shell_main(void);
 
 void shell_output_init_console(shell_output_t *out);
+void shell_output_init_buffer(shell_output_t *out);
+bool shell_output_prepare_file(shell_output_t *out, vfs_node_t *file);
 bool shell_output_write(shell_output_t *out, const char *text);
 bool shell_output_write_len(shell_output_t *out, const char *text, size_t len);
 void shell_print_error(const char *msg);
+char *shell_output_take_buffer(shell_output_t *out);
+void shell_output_reset(shell_output_t *out);
+
+char *shell_execute_line(shell_state_t *shell, const char *line, bool *success);
+bool shell_output_error(shell_output_t *out, const char *msg);
 
 #endif

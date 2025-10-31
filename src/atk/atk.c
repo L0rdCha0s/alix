@@ -7,9 +7,12 @@
 #include "atk_desktop.h"
 #include "atk_internal.h"
 #include "atk_window.h"
+#include "atk/atk_text_input.h"
+#include "atk/atk_shell.h"
 
 static void atk_apply_default_theme(atk_state_t *state);
 static void action_exit_to_text(atk_widget_t *button, void *context);
+static void action_open_shell(atk_widget_t *button, void *context);
 
 void atk_init(void)
 {
@@ -37,6 +40,17 @@ void atk_enter_mode(void)
                            ATK_BUTTON_STYLE_TITLE_BELOW,
                            true,
                            action_exit_to_text,
+                           state);
+
+    atk_desktop_add_button(state,
+                           140,
+                           40,
+                           88,
+                           88,
+                           "Shell",
+                           ATK_BUTTON_STYLE_TITLE_BELOW,
+                           true,
+                           action_open_shell,
                            state);
 }
 
@@ -99,6 +113,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                 }
                 state->pressed_window_button_window = win;
                 state->pressed_window_button = btn;
+                atk_text_input_focus(state, NULL);
                 handled = true;
             }
         }
@@ -142,6 +157,17 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                     }
                     result.redraw = true;
                 }
+
+                atk_widget_t *input_widget = atk_window_text_input_at(win, cursor_x, cursor_y);
+                if (input_widget)
+                {
+                    atk_text_input_focus(state, input_widget);
+                }
+                else
+                {
+                    atk_text_input_focus(state, NULL);
+                }
+
                 handled = true;
             }
         }
@@ -159,12 +185,14 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                     state->desktop_drag_offset_y = cursor_y - btn->y;
                     state->desktop_drag_moved = false;
                 }
+                atk_text_input_focus(state, NULL);
                 handled = true;
             }
         }
 
         if (!handled)
         {
+            atk_text_input_focus(state, NULL);
             atk_widget_t *created = atk_window_create_at(state, cursor_x, cursor_y);
             if (created)
             {
@@ -299,4 +327,39 @@ static void action_exit_to_text(atk_widget_t *button, void *context)
     {
         state->exit_requested = true;
     }
+}
+
+atk_key_event_result_t atk_handle_key_char(char ch)
+{
+    atk_state_t *state = atk_state_get();
+    atk_key_event_result_t result = { .redraw = false, .exit_video = false };
+
+    if (!state)
+    {
+        return result;
+    }
+
+    atk_widget_t *input = state->focused_input;
+    if (!input || !input->used)
+    {
+        return result;
+    }
+
+    atk_text_input_event_t event = atk_text_input_handle_char(input, ch);
+    if (event == ATK_TEXT_INPUT_EVENT_CHANGED || event == ATK_TEXT_INPUT_EVENT_SUBMIT)
+    {
+        result.redraw = true;
+    }
+    return result;
+}
+
+static void action_open_shell(atk_widget_t *button, void *context)
+{
+    (void)button;
+    atk_state_t *state = (atk_state_t *)context;
+    if (!state)
+    {
+        return;
+    }
+    atk_shell_open(state);
 }

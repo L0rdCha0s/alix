@@ -12,8 +12,7 @@ bool shell_cmd_dhclient(shell_state_t *shell, shell_output_t *out, const char *a
 
     if (!args || *args == '\0')
     {
-        shell_print_error("dhclient needs an interface name");
-        return false;
+        return shell_output_error(out, "dhclient needs an interface name");
     }
 
     char name[NET_IF_NAME_MAX];
@@ -28,14 +27,12 @@ bool shell_cmd_dhclient(shell_state_t *shell, shell_output_t *out, const char *a
     net_interface_t *iface = net_if_by_name(name);
     if (!iface)
     {
-        shell_print_error("interface not found");
-        return false;
+        return shell_output_error(out, "interface not found");
     }
 
     if (!net_dhcp_acquire(iface))
     {
-        shell_print_error("dhcp acquire failed");
-        return false;
+        return shell_output_error(out, "dhcp acquire failed");
     }
 
     shell_output_write(out, "DHCP discovery started for ");

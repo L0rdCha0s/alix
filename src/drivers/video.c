@@ -4,6 +4,7 @@
 #include "mouse.h"
 #include "atk.h"
 #include "pci.h"
+#include "keyboard.h"
 
 #define BGA_INDEX_PORT 0x1CE
 #define BGA_DATA_PORT  0x1CF
@@ -70,6 +71,7 @@ static void video_log(const char *msg);
 static void video_log_hex(const char *prefix, uint64_t value);
 static void detect_framebuffer(void);
 static void video_log_mouse_event(int dx, int dy, bool left_pressed);
+static void video_poll_keyboard(void);
 static void vga_enter_text_mode(void);
 static void vga_write_regs(const uint8_t *regs);
 static void vga_capture_state(void);
@@ -465,8 +467,10 @@ void video_run_loop(void)
     while (video_active && !exit_requested)
     {
         mouse_poll();
+        video_poll_keyboard();
         __asm__ volatile ("hlt");
         mouse_poll();
+        video_poll_keyboard();
     }
     video_log("video_run_loop end");
 }
@@ -481,6 +485,49 @@ void video_exit_mode(void)
     cursor_has_backup = false;
     video_dirty_reset();
     video_log("video mode exited");
+}
+
+static void video_poll_keyboard(void)
+{
+    if (!video_active)
+    {
+        return;
+    }
+
+    char ch = 0;
+    bool have_input = false;
+    bool redraw_needed = false;
+
+    while (keyboard_try_read(&ch))
+    {
+        have_input = true;
+        atk_key_event_result_t result = atk_handle_key_char(ch);
+        if (result.redraw)
+        {
+            redraw_needed = true;
+        }
+        if (result.exit_video)
+        {
+            exit_requested = true;
+        }
+    }
+
+    if (!have_input || !redraw_needed)
+    {
+        return;
+    }
+
+    cursor_restore();
+    video_dirty_reset();
+
+    atk_render();
+
+    if (dirty_active)
+    {
+        video_flush_dirty();
+    }
+
+    cursor_draw();
 }
 
 void video_on_mouse_event(int dx, int dy, bool left_pressed)

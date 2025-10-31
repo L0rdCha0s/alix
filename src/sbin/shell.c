@@ -26,12 +26,86 @@ static char *trim_whitespace(char *text);
 static void serial_emit_char(char c);
 static bool shell_output_redirect(shell_output_t *out, shell_state_t *shell, const char *path);
 static void shell_print_prompt(void);
-static void shell_process_line(shell_state_t *shell, char *buffer);
+static void shell_run_and_display(shell_state_t *shell, const char *input);
+static char *shell_duplicate_empty(void);
+static char *shell_duplicate_string(const char *text);
 
 void shell_output_init_console(shell_output_t *out)
 {
     out->to_file = false;
     out->file = NULL;
+    out->to_buffer = false;
+    out->buffer = NULL;
+    out->length = 0;
+    out->capacity = 0;
+}
+
+void shell_output_init_buffer(shell_output_t *out)
+{
+    out->to_file = false;
+    out->file = NULL;
+    out->to_buffer = true;
+    out->buffer = NULL;
+    out->length = 0;
+    out->capacity = 0;
+}
+
+bool shell_output_prepare_file(shell_output_t *out, vfs_node_t *file)
+{
+    if (!out)
+    {
+        return false;
+    }
+    out->to_file = true;
+    out->file = file;
+    out->to_buffer = false;
+    if (out->buffer)
+    {
+        free(out->buffer);
+        out->buffer = NULL;
+    }
+    out->length = 0;
+    out->capacity = 0;
+    return true;
+}
+
+static bool shell_output_write_console(shell_output_t *out, const char *text, size_t len)
+{
+    (void)out;
+    if (!text)
+    {
+        return true;
+    }
+
+    for (size_t i = 0; i < len; ++i)
+    {
+        char c = text[i];
+        console_putc(c);
+        serial_emit_char(c);
+    }
+    return true;
+}
+
+static bool shell_output_buffer_ensure(shell_output_t *out, size_t extra)
+{
+    size_t needed = out->length + extra + 1;
+    if (needed <= out->capacity)
+    {
+        return true;
+    }
+    size_t new_capacity = out->capacity ? out->capacity : 64;
+    while (new_capacity < needed)
+    {
+        new_capacity *= 2;
+    }
+    char *new_buffer = (char *)realloc(out->buffer, new_capacity);
+    if (!new_buffer)
+    {
+        return false;
+    }
+    out->buffer = new_buffer;
+    out->capacity = new_capacity;
+    return true;
 }
 
 bool shell_output_write_len(shell_output_t *out, const char *text, size_t len)
@@ -45,14 +119,19 @@ bool shell_output_write_len(shell_output_t *out, const char *text, size_t len)
     {
         return vfs_append(out->file, text, len);
     }
-
-    for (size_t i = 0; i < len; ++i)
+    if (out->to_buffer)
     {
-        char c = text[i];
-        console_putc(c);
-        serial_emit_char(c);
+        if (!shell_output_buffer_ensure(out, len))
+        {
+            return false;
+        }
+        memcpy(out->buffer + out->length, text, len);
+        out->length += len;
+        out->buffer[out->length] = '\0';
+        return true;
     }
-    return true;
+
+    return shell_output_write_console(out, text, len);
 }
 
 bool shell_output_write(shell_output_t *out, const char *text)
@@ -73,6 +152,56 @@ void shell_print_error(const char *msg)
     shell_output_write(&out, "\n");
 }
 
+bool shell_output_error(shell_output_t *out, const char *msg)
+{
+    if (!out)
+    {
+        return false;
+    }
+    shell_output_write(out, "Error: ");
+    shell_output_write(out, msg);
+    shell_output_write(out, "\n");
+    return false;
+}
+
+char *shell_output_take_buffer(shell_output_t *out)
+{
+    if (!out || !out->to_buffer)
+    {
+        return shell_duplicate_empty();
+    }
+
+    if (!out->buffer)
+    {
+        return shell_duplicate_empty();
+    }
+
+    char *result = out->buffer;
+    out->buffer = NULL;
+    out->capacity = 0;
+    out->length = 0;
+    out->to_buffer = false;
+    return result;
+}
+
+void shell_output_reset(shell_output_t *out)
+{
+    if (!out)
+    {
+        return;
+    }
+    if (out->buffer)
+    {
+        free(out->buffer);
+        out->buffer = NULL;
+    }
+    out->to_file = false;
+    out->file = NULL;
+    out->to_buffer = false;
+    out->length = 0;
+    out->capacity = 0;
+}
+
 void shell_main(void)
 {
     shell_state_t shell = { .cwd = vfs_root() };
@@ -86,7 +215,7 @@ void shell_main(void)
         shell_print_prompt();
         size_t len = cli_read_line(input, INPUT_CAPACITY);
         (void)len;
-        shell_process_line(&shell, input);
+        shell_run_and_display(&shell, input);
         rtl8139_poll();
     }
 }
@@ -105,12 +234,35 @@ static const shell_command_t g_commands[] = {
     { "free",        shell_cmd_free },
 };
 
-static void shell_process_line(shell_state_t *shell, char *buffer)
+char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
 {
-    char *line = trim_whitespace(buffer);
+    if (success)
+    {
+        *success = false;
+    }
+
+    if (!input)
+    {
+        return shell_duplicate_empty();
+    }
+
+    size_t input_len = strlen(input);
+    char *working = (char *)malloc(input_len + 1);
+    if (!working)
+    {
+        return shell_duplicate_empty();
+    }
+    memcpy(working, input, input_len + 1);
+
+    char *line = trim_whitespace(working);
     if (*line == '\0')
     {
-        return;
+        free(working);
+        if (success)
+        {
+            *success = true;
+        }
+        return shell_duplicate_empty();
     }
 
     char *redirect = NULL;
@@ -130,8 +282,8 @@ static void shell_process_line(shell_state_t *shell, char *buffer)
         redirect_path = trim_whitespace(redirect + 1);
         if (*redirect_path == '\0')
         {
-            shell_print_error("redirect target missing");
-            return;
+            free(working);
+        return shell_duplicate_string("Error: redirect target missing\n");
         }
     }
 
@@ -161,27 +313,62 @@ static void shell_process_line(shell_state_t *shell, char *buffer)
     }
 
     shell_output_t output;
-    shell_output_init_console(&output);
-
     if (redirect_path)
     {
+        shell_output_init_buffer(&output);
         if (!shell_output_redirect(&output, shell, redirect_path))
         {
-            shell_print_error("redirect failed");
-            return;
+            shell_output_reset(&output);
+            free(working);
+            return shell_duplicate_string("Error: redirect failed\n");
         }
     }
+    else
+    {
+        shell_output_init_buffer(&output);
+    }
 
+    bool handler_found = false;
+    bool handler_result = false;
     for (size_t i = 0; i < sizeof(g_commands) / sizeof(g_commands[0]); ++i)
     {
         if (strcmp(line, g_commands[i].name) == 0)
         {
-            g_commands[i].handler(shell, &output, args);
-            return;
+            handler_found = true;
+            handler_result = g_commands[i].handler(shell, &output, args);
+            break;
         }
     }
 
-    shell_print_error("unknown command");
+    char *result = NULL;
+
+    if (!handler_found)
+    {
+        result = shell_duplicate_string("Error: unknown command\n");
+        handler_result = false;
+    }
+    else if (redirect_path)
+    {
+        result = shell_duplicate_empty();
+    }
+    else
+    {
+        result = shell_output_take_buffer(&output);
+    }
+
+    shell_output_reset(&output);
+    free(working);
+
+    if (!result)
+    {
+        result = shell_duplicate_empty();
+    }
+
+    if (success)
+    {
+        *success = handler_found && handler_result;
+    }
+    return result;
 }
 
 static bool shell_output_redirect(shell_output_t *out, shell_state_t *shell, const char *path)
@@ -195,15 +382,55 @@ static bool shell_output_redirect(shell_output_t *out, shell_state_t *shell, con
     {
         return false;
     }
-    out->to_file = true;
-    out->file = file;
-    return true;
+    return shell_output_prepare_file(out, file);
+}
+
+static void shell_run_and_display(shell_state_t *shell, const char *input)
+{
+    bool success = false;
+    char *result = shell_execute_line(shell, input, &success);
+    if (result && *result)
+    {
+        console_write(result);
+        serial_write_string(result);
+    }
+    if (result)
+    {
+        free(result);
+    }
+    (void)success;
+}
+
+static char *shell_duplicate_empty(void)
+{
+    char *result = (char *)malloc(1);
+    if (result)
+    {
+        result[0] = '\0';
+    }
+    return result;
+}
+
+static char *shell_duplicate_string(const char *text)
+{
+    if (!text)
+    {
+        return shell_duplicate_empty();
+    }
+    size_t len = strlen(text);
+    char *copy = (char *)malloc(len + 1);
+    if (!copy)
+    {
+        return shell_duplicate_empty();
+    }
+    memcpy(copy, text, len + 1);
+    return copy;
 }
 
 static void shell_print_prompt(void)
 {
-    console_write("> ");
-    serial_write_string("> ");
+    console_write("alex@alix$ ");
+    serial_write_string("alex@alix$ ");
 }
 
 static char cli_get_char(void)

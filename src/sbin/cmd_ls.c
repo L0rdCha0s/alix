@@ -32,13 +32,11 @@ bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *path)
 
     if (!target)
     {
-        shell_print_error("path not found");
-        return false;
+        return shell_output_error(out, "path not found");
     }
     if (!vfs_is_dir(target))
     {
-        shell_print_error("path is not a directory");
-        return false;
+        return shell_output_error(out, "path is not a directory");
     }
 
     serial_write_string("In shell command ls 2\n");
