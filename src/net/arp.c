@@ -1,5 +1,7 @@
 #include "net/arp.h"
 
+#include <stddef.h>
+
 #include "libc.h"
 #include "serial.h"
 #include "net/dhcp.h"
@@ -25,6 +27,35 @@ static bool net_arp_send_generic(net_interface_t *iface, const uint8_t *dest_mac
                                  const uint8_t *target_mac, uint32_t target_ip,
                                  uint32_t source_ip, uint16_t opcode);
 
+static void arp_log_entry(const char *prefix, uint32_t ip, const uint8_t mac[6])
+{
+    if (!prefix)
+    {
+        return;
+    }
+    char ipbuf[32];
+    char macbuf[13];
+    net_format_ipv4(ip, ipbuf);
+    if (mac)
+    {
+        net_format_mac(mac, macbuf);
+    }
+    else
+    {
+        macbuf[0] = '\0';
+    }
+    serial_write_string("arp: ");
+    serial_write_string(prefix);
+    serial_write_string(" ip=");
+    serial_write_string(ipbuf);
+    if (mac)
+    {
+        serial_write_string(" mac=");
+        serial_write_string(macbuf);
+    }
+    serial_write_string("\r\n");
+}
+
 void net_arp_flush(void)
 {
     for (size_t i = 0; i < ARP_CACHE_SIZE; ++i)
@@ -46,9 +77,11 @@ bool net_arp_lookup(uint32_t ip, uint8_t mac_out[6])
         if (g_cache[i].valid && g_cache[i].ip == ip)
         {
             memcpy(mac_out, g_cache[i].mac, 6);
+            arp_log_entry("cache hit", ip, g_cache[i].mac);
             return true;
         }
     }
+    arp_log_entry("cache miss", ip, NULL);
     return false;
 }
 
@@ -147,6 +180,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
         if (g_cache[i].valid && g_cache[i].ip == ip)
         {
             memcpy(g_cache[i].mac, mac, 6);
+            arp_log_entry("updated entry", ip, mac);
             return;
         }
     }
@@ -158,6 +192,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
             g_cache[i].valid = true;
             g_cache[i].ip = ip;
             memcpy(g_cache[i].mac, mac, 6);
+            arp_log_entry("added entry", ip, mac);
             return;
         }
     }
@@ -166,6 +201,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
     g_cache[0].valid = true;
     g_cache[0].ip = ip;
     memcpy(g_cache[0].mac, mac, 6);
+    arp_log_entry("replaced entry", ip, mac);
 }
 
 void net_arp_announce(net_interface_t *iface, uint32_t ip)

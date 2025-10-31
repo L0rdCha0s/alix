@@ -84,11 +84,23 @@ run: os.img
 QEMU_DEBUG_LOG ?= qemu-debug.log
 QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
 
+# --- choose networking backend: vmnet-shared (macOS) or user (slirp)
+NET_BACKEND ?= vmnet-shared
+
+# Common NIC + optional packet capture
+NETDUMP := -object filter-dump,id=n0dump,netdev=n0,queue=all,file=qemu-net.pcap
+NETDEV_user := -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15
+NETDEV_vmnet-shared := -netdev vmnet-shared,id=n0
+
+# Resolve NETDEV flags for chosen backend
+NETDEV := $(NETDEV_$(NET_BACKEND))
+
+# Device (keep your RTL8139 + MAC)
+NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
+
 run-hdd: hdd.img
 	$(QEMU) -drive file=hdd.img,format=raw,if=ide -no-reboot -monitor none -serial stdio \
-		$(QEMU_DEBUG_FLAGS) -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15 \
-		-object filter-dump,id=n0dump,netdev=n0,queue=all,file=qemu-net.pcap \
-		-device rtl8139,netdev=n0,mac=52:54:00:12:34:56
+		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 clean:
 	rm -rf $(OBJDIR) os.img hdd.img

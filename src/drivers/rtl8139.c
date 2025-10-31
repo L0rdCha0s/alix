@@ -73,7 +73,8 @@ static __attribute__((aligned(256))) uint8_t g_rx_buffer[RTL_RX_BUFFER_SIZE];
 static int g_log_rx_count = 0;
 static uint8_t g_rx_frame[2048];
 static int g_state_dump_budget = 12;
-static int g_tx_dump_budget = 4;
+static int g_tx_dump_budget = 32;
+static int g_hw_tx_cursor = 0; // which TSD/TSAD pair the NIC expects next
 
 static void rtl8139_log(const char *msg);
 static void rtl8139_log_hex8(uint8_t value);
@@ -87,7 +88,7 @@ static uint8_t rtl8139_buffer_read8(uint32_t offset);
 static void rtl8139_copy_packet(uint32_t offset, uint8_t *dest, uint16_t len);
 static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t len);
 static void rtl8139_dump_frame(int slot, size_t len, const uint8_t *data);
-static void rtl8139_log_tsd_status(uint32_t tsd);
+static bool rtl8139_tx_slot_ready(int slot);
 
 void rtl8139_init(void)
 {
@@ -152,12 +153,10 @@ void rtl8139_init(void)
     g_rtl_present = true;
     interrupts_enable_irq(11);
 
+    g_hw_tx_cursor = 0;  // after reset, the NIC starts at pair 0
     for (int i = 0; i < RTL_TX_SLOT_COUNT; ++i) {
-        g_tx_phys[i] = (uint32_t)(uintptr_t)g_tx_buffer[i];   // ensure this is PHYS (see note below)
-        outl(g_io_base + RTL_REG_TSAD0 + i*4, g_tx_phys[i]);
-        // outl(g_io_base + RTL_REG_TSD0 + i*4, 0x0000);  // REMOVE this
-        // Optionally: mark host owns (not required, but safe)
-        // outl(g_io_base + RTL_REG_TSD0 + i*4, 0x2000);
+        g_tx_phys[i] = (uint32_t)(uintptr_t)g_tx_buffer[i];
+        outl(g_io_base + RTL_REG_TSAD0 + i*4, g_tx_phys[i]); // program once
     }
 
     g_iface = net_if_register("rtl0", g_mac);
@@ -362,77 +361,37 @@ static void rtl8139_copy_packet(uint32_t offset, uint8_t *dest, uint16_t len)
     }
 }
 
+
 static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t len)
 {
     (void)iface;
-    if (!g_rtl_present || !data || len == 0)
-    {
+    if (!g_rtl_present || !data || len == 0) return false;
+
+    size_t frame_len = len < 60 ? 60 : len;
+
+    int slot = g_hw_tx_cursor;
+
+    // Only the current pair is valid to use. Ensure it's free (OWN==1).
+    uint32_t tsd = inl(g_io_base + RTL_REG_TSD0 + slot*4);
+    if ((tsd & 0x2000U) == 0) {              // OWN bit not set -> NIC still using it
+        serial_write_string("rtl8139: tx pair busy\r\n");
         return false;
     }
-    if (len > sizeof(g_tx_buffer[0]))
-    {
-        serial_write_string("rtl8139: tx packet too large\r\n");
-        return false;
-    }
-
-    size_t frame_len = len;
-    if (frame_len < 60)
-    {
-        frame_len = 60;
-    }
-
-    int slot = -1;
-    for (int attempt = 0; attempt < RTL_TX_SLOT_COUNT; ++attempt) {
-        int cand = (g_tx_index + attempt) % RTL_TX_SLOT_COUNT;
-        uint32_t tsd = inl(g_io_base + RTL_REG_TSD0 + cand*4);
-
-        if (tsd & 0x2000U) {              // Host owns => free
-            slot = cand;
-            break;
-        }
-        if (tsd & 0x40000000U) {          // Aborted: reclaim it
-            outl(g_io_base + RTL_REG_TSD0 + cand*4, 0x2000U);
-            slot = cand;
-            break;
-        }
-    }
-    if (slot < 0) { /* all busy */ return false; }
-
-    uint16_t tsad_reg = RTL_REG_TSAD0 + slot * 4;
-    uint16_t tsd_reg = RTL_REG_TSD0 + slot * 4;
 
     memcpy(g_tx_buffer[slot], data, len);
-    if (frame_len > len)
-    {
-        memset(g_tx_buffer[slot] + len, 0, frame_len - len);
-    }
+    if (frame_len > len) memset(g_tx_buffer[slot] + len, 0, frame_len - len);
 
-    if (g_tx_dump_budget > 0)
-    {
-        rtl8139_dump_frame(slot, frame_len, g_tx_buffer[slot]);
-        g_tx_dump_budget--;
-    }
+    rtl8139_dump_frame(slot, frame_len, g_tx_buffer[slot]);
 
-    outl(g_io_base + RTL_REG_TSAD0 + slot*4, g_tx_phys[slot]);
-    outl(g_io_base + RTL_REG_TSD0  + slot*4, (uint32_t)frame_len & 0x1FFFU);
+    // TSADn already programmed; just kick by writing TSDn (length clears OWN)
+    outl(g_io_base + RTL_REG_TSD0 + slot*4, (uint32_t)frame_len & 0x1FFFU);
 
     rtl8139_dump_state("after tx");
 
-    uint32_t tsd_after;
-    for (int i = 0; i < 100000; ++i) {
-        tsd_after = inl(g_io_base + RTL_REG_TSD0 + slot*4);
-        if (tsd_after & 0x2000U) break;   // done when HostOwns==1
-    }
-
-    serial_write_string("rtl8139: tsd after=0x");
-    rtl8139_log_hex32(tsd_after);
-    serial_write_string(" ");
-    rtl8139_log_tsd_status(tsd_after);
-    serial_write_string("\r\n");
-
-    g_tx_index = (slot + 1) % RTL_TX_SLOT_COUNT;
+    g_hw_tx_cursor = (g_hw_tx_cursor + 1) % RTL_TX_SLOT_COUNT;  // advance *after* submit
     return true;
 }
+
 
 static void rtl8139_log(const char *msg)
 {
@@ -545,7 +504,7 @@ static void rtl8139_dump_frame(int slot, size_t len, const uint8_t *data)
     }
 }
 
-static void rtl8139_log_tsd_status(uint32_t tsd) {
+static void __attribute__((unused)) rtl8139_log_tsd_status(uint32_t tsd) {
     serial_write_string("[");
     if (tsd & 0x40000000U) serial_write_string("TABT ");    // abort
     if (tsd & 0x00004000U) serial_write_string("TUN ");     // underrun
@@ -555,3 +514,9 @@ static void rtl8139_log_tsd_status(uint32_t tsd) {
 }
 
 static void rtl8139_dump_state(const char *context);
+
+static bool rtl8139_tx_slot_ready(int slot)
+{
+    uint32_t tsd = inl(g_io_base + RTL_REG_TSD0 + slot * 4);
+    return (tsd & 0x2000U) != 0;
+}

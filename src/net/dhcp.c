@@ -284,10 +284,20 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         {
             subnet_mask = 0xFFFFFF00U;
         }
+        bool addr_changed = (iface->ipv4_addr != yiaddr);
+        if (addr_changed)
+        {
+            net_arp_flush();
+        }
         net_if_set_ipv4(iface, yiaddr, subnet_mask, router);
         if (router != 0)
         {
             net_route_set_default(iface, router);
+        }
+        net_arp_announce(iface, yiaddr);
+        if (router != 0)
+        {
+            net_arp_send_request(iface, router);
         }
         serial_write_string("dhcp: lease acquired. address=");
         net_format_ipv4(yiaddr, ipbuf);
