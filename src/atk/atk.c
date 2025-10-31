@@ -1,5 +1,7 @@
 #include "atk.h"
 
+#include <stddef.h>
+
 #include "video.h"
 
 #include "atk_desktop.h"
@@ -59,80 +61,85 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
     if (pressed_edge)
     {
-        state->dragging_window = -1;
-        state->dragging_desktop_button = -1;
+        state->dragging_window = NULL;
+        state->dragging_desktop_button = NULL;
         state->desktop_drag_moved = false;
-        state->pressed_window_button_window = -1;
-        state->pressed_window_button_index = -1;
-        state->pressed_desktop_button = -1;
+        state->pressed_window_button_window = NULL;
+        state->pressed_window_button = NULL;
+        state->pressed_desktop_button = NULL;
 
         bool handled = false;
 
-        for (int i = state->window_count - 1; i >= 0 && !handled; --i)
+        ATK_LIST_FOR_EACH_REVERSE(win_node, &state->windows)
         {
-            atk_widget_t *win = state->windows[i];
+            if (handled)
+            {
+                break;
+            }
+
+            atk_widget_t *win = (atk_widget_t *)win_node->value;
             if (!win || !win->used)
             {
                 continue;
             }
 
-            int button_index = -1;
-            atk_widget_t *btn = atk_window_get_button_at(win, cursor_x, cursor_y, &button_index);
+            atk_widget_t *btn = atk_window_get_button_at(win, cursor_x, cursor_y);
             if (btn)
             {
-                atk_widget_t *before = win;
-                int front_index = atk_window_bring_to_front(state, i);
-                if (front_index >= 0)
+                atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
+                bool moved = atk_window_bring_to_front(state, win);
+                if (moved)
                 {
-                    atk_widget_t *front_win = state->windows[front_index];
-                    if (front_index != i)
+                    atk_window_mark_dirty(win);
+                    if (prev_top && prev_top != win)
                     {
-                        atk_window_mark_dirty(before);
-                        atk_window_mark_dirty(front_win);
-                        result.redraw = true;
+                        atk_window_mark_dirty(prev_top);
                     }
-                    state->pressed_window_button_window = front_index;
-                    state->pressed_window_button_index = button_index;
-                    handled = true;
+                    result.redraw = true;
                 }
+                state->pressed_window_button_window = win;
+                state->pressed_window_button = btn;
+                handled = true;
             }
         }
 
         if (!handled)
         {
-            int title_index = atk_window_title_hit_test(state, cursor_x, cursor_y);
-            if (title_index >= 0)
+            atk_widget_t *win = atk_window_title_hit_test(state, cursor_x, cursor_y);
+            if (win && win->used)
             {
-                atk_widget_t *before = state->windows[title_index];
-                int front_index = atk_window_bring_to_front(state, title_index);
-                if (front_index >= 0)
+                atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
+                bool moved = atk_window_bring_to_front(state, win);
+                if (moved)
                 {
-                    atk_widget_t *front_win = state->windows[front_index];
-                    if (front_index != title_index)
+                    atk_window_mark_dirty(win);
+                    if (prev_top && prev_top != win)
                     {
-                        atk_window_mark_dirty(before);
-                        atk_window_mark_dirty(front_win);
-                        result.redraw = true;
+                        atk_window_mark_dirty(prev_top);
                     }
-                    state->dragging_window = front_index;
-                    state->drag_offset_x = cursor_x - front_win->x;
-                    state->drag_offset_y = cursor_y - front_win->y;
-                    handled = true;
+                    result.redraw = true;
                 }
+                state->dragging_window = win;
+                state->drag_offset_x = cursor_x - win->x;
+                state->drag_offset_y = cursor_y - win->y;
+                handled = true;
             }
         }
 
         if (!handled)
         {
-            int body_index = atk_window_hit_test(state, cursor_x, cursor_y);
-            if (body_index >= 0)
+            atk_widget_t *win = atk_window_hit_test(state, cursor_x, cursor_y);
+            if (win && win->used)
             {
-                atk_widget_t *before = state->windows[body_index];
-                int front_index = atk_window_bring_to_front(state, body_index);
-                if (front_index >= 0 && front_index != body_index)
+                atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
+                bool moved = atk_window_bring_to_front(state, win);
+                if (moved)
                 {
-                    atk_window_mark_dirty(before);
-                    atk_window_mark_dirty(state->windows[front_index]);
+                    atk_window_mark_dirty(win);
+                    if (prev_top && prev_top != win)
+                    {
+                        atk_window_mark_dirty(prev_top);
+                    }
                     result.redraw = true;
                 }
                 handled = true;
@@ -141,22 +148,18 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
         if (!handled)
         {
-            int desktop_index = atk_desktop_button_hit_test(state, cursor_x, cursor_y);
-            if (desktop_index >= 0)
+            atk_widget_t *btn = atk_desktop_button_hit_test(state, cursor_x, cursor_y);
+            if (btn && btn->used)
             {
-                atk_widget_t *btn = state->desktop_buttons[desktop_index];
-                if (btn && btn->used)
+                state->pressed_desktop_button = btn;
+                if (atk_button_is_draggable(btn))
                 {
-                    state->pressed_desktop_button = desktop_index;
-                    if (atk_button_is_draggable(btn))
-                    {
-                        state->dragging_desktop_button = desktop_index;
-                        state->desktop_drag_offset_x = cursor_x - btn->x;
-                        state->desktop_drag_offset_y = cursor_y - btn->y;
-                        state->desktop_drag_moved = false;
-                    }
-                    handled = true;
+                    state->dragging_desktop_button = btn;
+                    state->desktop_drag_offset_x = cursor_x - btn->x;
+                    state->desktop_drag_offset_y = cursor_y - btn->y;
+                    state->desktop_drag_moved = false;
                 }
+                handled = true;
             }
         }
 
@@ -172,112 +175,91 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
     }
     else if (released_edge)
     {
-        state->dragging_window = -1;
+        state->dragging_window = NULL;
 
-        if (state->dragging_desktop_button >= 0)
+        if (state->dragging_desktop_button)
         {
-            state->dragging_desktop_button = -1;
+            state->dragging_desktop_button = NULL;
         }
 
-        if (state->pressed_window_button_window >= 0 &&
-            state->pressed_window_button_window < state->window_count)
+        if (state->pressed_window_button_window && state->pressed_window_button)
         {
-            atk_widget_t *win = state->windows[state->pressed_window_button_window];
-            if (win && win->used)
+            atk_widget_t *win = state->pressed_window_button_window;
+            atk_widget_t *btn = state->pressed_window_button;
+            if (win->used && btn->used && atk_button_hit_test(btn, win->x, win->y, cursor_x, cursor_y))
             {
-                int button_count = atk_window_button_count(win);
-                if (state->pressed_window_button_index >= 0 &&
-                    state->pressed_window_button_index < button_count)
-                {
-                    atk_widget_t *btn = atk_window_button_at_index(win, state->pressed_window_button_index);
-                    if (btn && btn->used && atk_button_hit_test(btn, win->x, win->y, cursor_x, cursor_y))
-                    {
-                        atk_button_invoke(btn);
-                        result.redraw = true;
-                    }
-                }
+                atk_button_invoke(btn);
+                result.redraw = true;
             }
         }
-        state->pressed_window_button_window = -1;
-        state->pressed_window_button_index = -1;
+        state->pressed_window_button_window = NULL;
+        state->pressed_window_button = NULL;
 
-        if (state->pressed_desktop_button >= 0 &&
-            state->pressed_desktop_button < state->desktop_button_count)
+        if (state->pressed_desktop_button && state->pressed_desktop_button->used)
         {
-            atk_widget_t *btn = state->desktop_buttons[state->pressed_desktop_button];
-            if (btn && btn->used)
+            bool inside = atk_button_hit_test(state->pressed_desktop_button, 0, 0, cursor_x, cursor_y);
+            if (!state->desktop_drag_moved && inside)
             {
-                bool inside = atk_button_hit_test(btn, 0, 0, cursor_x, cursor_y);
-                if (!state->desktop_drag_moved && inside)
-                {
-                    atk_button_invoke(btn);
-                }
+                atk_button_invoke(state->pressed_desktop_button);
             }
         }
-        state->pressed_desktop_button = -1;
+        state->pressed_desktop_button = NULL;
         state->desktop_drag_moved = false;
     }
 
-    if (left_pressed && state->dragging_window >= 0 && state->dragging_window < state->window_count)
+    if (left_pressed && state->dragging_window && state->dragging_window->used)
     {
-        atk_widget_t *win = state->windows[state->dragging_window];
-        if (win && win->used)
-        {
-            int old_x = win->x;
-            int old_y = win->y;
-            int old_width = win->width;
-            int old_height = win->height;
+        atk_widget_t *win = state->dragging_window;
+        int old_x = win->x;
+        int old_y = win->y;
+        int old_width = win->width;
+        int old_height = win->height;
 
-            int new_x = cursor_x - state->drag_offset_x;
-            int new_y = cursor_y - state->drag_offset_y;
-            win->x = new_x;
-            win->y = new_y;
-            atk_window_ensure_inside(win);
-            if (win->x != old_x || win->y != old_y)
-            {
-                video_invalidate_rect(old_x - ATK_WINDOW_BORDER,
-                                      old_y - ATK_WINDOW_BORDER,
-                                      old_width + ATK_WINDOW_BORDER * 2,
-                                      old_height + ATK_WINDOW_BORDER * 2);
-                atk_window_mark_dirty(win);
-                result.redraw = true;
-            }
+        int new_x = cursor_x - state->drag_offset_x;
+        int new_y = cursor_y - state->drag_offset_y;
+        win->x = new_x;
+        win->y = new_y;
+        atk_window_ensure_inside(win);
+        if (win->x != old_x || win->y != old_y)
+        {
+            video_invalidate_rect(old_x - ATK_WINDOW_BORDER,
+                                  old_y - ATK_WINDOW_BORDER,
+                                  old_width + ATK_WINDOW_BORDER * 2,
+                                  old_height + ATK_WINDOW_BORDER * 2);
+            atk_window_mark_dirty(win);
+            result.redraw = true;
         }
     }
 
-    if (left_pressed && state->dragging_desktop_button >= 0 &&
-        state->dragging_desktop_button < state->desktop_button_count)
+    if (left_pressed && state->dragging_desktop_button && state->dragging_desktop_button->used)
     {
-        atk_widget_t *btn = state->desktop_buttons[state->dragging_desktop_button];
-        if (btn && btn->used)
+        atk_widget_t *btn = state->dragging_desktop_button;
+        int old_x = btn->x;
+        int old_y = btn->y;
+        int old_width = btn->width;
+        int old_height = atk_button_effective_height(btn);
+
+        int new_x = cursor_x - state->desktop_drag_offset_x;
+        int new_y = cursor_y - state->desktop_drag_offset_y;
+
+        if (new_x < 0) new_x = 0;
+        if (new_y < 0) new_y = 0;
+        int max_x = VIDEO_WIDTH - btn->width;
+        int max_y = VIDEO_HEIGHT - atk_button_effective_height(btn);
+        if (max_x < 0) max_x = 0;
+        if (max_y < 0) max_y = 0;
+        if (new_x > max_x) new_x = max_x;
+        if (new_y > max_y) new_y = max_y;
+
+        btn->x = new_x;
+        btn->y = new_y;
+
+        if (btn->x != old_x || btn->y != old_y)
         {
-            int old_x = btn->x;
-            int old_y = btn->y;
-            int old_width = btn->width;
-            int old_height = atk_button_effective_height(btn);
-
-            int new_x = cursor_x - state->desktop_drag_offset_x;
-            int new_y = cursor_y - state->desktop_drag_offset_y;
-
-            if (new_x < 0) new_x = 0;
-            if (new_y < 0) new_y = 0;
-            int max_x = VIDEO_WIDTH - btn->width;
-            int max_y = VIDEO_HEIGHT - atk_button_effective_height(btn);
-            if (max_x < 0) max_x = 0;
-            if (max_y < 0) max_y = 0;
-            if (new_x > max_x) new_x = max_x;
-            if (new_y > max_y) new_y = max_y;
-
-            btn->x = new_x;
-            btn->y = new_y;
-
-            if (btn->x != old_x || btn->y != old_y)
-            {
-                state->desktop_drag_moved = true;
-                video_invalidate_rect(old_x, old_y, old_width, old_height);
-                video_invalidate_rect(btn->x, btn->y, btn->width, atk_button_effective_height(btn));
-                result.redraw = true;
-            }
+            state->desktop_drag_moved = true;
+            video_invalidate_rect(old_x, old_y, old_width, old_height);
+            video_invalidate_rect(btn->x, btn->y, btn->width, atk_button_effective_height(btn));
+            result.redraw = true;
         }
     }
 

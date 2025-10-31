@@ -39,6 +39,8 @@ struct atk_widget
 
 size_t atk_class_total_payload(const atk_class_t *cls);
 atk_widget_t *atk_widget_init(void *memory, const atk_class_t *cls);
+atk_widget_t *atk_widget_create(const atk_class_t *cls);
+void atk_widget_destroy(atk_widget_t *widget);
 bool atk_widget_is_a(const atk_widget_t *widget, const atk_class_t *cls);
 void *atk_widget_priv(const atk_widget_t *widget, const atk_class_t *cls);
 

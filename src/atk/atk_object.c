@@ -30,6 +30,33 @@ atk_widget_t *atk_widget_init(void *memory, const atk_class_t *cls)
     return widget;
 }
 
+atk_widget_t *atk_widget_create(const atk_class_t *cls)
+{
+    if (!cls)
+    {
+        return 0;
+    }
+
+    size_t size = sizeof(atk_widget_t) + atk_class_total_payload(cls);
+    void *memory = malloc(size);
+    if (!memory)
+    {
+        return 0;
+    }
+
+    return atk_widget_init(memory, cls);
+}
+
+void atk_widget_destroy(atk_widget_t *widget)
+{
+    if (!widget)
+    {
+        return;
+    }
+
+    free(widget);
+}
+
 bool atk_widget_is_a(const atk_widget_t *widget, const atk_class_t *cls)
 {
     if (!widget || !cls)

@@ -1,5 +1,7 @@
 #include "atk_button.h"
 
+#include <stddef.h>
+
 #include "libc.h"
 #include "video.h"
 
@@ -32,6 +34,7 @@ void atk_button_configure(atk_widget_t *widget,
     priv->absolute = absolute;
     priv->action = action;
     priv->action_context = context;
+    priv->list_node = NULL;
     button_set_title(priv, title ? title : "");
 }
 

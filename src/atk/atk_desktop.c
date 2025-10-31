@@ -3,6 +3,8 @@
 #include "libc.h"
 #include "video.h"
 
+static void desktop_button_destroy(void *value);
+
 void atk_desktop_reset(atk_state_t *state)
 {
     if (!state)
@@ -10,15 +12,11 @@ void atk_desktop_reset(atk_state_t *state)
         return;
     }
 
-    for (int i = 0; i < ATK_MAX_DESKTOP_BUTTONS; ++i)
-    {
-        void *storage = state->desktop_button_storage[i];
-        state->desktop_buttons[i] = atk_widget_init(storage, &ATK_BUTTON_CLASS);
-    }
+    atk_list_clear(&state->desktop_buttons, desktop_button_destroy);
+    atk_list_init(&state->desktop_buttons);
 
-    state->desktop_button_count = 0;
-    state->pressed_desktop_button = -1;
-    state->dragging_desktop_button = -1;
+    state->pressed_desktop_button = 0;
+    state->dragging_desktop_button = 0;
     state->desktop_drag_offset_x = 0;
     state->desktop_drag_offset_y = 0;
     state->desktop_drag_moved = false;
@@ -31,9 +29,9 @@ void atk_desktop_draw_buttons(const atk_state_t *state)
         return;
     }
 
-    for (int i = 0; i < state->desktop_button_count; ++i)
+    ATK_LIST_FOR_EACH(node, &state->desktop_buttons)
     {
-        atk_widget_t *widget = state->desktop_buttons[i];
+        atk_widget_t *widget = (atk_widget_t *)node->value;
         if (widget && widget->used)
         {
             atk_button_draw(state, widget, 0, 0);
@@ -52,15 +50,16 @@ atk_widget_t *atk_desktop_add_button(atk_state_t *state,
                                      atk_button_action_t action,
                                      void *context)
 {
-    if (!state || state->desktop_button_count >= ATK_MAX_DESKTOP_BUTTONS)
+    if (!state)
     {
         return 0;
     }
 
-    int slot = state->desktop_button_count++;
-    void *storage = state->desktop_button_storage[slot];
-    atk_widget_t *widget = atk_widget_init(storage, &ATK_BUTTON_CLASS);
-    state->desktop_buttons[slot] = widget;
+    atk_widget_t *widget = atk_widget_create(&ATK_BUTTON_CLASS);
+    if (!widget)
+    {
+        return 0;
+    }
 
     widget->x = x;
     widget->y = y;
@@ -75,27 +74,58 @@ atk_widget_t *atk_desktop_add_button(atk_state_t *state,
                          true,
                          action,
                          context);
+
+    atk_list_node_t *node = atk_list_push_back(&state->desktop_buttons, widget);
+    if (!node)
+    {
+        atk_widget_destroy(widget);
+        return 0;
+    }
+
+    atk_button_priv_t *priv = (atk_button_priv_t *)atk_widget_priv(widget, &ATK_BUTTON_CLASS);
+    if (priv)
+    {
+        priv->list_node = node;
+    }
+
     return widget;
 }
 
-int atk_desktop_button_hit_test(const atk_state_t *state, int px, int py)
+atk_widget_t *atk_desktop_button_hit_test(const atk_state_t *state, int px, int py)
 {
     if (!state)
     {
-        return -1;
+        return 0;
     }
 
-    for (int i = state->desktop_button_count - 1; i >= 0; --i)
+    ATK_LIST_FOR_EACH_REVERSE(node, &state->desktop_buttons)
     {
-        atk_widget_t *widget = state->desktop_buttons[i];
+        atk_widget_t *widget = (atk_widget_t *)node->value;
         if (!widget || !widget->used)
         {
             continue;
         }
         if (atk_button_hit_test(widget, 0, 0, px, py))
         {
-            return i;
+            return widget;
         }
     }
-    return -1;
+    return 0;
+}
+
+static void desktop_button_destroy(void *value)
+{
+    atk_widget_t *widget = (atk_widget_t *)value;
+    if (!widget)
+    {
+        return;
+    }
+
+    atk_button_priv_t *priv = (atk_button_priv_t *)atk_widget_priv(widget, &ATK_BUTTON_CLASS);
+    if (priv)
+    {
+        priv->list_node = 0;
+    }
+
+    atk_widget_destroy(widget);
 }

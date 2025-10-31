@@ -21,8 +21,9 @@ static void action_window_close(atk_widget_t *button, void *context);
 static void window_draw(const atk_state_t *state, const atk_widget_t *window);
 static atk_window_priv_t *window_priv_mut(atk_widget_t *window);
 static const atk_window_priv_t *window_priv(const atk_widget_t *window);
-static atk_widget_t *window_allocate_slot(atk_state_t *state);
-static void window_release_slot(atk_widget_t *window);
+static void window_destroy(atk_widget_t *window);
+static void window_destroy_value(void *value);
+static void button_destroy_value(void *value);
 
 extern const atk_class_t ATK_BUTTON_CLASS;
 static const atk_widget_vtable_t window_vtable = { 0 };
@@ -35,19 +36,15 @@ void atk_window_reset_all(atk_state_t *state)
         return;
     }
 
-    for (int i = 0; i < ATK_MAX_WINDOWS; ++i)
-    {
-        atk_widget_init(state->window_storage[i], &ATK_WINDOW_CLASS);
-        state->windows[i] = 0;
-    }
+    atk_list_clear(&state->windows, window_destroy_value);
+    atk_list_init(&state->windows);
 
-    state->window_count = 0;
     state->next_window_id = 1;
-    state->dragging_window = -1;
+    state->dragging_window = 0;
     state->drag_offset_x = 0;
     state->drag_offset_y = 0;
-    state->pressed_window_button_window = -1;
-    state->pressed_window_button_index = -1;
+    state->pressed_window_button_window = 0;
+    state->pressed_window_button = 0;
 }
 
 void atk_window_draw_all(const atk_state_t *state)
@@ -57,9 +54,9 @@ void atk_window_draw_all(const atk_state_t *state)
         return;
     }
 
-    for (int i = 0; i < state->window_count; ++i)
+    ATK_LIST_FOR_EACH(node, &state->windows)
     {
-        atk_widget_t *window = state->windows[i];
+        atk_widget_t *window = (atk_widget_t *)node->value;
         if (window && window->used)
         {
             window_draw(state, window);
@@ -67,66 +64,38 @@ void atk_window_draw_all(const atk_state_t *state)
     }
 }
 
-int atk_window_bring_to_front(atk_state_t *state, int index)
+bool atk_window_bring_to_front(atk_state_t *state, atk_widget_t *window)
 {
-    if (!state || index < 0 || index >= state->window_count)
+    if (!state || !window)
     {
-        return -1;
-    }
-    if (index == state->window_count - 1)
-    {
-        return index;
+        return false;
     }
 
-    atk_widget_t *temp = state->windows[index];
-    for (int i = index; i < state->window_count - 1; ++i)
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv || !priv->list_node)
     {
-        state->windows[i] = state->windows[i + 1];
-
-        if (state->dragging_window == i + 1)
-        {
-            state->dragging_window = i;
-        }
-        if (state->pressed_window_button_window == i + 1)
-        {
-            state->pressed_window_button_window = i;
-        }
-    }
-    state->windows[state->window_count - 1] = temp;
-
-    int new_index = state->window_count - 1;
-
-    if (state->dragging_window == index)
-    {
-        state->dragging_window = new_index;
-    }
-    else if (state->dragging_window > index)
-    {
-        state->dragging_window--;
+        return false;
     }
 
-    if (state->pressed_window_button_window == index)
+    if (state->windows.tail == priv->list_node)
     {
-        state->pressed_window_button_window = new_index;
-    }
-    else if (state->pressed_window_button_window > index)
-    {
-        state->pressed_window_button_window--;
+        return false;
     }
 
-    return new_index;
+    atk_list_move_to_back(&state->windows, priv->list_node);
+    return true;
 }
 
-int atk_window_hit_test(const atk_state_t *state, int x, int y)
+atk_widget_t *atk_window_hit_test(const atk_state_t *state, int x, int y)
 {
     if (!state)
     {
-        return -1;
+        return 0;
     }
 
-    for (int i = state->window_count - 1; i >= 0; --i)
+    ATK_LIST_FOR_EACH_REVERSE(node, &state->windows)
     {
-        atk_widget_t *window = state->windows[i];
+        atk_widget_t *window = (atk_widget_t *)node->value;
         if (!window || !window->used)
         {
             continue;
@@ -134,22 +103,22 @@ int atk_window_hit_test(const atk_state_t *state, int x, int y)
         if (x >= window->x && x < window->x + window->width &&
             y >= window->y && y < window->y + window->height)
         {
-            return i;
+            return window;
         }
     }
-    return -1;
+    return 0;
 }
 
-int atk_window_title_hit_test(const atk_state_t *state, int x, int y)
+atk_widget_t *atk_window_title_hit_test(const atk_state_t *state, int x, int y)
 {
     if (!state)
     {
-        return -1;
+        return 0;
     }
 
-    for (int i = state->window_count - 1; i >= 0; --i)
+    ATK_LIST_FOR_EACH_REVERSE(node, &state->windows)
     {
-        atk_widget_t *window = state->windows[i];
+        atk_widget_t *window = (atk_widget_t *)node->value;
         if (!window || !window->used)
         {
             continue;
@@ -157,13 +126,13 @@ int atk_window_title_hit_test(const atk_state_t *state, int x, int y)
         if (x >= window->x && x < window->x + window->width &&
             y >= window->y && y < window->y + ATK_WINDOW_TITLE_HEIGHT)
         {
-            return i;
+            return window;
         }
     }
-    return -1;
+    return 0;
 }
 
-atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py, int *out_index)
+atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py)
 {
     if (!window || !window->used)
     {
@@ -171,43 +140,24 @@ atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py, int
     }
 
     atk_window_priv_t *priv = window_priv_mut(window);
-    for (int i = priv->button_count - 1; i >= 0; --i)
+    if (!priv)
     {
-        atk_widget_t *btn = priv->buttons[i];
+        return 0;
+    }
+
+    ATK_LIST_FOR_EACH_REVERSE(node, &priv->buttons)
+    {
+        atk_widget_t *btn = (atk_widget_t *)node->value;
         if (!btn || !btn->used)
         {
             continue;
         }
         if (atk_button_hit_test(btn, window->x, window->y, px, py))
         {
-            if (out_index)
-            {
-                *out_index = i;
-            }
             return btn;
         }
     }
     return 0;
-}
-
-atk_widget_t *atk_window_button_at_index(atk_widget_t *window, int index)
-{
-    atk_window_priv_t *priv = window_priv_mut(window);
-    if (!priv || index < 0 || index >= priv->button_count)
-    {
-        return 0;
-    }
-    return priv->buttons[index];
-}
-
-int atk_window_button_count(const atk_widget_t *window)
-{
-    const atk_window_priv_t *priv = window_priv(window);
-    if (!priv)
-    {
-        return 0;
-    }
-    return priv->button_count;
 }
 
 void atk_window_mark_dirty(const atk_widget_t *window)
@@ -253,20 +203,23 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
         return 0;
     }
 
-    if (state->window_count >= ATK_MAX_WINDOWS)
-    {
-        atk_log("window_create_at: max windows reached");
-        return 0;
-    }
-
-    atk_widget_t *window = window_allocate_slot(state);
+    atk_widget_t *window = atk_widget_create(&ATK_WINDOW_CLASS);
     if (!window)
     {
-        atk_log("window_create_at: no storage available");
+        atk_log("window_create_at: allocation failed");
         return 0;
     }
 
     atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        atk_widget_destroy(window);
+        return 0;
+    }
+
+    atk_list_init(&priv->buttons);
+    priv->list_node = 0;
+
     window->used = true;
     window->width = 600;
     window->height = 400;
@@ -274,7 +227,6 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     window->y = y - ATK_WINDOW_TITLE_HEIGHT / 2;
     window->parent = 0;
 
-    priv->button_count = 0;
     format_window_title(priv->title, sizeof(priv->title), state->next_window_id++);
 
     atk_window_ensure_inside(window);
@@ -287,18 +239,32 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     }
     int btn_height = ATK_WINDOW_TITLE_HEIGHT - btn_margin * 2;
 
-    window_add_button(window,
-                      "X",
-                      window->width - btn_width - btn_margin,
-                      btn_margin,
-                      btn_width,
-                      btn_height,
-                      ATK_BUTTON_STYLE_TITLE_INSIDE,
-                      false,
-                      action_window_close,
-                      window);
+    if (!window_add_button(window,
+                           "X",
+                           window->width - btn_width - btn_margin,
+                           btn_margin,
+                           btn_width,
+                           btn_height,
+                           ATK_BUTTON_STYLE_TITLE_INSIDE,
+                           false,
+                           action_window_close,
+                           window))
+    {
+        window_destroy(window);
+        atk_log("window_create_at: failed to add close button");
+        return 0;
+    }
 
-    state->windows[state->window_count++] = window;
+    atk_list_node_t *node = atk_list_push_back(&state->windows, window);
+    if (!node)
+    {
+        window_destroy(window);
+        atk_log("window_create_at: failed to track window");
+        return 0;
+    }
+
+    priv->list_node = node;
+
     return window;
 }
 
@@ -309,49 +275,25 @@ void atk_window_close(atk_state_t *state, atk_widget_t *window)
         return;
     }
 
-    int index = -1;
-    for (int i = 0; i < state->window_count; ++i)
+    if (state->dragging_window == window)
     {
-        if (state->windows[i] == window)
-        {
-            index = i;
-            break;
-        }
+        state->dragging_window = 0;
     }
 
-    if (index < 0)
+    if (state->pressed_window_button_window == window)
     {
-        return;
+        state->pressed_window_button_window = 0;
+        state->pressed_window_button = 0;
     }
 
-    if (state->dragging_window == index)
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (priv && priv->list_node)
     {
-        state->dragging_window = -1;
-    }
-    else if (state->dragging_window > index)
-    {
-        state->dragging_window--;
+        atk_list_remove(&state->windows, priv->list_node);
+        priv->list_node = 0;
     }
 
-    if (state->pressed_window_button_window == index)
-    {
-        state->pressed_window_button_window = -1;
-        state->pressed_window_button_index = -1;
-    }
-    else if (state->pressed_window_button_window > index)
-    {
-        state->pressed_window_button_window--;
-    }
-
-    for (int i = index; i < state->window_count - 1; ++i)
-    {
-        state->windows[i] = state->windows[i + 1];
-    }
-
-    state->window_count--;
-    state->windows[state->window_count] = 0;
-
-    window_release_slot(window);
+    window_destroy(window);
 }
 
 const char *atk_window_title(const atk_widget_t *window)
@@ -416,9 +358,9 @@ static void window_draw(const atk_state_t *state, const atk_widget_t *window)
                             window->height,
                             theme->window_border);
 
-    for (int i = 0; i < priv->button_count; ++i)
+    ATK_LIST_FOR_EACH(node, &priv->buttons)
     {
-        atk_widget_t *btn = priv->buttons[i];
+        atk_widget_t *btn = (atk_widget_t *)node->value;
         if (btn && btn->used)
         {
             atk_button_draw(state, btn, window->x, window->y);
@@ -501,15 +443,16 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
     }
 
     atk_window_priv_t *priv = window_priv_mut(window);
-    if (!priv || priv->button_count >= ATK_MAX_WINDOW_BUTTONS)
+    if (!priv)
     {
         return 0;
     }
 
-    int slot = priv->button_count++;
-    void *storage = priv->button_storage[slot];
-    atk_widget_t *btn = atk_widget_init(storage, &ATK_BUTTON_CLASS);
-    priv->buttons[slot] = btn;
+    atk_widget_t *btn = atk_widget_create(&ATK_BUTTON_CLASS);
+    if (!btn)
+    {
+        return 0;
+    }
 
     btn->x = rel_x;
     btn->y = rel_y;
@@ -524,6 +467,19 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
                          false,
                          action,
                          context);
+    atk_list_node_t *node = atk_list_push_back(&priv->buttons, btn);
+    if (!node)
+    {
+        atk_widget_destroy(btn);
+        return 0;
+    }
+
+    atk_button_priv_t *btn_priv = (atk_button_priv_t *)atk_widget_priv(btn, &ATK_BUTTON_CLASS);
+    if (btn_priv)
+    {
+        btn_priv->list_node = node;
+    }
+
     return btn;
 }
 
@@ -553,29 +509,41 @@ static const atk_window_priv_t *window_priv(const atk_widget_t *window)
     return (const atk_window_priv_t *)atk_widget_priv(window, &ATK_WINDOW_CLASS);
 }
 
-static atk_widget_t *window_allocate_slot(atk_state_t *state)
+static void button_destroy_value(void *value)
 {
-    for (int i = 0; i < ATK_MAX_WINDOWS; ++i)
+    atk_widget_t *widget = (atk_widget_t *)value;
+    if (!widget)
     {
-        atk_widget_t *slot = (atk_widget_t *)state->window_storage[i];
-        if (!slot->cls)
-        {
-            atk_widget_init(slot, &ATK_WINDOW_CLASS);
-        }
-        if (!slot->used)
-        {
-            atk_widget_init(slot, &ATK_WINDOW_CLASS);
-            return slot;
-        }
+        return;
     }
-    return 0;
+
+    atk_button_priv_t *priv = (atk_button_priv_t *)atk_widget_priv(widget, &ATK_BUTTON_CLASS);
+    if (priv)
+    {
+        priv->list_node = 0;
+    }
+
+    atk_widget_destroy(widget);
 }
 
-static void window_release_slot(atk_widget_t *window)
+static void window_destroy(atk_widget_t *window)
 {
     if (!window)
     {
         return;
     }
-    atk_widget_init(window, &ATK_WINDOW_CLASS);
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (priv)
+    {
+        atk_list_clear(&priv->buttons, button_destroy_value);
+        priv->list_node = 0;
+    }
+
+    atk_widget_destroy(window);
+}
+
+static void window_destroy_value(void *value)
+{
+    window_destroy((atk_widget_t *)value);
 }

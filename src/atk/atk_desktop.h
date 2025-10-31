@@ -15,6 +15,6 @@ atk_widget_t *atk_desktop_add_button(atk_state_t *state,
                                      bool draggable,
                                      atk_button_action_t action,
                                      void *context);
-int atk_desktop_button_hit_test(const atk_state_t *state, int px, int py);
+atk_widget_t *atk_desktop_button_hit_test(const atk_state_t *state, int px, int py);
 
 #endif
