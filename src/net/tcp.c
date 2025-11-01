@@ -199,6 +199,12 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
         return false;
     }
 
+    /* Announce our IP->MAC so the gateway learns/refreshes its neighbor entry. */
+    if (socket->iface && socket->iface->ipv4_addr)
+    {
+        net_arp_announce(socket->iface, socket->iface->ipv4_addr);
+    }
+
     if (!tcp_prepare_route(socket, remote_ip, remote_port))
     {
         tcp_mark_error(socket, "route failure");
@@ -244,6 +250,7 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
 
     return true;
 }
+
 
 bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t len)
 {
@@ -488,8 +495,11 @@ static bool tcp_prepare_route(net_tcp_socket_t *socket, uint32_t remote_ip, uint
         return false;
     }
 
+    /* Prefer a fresh ARP mapping; otherwise force an ARP query. */
     uint8_t mac[6];
-    if (net_arp_lookup(next_hop, mac))
+    uint32_t freq = timer_frequency(); if (freq == 0) freq = 100;
+    uint64_t max_age = (uint64_t)30 * freq; /* 30s */
+    if (net_arp_lookup_fresh(next_hop, mac, max_age))
     {
         memcpy(socket->remote_mac, mac, 6);
         socket->have_mac = true;
@@ -501,6 +511,8 @@ static bool tcp_prepare_route(net_tcp_socket_t *socket, uint32_t remote_ip, uint
     return true;
 }
 
+
+
 static bool tcp_send_syn(net_tcp_socket_t *socket)
 {
     if (!socket->have_mac)
@@ -511,7 +523,6 @@ static bool tcp_send_syn(net_tcp_socket_t *socket)
     return tcp_send_segment(socket, socket->seq_next, TCP_FLAG_SYN,
                             NULL, 0, true, true);
 }
-
 static void tcp_retransmit(net_tcp_socket_t *socket)
 {
     if (!socket || !socket->awaiting_ack)
@@ -523,6 +534,12 @@ static void tcp_retransmit(net_tcp_socket_t *socket)
     {
         tcp_mark_error(socket, "retry limit");
         return;
+    }
+
+    /* On the first miss, re-ARP the next hop to repair a stale neighbor entry. */
+    if (socket->retry_count == 0)
+    {
+        net_arp_send_request(socket->iface, socket->next_hop_ip);
     }
 
     const uint8_t *payload = socket->pending_payload_len ? socket->pending_payload : NULL;
@@ -539,6 +556,8 @@ static void tcp_retransmit(net_tcp_socket_t *socket)
     socket->retry_count++;
     socket->last_send_tick = timer_ticks();
 }
+
+
 
 void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length)
 {

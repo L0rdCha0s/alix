@@ -285,14 +285,12 @@ static void rtl8139_handle_receive(void)
 {
     rtl8139_dump_state("rx poll");
 
-    // Safety cap so we never spin forever if RX_EMPTY flickers
     int safety = 4096;
 
     while ((inb(g_io_base + RTL_REG_CR) & RTL_CR_RX_EMPTY) == 0 && safety-- > 0)
     {
         uint32_t offset = g_rx_offset;
 
-        // Descriptor header in ring: [status:16][length:16][payload...][CRC(4)]
         uint16_t rsr   = rtl8139_buffer_read16(offset + 0);
         uint16_t rxlen = rtl8139_buffer_read16(offset + 2);   // includes CRC
         bool ok = (rsr & 0x0001U) && rxlen >= 8 && rxlen <= (RTL_RX_RING_SIZE - 16);
@@ -303,11 +301,11 @@ static void rtl8139_handle_receive(void)
         }
 
         uint16_t frame_len = (uint16_t)(rxlen - 4);  // strip CRC
-        if (frame_len > 9216) {                      // jumbo/garbage guard
+        if (frame_len > 9216) {
             goto advance_ring;
         }
 
-        // Peek first up to 18 bytes to decide whether we care (VLAN-aware)
+        // Peek first up to 18 bytes
         uint8_t hdr[18];
         {
             uint32_t start = (offset + 4) & (RTL_RX_RING_SIZE - 1);
@@ -321,40 +319,40 @@ static void rtl8139_handle_receive(void)
         if (frame_len >= 14) {
             uint16_t eth_type = (uint16_t)((hdr[12] << 8) | hdr[13]);
             uint32_t l2_off = 14;
+            bool vlan = false;
 
-            // If VLAN tagged (0x8100), drop for now (stack not parsing 802.1Q yet).
-            // (If you want to support it later, parse inner EtherType at bytes 16/17
-            //  and keep l2_off = 18, but then your upper stack must understand VLAN.)
-            if (eth_type == 0x8100) {
-                goto advance_ring;
-            }
-
-            // Optional early filtering: only accept IPv4 and ARP currently.
-            if (!(eth_type == 0x0800 || eth_type == 0x0806)) {
-                goto advance_ring;
-            }
-
-            // Copy only frames we’ll actually process
+            // Copy full frame into linear buffer
             if (frame_len > sizeof(g_rx_frame)) {
                 serial_write_string("rtl8139: frame too large for buffer\r\n");
                 goto advance_ring;
             }
-
-            // Linearize the frame into g_rx_frame
             rtl8139_copy_packet(offset, g_rx_frame, frame_len);
 
-            // Light logging + IP/TCP/UDP port logging guarded by proto
+            // If VLAN tagged, strip one 802.1Q header (4 bytes) and rebase EtherType
+            if (eth_type == 0x8100 && frame_len >= 18)
+            {
+                vlan = true;
+                uint16_t inner = (uint16_t)((g_rx_frame[16] << 8) | g_rx_frame[17]);
+
+                // shift bytes [18..end) down to [14..)
+                size_t tail = (size_t)frame_len - 18;
+                memmove(&g_rx_frame[14], &g_rx_frame[18], tail);
+                frame_len = (uint16_t)(frame_len - 4);
+                eth_type = inner;
+                // l2_off remains 14 (we presented an untagged frame to upper layers)
+            }
+
+            // Only process IPv4 and ARP
+            if (!(eth_type == 0x0800 || eth_type == 0x0806)) {
+                goto advance_ring;
+            }
+
             serial_write_string("rtl8139: rx frame eth_type=0x");
             rtl8139_log_hex16(eth_type);
             serial_write_string(" len=0x");
             rtl8139_log_hex16(frame_len);
+            if (vlan) serial_write_string(" (vlan-stripped)");
             serial_write_string("\r\n");
-
-            if (eth_type == 0x0806 && g_arp_dump_budget > 0)
-            {
-                rtl8139_dump_bytes("rtl8139: arp frame snapshot", g_rx_frame, frame_len);
-                g_arp_dump_budget--;
-            }
 
             if (eth_type == 0x0800 && frame_len >= l2_off + 20) {
                 uint8_t ihl = (uint8_t)(g_rx_frame[l2_off] & 0x0F);
@@ -363,7 +361,6 @@ static void rtl8139_handle_receive(void)
                     uint8_t proto = g_rx_frame[l2_off + 9];
                     serial_write_string("rtl8139: ip proto=0x");
                     rtl8139_log_hex16(proto);
-
                     if ((proto == 6 /*TCP*/ || proto == 17 /*UDP*/) &&
                         frame_len >= l2_off + ip_hlen + 4)
                     {
@@ -380,25 +377,25 @@ static void rtl8139_handle_receive(void)
                 }
             }
 
-            // Hand off to upper layers (full Ethernet frame)
+            // Hand off to upper layers as if untagged Ethernet
             if (g_iface) {
                 net_arp_handle_frame(g_iface,  g_rx_frame, frame_len);
                 net_dhcp_handle_frame(g_iface, g_rx_frame, frame_len);
                 net_icmp_handle_frame(g_iface, g_rx_frame, frame_len);
-                net_dns_handle_frame(g_iface, g_rx_frame, frame_len);
-                net_tcp_handle_frame(g_iface, g_rx_frame, frame_len);
+                net_dns_handle_frame(g_iface,  g_rx_frame, frame_len);
+                net_tcp_handle_frame(g_iface,  g_rx_frame, frame_len);
             }
         }
 
-        advance_ring:
+    advance_ring:
         {
-            // Advance ring: descriptor(4) + data + CRC(4), then DWORD align
             uint32_t advance = (uint32_t)((rxlen + 4 + 3) & ~3U);
             g_rx_offset = (g_rx_offset + advance) & (RTL_RX_RING_SIZE - 1);
             outw(g_io_base + RTL_REG_CAPR, (uint16_t)((g_rx_offset - 16) & 0xFFFF));
         }
     }
 }
+
 
 
 static uint16_t rtl8139_buffer_read16(uint32_t offset)

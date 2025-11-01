@@ -5,14 +5,17 @@
 #include "libc.h"
 #include "serial.h"
 #include "net/dhcp.h"
+#include "timer.h"
 
 #define ARP_CACHE_SIZE 8
 
+// replace your struct with this (adds last_tick)
 typedef struct
 {
     bool valid;
     uint32_t ip;
     uint8_t mac[6];
+    uint64_t last_tick;
 } arp_entry_t;
 
 static arp_entry_t g_cache[ARP_CACHE_SIZE];
@@ -76,9 +79,33 @@ void net_arp_flush(void)
     {
         g_cache[i].valid = false;
         g_cache[i].ip = 0;
+        g_cache[i].last_tick = 0;
         memset(g_cache[i].mac, 0, sizeof(g_cache[i].mac));
     }
 }
+
+bool net_arp_lookup_fresh(uint32_t ip, uint8_t mac_out[6], uint64_t max_age_ticks)
+{
+    if (!mac_out || ip == 0) return false;
+
+    uint64_t now = timer_ticks();
+    for (size_t i = 0; i < ARP_CACHE_SIZE; ++i)
+    {
+        if (g_cache[i].valid && g_cache[i].ip == ip)
+        {
+            if (max_age_ticks && (now - g_cache[i].last_tick) > max_age_ticks)
+            {
+                // stale
+                return false;
+            }
+            memcpy(mac_out, g_cache[i].mac, 6);
+            arp_log_entry("cache hit", ip, g_cache[i].mac);
+            return true;
+        }
+    }
+    return false;
+}
+
 
 bool net_arp_lookup(uint32_t ip, uint8_t mac_out[6])
 {
@@ -213,17 +240,20 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
     serial_write_string(ipbuf);
     serial_write_string("\r\n");
 
-    if (ip == 0 || !mac)
+    if (ip == 0)
     {
-        arp_log_reason("store: ip zero or mac null");
+        arp_log_reason("store: ip zero");
         return;
     }
+
+    uint64_t now = timer_ticks();
 
     for (size_t i = 0; i < ARP_CACHE_SIZE; ++i)
     {
         if (g_cache[i].valid && g_cache[i].ip == ip)
         {
             memcpy(g_cache[i].mac, mac, 6);
+            g_cache[i].last_tick = now;
             arp_log_entry("updated entry", ip, mac);
             serial_write_string("arp: store updated index=");
             serial_write_char('0' + (char)i);
@@ -239,6 +269,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
             g_cache[i].valid = true;
             g_cache[i].ip = ip;
             memcpy(g_cache[i].mac, mac, 6);
+            g_cache[i].last_tick = now;
             arp_log_entry("added entry", ip, mac);
             serial_write_string("arp: store new index=");
             serial_write_char('0' + (char)i);
@@ -251,9 +282,11 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
     g_cache[0].valid = true;
     g_cache[0].ip = ip;
     memcpy(g_cache[0].mac, mac, 6);
+    g_cache[0].last_tick = now;
     arp_log_entry("replaced entry", ip, mac);
     serial_write_string("arp: store replaced index=0\r\n");
 }
+
 
 void net_arp_announce(net_interface_t *iface, uint32_t ip)
 {

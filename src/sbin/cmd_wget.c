@@ -33,6 +33,192 @@ static bool append_body_chunk(vfs_node_t *file, const uint8_t *data, size_t len,
                               shell_output_t *out);
 static bool format_decimal(char *buf, size_t cap, unsigned value, size_t *out_len);
 
+
+// --- chunked decoding helpers ---
+
+typedef enum
+{
+    CHUNK_READ_SIZE = 0,
+    CHUNK_READ_DATA,
+    CHUNK_READ_DATA_CR,
+    CHUNK_READ_DATA_LF,
+    CHUNK_READ_TRAILERS,
+    CHUNK_DONE
+} chunk_parse_state_t;
+
+typedef struct
+{
+    chunk_parse_state_t state;
+    size_t current_size;      // size of the current chunk
+    size_t remaining;         // bytes remaining to write for current chunk
+    char   linebuf[64];       // accumulates the "<hex>[;ext]*" size line (no CRLF)
+    size_t line_len;          // bytes in linebuf
+    int    trailer_stage;     // 0,1,2,3 progressing toward CRLFCRLF
+} chunked_state_t;
+
+static void chunked_init(chunked_state_t *st)
+{
+    st->state = CHUNK_READ_SIZE;
+    st->current_size = 0;
+    st->remaining = 0;
+    st->line_len = 0;
+    st->trailer_stage = 0;
+}
+
+static bool parse_chunk_size_line(const char *line, size_t len, size_t *out)
+{
+    // Parse hex number up to ';' (ignore chunk extensions)
+    size_t val = 0;
+    bool saw_digit = false;
+    for (size_t i = 0; i < len; ++i)
+    {
+        char c = line[i];
+        if (c == ';' || c == ' ' || c == '\t') break;
+
+        unsigned d;
+        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = 10u + (unsigned)(c - 'a');
+        else if (c >= 'A' && c <= 'F') d = 10u + (unsigned)(c - 'A');
+        else return false;
+
+        saw_digit = true;
+        if (val > (SIZE_MAX - d) / 16) return false; // overflow guard
+        val = (val << 4) | d;
+    }
+    if (!saw_digit) return false;
+    *out = val;
+    return true;
+}
+
+// Feed bytes into the chunked decoder. Writes body to `file`.
+// Sets *done=true when the final chunk + trailers complete.
+static bool chunked_consume(chunked_state_t *st,
+                            vfs_node_t *file,
+                            const uint8_t *data, size_t len,
+                            size_t *written,
+                            shell_output_t *out,
+                            bool *done)
+{
+    size_t pos = 0;
+    *done = false;
+
+    while (pos < len && st->state != CHUNK_DONE)
+    {
+        switch (st->state)
+        {
+        case CHUNK_READ_SIZE:
+        {
+            // accumulate until CRLF
+            char b = (char)data[pos++];
+            if (st->line_len >= sizeof(st->linebuf))
+            {
+                shell_output_error(out, "chunk-size line too long");
+                return false;
+            }
+            st->linebuf[st->line_len++] = b;
+
+            if (st->line_len >= 2 &&
+                st->linebuf[st->line_len - 2] == '\r' &&
+                st->linebuf[st->line_len - 1] == '\n')
+            {
+                // parse without the trailing CRLF
+                size_t linelen = st->line_len - 2;
+                if (!parse_chunk_size_line(st->linebuf, linelen, &st->current_size))
+                {
+                    shell_output_error(out, "invalid chunk-size");
+                    return false;
+                }
+                st->line_len = 0;
+
+                st->remaining = st->current_size;
+                if (st->current_size == 0)
+                {
+                    st->state = CHUNK_READ_TRAILERS; // next: trailers then end
+                    st->trailer_stage = 0;
+                }
+                else
+                {
+                    st->state = CHUNK_READ_DATA;
+                }
+            }
+            break;
+        }
+
+        case CHUNK_READ_DATA:
+        {
+            size_t avail = len - pos;
+            size_t take = (st->remaining < avail) ? st->remaining : avail;
+            if (take > 0)
+            {
+                if (!vfs_append(file, (const char *)data + pos, take))
+                {
+                    shell_output_error(out, "failed to write to file");
+                    return false;
+                }
+                pos += take;
+                st->remaining -= take;
+                *written += take;
+            }
+            if (st->remaining == 0)
+            {
+                st->state = CHUNK_READ_DATA_CR; // expect "\r\n" after data
+            }
+            break;
+        }
+
+        case CHUNK_READ_DATA_CR:
+            if (pos >= len) return true; // need more data
+            if (data[pos++] != '\r')
+            {
+                shell_output_error(out, "malformed chunk: missing CR");
+                return false;
+            }
+            st->state = CHUNK_READ_DATA_LF;
+            break;
+
+        case CHUNK_READ_DATA_LF:
+            if (pos >= len) return true; // need more data
+            if (data[pos++] != '\n')
+            {
+                shell_output_error(out, "malformed chunk: missing LF");
+                return false;
+            }
+            st->state = CHUNK_READ_SIZE; // next chunk
+            break;
+
+        case CHUNK_READ_TRAILERS:
+        {
+            // look for CRLFCRLF
+            char c = (char)data[pos++];
+            switch (st->trailer_stage)
+            {
+            case 0: st->trailer_stage = (c == '\r') ? 1 : 0; break;
+            case 1: st->trailer_stage = (c == '\n') ? 2 : (c == '\r' ? 1 : 0); break;
+            case 2: st->trailer_stage = (c == '\r') ? 3 : 0; break;
+            case 3:
+                if (c == '\n')
+                {
+                    st->state = CHUNK_DONE;
+                    *done = true;
+                }
+                else
+                {
+                    st->trailer_stage = 0;
+                }
+                break;
+            }
+            break;
+        }
+
+        case CHUNK_DONE:
+            *done = true;
+            break;
+        }
+    }
+
+    return true;
+}
+
 bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 {
     const char *cursor = args ? args : "";
@@ -291,6 +477,9 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     bool header_parsed = false;
     bool have_length = false;
     size_t content_length = 0;
+    bool is_chunked = false;
+    chunked_state_t cstate;
+    bool chunked_done = false;
     uint64_t last_progress = timer_ticks();
 
     uint8_t chunk[WGET_CHUNK_SIZE];
@@ -313,6 +502,12 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             {
                 if (net_tcp_socket_remote_closed(socket))
                 {
+                    // If chunked and not finished, it's an error
+                    if (is_chunked && !chunked_done)
+                    {
+                        shell_output_error(out, "connection closed before complete chunked body");
+                        goto cleanup;
+                    }
                     if (have_length && written < content_length)
                     {
                         shell_output_error(out, "connection closed before full body");
@@ -336,6 +531,11 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             {
                 if (net_tcp_socket_remote_closed(socket))
                 {
+                    if (is_chunked && !chunked_done)
+                    {
+                        shell_output_error(out, "connection closed before complete chunked body");
+                        goto cleanup;
+                    }
                     if (have_length && written < content_length)
                     {
                         shell_output_error(out, "connection closed before full body");
@@ -413,20 +613,17 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     for (size_t i = 0; value[i]; ++i)
                     {
                         char c = value[i];
-                        if (c >= 'A' && c <= 'Z')
-                        {
-                            c = (char)(c + 32);
-                            value[i] = c;
-                        }
+                        if (c >= 'A' && c <= 'Z') value[i] = (char)(c + 32);
                     }
                     if (find_substring(value, "chunked"))
                     {
-                        shell_output_error(out, "chunked encoding not supported");
-                        goto cleanup;
+                        is_chunked = true;
+                        have_length = false; // TE: chunked takes precedence over Content-Length
+                        chunked_init(&cstate);
                     }
                 }
 
-                if (find_header_value(header_buf, "content-length", value, sizeof(value)))
+                if (!is_chunked && find_header_value(header_buf, "content-length", value, sizeof(value)))
                 {
                     if (!parse_decimal_size(value, &content_length))
                     {
@@ -449,14 +646,32 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         if (read > body_offset)
         {
             size_t body_len = read - body_offset;
-            if (!append_body_chunk(file, chunk + body_offset, body_len,
-                                   &written, have_length, content_length, out))
+
+            if (is_chunked)
             {
-                goto cleanup;
+                bool done = false;
+                if (!chunked_consume(&cstate, file, chunk + body_offset, body_len,
+                                     &written, out, &done))
+                {
+                    goto cleanup;
+                }
+                if (done)
+                {
+                    chunked_done = true;
+                }
+            }
+            else
+            {
+                if (!append_body_chunk(file, chunk + body_offset, body_len,
+                                       &written, have_length, content_length, out))
+                {
+                    goto cleanup;
+                }
             }
         }
 
-        if (have_length && written >= content_length)
+        if ((is_chunked && chunked_done) ||
+            (have_length && written >= content_length))
         {
             break;
         }
@@ -510,6 +725,7 @@ cleanup:
     }
     return success;
 }
+
 
 static const char *skip_ws(const char *cursor)
 {

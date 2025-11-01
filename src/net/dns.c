@@ -22,13 +22,19 @@
 #define DNS_FLAG_RD (1U << 8)
 #define DNS_FLAG_RA (1U << 7)
 
+#define DNS_RCODE(flags) ((flags) & 0x000F)
+#define DNS_TYPE_OPT 41
+#define NET_DNS_MAX_CNAME_HOPS 8
+
 typedef struct
 {
     bool active;
     uint16_t id;
     uint16_t qtype;
     uint16_t local_port;
-    char hostname[NET_DNS_NAME_MAX + 1];
+    char hostname[NET_DNS_NAME_MAX + 1];       /* original name requested */
+    char qname_current[NET_DNS_NAME_MAX + 1];  /* name we are currently querying */
+    uint8_t cname_hops;                        /* how many extra queries we've issued following CNAMEs */
     net_interface_t *iface;
     uint32_t server_ip;
     uint32_t next_hop;
@@ -41,6 +47,7 @@ typedef struct
     bool success;
     net_dns_result_t result;
 } dns_pending_t;
+
 
 static uint32_t g_servers[NET_DNS_MAX_SERVERS];
 static size_t g_server_count = 0;
@@ -73,6 +80,25 @@ void net_dns_init(void)
         g_pending[i].active = false;
     }
 }
+
+static bool dns_name_equal(const char *a, const char *b)
+{
+    if (!a || !b) return false;
+    size_t la = strlen(a), lb = strlen(b);
+    if (la && a[la-1] == '.') la--;
+    if (lb && b[lb-1] == '.') lb--;
+    if (la != lb) return false;
+    for (size_t i = 0; i < la; ++i)
+    {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
+
 
 void net_dns_set_servers(const uint32_t *servers, size_t count)
 {
@@ -167,14 +193,13 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
     }
 
     memcpy(pending->hostname, hostname, len + 1);
+    memcpy(pending->qname_current, hostname, len + 1);
+    pending->cname_hops = 0;
     pending->qtype = qtype;
     pending->id = g_next_id++;
     pending->iface = preferred_iface;
     pending->timeout_ticks = timer_frequency();
-    if (pending->timeout_ticks == 0)
-    {
-        pending->timeout_ticks = 100;
-    }
+    if (pending->timeout_ticks == 0) pending->timeout_ticks = 100;
 
     bool sent = false;
     for (size_t i = 0; i < g_server_count; ++i)
@@ -211,12 +236,9 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
     while (!pending->completed)
     {
         uint64_t now = timer_ticks();
-        if (now >= deadline)
-        {
-            break;
-        }
-        if (pending->sent_tick != 0 &&
-            now - pending->sent_tick >= pending->timeout_ticks)
+        if (now >= deadline) break;
+
+        if (pending->sent_tick != 0 && now - pending->sent_tick >= pending->timeout_ticks)
         {
             if (pending->retries >= g_retry_count)
             {
@@ -238,6 +260,8 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
     dns_release_pending(pending);
     return success;
 }
+
+
 
 bool net_dns_resolve_ipv4(const char *hostname, net_interface_t *preferred_iface,
                           uint32_t *out_addr)
@@ -349,20 +373,10 @@ static bool dns_send_query(dns_pending_t *pending)
         }
         uint64_t start = timer_ticks();
         uint64_t wait_ticks = timer_frequency() / 5; /* ~200ms */
-        if (wait_ticks == 0)
-        {
-            wait_ticks = 20;
-        }
+        if (wait_ticks == 0) wait_ticks = 20;
         while (timer_ticks() - start < wait_ticks)
         {
             rtl8139_poll();
-            uint8_t mac_dump[6];
-            if (net_arp_lookup(pending->next_hop, mac_dump))
-            {
-                char macbuf[32];
-                net_format_mac(mac_dump, macbuf);
-                dns_log("send_query: ARP cache unexpectedly populated early");
-            }
             uint8_t mac[6];
             if (net_arp_lookup(pending->next_hop, mac))
             {
@@ -381,13 +395,10 @@ static bool dns_send_query(dns_pending_t *pending)
 
     uint8_t packet[NET_DNS_MAX_PACKET];
     memset(packet, 0, sizeof(packet));
-    if (sizeof(packet) < 64)
-    {
-        return false;
-    }
+    if (sizeof(packet) < 64) return false;
 
     uint8_t *eth = packet;
-    uint8_t *ip = packet + 14;
+    uint8_t *ip  = packet + 14;
     uint8_t *udp = ip + 20;
     uint8_t *dns = udp + 8;
 
@@ -399,34 +410,29 @@ static bool dns_send_query(dns_pending_t *pending)
     write_be16(dns + 8, 0);
     write_be16(dns + 10, 0);
 
-    size_t question_len = NET_DNS_MAX_PACKET - (dns_len);
-    size_t tmp_len = question_len;
-    if (!dns_encode_question(pending->hostname, pending->qtype, dns + dns_len, &tmp_len))
+    size_t qlen_cap = NET_DNS_MAX_PACKET - dns_len;
+    size_t qlen = qlen_cap;
+    if (!dns_encode_question(pending->qname_current, pending->qtype, dns + dns_len, &qlen))
     {
+        dns_log("send_query: encode_question failed");
         return false;
     }
-    dns_len += tmp_len;
+    dns_len += qlen;
 
     size_t udp_len = 8 + dns_len;
-    size_t ip_len = 20 + udp_len;
+    size_t ip_len  = 20 + udp_len;
     size_t frame_len = 14 + ip_len;
-    if (frame_len < 60)
-    {
-        frame_len = 60;
-    }
+    if (frame_len < 60) frame_len = 60;
 
     memcpy(eth, pending->server_mac, 6);
     memcpy(eth + 6, iface->mac, 6);
-    eth[12] = 0x08;
-    eth[13] = 0x00;
+    eth[12] = 0x08; eth[13] = 0x00;
 
-    ip[0] = 0x45;
-    ip[1] = 0x00;
+    ip[0] = 0x45; ip[1] = 0x00;
     write_be16(ip + 2, (uint16_t)ip_len);
     write_be16(ip + 4, 0);
     write_be16(ip + 6, 0);
-    ip[8] = 64;
-    ip[9] = 17;
+    ip[8] = 64; ip[9] = 17;
     write_be32(ip + 12, iface->ipv4_addr);
     write_be32(ip + 16, pending->server_ip);
     write_be16(ip + 10, 0);
@@ -452,14 +458,8 @@ static bool dns_send_query(dns_pending_t *pending)
         udp_ptr += 2;
         udp_bytes -= 2;
     }
-    if (udp_bytes)
-    {
-        sum += (uint32_t)(udp_ptr[0] << 8);
-    }
-    while (sum >> 16)
-    {
-        sum = (sum & 0xFFFFU) + (sum >> 16);
-    }
+    if (udp_bytes) sum += (uint32_t)(udp_ptr[0] << 8);
+    while (sum >> 16) sum = (sum & 0xFFFFU) + (sum >> 16);
     write_be16(udp + 6, (uint16_t)(~sum));
 
     if (!net_if_send(iface, packet, frame_len))
@@ -473,35 +473,51 @@ static bool dns_send_query(dns_pending_t *pending)
     return true;
 }
 
+static bool dns_skip_rrs(const uint8_t *dns, size_t dns_len, size_t *off, uint16_t count)
+{
+    size_t o = *off;
+    for (uint16_t i = 0; i < count; ++i)
+    {
+        char tmp[NET_DNS_NAME_MAX + 1];
+        if (!dns_decode_name(dns, dns_len, &o, tmp, sizeof(tmp))) return false;
+        if (o + 10 > dns_len) return false;
+        uint16_t rdlen = read_be16(dns + o + 8);
+        o += 10;
+        if (o + rdlen > dns_len) return false;
+        o += rdlen;
+    }
+    *off = o;
+    return true;
+}
+
+
+
 void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length)
 {
-    if (!iface || !frame || length < 14 + 20 + 8)
-    {
-        return;
-    }
+    if (!iface || !frame || length < 14 + 20 + 8) return;
+
     const uint8_t *eth = frame;
     uint16_t eth_type = (uint16_t)((eth[12] << 8) | eth[13]);
-    if (eth_type != 0x0800)
-    {
-        return;
-    }
+    if (eth_type != 0x0800) return;
+
     const uint8_t *ip = frame + 14;
     uint8_t version = (uint8_t)(ip[0] >> 4);
     uint8_t ihl = (uint8_t)(ip[0] & 0x0F);
-    if (version != 4 || ihl < 5)
-    {
-        return;
-    }
-    size_t ip_header_len = (size_t)ihl * 4;
-    if (length < 14 + ip_header_len + 8)
-    {
-        return;
-    }
-    if (ip[9] != 17)
-    {
-        return;
-    }
-    uint16_t dst_port = read_be16(ip + ip_header_len + 2);
+    if (version != 4 || ihl < 5) return;
+
+    size_t ip_hlen = (size_t)ihl * 4;
+    if (length < 14 + ip_hlen + 8) return;
+    if (ip[9] != 17) return; /* UDP */
+
+    uint16_t ip_total_len = read_be16(ip + 2);
+    if (ip_total_len < ip_hlen + 8) return;
+
+    const uint8_t *udp = ip + ip_hlen;
+    uint16_t src_port = read_be16(udp + 0);
+    uint16_t dst_port = read_be16(udp + 2);
+    uint16_t udp_len  = read_be16(udp + 4);
+    if (udp_len < 8 || (size_t)(udp - ip) + udp_len > ip_total_len) return;
+
     dns_pending_t *pending = NULL;
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
@@ -511,128 +527,182 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             break;
         }
     }
-    if (!pending)
-    {
-        return;
-    }
-    uint16_t src_port = read_be16(ip + ip_header_len + 0);
-    if (src_port != 53)
-    {
-        return;
-    }
-    uint16_t total_len = read_be16(ip + 2);
-    size_t ip_payload_len = total_len > ip_header_len ? total_len - ip_header_len : 0;
-    if (ip_payload_len < 8)
-    {
-        return;
-    }
-    const uint8_t *udp = ip + ip_header_len;
-    uint16_t udp_len = read_be16(udp + 4);
-    if (udp_len < 8)
-    {
-        return;
-    }
+    if (!pending) return;
+    if (src_port != 53) return;
+
     const uint8_t *dns = udp + 8;
     size_t dns_len = udp_len - 8;
-    if (dns_len < 12)
-    {
-        return;
-    }
+    if (dns_len < 12) return;
 
-    uint16_t id = read_be16(dns + 0);
-    if (!pending || !pending->active || pending->iface != iface || pending->id != id)
-    {
-        return;
-    }
-
+    uint16_t id    = read_be16(dns + 0);
     uint16_t flags = read_be16(dns + 2);
-    if ((flags & DNS_FLAG_QR) == 0)
-    {
-        return;
-    }
+    if (!pending->active || pending->iface != iface || pending->id != id) return;
+    if ((flags & DNS_FLAG_QR) == 0) { return; }             /* not a response */
+    if ((flags & 0x000F) != 0)      { dns_finish_pending(pending, false, NULL); return; } /* RCODE != NOERROR */
+    if (flags & DNS_FLAG_TC)        { dns_finish_pending(pending, false, NULL); return; } /* truncated over UDP */
+
     uint16_t qdcount = read_be16(dns + 4);
     uint16_t ancount = read_be16(dns + 6);
+    uint16_t nscount = read_be16(dns + 8);
+    uint16_t arcount = read_be16(dns + 10);
 
     size_t offset = 12;
-    for (uint16_t i = 0; i < qdcount; ++i)
+
+    /* Decode first question to get the owner name we asked for */
+    char qname[NET_DNS_NAME_MAX + 1]; qname[0] = '\0';
+    if (qdcount > 0)
     {
-        char name[NET_DNS_NAME_MAX + 1];
-        if (!dns_decode_name(dns, dns_len, &offset, name, sizeof(name)))
+        if (!dns_decode_name(dns, dns_len, &offset, qname, sizeof(qname))) { dns_finish_pending(pending, false, NULL); return; }
+        if (offset + 4 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
+        offset += 4; /* QTYPE/QCLASS */
+        /* Skip any extra questions if present */
+        for (uint16_t qi = 1; qi < qdcount; ++qi)
         {
-            dns_finish_pending(pending, false, NULL);
-            return;
+            if (!dns_decode_name(dns, dns_len, &offset, qname, sizeof(qname))) { dns_finish_pending(pending, false, NULL); return; }
+            if (offset + 4 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
+            offset += 4;
         }
-        if (offset + 4 > dns_len)
-        {
-            dns_finish_pending(pending, false, NULL);
-            return;
-        }
-        offset += 4;
     }
 
-    net_dns_result_t res;
-    memset(&res, 0, sizeof(res));
+    /* Answers start here */
+    size_t answers_start = offset;
 
-    for (uint16_t i = 0; i < ancount; ++i)
+    /* Compute section boundaries (without parsing) */
+    size_t after_answers = answers_start;
+    if (!dns_skip_rrs(dns, dns_len, &after_answers, ancount)) { dns_finish_pending(pending, false, NULL); return; }
+    size_t after_authority = after_answers;
+    if (!dns_skip_rrs(dns, dns_len, &after_authority, nscount)) { dns_finish_pending(pending, false, NULL); return; }
+
+    /* Follow CNAME chain within this message (order-independent) */
+    char target[NET_DNS_NAME_MAX + 1];
+    if (pending->qname_current[0]) {
+        memcpy(target, pending->qname_current, strlen(pending->qname_current) + 1);
+    } else {
+        memcpy(target, qname, strlen(qname) + 1);
+    }
+
+    for (int hop = 0; hop < NET_DNS_MAX_CNAME_HOPS; ++hop)
     {
-        char rr_name[NET_DNS_NAME_MAX + 1];
-        if (!dns_decode_name(dns, dns_len, &offset, rr_name, sizeof(rr_name)))
+        bool changed = false;
+        size_t o = answers_start;
+        for (uint16_t i = 0; i < ancount; ++i)
         {
-            dns_finish_pending(pending, false, NULL);
-            return;
-        }
-        if (offset + 10 > dns_len)
-        {
-            dns_finish_pending(pending, false, NULL);
-            return;
-        }
-        uint16_t type = read_be16(dns + offset);
-        uint16_t rr_class = read_be16(dns + offset + 2);
-        uint16_t rdlength = read_be16(dns + offset + 8);
-        offset += 10;
-        if (offset + rdlength > dns_len)
-        {
-            dns_finish_pending(pending, false, NULL);
-            return;
-        }
-        if (rr_class != 1)
-        {
-            offset += rdlength;
-            continue;
-        }
-        if (type == NET_DNS_TYPE_A && rdlength == 4)
-        {
-            res.has_a = true;
-            res.addr = ((uint32_t)dns[offset] << 24)
-                     | ((uint32_t)dns[offset + 1] << 16)
-                     | ((uint32_t)dns[offset + 2] << 8)
-                     | (uint32_t)dns[offset + 3];
-            res.rr_type = NET_DNS_TYPE_A;
-            dns_finish_pending(pending, true, &res);
-            return;
-        }
-        else if (type == NET_DNS_TYPE_CNAME)
-        {
-            size_t cname_offset = offset;
-            if (dns_decode_name(dns, dns_len, &cname_offset, res.cname, sizeof(res.cname)))
+            char rr_name[NET_DNS_NAME_MAX + 1];
+            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(rr_name))) { dns_finish_pending(pending, false, NULL); return; }
+            if (o + 10 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
+            uint16_t type   = read_be16(dns + o + 0);
+            uint16_t rr_cls = read_be16(dns + o + 2);
+            uint16_t rdlen  = read_be16(dns + o + 8);
+            o += 10;
+            if (o + rdlen > dns_len) { dns_finish_pending(pending, false, NULL); return; }
+
+            if (rr_cls == 1 && type == NET_DNS_TYPE_CNAME)
             {
-                res.has_cname = true;
-                res.rr_type = NET_DNS_TYPE_CNAME;
-                offset += rdlength;
-                dns_finish_pending(pending, true, &res);
-                return;
+                size_t ro = o;
+                char cname_tgt[NET_DNS_NAME_MAX + 1];
+                if (dns_decode_name(dns, dns_len, &ro, cname_tgt, sizeof(cname_tgt)))
+                {
+                    if (dns_name_equal(rr_name, target) && !dns_name_equal(cname_tgt, target))
+                    {
+                        memcpy(target, cname_tgt, strlen(cname_tgt) + 1);
+                        changed = true;
+                    }
+                }
             }
-            dns_finish_pending(pending, false, NULL);
-            return;
+            o += rdlen;
         }
-        else
+        if (!changed) break;
+    }
+
+    /* Look for A(target) in Answer section */
+    bool found_a = false;
+    uint32_t found_addr = 0;
+    {
+        size_t o = answers_start;
+        for (uint16_t i = 0; i < ancount; ++i)
         {
-            offset += rdlength;
+            char rr_name[NET_DNS_NAME_MAX + 1];
+            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(rr_name))) { dns_finish_pending(pending, false, NULL); return; }
+            if (o + 10 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
+            uint16_t type   = read_be16(dns + o + 0);
+            uint16_t rr_cls = read_be16(dns + o + 2);
+            uint16_t rdlen  = read_be16(dns + o + 8);
+            o += 10;
+            if (o + rdlen > dns_len) { dns_finish_pending(pending, false, NULL); return; }
+
+            if (rr_cls == 1 && type == NET_DNS_TYPE_A && rdlen == 4 && dns_name_equal(rr_name, target))
+            {
+                found_a = true;
+                found_addr = ((uint32_t)dns[o] << 24) | ((uint32_t)dns[o+1] << 16) |
+                             ((uint32_t)dns[o+2] << 8)  |  (uint32_t)dns[o+3];
+            }
+            o += rdlen;
+        }
+    }
+
+    /* If not found, search Additional (ignore OPT/EDNS = type 41) */
+    if (!found_a)
+    {
+        size_t o = after_authority;
+        for (uint16_t i = 0; i < arcount; ++i)
+        {
+            char rr_name[NET_DNS_NAME_MAX + 1];
+            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(rr_name))) { dns_finish_pending(pending, false, NULL); return; }
+            if (o + 10 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
+            uint16_t type   = read_be16(dns + o + 0);
+            uint16_t rr_cls = read_be16(dns + o + 2);
+            uint16_t rdlen  = read_be16(dns + o + 8);
+            o += 10;
+            if (o + rdlen > dns_len) { dns_finish_pending(pending, false, NULL); return; }
+
+            if (type != 41) /* DNS_TYPE_OPT */
+            {
+                if (rr_cls == 1 && type == NET_DNS_TYPE_A && rdlen == 4 && dns_name_equal(rr_name, target))
+                {
+                    found_a = true;
+                    found_addr = ((uint32_t)dns[o] << 24) | ((uint32_t)dns[o+1] << 16) |
+                                 ((uint32_t)dns[o+2] << 8)  |  (uint32_t)dns[o+3];
+                }
+            }
+            o += rdlen;
+        }
+    }
+
+    if (found_a)
+    {
+        net_dns_result_t res;
+        memset(&res, 0, sizeof(res));
+        res.has_a  = true;
+        res.addr   = found_addr;
+        res.rr_type = NET_DNS_TYPE_A;
+        dns_finish_pending(pending, true, &res);
+        return;
+    }
+
+    /* No A yet. If target != current qname, follow CNAME by issuing a new query (bounded). */
+    if (!dns_name_equal(target, pending->qname_current) &&
+        pending->qtype == NET_DNS_TYPE_A &&
+        pending->cname_hops < NET_DNS_MAX_CNAME_HOPS)
+    {
+        size_t tlen = strlen(target);
+        if (tlen > NET_DNS_NAME_MAX) { dns_finish_pending(pending, false, NULL); return; }
+        memcpy(pending->qname_current, target, tlen + 1);
+        pending->cname_hops++;
+        pending->id = g_next_id++;
+        pending->retries = 0;
+        pending->sent_tick = 0;
+
+        if (dns_prepare_route(pending) && dns_send_query(pending))
+        {
+            /* wait for follow-up response */
+            return;
         }
     }
 
     dns_finish_pending(pending, false, NULL);
 }
+
+
 
 static bool dns_encode_label(const char **cursor, uint8_t *buffer, size_t *offset, size_t capacity)
 {

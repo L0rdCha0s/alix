@@ -4,7 +4,6 @@
 #include "mouse.h"
 #include "console.h"
 #include "serial.h"
-#include "rtl8139.h"
 
 
 bool shell_cmd_start_video(shell_state_t *shell, shell_output_t *out, const char *args)
