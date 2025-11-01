@@ -189,17 +189,6 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                 handled = true;
             }
         }
-
-        if (!handled)
-        {
-            atk_text_input_focus(state, NULL);
-            atk_widget_t *created = atk_window_create_at(state, cursor_x, cursor_y);
-            if (created)
-            {
-                atk_window_mark_dirty(created);
-                result.redraw = true;
-            }
-        }
     }
     else if (released_edge)
     {

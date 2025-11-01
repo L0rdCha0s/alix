@@ -81,6 +81,19 @@ static int g_tx_dump_budget = 32;
 static int g_hw_tx_cursor = 0; // which TSD/TSAD pair the NIC expects next
 static int g_tx_tail_cursor = 0; // oldest descriptor that might still be owned by NIC
 static int g_tx_inflight = 0;    // number of descriptors handed to NIC
+static bool g_tx_queue_enabled = true;
+
+#define RTL_TX_QUEUE_MAX 16
+typedef struct
+{
+    uint8_t *data;
+    size_t len;
+} rtl8139_tx_entry_t;
+
+static rtl8139_tx_entry_t g_tx_queue[RTL_TX_QUEUE_MAX];
+static int g_tx_queue_head = 0;
+static int g_tx_queue_tail = 0;
+static int g_tx_queue_count = 0;
 
 static void rtl8139_log(const char *msg);
 static void rtl8139_log_hex8(uint8_t value);
@@ -96,7 +109,10 @@ static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t 
 static void rtl8139_dump_frame(int slot, size_t len, const uint8_t *data);
 static bool rtl8139_tx_slot_ready(int slot);
 static void rtl8139_reclaim_tx(void);
-static bool rtl8139_tx_reserve_slot(void);
+static int rtl8139_tx_reserve_slot(void);
+static void rtl8139_hw_send_slot(int slot, const uint8_t *data, size_t len);
+static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len);
+static void rtl8139_tx_flush_queue(void);
 
 void rtl8139_init(void)
 {
@@ -164,6 +180,9 @@ void rtl8139_init(void)
     g_hw_tx_cursor = 0;  // after reset, the NIC starts at pair 0
     g_tx_tail_cursor = 0;
     g_tx_inflight = 0;
+    g_tx_queue_head = 0;
+    g_tx_queue_tail = 0;
+    g_tx_queue_count = 0;
     for (int i = 0; i < RTL_TX_SLOT_COUNT; ++i) {
         g_tx_phys[i] = (uint32_t)(uintptr_t)g_tx_buffer[i];
         outl(g_io_base + RTL_REG_TSAD0 + i*4, g_tx_phys[i]); // program once
@@ -234,6 +253,7 @@ void rtl8139_on_irq(void)
     if (status & (RTL_ISR_TOK | RTL_ISR_TER))
     {
         rtl8139_reclaim_tx();
+        rtl8139_tx_flush_queue();
     }
 
     net_tcp_poll();
@@ -247,6 +267,7 @@ void rtl8139_poll(void)
     }
     rtl8139_handle_receive();
     rtl8139_reclaim_tx();
+    rtl8139_tx_flush_queue();
     net_tcp_poll();
 }
 
@@ -408,35 +429,37 @@ static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t 
     (void)iface;
     if (!g_rtl_present || !data || len == 0) return false;
 
-    if (!rtl8139_tx_reserve_slot())
+    if (len > sizeof(g_tx_buffer[0]))
     {
+        rtl8139_log("tx frame too large");
+        return false;
+    }
+
+    rtl8139_reclaim_tx();
+
+    if (g_tx_inflight >= RTL_TX_SLOT_COUNT)
+    {
+        if (rtl8139_tx_queue_push(data, len))
+        {
+            return true;
+        }
+        rtl8139_log("tx queue full");
+        return false;
+    }
+
+    int slot = rtl8139_tx_reserve_slot();
+    if (slot < 0)
+    {
+        if (rtl8139_tx_queue_push(data, len))
+        {
+            return true;
+        }
         rtl8139_log("tx ring saturated");
         return false;
     }
 
-    size_t frame_len = len < 60 ? 60 : len;
-
-    int slot = g_hw_tx_cursor;
-    if (!rtl8139_tx_slot_ready(slot))
-    {
-        rtl8139_log("tx slot unexpectedly busy");
-        rtl8139_dump_state("tx busy");
-        return false;
-    }
-
-    // Only the current pair is valid to use. Ensure it's free (OWN==1).
-    memcpy(g_tx_buffer[slot], data, len);
-    if (frame_len > len) memset(g_tx_buffer[slot] + len, 0, frame_len - len);
-
-    rtl8139_dump_frame(slot, frame_len, g_tx_buffer[slot]);
-
-    // TSADn already programmed; just kick by writing TSDn (length clears OWN)
-    outl(g_io_base + RTL_REG_TSD0 + slot*4, (uint32_t)frame_len & 0x1FFFU);
-
-    rtl8139_dump_state("after tx");
-
-    g_hw_tx_cursor = (g_hw_tx_cursor + 1) % RTL_TX_SLOT_COUNT;  // advance *after* submit
-    g_tx_inflight++;
+    rtl8139_hw_send_slot(slot, data, len);
+    rtl8139_tx_flush_queue();
     return true;
 }
 
@@ -584,22 +607,80 @@ static void rtl8139_reclaim_tx(void)
     }
 }
 
-static bool rtl8139_tx_reserve_slot(void)
+static int rtl8139_tx_reserve_slot(void)
 {
-    rtl8139_reclaim_tx();
-    if (g_tx_inflight < RTL_TX_SLOT_COUNT)
+    if (g_tx_inflight >= RTL_TX_SLOT_COUNT)
     {
-        return true;
+        return -1;
     }
 
-    const int spin_limit = 4096;
-    for (int i = 0; i < spin_limit; ++i)
+    int slot = g_hw_tx_cursor;
+    if (!rtl8139_tx_slot_ready(slot))
     {
-        rtl8139_reclaim_tx();
-        if (g_tx_inflight < RTL_TX_SLOT_COUNT)
-        {
-            return true;
-        }
+        rtl8139_log("tx slot unexpectedly busy");
+        rtl8139_dump_state("tx busy");
+        return -1;
     }
-    return false;
+    return slot;
+}
+
+static void rtl8139_hw_send_slot(int slot, const uint8_t *data, size_t len)
+{
+    size_t frame_len = (len < 60) ? 60 : len;
+    memcpy(g_tx_buffer[slot], data, len);
+    if (frame_len > len)
+    {
+        memset(g_tx_buffer[slot] + len, 0, frame_len - len);
+    }
+
+    rtl8139_dump_frame(slot, frame_len, g_tx_buffer[slot]);
+
+    outl(g_io_base + RTL_REG_TSD0 + slot * 4, (uint32_t)frame_len & 0x1FFFU);
+    rtl8139_dump_state("after tx");
+
+    g_hw_tx_cursor = (g_hw_tx_cursor + 1) % RTL_TX_SLOT_COUNT;
+    g_tx_inflight++;
+}
+
+static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len)
+{
+    if (!g_tx_queue_enabled)
+    {
+        return false;
+    }
+    if (g_tx_queue_count >= RTL_TX_QUEUE_MAX)
+    {
+        rtl8139_log("tx queue overflow");
+        return false;
+    }
+    uint8_t *buffer = (uint8_t *)malloc(len);
+    if (!buffer)
+    {
+        rtl8139_log("tx queue alloc failed");
+        return false;
+    }
+    memcpy(buffer, data, len);
+    g_tx_queue[g_tx_queue_tail].data = buffer;
+    g_tx_queue[g_tx_queue_tail].len = len;
+    g_tx_queue_tail = (g_tx_queue_tail + 1) % RTL_TX_QUEUE_MAX;
+    g_tx_queue_count++;
+    return true;
+}
+
+static void rtl8139_tx_flush_queue(void)
+{
+    while (g_tx_queue_count > 0 && g_tx_inflight < RTL_TX_SLOT_COUNT)
+    {
+        int slot = rtl8139_tx_reserve_slot();
+        if (slot < 0)
+        {
+            break;
+        }
+        rtl8139_tx_entry_t entry = g_tx_queue[g_tx_queue_head];
+        g_tx_queue[g_tx_queue_head].data = NULL;
+        g_tx_queue_head = (g_tx_queue_head + 1) % RTL_TX_QUEUE_MAX;
+        g_tx_queue_count--;
+        rtl8139_hw_send_slot(slot, entry.data, entry.len);
+        free(entry.data);
+    }
 }

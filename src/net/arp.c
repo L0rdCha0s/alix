@@ -81,7 +81,7 @@ bool net_arp_lookup(uint32_t ip, uint8_t mac_out[6])
             return true;
         }
     }
-    arp_log_entry("cache miss", ip, NULL);
+    // arp_log_entry("cache miss", ip, NULL);
     return false;
 }
 
