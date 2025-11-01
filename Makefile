@@ -12,6 +12,7 @@ DRIVER_DIR  := $(SRC_DIR)/drivers
 ATK_DIR     := $(SRC_DIR)/atk
 NET_DIR     := $(SRC_DIR)/net
 SBIN_DIR    := $(SRC_DIR)/sbin
+CRYPTO_DIR  := $(SRC_DIR)/crypto
 INCLUDE_DIR := include
 OBJDIR      := build
 
@@ -28,6 +29,7 @@ C_SOURCES := \
 	$(wildcard $(DRIVER_DIR)/*.c) \
 	$(wildcard $(ATK_DIR)/*.c) \
 	$(wildcard $(NET_DIR)/*.c) \
+	$(wildcard $(CRYPTO_DIR)/*.c) \
 	$(wildcard $(ARCH_DIR)/*.c) \
 	$(wildcard $(SBIN_DIR)/*.c)
 

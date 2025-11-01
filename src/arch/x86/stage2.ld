@@ -33,6 +33,8 @@ SECTIONS
     *(.rodata*)
   }
 
+  . = 0x0000000000106000;
+
   .bss ALIGN(16) :
   {
     __bss_start = .;

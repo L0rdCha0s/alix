@@ -1,5 +1,8 @@
 #include "idt.h"
 #include "libc.h"
+#include "heap.h"
+#include "serial.h"
+#include <stddef.h>
 
 struct idt_entry
 {
@@ -18,11 +21,35 @@ struct idt_ptr
     uint64_t base;
 } __attribute__((packed));
 
-static struct idt_entry idt[256];
+static struct idt_entry *idt = NULL;
 
+uintptr_t idt_current_base(void)
+{
+    return (uintptr_t)idt;
+}
 void idt_init(void)
 {
-    memset(idt, 0, sizeof(idt));
+    size_t idt_bytes = sizeof(struct idt_entry) * 256;
+    if (!idt)
+    {
+        serial_write_string("IDT alloc request\r\n");
+        idt = malloc(idt_bytes);
+        serial_write_string("IDT alloc ptr=\r\n");
+        serial_write_hex64((uint64_t)idt);
+        serial_write_string("\r\n");
+        if (!idt)
+        {
+            serial_write_string("IDT allocation failed\r\n");
+            for (;;)
+            {
+                __asm__ volatile ("hlt");
+            }
+        }
+    }
+    serial_write_string("IDT memset ptr=\r\n");
+    serial_write_hex64((uint64_t)idt);
+    serial_write_string("\r\n");
+    memset(idt, 0, idt_bytes);
 }
 
 void idt_set_gate(uint8_t vector, void (*handler)(void))
@@ -41,7 +68,7 @@ void idt_set_gate(uint8_t vector, void (*handler)(void))
 void idt_load(void)
 {
     struct idt_ptr descriptor;
-    descriptor.limit = sizeof(idt) - 1;
-    descriptor.base = (uint64_t)&idt[0];
+    descriptor.limit = (uint16_t)(sizeof(struct idt_entry) * 256 - 1);
+    descriptor.base = (uint64_t)idt;
     __asm__ volatile ("lidt %0" : : "m"(descriptor));
 }

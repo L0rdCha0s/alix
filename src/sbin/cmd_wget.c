@@ -8,6 +8,7 @@
 #include "net/route.h"
 #include "net/dns.h"
 #include "net/tcp.h"
+#include "net/tls.h"
 #include "rtl8139.h"
 #include "timer.h"
 #include "vfs.h"
@@ -94,6 +95,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
     char host_name[128];
     uint16_t remote_port = 80;
+    bool use_tls = false;
     if (!parse_host_and_port(host_token, host_name, sizeof(host_name), &remote_port))
     {
         return shell_output_error(out, "invalid host or port");
@@ -135,6 +137,8 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         return shell_output_error(out, "ARP resolution failed");
     }
 
+    use_tls = (remote_port == 443);
+
     net_tcp_socket_t *socket = net_tcp_socket_open(iface);
     if (!socket)
     {
@@ -143,6 +147,8 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
     bool success = false;
     bool request_sent = false;
+    bool tls_active = false;
+    tls_session_t tls_session;
     vfs_node_t *file = NULL;
     size_t written = 0;
 
@@ -185,6 +191,22 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             goto cleanup;
         }
         rtl8139_poll();
+    }
+
+    if (use_tls)
+    {
+        if (!tls_session_init(&tls_session, socket))
+        {
+            shell_output_error(out, "TLS session init failed");
+            goto cleanup;
+        }
+        shell_output_write(out, "Negotiating TLS...\n");
+        if (!tls_session_handshake(&tls_session, host_name))
+        {
+            shell_output_error(out, "TLS handshake failed");
+            goto cleanup;
+        }
+        tls_active = true;
     }
 
     file = vfs_open_file(shell->cwd, dest_token, true, true);
@@ -245,10 +267,21 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     memcpy(request + req_len, line, strlen(line));
     req_len += strlen(line);
 
-    if (!net_tcp_socket_send(socket, (const uint8_t *)request, req_len))
+    if (tls_active)
     {
-        shell_output_error(out, "failed to send HTTP request");
-        goto cleanup;
+        if (!tls_session_send(&tls_session, (const uint8_t *)request, req_len))
+        {
+            shell_output_error(out, "failed to send HTTPS request");
+            goto cleanup;
+        }
+    }
+    else
+    {
+        if (!net_tcp_socket_send(socket, (const uint8_t *)request, req_len))
+        {
+            shell_output_error(out, "failed to send HTTP request");
+            goto cleanup;
+        }
     }
     request_sent = true;
     shell_output_write(out, "Request sent, awaiting response...\n");
@@ -273,32 +306,59 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             goto cleanup;
         }
 
-        size_t available = net_tcp_socket_available(socket);
-        if (available == 0)
+        size_t read = 0;
+        if (tls_active)
         {
-            if (net_tcp_socket_remote_closed(socket))
+            read = tls_session_recv(&tls_session, chunk, sizeof(chunk));
+            if (read == 0)
             {
-                if (have_length && written < content_length)
+                if (net_tcp_socket_remote_closed(socket))
                 {
-                    shell_output_error(out, "connection closed before full body");
+                    if (have_length && written < content_length)
+                    {
+                        shell_output_error(out, "connection closed before full body");
+                        goto cleanup;
+                    }
+                    break;
+                }
+
+                if (timer_ticks() - last_progress >= data_timeout)
+                {
+                    shell_output_error(out, "no data received (timeout)");
                     goto cleanup;
                 }
-                break;
+                continue;
             }
-
-            if (timer_ticks() - last_progress >= data_timeout)
-            {
-                shell_output_error(out, "no data received (timeout)");
-                goto cleanup;
-            }
-            continue;
         }
-
-        size_t to_read = available < sizeof(chunk) ? available : sizeof(chunk);
-        size_t read = net_tcp_socket_read(socket, chunk, to_read);
-        if (read == 0)
+        else
         {
-            continue;
+            size_t available = net_tcp_socket_available(socket);
+            if (available == 0)
+            {
+                if (net_tcp_socket_remote_closed(socket))
+                {
+                    if (have_length && written < content_length)
+                    {
+                        shell_output_error(out, "connection closed before full body");
+                        goto cleanup;
+                    }
+                    break;
+                }
+
+                if (timer_ticks() - last_progress >= data_timeout)
+                {
+                    shell_output_error(out, "no data received (timeout)");
+                    goto cleanup;
+                }
+                continue;
+            }
+
+            size_t to_read = available < sizeof(chunk) ? available : sizeof(chunk);
+            read = net_tcp_socket_read(socket, chunk, to_read);
+            if (read == 0)
+            {
+                continue;
+            }
         }
         last_progress = timer_ticks();
 
@@ -438,6 +498,10 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     shell_output_write(out, "\n");
 
 cleanup:
+    if (tls_active)
+    {
+        tls_session_close(&tls_session);
+    }
     if (socket)
     {
         if (request_sent)

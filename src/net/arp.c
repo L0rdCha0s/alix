@@ -142,7 +142,6 @@ void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     uint16_t eth_type = (uint16_t)((eth[12] << 8) | eth[13]);
     if (eth_type != 0x0806)
     {
-        arp_log_reason("handle_frame early exit: eth_type not ARP");
         return;
     }
 

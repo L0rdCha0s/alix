@@ -11,6 +11,7 @@
 #include "net/interface.h"
 #include "net/tcp.h"
 #include "net/dns.h"
+#include "idt.h"
 
 static void network_poll_task(void *context)
 {
@@ -28,6 +29,9 @@ void kernel_main(void)
     heap_init();
 
     serial_write_char('k');
+    serial_write_string("IDT base pre-init=\r\n");
+    serial_write_hex64(idt_current_base());
+    serial_write_string("\r\n");
     hwinfo_print_boot_summary();
     serial_write_char('h');
     serial_write_char('v');

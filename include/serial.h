@@ -9,5 +9,6 @@ void serial_write_string(const char *s);
 void serial_write_hex64(uint64_t value);
 char serial_read_char(void);
 bool serial_has_char(void);
+bool serial_is_ready(void);
 
 #endif
