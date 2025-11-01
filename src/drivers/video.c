@@ -5,7 +5,6 @@
 #include "atk.h"
 #include "pci.h"
 #include "keyboard.h"
-#include "rtl8139.h"
 
 
 #define BGA_INDEX_PORT 0x1CE
@@ -472,7 +471,6 @@ void video_run_loop(void)
         video_poll_keyboard();
         __asm__ volatile ("hlt");
         mouse_poll();
-        rtl8139_poll();
         video_poll_keyboard();
     }
     video_log("video_run_loop end");

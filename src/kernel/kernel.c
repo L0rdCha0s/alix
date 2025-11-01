@@ -12,6 +12,12 @@
 #include "net/tcp.h"
 #include "net/dns.h"
 
+static void network_poll_task(void *context)
+{
+    (void)context;
+    rtl8139_poll();
+}
+
 void kernel_main(void)
 {
     serial_init();
@@ -40,6 +46,10 @@ void kernel_main(void)
     net_tcp_init();
 
     rtl8139_init();
+    if (!timer_register_periodic(network_poll_task, (void *)0, 1))
+    {
+        serial_write_string("timer register failed for network poll\r\n");
+    }
     serial_write_char('N');
     serial_write_char('m');
     serial_write_char('E');

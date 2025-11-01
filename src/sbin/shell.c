@@ -8,7 +8,6 @@
 #include "keyboard.h"
 #include "mouse.h"
 #include "libc.h"
-#include "rtl8139.h"
 #include "vfs.h"
 
 #define INPUT_CAPACITY 256
@@ -216,7 +215,6 @@ void shell_main(void)
         size_t len = cli_read_line(input, INPUT_CAPACITY);
         (void)len;
         shell_run_and_display(&shell, input);
-        rtl8139_poll();
     }
 }
 
