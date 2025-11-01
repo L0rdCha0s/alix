@@ -1,78 +1,93 @@
-#include <stddef.h>
+#include "types.h"  
 #include "vfs.h"
 #include "libc.h"
-#include "serial.h"
+#include "heap.h"
 
-
-#define VFS_POOL_BASE      0x0000000001000000ULL /* 16 MiB, safely past firmware/VGA */
-#define VFS_MAX_NODES      512
-#define VFS_NAME_MAX       32
-#define VFS_FILE_CAPACITY  4096
+/*
+ * Heap-backed VFS:
+ *  - Nodes and names allocated dynamically.
+ *  - File data grows via realloc (doubling strategy).
+ *  - No fixed limits on node count, name length, or file size (bounded by RAM).
+ */
 
 struct vfs_node
 {
-    bool used;
     bool is_dir;
-    char name[VFS_NAME_MAX];
+    char *name;                      /* dynamically allocated */
     struct vfs_node *parent;
     struct vfs_node *first_child;
     struct vfs_node *next_sibling;
-    size_t size;
-    size_t capacity;
-    char data[VFS_FILE_CAPACITY];
+
+    /* file payload (unused for directories) */
+    size_t size;                     /* bytes used (not incl. '\0') */
+    size_t capacity;                 /* bytes allocated in data[] */
+    char *data;                      /* dynamically allocated, NUL-terminated when capacity > 0 */
 };
 
-#define VFS_POOL_SIZE      (sizeof(struct vfs_node) * VFS_MAX_NODES)
-
-static struct vfs_node *const nodes = (struct vfs_node *)VFS_POOL_BASE;
 static vfs_node_t *root = NULL;
 
-static void vfs_zero_node(vfs_node_t *node)
+/* ---------- helpers ---------- */
+
+static inline const char *skip_separators(const char *p)
 {
-    if (!node)
+    while (*p == '/') ++p;
+    return p;
+}
+
+static bool is_dot(const char *s)
+{
+    return s[0] == '.' && s[1] == '\0';
+}
+
+static bool is_dot_dot(const char *s)
+{
+    return s[0] == '.' && s[1] == '.' && s[2] == '\0';
+}
+
+static char *vfs_strdup(const char *s)
+{
+    if (!s) return NULL;
+    size_t len = strlen(s);
+    char *p = (char *)malloc(len + 1);
+    if (!p) return NULL;
+    memcpy(p, s, len + 1);
+    return p;
+}
+
+/* Extract next path component into a freshly malloc'd string; caller must free(). */
+static bool next_component(const char **path_ptr, char **out_name)
+{
+    const char *p = skip_separators(*path_ptr);
+    if (*p == '\0')
     {
-        return;
+        *path_ptr = p;
+        *out_name = NULL;
+        return false;
     }
-    node->used = false;
-    node->is_dir = false;
-    node->name[0] = '\0';
-    node->parent = NULL;
-    node->first_child = NULL;
-    node->next_sibling = NULL;
-    node->size = 0;
-    node->capacity = VFS_FILE_CAPACITY;
-    node->data[0] = '\0';
+
+    const char *start = p;
+    while (*p && *p != '/') ++p;
+
+    size_t len = (size_t)(p - start);
+    char *name = (char *)malloc(len + 1);
+    if (!name) { *out_name = NULL; return false; }
+    memcpy(name, start, len);
+    name[len] = '\0';
+
+    *out_name = name;
+    *path_ptr = p;  /* now at '/' or '\0' */
+    return true;
 }
 
 static vfs_node_t *vfs_alloc_node(void)
 {
-    for (size_t i = 0; i < VFS_MAX_NODES; ++i)
-    {
-        if (!nodes[i].used)
-        {
-            nodes[i].used = true;
-            nodes[i].size = 0;
-            nodes[i].capacity = VFS_FILE_CAPACITY;
-            nodes[i].data[0] = '\0';
-            nodes[i].first_child = NULL;
-            nodes[i].next_sibling = NULL;
-            nodes[i].parent = NULL;
-            nodes[i].name[0] = '\0';
-            serial_write_char('A');
-            serial_write_hex64((uint64_t)&nodes[i]);
-            serial_write_char('\n');
-            return &nodes[i];
-        }
-    }
-    return NULL;
+    vfs_node_t *n = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    return n;
 }
 
 static void vfs_attach_child(vfs_node_t *parent, vfs_node_t *child)
 {
-    if (!parent || !child)
-    {
-        return;
-    }
+    if (!parent || !child) return;
     child->parent = parent;
     child->next_sibling = parent->first_child;
     parent->first_child = child;
@@ -80,230 +95,173 @@ static void vfs_attach_child(vfs_node_t *parent, vfs_node_t *child)
 
 static vfs_node_t *vfs_find_child(vfs_node_t *parent, const char *name)
 {
-    if (!parent)
+    if (!parent || !name) return NULL;
+    for (vfs_node_t *n = parent->first_child; n; n = n->next_sibling)
     {
-        return NULL;
-    }
-    vfs_node_t *node = parent->first_child;
-    while (node)
-    {
-        if (strcmp(node->name, name) == 0)
-        {
-            return node;
-        }
-        node = node->next_sibling;
+        if (n->name && strcmp(n->name, name) == 0)
+            return n;
     }
     return NULL;
 }
 
-static const char *skip_separators(const char *path)
+/* Ensure file has room for at least `need` bytes (+1 for trailing NUL). */
+static bool ensure_capacity(vfs_node_t *file, size_t need)
 {
-    while (*path == '/')
-    {
-        ++path;
-    }
-    return path;
-}
+    if (!file || file->is_dir) return false;
 
-static bool next_component(const char **path_ptr, char *out)
-{
-    const char *path = skip_separators(*path_ptr);
-    if (*path == '\0')
+    size_t req = need + 1; /* keep a trailing '\0' */
+    if (file->capacity >= req) return true;
+
+    size_t new_cap = (file->capacity == 0) ? 64 : file->capacity;
+    while (new_cap < req)
     {
-        *path_ptr = path;
-        return false;
+        size_t next = new_cap << 1;
+        if (next <= new_cap) { new_cap = req; break; } /* overflow guard */
+        new_cap = next;
+        if (new_cap < req) new_cap = req;
     }
 
-    size_t len = 0;
-    while (*path && *path != '/')
-    {
-        if (len < VFS_NAME_MAX - 1)
-        {
-            out[len++] = *path;
-        }
-        ++path;
-    }
-    out[len] = '\0';
-    *path_ptr = path;
+    char *nbuf = (char *)realloc(file->data, new_cap);
+    if (!nbuf) return false;
+
+    file->data = nbuf;
+    file->capacity = new_cap;
+    if (file->size + 1 <= file->capacity)
+        file->data[file->size] = '\0';
     return true;
 }
 
-static bool is_dot(const char *name)
+static void ensure_terminator(vfs_node_t *node)
 {
-    return name[0] == '.' && name[1] == '\0';
-}
-
-static bool is_dot_dot(const char *name)
-{
-    return name[0] == '.' && name[1] == '.' && name[2] == '\0';
-}
-
-static void copy_name(char *dst, const char *src)
-{
-    size_t i = 0;
-    for (; i < VFS_NAME_MAX - 1 && src[i]; ++i)
+    if (!node || node->is_dir) return;
+    if (node->capacity == 0)
     {
-        dst[i] = src[i];
+        if (ensure_capacity(node, 0))
+            node->data[0] = '\0';
+        return;
     }
-    dst[i] = '\0';
+    if (node->size + 1 <= node->capacity)
+        node->data[node->size] = '\0';
+    else
+        node->data[node->capacity - 1] = '\0';
 }
 
+/* Resolve existing node by path (no creation). Returns NULL if any component is missing. */
 static vfs_node_t *resolve_node(vfs_node_t *cwd, const char *path)
 {
-    serial_write_char('1');
-    if (!path || !*path)
-    {
-        return cwd;
-    }
+    if (!path || !*path) return cwd;
 
     vfs_node_t *node = (path[0] == '/') ? root : cwd;
     const char *cursor = path;
-    char component[VFS_NAME_MAX];
 
     cursor = skip_separators(cursor);
-    if (*cursor == '\0')
-    {
-        return node;
-    }
+    if (*cursor == '\0') return node;
 
-    while (next_component(&cursor, component))
+    char *component = NULL;
+    while (next_component(&cursor, &component))
     {
         cursor = skip_separators(cursor);
+
         if (is_dot(component))
         {
+            free(component);
             continue;
         }
         if (is_dot_dot(component))
         {
-            if (node && node->parent)
-            {
-                node = node->parent;
-            }
+            if (node && node->parent) node = node->parent;
+            free(component);
             continue;
         }
 
         vfs_node_t *child = vfs_find_child(node, component);
-        if (!child)
-        {
-            return NULL;
-        }
+        free(component);
+        if (!child) return NULL;
         node = child;
     }
 
     return node;
 }
 
-static bool split_parent_and_name(vfs_node_t *cwd, const char *path, vfs_node_t **parent_out, char *name_out)
+/*
+ * Split a path into (parent dir, final name).
+ * Returns true on success and provides:
+ *   - *parent_out = parent directory node
+ *   - *name_out   = malloc'd last component (caller owns/free)
+ */
+static bool split_parent_and_name(vfs_node_t *cwd, const char *path,
+                                  vfs_node_t **parent_out, char **name_out)
 {
-    if (!path || !*path)
-    {
-        return false;
-    }
+    if (!path || !*path) return false;
 
     vfs_node_t *current = (path[0] == '/') ? root : cwd;
     const char *cursor = path;
-    char component[VFS_NAME_MAX];
-    bool found_component = false;
 
     cursor = skip_separators(cursor);
-    if (*cursor == '\0')
-    {
-        return false;
-    }
+    if (*cursor == '\0') return false;
 
-    while (next_component(&cursor, component))
+    char *component = NULL;
+    bool saw_any = false;
+
+    while (next_component(&cursor, &component))
     {
         cursor = skip_separators(cursor);
         bool last = (*cursor == '\0');
+        saw_any = true;
 
-        if (is_dot(component) || is_dot_dot(component))
+        if (is_dot(component))
         {
-            if (last)
-            {
-                return false;
-            }
-
-            if (is_dot_dot(component) && current && current->parent)
-            {
-                current = current->parent;
-            }
+            if (last) { free(component); return false; }
+            free(component);
+            continue;
+        }
+        if (is_dot_dot(component))
+        {
+            if (last) { free(component); return false; }
+            if (current && current->parent) current = current->parent;
+            free(component);
             continue;
         }
 
-        found_component = true;
-
         if (last)
         {
-            copy_name(name_out, component);
             *parent_out = current;
+            *name_out   = component; /* ownership to caller */
             return true;
         }
 
         vfs_node_t *child = vfs_find_child(current, component);
         if (!child || !child->is_dir)
         {
+            free(component);
             return false;
         }
         current = child;
+        free(component);
     }
 
-    return found_component;
+    return saw_any;
 }
+
+/* ---------- public API ---------- */
 
 void vfs_init(void)
 {
-    memset(nodes, 0, VFS_POOL_SIZE);
-    for (size_t i = 0; i < VFS_MAX_NODES; ++i)
-    {
-        vfs_zero_node(&nodes[i]);
-    }
+    if (root) return;
 
-    serial_write_char('Z');
-    for (int i = 0; i < 8; ++i)
-    {
-        uint8_t byte = ((uint8_t *)&nodes[0])[i];
-        static const char hex[] = "0123456789ABCDEF";
-        serial_write_char(hex[(byte >> 4) & 0xF]);
-        serial_write_char(hex[byte & 0xF]);
-    }
-    serial_write_char('\n');
-
-    serial_write_char('U');
-    serial_write_hex64((uint64_t)root);
-    serial_write_char('\n');
     vfs_node_t *node = vfs_alloc_node();
-    serial_write_char('N');
-    serial_write_hex64((uint64_t)node);
-    serial_write_char('\n');
+    if (!node) return; /* OOM: VFS disabled */
+
+    node->is_dir = true;
+    node->name   = vfs_strdup("/");
+    node->parent = NULL;
+    node->first_child = NULL;
+    node->next_sibling = NULL;
+    node->size = 0;
+    node->capacity = 0;
+    node->data = NULL;
+
     root = node;
-    serial_write_char('0');
-    serial_write_hex64((uint64_t)root);
-    serial_write_char('\n');
-    root = (vfs_node_t *)0x12345678ULL;
-    serial_write_char('1');
-    serial_write_hex64((uint64_t)root);
-    serial_write_char('\n');
-    root = node;
-    serial_write_char('B');
-    static const char hex[] = "0123456789ABCDEF";
-    uint8_t *root_bytes = (uint8_t *)&root;
-    for (int i = 0; i < 8; ++i)
-    {
-        uint8_t byte = root_bytes[i];
-        serial_write_char(hex[(byte >> 4) & 0xF]);
-        serial_write_char(hex[byte & 0xF]);
-    }
-    serial_write_char('\n');
-    if (root)
-    {
-        root->is_dir = true;
-        root->parent = NULL;
-        root->name[0] = '/';
-        root->name[1] = '\0';
-        serial_write_char('R');
-        serial_write_hex64((uint64_t)root);
-        serial_write_char('\n');
-    }
 }
 
 vfs_node_t *vfs_root(void)
@@ -319,84 +277,76 @@ vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
 vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
 {
     vfs_node_t *parent = NULL;
-    char name[VFS_NAME_MAX];
-    if (!split_parent_and_name(cwd ? cwd : root, path, &parent, name))
-    {
+    char *name = NULL;
+
+    if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
         return NULL;
-    }
 
     vfs_node_t *existing = vfs_find_child(parent, name);
     if (existing)
     {
+        free(name);
         return existing->is_dir ? existing : NULL;
     }
 
     vfs_node_t *dir = vfs_alloc_node();
     if (!dir)
     {
+        free(name);
         return NULL;
     }
 
     dir->is_dir = true;
-    copy_name(dir->name, name);
+    dir->name   = name;   /* take ownership */
     dir->size = 0;
-    dir->data[0] = '\0';
+    dir->capacity = 0;
+    dir->data = NULL;
+
     vfs_attach_child(parent, dir);
     return dir;
-}
-
-static void ensure_terminator(vfs_node_t *node)
-{
-    if (!node)
-    {
-        return;
-    }
-    if (node->size < node->capacity)
-    {
-        node->data[node->size] = '\0';
-    }
-    else if (node->capacity > 0)
-    {
-        node->data[node->capacity - 1] = '\0';
-    }
 }
 
 vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool truncate)
 {
     vfs_node_t *parent = NULL;
-    char name[VFS_NAME_MAX];
-    if (!split_parent_and_name(cwd ? cwd : root, path, &parent, name))
-    {
+    char *name = NULL;
+
+    if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
         return NULL;
-    }
 
     vfs_node_t *file = vfs_find_child(parent, name);
     if (!file)
     {
         if (!create)
         {
+            free(name);
             return NULL;
         }
         file = vfs_alloc_node();
         if (!file)
         {
+            free(name);
             return NULL;
         }
         file->is_dir = false;
-        copy_name(file->name, name);
+        file->name   = name;   /* take ownership */
         file->size = 0;
-        file->data[0] = '\0';
+        file->capacity = 0;
+        file->data = NULL;
         vfs_attach_child(parent, file);
+    }
+    else
+    {
+        free(name);
     }
 
     if (file->is_dir)
-    {
         return NULL;
-    }
 
     if (truncate)
     {
         file->size = 0;
+        if (!ensure_capacity(file, 0)) return NULL;
         file->data[0] = '\0';
     }
 
@@ -411,25 +361,20 @@ bool vfs_is_dir(const vfs_node_t *node)
 
 bool vfs_truncate(vfs_node_t *file)
 {
-    if (!file || file->is_dir)
-    {
-        return false;
-    }
+    if (!file || file->is_dir) return false;
     file->size = 0;
+    if (!ensure_capacity(file, 0)) return false;
     file->data[0] = '\0';
     return true;
 }
 
 bool vfs_append(vfs_node_t *file, const char *data, size_t len)
 {
-    if (!file || file->is_dir)
-    {
-        return false;
-    }
-    if (file->size + len > file->capacity)
-    {
-        return false;
-    }
+    if (!file || file->is_dir) return false;
+    if (!data || len == 0) { ensure_terminator(file); return true; }
+
+    if (!ensure_capacity(file, file->size + len)) return false;
+
     memmove(file->data + file->size, data, len);
     file->size += len;
     ensure_terminator(file);
@@ -440,17 +385,11 @@ const char *vfs_data(const vfs_node_t *file, size_t *size)
 {
     if (!file || file->is_dir)
     {
-        if (size)
-        {
-            *size = 0;
-        }
+        if (size) *size = 0;
         return NULL;
     }
-    if (size)
-    {
-        *size = file->size;
-    }
-    return file->data;
+    if (size) *size = file->size;
+    return file->data ? file->data : "";
 }
 
 const char *vfs_name(const vfs_node_t *node)
@@ -460,19 +399,11 @@ const char *vfs_name(const vfs_node_t *node)
 
 vfs_node_t *vfs_first_child(vfs_node_t *dir)
 {
-    serial_write_char('3');
-    if (!dir || !dir->is_dir)
-    {
-        serial_write_char('4');
-        return NULL;
-    }
-
-    serial_write_char('5');
+    if (!dir || !dir->is_dir) return NULL;
     return dir->first_child;
 }
 
 vfs_node_t *vfs_next_sibling(vfs_node_t *node)
 {
-    serial_write_char('6');
     return node ? node->next_sibling : NULL;
 }

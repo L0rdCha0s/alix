@@ -16,7 +16,6 @@
 
 #define WGET_HEADER_CAP 2048
 #define WGET_CHUNK_SIZE 512
-#define WGET_FILE_MAX   4096
 
 static const char *skip_ws(const char *cursor);
 static bool read_token(const char **cursor, char *out, size_t capacity);
@@ -435,11 +434,6 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                         goto cleanup;
                     }
                     have_length = true;
-                    if (content_length > WGET_FILE_MAX)
-                    {
-                        shell_output_error(out, "file larger than VFS capacity");
-                        goto cleanup;
-                    }
                 }
 
                 header_parsed = true;
@@ -801,12 +795,6 @@ static bool append_body_chunk(vfs_node_t *file, const uint8_t *data, size_t len,
     {
         size_t allowed = expected_length - *written;
         len = allowed;
-    }
-
-    if (*written + len > WGET_FILE_MAX)
-    {
-        shell_output_error(out, "file exceeds VFS capacity");
-        return false;
     }
 
     if (!vfs_append(file, (const char *)data, len))
