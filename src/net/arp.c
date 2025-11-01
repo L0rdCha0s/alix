@@ -26,6 +26,20 @@ static void net_arp_send_reply(net_interface_t *iface, const uint8_t *target_mac
 static bool net_arp_send_generic(net_interface_t *iface, const uint8_t *dest_mac,
                                  const uint8_t *target_mac, uint32_t target_ip,
                                  uint32_t source_ip, uint16_t opcode);
+static void arp_log_reason(const char *reason);
+
+
+static void arp_log_reason(const char *reason)
+{
+    if (!reason)
+    {
+        return;
+    }
+    serial_write_string("arp: ");
+    serial_write_string(reason);
+    serial_write_string("\r\n");
+}
+
 
 static void arp_log_entry(const char *prefix, uint32_t ip, const uint8_t mac[6])
 {
@@ -89,6 +103,7 @@ bool net_arp_send_request(net_interface_t *iface, uint32_t target_ip)
 {
     if (!iface || !iface->present)
     {
+        serial_write_string("arp: send_request invalid iface\r\n");
         return false;
     }
 
@@ -99,13 +114,27 @@ bool net_arp_send_request(net_interface_t *iface, uint32_t target_ip)
     memset(broadcast, 0xFF, sizeof(broadcast));
     uint8_t zero_mac[6] = {0};
     uint32_t source_ip = iface->ipv4_addr;
-    return net_arp_send_generic(iface, broadcast, zero_mac, target_ip, source_ip, 0x0001);
+    bool ok = net_arp_send_generic(iface, broadcast, zero_mac, target_ip, source_ip, 0x0001);
+    if (ok)
+    {
+        serial_write_string("arp: request sent for ");
+        char ipbuf[32];
+        net_format_ipv4(target_ip, ipbuf);
+        serial_write_string(ipbuf);
+        serial_write_string("\r\n");
+    }
+    else
+    {
+        serial_write_string("arp: request send failed\r\n");
+    }
+    return ok;
 }
 
 void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length)
 {
     if (!iface || !frame || length < 42)
     {
+        arp_log_reason("handle_frame early exit: bad iface/frame/length");
         return;
     }
 
@@ -113,6 +142,7 @@ void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     uint16_t eth_type = (uint16_t)((eth[12] << 8) | eth[13]);
     if (eth_type != 0x0806)
     {
+        arp_log_reason("handle_frame early exit: eth_type not ARP");
         return;
     }
 
@@ -125,6 +155,7 @@ void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
     if (hw_type != 0x0001 || proto_type != 0x0800 || hw_len != 6 || proto_len != 4)
     {
+        arp_log_reason("handle_frame early exit: unexpected hw/proto sizes");
         return;
     }
 
@@ -139,6 +170,7 @@ void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
     if (opcode == 0x0002)
     {
+        arp_log_reason("handle_frame early exit: opcode reply, no response needed");
         return;
     }
 
@@ -170,8 +202,21 @@ void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
 static void net_arp_store(uint32_t ip, const uint8_t mac[6])
 {
+    if (!mac)
+    {
+        arp_log_reason("store: NULL mac");
+        return;
+    }
+
+    char ipbuf[32];
+    net_format_ipv4(ip, ipbuf);
+    serial_write_string("arp: store request ip=");
+    serial_write_string(ipbuf);
+    serial_write_string("\r\n");
+
     if (ip == 0 || !mac)
     {
+        arp_log_reason("store: ip zero or mac null");
         return;
     }
 
@@ -181,6 +226,9 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
         {
             memcpy(g_cache[i].mac, mac, 6);
             arp_log_entry("updated entry", ip, mac);
+            serial_write_string("arp: store updated index=");
+            serial_write_char('0' + (char)i);
+            serial_write_string("\r\n");
             return;
         }
     }
@@ -193,6 +241,9 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
             g_cache[i].ip = ip;
             memcpy(g_cache[i].mac, mac, 6);
             arp_log_entry("added entry", ip, mac);
+            serial_write_string("arp: store new index=");
+            serial_write_char('0' + (char)i);
+            serial_write_string("\r\n");
             return;
         }
     }
@@ -202,12 +253,14 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
     g_cache[0].ip = ip;
     memcpy(g_cache[0].mac, mac, 6);
     arp_log_entry("replaced entry", ip, mac);
+    serial_write_string("arp: store replaced index=0\r\n");
 }
 
 void net_arp_announce(net_interface_t *iface, uint32_t ip)
 {
     if (!iface || ip == 0)
     {
+        arp_log_reason("announce early exit: bad iface or ip zero");
         return;
     }
 

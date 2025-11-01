@@ -63,6 +63,7 @@ static bool dns_send_query(dns_pending_t *pending);
 static bool dns_prepare_route(dns_pending_t *pending);
 static uint16_t checksum16(const uint8_t *data, size_t len);
 static uint16_t dns_allocate_port(void);
+static void dns_log_ipv4(const char *prefix, uint32_t addr);
 
 void net_dns_init(void)
 {
@@ -78,6 +79,7 @@ void net_dns_set_servers(const uint32_t *servers, size_t count)
     g_server_count = 0;
     if (!servers || count == 0)
     {
+        dns_log("set_servers: empty input");
         return;
     }
     for (size_t i = 0; i < count && g_server_count < NET_DNS_MAX_SERVERS; ++i)
@@ -85,7 +87,21 @@ void net_dns_set_servers(const uint32_t *servers, size_t count)
         if (servers[i] != 0)
         {
             g_servers[g_server_count++] = servers[i];
+            dns_log_ipv4("set_servers: added", servers[i]);
         }
+    }
+    if (g_server_count == 0)
+    {
+        dns_log("set_servers: no usable servers");
+    }
+    else
+    {
+        char buf[64];
+        size_t len = strlen("set_servers: total=");
+        memcpy(buf, "set_servers: total=", len);
+        buf[len++] = (char)('0' + (int)g_server_count);
+        buf[len] = '\0';
+        dns_log(buf);
     }
 }
 
@@ -122,11 +138,13 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
 {
     if (!hostname || !result || qtype == 0)
     {
+        dns_log("resolve: invalid arguments");
         return false;
     }
     size_t len = strlen(hostname);
     if (len == 0 || len > NET_DNS_NAME_MAX)
     {
+        dns_log("resolve: hostname invalid length");
         return false;
     }
     if (g_server_count == 0)
@@ -169,6 +187,7 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
 
         if (!dns_prepare_route(pending))
         {
+            dns_log_ipv4("resolve: route unavailable for", pending->server_ip);
             continue;
         }
         if (dns_send_query(pending))
@@ -176,10 +195,12 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
             sent = true;
             break;
         }
+        dns_log_ipv4("resolve: failed to send query to", pending->server_ip);
     }
 
     if (!sent)
     {
+        dns_log("resolve: failed to send to all servers");
         dns_release_pending(pending);
         return false;
     }
@@ -283,12 +304,16 @@ static bool dns_prepare_route(dns_pending_t *pending)
     uint32_t next_hop = pending->server_ip;
     if (!net_route_next_hop(iface, pending->server_ip, &iface, &next_hop))
     {
+        dns_log("prepare_route: next hop lookup failed");
         return false;
     }
     if (!iface || !iface->present || !iface->link_up || iface->ipv4_addr == 0)
     {
+        dns_log("prepare_route: interface unusable");
         return false;
     }
+    dns_log_ipv4("prepare_route: using iface ip", iface->ipv4_addr);
+    dns_log_ipv4("prepare_route: next hop", next_hop);
     pending->iface = iface;
     pending->next_hop = next_hop;
 
@@ -310,13 +335,16 @@ static bool dns_send_query(dns_pending_t *pending)
     net_interface_t *iface = pending->iface;
     if (!iface)
     {
+        dns_log("send_query: missing iface");
         return false;
     }
 
     if (!pending->have_mac)
     {
+        dns_log_ipv4("send_query: resolving via ARP for", pending->next_hop);
         if (!net_arp_send_request(iface, pending->next_hop))
         {
+            dns_log("send_query: failed to start ARP");
             return false;
         }
         uint64_t start = timer_ticks();
@@ -328,6 +356,13 @@ static bool dns_send_query(dns_pending_t *pending)
         while (timer_ticks() - start < wait_ticks)
         {
             rtl8139_poll();
+            uint8_t mac_dump[6];
+            if (net_arp_lookup(pending->next_hop, mac_dump))
+            {
+                char macbuf[32];
+                net_format_mac(mac_dump, macbuf);
+                dns_log("send_query: ARP cache unexpectedly populated early");
+            }
             uint8_t mac[6];
             if (net_arp_lookup(pending->next_hop, mac))
             {
@@ -338,8 +373,10 @@ static bool dns_send_query(dns_pending_t *pending)
         }
         if (!pending->have_mac)
         {
+            dns_log("send_query: ARP resolution timeout");
             return false;
         }
+        dns_log("send_query: ARP resolved");
     }
 
     uint8_t packet[NET_DNS_MAX_PACKET];
@@ -427,6 +464,7 @@ static bool dns_send_query(dns_pending_t *pending)
 
     if (!net_if_send(iface, packet, frame_len))
     {
+        dns_log("send_query: net_if_send failed");
         return false;
     }
 
@@ -762,6 +800,34 @@ static void dns_log(const char *msg)
     serial_write_string("dns: ");
     serial_write_string(msg);
     serial_write_string("\r\n");
+}
+
+static void dns_log_ipv4(const char *prefix, uint32_t addr)
+{
+    char buf[64];
+    char ip[32];
+    net_format_ipv4(addr, ip);
+    size_t len = 0;
+    while (prefix[len] && len < sizeof(buf) - 1)
+    {
+        buf[len] = prefix[len];
+        ++len;
+    }
+    if (len < sizeof(buf) - 2)
+    {
+        buf[len++] = ' ';
+        buf[len++] = '=';
+        buf[len++] = ' ';
+    }
+    size_t ip_len = strlen(ip);
+    if (len + ip_len >= sizeof(buf))
+    {
+        ip_len = sizeof(buf) - len - 1;
+    }
+    memcpy(buf + len, ip, ip_len);
+    len += ip_len;
+    buf[len] = '\0';
+    dns_log(buf);
 }
 
 static uint16_t checksum16(const uint8_t *data, size_t len)

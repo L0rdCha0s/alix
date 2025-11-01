@@ -5,6 +5,8 @@
 #include "atk.h"
 #include "pci.h"
 #include "keyboard.h"
+#include "rtl8139.h"
+
 
 #define BGA_INDEX_PORT 0x1CE
 #define BGA_DATA_PORT  0x1CF
@@ -44,7 +46,7 @@ static uint16_t cursor_backup[CURSOR_W * CURSOR_H];
 static bool last_left_down = false;
 static bool logged_first_mouse = false;
 
-#define BACKBUFFER_ADDR 0x0000000000200000ULL
+#define BACKBUFFER_ADDR 0x0000000000E00000ULL  /* 14 MiB: above kernel stack, below VFS pool */
 static uint16_t *backbuffer = (uint16_t *)(uintptr_t)BACKBUFFER_ADDR;
 
 #define VGA_FONT_BYTES 8192
@@ -470,6 +472,7 @@ void video_run_loop(void)
         video_poll_keyboard();
         __asm__ volatile ("hlt");
         mouse_poll();
+        rtl8139_poll();
         video_poll_keyboard();
     }
     video_log("video_run_loop end");
