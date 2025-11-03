@@ -1,5 +1,7 @@
 #include "libc.h"
 
+#include "fd.h"
+
 void *memset(void *dst, int value, size_t count)
 {
     uint8_t *ptr = (uint8_t *)dst;
@@ -100,4 +102,19 @@ int memcmp(const void *a, const void *b, size_t count)
         }
     }
     return 0;
+}
+
+ssize_t read(int fd, void *buffer, size_t count)
+{
+    return fd_read(fd, buffer, count);
+}
+
+ssize_t write(int fd, const void *buffer, size_t count)
+{
+    return fd_write(fd, buffer, count);
+}
+
+int close(int fd)
+{
+    return fd_close(fd);
 }
