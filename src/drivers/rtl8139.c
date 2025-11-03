@@ -92,6 +92,19 @@ static size_t g_tx_queue_len[RTL_TX_QUEUE_MAX];
 static int g_tx_queue_head = 0;
 static int g_tx_queue_tail = 0;
 static int g_tx_queue_count = 0;
+
+typedef struct
+{
+    bool valid;
+    uint64_t issue_tick;
+    uint32_t seq;
+    uint32_t ack;
+    uint8_t flags;
+    uint16_t length;
+} rtl8139_tx_meta_t;
+
+static rtl8139_tx_meta_t g_tx_meta[RTL_TX_SLOT_COUNT];
+static const uint64_t RTL_TX_STALL_TICKS = 50;
 static void rtl8139_log(const char *msg);
 static void rtl8139_log_hex8(uint8_t value);
 static void rtl8139_log_hex16(uint16_t value);
@@ -112,6 +125,11 @@ static void rtl8139_tx_flush_queue(void);
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len);
 static void rtl8139_timer_task(void *context);
 static void rtl8139_log_tx_state(const char *context);
+static void rtl8139_log_tsd_status(uint32_t tsd);
+static void rtl8139_tx_meta_capture(int slot, const uint8_t *frame, size_t len);
+static void rtl8139_tx_meta_clear(int slot);
+static void rtl8139_tx_check_stuck(const char *context);
+static void rtl8139_tx_force_release(const char *context);
 
 void rtl8139_init(void)
 {
@@ -182,6 +200,7 @@ void rtl8139_init(void)
     g_tx_queue_head = 0;
     g_tx_queue_tail = 0;
     g_tx_queue_count = 0;
+    memset(g_tx_meta, 0, sizeof(g_tx_meta));
     for (int i = 0; i < RTL_TX_SLOT_COUNT; ++i) {
         g_tx_phys[i] = (uint32_t)(uintptr_t)g_tx_buffer[i];
         outl(g_io_base + RTL_REG_TSAD0 + i*4, g_tx_phys[i]); // program once
@@ -501,6 +520,14 @@ static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t 
 
     rtl8139_log("tx ring saturated");
     rtl8139_log_tx_state("ring_saturated");
+    rtl8139_tx_check_stuck("ring_saturated");
+    rtl8139_tx_force_release("ring_saturated");
+    rtl8139_reclaim_tx();
+    if (rtl8139_tx_queue_push(data, len))
+    {
+        rtl8139_tx_flush_queue();
+        return true;
+    }
     return false;
 }
 
@@ -629,6 +656,195 @@ static void rtl8139_log_tx_state(const char *context)
     g_tx_dump_budget--;
 }
 
+static uint32_t rtl8139_read_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) |
+           ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) |
+           (uint32_t)p[3];
+}
+
+static void rtl8139_tx_meta_clear(int slot)
+{
+    if (slot < 0 || slot >= RTL_TX_SLOT_COUNT)
+    {
+        return;
+    }
+    g_tx_meta[slot].valid = false;
+    g_tx_meta[slot].issue_tick = 0;
+    g_tx_meta[slot].seq = 0;
+    g_tx_meta[slot].ack = 0;
+    g_tx_meta[slot].flags = 0;
+    g_tx_meta[slot].length = 0;
+}
+
+static void rtl8139_tx_meta_capture(int slot, const uint8_t *frame, size_t len)
+{
+    if (slot < 0 || slot >= RTL_TX_SLOT_COUNT || !frame)
+    {
+        return;
+    }
+
+    rtl8139_tx_meta_t *meta = &g_tx_meta[slot];
+    meta->valid = false;
+    meta->issue_tick = timer_ticks();
+    meta->length = (uint16_t)((len < 60) ? 60 : len);
+    meta->seq = 0;
+    meta->ack = 0;
+    meta->flags = 0;
+
+    if (len < 54)
+    {
+        return;
+    }
+
+    uint16_t eth_type = (uint16_t)((frame[12] << 8) | frame[13]);
+    if (eth_type != 0x0800)
+    {
+        return;
+    }
+
+    const uint8_t *ip = frame + 14;
+    uint8_t version = (uint8_t)(ip[0] >> 4);
+    uint8_t ihl = (uint8_t)(ip[0] & 0x0F);
+    size_t ip_hlen = (size_t)ihl * 4U;
+    if (version != 4 || ihl < 5)
+    {
+        return;
+    }
+    if (len < 14 + ip_hlen + 20)
+    {
+        return;
+    }
+    if (ip[9] != 6) /* TCP */
+    {
+        return;
+    }
+
+    const uint8_t *tcp = ip + ip_hlen;
+    meta->seq = rtl8139_read_be32(tcp + 4);
+    meta->ack = rtl8139_read_be32(tcp + 8);
+    meta->flags = tcp[13];
+    meta->valid = true;
+}
+
+static void rtl8139_tx_log_meta(const char *context, int slot, const rtl8139_tx_meta_t *meta, uint32_t tsd, uint64_t delta)
+{
+    if (!meta || !meta->valid || g_tx_dump_budget <= 0)
+    {
+        return;
+    }
+
+    serial_write_string("rtl8139: tx meta[");
+    if (context)
+    {
+        serial_write_string(context);
+    }
+    serial_write_string("] slot=0x");
+    rtl8139_log_hex8((uint8_t)slot);
+    serial_write_string(" seq=0x");
+    rtl8139_log_hex32(meta->seq);
+    serial_write_string(" ack=0x");
+    rtl8139_log_hex32(meta->ack);
+    serial_write_string(" flags=0x");
+    rtl8139_log_hex16(meta->flags);
+    serial_write_string(" len=0x");
+    rtl8139_log_hex16(meta->length);
+    serial_write_string(" dticks=0x");
+    rtl8139_log_hex32((uint32_t)delta);
+    serial_write_string(" tsd=0x");
+    rtl8139_log_hex32(tsd);
+    serial_write_string(" ");
+    rtl8139_log_tsd_status(tsd);
+    serial_write_string("]\r\n");
+
+    g_tx_dump_budget--;
+}
+
+static void rtl8139_tx_check_stuck(const char *context)
+{
+    if (!g_rtl_present)
+    {
+        return;
+    }
+    uint64_t now = timer_ticks();
+    for (int slot = 0; slot < RTL_TX_SLOT_COUNT; ++slot)
+    {
+        rtl8139_tx_meta_t *meta = &g_tx_meta[slot];
+        if (!meta->valid)
+        {
+            continue;
+        }
+        uint64_t delta = now - meta->issue_tick;
+        if (delta < RTL_TX_STALL_TICKS)
+        {
+            continue;
+        }
+        uint32_t tsd = inl(g_io_base + RTL_REG_TSD0 + slot * 4);
+        if ((tsd & 0x2000U) != 0)
+        {
+            /* descriptor already host-owned; will be reclaimed shortly */
+            continue;
+        }
+        rtl8139_tx_log_meta(context ? context : "stuck", slot, meta, tsd, delta);
+    }
+}
+
+static void rtl8139_tx_force_release(const char *context)
+{
+    if (!g_rtl_present)
+    {
+        return;
+    }
+
+    bool any = false;
+    uint64_t now = timer_ticks();
+    for (int slot = 0; slot < RTL_TX_SLOT_COUNT; ++slot)
+    {
+        rtl8139_tx_meta_t *meta = &g_tx_meta[slot];
+        if (!meta->valid)
+        {
+            continue;
+        }
+        uint64_t delta = now - meta->issue_tick;
+        if (delta < (RTL_TX_STALL_TICKS * 2))
+        {
+            continue;
+        }
+        uint32_t tsd = inl(g_io_base + RTL_REG_TSD0 + slot * 4);
+        if ((tsd & 0x2000U) != 0)
+        {
+            continue;
+        }
+        if (g_tx_dump_budget > 0)
+        {
+            serial_write_string("rtl8139: tx force release[");
+            if (context)
+            {
+                serial_write_string(context);
+            }
+            serial_write_string("] slot=0x");
+            rtl8139_log_hex8((uint8_t)slot);
+            serial_write_string(" dticks=0x");
+            rtl8139_log_hex32((uint32_t)delta);
+            serial_write_string(" tsd=0x");
+            rtl8139_log_hex32(tsd);
+            serial_write_string(" ");
+            rtl8139_log_tsd_status(tsd);
+            serial_write_string("\r\n");
+            g_tx_dump_budget--;
+        }
+        outl(g_io_base + RTL_REG_TSD0 + slot * 4, 0x00002000U);
+        rtl8139_tx_meta_clear(slot);
+        any = true;
+    }
+
+    if (any)
+    {
+        rtl8139_reclaim_tx();
+    }
+}
+
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len)
 {
     if (!data || len == 0)
@@ -684,7 +900,7 @@ static void rtl8139_dump_frame(int slot, size_t len, const uint8_t *data)
     }
 }
 
-static void __attribute__((unused)) rtl8139_log_tsd_status(uint32_t tsd) {
+static void rtl8139_log_tsd_status(uint32_t tsd) {
     serial_write_string("[");
     if (tsd & 0x40000000U) serial_write_string("TABT ");    // abort
     if (tsd & 0x00004000U) serial_write_string("TUN ");     // underrun
@@ -711,6 +927,12 @@ static void rtl8139_reclaim_tx(void)
         {
             break;
         }
+        if (g_tx_meta[slot].valid)
+        {
+            uint64_t now = timer_ticks();
+            rtl8139_tx_log_meta("complete", slot, &g_tx_meta[slot], tsd, now - g_tx_meta[slot].issue_tick);
+        }
+        rtl8139_tx_meta_clear(slot);
         g_tx_tail_cursor = (g_tx_tail_cursor + 1) % RTL_TX_SLOT_COUNT;
         g_tx_inflight--;
     }
@@ -726,6 +948,7 @@ static void rtl8139_hw_send_slot(int slot, const uint8_t *data, size_t len)
     }
 
     rtl8139_dump_frame(slot, frame_len, g_tx_buffer[slot]);
+    rtl8139_tx_meta_capture(slot, g_tx_buffer[slot], frame_len);
 
     outl(g_io_base + RTL_REG_TSD0 + slot * 4, (uint32_t)frame_len & 0x1FFFU);
     rtl8139_dump_state("after tx");
@@ -740,7 +963,13 @@ static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len)
     {
         rtl8139_log("tx queue push failed");
         rtl8139_log_tx_state("queue_push_fail");
-        return false;
+        rtl8139_tx_check_stuck("queue_push_fail");
+        rtl8139_tx_force_release("queue_push_fail");
+        rtl8139_reclaim_tx();
+        if (g_tx_queue_count >= RTL_TX_QUEUE_MAX || len > RTL_TX_FRAME_MAX)
+        {
+            return false;
+        }
     }
     memcpy(g_tx_queue_data[g_tx_queue_tail], data, len);
     g_tx_queue_len[g_tx_queue_tail] = len;
@@ -773,5 +1002,7 @@ static void rtl8139_tx_flush_queue(void)
     if (!progressed && g_tx_queue_count > 0)
     {
         rtl8139_log_tx_state("flush_blocked");
+        rtl8139_tx_check_stuck("flush_blocked");
+        rtl8139_tx_force_release("flush_blocked");
     }
 }
