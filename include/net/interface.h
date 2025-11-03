@@ -15,7 +15,6 @@ typedef struct net_interface
     uint32_t ipv4_netmask;
     uint32_t ipv4_gateway;
     bool (*send)(struct net_interface *, const uint8_t *, size_t);
-    void (*poll)(struct net_interface *);
 } net_interface_t;
 
 void net_if_init(void);
@@ -26,8 +25,6 @@ net_interface_t *net_if_at(size_t index);
 void net_if_set_link_up(net_interface_t *iface, bool up);
 void net_if_set_ipv4(net_interface_t *iface, uint32_t addr, uint32_t netmask, uint32_t gateway);
 void net_if_set_tx_handler(net_interface_t *iface, bool (*handler)(net_interface_t *, const uint8_t *, size_t));
-void net_if_set_poll_handler(net_interface_t *iface, void (*handler)(net_interface_t *));
-void net_if_poll_all(void);
 bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len);
 
 void net_format_mac(const uint8_t mac[6], char *out);

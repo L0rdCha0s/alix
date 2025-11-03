@@ -32,6 +32,7 @@ typedef struct
     size_t recv_plain_offset;
     uint8_t record_buffer[18432];
     size_t record_buffer_len;
+    int socket_fd;
 } tls_session_t;
 
 bool tls_session_init(tls_session_t *session, net_tcp_socket_t *socket);

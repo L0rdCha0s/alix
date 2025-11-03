@@ -8,6 +8,7 @@
 #include "serial.h"
 #include "timer.h"
 #include "libc.h"
+#include "fd.h"
 
 #define TCP_FLAG_FIN 0x01
 #define TCP_FLAG_SYN 0x02
@@ -68,6 +69,8 @@ struct net_tcp_socket
     size_t rx_size;
     size_t rx_capacity;
     uint16_t advertised_window;
+    int fd;
+    bool fd_registered;
     tcp_reass_segment_t *reass_head;
     size_t reass_bytes;
     size_t reass_segments;
@@ -118,6 +121,16 @@ static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const u
 static void tcp_reassembly_drain(net_tcp_socket_t *socket);
 static void tcp_log_hex32(uint32_t value);
 static void tcp_log_size(const char *label, size_t value);
+static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
+static ssize_t tcp_fd_read(void *ctx, void *buffer, size_t count);
+static ssize_t tcp_fd_write(void *ctx, const void *buffer, size_t count);
+static int tcp_fd_close(void *ctx);
+
+static const fd_ops_t g_tcp_fd_ops = {
+    .read = tcp_fd_read,
+    .write = tcp_fd_write,
+    .close = tcp_fd_close,
+};
 
 void net_tcp_init(void)
 {
@@ -146,6 +159,8 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
     {
         return;
     }
+    int fd = socket->fd;
+    bool fd_registered = socket->fd_registered;
     tcp_reassembly_clear(socket);
     if (socket->pending_payload)
     {
@@ -156,10 +171,16 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
         free(socket->rx_buffer);
     }
     memset(socket, 0, sizeof(*socket));
+    socket->fd = -1;
+    socket->fd_registered = false;
     socket->state = TCP_STATE_UNUSED;
     socket->remote_window = 4096;
     socket->max_retries = 6;
     socket->advertised_window = 0;
+    if (fd_registered && fd >= 0)
+    {
+        fd_release(fd);
+    }
 }
 
 static bool tcp_ensure_pending_capacity(net_tcp_socket_t *socket, size_t needed)
@@ -511,6 +532,14 @@ net_tcp_socket_t *net_tcp_socket_open(net_interface_t *iface)
                 tcp_reset_socket(socket);
                 return NULL;
             }
+            int fd = fd_allocate(&g_tcp_fd_ops, socket);
+            if (fd < 0)
+            {
+                tcp_reset_socket(socket);
+                return NULL;
+            }
+            socket->fd = fd;
+            socket->fd_registered = true;
             return socket;
         }
     }
@@ -691,6 +720,48 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
     return to_copy;
 }
 
+static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
+{
+    if (!socket)
+    {
+        return -1;
+    }
+    if (capacity == 0)
+    {
+        return 0;
+    }
+
+    for (;;)
+    {
+        if (socket->error || socket->state == TCP_STATE_ERROR)
+        {
+            return -1;
+        }
+        if (socket->remote_closed && socket->rx_size == 0)
+        {
+            return 0;
+        }
+
+        size_t available = net_tcp_socket_available(socket);
+        if (available > 0)
+        {
+            if (available > capacity)
+            {
+                available = capacity;
+            }
+            size_t read_now = net_tcp_socket_read(socket, buffer, available);
+            return (ssize_t)read_now;
+        }
+
+        if (socket->state == TCP_STATE_UNUSED)
+        {
+            return -1;
+        }
+
+        __asm__ volatile ("pause");
+    }
+}
+
 bool net_tcp_socket_is_established(const net_tcp_socket_t *socket)
 {
     if (!socket)
@@ -790,6 +861,58 @@ void net_tcp_socket_release(net_tcp_socket_t *socket)
 uint64_t net_tcp_socket_last_activity(const net_tcp_socket_t *socket)
 {
     return socket ? socket->last_activity_tick : 0;
+}
+
+int net_tcp_socket_fd(const net_tcp_socket_t *socket)
+{
+    if (!socket || !socket->fd_registered)
+    {
+        return -1;
+    }
+    return socket->fd;
+}
+
+ssize_t net_tcp_socket_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
+{
+    return tcp_read_blocking(socket, buffer, capacity);
+}
+
+static ssize_t tcp_fd_read(void *ctx, void *buffer, size_t count)
+{
+    return tcp_read_blocking((net_tcp_socket_t *)ctx, (uint8_t *)buffer, count);
+}
+
+static ssize_t tcp_fd_write(void *ctx, const void *buffer, size_t count)
+{
+    net_tcp_socket_t *socket = (net_tcp_socket_t *)ctx;
+    if (!socket || !buffer || count == 0)
+    {
+        return 0;
+    }
+
+    size_t to_send = count;
+    if (to_send > NET_TCP_MAX_PAYLOAD)
+    {
+        to_send = NET_TCP_MAX_PAYLOAD;
+    }
+
+    if (!net_tcp_socket_send(socket, (const uint8_t *)buffer, to_send))
+    {
+        return -1;
+    }
+    return (ssize_t)to_send;
+}
+
+static int tcp_fd_close(void *ctx)
+{
+    net_tcp_socket_t *socket = (net_tcp_socket_t *)ctx;
+    if (!socket)
+    {
+        return -1;
+    }
+    net_tcp_socket_close(socket);
+    net_tcp_socket_release(socket);
+    return 0;
 }
 
 void net_tcp_poll(void)

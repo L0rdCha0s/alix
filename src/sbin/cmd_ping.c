@@ -135,8 +135,6 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     }
     const uint64_t timeout_ticks = (uint64_t)frequency * 5;
 
-    net_if_poll_all();
-
     if (!have_mac)
     {
         shell_output_write(out, "  Resolving ARP...\n");
@@ -148,12 +146,12 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         uint64_t start = timer_ticks();
         while (timer_ticks() - start < timeout_ticks)
         {
-            net_if_poll_all();
             if (net_arp_lookup(next_hop_ip, target_mac))
             {
                 have_mac = true;
                 break;
             }
+            __asm__ volatile ("pause");
         }
 
         if (!have_mac)
@@ -181,7 +179,6 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     uint64_t send_tick = timer_ticks();
     while (timer_ticks() - send_tick < timeout_ticks)
     {
-        net_if_poll_all();
         net_icmp_reply_t reply;
         if (net_icmp_get_reply(identifier, sequence, &reply))
         {
@@ -197,6 +194,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
             shell_output_write(out, "ms\n");
             return true;
         }
+        __asm__ volatile ("pause");
     }
 
     shell_output_write(out, "  Request timed out\n");
