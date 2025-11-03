@@ -9,13 +9,12 @@
 #include "net/dns.h"
 #include "net/tcp.h"
 #include "net/tls.h"
-#include "rtl8139.h"
 #include "timer.h"
 #include "vfs.h"
 #include "libc.h"
 
 #define WGET_HEADER_CAP 2048
-#define WGET_CHUNK_SIZE 512
+#define WGET_CHUNK_SIZE 4096
 
 static const char *skip_ws(const char *cursor);
 static bool read_token(const char **cursor, char *out, size_t capacity);
@@ -375,7 +374,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             shell_output_error(out, "TCP connect timeout");
             goto cleanup;
         }
-        rtl8139_poll();
+        net_if_poll_all();
     }
 
     if (use_tls)
@@ -486,7 +485,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
     while (1)
     {
-        rtl8139_poll();
+        net_if_poll_all();
 
         if (net_tcp_socket_has_error(socket))
         {
@@ -544,6 +543,12 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     break;
                 }
 
+                uint64_t activity = net_tcp_socket_last_activity(socket);
+                if (activity > last_progress)
+                {
+                    last_progress = activity;
+                }
+
                 if (timer_ticks() - last_progress >= data_timeout)
                 {
                     shell_output_error(out, "no data received (timeout)");
@@ -556,6 +561,14 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             read = net_tcp_socket_read(socket, chunk, to_read);
             if (read == 0)
             {
+                shell_output_write(out, "debug: available ");
+                char buf[16];
+                if (!format_decimal(buf, sizeof(buf), (unsigned)available, NULL))
+                {
+                    buf[0] = '\0';
+                }
+                shell_output_write(out, buf);
+                shell_output_write(out, ", read=0\n");
                 continue;
             }
         }
@@ -588,6 +601,9 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             if (header_done && !header_parsed)
             {
                 int status_code = 0;
+                shell_output_write(out, "HTTP headers received:\n");
+                shell_output_write(out, header_buf);
+                shell_output_write(out, "\n");
                 if (!parse_http_status(header_buf, &status_code))
                 {
                     shell_output_error(out, "invalid HTTP status line");
@@ -625,13 +641,21 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
                 if (!is_chunked && find_header_value(header_buf, "content-length", value, sizeof(value)))
                 {
-                    if (!parse_decimal_size(value, &content_length))
-                    {
-                        shell_output_error(out, "invalid Content-Length");
-                        goto cleanup;
-                    }
-                    have_length = true;
+                if (!parse_decimal_size(value, &content_length))
+                {
+                    shell_output_error(out, "invalid Content-Length");
+                    goto cleanup;
                 }
+                shell_output_write(out, "debug: content-length=");
+                char len_buf[24];
+                if (!format_decimal(len_buf, sizeof(len_buf), (unsigned)content_length, NULL))
+                {
+                    len_buf[0] = '\0';
+                }
+                shell_output_write(out, len_buf);
+                shell_output_write(out, "\n");
+                have_length = true;
+            }
 
                 header_parsed = true;
             }
@@ -654,6 +678,17 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                                      &written, out, &done))
                 {
                     goto cleanup;
+                }
+                if (done)
+                {
+                    shell_output_write(out, "debug: chunked complete, total ");
+                    char size_buf[16];
+                    if (!format_decimal(size_buf, sizeof(size_buf), (unsigned)written, NULL))
+                    {
+                        size_buf[0] = '\0';
+                    }
+                    shell_output_write(out, size_buf);
+                    shell_output_write(out, "\n");
                 }
                 if (done)
                 {
@@ -989,7 +1024,7 @@ static bool ensure_arp(net_interface_t *iface, uint32_t next_hop_ip, uint64_t ti
     uint64_t start = timer_ticks();
     while (timer_ticks() - start < timeout_ticks)
     {
-        rtl8139_poll();
+        net_if_poll_all();
         if (net_arp_lookup(next_hop_ip, mac))
         {
             return true;
@@ -1020,6 +1055,21 @@ static bool append_body_chunk(vfs_node_t *file, const uint8_t *data, size_t len,
     }
 
     *written += len;
+    shell_output_write(out, "debug: wrote ");
+    char buf[24];
+    if (!format_decimal(buf, sizeof(buf), (unsigned)len, NULL))
+    {
+        buf[0] = '\0';
+    }
+    shell_output_write(out, buf);
+    shell_output_write(out, " bytes (total ");
+    char total_buf[24];
+    if (!format_decimal(total_buf, sizeof(total_buf), (unsigned)(*written), NULL))
+    {
+        total_buf[0] = '\0';
+    }
+    shell_output_write(out, total_buf);
+    shell_output_write(out, ")\n");
     return true;
 }
 

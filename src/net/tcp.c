@@ -15,9 +15,20 @@
 #define TCP_FLAG_PSH 0x08
 #define TCP_FLAG_ACK 0x10
 
-#define NET_TCP_MAX_SOCKETS      4
-#define NET_TCP_RX_CAPACITY      4096
-#define NET_TCP_MAX_PAYLOAD      1460
+#define NET_TCP_MAX_SOCKETS           4
+#define NET_TCP_RX_INITIAL_CAPACITY   32768
+#define NET_TCP_RX_MAX_CAPACITY       524280
+#define NET_TCP_MAX_PAYLOAD           1460
+#define NET_TCP_REASS_LIMIT           524280
+#define NET_TCP_REASS_MAX_SEGMENTS    128
+
+typedef struct tcp_reass_segment
+{
+    uint32_t seq;
+    size_t len;
+    uint8_t *data;
+    struct tcp_reass_segment *next;
+} tcp_reass_segment_t;
 
 typedef enum
 {
@@ -49,11 +60,18 @@ struct net_tcp_socket
     bool have_mac;
     bool awaiting_ack;
     uint8_t pending_flags;
-    uint8_t pending_payload[NET_TCP_MAX_PAYLOAD];
+    uint8_t *pending_payload;
     size_t pending_payload_len;
+    size_t pending_payload_capacity;
     uint16_t remote_window;
-    uint8_t rx_buffer[NET_TCP_RX_CAPACITY];
+    uint8_t *rx_buffer;
     size_t rx_size;
+    size_t rx_capacity;
+    uint16_t advertised_window;
+    tcp_reass_segment_t *reass_head;
+    size_t reass_bytes;
+    size_t reass_segments;
+    uint64_t reass_last_ack_tick;
     bool remote_closed;
     bool error;
 
@@ -93,6 +111,13 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
 static void tcp_send_ack(net_tcp_socket_t *socket);
 static void tcp_retransmit(net_tcp_socket_t *socket);
 static void tcp_mark_error(net_tcp_socket_t *socket, const char *reason);
+static bool tcp_ensure_rx_capacity(net_tcp_socket_t *socket, size_t needed);
+static bool tcp_ensure_pending_capacity(net_tcp_socket_t *socket, size_t needed);
+static void tcp_reassembly_clear(net_tcp_socket_t *socket);
+static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const uint8_t *data, size_t len);
+static void tcp_reassembly_drain(net_tcp_socket_t *socket);
+static void tcp_log_hex32(uint32_t value);
+static void tcp_log_size(const char *label, size_t value);
 
 void net_tcp_init(void)
 {
@@ -121,10 +146,314 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
     {
         return;
     }
+    tcp_reassembly_clear(socket);
+    if (socket->pending_payload)
+    {
+        free(socket->pending_payload);
+    }
+    if (socket->rx_buffer)
+    {
+        free(socket->rx_buffer);
+    }
     memset(socket, 0, sizeof(*socket));
     socket->state = TCP_STATE_UNUSED;
     socket->remote_window = 4096;
     socket->max_retries = 6;
+    socket->advertised_window = 0;
+}
+
+static bool tcp_ensure_pending_capacity(net_tcp_socket_t *socket, size_t needed)
+{
+    if (!socket)
+    {
+        return false;
+    }
+    if (needed == 0)
+    {
+        return true;
+    }
+    if (socket->pending_payload_capacity >= needed)
+    {
+        return true;
+    }
+
+    size_t new_capacity = socket->pending_payload_capacity ? socket->pending_payload_capacity : NET_TCP_MAX_PAYLOAD;
+    if (new_capacity < needed)
+    {
+        new_capacity = needed;
+    }
+
+    uint8_t *buffer = (uint8_t *)realloc(socket->pending_payload, new_capacity);
+    if (!buffer)
+    {
+        return false;
+    }
+
+    socket->pending_payload = buffer;
+    socket->pending_payload_capacity = new_capacity;
+    return true;
+}
+
+static void tcp_reassembly_clear(net_tcp_socket_t *socket)
+{
+    if (!socket)
+    {
+        return;
+    }
+    tcp_reass_segment_t *seg = socket->reass_head;
+    while (seg)
+    {
+        tcp_reass_segment_t *next = seg->next;
+        if (seg->data)
+        {
+            free(seg->data);
+        }
+        free(seg);
+        seg = next;
+    }
+    socket->reass_head = NULL;
+    socket->reass_bytes = 0;
+    socket->reass_segments = 0;
+    socket->reass_last_ack_tick = 0;
+}
+
+static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const uint8_t *data, size_t len)
+{
+    if (!socket || !data || len == 0)
+    {
+        return true;
+    }
+
+    uint32_t recv_next = socket->recv_next;
+    if (seq + len <= recv_next)
+    {
+        return true;
+    }
+    if (seq < recv_next)
+    {
+        size_t trim = (size_t)(recv_next - seq);
+        if (trim >= len)
+        {
+            return true;
+        }
+        seq += (uint32_t)trim;
+        data += trim;
+        len -= trim;
+    }
+
+    tcp_reass_segment_t *seg = socket->reass_head;
+    while (seg)
+    {
+        if (seq + len <= seg->seq)
+        {
+            seg = seg->next;
+            continue;
+        }
+        if (seq >= seg->seq + seg->len)
+        {
+            seg = seg->next;
+            continue;
+        }
+        if (seq >= seg->seq)
+        {
+            size_t trim = (size_t)((seg->seq + seg->len) - seq);
+            if (trim >= len)
+            {
+                return true;
+            }
+            seq += (uint32_t)trim;
+            data += trim;
+            len -= trim;
+            seg = socket->reass_head;
+            continue;
+        }
+        else
+        {
+            size_t overlap = (size_t)((seq + len) - seg->seq);
+            if (overlap >= len)
+            {
+                return true;
+            }
+            len -= overlap;
+            seg = socket->reass_head;
+            continue;
+        }
+    }
+
+    if (len == 0)
+    {
+        return true;
+    }
+
+    if (socket->reass_segments >= NET_TCP_REASS_MAX_SEGMENTS ||
+        socket->reass_bytes + len > NET_TCP_REASS_LIMIT)
+    {
+        serial_write_string("tcp: reassembly drop len=0x");
+        tcp_log_hex32((uint32_t)len);
+        serial_write_string("\r\n");
+        return false;
+    }
+
+    tcp_reass_segment_t *node = (tcp_reass_segment_t *)malloc(sizeof(tcp_reass_segment_t));
+    if (!node)
+    {
+        return false;
+    }
+    uint8_t *copy = (uint8_t *)malloc(len);
+    if (!copy)
+    {
+        free(node);
+        return false;
+    }
+    memcpy(copy, data, len);
+    node->seq = seq;
+    node->len = len;
+    node->data = copy;
+    node->next = NULL;
+
+    tcp_reass_segment_t **link = &socket->reass_head;
+    while (*link && (*link)->seq < seq)
+    {
+        link = &(*link)->next;
+    }
+    node->next = *link;
+    *link = node;
+    socket->reass_bytes += len;
+    socket->reass_segments += 1;
+    serial_write_string("tcp: reassembly store seq=0x");
+    tcp_log_hex32(seq);
+    serial_write_string(" len=0x");
+    tcp_log_hex32((uint32_t)len);
+    serial_write_string(" total=0x");
+    tcp_log_hex32((uint32_t)socket->reass_bytes);
+    serial_write_string(" segs=");
+    tcp_log_hex32((uint32_t)socket->reass_segments);
+    serial_write_string("\r\n");
+    return true;
+}
+
+static void tcp_reassembly_drain(net_tcp_socket_t *socket)
+{
+    if (!socket)
+    {
+        return;
+    }
+    while (socket->reass_head && socket->reass_head->seq == socket->recv_next)
+    {
+        tcp_reass_segment_t *seg = socket->reass_head;
+        size_t needed = socket->rx_size + seg->len;
+        if (!tcp_ensure_rx_capacity(socket, needed) || !socket->rx_buffer)
+        {
+            tcp_mark_error(socket, "rx alloc failed");
+            return;
+        }
+        memcpy(socket->rx_buffer + socket->rx_size, seg->data, seg->len);
+        socket->rx_size += seg->len;
+        socket->recv_next += (uint32_t)seg->len;
+    socket->reass_head = seg->next;
+    socket->reass_bytes -= seg->len;
+    if (socket->reass_segments > 0)
+    {
+        socket->reass_segments -= 1;
+    }
+        serial_write_string("tcp: reassembly drain seq=0x");
+        tcp_log_hex32(seg->seq);
+        serial_write_string(" len=0x");
+        tcp_log_hex32((uint32_t)seg->len);
+        serial_write_string(" next=0x");
+        tcp_log_hex32(socket->recv_next);
+        serial_write_string(" remain=0x");
+        tcp_log_hex32((uint32_t)socket->reass_bytes);
+        serial_write_string("\r\n");
+        free(seg->data);
+        free(seg);
+    }
+}
+
+static bool tcp_ensure_rx_capacity(net_tcp_socket_t *socket, size_t needed)
+{
+    if (!socket)
+    {
+        return false;
+    }
+    if (needed == 0)
+    {
+        needed = NET_TCP_RX_INITIAL_CAPACITY;
+    }
+    if (needed > NET_TCP_RX_MAX_CAPACITY)
+    {
+        return false;
+    }
+
+    size_t current = socket->rx_capacity;
+    if (current < NET_TCP_RX_INITIAL_CAPACITY)
+    {
+        current = NET_TCP_RX_INITIAL_CAPACITY;
+    }
+
+    size_t target = current;
+    if (target < needed)
+    {
+        target = current;
+        while (target < needed && target < NET_TCP_RX_MAX_CAPACITY)
+        {
+            size_t next = target * 2;
+            if (next < target || next > NET_TCP_RX_MAX_CAPACITY)
+            {
+                next = NET_TCP_RX_MAX_CAPACITY;
+            }
+            target = next;
+        }
+        if (target < needed)
+        {
+            target = needed;
+        }
+    }
+
+    if (target > NET_TCP_RX_MAX_CAPACITY)
+    {
+        return false;
+    }
+
+    uint8_t *buffer = (uint8_t *)realloc(socket->rx_buffer, target);
+    if (!buffer)
+    {
+        return false;
+    }
+
+    socket->rx_buffer = buffer;
+    if (socket->rx_capacity != target)
+    {
+        serial_write_string("tcp: rx buffer resize old=0x");
+        tcp_log_hex32((uint32_t)socket->rx_capacity);
+        serial_write_string(" new=0x");
+        tcp_log_hex32((uint32_t)target);
+        serial_write_string("\r\n");
+    }
+    socket->rx_capacity = target;
+    return true;
+}
+
+static void tcp_log_hex32(uint32_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char buf[8];
+    for (int i = 0; i < 8; ++i)
+    {
+        buf[7 - i] = hex[value & 0xF];
+        value >>= 4;
+    }
+    for (int i = 0; i < 8; ++i)
+    {
+        serial_write_char(buf[i]);
+    }
+}
+
+static void tcp_log_size(const char *label, size_t value)
+{
+    serial_write_string(label);
+    serial_write_string("0x");
+    tcp_log_hex32((uint32_t)value);
 }
 
 static uint16_t tcp_allocate_port(void)
@@ -196,6 +525,12 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
     }
     if (socket->state != TCP_STATE_CLOSED)
     {
+        return false;
+    }
+
+    if (!tcp_ensure_rx_capacity(socket, NET_TCP_RX_INITIAL_CAPACITY))
+    {
+        tcp_mark_error(socket, "rx alloc failed");
         return false;
     }
 
@@ -294,7 +629,7 @@ size_t net_tcp_socket_available(const net_tcp_socket_t *socket)
 
 size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
 {
-    if (!socket || capacity == 0 || socket->rx_size == 0)
+    if (!socket || capacity == 0 || socket->rx_size == 0 || !socket->rx_buffer)
     {
         return 0;
     }
@@ -312,6 +647,29 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
         memmove(socket->rx_buffer, socket->rx_buffer + to_copy, socket->rx_size - to_copy);
     }
     socket->rx_size -= to_copy;
+
+    size_t available = 0;
+    if (socket->rx_capacity > socket->rx_size)
+    {
+        available = socket->rx_capacity - socket->rx_size;
+    }
+    if (available > NET_TCP_RX_MAX_CAPACITY)
+    {
+        available = NET_TCP_RX_MAX_CAPACITY;
+    }
+    uint16_t window = (uint16_t)available;
+    if (window > socket->advertised_window &&
+        socket->have_mac &&
+        (socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT))
+    {
+        serial_write_string("tcp: window update ack win=0x");
+        tcp_log_hex32((uint32_t)window);
+        serial_write_string(" prev=0x");
+        tcp_log_hex32((uint32_t)socket->advertised_window);
+        serial_write_string("\r\n");
+        tcp_send_ack(socket);
+    }
+
     return to_copy;
 }
 
@@ -409,6 +767,11 @@ void net_tcp_socket_release(net_tcp_socket_t *socket)
         return;
     }
     tcp_reset_socket(socket);
+}
+
+uint64_t net_tcp_socket_last_activity(const net_tcp_socket_t *socket)
+{
+    return socket ? socket->last_activity_tick : 0;
 }
 
 void net_tcp_poll(void)
@@ -751,6 +1114,14 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
         return;
     }
 
+    serial_write_string("tcp: rx payload_len=");
+    tcp_log_size("", payload_len);
+    serial_write_string(" rx_size=");
+    tcp_log_size("", socket->rx_size);
+    serial_write_string(" capacity=");
+    tcp_log_size("", socket->rx_capacity);
+    serial_write_string("\r\n");
+
     if (socket->state != TCP_STATE_ESTABLISHED && socket->state != TCP_STATE_CLOSE_WAIT)
     {
         return;
@@ -758,19 +1129,65 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
 
     if (seq_num != socket->recv_next)
     {
+        if (seq_num < socket->recv_next)
+        {
+            uint32_t diff = socket->recv_next - seq_num;
+            if ((size_t)diff >= payload_len)
+            {
+                tcp_send_ack(socket);
+                return;
+            }
+            seq_num += diff;
+            payload += diff;
+            payload_len -= diff;
+            if (payload_len == 0)
+            {
+                tcp_send_ack(socket);
+                return;
+            }
+        }
+    }
+
+    if (seq_num != socket->recv_next)
+    {
+        serial_write_string("tcp: out-of-order exp=0x");
+        tcp_log_hex32(socket->recv_next);
+        serial_write_string(" got=0x");
+        tcp_log_hex32(seq_num);
+        serial_write_string(" len=0x");
+        tcp_log_hex32((uint32_t)payload_len);
+        serial_write_string("\r\n");
+        if (!tcp_reassembly_store(socket, seq_num, payload, payload_len))
+        {
+            serial_write_string("tcp: reassembly store failed\r\n");
+        }
         tcp_send_ack(socket);
         return;
     }
 
-    if (socket->rx_size + payload_len > NET_TCP_RX_CAPACITY)
+    size_t needed = socket->rx_size + payload_len;
+    if (needed > NET_TCP_RX_MAX_CAPACITY)
     {
         tcp_mark_error(socket, "rx overflow");
         return;
     }
+    if (!tcp_ensure_rx_capacity(socket, needed) || !socket->rx_buffer)
+    {
+        tcp_mark_error(socket, "rx alloc failed");
+        return;
+    }
+
+    serial_write_string("tcp: rx ensured capacity=");
+    tcp_log_size("", socket->rx_capacity);
+    serial_write_string(" needed=");
+    tcp_log_size("", needed);
+    serial_write_string("\r\n");
 
     memcpy(socket->rx_buffer + socket->rx_size, payload, payload_len);
     socket->rx_size += payload_len;
     socket->recv_next += (uint32_t)payload_len;
+
+    tcp_reassembly_drain(socket);
 
     tcp_send_ack(socket);
 }
@@ -781,8 +1198,19 @@ static void tcp_send_ack(net_tcp_socket_t *socket)
     {
         return;
     }
+    serial_write_string("tcp: send ack seq=0x");
+    tcp_log_hex32(socket->seq_next);
+    serial_write_string(" ack=0x");
+    tcp_log_hex32(socket->recv_next);
+    serial_write_string("\r\n");
     uint8_t flags = TCP_FLAG_ACK;
-    tcp_send_segment(socket, socket->seq_next, flags, NULL, 0, false, false);
+    if (tcp_send_segment(socket, socket->seq_next, flags, NULL, 0, false, false))
+    {
+        if (socket->reass_head)
+        {
+            socket->reass_last_ack_tick = timer_ticks();
+        }
+    }
 }
 
 static net_tcp_socket_t *tcp_find_socket(net_interface_t *iface, uint16_t local_port,
@@ -842,6 +1270,22 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     {
         return false;
     }
+    if (payload_len > NET_TCP_MAX_PAYLOAD)
+    {
+        return false;
+    }
+    if (payload_len > 0 && !payload)
+    {
+        return false;
+    }
+    if (track_retransmit && payload_len > 0)
+    {
+        if (!tcp_ensure_pending_capacity(socket, payload_len))
+        {
+            tcp_mark_error(socket, "tx alloc failed");
+            return false;
+        }
+    }
 
     uint8_t frame[14 + 20 + 20 + NET_TCP_MAX_PAYLOAD];
     memset(frame, 0, sizeof(frame));
@@ -874,7 +1318,16 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     write_be32(tcp + 8, socket->recv_next);
     tcp[12] = (uint8_t)((5 << 4) & 0xF0);
     tcp[13] = flags;
-    uint16_t window = (uint16_t)(NET_TCP_RX_CAPACITY - socket->rx_size);
+    size_t window_avail = 0;
+    if (socket->rx_capacity > socket->rx_size)
+    {
+        window_avail = socket->rx_capacity - socket->rx_size;
+    }
+    if (window_avail > NET_TCP_RX_MAX_CAPACITY)
+    {
+        window_avail = NET_TCP_RX_MAX_CAPACITY;
+    }
+    uint16_t window = (uint16_t)window_avail;
     if (window == 0)
     {
         window = 1;
@@ -898,8 +1351,14 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
 
     if (!net_if_send(socket->iface, frame, frame_len))
     {
+        serial_write_string("tcp: send failed len=0x");
+        tcp_log_hex32((uint32_t)frame_len);
+        serial_write_string(" flags=0x");
+        tcp_log_hex32(flags);
+        serial_write_string("\r\n");
         return false;
     }
+    socket->advertised_window = window;
 
     if (advance_seq)
     {
@@ -919,7 +1378,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     {
         socket->pending_flags = flags;
         socket->pending_payload_len = payload_len;
-        if (payload_len > 0 && payload)
+        if (payload_len > 0 && socket->pending_payload && payload)
         {
             memcpy(socket->pending_payload, payload, payload_len);
         }

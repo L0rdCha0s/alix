@@ -9,7 +9,6 @@
 #include "net/arp.h"
 #include "net/interface.h"
 #include "net/route.h"
-#include "rtl8139.h"
 
 #define NET_DNS_MAX_SERVERS 4
 #define NET_DNS_MAX_PENDING 4
@@ -249,7 +248,7 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
                 break;
             }
         }
-        rtl8139_poll();
+        net_if_poll_all();
     }
 
     bool success = pending->completed && pending->success;
@@ -376,7 +375,7 @@ static bool dns_send_query(dns_pending_t *pending)
         if (wait_ticks == 0) wait_ticks = 20;
         while (timer_ticks() - start < wait_ticks)
         {
-            rtl8139_poll();
+            net_if_poll_all();
             uint8_t mac[6];
             if (net_arp_lookup(pending->next_hop, mac))
             {

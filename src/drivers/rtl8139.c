@@ -75,7 +75,8 @@ static uint32_t g_tx_phys[RTL_TX_SLOT_COUNT];
    addresses and corrupt nearby kernel data/rodata. */
 static __attribute__((aligned(256))) uint8_t g_rx_buffer[RTL_RX_BUFFER_SIZE];
 static int g_log_rx_count = 0;
-static uint8_t g_rx_frame[2048];
+#define RTL_RX_FRAME_MAX  12288
+static uint8_t g_rx_frame[RTL_RX_FRAME_MAX];
 static int g_state_dump_budget = 12;
 static int g_tx_dump_budget = 32;
 static int g_hw_tx_cursor = 0; // which TSD/TSAD pair the NIC expects next
@@ -108,6 +109,7 @@ static void rtl8139_hw_send_slot(int slot, const uint8_t *data, size_t len);
 static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len);
 static void rtl8139_tx_flush_queue(void);
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len);
+static void rtl8139_poll_iface(net_interface_t *iface);
 
 void rtl8139_init(void)
 {
@@ -189,6 +191,7 @@ void rtl8139_init(void)
     {
         net_if_set_link_up(g_iface, true);
         net_if_set_tx_handler(g_iface, rtl8139_tx_send);
+        net_if_set_poll_handler(g_iface, rtl8139_poll_iface);
     }
 
     serial_write_string("rtl8139: found at bus ");
@@ -266,6 +269,12 @@ void rtl8139_poll(void)
     net_tcp_poll();
 }
 
+static void rtl8139_poll_iface(net_interface_t *iface)
+{
+    (void)iface;
+    rtl8139_poll();
+}
+
 bool rtl8139_is_present(void)
 {
     return g_rtl_present;
@@ -301,7 +310,7 @@ static void rtl8139_handle_receive(void)
         }
 
         uint16_t frame_len = (uint16_t)(rxlen - 4);  // strip CRC
-        if (frame_len > 9216) {
+        if (frame_len > RTL_RX_FRAME_MAX) {
             goto advance_ring;
         }
 
@@ -323,7 +332,11 @@ static void rtl8139_handle_receive(void)
 
             // Copy full frame into linear buffer
             if (frame_len > sizeof(g_rx_frame)) {
-                serial_write_string("rtl8139: frame too large for buffer\r\n");
+                serial_write_string("rtl8139: frame too large len=0x");
+                rtl8139_log_hex16(frame_len);
+                serial_write_string(" cap=0x");
+                rtl8139_log_hex16((uint16_t)sizeof(g_rx_frame));
+                serial_write_string("\r\n");
                 goto advance_ring;
             }
             rtl8139_copy_packet(offset, g_rx_frame, frame_len);

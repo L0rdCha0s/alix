@@ -28,6 +28,7 @@ C_SOURCES := \
 	$(wildcard $(KERNEL_DIR)/*.c) \
 	$(wildcard $(DRIVER_DIR)/*.c) \
 	$(wildcard $(ATK_DIR)/*.c) \
+	$(wildcard $(ATK_DIR)/util/*.c) \
 	$(wildcard $(NET_DIR)/*.c) \
 	$(wildcard $(CRYPTO_DIR)/*.c) \
 	$(wildcard $(ARCH_DIR)/*.c) \

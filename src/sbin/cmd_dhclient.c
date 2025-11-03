@@ -2,7 +2,6 @@
 
 #include "net/interface.h"
 #include "net/dhcp.h"
-#include "rtl8139.h"
 #include "timer.h"
 #include "libc.h"
 
@@ -43,7 +42,7 @@ bool shell_cmd_dhclient(shell_state_t *shell, shell_output_t *out, const char *a
     uint64_t timeout = timer_frequency() * 5; /* wait up to ~5 seconds */
     while (net_dhcp_in_progress())
     {
-        rtl8139_poll();
+        net_if_poll_all();
         if (iface->ipv4_addr != 0)
         {
             break;

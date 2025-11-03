@@ -61,8 +61,9 @@ net_interface_t *net_if_register(const char *name, const uint8_t mac[6])
     iface->link_up = false;
     iface->ipv4_addr = 0;
     iface->ipv4_netmask = 0;
-    iface->ipv4_gateway = 0;
-    iface->send = NULL;
+   iface->ipv4_gateway = 0;
+   iface->send = NULL;
+    iface->poll = NULL;
     if (mac)
     {
         memcpy(iface->mac, mac, 6);
@@ -146,6 +147,15 @@ void net_if_set_tx_handler(net_interface_t *iface, bool (*handler)(net_interface
     iface->send = handler;
 }
 
+void net_if_set_poll_handler(net_interface_t *iface, void (*handler)(net_interface_t *))
+{
+    if (!iface)
+    {
+        return;
+    }
+    iface->poll = handler;
+}
+
 bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
 {
     if (!iface || !iface->send)
@@ -153,6 +163,19 @@ bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
         return false;
     }
     return iface->send(iface, data, len);
+}
+
+void net_if_poll_all(void)
+{
+    for (size_t i = 0; i < g_interface_count; ++i)
+    {
+        net_interface_t *iface = &g_interfaces[i];
+        if (!iface->present || !iface->poll)
+        {
+            continue;
+        }
+        iface->poll(iface);
+    }
 }
 
 static void write_hex_byte(uint8_t value, char *out)

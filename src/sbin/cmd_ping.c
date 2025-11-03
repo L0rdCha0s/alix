@@ -5,7 +5,6 @@
 #include "net/interface.h"
 #include "net/route.h"
 #include "net/dns.h"
-#include "rtl8139.h"
 #include "timer.h"
 #include "libc.h"
 #include <stddef.h>
@@ -136,7 +135,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     }
     const uint64_t timeout_ticks = (uint64_t)frequency * 5;
 
-    rtl8139_poll();
+    net_if_poll_all();
 
     if (!have_mac)
     {
@@ -149,7 +148,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         uint64_t start = timer_ticks();
         while (timer_ticks() - start < timeout_ticks)
         {
-            rtl8139_poll();
+            net_if_poll_all();
             if (net_arp_lookup(next_hop_ip, target_mac))
             {
                 have_mac = true;
@@ -182,7 +181,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     uint64_t send_tick = timer_ticks();
     while (timer_ticks() - send_tick < timeout_ticks)
     {
-        rtl8139_poll();
+        net_if_poll_all();
         net_icmp_reply_t reply;
         if (net_icmp_get_reply(identifier, sequence, &reply))
         {

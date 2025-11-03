@@ -20,5 +20,6 @@ bool net_tcp_socket_has_error(const net_tcp_socket_t *socket);
 const char *net_tcp_socket_state(const net_tcp_socket_t *socket);
 void net_tcp_socket_close(net_tcp_socket_t *socket);
 void net_tcp_socket_release(net_tcp_socket_t *socket);
+uint64_t net_tcp_socket_last_activity(const net_tcp_socket_t *socket);
 
 #endif

@@ -16,7 +16,7 @@
 static void network_poll_task(void *context)
 {
     (void)context;
-    rtl8139_poll();
+    net_if_poll_all();
 }
 
 void kernel_main(void)
@@ -59,7 +59,7 @@ void kernel_main(void)
     serial_write_char('E');
     interrupts_enable();
     serial_write_char('e');
-    rtl8139_poll();
+    net_if_poll_all();
 
     shell_main();
 
