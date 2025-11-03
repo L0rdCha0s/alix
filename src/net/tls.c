@@ -176,6 +176,11 @@ static uint64_t tls_default_timeout_ticks(void)
 
 static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t len, uint64_t timeout_ticks)
 {
+    if (!session || session->socket_fd < 0)
+    {
+        return false;
+    }
+
     uint64_t start = timer_ticks();
     size_t remaining = len;
     while (remaining > 0)
@@ -184,8 +189,17 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
         {
             return false;
         }
-        size_t available = net_tcp_socket_available(session->socket);
-        if (available == 0)
+
+        ssize_t got = read(session->socket_fd, out, remaining);
+        if (got < 0)
+        {
+            if (timer_ticks() - start >= timeout_ticks)
+            {
+                return false;
+            }
+            continue;
+        }
+        if (got == 0)
         {
             if (net_tcp_socket_remote_closed(session->socket))
             {
@@ -197,17 +211,10 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
             }
             continue;
         }
-        if (available > remaining)
-        {
-            available = remaining;
-        }
-        size_t read = net_tcp_socket_read(session->socket, out, available);
-        if (read == 0)
-        {
-            continue;
-        }
-        out += read;
-        remaining -= read;
+
+        out += got;
+        remaining -= (size_t)got;
+        start = timer_ticks();
     }
     return true;
 }
@@ -956,6 +963,11 @@ bool tls_session_init(tls_session_t *session, net_tcp_socket_t *socket)
     }
     memset(session, 0, sizeof(*session));
     session->socket = socket;
+    session->socket_fd = net_tcp_socket_fd(socket);
+    if (session->socket_fd < 0)
+    {
+        return false;
+    }
     sha256_init(&session->handshake_hash);
     rsa_public_key_init(&session->server_key);
     return true;
@@ -1228,6 +1240,8 @@ void tls_session_close(tls_session_t *session)
     {
         return;
     }
+    session->socket = NULL;
+    session->socket_fd = -1;
     memset(session->client_write_mac, 0, sizeof(session->client_write_mac));
     memset(session->server_write_mac, 0, sizeof(session->server_write_mac));
     memset(session->client_write_key, 0, sizeof(session->client_write_key));

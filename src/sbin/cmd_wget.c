@@ -328,9 +328,14 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     {
         return shell_output_error(out, "no TCP sockets available");
     }
+    int socket_fd = net_tcp_socket_fd(socket);
+    if (socket_fd < 0)
+    {
+        shell_output_error(out, "failed to allocate socket descriptor");
+        goto cleanup;
+    }
 
     bool success = false;
-    bool request_sent = false;
     bool tls_active = false;
     tls_session_t tls_session;
     vfs_node_t *file = NULL;
@@ -374,7 +379,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             shell_output_error(out, "TCP connect timeout");
             goto cleanup;
         }
-        net_if_poll_all();
+        __asm__ volatile ("pause");
     }
 
     if (use_tls)
@@ -467,7 +472,6 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             goto cleanup;
         }
     }
-    request_sent = true;
     shell_output_write(out, "Request sent, awaiting response...\n");
 
     char header_buf[WGET_HEADER_CAP];
@@ -485,23 +489,20 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
     while (1)
     {
-        net_if_poll_all();
-
         if (net_tcp_socket_has_error(socket))
         {
             shell_output_error(out, "TCP connection error");
             goto cleanup;
         }
 
-        size_t read = 0;
+        size_t bytes_read = 0;
         if (tls_active)
         {
-            read = tls_session_recv(&tls_session, chunk, sizeof(chunk));
-            if (read == 0)
+            bytes_read = tls_session_recv(&tls_session, chunk, sizeof(chunk));
+            if (bytes_read == 0)
             {
                 if (net_tcp_socket_remote_closed(socket))
                 {
-                    // If chunked and not finished, it's an error
                     if (is_chunked && !chunked_done)
                     {
                         shell_output_error(out, "connection closed before complete chunked body");
@@ -525,8 +526,13 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         }
         else
         {
-            size_t available = net_tcp_socket_available(socket);
-            if (available == 0)
+            ssize_t got = read(socket_fd, chunk, sizeof(chunk));
+            if (got < 0)
+            {
+                shell_output_error(out, "socket read failed");
+                goto cleanup;
+            }
+            if (got == 0)
             {
                 if (net_tcp_socket_remote_closed(socket))
                 {
@@ -543,12 +549,6 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     break;
                 }
 
-                uint64_t activity = net_tcp_socket_last_activity(socket);
-                if (activity > last_progress)
-                {
-                    last_progress = activity;
-                }
-
                 if (timer_ticks() - last_progress >= data_timeout)
                 {
                     shell_output_error(out, "no data received (timeout)");
@@ -556,28 +556,14 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                 }
                 continue;
             }
-
-            size_t to_read = available < sizeof(chunk) ? available : sizeof(chunk);
-            read = net_tcp_socket_read(socket, chunk, to_read);
-            if (read == 0)
-            {
-                shell_output_write(out, "debug: available ");
-                char buf[16];
-                if (!format_decimal(buf, sizeof(buf), (unsigned)available, NULL))
-                {
-                    buf[0] = '\0';
-                }
-                shell_output_write(out, buf);
-                shell_output_write(out, ", read=0\n");
-                continue;
-            }
+            bytes_read = (size_t)got;
         }
         last_progress = timer_ticks();
 
         size_t offset = 0;
         if (!header_done)
         {
-            while (!header_done && offset < read)
+            while (!header_done && offset < bytes_read)
             {
                 if (header_len >= sizeof(header_buf) - 1)
                 {
@@ -667,9 +653,9 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         }
 
         size_t body_offset = offset;
-        if (read > body_offset)
+        if (bytes_read > body_offset)
         {
-            size_t body_len = read - body_offset;
+            size_t body_len = bytes_read - body_offset;
 
             if (is_chunked)
             {
@@ -746,12 +732,13 @@ cleanup:
     {
         tls_session_close(&tls_session);
     }
-    if (socket)
+    if (socket_fd >= 0)
     {
-        if (request_sent)
-        {
-            net_tcp_socket_close(socket);
-        }
+        close(socket_fd);
+        socket_fd = -1;
+    }
+    else if (socket)
+    {
         net_tcp_socket_release(socket);
     }
     if (!success && file)
