@@ -1011,11 +1011,11 @@ static bool ensure_arp(net_interface_t *iface, uint32_t next_hop_ip, uint64_t ti
     uint64_t start = timer_ticks();
     while (timer_ticks() - start < timeout_ticks)
     {
-        net_if_poll_all();
         if (net_arp_lookup(next_hop_ip, mac))
         {
             return true;
         }
+        __asm__ volatile ("pause");
     }
     return false;
 }

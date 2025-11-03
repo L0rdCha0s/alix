@@ -10,6 +10,7 @@
 #include "net/dns.h"
 #include "net/tcp.h"
 #include "interrupts.h"
+#include "timer.h"
 
 #define RTL_VENDOR_ID 0x10EC
 #define RTL_DEVICE_ID 0x8139
@@ -109,7 +110,7 @@ static void rtl8139_hw_send_slot(int slot, const uint8_t *data, size_t len);
 static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len);
 static void rtl8139_tx_flush_queue(void);
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len);
-static void rtl8139_poll_iface(net_interface_t *iface);
+static void rtl8139_timer_task(void *context);
 static void rtl8139_log_tx_state(const char *context);
 
 void rtl8139_init(void)
@@ -192,7 +193,21 @@ void rtl8139_init(void)
     {
         net_if_set_link_up(g_iface, true);
         net_if_set_tx_handler(g_iface, rtl8139_tx_send);
-        net_if_set_poll_handler(g_iface, rtl8139_poll_iface);
+    }
+
+    uint32_t timer_freq = timer_frequency();
+    if (timer_freq == 0)
+    {
+        timer_freq = 100;
+    }
+    uint32_t interval = timer_freq / 200U;
+    if (interval == 0)
+    {
+        interval = 1;
+    }
+    if (!timer_register_periodic(rtl8139_timer_task, NULL, interval))
+    {
+        rtl8139_log("failed to register timer task");
     }
 
     serial_write_string("rtl8139: found at bus ");
@@ -270,9 +285,9 @@ void rtl8139_poll(void)
     net_tcp_poll();
 }
 
-static void rtl8139_poll_iface(net_interface_t *iface)
+static void rtl8139_timer_task(void *context)
 {
-    (void)iface;
+    (void)context;
     rtl8139_poll();
 }
 
