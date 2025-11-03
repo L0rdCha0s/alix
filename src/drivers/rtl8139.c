@@ -362,27 +362,49 @@ static void rtl8139_handle_receive(void)
                 goto advance_ring;
             }
 
-            serial_write_string("rtl8139: rx frame eth_type=0x");
-            rtl8139_log_hex16(eth_type);
-            serial_write_string(" len=0x");
-            rtl8139_log_hex16(frame_len);
-            if (vlan) serial_write_string(" (vlan-stripped)");
-            serial_write_string("\r\n");
+            bool log_frame = true;
+            bool have_proto = false;
+            bool have_ports = false;
+            uint8_t proto = 0;
+            uint16_t sport = 0;
+            uint16_t dport = 0;
 
             if (eth_type == 0x0800 && frame_len >= l2_off + 20) {
                 uint8_t ihl = (uint8_t)(g_rx_frame[l2_off] & 0x0F);
                 size_t ip_hlen = (size_t)ihl * 4;
                 if (frame_len >= l2_off + ip_hlen) {
-                    uint8_t proto = g_rx_frame[l2_off + 9];
-                    serial_write_string("rtl8139: ip proto=0x");
-                    rtl8139_log_hex16(proto);
+                    proto = g_rx_frame[l2_off + 9];
+                    have_proto = true;
                     if ((proto == 6 /*TCP*/ || proto == 17 /*UDP*/) &&
                         frame_len >= l2_off + ip_hlen + 4)
                     {
-                        uint16_t sport = (uint16_t)((g_rx_frame[l2_off + ip_hlen + 0] << 8) |
-                                                    g_rx_frame[l2_off + ip_hlen + 1]);
-                        uint16_t dport = (uint16_t)((g_rx_frame[l2_off + ip_hlen + 2] << 8) |
-                                                    g_rx_frame[l2_off + ip_hlen + 3]);
+                        sport = (uint16_t)((g_rx_frame[l2_off + ip_hlen + 0] << 8) |
+                                           g_rx_frame[l2_off + ip_hlen + 1]);
+                        dport = (uint16_t)((g_rx_frame[l2_off + ip_hlen + 2] << 8) |
+                                           g_rx_frame[l2_off + ip_hlen + 3]);
+                        have_ports = true;
+                        if (proto == 17 &&
+                            (sport == 0x0043 || sport == 0x0044 ||
+                             dport == 0x0043 || dport == 0x0044))
+                        {
+                            log_frame = false; /* suppress noisy DHCP chatter */
+                        }
+                    }
+                }
+            }
+
+            if (log_frame) {
+                serial_write_string("rtl8139: rx frame eth_type=0x");
+                rtl8139_log_hex16(eth_type);
+                serial_write_string(" len=0x");
+                rtl8139_log_hex16(frame_len);
+                if (vlan) serial_write_string(" (vlan-stripped)");
+                serial_write_string("\r\n");
+
+                if (have_proto) {
+                    serial_write_string("rtl8139: ip proto=0x");
+                    rtl8139_log_hex16(proto);
+                    if (have_ports) {
                         serial_write_string(" src_port=0x");
                         rtl8139_log_hex16(sport);
                         serial_write_string(" dst_port=0x");

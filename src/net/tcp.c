@@ -648,6 +648,24 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
     }
     socket->rx_size -= to_copy;
 
+    size_t window_avail = 0;
+    if (socket->rx_capacity > socket->rx_size)
+    {
+        window_avail = socket->rx_capacity - socket->rx_size;
+    }
+
+    serial_write_string("tcp: app read len=0x");
+    tcp_log_hex32((uint32_t)to_copy);
+    serial_write_string(" remain=0x");
+    tcp_log_hex32((uint32_t)socket->rx_size);
+    serial_write_string(" capacity=0x");
+    tcp_log_hex32((uint32_t)socket->rx_capacity);
+    serial_write_string(" window_avail=0x");
+    tcp_log_hex32((uint32_t)window_avail);
+    serial_write_string(" advertised=0x");
+    tcp_log_hex32((uint32_t)socket->advertised_window);
+    serial_write_string("\r\n");
+
     size_t available = 0;
     if (socket->rx_capacity > socket->rx_size)
     {
@@ -1198,14 +1216,32 @@ static void tcp_send_ack(net_tcp_socket_t *socket)
     {
         return;
     }
-    serial_write_string("tcp: send ack seq=0x");
-    tcp_log_hex32(socket->seq_next);
-    serial_write_string(" ack=0x");
-    tcp_log_hex32(socket->recv_next);
-    serial_write_string("\r\n");
+
+    size_t window_avail = 0;
+    if (socket->rx_capacity > socket->rx_size)
+    {
+        window_avail = socket->rx_capacity - socket->rx_size;
+    }
+    uint16_t prev_window = socket->advertised_window;
+
     uint8_t flags = TCP_FLAG_ACK;
     if (tcp_send_segment(socket, socket->seq_next, flags, NULL, 0, false, false))
     {
+        serial_write_string("tcp: send ack seq=0x");
+        tcp_log_hex32(socket->seq_next);
+        serial_write_string(" ack=0x");
+        tcp_log_hex32(socket->recv_next);
+        serial_write_string(" win=0x");
+        tcp_log_hex32((uint32_t)socket->advertised_window);
+        serial_write_string(" avail=0x");
+        tcp_log_hex32((uint32_t)window_avail);
+        serial_write_string(" prev=0x");
+        tcp_log_hex32((uint32_t)prev_window);
+        serial_write_string(" rx_size=0x");
+        tcp_log_hex32((uint32_t)socket->rx_size);
+        serial_write_string(" capacity=0x");
+        tcp_log_hex32((uint32_t)socket->rx_capacity);
+        serial_write_string("\r\n");
         if (socket->reass_head)
         {
             socket->reass_last_ack_tick = timer_ticks();
@@ -1330,6 +1366,19 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     uint16_t window = (uint16_t)window_avail;
     if (window == 0)
     {
+        serial_write_string("tcp: warn zero window seq=0x");
+        tcp_log_hex32(seq);
+        serial_write_string(" ack=0x");
+        tcp_log_hex32(socket->recv_next);
+        serial_write_string(" rx_size=0x");
+        tcp_log_hex32((uint32_t)socket->rx_size);
+        serial_write_string(" capacity=0x");
+        tcp_log_hex32((uint32_t)socket->rx_capacity);
+        serial_write_string(" avail=0x");
+        tcp_log_hex32((uint32_t)window_avail);
+        serial_write_string(" flags=0x");
+        tcp_log_hex32(flags);
+        serial_write_string("\r\n");
         window = 1;
     }
     write_be16(tcp + 14, window);
