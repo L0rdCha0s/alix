@@ -110,6 +110,7 @@ static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len);
 static void rtl8139_tx_flush_queue(void);
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len);
 static void rtl8139_poll_iface(net_interface_t *iface);
+static void rtl8139_log_tx_state(const char *context);
 
 void rtl8139_init(void)
 {
@@ -302,6 +303,7 @@ static void rtl8139_handle_receive(void)
 
         uint16_t rsr   = rtl8139_buffer_read16(offset + 0);
         uint16_t rxlen = rtl8139_buffer_read16(offset + 2);   // includes CRC
+        rxlen &= 0x1FFFU; // length occupies 13 bits; high bits are reserved/status
         bool ok = (rsr & 0x0001U) && rxlen >= 8 && rxlen <= (RTL_RX_RING_SIZE - 16);
 
         if (!ok) {
@@ -461,6 +463,7 @@ static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t 
     }
 
     rtl8139_log("tx ring saturated");
+    rtl8139_log_tx_state("ring_saturated");
     return false;
 }
 
@@ -548,6 +551,45 @@ static void rtl8139_dump_state(const char *context)
     serial_write_string("\r\n");
 
     g_state_dump_budget--;
+}
+
+static void rtl8139_log_tx_state(const char *context)
+{
+    if (!g_rtl_present || g_tx_dump_budget <= 0)
+    {
+        return;
+    }
+
+    serial_write_string("rtl8139: tx state[");
+    if (context)
+    {
+        serial_write_string(context);
+    }
+    serial_write_string("] inflight=0x");
+    rtl8139_log_hex16((uint16_t)g_tx_inflight);
+    serial_write_string(" queue=0x");
+    rtl8139_log_hex16((uint16_t)g_tx_queue_count);
+    serial_write_string(" head=0x");
+    rtl8139_log_hex16((uint16_t)g_tx_queue_head);
+    serial_write_string(" tail=0x");
+    rtl8139_log_hex16((uint16_t)g_tx_queue_tail);
+    serial_write_string(" hw_cur=0x");
+    rtl8139_log_hex16((uint16_t)g_hw_tx_cursor);
+    serial_write_string(" tail_cur=0x");
+    rtl8139_log_hex16((uint16_t)g_tx_tail_cursor);
+    serial_write_string("\r\n");
+
+    for (int i = 0; i < RTL_TX_SLOT_COUNT; ++i)
+    {
+        uint32_t tsd = inl(g_io_base + RTL_REG_TSD0 + i * 4);
+        serial_write_string("rtl8139:   slot=");
+        rtl8139_log_hex8((uint8_t)i);
+        serial_write_string(" tsd=0x");
+        rtl8139_log_hex32(tsd);
+        serial_write_string("\r\n");
+    }
+
+    g_tx_dump_budget--;
 }
 
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len)
@@ -659,6 +701,8 @@ static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len)
 {
     if (g_tx_queue_count >= RTL_TX_QUEUE_MAX || len > RTL_TX_FRAME_MAX)
     {
+        rtl8139_log("tx queue push failed");
+        rtl8139_log_tx_state("queue_push_fail");
         return false;
     }
     memcpy(g_tx_queue_data[g_tx_queue_tail], data, len);
@@ -670,6 +714,7 @@ static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len)
 
 static void rtl8139_tx_flush_queue(void)
 {
+    bool progressed = false;
     while (g_tx_queue_count > 0)
     {
         if (g_tx_inflight >= RTL_TX_SLOT_COUNT)
@@ -686,5 +731,10 @@ static void rtl8139_tx_flush_queue(void)
         g_tx_queue_head = (g_tx_queue_head + 1) % RTL_TX_QUEUE_MAX;
         g_tx_queue_count--;
         rtl8139_hw_send_slot(slot, buffer, len);
+        progressed = true;
+    }
+    if (!progressed && g_tx_queue_count > 0)
+    {
+        rtl8139_log_tx_state("flush_blocked");
     }
 }

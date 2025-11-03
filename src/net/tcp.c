@@ -1355,6 +1355,57 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
         tcp_log_hex32((uint32_t)frame_len);
         serial_write_string(" flags=0x");
         tcp_log_hex32(flags);
+        serial_write_string(" iface=");
+        if (socket->iface)
+        {
+            for (int i = 0; i < NET_IF_NAME_MAX; ++i)
+            {
+                char c = socket->iface->name[i];
+                if (c == '\0')
+                {
+                    break;
+                }
+                serial_write_char(c);
+            }
+        }
+        else
+        {
+            serial_write_string("null");
+        }
+        serial_write_string("\r\n");
+
+        serial_write_string("tcp: send fail state=0x");
+        tcp_log_hex32((uint32_t)socket->state);
+        serial_write_string(" seq=0x");
+        tcp_log_hex32(seq);
+        serial_write_string(" next=0x");
+        tcp_log_hex32(socket->seq_next);
+        serial_write_string(" unacked_seq=0x");
+        tcp_log_hex32(socket->unacked_seq);
+        serial_write_string(" unacked_len=0x");
+        tcp_log_hex32(socket->unacked_len);
+        serial_write_string(" pending_len=0x");
+        tcp_log_hex32((uint32_t)socket->pending_payload_len);
+        serial_write_string(" rx_size=0x");
+        tcp_log_hex32((uint32_t)socket->rx_size);
+        serial_write_string(" rx_capacity=0x");
+        tcp_log_hex32((uint32_t)socket->rx_capacity);
+        serial_write_string("\r\n");
+
+        serial_write_string("tcp: send fail ports local=0x");
+        tcp_log_hex32((uint32_t)socket->local_port);
+        serial_write_string(" remote=0x");
+        tcp_log_hex32((uint32_t)socket->remote_port);
+        serial_write_string(" remote_ip=0x");
+        tcp_log_hex32(socket->remote_ip);
+        serial_write_string(" remote_win=0x");
+        tcp_log_hex32((uint32_t)socket->remote_window);
+        serial_write_string(" advertised=0x");
+        tcp_log_hex32((uint32_t)socket->advertised_window);
+        serial_write_string(" awaiting_ack=0x");
+        tcp_log_hex32(socket->awaiting_ack ? 1U : 0U);
+        serial_write_string(" pending_flags=0x");
+        tcp_log_hex32((uint32_t)socket->pending_flags);
         serial_write_string("\r\n");
         return false;
     }
