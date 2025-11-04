@@ -5,7 +5,7 @@
 ; Define a dedicated kernel heap region well above the VFS pool (16 MiB)
 ; This keeps dynamic allocations from overlapping the in-memory filesystem
 %define KERNEL_HEAP_BASE 0x0000000002000000 ; 32 MiB
-%define KERNEL_HEAP_SIZE 0x0000000001000000 ; 16 MiB span
+%define KERNEL_HEAP_SIZE 0x0000000040000000 ; 1 GiB span
 ; Place paging structures safely above the stage2 image (~0x70xxx)
 ; Use 1 MiB region to avoid overlap with loaded kernel image and BSS.
 %define PML4          0x0000000000100000
