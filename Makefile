@@ -79,6 +79,7 @@ hdd.img: $(BOOT_BIN) $(STAGE2_BIN)
 	dd if=$(BOOT_BIN)   of=$@ conv=notrunc 2>/dev/null
 	dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
 
+RAM ?= 4G
 QEMU_DEBUG_LOG   ?= qemu-debug.log
 QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
 HOMEBREW_PREFIX  := $(shell brew --prefix)
@@ -116,12 +117,12 @@ NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
 
 run: os.img
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -fda os.img -boot a -no-reboot -monitor none -serial stdio \
+	$(QEMU) -m $(RAM) -fda os.img -boot a -no-reboot -monitor none -serial stdio \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 run-hdd: hdd.img
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -drive file=hdd.img,format=raw,if=ide -no-reboot -monitor none -serial stdio \
+	$(QEMU) -m $(RAM) -drive file=hdd.img,format=raw,if=ide -no-reboot -monitor none -serial stdio \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 clean:

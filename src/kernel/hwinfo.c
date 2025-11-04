@@ -139,8 +139,8 @@ static void append_hex(char *buffer, size_t *index, size_t capacity, uint64_t va
 
 static void load_e820(void)
 {
-    volatile uint16_t *count_ptr = (volatile uint16_t *)E820_STORAGE_PHYS;
-    uint32_t count = (uint32_t)(*count_ptr);
+    volatile uint32_t *count_ptr = (volatile uint32_t *)E820_STORAGE_PHYS;
+    uint32_t count = *count_ptr;
     if (count > E820_MAX_ENTRIES)
     {
         count = E820_MAX_ENTRIES;

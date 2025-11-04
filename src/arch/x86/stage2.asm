@@ -8,6 +8,10 @@
 %define KERNEL_HEAP_SIZE 0x0000000040000000 ; 1 GiB span
 ; Place paging structures safely above the stage2 image (~0x70xxx)
 ; Use 1 MiB region to avoid overlap with loaded kernel image and BSS.
+%define E820_STORAGE_PHYS 0x00008000
+%define E820_ENTRY_SIZE   24
+%define E820_MAX_ENTRIES  64
+%define E820_SEG          (E820_STORAGE_PHYS >> 4)
 %define PML4          0x0000000000100000
 %define PDP           0x0000000000101000
 %define PD0           0x0000000000102000
@@ -59,7 +63,7 @@ start16:
   mov bl, 0x07
   int 0x10
 
-  ; (E820 memory map collection removed for bring-up simplicity)
+  call collect_e820
 
   ; Enable A20 using port 0x92
   in   al, 0x92
@@ -102,7 +106,53 @@ gdt_ptr:
   dw gdt_end - gdt - 1
   dq gdt
 
-; (E820 memory map collection removed)
+ALIGN 4
+collect_e820:
+  pusha
+  push es
+  mov ax, E820_SEG
+  mov es, ax
+  xor di, di
+  xor ax, ax
+  mov [es:di], ax
+  mov [es:di+2], ax
+  add di, 4
+  xor ebx, ebx
+  xor bp, bp
+
+.e820_loop:
+  push di
+  mov cx, E820_ENTRY_SIZE / 2
+  xor ax, ax
+  cld
+  rep stosw
+  pop di
+
+  mov eax, 0x0000E820
+  mov edx, 0x534D4150
+  mov ecx, E820_ENTRY_SIZE
+  int 0x15
+  jc .done
+  cmp eax, 0x534D4150
+  jne .done
+
+  inc bp
+  cmp bp, E820_MAX_ENTRIES
+  jae .done
+
+  add di, E820_ENTRY_SIZE
+  test ebx, ebx
+  jnz .e820_loop
+
+.done:
+  mov ax, bp
+  mov [es:0], ax
+  xor ax, ax
+  mov [es:2], ax
+  pop es
+  popa
+  ret
+
 
 ALIGN 16
 tss64:
