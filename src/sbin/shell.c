@@ -206,8 +206,8 @@ void shell_main(void)
     shell_state_t shell = { .cwd = vfs_root() };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, dhclient, start_video, alloc1m, free.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, dhclient, start_video, alloc1m, free.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free.\r\n");
 
     while (1)
     {
@@ -227,6 +227,8 @@ static const shell_command_t g_commands[] = {
     { "ping",        shell_cmd_ping },
     { "nslookup",    shell_cmd_nslookup },
     { "wget",        shell_cmd_wget },
+    { "imgview",     shell_cmd_imgview },
+    { "sha1sum",     shell_cmd_sha1sum },
     { "dhclient",    shell_cmd_dhclient },
     { "start_video", shell_cmd_start_video },
     { "net_mac",     shell_cmd_net_mac },

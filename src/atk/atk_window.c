@@ -6,6 +6,7 @@
 #include "video.h"
 #include "atk/atk_label.h"
 #include "atk/atk_text_input.h"
+#include "atk/atk_image.h"
 
 static void atk_log(const char *msg);
 static void format_window_title(char *buffer, size_t capacity, int id);
@@ -438,6 +439,10 @@ static void window_draw(const atk_state_t *state, const atk_widget_t *window)
         {
             atk_label_draw(state, child);
         }
+        else if (atk_widget_is_a(child, &ATK_IMAGE_CLASS))
+        {
+            atk_image_draw(state, child);
+        }
         else if (atk_widget_is_a(child, &ATK_TEXT_INPUT_CLASS))
         {
             atk_text_input_draw(state, child);
@@ -626,6 +631,11 @@ static void window_child_destroy(void *value)
     else if (atk_widget_is_a(widget, &ATK_LABEL_CLASS))
     {
         atk_label_destroy(widget);
+        atk_widget_destroy(widget);
+    }
+    else if (atk_widget_is_a(widget, &ATK_IMAGE_CLASS))
+    {
+        atk_image_destroy(widget);
         atk_widget_destroy(widget);
     }
     else if (atk_widget_is_a(widget, &ATK_TEXT_INPUT_CLASS))

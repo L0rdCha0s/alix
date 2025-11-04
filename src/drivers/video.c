@@ -5,6 +5,7 @@
 #include "atk.h"
 #include "pci.h"
 #include "keyboard.h"
+#include "libc.h"
 
 
 #define BGA_INDEX_PORT 0x1CE
@@ -90,6 +91,8 @@ static void video_flush_dirty(void);
 static void cursor_restore(void);
 static void cursor_draw(void);
 static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg);
+static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
+                               const uint8_t *src, int stride_bytes, int src_x0, int src_y0);
 
 void video_init(void)
 {
@@ -367,6 +370,83 @@ void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
     }
 }
 
+static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
+                               const uint8_t *src, int stride_bytes, int src_x0, int src_y0)
+{
+    const uint8_t *row_ptr = src + (size_t)src_y0 * (size_t)stride_bytes + (size_t)src_x0 * 2U;
+    for (int row = 0; row < copy_h; ++row)
+    {
+        uint16_t *dst = &backbuffer[(dst_y0 + row) * VIDEO_WIDTH + dst_x0];
+        memcpy(dst, row_ptr, (size_t)copy_w * 2U);
+        row_ptr += stride_bytes;
+    }
+}
+
+void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
+{
+    if (!pixels || width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    if (stride_bytes <= 0)
+    {
+        stride_bytes = width * 2;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+    int src_x = 0;
+    int src_y = 0;
+
+    if (x0 < 0)
+    {
+        src_x = -x0;
+        x0 = 0;
+    }
+    if (y0 < 0)
+    {
+        src_y = -y0;
+        y0 = 0;
+    }
+    if (x1 > VIDEO_WIDTH)
+    {
+        x1 = VIDEO_WIDTH;
+    }
+    if (y1 > VIDEO_HEIGHT)
+    {
+        y1 = VIDEO_HEIGHT;
+    }
+
+    int copy_w = x1 - x0;
+    int copy_h = y1 - y0;
+    if (copy_w <= 0 || copy_h <= 0)
+    {
+        return;
+    }
+
+    int max_copy_w = width - src_x;
+    int max_copy_h = height - src_y;
+    if (copy_w > max_copy_w)
+    {
+        copy_w = max_copy_w;
+    }
+    if (copy_h > max_copy_h)
+    {
+        copy_h = max_copy_h;
+    }
+    if (copy_w <= 0 || copy_h <= 0)
+    {
+        return;
+    }
+
+    video_blit_clipped(x0, y0, copy_w, copy_h,
+                       (const uint8_t *)pixels, stride_bytes, src_x, src_y);
+    video_invalidate_rect(x0, y0, copy_w, copy_h);
+}
+
 static void video_dirty_reset(void)
 {
     dirty_active = false;
@@ -583,6 +663,12 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     last_left_down = left_pressed;
 }
+
+bool video_is_active(void)
+{
+    return video_active;
+}
+
 static void video_log(const char *msg)
 {
     serial_write_string(msg);
