@@ -89,6 +89,7 @@ bool atk_shell_open(atk_state_t *state)
     atk_text_input_set_submit_handler(input, atk_shell_on_submit, view);
     atk_text_input_clear(input);
     atk_shell_append_prompt(view);
+    atk_label_scroll_to_bottom(label);
     atk_text_input_focus(state, input);
 
     atk_window_mark_dirty(window);
@@ -148,6 +149,7 @@ static void atk_shell_on_submit(atk_widget_t *input_widget, void *context)
 
     atk_text_input_clear(input_widget);
     atk_shell_append_prompt(view);
+    atk_label_scroll_to_bottom(view->label);
     atk_text_input_focus(view->state, input_widget);
     atk_window_mark_dirty(view->window);
     (void)success;

@@ -17,6 +17,8 @@ void video_fill(uint16_t color);
 void video_draw_rect(int x, int y, int width, int height, uint16_t color);
 void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color);
 void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
+void video_draw_text_clipped(int x, int y, int width, int height,
+                             const char *text, uint16_t fg, uint16_t bg);
 void video_invalidate_rect(int x, int y, int width, int height);
 void video_invalidate_all(void);
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes);

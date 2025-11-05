@@ -81,7 +81,7 @@ hdd.img: $(BOOT_BIN) $(STAGE2_BIN)
 
 RAM ?= 4G
 QEMU_DEBUG_LOG   ?= qemu-debug.log
-QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
+# QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
 HOMEBREW_PREFIX  := $(shell brew --prefix)
 
 # --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)

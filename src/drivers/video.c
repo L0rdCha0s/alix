@@ -7,7 +7,6 @@
 #include "keyboard.h"
 #include "libc.h"
 
-
 #define BGA_INDEX_PORT 0x1CE
 #define BGA_DATA_PORT  0x1CF
 #define BGA_REG_ID     0x0
@@ -28,37 +27,32 @@
 #define FONT_WIDTH 8
 #define FONT_HEIGHT 16
 
+#define VGA_FONT_BYTES 8192
+
+#define BACKBUFFER_ADDR 0x0000000000E00000ULL  /* 14 MiB: above kernel stack, below VFS pool */
+static uint16_t *backbuffer = (uint16_t *)(uintptr_t)BACKBUFFER_ADDR;
+
 static volatile uint16_t *framebuffer = 0;
 static uint64_t framebuffer_phys = 0;
 static bool framebuffer_detected = false;
+
 static bool vga_state_saved = false;
 static uint8_t saved_regs[1 + 5 + 25 + 9 + 21];
-static int video_mouse_log_count = 0;
+
+static bool vga_font_saved = false;
+static uint8_t saved_font[VGA_FONT_BYTES];
 
 static bool video_active = false;
 static bool exit_requested = false;
 static int cursor_x = 0;
 static int cursor_y = 0;
-static bool cursor_has_backup = false;
-static int cursor_backup_x = 0;
-static int cursor_backup_y = 0;
-static uint16_t cursor_backup[CURSOR_W * CURSOR_H];
+static int prev_cursor_x = 0;
+static int prev_cursor_y = 0;
 static bool last_left_down = false;
 static bool logged_first_mouse = false;
 
-#define BACKBUFFER_ADDR 0x0000000000E00000ULL  /* 14 MiB: above kernel stack, below VFS pool */
-static uint16_t *backbuffer = (uint16_t *)(uintptr_t)BACKBUFFER_ADDR;
-
-#define VGA_FONT_BYTES 8192
-
-static bool dirty_active = false;
-static int dirty_x0 = 0;
-static int dirty_y0 = 0;
-static int dirty_x1 = 0;
-static int dirty_y1 = 0;
-
-static bool vga_font_saved = false;
-static uint8_t saved_font[VGA_FONT_BYTES];
+static int video_mouse_log_count = 0;
+#define VIDEO_MOUSE_LOG 0
 
 typedef struct
 {
@@ -69,6 +63,45 @@ typedef struct
     uint8_t gc6;
 } vga_font_regs_t;
 
+/* --------- MSR / MTRR helpers (write-combining for LFB) --------- */
+static inline uint64_t rdmsr(uint32_t msr)
+{
+    uint32_t lo, hi;
+    __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline void wrmsr(uint32_t msr, uint64_t v)
+{
+    uint32_t lo = (uint32_t)v, hi = (uint32_t)(v >> 32);
+    __asm__ volatile ("wrmsr" :: "c"(msr), "a"(lo), "d"(hi));
+}
+
+#define IA32_MTRR_DEF_TYPE   0x2FF
+#define IA32_MTRR_PHYSBASE0  0x200
+#define IA32_MTRR_PHYSMASK0  0x201
+#define MTRR_TYPE_WC         0x01
+#define MTRR_DEF_ENABLE      (1ULL<<11)
+#define MTRR_VALID           (1ULL<<11)
+
+/* Align/size must be power of two; aperture is typically 16 MiB for Bochs/QEMU BGA. */
+static void video_enable_wc(uint64_t phys, uint64_t size)
+{
+    uint64_t def = rdmsr(IA32_MTRR_DEF_TYPE);
+
+    /* disable MTRRs while programming */
+    wrmsr(IA32_MTRR_DEF_TYPE, def & ~MTRR_DEF_ENABLE);
+
+    /* PhysBase: low 8 bits type, address in bits 12.. */
+    wrmsr(IA32_MTRR_PHYSBASE0, (phys & 0xFFFFFF000ULL) | MTRR_TYPE_WC);
+    /* PhysMask: valid bit + address mask in bits 12.. */
+    wrmsr(IA32_MTRR_PHYSMASK0, ((~(size - 1)) & 0xFFFFFF000ULL) | MTRR_VALID);
+
+    /* re-enable */
+    wrmsr(IA32_MTRR_DEF_TYPE, def | MTRR_DEF_ENABLE);
+    __asm__ volatile ("wbinvd"); /* be conservative */
+}
+
+/* --------- Prototypes --------- */
 static void video_log(const char *msg);
 static void video_log_hex(const char *prefix, uint64_t value);
 static void detect_framebuffer(void);
@@ -88,19 +121,13 @@ static uint8_t vga_gc_read(uint8_t index);
 static void vga_gc_write(uint8_t index, uint8_t value);
 static void video_dirty_reset(void);
 static void video_flush_dirty(void);
-static void cursor_restore(void);
-static void cursor_draw(void);
+static void cursor_draw_overlay(void);
+static void cursor_mark_old_rect_dirty(void);
 static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg);
 static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
                                const uint8_t *src, int stride_bytes, int src_x0, int src_y0);
 
-void video_init(void)
-{
-    vga_capture_state();
-    vga_capture_font();
-    atk_init();
-}
-
+/* --------- Cursor shape --------- */
 static const char *cursor_shape[CURSOR_H] = {
     "X...............",
     "XX..............",
@@ -124,7 +151,6 @@ static uint16_t cursor_color_primary(void)
 {
     return (uint16_t)(((0xFF & 0xF8) << 8) | ((0xFF & 0xFC) << 3) | (0xFF >> 3));
 }
-
 static uint16_t cursor_color_shadow(void)
 {
     uint8_t r = 0x40, g = 0x40, b = 0x40;
@@ -136,22 +162,29 @@ uint16_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
     return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
 
+/* --------- BGA helpers --------- */
 static void bga_write(uint16_t index, uint16_t value)
 {
     outw(BGA_INDEX_PORT, index);
     outw(BGA_DATA_PORT, value);
 }
-
 static uint16_t bga_read(uint16_t index)
 {
     outw(BGA_INDEX_PORT, index);
     return inw(BGA_DATA_PORT);
 }
-
 static bool bga_available(void)
 {
     uint16_t id = bga_read(BGA_REG_ID);
     return id >= 0xB0C0 && id <= 0xB0C6;
+}
+
+/* --------- Public API --------- */
+void video_init(void)
+{
+    vga_capture_state();
+    vga_capture_font();
+    atk_init();
 }
 
 static bool video_hw_enable(void)
@@ -162,6 +195,10 @@ static bool video_hw_enable(void)
         video_log("framebuffer phys is zero");
         return false;
     }
+
+    /* Enable write-combining over the LFB aperture (16 MiB typical) */
+    video_enable_wc(framebuffer_phys, 16ULL * 1024 * 1024ULL);
+
     framebuffer = (volatile uint16_t *)(uintptr_t)framebuffer_phys;
     video_log_hex("Framebuffer phys base: 0x", framebuffer_phys);
 
@@ -207,126 +244,43 @@ void video_fill(uint16_t color)
     }
 }
 
-static void cursor_restore(void)
+/* Draw cursor only to the LFB (overlay), no readbacks */
+static void cursor_draw_overlay(void)
 {
-    if (!cursor_has_backup)
-    {
-        return;
-    }
-    for (int row = 0; row < CURSOR_H; ++row)
-    {
-        for (int col = 0; col < CURSOR_W; ++col)
-        {
-            int dst_x = cursor_backup_x + col;
-            int dst_y = cursor_backup_y + row;
-            if (dst_x < 0 || dst_x >= VIDEO_WIDTH || dst_y < 0 || dst_y >= VIDEO_HEIGHT)
-            {
-                continue;
-            }
-            framebuffer[dst_y * VIDEO_WIDTH + dst_x] = cursor_backup[row * CURSOR_W + col];
-        }
-    }
-    cursor_has_backup = false;
-}
-
-static void cursor_draw(void)
-{
-    cursor_restore();
-
-    if (cursor_x < 0)
-    {
-        cursor_x = 0;
-    }
-    if (cursor_y < 0)
-    {
-        cursor_y = 0;
-    }
-    if (cursor_x > VIDEO_WIDTH - CURSOR_W)
-    {
-        cursor_x = VIDEO_WIDTH - CURSOR_W;
-    }
-    if (cursor_y > VIDEO_HEIGHT - CURSOR_H)
-    {
-        cursor_y = VIDEO_HEIGHT - CURSOR_H;
-    }
-
-    cursor_backup_x = cursor_x;
-    cursor_backup_y = cursor_y;
+    /* clamp */
+    if (cursor_x < 0) cursor_x = 0;
+    if (cursor_y < 0) cursor_y = 0;
+    if (cursor_x > VIDEO_WIDTH  - CURSOR_W)  cursor_x = VIDEO_WIDTH  - CURSOR_W;
+    if (cursor_y > VIDEO_HEIGHT - CURSOR_H)  cursor_y = VIDEO_HEIGHT - CURSOR_H;
 
     for (int row = 0; row < CURSOR_H; ++row)
     {
+        int dst_y = cursor_y + row;
+        if ((unsigned)dst_y >= VIDEO_HEIGHT) continue;
+
         for (int col = 0; col < CURSOR_W; ++col)
         {
             int dst_x = cursor_x + col;
-            int dst_y = cursor_y + row;
-            if (dst_x < 0 || dst_x >= VIDEO_WIDTH || dst_y < 0 || dst_y >= VIDEO_HEIGHT)
-            {
-                cursor_backup[row * CURSOR_W + col] = 0;
-                continue;
-            }
-
-            uint16_t *dest = (uint16_t *)&framebuffer[dst_y * VIDEO_WIDTH + dst_x];
-            cursor_backup[row * CURSOR_W + col] = *dest;
+            if ((unsigned)dst_x >= VIDEO_WIDTH) continue;
 
             char pixel = cursor_shape[row][col];
-            if (pixel == 'X')
-            {
-                *dest = cursor_color_primary();
-            }
-            else if (pixel == 'O')
-            {
-                *dest = cursor_color_shadow();
-            }
+            if (pixel == '.') continue; /* leave background as last flushed */
+
+            uint16_t *p = (uint16_t *)&framebuffer[dst_y * VIDEO_WIDTH + dst_x];
+            *p = (pixel == 'X') ? cursor_color_primary() : cursor_color_shadow();
         }
     }
-    cursor_has_backup = true;
+
+    prev_cursor_x = cursor_x;
+    prev_cursor_y = cursor_y;
 }
 
-void video_draw_rect(int x, int y, int width, int height, uint16_t color)
+static void cursor_mark_old_rect_dirty(void)
 {
-    if (width <= 0 || height <= 0)
-    {
-        return;
-    }
-
-    int x0 = x;
-    int y0 = y;
-    int x1 = x + width;
-    int y1 = y + height;
-
-    if (x1 <= 0 || y1 <= 0 || x0 >= VIDEO_WIDTH || y0 >= VIDEO_HEIGHT)
-    {
-        return;
-    }
-
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > VIDEO_WIDTH) x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
-
-    for (int row = y0; row < y1; ++row)
-    {
-        uint16_t *dst = &backbuffer[row * VIDEO_WIDTH + x0];
-        for (int col = x0; col < x1; ++col)
-        {
-            *dst++ = color;
-        }
-    }
+    video_invalidate_rect(prev_cursor_x, prev_cursor_y, CURSOR_W, CURSOR_H);
 }
 
-void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color)
-{
-    if (width <= 0 || height <= 0)
-    {
-        return;
-    }
-
-    video_draw_rect(x, y, width, 1, color);
-    video_draw_rect(x, y + height - 1, width, 1, color);
-    video_draw_rect(x, y, 1, height, color);
-    video_draw_rect(x + width - 1, y, 1, height, color);
-}
-
+/* --------- Text & blits to backbuffer --------- */
 static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
 {
     unsigned char ch = (unsigned char)c;
@@ -340,18 +294,13 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
     for (int row = 0; row < FONT_HEIGHT; ++row)
     {
         int dst_y = y + row;
-        if (dst_y < 0 || dst_y >= VIDEO_HEIGHT)
-        {
-            continue;
-        }
+        if ((unsigned)dst_y >= VIDEO_HEIGHT) continue;
+
         uint8_t bits = glyph[row];
         int dst_x = x;
         for (int col = 0; col < FONT_WIDTH; ++col, ++dst_x)
         {
-            if (dst_x < 0 || dst_x >= VIDEO_WIDTH)
-            {
-                continue;
-            }
+            if ((unsigned)dst_x >= VIDEO_WIDTH) continue;
             uint16_t color = (bits & (0x80 >> col)) ? fg : bg;
             backbuffer[dst_y * VIDEO_WIDTH + dst_x] = color;
         }
@@ -360,13 +309,56 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
 
 void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
 {
-    if (!text)
-    {
-        return;
-    }
+    if (!text) return;
     for (size_t i = 0; text[i] != '\0'; ++i)
     {
         video_draw_char(x + (int)(i * FONT_WIDTH), y, text[i], fg, bg);
+    }
+}
+
+void video_draw_text_clipped(int x, int y, int width, int height,
+                             const char *text, uint16_t fg, uint16_t bg)
+{
+    if (!text || width <= 0 || height <= 0) return;
+
+    int max_chars_per_line = width / FONT_WIDTH;
+    if (max_chars_per_line <= 0) return;
+
+    int line_height = FONT_HEIGHT + 2;
+    int max_lines = height / line_height;
+    if (max_lines <= 0) return;
+
+    const char *cursor = text;
+    int drawn_lines = 0;
+    char buffer[512];
+    int buffer_limit = (int)sizeof(buffer) - 1;
+
+    while (drawn_lines < max_lines && *cursor != '\0')
+    {
+        int chars_in_line = 0;
+        const char *line_start = cursor;
+
+        while (*cursor != '\0' && *cursor != '\n' && chars_in_line < max_chars_per_line)
+        {
+            ++cursor;
+            ++chars_in_line;
+        }
+
+        int copy_len = chars_in_line;
+        if (copy_len > buffer_limit) copy_len = buffer_limit;
+
+        for (int i = 0; i < copy_len; ++i) buffer[i] = line_start[i];
+        buffer[copy_len] = '\0';
+
+        video_draw_text(x, y + drawn_lines * line_height, buffer, fg, bg);
+        ++drawn_lines;
+
+        if (copy_len < chars_in_line)
+        {
+            cursor = line_start + copy_len;
+            continue;
+        }
+        if (*cursor == '\n') ++cursor;
     }
 }
 
@@ -384,68 +376,35 @@ static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
 
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
 {
-    if (!pixels || width <= 0 || height <= 0)
-    {
-        return;
-    }
+    if (!pixels || width <= 0 || height <= 0) return;
+    if (stride_bytes <= 0) stride_bytes = width * 2;
 
-    if (stride_bytes <= 0)
-    {
-        stride_bytes = width * 2;
-    }
+    int x0 = x, y0 = y;
+    int x1 = x + width, y1 = y + height;
+    int src_x = 0, src_y = 0;
 
-    int x0 = x;
-    int y0 = y;
-    int x1 = x + width;
-    int y1 = y + height;
-    int src_x = 0;
-    int src_y = 0;
-
-    if (x0 < 0)
-    {
-        src_x = -x0;
-        x0 = 0;
-    }
-    if (y0 < 0)
-    {
-        src_y = -y0;
-        y0 = 0;
-    }
-    if (x1 > VIDEO_WIDTH)
-    {
-        x1 = VIDEO_WIDTH;
-    }
-    if (y1 > VIDEO_HEIGHT)
-    {
-        y1 = VIDEO_HEIGHT;
-    }
+    if (x0 < 0) { src_x = -x0; x0 = 0; }
+    if (y0 < 0) { src_y = -y0; y0 = 0; }
+    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
+    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
 
     int copy_w = x1 - x0;
     int copy_h = y1 - y0;
-    if (copy_w <= 0 || copy_h <= 0)
-    {
-        return;
-    }
+    if (copy_w <= 0 || copy_h <= 0) return;
 
-    int max_copy_w = width - src_x;
+    int max_copy_w = width  - src_x;
     int max_copy_h = height - src_y;
-    if (copy_w > max_copy_w)
-    {
-        copy_w = max_copy_w;
-    }
-    if (copy_h > max_copy_h)
-    {
-        copy_h = max_copy_h;
-    }
-    if (copy_w <= 0 || copy_h <= 0)
-    {
-        return;
-    }
+    if (copy_w > max_copy_w) copy_w = max_copy_w;
+    if (copy_h > max_copy_h) copy_h = max_copy_h;
+    if (copy_w <= 0 || copy_h <= 0) return;
 
-    video_blit_clipped(x0, y0, copy_w, copy_h,
-                       (const uint8_t *)pixels, stride_bytes, src_x, src_y);
+    video_blit_clipped(x0, y0, copy_w, copy_h, (const uint8_t *)pixels, stride_bytes, src_x, src_y);
     video_invalidate_rect(x0, y0, copy_w, copy_h);
 }
+
+/* --------- Dirty tracking & flush --------- */
+static bool dirty_active = false;
+static int dirty_x0 = 0, dirty_y0 = 0, dirty_x1 = 0, dirty_y1 = 0;
 
 static void video_dirty_reset(void)
 {
@@ -456,31 +415,22 @@ static void video_dirty_reset(void)
 
 void video_invalidate_rect(int x, int y, int width, int height)
 {
-    int x0 = x;
-    int y0 = y;
-    int x1 = x + width;
-    int y1 = y + height;
+    int x0 = x, y0 = y, x1 = x + width, y1 = y + height;
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > VIDEO_WIDTH) x1 = VIDEO_WIDTH;
+    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
     if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
 
-    if (x0 >= x1 || y0 >= y1)
-    {
-        return;
-    }
+    if (x0 >= x1 || y0 >= y1) return;
 
     if (!dirty_active)
     {
         dirty_active = true;
-        dirty_x0 = x0;
-        dirty_y0 = y0;
-        dirty_x1 = x1;
-        dirty_y1 = y1;
+        dirty_x0 = x0; dirty_y0 = y0;
+        dirty_x1 = x1; dirty_y1 = y1;
         return;
     }
-
     if (x0 < dirty_x0) dirty_x0 = x0;
     if (y0 < dirty_y0) dirty_y0 = y0;
     if (x1 > dirty_x1) dirty_x1 = x1;
@@ -492,26 +442,40 @@ void video_invalidate_all(void)
     video_invalidate_rect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
 }
 
+/* Copy with wide stores; helps WC coalesce */
+static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t bytes)
+{
+    const uint8_t *s = (const uint8_t *)src;
+    volatile uint8_t *d = (volatile uint8_t *)dst_mmio;
+
+    size_t i = 0;
+    /* align to 8 */
+    for (; ((uintptr_t)(d + i) & 7) && i < bytes; ++i) d[i] = s[i];
+    for (; i + 8 <= bytes; i += 8)
+    {
+        *(volatile uint64_t *)(d + i) = *(const uint64_t *)(s + i);
+    }
+    for (; i < bytes; ++i) d[i] = s[i];
+}
+
 static void video_flush_dirty(void)
 {
-    if (!dirty_active || !framebuffer)
-    {
-        return;
-    }
+    if (!dirty_active || !framebuffer) return;
+
+    int w = dirty_x1 - dirty_x0;
+    size_t row_bytes = (size_t)w * 2U;
 
     for (int y = dirty_y0; y < dirty_y1; ++y)
     {
         volatile uint16_t *dst = &framebuffer[y * VIDEO_WIDTH + dirty_x0];
         uint16_t *src = &backbuffer[y * VIDEO_WIDTH + dirty_x0];
-        for (int x = dirty_x0; x < dirty_x1; ++x)
-        {
-            *dst++ = *src++;
-        }
+        fb_memcpy_wc((void *)dst, src, row_bytes);
     }
 
     video_dirty_reset();
 }
 
+/* --------- Mode entry/exit & loop --------- */
 bool video_enter_mode(void)
 {
     if (!video_hw_enable())
@@ -530,14 +494,17 @@ bool video_enter_mode(void)
 
     uint16_t sample = backbuffer[(VIDEO_WIDTH * VIDEO_HEIGHT) / 2];
     video_log_hex("Sample pixel mid-screen: 0x", sample);
+
     cursor_x = VIDEO_WIDTH / 2;
     cursor_y = VIDEO_HEIGHT / 2;
-    cursor_has_backup = false;
+    prev_cursor_x = cursor_x;
+    prev_cursor_y = cursor_y;
     last_left_down = false;
     exit_requested = false;
     video_active = true;
     logged_first_mouse = false;
-    cursor_draw();
+
+    cursor_draw_overlay();
     video_log("cursor drawn, entering loop");
     return true;
 }
@@ -550,30 +517,24 @@ void video_run_loop(void)
         mouse_poll();
         video_poll_keyboard();
         __asm__ volatile ("hlt");
-        mouse_poll();
-        video_poll_keyboard();
     }
     video_log("video_run_loop end");
 }
 
 void video_exit_mode(void)
 {
-    cursor_restore();
     video_hw_disable();
     vga_enter_text_mode();
     video_active = false;
     exit_requested = false;
-    cursor_has_backup = false;
     video_dirty_reset();
     video_log("video mode exited");
 }
 
+/* --------- Input paths --------- */
 static void video_poll_keyboard(void)
 {
-    if (!video_active)
-    {
-        return;
-    }
+    if (!video_active) return;
 
     char ch = 0;
     bool have_input = false;
@@ -583,62 +544,47 @@ static void video_poll_keyboard(void)
     {
         have_input = true;
         atk_key_event_result_t result = atk_handle_key_char(ch);
-        if (result.redraw)
-        {
-            redraw_needed = true;
-        }
-        if (result.exit_video)
-        {
-            exit_requested = true;
-        }
+        if (result.redraw) redraw_needed = true;
+        if (result.exit_video) exit_requested = true;
     }
 
-    if (!have_input || !redraw_needed)
-    {
-        return;
-    }
+    if (!have_input || !redraw_needed) return;
 
-    cursor_restore();
-    video_dirty_reset();
-
+    video_dirty_reset(); /* let renderer declare dirties */
     atk_render();
-
-    if (dirty_active)
-    {
-        video_flush_dirty();
-    }
-
-    cursor_draw();
+    if (dirty_active) video_flush_dirty();
+    cursor_draw_overlay();
 }
 
 void video_on_mouse_event(int dx, int dy, bool left_pressed)
 {
     if (!video_active)
     {
-        if (dx != 0 || dy != 0 || left_pressed)
-        {
-            video_log("mouse event ignored (video inactive)");
-        }
+#if VIDEO_MOUSE_LOG
+        if (dx != 0 || dy != 0 || left_pressed) video_log("mouse event ignored (video inactive)");
+#endif
         return;
     }
-    cursor_restore();
-    video_dirty_reset();
 
+    /* old cursor area will need repainting from backbuffer */
+    cursor_mark_old_rect_dirty();
+
+    /* update cursor */
     cursor_x += dx;
     cursor_y += dy;
-
     if (cursor_x < 0) cursor_x = 0;
     if (cursor_y < 0) cursor_y = 0;
     if (cursor_x > VIDEO_WIDTH - 1) cursor_x = VIDEO_WIDTH - 1;
     if (cursor_y > VIDEO_HEIGHT - 1) cursor_y = VIDEO_HEIGHT - 1;
 
-    bool pressed_edge = left_pressed && !last_left_down;
-    bool released_edge = !left_pressed && last_left_down;
+    bool pressed_edge  = (left_pressed && !last_left_down);
+    bool released_edge = (!left_pressed && last_left_down);
 
     atk_mouse_event_result_t result = atk_handle_mouse_event(cursor_x, cursor_y, pressed_edge, released_edge, left_pressed);
 
     if (result.redraw)
     {
+        /* let renderer choose dirties; do not pre-clear here */
         atk_render();
     }
 
@@ -647,14 +593,16 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
         video_flush_dirty();
     }
 
-    cursor_draw();
+    cursor_draw_overlay();
 
+#if VIDEO_MOUSE_LOG
     if (!logged_first_mouse)
     {
         video_log("mouse movement detected in video");
         logged_first_mouse = true;
     }
     video_log_mouse_event(dx, dy, left_pressed);
+#endif
 
     if (result.exit_video)
     {
@@ -664,11 +612,7 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     last_left_down = left_pressed;
 }
 
-bool video_is_active(void)
-{
-    return video_active;
-}
-
+/* --------- Logging & detection --------- */
 static void video_log(const char *msg)
 {
     serial_write_string(msg);
@@ -713,10 +657,8 @@ static void detect_framebuffer(void)
 
 static void video_log_mouse_event(int dx, int dy, bool left_pressed)
 {
-    if (video_mouse_log_count >= 16)
-    {
-        return;
-    }
+#if VIDEO_MOUSE_LOG
+    if (video_mouse_log_count >= 16) return;
     ++video_mouse_log_count;
     serial_write_string("mouse event dx=");
     serial_write_char((dx >= 0) ? '+' : '-');
@@ -729,26 +671,27 @@ static void video_log_mouse_event(int dx, int dy, bool left_pressed)
     serial_write_char('0' + (abs_dy / 10));
     serial_write_char('0' + (abs_dy % 10));
     serial_write_string(left_pressed ? " left=1\r\n" : " left=0\r\n");
+#else
+    (void)dx; (void)dy; (void)left_pressed;
+#endif
 }
 
+/* --------- VGA state/font save/restore --------- */
 static uint8_t vga_seq_read(uint8_t index)
 {
     outb(0x3C4, index);
     return inb(0x3C5);
 }
-
 static void vga_seq_write(uint8_t index, uint8_t value)
 {
     outb(0x3C4, index);
     outb(0x3C5, value);
 }
-
 static uint8_t vga_gc_read(uint8_t index)
 {
     outb(0x3CE, index);
     return inb(0x3CF);
 }
-
 static void vga_gc_write(uint8_t index, uint8_t value)
 {
     outb(0x3CE, index);
@@ -757,16 +700,13 @@ static void vga_gc_write(uint8_t index, uint8_t value)
 
 static void vga_font_access_begin(vga_font_regs_t *state)
 {
-    if (!state)
-    {
-        return;
-    }
+    if (!state) return;
 
     state->seq2 = vga_seq_read(0x02);
     state->seq4 = vga_seq_read(0x04);
-    state->gc4 = vga_gc_read(0x04);
-    state->gc5 = vga_gc_read(0x05);
-    state->gc6 = vga_gc_read(0x06);
+    state->gc4  = vga_gc_read(0x04);
+    state->gc5  = vga_gc_read(0x05);
+    state->gc6  = vga_gc_read(0x06);
 
     vga_seq_write(0x00, 0x01);
     vga_seq_write(0x02, 0x04);
@@ -780,10 +720,7 @@ static void vga_font_access_begin(vga_font_regs_t *state)
 
 static void vga_font_access_end(const vga_font_regs_t *state)
 {
-    if (!state)
-    {
-        return;
-    }
+    if (!state) return;
 
     vga_seq_write(0x00, 0x01);
     vga_seq_write(0x02, state->seq2);
@@ -838,10 +775,8 @@ static void vga_write_regs(const uint8_t *regs)
 
 static void vga_capture_state(void)
 {
-    if (vga_state_saved)
-    {
-        return;
-    }
+    if (vga_state_saved) return;
+
     uint8_t *ptr = saved_regs;
     *ptr++ = inb(0x3CC);
 
@@ -894,10 +829,7 @@ static bool vga_restore_state(void)
 
 static void vga_capture_font(void)
 {
-    if (vga_font_saved)
-    {
-        return;
-    }
+    if (vga_font_saved) return;
     if (!vga_state_saved)
     {
         video_log("Cannot capture VGA font before state capture");
@@ -954,4 +886,50 @@ static void vga_enter_text_mode(void)
         return;
     }
     vga_restore_font();
+}
+
+void video_draw_rect(int x, int y, int width, int height, uint16_t color)
+{
+    if (width <= 0 || height <= 0) return;
+
+    int x0 = x, y0 = y;
+    int x1 = x + width, y1 = y + height;
+
+    // trivial reject
+    if (x1 <= 0 || y1 <= 0 || x0 >= VIDEO_WIDTH || y0 >= VIDEO_HEIGHT) return;
+
+    // clip to screen
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
+    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+
+    for (int row = y0; row < y1; ++row)
+    {
+        uint16_t *dst = &backbuffer[row * VIDEO_WIDTH + x0];
+        for (int col = x0; col < x1; ++col)
+        {
+            *dst++ = color;
+        }
+    }
+
+    // NOTE: No video_invalidate_rect() here — callers mark dirty as needed.
+}
+
+void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color)
+{
+    if (width <= 0 || height <= 0) return;
+
+    // top & bottom
+    video_draw_rect(x, y, width, 1, color);
+    video_draw_rect(x, y + height - 1, width, 1, color);
+
+    // left & right
+    video_draw_rect(x, y, 1, height, color);
+    video_draw_rect(x + width - 1, y, 1, height, color);
+}
+
+bool video_is_active(void)
+{
+    return video_active;
 }

@@ -8,6 +8,9 @@
 #include "atk/atk_text_input.h"
 #include "atk/atk_image.h"
 
+/* Forward decl for compilers if video.h doesn't expose it (no harm if duplicated). */
+void video_invalidate_rect(int x, int y, int width, int height);
+
 static void atk_log(const char *msg);
 static void format_window_title(char *buffer, size_t capacity, int id);
 static void window_get_bounds(const atk_widget_t *window, int *x, int *y, int *width, int *height);
