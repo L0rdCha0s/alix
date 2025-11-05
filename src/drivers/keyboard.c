@@ -1,6 +1,7 @@
 #include "keyboard.h"
 #include "io.h"
 #include "interrupts.h"
+#include "serial.h"
 
 #define KBD_STATUS 0x64
 #define KBD_DATA   0x60
@@ -11,9 +12,10 @@ static uint8_t caps_lock_enabled = 0;
 static uint8_t extended_code_pending = 0;
 
 #define KBD_BUFFER_SIZE 64
-static uint8_t scancode_buffer[KBD_BUFFER_SIZE];
-static size_t buffer_head = 0;
-static size_t buffer_tail = 0;
+static volatile uint8_t scancode_buffer[KBD_BUFFER_SIZE];
+static volatile size_t buffer_head = 0;
+static volatile size_t buffer_tail = 0;
+static uint8_t key_down[128];
 
 static bool buffer_empty(void)
 {
@@ -33,6 +35,12 @@ static void buffer_push(uint8_t code)
     }
     scancode_buffer[buffer_head] = code;
     buffer_head = (buffer_head + 1) % KBD_BUFFER_SIZE;
+
+    serial_write_string("keyboard.c: buffer_push scancode=0x");
+    static const char hex[] = "0123456789ABCDEF";
+    serial_write_char(hex[(code >> 4) & 0xF]);
+    serial_write_char(hex[code & 0xF]);
+    serial_write_string("\r\n");
 }
 
 static bool buffer_pop(uint8_t *code)
@@ -92,6 +100,10 @@ static void keyboard_reset_state(void)
     extended_code_pending = 0;
     buffer_head = 0;
     buffer_tail = 0;
+    for (size_t i = 0; i < sizeof(key_down); ++i)
+    {
+        key_down[i] = 0;
+    }
 
     /* Drain any outstanding scancodes the firmware may have queued. */
     uint8_t discard;
@@ -108,6 +120,9 @@ void keyboard_init(void)
 
 bool keyboard_try_read(char *out_char)
 {
+    //serial_write_string("keybaord.c: keyboard_try_read\n");
+
+
     uint8_t scancode;
     if (!read_scancode(&scancode))
     {
@@ -141,11 +156,19 @@ bool keyboard_try_read(char *out_char)
     if (scancode == 0x2A)
     {
         left_shift_pressed = released ? 0 : 1;
+        if (scancode < 128)
+        {
+            key_down[scancode] = released ? 0 : 1;
+        }
         return false;
     }
     if (scancode == 0x36)
     {
         right_shift_pressed = released ? 0 : 1;
+        if (scancode < 128)
+        {
+            key_down[scancode] = released ? 0 : 1;
+        }
         return false;
     }
 
@@ -157,7 +180,20 @@ bool keyboard_try_read(char *out_char)
 
     if (released)
     {
+        if (scancode < 128)
+        {
+            key_down[scancode] = 0;
+        }
         return false;
+    }
+
+    if (scancode < 128)
+    {
+        if (key_down[scancode])
+        {
+            return false;
+        }
+        key_down[scancode] = 1;
     }
 
     bool shift_active = (left_shift_pressed | right_shift_pressed) != 0;
@@ -201,5 +237,11 @@ bool keyboard_try_read(char *out_char)
 
 void keyboard_buffer_push(uint8_t scancode)
 {
+    serial_write_string("keyboard.c: keyboard_buffer_push scancode=0x");
+    static const char hex[] = "0123456789ABCDEF";
+    serial_write_char(hex[(scancode >> 4) & 0xF]);
+    serial_write_char(hex[scancode & 0xF]);
+    serial_write_string("\r\n");
+
     buffer_push(scancode);
 }

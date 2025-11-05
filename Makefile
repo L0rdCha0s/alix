@@ -36,8 +36,11 @@ C_SOURCES := \
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 
+ASM_SOURCES := $(wildcard $(ARCH_DIR)/*.S)
+ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
+
 STAGE2_OBJ := $(OBJDIR)/arch/x86/stage2.o
-STAGE2_OBJS := $(STAGE2_OBJ) $(C_OBJECTS)
+STAGE2_OBJS := $(STAGE2_OBJ) $(C_OBJECTS) $(ASM_OBJECTS)
 
 BOOT_BIN   := $(OBJDIR)/boot.bin
 STAGE2_ELF := $(OBJDIR)/stage2.elf
@@ -52,6 +55,10 @@ $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 $(STAGE2_OBJ): $(STAGE2_SRC)
 	@mkdir -p $(dir $@)
 	$(NASM) -f elf64 -o $@ $<
+
+$(OBJDIR)/%.o: $(SRC_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BOOT_BIN): $(BOOT_SRC) $(STAGE2_BIN)
 	@mkdir -p $(dir $@)
@@ -81,7 +88,7 @@ hdd.img: $(BOOT_BIN) $(STAGE2_BIN)
 
 RAM ?= 4G
 QEMU_DEBUG_LOG   ?= qemu-debug.log
-# QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
+QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
 HOMEBREW_PREFIX  := $(shell brew --prefix)
 
 # --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)

@@ -155,6 +155,8 @@ collect_e820:
 
 
 ALIGN 16
+  global tss64
+  global tss64_end
 tss64:
   dd 0
   dd 0
@@ -309,7 +311,7 @@ pmode_entry:
   loop .map_high3_loop
 
   mov eax, cr4
-  or  eax, (1 << 5)          ; enable PAE
+  or  eax, (1 << 5) | (1 << 9) | (1 << 10) ; enable PAE + OSFXSR + OSXMMEXCPT
   mov cr4, eax
 
   mov eax, PML4
@@ -321,7 +323,8 @@ pmode_entry:
   wrmsr
 
   mov eax, cr0
-  or  eax, (1 << 31)         ; enable paging
+  or  eax, (1 << 31) | (1 << 1) ; enable paging and MP
+  and eax, ~(1 << 2)             ; clear EM to allow FPU/SSE
   mov cr0, eax
 
   jmp CODE64_SEL:long_entry

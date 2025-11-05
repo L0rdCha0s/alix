@@ -187,24 +187,11 @@ void mouse_poll(void)
         {
             break; /* no data pending */
         }
-        uint8_t data = inb(KBD_DATA);
         if ((status & 0x20) == 0)
         {
-            if (mouse_poll_log < 8)
-            {
-                serial_write_string("mouse_poll draining keyboard status=0x");
-                static const char hex[] = "0123456789ABCDEF";
-                serial_write_char(hex[(status >> 4) & 0xF]);
-                serial_write_char(hex[status & 0xF]);
-                serial_write_string(" data=0x");
-                serial_write_char(hex[(data >> 4) & 0xF]);
-                serial_write_char(hex[data & 0xF]);
-                serial_write_string("\r\n");
-                mouse_poll_log++;
-            }
-            keyboard_buffer_push(data);
-            continue;
+            break; /* keyboard data: leave for keyboard driver */
         }
+        uint8_t data = inb(KBD_DATA);
         mouse_process_byte(data);
     }
 }

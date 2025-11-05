@@ -12,6 +12,14 @@
 #include "net/tcp.h"
 #include "net/dns.h"
 #include "idt.h"
+#include "process.h"
+
+static void shell_process_entry(void *arg)
+{
+    (void)arg;
+    shell_main();
+    process_exit(0);
+}
 
 void kernel_main(void)
 {
@@ -21,6 +29,7 @@ void kernel_main(void)
     console_clear();
 
     heap_init();
+    process_system_init();
 
     serial_write_char('k');
     serial_write_string("IDT base pre-init=\r\n");
@@ -35,6 +44,7 @@ void kernel_main(void)
     serial_write_char('\n');
     serial_write_char('f');
     interrupts_init();
+    interrupts_enable_irq(1);
     serial_write_char('I');
     timer_init(100);
     serial_write_char('T');
@@ -49,7 +59,18 @@ void kernel_main(void)
     serial_write_char('E');
     interrupts_enable();
     serial_write_char('e');
-    shell_main();
+
+    process_t *shell_process = process_create_kernel("shell", shell_process_entry, NULL, 0);
+    if (!shell_process)
+    {
+        serial_write_string("Failed to create shell process\r\n");
+        for (;;)
+        {
+            __asm__ volatile ("hlt");
+        }
+    }
+
+    process_start_scheduler();
 
     for (;;)
     {

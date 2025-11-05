@@ -1,5 +1,3 @@
-#include <stddef.h>
-
 #include "shell.h"
 #include "shell_commands.h"
 
@@ -8,6 +6,7 @@
 #include "keyboard.h"
 #include "mouse.h"
 #include "libc.h"
+#include "process.h"
 #include "vfs.h"
 
 #define INPUT_CAPACITY 256
@@ -17,6 +16,15 @@ typedef struct
     const char *name;
     bool (*handler)(shell_state_t *, shell_output_t *, const char *);
 } shell_command_t;
+
+typedef struct
+{
+    shell_state_t *shell;
+    shell_output_t *output;
+    const char *args;
+    bool (*handler)(shell_state_t *, shell_output_t *, const char *);
+    bool result;
+} shell_command_task_t;
 
 static char cli_get_char(void);
 static size_t cli_read_line(char *buffer, size_t capacity);
@@ -28,6 +36,7 @@ static void shell_print_prompt(void);
 static void shell_run_and_display(shell_state_t *shell, const char *input);
 static char *shell_duplicate_empty(void);
 static char *shell_duplicate_string(const char *text);
+static void shell_command_runner(void *arg);
 
 void shell_output_init_console(shell_output_t *out)
 {
@@ -236,6 +245,18 @@ static const shell_command_t g_commands[] = {
     { "free",        shell_cmd_free },
 };
 
+static void shell_command_runner(void *arg)
+{
+    shell_command_task_t *task = (shell_command_task_t *)arg;
+    bool ok = false;
+    if (task && task->handler)
+    {
+        ok = task->handler(task->shell, task->output, task->args);
+        task->result = ok;
+    }
+    process_exit(ok ? 0 : 1);
+}
+
 char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
 {
     if (success)
@@ -337,7 +358,33 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         if (strcmp(line, g_commands[i].name) == 0)
         {
             handler_found = true;
-            handler_result = g_commands[i].handler(shell, &output, args);
+            shell_command_task_t *task = (shell_command_task_t *)malloc(sizeof(shell_command_task_t));
+            if (!task)
+            {
+                handler_result = false;
+                break;
+            }
+            task->shell = shell;
+            task->output = &output;
+            task->args = args;
+            task->handler = g_commands[i].handler;
+            task->result = false;
+
+            process_t *proc = process_create_kernel(g_commands[i].name,
+                                                    shell_command_runner,
+                                                    task,
+                                                    0);
+            if (!proc)
+            {
+                free(task);
+                handler_result = false;
+                break;
+            }
+
+            process_join(proc, NULL);
+            handler_result = task->result;
+            process_destroy(proc);
+            free(task);
             break;
         }
     }
@@ -437,23 +484,32 @@ static void shell_print_prompt(void)
 
 static char cli_get_char(void)
 {
+    serial_write_string("In cli_get_char\n");
+
     while (1)
     {
         char c;
         if (keyboard_try_read(&c))
         {
+            serial_write_string("shell.c: keyboard_try_read has char\n");
+
             return c;
         }
         if (serial_has_char())
         {
+            serial_write_string("shell.c: serial_has_char has char\n");
+
             return serial_read_char();
         }
+
         mouse_poll();
     }
 }
 
 static size_t cli_read_line(char *buffer, size_t capacity)
 {
+    serial_write_string("shell.c: cli_read_line in\n");
+    
     size_t len = 0;
     while (1)
     {
@@ -490,6 +546,8 @@ static size_t cli_read_line(char *buffer, size_t capacity)
             serial_write_char(c);
         }
     }
+
+    serial_write_string("shell.c: cli_read_line out\n");
 }
 
 static bool is_space(char c)

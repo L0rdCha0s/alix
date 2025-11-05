@@ -2,9 +2,12 @@
 #include "io.h"
 #include "timer.h"
 #include "mouse.h"
+#include "keyboard.h"
 #include "types.h"
+#include "interrupts.h"
 #include "rtl8139.h"
 #include "serial.h"
+#include "process.h"
 
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
@@ -15,15 +18,7 @@
 static uint8_t pic1_mask = 0xFF;
 static uint8_t pic2_mask = 0xFF;
 static int irq12_log_count = 0;
-
-struct interrupt_frame
-{
-    uint64_t rip;
-    uint64_t cs;
-    uint64_t rflags;
-    uint64_t rsp;
-    uint64_t ss;
-};
+static int irq1_log_count = 0;
 
 static void pic_remap(void)
 {
@@ -55,21 +50,42 @@ static void pic_send_eoi(uint8_t irq)
     outb(PIC1_COMMAND, PIC_EOI);
 }
 
-__attribute__((interrupt)) static void irq0_handler(struct interrupt_frame *frame)
+__attribute__((interrupt)) static void irq1_handler(interrupt_frame_t *frame)
 {
     (void)frame;
+    uint8_t status = inb(0x64);
+    if ((status & 0x01) != 0)
+    {
+        uint8_t scancode = inb(0x60);
+        keyboard_buffer_push(scancode);
+        if (irq1_log_count < 16)
+        {
+            serial_write_string("irq1 scancode=0x");
+            static const char hex[] = "0123456789ABCDEF";
+            serial_write_char(hex[(scancode >> 4) & 0xF]);
+            serial_write_char(hex[scancode & 0xF]);
+            serial_write_string("\r\n");
+            irq1_log_count++;
+        }
+    }
+    pic_send_eoi(1);
+}
+
+__attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
+{
     timer_on_tick();
+    process_on_timer_tick(frame);
     pic_send_eoi(0);
 }
 
-__attribute__((interrupt)) static void irq11_handler(struct interrupt_frame *frame)
+__attribute__((interrupt)) static void irq11_handler(interrupt_frame_t *frame)
 {
     (void)frame;
     rtl8139_on_irq();
     pic_send_eoi(11);
 }
 
-__attribute__((interrupt)) static void irq12_handler(struct interrupt_frame *frame)
+__attribute__((interrupt)) static void irq12_handler(interrupt_frame_t *frame)
 {
     (void)frame;
     uint8_t status = inb(0x64);
@@ -105,6 +121,7 @@ void interrupts_init(void)
 {
     idt_init();
     idt_set_gate(32, (void *)irq0_handler);
+    idt_set_gate(33, (void *)irq1_handler);
     idt_set_gate(43, (void *)irq11_handler);
     idt_set_gate(44, (void *)irq12_handler);
     idt_load();
