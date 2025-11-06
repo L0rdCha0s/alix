@@ -3,6 +3,7 @@
 
 #include "atk/object.h"
 #include "atk/atk_list.h"
+#include "atk/atk_terminal.h"
 #include "types.h"
 
 #define ATK_WINDOW_TITLE_HEIGHT 28
@@ -39,6 +40,7 @@ typedef struct
     atk_list_node_t *list_node;
     atk_list_t children;
     atk_list_t text_inputs;
+    atk_list_t terminals;
     void *user_context;
     void (*on_destroy)(void *context);
 } atk_window_priv_t;
@@ -76,6 +78,7 @@ typedef struct atk_state
     bool desktop_drag_moved;
 
     atk_widget_t *focused_input;
+    atk_widget_t *focused_terminal;
 
     atk_theme_t theme;
     bool exit_requested;
@@ -86,6 +89,7 @@ extern const atk_class_t ATK_BUTTON_CLASS;
 extern const atk_class_t ATK_WINDOW_CLASS;
 extern const atk_class_t ATK_LABEL_CLASS;
 extern const atk_class_t ATK_TEXT_INPUT_CLASS;
+extern const atk_class_t ATK_TERMINAL_CLASS;
 
 atk_state_t *atk_state_get(void);
 

@@ -337,7 +337,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
     bool success = false;
     bool tls_active = false;
-    tls_session_t tls_session;
+    tls_session_t *tls_session = NULL;
     vfs_node_t *file = NULL;
     size_t written = 0;
 
@@ -384,13 +384,20 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
     if (use_tls)
     {
-        if (!tls_session_init(&tls_session, socket))
+        tls_session = (tls_session_t *)malloc(sizeof(tls_session_t));
+        if (!tls_session)
+        {
+            shell_output_error(out, "TLS session alloc failed");
+            goto cleanup;
+        }
+        memset(tls_session, 0, sizeof(*tls_session));
+        if (!tls_session_init(tls_session, socket))
         {
             shell_output_error(out, "TLS session init failed");
             goto cleanup;
         }
         shell_output_write(out, "Negotiating TLS...\n");
-        if (!tls_session_handshake(&tls_session, host_name))
+        if (!tls_session_handshake(tls_session, host_name))
         {
             shell_output_error(out, "TLS handshake failed");
             goto cleanup;
@@ -458,7 +465,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
     if (tls_active)
     {
-        if (!tls_session_send(&tls_session, (const uint8_t *)request, req_len))
+        if (!tls_session_send(tls_session, (const uint8_t *)request, req_len))
         {
             shell_output_error(out, "failed to send HTTPS request");
             goto cleanup;
@@ -498,7 +505,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         size_t bytes_read = 0;
         if (tls_active)
         {
-            bytes_read = tls_session_recv(&tls_session, chunk, sizeof(chunk));
+            bytes_read = tls_session_recv(tls_session, chunk, sizeof(chunk));
             if (bytes_read == 0)
             {
                 if (net_tcp_socket_remote_closed(socket))
@@ -728,9 +735,11 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     shell_output_write(out, "\n");
 
 cleanup:
-    if (tls_active)
+    if (tls_session)
     {
-        tls_session_close(&tls_session);
+        tls_session_close(tls_session);
+        free(tls_session);
+        tls_session = NULL;
     }
     if (socket_fd >= 0)
     {

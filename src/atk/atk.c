@@ -8,6 +8,7 @@
 #include "atk_internal.h"
 #include "atk_window.h"
 #include "atk/atk_text_input.h"
+#include "atk/atk_terminal.h"
 #include "atk/atk_shell.h"
 
 static void atk_apply_default_theme(atk_state_t *state);
@@ -162,10 +163,21 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                 if (input_widget)
                 {
                     atk_text_input_focus(state, input_widget);
+                    atk_terminal_focus(state, NULL);
                 }
                 else
                 {
-                    atk_text_input_focus(state, NULL);
+                    atk_widget_t *terminal_widget = atk_window_terminal_at(win, cursor_x, cursor_y);
+                    if (terminal_widget)
+                    {
+                        atk_text_input_focus(state, NULL);
+                        atk_terminal_focus(state, terminal_widget);
+                    }
+                    else
+                    {
+                        atk_text_input_focus(state, NULL);
+                        atk_terminal_focus(state, NULL);
+                    }
                 }
 
                 handled = true;
@@ -186,6 +198,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                     state->desktop_drag_moved = false;
                 }
                 atk_text_input_focus(state, NULL);
+                atk_terminal_focus(state, NULL);
                 handled = true;
             }
         }
@@ -326,6 +339,16 @@ atk_key_event_result_t atk_handle_key_char(char ch)
 
     if (!state)
     {
+        return result;
+    }
+
+    atk_widget_t *terminal = state->focused_terminal;
+    if (terminal && terminal->used)
+    {
+        if (atk_terminal_handle_char(terminal, ch))
+        {
+            result.redraw = true;
+        }
         return result;
     }
 

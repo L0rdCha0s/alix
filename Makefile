@@ -18,7 +18,7 @@ OBJDIR      := build
 
 CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
           -m64 -mno-red-zone -mgeneral-regs-only -Wall -Wextra -I$(INCLUDE_DIR) \
-          -fno-merge-constants
+          -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 BOOT_SRC    := $(ARCH_DIR)/boot.asm
 STAGE2_SRC  := $(ARCH_DIR)/stage2.asm

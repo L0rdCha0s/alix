@@ -4,8 +4,7 @@
 #include <stddef.h>
 
 #include "atk_window.h"
-#include "atk/atk_label.h"
-#include "atk/atk_text_input.h"
+#include "atk/atk_terminal.h"
 #include "shell.h"
 #include "vfs.h"
 #include "libc.h"
@@ -17,14 +16,13 @@ typedef struct
 {
     atk_state_t *state;
     atk_widget_t *window;
-    atk_widget_t *label;
-    atk_widget_t *input;
+    atk_widget_t *terminal;
     shell_state_t shell;
     int stdout_fd;
 } atk_shell_view_t;
 
 static void atk_shell_view_destroy(void *context);
-static void atk_shell_on_submit(atk_widget_t *input, void *context);
+static void atk_shell_on_submit(atk_widget_t *terminal, void *context, const char *line);
 static void atk_shell_append_prompt(atk_shell_view_t *view);
 static void atk_shell_stream_write(void *context, const char *data, size_t len);
 static ssize_t atk_shell_fd_write(void *ctx, const void *buffer, size_t count);
@@ -62,52 +60,35 @@ bool atk_shell_open(atk_state_t *state)
 
     view->state = state;
     view->window = window;
-    view->label = NULL;
-    view->input = NULL;
+    view->terminal = NULL;
     view->shell.cwd = vfs_root();
     view->shell.stdout_fd = process_current_stdout_fd();
     view->shell.stream_fn = atk_shell_stream_write;
     view->shell.stream_context = view;
     view->stdout_fd = -1;
 
-    int label_x = 16;
-    int label_y = ATK_WINDOW_TITLE_HEIGHT + 10;
-    int input_margin = 16;
-
-    atk_widget_t *input = atk_window_add_text_input(window,
-                                                    label_x,
-                                                    window->height - input_margin - (ATK_FONT_HEIGHT + 8),
-                                                    window->width - label_x * 2);
-    if (!input)
+    int margin = 12;
+    int top = ATK_WINDOW_TITLE_HEIGHT + 8;
+    atk_widget_t *terminal = atk_window_add_terminal(window,
+                                                     margin,
+                                                     top,
+                                                     window->width - margin * 2,
+                                                     window->height - top - margin);
+    if (!terminal)
     {
         free(view);
         atk_window_close(state, window);
         return false;
     }
 
-    int input_height = input->height;
-    atk_widget_t *label = atk_window_add_label(window,
-                                               label_x,
-                                               label_y,
-                                               window->width - label_x * 2,
-                                               window->height - label_y - input_height - input_margin - 8);
-    if (!label)
-    {
-        free(view);
-        atk_window_close(state, window);
-        return false;
-    }
-
-    view->label = label;
-    view->input = input;
+    view->terminal = terminal;
 
     atk_window_set_context(window, view, atk_shell_view_destroy);
 
-    atk_text_input_set_submit_handler(input, atk_shell_on_submit, view);
-    atk_text_input_clear(input);
+    atk_terminal_reset(terminal);
+    atk_terminal_set_submit_handler(terminal, atk_shell_on_submit, view);
+    atk_terminal_focus(state, terminal);
     atk_shell_append_prompt(view);
-    atk_label_scroll_to_bottom(label);
-    atk_text_input_focus(state, input);
 
     int fd = fd_allocate(&g_atk_shell_fd_ops, view);
     if (fd >= 0)
@@ -127,6 +108,10 @@ static void atk_shell_view_destroy(void *context)
     {
         return;
     }
+    if (view->state && view->terminal && atk_terminal_is_focused(view->state, view->terminal))
+    {
+        atk_terminal_focus(view->state, NULL);
+    }
     if (view->stdout_fd >= 0)
     {
         fd_close(view->stdout_fd);
@@ -139,38 +124,34 @@ static void atk_shell_view_destroy(void *context)
 
 static void atk_shell_append_prompt(atk_shell_view_t *view)
 {
-    if (!view || !view->label)
+    if (!view || !view->terminal)
     {
         return;
     }
-    atk_label_append_text(view->label, "alex@alix$ ");
+    static const char prompt[] = "alex@alix$ ";
+    atk_terminal_write(view->terminal, prompt, sizeof(prompt) - 1);
 }
 
-static void atk_shell_on_submit(atk_widget_t *input_widget, void *context)
+static void atk_shell_on_submit(atk_widget_t *terminal_widget, void *context, const char *line)
 {
     atk_shell_view_t *view = (atk_shell_view_t *)context;
-    if (!view || !input_widget)
+    if (!view || !terminal_widget)
     {
         return;
     }
 
-    const char *command = atk_text_input_text(input_widget);
-    if (!command)
-    {
-        command = "";
-    }
-
-    atk_label_append_text(view->label, command);
-    atk_label_append_text(view->label, "\n");
+    const char *command = line ? line : "";
 
     bool success = false;
     char *output = shell_execute_line(&view->shell, command, &success);
     if (output && *output)
     {
-        atk_label_append_text(view->label, output);
-        if (output[strlen(output) - 1] != '\n')
+        size_t len = strlen(output);
+        atk_terminal_write(view->terminal, output, len);
+        if (len == 0 || output[len - 1] != '\n')
         {
-            atk_label_append_text(view->label, "\n");
+            const char newline[] = "\r\n";
+            atk_terminal_write(view->terminal, newline, sizeof(newline) - 1);
         }
     }
     if (output)
@@ -178,10 +159,7 @@ static void atk_shell_on_submit(atk_widget_t *input_widget, void *context)
         free(output);
     }
 
-    atk_text_input_clear(input_widget);
     atk_shell_append_prompt(view);
-    atk_label_scroll_to_bottom(view->label);
-    atk_text_input_focus(view->state, input_widget);
     atk_window_mark_dirty(view->window);
     (void)success;
 }
@@ -189,19 +167,12 @@ static void atk_shell_on_submit(atk_widget_t *input_widget, void *context)
 static void atk_shell_stream_write(void *context, const char *data, size_t len)
 {
     atk_shell_view_t *view = (atk_shell_view_t *)context;
-    if (!view || !view->label || !data || len == 0)
+    if (!view || !view->terminal || !data || len == 0)
     {
         return;
     }
 
-    for (size_t i = 0; i < len; ++i)
-    {
-        char buf[2] = { data[i], 0 };
-        atk_label_append_text(view->label, buf);
-    }
-    atk_label_scroll_to_bottom(view->label);
-    atk_window_mark_dirty(view->window);
-    video_request_refresh_window(view->window);
+    atk_terminal_write(view->terminal, data, len);
 }
 
 static ssize_t atk_shell_fd_write(void *ctx, const void *buffer, size_t count)

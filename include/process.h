@@ -5,7 +5,7 @@
 #include "interrupts.h"
 
 #define PROCESS_NAME_MAX 32
-#define PROCESS_DEFAULT_STACK_SIZE (32UL * 1024UL)
+#define PROCESS_DEFAULT_STACK_SIZE (128UL * 1024UL)
 
 typedef struct process process_t;
 typedef struct thread thread_t;

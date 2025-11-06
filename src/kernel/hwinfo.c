@@ -355,8 +355,17 @@ static void log_pci_devices(void)
                 append_hex(line, &idx, sizeof(line), device, 2);
                 append_char(line, &idx, sizeof(line), '.');
                 append_hex(line, &idx, sizeof(line), function, 1);
-                append_text(line, &idx, sizeof(line), " vendor 0x");
-                append_hex(line, &idx, sizeof(line), vendor, 4);
+                append_text(line, &idx, sizeof(line), " vendor ");
+                const char *vendor_name = pci_vendor_name(vendor);
+                if (vendor_name)
+                {
+                    append_text(line, &idx, sizeof(line), vendor_name);
+                }
+                else
+                {
+                    append_text(line, &idx, sizeof(line), "0x");
+                    append_hex(line, &idx, sizeof(line), vendor, 4);
+                }
                 append_text(line, &idx, sizeof(line), " device 0x");
                 append_hex(line, &idx, sizeof(line), device_id, 4);
                 append_text(line, &idx, sizeof(line), " class ");
