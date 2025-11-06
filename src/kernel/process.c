@@ -15,6 +15,9 @@
 #define RFLAGS_IF_BIT       (1ULL << 9)
 #define RFLAGS_DEFAULT      (RFLAGS_RESERVED_BIT | RFLAGS_IF_BIT)
 
+#define PROCESS_STACK_GUARD_SIZE (4096UL)
+#define STACK_GUARD_PATTERN      0x5A
+
 typedef uint64_t cpu_context_t;
 
 #define PROCESS_TIME_SLICE_TICKS 10U
@@ -65,6 +68,7 @@ struct thread
     process_t *process;
     cpu_context_t *context;
     uint8_t *stack_base;
+    uint8_t *stack_guard_base;
     size_t stack_size;
     uintptr_t kernel_stack_top;
     thread_entry_t entry;
@@ -82,6 +86,8 @@ struct thread
     bool preempt_pending;
     bool fpu_initialized;
     char name[PROCESS_NAME_MAX];
+    bool stack_guard_failed;
+    const char *stack_guard_reason;
 };
 
 struct process
@@ -185,6 +191,97 @@ static void tss_set_rsp0(uint64_t rsp0)
 {
     uint64_t *slot = (uint64_t *)(tss64 + TSS_RSP0_OFFSET);
     *slot = rsp0;
+}
+
+static void process_handle_stack_guard_fault(void) __attribute__((noreturn));
+
+static bool thread_stack_pointer_valid(const thread_t *thread, uint64_t rsp)
+{
+    if (!thread || !thread->stack_base)
+    {
+        return true;
+    }
+
+    uintptr_t lower = (uintptr_t)thread->stack_base;
+    uintptr_t upper = thread->kernel_stack_top;
+    if (rsp < lower)
+    {
+        return false;
+    }
+    if (rsp > upper)
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool thread_stack_guard_intact(const thread_t *thread)
+{
+    if (!thread || !thread->stack_guard_base)
+    {
+        return true;
+    }
+    if (thread->stack_guard_failed)
+    {
+        return false;
+    }
+    const uint8_t *guard = thread->stack_guard_base;
+    for (size_t i = 0; i < PROCESS_STACK_GUARD_SIZE; ++i)
+    {
+        if (guard[i] != STACK_GUARD_PATTERN)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void thread_mark_stack_guard_failure(thread_t *thread, const char *reason)
+{
+    if (!thread)
+    {
+        return;
+    }
+    if (!thread->stack_guard_failed)
+    {
+        thread->stack_guard_failed = true;
+        thread->stack_guard_reason = reason;
+    }
+}
+
+static void thread_trigger_stack_guard(thread_t *thread,
+                                       interrupt_frame_t *frame,
+                                       const char *reason)
+{
+    if (!thread || !frame)
+    {
+        return;
+    }
+
+    thread_mark_stack_guard_failure(thread, reason);
+
+    uintptr_t lower = (uintptr_t)thread->stack_base;
+    uintptr_t upper = thread->kernel_stack_top;
+
+    uintptr_t safe_rsp = upper;
+    if (safe_rsp > lower + 64)
+    {
+        safe_rsp -= 32;
+    }
+    safe_rsp &= ~(uintptr_t)0xFULL;
+    if (safe_rsp <= lower)
+    {
+        safe_rsp = lower + 32;
+    }
+    if (safe_rsp > upper)
+    {
+        safe_rsp = upper;
+    }
+    safe_rsp &= ~(uintptr_t)0xFULL;
+
+    frame->rsp = safe_rsp;
+    frame->rip = (uint64_t)process_handle_stack_guard_fault;
+    frame->rflags &= ~RFLAGS_IF_BIT;
 }
 
 __attribute__((naked)) static void context_switch(cpu_context_t **, cpu_context_t *)
@@ -301,12 +398,17 @@ static thread_t *thread_create(process_t *process,
     memset(thread, 0, sizeof(*thread));
 
     size_t actual_stack = stack_size ? stack_size : PROCESS_DEFAULT_STACK_SIZE;
-    thread->stack_base = (uint8_t *)malloc(actual_stack);
-    if (!thread->stack_base)
+    size_t guard_size = PROCESS_STACK_GUARD_SIZE;
+    size_t allocation_size = actual_stack + guard_size;
+    uint8_t *stack_allocation = (uint8_t *)malloc(allocation_size);
+    if (!stack_allocation)
     {
         free(thread);
         return NULL;
     }
+    memset(stack_allocation, STACK_GUARD_PATTERN, guard_size);
+    thread->stack_guard_base = stack_allocation;
+    thread->stack_base = stack_allocation + guard_size;
     thread->stack_size = actual_stack;
 
     uintptr_t stack_limit = ((uintptr_t)thread->stack_base + actual_stack) & ~(uintptr_t)0xF;
@@ -339,6 +441,8 @@ static thread_t *thread_create(process_t *process,
     thread->fs_base = 0;
     thread->gs_base = (uint64_t)&thread->tls;
     thread->fpu_initialized = true;
+    thread->stack_guard_failed = false;
+    thread->stack_guard_reason = NULL;
     memcpy(&thread->fpu_state, &g_fpu_initial_state, sizeof(fpu_state_t));
 
     if (name)
@@ -597,6 +701,47 @@ static void thread_trampoline(void)
     process_exit(0);
 }
 
+static void process_handle_stack_guard_fault(void)
+{
+    thread_t *current = g_current_thread;
+    if (!current)
+    {
+        fatal("stack guard fault with no current thread");
+    }
+
+    serial_write_string("process: stack guard violation in thread ");
+    if (current->name[0] != '\0')
+    {
+        serial_write_string(current->name);
+    }
+    else
+    {
+        serial_write_string("(anon)");
+    }
+    if (current->stack_guard_reason)
+    {
+        serial_write_string(" reason=");
+        serial_write_string(current->stack_guard_reason);
+    }
+    serial_write_string("\r\n");
+
+    current->exit_status = -1;
+    current->exited = true;
+    current->state = THREAD_STATE_ZOMBIE;
+    current->preempt_pending = false;
+    current->time_slice_remaining = 0;
+
+    process_t *proc = current->process;
+    if (proc)
+    {
+        proc->exit_status = -1;
+        proc->state = PROCESS_STATE_ZOMBIE;
+    }
+
+    scheduler_schedule(false);
+    fatal("stack guard handler returned");
+}
+
 void process_system_init(void)
 {
     fpu_prepare_initial_state();
@@ -709,7 +854,13 @@ void process_destroy(process_t *process)
         {
             remove_from_run_queue(thread);
         }
-        if (thread->stack_base)
+        if (thread->stack_guard_base)
+        {
+            free(thread->stack_guard_base);
+            thread->stack_guard_base = NULL;
+            thread->stack_base = NULL;
+        }
+        else if (thread->stack_base)
         {
             free(thread->stack_base);
             thread->stack_base = NULL;
@@ -892,6 +1043,18 @@ void process_on_timer_tick(interrupt_frame_t *frame)
     thread_t *thread = g_current_thread;
     if (!thread || thread->is_idle)
     {
+        return;
+    }
+
+    if (!thread_stack_pointer_valid(thread, frame->rsp))
+    {
+        thread_trigger_stack_guard(thread, frame, "rsp_out_of_bounds");
+        return;
+    }
+
+    if (!thread_stack_guard_intact(thread))
+    {
+        thread_trigger_stack_guard(thread, frame, "guard_corrupted");
         return;
     }
 

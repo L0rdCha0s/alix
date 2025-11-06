@@ -18,13 +18,21 @@
 
 static const char *skip_ws(const char *cursor);
 static bool read_token(const char **cursor, char *out, size_t capacity);
-static bool parse_host_and_port(const char *text, char *host_out, size_t host_cap, uint16_t *port_out);
+static bool parse_url(const char *text,
+                      char *host_out,
+                      size_t host_cap,
+                      uint16_t *port_out,
+                      char *path_out,
+                      size_t path_cap,
+                      bool *use_tls_out);
 static bool parse_decimal_u16(const char *text, uint16_t *out);
 static bool parse_decimal_size(const char *text, size_t *out);
 static const char *find_substring(const char *haystack, const char *needle);
 static bool find_header_value(const char *headers, const char *name_lower,
                               char *value_out, size_t capacity);
 static bool parse_http_status(const char *headers, int *status_out);
+static const char *string_chr(const char *s, char ch);
+static const char *string_rchr(const char *s, char ch);
 
 static bool ensure_arp(net_interface_t *iface, uint32_t next_hop_ip, uint64_t timeout_ticks);
 static bool append_body_chunk(vfs_node_t *file, const uint8_t *data, size_t len,
@@ -221,56 +229,81 @@ static bool chunked_consume(chunked_state_t *st,
 bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 {
     const char *cursor = args ? args : "";
-    char t1[128];
-    char t2[256];
-    char t3[256];
-    char t4[128];
-    bool have_iface = false;
+    char tokens[3][256];
+    size_t token_count = 0;
 
-    if (!read_token(&cursor, t1, sizeof(t1)) ||
-        !read_token(&cursor, t2, sizeof(t2)) ||
-        !read_token(&cursor, t3, sizeof(t3)))
+    while (token_count < 3 && read_token(&cursor, tokens[token_count], sizeof(tokens[token_count])))
     {
-        return shell_output_error(out, "Usage: wget [iface] <host[:port]> <path> <dest>");
+        token_count++;
     }
 
-    bool have_fourth = read_token(&cursor, t4, sizeof(t4));
     cursor = skip_ws(cursor);
     if (*cursor != '\0')
     {
-        return shell_output_error(out, "Usage: wget [iface] <host[:port]> <path> <dest>");
+        return shell_output_error(out, "Usage: wget [iface] <url> [dest]");
     }
 
-    char iface_name[NET_IF_NAME_MAX];
-    char host_token[128];
-    char path_token[256];
-    char dest_token[128];
-
-    if (have_fourth)
+    if (token_count == 0)
     {
-        have_iface = true;
-        memcpy(iface_name, t1, strlen(t1) + 1);
-        memcpy(host_token, t2, strlen(t2) + 1);
-        memcpy(path_token, t3, strlen(t3) + 1);
-        memcpy(dest_token, t4, strlen(t4) + 1);
-    }
-    else
-    {
-        have_iface = false;
-        memcpy(host_token, t1, strlen(t1) + 1);
-        memcpy(path_token, t2, strlen(t2) + 1);
-        memcpy(dest_token, t3, strlen(t3) + 1);
+        return shell_output_error(out, "Usage: wget [iface] <url> [dest]");
     }
 
-    if (path_token[0] == '\0' || dest_token[0] == '\0')
-    {
-        return shell_output_error(out, "path and destination must be non-empty");
-    }
-
+    bool have_iface = false;
     net_interface_t *iface = NULL;
+    const char *url_arg = NULL;
+    const char *dest_arg = NULL;
+
+    if (token_count >= 2)
+    {
+        net_interface_t *candidate = net_if_by_name(tokens[0]);
+        if (candidate)
+        {
+            size_t name_len = strlen(tokens[0]);
+            if (name_len == 0 || name_len >= NET_IF_NAME_MAX)
+            {
+                return shell_output_error(out, "interface name too long");
+            }
+            have_iface = true;
+            iface = candidate;
+            url_arg = tokens[1];
+            if (token_count == 3)
+            {
+                dest_arg = tokens[2];
+            }
+        }
+    }
+
+    if (!have_iface)
+    {
+        url_arg = tokens[0];
+        if (token_count >= 2)
+        {
+            dest_arg = tokens[1];
+        }
+    }
+    else if (token_count < 2)
+    {
+        return shell_output_error(out, "Usage: wget [iface] <url> [dest]");
+    }
+
+    if (!url_arg || url_arg[0] == '\0')
+    {
+        return shell_output_error(out, "url must be non-empty");
+    }
+
+    char dest_token[128];
+    if (dest_arg)
+    {
+        size_t dest_len = strlen(dest_arg);
+        if (dest_len == 0 || dest_len >= sizeof(dest_token))
+        {
+            return shell_output_error(out, "destination name invalid");
+        }
+        memcpy(dest_token, dest_arg, dest_len + 1);
+    }
+
     if (have_iface)
     {
-        iface = net_if_by_name(iface_name);
         if (!iface || !iface->present)
         {
             return shell_output_error(out, "interface not found");
@@ -278,12 +311,42 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     }
 
     char host_name[128];
+    char request_path[256];
     uint16_t remote_port = 80;
-    bool use_tls = false;
-    if (!parse_host_and_port(host_token, host_name, sizeof(host_name), &remote_port))
+    bool tls_via_scheme = false;
+    if (!parse_url(url_arg, host_name, sizeof(host_name), &remote_port,
+                   request_path, sizeof(request_path), &tls_via_scheme))
     {
-        return shell_output_error(out, "invalid host or port");
+        return shell_output_error(out, "invalid url");
     }
+
+    if (!dest_arg)
+    {
+        const char *fname = string_rchr(request_path, '/');
+        if (fname)
+        {
+            fname++;
+        }
+        else
+        {
+            fname = request_path;
+        }
+        const char *query = string_chr(fname, '?');
+        size_t name_len = query ? (size_t)(query - fname) : strlen(fname);
+        if (name_len == 0)
+        {
+            fname = "index.html";
+            name_len = strlen(fname);
+        }
+        if (name_len >= sizeof(dest_token))
+        {
+            return shell_output_error(out, "derived destination name too long");
+        }
+        memcpy(dest_token, fname, name_len);
+        dest_token[name_len] = '\0';
+    }
+
+    bool use_tls = tls_via_scheme || (remote_port == 443);
 
     uint32_t remote_ip = 0;
     if (!net_parse_ipv4(host_name, &remote_ip))
@@ -321,8 +384,6 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         return shell_output_error(out, "ARP resolution failed");
     }
 
-    use_tls = (remote_port == 443);
-
     net_tcp_socket_t *socket = net_tcp_socket_open(iface);
     if (!socket)
     {
@@ -340,23 +401,6 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     tls_session_t *tls_session = NULL;
     vfs_node_t *file = NULL;
     size_t written = 0;
-
-    char request_path[256];
-    if (path_token[0] == '/')
-    {
-        memcpy(request_path, path_token, strlen(path_token) + 1);
-    }
-    else
-    {
-        size_t len = strlen(path_token);
-        if (len + 1 >= sizeof(request_path))
-        {
-            shell_output_error(out, "path too long");
-            goto cleanup;
-        }
-        request_path[0] = '/';
-        memcpy(request_path + 1, path_token, len + 1);
-    }
 
     if (!net_tcp_socket_connect(socket, remote_ip, remote_port))
     {
@@ -421,7 +465,8 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         goto cleanup;
     }
     memcpy(host_header, host_name, host_len);
-    if (remote_port != 80)
+    if ((!use_tls && remote_port != 80) ||
+        (use_tls && remote_port != 443))
     {
         if (host_len + 1 >= sizeof(host_header))
         {
@@ -794,15 +839,49 @@ static bool read_token(const char **cursor, char *out, size_t capacity)
     return true;
 }
 
-static bool parse_host_and_port(const char *text, char *host_out, size_t host_cap, uint16_t *port_out)
+static bool parse_url(const char *text,
+                      char *host_out,
+                      size_t host_cap,
+                      uint16_t *port_out,
+                      char *path_out,
+                      size_t path_cap,
+                      bool *use_tls_out)
 {
-    if (!text || !host_out || host_cap == 0 || !port_out)
+    if (!text || !host_out || host_cap == 0 || !port_out || !path_out || path_cap == 0)
     {
         return false;
     }
 
+    const char *cursor = text;
+    bool tls = false;
+    uint16_t port = 80;
+
+    if (strncmp(cursor, "http://", 7) == 0)
+    {
+        cursor += 7;
+    }
+    else if (strncmp(cursor, "https://", 8) == 0)
+    {
+        cursor += 8;
+        tls = true;
+        port = 443;
+    }
+
+    if (*cursor == '\0')
+    {
+        return false;
+    }
+
+    const char *slash = string_chr(cursor, '/');
+    const char *query = string_chr(cursor, '?');
+    const char *host_end = slash ? slash : cursor + strlen(cursor);
+    if (query && (!slash || query < slash))
+    {
+        host_end = query;
+    }
+
     const char *colon = NULL;
-    for (const char *p = text; *p; ++p)
+    for (const char *p = cursor; p < host_end; ++p)
     {
         if (*p == ':')
         {
@@ -811,19 +890,74 @@ static bool parse_host_and_port(const char *text, char *host_out, size_t host_ca
         }
     }
 
-    size_t host_len = colon ? (size_t)(colon - text) : strlen(text);
+    size_t host_len = colon ? (size_t)(colon - cursor) : (size_t)(host_end - cursor);
     if (host_len == 0 || host_len >= host_cap)
     {
         return false;
     }
-    memcpy(host_out, text, host_len);
+    memcpy(host_out, cursor, host_len);
     host_out[host_len] = '\0';
 
     if (colon)
     {
-        return parse_decimal_u16(colon + 1, port_out);
+        const char *port_start = colon + 1;
+        if (port_start >= host_end)
+        {
+            return false;
+        }
+        char port_buf[6];
+        size_t port_len = (size_t)(host_end - port_start);
+        if (port_len == 0 || port_len >= sizeof(port_buf))
+        {
+            return false;
+        }
+        memcpy(port_buf, port_start, port_len);
+        port_buf[port_len] = '\0';
+        if (!parse_decimal_u16(port_buf, &port))
+        {
+            return false;
+        }
     }
-    *port_out = 80;
+
+    const char *path_start = slash;
+
+    if (path_start)
+    {
+        size_t remaining = strlen(path_start);
+        if (remaining + 1 > path_cap)
+        {
+            return false;
+        }
+        memcpy(path_out, path_start, remaining + 1);
+    }
+    else
+    {
+        if (query)
+        {
+            size_t query_len = strlen(query);
+            if (query_len + 2 > path_cap)
+            {
+                return false;
+            }
+            path_out[0] = '/';
+            memcpy(path_out + 1, query, query_len + 1);
+        }
+        else
+        {
+            if (path_cap < 2)
+            {
+                return false;
+            }
+            path_out[0] = '/';
+            path_out[1] = '\0';
+        }
+    }
+
+    if (use_tls_out)
+    {
+        *use_tls_out = tls;
+    }
+    *port_out = port;
     return true;
 }
 
@@ -1004,6 +1138,41 @@ static bool parse_http_status(const char *headers, int *status_out)
     }
     *status_out = (code[0] - '0') * 100 + (code[1] - '0') * 10 + (code[2] - '0');
     return true;
+}
+
+static const char *string_chr(const char *s, char ch)
+{
+    if (!s)
+    {
+        return NULL;
+    }
+    while (*s)
+    {
+        if (*s == ch)
+        {
+            return s;
+        }
+        ++s;
+    }
+    return NULL;
+}
+
+static const char *string_rchr(const char *s, char ch)
+{
+    if (!s)
+    {
+        return NULL;
+    }
+    const char *last = NULL;
+    while (*s)
+    {
+        if (*s == ch)
+        {
+            last = s;
+        }
+        ++s;
+    }
+    return last;
 }
 
 static bool ensure_arp(net_interface_t *iface, uint32_t next_hop_ip, uint64_t timeout_ticks)
