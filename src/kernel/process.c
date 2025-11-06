@@ -1,6 +1,7 @@
 #include "process.h"
 
 #include "heap.h"
+#include "paging.h"
 #include "libc.h"
 #include "serial.h"
 #include "msr.h"
@@ -96,6 +97,7 @@ struct process
     process_state_t state;
     char name[PROCESS_NAME_MAX];
     uint64_t cr3;
+    paging_space_t address_space;
     thread_t *main_thread;
     thread_t *current_thread;
     int exit_status;
@@ -350,7 +352,12 @@ static process_t *allocate_process(const char *name)
     memset(proc, 0, sizeof(*proc));
     proc->pid = g_next_pid++;
     proc->state = PROCESS_STATE_READY;
-    proc->cr3 = read_cr3();
+    if (!paging_clone_kernel_space(&proc->address_space))
+    {
+        free(proc);
+        return NULL;
+    }
+    proc->cr3 = proc->address_space.cr3;
     if (name)
     {
         size_t len = strlen(name);
@@ -813,6 +820,7 @@ process_t *process_create_kernel(const char *name,
     thread_t *thread = thread_create(proc, name, entry, arg, stack_size, false);
     if (!thread)
     {
+        paging_destroy_space(&proc->address_space);
         free(proc);
         return NULL;
     }
@@ -879,6 +887,7 @@ void process_destroy(process_t *process)
         cursor = &(*cursor)->next;
     }
 
+    paging_destroy_space(&process->address_space);
     free(process);
 }
 

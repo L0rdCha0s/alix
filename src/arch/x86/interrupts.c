@@ -8,6 +8,7 @@
 #include "rtl8139.h"
 #include "serial.h"
 #include "process.h"
+#include "console.h"
 
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
@@ -18,7 +19,74 @@
 static uint8_t pic1_mask = 0xFF;
 static uint8_t pic2_mask = 0xFF;
 static int irq12_log_count = 0;
-static int irq1_log_count = 0;
+
+static void halt_forever(void) __attribute__((noreturn));
+static void fault_report(const char *reason,
+                         const interrupt_frame_t *frame,
+                         uint64_t error_code,
+                         bool has_error,
+                         bool include_cr2,
+                         uint64_t cr2_value);
+
+static inline uint64_t read_cr2(void)
+{
+    uint64_t value;
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(value));
+    return value;
+}
+
+static void halt_forever(void)
+{
+    for (;;)
+    {
+        __asm__ volatile ("cli; hlt");
+    }
+}
+
+static void fault_report(const char *reason,
+                         const interrupt_frame_t *frame,
+                         uint64_t error_code,
+                         bool has_error,
+                         bool include_cr2,
+                         uint64_t cr2_value)
+{
+    console_write("CPU exception encountered, see serial log.\n");
+    serial_write_string("\r\n=== CPU EXCEPTION ===\r\n");
+    serial_write_string("reason: ");
+    serial_write_string(reason);
+    serial_write_string("\r\n");
+    if (frame)
+    {
+        serial_write_string("  RIP=");
+        serial_write_hex64(frame->rip);
+        serial_write_string(" RSP=");
+        serial_write_hex64(frame->rsp);
+        serial_write_string(" RFLAGS=");
+        serial_write_hex64(frame->rflags);
+        serial_write_string(" CS=");
+        serial_write_hex64(frame->cs);
+        serial_write_string(" SS=");
+        serial_write_hex64(frame->ss);
+        serial_write_string("\r\n");
+    }
+    if (has_error)
+    {
+        serial_write_string("  ERR=");
+        serial_write_hex64(error_code);
+        serial_write_string("\r\n");
+    }
+    if (include_cr2)
+    {
+        serial_write_string("  CR2=");
+        serial_write_hex64(cr2_value);
+        serial_write_string("\r\n");
+    }
+    uint64_t pid = process_current_pid();
+    serial_write_string("  current_pid=0x");
+    serial_write_hex64(pid);
+    serial_write_string("\r\n");
+    serial_write_string("======================\r\n");
+}
 
 static void pic_remap(void)
 {
@@ -109,9 +177,39 @@ __attribute__((interrupt)) static void irq12_handler(interrupt_frame_t *frame)
     irq12_log_count++;
 }
 
+__attribute__((interrupt)) static void divide_error_handler(interrupt_frame_t *frame)
+{
+    (void)frame;
+    fault_report("divide_error", frame, 0, false, false, 0);
+    halt_forever();
+}
+
+__attribute__((interrupt)) static void invalid_opcode_handler(interrupt_frame_t *frame)
+{
+    fault_report("invalid_opcode", frame, 0, false, false, 0);
+    halt_forever();
+}
+
+__attribute__((interrupt)) static void general_protection_handler(interrupt_frame_t *frame, uint64_t error_code)
+{
+    fault_report("general_protection", frame, error_code, true, false, 0);
+    halt_forever();
+}
+
+__attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *frame, uint64_t error_code)
+{
+    uint64_t fault_address = read_cr2();
+    fault_report("page_fault", frame, error_code, true, true, fault_address);
+    halt_forever();
+}
+
 void interrupts_init(void)
 {
     idt_init();
+    idt_set_gate(0, (void *)divide_error_handler);
+    idt_set_gate(6, (void *)invalid_opcode_handler);
+    idt_set_gate(13, (void *)general_protection_handler);
+    idt_set_gate(14, (void *)page_fault_handler);
     idt_set_gate(32, (void *)irq0_handler);
     idt_set_gate(33, (void *)irq1_handler);
     idt_set_gate(43, (void *)irq11_handler);

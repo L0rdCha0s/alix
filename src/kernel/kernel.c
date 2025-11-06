@@ -6,6 +6,7 @@
 #include "timer.h"
 #include "hwinfo.h"
 #include "heap.h"
+#include "paging.h"
 #include "rtl8139.h"
 #include "shell.h"
 #include "net/interface.h"
@@ -32,6 +33,7 @@ void kernel_main(void)
     console_clear();
 
     heap_init();
+    paging_init();
     process_system_init();
     block_init();
 
