@@ -201,7 +201,7 @@ static void atk_shell_stream_write(void *context, const char *data, size_t len)
     }
     atk_label_scroll_to_bottom(view->label);
     atk_window_mark_dirty(view->window);
-    video_request_refresh();
+    video_request_refresh_window(view->window);
 }
 
 static ssize_t atk_shell_fd_write(void *ctx, const void *buffer, size_t count)

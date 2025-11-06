@@ -6,6 +6,8 @@
 #define VIDEO_WIDTH  1280
 #define VIDEO_HEIGHT 1024
 
+struct atk_widget;
+
 void video_init(void);
 bool video_enter_mode(void);
 void video_run_loop(void);
@@ -24,6 +26,7 @@ void video_invalidate_all(void);
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes);
 bool video_is_active(void);
 void video_request_refresh(void);
+void video_request_refresh_window(struct atk_widget *window);
 
 
 #endif

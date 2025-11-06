@@ -25,7 +25,7 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
                                        atk_button_action_t action,
                                        void *context);
 static void action_window_close(atk_widget_t *button, void *context);
-static void window_draw(const atk_state_t *state, const atk_widget_t *window);
+static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window);
 static atk_window_priv_t *window_priv_mut(atk_widget_t *window);
 static const atk_window_priv_t *window_priv(const atk_widget_t *window);
 static void window_destroy(atk_widget_t *window);
@@ -67,7 +67,7 @@ void atk_window_draw_all(const atk_state_t *state)
         atk_widget_t *window = (atk_widget_t *)node->value;
         if (window && window->used)
         {
-            window_draw(state, window);
+            window_draw_internal(state, window);
         }
     }
 }
@@ -380,7 +380,7 @@ static void atk_log(const char *msg)
     serial_write_string("\r\n");
 }
 
-static void window_draw(const atk_state_t *state, const atk_widget_t *window)
+static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window)
 {
     if (!state || !window || !window->used)
     {
@@ -451,6 +451,11 @@ static void window_draw(const atk_state_t *state, const atk_widget_t *window)
             atk_text_input_draw(state, child);
         }
     }
+}
+
+void atk_window_draw(atk_state_t *state, atk_widget_t *window)
+{
+    window_draw_internal(state, window);
 }
 
 static void format_window_title(char *buffer, size_t capacity, int id)

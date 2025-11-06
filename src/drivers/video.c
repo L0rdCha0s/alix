@@ -3,9 +3,17 @@
 #include "serial.h"
 #include "mouse.h"
 #include "atk.h"
+#include "atk/object.h"
 #include "pci.h"
 #include "keyboard.h"
 #include "libc.h"
+
+typedef struct atk_state atk_state_t;
+typedef struct atk_widget atk_widget_t;
+
+atk_state_t *atk_state_get(void);
+void atk_window_draw(atk_state_t *state, atk_widget_t *window);
+void atk_window_mark_dirty(const atk_widget_t *window);
 
 #define BGA_INDEX_PORT 0x1CE
 #define BGA_DATA_PORT  0x1CF
@@ -53,6 +61,10 @@ static bool logged_first_mouse = false;
 
 static int video_mouse_log_count = 0;
 #define VIDEO_MOUSE_LOG 0
+
+static volatile bool refresh_requested = false;
+static bool refresh_requested_full = false;
+static atk_widget_t *refresh_window = NULL;
 
 typedef struct
 {
@@ -121,6 +133,7 @@ static uint8_t vga_gc_read(uint8_t index);
 static void vga_gc_write(uint8_t index, uint8_t value);
 static void video_dirty_reset(void);
 static void video_flush_dirty(void);
+static void video_perform_refresh(void);
 static void cursor_draw_overlay(void);
 static void cursor_mark_old_rect_dirty(void);
 static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg);
@@ -475,6 +488,55 @@ static void video_flush_dirty(void)
     video_dirty_reset();
 }
 
+static void video_perform_refresh(void)
+{
+    if (!video_active)
+    {
+        return;
+    }
+
+    atk_state_t *state = atk_state_get();
+
+    if (refresh_window)
+    {
+        atk_widget_t *window = refresh_window;
+        refresh_window = NULL;
+
+        if (window && window->used)
+        {
+            video_dirty_reset();
+            atk_window_draw(state, window);
+            atk_window_mark_dirty(window);
+            if (dirty_active)
+            {
+                video_flush_dirty();
+            }
+            cursor_draw_overlay();
+        }
+        else
+        {
+            refresh_requested_full = true;
+        }
+
+        refresh_requested = refresh_requested_full || (refresh_window != NULL);
+        return;
+    }
+
+    if (refresh_requested_full)
+    {
+        refresh_requested_full = false;
+        video_dirty_reset();
+        atk_render();
+        if (dirty_active)
+        {
+            video_flush_dirty();
+        }
+        cursor_draw_overlay();
+    }
+
+    refresh_requested = refresh_requested_full || (refresh_window != NULL);
+}
+
 /* --------- Mode entry/exit & loop --------- */
 bool video_enter_mode(void)
 {
@@ -516,6 +578,11 @@ void video_run_loop(void)
     {
         mouse_poll();
         video_poll_keyboard();
+        if (refresh_requested)
+        {
+            refresh_requested = false;
+            video_perform_refresh();
+        }
         __asm__ volatile ("hlt");
     }
     video_log("video_run_loop end");
@@ -527,14 +594,18 @@ void video_request_refresh(void)
     {
         return;
     }
+    refresh_requested_full = true;
+    refresh_requested = true;
+}
 
-    video_dirty_reset();
-    atk_render();
-    if (dirty_active)
+void video_request_refresh_window(atk_widget_t *window)
+{
+    if (!video_active || !window)
     {
-        video_flush_dirty();
+        return;
     }
-    cursor_draw_overlay();
+    refresh_window = window;
+    refresh_requested = true;
 }
 
 void video_exit_mode(void)
@@ -566,10 +637,8 @@ static void video_poll_keyboard(void)
 
     if (!have_input || !redraw_needed) return;
 
-    video_dirty_reset(); /* let renderer declare dirties */
-    atk_render();
-    if (dirty_active) video_flush_dirty();
-    cursor_draw_overlay();
+    video_request_refresh();
+    video_perform_refresh();
 }
 
 void video_on_mouse_event(int dx, int dy, bool left_pressed)
@@ -949,3 +1018,4 @@ bool video_is_active(void)
 {
     return video_active;
 }
+#include "atk/atk_label.h" /* for forward decls? maybe not needed but safe? */
