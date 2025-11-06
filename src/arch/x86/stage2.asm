@@ -19,10 +19,13 @@
 %define PD2           0x0000000000104000
 %define PD3           0x0000000000105000
 
-%define CODE32_SEL 0x08
-%define DATA32_SEL 0x10
-%define CODE64_SEL 0x18
-%define TSS_SEL   0x20
+%define CODE32_SEL      0x08
+%define DATA32_SEL      0x10
+%define CODE64_SEL      0x18
+%define DATA64_SEL      0x20
+%define USER_CODE64_SEL 0x28
+%define USER_DATA64_SEL 0x30
+%define TSS_SEL         0x38
 
 %define TSS_RSP0_OFFSET 4
 %define TSS_IOMAP_OFFSET 0x66
@@ -94,9 +97,12 @@ start16:
   ALIGN 8
 gdt:
   dq 0
-  dq 0x00CF9A000000FFFF      ; 32-bit code
-  dq 0x00CF92000000FFFF      ; 32-bit data
-  dq 0x00A09A0000000000      ; 64-bit code
+  dq 0x00CF9A000000FFFF      ; 32-bit code (ring 0)
+  dq 0x00CF92000000FFFF      ; 32-bit data (ring 0)
+  dq 0x00A09A0000000000      ; 64-bit kernel code
+  dq 0x00A0920000000000      ; 64-bit kernel data
+  dq 0x00A0FA0000000000      ; 64-bit user code (ring 3)
+  dq 0x00A0F20000000000      ; 64-bit user data (ring 3)
 tss_descriptor:
   dq 0
   dq 0
@@ -153,28 +159,6 @@ collect_e820:
   popa
   ret
 
-
-ALIGN 16
-  global tss64
-  global tss64_end
-tss64:
-  dd 0
-  dd 0
-  dq 0                ; rsp0
-  dq 0                ; rsp1
-  dq 0                ; rsp2
-  dq 0                ; reserved1
-  dq 0                ; ist1
-  dq 0                ; ist2
-  dq 0                ; ist3
-  dq 0                ; ist4
-  dq 0                ; ist5
-  dq 0                ; ist6
-  dq 0                ; ist7
-  dq 0                ; reserved2
-  dw 0                ; reserved3
-  dw 0                ; iomap base (set later)
-tss64_end:
 
 section .pmode
 BITS 32
@@ -333,7 +317,7 @@ section .longmode
 BITS 64
 default rel
 long_entry:
-  mov ax, DATA32_SEL
+  mov ax, DATA64_SEL
   mov ds, ax
   mov es, ax
   mov ss, ax
@@ -435,6 +419,27 @@ halt_loop:
 
 section .data
 ALIGN 8
+  global tss64
+  global tss64_end
+tss64:
+  dd 0
+  dd 0
+  dq 0                ; rsp0
+  dq 0                ; rsp1
+  dq 0                ; rsp2
+  dq 0                ; reserved1
+  dq 0                ; ist1
+  dq 0                ; ist2
+  dq 0                ; ist3
+  dq 0                ; ist4
+  dq 0                ; ist5
+  dq 0                ; ist6
+  dq 0                ; ist7
+  dq 0                ; reserved2
+  dw 0                ; reserved3
+  dw 0                ; iomap base (set later)
+tss64_end:
+
   global kernel_heap_base
 kernel_heap_base: dq KERNEL_HEAP_BASE
   global kernel_heap_end

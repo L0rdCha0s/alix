@@ -67,5 +67,10 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity);
 const char *process_state_name(process_state_t state);
 const char *thread_state_name(thread_state_t state);
 uint64_t process_get_pid(const process_t *process);
+bool process_handle_exception(interrupt_frame_t *frame,
+                              const char *reason,
+                              uint64_t error_code,
+                              bool has_address,
+                              uint64_t address);
 
 #endif

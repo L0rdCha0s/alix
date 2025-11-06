@@ -181,18 +181,30 @@ __attribute__((interrupt)) static void divide_error_handler(interrupt_frame_t *f
 {
     (void)frame;
     fault_report("divide_error", frame, 0, false, false, 0);
+    if (process_handle_exception(frame, "divide_error", 0, false, 0))
+    {
+        return;
+    }
     halt_forever();
 }
 
 __attribute__((interrupt)) static void invalid_opcode_handler(interrupt_frame_t *frame)
 {
     fault_report("invalid_opcode", frame, 0, false, false, 0);
+    if (process_handle_exception(frame, "invalid_opcode", 0, false, 0))
+    {
+        return;
+    }
     halt_forever();
 }
 
 __attribute__((interrupt)) static void general_protection_handler(interrupt_frame_t *frame, uint64_t error_code)
 {
     fault_report("general_protection", frame, error_code, true, false, 0);
+    if (process_handle_exception(frame, "general_protection", error_code, false, 0))
+    {
+        return;
+    }
     halt_forever();
 }
 
@@ -200,6 +212,10 @@ __attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *fra
 {
     uint64_t fault_address = read_cr2();
     fault_report("page_fault", frame, error_code, true, true, fault_address);
+    if (process_handle_exception(frame, "page_fault", error_code, true, fault_address))
+    {
+        return;
+    }
     halt_forever();
 }
 

@@ -1,6 +1,7 @@
 #include "process.h"
 
 #include "heap.h"
+#include "arch/x86/segments.h"
 #include "paging.h"
 #include "libc.h"
 #include "serial.h"
@@ -89,6 +90,11 @@ struct thread
     char name[PROCESS_NAME_MAX];
     bool stack_guard_failed;
     const char *stack_guard_reason;
+    bool is_user;
+    const char *fault_reason;
+    uint64_t fault_error_code;
+    uint64_t fault_address;
+    bool fault_has_address;
 };
 
 struct process
@@ -103,6 +109,7 @@ struct process
     int exit_status;
     struct process *next;
     int stdout_fd;
+    bool is_user;
 };
 
 static process_t *g_process_list = NULL;
@@ -196,6 +203,7 @@ static void tss_set_rsp0(uint64_t rsp0)
 }
 
 static void process_handle_stack_guard_fault(void) __attribute__((noreturn));
+static void process_handle_fatal_fault(void) __attribute__((noreturn));
 
 static bool thread_stack_pointer_valid(const thread_t *thread, uint64_t rsp)
 {
@@ -283,6 +291,27 @@ static void thread_trigger_stack_guard(thread_t *thread,
 
     frame->rsp = safe_rsp;
     frame->rip = (uint64_t)process_handle_stack_guard_fault;
+    frame->rflags &= ~RFLAGS_IF_BIT;
+}
+
+static void process_trigger_fatal_fault(thread_t *thread,
+                                        interrupt_frame_t *frame,
+                                        const char *reason,
+                                        uint64_t error_code,
+                                        bool has_address,
+                                        uint64_t address)
+{
+    if (!thread || !frame)
+    {
+        return;
+    }
+    thread->fault_reason = reason;
+    thread->fault_error_code = error_code;
+    thread->fault_has_address = has_address;
+    thread->fault_address = address;
+    frame->rip = (uint64_t)process_handle_fatal_fault;
+    frame->cs = GDT_SELECTOR_KERNEL_CODE;
+    frame->ss = GDT_SELECTOR_KERNEL_DATA;
     frame->rflags &= ~RFLAGS_IF_BIT;
 }
 
@@ -377,6 +406,7 @@ static process_t *allocate_process(const char *name)
     proc->current_thread = NULL;
     proc->next = NULL;
     proc->stdout_fd = g_console_stdout_fd;
+    proc->is_user = false;
     return proc;
 }
 
@@ -390,7 +420,8 @@ static thread_t *thread_create(process_t *process,
                                thread_entry_t entry,
                                void *arg,
                                size_t stack_size,
-                               bool is_idle)
+                               bool is_idle,
+                               bool user_mode)
 {
     if (!process || !entry)
     {
@@ -403,6 +434,11 @@ static thread_t *thread_create(process_t *process,
         return NULL;
     }
     memset(thread, 0, sizeof(*thread));
+    bool is_user_thread = user_mode;
+    if (!is_user_thread && process)
+    {
+        is_user_thread = process->is_user;
+    }
 
     size_t actual_stack = stack_size ? stack_size : PROCESS_DEFAULT_STACK_SIZE;
     size_t guard_size = PROCESS_STACK_GUARD_SIZE;
@@ -450,6 +486,11 @@ static thread_t *thread_create(process_t *process,
     thread->fpu_initialized = true;
     thread->stack_guard_failed = false;
     thread->stack_guard_reason = NULL;
+    thread->is_user = is_user_thread;
+    thread->fault_reason = NULL;
+    thread->fault_error_code = 0;
+    thread->fault_address = 0;
+    thread->fault_has_address = false;
     memcpy(&thread->fpu_state, &g_fpu_initial_state, sizeof(fpu_state_t));
 
     if (name)
@@ -749,6 +790,78 @@ static void process_handle_stack_guard_fault(void)
     fatal("stack guard handler returned");
 }
 
+static void process_handle_fatal_fault(void)
+{
+    thread_t *current = g_current_thread;
+    if (!current)
+    {
+        fatal("fatal fault handler without current thread");
+    }
+
+    serial_write_string("process: fatal fault in thread ");
+    if (current->name[0] != '\0')
+    {
+        serial_write_string(current->name);
+    }
+    else
+    {
+        serial_write_string("(anon)");
+    }
+    serial_write_string(" reason=");
+    if (current->fault_reason)
+    {
+        serial_write_string(current->fault_reason);
+    }
+    else
+    {
+        serial_write_string("unknown");
+    }
+    serial_write_string(" error=0x");
+    serial_write_hex64(current->fault_error_code);
+    if (current->fault_has_address)
+    {
+        serial_write_string(" addr=0x");
+        serial_write_hex64(current->fault_address);
+    }
+    serial_write_string("\r\n");
+
+    scheduler_schedule(false);
+    fatal("fatal fault handler returned");
+}
+
+bool process_handle_exception(interrupt_frame_t *frame,
+                              const char *reason,
+                              uint64_t error_code,
+                              bool has_address,
+                              uint64_t address)
+{
+    if (!frame)
+    {
+        return false;
+    }
+    thread_t *thread = g_current_thread;
+    if (!thread || !thread->is_user)
+    {
+        return false;
+    }
+
+    thread->exit_status = -1;
+    thread->exited = true;
+    thread->state = THREAD_STATE_ZOMBIE;
+    thread->preempt_pending = false;
+    thread->time_slice_remaining = 0;
+
+    process_t *proc = thread->process;
+    if (proc)
+    {
+        proc->exit_status = -1;
+        proc->state = PROCESS_STATE_ZOMBIE;
+    }
+
+    process_trigger_fatal_fault(thread, frame, reason, error_code, has_address, address);
+    return true;
+}
+
 void process_system_init(void)
 {
     fpu_prepare_initial_state();
@@ -776,12 +889,13 @@ void process_system_init(void)
     }
     idle_process->pid = 0;
     idle_process->state = PROCESS_STATE_READY;
+    idle_process->is_user = false;
     idle_process->cr3 = read_cr3();
     idle_process->next = g_process_list;
     g_process_list = idle_process;
     g_next_pid = 1;
 
-    g_idle_thread = thread_create(idle_process, "idle", idle_thread_entry, NULL, PROCESS_DEFAULT_STACK_SIZE, true);
+    g_idle_thread = thread_create(idle_process, "idle", idle_thread_entry, NULL, PROCESS_DEFAULT_STACK_SIZE, true, false);
     if (!g_idle_thread)
     {
         fatal("unable to allocate idle thread");
@@ -817,7 +931,7 @@ process_t *process_create_kernel(const char *name,
         return NULL;
     }
 
-    thread_t *thread = thread_create(proc, name, entry, arg, stack_size, false);
+    thread_t *thread = thread_create(proc, name, entry, arg, stack_size, false, proc->is_user);
     if (!thread)
     {
         paging_destroy_space(&proc->address_space);

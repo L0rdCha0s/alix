@@ -5,43 +5,91 @@
 #include "msr.h"
 #include "types.h"
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-extern uintptr_t kernel_heap_base;
+extern uint8_t __kernel_text_start[];
+extern uint8_t __kernel_text_end[];
+extern uint8_t __kernel_data_start[];
+extern uint8_t __kernel_data_end[];
 
 #define IA32_EFER                     0xC0000080u
 #define PAGE_SIZE_BYTES               4096ULL
-#define PAGE_TABLE_PAGES              6ULL
 #define PAGE_TABLE_ALIGNMENT          PAGE_SIZE_BYTES
 #define PAGE_DIRECTORY_ENTRIES        512ULL
 #define PAGE_LARGE_SIZE               0x200000ULL
 #define PAGE_PRESENT                  (1ULL << 0)
 #define PAGE_WRITABLE                 (1ULL << 1)
-#define PAGE_GLOBAL                   (1ULL << 8)
+#define PAGE_USER                     (1ULL << 2)
 #define PAGE_PAGE_SIZE                (1ULL << 7)
+#define PAGE_GLOBAL                   (1ULL << 8)
 #define PAGE_NO_EXECUTE               (1ULL << 63)
+
+#define IDENTITY_LIMIT                (4ULL * 1024ULL * 1024ULL * 1024ULL)
 
 typedef struct
 {
     uint64_t *pml4;
     uint64_t *pdp;
-    uint64_t *pd[4];
+    uint64_t *pd[PAGE_DIRECTORY_ENTRIES];
     void *raw_allocation;
     size_t raw_bytes;
+    paging_space_t *owner;
 } page_tables_t;
+
+static inline size_t required_pd_tables(void)
+{
+    const uint64_t span = (1ULL << 30); /* 1 GiB per PD */
+    return (size_t)((IDENTITY_LIMIT + span - 1) / span);
+}
 
 static paging_space_t g_kernel_space = { 0 };
 static bool g_paging_ready = false;
 static bool g_nx_supported = false;
 static bool g_smep_supported = false;
 static bool g_smap_supported = false;
-static uintptr_t g_heap_nx_base = 0;
 
 static inline uintptr_t align_up(uintptr_t value, uintptr_t alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static inline uintptr_t align_down(uintptr_t value, uintptr_t alignment)
+{
+    return value & ~(alignment - 1);
+}
+static bool track_extra_page(paging_space_t *space, void *raw, void *aligned)
+{
+    if (!space || !raw || !aligned)
+    {
+        return false;
+    }
+    if (space->extra_page_count >= PAGING_MAX_EXTRA_PAGES)
+    {
+        return false;
+    }
+    space->extra_pages[space->extra_page_count].raw = raw;
+    space->extra_pages[space->extra_page_count].aligned = aligned;
+    space->extra_page_count++;
+    return true;
+}
+
+static void *allocate_aligned_page(paging_space_t *space)
+{
+    size_t raw_bytes = (size_t)(PAGE_SIZE_BYTES + PAGE_TABLE_ALIGNMENT);
+    uint8_t *raw = (uint8_t *)malloc(raw_bytes);
+    if (!raw)
+    {
+        return NULL;
+    }
+    uintptr_t aligned = align_up((uintptr_t)raw, PAGE_TABLE_ALIGNMENT);
+    memset((void *)aligned, 0, PAGE_SIZE_BYTES);
+    if (!track_extra_page(space, raw, (void *)aligned))
+    {
+        free(raw);
+        return NULL;
+    }
+    return (void *)aligned;
 }
 
 static inline void write_cr3(uintptr_t value)
@@ -134,14 +182,16 @@ static void enable_protection_bits(void)
     }
 }
 
-static bool allocate_tables(page_tables_t *tables)
+static bool allocate_tables(page_tables_t *tables, paging_space_t *space)
 {
-    if (!tables)
+    if (!tables || !space)
     {
         return false;
     }
 
-    size_t table_bytes = (size_t)(PAGE_TABLE_PAGES * PAGE_SIZE_BYTES);
+    size_t pd_tables = required_pd_tables();
+    size_t table_pages = 2 + pd_tables;
+    size_t table_bytes = (size_t)(table_pages * PAGE_SIZE_BYTES);
     size_t raw_bytes = table_bytes + PAGE_TABLE_ALIGNMENT;
     uint8_t *raw = (uint8_t *)malloc(raw_bytes);
     if (!raw)
@@ -151,42 +201,140 @@ static bool allocate_tables(page_tables_t *tables)
     uintptr_t base = align_up((uintptr_t)raw, PAGE_TABLE_ALIGNMENT);
     memset((void *)base, 0, table_bytes);
 
+    tables->owner = space;
     tables->raw_allocation = raw;
     tables->raw_bytes = raw_bytes;
     tables->pml4 = (uint64_t *)base;
     tables->pdp = (uint64_t *)(base + PAGE_SIZE_BYTES);
-    for (size_t i = 0; i < 4; ++i)
+    for (size_t i = 0; i < PAGE_DIRECTORY_ENTRIES; ++i)
     {
-        tables->pd[i] = (uint64_t *)(base + PAGE_SIZE_BYTES * (2 + i));
+        tables->pd[i] = NULL;
+    }
+    uintptr_t cursor = base + PAGE_SIZE_BYTES * 2;
+    const uint64_t pd_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL | PAGE_USER;
+    for (size_t i = 0; i < pd_tables; ++i)
+    {
+        tables->pd[i] = (uint64_t *)(cursor + PAGE_SIZE_BYTES * i);
+        tables->pdp[i] = ((uintptr_t)tables->pd[i]) | pd_flags;
     }
     return true;
 }
 
-static void map_identity_large(page_tables_t *tables)
+static uint64_t *ensure_pd(page_tables_t *tables, size_t index)
 {
-    uint64_t region_base = 0;
-    for (size_t pd_index = 0; pd_index < 4; ++pd_index)
+    if (!tables || index >= PAGE_DIRECTORY_ENTRIES)
     {
-        uint64_t *pd = tables->pd[pd_index];
-        for (size_t entry = 0; entry < PAGE_DIRECTORY_ENTRIES; ++entry)
+        return NULL;
+    }
+    if (!tables->pd[index])
+    {
+        void *page = allocate_aligned_page(tables->owner);
+        if (!page)
         {
-            uint64_t addr = region_base + (entry * PAGE_LARGE_SIZE);
-            uint64_t flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_PAGE_SIZE | PAGE_GLOBAL;
-            if (g_nx_supported && addr >= g_heap_nx_base)
-            {
-                flags |= PAGE_NO_EXECUTE;
-            }
-            pd[entry] = addr | flags;
+            return NULL;
         }
-        region_base += (uint64_t)PAGE_DIRECTORY_ENTRIES * PAGE_LARGE_SIZE;
+        tables->pd[index] = (uint64_t *)page;
+        uint64_t flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+        tables->pdp[index] = ((uintptr_t)page) | flags;
+    }
+    return tables->pd[index];
+}
+
+static void apply_large_mapping(uint64_t *pd_entry,
+                                uint64_t phys_addr,
+                                bool executable)
+{
+    uint64_t flags = PAGE_PRESENT | PAGE_PAGE_SIZE | PAGE_GLOBAL;
+    flags |= PAGE_WRITABLE;
+    if (g_nx_supported && !executable)
+    {
+        flags |= PAGE_NO_EXECUTE;
+    }
+    *pd_entry = (phys_addr & ~(PAGE_LARGE_SIZE - 1)) | flags;
+}
+
+static void apply_small_mapping(uint64_t *pt_entry,
+                                uint64_t phys_addr,
+                                bool writable,
+                                bool executable,
+                                bool user_accessible)
+{
+    uint64_t flags = PAGE_PRESENT | PAGE_GLOBAL;
+    if (writable)
+    {
+        flags |= PAGE_WRITABLE;
+    }
+    if (user_accessible)
+    {
+        flags |= PAGE_USER;
+    }
+    if (g_nx_supported && !executable)
+    {
+        flags |= PAGE_NO_EXECUTE;
+    }
+    *pt_entry = phys_addr | flags;
+}
+
+static void map_identity_space(page_tables_t *tables)
+{
+    if (!tables)
+    {
+        return;
     }
 
-    for (size_t i = 0; i < 4; ++i)
-    {
-        tables->pdp[i] = ((uintptr_t)tables->pd[i]) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
-    }
+    const uint64_t text_actual_start = (uint64_t)__kernel_text_start;
+    const uint64_t text_actual_end = (uint64_t)__kernel_text_end;
+    const uint64_t data_actual_start = (uint64_t)__kernel_data_start;
+    const uint64_t data_actual_end = (uint64_t)__kernel_data_end;
+    const uint64_t fine_start = align_down(text_actual_start, PAGE_LARGE_SIZE);
+    const uint64_t fine_end = align_up(data_actual_end, PAGE_LARGE_SIZE);
 
     tables->pml4[0] = ((uintptr_t)tables->pdp) | PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+
+    for (uint64_t addr = 0; addr < IDENTITY_LIMIT; addr += PAGE_LARGE_SIZE)
+    {
+        size_t pd_index = (size_t)(addr >> 30);
+        uint64_t *pd = ensure_pd(tables, pd_index);
+        if (!pd)
+        {
+            paging_panic("unable to allocate page directory");
+        }
+        size_t pde_index = (size_t)((addr >> 21) & 0x1FF);
+        uint64_t chunk_base = addr;
+        uint64_t chunk_end = chunk_base + PAGE_LARGE_SIZE;
+        bool chunk_executable = chunk_base < text_actual_end;
+
+        bool needs_small = !(chunk_end <= fine_start || chunk_base >= fine_end);
+        if (!needs_small)
+        {
+            apply_large_mapping(&pd[pde_index], chunk_base, chunk_executable);
+            continue;
+        }
+
+        uint64_t *pt = (uint64_t *)allocate_aligned_page(tables->owner);
+        if (!pt)
+        {
+            paging_panic("unable to allocate PT for fine mapping");
+        }
+        uint64_t pt_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+        pd[pde_index] = ((uintptr_t)pt) | pt_flags;
+        for (size_t i = 0; i < 512; ++i)
+        {
+            uint64_t page_addr = chunk_base + (i * PAGE_SIZE_BYTES);
+            bool in_text = page_addr + PAGE_SIZE_BYTES > text_actual_start &&
+                           page_addr < text_actual_end;
+            bool in_data = page_addr + PAGE_SIZE_BYTES > data_actual_start &&
+                           page_addr < data_actual_end;
+            bool exec = in_text;
+            bool writable = !in_text;
+            if (in_data)
+            {
+                writable = true;
+                exec = false;
+            }
+            apply_small_mapping(&pt[i], page_addr, writable, exec, false);
+        }
+    }
 }
 
 static bool build_identity_space(paging_space_t *space)
@@ -195,14 +343,20 @@ static bool build_identity_space(paging_space_t *space)
     {
         return false;
     }
+    space->extra_page_count = 0;
+    for (size_t i = 0; i < PAGING_MAX_EXTRA_PAGES; ++i)
+    {
+        space->extra_pages[i].raw = NULL;
+        space->extra_pages[i].aligned = NULL;
+    }
     page_tables_t tables;
     memset(&tables, 0, sizeof(tables));
-    if (!allocate_tables(&tables))
+    if (!allocate_tables(&tables, space))
     {
         return false;
     }
 
-    map_identity_large(&tables);
+    map_identity_space(&tables);
 
     space->cr3 = (uintptr_t)tables.pml4;
     space->allocation_base = tables.raw_allocation;
@@ -219,7 +373,6 @@ void paging_init(void)
     }
 
     detect_features();
-    g_heap_nx_base = (uintptr_t)kernel_heap_base;
 
     paging_space_t kernel_space;
     memset(&kernel_space, 0, sizeof(kernel_space));
@@ -228,8 +381,8 @@ void paging_init(void)
         paging_panic("kernel page table allocation failed");
     }
 
-    write_cr3(kernel_space.cr3);
     enable_protection_bits();
+    write_cr3(kernel_space.cr3);
 
     g_kernel_space = kernel_space;
     g_paging_ready = true;
@@ -259,6 +412,16 @@ void paging_destroy_space(paging_space_t *space)
     {
         return;
     }
+    for (size_t i = 0; i < space->extra_page_count; ++i)
+    {
+        if (space->extra_pages[i].raw)
+        {
+            free(space->extra_pages[i].raw);
+            space->extra_pages[i].raw = NULL;
+            space->extra_pages[i].aligned = NULL;
+        }
+    }
+    space->extra_page_count = 0;
     free(space->allocation_base);
     space->allocation_base = NULL;
     space->allocation_size = 0;
