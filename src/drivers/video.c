@@ -3,11 +3,20 @@
 #include "serial.h"
 #include "mouse.h"
 #include "atk.h"
-#include "atk/object.h"
+#include "atk/atk_list.h"
 #include "pci.h"
 #include "keyboard.h"
 #include "libc.h"
 
+typedef struct atk_state atk_state_t;
+typedef struct atk_widget atk_widget_t;
+
+atk_state_t *atk_state_get(void);
+void atk_window_draw(atk_state_t *state, atk_widget_t *window);
+void atk_window_draw_from(atk_state_t *state, atk_widget_t *start_window);
+void atk_window_mark_dirty(const atk_widget_t *window);
+bool atk_window_contains(const atk_state_t *state, const atk_widget_t *window);
+bool atk_window_is_topmost(const atk_state_t *state, const atk_widget_t *window);
 typedef struct atk_state atk_state_t;
 typedef struct atk_widget atk_widget_t;
 
@@ -135,7 +144,7 @@ static void video_dirty_reset(void);
 static void video_flush_dirty(void);
 static void video_perform_refresh(void);
 static void cursor_draw_overlay(void);
-static void cursor_mark_old_rect_dirty(void);
+static void cursor_restore_background(void);
 static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg);
 static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
                                const uint8_t *src, int stride_bytes, int src_x0, int src_y0);
@@ -288,9 +297,35 @@ static void cursor_draw_overlay(void)
     prev_cursor_y = cursor_y;
 }
 
-static void cursor_mark_old_rect_dirty(void)
+static void cursor_restore_background(void)
 {
-    video_invalidate_rect(prev_cursor_x, prev_cursor_y, CURSOR_W, CURSOR_H);
+    if (!framebuffer)
+    {
+        return;
+    }
+
+    int x0 = prev_cursor_x;
+    int y0 = prev_cursor_y;
+    for (int row = 0; row < CURSOR_H; ++row)
+    {
+        int dst_y = y0 + row;
+        if ((unsigned)dst_y >= VIDEO_HEIGHT)
+        {
+            continue;
+        }
+
+        for (int col = 0; col < CURSOR_W; ++col)
+        {
+            int dst_x = x0 + col;
+            if ((unsigned)dst_x >= VIDEO_WIDTH)
+            {
+                continue;
+            }
+
+            size_t index = (size_t)dst_y * VIDEO_WIDTH + dst_x;
+            framebuffer[index] = backbuffer[index];
+        }
+    }
 }
 
 /* --------- Text & blits to backbuffer --------- */
@@ -495,31 +530,32 @@ static void video_perform_refresh(void)
         return;
     }
 
+    if (dirty_active)
+    {
+        video_flush_dirty();
+    }
+
     atk_state_t *state = atk_state_get();
 
     if (refresh_window)
     {
-        atk_widget_t *window = refresh_window;
+        atk_widget_t *target = refresh_window;
         refresh_window = NULL;
 
-        if (window && window->used)
+        if (target)
         {
             video_dirty_reset();
-            atk_window_draw(state, window);
-            atk_window_mark_dirty(window);
+            atk_window_draw_from(state, target);
             if (dirty_active)
             {
                 video_flush_dirty();
             }
             cursor_draw_overlay();
-        }
-        else
-        {
-            refresh_requested_full = true;
+            refresh_requested = refresh_requested_full || (refresh_window != NULL);
+            return;
         }
 
-        refresh_requested = refresh_requested_full || (refresh_window != NULL);
-        return;
+        refresh_requested_full = true;
     }
 
     if (refresh_requested_full)
@@ -604,6 +640,21 @@ void video_request_refresh_window(atk_widget_t *window)
     {
         return;
     }
+    atk_state_t *state = atk_state_get();
+    if (!state || !atk_window_contains(state, window))
+    {
+        refresh_requested_full = true;
+        refresh_requested = true;
+        return;
+    }
+
+    if (!atk_window_is_topmost(state, window))
+    {
+        refresh_requested_full = true;
+        refresh_requested = true;
+        return;
+    }
+
     refresh_window = window;
     refresh_requested = true;
 }
@@ -651,8 +702,15 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
         return;
     }
 
-    /* old cursor area will need repainting from backbuffer */
-    cursor_mark_old_rect_dirty();
+    if (refresh_window)
+    {
+        refresh_requested_full = true;
+        refresh_window = NULL;
+        refresh_requested = true;
+    }
+
+    /* restore previous cursor region before drawing new one */
+    cursor_restore_background();
 
     /* update cursor */
     cursor_x += dx;
@@ -673,9 +731,15 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
         atk_render();
     }
 
-    if (dirty_active)
+    if (dirty_active && !refresh_requested)
     {
         video_flush_dirty();
+    }
+
+    if (refresh_requested)
+    {
+        video_perform_refresh();
+        return;
     }
 
     cursor_draw_overlay();

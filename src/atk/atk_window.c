@@ -458,6 +458,49 @@ void atk_window_draw(atk_state_t *state, atk_widget_t *window)
     window_draw_internal(state, window);
 }
 
+void atk_window_draw_from(atk_state_t *state, atk_widget_t *start)
+{
+    if (!state || !start)
+    {
+        return;
+    }
+
+    atk_list_node_t *node = atk_list_find(&state->windows, start);
+    if (!node)
+    {
+        return;
+    }
+
+    for (atk_list_node_t *n = node; n; n = n->next)
+    {
+        atk_widget_t *window = (atk_widget_t *)n->value;
+        if (!window || !window->used)
+        {
+            continue;
+        }
+        atk_window_mark_dirty(window);
+        window_draw_internal(state, window);
+    }
+}
+
+bool atk_window_contains(const atk_state_t *state, const atk_widget_t *window)
+{
+    if (!state || !window)
+    {
+        return false;
+    }
+    return atk_list_find(&state->windows, window) != NULL;
+}
+
+bool atk_window_is_topmost(const atk_state_t *state, const atk_widget_t *window)
+{
+    if (!state || !window || !state->windows.tail)
+    {
+        return false;
+    }
+    return state->windows.tail->value == window;
+}
+
 static void format_window_title(char *buffer, size_t capacity, int id)
 {
     if (!buffer || capacity == 0)
