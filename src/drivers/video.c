@@ -24,6 +24,19 @@ atk_state_t *atk_state_get(void);
 void atk_window_draw(atk_state_t *state, atk_widget_t *window);
 void atk_window_mark_dirty(const atk_widget_t *window);
 
+static inline uint64_t video_irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("cli" ::: "memory");
+    return flags;
+}
+
+static inline void video_irq_restore(uint64_t flags)
+{
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc");
+}
+
 #define BGA_INDEX_PORT 0x1CE
 #define BGA_DATA_PORT  0x1CF
 #define BGA_REG_ID     0x0
@@ -525,9 +538,11 @@ static void video_flush_dirty(void)
 
 static void video_perform_refresh(void)
 {
+    uint64_t irq_state = video_irq_save();
+
     if (!video_active)
     {
-        return;
+        goto out;
     }
 
     if (dirty_active)
@@ -552,7 +567,7 @@ static void video_perform_refresh(void)
             }
             cursor_draw_overlay();
             refresh_requested = refresh_requested_full || (refresh_window != NULL);
-            return;
+            goto out;
         }
 
         refresh_requested_full = true;
@@ -571,6 +586,9 @@ static void video_perform_refresh(void)
     }
 
     refresh_requested = refresh_requested_full || (refresh_window != NULL);
+
+out:
+    video_irq_restore(irq_state);
 }
 
 /* --------- Mode entry/exit & loop --------- */
@@ -694,12 +712,14 @@ static void video_poll_keyboard(void)
 
 void video_on_mouse_event(int dx, int dy, bool left_pressed)
 {
+    uint64_t irq_state = video_irq_save();
+
     if (!video_active)
     {
 #if VIDEO_MOUSE_LOG
         if (dx != 0 || dy != 0 || left_pressed) video_log("mouse event ignored (video inactive)");
 #endif
-        return;
+        goto out;
     }
 
     if (refresh_window)
@@ -739,7 +759,7 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     if (refresh_requested)
     {
         video_perform_refresh();
-        return;
+        goto out;
     }
 
     cursor_draw_overlay();
@@ -759,6 +779,9 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     }
 
     last_left_down = left_pressed;
+
+out:
+    video_irq_restore(irq_state);
 }
 
 /* --------- Logging & detection --------- */
