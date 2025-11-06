@@ -37,6 +37,7 @@ static void shell_run_and_display(shell_state_t *shell, const char *input);
 static char *shell_duplicate_empty(void);
 static char *shell_duplicate_string(const char *text);
 static void shell_command_runner(void *arg);
+static void shell_stream_console_write(void *context, const char *data, size_t len);
 
 void shell_output_init_console(shell_output_t *out)
 {
@@ -212,11 +213,16 @@ void shell_output_reset(shell_output_t *out)
 
 void shell_main(void)
 {
-    shell_state_t shell = { .cwd = vfs_root() };
+    shell_state_t shell = {
+        .cwd = vfs_root(),
+        .stream_fn = shell_stream_console_write,
+        .stream_context = NULL,
+        .stdout_fd = process_current_stdout_fd()
+    };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free, loop1, loop2, top.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free, loop1, loop2, top.\r\n");
 
     while (1)
     {
@@ -243,6 +249,9 @@ static const shell_command_t g_commands[] = {
     { "net_mac",     shell_cmd_net_mac },
     { "alloc1m",     shell_cmd_alloc1m },
     { "free",        shell_cmd_free },
+    { "loop1",       shell_cmd_loop1 },
+    { "loop2",       shell_cmd_loop2 },
+    { "top",         shell_cmd_top },
 };
 
 static void shell_command_runner(void *arg)
@@ -373,7 +382,8 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             process_t *proc = process_create_kernel(g_commands[i].name,
                                                     shell_command_runner,
                                                     task,
-                                                    0);
+                                                    0,
+                                                    shell ? shell->stdout_fd : -1);
             if (!proc)
             {
                 free(task);
@@ -580,4 +590,15 @@ static void serial_emit_char(char c)
         serial_write_char('\r');
     }
     serial_write_char(c);
+}
+
+static void shell_stream_console_write(void *context, const char *data, size_t len)
+{
+    (void)context;
+    for (size_t i = 0; i < len; ++i)
+    {
+        char c = data[i];
+        console_putc(c);
+        serial_emit_char(c);
+    }
 }

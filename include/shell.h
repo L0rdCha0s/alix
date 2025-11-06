@@ -20,6 +20,9 @@ struct shell_output
 struct shell_state
 {
     vfs_node_t *cwd;
+    void (*stream_fn)(void *context, const char *data, size_t len);
+    void *stream_context;
+    int stdout_fd;
 };
 
 void shell_main(void);

@@ -23,6 +23,7 @@ void video_invalidate_rect(int x, int y, int width, int height);
 void video_invalidate_all(void);
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes);
 bool video_is_active(void);
+void video_request_refresh(void);
 
 
 #endif

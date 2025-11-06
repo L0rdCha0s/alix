@@ -60,7 +60,7 @@ void kernel_main(void)
     interrupts_enable();
     serial_write_char('e');
 
-    process_t *shell_process = process_create_kernel("shell", shell_process_entry, NULL, 0);
+    process_t *shell_process = process_create_kernel("shell", shell_process_entry, NULL, 0, -1);
     if (!shell_process)
     {
         serial_write_string("Failed to create shell process\r\n");

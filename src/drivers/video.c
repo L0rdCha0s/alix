@@ -521,6 +521,22 @@ void video_run_loop(void)
     video_log("video_run_loop end");
 }
 
+void video_request_refresh(void)
+{
+    if (!video_active)
+    {
+        return;
+    }
+
+    video_dirty_reset();
+    atk_render();
+    if (dirty_active)
+    {
+        video_flush_dirty();
+    }
+    cursor_draw_overlay();
+}
+
 void video_exit_mode(void)
 {
     video_hw_disable();

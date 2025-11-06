@@ -4,6 +4,8 @@
 #include "libc.h"
 #include "serial.h"
 #include "msr.h"
+#include "console.h"
+#include "fd.h"
 
 #define MSR_FS_BASE         0xC0000100
 #define MSR_GS_BASE         0xC0000101
@@ -92,6 +94,7 @@ struct process
     thread_t *current_thread;
     int exit_status;
     struct process *next;
+    int stdout_fd;
 };
 
 static process_t *g_process_list = NULL;
@@ -105,6 +108,34 @@ static uint64_t g_next_pid = 1;
 
 static fpu_state_t g_fpu_initial_state;
 static bool g_fpu_template_ready = false;
+static int g_console_stdout_fd = -1;
+
+static ssize_t console_stdout_write(void *ctx, const void *buffer, size_t count)
+{
+    (void)ctx;
+    if (!buffer)
+    {
+        return 0;
+    }
+    const char *data = (const char *)buffer;
+    for (size_t i = 0; i < count; ++i)
+    {
+        char c = data[i];
+        console_putc(c);
+        if (c == '\n')
+        {
+            serial_write_char('\r');
+        }
+        serial_write_char(c);
+    }
+    return (ssize_t)count;
+}
+
+static const fd_ops_t console_stdout_ops = {
+    .read = NULL,
+    .write = console_stdout_write,
+    .close = NULL,
+};
 
 static inline uint64_t cpu_save_flags(void)
 {
@@ -241,6 +272,7 @@ static process_t *allocate_process(const char *name)
     proc->main_thread = NULL;
     proc->current_thread = NULL;
     proc->next = NULL;
+    proc->stdout_fd = g_console_stdout_fd;
     return proc;
 }
 
@@ -569,6 +601,15 @@ void process_system_init(void)
 {
     fpu_prepare_initial_state();
 
+    if (g_console_stdout_fd < 0)
+    {
+        g_console_stdout_fd = fd_allocate(&console_stdout_ops, NULL);
+        if (g_console_stdout_fd < 0)
+        {
+            fatal("unable to allocate console stdout fd");
+        }
+    }
+
     g_process_list = NULL;
     g_current_process = NULL;
     g_current_thread = NULL;
@@ -610,7 +651,8 @@ void process_start_scheduler(void)
 process_t *process_create_kernel(const char *name,
                                  thread_entry_t entry,
                                  void *arg,
-                                 size_t stack_size)
+                                 size_t stack_size,
+                                 int stdout_fd)
 {
     if (!entry)
     {
@@ -628,6 +670,15 @@ process_t *process_create_kernel(const char *name,
     {
         free(proc);
         return NULL;
+    }
+
+    if (stdout_fd >= 0)
+    {
+        proc->stdout_fd = stdout_fd;
+    }
+    else
+    {
+        proc->stdout_fd = g_console_stdout_fd;
     }
 
     proc->main_thread = thread;
@@ -738,6 +789,97 @@ uint64_t process_current_pid(void)
         return 0;
     }
     return g_current_process->pid;
+}
+
+uint64_t process_get_pid(const process_t *process)
+{
+    if (!process)
+    {
+        return 0;
+    }
+    return process->pid;
+}
+
+int process_current_stdout_fd(void)
+{
+    if (g_current_process && g_current_process->stdout_fd >= 0)
+    {
+        return g_current_process->stdout_fd;
+    }
+    return g_console_stdout_fd;
+}
+
+ssize_t process_stdout_write(const char *data, size_t len)
+{
+    int fd = process_current_stdout_fd();
+    if (fd < 0)
+    {
+        return -1;
+    }
+    return fd_write(fd, data, len);
+}
+
+size_t process_snapshot(process_info_t *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return 0;
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    size_t count = 0;
+    for (process_t *proc = g_process_list; proc && count < capacity; proc = proc->next)
+    {
+        process_info_t *info = &buffer[count++];
+        info->pid = proc->pid;
+        info->state = proc->state;
+        info->name = proc->name[0] ? proc->name : "(anon)";
+        info->stdout_fd = proc->stdout_fd;
+        thread_t *thread = proc->current_thread ? proc->current_thread : proc->main_thread;
+        if (thread)
+        {
+            info->thread_state = thread->state;
+            info->thread_name = thread->name[0] ? thread->name : "";
+            info->is_idle = thread->is_idle;
+            info->time_slice_remaining = thread->time_slice_remaining;
+        }
+        else
+        {
+            info->thread_state = THREAD_STATE_ZOMBIE;
+            info->thread_name = "";
+            info->is_idle = false;
+            info->time_slice_remaining = 0;
+        }
+        info->is_current = (proc == g_current_process);
+    }
+
+    cpu_restore_flags(flags);
+    return count;
+}
+
+const char *process_state_name(process_state_t state)
+{
+    switch (state)
+    {
+        case PROCESS_STATE_READY:   return "ready";
+        case PROCESS_STATE_RUNNING: return "running";
+        case PROCESS_STATE_ZOMBIE:  return "zombie";
+    }
+    return "unknown";
+}
+
+const char *thread_state_name(thread_state_t state)
+{
+    switch (state)
+    {
+        case THREAD_STATE_READY:   return "ready";
+        case THREAD_STATE_RUNNING: return "running";
+        case THREAD_STATE_BLOCKED: return "blocked";
+        case THREAD_STATE_ZOMBIE:  return "zombie";
+    }
+    return "unknown";
 }
 
 void process_on_timer_tick(interrupt_frame_t *frame)
