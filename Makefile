@@ -45,6 +45,7 @@ STAGE2_OBJS := $(STAGE2_OBJ) $(C_OBJECTS) $(ASM_OBJECTS)
 BOOT_BIN   := $(OBJDIR)/boot.bin
 STAGE2_ELF := $(OBJDIR)/stage2.elf
 STAGE2_BIN := $(OBJDIR)/stage2.bin
+DATA_IMG   := data.img
 
 all: os.img
 
@@ -85,6 +86,9 @@ hdd.img: $(BOOT_BIN) $(STAGE2_BIN)
 	dd if=/dev/zero of=$@ bs=1M count=16 2>/dev/null
 	dd if=$(BOOT_BIN)   of=$@ conv=notrunc 2>/dev/null
 	dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
+
+$(DATA_IMG):
+	truncate -s 4G $@
 
 RAM ?= 4G
 QEMU_DEBUG_LOG   ?= qemu-debug.log
@@ -127,13 +131,16 @@ run: os.img
 	$(QEMU) -m $(RAM) -fda os.img -boot a -no-reboot -monitor none -serial stdio \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
-run-hdd: hdd.img
+run-hdd: hdd.img $(DATA_IMG)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -m $(RAM) -drive file=hdd.img,format=raw,if=ide -no-reboot -monitor none -serial stdio \
+	$(QEMU) -m $(RAM) \
+		-drive file=hdd.img,format=raw,if=ide,index=0,media=disk \
+		-drive file=$(DATA_IMG),format=raw,if=ide,index=1,media=disk \
+		-no-reboot -monitor none -serial stdio \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 clean:
-	rm -rf $(OBJDIR) os.img hdd.img
+	rm -rf $(OBJDIR) os.img hdd.img $(DATA_IMG)
 
 tests/dhcp_packet_test: tests/dhcp_packet_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -o $@ $<

@@ -13,6 +13,9 @@
 #include "net/dns.h"
 #include "idt.h"
 #include "process.h"
+#include "block.h"
+#include "devfs.h"
+#include "ata.h"
 
 static void shell_process_entry(void *arg)
 {
@@ -30,6 +33,7 @@ void kernel_main(void)
 
     heap_init();
     process_system_init();
+    block_init();
 
     serial_write_char('k');
     serial_write_string("IDT base pre-init=\r\n");
@@ -39,6 +43,7 @@ void kernel_main(void)
     serial_write_char('h');
     serial_write_char('v');
     vfs_init();
+    devfs_init();
     serial_write_char('Q');
     serial_write_hex64((uint64_t)vfs_root());
     serial_write_char('\n');
@@ -48,6 +53,8 @@ void kernel_main(void)
     serial_write_char('I');
     timer_init(100);
     serial_write_char('T');
+    ata_init();
+    devfs_register_block_devices();
 
     net_if_init();
     net_dns_init();

@@ -58,15 +58,7 @@ __attribute__((interrupt)) static void irq1_handler(interrupt_frame_t *frame)
     {
         uint8_t scancode = inb(0x60);
         keyboard_buffer_push(scancode);
-        if (irq1_log_count < 16)
-        {
-            serial_write_string("irq1 scancode=0x");
-            static const char hex[] = "0123456789ABCDEF";
-            serial_write_char(hex[(scancode >> 4) & 0xF]);
-            serial_write_char(hex[scancode & 0xF]);
-            serial_write_string("\r\n");
-            irq1_log_count++;
-        }
+    
     }
     pic_send_eoi(1);
 }

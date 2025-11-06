@@ -18,6 +18,8 @@ bool shell_cmd_alloc1m(shell_state_t *shell, shell_output_t *out, const char *ar
 bool shell_cmd_free(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_imgview(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_sha1sum(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_mkfs(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_mount(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_loop1(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_loop2(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_top(shell_state_t *shell, shell_output_t *out, const char *args);

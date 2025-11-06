@@ -36,11 +36,11 @@ static void buffer_push(uint8_t code)
     scancode_buffer[buffer_head] = code;
     buffer_head = (buffer_head + 1) % KBD_BUFFER_SIZE;
 
-    serial_write_string("keyboard.c: buffer_push scancode=0x");
-    static const char hex[] = "0123456789ABCDEF";
-    serial_write_char(hex[(code >> 4) & 0xF]);
-    serial_write_char(hex[code & 0xF]);
-    serial_write_string("\r\n");
+    //serial_write_string("keyboard.c: buffer_push scancode=0x");
+    //static const char hex[] = "0123456789ABCDEF";
+    //serial_write_char(hex[(code >> 4) & 0xF]);
+    //serial_write_char(hex[code & 0xF]);
+    //serial_write_string("\r\n");
 }
 
 static bool buffer_pop(uint8_t *code)
@@ -237,11 +237,11 @@ bool keyboard_try_read(char *out_char)
 
 void keyboard_buffer_push(uint8_t scancode)
 {
-    serial_write_string("keyboard.c: keyboard_buffer_push scancode=0x");
+    //serial_write_string("keyboard.c: keyboard_buffer_push scancode=0x");
     static const char hex[] = "0123456789ABCDEF";
-    serial_write_char(hex[(scancode >> 4) & 0xF]);
-    serial_write_char(hex[scancode & 0xF]);
-    serial_write_string("\r\n");
+    //serial_write_char(hex[(scancode >> 4) & 0xF]);
+    //serial_write_char(hex[scancode & 0xF]);
+    //serial_write_string("\r\n");
 
     buffer_push(scancode);
 }

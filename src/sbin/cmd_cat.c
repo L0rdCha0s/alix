@@ -19,6 +19,10 @@ bool shell_cmd_cat(shell_state_t *shell, shell_output_t *out, const char *path)
     {
         return shell_output_error(out, "path is a directory");
     }
+    if (vfs_is_block(node))
+    {
+        return shell_output_error(out, "path is a block device");
+    }
 
     size_t size = 0;
     const char *data = vfs_data(node, &size);

@@ -221,8 +221,8 @@ void shell_main(void)
     };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free, loop1, loop2, top.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free, loop1, loop2, top.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, mkfs, mount, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free, loop1, loop2, top.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, mkfs, mount, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, alloc1m, free, loop1, loop2, top.\r\n");
 
     while (1)
     {
@@ -237,6 +237,8 @@ static const shell_command_t g_commands[] = {
     { "echo",        shell_cmd_echo },
     { "cat",         shell_cmd_cat },
     { "mkdir",       shell_cmd_mkdir },
+    { "mkfs",        shell_cmd_mkfs },
+    { "mount",       shell_cmd_mount },
     { "ls",          shell_cmd_ls },
     { "ip",          shell_cmd_ip },
     { "ping",        shell_cmd_ping },
@@ -494,20 +496,20 @@ static void shell_print_prompt(void)
 
 static char cli_get_char(void)
 {
-    serial_write_string("In cli_get_char\n");
+    //serial_write_string("In cli_get_char\n");
 
     while (1)
     {
         char c;
         if (keyboard_try_read(&c))
         {
-            serial_write_string("shell.c: keyboard_try_read has char\n");
+            //serial_write_string("shell.c: keyboard_try_read has char\n");
 
             return c;
         }
         if (serial_has_char())
         {
-            serial_write_string("shell.c: serial_has_char has char\n");
+            //serial_write_string("shell.c: serial_has_char has char\n");
 
             return serial_read_char();
         }
@@ -518,7 +520,7 @@ static char cli_get_char(void)
 
 static size_t cli_read_line(char *buffer, size_t capacity)
 {
-    serial_write_string("shell.c: cli_read_line in\n");
+    //serial_write_string("shell.c: cli_read_line in\n");
     
     size_t len = 0;
     while (1)
@@ -557,7 +559,7 @@ static size_t cli_read_line(char *buffer, size_t capacity)
         }
     }
 
-    serial_write_string("shell.c: cli_read_line out\n");
+    //serial_write_string("shell.c: cli_read_line out\n");
 }
 
 static bool is_space(char c)

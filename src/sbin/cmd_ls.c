@@ -42,10 +42,15 @@ bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *path)
     serial_write_string("In shell command ls 2\n");
     for (vfs_node_t *child = vfs_first_child(target); child; child = vfs_next_sibling(child))
     {
-        shell_output_write(out, vfs_name(child));
+        const char *name = vfs_name(child);
+        shell_output_write(out, name ? name : "");
         if (vfs_is_dir(child))
         {
             shell_output_write(out, "/");
+        }
+        else if (vfs_is_block(child))
+        {
+            shell_output_write(out, "@");
         }
         shell_output_write(out, "\n");
     }
