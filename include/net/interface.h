@@ -4,6 +4,7 @@
 #include "types.h"
 
 #define NET_IF_NAME_MAX 8
+#define NET_MAX_INTERFACES 8
 
 typedef struct net_interface
 {
@@ -15,7 +16,30 @@ typedef struct net_interface
     uint32_t ipv4_netmask;
     uint32_t ipv4_gateway;
     bool (*send)(struct net_interface *, const uint8_t *, size_t);
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
+    uint64_t rx_packets;
+    uint64_t tx_packets;
+    uint64_t rx_errors;
+    uint64_t tx_errors;
 } net_interface_t;
+
+typedef struct
+{
+    const char *name;
+    bool present;
+    bool link_up;
+    uint8_t mac[6];
+    uint32_t ipv4_addr;
+    uint32_t ipv4_netmask;
+    uint32_t ipv4_gateway;
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
+    uint64_t rx_packets;
+    uint64_t tx_packets;
+    uint64_t rx_errors;
+    uint64_t tx_errors;
+} net_interface_stats_t;
 
 void net_if_init(void);
 net_interface_t *net_if_register(const char *name, const uint8_t mac[6]);
@@ -26,6 +50,10 @@ void net_if_set_link_up(net_interface_t *iface, bool up);
 void net_if_set_ipv4(net_interface_t *iface, uint32_t addr, uint32_t netmask, uint32_t gateway);
 void net_if_set_tx_handler(net_interface_t *iface, bool (*handler)(net_interface_t *, const uint8_t *, size_t));
 bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len);
+void net_if_record_rx(net_interface_t *iface, size_t bytes);
+void net_if_record_rx_error(net_interface_t *iface);
+void net_if_record_tx_error(net_interface_t *iface);
+size_t net_if_snapshot(net_interface_stats_t *buffer, size_t capacity);
 
 void net_format_mac(const uint8_t mac[6], char *out);
 void net_format_ipv4(uint32_t addr, char *out);

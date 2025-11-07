@@ -341,12 +341,20 @@ static void rtl8139_handle_receive(void)
         bool ok = (rsr & 0x0001U) && rxlen >= 8 && rxlen <= (RTL_RX_RING_SIZE - 16);
 
         if (!ok) {
+            if (g_iface)
+            {
+                net_if_record_rx_error(g_iface);
+            }
             rtl8139_dump_state("rx invalid");
             goto advance_ring;
         }
 
         uint16_t frame_len = (uint16_t)(rxlen - 4);  // strip CRC
         if (frame_len > RTL_RX_FRAME_MAX) {
+            if (g_iface)
+            {
+                net_if_record_rx_error(g_iface);
+            }
             goto advance_ring;
         }
 
@@ -368,6 +376,10 @@ static void rtl8139_handle_receive(void)
 
             // Copy full frame into linear buffer
             if (frame_len > sizeof(g_rx_frame)) {
+                if (g_iface)
+                {
+                    net_if_record_rx_error(g_iface);
+                }
                 serial_write_string("rtl8139: frame too large len=0x");
                 rtl8139_log_hex16(frame_len);
                 serial_write_string(" cap=0x");
@@ -389,6 +401,11 @@ static void rtl8139_handle_receive(void)
                 frame_len = (uint16_t)(frame_len - 4);
                 eth_type = inner;
                 // l2_off remains 14 (we presented an untagged frame to upper layers)
+            }
+
+            if (g_iface)
+            {
+                net_if_record_rx(g_iface, frame_len);
             }
 
             // Only process IPv4 and ARP

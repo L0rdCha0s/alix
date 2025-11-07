@@ -43,5 +43,7 @@ atk_widget_t *atk_widget_create(const atk_class_t *cls);
 void atk_widget_destroy(atk_widget_t *widget);
 bool atk_widget_is_a(const atk_widget_t *widget, const atk_class_t *cls);
 void *atk_widget_priv(const atk_widget_t *widget, const atk_class_t *cls);
+void atk_widget_absolute_position(const atk_widget_t *widget, int *x_out, int *y_out);
+void atk_widget_absolute_bounds(const atk_widget_t *widget, int *x_out, int *y_out, int *width_out, int *height_out);
 
 #endif

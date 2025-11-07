@@ -105,3 +105,27 @@ bool timer_register_periodic(timer_callback_t callback, void *context, uint32_t 
     }
     return false;
 }
+
+bool timer_unregister(timer_callback_t callback, void *context)
+{
+    if (!callback)
+    {
+        return false;
+    }
+
+    bool removed = false;
+    for (size_t i = 0; i < TIMER_MAX_TASKS; ++i)
+    {
+        timer_task_t *task = &g_tasks[i];
+        if (task->in_use && task->callback == callback && task->context == context)
+        {
+            task->in_use = false;
+            task->callback = 0;
+            task->context = 0;
+            task->interval = 0;
+            task->next_tick = 0;
+            removed = true;
+        }
+    }
+    return removed;
+}

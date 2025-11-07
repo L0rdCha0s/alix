@@ -99,3 +99,43 @@ void *atk_widget_priv(const atk_widget_t *widget, const atk_class_t *cls)
     uint8_t *base = (uint8_t *)(widget + 1);
     return base + offset;
 }
+
+void atk_widget_absolute_position(const atk_widget_t *widget, int *x_out, int *y_out)
+{
+    int x = 0;
+    int y = 0;
+    const atk_widget_t *current = widget;
+    while (current)
+    {
+        x += current->x;
+        y += current->y;
+        current = current->parent;
+    }
+    if (x_out)
+    {
+        *x_out = x;
+    }
+    if (y_out)
+    {
+        *y_out = y;
+    }
+}
+
+void atk_widget_absolute_bounds(const atk_widget_t *widget, int *x_out, int *y_out, int *width_out, int *height_out)
+{
+    if (!widget)
+    {
+        if (x_out) *x_out = 0;
+        if (y_out) *y_out = 0;
+        if (width_out) *width_out = 0;
+        if (height_out) *height_out = 0;
+        return;
+    }
+    int x = 0;
+    int y = 0;
+    atk_widget_absolute_position(widget, &x, &y);
+    if (x_out) *x_out = x;
+    if (y_out) *y_out = y;
+    if (width_out) *width_out = widget->width;
+    if (height_out) *height_out = widget->height;
+}

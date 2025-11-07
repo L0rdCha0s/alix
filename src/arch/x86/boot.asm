@@ -2,7 +2,7 @@
 ; Assembled with: nasm -f bin -o boot.bin boot.asm
 
 %ifndef STAGE2_SEG
-%define STAGE2_SEG     0x1000        ; load segment for stage2 (phys 0x10000)
+%define STAGE2_SEG     0x0900        ; load segment for stage2 (phys 0x09000)
 %endif
 %ifndef STAGE2_OFF
 %define STAGE2_OFF     0x0000

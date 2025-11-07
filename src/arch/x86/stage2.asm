@@ -1,6 +1,7 @@
-; stage2.asm — sets up long mode and jumps to C kernel at 0x00010000
+; stage2.asm — sets up long mode and jumps to C kernel at 0x00009000
 
-%define STAGE2_BASE   0x0000000000010000
+%define STAGE2_BASE   0x0000000000009000
+%define STAGE2_SEGMENT (STAGE2_BASE >> 4)
 %define STACK_TOP     0x0000000000D00000 ; 13 MiB stack top, ample headroom above kernel BSS
 ; Define a dedicated kernel heap region well above the VFS pool (16 MiB)
 ; This keeps dynamic allocations from overlapping the in-memory filesystem
@@ -42,7 +43,7 @@ section .start16
 
 start16:
   cli
-  mov ax, 0x1000
+  mov ax, STAGE2_SEGMENT
   mov ds, ax
   mov es, ax
   mov ax, 0x9000           ; place real-mode stack well above stage2 image

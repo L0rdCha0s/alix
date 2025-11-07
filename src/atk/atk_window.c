@@ -7,6 +7,7 @@
 #include "atk/atk_image.h"
 #include "atk/atk_label.h"
 #include "atk/atk_scrollbar.h"
+#include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
 #include "atk/atk_terminal.h"
 
@@ -32,7 +33,6 @@ static atk_window_priv_t *window_priv_mut(atk_widget_t *window);
 static const atk_window_priv_t *window_priv(const atk_widget_t *window);
 static void window_destroy(atk_widget_t *window);
 static void window_destroy_value(void *value);
-static void button_destroy_value(void *value);
 
 extern const atk_class_t ATK_BUTTON_CLASS;
 static const atk_widget_vtable_t window_vtable = { 0 };
@@ -255,6 +255,34 @@ atk_widget_t *atk_window_scrollbar_at(atk_widget_t *window, int px, int py)
         if (atk_scrollbar_hit_test(bar, window->x, window->y, px, py))
         {
             return bar;
+        }
+    }
+    return NULL;
+}
+
+atk_widget_t *atk_window_tab_view_at(atk_widget_t *window, int px, int py)
+{
+    if (!window || !window->used)
+    {
+        return NULL;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return NULL;
+    }
+
+    ATK_LIST_FOR_EACH_REVERSE(node, &priv->children)
+    {
+        atk_widget_t *child = (atk_widget_t *)node->value;
+        if (!child || !child->used || !atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
+        {
+            continue;
+        }
+        if (atk_tab_view_contains_point(child, px, py))
+        {
+            return child;
         }
     }
     return NULL;
@@ -509,30 +537,7 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
             continue;
         }
 
-        if (atk_widget_is_a(child, &ATK_BUTTON_CLASS))
-        {
-            atk_button_draw(state, child, window->x, window->y);
-        }
-        else if (atk_widget_is_a(child, &ATK_LABEL_CLASS))
-        {
-            atk_label_draw(state, child);
-        }
-        else if (atk_widget_is_a(child, &ATK_IMAGE_CLASS))
-        {
-            atk_image_draw(state, child);
-        }
-        else if (atk_widget_is_a(child, &ATK_TEXT_INPUT_CLASS))
-        {
-            atk_text_input_draw(state, child);
-        }
-        else if (atk_widget_is_a(child, &ATK_TERMINAL_CLASS))
-        {
-            atk_terminal_draw(state, child);
-        }
-        else if (atk_widget_is_a(child, &ATK_SCROLLBAR_CLASS))
-        {
-            atk_scrollbar_draw(state, child);
-        }
+        atk_widget_draw_any(state, child);
     }
 }
 
@@ -733,23 +738,6 @@ static const atk_window_priv_t *window_priv(const atk_widget_t *window)
     return (const atk_window_priv_t *)atk_widget_priv(window, &ATK_WINDOW_CLASS);
 }
 
-static void button_destroy_value(void *value)
-{
-    atk_widget_t *widget = (atk_widget_t *)value;
-    if (!widget)
-    {
-        return;
-    }
-
-    atk_button_priv_t *priv = (atk_button_priv_t *)atk_widget_priv(widget, &ATK_BUTTON_CLASS);
-    if (priv)
-    {
-        priv->list_node = 0;
-    }
-
-    atk_widget_destroy(widget);
-}
-
 static void window_child_destroy(void *value)
 {
     atk_widget_t *widget = (atk_widget_t *)value;
@@ -757,40 +745,7 @@ static void window_child_destroy(void *value)
     {
         return;
     }
-
-    if (atk_widget_is_a(widget, &ATK_BUTTON_CLASS))
-    {
-        button_destroy_value(widget);
-    }
-    else if (atk_widget_is_a(widget, &ATK_LABEL_CLASS))
-    {
-        atk_label_destroy(widget);
-        atk_widget_destroy(widget);
-    }
-    else if (atk_widget_is_a(widget, &ATK_IMAGE_CLASS))
-    {
-        atk_image_destroy(widget);
-        atk_widget_destroy(widget);
-    }
-    else if (atk_widget_is_a(widget, &ATK_TEXT_INPUT_CLASS))
-    {
-        atk_text_input_destroy(widget);
-        atk_widget_destroy(widget);
-    }
-    else if (atk_widget_is_a(widget, &ATK_TERMINAL_CLASS))
-    {
-        atk_terminal_destroy(widget);
-        atk_widget_destroy(widget);
-    }
-    else if (atk_widget_is_a(widget, &ATK_SCROLLBAR_CLASS))
-    {
-        atk_scrollbar_destroy(widget);
-        atk_widget_destroy(widget);
-    }
-    else
-    {
-        atk_widget_destroy(widget);
-    }
+    atk_widget_destroy_any(widget);
 }
 
 static void window_destroy(atk_widget_t *window)

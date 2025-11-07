@@ -5,8 +5,6 @@
 
 #include "libc.h"
 
-#define NET_MAX_INTERFACES 8
-
 static net_interface_t g_interfaces[NET_MAX_INTERFACES];
 static size_t g_interface_count = 0;
 
@@ -152,7 +150,74 @@ bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
     {
         return false;
     }
-    return iface->send(iface, data, len);
+    bool ok = iface->send(iface, data, len);
+    if (ok)
+    {
+        iface->tx_packets++;
+        iface->tx_bytes += (uint64_t)len;
+    }
+    else
+    {
+        iface->tx_errors++;
+    }
+    return ok;
+}
+
+void net_if_record_rx(net_interface_t *iface, size_t bytes)
+{
+    if (!iface)
+    {
+        return;
+    }
+    iface->rx_packets++;
+    iface->rx_bytes += (uint64_t)bytes;
+}
+
+void net_if_record_rx_error(net_interface_t *iface)
+{
+    if (!iface)
+    {
+        return;
+    }
+    iface->rx_errors++;
+}
+
+void net_if_record_tx_error(net_interface_t *iface)
+{
+    if (!iface)
+    {
+        return;
+    }
+    iface->tx_errors++;
+}
+
+size_t net_if_snapshot(net_interface_stats_t *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return 0;
+    }
+
+    size_t count = (g_interface_count < capacity) ? g_interface_count : capacity;
+    for (size_t i = 0; i < count; ++i)
+    {
+        net_interface_t *iface = &g_interfaces[i];
+        net_interface_stats_t *stats = &buffer[i];
+        stats->name = iface->name;
+        stats->present = iface->present;
+        stats->link_up = iface->link_up;
+        memcpy(stats->mac, iface->mac, sizeof(stats->mac));
+        stats->ipv4_addr = iface->ipv4_addr;
+        stats->ipv4_netmask = iface->ipv4_netmask;
+        stats->ipv4_gateway = iface->ipv4_gateway;
+        stats->rx_bytes = iface->rx_bytes;
+        stats->tx_bytes = iface->tx_bytes;
+        stats->rx_packets = iface->rx_packets;
+        stats->tx_packets = iface->tx_packets;
+        stats->rx_errors = iface->rx_errors;
+        stats->tx_errors = iface->tx_errors;
+    }
+    return count;
 }
 
 static void write_hex_byte(uint8_t value, char *out)

@@ -8,6 +8,8 @@
 #include "atk_internal.h"
 #include "atk_window.h"
 #include "atk/atk_scrollbar.h"
+#include "atk/atk_task_manager.h"
+#include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
 #include "atk/atk_terminal.h"
 #include "atk/atk_shell.h"
@@ -15,6 +17,7 @@
 static void atk_apply_default_theme(atk_state_t *state);
 static void action_exit_to_text(atk_widget_t *button, void *context);
 static void action_open_shell(atk_widget_t *button, void *context);
+static void action_open_task_manager(atk_widget_t *button, void *context);
 
 void atk_init(void)
 {
@@ -53,6 +56,17 @@ void atk_enter_mode(void)
                            ATK_BUTTON_STYLE_TITLE_BELOW,
                            true,
                            action_open_shell,
+                           state);
+
+    atk_desktop_add_button(state,
+                           240,
+                           40,
+                           88,
+                           88,
+                           "Tasks",
+                           ATK_BUTTON_STYLE_TITLE_BELOW,
+                           true,
+                           action_open_task_manager,
                            state);
 }
 
@@ -178,6 +192,16 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                         {
                             result.redraw = true;
                         }
+                    }
+                }
+
+                if (!consumed)
+                {
+                    atk_widget_t *tab_widget = atk_window_tab_view_at(win, cursor_x, cursor_y);
+                    if (tab_widget && atk_tab_view_handle_mouse(tab_widget, cursor_x, cursor_y))
+                    {
+                        consumed = true;
+                        result.redraw = true;
                     }
                 }
 
@@ -414,4 +438,15 @@ static void action_open_shell(atk_widget_t *button, void *context)
         return;
     }
     atk_shell_open(state);
+}
+
+static void action_open_task_manager(atk_widget_t *button, void *context)
+{
+    (void)button;
+    atk_state_t *state = (atk_state_t *)context;
+    if (!state)
+    {
+        return;
+    }
+    atk_task_manager_open(state);
 }

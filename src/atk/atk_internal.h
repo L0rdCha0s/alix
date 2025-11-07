@@ -93,7 +93,11 @@ extern const atk_class_t ATK_LABEL_CLASS;
 extern const atk_class_t ATK_TEXT_INPUT_CLASS;
 extern const atk_class_t ATK_TERMINAL_CLASS;
 extern const atk_class_t ATK_SCROLLBAR_CLASS;
+extern const atk_class_t ATK_LIST_VIEW_CLASS;
+extern const atk_class_t ATK_TAB_VIEW_CLASS;
 
 atk_state_t *atk_state_get(void);
+void atk_widget_draw_any(const atk_state_t *state, const atk_widget_t *widget);
+void atk_widget_destroy_any(atk_widget_t *widget);
 
 #endif
