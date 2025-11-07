@@ -9,6 +9,8 @@
 static uint8_t left_shift_pressed = 0;
 static uint8_t right_shift_pressed = 0;
 static uint8_t caps_lock_enabled = 0;
+static uint8_t left_ctrl_pressed = 0;
+static uint8_t right_ctrl_pressed = 0;
 static uint8_t extended_code_pending = 0;
 
 #define KBD_BUFFER_SIZE 64
@@ -97,6 +99,8 @@ static void keyboard_reset_state(void)
     left_shift_pressed = 0;
     right_shift_pressed = 0;
     caps_lock_enabled = 0;
+    left_ctrl_pressed = 0;
+    right_ctrl_pressed = 0;
     extended_code_pending = 0;
     buffer_head = 0;
     buffer_tail = 0;
@@ -130,6 +134,7 @@ bool keyboard_try_read(char *out_char)
     }
 
     bool keypad_enter = false;
+    bool extended = false;
 
     if (scancode == 0xE0)
     {
@@ -143,13 +148,10 @@ bool keyboard_try_read(char *out_char)
     if (extended_code_pending)
     {
         extended_code_pending = 0;
+        extended = true;
         if (scancode == 0x1C)
         {
             keypad_enter = true;
-        }
-        else
-        {
-            /* Ignore other extended-key prefixes for now. */
         }
     }
 
@@ -178,6 +180,21 @@ bool keyboard_try_read(char *out_char)
         return false;
     }
 
+    if (!extended && scancode == 0x1D)
+    {
+        left_ctrl_pressed = released ? 0 : 1;
+        if (scancode < 128)
+        {
+            key_down[scancode] = released ? 0 : 1;
+        }
+        return false;
+    }
+    if (extended && scancode == 0x1D)
+    {
+        right_ctrl_pressed = released ? 0 : 1;
+        return false;
+    }
+
     if (released)
     {
         if (scancode < 128)
@@ -197,6 +214,7 @@ bool keyboard_try_read(char *out_char)
     }
 
     bool shift_active = (left_shift_pressed | right_shift_pressed) != 0;
+    bool ctrl_active = (left_ctrl_pressed | right_ctrl_pressed) != 0;
     char base = normal_map[scancode];
     if (base == 0)
     {
@@ -229,6 +247,18 @@ bool keyboard_try_read(char *out_char)
     if (ch == 0)
     {
         return false;
+    }
+
+    if (ctrl_active)
+    {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))
+        {
+            ch = (char)(ch & 0x1F);
+        }
+        else
+        {
+            return false;
+        }
     }
 
     *out_char = ch;

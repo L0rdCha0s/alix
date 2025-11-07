@@ -171,6 +171,16 @@ static void atk_shell_on_submit(atk_widget_t *terminal_widget, void *context, co
         return;
     }
 
+    if (view->shell.foreground_process)
+    {
+        /* Input while a process is running should be consumed by that
+         * process. We do not yet have a stdin path, so just leave the
+         * text in the transcript without invoking the shell again. */
+        atk_window_mark_dirty(view->window);
+        (void)line;
+        return;
+    }
+
     const char *command = line ? line : "";
 
     bool success = false;

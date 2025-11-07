@@ -301,11 +301,6 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         return shell_duplicate_empty();
     }
 
-    if (shell)
-    {
-        shell->foreground_process = NULL;
-    }
-
     size_t input_len = strlen(input);
     char *working = (char *)malloc(input_len + 1);
     if (!working)
