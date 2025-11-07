@@ -9,6 +9,9 @@
 #include "serial.h"
 #include "process.h"
 #include "console.h"
+#include "syscall.h"
+
+extern void syscall_entry(void);
 
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
@@ -230,6 +233,7 @@ void interrupts_init(void)
     idt_set_gate(33, (void *)irq1_handler);
     idt_set_gate(43, (void *)irq11_handler);
     idt_set_gate(44, (void *)irq12_handler);
+    idt_set_gate_dpl(0x80, syscall_entry, 3);
     idt_load();
     pic_remap();
     pic_set_masks();

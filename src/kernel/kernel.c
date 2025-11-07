@@ -67,6 +67,12 @@ void kernel_main(void)
         }
     }
 
+    process_t *user_demo = process_create_user_dummy("user_demo", -1);
+    if (!user_demo)
+    {
+        serial_write_string("Failed to create demo user process\r\n");
+    }
+
     process_start_scheduler();
 
     for (;;)

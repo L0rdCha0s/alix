@@ -24,6 +24,7 @@ extern uint8_t __kernel_data_end[];
 #define PAGE_PAGE_SIZE                (1ULL << 7)
 #define PAGE_GLOBAL                   (1ULL << 8)
 #define PAGE_NO_EXECUTE               (1ULL << 63)
+#define PAGE_ADDRESS_MASK             0x000FFFFFFFFFF000ULL
 
 #define IDENTITY_LIMIT                (4ULL * 1024ULL * 1024ULL * 1024ULL)
 
@@ -58,6 +59,32 @@ static inline uintptr_t align_down(uintptr_t value, uintptr_t alignment)
 {
     return value & ~(alignment - 1);
 }
+
+static inline size_t index_pml4(uintptr_t addr)
+{
+    return (size_t)((addr >> 39) & 0x1FF);
+}
+
+static inline size_t index_pdpt(uintptr_t addr)
+{
+    return (size_t)((addr >> 30) & 0x1FF);
+}
+
+static inline size_t index_pd(uintptr_t addr)
+{
+    return (size_t)((addr >> 21) & 0x1FF);
+}
+
+static inline size_t index_pt(uintptr_t addr)
+{
+    return (size_t)((addr >> 12) & 0x1FF);
+}
+
+static inline uint64_t *entry_to_table(uint64_t entry)
+{
+    return (uint64_t *)(entry & PAGE_ADDRESS_MASK);
+}
+
 static bool track_extra_page(paging_space_t *space, void *raw, void *aligned)
 {
     if (!space || !raw || !aligned)
@@ -275,6 +302,131 @@ static void apply_small_mapping(uint64_t *pt_entry,
     *pt_entry = phys_addr | flags;
 }
 
+static bool split_large_page(paging_space_t *space,
+                             uint64_t *pd_entry,
+                             bool user_accessible)
+{
+    if (!space || !pd_entry || (*pd_entry & PAGE_PAGE_SIZE) == 0)
+    {
+        return true;
+    }
+
+    uintptr_t base = *pd_entry & PAGE_ADDRESS_MASK;
+    base &= ~(PAGE_LARGE_SIZE - 1);
+    bool writable = ((*pd_entry & PAGE_WRITABLE) != 0);
+    bool executable = ((*pd_entry & PAGE_NO_EXECUTE) == 0);
+
+    uint64_t *pt = (uint64_t *)allocate_aligned_page(space);
+    if (!pt)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < 512; ++i)
+    {
+        uintptr_t page_addr = base + (i * PAGE_SIZE_BYTES);
+        apply_small_mapping(&pt[i], page_addr, writable, executable, false);
+    }
+
+    uint64_t flags = PAGE_PRESENT | PAGE_GLOBAL;
+    if (writable)
+    {
+        flags |= PAGE_WRITABLE;
+    }
+    if (user_accessible)
+    {
+        flags |= PAGE_USER;
+    }
+    *pd_entry = ((uintptr_t)pt) | flags;
+    return true;
+}
+
+static bool ensure_page_table(paging_space_t *space,
+                              uintptr_t virt_addr,
+                              bool user_accessible,
+                              uint64_t **out_pt)
+{
+    if (!space || !space->tables_base || !out_pt)
+    {
+        return false;
+    }
+
+    uint64_t *pml4 = (uint64_t *)space->tables_base;
+    size_t pml4_idx = index_pml4(virt_addr);
+    size_t pdpt_idx = index_pdpt(virt_addr);
+    size_t pd_idx = index_pd(virt_addr);
+
+    if ((pml4[pml4_idx] & PAGE_PRESENT) == 0)
+    {
+        uint64_t *new_pdpt = (uint64_t *)allocate_aligned_page(space);
+        if (!new_pdpt)
+        {
+            return false;
+        }
+        memset(new_pdpt, 0, PAGE_SIZE_BYTES);
+        uint64_t flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+        if (user_accessible)
+        {
+            flags |= PAGE_USER;
+        }
+        pml4[pml4_idx] = ((uintptr_t)new_pdpt) | flags;
+    }
+    else if (user_accessible)
+    {
+        pml4[pml4_idx] |= PAGE_USER;
+    }
+
+    uint64_t *pdpt = entry_to_table(pml4[pml4_idx]);
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0)
+    {
+        uint64_t *new_pd = (uint64_t *)allocate_aligned_page(space);
+        if (!new_pd)
+        {
+            return false;
+        }
+        memset(new_pd, 0, PAGE_SIZE_BYTES);
+        uint64_t flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+        if (user_accessible)
+        {
+            flags |= PAGE_USER;
+        }
+        pdpt[pdpt_idx] = ((uintptr_t)new_pd) | flags;
+    }
+    else if (user_accessible)
+    {
+        pdpt[pdpt_idx] |= PAGE_USER;
+    }
+
+    uint64_t *pd = entry_to_table(pdpt[pdpt_idx]);
+    if (!split_large_page(space, &pd[pd_idx], user_accessible))
+    {
+        return false;
+    }
+
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0)
+    {
+        uint64_t *new_pt = (uint64_t *)allocate_aligned_page(space);
+        if (!new_pt)
+        {
+            return false;
+        }
+        memset(new_pt, 0, PAGE_SIZE_BYTES);
+        uint64_t flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+        if (user_accessible)
+        {
+            flags |= PAGE_USER;
+        }
+        pd[pd_idx] = ((uintptr_t)new_pt) | flags;
+    }
+    else if (user_accessible)
+    {
+        pd[pd_idx] |= PAGE_USER;
+    }
+
+    *out_pt = entry_to_table(pd[pd_idx]);
+    return true;
+}
+
 static void map_identity_space(page_tables_t *tables)
 {
     if (!tables)
@@ -436,4 +588,58 @@ uintptr_t paging_kernel_cr3(void)
         return read_cr3();
     }
     return g_kernel_space.cr3;
+}
+
+bool paging_map_user_page(paging_space_t *space,
+                          uintptr_t virtual_addr,
+                          uintptr_t physical_addr,
+                          bool writable,
+                          bool executable)
+{
+    if (!space)
+    {
+        return false;
+    }
+
+    virtual_addr = align_down(virtual_addr, PAGE_SIZE_BYTES);
+    physical_addr = align_down(physical_addr, PAGE_SIZE_BYTES);
+
+    uint64_t *pt = NULL;
+    if (!ensure_page_table(space, virtual_addr, true, &pt))
+    {
+        return false;
+    }
+
+    size_t pt_idx = index_pt(virtual_addr);
+    apply_small_mapping(&pt[pt_idx], physical_addr, writable, executable, true);
+    return true;
+}
+
+bool paging_map_user_range(paging_space_t *space,
+                           uintptr_t virtual_addr,
+                           uintptr_t physical_addr,
+                           size_t length,
+                           bool writable,
+                           bool executable)
+{
+    if (!space || length == 0)
+    {
+        return false;
+    }
+
+    uintptr_t virt = align_down(virtual_addr, PAGE_SIZE_BYTES);
+    uintptr_t phys = align_down(physical_addr, PAGE_SIZE_BYTES);
+    size_t remaining = align_up(length, PAGE_SIZE_BYTES);
+
+    while (remaining > 0)
+    {
+        if (!paging_map_user_page(space, virt, phys, writable, executable))
+        {
+            return false;
+        }
+        virt += PAGE_SIZE_BYTES;
+        phys += PAGE_SIZE_BYTES;
+        remaining -= PAGE_SIZE_BYTES;
+    }
+    return true;
 }

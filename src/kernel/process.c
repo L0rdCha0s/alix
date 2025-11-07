@@ -20,6 +20,12 @@
 #define PROCESS_STACK_GUARD_SIZE (4096UL)
 #define STACK_GUARD_PATTERN      0x5A
 
+#define USER_ADDRESS_SPACE_BASE   0x0000008000000000ULL
+#define USER_DUMMY_CODE_BASE      (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
+#define USER_DUMMY_STACK_TOP      (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)
+#define USER_DUMMY_STACK_SIZE     (64ULL * 1024ULL)
+#define PAGE_SIZE_BYTES_LOCAL     4096ULL
+
 typedef uint64_t cpu_context_t;
 
 #define PROCESS_TIME_SLICE_TICKS 10U
@@ -37,6 +43,30 @@ typedef struct
 {
     uint8_t bytes[512];
 } __attribute__((aligned(64))) fpu_state_t;
+
+typedef struct process_user_region
+{
+    void *raw_allocation;
+    void *aligned_allocation;
+    size_t mapped_size;
+    uintptr_t user_base;
+    bool writable;
+    bool executable;
+    struct process_user_region *next;
+} process_user_region_t;
+
+typedef struct user_thread_bootstrap
+{
+    uintptr_t entry;
+    uintptr_t stack_top;
+} user_thread_bootstrap_t;
+
+static const uint8_t g_user_exit_stub[] = {
+    0x31, 0xFF,       /* xor edi, edi */
+    0x31, 0xC0,       /* xor eax, eax */
+    0xCD, 0x80,       /* int 0x80 */
+    0xF4              /* hlt (should not reach) */
+};
 
 struct trap_frame
 {
@@ -114,6 +144,10 @@ struct process
     process_t *first_child;
     process_t *sibling_prev;
     process_t *sibling_next;
+    process_user_region_t *user_regions;
+    uintptr_t user_entry_point;
+    uintptr_t user_stack_top;
+    size_t user_stack_size;
 };
 
 static process_t *g_process_list = NULL;
@@ -198,6 +232,21 @@ static bool pointer_in_heap(uint64_t addr, size_t size)
     uint64_t heap_start = (uint64_t)kernel_heap_base;
     uint64_t heap_end = (uint64_t)kernel_heap_end;
     return addr >= heap_start && (addr + size) <= heap_end;
+}
+
+static inline uintptr_t align_up_uintptr(uintptr_t value, uintptr_t alignment)
+{
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static inline uintptr_t align_down_uintptr(uintptr_t value, uintptr_t alignment)
+{
+    return value & ~(alignment - 1);
+}
+
+static inline size_t align_up_size(size_t value, size_t alignment)
+{
+    return (value + alignment - 1) & ~(alignment - 1);
 }
 
 static void tss_set_rsp0(uint64_t rsp0)
@@ -375,7 +424,7 @@ static void fatal(const char *msg)
     }
 }
 
-static process_t *allocate_process(const char *name)
+static process_t *allocate_process(const char *name, bool is_user)
 {
     process_t *proc = (process_t *)malloc(sizeof(process_t));
     if (!proc)
@@ -410,21 +459,186 @@ static process_t *allocate_process(const char *name)
     proc->current_thread = NULL;
     proc->next = NULL;
     proc->stdout_fd = g_console_stdout_fd;
-    proc->is_user = false;
+    proc->is_user = is_user;
     proc->parent = NULL;
     proc->first_child = NULL;
     proc->sibling_prev = NULL;
     proc->sibling_next = NULL;
+    proc->user_regions = NULL;
+    proc->user_entry_point = 0;
+    proc->user_stack_top = 0;
+    proc->user_stack_size = 0;
     return proc;
+}
+
+static void process_free_user_regions(process_t *process)
+{
+    if (!process)
+    {
+        return;
+    }
+
+    process_user_region_t *region = process->user_regions;
+    while (region)
+    {
+        process_user_region_t *next = region->next;
+        if (region->raw_allocation)
+        {
+            free(region->raw_allocation);
+        }
+        free(region);
+        region = next;
+    }
+    process->user_regions = NULL;
+}
+
+static bool process_map_user_region(process_t *process, const process_user_region_t *region)
+{
+    if (!process || !region || region->mapped_size == 0)
+    {
+        return false;
+    }
+    return paging_map_user_range(&process->address_space,
+                                 region->user_base,
+                                 (uintptr_t)region->aligned_allocation,
+                                 region->mapped_size,
+                                 region->writable,
+                                 region->executable);
+}
+
+static bool process_user_region_allocate(process_t *process,
+                                         uintptr_t user_base,
+                                         size_t bytes,
+                                         bool writable,
+                                         bool executable,
+                                         process_user_region_t **region_out)
+{
+    if (!process || bytes == 0)
+    {
+        return false;
+    }
+
+    size_t aligned_bytes = align_up_size(bytes, PAGE_SIZE_BYTES_LOCAL);
+    size_t raw_bytes = aligned_bytes + PAGE_SIZE_BYTES_LOCAL;
+    uint8_t *raw = (uint8_t *)malloc(raw_bytes);
+    if (!raw)
+    {
+        return false;
+    }
+    uintptr_t aligned = align_up_uintptr((uintptr_t)raw, PAGE_SIZE_BYTES_LOCAL);
+    memset((void *)aligned, 0, aligned_bytes);
+
+    process_user_region_t *region = (process_user_region_t *)malloc(sizeof(process_user_region_t));
+    if (!region)
+    {
+        free(raw);
+        return false;
+    }
+
+    region->raw_allocation = raw;
+    region->aligned_allocation = (void *)aligned;
+    region->mapped_size = aligned_bytes;
+    region->user_base = user_base;
+    region->writable = writable;
+    region->executable = executable;
+    region->next = process->user_regions;
+    process->user_regions = region;
+
+    if (region_out)
+    {
+        *region_out = region;
+    }
+    return true;
+}
+
+static bool process_setup_dummy_user_space(process_t *process)
+{
+    if (!process)
+    {
+        return false;
+    }
+
+    process_user_region_t *code_region = NULL;
+    if (!process_user_region_allocate(process,
+                                      USER_DUMMY_CODE_BASE,
+                                      PAGE_SIZE_BYTES_LOCAL,
+                                      false,
+                                      true,
+                                      &code_region))
+    {
+        return false;
+    }
+
+    memcpy(code_region->aligned_allocation, g_user_exit_stub, sizeof(g_user_exit_stub));
+    if (!process_map_user_region(process, code_region))
+    {
+        return false;
+    }
+
+    process_user_region_t *stack_region = NULL;
+    if (!process_user_region_allocate(process,
+                                      USER_DUMMY_STACK_TOP - USER_DUMMY_STACK_SIZE,
+                                      USER_DUMMY_STACK_SIZE,
+                                      true,
+                                      false,
+                                      &stack_region))
+    {
+        return false;
+    }
+    if (!process_map_user_region(process, stack_region))
+    {
+        return false;
+    }
+
+    process->user_entry_point = USER_DUMMY_CODE_BASE;
+    process->user_stack_top = USER_DUMMY_STACK_TOP;
+    process->user_stack_size = USER_DUMMY_STACK_SIZE;
+    return true;
 }
 
 static void scheduler_schedule(bool requeue_current);
 static void idle_thread_entry(void *arg) __attribute__((noreturn));
 static void thread_trampoline(void) __attribute__((noreturn));
+static void user_thread_entry(void *arg) __attribute__((noreturn));
+static void enqueue_thread(thread_t *thread);
 static void remove_from_run_queue(thread_t *thread);
 static void process_attach_child(process_t *parent, process_t *child);
 static void process_detach_child(process_t *child);
 static process_t *process_detach_first_child(process_t *parent);
+
+static process_t *process_finalize_new_process(process_t *proc,
+                                               thread_t *thread,
+                                               int stdout_fd,
+                                               process_t *parent)
+{
+    if (!proc || !thread)
+    {
+        return NULL;
+    }
+
+    if (stdout_fd >= 0)
+    {
+        proc->stdout_fd = stdout_fd;
+    }
+    else
+    {
+        proc->stdout_fd = g_console_stdout_fd;
+    }
+
+    proc->main_thread = thread;
+    proc->current_thread = thread;
+    proc->next = g_process_list;
+    g_process_list = proc;
+
+    process_t *actual_parent = parent ? parent : g_current_process;
+    if (actual_parent)
+    {
+        process_attach_child(actual_parent, proc);
+    }
+
+    enqueue_thread(thread);
+    return proc;
+}
 
 static thread_t *thread_create(process_t *process,
                                const char *name,
@@ -844,6 +1058,63 @@ void process_preempt_hook(void)
     }
 }
 
+static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
+                                                           uintptr_t user_stack_top)
+{
+    uintptr_t aligned_stack = align_down_uintptr(user_stack_top, 16ULL);
+    uintptr_t stack_value = aligned_stack;
+    uintptr_t entry_value = entry;
+    uint64_t rflags = RFLAGS_DEFAULT;
+    uint64_t cs = (uint64_t)(GDT_SELECTOR_USER_CODE | 0x3u);
+    uint64_t ss = (uint64_t)(GDT_SELECTOR_USER_DATA | 0x3u);
+    uint64_t data_sel = (uint64_t)(GDT_SELECTOR_USER_DATA | 0x3u);
+
+    __asm__ volatile (
+        "mov %[ds], %%rax\n\t"
+        "mov %%ax, %%ds\n\t"
+        "mov %%ax, %%es\n\t"
+        "mov %%ax, %%fs\n\t"
+        "mov %%ax, %%gs\n\t"
+        "xor %%rdi, %%rdi\n\t"
+        "xor %%rsi, %%rsi\n\t"
+        "xor %%rdx, %%rdx\n\t"
+        "xor %%rcx, %%rcx\n\t"
+        "xor %%r8, %%r8\n\t"
+        "xor %%r9, %%r9\n\t"
+        "xor %%r10, %%r10\n\t"
+        "xor %%r11, %%r11\n\t"
+        "push %[ss]\n\t"
+        "pushq %[stack]\n\t"
+        "push %[rflags]\n\t"
+        "push %[cs]\n\t"
+        "pushq %[entry]\n\t"
+        "iretq\n\t"
+        :
+        : [ds]"r"(data_sel),
+          [ss]"r"(ss),
+          [stack]"m"(stack_value),
+          [rflags]"r"(rflags),
+          [cs]"r"(cs),
+          [entry]"m"(entry_value)
+        : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
+    __builtin_unreachable();
+}
+
+static void user_thread_entry(void *arg)
+{
+    user_thread_bootstrap_t params = { 0 };
+    if (arg)
+    {
+        memcpy(&params, arg, sizeof(params));
+        free(arg);
+    }
+    if (!params.entry || !params.stack_top)
+    {
+        fatal("user thread bootstrap missing entry/stack");
+    }
+    process_jump_to_user(params.entry, params.stack_top);
+}
+
 static void thread_trampoline(void)
 {
     thread_t *self = g_current_thread;
@@ -987,7 +1258,7 @@ void process_system_init(void)
     g_run_queue_tail = NULL;
     g_next_pid = 1;
 
-    process_t *idle_process = allocate_process("idle");
+    process_t *idle_process = allocate_process("idle", false);
     if (!idle_process)
     {
         fatal("unable to allocate idle process");
@@ -1031,7 +1302,7 @@ static process_t *process_create_kernel_internal(const char *name,
         return NULL;
     }
 
-    process_t *proc = allocate_process(name);
+    process_t *proc = allocate_process(name, false);
     if (!proc)
     {
         return NULL;
@@ -1045,28 +1316,56 @@ static process_t *process_create_kernel_internal(const char *name,
         return NULL;
     }
 
-    if (stdout_fd >= 0)
-    {
-        proc->stdout_fd = stdout_fd;
-    }
-    else
-    {
-        proc->stdout_fd = g_console_stdout_fd;
-    }
+    return process_finalize_new_process(proc, thread, stdout_fd, parent);
+}
 
-    proc->main_thread = thread;
-    proc->current_thread = thread;
-    proc->next = g_process_list;
-    g_process_list = proc;
-
-    process_t *actual_parent = parent ? parent : g_current_process;
-    if (actual_parent)
+static process_t *process_create_user_dummy_internal(const char *name,
+                                                     size_t stack_size,
+                                                     int stdout_fd,
+                                                     process_t *parent)
+{
+    process_t *proc = allocate_process(name, true);
+    if (!proc)
     {
-        process_attach_child(actual_parent, proc);
+        return NULL;
     }
 
-    enqueue_thread(thread);
-    return proc;
+    if (!process_setup_dummy_user_space(proc))
+    {
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
+    user_thread_bootstrap_t *bootstrap = (user_thread_bootstrap_t *)malloc(sizeof(user_thread_bootstrap_t));
+    if (!bootstrap)
+    {
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+    bootstrap->entry = proc->user_entry_point;
+    bootstrap->stack_top = proc->user_stack_top;
+
+    thread_t *thread = thread_create(proc,
+                                     name,
+                                     user_thread_entry,
+                                     bootstrap,
+                                     stack_size,
+                                     false,
+                                     true);
+    if (!thread)
+    {
+        free(bootstrap);
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
+    return process_finalize_new_process(proc, thread, stdout_fd, parent);
 }
 
 process_t *process_create_kernel(const char *name,
@@ -1086,6 +1385,25 @@ process_t *process_create_kernel_with_parent(const char *name,
                                              process_t *parent)
 {
     return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, parent);
+}
+
+process_t *process_create_user_dummy(const char *name,
+                                     int stdout_fd)
+{
+    return process_create_user_dummy_internal(name,
+                                              PROCESS_DEFAULT_STACK_SIZE,
+                                              stdout_fd,
+                                              NULL);
+}
+
+process_t *process_create_user_dummy_with_parent(const char *name,
+                                                 int stdout_fd,
+                                                 process_t *parent)
+{
+    return process_create_user_dummy_internal(name,
+                                              PROCESS_DEFAULT_STACK_SIZE,
+                                              stdout_fd,
+                                              parent);
 }
 
 void process_yield(void)
@@ -1145,6 +1463,7 @@ void process_destroy(process_t *process)
         cursor = &(*cursor)->next;
     }
 
+    process_free_user_regions(process);
     paging_destroy_space(&process->address_space);
     free(process);
 }
@@ -1305,6 +1624,22 @@ int process_current_stdout_fd(void)
         return g_current_process->stdout_fd;
     }
     return g_console_stdout_fd;
+}
+
+bool process_query_user_layout(const process_t *process,
+                               process_user_layout_t *layout)
+{
+    if (!process || !layout)
+    {
+        return false;
+    }
+
+    layout->is_user = process->is_user;
+    layout->cr3 = process->cr3;
+    layout->entry_point = process->user_entry_point;
+    layout->stack_top = process->user_stack_top;
+    layout->stack_size = process->user_stack_size;
+    return process->is_user && process->user_entry_point != 0 && process->user_stack_top != 0;
 }
 
 ssize_t process_stdout_write(const char *data, size_t len)

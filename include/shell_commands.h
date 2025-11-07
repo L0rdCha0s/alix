@@ -25,5 +25,6 @@ bool shell_cmd_mount(shell_state_t *shell, shell_output_t *out, const char *args
 bool shell_cmd_loop1(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_loop2(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_top(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_userdemo(shell_state_t *shell, shell_output_t *out, const char *args);
 
 #endif

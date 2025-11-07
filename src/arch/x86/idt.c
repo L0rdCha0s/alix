@@ -52,17 +52,25 @@ void idt_init(void)
     memset(idt, 0, idt_bytes);
 }
 
-void idt_set_gate(uint8_t vector, void (*handler)(void))
+void idt_set_gate_dpl(uint8_t vector, void (*handler)(void), uint8_t dpl)
 {
     uint64_t addr = (uint64_t)handler;
     struct idt_entry *entry = &idt[vector];
     entry->offset_low = (uint16_t)(addr & 0xFFFF);
     entry->selector = 0x18;  /* 64-bit code segment */
     entry->ist = 0;
-    entry->type_attr = 0x8E;
+    uint8_t attr = 0x8E;
+    attr &= (uint8_t)~0x60;
+    attr |= (uint8_t)((dpl & 0x3u) << 5);
+    entry->type_attr = attr;
     entry->offset_mid = (uint16_t)((addr >> 16) & 0xFFFF);
     entry->offset_high = (uint32_t)((addr >> 32) & 0xFFFFFFFF);
     entry->zero = 0;
+}
+
+void idt_set_gate(uint8_t vector, void (*handler)(void))
+{
+    idt_set_gate_dpl(vector, handler, 0);
 }
 
 void idt_load(void)

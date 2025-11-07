@@ -42,6 +42,15 @@ typedef struct process_info
     int stdout_fd;
 } process_info_t;
 
+typedef struct process_user_layout
+{
+    bool is_user;
+    uintptr_t cr3;
+    uintptr_t entry_point;
+    uintptr_t stack_top;
+    size_t stack_size;
+} process_user_layout_t;
+
 void process_system_init(void);
 void process_start_scheduler(void);
 
@@ -56,6 +65,11 @@ process_t *process_create_kernel_with_parent(const char *name,
                                              size_t stack_size,
                                              int stdout_fd,
                                              process_t *parent);
+process_t *process_create_user_dummy(const char *name,
+                                     int stdout_fd);
+process_t *process_create_user_dummy_with_parent(const char *name,
+                                                 int stdout_fd,
+                                                 process_t *parent);
 
 void process_yield(void);
 void process_exit(int status) __attribute__((noreturn));
@@ -85,5 +99,7 @@ bool process_handle_exception(interrupt_frame_t *frame,
                               uint64_t error_code,
                               bool has_address,
                               uint64_t address);
+bool process_query_user_layout(const process_t *process,
+                               process_user_layout_t *layout);
 
 #endif

@@ -25,5 +25,16 @@ void paging_init(void);
 bool paging_clone_kernel_space(paging_space_t *space);
 void paging_destroy_space(paging_space_t *space);
 uintptr_t paging_kernel_cr3(void);
+bool paging_map_user_page(paging_space_t *space,
+                          uintptr_t virtual_addr,
+                          uintptr_t physical_addr,
+                          bool writable,
+                          bool executable);
+bool paging_map_user_range(paging_space_t *space,
+                           uintptr_t virtual_addr,
+                           uintptr_t physical_addr,
+                           size_t length,
+                           bool writable,
+                           bool executable);
 
 #endif
