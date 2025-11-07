@@ -6,12 +6,14 @@
 #include "net/route.h"
 #include "net/dns.h"
 #include "timer.h"
+#include "process.h"
 #include "libc.h"
 #include <stddef.h>
 
 static const char *skip_ws(const char *cursor);
 static bool read_token(const char **cursor, char *out, size_t capacity);
-static void write_uint(shell_output_t *out, unsigned value);
+static void ping_stdout_write(const char *text);
+static void ping_stdout_write_uint(unsigned value);
 
 bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 {
@@ -84,9 +86,9 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     bool resolved_host = false;
     if (!net_parse_ipv4(ip_token, &target_ip))
     {
-        shell_output_write(out, "Resolving ");
-        shell_output_write(out, ip_token);
-        shell_output_write(out, "...\n");
+        ping_stdout_write("Resolving ");
+        ping_stdout_write(ip_token);
+        ping_stdout_write("...\n");
         if (!net_dns_resolve_ipv4(ip_token, requested_iface, &target_ip))
         {
             return shell_output_error(out, "unable to resolve host");
@@ -110,21 +112,21 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
     net_format_ipv4(iface->ipv4_addr, source_str);
 
-    shell_output_write(out, "PING ");
+    ping_stdout_write("PING ");
     if (resolved_host)
     {
-        shell_output_write(out, ip_token);
-        shell_output_write(out, " (");
-        shell_output_write(out, target_str);
-        shell_output_write(out, ")");
+        ping_stdout_write(ip_token);
+        ping_stdout_write(" (");
+        ping_stdout_write(target_str);
+        ping_stdout_write(")");
     }
     else
     {
-        shell_output_write(out, target_str);
+        ping_stdout_write(target_str);
     }
-    shell_output_write(out, " from ");
-    shell_output_write(out, source_str);
-    shell_output_write(out, ":\n");
+    ping_stdout_write(" from ");
+    ping_stdout_write(source_str);
+    ping_stdout_write(":\n");
 
     uint8_t target_mac[6];
     bool have_mac = net_arp_lookup(next_hop_ip, target_mac);
@@ -137,7 +139,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
     if (!have_mac)
     {
-        shell_output_write(out, "  Resolving ARP...\n");
+        ping_stdout_write("  Resolving ARP...\n");
         if (!net_arp_send_request(iface, next_hop_ip))
         {
             return shell_output_error(out, "failed to send ARP request");
@@ -156,7 +158,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
         if (!have_mac)
         {
-            shell_output_write(out, "  Request timed out (ARP)\n");
+            ping_stdout_write("  Request timed out (ARP)\n");
             return false;
         }
     }
@@ -170,35 +172,52 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     }
     uint16_t sequence = 1;
     const size_t payload_len = 32;
+    const uint64_t interval_ticks = frequency;
 
-    if (!net_icmp_send_echo(iface, target_mac, target_ip, identifier, sequence, payload_len))
+    while (1)
     {
-        return shell_output_error(out, "failed to send ICMP echo request");
-    }
-
-    uint64_t send_tick = timer_ticks();
-    while (timer_ticks() - send_tick < timeout_ticks)
-    {
-        net_icmp_reply_t reply;
-        if (net_icmp_get_reply(identifier, sequence, &reply))
+        if (!net_icmp_send_echo(iface, target_mac, target_ip, identifier, sequence, payload_len))
         {
-            char reply_ip[32];
-            net_format_ipv4(reply.from_ip, reply_ip);
-            shell_output_write(out, "  Reply from ");
-            shell_output_write(out, reply_ip);
-            shell_output_write(out, ": bytes=");
-            write_uint(out, (unsigned)reply.bytes);
-            shell_output_write(out, " time=");
-            uint64_t ms = reply.rtt_ticks * 1000ULL / frequency;
-            write_uint(out, (unsigned)ms);
-            shell_output_write(out, "ms\n");
-            return true;
+            return shell_output_error(out, "failed to send ICMP echo request");
         }
-        __asm__ volatile ("pause");
+
+        uint64_t send_tick = timer_ticks();
+        bool got_reply = false;
+        while (timer_ticks() - send_tick < timeout_ticks)
+        {
+            net_icmp_reply_t reply;
+            if (net_icmp_get_reply(identifier, sequence, &reply))
+            {
+                char reply_ip[32];
+                net_format_ipv4(reply.from_ip, reply_ip);
+                ping_stdout_write("  Reply from ");
+                ping_stdout_write(reply_ip);
+                ping_stdout_write(": bytes=");
+                ping_stdout_write_uint((unsigned)reply.bytes);
+                ping_stdout_write(" time=");
+                uint64_t ms = reply.rtt_ticks * 1000ULL / frequency;
+                ping_stdout_write_uint((unsigned)ms);
+                ping_stdout_write("ms\n");
+                got_reply = true;
+                break;
+            }
+            process_yield();
+        }
+
+        if (!got_reply)
+        {
+            ping_stdout_write("  Request timed out\n");
+        }
+
+        sequence++;
+        uint64_t target_tick = send_tick + interval_ticks;
+        while (timer_ticks() < target_tick)
+        {
+            process_yield();
+        }
     }
 
-    shell_output_write(out, "  Request timed out\n");
-    return false;
+    return true;
 }
 
 static const char *skip_ws(const char *cursor)
@@ -244,7 +263,16 @@ static bool read_token(const char **cursor, char *out, size_t capacity)
     return true;
 }
 
-static void write_uint(shell_output_t *out, unsigned value)
+static void ping_stdout_write(const char *text)
+{
+    if (!text)
+    {
+        return;
+    }
+    process_stdout_write(text, strlen(text));
+}
+
+static void ping_stdout_write_uint(unsigned value)
 {
     char buf[16];
     int pos = 0;
@@ -260,8 +288,8 @@ static void write_uint(shell_output_t *out, unsigned value)
             value /= 10U;
         }
     }
-    for (int i = pos - 1; i >= 0; --i)
+    while (pos-- > 0)
     {
-        shell_output_write_len(out, &buf[i], 1);
+        process_stdout_write(&buf[pos], 1);
     }
 }

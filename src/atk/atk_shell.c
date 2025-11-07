@@ -19,6 +19,8 @@ typedef struct
     atk_widget_t *terminal;
     shell_state_t shell;
     int stdout_fd;
+    process_t *shell_process;
+    bool shell_process_should_exit;
 } atk_shell_view_t;
 
 static void atk_shell_view_destroy(void *context);
@@ -29,6 +31,7 @@ static void atk_shell_stream_write(void *context, const char *data, size_t len);
 static ssize_t atk_shell_fd_write(void *ctx, const void *buffer, size_t count);
 static int atk_shell_fd_close(void *ctx);
 static void atk_shell_wait_hook(void *context);
+static void atk_shell_process_entry(void *arg);
 
 static const fd_ops_t g_atk_shell_fd_ops = {
     .read = NULL,
@@ -70,7 +73,10 @@ bool atk_shell_open(atk_state_t *state)
     view->shell.foreground_process = NULL;
     view->shell.wait_hook = atk_shell_wait_hook;
     view->shell.wait_context = view;
+    view->shell.owner_process = NULL;
     view->stdout_fd = -1;
+    view->shell_process = NULL;
+    view->shell_process_should_exit = false;
 
     int margin_x = 8; /* tighter horizontal margin to balance scrollbar width */
     int margin_y = 12;
@@ -91,18 +97,40 @@ bool atk_shell_open(atk_state_t *state)
 
     atk_window_set_context(window, view, atk_shell_view_destroy);
 
-    atk_terminal_reset(terminal);
-    atk_terminal_set_submit_handler(terminal, atk_shell_on_submit, view);
-    atk_terminal_set_control_handler(terminal, atk_shell_on_control, view);
-    atk_terminal_focus(state, terminal);
-    atk_shell_append_prompt(view);
-
     int fd = fd_allocate(&g_atk_shell_fd_ops, view);
     if (fd >= 0)
     {
         view->stdout_fd = fd;
         view->shell.stdout_fd = fd;
     }
+
+    process_t *shell_proc = process_create_kernel_with_parent("atk_shell",
+                                                             atk_shell_process_entry,
+                                                             view,
+                                                             0,
+                                                             view->shell.stdout_fd,
+                                                             process_current());
+    if (!shell_proc)
+    {
+        if (view->stdout_fd >= 0)
+        {
+            fd_close(view->stdout_fd);
+            view->stdout_fd = -1;
+        }
+        atk_terminal_destroy(terminal);
+        atk_widget_destroy(terminal);
+        free(view);
+        atk_window_close(state, window);
+        return false;
+    }
+    view->shell_process = shell_proc;
+    view->shell.owner_process = shell_proc;
+
+    atk_terminal_reset(terminal);
+    atk_terminal_set_submit_handler(terminal, atk_shell_on_submit, view);
+    atk_terminal_set_control_handler(terminal, atk_shell_on_control, view);
+    atk_terminal_focus(state, terminal);
+    atk_shell_append_prompt(view);
 
     atk_window_mark_dirty(window);
     return true;
@@ -118,6 +146,14 @@ static void atk_shell_view_destroy(void *context)
     if (view->state && view->terminal && atk_terminal_is_focused(view->state, view->terminal))
     {
         atk_terminal_focus(view->state, NULL);
+    }
+    if (view->shell_process)
+    {
+        view->shell_process_should_exit = true;
+        process_kill_tree(view->shell_process);
+        process_destroy(view->shell_process);
+        view->shell_process = NULL;
+        view->shell.foreground_process = NULL;
     }
     if (view->stdout_fd >= 0)
     {
@@ -237,4 +273,14 @@ static void atk_shell_wait_hook(void *context)
 {
     (void)context;
     video_pump_events();
+}
+
+static void atk_shell_process_entry(void *arg)
+{
+    atk_shell_view_t *view = (atk_shell_view_t *)arg;
+    while (view && !view->shell_process_should_exit)
+    {
+        process_yield();
+    }
+    process_exit(0);
 }

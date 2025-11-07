@@ -50,6 +50,12 @@ process_t *process_create_kernel(const char *name,
                                  void *arg,
                                  size_t stack_size,
                                  int stdout_fd);
+process_t *process_create_kernel_with_parent(const char *name,
+                                             thread_entry_t entry,
+                                             void *arg,
+                                             size_t stack_size,
+                                             int stdout_fd,
+                                             process_t *parent);
 
 void process_yield(void);
 void process_exit(int status) __attribute__((noreturn));
@@ -60,6 +66,7 @@ int process_join_with_hook(process_t *process,
                           process_wait_hook_t hook,
                           void *context);
 bool process_kill(process_t *process, int status);
+void process_kill_tree(process_t *process);
 
 process_t *process_current(void);
 thread_t *thread_current(void);

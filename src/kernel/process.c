@@ -110,6 +110,10 @@ struct process
     struct process *next;
     int stdout_fd;
     bool is_user;
+    process_t *parent;
+    process_t *first_child;
+    process_t *sibling_prev;
+    process_t *sibling_next;
 };
 
 static process_t *g_process_list = NULL;
@@ -407,6 +411,10 @@ static process_t *allocate_process(const char *name)
     proc->next = NULL;
     proc->stdout_fd = g_console_stdout_fd;
     proc->is_user = false;
+    proc->parent = NULL;
+    proc->first_child = NULL;
+    proc->sibling_prev = NULL;
+    proc->sibling_next = NULL;
     return proc;
 }
 
@@ -414,6 +422,9 @@ static void scheduler_schedule(bool requeue_current);
 static void idle_thread_entry(void *arg) __attribute__((noreturn));
 static void thread_trampoline(void) __attribute__((noreturn));
 static void remove_from_run_queue(thread_t *thread);
+static void process_attach_child(process_t *parent, process_t *child);
+static void process_detach_child(process_t *child);
+static process_t *process_detach_first_child(process_t *parent);
 
 static thread_t *thread_create(process_t *process,
                                const char *name,
@@ -591,6 +602,100 @@ static void remove_from_run_queue(thread_t *thread)
         prev = cursor;
         cursor = cursor->queue_next;
     }
+}
+
+static void process_attach_child(process_t *parent, process_t *child)
+{
+    if (!child)
+    {
+        return;
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    child->parent = parent;
+    child->sibling_prev = NULL;
+    if (parent)
+    {
+        child->sibling_next = parent->first_child;
+        if (child->sibling_next)
+        {
+            child->sibling_next->sibling_prev = child;
+        }
+        parent->first_child = child;
+    }
+    else
+    {
+        child->sibling_next = NULL;
+    }
+
+    cpu_restore_flags(flags);
+}
+
+static void process_detach_child(process_t *child)
+{
+    if (!child)
+    {
+        return;
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    process_t *parent = child->parent;
+    if (parent && parent->first_child == child)
+    {
+        parent->first_child = child->sibling_next;
+    }
+    if (child->sibling_prev)
+    {
+        child->sibling_prev->sibling_next = child->sibling_next;
+    }
+    if (child->sibling_next)
+    {
+        child->sibling_next->sibling_prev = child->sibling_prev;
+    }
+
+    child->parent = NULL;
+    child->sibling_prev = NULL;
+    child->sibling_next = NULL;
+
+    cpu_restore_flags(flags);
+}
+
+static process_t *process_detach_first_child(process_t *parent)
+{
+    if (!parent)
+    {
+        return NULL;
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    process_t *child = parent->first_child;
+    if (child)
+    {
+        if (parent->first_child == child)
+        {
+            parent->first_child = child->sibling_next;
+        }
+        if (child->sibling_prev)
+        {
+            child->sibling_prev->sibling_next = child->sibling_next;
+        }
+        if (child->sibling_next)
+        {
+            child->sibling_next->sibling_prev = child->sibling_prev;
+        }
+        child->parent = NULL;
+        child->sibling_prev = NULL;
+        child->sibling_next = NULL;
+    }
+
+    cpu_restore_flags(flags);
+    return child;
 }
 
 static void switch_to_thread(thread_t *next)
@@ -914,11 +1019,12 @@ void process_start_scheduler(void)
     }
 }
 
-process_t *process_create_kernel(const char *name,
-                                 thread_entry_t entry,
-                                 void *arg,
-                                 size_t stack_size,
-                                 int stdout_fd)
+static process_t *process_create_kernel_internal(const char *name,
+                                                 thread_entry_t entry,
+                                                 void *arg,
+                                                 size_t stack_size,
+                                                 int stdout_fd,
+                                                 process_t *parent)
 {
     if (!entry)
     {
@@ -953,8 +1059,33 @@ process_t *process_create_kernel(const char *name,
     proc->next = g_process_list;
     g_process_list = proc;
 
+    process_t *actual_parent = parent ? parent : g_current_process;
+    if (actual_parent)
+    {
+        process_attach_child(actual_parent, proc);
+    }
+
     enqueue_thread(thread);
     return proc;
+}
+
+process_t *process_create_kernel(const char *name,
+                                 thread_entry_t entry,
+                                 void *arg,
+                                 size_t stack_size,
+                                 int stdout_fd)
+{
+    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, NULL);
+}
+
+process_t *process_create_kernel_with_parent(const char *name,
+                                             thread_entry_t entry,
+                                             void *arg,
+                                             size_t stack_size,
+                                             int stdout_fd,
+                                             process_t *parent)
+{
+    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, parent);
 }
 
 void process_yield(void)
@@ -968,6 +1099,19 @@ void process_destroy(process_t *process)
     {
         return;
     }
+
+    if (process->first_child)
+    {
+        process_t *child = process->first_child;
+        while (child)
+        {
+            process_t *next = child->sibling_next;
+            process_detach_child(child);
+            child = next;
+        }
+    }
+
+    process_detach_child(process);
 
     thread_t *thread = process->main_thread;
     if (thread)
@@ -1107,6 +1251,23 @@ bool process_kill(process_t *process, int status)
     }
 
     return true;
+}
+
+void process_kill_tree(process_t *process)
+{
+    if (!process)
+    {
+        return;
+    }
+
+    process_t *child = NULL;
+    while ((child = process_detach_first_child(process)) != NULL)
+    {
+        process_kill_tree(child);
+        process_destroy(child);
+    }
+
+    process_kill(process, -1);
 }
 
 process_t *process_current(void)

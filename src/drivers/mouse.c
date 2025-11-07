@@ -16,6 +16,19 @@ static int mouse_irq_byte_log = 0;
 static int mouse_poll_log = 0;
 static int mouse_packet_log = 0;
 
+static inline uint64_t mouse_irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("cli" ::: "memory");
+    return flags;
+}
+
+static inline void mouse_irq_restore(uint64_t flags)
+{
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc");
+}
+
 static void mouse_log(const char *msg)
 {
     serial_write_string(msg);
@@ -119,41 +132,56 @@ void mouse_reset_debug_counter(void)
 
 static void mouse_process_byte(uint8_t byte)
 {
+    uint64_t irq_state = mouse_irq_save();
+    bool emit = false;
+    int emit_dx = 0;
+    int emit_dy = 0;
+    bool emit_left = false;
+
     if (byte == 0xFA || byte == 0xAA)
     {
         packet_index = 0;
-        return;
+        goto out;
     }
     if ((packet_index == 0) && ((byte & 0x08) == 0))
     {
-        return; /* sync */
+        goto out; /* sync */
     }
 
     packet[packet_index++] = byte;
     if (packet_index < 3)
     {
-        return;
+        goto out;
     }
 
     packet_index = 0;
 
-    int dx = (int8_t)packet[1];
-    int dy = (int8_t)packet[2];
-    bool left = (packet[0] & 0x01) != 0;
-    //mouse_log_packet(dx, dy, left, packet[0]);
+    emit_dx = (int8_t)packet[1];
+    emit_dy = (int8_t)packet[2];
+    emit_left = (packet[0] & 0x01) != 0;
+    emit = true;
+
+out:
+    mouse_irq_restore(irq_state);
+
+    if (!emit)
+    {
+        return;
+    }
+
     if (mouse_packet_log < 16)
     {
         serial_write_string("mouse packet dx=");
-        serial_write_hex64((uint64_t)(int64_t)dx);
+        serial_write_hex64((uint64_t)(int64_t)emit_dx);
         serial_write_string(" dy=");
-        serial_write_hex64((uint64_t)(int64_t)dy);
-        serial_write_string(left ? " left=1\r\n" : " left=0\r\n");
+        serial_write_hex64((uint64_t)(int64_t)emit_dy);
+        serial_write_string(emit_left ? " left=1\r\n" : " left=0\r\n");
         mouse_packet_log++;
     }
 
     if (g_listener)
     {
-        g_listener(dx, -dy, left);
+        g_listener(emit_dx, -emit_dy, emit_left);
     }
 }
 

@@ -27,6 +27,7 @@ struct shell_state
     process_t *foreground_process;
     process_wait_hook_t wait_hook;
     void *wait_context;
+    process_t *owner_process;
 };
 
 void shell_main(void);

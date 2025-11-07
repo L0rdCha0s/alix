@@ -236,7 +236,8 @@ void shell_main(void)
         .stdout_fd = process_current_stdout_fd(),
         .foreground_process = NULL,
         .wait_hook = NULL,
-        .wait_context = NULL
+        .wait_context = NULL,
+        .owner_process = process_current()
     };
     char input[INPUT_CAPACITY];
 
@@ -402,11 +403,12 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             task->handler = g_commands[i].handler;
             task->result = false;
 
-            process_t *proc = process_create_kernel(g_commands[i].name,
-                                                    shell_command_runner,
-                                                    task,
-                                                    0,
-                                                    shell ? shell->stdout_fd : -1);
+            process_t *proc = process_create_kernel_with_parent(g_commands[i].name,
+                                                                shell_command_runner,
+                                                                task,
+                                                                0,
+                                                                shell ? shell->stdout_fd : -1,
+                                                                shell ? shell->owner_process : NULL);
             if (!proc)
             {
                 free(task);
