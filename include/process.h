@@ -102,5 +102,20 @@ bool process_handle_exception(interrupt_frame_t *frame,
 bool process_query_user_layout(const process_t *process,
                                process_user_layout_t *layout);
 int64_t process_user_sbrk(process_t *process, int64_t increment);
+bool process_map_user_segment(process_t *process,
+                              uintptr_t user_base,
+                              size_t bytes,
+                              bool writable,
+                              bool executable,
+                              void **host_ptr_out);
+process_t *process_create_user_elf(const char *name,
+                                   const uint8_t *image,
+                                   size_t size,
+                                   int stdout_fd);
+process_t *process_create_user_elf_with_parent(const char *name,
+                                               const uint8_t *image,
+                                               size_t size,
+                                               int stdout_fd,
+                                               process_t *parent);
 
 #endif

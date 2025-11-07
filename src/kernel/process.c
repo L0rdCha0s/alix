@@ -8,6 +8,7 @@
 #include "msr.h"
 #include "console.h"
 #include "fd.h"
+#include "elf.h"
 
 #define MSR_FS_BASE         0xC0000100
 #define MSR_GS_BASE         0xC0000101
@@ -21,9 +22,9 @@
 #define STACK_GUARD_PATTERN      0x5A
 
 #define USER_ADDRESS_SPACE_BASE   0x0000008000000000ULL
-#define USER_DUMMY_CODE_BASE      (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
-#define USER_DUMMY_STACK_TOP      (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)
-#define USER_DUMMY_STACK_SIZE     (64ULL * 1024ULL)
+#define USER_STUB_CODE_BASE       (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
+#define USER_STACK_TOP            (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)
+#define USER_STACK_SIZE           (64ULL * 1024ULL)
 #define USER_HEAP_BASE            (USER_ADDRESS_SPACE_BASE + 0x02000000ULL)
 #define USER_HEAP_SIZE            (8ULL * 1024ULL * 1024ULL)
 #define PAGE_SIZE_BYTES_LOCAL     4096ULL
@@ -506,6 +507,29 @@ static void process_free_user_regions(process_t *process)
     process->user_heap_limit = 0;
 }
 
+static void process_unlink_user_region(process_t *process, process_user_region_t *region)
+{
+    if (!process || !region)
+    {
+        return;
+    }
+    process_user_region_t **cursor = &process->user_regions;
+    while (*cursor)
+    {
+        if (*cursor == region)
+        {
+            *cursor = region->next;
+            break;
+        }
+        cursor = &(*cursor)->next;
+    }
+    if (region->raw_allocation)
+    {
+        free(region->raw_allocation);
+    }
+    free(region);
+}
+
 static bool process_map_user_region(process_t *process, const process_user_region_t *region)
 {
     if (!process || !region || region->mapped_size == 0)
@@ -565,6 +589,94 @@ static bool process_user_region_allocate(process_t *process,
     return true;
 }
 
+bool process_map_user_segment(process_t *process,
+                              uintptr_t user_base,
+                              size_t bytes,
+                              bool writable,
+                              bool executable,
+                              void **host_ptr_out)
+{
+    if (!process || bytes == 0)
+    {
+        return false;
+    }
+
+    uintptr_t aligned_base = align_down_uintptr(user_base, PAGE_SIZE_BYTES_LOCAL);
+    size_t offset = (size_t)(user_base - aligned_base);
+    size_t total = align_up_size(bytes + offset, PAGE_SIZE_BYTES_LOCAL);
+
+    process_user_region_t *region = NULL;
+    if (!process_user_region_allocate(process,
+                                      aligned_base,
+                                      total,
+                                      writable,
+                                      executable,
+                                      &region))
+    {
+        return false;
+    }
+
+    if (!process_map_user_region(process, region))
+    {
+        process_unlink_user_region(process, region);
+        return false;
+    }
+
+    if (host_ptr_out)
+    {
+        uint8_t *base_ptr = (uint8_t *)region->aligned_allocation;
+        *host_ptr_out = base_ptr + offset;
+    }
+    return true;
+}
+
+static bool process_setup_user_stack(process_t *process)
+{
+    if (!process_map_user_segment(process,
+                                  USER_STACK_TOP - USER_STACK_SIZE,
+                                  USER_STACK_SIZE,
+                                  true,
+                                  false,
+                                  NULL))
+    {
+        return false;
+    }
+    process->user_stack_top = USER_STACK_TOP;
+    process->user_stack_size = USER_STACK_SIZE;
+    return true;
+}
+
+static bool process_setup_user_heap(process_t *process)
+{
+    if (!process_map_user_segment(process,
+                                  USER_HEAP_BASE,
+                                  USER_HEAP_SIZE,
+                                  true,
+                                  false,
+                                  NULL))
+    {
+        return false;
+    }
+    process->user_heap_region = process->user_regions;
+    process->user_heap_base = USER_HEAP_BASE;
+    process->user_heap_brk = USER_HEAP_BASE;
+    process->user_heap_limit = USER_HEAP_BASE + USER_HEAP_SIZE;
+    return true;
+}
+
+static bool process_setup_basic_user_memory(process_t *process)
+{
+    if (!process_setup_user_stack(process))
+    {
+        return false;
+    }
+    if (!process_setup_user_heap(process))
+    {
+        return false;
+    }
+    return true;
+}
+
 static bool process_setup_dummy_user_space(process_t *process)
 {
     if (!process)
@@ -572,61 +684,24 @@ static bool process_setup_dummy_user_space(process_t *process)
         return false;
     }
 
-    process_user_region_t *code_region = NULL;
-    if (!process_user_region_allocate(process,
-                                      USER_DUMMY_CODE_BASE,
-                                      PAGE_SIZE_BYTES_LOCAL,
-                                      false,
-                                      true,
-                                      &code_region))
+    void *code_ptr = NULL;
+    if (!process_map_user_segment(process,
+                                  USER_STUB_CODE_BASE,
+                                  PAGE_SIZE_BYTES_LOCAL,
+                                  false,
+                                  true,
+                                  &code_ptr))
+    {
+        return false;
+    }
+    memcpy(code_ptr, g_user_exit_stub, sizeof(g_user_exit_stub));
+
+    if (!process_setup_basic_user_memory(process))
     {
         return false;
     }
 
-    memcpy(code_region->aligned_allocation, g_user_exit_stub, sizeof(g_user_exit_stub));
-    if (!process_map_user_region(process, code_region))
-    {
-        return false;
-    }
-
-    process_user_region_t *stack_region = NULL;
-    if (!process_user_region_allocate(process,
-                                      USER_DUMMY_STACK_TOP - USER_DUMMY_STACK_SIZE,
-                                      USER_DUMMY_STACK_SIZE,
-                                      true,
-                                      false,
-                                      &stack_region))
-    {
-        return false;
-    }
-    if (!process_map_user_region(process, stack_region))
-    {
-        return false;
-    }
-
-    process_user_region_t *heap_region = NULL;
-    if (!process_user_region_allocate(process,
-                                      USER_HEAP_BASE,
-                                      USER_HEAP_SIZE,
-                                      true,
-                                      false,
-                                      &heap_region))
-    {
-        return false;
-    }
-    if (!process_map_user_region(process, heap_region))
-    {
-        return false;
-    }
-
-    process->user_heap_region = heap_region;
-    process->user_heap_base = heap_region->user_base;
-    process->user_heap_brk = heap_region->user_base;
-    process->user_heap_limit = heap_region->user_base + heap_region->mapped_size;
-
-    process->user_entry_point = USER_DUMMY_CODE_BASE;
-    process->user_stack_top = USER_DUMMY_STACK_TOP;
-    process->user_stack_size = USER_DUMMY_STACK_SIZE;
+    process->user_entry_point = USER_STUB_CODE_BASE;
     return true;
 }
 
@@ -1402,6 +1477,80 @@ static process_t *process_create_user_dummy_internal(const char *name,
     return process_finalize_new_process(proc, thread, stdout_fd, parent);
 }
 
+static process_t *process_create_user_elf_internal(const char *name,
+                                                   const uint8_t *image,
+                                                   size_t size,
+                                                   int stdout_fd,
+                                                   process_t *parent)
+{
+    if (!image || size == 0)
+    {
+        return NULL;
+    }
+
+    process_t *proc = allocate_process(name, true);
+    if (!proc)
+    {
+        return NULL;
+    }
+
+    if (!process_setup_basic_user_memory(proc))
+    {
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
+    uintptr_t entry_point = 0;
+    if (!elf_load_process(proc, image, size, &entry_point))
+    {
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
+    if (entry_point == 0)
+    {
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
+    proc->user_entry_point = entry_point;
+
+    user_thread_bootstrap_t *bootstrap = (user_thread_bootstrap_t *)malloc(sizeof(user_thread_bootstrap_t));
+    if (!bootstrap)
+    {
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+    bootstrap->entry = proc->user_entry_point;
+    bootstrap->stack_top = proc->user_stack_top;
+
+    thread_t *thread = thread_create(proc,
+                                     name,
+                                     user_thread_entry,
+                                     bootstrap,
+                                     PROCESS_DEFAULT_STACK_SIZE,
+                                     false,
+                                     true);
+    if (!thread)
+    {
+        free(bootstrap);
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
+    return process_finalize_new_process(proc, thread, stdout_fd, parent);
+}
+
 process_t *process_create_kernel(const char *name,
                                  thread_entry_t entry,
                                  void *arg,
@@ -1438,6 +1587,23 @@ process_t *process_create_user_dummy_with_parent(const char *name,
                                               PROCESS_DEFAULT_STACK_SIZE,
                                               stdout_fd,
                                               parent);
+}
+
+process_t *process_create_user_elf(const char *name,
+                                   const uint8_t *image,
+                                   size_t size,
+                                   int stdout_fd)
+{
+    return process_create_user_elf_internal(name, image, size, stdout_fd, NULL);
+}
+
+process_t *process_create_user_elf_with_parent(const char *name,
+                                               const uint8_t *image,
+                                               size_t size,
+                                               int stdout_fd,
+                                               process_t *parent)
+{
+    return process_create_user_elf_internal(name, image, size, stdout_fd, parent);
 }
 
 void process_yield(void)
