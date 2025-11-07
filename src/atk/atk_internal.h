@@ -41,6 +41,7 @@ typedef struct
     atk_list_t children;
     atk_list_t text_inputs;
     atk_list_t terminals;
+    atk_list_t scrollbars;
     void *user_context;
     void (*on_destroy)(void *context);
 } atk_window_priv_t;
@@ -79,6 +80,7 @@ typedef struct atk_state
 
     atk_widget_t *focused_input;
     atk_widget_t *focused_terminal;
+    atk_widget_t *dragging_scrollbar;
 
     atk_theme_t theme;
     bool exit_requested;
@@ -90,6 +92,7 @@ extern const atk_class_t ATK_WINDOW_CLASS;
 extern const atk_class_t ATK_LABEL_CLASS;
 extern const atk_class_t ATK_TEXT_INPUT_CLASS;
 extern const atk_class_t ATK_TERMINAL_CLASS;
+extern const atk_class_t ATK_SCROLLBAR_CLASS;
 
 atk_state_t *atk_state_get(void);
 

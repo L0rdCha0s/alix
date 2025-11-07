@@ -67,13 +67,14 @@ bool atk_shell_open(atk_state_t *state)
     view->shell.stream_context = view;
     view->stdout_fd = -1;
 
-    int margin = 12;
+    int margin_x = 8; /* tighter horizontal margin to balance scrollbar width */
+    int margin_y = 12;
     int top = ATK_WINDOW_TITLE_HEIGHT + 8;
     atk_widget_t *terminal = atk_window_add_terminal(window,
-                                                     margin,
+                                                     margin_x,
                                                      top,
-                                                     window->width - margin * 2,
-                                                     window->height - top - margin);
+                                                     window->width - margin_x * 2,
+                                                     window->height - top - margin_y);
     if (!terminal)
     {
         free(view);

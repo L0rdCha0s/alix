@@ -7,6 +7,7 @@
 #include "atk_desktop.h"
 #include "atk_internal.h"
 #include "atk_window.h"
+#include "atk/atk_scrollbar.h"
 #include "atk/atk_text_input.h"
 #include "atk/atk_terminal.h"
 #include "atk/atk_shell.h"
@@ -82,6 +83,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         state->pressed_window_button_window = NULL;
         state->pressed_window_button = NULL;
         state->pressed_desktop_button = NULL;
+        if (state->dragging_scrollbar)
+        {
+            atk_scrollbar_end_drag(state->dragging_scrollbar);
+            state->dragging_scrollbar = NULL;
+        }
 
         bool handled = false;
 
@@ -159,24 +165,43 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                     result.redraw = true;
                 }
 
-                atk_widget_t *input_widget = atk_window_text_input_at(win, cursor_x, cursor_y);
-                if (input_widget)
+                bool consumed = false;
+                atk_widget_t *scroll_widget = atk_window_scrollbar_at(win, cursor_x, cursor_y);
+                if (scroll_widget)
                 {
-                    atk_text_input_focus(state, input_widget);
-                    atk_terminal_focus(state, NULL);
-                }
-                else
-                {
-                    atk_widget_t *terminal_widget = atk_window_terminal_at(win, cursor_x, cursor_y);
-                    if (terminal_widget)
+                    bool value_changed = false;
+                    if (atk_scrollbar_begin_drag(scroll_widget, cursor_x, cursor_y, &value_changed))
                     {
-                        atk_text_input_focus(state, NULL);
-                        atk_terminal_focus(state, terminal_widget);
+                        state->dragging_scrollbar = scroll_widget;
+                        consumed = true;
+                        if (value_changed)
+                        {
+                            result.redraw = true;
+                        }
+                    }
+                }
+
+                if (!consumed)
+                {
+                    atk_widget_t *input_widget = atk_window_text_input_at(win, cursor_x, cursor_y);
+                    if (input_widget)
+                    {
+                        atk_text_input_focus(state, input_widget);
+                        atk_terminal_focus(state, NULL);
                     }
                     else
                     {
-                        atk_text_input_focus(state, NULL);
-                        atk_terminal_focus(state, NULL);
+                        atk_widget_t *terminal_widget = atk_window_terminal_at(win, cursor_x, cursor_y);
+                        if (terminal_widget)
+                        {
+                            atk_text_input_focus(state, NULL);
+                            atk_terminal_focus(state, terminal_widget);
+                        }
+                        else
+                        {
+                            atk_text_input_focus(state, NULL);
+                            atk_terminal_focus(state, NULL);
+                        }
                     }
                 }
 
@@ -206,6 +231,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
     else if (released_edge)
     {
         state->dragging_window = NULL;
+        if (state->dragging_scrollbar)
+        {
+            atk_scrollbar_end_drag(state->dragging_scrollbar);
+            state->dragging_scrollbar = NULL;
+        }
 
         if (state->dragging_desktop_button)
         {
@@ -236,6 +266,14 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         }
         state->pressed_desktop_button = NULL;
         state->desktop_drag_moved = false;
+    }
+
+    if (left_pressed && state->dragging_scrollbar && state->dragging_scrollbar->used)
+    {
+        if (atk_scrollbar_drag_to(state->dragging_scrollbar, cursor_x, cursor_y))
+        {
+            result.redraw = true;
+        }
     }
 
     if (left_pressed && state->dragging_window && state->dragging_window->used)

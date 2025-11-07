@@ -20,6 +20,7 @@ void atk_window_close(atk_state_t *state, atk_widget_t *window);
 const char *atk_window_title(const atk_widget_t *window);
 atk_widget_t *atk_window_text_input_at(atk_widget_t *window, int px, int py);
 atk_widget_t *atk_window_terminal_at(atk_widget_t *window, int px, int py);
+atk_widget_t *atk_window_scrollbar_at(atk_widget_t *window, int px, int py);
 void atk_window_set_context(atk_widget_t *window, void *context, void (*on_destroy)(void *context));
 void *atk_window_context(const atk_widget_t *window);
 

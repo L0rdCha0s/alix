@@ -4,9 +4,10 @@
 #include "libc.h"
 #include "serial.h"
 #include "video.h"
-#include "atk/atk_label.h"
-#include "atk/atk_text_input.h"
 #include "atk/atk_image.h"
+#include "atk/atk_label.h"
+#include "atk/atk_scrollbar.h"
+#include "atk/atk_text_input.h"
 #include "atk/atk_terminal.h"
 
 /* Forward decl for compilers if video.h doesn't expose it (no harm if duplicated). */
@@ -55,6 +56,7 @@ void atk_window_reset_all(atk_state_t *state)
     state->pressed_window_button = 0;
     state->focused_input = NULL;
     state->focused_terminal = NULL;
+    state->dragging_scrollbar = NULL;
 }
 
 void atk_window_draw_all(const atk_state_t *state)
@@ -230,6 +232,34 @@ atk_widget_t *atk_window_terminal_at(atk_widget_t *window, int px, int py)
     return NULL;
 }
 
+atk_widget_t *atk_window_scrollbar_at(atk_widget_t *window, int px, int py)
+{
+    if (!window || !window->used)
+    {
+        return NULL;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return NULL;
+    }
+
+    ATK_LIST_FOR_EACH_REVERSE(node, &priv->scrollbars)
+    {
+        atk_widget_t *bar = (atk_widget_t *)node->value;
+        if (!bar || !bar->used)
+        {
+            continue;
+        }
+        if (atk_scrollbar_hit_test(bar, window->x, window->y, px, py))
+        {
+            return bar;
+        }
+    }
+    return NULL;
+}
+
 void atk_window_mark_dirty(const atk_widget_t *window)
 {
     int x, y, w, h;
@@ -291,6 +321,7 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     atk_list_init(&priv->children);
     atk_list_init(&priv->text_inputs);
     atk_list_init(&priv->terminals);
+    atk_list_init(&priv->scrollbars);
     priv->list_node = 0;
     priv->user_context = NULL;
     priv->on_destroy = NULL;
@@ -375,6 +406,11 @@ void atk_window_close(atk_state_t *state, atk_widget_t *window)
     if (state->focused_terminal && state->focused_terminal->parent == window)
     {
         atk_terminal_focus(state, NULL);
+    }
+    if (state->dragging_scrollbar && state->dragging_scrollbar->parent == window)
+    {
+        atk_scrollbar_end_drag(state->dragging_scrollbar);
+        state->dragging_scrollbar = NULL;
     }
 
     if (priv && priv->on_destroy && priv->user_context)
@@ -492,6 +528,10 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
         else if (atk_widget_is_a(child, &ATK_TERMINAL_CLASS))
         {
             atk_terminal_draw(state, child);
+        }
+        else if (atk_widget_is_a(child, &ATK_SCROLLBAR_CLASS))
+        {
+            atk_scrollbar_draw(state, child);
         }
     }
 }
@@ -742,6 +782,11 @@ static void window_child_destroy(void *value)
         atk_terminal_destroy(widget);
         atk_widget_destroy(widget);
     }
+    else if (atk_widget_is_a(widget, &ATK_SCROLLBAR_CLASS))
+    {
+        atk_scrollbar_destroy(widget);
+        atk_widget_destroy(widget);
+    }
     else
     {
         atk_widget_destroy(widget);
@@ -762,6 +807,7 @@ static void window_destroy(atk_widget_t *window)
         atk_list_clear(&priv->buttons, NULL);
         atk_list_clear(&priv->text_inputs, NULL);
         atk_list_clear(&priv->terminals, NULL);
+        atk_list_clear(&priv->scrollbars, NULL);
         priv->list_node = 0;
         priv->user_context = NULL;
         priv->on_destroy = NULL;

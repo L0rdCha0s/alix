@@ -11,6 +11,8 @@ struct atk_state;
 
 typedef void (*atk_terminal_submit_t)(atk_widget_t *terminal, void *context, const char *line);
 
+#define ATK_TERMINAL_SCROLLBAR_WIDTH 14
+
 atk_widget_t *atk_window_add_terminal(atk_widget_t *window, int x, int y, int width, int height);
 void atk_terminal_reset(atk_widget_t *terminal);
 void atk_terminal_write(atk_widget_t *terminal, const char *data, size_t len);

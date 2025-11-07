@@ -3,9 +3,11 @@
 #include "atk_internal.h"
 #include "video.h"
 #include "libc.h"
+#include "atk/atk_scrollbar.h"
 
 #define ATK_TERMINAL_MAX_PARAMS 8
 #define ATK_TERMINAL_TAB_WIDTH 8
+#define ATK_TERMINAL_SCROLLBACK_LINES 500
 
 typedef enum
 {
@@ -25,6 +27,15 @@ typedef struct
     char *cells;
     uint16_t *fg;
     uint16_t *bg;
+    atk_widget_t *scrollbar;
+    int scrollbar_width;
+    int view_offset;
+    int scrollback_capacity;
+    int scrollback_count;
+    int scrollback_start;
+    char *scrollback_cells;
+    uint16_t *scrollback_fg;
+    uint16_t *scrollback_bg;
 
     int cursor_row;
     int cursor_col;
@@ -56,6 +67,7 @@ const atk_class_t ATK_TERMINAL_CLASS = { "Terminal", &ATK_WIDGET_CLASS, &termina
 
 static void terminal_invalidate(const atk_widget_t *terminal);
 static bool terminal_allocate_buffers(atk_terminal_priv_t *priv);
+static bool terminal_create_scrollbar(atk_widget_t *terminal, atk_terminal_priv_t *priv);
 static void terminal_reset_state(atk_terminal_priv_t *priv);
 static void terminal_apply_palette(atk_terminal_priv_t *priv);
 static void terminal_set_cell(atk_terminal_priv_t *priv, int row, int col, char ch);
@@ -71,6 +83,11 @@ static void terminal_csi_dispatch(atk_terminal_priv_t *priv, char command);
 static int terminal_get_param(const atk_terminal_priv_t *priv, int index, int default_value);
 static uint16_t terminal_color_from_code(atk_terminal_priv_t *priv, int code);
 static bool terminal_ensure_input_capacity(atk_terminal_priv_t *priv, size_t extra);
+static void terminal_store_scrollback_line(atk_terminal_priv_t *priv, int row);
+static void terminal_clamp_view_offset(atk_terminal_priv_t *priv);
+static void terminal_update_scrollbar(atk_terminal_priv_t *priv);
+static void terminal_scrollbar_changed(atk_widget_t *scrollbar, void *context, int value);
+static size_t terminal_scrollback_offset(const atk_terminal_priv_t *priv, int logical_index);
 
 static atk_terminal_priv_t *terminal_priv_mut(atk_widget_t *terminal)
 {
@@ -118,7 +135,15 @@ atk_widget_t *atk_window_add_terminal(atk_widget_t *window, int x, int y, int wi
     term_priv->submit = NULL;
     term_priv->submit_context = NULL;
 
-    int cols = width / ATK_FONT_WIDTH;
+    int scrollbar_width = ATK_TERMINAL_SCROLLBAR_WIDTH;
+    if (width <= scrollbar_width)
+    {
+        atk_widget_destroy(terminal);
+        return NULL;
+    }
+
+    int text_width = width - scrollbar_width;
+    int cols = text_width / ATK_FONT_WIDTH;
     int line_height = ATK_FONT_HEIGHT + 2;
     int rows = height / line_height;
     if (cols <= 0 || rows <= 0)
@@ -131,6 +156,15 @@ atk_widget_t *atk_window_add_terminal(atk_widget_t *window, int x, int y, int wi
     term_priv->cells = NULL;
     term_priv->fg = NULL;
     term_priv->bg = NULL;
+    term_priv->scrollbar = NULL;
+    term_priv->scrollbar_width = scrollbar_width;
+    term_priv->view_offset = 0;
+    term_priv->scrollback_capacity = ATK_TERMINAL_SCROLLBACK_LINES;
+    term_priv->scrollback_count = 0;
+    term_priv->scrollback_start = 0;
+    term_priv->scrollback_cells = NULL;
+    term_priv->scrollback_fg = NULL;
+    term_priv->scrollback_bg = NULL;
     term_priv->cursor_row = 0;
     term_priv->cursor_col = 0;
     term_priv->saved_row = 0;
@@ -166,6 +200,14 @@ atk_widget_t *atk_window_add_terminal(atk_widget_t *window, int x, int y, int wi
     }
 
     term_priv->list_node = term_node;
+    if (!terminal_create_scrollbar(terminal, term_priv))
+    {
+        atk_list_remove(&priv->terminals, term_node);
+        atk_list_remove(&priv->children, child_node);
+        atk_terminal_destroy(terminal);
+        atk_widget_destroy(terminal);
+        return NULL;
+    }
     terminal_apply_palette(term_priv);
     terminal_reset_state(term_priv);
     return terminal;
@@ -450,17 +492,57 @@ void atk_terminal_draw(const atk_state_t *state, const atk_widget_t *terminal)
     video_draw_rect(x, y, terminal->width, terminal->height, priv->default_bg);
 
     int line_height = ATK_FONT_HEIGHT + 2;
+    int total_lines = priv->scrollback_count + priv->rows;
+    if (total_lines < priv->rows)
+    {
+        total_lines = priv->rows;
+    }
+    int top_index = total_lines - priv->rows - priv->view_offset;
+    if (top_index < 0)
+    {
+        top_index = 0;
+    }
+    bool cursor_visible = (priv->view_offset == 0);
+
     for (int row = 0; row < priv->rows; ++row)
     {
         int draw_y = y + row * line_height;
+        int global_index = top_index + row;
+        const char *line_cells = NULL;
+        const uint16_t *line_fg = NULL;
+        const uint16_t *line_bg = NULL;
+        int screen_row = -1;
+
+        if (global_index < priv->scrollback_count)
+        {
+            size_t offset = terminal_scrollback_offset(priv, global_index);
+            line_cells = priv->scrollback_cells + offset;
+            line_fg = priv->scrollback_fg + offset;
+            line_bg = priv->scrollback_bg + offset;
+        }
+        else
+        {
+            screen_row = global_index - priv->scrollback_count;
+            if (screen_row < 0) screen_row = 0;
+            if (screen_row >= priv->rows) screen_row = priv->rows - 1;
+            size_t offset = (size_t)screen_row * (size_t)priv->cols;
+            line_cells = priv->cells + offset;
+            line_fg = priv->fg + offset;
+            line_bg = priv->bg + offset;
+        }
+
         for (int col = 0; col < priv->cols; ++col)
         {
-            int index = row * priv->cols + col;
-            char ch = priv->cells[index];
-            uint16_t fg = priv->fg[index];
-            uint16_t bg = priv->bg[index];
+            char ch = line_cells[col];
+            uint16_t fg = line_fg[col];
+            uint16_t bg = line_bg[col];
 
-            bool cursor_here = (row == priv->cursor_row && col == priv->cursor_col && priv->show_cursor && priv->focused);
+            bool cursor_here = (cursor_visible &&
+                                screen_row >= 0 &&
+                                screen_row == priv->cursor_row &&
+                                col == priv->cursor_col &&
+                                priv->show_cursor &&
+                                priv->focused);
             if (cursor_here)
             {
                 uint16_t tmp = fg;
@@ -508,6 +590,21 @@ void atk_terminal_destroy(atk_widget_t *terminal)
         free(priv->bg);
         priv->bg = NULL;
     }
+    if (priv->scrollback_cells)
+    {
+        free(priv->scrollback_cells);
+        priv->scrollback_cells = NULL;
+    }
+    if (priv->scrollback_fg)
+    {
+        free(priv->scrollback_fg);
+        priv->scrollback_fg = NULL;
+    }
+    if (priv->scrollback_bg)
+    {
+        free(priv->scrollback_bg);
+        priv->scrollback_bg = NULL;
+    }
     if (priv->input_buffer)
     {
         free(priv->input_buffer);
@@ -540,7 +637,23 @@ static bool terminal_allocate_buffers(atk_terminal_priv_t *priv)
     priv->cells = (char *)malloc(count);
     priv->fg = (uint16_t *)malloc(sizeof(uint16_t) * count);
     priv->bg = (uint16_t *)malloc(sizeof(uint16_t) * count);
-    if (!priv->cells || !priv->fg || !priv->bg)
+    size_t scrollback_total = (size_t)priv->scrollback_capacity * (size_t)priv->cols;
+    if (priv->scrollback_capacity > 0 && priv->cols > 0)
+    {
+        priv->scrollback_cells = (char *)malloc(scrollback_total);
+        priv->scrollback_fg = (uint16_t *)malloc(sizeof(uint16_t) * scrollback_total);
+        priv->scrollback_bg = (uint16_t *)malloc(sizeof(uint16_t) * scrollback_total);
+    }
+    else
+    {
+        priv->scrollback_cells = NULL;
+        priv->scrollback_fg = NULL;
+        priv->scrollback_bg = NULL;
+    }
+
+    if (!priv->cells || !priv->fg || !priv->bg ||
+        (priv->scrollback_capacity > 0 &&
+         (!priv->scrollback_cells || !priv->scrollback_fg || !priv->scrollback_bg)))
     {
         return false;
     }
@@ -596,6 +709,10 @@ static void terminal_reset_state(atk_terminal_priv_t *priv)
     priv->param_question = false;
     priv->attr_bold = false;
     priv->input_length = 0;
+    priv->scrollback_count = 0;
+    priv->scrollback_start = 0;
+    priv->view_offset = 0;
+    terminal_update_scrollbar(priv);
 }
 
 static void terminal_set_cell(atk_terminal_priv_t *priv, int row, int col, char ch)
@@ -638,18 +755,26 @@ static void terminal_scroll_up(atk_terminal_priv_t *priv, int lines)
     {
         return;
     }
-    if (lines >= priv->rows)
+    if (lines > priv->rows)
     {
-        terminal_reset_state(priv);
-        return;
+        lines = priv->rows;
+    }
+
+    for (int row = 0; row < lines; ++row)
+    {
+        terminal_store_scrollback_line(priv, row);
     }
 
     int cols = priv->cols;
     int rows = priv->rows;
-    int count = cols * (rows - lines);
-    memmove(priv->cells, priv->cells + lines * cols, (size_t)count);
-    memmove(priv->fg, priv->fg + lines * cols, (size_t)count * sizeof(uint16_t));
-    memmove(priv->bg, priv->bg + lines * cols, (size_t)count * sizeof(uint16_t));
+    int remaining_rows = rows - lines;
+    if (remaining_rows > 0)
+    {
+        size_t count = (size_t)cols * (size_t)remaining_rows;
+        memmove(priv->cells, priv->cells + lines * cols, count);
+        memmove(priv->fg, priv->fg + lines * cols, count * sizeof(uint16_t));
+        memmove(priv->bg, priv->bg + lines * cols, count * sizeof(uint16_t));
+    }
 
     for (int row = rows - lines; row < rows; ++row)
     {
@@ -666,6 +791,8 @@ static void terminal_scroll_up(atk_terminal_priv_t *priv, int lines)
     {
         priv->cursor_row = 0;
     }
+    terminal_clamp_view_offset(priv);
+    terminal_update_scrollbar(priv);
 }
 
 static void terminal_line_feed(atk_terminal_priv_t *priv)
@@ -932,4 +1059,134 @@ static bool terminal_ensure_input_capacity(atk_terminal_priv_t *priv, size_t ext
     priv->input_buffer = buffer;
     priv->input_capacity = new_capacity;
     return true;
+}
+
+static bool terminal_create_scrollbar(atk_widget_t *terminal, atk_terminal_priv_t *priv)
+{
+    if (!terminal || !priv || !terminal->parent)
+    {
+        return false;
+    }
+
+    if (priv->scrollbar_width <= 0)
+    {
+        priv->scrollbar = NULL;
+        return true;
+    }
+
+    int sb_x = terminal->x + terminal->width - priv->scrollbar_width;
+    int sb_y = terminal->y;
+    atk_widget_t *scrollbar = atk_window_add_scrollbar(terminal->parent,
+                                                       sb_x,
+                                                       sb_y,
+                                                       priv->scrollbar_width,
+                                                       terminal->height,
+                                                       ATK_SCROLLBAR_VERTICAL);
+    if (!scrollbar)
+    {
+        return false;
+    }
+
+    priv->scrollbar = scrollbar;
+    atk_scrollbar_set_change_handler(scrollbar, terminal_scrollbar_changed, terminal);
+    atk_scrollbar_set_range(scrollbar, 0, priv->scrollback_count, priv->rows);
+    atk_scrollbar_set_value(scrollbar, priv->scrollback_count - priv->view_offset);
+    return true;
+}
+
+static void terminal_store_scrollback_line(atk_terminal_priv_t *priv, int row)
+{
+    if (!priv || priv->scrollback_capacity <= 0 || priv->cols <= 0)
+    {
+        return;
+    }
+    if (row < 0 || row >= priv->rows)
+    {
+        return;
+    }
+
+    size_t line_offset = (size_t)row * (size_t)priv->cols;
+    size_t insert_offset;
+    if (priv->scrollback_count < priv->scrollback_capacity)
+    {
+        insert_offset = terminal_scrollback_offset(priv, priv->scrollback_count);
+        priv->scrollback_count++;
+    }
+    else
+    {
+        insert_offset = terminal_scrollback_offset(priv, 0);
+        priv->scrollback_start = (priv->scrollback_start + 1) % priv->scrollback_capacity;
+    }
+
+    memcpy(priv->scrollback_cells + insert_offset, priv->cells + line_offset, (size_t)priv->cols);
+    memcpy(priv->scrollback_fg + insert_offset, priv->fg + line_offset, sizeof(uint16_t) * (size_t)priv->cols);
+    memcpy(priv->scrollback_bg + insert_offset, priv->bg + line_offset, sizeof(uint16_t) * (size_t)priv->cols);
+}
+
+static void terminal_clamp_view_offset(atk_terminal_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->view_offset < 0)
+    {
+        priv->view_offset = 0;
+    }
+    if (priv->view_offset > priv->scrollback_count)
+    {
+        priv->view_offset = priv->scrollback_count;
+    }
+}
+
+static void terminal_update_scrollbar(atk_terminal_priv_t *priv)
+{
+    if (!priv || !priv->scrollbar)
+    {
+        return;
+    }
+    atk_scrollbar_set_range(priv->scrollbar, 0, priv->scrollback_count, priv->rows);
+    int value = priv->scrollback_count - priv->view_offset;
+    if (value < 0)
+    {
+        value = 0;
+    }
+    atk_scrollbar_set_value(priv->scrollbar, value);
+    atk_scrollbar_mark_dirty(priv->scrollbar);
+}
+
+static void terminal_scrollbar_changed(atk_widget_t *scrollbar, void *context, int value)
+{
+    (void)scrollbar;
+    atk_widget_t *terminal = (atk_widget_t *)context;
+    atk_terminal_priv_t *priv = terminal_priv_mut(terminal);
+    if (!priv)
+    {
+        return;
+    }
+    if (value < 0)
+    {
+        value = 0;
+    }
+    if (value > priv->scrollback_count)
+    {
+        value = priv->scrollback_count;
+    }
+    priv->view_offset = priv->scrollback_count - value;
+    terminal_invalidate(terminal);
+}
+
+static size_t terminal_scrollback_offset(const atk_terminal_priv_t *priv, int logical_index)
+{
+    if (!priv || priv->scrollback_capacity <= 0 || priv->cols <= 0)
+    {
+        return 0;
+    }
+    int slot = logical_index % priv->scrollback_capacity;
+    if (slot < 0)
+    {
+        slot += priv->scrollback_capacity;
+    }
+    slot = (priv->scrollback_start + slot) % priv->scrollback_capacity;
+    return (size_t)slot * (size_t)priv->cols;
 }
