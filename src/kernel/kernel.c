@@ -5,6 +5,7 @@
 #include "interrupts.h"
 #include "timer.h"
 #include "hwinfo.h"
+#include "acpi.h"
 #include "heap.h"
 #include "paging.h"
 #include "rtl8139.h"
@@ -42,6 +43,7 @@ void kernel_main(void)
     serial_write_hex64(idt_current_base());
     serial_write_string("\r\n");
     hwinfo_print_boot_summary();
+    acpi_init();
     serial_write_char('h');
     serial_write_char('v');
     vfs_init();

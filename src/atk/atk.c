@@ -358,6 +358,7 @@ static void atk_apply_default_theme(atk_state_t *state)
     state->theme.button_text = video_make_color(0x10, 0x10, 0x10);
     state->theme.desktop_icon_face = video_make_color(0x50, 0x90, 0xD0);
     state->theme.desktop_icon_text = state->theme.window_title_text;
+
 }
 
 static void action_exit_to_text(atk_widget_t *button, void *context)

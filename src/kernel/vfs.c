@@ -1230,3 +1230,16 @@ bool vfs_is_mount_point(const vfs_node_t *node)
     vfs_mount_t *mount = node->mount;
     return mount && mount->mount_point == node;
 }
+
+bool vfs_sync_all(void)
+{
+    bool ok = true;
+    for (vfs_mount_t *mount = mounts; mount; mount = mount->next)
+    {
+        if (!vfs_mount_sync(mount))
+        {
+            ok = false;
+        }
+    }
+    return ok;
+}
