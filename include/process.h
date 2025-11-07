@@ -12,6 +12,7 @@ typedef struct thread thread_t;
 typedef struct trap_frame trap_frame_t;
 
 typedef void (*thread_entry_t)(void *arg);
+typedef void (*process_wait_hook_t)(void *context);
 
 typedef enum
 {
@@ -54,6 +55,11 @@ void process_yield(void);
 void process_exit(int status) __attribute__((noreturn));
 
 int process_join(process_t *process, int *status_out);
+int process_join_with_hook(process_t *process,
+                          int *status_out,
+                          process_wait_hook_t hook,
+                          void *context);
+bool process_kill(process_t *process, int status);
 
 process_t *process_current(void);
 thread_t *thread_current(void);

@@ -6,6 +6,7 @@
 #include "atk/layout.h"
 #include "atk_window.h"
 #include "libc.h"
+#include "logger.h"
 #include "process.h"
 #include "net/interface.h"
 #include "timer.h"
@@ -50,14 +51,17 @@ static atk_taskmgr_net_history_t *taskmgr_history_slot(atk_task_manager_view_t *
 
 bool atk_task_manager_open(atk_state_t *state)
 {
+    logger_log("taskmgr: open requested");
     if (!state)
     {
+        logger_log("taskmgr: open aborted (no state)");
         return false;
     }
 
     atk_task_manager_view_t *view = (atk_task_manager_view_t *)malloc(sizeof(atk_task_manager_view_t));
     if (!view)
     {
+        logger_log("taskmgr: view allocation failed");
         return false;
     }
     memset(view, 0, sizeof(*view));
@@ -65,6 +69,7 @@ bool atk_task_manager_open(atk_state_t *state)
 
     if (!atk_task_manager_init_ui(view))
     {
+        logger_log("taskmgr: init_ui failed");
         atk_task_manager_view_destroy(view);
         return false;
     }
@@ -75,11 +80,16 @@ bool atk_task_manager_open(atk_state_t *state)
         view->timer_interval = 1;
     }
     view->timer_registered = timer_register_periodic(atk_task_manager_timer, view, view->timer_interval);
+    if (!view->timer_registered)
+    {
+        logger_log("taskmgr: timer registration failed");
+    }
 
     atk_task_manager_refresh_processes(view);
     atk_task_manager_refresh_network(view);
     atk_tab_view_set_change_handler(view->tab_view, atk_task_manager_on_tab_changed, view);
     atk_window_mark_dirty(view->window);
+    logger_log("taskmgr: open complete");
     return true;
 }
 
@@ -88,6 +98,7 @@ static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
     atk_widget_t *window = atk_window_create_at(view->state, 320, 240);
     if (!window)
     {
+        logger_log("taskmgr: window creation failed");
         return false;
     }
     window->width = 720;
@@ -106,6 +117,7 @@ static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
     atk_widget_t *tab_view = atk_window_add_tab_view(window, content.x, content.y, content.width, content.height);
     if (!tab_view)
     {
+        logger_log("taskmgr: tab view creation failed");
         atk_window_close(view->state, window);
         return false;
     }
@@ -114,6 +126,7 @@ static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
     atk_widget_t *process_list = atk_list_view_create();
     if (!process_list)
     {
+        logger_log("taskmgr: process list widget alloc failed");
         atk_window_close(view->state, window);
         return false;
     }
@@ -131,6 +144,7 @@ static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
     };
     if (!atk_list_view_configure_columns(process_list, PROCESS_COLUMNS, sizeof(PROCESS_COLUMNS) / sizeof(PROCESS_COLUMNS[0])))
     {
+        logger_log("taskmgr: process list column config failed");
         atk_list_view_destroy(process_list);
         atk_widget_destroy(process_list);
         atk_window_close(view->state, window);
@@ -138,6 +152,7 @@ static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
     }
     if (!atk_tab_view_add_page(tab_view, "Processes", process_list))
     {
+        logger_log("taskmgr: failed to add process tab");
         atk_list_view_destroy(process_list);
         atk_widget_destroy(process_list);
         atk_window_close(view->state, window);
@@ -148,6 +163,7 @@ static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
     atk_widget_t *network_list = atk_list_view_create();
     if (!network_list)
     {
+        logger_log("taskmgr: network list widget alloc failed");
         atk_window_close(view->state, window);
         return false;
     }
@@ -166,6 +182,7 @@ static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
     };
     if (!atk_list_view_configure_columns(network_list, NETWORK_COLUMNS, sizeof(NETWORK_COLUMNS) / sizeof(NETWORK_COLUMNS[0])))
     {
+        logger_log("taskmgr: network list column config failed");
         atk_list_view_destroy(network_list);
         atk_widget_destroy(network_list);
         atk_window_close(view->state, window);
@@ -173,6 +190,7 @@ static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
     }
     if (!atk_tab_view_add_page(tab_view, "Network", network_list))
     {
+        logger_log("taskmgr: failed to add network tab");
         atk_list_view_destroy(network_list);
         atk_widget_destroy(network_list);
         atk_window_close(view->state, window);

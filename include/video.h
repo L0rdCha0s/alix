@@ -27,6 +27,7 @@ void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixe
 bool video_is_active(void);
 void video_request_refresh(void);
 void video_request_refresh_window(struct atk_widget *window);
+void video_pump_events(void);
 
 
 #endif

@@ -23,10 +23,12 @@ typedef struct
 
 static void atk_shell_view_destroy(void *context);
 static void atk_shell_on_submit(atk_widget_t *terminal, void *context, const char *line);
+static bool atk_shell_on_control(atk_widget_t *terminal, void *context, char control);
 static void atk_shell_append_prompt(atk_shell_view_t *view);
 static void atk_shell_stream_write(void *context, const char *data, size_t len);
 static ssize_t atk_shell_fd_write(void *ctx, const void *buffer, size_t count);
 static int atk_shell_fd_close(void *ctx);
+static void atk_shell_wait_hook(void *context);
 
 static const fd_ops_t g_atk_shell_fd_ops = {
     .read = NULL,
@@ -65,6 +67,9 @@ bool atk_shell_open(atk_state_t *state)
     view->shell.stdout_fd = process_current_stdout_fd();
     view->shell.stream_fn = atk_shell_stream_write;
     view->shell.stream_context = view;
+    view->shell.foreground_process = NULL;
+    view->shell.wait_hook = atk_shell_wait_hook;
+    view->shell.wait_context = view;
     view->stdout_fd = -1;
 
     int margin_x = 8; /* tighter horizontal margin to balance scrollbar width */
@@ -88,6 +93,7 @@ bool atk_shell_open(atk_state_t *state)
 
     atk_terminal_reset(terminal);
     atk_terminal_set_submit_handler(terminal, atk_shell_on_submit, view);
+    atk_terminal_set_control_handler(terminal, atk_shell_on_control, view);
     atk_terminal_focus(state, terminal);
     atk_shell_append_prompt(view);
 
@@ -131,6 +137,30 @@ static void atk_shell_append_prompt(atk_shell_view_t *view)
     }
     static const char prompt[] = "alex@alix$ ";
     atk_terminal_write(view->terminal, prompt, sizeof(prompt) - 1);
+}
+
+static bool atk_shell_on_control(atk_widget_t *terminal_widget, void *context, char control)
+{
+    atk_shell_view_t *view = (atk_shell_view_t *)context;
+    if (!view || !terminal_widget || control != 0x03)
+    {
+        return false;
+    }
+
+    bool had_process = (view->shell.foreground_process != NULL);
+    shell_request_interrupt(&view->shell);
+    atk_terminal_clear_input(terminal_widget);
+
+    static const char ctrlc_text[] = "^C\r\n";
+    atk_terminal_write(terminal_widget, ctrlc_text, sizeof(ctrlc_text) - 1);
+
+    if (!had_process)
+    {
+        atk_shell_append_prompt(view);
+    }
+
+    atk_window_mark_dirty(view->window);
+    return true;
 }
 
 static void atk_shell_on_submit(atk_widget_t *terminal_widget, void *context, const char *line)
@@ -191,4 +221,10 @@ static int atk_shell_fd_close(void *ctx)
 {
     (void)ctx;
     return 0;
+}
+
+static void atk_shell_wait_hook(void *context)
+{
+    (void)context;
+    video_pump_events();
 }

@@ -1,4 +1,4 @@
-; stage2.asm — sets up long mode and jumps to C kernel at 0x00009000
+; stage2.asm — sets up long mode and jumps to C kernel at 0x00100000
 
 %define STAGE2_BASE   0x0000000000009000
 %define STAGE2_SEGMENT (STAGE2_BASE >> 4)
@@ -13,12 +13,13 @@
 %define E820_ENTRY_SIZE   24
 %define E820_MAX_ENTRIES  64
 %define E820_SEG          (E820_STORAGE_PHYS >> 4)
-%define PML4          0x0000000000100000
-%define PDP           0x0000000000101000
-%define PD0           0x0000000000102000
-%define PD1           0x0000000000103000
-%define PD2           0x0000000000104000
-%define PD3           0x0000000000105000
+%define PAGE_TABLE_BASE 0x0000000000040000
+%define PML4          (PAGE_TABLE_BASE + 0x0000)
+%define PDP           (PAGE_TABLE_BASE + 0x1000)
+%define PD0           (PAGE_TABLE_BASE + 0x2000)
+%define PD1           (PAGE_TABLE_BASE + 0x3000)
+%define PD2           (PAGE_TABLE_BASE + 0x4000)
+%define PD3           (PAGE_TABLE_BASE + 0x5000)
 
 %define CODE32_SEL      0x08
 %define DATA32_SEL      0x10
@@ -40,6 +41,14 @@ section .start16
   extern __bss_start
   extern __bss_end
   extern serial_write_char
+  extern __kernel_lma_start
+  extern __kernel_vma_start
+  extern __kernel_text_lma
+  extern __kernel_text_start
+  extern __kernel_text_size
+  extern __kernel_data_lma
+  extern __kernel_data_start
+  extern __kernel_data_size
 
 start16:
   cli
@@ -169,6 +178,20 @@ pmode_entry:
   mov es, ax
   mov ss, ax
   mov esp, 0x90000
+
+  ; Relocate kernel sections from their low-memory load addresses
+  ; into their high-memory virtual addresses before enabling paging.
+  cld
+
+  mov esi, __kernel_text_lma
+  mov edi, __kernel_text_start
+  mov ecx, __kernel_text_size
+  rep movsb
+
+  mov esi, __kernel_data_lma
+  mov edi, __kernel_data_start
+  mov ecx, __kernel_data_size
+  rep movsb
 
   ; Initialize COM1 quickly in I/O mode (115200 8N1)
   mov dx, COM1+1
@@ -447,3 +470,36 @@ kernel_heap_base: dq KERNEL_HEAP_BASE
 kernel_heap_end:  dq KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE
   global kernel_heap_size
 kernel_heap_size: dq KERNEL_HEAP_SIZE
+  ; Verify text copy sanity (compare first 32 bytes)
+  mov esi, __kernel_text_lma
+  mov edi, __kernel_text_start
+  mov ecx, 32
+  repe cmpsb
+  jz .text_ok
+  mov dx, COM1+5
+.lm_text_err_wait:
+  in al, dx
+  test al, 0x20
+  jz .lm_text_err_wait
+  mov dx, COM1
+  mov al, 'X'
+  out dx, al
+  jmp $
+.text_ok:
+
+  ; Verify data copy sanity (compare first 32 bytes)
+  mov esi, __kernel_data_lma
+  mov edi, __kernel_data_start
+  mov ecx, 32
+  repe cmpsb
+  jz .data_ok
+  mov dx, COM1+5
+.lm_data_err_wait:
+  in al, dx
+  test al, 0x20
+  jz .lm_data_err_wait
+  mov dx, COM1
+  mov al, 'Y'
+  out dx, al
+  jmp $
+.data_ok:

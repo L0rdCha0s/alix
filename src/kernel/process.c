@@ -1027,7 +1027,10 @@ void process_exit(int status)
     fatal("process_exit returned");
 }
 
-int process_join(process_t *process, int *status_out)
+int process_join_with_hook(process_t *process,
+                          int *status_out,
+                          process_wait_hook_t hook,
+                          void *context)
 {
     if (!process)
     {
@@ -1036,6 +1039,10 @@ int process_join(process_t *process, int *status_out)
 
     while (process->state != PROCESS_STATE_ZOMBIE)
     {
+        if (hook)
+        {
+            hook(context);
+        }
         process_yield();
     }
 
@@ -1044,6 +1051,62 @@ int process_join(process_t *process, int *status_out)
         *status_out = process->exit_status;
     }
     return process->exit_status;
+}
+
+int process_join(process_t *process, int *status_out)
+{
+    return process_join_with_hook(process, status_out, NULL, NULL);
+}
+
+bool process_kill(process_t *process, int status)
+{
+    if (!process)
+    {
+        return false;
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    thread_t *thread = process->current_thread ? process->current_thread : process->main_thread;
+    if (!thread)
+    {
+        cpu_restore_flags(flags);
+        return false;
+    }
+
+    if (process->state == PROCESS_STATE_ZOMBIE || thread->state == THREAD_STATE_ZOMBIE)
+    {
+        process->state = PROCESS_STATE_ZOMBIE;
+        process->exit_status = status;
+        cpu_restore_flags(flags);
+        return true;
+    }
+
+    bool target_running = (thread == g_current_thread);
+
+    if (thread->in_run_queue)
+    {
+        remove_from_run_queue(thread);
+    }
+
+    thread->exit_status = status;
+    thread->exited = true;
+    thread->state = THREAD_STATE_ZOMBIE;
+    thread->preempt_pending = false;
+    thread->time_slice_remaining = 0;
+
+    process->exit_status = status;
+    process->state = PROCESS_STATE_ZOMBIE;
+
+    cpu_restore_flags(flags);
+
+    if (target_running)
+    {
+        process_exit(status);
+    }
+
+    return true;
 }
 
 process_t *process_current(void)

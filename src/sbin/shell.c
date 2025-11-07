@@ -173,6 +173,22 @@ bool shell_output_error(shell_output_t *out, const char *msg)
     return false;
 }
 
+bool shell_request_interrupt(shell_state_t *shell)
+{
+    if (!shell)
+    {
+        return false;
+    }
+
+    process_t *proc = shell->foreground_process;
+    if (!proc)
+    {
+        return false;
+    }
+
+    return process_kill(proc, -1);
+}
+
 char *shell_output_take_buffer(shell_output_t *out)
 {
     if (!out || !out->to_buffer)
@@ -217,12 +233,15 @@ void shell_main(void)
         .cwd = vfs_root(),
         .stream_fn = shell_stream_console_write,
         .stream_context = NULL,
-        .stdout_fd = process_current_stdout_fd()
+        .stdout_fd = process_current_stdout_fd(),
+        .foreground_process = NULL,
+        .wait_hook = NULL,
+        .wait_context = NULL
     };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top.\r\n");
 
     while (1)
     {
@@ -246,6 +265,7 @@ static const shell_command_t g_commands[] = {
     { "nslookup",    shell_cmd_nslookup },
     { "wget",        shell_cmd_wget },
     { "imgview",     shell_cmd_imgview },
+    { "logcat",      shell_cmd_logcat },
     { "sha1sum",     shell_cmd_sha1sum },
     { "dhclient",    shell_cmd_dhclient },
     { "start_video", shell_cmd_start_video },
@@ -279,6 +299,11 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
     if (!input)
     {
         return shell_duplicate_empty();
+    }
+
+    if (shell)
+    {
+        shell->foreground_process = NULL;
     }
 
     size_t input_len = strlen(input);
@@ -394,10 +419,23 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                 break;
             }
 
-            process_join(proc, NULL);
+            if (shell)
+            {
+                shell->foreground_process = proc;
+            }
+
+            process_join_with_hook(proc,
+                                    NULL,
+                                    shell ? shell->wait_hook : NULL,
+                                    shell ? shell->wait_context : NULL);
             handler_result = task->result;
             process_destroy(proc);
             free(task);
+
+            if (shell && shell->foreground_process == proc)
+            {
+                shell->foreground_process = NULL;
+            }
             break;
         }
     }

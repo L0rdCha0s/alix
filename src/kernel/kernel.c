@@ -18,6 +18,7 @@
 #include "block.h"
 #include "devfs.h"
 #include "ata.h"
+#include "logger.h"
 
 static void shell_process_entry(void *arg)
 {
@@ -38,25 +39,14 @@ void kernel_main(void)
     process_system_init();
     block_init();
 
-    serial_write_char('k');
-    serial_write_string("IDT base pre-init=\r\n");
-    serial_write_hex64(idt_current_base());
-    serial_write_string("\r\n");
     hwinfo_print_boot_summary();
     acpi_init();
-    serial_write_char('h');
-    serial_write_char('v');
     vfs_init();
+    logger_init();
     devfs_init();
-    serial_write_char('Q');
-    serial_write_hex64((uint64_t)vfs_root());
-    serial_write_char('\n');
-    serial_write_char('f');
     interrupts_init();
     interrupts_enable_irq(1);
-    serial_write_char('I');
     timer_init(100);
-    serial_write_char('T');
     ata_init();
     devfs_register_block_devices();
 
@@ -65,11 +55,7 @@ void kernel_main(void)
     net_tcp_init();
 
     rtl8139_init();
-    serial_write_char('N');
-    serial_write_char('m');
-    serial_write_char('E');
     interrupts_enable();
-    serial_write_char('e');
 
     process_t *shell_process = process_create_kernel("shell", shell_process_entry, NULL, 0, -1);
     if (!shell_process)

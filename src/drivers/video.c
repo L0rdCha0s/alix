@@ -642,6 +642,22 @@ void video_run_loop(void)
     video_log("video_run_loop end");
 }
 
+void video_pump_events(void)
+{
+    if (!video_active)
+    {
+        return;
+    }
+
+    mouse_poll();
+    video_poll_keyboard();
+    if (refresh_requested)
+    {
+        refresh_requested = false;
+        video_perform_refresh();
+    }
+}
+
 void video_request_refresh(void)
 {
     if (!video_active)

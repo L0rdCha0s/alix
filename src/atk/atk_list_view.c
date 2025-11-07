@@ -4,6 +4,10 @@
 #include "video.h"
 #include "libc.h"
 
+#if ATK_LIST_VIEW_MAX_COLUMNS < 10
+#error "ATK_LIST_VIEW_MAX_COLUMNS must be at least 10 to support task manager views"
+#endif
+
 #define ATK_LIST_VIEW_DEFAULT_HEADER_HEIGHT (ATK_FONT_HEIGHT + 6)
 #define ATK_LIST_VIEW_DEFAULT_ROW_HEIGHT    (ATK_FONT_HEIGHT + 4)
 #define ATK_LIST_VIEW_MIN_COLUMN_WIDTH      (ATK_FONT_WIDTH * 4)

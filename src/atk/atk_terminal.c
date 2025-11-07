@@ -21,6 +21,8 @@ typedef struct
     atk_list_node_t *list_node;
     atk_terminal_submit_t submit;
     void *submit_context;
+    atk_terminal_control_t control_handler;
+    void *control_context;
 
     int cols;
     int rows;
@@ -134,6 +136,8 @@ atk_widget_t *atk_window_add_terminal(atk_widget_t *window, int x, int y, int wi
 
     term_priv->submit = NULL;
     term_priv->submit_context = NULL;
+    term_priv->control_handler = NULL;
+    term_priv->control_context = NULL;
 
     int scrollbar_width = ATK_TERMINAL_SCROLLBAR_WIDTH;
     if (width <= scrollbar_width)
@@ -354,6 +358,17 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch)
         return false;
     }
 
+    if (ch == 0x03)
+    {
+        if (priv->control_handler &&
+            priv->control_handler(terminal, priv->control_context, ch))
+        {
+            terminal_invalidate(terminal);
+            return true;
+        }
+        return false;
+    }
+
     if (ch == '\r')
     {
         ch = '\n';
@@ -409,6 +424,29 @@ void atk_terminal_set_submit_handler(atk_widget_t *terminal, atk_terminal_submit
     }
     priv->submit = handler;
     priv->submit_context = context;
+}
+
+void atk_terminal_set_control_handler(atk_widget_t *terminal,
+                                      atk_terminal_control_t handler,
+                                      void *context)
+{
+    atk_terminal_priv_t *priv = terminal_priv_mut(terminal);
+    if (!priv)
+    {
+        return;
+    }
+    priv->control_handler = handler;
+    priv->control_context = context;
+}
+
+void atk_terminal_clear_input(atk_widget_t *terminal)
+{
+    atk_terminal_priv_t *priv = terminal_priv_mut(terminal);
+    if (!priv)
+    {
+        return;
+    }
+    priv->input_length = 0;
 }
 
 void atk_terminal_focus(atk_state_t *state, atk_widget_t *terminal)

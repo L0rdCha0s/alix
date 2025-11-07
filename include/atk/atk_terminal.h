@@ -10,6 +10,7 @@ extern "C" {
 struct atk_state;
 
 typedef void (*atk_terminal_submit_t)(atk_widget_t *terminal, void *context, const char *line);
+typedef bool (*atk_terminal_control_t)(atk_widget_t *terminal, void *context, char control);
 
 #define ATK_TERMINAL_SCROLLBAR_WIDTH 14
 
@@ -18,6 +19,8 @@ void atk_terminal_reset(atk_widget_t *terminal);
 void atk_terminal_write(atk_widget_t *terminal, const char *data, size_t len);
 bool atk_terminal_handle_char(atk_widget_t *terminal, char ch);
 void atk_terminal_set_submit_handler(atk_widget_t *terminal, atk_terminal_submit_t handler, void *context);
+void atk_terminal_set_control_handler(atk_widget_t *terminal, atk_terminal_control_t handler, void *context);
+void atk_terminal_clear_input(atk_widget_t *terminal);
 void atk_terminal_focus(struct atk_state *state, atk_widget_t *terminal);
 bool atk_terminal_is_focused(const struct atk_state *state, const atk_widget_t *terminal);
 void atk_terminal_mark_dirty(atk_widget_t *terminal);

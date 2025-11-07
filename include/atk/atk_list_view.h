@@ -9,7 +9,7 @@ extern "C" {
 
 struct atk_state;
 
-#define ATK_LIST_VIEW_MAX_COLUMNS 8
+#define ATK_LIST_VIEW_MAX_COLUMNS 12
 #define ATK_LIST_VIEW_COLUMN_TITLE_MAX 24
 #define ATK_LIST_VIEW_CELL_TEXT_MAX 64
 
