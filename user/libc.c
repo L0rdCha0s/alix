@@ -1,0 +1,348 @@
+#include "userlib.h"
+
+#define ALIGNMENT 16UL
+#define SIZE_MAX_VALUE ((size_t)-1)
+
+typedef struct heap_block
+{
+    size_t size;
+    struct heap_block *next;
+    struct heap_block *prev;
+    bool free;
+} heap_block_t;
+
+static heap_block_t *g_heap_head = NULL;
+static heap_block_t *g_heap_tail = NULL;
+
+static size_t align_size(size_t size)
+{
+    if (size == 0)
+    {
+        return 0;
+    }
+    size_t mask = ALIGNMENT - 1;
+    return (size + mask) & ~mask;
+}
+
+static void split_block(heap_block_t *block, size_t size)
+{
+    if (!block || block->size <= size + sizeof(heap_block_t) + ALIGNMENT)
+    {
+        return;
+    }
+
+    uintptr_t base = (uintptr_t)block;
+    uintptr_t new_block_addr = base + sizeof(heap_block_t) + size;
+    heap_block_t *new_block = (heap_block_t *)new_block_addr;
+    new_block->size = block->size - size - sizeof(heap_block_t);
+    new_block->free = true;
+    new_block->next = block->next;
+    new_block->prev = block;
+    if (new_block->next)
+    {
+        new_block->next->prev = new_block;
+    }
+    else
+    {
+        g_heap_tail = new_block;
+    }
+    block->next = new_block;
+    block->size = size;
+}
+
+static void coalesce(heap_block_t *block)
+{
+    if (!block)
+    {
+        return;
+    }
+
+    if (block->next && block->next->free)
+    {
+        heap_block_t *next = block->next;
+        block->size += sizeof(heap_block_t) + next->size;
+        block->next = next->next;
+        if (block->next)
+        {
+            block->next->prev = block;
+        }
+        else
+        {
+            g_heap_tail = block;
+        }
+    }
+
+    if (block->prev && block->prev->free)
+    {
+        block = block->prev;
+        coalesce(block);
+    }
+}
+
+static heap_block_t *find_free_block(size_t size)
+{
+    for (heap_block_t *block = g_heap_head; block; block = block->next)
+    {
+        if (block->free && block->size >= size)
+        {
+            return block;
+        }
+    }
+    return NULL;
+}
+
+static heap_block_t *request_block(size_t size)
+{
+    size_t total = sizeof(heap_block_t) + size;
+    void *base = sys_sbrk((int64_t)total);
+    if (base == (void *)-1)
+    {
+        return NULL;
+    }
+    heap_block_t *block = (heap_block_t *)base;
+    block->size = size;
+    block->next = NULL;
+    block->prev = g_heap_tail;
+    block->free = false;
+
+    if (g_heap_tail)
+    {
+        g_heap_tail->next = block;
+    }
+    else
+    {
+        g_heap_head = block;
+    }
+    g_heap_tail = block;
+    return block;
+}
+
+static heap_block_t *payload_to_block(void *ptr)
+{
+    if (!ptr)
+    {
+        return NULL;
+    }
+    return (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+}
+
+void *memset(void *dst, int value, size_t count)
+{
+    uint8_t *ptr = (uint8_t *)dst;
+    uint8_t byte = (uint8_t)value;
+    for (size_t i = 0; i < count; ++i)
+    {
+        ptr[i] = byte;
+    }
+    return dst;
+}
+
+void *memcpy(void *dst, const void *src, size_t count)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    for (size_t i = 0; i < count; ++i)
+    {
+        d[i] = s[i];
+    }
+    return dst;
+}
+
+void *memmove(void *dst, const void *src, size_t count)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    if (d == s || count == 0)
+    {
+        return dst;
+    }
+
+    if (d < s)
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            d[i] = s[i];
+        }
+    }
+    else
+    {
+        for (size_t i = count; i > 0; --i)
+        {
+            d[i - 1] = s[i - 1];
+        }
+    }
+
+    return dst;
+}
+
+int memcmp(const void *a, const void *b, size_t count)
+{
+    const uint8_t *pa = (const uint8_t *)a;
+    const uint8_t *pb = (const uint8_t *)b;
+    for (size_t i = 0; i < count; ++i)
+    {
+        uint8_t va = pa[i];
+        uint8_t vb = pb[i];
+        if (va != vb)
+        {
+            return (int)va - (int)vb;
+        }
+    }
+    return 0;
+}
+
+size_t strlen(const char *str)
+{
+    size_t len = 0;
+    while (str && str[len] != '\0')
+    {
+        ++len;
+    }
+    return len;
+}
+
+int strcmp(const char *a, const char *b)
+{
+    while (*a && (*a == *b))
+    {
+        ++a;
+        ++b;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+int strncmp(const char *a, const char *b, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+    {
+        unsigned char ca = a[i];
+        unsigned char cb = b[i];
+        if (ca != cb || ca == '\0' || cb == '\0')
+        {
+            return ca - cb;
+        }
+    }
+    return 0;
+}
+
+void *malloc(size_t size)
+{
+    size = align_size(size);
+    if (size == 0)
+    {
+        return NULL;
+    }
+
+    heap_block_t *block = find_free_block(size);
+    if (!block)
+    {
+        block = request_block(size);
+        if (!block)
+        {
+            return NULL;
+        }
+    }
+    else
+    {
+        block->free = false;
+        split_block(block, size);
+    }
+
+    return (uint8_t *)block + sizeof(heap_block_t);
+}
+
+void free(void *ptr)
+{
+    heap_block_t *block = payload_to_block(ptr);
+    if (!block || block->free)
+    {
+        return;
+    }
+
+    block->free = true;
+    coalesce(block);
+}
+
+void *realloc(void *ptr, size_t size)
+{
+    if (!ptr)
+    {
+        return malloc(size);
+    }
+    if (size == 0)
+    {
+        free(ptr);
+        return NULL;
+    }
+
+    heap_block_t *block = payload_to_block(ptr);
+    if (!block)
+    {
+        return NULL;
+    }
+
+    size = align_size(size);
+    if (size <= block->size)
+    {
+        split_block(block, size);
+        return ptr;
+    }
+
+    void *new_ptr = malloc(size);
+    if (!new_ptr)
+    {
+        return NULL;
+    }
+    memcpy(new_ptr, ptr, block->size);
+    free(ptr);
+    return new_ptr;
+}
+
+void *calloc(size_t count, size_t size)
+{
+    if (count != 0 && size > SIZE_MAX_VALUE / count)
+    {
+        return NULL;
+    }
+    size_t total = count * size;
+    void *ptr = malloc(total);
+    if (!ptr)
+    {
+        return NULL;
+    }
+    memset(ptr, 0, total);
+    return ptr;
+}
+
+ssize_t read(int fd, void *buffer, size_t count)
+{
+    return sys_read(fd, buffer, count);
+}
+
+ssize_t write(int fd, const void *buffer, size_t count)
+{
+    return sys_write(fd, buffer, count);
+}
+
+int close(int fd)
+{
+    return sys_close(fd);
+}
+
+int open(const char *path, uint64_t flags)
+{
+    return sys_open(path, flags);
+}
+
+void *sbrk(int64_t increment)
+{
+    return sys_sbrk(increment);
+}
+
+void exit(int status)
+{
+    sys_exit(status);
+    for (;;)
+    {
+    }
+}
