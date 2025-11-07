@@ -101,5 +101,6 @@ bool process_handle_exception(interrupt_frame_t *frame,
                               uint64_t address);
 bool process_query_user_layout(const process_t *process,
                                process_user_layout_t *layout);
+int64_t process_user_sbrk(process_t *process, int64_t increment);
 
 #endif

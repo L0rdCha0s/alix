@@ -27,6 +27,8 @@ block_device_t *vfs_block_device(const vfs_node_t *node);
 vfs_node_type_t vfs_node_type(const vfs_node_t *node);
 bool vfs_truncate(vfs_node_t *file);
 bool vfs_append(vfs_node_t *file, const char *data, size_t len);
+ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count);
+ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t count);
 const char *vfs_data(const vfs_node_t *file, size_t *size);
 const char *vfs_name(const vfs_node_t *node);
 vfs_node_t *vfs_first_child(vfs_node_t *dir);

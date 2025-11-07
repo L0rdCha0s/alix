@@ -671,6 +671,67 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
     return true;
 }
 
+ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
+{
+    if (!file || file->type != VFS_NODE_FILE || !buffer)
+    {
+        return -1;
+    }
+    ensure_terminator(file);
+    if (offset >= file->size || count == 0)
+    {
+        return 0;
+    }
+    size_t available = file->size - offset;
+    if (count > available)
+    {
+        count = available;
+    }
+    memcpy(buffer, file->data + offset, count);
+    return (ssize_t)count;
+}
+
+ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t count)
+{
+    if (!file || file->type != VFS_NODE_FILE)
+    {
+        return -1;
+    }
+    if (count > 0 && !data)
+    {
+        return -1;
+    }
+    if (count == 0)
+    {
+        return 0;
+    }
+    if (offset > (size_t)-1 - count)
+    {
+        return -1;
+    }
+    size_t end = offset + count;
+    if (!ensure_capacity(file, end))
+    {
+        return -1;
+    }
+    if (offset > file->size)
+    {
+        size_t gap = offset - file->size;
+        memset(file->data + file->size, 0, gap);
+    }
+    memcpy(file->data + offset, data, count);
+    if (end > file->size)
+    {
+        file->size = end;
+    }
+    ensure_terminator(file);
+    if (file->mount && !vfs_mount_sync_node(file))
+    {
+        return -1;
+    }
+    return (ssize_t)count;
+}
+
 const char *vfs_data(const vfs_node_t *file, size_t *size)
 {
     if (!file || file->type != VFS_NODE_FILE)

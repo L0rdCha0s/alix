@@ -24,6 +24,8 @@
 #define USER_DUMMY_CODE_BASE      (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
 #define USER_DUMMY_STACK_TOP      (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)
 #define USER_DUMMY_STACK_SIZE     (64ULL * 1024ULL)
+#define USER_HEAP_BASE            (USER_ADDRESS_SPACE_BASE + 0x02000000ULL)
+#define USER_HEAP_SIZE            (8ULL * 1024ULL * 1024ULL)
 #define PAGE_SIZE_BYTES_LOCAL     4096ULL
 
 typedef uint64_t cpu_context_t;
@@ -148,6 +150,10 @@ struct process
     uintptr_t user_entry_point;
     uintptr_t user_stack_top;
     size_t user_stack_size;
+    process_user_region_t *user_heap_region;
+    uintptr_t user_heap_base;
+    uintptr_t user_heap_brk;
+    uintptr_t user_heap_limit;
 };
 
 static process_t *g_process_list = NULL;
@@ -468,6 +474,10 @@ static process_t *allocate_process(const char *name, bool is_user)
     proc->user_entry_point = 0;
     proc->user_stack_top = 0;
     proc->user_stack_size = 0;
+    proc->user_heap_region = NULL;
+    proc->user_heap_base = 0;
+    proc->user_heap_brk = 0;
+    proc->user_heap_limit = 0;
     return proc;
 }
 
@@ -490,6 +500,10 @@ static void process_free_user_regions(process_t *process)
         region = next;
     }
     process->user_regions = NULL;
+    process->user_heap_region = NULL;
+    process->user_heap_base = 0;
+    process->user_heap_brk = 0;
+    process->user_heap_limit = 0;
 }
 
 static bool process_map_user_region(process_t *process, const process_user_region_t *region)
@@ -589,6 +603,26 @@ static bool process_setup_dummy_user_space(process_t *process)
     {
         return false;
     }
+
+    process_user_region_t *heap_region = NULL;
+    if (!process_user_region_allocate(process,
+                                      USER_HEAP_BASE,
+                                      USER_HEAP_SIZE,
+                                      true,
+                                      false,
+                                      &heap_region))
+    {
+        return false;
+    }
+    if (!process_map_user_region(process, heap_region))
+    {
+        return false;
+    }
+
+    process->user_heap_region = heap_region;
+    process->user_heap_base = heap_region->user_base;
+    process->user_heap_brk = heap_region->user_base;
+    process->user_heap_limit = heap_region->user_base + heap_region->mapped_size;
 
     process->user_entry_point = USER_DUMMY_CODE_BASE;
     process->user_stack_top = USER_DUMMY_STACK_TOP;
@@ -1640,6 +1674,48 @@ bool process_query_user_layout(const process_t *process,
     layout->stack_top = process->user_stack_top;
     layout->stack_size = process->user_stack_size;
     return process->is_user && process->user_entry_point != 0 && process->user_stack_top != 0;
+}
+
+int64_t process_user_sbrk(process_t *process, int64_t increment)
+{
+    if (!process || !process->is_user || !process->user_heap_region)
+    {
+        return -1;
+    }
+
+    uintptr_t base = process->user_heap_base;
+    uintptr_t limit = process->user_heap_limit;
+    uintptr_t current = process->user_heap_brk;
+    if (base == 0 || limit <= base || current < base || current > limit)
+    {
+        return -1;
+    }
+    uintptr_t new_brk = current;
+
+    if (increment > 0)
+    {
+        uint64_t inc = (uint64_t)increment;
+        if (inc > (limit - current))
+        {
+            return -1;
+        }
+        new_brk = current + inc;
+        uint8_t *heap_mem = (uint8_t *)process->user_heap_region->aligned_allocation;
+        size_t offset = (size_t)(current - base);
+        memset(heap_mem + offset, 0, inc);
+    }
+    else if (increment < 0)
+    {
+        uint64_t dec = (uint64_t)(-increment);
+        if (dec > (current - base))
+        {
+            return -1;
+        }
+        new_brk = current - dec;
+    }
+
+    process->user_heap_brk = new_brk;
+    return (int64_t)current;
 }
 
 ssize_t process_stdout_write(const char *data, size_t len)
