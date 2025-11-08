@@ -10,6 +10,10 @@
 #include "libc.h"
 #include "fd.h"
 
+#ifndef TCP_TRACE_VERBOSE
+#define TCP_TRACE_VERBOSE 0
+#endif
+
 #define TCP_FLAG_FIN 0x01
 #define TCP_FLAG_SYN 0x02
 #define TCP_FLAG_RST 0x04
@@ -20,8 +24,8 @@
 #define NET_TCP_RX_INITIAL_CAPACITY   32768
 #define NET_TCP_RX_MAX_CAPACITY       524280
 #define NET_TCP_MAX_PAYLOAD           1460
-#define NET_TCP_REASS_LIMIT           524280
-#define NET_TCP_REASS_MAX_SEGMENTS    128
+#define NET_TCP_REASS_LIMIT           NET_TCP_RX_MAX_CAPACITY
+#define NET_TCP_REASS_MAX_SEGMENTS    2048
 
 typedef struct tcp_reass_segment
 {
@@ -120,7 +124,7 @@ static void tcp_reassembly_clear(net_tcp_socket_t *socket);
 static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const uint8_t *data, size_t len);
 static void tcp_reassembly_drain(net_tcp_socket_t *socket);
 static void tcp_log_hex32(uint32_t value);
-static void tcp_log_size(const char *label, size_t value);
+static void tcp_log_size(const char *label, size_t value) __attribute__((unused));
 static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
 static ssize_t tcp_fd_read(void *ctx, void *buffer, size_t count);
 static ssize_t tcp_fd_write(void *ctx, const void *buffer, size_t count);
@@ -341,6 +345,7 @@ static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const u
     *link = node;
     socket->reass_bytes += len;
     socket->reass_segments += 1;
+#if TCP_TRACE_VERBOSE
     serial_write_string("tcp: reassembly store seq=0x");
     tcp_log_hex32(seq);
     serial_write_string(" len=0x");
@@ -350,6 +355,7 @@ static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const u
     serial_write_string(" segs=");
     tcp_log_hex32((uint32_t)socket->reass_segments);
     serial_write_string("\r\n");
+#endif
     return true;
 }
 
@@ -377,6 +383,7 @@ static void tcp_reassembly_drain(net_tcp_socket_t *socket)
     {
         socket->reass_segments -= 1;
     }
+#if TCP_TRACE_VERBOSE
         serial_write_string("tcp: reassembly drain seq=0x");
         tcp_log_hex32(seg->seq);
         serial_write_string(" len=0x");
@@ -386,6 +393,7 @@ static void tcp_reassembly_drain(net_tcp_socket_t *socket)
         serial_write_string(" remain=0x");
         tcp_log_hex32((uint32_t)socket->reass_bytes);
         serial_write_string("\r\n");
+#endif
         free(seg->data);
         free(seg);
     }
@@ -445,11 +453,13 @@ static bool tcp_ensure_rx_capacity(net_tcp_socket_t *socket, size_t needed)
     socket->rx_buffer = buffer;
     if (socket->rx_capacity != target)
     {
+#if TCP_TRACE_VERBOSE
         serial_write_string("tcp: rx buffer resize old=0x");
         tcp_log_hex32((uint32_t)socket->rx_capacity);
         serial_write_string(" new=0x");
         tcp_log_hex32((uint32_t)target);
         serial_write_string("\r\n");
+#endif
     }
     socket->rx_capacity = target;
     return true;
@@ -470,7 +480,7 @@ static void tcp_log_hex32(uint32_t value)
     }
 }
 
-static void tcp_log_size(const char *label, size_t value)
+static __attribute__((unused)) void tcp_log_size(const char *label, size_t value)
 {
     serial_write_string(label);
     serial_write_string("0x");
@@ -683,6 +693,7 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
         window_avail = socket->rx_capacity - socket->rx_size;
     }
 
+#if TCP_TRACE_VERBOSE
     serial_write_string("tcp: app read len=0x");
     tcp_log_hex32((uint32_t)to_copy);
     serial_write_string(" remain=0x");
@@ -694,6 +705,7 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
     serial_write_string(" advertised=0x");
     tcp_log_hex32((uint32_t)socket->advertised_window);
     serial_write_string("\r\n");
+#endif
 
     size_t available = 0;
     if (socket->rx_capacity > socket->rx_size)
@@ -709,11 +721,13 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
         socket->have_mac &&
         (socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT))
     {
+#if TCP_TRACE_VERBOSE
         serial_write_string("tcp: window update ack win=0x");
         tcp_log_hex32((uint32_t)window);
         serial_write_string(" prev=0x");
         tcp_log_hex32((uint32_t)socket->advertised_window);
         serial_write_string("\r\n");
+#endif
         tcp_send_ack(socket);
     }
 
@@ -1255,6 +1269,7 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
         return;
     }
 
+#if TCP_TRACE_VERBOSE
     serial_write_string("tcp: rx payload_len=");
     tcp_log_size("", payload_len);
     serial_write_string(" rx_size=");
@@ -1262,6 +1277,7 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
     serial_write_string(" capacity=");
     tcp_log_size("", socket->rx_capacity);
     serial_write_string("\r\n");
+#endif
 
     if (socket->state != TCP_STATE_ESTABLISHED && socket->state != TCP_STATE_CLOSE_WAIT)
     {
@@ -1318,11 +1334,13 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
         return;
     }
 
+#if TCP_TRACE_VERBOSE
     serial_write_string("tcp: rx ensured capacity=");
     tcp_log_size("", socket->rx_capacity);
     serial_write_string(" needed=");
     tcp_log_size("", needed);
     serial_write_string("\r\n");
+#endif
 
     memcpy(socket->rx_buffer + socket->rx_size, payload, payload_len);
     socket->rx_size += payload_len;
@@ -1350,6 +1368,7 @@ static void tcp_send_ack(net_tcp_socket_t *socket)
     uint8_t flags = TCP_FLAG_ACK;
     if (tcp_send_segment(socket, socket->seq_next, flags, NULL, 0, false, false))
     {
+#if TCP_TRACE_VERBOSE
         serial_write_string("tcp: send ack seq=0x");
         tcp_log_hex32(socket->seq_next);
         serial_write_string(" ack=0x");
@@ -1365,6 +1384,7 @@ static void tcp_send_ack(net_tcp_socket_t *socket)
         serial_write_string(" capacity=0x");
         tcp_log_hex32((uint32_t)socket->rx_capacity);
         serial_write_string("\r\n");
+#endif
         if (socket->reass_head)
         {
             socket->reass_last_ack_tick = timer_ticks();

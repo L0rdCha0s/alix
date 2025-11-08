@@ -13,6 +13,10 @@
 #include "vfs.h"
 #include "libc.h"
 
+#ifndef WGET_TRACE_ENABLE
+#define WGET_TRACE_ENABLE 0
+#endif
+
 #define WGET_HEADER_CAP 2048
 #define WGET_CHUNK_SIZE 4096
 
@@ -684,6 +688,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     shell_output_error(out, "invalid Content-Length");
                     goto cleanup;
                 }
+#if WGET_TRACE_ENABLE
                 shell_output_write(out, "debug: content-length=");
                 char len_buf[24];
                 if (!format_decimal(len_buf, sizeof(len_buf), (unsigned)content_length, NULL))
@@ -692,6 +697,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                 }
                 shell_output_write(out, len_buf);
                 shell_output_write(out, "\n");
+#endif
                 have_length = true;
             }
 
@@ -719,6 +725,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                 }
                 if (done)
                 {
+#if WGET_TRACE_ENABLE
                     shell_output_write(out, "debug: chunked complete, total ");
                     char size_buf[16];
                     if (!format_decimal(size_buf, sizeof(size_buf), (unsigned)written, NULL))
@@ -727,6 +734,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     }
                     shell_output_write(out, size_buf);
                     shell_output_write(out, "\n");
+#endif
                 }
                 if (done)
                 {
@@ -1220,6 +1228,7 @@ static bool append_body_chunk(vfs_node_t *file, const uint8_t *data, size_t len,
     }
 
     *written += len;
+#if WGET_TRACE_ENABLE
     shell_output_write(out, "debug: wrote ");
     char buf[24];
     if (!format_decimal(buf, sizeof(buf), (unsigned)len, NULL))
@@ -1235,6 +1244,7 @@ static bool append_body_chunk(vfs_node_t *file, const uint8_t *data, size_t len,
     }
     shell_output_write(out, total_buf);
     shell_output_write(out, ")\n");
+#endif
     return true;
 }
 

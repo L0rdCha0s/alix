@@ -12,6 +12,10 @@
 #include "interrupts.h"
 #include "timer.h"
 
+#ifndef RTL8139_TRACE_ENABLE
+#define RTL8139_TRACE_ENABLE 0
+#endif
+
 #define RTL_VENDOR_ID 0x10EC
 #define RTL_DEVICE_ID 0x8139
 
@@ -47,18 +51,21 @@
 #define RTL_RCR_WRAP  (1U << 7)
 #define RTL_RCR_MXDMA_SHIFT 8
 #define RTL_RCR_MXDMA_UNLIMITED (7U << RTL_RCR_MXDMA_SHIFT)
-#define RTL_RCR_RBLEN_8K (0U << 11)
+#define RTL_RCR_RBLEN_8K   (0U << 11)
+#define RTL_RCR_RBLEN_16K  (1U << 11)
+#define RTL_RCR_RBLEN_32K  (2U << 11)
+#define RTL_RCR_RBLEN_64K  (3U << 11)
 
 // Remove AAP (promisc) and AM (all multicast)
 #define RTL_RCR_DEFAULT ( \
     RTL_RCR_APM | RTL_RCR_AB | \
-    RTL_RCR_WRAP | RTL_RCR_MXDMA_UNLIMITED | RTL_RCR_RBLEN_8K)
+    RTL_RCR_WRAP | RTL_RCR_MXDMA_UNLIMITED | RTL_RCR_RBLEN_64K)
 
 
-/* RX ring in the 8139 is 8 KiB plus a 16-byte header. We keep an
-   additional safety tail for convenient linear reads across the wrap,
-   but all hardware offsets must wrap at exactly 8 KiB. */
-#define RTL_RX_RING_SIZE   (8192)
+/* RX ring in the 8139 is 64 KiB plus a 16-byte header when RBLEN is set
+   accordingly. We keep an additional safety tail for convenient linear reads across the wrap,
+   but all hardware offsets must wrap at exactly 64 KiB. */
+#define RTL_RX_RING_SIZE   (64 * 1024)
 #define RTL_RX_BUFFER_SIZE (RTL_RX_RING_SIZE + 16 + 1500)
 
 static bool g_rtl_present = false;
@@ -255,9 +262,11 @@ void rtl8139_on_irq(void)
         return;
     }
 
+#if RTL8139_TRACE_ENABLE
     serial_write_string("rtl8139: irq status=0x");
     rtl8139_log_hex16(status);
     serial_write_string("\r\n");
+#endif
 
     outw(g_io_base + RTL_REG_ISR, status);
 
@@ -269,19 +278,23 @@ void rtl8139_on_irq(void)
     {
         rtl8139_log("tx error");
     }
+#if RTL8139_TRACE_ENABLE
     if (status & RTL_ISR_TOK)
     {
         rtl8139_log("tx ok");
     }
+#endif
     if (status & RTL_ISR_ROK)
     {
         rtl8139_handle_receive();
     }
 
+#if RTL8139_TRACE_ENABLE
     if (status & (RTL_ISR_RER | RTL_ISR_TER | RTL_ISR_TOK | RTL_ISR_ROK))
     {
         rtl8139_dump_state("irq");
     }
+#endif
 
     if (status & (RTL_ISR_TOK | RTL_ISR_TER))
     {
@@ -327,7 +340,9 @@ bool rtl8139_get_mac(uint8_t mac_out[6])
 
 static void rtl8139_handle_receive(void)
 {
+#if RTL8139_TRACE_ENABLE
     rtl8139_dump_state("rx poll");
+#endif
 
     int safety = 4096;
 
@@ -413,6 +428,7 @@ static void rtl8139_handle_receive(void)
                 goto advance_ring;
             }
 
+#if RTL8139_TRACE_ENABLE
             bool log_frame = true;
             bool have_proto = false;
             bool have_ports = false;
@@ -464,6 +480,7 @@ static void rtl8139_handle_receive(void)
                     serial_write_string("\r\n");
                 }
             }
+#endif
 
             // Hand off to upper layers as if untagged Ethernet
             if (g_iface) {
@@ -594,6 +611,10 @@ static void rtl8139_log_mac_address(void)
 
 static void rtl8139_dump_state(const char *context)
 {
+#if !RTL8139_TRACE_ENABLE
+    (void)context;
+    return;
+#else
     if (!g_rtl_present || g_state_dump_budget <= 0)
     {
         return;
@@ -632,6 +653,7 @@ static void rtl8139_dump_state(const char *context)
     serial_write_string("\r\n");
 
     g_state_dump_budget--;
+#endif
 }
 
 static void rtl8139_log_tx_state(const char *context)
@@ -747,6 +769,14 @@ static void rtl8139_tx_meta_capture(int slot, const uint8_t *frame, size_t len)
 
 static void rtl8139_tx_log_meta(const char *context, int slot, const rtl8139_tx_meta_t *meta, uint32_t tsd, uint64_t delta)
 {
+#if !RTL8139_TRACE_ENABLE
+    (void)context;
+    (void)slot;
+    (void)meta;
+    (void)tsd;
+    (void)delta;
+    return;
+#else
     if (!meta || !meta->valid || g_tx_dump_budget <= 0)
     {
         return;
@@ -776,6 +806,7 @@ static void rtl8139_tx_log_meta(const char *context, int slot, const rtl8139_tx_
     serial_write_string("]\r\n");
 
     g_tx_dump_budget--;
+#endif
 }
 
 static void rtl8139_tx_check_stuck(const char *context)
@@ -864,6 +895,12 @@ static void rtl8139_tx_force_release(const char *context)
 
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len)
 {
+#if !RTL8139_TRACE_ENABLE
+    (void)prefix;
+    (void)data;
+    (void)len;
+    return;
+#else
     if (!data || len == 0)
     {
         return;
@@ -889,10 +926,17 @@ static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t l
         }
         serial_write_string("\r\n");
     }
+#endif
 }
 
 static void rtl8139_dump_frame(int slot, size_t len, const uint8_t *data)
 {
+#if !RTL8139_TRACE_ENABLE
+    (void)slot;
+    (void)len;
+    (void)data;
+    return;
+#else
     serial_write_string("rtl8139: frame[slot=");
     rtl8139_log_hex8((uint8_t)slot);
     serial_write_string("] len=0x");
@@ -915,6 +959,7 @@ static void rtl8139_dump_frame(int slot, size_t len, const uint8_t *data)
             serial_write_char(' ');
         }
     }
+#endif
 }
 
 static void rtl8139_log_tsd_status(uint32_t tsd) {
