@@ -390,7 +390,7 @@ int main(int argc, char **argv)
     }
 
     const char *font_path = argv[1];
-    int font_size = (argc >= 3) ? parse_font_size(argv[2], 96) : 96;
+    int font_size = (argc >= 3) ? parse_font_size(argv[2], 16) : 16;
     size_t font_size_bytes = 0;
     uint8_t *font_data = read_entire_file(font_path, &font_size_bytes);
     if (!font_data || font_size_bytes == 0)

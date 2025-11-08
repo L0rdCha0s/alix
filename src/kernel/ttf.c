@@ -1034,7 +1034,7 @@ static bool ttf_point_in_winding(const ttf_edge_t *edges,
         {
             continue;
         }
-        int64_t t = ((int64_t)sample_y - (int64_t)y0) << TTF_FP_SHIFT;
+        int64_t t = (int64_t)sample_y - (int64_t)y0;
         int64_t dx = (int64_t)edges[i].x1 - (int64_t)edges[i].x0;
         int64_t ix = (int64_t)edges[i].x0 + (dx * t) / dy;
         if (ix > sample_x)
