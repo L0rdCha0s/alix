@@ -2,6 +2,12 @@
 
 #include "libc.h"
 
+#if TTF_HOST_BUILD
+#include <stdio.h>
+#else
+#include "serial.h"
+#endif
+
 #define TTF_TAG(a, b, c, d) (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | ((uint32_t)(c) << 8) | (uint32_t)(d))
 
 #define TTF_FP_SHIFT 6
@@ -22,6 +28,13 @@ typedef struct
 
 typedef struct
 {
+    const uint8_t *table;
+    uint32_t length;
+    uint32_t group_count;
+} ttf_cmap12_t;
+
+typedef struct
+{
     uint8_t *data;
     size_t size;
     uint16_t units_per_em;
@@ -37,7 +50,13 @@ typedef struct
     uint32_t hmtx_length;
     uint32_t *glyph_offsets;
     ttf_cmap4_t cmap4;
+    ttf_cmap12_t cmap12;
 } ttf_font_impl_t;
+
+static void ttf_log(const char *msg);
+static void ttf_log_tag(const char *prefix, uint32_t tag);
+static void ttf_log_u32(const char *prefix, uint32_t value);
+static bool ttf_fail(const char *msg);
 
 typedef struct
 {
@@ -69,6 +88,69 @@ typedef struct
     size_t count;
     size_t capacity;
 } ttf_edge_list_t;
+
+static void ttf_tag_to_string(uint32_t tag, char out[5])
+{
+    out[0] = (char)((tag >> 24) & 0xFF);
+    out[1] = (char)((tag >> 16) & 0xFF);
+    out[2] = (char)((tag >> 8) & 0xFF);
+    out[3] = (char)(tag & 0xFF);
+    out[4] = '\0';
+}
+
+#if TTF_HOST_BUILD
+static void ttf_log(const char *msg)
+{
+    fprintf(stderr, "[ttf] %s\n", msg);
+}
+
+static void ttf_log_tag(const char *prefix, uint32_t tag)
+{
+    char name[5];
+    ttf_tag_to_string(tag, name);
+    fprintf(stderr, "[ttf] %s%s\n", prefix, name);
+}
+
+static void __attribute__((unused)) ttf_log_u32(const char *prefix, uint32_t value)
+{
+    fprintf(stderr, "[ttf] %s0x%08X\n", prefix, value);
+}
+#else
+static void ttf_log(const char *msg)
+{
+    serial_write_string("[ttf] ");
+    serial_write_string(msg);
+    serial_write_string("\r\n");
+}
+
+static void ttf_log_tag(const char *prefix, uint32_t tag)
+{
+    char name[5];
+    ttf_tag_to_string(tag, name);
+    serial_write_string("[ttf] ");
+    serial_write_string(prefix);
+    for (int i = 0; i < 4 && name[i] != '\0'; ++i)
+    {
+        serial_write_char(name[i]);
+    }
+    serial_write_string("\r\n");
+}
+
+static void __attribute__((unused)) ttf_log_u32(const char *prefix, uint32_t value)
+{
+    serial_write_string("[ttf] ");
+    serial_write_string(prefix);
+    serial_write_string("0x");
+    serial_write_hex64(value);
+    serial_write_string("\r\n");
+}
+#endif
+
+static bool ttf_fail(const char *msg)
+{
+    ttf_log(msg);
+    return false;
+}
 
 static uint16_t ttf_read_u16(const uint8_t *ptr)
 {
@@ -258,18 +340,31 @@ static bool ttf_locate_table(const ttf_font_impl_t *impl,
     return false;
 }
 
+static bool ttf_require_table(const ttf_font_impl_t *impl,
+                              uint32_t tag,
+                              uint32_t *offset_out,
+                              uint32_t *length_out)
+{
+    if (ttf_locate_table(impl, tag, offset_out, length_out))
+    {
+        return true;
+    }
+    ttf_log_tag("missing table ", tag);
+    return false;
+}
+
 static bool ttf_parse_cmap_format4(ttf_font_impl_t *impl,
                                    const uint8_t *table,
                                    uint32_t length)
 {
     if (!impl || !table || length < 16)
     {
-        return false;
+        return ttf_fail("cmap4: table too small");
     }
     uint16_t seg_count_x2 = ttf_read_u16(table + 6);
     if (seg_count_x2 == 0 || (seg_count_x2 & 1))
     {
-        return false;
+        return ttf_fail("cmap4: invalid segCount");
     }
     uint16_t seg_count = seg_count_x2 / 2;
     uint32_t end_codes_offset = 14;
@@ -279,7 +374,7 @@ static bool ttf_parse_cmap_format4(ttf_font_impl_t *impl,
     uint32_t id_range_offset = id_delta_offset + seg_count * 2;
     if (id_range_offset + seg_count * 2 > length)
     {
-        return false;
+        return ttf_fail("cmap4: truncated arrays");
     }
 
     impl->cmap4.table = table;
@@ -292,23 +387,89 @@ static bool ttf_parse_cmap_format4(ttf_font_impl_t *impl,
     return true;
 }
 
+static bool ttf_parse_cmap_format12(ttf_font_impl_t *impl,
+                                    const uint8_t *table,
+                                    uint32_t length)
+{
+    if (!impl || !table || length < 16)
+    {
+        return ttf_fail("cmap12: table too small");
+    }
+    uint32_t declared_length = ttf_read_u32(table + 4);
+    if (declared_length > length)
+    {
+        return ttf_fail("cmap12: declared length too large");
+    }
+    uint32_t group_count = ttf_read_u32(table + 12);
+    uint64_t required = (uint64_t)group_count * 12ULL;
+    if (group_count == 0 || 16ULL + required > length)
+    {
+        return ttf_fail("cmap12: group data truncated");
+    }
+
+    impl->cmap12.table = table;
+    impl->cmap12.length = length;
+    impl->cmap12.group_count = group_count;
+    ttf_log("cmap: using format 12 subtable");
+    return true;
+}
+
+static uint16_t ttf_cmap12_lookup(const ttf_cmap12_t *cmap, uint32_t codepoint)
+{
+    if (!cmap || !cmap->table || cmap->group_count == 0)
+    {
+        return 0;
+    }
+    const uint8_t *groups = cmap->table + 16;
+    uint32_t left = 0;
+    uint32_t right = cmap->group_count;
+    while (left < right)
+    {
+        uint32_t mid = left + (right - left) / 2;
+        const uint8_t *entry = groups + mid * 12;
+        uint32_t start = ttf_read_u32(entry);
+        uint32_t end = ttf_read_u32(entry + 4);
+        if (codepoint < start)
+        {
+            right = mid;
+        }
+        else if (codepoint > end)
+        {
+            left = mid + 1;
+        }
+        else
+        {
+            uint32_t start_glyph = ttf_read_u32(entry + 8);
+            uint32_t glyph = start_glyph + (codepoint - start);
+            if (glyph > 0xFFFF)
+            {
+                glyph &= 0xFFFF;
+            }
+            return (uint16_t)glyph;
+        }
+    }
+    return 0;
+}
+
 static bool ttf_parse_cmap(ttf_font_impl_t *impl, uint32_t offset, uint32_t length)
 {
-    if (!impl || offset + length > impl->size || length < 4)
+    if (!impl || length < 4 || offset > impl->size || length > impl->size - offset)
     {
-        return false;
+        return ttf_fail("cmap: invalid bounds");
     }
     const uint8_t *table = impl->data + offset;
     uint16_t num_subtables = ttf_read_u16(table + 2);
 
-    const uint8_t *best = NULL;
-    uint32_t best_length = 0;
+    const uint8_t *best4 = NULL;
+    uint32_t best4_length = 0;
+    const uint8_t *best12 = NULL;
+    uint32_t best12_length = 0;
     for (uint16_t i = 0; i < num_subtables; ++i)
     {
         const uint8_t *record = table + 4 + i * 8;
         if (record + 8 > table + length)
         {
-            return false;
+            return ttf_fail("cmap: record truncated");
         }
         uint16_t platform = ttf_read_u16(record);
         uint16_t encoding = ttf_read_u16(record + 2);
@@ -319,28 +480,47 @@ static bool ttf_parse_cmap(ttf_font_impl_t *impl, uint32_t offset, uint32_t leng
         }
         const uint8_t *subtable = table + sub_offset;
         uint16_t format = ttf_read_u16(subtable);
+        if (format == 12)
+        {
+            best12 = subtable;
+            best12_length = length - sub_offset;
+            if (platform == 3 && (encoding == 1 || encoding == 10))
+            {
+                break;
+            }
+            continue;
+        }
         if (format != 4)
         {
             continue;
         }
         if (platform == 3 && (encoding == 1 || encoding == 10))
         {
-            best = subtable;
-            best_length = length - sub_offset;
+            best4 = subtable;
+            best4_length = length - sub_offset;
             break;
         }
-        if (!best && (platform == 0 || platform == 3))
+        if (!best4 && (platform == 0 || platform == 3))
         {
-            best = subtable;
-            best_length = length - sub_offset;
+            best4 = subtable;
+            best4_length = length - sub_offset;
         }
     }
 
-    if (!best)
+    bool parsed = false;
+    if (best12)
     {
-        return false;
+        parsed = ttf_parse_cmap_format12(impl, best12, best12_length);
     }
-    return ttf_parse_cmap_format4(impl, best, best_length);
+    if (!parsed && best4)
+    {
+        parsed = ttf_parse_cmap_format4(impl, best4, best4_length);
+    }
+    if (!parsed)
+    {
+        return ttf_fail("cmap: no supported subtable");
+    }
+    return true;
 }
 
 static bool ttf_build_glyph_offsets(ttf_font_impl_t *impl,
@@ -349,13 +529,13 @@ static bool ttf_build_glyph_offsets(ttf_font_impl_t *impl,
 {
     if (!impl || !loca_table || impl->num_glyphs == 0)
     {
-        return false;
+        return ttf_fail("loca: invalid arguments");
     }
     size_t count = (size_t)impl->num_glyphs + 1;
     uint32_t *offsets = (uint32_t *)malloc(count * sizeof(uint32_t));
     if (!offsets)
     {
-        return false;
+        return ttf_fail("loca: offset allocation failed");
     }
 
     if (impl->index_to_loc_format == 0)
@@ -363,24 +543,29 @@ static bool ttf_build_glyph_offsets(ttf_font_impl_t *impl,
         if (loca_length < count * 2)
         {
             free(offsets);
-            return false;
+            return ttf_fail("loca: 16-bit table truncated");
         }
         for (size_t i = 0; i < count; ++i)
         {
             offsets[i] = (uint32_t)ttf_read_u16(loca_table + i * 2) * 2u;
         }
     }
-    else
+    else if (impl->index_to_loc_format == 1)
     {
         if (loca_length < count * 4)
         {
             free(offsets);
-            return false;
+            return ttf_fail("loca: 32-bit table truncated");
         }
         for (size_t i = 0; i < count; ++i)
         {
             offsets[i] = ttf_read_u32(loca_table + i * 4);
         }
+    }
+    else
+    {
+        free(offsets);
+        return ttf_fail("loca: unsupported format");
     }
 
     impl->glyph_offsets = offsets;
@@ -397,13 +582,13 @@ static bool ttf_parse_tables(ttf_font_impl_t *impl)
     uint32_t hhea_offset = 0, hhea_length = 0;
     uint32_t hmtx_offset = 0, hmtx_length = 0;
 
-    if (!ttf_locate_table(impl, TTF_TAG('h', 'e', 'a', 'd'), &head_offset, &head_length) ||
-        !ttf_locate_table(impl, TTF_TAG('m', 'a', 'x', 'p'), &maxp_offset, &maxp_length) ||
-        !ttf_locate_table(impl, TTF_TAG('c', 'm', 'a', 'p'), &cmap_offset, &cmap_length) ||
-        !ttf_locate_table(impl, TTF_TAG('l', 'o', 'c', 'a'), &loca_offset, &loca_length) ||
-        !ttf_locate_table(impl, TTF_TAG('g', 'l', 'y', 'f'), &glyf_offset, &glyf_length) ||
-        !ttf_locate_table(impl, TTF_TAG('h', 'h', 'e', 'a'), &hhea_offset, &hhea_length) ||
-        !ttf_locate_table(impl, TTF_TAG('h', 'm', 't', 'x'), &hmtx_offset, &hmtx_length))
+    if (!ttf_require_table(impl, TTF_TAG('h', 'e', 'a', 'd'), &head_offset, &head_length) ||
+        !ttf_require_table(impl, TTF_TAG('m', 'a', 'x', 'p'), &maxp_offset, &maxp_length) ||
+        !ttf_require_table(impl, TTF_TAG('c', 'm', 'a', 'p'), &cmap_offset, &cmap_length) ||
+        !ttf_require_table(impl, TTF_TAG('l', 'o', 'c', 'a'), &loca_offset, &loca_length) ||
+        !ttf_require_table(impl, TTF_TAG('g', 'l', 'y', 'f'), &glyf_offset, &glyf_length) ||
+        !ttf_require_table(impl, TTF_TAG('h', 'h', 'e', 'a'), &hhea_offset, &hhea_length) ||
+        !ttf_require_table(impl, TTF_TAG('h', 'm', 't', 'x'), &hmtx_offset, &hmtx_length))
     {
         return false;
     }
@@ -414,7 +599,7 @@ static bool ttf_parse_tables(ttf_font_impl_t *impl)
 
     if (head_length < 54 || maxp_length < 6 || hhea_length < 36)
     {
-        return false;
+        return ttf_fail("metrics tables truncated");
     }
 
     impl->units_per_em = ttf_read_u16(head + 18);
@@ -427,15 +612,17 @@ static bool ttf_parse_tables(ttf_font_impl_t *impl)
 
     if (impl->units_per_em == 0 || impl->num_hmetrics == 0)
     {
-        return false;
+        return ttf_fail("metrics tables invalid");
     }
 
     if (!ttf_parse_cmap(impl, cmap_offset, cmap_length))
     {
+        ttf_log("failed to parse cmap");
         return false;
     }
     if (!ttf_build_glyph_offsets(impl, impl->data + loca_offset, loca_length))
     {
+        ttf_log("failed to build glyph offsets");
         return false;
     }
 
@@ -450,12 +637,14 @@ bool ttf_font_load(ttf_font_t *font, const uint8_t *data, size_t size)
 {
     if (!font || !data || size < 12)
     {
+        ttf_log("font_load: invalid arguments");
         return false;
     }
 
     ttf_font_impl_t *impl = (ttf_font_impl_t *)malloc(sizeof(ttf_font_impl_t));
     if (!impl)
     {
+        ttf_log("font_load: impl allocation failed");
         return false;
     }
     memset(impl, 0, sizeof(*impl));
@@ -463,6 +652,7 @@ bool ttf_font_load(ttf_font_t *font, const uint8_t *data, size_t size)
     impl->data = (uint8_t *)malloc(size);
     if (!impl->data)
     {
+        ttf_log("font_load: data allocation failed");
         ttf_font_impl_destroy(impl);
         return false;
     }
@@ -471,6 +661,7 @@ bool ttf_font_load(ttf_font_t *font, const uint8_t *data, size_t size)
 
     if (!ttf_parse_tables(impl))
     {
+        ttf_log("font_load: parse tables failed");
         ttf_font_impl_destroy(impl);
         return false;
     }
@@ -496,11 +687,13 @@ bool ttf_font_metrics(const ttf_font_t *font, int pixel_height, ttf_font_metrics
 {
     if (!font || !font->impl || !out_metrics || pixel_height <= 0)
     {
+        ttf_log("metrics: invalid arguments");
         return false;
     }
     const ttf_font_impl_t *impl = (const ttf_font_impl_t *)font->impl;
     if (impl->units_per_em == 0)
     {
+        ttf_log("metrics: units_per_em is zero");
         return false;
     }
     int64_t numerator = (int64_t)pixel_height * TTF_FP_ONE;
@@ -521,6 +714,16 @@ uint16_t ttf_font_lookup_glyph(const ttf_font_t *font, uint32_t codepoint)
         return 0;
     }
     const ttf_font_impl_t *impl = (const ttf_font_impl_t *)font->impl;
+
+    if (impl->cmap12.table && impl->cmap12.group_count > 0)
+    {
+        uint16_t glyph = ttf_cmap12_lookup(&impl->cmap12, codepoint);
+        if (glyph != 0)
+        {
+            return glyph;
+        }
+    }
+
     const ttf_cmap4_t *cmap = &impl->cmap4;
     if (!cmap->table || cmap->seg_count == 0)
     {
@@ -568,12 +771,13 @@ static bool ttf_get_glyph_data(const ttf_font_impl_t *impl,
 {
     if (!impl || !impl->glyph_offsets || glyph_index >= impl->num_glyphs)
     {
-        return false;
+        return ttf_fail("glyph: invalid index");
     }
     uint32_t offset = impl->glyph_offsets[glyph_index];
     uint32_t next = impl->glyph_offsets[glyph_index + 1];
     if (offset >= impl->glyf_length || next > impl->glyf_length || next < offset)
     {
+        ttf_log("glyph: bounds outside glyf table");
         return false;
     }
     if (data_out)
@@ -594,7 +798,7 @@ static bool ttf_get_hmetrics(const ttf_font_impl_t *impl,
 {
     if (!impl || !impl->hmtx_table || impl->hmtx_length == 0)
     {
-        return false;
+        return ttf_fail("hmtx: table missing");
     }
 
     uint16_t advance = 0;
@@ -604,7 +808,7 @@ static bool ttf_get_hmetrics(const ttf_font_impl_t *impl,
         size_t offset = (size_t)glyph_index * 4;
         if (offset + 4 > impl->hmtx_length)
         {
-            return false;
+            return ttf_fail("hmtx: glyph metrics truncated");
         }
         advance = ttf_read_u16(impl->hmtx_table + offset);
         lsb = ttf_read_i16(impl->hmtx_table + offset + 2);
@@ -614,14 +818,14 @@ static bool ttf_get_hmetrics(const ttf_font_impl_t *impl,
         size_t last = (size_t)(impl->num_hmetrics - 1) * 4;
         if (last + 4 > impl->hmtx_length)
         {
-            return false;
+            return ttf_fail("hmtx: last metric truncated");
         }
         advance = ttf_read_u16(impl->hmtx_table + last);
         size_t extra_index = (size_t)(glyph_index - impl->num_hmetrics);
         size_t extra_offset = (size_t)impl->num_hmetrics * 4 + extra_index * 2;
         if (extra_offset + 2 > impl->hmtx_length)
         {
-            return false;
+            return ttf_fail("hmtx: long metrics truncated");
         }
         lsb = ttf_read_i16(impl->hmtx_table + extra_offset);
     }

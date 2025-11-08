@@ -60,6 +60,9 @@ USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOUR
 USER_ELFS := $(USER_OBJDIR)/userdemo2.elf $(USER_OBJDIR)/atk_demo.elf $(USER_OBJDIR)/ttf_demo.elf
 USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/userdemo2 $(USER_BIN_DIR)/atk_demo $(USER_BIN_DIR)/ttf_demo
+HOST_TEST_DIR := $(OBJDIR)/host-tests
+HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
+HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -I$(INCLUDE_DIR) -DTTF_HOST_BUILD
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
 EFI_DIR    := build/EFI/BOOT
@@ -125,6 +128,10 @@ $(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
 $(USER_BIN_DIR)/ttf_demo: $(USER_OBJDIR)/ttf_demo.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
+
+$(HOST_TEST_BIN): tests/ttf_host_test.c src/kernel/ttf.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/ttf_host_test.c src/kernel/ttf.c -o $@
 
 LOADER_HEADERS := \
 	$(INCLUDE_DIR)/uefi.h \
@@ -211,4 +218,7 @@ tests/dhcp_packet_test: tests/dhcp_packet_test.c
 test-dhcp: tests/dhcp_packet_test
 	./tests/dhcp_packet_test
 
-.PHONY: all run run-hdd clean test-dhcp
+ttf-test: $(HOST_TEST_BIN)
+	$(HOST_TEST_BIN) SF-Pro.ttf
+
+.PHONY: all run run-hdd clean test-dhcp ttf-test

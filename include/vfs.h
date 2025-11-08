@@ -31,6 +31,7 @@ ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
 ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t count);
 const char *vfs_data(const vfs_node_t *file, size_t *size);
 const char *vfs_name(const vfs_node_t *node);
+bool vfs_remove_file(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_first_child(vfs_node_t *dir);
 vfs_node_t *vfs_next_sibling(vfs_node_t *node);
 vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device_t *device);

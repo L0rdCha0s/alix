@@ -901,3 +901,15 @@ void ahci_interrupts_activate(void)
     g_ahci_irq_ready = true;
     g_ahci_use_interrupts = true;
 }
+
+void ahci_set_interrupt_mode(bool enable)
+{
+    if (enable && g_ahci_irq_ready)
+    {
+        g_ahci_use_interrupts = true;
+    }
+    else if (!enable)
+    {
+        g_ahci_use_interrupts = false;
+    }
+}

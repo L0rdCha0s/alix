@@ -70,9 +70,11 @@ static uint8_t *read_entire_file(const char *path, size_t *size_out)
         return NULL;
     }
 
+    printf("ttf_demo: read_entire_file '%s'\n", path);
     int fd = open(path, 0);
     if (fd < 0)
     {
+        printf("ttf_demo: open failed (%s)\n", path);
         return NULL;
     }
 
@@ -81,6 +83,7 @@ static uint8_t *read_entire_file(const char *path, size_t *size_out)
     uint8_t *buffer = (uint8_t *)malloc(capacity);
     if (!buffer)
     {
+        printf("ttf_demo: malloc failed (%s)\n", path);
         close(fd);
         return NULL;
     }
@@ -104,6 +107,7 @@ static uint8_t *read_entire_file(const char *path, size_t *size_out)
         ssize_t bytes = read(fd, buffer + size, capacity - size);
         if (bytes < 0)
         {
+            printf("ttf_demo: read error on %s\n", path);
             free(buffer);
             close(fd);
             return NULL;
@@ -115,6 +119,7 @@ static uint8_t *read_entire_file(const char *path, size_t *size_out)
         size += (size_t)bytes;
     }
     close(fd);
+    printf("ttf_demo: read %zu bytes from %s\n", size, path);
     if (size_out)
     {
         *size_out = size;
@@ -394,10 +399,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    printf("ttf_demo: font size=%u bytes\n", (unsigned)font_size_bytes);
     ttf_font_t font = {0};
     if (!ttf_font_load(&font, font_data, font_size_bytes))
     {
-        printf("ttf_demo: invalid font file\n");
+        printf("ttf_demo: invalid font file (size=%u)\n", (unsigned)font_size_bytes);
         free(font_data);
         return 1;
     }

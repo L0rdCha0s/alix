@@ -528,7 +528,12 @@ int close(int fd)
 
 int open(const char *path, uint64_t flags)
 {
-    return sys_open(path, flags);
+    uint64_t mode_flags = flags;
+    if ((mode_flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) == 0)
+    {
+        mode_flags |= SYSCALL_OPEN_READ;
+    }
+    return sys_open(path, mode_flags);
 }
 
 void *sbrk(int64_t increment)

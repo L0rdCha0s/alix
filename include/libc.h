@@ -1,7 +1,14 @@
 #ifndef LIBC_H
 #define LIBC_H
 
+#ifdef TTF_HOST_BUILD
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <sys/types.h>
+#else
 #include "types.h"
+#endif
 
 void *memset(void *dst, int value, size_t count);
 void *memmove(void *dst, const void *src, size_t count);

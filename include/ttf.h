@@ -1,7 +1,13 @@
 #ifndef TTF_H
 #define TTF_H
 
+#ifdef TTF_HOST_BUILD
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#else
 #include "types.h"
+#endif
 
 typedef struct ttf_font
 {

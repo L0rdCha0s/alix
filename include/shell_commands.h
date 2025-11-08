@@ -6,6 +6,8 @@
 bool shell_cmd_echo(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_cat(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_mkdir(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_cd(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_rm(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_ip(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_shutdown(shell_state_t *shell, shell_output_t *out, const char *args);

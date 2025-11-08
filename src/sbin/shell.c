@@ -241,8 +241,8 @@ void shell_main(void)
     };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, runelf.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, runelf.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, runelf.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, runelf.\r\n");
 
     while (1)
     {
@@ -257,6 +257,8 @@ static const shell_command_t g_commands[] = {
     { "echo",        shell_cmd_echo },
     { "cat",         shell_cmd_cat },
     { "mkdir",       shell_cmd_mkdir },
+    { "cd",          shell_cmd_cd },
+    { "rm",          shell_cmd_rm },
     { "mkfs",        shell_cmd_mkfs },
     { "mount",       shell_cmd_mount },
     { "shutdown",    shell_cmd_shutdown },

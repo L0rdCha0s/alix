@@ -748,6 +748,42 @@ const char *vfs_name(const vfs_node_t *node)
     return node ? node->name : NULL;
 }
 
+bool vfs_remove_file(vfs_node_t *cwd, const char *path)
+{
+    if (!path || *path == '\0')
+    {
+        return false;
+    }
+
+    vfs_node_t *parent = NULL;
+    char *name = NULL;
+    if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
+    {
+        return false;
+    }
+    if (!parent)
+    {
+        free(name);
+        return false;
+    }
+
+    vfs_node_t *node = vfs_find_child(parent, name);
+    free(name);
+    if (!node || node->type != VFS_NODE_FILE)
+    {
+        return false;
+    }
+
+    vfs_detach_child(node);
+    vfs_free_subtree(node);
+
+    if (parent->mount && !vfs_mount_sync_node(parent))
+    {
+        return false;
+    }
+    return true;
+}
+
 vfs_node_t *vfs_first_child(vfs_node_t *dir)
 {
     if (!dir || dir->type != VFS_NODE_DIR) return NULL;
