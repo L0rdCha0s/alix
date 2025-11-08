@@ -1201,8 +1201,6 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
         "mov %[ds], %%rax\n\t"
         "mov %%ax, %%ds\n\t"
         "mov %%ax, %%es\n\t"
-        "mov %%ax, %%fs\n\t"
-        "mov %%ax, %%gs\n\t"
         "xor %%rdi, %%rdi\n\t"
         "xor %%rsi, %%rsi\n\t"
         "xor %%rdx, %%rdx\n\t"
