@@ -1976,7 +1976,10 @@ void process_on_timer_tick(interrupt_frame_t *frame)
         return;
     }
 
-    if (!thread_stack_pointer_valid(thread, frame->rsp))
+    uint64_t kernel_rsp = 0;
+    __asm__ volatile ("mov %%rsp, %0" : "=r"(kernel_rsp));
+
+    if (!thread_stack_pointer_valid(thread, kernel_rsp))
     {
         thread_trigger_stack_guard(thread, frame, "rsp_out_of_bounds");
         return;
