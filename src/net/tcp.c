@@ -14,6 +14,19 @@
 #define TCP_TRACE_VERBOSE 0
 #endif
 
+static inline uint64_t tcp_irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("cli" ::: "memory");
+    return flags;
+}
+
+static inline void tcp_irq_restore(uint64_t flags)
+{
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
+}
+
 #define TCP_FLAG_FIN 0x01
 #define TCP_FLAG_SYN 0x02
 #define TCP_FLAG_RST 0x04
@@ -663,15 +676,26 @@ size_t net_tcp_socket_available(const net_tcp_socket_t *socket)
     {
         return 0;
     }
-    return socket->rx_size;
+    uint64_t irq_flags = tcp_irq_save();
+    size_t available = socket->rx_size;
+    tcp_irq_restore(irq_flags);
+    return available;
 }
 
 size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
 {
-    if (!socket || capacity == 0 || socket->rx_size == 0 || !socket->rx_buffer)
+    if (!socket || capacity == 0)
     {
         return 0;
     }
+
+    uint64_t irq_flags = tcp_irq_save();
+    if (socket->rx_size == 0 || !socket->rx_buffer)
+    {
+        tcp_irq_restore(irq_flags);
+        return 0;
+    }
+
     size_t to_copy = socket->rx_size;
     if (to_copy > capacity)
     {
@@ -692,32 +716,32 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
     {
         window_avail = socket->rx_capacity - socket->rx_size;
     }
+    size_t rx_size_now = socket->rx_size;
+    size_t rx_capacity_now = socket->rx_capacity;
+    uint16_t prev_window = socket->advertised_window;
+    tcp_irq_restore(irq_flags);
 
 #if TCP_TRACE_VERBOSE
     serial_write_string("tcp: app read len=0x");
     tcp_log_hex32((uint32_t)to_copy);
     serial_write_string(" remain=0x");
-    tcp_log_hex32((uint32_t)socket->rx_size);
+    tcp_log_hex32((uint32_t)rx_size_now);
     serial_write_string(" capacity=0x");
-    tcp_log_hex32((uint32_t)socket->rx_capacity);
+    tcp_log_hex32((uint32_t)rx_capacity_now);
     serial_write_string(" window_avail=0x");
     tcp_log_hex32((uint32_t)window_avail);
     serial_write_string(" advertised=0x");
-    tcp_log_hex32((uint32_t)socket->advertised_window);
+    tcp_log_hex32((uint32_t)prev_window);
     serial_write_string("\r\n");
 #endif
 
-    size_t available = 0;
-    if (socket->rx_capacity > socket->rx_size)
-    {
-        available = socket->rx_capacity - socket->rx_size;
-    }
+    size_t available = window_avail;
     if (available > NET_TCP_RX_MAX_CAPACITY)
     {
         available = NET_TCP_RX_MAX_CAPACITY;
     }
     uint16_t window = (uint16_t)available;
-    if (window > socket->advertised_window &&
+    if (window > prev_window &&
         socket->have_mac &&
         (socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT))
     {
@@ -725,7 +749,7 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
         serial_write_string("tcp: window update ack win=0x");
         tcp_log_hex32((uint32_t)window);
         serial_write_string(" prev=0x");
-        tcp_log_hex32((uint32_t)socket->advertised_window);
+        tcp_log_hex32((uint32_t)prev_window);
         serial_write_string("\r\n");
 #endif
         tcp_send_ack(socket);
