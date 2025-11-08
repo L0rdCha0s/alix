@@ -162,14 +162,7 @@ static void mouse_process_byte(uint8_t byte)
     emit = true;
 
 out:
-    mouse_irq_restore(irq_state);
-
-    if (!emit)
-    {
-        return;
-    }
-
-    if (mouse_packet_log < 16)
+    if (emit && mouse_packet_log < 16)
     {
         serial_write_string("mouse packet dx=");
         serial_write_hex64((uint64_t)(int64_t)emit_dx);
@@ -179,10 +172,12 @@ out:
         mouse_packet_log++;
     }
 
-    if (g_listener)
+    if (emit && g_listener)
     {
         g_listener(emit_dx, -emit_dy, emit_left);
     }
+
+    mouse_irq_restore(irq_state);
 }
 
 void mouse_on_irq(uint8_t byte)
@@ -210,16 +205,20 @@ void mouse_poll(void)
        Leave keyboard bytes untouched for keyboard_try_read(). */
     while (1)
     {
+        uint64_t irq_state = mouse_irq_save();
         uint8_t status = inb(KBD_STATUS);
         if ((status & 0x01) == 0)
         {
+            mouse_irq_restore(irq_state);
             break; /* no data pending */
         }
         if ((status & 0x20) == 0)
         {
+            mouse_irq_restore(irq_state);
             break; /* keyboard data: leave for keyboard driver */
         }
         uint8_t data = inb(KBD_DATA);
         mouse_process_byte(data);
+        mouse_irq_restore(irq_state);
     }
 }
