@@ -21,6 +21,14 @@ void video_surface_attach(uint16_t *buffer, uint32_t width, uint32_t height)
     g_surface_dirty = true;
 }
 
+void video_surface_detach(void)
+{
+    g_surface = NULL;
+    g_surface_width = 0;
+    g_surface_height = 0;
+    g_surface_dirty = false;
+}
+
 static inline bool surface_ready(void)
 {
     return (g_surface != NULL && g_surface_width > 0 && g_surface_height > 0);

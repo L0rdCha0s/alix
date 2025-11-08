@@ -83,6 +83,7 @@ void atk_user_close(atk_user_window_t *win)
     }
     if (win->buffer)
     {
+        video_surface_detach();
         free(win->buffer);
         win->buffer = NULL;
     }
