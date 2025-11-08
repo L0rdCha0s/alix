@@ -14,6 +14,7 @@
 #define AHCI_MAX_TRANSFER_SECTORS 0xFFFFU
 #define AHCI_CMD_FIS_LENGTH_DW    5
 #define AHCI_CMD_TIMEOUT          1000000U
+#define AHCI_COMRESET_DELAY       100000U
 
 #define HBA_GHC_HR   (1U << 0)
 #define HBA_GHC_IE   (1U << 1)
@@ -32,6 +33,9 @@
 #define HBA_PxCMD_CR    (1U << 15)
 
 #define HBA_PxIS_TFES   (1U << 30)
+
+#define HBA_PxSCTL_DET_MASK 0xF
+#define HBA_PxSCTL_DET_INIT 0x1
 
 #define HBA_BOHC_BOS    (1U << 0)
 #define HBA_BOHC_OOS    (1U << 1)
@@ -134,6 +138,48 @@ typedef struct
 
 static volatile hba_mem_t *g_hba = NULL;
 
+static void ahci_log(const char *msg)
+{
+    serial_write_string("[ahci] ");
+    serial_write_string(msg ? msg : "(null)");
+    serial_write_string("\r\n");
+}
+
+static void ahci_log_hex(const char *msg, uint64_t value)
+{
+    serial_write_string("[ahci] ");
+    if (msg)
+    {
+        serial_write_string(msg);
+    }
+    serial_write_string("0x");
+    serial_write_hex64(value);
+    serial_write_string("\r\n");
+}
+
+static void ahci_log_port(uint32_t port_no, const char *msg)
+{
+    serial_write_string("[ahci] port ");
+    serial_write_hex64(port_no);
+    serial_write_string(": ");
+    serial_write_string(msg ? msg : "(null)");
+    serial_write_string("\r\n");
+}
+
+static void ahci_log_port_hex(uint32_t port_no, const char *msg, uint64_t value)
+{
+    serial_write_string("[ahci] port ");
+    serial_write_hex64(port_no);
+    serial_write_string(": ");
+    if (msg)
+    {
+        serial_write_string(msg);
+    }
+    serial_write_string("0x");
+    serial_write_hex64(value);
+    serial_write_string("\r\n");
+}
+
 static void ahci_request_os_ownership(void)
 {
     if (!g_hba)
@@ -149,10 +195,11 @@ static void ahci_request_os_ownership(void)
     {
         if ((g_hba->bohc & HBA_BOHC_BOS) == 0)
         {
+            ahci_log("claimed ownership from BIOS");
             return;
         }
     }
-    serial_write_string("[ahci] BIOS ownership release timed out\r\n");
+    ahci_log("BIOS ownership release timed out");
 }
 
 static bool ahci_reset_controller(void)
@@ -169,10 +216,11 @@ static bool ahci_reset_controller(void)
             g_hba->ghc |= HBA_GHC_AE;
             g_hba->ghc &= ~HBA_GHC_IE;
             g_hba->is = (uint32_t)~0U;
+            ahci_log("controller reset complete");
             return true;
         }
     }
-    serial_write_string("[ahci] controller reset timeout\r\n");
+    ahci_log("controller reset timeout");
     return false;
 }
 
@@ -208,6 +256,14 @@ static void free_aligned(void *ptr)
     uintptr_t raw = ((uintptr_t *)ptr)[-1];
     free((void *)raw);
 }
+
+static void ahci_spin_delay(uint32_t loops)
+{
+    for (volatile uint32_t i = 0; i < loops; ++i)
+    {
+        __asm__ volatile ("" ::: "memory");
+    }
+}
 static void ahci_port_stop(hba_port_t *port)
 {
     port->cmd &= ~(HBA_PxCMD_ST | HBA_PxCMD_FRE);
@@ -224,6 +280,67 @@ static void ahci_port_start(hba_port_t *port)
     port->cmd |= (HBA_PxCMD_SUD | HBA_PxCMD_POD);
     port->cmd |= HBA_PxCMD_FRE;
     port->cmd |= HBA_PxCMD_ST;
+}
+
+static bool ahci_port_status_device(uint32_t ssts)
+{
+    uint8_t det = (uint8_t)(ssts & 0x0F);
+    uint8_t ipm = (uint8_t)((ssts >> 8) & 0x0F);
+    return det == HBA_PORT_DEV_PRESENT && ipm == HBA_PORT_IPM_ACTIVE;
+}
+
+static bool ahci_port_wait_device(hba_port_t *port)
+{
+    for (uint32_t i = 0; i < AHCI_CMD_TIMEOUT; ++i)
+    {
+        uint32_t ssts = port->ssts;
+        if (ahci_port_status_device(ssts))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ahci_port_comreset(hba_port_t *port)
+{
+    if (!port)
+    {
+        return;
+    }
+    ahci_port_stop(port);
+    uint32_t sctl = port->sctl;
+    port->sctl = (sctl & ~HBA_PxSCTL_DET_MASK) | HBA_PxSCTL_DET_INIT;
+    ahci_spin_delay(AHCI_COMRESET_DELAY);
+    port->sctl = sctl & ~HBA_PxSCTL_DET_MASK;
+    ahci_spin_delay(AHCI_COMRESET_DELAY);
+}
+
+static bool ahci_port_device_present(hba_port_t *port, uint32_t port_no)
+{
+    if (!port)
+    {
+        return false;
+    }
+    ahci_log_port_hex(port_no, "ssts before spin-up: ", port->ssts);
+    port->cmd |= (HBA_PxCMD_SUD | HBA_PxCMD_POD);
+    if (ahci_port_wait_device(port))
+    {
+        ahci_log_port_hex(port_no, "link ready ssts=", port->ssts);
+        return true;
+    }
+    ahci_port_comreset(port);
+    port->cmd |= (HBA_PxCMD_SUD | HBA_PxCMD_POD);
+    bool ready = ahci_port_wait_device(port);
+    if (ready)
+    {
+        ahci_log_port_hex(port_no, "link ready after COMRESET ssts=", port->ssts);
+    }
+    else
+    {
+        ahci_log_port_hex(port_no, "link failed to come ready ssts=", port->ssts);
+    }
+    return ready;
 }
 
 static int ahci_port_find_slot(hba_port_t *port)
@@ -467,18 +584,17 @@ static bool ahci_block_write(block_device_t *device, uint64_t lba, uint32_t coun
 static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
 {
     hba_port_t *port = &hba->ports[port_no];
+    if (!ahci_port_device_present(port, port_no))
+    {
+        ahci_log_port(port_no, "no device detected");
+        return;
+    }
     uint32_t ssts = port->ssts;
-    uint8_t ipm = (uint8_t)((ssts >> 8) & 0x0F);
-    uint8_t det = (uint8_t)(ssts & 0x0F);
-    if (det != HBA_PORT_DEV_PRESENT || ipm != HBA_PORT_IPM_ACTIVE)
+    if (!ahci_port_status_device(ssts))
     {
+        ahci_log_port(port_no, "device status check failed");
         return;
     }
-    if (port->sig != HBA_PORT_SIG_SATA)
-    {
-        return;
-    }
-
     ahci_port_ctx_t *ctx = (ahci_port_ctx_t *)calloc(1, sizeof(ahci_port_ctx_t));
     if (!ctx)
     {
@@ -490,7 +606,19 @@ static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
 
     if (!ahci_port_configure(ctx))
     {
-        serial_write_string("[ahci] port configure failed\r\n");
+        ahci_log_port(port_no, "port configure failed");
+        ahci_port_release(ctx);
+        return;
+    }
+
+    uint32_t signature = port->sig;
+    for (uint32_t i = 0; i < AHCI_CMD_TIMEOUT && (!signature || signature == 0xFFFFFFFF); ++i)
+    {
+        signature = port->sig;
+    }
+    if (signature != HBA_PORT_SIG_SATA)
+    {
+        ahci_log_port_hex(port_no, "unsupported signature ", signature);
         ahci_port_release(ctx);
         return;
     }
@@ -504,7 +632,7 @@ static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
     bool ok = ahci_identify_port(ctx, identify);
     if (!ok)
     {
-        serial_write_string("[ahci] IDENTIFY failed\r\n");
+        ahci_log_port(port_no, "IDENTIFY failed");
         free(identify);
         ahci_port_release(ctx);
         return;
@@ -557,13 +685,12 @@ static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
     if (blk)
     {
         ctx->block = blk;
-        serial_write_string("[ahci] registered ");
-        serial_write_string(name);
-        serial_write_string("\r\n");
+        ahci_log_port(port_no, "registered block device");
+        ahci_log_port_hex(port_no, "sectors=", sectors);
         return;
     }
 
-    serial_write_string("[ahci] failed to register block device\r\n");
+    ahci_log_port(port_no, "failed to register block device");
     ahci_port_release(ctx);
 }
 
@@ -613,7 +740,10 @@ void ahci_init(void)
     }
 
     pci_set_command_bits(dev, 0x7, 0);
+    uint64_t bdf = ((uint64_t)dev.bus << 16) | ((uint64_t)dev.device << 8) | dev.function;
+    ahci_log_hex("controller PCI bdf=", bdf);
     uint32_t bar5 = pci_config_read32(dev, 0x24) & ~0xF;
+    ahci_log_hex("controller BAR5=", bar5);
     if (!bar5)
     {
         serial_write_string("[ahci] BAR5 invalid\r\n");
@@ -633,6 +763,7 @@ void ahci_init(void)
     }
 
     uint32_t pi = g_hba->pi;
+    ahci_log_hex("port implemented mask=", pi);
     for (uint32_t i = 0; i < AHCI_MAX_PORTS; ++i)
     {
         if (pi & (1U << i))
