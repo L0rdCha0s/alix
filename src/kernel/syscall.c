@@ -59,7 +59,12 @@ static int syscall_file_close(void *ctx)
 {
     if (ctx)
     {
-        free(ctx);
+        file_handle_t *handle = (file_handle_t *)ctx;
+        if (handle->node)
+        {
+            vfs_flush_node(handle->node);
+        }
+        free(handle);
     }
     return 0;
 }

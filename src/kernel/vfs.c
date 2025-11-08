@@ -36,6 +36,7 @@ struct vfs_mount
     block_device_t *device;
     vfs_node_t *mount_point;
     struct vfs_mount *next;
+    bool dirty;
 };
 
 struct vfs_node
@@ -54,12 +55,16 @@ struct vfs_node
 
     /* device backing (for block nodes) */
     block_device_t *block_device;
+    bool dirty;
 };
 
 static vfs_node_t *root = NULL;
 static vfs_mount_t *mounts = NULL;
 
 static bool vfs_mount_sync_node(vfs_node_t *node);
+static void vfs_mark_node_dirty(vfs_node_t *node);
+static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount);
+static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 static bool vfs_mount_sync(vfs_mount_t *mount);
 static bool vfs_device_is_mounted(block_device_t *device);
 
@@ -252,6 +257,36 @@ static void ensure_terminator(vfs_node_t *node)
         node->data[node->size] = '\0';
     else
         node->data[node->capacity - 1] = '\0';
+}
+
+static void vfs_mark_node_dirty(vfs_node_t *node)
+{
+    if (!node)
+    {
+        return;
+    }
+    node->dirty = true;
+    if (node->mount)
+    {
+        node->mount->dirty = true;
+    }
+}
+
+static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount)
+{
+    if (!node)
+    {
+        return;
+    }
+    if (mount && node->mount != mount)
+    {
+        return;
+    }
+    node->dirty = false;
+    for (vfs_node_t *child = node->first_child; child; child = child->next_sibling)
+    {
+        vfs_clear_dirty_subtree(child, mount);
+    }
 }
 
 static bool vfs_measure_node(const vfs_node_t *node,
@@ -546,12 +581,8 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     dir->data = NULL;
 
     vfs_attach_child(parent, dir);
-    if (dir->mount && !vfs_mount_sync_node(dir))
-    {
-        vfs_detach_child(dir);
-        vfs_free_subtree(dir);
-        return NULL;
-    }
+    vfs_mark_node_dirty(parent);
+    vfs_mark_node_dirty(dir);
     return dir;
 }
 
@@ -582,12 +613,8 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
         file->capacity = 0;
         file->data = NULL;
         vfs_attach_child(parent, file);
-        if (file->mount && !vfs_mount_sync_node(file))
-        {
-            vfs_detach_child(file);
-            vfs_free_subtree(file);
-            return NULL;
-        }
+        vfs_mark_node_dirty(parent);
+        vfs_mark_node_dirty(file);
     }
     else
     {
@@ -602,10 +629,7 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
         file->size = 0;
         if (!ensure_capacity(file, 0)) return NULL;
         file->data[0] = '\0';
-        if (file->mount && !vfs_mount_sync_node(file))
-        {
-            return NULL;
-        }
+        vfs_mark_node_dirty(file);
     }
 
     ensure_terminator(file);
@@ -647,10 +671,7 @@ bool vfs_truncate(vfs_node_t *file)
     file->size = 0;
     if (!ensure_capacity(file, 0)) return false;
     file->data[0] = '\0';
-    if (!vfs_mount_sync_node(file))
-    {
-        return false;
-    }
+    vfs_mark_node_dirty(file);
     return true;
 }
 
@@ -664,10 +685,7 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
     memmove(file->data + file->size, data, len);
     file->size += len;
     ensure_terminator(file);
-    if (!vfs_mount_sync_node(file))
-    {
-        return false;
-    }
+    vfs_mark_node_dirty(file);
     return true;
 }
 
@@ -725,10 +743,7 @@ ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t c
         file->size = end;
     }
     ensure_terminator(file);
-    if (file->mount && !vfs_mount_sync_node(file))
-    {
-        return -1;
-    }
+    vfs_mark_node_dirty(file);
     return (ssize_t)count;
 }
 
@@ -777,10 +792,7 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
     vfs_detach_child(node);
     vfs_free_subtree(node);
 
-    if (parent->mount && !vfs_mount_sync_node(parent))
-    {
-        return false;
-    }
+    vfs_mark_node_dirty(parent);
     return true;
 }
 
@@ -1006,6 +1018,25 @@ static bool vfs_mount_sync(vfs_mount_t *mount)
     return ok;
 }
 
+static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
+{
+    if (!mount)
+    {
+        return true;
+    }
+    if (!mount->dirty && !force)
+    {
+        return true;
+    }
+    if (!vfs_mount_sync(mount))
+    {
+        return false;
+    }
+    mount->dirty = false;
+    vfs_clear_dirty_subtree(mount->mount_point, mount);
+    return true;
+}
+
 static bool vfs_mount_sync_node(vfs_node_t *node)
 {
     if (!node)
@@ -1017,7 +1048,12 @@ static bool vfs_mount_sync_node(vfs_node_t *node)
     {
         return true;
     }
-    return vfs_mount_sync(mount);
+    if (!mount->dirty)
+    {
+        node->dirty = false;
+        return true;
+    }
+    return vfs_mount_writeback(mount, false);
 }
 
 static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
@@ -1303,6 +1339,7 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     mount->device = device;
     mount->mount_point = mount_point;
     mount->next = NULL;
+    mount->dirty = false;
 
     mount_point->mount = mount;
 
@@ -1333,10 +1370,15 @@ bool vfs_sync_all(void)
     bool ok = true;
     for (vfs_mount_t *mount = mounts; mount; mount = mount->next)
     {
-        if (!vfs_mount_sync(mount))
+        if (!vfs_mount_writeback(mount, true))
         {
             ok = false;
         }
     }
     return ok;
+}
+
+bool vfs_flush_node(vfs_node_t *node)
+{
+    return vfs_mount_sync_node(node);
 }

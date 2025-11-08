@@ -40,5 +40,6 @@ bool vfs_format(block_device_t *device);
 bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point);
 bool vfs_is_mount_point(const vfs_node_t *node);
 bool vfs_sync_all(void);
+bool vfs_flush_node(vfs_node_t *node);
 
 #endif
