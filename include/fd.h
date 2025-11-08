@@ -11,6 +11,7 @@ typedef struct fd_ops
 } fd_ops_t;
 
 int fd_allocate(const fd_ops_t *ops, void *context);
+int fd_install(int fd, const fd_ops_t *ops, void *context);
 void fd_release(int fd);
 ssize_t fd_read(int fd, void *buffer, size_t count);
 ssize_t fd_write(int fd, const void *buffer, size_t count);

@@ -36,6 +36,22 @@ int fd_allocate(const fd_ops_t *ops, void *context)
     return -1;
 }
 
+int fd_install(int fd, const fd_ops_t *ops, void *context)
+{
+    if (!ops || !fd_valid(fd))
+    {
+        return -1;
+    }
+    if (g_fd_table[fd].used)
+    {
+        return -1;
+    }
+    g_fd_table[fd].used = true;
+    g_fd_table[fd].ops = ops;
+    g_fd_table[fd].context = context;
+    return fd;
+}
+
 void fd_release(int fd)
 {
     if (!fd_valid(fd))

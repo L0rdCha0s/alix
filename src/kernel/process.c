@@ -351,6 +351,8 @@ static void thread_trigger_stack_guard(thread_t *thread,
 
     frame->rsp = safe_rsp;
     frame->rip = (uint64_t)process_handle_stack_guard_fault;
+    frame->cs = GDT_SELECTOR_KERNEL_CODE;
+    frame->ss = GDT_SELECTOR_KERNEL_DATA;
     frame->rflags &= ~RFLAGS_IF_BIT;
 }
 
@@ -1353,7 +1355,11 @@ void process_system_init(void)
 
     if (g_console_stdout_fd < 0)
     {
-        g_console_stdout_fd = fd_allocate(&console_stdout_ops, NULL);
+        g_console_stdout_fd = fd_install(1, &console_stdout_ops, NULL);
+        if (g_console_stdout_fd < 0)
+        {
+            g_console_stdout_fd = fd_allocate(&console_stdout_ops, NULL);
+        }
         if (g_console_stdout_fd < 0)
         {
             fatal("unable to allocate console stdout fd");
