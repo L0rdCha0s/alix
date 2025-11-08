@@ -1,7 +1,9 @@
 #include "acpi.h"
 
+#include "bootinfo.h"
 #include "io.h"
 #include "libc.h"
+#include "serial.h"
 
 #ifndef offsetof
 #define offsetof(type, member) __builtin_offsetof(type, member)
@@ -134,6 +136,28 @@ static void acpi_write_pm(const acpi_pm_register_t *reg, uint16_t value);
 static bool acpi_sci_enabled(void);
 static void acpi_enable_if_needed(const acpi_fadt_t *fadt);
 
+static void acpi_log(const char *msg)
+{
+    serial_write_string("[acpi] ");
+    serial_write_string(msg);
+    serial_write_string("\r\n");
+}
+static void acpi_log_hex(const char *prefix, uint64_t value)
+{
+    serial_write_string("[acpi] ");
+    serial_write_string(prefix);
+    char buf[17];
+    for (int i = 15; i >= 0; --i)
+    {
+        uint8_t nibble = (uint8_t)(value & 0xF);
+        buf[i] = (char)((nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10));
+        value >>= 4;
+    }
+    buf[16] = '\0';
+    serial_write_string(buf);
+    serial_write_string("\r\n");
+}
+
 static bool acpi_checksum(const void *table, size_t length)
 {
     if (!table || length == 0)
@@ -190,17 +214,68 @@ static acpi_rsdp_v2_t *acpi_scan_region(uintptr_t start, uintptr_t end)
 
 static acpi_rsdp_v2_t *acpi_find_rsdp(void)
 {
+    acpi_log("Searching for RSDP");
+    if (boot_info.acpi_rsdp_length >= sizeof(acpi_rsdp_v1_t))
+    {
+        acpi_log_hex("Checking bootinfo RSDP copy length ", boot_info.acpi_rsdp_length);
+        acpi_rsdp_v2_t *rsdp = (acpi_rsdp_v2_t *)(void *)boot_info.acpi_rsdp_data;
+        size_t length = boot_info.acpi_rsdp_length;
+        if (length > sizeof(boot_info.acpi_rsdp_data))
+        {
+            length = sizeof(boot_info.acpi_rsdp_data);
+        }
+        if (length == sizeof(acpi_rsdp_v1_t) || length >= sizeof(acpi_rsdp_v2_t))
+        {
+            if (acpi_checksum(rsdp, length))
+            {
+                acpi_log("Using RSDP copy from bootinfo");
+                return rsdp;
+            }
+            acpi_log("Bootinfo RSDP copy checksum failed");
+        }
+    }
+    if (boot_info.magic == BOOTINFO_MAGIC && boot_info.acpi_rsdp != 0)
+    {
+        acpi_log_hex("Bootinfo RSDP pointer ", boot_info.acpi_rsdp);
+        volatile acpi_rsdp_v2_t *rsdp_phys = (acpi_rsdp_v2_t *)(uintptr_t)boot_info.acpi_rsdp;
+        acpi_rsdp_v2_t rsdp_copy_v2;
+        memcpy(&rsdp_copy_v2, (const void *)(uintptr_t)boot_info.acpi_rsdp, sizeof(rsdp_copy_v2));
+        acpi_rsdp_v2_t *rsdp = &rsdp_copy_v2;
+        if (rsdp)
+        {
+            size_t length = (rsdp->length != 0) ? rsdp->length : sizeof(acpi_rsdp_v1_t);
+            if (acpi_checksum(rsdp, length))
+            {
+                acpi_log("Bootinfo RSDP valid");
+                return rsdp;
+            }
+            acpi_log("Bootinfo RSDP checksum failed");
+        }
+    }
+
     uintptr_t ebda = acpi_ebda_address();
     if (ebda >= 0x400 && ebda + 1024 <= 0x100000)
     {
+        acpi_log_hex("Scanning EBDA at ", ebda);
         acpi_rsdp_v2_t *rsdp = acpi_scan_region(ebda, ebda + 1024);
         if (rsdp)
         {
+            acpi_log("Found RSDP in EBDA");
             return rsdp;
         }
     }
 
-    return acpi_scan_region(0xE0000, 0x100000);
+    acpi_log("Scanning BIOS region 0xE0000-0x100000");
+    acpi_rsdp_v2_t *rsdp = acpi_scan_region(0xE0000, 0x100000);
+    if (rsdp)
+    {
+        acpi_log("Found RSDP in BIOS area");
+    }
+    else
+    {
+        acpi_log("RSDP not found in BIOS area");
+    }
+    return rsdp;
 }
 
 static acpi_sdt_header_t *acpi_map_sdt(uint64_t phys, const char *expected_signature)
@@ -481,6 +556,11 @@ static void acpi_enable_if_needed(const acpi_fadt_t *fadt)
     {
         return;
     }
+    if (boot_info.version >= BOOTINFO_VERSION)
+    {
+        /* UEFI firmware already exposes ACPI in system mode, do not poke SMI. */
+        return;
+    }
     if (acpi_sci_enabled())
     {
         return;
@@ -504,22 +584,34 @@ bool acpi_init(void)
 {
     if (g_acpi_state.initialized)
     {
+        acpi_log("init already run");
         return g_acpi_state.ready;
     }
     g_acpi_state.initialized = true;
+    acpi_log("init start");
 
     acpi_rsdp_v2_t *rsdp = acpi_find_rsdp();
     if (!rsdp)
     {
+        acpi_log("RSDP not found");
         return false;
     }
+    acpi_log("RSDP located");
 
     acpi_sdt_header_t *xsdt = NULL;
     if (rsdp->first.revision >= 2 && rsdp->xsdt_address)
     {
         xsdt = acpi_map_sdt(rsdp->xsdt_address, "XSDT");
+        if (xsdt)
+        {
+            acpi_log("XSDT mapped");
+        }
     }
     acpi_sdt_header_t *rsdt = acpi_map_sdt(rsdp->first.rsdt_address, "RSDT");
+    if (rsdt)
+    {
+        acpi_log("RSDT mapped");
+    }
 
     acpi_sdt_header_t *fadt_header = NULL;
     if (xsdt)
@@ -532,12 +624,15 @@ bool acpi_init(void)
     }
     if (!fadt_header)
     {
+        acpi_log("FADT not found");
         return false;
     }
+    acpi_log("FADT located");
 
     acpi_fadt_t *fadt = (acpi_fadt_t *)fadt_header;
     if (fadt->pm1_control_length < 2)
     {
+        acpi_log("FADT control length invalid");
         return false;
     }
 
@@ -565,16 +660,20 @@ bool acpi_init(void)
     acpi_sdt_header_t *dsdt = acpi_map_sdt(dsdt_phys, "DSDT");
     if (!dsdt)
     {
+        acpi_log("DSDT map failed");
         return false;
     }
+    acpi_log("DSDT mapped");
     size_t aml_length = dsdt->length > sizeof(acpi_sdt_header_t) ? dsdt->length - sizeof(acpi_sdt_header_t) : 0;
     const uint8_t *aml = (const uint8_t *)dsdt + sizeof(acpi_sdt_header_t);
     if (!acpi_extract_s5(aml, aml_length, &g_acpi_state.slp_typa, &g_acpi_state.slp_typb))
     {
+        acpi_log("Failed to parse _S5");
         return false;
     }
     if (g_acpi_state.slp_typa == 0)
     {
+        acpi_log("SLP_TYP A missing");
         return false;
     }
     if (g_acpi_state.slp_typb == 0)
@@ -585,10 +684,12 @@ bool acpi_init(void)
     g_acpi_state.ready = (g_acpi_state.pm1a.address != 0);
     if (!g_acpi_state.ready)
     {
+        acpi_log("PM1A address missing");
         return false;
     }
 
     acpi_enable_if_needed(fadt);
+    acpi_log("init complete");
     return true;
 }
 

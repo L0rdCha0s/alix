@@ -1,4 +1,3 @@
-NASM     := nasm
 CC       := x86_64-elf-gcc
 LD       := x86_64-elf-ld
 OBJCOPY  := x86_64-elf-objcopy
@@ -18,11 +17,13 @@ OBJDIR      := build
 
 CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
           -m64 -mno-red-zone -mgeneral-regs-only -Wall -Wextra -I$(INCLUDE_DIR) \
-          -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables
+          -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
+          -fshort-wchar
 
-BOOT_SRC    := $(ARCH_DIR)/boot.asm
-STAGE2_SRC  := $(ARCH_DIR)/stage2.asm
-STAGE2_LD   := $(ARCH_DIR)/stage2.ld
+KERNEL_LD   := $(ARCH_DIR)/uefi.ld
+LOADER_DIR  := src/loader
+
+ARCH_KERNEL_SOURCES := $(filter-out $(ARCH_DIR)/uefi_boot.c,$(wildcard $(ARCH_DIR)/*.c))
 
 C_SOURCES := \
 	$(wildcard $(KERNEL_DIR)/*.c) \
@@ -31,7 +32,7 @@ C_SOURCES := \
 	$(wildcard $(ATK_DIR)/util/*.c) \
 	$(wildcard $(NET_DIR)/*.c) \
 	$(wildcard $(CRYPTO_DIR)/*.c) \
-	$(wildcard $(ARCH_DIR)/*.c) \
+	$(ARCH_KERNEL_SOURCES) \
 	$(wildcard $(SBIN_DIR)/*.c)
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
@@ -39,60 +40,48 @@ C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 ASM_SOURCES := $(wildcard $(ARCH_DIR)/*.S)
 ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 
-STAGE2_OBJ := $(OBJDIR)/arch/x86/stage2.o
-STAGE2_OBJS := $(STAGE2_OBJ) $(C_OBJECTS) $(ASM_OBJECTS)
-
-BOOT_BIN   := $(OBJDIR)/boot.bin
-STAGE2_ELF := $(OBJDIR)/stage2.elf
-STAGE2_BIN := $(OBJDIR)/stage2.bin
+KERNEL_ELF := $(OBJDIR)/alix.elf
+EFI_DIR    := build/EFI/BOOT
+EFI_BIN    := $(EFI_DIR)/BOOTX64.EFI
 DATA_IMG   := data.img
+LOADER_SRC := $(LOADER_DIR)/uefi_loader.c
+LOADER_CC  ?= x86_64-w64-mingw32-gcc
+LOADER_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
+                 -mno-red-zone -Wall -Wextra -I$(INCLUDE_DIR) -fshort-wchar
+LOADER_LDFLAGS := -nostdlib -Wl,--dll -Wl,--entry=efi_main -Wl,--subsystem,10 \
+                  -Wl,--image-base,0x4000000 -Wl,--file-alignment,0x200 -Wl,--section-alignment,0x1000 \
+                  -Wl,--major-subsystem-version,10 -Wl,--minor-subsystem-version,0
 
-all: os.img
+all: $(KERNEL_ELF) $(EFI_BIN)
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(STAGE2_OBJ): $(STAGE2_SRC)
-	@mkdir -p $(dir $@)
-	$(NASM) -f elf64 -o $@ $<
-
 $(OBJDIR)/%.o: $(SRC_DIR)/%.S
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(BOOT_BIN): $(BOOT_SRC) $(STAGE2_BIN)
-	@mkdir -p $(dir $@)
-	stsz=$$(wc -c < $(STAGE2_BIN)); \
-	secs=$$(( ($$stsz + 511) / 512 )); \
-	echo "Assembling boot sector with STAGE2_SECTORS=$$secs"; \
-	$(NASM) -f bin -o $@ -D STAGE2_SECTORS=$$secs $<
+$(KERNEL_ELF): $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_LD)
+	$(LD) -nostdlib -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
 
-$(STAGE2_ELF): $(STAGE2_OBJS) $(STAGE2_LD)
-	$(LD) -nostdlib -T $(STAGE2_LD) -o $@ $(STAGE2_OBJS)
+LOADER_HEADERS := \
+	$(INCLUDE_DIR)/uefi.h \
+	$(INCLUDE_DIR)/bootinfo.h \
+	$(INCLUDE_DIR)/arch/x86/bootlayout.h
 
-$(STAGE2_BIN): $(STAGE2_ELF)
-	$(OBJCOPY) -O binary $< $@
-
-# 1.44MB **floppy/drive** image (NOT an ISO/CD)
-os.img: $(BOOT_BIN) $(STAGE2_BIN)
-	@# Create a 1.44MB floppy image
-	dd if=/dev/zero of=$@ bs=512 count=2880 2>/dev/null
-	dd if=$(BOOT_BIN)   of=$@ conv=notrunc 2>/dev/null
-	dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
-
-# Optional: small HDD-style image (no partition table, boots from LBA0 directly)
-hdd.img: $(BOOT_BIN) $(STAGE2_BIN)
-	dd if=/dev/zero of=$@ bs=1M count=16 2>/dev/null
-	dd if=$(BOOT_BIN)   of=$@ conv=notrunc 2>/dev/null
-	dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
+$(EFI_BIN): $(LOADER_SRC) $(KERNEL_ELF) $(LOADER_HEADERS)
+	@mkdir -p $(EFI_DIR)
+	$(LOADER_CC) $(LOADER_CFLAGS) $(LOADER_LDFLAGS) -o $@ $<
 
 $(DATA_IMG):
 	truncate -s 4G $@
 
 RAM ?= 4G
-QEMU_DEBUG_LOG   ?= qemu-debug.log
-QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors -D $(QEMU_DEBUG_LOG)
+OVMF_CODE ?= vendor/OVMF_CODE.fd
+OVMF_VARS ?= vendor/OVMF_VARS-1024x768.fd
+QEMU_DEBUG_LOG   ?= qemu.log
+QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors,trace:ahci_*,trace:ide_*,trace:cmd_identify -D $(QEMU_DEBUG_LOG)
 HOMEBREW_PREFIX  := $(shell brew --prefix)
 
 # --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)
@@ -126,21 +115,34 @@ endif
 # Device (keep RTL8139 + MAC)
 NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
 
-run: os.img
+run: $(EFI_BIN) $(DATA_IMG)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -m $(RAM) -fda os.img -boot a -no-reboot -monitor none -serial stdio \
+	$(QEMU) -nodefaults -m $(RAM) -machine q35,accel=kvm:tcg \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
+		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device ahci,id=ahci0 \
+		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
+		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
+		-device ide-hd,drive=data,bus=ahci0.1 \
+		-no-reboot -monitor vc:1280x1024 -serial stdio -vga std \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
-run-hdd: hdd.img $(DATA_IMG)
+run-hdd: $(EFI_BIN) $(DATA_IMG)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -m $(RAM) \
-		-drive file=hdd.img,format=raw,if=ide,index=0,media=disk \
-		-drive file=$(DATA_IMG),format=raw,if=ide,index=1,media=disk \
-		-no-reboot -monitor none -serial stdio \
+	$(QEMU) -nodefaults -m $(RAM) -machine q35,accel=kvm:tcg \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
+		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device ahci,id=ahci0 \
+		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
+		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
+		-device ide-hd,drive=data,bus=ahci0.1 \
+		-no-reboot -monitor vc:1280x1024 -serial stdio -vga std \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 clean:
-	rm -rf $(OBJDIR) os.img hdd.img $(DATA_IMG)
+	rm -rf $(OBJDIR) $(DATA_IMG)
 
 tests/dhcp_packet_test: tests/dhcp_packet_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -o $@ $<

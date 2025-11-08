@@ -4,11 +4,10 @@
 #include "pci.h"
 #include "libc.h"
 #include "types.h"
+#include "bootinfo.h"
 #include <stddef.h>
 
-#define E820_STORAGE_PHYS   ((uintptr_t)0x00008000)
 #define E820_MAX_ENTRIES    64
-#define E820_ENTRY_SIZE     24
 
 typedef struct
 {
@@ -139,20 +138,22 @@ static void append_hex(char *buffer, size_t *index, size_t capacity, uint64_t va
 
 static void load_e820(void)
 {
-    volatile uint32_t *count_ptr = (volatile uint32_t *)E820_STORAGE_PHYS;
-    uint32_t count = *count_ptr;
+    if (boot_info.magic != BOOTINFO_MAGIC)
+    {
+        g_e820_count = 0;
+        return;
+    }
+    uint32_t count = boot_info.e820_entry_count;
     if (count > E820_MAX_ENTRIES)
     {
         count = E820_MAX_ENTRIES;
     }
-    volatile const uint8_t *entry_bytes = (volatile const uint8_t *)(E820_STORAGE_PHYS + 4);
     for (uint32_t i = 0; i < count; ++i)
     {
-        volatile const e820_entry_t *src = (volatile const e820_entry_t *)(entry_bytes + (i * E820_ENTRY_SIZE));
-        g_e820[i].base = src->base;
-        g_e820[i].length = src->length;
-        g_e820[i].type = src->type;
-        g_e820[i].attr = src->attr;
+        g_e820[i].base = boot_info.e820[i].base;
+        g_e820[i].length = boot_info.e820[i].length;
+        g_e820[i].type = boot_info.e820[i].type;
+        g_e820[i].attr = boot_info.e820[i].attr;
     }
     g_e820_count = count;
 }

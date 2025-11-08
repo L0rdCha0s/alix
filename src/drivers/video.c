@@ -1064,13 +1064,7 @@ static void vga_enter_text_mode(void)
 {
     if (!vga_restore_state())
     {
-        video_log("Falling back to BIOS text mode call");
-        __asm__ volatile (
-            "mov $0x0003, %%ax\n\t"
-            "int $0x10\n\t"
-            :
-            :
-            : "ax", "memory");
+        video_log("Unable to restore VGA state (UEFI build has no BIOS fallback)");
         return;
     }
     vga_restore_font();
