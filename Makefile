@@ -210,7 +210,12 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 clean:
-	rm -rf $(OBJDIR) $(DATA_IMG) $(USER_BIN_DIR)
+	rm -rf $(OBJDIR) $(USER_BIN_DIR)
+
+.PHONY: clean clean-all
+
+clean-all: clean
+	rm -f $(DATA_IMG)
 
 tests/dhcp_packet_test: tests/dhcp_packet_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -o $@ $<

@@ -96,6 +96,7 @@ static uint8_t *read_entire_file(const char *path, size_t *size_out)
             uint8_t *new_buffer = (uint8_t *)realloc(buffer, new_capacity);
             if (!new_buffer)
             {
+                printf("ttf_demo: realloc failed (%s, new_capacity=%zu)\n", path, new_capacity);
                 free(buffer);
                 close(fd);
                 return NULL;

@@ -8,12 +8,19 @@
 #include "interrupts.h"
 #include "process.h"
 
+#ifndef AHCI_TRACE_IRQ
+#define AHCI_TRACE_IRQ 0
+#endif
+#ifndef AHCI_TRACE_WAIT
+#define AHCI_TRACE_WAIT 0
+#endif
+
 #define AHCI_MAX_PORTS            32
 #define AHCI_MAX_COMMANDS         32
 #define AHCI_SECTOR_SIZE          512
 #define AHCI_MAX_PRDT_ENTRIES     8
 #define AHCI_PRDT_MAX_BYTES       (4 * 1024 * 1024)
-#define AHCI_MAX_TRANSFER_SECTORS 0xFFFFU
+#define AHCI_MAX_TRANSFER_SECTORS 1024U
 #define AHCI_CMD_FIS_LENGTH_DW    5
 #define AHCI_CMD_TIMEOUT          1000000U
 #define AHCI_COMRESET_DELAY       1000U
@@ -422,7 +429,7 @@ static void ahci_handle_port_irq(uint32_t port_no)
         return;
     }
     port->is = status;
-#if 1
+#if AHCI_TRACE_IRQ
     ahci_log_port_hex(port_no, "irq PxIS=", status);
 #endif
     if (status & HBA_PxIS_TFES)
@@ -576,7 +583,9 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     port->ci |= ctx->wait_slot_mask;
     if (use_irq)
     {
+#if AHCI_TRACE_WAIT
         ahci_log_port_hex(ctx->port_no, "waiting on slot mask ", ctx->wait_slot_mask);
+#endif
     }
 
     if (use_irq)
@@ -606,6 +615,7 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
             port->is = HBA_PxIS_TFES;
             return false;
         }
+        process_yield();
     }
     if (port->is & HBA_PxIS_TFES)
     {
@@ -878,7 +888,9 @@ void ahci_on_irq(void)
     {
         return;
     }
+#if AHCI_TRACE_IRQ
     ahci_log_hex("irq PxIS mask=", pending);
+#endif
     g_hba->is = pending;
     for (uint32_t port_no = 0; port_no < AHCI_MAX_PORTS; ++port_no)
     {

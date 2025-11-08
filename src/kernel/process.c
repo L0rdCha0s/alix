@@ -29,7 +29,7 @@
 #define USER_STACK_TOP            (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)
 #define USER_STACK_SIZE           (64ULL * 1024ULL)
 #define USER_HEAP_BASE            (USER_ADDRESS_SPACE_BASE + 0x02000000ULL)
-#define USER_HEAP_SIZE            (8ULL * 1024ULL * 1024ULL)
+#define USER_HEAP_SIZE            (64ULL * 1024ULL * 1024ULL)
 #define PAGE_SIZE_BYTES_LOCAL     4096ULL
 
 typedef uint64_t cpu_context_t;

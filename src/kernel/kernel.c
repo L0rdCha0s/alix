@@ -153,7 +153,18 @@ static void mount_default_fstab(void)
             serial_write_string(entry->device_name);
             serial_write_string(" -> ");
             serial_write_string(entry->mount_path);
-            serial_write_string("\r\n");
+            serial_write_string(", attempting format\r\n");
+            if (vfs_format(device))
+            {
+                if (!vfs_mount_device(device, mount_point))
+                {
+                    serial_write_string("[alix] fstab: mount still failing after format\r\n");
+                }
+            }
+            else
+            {
+                serial_write_string("[alix] fstab: format failed\r\n");
+            }
         }
     }
 }
