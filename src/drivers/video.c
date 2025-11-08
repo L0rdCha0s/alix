@@ -7,6 +7,7 @@
 #include "pci.h"
 #include "keyboard.h"
 #include "libc.h"
+#include "font.h"
 
 typedef struct atk_state atk_state_t;
 typedef struct atk_widget atk_widget_t;
@@ -58,6 +59,8 @@ static inline void video_irq_restore(uint64_t flags)
 #define FONT_HEIGHT 16
 
 #define VGA_FONT_BYTES 8192
+#define VIDEO_FONT_CHAR_COUNT 256
+#define VIDEO_FONT_BYTES      (VIDEO_FONT_CHAR_COUNT * FONT_HEIGHT)
 
 #define BACKBUFFER_ADDR 0x0000000000E00000ULL  /* 14 MiB: above kernel stack, below VFS pool */
 static uint16_t *backbuffer = (uint16_t *)(uintptr_t)BACKBUFFER_ADDR;
@@ -71,6 +74,7 @@ static uint8_t saved_regs[1 + 5 + 25 + 9 + 21];
 
 static bool vga_font_saved = false;
 static uint8_t saved_font[VGA_FONT_BYTES];
+static uint8_t video_font[VIDEO_FONT_BYTES];
 
 static bool video_active = false;
 static bool exit_requested = false;
@@ -158,6 +162,7 @@ static void video_flush_dirty(void);
 static void video_perform_refresh(void);
 static void cursor_draw_overlay(void);
 static void cursor_restore_background(void);
+static void video_prepare_font(void);
 static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg);
 static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
                                const uint8_t *src, int stride_bytes, int src_x0, int src_y0);
@@ -219,6 +224,7 @@ void video_init(void)
 {
     vga_capture_state();
     vga_capture_font();
+    video_prepare_font();
     atk_init();
 }
 
@@ -342,16 +348,27 @@ static void cursor_restore_background(void)
 }
 
 /* --------- Text & blits to backbuffer --------- */
+static void video_prepare_font(void)
+{
+    uint8_t rows[FONT_HEIGHT];
+    for (int ch = 0; ch < VIDEO_FONT_CHAR_COUNT; ++ch)
+    {
+        font_basic_copy_glyph8x16((uint8_t)ch, rows);
+        size_t offset = (size_t)ch * FONT_HEIGHT;
+        memcpy(&video_font[offset], rows, FONT_HEIGHT);
+    }
+}
+
 static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
 {
     unsigned char ch = (unsigned char)c;
-    size_t glyph_offset = (size_t)ch * 32;
-    if (glyph_offset + FONT_HEIGHT > VGA_FONT_BYTES)
+    size_t glyph_offset = (size_t)ch * FONT_HEIGHT;
+    if (glyph_offset + FONT_HEIGHT > VIDEO_FONT_BYTES)
     {
         return;
     }
 
-    const uint8_t *glyph = &saved_font[glyph_offset];
+    const uint8_t *glyph = &video_font[glyph_offset];
     for (int row = 0; row < FONT_HEIGHT; ++row)
     {
         int dst_y = y + row;
