@@ -13,6 +13,7 @@ NET_DIR     := $(SRC_DIR)/net
 SBIN_DIR    := $(SRC_DIR)/sbin
 CRYPTO_DIR  := $(SRC_DIR)/crypto
 INCLUDE_DIR := include
+USER_DIR    := user
 OBJDIR      := build
 
 CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
@@ -40,6 +41,16 @@ C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 ASM_SOURCES := $(wildcard $(ARCH_DIR)/*.S)
 ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 
+USER_OBJDIR := $(OBJDIR)/user
+USER_CFLAGS := $(CFLAGS) -I$(USER_DIR)
+USER_COMMON_SOURCES := \
+	$(USER_DIR)/crt0.c \
+	$(USER_DIR)/syscall.c \
+	$(USER_DIR)/libc.c
+USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
+USER_LD_SCRIPT := $(USER_DIR)/link.ld
+USER_ELFS := $(USER_OBJDIR)/userdemo2.elf
+
 KERNEL_ELF := $(OBJDIR)/alix.elf
 EFI_DIR    := build/EFI/BOOT
 EFI_BIN    := $(EFI_DIR)/BOOTX64.EFI
@@ -52,7 +63,7 @@ LOADER_LDFLAGS := -nostdlib -Wl,--dll -Wl,--entry=efi_main -Wl,--subsystem,10 \
                   -Wl,--image-base,0x4000000 -Wl,--file-alignment,0x200 -Wl,--section-alignment,0x1000 \
                   -Wl,--major-subsystem-version,10 -Wl,--minor-subsystem-version,0
 
-all: $(KERNEL_ELF) $(EFI_BIN)
+all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS)
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -62,8 +73,16 @@ $(OBJDIR)/%.o: $(SRC_DIR)/%.S
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(USER_OBJDIR)/%.o: $(USER_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
 $(KERNEL_ELF): $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_LD)
 	$(LD) -nostdlib -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
+
+$(USER_OBJDIR)/userdemo2.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/userdemo2.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/userdemo2.o
 
 LOADER_HEADERS := \
 	$(INCLUDE_DIR)/uefi.h \
@@ -115,7 +134,7 @@ endif
 # Device (keep RTL8139 + MAC)
 NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
 
-run: $(EFI_BIN) $(DATA_IMG)
+run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS)
 	$(QEMU_NET_PREFIX) \
 	$(QEMU) -nodefaults -m $(RAM) -machine q35,accel=kvm:tcg \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
@@ -128,7 +147,7 @@ run: $(EFI_BIN) $(DATA_IMG)
 		-no-reboot -monitor vc:1280x1024 -serial stdio -vga std \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
-run-hdd: $(EFI_BIN) $(DATA_IMG)
+run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS)
 	$(QEMU_NET_PREFIX) \
 	$(QEMU) -nodefaults -m $(RAM) -machine q35,accel=kvm:tcg \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \

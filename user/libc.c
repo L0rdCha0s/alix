@@ -1,3 +1,5 @@
+#include <stdarg.h>
+
 #include "userlib.h"
 
 #define ALIGNMENT 16UL
@@ -223,6 +225,201 @@ int strncmp(const char *a, const char *b, size_t n)
         }
     }
     return 0;
+}
+
+typedef struct
+{
+    int fd;
+    int count;
+    bool error;
+} printf_sink_t;
+
+static void printf_sink_write(printf_sink_t *sink, const char *data, size_t len)
+{
+    if (!sink || sink->error || !data || len == 0)
+    {
+        return;
+    }
+
+    size_t offset = 0;
+    while (offset < len)
+    {
+        ssize_t result = write(sink->fd, data + offset, len - offset);
+        if (result <= 0)
+        {
+            sink->error = true;
+            return;
+        }
+        offset += (size_t)result;
+        sink->count += (int)result;
+    }
+}
+
+static void printf_sink_putc(printf_sink_t *sink, char c)
+{
+    printf_sink_write(sink, &c, 1);
+}
+
+static void printf_sink_puts(printf_sink_t *sink, const char *text)
+{
+    if (!text)
+    {
+        text = "(null)";
+    }
+    printf_sink_write(sink, text, strlen(text));
+}
+
+static void printf_sink_print_unsigned(printf_sink_t *sink,
+                                       uint64_t value,
+                                       unsigned base,
+                                       bool uppercase)
+{
+    if (base < 2 || base > 16)
+    {
+        return;
+    }
+
+    char buffer[32];
+    size_t index = 0;
+    const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+
+    do
+    {
+        buffer[index++] = digits[value % base];
+        value /= base;
+    } while (value != 0 && index < sizeof(buffer));
+
+    while (index > 0)
+    {
+        printf_sink_putc(sink, buffer[--index]);
+    }
+}
+
+static void printf_sink_print_signed(printf_sink_t *sink, int64_t value)
+{
+    if (value < 0)
+    {
+        printf_sink_putc(sink, '-');
+        uint64_t magnitude = (uint64_t)(-(value + 1)) + 1;
+        printf_sink_print_unsigned(sink, magnitude, 10, false);
+        return;
+    }
+    printf_sink_print_unsigned(sink, (uint64_t)value, 10, false);
+}
+
+static void printf_format(printf_sink_t *sink, const char *format, va_list args)
+{
+    while (format && *format && sink && !sink->error)
+    {
+        if (*format != '%')
+        {
+            const char *start = format;
+            while (*format && *format != '%')
+            {
+                ++format;
+            }
+            printf_sink_write(sink, start, (size_t)(format - start));
+            continue;
+        }
+
+        ++format;
+        if (*format == '%')
+        {
+            printf_sink_putc(sink, '%');
+            ++format;
+            continue;
+        }
+
+        char specifier = *format ? *format++ : '\0';
+        switch (specifier)
+        {
+            case 'c':
+            {
+                char value = (char)va_arg(args, int);
+                printf_sink_putc(sink, value);
+                break;
+            }
+            case 's':
+            {
+                const char *text = va_arg(args, const char *);
+                printf_sink_puts(sink, text);
+                break;
+            }
+            case 'd':
+            case 'i':
+            {
+                int value = va_arg(args, int);
+                printf_sink_print_signed(sink, (int64_t)value);
+                break;
+            }
+            case 'u':
+            {
+                unsigned int value = va_arg(args, unsigned int);
+                printf_sink_print_unsigned(sink, (uint64_t)value, 10, false);
+                break;
+            }
+            case 'x':
+            {
+                unsigned int value = va_arg(args, unsigned int);
+                printf_sink_print_unsigned(sink, (uint64_t)value, 16, false);
+                break;
+            }
+            case 'X':
+            {
+                unsigned int value = va_arg(args, unsigned int);
+                printf_sink_print_unsigned(sink, (uint64_t)value, 16, true);
+                break;
+            }
+            case 'p':
+            {
+                uintptr_t ptr = (uintptr_t)va_arg(args, void *);
+                printf_sink_write(sink, "0x", 2);
+                printf_sink_print_unsigned(sink, ptr, 16, false);
+                break;
+            }
+            case '\0':
+            {
+                printf_sink_putc(sink, '%');
+                return;
+            }
+            default:
+            {
+                printf_sink_putc(sink, '%');
+                printf_sink_putc(sink, specifier);
+                break;
+            }
+        }
+    }
+}
+
+static int vprintf_internal(const char *format, va_list args)
+{
+    if (!format)
+    {
+        return -1;
+    }
+
+    printf_sink_t sink = {
+        .fd = 1,
+        .count = 0,
+        .error = false
+    };
+
+    printf_format(&sink, format, args);
+    if (sink.error)
+    {
+        return -1;
+    }
+    return sink.count;
+}
+
+int printf(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int result = vprintf_internal(format, args);
+    va_end(args);
+    return result;
 }
 
 void *malloc(size_t size)

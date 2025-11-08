@@ -13,10 +13,35 @@ static const char *skip_spaces(const char *text)
     return text;
 }
 
+static char *extract_path_argument(const char *args)
+{
+    const char *start = skip_spaces(args ? args : "");
+    if (!start || *start == '\0')
+    {
+        return NULL;
+    }
+
+    const char *end = start;
+    while (*end && *end != ' ' && *end != '\t')
+    {
+        ++end;
+    }
+
+    size_t length = (size_t)(end - start);
+    char *path = (char *)malloc(length + 1);
+    if (!path)
+    {
+        return NULL;
+    }
+    memcpy(path, start, length);
+    path[length] = '\0';
+    return path;
+}
+
 bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *args)
 {
-    const char *path = skip_spaces(args ? args : "");
-    if (!path || *path == '\0')
+    char *path = extract_path_argument(args);
+    if (!path)
     {
         return shell_output_error(out, "runelf: path required");
     }
@@ -31,6 +56,7 @@ bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *arg
 
     if (!node || !vfs_is_file(node))
     {
+        free(path);
         return shell_output_error(out, "runelf: file not found");
     }
 
@@ -38,6 +64,7 @@ bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *arg
     const char *data = vfs_data(node, &size);
     if (!data || size == 0)
     {
+        free(path);
         return shell_output_error(out, "runelf: empty file");
     }
 
@@ -46,6 +73,8 @@ bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *arg
                                                           size,
                                                           -1,
                                                           process_current());
+    free(path);
+
     if (!proc)
     {
         return shell_output_error(out, "runelf: failed to start process");
