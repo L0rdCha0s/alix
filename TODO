@@ -1,0 +1,14 @@
+Kernel
+-------
+* Process support - DONE
+* Basic kernel scheduler (round robin) - DONE
+* Persistent storage in filesystem - DONE
+* Proc file system
+* Migrate to 32bit colour
+
+UI
+--
+* Scroll bar in terminal
+* Move 'new line' to current prompt location - DONE
+* VT102 support? - DONE
+* Hardware info in app 
