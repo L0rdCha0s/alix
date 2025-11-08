@@ -95,9 +95,13 @@ static heap_block_t *find_free_block(size_t size)
 
 static heap_block_t *request_block(size_t size)
 {
+    if (size > SIZE_MAX_VALUE - sizeof(heap_block_t))
+    {
+        return NULL;
+    }
     size_t total = sizeof(heap_block_t) + size;
     void *base = sys_sbrk((int64_t)total);
-    if (base == (void *)-1)
+    if (base == (void *)-1 || base == NULL)
     {
         return NULL;
     }

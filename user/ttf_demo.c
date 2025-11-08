@@ -1,18 +1,14 @@
 #include "atk_user.h"
 
-#include "atk.h"
-#include "atk_internal.h"
-#include "atk_window.h"
-#include "atk/atk_label.h"
-#include "atk/atk_image.h"
 #include "libc.h"
 #include "video.h"
 #include "ttf.h"
 #include "userlib.h"
+#include "font.h"
 
 #define GLYPH_COLUMNS 6
 #define CELL_PADDING 12
-#define LABEL_HEIGHT 40
+#define LABEL_HEIGHT 18
 #define WINDOW_MARGIN 16
 
 typedef struct
@@ -341,44 +337,239 @@ static void destroy_glyphs(glyph_entry_t *entries, size_t count)
     }
 }
 
-static void apply_ui_theme(atk_state_t *state)
+static inline bool surface_ready(const atk_user_window_t *session)
 {
-    if (!state)
+    return session && session->buffer && session->width > 0 && session->height > 0;
+}
+
+static void surface_fill(const atk_user_window_t *session, uint16_t color)
+{
+    if (!surface_ready(session))
     {
         return;
     }
-    state->theme.background = video_make_color(0x15, 0x19, 0x24);
-    state->theme.window_border = video_make_color(0x30, 0x34, 0x40);
-    state->theme.window_title = video_make_color(0x28, 0x3C, 0x66);
-    state->theme.window_title_text = video_make_color(0xFF, 0xFF, 0xFF);
-    state->theme.window_body = video_make_color(0x21, 0x25, 0x30);
-    state->theme.button_face = video_make_color(0x31, 0x36, 0x45);
-    state->theme.button_text = video_make_color(0xE6, 0xE6, 0xE6);
-}
-
-static void process_mouse_event(const user_atk_event_t *event)
-{
-    bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
-    bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
-    bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
-    atk_mouse_event_result_t result = atk_handle_mouse_event(event->x,
-                                                             event->y,
-                                                             press,
-                                                             release,
-                                                             left);
-    if (result.redraw)
+    size_t pixels = (size_t)session->width * (size_t)session->height;
+    for (size_t i = 0; i < pixels; ++i)
     {
-        atk_render();
+        session->buffer[i] = color;
     }
 }
 
-static void process_key_event(const user_atk_event_t *event)
+static void surface_draw_rect(const atk_user_window_t *session,
+                              int x,
+                              int y,
+                              int width,
+                              int height,
+                              uint16_t color)
 {
-    atk_key_event_result_t result = atk_handle_key_char((char)event->data0);
-    if (result.redraw)
+    if (!surface_ready(session) || width <= 0 || height <= 0)
     {
-        atk_render();
+        return;
     }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+
+    if (x1 <= 0 || y1 <= 0 || x0 >= (int)session->width || y0 >= (int)session->height)
+    {
+        return;
+    }
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)session->width) x1 = (int)session->width;
+    if (y1 > (int)session->height) y1 = (int)session->height;
+
+    for (int row = y0; row < y1; ++row)
+    {
+        uint16_t *dst = session->buffer + (size_t)row * session->width + x0;
+        for (int col = x0; col < x1; ++col)
+        {
+            *dst++ = color;
+        }
+    }
+}
+
+static void surface_draw_rect_outline(const atk_user_window_t *session,
+                                      int x,
+                                      int y,
+                                      int width,
+                                      int height,
+                                      uint16_t color)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+    surface_draw_rect(session, x, y, width, 1, color);
+    surface_draw_rect(session, x, y + height - 1, width, 1, color);
+    surface_draw_rect(session, x, y, 1, height, color);
+    surface_draw_rect(session, x + width - 1, y, 1, height, color);
+}
+
+static void surface_draw_char(const atk_user_window_t *session,
+                              int x,
+                              int y,
+                              char c,
+                              uint16_t fg,
+                              uint16_t bg)
+{
+    if (!surface_ready(session))
+    {
+        return;
+    }
+    uint8_t glyph[FONT_BASIC_HEIGHT_X2];
+    font_basic_copy_glyph8x16((uint8_t)c, glyph);
+
+    for (int row = 0; row < FONT_BASIC_HEIGHT_X2; ++row)
+    {
+        int dst_y = y + row;
+        if (dst_y < 0 || dst_y >= (int)session->height)
+        {
+            continue;
+        }
+        uint8_t bits = glyph[row];
+        uint16_t *dst = session->buffer + (size_t)dst_y * session->width;
+        for (int col = 0; col < FONT_BASIC_WIDTH; ++col)
+        {
+            int dst_x = x + col;
+            if (dst_x < 0 || dst_x >= (int)session->width)
+            {
+                continue;
+            }
+            uint16_t color = (bits & (1U << (7 - col))) ? fg : bg;
+            dst[dst_x] = color;
+        }
+    }
+}
+
+static void surface_draw_text(const atk_user_window_t *session,
+                              int x,
+                              int y,
+                              const char *text,
+                              uint16_t fg,
+                              uint16_t bg)
+{
+    if (!surface_ready(session) || !text)
+    {
+        return;
+    }
+    int cursor_x = x;
+    for (size_t i = 0; text[i] != '\0'; ++i)
+    {
+        surface_draw_char(session, cursor_x, y, text[i], fg, bg);
+        cursor_x += FONT_BASIC_WIDTH;
+    }
+}
+
+static void blit_atlas_into_window(const atk_user_window_t *session,
+                                   int dst_x,
+                                   int dst_y,
+                                   const uint16_t *atlas_pixels,
+                                   int atlas_width,
+                                   int atlas_height)
+{
+    if (!surface_ready(session) || !atlas_pixels)
+    {
+        return;
+    }
+
+    for (int y = 0; y < atlas_height; ++y)
+    {
+        int target_y = dst_y + y;
+        if (target_y < 0 || target_y >= (int)session->height)
+        {
+            continue;
+        }
+
+        const uint16_t *src_row = atlas_pixels + (size_t)y * (size_t)atlas_width;
+        uint16_t *dst_row = session->buffer + (size_t)target_y * session->width;
+
+        int start_x = dst_x;
+        int copy_width = atlas_width;
+
+        if (start_x < 0)
+        {
+            int skip = -start_x;
+            start_x = 0;
+            copy_width -= skip;
+            src_row += skip;
+        }
+        if (start_x + copy_width > (int)session->width)
+        {
+            copy_width = (int)session->width - start_x;
+        }
+        if (copy_width <= 0)
+        {
+            continue;
+        }
+
+        memcpy(dst_row + start_x, src_row, (size_t)copy_width * sizeof(uint16_t));
+    }
+}
+
+static void render_scene(const atk_user_window_t *session,
+                         const char *font_path,
+                         int font_size,
+                         const uint16_t *atlas_pixels,
+                         int atlas_width,
+                         int atlas_height)
+{
+    if (!surface_ready(session))
+    {
+        return;
+    }
+
+    uint16_t bg = video_make_color(0x21, 0x25, 0x30);
+    uint16_t text = video_make_color(0xF4, 0xF4, 0xF4);
+    uint16_t accent = video_make_color(0x15, 0x19, 0x24);
+    uint16_t border = video_make_color(0x30, 0x34, 0x40);
+
+    surface_fill(session, bg);
+
+    char info[256];
+    size_t len = 0;
+    append_text(info, sizeof(info), &len, "Font: ");
+    append_text(info, sizeof(info), &len, font_path ? font_path : "(null)");
+    append_text(info, sizeof(info), &len, " (");
+    append_int(info, sizeof(info), &len, font_size);
+    append_text(info, sizeof(info), &len, " px)");
+    if (len < sizeof(info))
+    {
+        info[len] = '\0';
+    }
+    else
+    {
+        info[sizeof(info) - 1] = '\0';
+    }
+
+    surface_draw_text(session,
+                      WINDOW_MARGIN,
+                      WINDOW_MARGIN,
+                      info,
+                      text,
+                      bg);
+
+    int atlas_x = WINDOW_MARGIN;
+    int atlas_y = WINDOW_MARGIN * 2 + LABEL_HEIGHT;
+    int outline_width = atlas_width + WINDOW_MARGIN;
+    int outline_height = atlas_height + WINDOW_MARGIN;
+
+    surface_draw_rect(session,
+                      atlas_x - WINDOW_MARGIN / 2,
+                      atlas_y - WINDOW_MARGIN / 2,
+                      outline_width,
+                      outline_height,
+                      accent);
+    surface_draw_rect_outline(session,
+                              atlas_x - WINDOW_MARGIN / 2,
+                              atlas_y - WINDOW_MARGIN / 2,
+                              outline_width,
+                              outline_height,
+                              border);
+
+    blit_atlas_into_window(session, atlas_x, atlas_y, atlas_pixels, atlas_width, atlas_height);
 }
 
 int main(int argc, char **argv)
@@ -467,89 +658,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    atk_init();
-    atk_state_t *state = atk_state_get();
-    apply_ui_theme(state);
-
-    atk_widget_t *window = atk_window_create_at(state, VIDEO_WIDTH / 2, VIDEO_HEIGHT / 2);
-    if (!window)
-    {
-        printf("ttf_demo: failed to create window\n");
-        atk_user_close(&session);
-        free(atlas_pixels);
-        ttf_font_unload(&font);
-        return 1;
-    }
-    atk_window_set_title_text(window, "TrueType Demo");
-
-    int content_width = atlas_width + WINDOW_MARGIN * 2;
-    int content_height = atlas_height + LABEL_HEIGHT + WINDOW_MARGIN * 3;
-    if (window->width < content_width)
-    {
-        window->width = content_width;
-    }
-    if (window->height < content_height + ATK_WINDOW_TITLE_HEIGHT)
-    {
-        window->height = content_height + ATK_WINDOW_TITLE_HEIGHT;
-    }
-    window->x = (VIDEO_WIDTH - window->width) / 2;
-    window->y = (VIDEO_HEIGHT - window->height) / 2 - ATK_WINDOW_TITLE_HEIGHT / 2;
-
-    int label_x = WINDOW_MARGIN;
-    int label_y = ATK_WINDOW_TITLE_HEIGHT + WINDOW_MARGIN;
-    atk_widget_t *label = atk_window_add_label(window,
-                                               label_x,
-                                               label_y,
-                                               window->width - WINDOW_MARGIN * 2,
-                                               LABEL_HEIGHT);
-    if (label)
-    {
-        char info[256];
-        size_t len = 0;
-        append_text(info, sizeof(info), &len, "Font: ");
-        append_text(info, sizeof(info), &len, font_path);
-        append_text(info, sizeof(info), &len, " (");
-        append_int(info, sizeof(info), &len, font_size);
-        append_text(info, sizeof(info), &len, " px)");
-        if (len < sizeof(info))
-        {
-            info[len] = '\0';
-        }
-        else
-        {
-            info[sizeof(info) - 1] = '\0';
-        }
-        atk_label_set_text(label, info);
-    }
-
-    atk_widget_t *image = atk_window_add_image(window,
-                                               WINDOW_MARGIN,
-                                               label_y + LABEL_HEIGHT + WINDOW_MARGIN / 2);
-    if (!image)
-    {
-        printf("ttf_demo: failed to create image widget\n");
-        atk_user_close(&session);
-        free(atlas_pixels);
-        ttf_font_unload(&font);
-        return 1;
-    }
-
-    if (!atk_image_set_pixels(image,
-                              atlas_pixels,
-                              atlas_width,
-                              atlas_height,
-                              atlas_width * (int)sizeof(uint16_t),
-                              true))
-    {
-        printf("ttf_demo: failed to upload atlas\n");
-        atk_user_close(&session);
-        free(atlas_pixels);
-        ttf_font_unload(&font);
-        return 1;
-    }
-
-    atk_window_mark_dirty(window);
-    atk_render();
+    render_scene(&session, font_path, font_size, atlas_pixels, atlas_width, atlas_height);
+    free(atlas_pixels);
     atk_user_present(&session);
 
     bool running = true;
@@ -563,16 +673,14 @@ int main(int argc, char **argv)
 
         switch (event.type)
         {
-            case USER_ATK_EVENT_MOUSE:
-                process_mouse_event(&event);
-                atk_user_present(&session);
-                break;
-            case USER_ATK_EVENT_KEY:
-                process_key_event(&event);
-                atk_user_present(&session);
-                break;
             case USER_ATK_EVENT_CLOSE:
                 running = false;
+                break;
+            case USER_ATK_EVENT_KEY:
+                if (event.data0 == 27) /* ESC */
+                {
+                    running = false;
+                }
                 break;
             default:
                 break;
