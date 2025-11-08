@@ -5,6 +5,8 @@
 #include "pci.h"
 #include "serial.h"
 #include "types.h"
+#include "interrupts.h"
+#include "process.h"
 
 #define AHCI_MAX_PORTS            32
 #define AHCI_MAX_COMMANDS         32
@@ -14,7 +16,7 @@
 #define AHCI_MAX_TRANSFER_SECTORS 0xFFFFU
 #define AHCI_CMD_FIS_LENGTH_DW    5
 #define AHCI_CMD_TIMEOUT          1000000U
-#define AHCI_COMRESET_DELAY       100000U
+#define AHCI_COMRESET_DELAY       1000U
 
 #define HBA_GHC_HR   (1U << 0)
 #define HBA_GHC_IE   (1U << 1)
@@ -32,6 +34,10 @@
 #define HBA_PxCMD_FR    (1U << 14)
 #define HBA_PxCMD_CR    (1U << 15)
 
+#define HBA_PxIS_DHRS   (1U << 0)
+#define HBA_PxIS_PSS    (1U << 1)
+#define HBA_PxIS_DSS    (1U << 2)
+#define HBA_PxIS_SDBS   (1U << 3)
 #define HBA_PxIS_TFES   (1U << 30)
 
 #define HBA_PxSCTL_DET_MASK 0xF
@@ -134,9 +140,16 @@ typedef struct
     uint8_t *fis;
     uint8_t port_no;
     block_device_t *block;
+    volatile bool waiting;
+    volatile bool wait_success;
+    uint32_t wait_slot_mask;
 } ahci_port_ctx_t;
 
 static volatile hba_mem_t *g_hba = NULL;
+static ahci_port_ctx_t *g_ahci_ports[AHCI_MAX_PORTS] = { 0 };
+static uint8_t g_ahci_irq_line = 10;
+static bool g_ahci_irq_ready = false;
+static bool g_ahci_use_interrupts = false;
 
 static void ahci_log(const char *msg)
 {
@@ -231,6 +244,7 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
                            void *buffer,
                            bool write);
 static bool ahci_identify_port(ahci_port_ctx_t *ctx, uint16_t *identify);
+static void ahci_handle_port_irq(uint32_t port_no);
 
 static void *alloc_aligned(size_t size, size_t align)
 {
@@ -322,7 +336,13 @@ static bool ahci_port_device_present(hba_port_t *port, uint32_t port_no)
     {
         return false;
     }
-    ahci_log_port_hex(port_no, "ssts before spin-up: ", port->ssts);
+    uint32_t initial_ssts = port->ssts;
+    ahci_log_port_hex(port_no, "ssts before spin-up: ", initial_ssts);
+    if (initial_ssts == 0)
+    {
+        ahci_log_port(port_no, "ssts zero, skipping");
+        return false;
+    }
     port->cmd |= (HBA_PxCMD_SUD | HBA_PxCMD_POD);
     if (ahci_port_wait_device(port))
     {
@@ -380,7 +400,43 @@ static void ahci_port_release(ahci_port_ctx_t *ctx)
             ctx->cmd_tables[i] = NULL;
         }
     }
+    g_ahci_ports[ctx->port_no] = NULL;
     free(ctx);
+}
+
+static void ahci_handle_port_irq(uint32_t port_no)
+{
+    if (port_no >= AHCI_MAX_PORTS)
+    {
+        return;
+    }
+    ahci_port_ctx_t *ctx = g_ahci_ports[port_no];
+    if (!ctx || !ctx->port)
+    {
+        return;
+    }
+    hba_port_t *port = ctx->port;
+    uint32_t status = port->is;
+    if (!status)
+    {
+        return;
+    }
+    port->is = status;
+#if 1
+    ahci_log_port_hex(port_no, "irq PxIS=", status);
+#endif
+    if (status & HBA_PxIS_TFES)
+    {
+        ctx->wait_success = false;
+        ctx->waiting = false;
+        port->serr = (uint32_t)~0U;
+        return;
+    }
+    if (ctx->waiting && !(port->ci & ctx->wait_slot_mask))
+    {
+        ctx->wait_success = true;
+        ctx->waiting = false;
+    }
 }
 
 static bool ahci_port_configure(ahci_port_ctx_t *ctx)
@@ -417,7 +473,7 @@ static bool ahci_port_configure(ahci_port_ctx_t *ctx)
 
     port->is = (uint32_t)~0U;
     port->serr = (uint32_t)~0U;
-    port->ie = 0;
+    port->ie = HBA_PxIS_DHRS | HBA_PxIS_PSS | HBA_PxIS_DSS | HBA_PxIS_SDBS | HBA_PxIS_TFES;
     port->sact = 0;
     port->ci = 0;
     port->cmd |= (HBA_PxCMD_SUD | HBA_PxCMD_POD);
@@ -513,21 +569,43 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     cfis[13] = (uint8_t)((count >> 8) & 0xFF);
 
     port->is = (uint32_t)~0U;
-    port->ci = (1U << slot);
+    ctx->wait_slot_mask = (uint32_t)(1U << slot);
+    ctx->wait_success = false;
+    bool use_irq = g_ahci_use_interrupts;
+    ctx->waiting = use_irq;
+    port->ci |= ctx->wait_slot_mask;
+    if (use_irq)
+    {
+        ahci_log_port_hex(ctx->port_no, "waiting on slot mask ", ctx->wait_slot_mask);
+    }
 
-    uint32_t timeout = AHCI_CMD_TIMEOUT;
-    while ((port->ci & (1U << slot)) && timeout--)
+    if (use_irq)
+    {
+        uint32_t timeout = AHCI_CMD_TIMEOUT;
+        while (ctx->waiting && timeout--)
+        {
+            process_yield();
+        }
+        if (ctx->waiting)
+        {
+            ctx->waiting = false;
+            ahci_log_port(ctx->port_no, "irq wait timed out");
+            use_irq = false;
+        }
+        if (ctx->wait_success)
+        {
+            return true;
+        }
+        ahci_log_port(ctx->port_no, "irq wait failed, retrying with polling");
+    }
+
+    while (port->ci & ctx->wait_slot_mask)
     {
         if (port->is & HBA_PxIS_TFES)
         {
             port->is = HBA_PxIS_TFES;
             return false;
         }
-    }
-    if (timeout == 0)
-    {
-        serial_write_string("[ahci] command timeout\r\n");
-        return false;
     }
     if (port->is & HBA_PxIS_TFES)
     {
@@ -603,6 +681,10 @@ static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
     }
     ctx->port = (hba_port_t *)port;
     ctx->port_no = (uint8_t)port_no;
+    ctx->waiting = false;
+    ctx->wait_success = false;
+    ctx->wait_slot_mask = 0;
+    g_ahci_ports[port_no] = ctx;
 
     if (!ahci_port_configure(ctx))
     {
@@ -762,6 +844,14 @@ void ahci_init(void)
         return;
     }
 
+    uint8_t irq_line = pci_config_read8(dev, 0x3C);
+    if (irq_line == 0 || irq_line == 0xFF)
+    {
+        irq_line = 11;
+        pci_config_write8(dev, 0x3C, irq_line);
+    }
+    g_ahci_irq_line = irq_line;
+
     uint32_t pi = g_hba->pi;
     ahci_log_hex("port implemented mask=", pi);
     for (uint32_t i = 0; i < AHCI_MAX_PORTS; ++i)
@@ -775,4 +865,39 @@ void ahci_init(void)
 static bool ahci_identify_port(ahci_port_ctx_t *ctx, uint16_t *identify)
 {
     return ahci_issue_cmd(ctx, ATA_CMD_IDENTIFY, 0, 0, identify, false);
+}
+
+void ahci_on_irq(void)
+{
+    if (!g_hba)
+    {
+        return;
+    }
+    uint32_t pending = g_hba->is;
+    if (!pending)
+    {
+        return;
+    }
+    ahci_log_hex("irq PxIS mask=", pending);
+    g_hba->is = pending;
+    for (uint32_t port_no = 0; port_no < AHCI_MAX_PORTS; ++port_no)
+    {
+        if (pending & (1U << port_no))
+        {
+            ahci_handle_port_irq(port_no);
+        }
+    }
+}
+
+void ahci_interrupts_activate(void)
+{
+    if (!g_hba || g_ahci_irq_ready)
+    {
+        return;
+    }
+    ahci_log_hex("enabling IRQ line=", g_ahci_irq_line);
+    interrupts_enable_irq(g_ahci_irq_line);
+    g_hba->ghc |= HBA_GHC_IE;
+    g_ahci_irq_ready = true;
+    g_ahci_use_interrupts = true;
 }

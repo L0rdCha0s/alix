@@ -10,6 +10,7 @@
 #include "process.h"
 #include "console.h"
 #include "syscall.h"
+#include "ahci.h"
 
 extern void syscall_entry(void);
 
@@ -144,6 +145,7 @@ __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
 __attribute__((interrupt)) static void irq11_handler(interrupt_frame_t *frame)
 {
     (void)frame;
+    ahci_on_irq();
     rtl8139_on_irq();
     pic_send_eoi(11);
 }
@@ -237,6 +239,7 @@ void interrupts_init(void)
     idt_load();
     pic_remap();
     pic_set_masks();
+    ahci_interrupts_activate();
 }
 
 void interrupts_enable_irq(uint8_t irq)
