@@ -1,0 +1,485 @@
+#include "user_atk_host.h"
+
+#include "atk_internal.h"
+#include "atk_window.h"
+#include "atk/atk_image.h"
+#include "heap.h"
+#include "libc.h"
+#include "process.h"
+#include "serial.h"
+#include "video.h"
+
+typedef struct user_atk_window
+{
+    uint32_t handle;
+    process_t *owner;
+    atk_widget_t *window;
+    atk_widget_t *image;
+    uint16_t *pixels;
+    size_t pixel_bytes;
+    int content_width;
+    int content_height;
+    int content_offset_x;
+    int content_offset_y;
+    int stride_bytes;
+    bool closed;
+    bool destroying;
+    user_atk_event_t events[USER_ATK_EVENT_QUEUE_MAX];
+    size_t event_head;
+    size_t event_tail;
+    size_t event_count;
+    struct user_atk_window *next;
+    struct user_atk_window *prev;
+} user_atk_window_t;
+
+static user_atk_window_t *g_windows_head = NULL;
+static user_atk_window_t *g_focus_window = NULL;
+static user_atk_window_t *g_capture_window = NULL;
+static uint32_t g_next_handle = 1;
+
+static user_atk_window_t *user_atk_from_window(const atk_widget_t *window);
+static user_atk_window_t *user_atk_find(uint32_t handle, process_t *owner);
+static void user_atk_insert(user_atk_window_t *win);
+static void user_atk_remove(user_atk_window_t *win, bool closing_kernel);
+static void user_atk_window_on_destroy(void *context);
+static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t *event);
+static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_event);
+static void user_atk_send_close_event(user_atk_window_t *win);
+
+void user_atk_init(void)
+{
+    g_windows_head = NULL;
+    g_focus_window = NULL;
+    g_capture_window = NULL;
+    g_next_handle = 1;
+}
+
+static user_atk_window_t *user_atk_from_window(const atk_widget_t *window)
+{
+    if (!window)
+    {
+        return NULL;
+    }
+    return (user_atk_window_t *)atk_window_context(window);
+}
+
+bool user_atk_window_is_remote(const atk_widget_t *window)
+{
+    return user_atk_from_window(window) != NULL;
+}
+
+void user_atk_focus_window(const atk_widget_t *window)
+{
+    user_atk_window_t *target = user_atk_from_window(window);
+    g_focus_window = target;
+    if (!target)
+    {
+        return;
+    }
+    if (target->closed)
+    {
+        g_focus_window = NULL;
+    }
+}
+
+bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
+                                int cursor_x,
+                                int cursor_y,
+                                bool pressed_edge,
+                                bool released_edge,
+                                bool left_pressed)
+{
+    user_atk_window_t *target = g_capture_window;
+    if (!target)
+    {
+        target = user_atk_from_window(hover_window);
+    }
+    if (!target || target->closed || !target->window)
+    {
+        return false;
+    }
+
+    int win_x = target->window->x + target->content_offset_x;
+    int win_y = target->window->y + target->content_offset_y;
+
+    int rel_x = cursor_x - win_x;
+    int rel_y = cursor_y - win_y;
+
+    bool inside = (rel_x >= 0 && rel_y >= 0 &&
+                   rel_x < target->content_width &&
+                   rel_y < target->content_height);
+
+    if (!inside && !g_capture_window)
+    {
+        return false;
+    }
+
+    user_atk_event_t event = {
+        .type = USER_ATK_EVENT_MOUSE,
+        .flags = 0,
+        .x = rel_x,
+        .y = rel_y,
+        .data0 = 0,
+        .data1 = 0,
+    };
+
+    if (left_pressed)
+    {
+        event.flags |= USER_ATK_MOUSE_FLAG_LEFT;
+    }
+    if (pressed_edge)
+    {
+        event.flags |= USER_ATK_MOUSE_FLAG_PRESS;
+        g_capture_window = target;
+    }
+    if (released_edge)
+    {
+        event.flags |= USER_ATK_MOUSE_FLAG_RELEASE;
+        if (g_capture_window == target && !left_pressed)
+        {
+            g_capture_window = NULL;
+        }
+    }
+
+    user_atk_queue_event(target, &event);
+    return true;
+}
+
+bool user_atk_route_key_event(char ch)
+{
+    if (!g_focus_window || g_focus_window->closed)
+    {
+        return false;
+    }
+
+    user_atk_event_t event = {
+        .type = USER_ATK_EVENT_KEY,
+        .flags = 0,
+        .x = 0,
+        .y = 0,
+        .data0 = (uint8_t)ch,
+        .data1 = 0,
+    };
+    user_atk_queue_event(g_focus_window, &event);
+    return true;
+}
+
+static void user_atk_window_on_destroy(void *context)
+{
+    user_atk_window_t *win = (user_atk_window_t *)context;
+    if (!win)
+    {
+        return;
+    }
+
+    win->window = NULL;
+    win->image = NULL;
+    win->pixels = NULL;
+    win->closed = true;
+    if (g_focus_window == win)
+    {
+        g_focus_window = NULL;
+    }
+    if (g_capture_window == win)
+    {
+        g_capture_window = NULL;
+    }
+    user_atk_send_close_event(win);
+}
+
+static void user_atk_insert(user_atk_window_t *win)
+{
+    win->prev = NULL;
+    win->next = g_windows_head;
+    if (g_windows_head)
+    {
+        g_windows_head->prev = win;
+    }
+    g_windows_head = win;
+}
+
+static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
+{
+    if (!win)
+    {
+        return;
+    }
+
+    if (win->prev)
+    {
+        win->prev->next = win->next;
+    }
+    else
+    {
+        g_windows_head = win->next;
+    }
+    if (win->next)
+    {
+        win->next->prev = win->prev;
+    }
+    win->next = NULL;
+    win->prev = NULL;
+
+    if (!closing_kernel && win->window)
+    {
+        win->destroying = true;
+        atk_window_close(atk_state_get(), win->window);
+        win->destroying = false;
+    }
+
+    if (g_focus_window == win)
+    {
+        g_focus_window = NULL;
+    }
+    if (g_capture_window == win)
+    {
+        g_capture_window = NULL;
+    }
+
+    free(win);
+}
+
+static user_atk_window_t *user_atk_find(uint32_t handle, process_t *owner)
+{
+    for (user_atk_window_t *win = g_windows_head; win; win = win->next)
+    {
+        if (win->handle == handle && win->owner == owner)
+        {
+            return win;
+        }
+    }
+    return NULL;
+}
+
+int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
+{
+    if (!desc_user)
+    {
+        return -1;
+    }
+
+    user_atk_window_desc_t desc;
+    memcpy(&desc, desc_user, sizeof(desc));
+
+    if (desc.width == 0 || desc.height == 0)
+    {
+        return -1;
+    }
+    if (desc.width > VIDEO_WIDTH)
+    {
+        desc.width = VIDEO_WIDTH;
+    }
+    if (desc.height > VIDEO_HEIGHT)
+    {
+        desc.height = VIDEO_HEIGHT;
+    }
+    desc.title[USER_ATK_TITLE_MAX - 1] = '\0';
+
+    atk_state_t *state = atk_state_get();
+    atk_widget_t *window = atk_window_create_at(state, VIDEO_WIDTH / 2, VIDEO_HEIGHT / 2);
+    if (!window)
+    {
+        return -1;
+    }
+
+    const int margin = 8;
+    int content_offset_x = margin;
+    int content_offset_y = ATK_WINDOW_TITLE_HEIGHT + margin;
+    window->width = desc.width + margin * 2;
+    window->height = desc.height + margin * 2 + ATK_WINDOW_TITLE_HEIGHT;
+    atk_window_ensure_inside(window);
+
+    if (desc.title[0] != '\0')
+    {
+        atk_window_set_title_text(window, desc.title);
+    }
+
+    atk_widget_t *image = atk_window_add_image(window, content_offset_x, content_offset_y);
+    if (!image)
+    {
+        atk_window_close(state, window);
+        return -1;
+    }
+
+    size_t pixel_bytes = (size_t)desc.width * (size_t)desc.height * sizeof(uint16_t);
+    uint16_t *pixels = (uint16_t *)malloc(pixel_bytes);
+    if (!pixels)
+    {
+        atk_window_close(state, window);
+        return -1;
+    }
+    memset(pixels, 0, pixel_bytes);
+
+    if (!atk_image_set_pixels(image, pixels, desc.width, desc.height, desc.width * (int)sizeof(uint16_t), true))
+    {
+        free(pixels);
+        atk_window_close(state, window);
+        return -1;
+    }
+
+    user_atk_window_t *win = (user_atk_window_t *)calloc(1, sizeof(user_atk_window_t));
+    if (!win)
+    {
+        atk_window_close(state, window);
+        return -1;
+    }
+
+    win->handle = g_next_handle++;
+    win->owner = process_current();
+    win->window = window;
+    win->image = image;
+    win->pixels = atk_image_pixels(image);
+    win->pixel_bytes = pixel_bytes;
+    win->content_width = desc.width;
+    win->content_height = desc.height;
+    win->content_offset_x = content_offset_x;
+    win->content_offset_y = content_offset_y;
+    win->stride_bytes = desc.width * (int)sizeof(uint16_t);
+    win->closed = false;
+    win->destroying = false;
+    win->event_head = 0;
+    win->event_tail = 0;
+    win->event_count = 0;
+
+    atk_window_set_context(window, win, user_atk_window_on_destroy);
+    user_atk_insert(win);
+
+    atk_window_mark_dirty(window);
+    video_request_refresh_window(window);
+    return (int64_t)win->handle;
+}
+
+int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byte_len)
+{
+    if (!pixels)
+    {
+        return -1;
+    }
+    user_atk_window_t *win = user_atk_find(handle, process_current());
+    if (!win || win->closed || !win->pixels)
+    {
+        return -1;
+    }
+
+    if (byte_len != win->pixel_bytes)
+    {
+        return -1;
+    }
+
+    memcpy(win->pixels, pixels, byte_len);
+    if (win->window)
+    {
+        atk_window_mark_dirty(win->window);
+        video_request_refresh_window(win->window);
+    }
+    else
+    {
+        video_request_refresh();
+    }
+    return 0;
+}
+
+int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, uint32_t flags)
+{
+    if (!event_out)
+    {
+        return -1;
+    }
+    user_atk_window_t *win = user_atk_find(handle, process_current());
+    if (!win)
+    {
+        return -1;
+    }
+
+    bool block = (flags & USER_ATK_POLL_FLAG_BLOCK) != 0;
+
+    user_atk_event_t event = { 0 };
+    while (!user_atk_pop_event(win, &event))
+    {
+        if (!block || win->closed)
+        {
+            memset(event_out, 0, sizeof(*event_out));
+            return 0;
+        }
+        process_yield();
+    }
+
+    *event_out = event;
+    return 1;
+}
+
+int64_t user_atk_sys_close(uint32_t handle)
+{
+    user_atk_window_t *win = user_atk_find(handle, process_current());
+    if (!win)
+    {
+        return -1;
+    }
+
+    user_atk_remove(win, false);
+    return 0;
+}
+
+void user_atk_on_process_destroy(process_t *process)
+{
+    user_atk_window_t *win = g_windows_head;
+    while (win)
+    {
+        user_atk_window_t *next = win->next;
+        if (win->owner == process)
+        {
+            user_atk_remove(win, false);
+        }
+        win = next;
+    }
+}
+
+static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t *event)
+{
+    if (!win || !event)
+    {
+        return;
+    }
+
+    win->events[win->event_tail] = *event;
+    win->event_tail = (win->event_tail + 1) % USER_ATK_EVENT_QUEUE_MAX;
+    if (win->event_count == USER_ATK_EVENT_QUEUE_MAX)
+    {
+        win->event_head = (win->event_head + 1) % USER_ATK_EVENT_QUEUE_MAX;
+        win->event_count--;
+    }
+    win->event_count++;
+}
+
+static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_event)
+{
+    if (!win || win->event_count == 0)
+    {
+        return false;
+    }
+
+    if (out_event)
+    {
+        *out_event = win->events[win->event_head];
+    }
+    win->event_head = (win->event_head + 1) % USER_ATK_EVENT_QUEUE_MAX;
+    win->event_count--;
+    return true;
+}
+
+static void user_atk_send_close_event(user_atk_window_t *win)
+{
+    if (!win)
+    {
+        return;
+    }
+    user_atk_event_t event = {
+        .type = USER_ATK_EVENT_CLOSE,
+        .flags = 0,
+        .x = 0,
+        .y = 0,
+        .data0 = 0,
+        .data1 = 0,
+    };
+    user_atk_queue_event(win, &event);
+}

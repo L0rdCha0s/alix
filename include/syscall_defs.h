@@ -11,6 +11,10 @@ typedef enum
     SYSCALL_OPEN = 3,
     SYSCALL_CLOSE = 4,
     SYSCALL_SBRK = 5,
+    SYSCALL_UI_CREATE = 6,
+    SYSCALL_UI_PRESENT = 7,
+    SYSCALL_UI_POLL_EVENT = 8,
+    SYSCALL_UI_CLOSE = 9,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)

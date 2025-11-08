@@ -8,7 +8,7 @@ Kernel
 
 UI
 --
-* Scroll bar in terminal
+* Scroll bar in terminal - DONE
 * Move 'new line' to current prompt location - DONE
 * VT102 support? - DONE
 * Hardware info in app 

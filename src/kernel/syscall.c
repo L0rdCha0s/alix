@@ -7,6 +7,7 @@
 #include "heap.h"
 #include "vfs.h"
 #include "libc.h"
+#include "user_atk_host.h"
 
 typedef struct
 {
@@ -168,6 +169,22 @@ void syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_SBRK:
             result = process_user_sbrk(process_current(), (int64_t)frame->rdi);
+            break;
+        case SYSCALL_UI_CREATE:
+            result = user_atk_sys_create((const user_atk_window_desc_t *)frame->rdi);
+            break;
+        case SYSCALL_UI_PRESENT:
+            result = user_atk_sys_present((uint32_t)frame->rdi,
+                                          (const uint16_t *)frame->rsi,
+                                          (size_t)frame->rdx);
+            break;
+        case SYSCALL_UI_POLL_EVENT:
+            result = user_atk_sys_poll_event((uint32_t)frame->rdi,
+                                             (user_atk_event_t *)frame->rsi,
+                                             (uint32_t)frame->rdx);
+            break;
+        case SYSCALL_UI_CLOSE:
+            result = user_atk_sys_close((uint32_t)frame->rdi);
             break;
         default:
             serial_write_string("syscall: unhandled id=");

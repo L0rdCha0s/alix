@@ -20,6 +20,7 @@
 #include "ata.h"
 #include "ahci.h"
 #include "logger.h"
+#include "user_atk_host.h"
 
 static void shell_process_entry(void *arg)
 {
@@ -41,6 +42,7 @@ void kernel_main(void)
     serial_write_string("[alix] after paging_init\n");
     process_system_init();
     serial_write_string("[alix] after process_system_init\n");
+    user_atk_init();
     block_init();
     ahci_init();
     serial_write_string("[alix] after block_init\n");

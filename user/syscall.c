@@ -78,3 +78,23 @@ void sys_exit(int status)
         syscall0(SYSCALL_EXIT);
     }
 }
+
+int sys_ui_create(const user_atk_window_desc_t *desc)
+{
+    return (int)syscall1(SYSCALL_UI_CREATE, (long)desc);
+}
+
+int sys_ui_present(uint32_t handle, const void *pixels, size_t byte_len)
+{
+    return (int)syscall3(SYSCALL_UI_PRESENT, (long)handle, (long)pixels, (long)byte_len);
+}
+
+int sys_ui_poll_event(uint32_t handle, user_atk_event_t *event, uint32_t flags)
+{
+    return (int)syscall3(SYSCALL_UI_POLL_EVENT, (long)handle, (long)event, (long)flags);
+}
+
+int sys_ui_close(uint32_t handle)
+{
+    return (int)syscall1(SYSCALL_UI_CLOSE, (long)handle);
+}

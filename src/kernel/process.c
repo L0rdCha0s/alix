@@ -9,6 +9,7 @@
 #include "console.h"
 #include "fd.h"
 #include "elf.h"
+#include "user_atk_host.h"
 
 #define MSR_FS_BASE         0xC0000100
 #define MSR_GS_BASE         0xC0000101
@@ -239,6 +240,28 @@ static bool pointer_in_heap(uint64_t addr, size_t size)
     uint64_t heap_start = (uint64_t)kernel_heap_base;
     uint64_t heap_end = (uint64_t)kernel_heap_end;
     return addr >= heap_start && (addr + size) <= heap_end;
+}
+
+static uint64_t sanitize_gs_base(thread_t *thread)
+{
+    if (!thread)
+    {
+        return 0;
+    }
+
+    if (!pointer_in_heap(thread->gs_base, sizeof(thread_tls_t)))
+    {
+        uint64_t old_base = thread->gs_base;
+        thread->gs_base = (uint64_t)&thread->tls;
+        serial_write_string("process: repaired GS base for thread ");
+        serial_write_string(thread->name);
+        serial_write_string(" old=0x");
+        serial_write_hex64(old_base);
+        serial_write_string(" new=0x");
+        serial_write_hex64(thread->gs_base);
+        serial_write_string("\r\n");
+    }
+    return thread->gs_base;
 }
 
 static inline uintptr_t align_up_uintptr(uintptr_t value, uintptr_t alignment)
@@ -1060,13 +1083,7 @@ static void switch_to_thread(thread_t *next)
         next->time_slice_remaining = PROCESS_TIME_SLICE_TICKS;
         next->preempt_pending = false;
 
-        if (!pointer_in_heap(next->gs_base, sizeof(thread_tls_t)))
-        {
-            serial_write_string("process: invalid next GS base=0x");
-            serial_write_hex64(next->gs_base);
-            serial_write_string("\r\n");
-            fatal("invalid GS base for next thread");
-        }
+        sanitize_gs_base(next);
 
         uint64_t desired_cr3 = next_process ? next_process->cr3 : read_cr3();
         if (desired_cr3 && desired_cr3 != read_cr3())
@@ -1624,6 +1641,8 @@ void process_destroy(process_t *process)
         return;
     }
 
+    user_atk_on_process_destroy(process);
+
     if (process->first_child)
     {
         process_t *child = process->first_child;
@@ -1991,13 +2010,7 @@ void process_on_timer_tick(interrupt_frame_t *frame)
         return;
     }
 
-    if (!pointer_in_heap(thread->gs_base, sizeof(thread_tls_t)))
-    {
-        serial_write_string("process: invalid current GS base=0x");
-        serial_write_hex64(thread->gs_base);
-        serial_write_string("\r\n");
-        fatal("invalid GS base for current thread");
-    }
+    sanitize_gs_base(thread);
 
     if (thread->preempt_pending)
     {

@@ -8,16 +8,22 @@
 #include "atk_internal.h"
 #include "atk_window.h"
 #include "atk/atk_scrollbar.h"
-#include "atk/atk_task_manager.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
 #include "atk/atk_terminal.h"
+#include "user_atk_host.h"
+
+#ifndef ATK_NO_DESKTOP_APPS
+#include "atk/atk_task_manager.h"
 #include "atk/atk_shell.h"
+#endif
 
 static void atk_apply_default_theme(atk_state_t *state);
 static void action_exit_to_text(atk_widget_t *button, void *context);
+#ifndef ATK_NO_DESKTOP_APPS
 static void action_open_shell(atk_widget_t *button, void *context);
 static void action_open_task_manager(atk_widget_t *button, void *context);
+#endif
 
 void atk_init(void)
 {
@@ -36,6 +42,7 @@ void atk_enter_mode(void)
     atk_window_reset_all(state);
     atk_desktop_reset(state);
 
+#ifndef ATK_NO_DESKTOP_APPS
     atk_desktop_add_button(state,
                            40,
                            40,
@@ -68,6 +75,9 @@ void atk_enter_mode(void)
                            true,
                            action_open_task_manager,
                            state);
+#else
+    (void)action_exit_to_text;
+#endif
 }
 
 void atk_render(void)
@@ -229,6 +239,12 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                     }
                 }
 
+                if (!consumed && user_atk_window_is_remote(win))
+                {
+                    user_atk_focus_window(win);
+                    consumed = true;
+                }
+
                 handled = true;
             }
         }
@@ -356,6 +372,18 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         }
     }
 
+    atk_widget_t *hover_window = atk_window_hit_test(state, cursor_x, cursor_y);
+    bool remote_handled = user_atk_route_mouse_event(hover_window,
+                                                     cursor_x,
+                                                     cursor_y,
+                                                     pressed_edge,
+                                                     released_edge,
+                                                     left_pressed);
+    if (pressed_edge && !remote_handled)
+    {
+        user_atk_focus_window(NULL);
+    }
+
     if (state->exit_requested)
     {
         result.exit_video = true;
@@ -415,6 +443,11 @@ atk_key_event_result_t atk_handle_key_char(char ch)
         return result;
     }
 
+    if (user_atk_route_key_event(ch))
+    {
+        return result;
+    }
+
     atk_widget_t *input = state->focused_input;
     if (!input || !input->used)
     {
@@ -429,6 +462,7 @@ atk_key_event_result_t atk_handle_key_char(char ch)
     return result;
 }
 
+#ifndef ATK_NO_DESKTOP_APPS
 static void action_open_shell(atk_widget_t *button, void *context)
 {
     (void)button;
@@ -450,3 +484,4 @@ static void action_open_task_manager(atk_widget_t *button, void *context)
     }
     atk_task_manager_open(state);
 }
+#endif

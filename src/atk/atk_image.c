@@ -13,6 +13,7 @@ typedef struct
     int img_height;
     int stride_bytes;
     atk_list_node_t *list_node;
+    bool owns_pixels;
 } atk_image_priv_t;
 
 static void atk_image_invalidate(const atk_widget_t *image);
@@ -56,6 +57,7 @@ atk_widget_t *atk_window_add_image(atk_widget_t *window, int x, int y)
     image_priv->img_width = 0;
     image_priv->img_height = 0;
     image_priv->stride_bytes = 0;
+    image_priv->owns_pixels = false;
 
     atk_list_node_t *child_node = atk_list_push_back(&priv->children, image);
     if (!child_node)
@@ -91,20 +93,7 @@ bool atk_image_load_jpeg(atk_widget_t *image, const uint8_t *data, size_t size)
         return false;
     }
 
-    if (priv->pixels)
-    {
-        free(priv->pixels);
-    }
-    priv->pixels = pixels;
-    priv->img_width = width;
-    priv->img_height = height;
-    priv->stride_bytes = stride_bytes;
-
-    image->width = width;
-    image->height = height;
-
-    atk_image_invalidate(image);
-    return true;
+    return atk_image_set_pixels(image, pixels, width, height, stride_bytes, true);
 }
 
 void atk_image_destroy(atk_widget_t *image)
@@ -118,14 +107,15 @@ void atk_image_destroy(atk_widget_t *image)
     {
         return;
     }
-    if (priv->pixels)
+    if (priv->pixels && priv->owns_pixels)
     {
         free(priv->pixels);
-        priv->pixels = NULL;
     }
+    priv->pixels = NULL;
     priv->img_width = 0;
     priv->img_height = 0;
     priv->stride_bytes = 0;
+    priv->owns_pixels = false;
     priv->list_node = NULL;
 }
 
@@ -168,6 +158,54 @@ int atk_image_height(const atk_widget_t *image)
 {
     const atk_image_priv_t *priv = (const atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
     return priv ? priv->img_height : 0;
+}
+
+bool atk_image_set_pixels(atk_widget_t *image,
+                          uint16_t *pixels,
+                          int width,
+                          int height,
+                          int stride_bytes,
+                          bool take_ownership)
+{
+    if (!image || !pixels || width <= 0 || height <= 0 || stride_bytes <= 0)
+    {
+        return false;
+    }
+
+    atk_image_priv_t *priv = (atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
+    if (!priv)
+    {
+        return false;
+    }
+
+    if (priv->pixels && priv->owns_pixels)
+    {
+        free(priv->pixels);
+    }
+
+    priv->pixels = pixels;
+    priv->img_width = width;
+    priv->img_height = height;
+    priv->stride_bytes = stride_bytes;
+    priv->owns_pixels = take_ownership;
+
+    image->width = width;
+    image->height = height;
+
+    atk_image_invalidate(image);
+    return true;
+}
+
+uint16_t *atk_image_pixels(const atk_widget_t *image)
+{
+    const atk_image_priv_t *priv = (const atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
+    return priv ? priv->pixels : NULL;
+}
+
+int atk_image_stride_bytes(const atk_widget_t *image)
+{
+    const atk_image_priv_t *priv = (const atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
+    return priv ? priv->stride_bytes : 0;
 }
 
 static void atk_image_invalidate(const atk_widget_t *image)

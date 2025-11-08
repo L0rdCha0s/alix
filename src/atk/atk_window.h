@@ -18,6 +18,7 @@ void atk_window_ensure_inside(atk_widget_t *window);
 atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y);
 void atk_window_close(atk_state_t *state, atk_widget_t *window);
 const char *atk_window_title(const atk_widget_t *window);
+void atk_window_set_title_text(atk_widget_t *window, const char *title);
 atk_widget_t *atk_window_text_input_at(atk_widget_t *window, int px, int py);
 atk_widget_t *atk_window_terminal_at(atk_widget_t *window, int px, int py);
 atk_widget_t *atk_window_scrollbar_at(atk_widget_t *window, int px, int py);

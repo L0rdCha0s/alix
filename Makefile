@@ -17,7 +17,7 @@ USER_DIR    := user
 OBJDIR      := build
 
 CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
-          -m64 -mno-red-zone -mgeneral-regs-only -Wall -Wextra -I$(INCLUDE_DIR) \
+          -m64 -mno-red-zone -mgeneral-regs-only -Wall -Wextra -I$(INCLUDE_DIR) -I$(ATK_DIR) \
           -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
           -fshort-wchar
 
@@ -42,14 +42,24 @@ ASM_SOURCES := $(wildcard $(ARCH_DIR)/*.S)
 ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 
 USER_OBJDIR := $(OBJDIR)/user
-USER_CFLAGS := $(CFLAGS) -I$(USER_DIR)
+USER_CFLAGS := $(CFLAGS) -I$(USER_DIR) -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS -DVIDEO_WIDTH=640 -DVIDEO_HEIGHT=360
 USER_COMMON_SOURCES := \
 	$(USER_DIR)/crt0.c \
 	$(USER_DIR)/syscall.c \
-	$(USER_DIR)/libc.c
+	$(USER_DIR)/libc.c \
+	$(USER_DIR)/atk_user.c \
+	$(USER_DIR)/video_surface.c \
+	$(USER_DIR)/serial_stub.c \
+	$(USER_DIR)/atk_user_host_stub.c
 USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
+USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o
 USER_LD_SCRIPT := $(USER_DIR)/link.ld
-USER_ELFS := $(USER_OBJDIR)/userdemo2.elf
+USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c,$(wildcard $(ATK_DIR)/*.c))
+USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
+USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
+USER_ELFS := $(USER_OBJDIR)/userdemo2.elf $(USER_OBJDIR)/atk_demo.elf
+USER_BIN_DIR := build/bin
+USER_BINS := $(USER_BIN_DIR)/userdemo2 $(USER_BIN_DIR)/atk_demo
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
 EFI_DIR    := build/EFI/BOOT
@@ -63,7 +73,7 @@ LOADER_LDFLAGS := -nostdlib -Wl,--dll -Wl,--entry=efi_main -Wl,--subsystem,10 \
                   -Wl,--image-base,0x4000000 -Wl,--file-alignment,0x200 -Wl,--section-alignment,0x1000 \
                   -Wl,--major-subsystem-version,10 -Wl,--minor-subsystem-version,0
 
-all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS)
+all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS) $(USER_BINS)
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -77,12 +87,36 @@ $(USER_OBJDIR)/%.o: $(USER_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
+$(USER_OBJDIR)/atk/%.o: $(ATK_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/atk/util/%.o: $(ATK_DIR)/util/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/kernel/%.o: $(KERNEL_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
 $(KERNEL_ELF): $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_LD)
 	$(LD) -nostdlib -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
 
 $(USER_OBJDIR)/userdemo2.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/userdemo2.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/userdemo2.o
+
+$(USER_OBJDIR)/atk_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_demo.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_demo.o
+
+$(USER_BIN_DIR)/userdemo2: $(USER_OBJDIR)/userdemo2.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
 
 LOADER_HEADERS := \
 	$(INCLUDE_DIR)/uefi.h \
@@ -134,7 +168,7 @@ endif
 # Device (keep RTL8139 + MAC)
 NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
 
-run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS)
+run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
 	$(QEMU) -nodefaults -m $(RAM) -machine q35,accel=kvm:tcg \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
@@ -147,7 +181,7 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS)
 		-no-reboot -monitor vc:1280x1024 -serial stdio -vga std \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
-run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS)
+run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
 	$(QEMU) -nodefaults -m $(RAM) -machine q35,accel=kvm:tcg \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
@@ -161,7 +195,7 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS)
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 clean:
-	rm -rf $(OBJDIR) $(DATA_IMG)
+	rm -rf $(OBJDIR) $(DATA_IMG) $(USER_BIN_DIR)
 
 tests/dhcp_packet_test: tests/dhcp_packet_test.c
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -o $@ $<

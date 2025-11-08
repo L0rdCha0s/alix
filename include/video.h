@@ -3,8 +3,12 @@
 
 #include "types.h"
 
+#ifndef VIDEO_WIDTH
 #define VIDEO_WIDTH  1280
+#endif
+#ifndef VIDEO_HEIGHT
 #define VIDEO_HEIGHT 1024
+#endif
 
 struct atk_widget;
 

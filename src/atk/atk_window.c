@@ -460,6 +460,26 @@ const char *atk_window_title(const atk_widget_t *window)
     return priv->title;
 }
 
+void atk_window_set_title_text(atk_widget_t *window, const char *title)
+{
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return;
+    }
+
+    size_t i = 0;
+    if (title)
+    {
+        for (; title[i] != '\0' && i < sizeof(priv->title) - 1; ++i)
+        {
+            priv->title[i] = title[i];
+        }
+    }
+    priv->title[i] = '\0';
+    atk_window_mark_dirty(window);
+}
+
 void atk_window_set_context(atk_widget_t *window, void *context, void (*on_destroy)(void *context))
 {
     atk_window_priv_t *priv = window_priv_mut(window);
