@@ -10,6 +10,7 @@
 #include "fd.h"
 #include "elf.h"
 #include "user_atk_host.h"
+#include "syscall_defs.h"
 
 #define MSR_FS_BASE         0xC0000100
 #define MSR_GS_BASE         0xC0000101
@@ -24,6 +25,7 @@
 
 #define USER_ADDRESS_SPACE_BASE   0x0000008000000000ULL
 #define USER_STUB_CODE_BASE       (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
+#define USER_PREEMPT_STUB_BASE    (USER_ADDRESS_SPACE_BASE + 0x00110000ULL)
 #define USER_STACK_TOP            (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)
 #define USER_STACK_SIZE           (64ULL * 1024ULL)
 #define USER_HEAP_BASE            (USER_ADDRESS_SPACE_BASE + 0x02000000ULL)
@@ -72,6 +74,12 @@ static const uint8_t g_user_exit_stub[] = {
     0x31, 0xC0,       /* xor eax, eax */
     0xCD, 0x80,       /* int 0x80 */
     0xF4              /* hlt (should not reach) */
+};
+
+static const uint8_t g_user_preempt_stub[] = {
+    0xB8, (uint8_t)SYSCALL_YIELD, 0x00, 0x00, 0x00, /* mov eax, SYSCALL_YIELD */
+    0xCD, 0x80,                                      /* int 0x80 */
+    0xEB, 0xF9                                       /* jmp back to self */
 };
 
 struct trap_frame
@@ -779,6 +787,19 @@ static bool process_store_args(process_t *process,
     return true;
 }
 
+static void process_dump_stack_entry(uintptr_t addr, uintptr_t value, bool mark_rsp)
+{
+    serial_write_string("    [");
+    serial_write_hex64(addr);
+    serial_write_string("] = 0x");
+    serial_write_hex64(value);
+    if (mark_rsp)
+    {
+        serial_write_string(" <-- rsp");
+    }
+    serial_write_string("\r\n");
+}
+
 static inline bool process_write_stack_uintptr(uint8_t *host_base,
                                                uintptr_t stack_bottom,
                                                uintptr_t stack_top,
@@ -792,6 +813,104 @@ static inline bool process_write_stack_uintptr(uint8_t *host_base,
     size_t offset = (size_t)(addr - stack_bottom);
     memcpy(host_base + offset, &value, sizeof(uintptr_t));
     return true;
+}
+
+static bool process_setup_preempt_stub(process_t *process)
+{
+    if (!process)
+    {
+        return false;
+    }
+
+    void *stub_ptr = NULL;
+    if (!process_map_user_segment(process,
+                                  USER_PREEMPT_STUB_BASE,
+                                  PAGE_SIZE_BYTES_LOCAL,
+                                  false,
+                                  true,
+                                  &stub_ptr))
+    {
+        return false;
+    }
+
+    memset(stub_ptr, 0x90, PAGE_SIZE_BYTES_LOCAL);
+    memcpy(stub_ptr, g_user_preempt_stub, sizeof(g_user_preempt_stub));
+    return true;
+}
+
+void process_dump_user_stack(process_t *process,
+                             uintptr_t rsp,
+                             size_t max_entries_above,
+                             size_t max_entries_below)
+{
+    if (!process || !process->is_user || (max_entries_above == 0 && max_entries_below == 0))
+    {
+        return;
+    }
+    if (!process->user_stack_host || process->user_stack_size == 0 || rsp == 0)
+    {
+        serial_write_string("  user stack: unavailable\r\n");
+        return;
+    }
+
+    uintptr_t stack_top = process->user_stack_top;
+    uintptr_t stack_bottom = stack_top - process->user_stack_size;
+
+    serial_write_string("  user stack: range=[");
+    serial_write_hex64(stack_bottom);
+    serial_write_string(", ");
+    serial_write_hex64(stack_top);
+    serial_write_string(") rsp=");
+    serial_write_hex64(rsp);
+    serial_write_string("\r\n");
+
+    if (rsp < stack_bottom || rsp >= stack_top)
+    {
+        serial_write_string("  user stack: rsp outside stack bounds\r\n");
+        return;
+    }
+
+    /* Print entries below rsp (older stack values) */
+    if (max_entries_below > 0)
+    {
+        uintptr_t addr = rsp;
+        size_t ready = 0;
+        while (addr > stack_bottom && ready < max_entries_below)
+        {
+            addr -= sizeof(uintptr_t);
+            ready++;
+            if (addr < stack_bottom)
+            {
+                break;
+            }
+        }
+
+        while (ready > 0 && addr >= stack_bottom)
+        {
+            size_t offset = (size_t)(addr - stack_bottom);
+            uintptr_t value = 0;
+            memcpy(&value, process->user_stack_host + offset, sizeof(uintptr_t));
+            process_dump_stack_entry(addr, value, false);
+            addr += sizeof(uintptr_t);
+            ready--;
+        }
+    }
+
+    /* Print entries starting at rsp and moving upward */
+    if (max_entries_above > 0)
+    {
+        uintptr_t addr = rsp;
+        size_t remaining = max_entries_above;
+        while (remaining > 0 && addr + sizeof(uintptr_t) <= stack_top)
+        {
+            size_t offset = (size_t)(addr - stack_bottom);
+            uintptr_t value = 0;
+            memcpy(&value, process->user_stack_host + offset, sizeof(uintptr_t));
+            process_dump_stack_entry(addr, value, addr == rsp);
+            addr += sizeof(uintptr_t);
+            remaining--;
+        }
+    }
 }
 
 static bool process_prepare_stack_with_args(process_t *process)
@@ -908,7 +1027,7 @@ static bool process_setup_basic_user_memory(process_t *process)
     {
         return false;
     }
-    return true;
+    return process_setup_preempt_stub(process);
 }
 
 static bool process_setup_dummy_user_space(process_t *process)
@@ -2077,6 +2196,18 @@ uint64_t process_current_pid(void)
     return g_current_process->pid;
 }
 
+uint64_t process_take_preempt_resume_rip(void)
+{
+    thread_t *thread = g_current_thread;
+    if (!thread)
+    {
+        return 0;
+    }
+    uint64_t rip = thread->tls.preempt_resume_rip;
+    thread->tls.preempt_resume_rip = 0;
+    return rip;
+}
+
 uint64_t process_get_pid(const process_t *process)
 {
     if (!process)
@@ -2273,6 +2404,20 @@ void process_on_timer_tick(interrupt_frame_t *frame)
 
     thread->preempt_pending = true;
     thread->time_slice_remaining = PROCESS_TIME_SLICE_TICKS;
+
+    bool user_mode = frame && ((frame->cs & 0x3u) == 0x3u);
+    if (!frame)
+    {
+        return;
+    }
+
     thread->tls.preempt_resume_rip = frame->rip;
-    frame->rip = (uint64_t)process_preempt_trampoline;
+    if (user_mode)
+    {
+        frame->rip = USER_PREEMPT_STUB_BASE;
+    }
+    else
+    {
+        frame->rip = (uint64_t)process_preempt_trampoline;
+    }
 }

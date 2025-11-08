@@ -98,3 +98,8 @@ int sys_ui_close(uint32_t handle)
 {
     return (int)syscall1(SYSCALL_UI_CLOSE, (long)handle);
 }
+
+int sys_yield(void)
+{
+    return (int)syscall0(SYSCALL_YIELD);
+}

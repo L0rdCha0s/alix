@@ -167,6 +167,17 @@ void syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_CLOSE:
             result = syscall_do_close(frame->rdi);
             break;
+        case SYSCALL_YIELD:
+            process_preempt_hook();
+            {
+                uint64_t resume = process_take_preempt_resume_rip();
+                if (resume)
+                {
+                    frame->rip = resume;
+                }
+            }
+            result = 0;
+            break;
         case SYSCALL_SBRK:
             result = process_user_sbrk(process_current(), (int64_t)frame->rdi);
             break;

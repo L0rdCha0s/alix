@@ -89,6 +89,7 @@ int process_current_stdout_fd(void);
 ssize_t process_stdout_write(const char *data, size_t len);
 
 void process_on_timer_tick(interrupt_frame_t *frame);
+void process_preempt_hook(void);
 void process_destroy(process_t *process);
 size_t process_snapshot(process_info_t *buffer, size_t capacity);
 const char *process_state_name(process_state_t state);
@@ -102,12 +103,17 @@ bool process_handle_exception(interrupt_frame_t *frame,
 bool process_query_user_layout(const process_t *process,
                                process_user_layout_t *layout);
 int64_t process_user_sbrk(process_t *process, int64_t increment);
+uint64_t process_take_preempt_resume_rip(void);
 bool process_map_user_segment(process_t *process,
                               uintptr_t user_base,
                               size_t bytes,
                               bool writable,
                               bool executable,
                               void **host_ptr_out);
+void process_dump_user_stack(process_t *process,
+                             uintptr_t rsp,
+                             size_t max_entries_above,
+                             size_t max_entries_below);
 process_t *process_create_user_elf(const char *name,
                                    const uint8_t *image,
                                    size_t size,

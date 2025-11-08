@@ -330,6 +330,13 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
             continue;
         }
 
+        bool length_z = false;
+        if (*format == 'z')
+        {
+            length_z = true;
+            ++format;
+        }
+
         char specifier = *format ? *format++ : '\0';
         switch (specifier)
         {
@@ -348,26 +355,58 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
             case 'd':
             case 'i':
             {
-                int value = va_arg(args, int);
-                printf_sink_print_signed(sink, (int64_t)value);
+                if (length_z)
+                {
+                    ssize_t value = va_arg(args, ssize_t);
+                    printf_sink_print_signed(sink, (int64_t)value);
+                }
+                else
+                {
+                    int value = va_arg(args, int);
+                    printf_sink_print_signed(sink, (int64_t)value);
+                }
                 break;
             }
             case 'u':
             {
-                unsigned int value = va_arg(args, unsigned int);
-                printf_sink_print_unsigned(sink, (uint64_t)value, 10, false);
+                if (length_z)
+                {
+                    size_t value = va_arg(args, size_t);
+                    printf_sink_print_unsigned(sink, (uint64_t)value, 10, false);
+                }
+                else
+                {
+                    unsigned int value = va_arg(args, unsigned int);
+                    printf_sink_print_unsigned(sink, (uint64_t)value, 10, false);
+                }
                 break;
             }
             case 'x':
             {
-                unsigned int value = va_arg(args, unsigned int);
-                printf_sink_print_unsigned(sink, (uint64_t)value, 16, false);
+                if (length_z)
+                {
+                    size_t value = va_arg(args, size_t);
+                    printf_sink_print_unsigned(sink, (uint64_t)value, 16, false);
+                }
+                else
+                {
+                    unsigned int value = va_arg(args, unsigned int);
+                    printf_sink_print_unsigned(sink, (uint64_t)value, 16, false);
+                }
                 break;
             }
             case 'X':
             {
-                unsigned int value = va_arg(args, unsigned int);
-                printf_sink_print_unsigned(sink, (uint64_t)value, 16, true);
+                if (length_z)
+                {
+                    size_t value = va_arg(args, size_t);
+                    printf_sink_print_unsigned(sink, (uint64_t)value, 16, true);
+                }
+                else
+                {
+                    unsigned int value = va_arg(args, unsigned int);
+                    printf_sink_print_unsigned(sink, (uint64_t)value, 16, true);
+                }
                 break;
             }
             case 'p':
@@ -380,11 +419,19 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
             case '\0':
             {
                 printf_sink_putc(sink, '%');
+                if (length_z)
+                {
+                    printf_sink_putc(sink, 'z');
+                }
                 return;
             }
             default:
             {
                 printf_sink_putc(sink, '%');
+                if (length_z)
+                {
+                    printf_sink_putc(sink, 'z');
+                }
                 printf_sink_putc(sink, specifier);
                 break;
             }

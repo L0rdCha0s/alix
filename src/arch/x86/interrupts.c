@@ -217,6 +217,11 @@ __attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *fra
 {
     uint64_t fault_address = read_cr2();
     fault_report("page_fault", frame, error_code, true, true, fault_address);
+    process_t *proc = process_current();
+    if (proc)
+    {
+        process_dump_user_stack(proc, frame ? frame->rsp : 0, 24, 8);
+    }
     if (process_handle_exception(frame, "page_fault", error_code, true, fault_address))
     {
         return;
