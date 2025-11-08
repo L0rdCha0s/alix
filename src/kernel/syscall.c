@@ -114,7 +114,12 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     bool create = (flags & SYSCALL_OPEN_CREATE) != 0;
     bool truncate = (flags & SYSCALL_OPEN_TRUNCATE) != 0;
 
-    vfs_node_t *node = vfs_open_file(vfs_root(), path, create, truncate && writable);
+    vfs_node_t *cwd = process_current_cwd();
+    if (!cwd)
+    {
+        cwd = vfs_root();
+    }
+    vfs_node_t *node = vfs_open_file(cwd, path, create, truncate && writable);
     if (!node)
     {
         return -1;

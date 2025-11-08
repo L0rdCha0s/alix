@@ -10,6 +10,14 @@
 #include "vfs.h"
 
 #define INPUT_CAPACITY 256
+#define SHELL_HISTORY_LIMIT 20
+
+static char *cli_history_entries[SHELL_HISTORY_LIMIT];
+static size_t cli_history_start = 0;
+static size_t cli_history_count = 0;
+static size_t cli_history_cursor_from_end = 0;
+static char cli_history_saved_line[INPUT_CAPACITY];
+static bool cli_history_saved_valid = false;
 
 typedef struct
 {
@@ -26,8 +34,11 @@ typedef struct
     bool result;
 } shell_command_task_t;
 
+static bool cli_try_read_char(char *out);
 static char cli_get_char(void);
 static size_t cli_read_line(char *buffer, size_t capacity);
+static bool cli_handle_escape_sequence(char *buffer, size_t *len, size_t capacity);
+static bool cli_wait_for_char(char *out, int attempts);
 static bool is_space(char c);
 static char *trim_whitespace(char *text);
 static void serial_emit_char(char c);
@@ -38,6 +49,13 @@ static char *shell_duplicate_empty(void);
 static char *shell_duplicate_string(const char *text);
 static void shell_command_runner(void *arg);
 static void shell_stream_console_write(void *context, const char *data, size_t len);
+static void cli_history_record(const char *line);
+static bool cli_history_show_previous(char *buffer, size_t *len, size_t capacity);
+static bool cli_history_show_next(char *buffer, size_t *len, size_t capacity);
+static void cli_history_load_current(char *buffer, size_t *len, size_t capacity);
+static void cli_history_load_text(const char *text, char *buffer, size_t *len, size_t capacity);
+static void cli_history_save_current(const char *buffer, size_t len);
+static bool cli_line_is_blank(const char *line);
 
 void shell_output_init_console(shell_output_t *out)
 {
@@ -230,7 +248,7 @@ void shell_output_reset(shell_output_t *out)
 void shell_main(void)
 {
     shell_state_t shell = {
-        .cwd = vfs_root(),
+        .cwd = process_current_cwd(),
         .stream_fn = shell_stream_console_write,
         .stream_context = NULL,
         .stdout_fd = process_current_stdout_fd(),
@@ -249,6 +267,7 @@ void shell_main(void)
         shell_print_prompt();
         size_t len = cli_read_line(input, INPUT_CAPACITY);
         (void)len;
+        cli_history_record(input);
         shell_run_and_display(&shell, input);
     }
 }
@@ -536,28 +555,47 @@ static void shell_print_prompt(void)
     serial_write_string("alex@alix$ ");
 }
 
+static bool cli_try_read_char(char *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (keyboard_try_read(out))
+    {
+        return true;
+    }
+    if (serial_has_char())
+    {
+        *out = serial_read_char();
+        return true;
+    }
+    return false;
+}
+
 static char cli_get_char(void)
 {
     //serial_write_string("In cli_get_char\n");
 
-    while (1)
+    char c;
+    while (!cli_try_read_char(&c))
     {
-        char c;
-        if (keyboard_try_read(&c))
-        {
-            //serial_write_string("shell.c: keyboard_try_read has char\n");
-
-            return c;
-        }
-        if (serial_has_char())
-        {
-            //serial_write_string("shell.c: serial_has_char has char\n");
-
-            return serial_read_char();
-        }
-
         mouse_poll();
     }
+    return c;
+}
+
+static bool cli_wait_for_char(char *out, int attempts)
+{
+    while (attempts-- > 0)
+    {
+        if (cli_try_read_char(out))
+        {
+            return true;
+        }
+        mouse_poll();
+    }
+    return false;
 }
 
 static size_t cli_read_line(char *buffer, size_t capacity)
@@ -568,6 +606,14 @@ static size_t cli_read_line(char *buffer, size_t capacity)
     while (1)
     {
         char c = cli_get_char();
+
+        if (c == 0x1B)
+        {
+            if (cli_handle_escape_sequence(buffer, &len, capacity))
+            {
+                continue;
+            }
+        }
 
         if (c == '\r')
         {
@@ -602,6 +648,44 @@ static size_t cli_read_line(char *buffer, size_t capacity)
     }
 
     //serial_write_string("shell.c: cli_read_line out\n");
+}
+
+static bool cli_handle_escape_sequence(char *buffer, size_t *len, size_t capacity)
+{
+    (void)capacity;
+    if (!buffer || !len)
+    {
+        return true;
+    }
+
+    char next = 0;
+    if (!cli_wait_for_char(&next, 64))
+    {
+        return true;
+    }
+    if (next != '[')
+    {
+        return true;
+    }
+
+    char final = 0;
+    if (!cli_wait_for_char(&final, 64))
+    {
+        return true;
+    }
+
+    switch (final)
+    {
+        case 'A':
+            cli_history_show_previous(buffer, len, capacity);
+            break;
+        case 'B':
+            cli_history_show_next(buffer, len, capacity);
+            break;
+        default:
+            break;
+    }
+    return true;
 }
 
 static bool is_space(char c)
@@ -645,4 +729,177 @@ static void shell_stream_console_write(void *context, const char *data, size_t l
         console_putc(c);
         serial_emit_char(c);
     }
+}
+
+static bool cli_line_is_blank(const char *line)
+{
+    if (!line)
+    {
+        return true;
+    }
+    while (*line)
+    {
+        if (!is_space(*line))
+        {
+            return false;
+        }
+        ++line;
+    }
+    return true;
+}
+
+static void cli_history_record(const char *line)
+{
+    if (cli_line_is_blank(line))
+    {
+        cli_history_cursor_from_end = 0;
+        cli_history_saved_valid = false;
+        return;
+    }
+
+    char *copy = shell_duplicate_string(line);
+    if (!copy)
+    {
+        return;
+    }
+
+    if (cli_history_count < SHELL_HISTORY_LIMIT)
+    {
+        size_t index = (cli_history_start + cli_history_count) % SHELL_HISTORY_LIMIT;
+        cli_history_entries[index] = copy;
+        cli_history_count++;
+    }
+    else
+    {
+        size_t index = cli_history_start;
+        free(cli_history_entries[index]);
+        cli_history_entries[index] = copy;
+        cli_history_start = (cli_history_start + 1) % SHELL_HISTORY_LIMIT;
+    }
+
+    cli_history_cursor_from_end = 0;
+    cli_history_saved_valid = false;
+}
+
+static void cli_history_save_current(const char *buffer, size_t len)
+{
+    if (!buffer)
+    {
+        cli_history_saved_valid = false;
+        return;
+    }
+    if (len >= INPUT_CAPACITY)
+    {
+        len = INPUT_CAPACITY - 1;
+    }
+    memcpy(cli_history_saved_line, buffer, len);
+    cli_history_saved_line[len] = '\0';
+    cli_history_saved_valid = true;
+}
+
+static void cli_history_load_text(const char *text,
+                                  char *buffer,
+                                  size_t *len,
+                                  size_t capacity)
+{
+    if (!buffer || !len || capacity == 0)
+    {
+        return;
+    }
+
+    while (*len > 0)
+    {
+        --(*len);
+        console_backspace();
+        serial_write_string("\b \b");
+    }
+
+    size_t copy_len = 0;
+    if (text)
+    {
+        copy_len = strlen(text);
+    }
+    if (copy_len >= capacity)
+    {
+        copy_len = capacity - 1;
+    }
+    if (copy_len > 0 && text)
+    {
+        memcpy(buffer, text, copy_len);
+    }
+    buffer[copy_len] = '\0';
+    *len = copy_len;
+
+    for (size_t i = 0; i < copy_len; ++i)
+    {
+        char ch = buffer[i];
+        console_putc(ch);
+        serial_write_char(ch);
+    }
+}
+
+static void cli_history_load_current(char *buffer, size_t *len, size_t capacity)
+{
+    if (cli_history_cursor_from_end == 0)
+    {
+        if (cli_history_saved_valid)
+        {
+            cli_history_load_text(cli_history_saved_line, buffer, len, capacity);
+            cli_history_saved_valid = false;
+        }
+        else
+        {
+            cli_history_load_text("", buffer, len, capacity);
+        }
+        return;
+    }
+
+    if (cli_history_count == 0)
+    {
+        cli_history_load_text("", buffer, len, capacity);
+        return;
+    }
+
+    size_t offset = cli_history_count - cli_history_cursor_from_end;
+    size_t slot = (cli_history_start + offset) % SHELL_HISTORY_LIMIT;
+    const char *entry = cli_history_entries[slot];
+    cli_history_load_text(entry ? entry : "", buffer, len, capacity);
+}
+
+static bool cli_history_show_previous(char *buffer, size_t *len, size_t capacity)
+{
+    if (!buffer || !len || capacity == 0)
+    {
+        return true;
+    }
+    if (cli_history_count == 0)
+    {
+        return true;
+    }
+    if (cli_history_cursor_from_end >= cli_history_count)
+    {
+        return true;
+    }
+    if (cli_history_cursor_from_end == 0)
+    {
+        cli_history_save_current(buffer, *len);
+    }
+    cli_history_cursor_from_end++;
+    cli_history_load_current(buffer, len, capacity);
+    return true;
+}
+
+static bool cli_history_show_next(char *buffer, size_t *len, size_t capacity)
+{
+    if (!buffer || !len || capacity == 0)
+    {
+        return true;
+    }
+    if (cli_history_cursor_from_end == 0)
+    {
+        return true;
+    }
+    cli_history_cursor_from_end--;
+    cli_history_load_current(buffer, len, capacity);
+    return true;
 }

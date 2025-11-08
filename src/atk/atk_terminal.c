@@ -8,6 +8,7 @@
 #define ATK_TERMINAL_MAX_PARAMS 8
 #define ATK_TERMINAL_TAB_WIDTH 8
 #define ATK_TERMINAL_SCROLLBACK_LINES 500
+#define ATK_TERMINAL_HISTORY_LIMIT 20
 
 typedef enum
 {
@@ -15,6 +16,13 @@ typedef enum
     TERM_PARSE_ESC,
     TERM_PARSE_CSI
 } term_parse_state_t;
+
+typedef enum
+{
+    TERM_INPUT_NORMAL = 0,
+    TERM_INPUT_ESC,
+    TERM_INPUT_ESC_BRACKET
+} term_input_state_t;
 
 typedef struct
 {
@@ -62,6 +70,13 @@ typedef struct
     char *input_buffer;
     size_t input_length;
     size_t input_capacity;
+    char *history_entries[ATK_TERMINAL_HISTORY_LIMIT];
+    size_t history_start;
+    size_t history_count;
+    size_t history_cursor_from_end;
+    char *history_saved_line;
+    bool history_saved_valid;
+    term_input_state_t input_state;
 } atk_terminal_priv_t;
 
 static const atk_widget_vtable_t terminal_vtable = { 0 };
@@ -90,6 +105,16 @@ static void terminal_clamp_view_offset(atk_terminal_priv_t *priv);
 static void terminal_update_scrollbar(atk_terminal_priv_t *priv);
 static void terminal_scrollbar_changed(atk_widget_t *scrollbar, void *context, int value);
 static size_t terminal_scrollback_offset(const atk_terminal_priv_t *priv, int logical_index);
+static void terminal_history_clear(atk_terminal_priv_t *priv);
+static void terminal_history_reset_navigation(atk_terminal_priv_t *priv);
+static bool terminal_history_is_blank(const char *line);
+static void terminal_history_add(atk_terminal_priv_t *priv, const char *line);
+static void terminal_history_save_current(atk_terminal_priv_t *priv);
+static void terminal_history_load_current(atk_terminal_priv_t *priv);
+static void terminal_history_load_text(atk_terminal_priv_t *priv, const char *text);
+static bool terminal_history_show_previous(atk_terminal_priv_t *priv);
+static bool terminal_history_show_next(atk_terminal_priv_t *priv);
+static void terminal_clear_input(atk_terminal_priv_t *priv);
 
 static atk_terminal_priv_t *terminal_priv_mut(atk_widget_t *terminal)
 {
@@ -358,6 +383,47 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch)
         return false;
     }
 
+    if (priv->input_state == TERM_INPUT_ESC)
+    {
+        if (ch == '[')
+        {
+            priv->input_state = TERM_INPUT_ESC_BRACKET;
+        }
+        else
+        {
+            priv->input_state = TERM_INPUT_NORMAL;
+        }
+        return true;
+    }
+    if (priv->input_state == TERM_INPUT_ESC_BRACKET)
+    {
+        bool handled = false;
+        if (ch == 'A')
+        {
+            handled = terminal_history_show_previous(priv);
+        }
+        else if (ch == 'B')
+        {
+            handled = terminal_history_show_next(priv);
+        }
+        priv->input_state = TERM_INPUT_NORMAL;
+        if (handled)
+        {
+            terminal_invalidate(terminal);
+        }
+        return true;
+    }
+
+    if (ch == 0x1B)
+    {
+        priv->input_state = TERM_INPUT_ESC;
+        return true;
+    }
+    else
+    {
+        priv->input_state = TERM_INPUT_NORMAL;
+    }
+
     if (ch == 0x03)
     {
         if (priv->control_handler &&
@@ -382,6 +448,8 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch)
             priv->input_length = 0;
         }
         priv->input_buffer[priv->input_length] = '\0';
+        terminal_history_add(priv, priv->input_buffer ? priv->input_buffer : "");
+        terminal_history_reset_navigation(priv);
         if (priv->submit)
         {
             priv->submit(terminal, priv->submit_context, priv->input_buffer ? priv->input_buffer : "");
@@ -447,6 +515,11 @@ void atk_terminal_clear_input(atk_widget_t *terminal)
         return;
     }
     priv->input_length = 0;
+    if (priv->input_buffer && priv->input_capacity > 0)
+    {
+        priv->input_buffer[0] = '\0';
+    }
+    terminal_history_reset_navigation(priv);
 }
 
 void atk_terminal_focus(atk_state_t *state, atk_widget_t *terminal)
@@ -648,6 +721,7 @@ void atk_terminal_destroy(atk_widget_t *terminal)
         free(priv->input_buffer);
         priv->input_buffer = NULL;
     }
+    terminal_history_clear(priv);
 
     priv->list_node = NULL;
     priv->submit = NULL;
@@ -656,6 +730,250 @@ void atk_terminal_destroy(atk_widget_t *terminal)
 }
 
 /* --------- Internal helpers --------- */
+
+static void terminal_history_clear(atk_terminal_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    for (size_t i = 0; i < ATK_TERMINAL_HISTORY_LIMIT; ++i)
+    {
+        if (priv->history_entries[i])
+        {
+            free(priv->history_entries[i]);
+            priv->history_entries[i] = NULL;
+        }
+    }
+    if (priv->history_saved_line)
+    {
+        free(priv->history_saved_line);
+        priv->history_saved_line = NULL;
+    }
+    priv->history_start = 0;
+    priv->history_count = 0;
+    priv->history_cursor_from_end = 0;
+    priv->history_saved_valid = false;
+}
+
+static void terminal_history_reset_navigation(atk_terminal_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    priv->history_cursor_from_end = 0;
+    if (priv->history_saved_line)
+    {
+        free(priv->history_saved_line);
+        priv->history_saved_line = NULL;
+    }
+    priv->history_saved_valid = false;
+}
+
+static bool terminal_history_is_blank(const char *line)
+{
+    if (!line)
+    {
+        return true;
+    }
+    while (*line)
+    {
+        if (*line != ' ' && *line != '\t')
+        {
+            return false;
+        }
+        ++line;
+    }
+    return true;
+}
+
+static void terminal_history_add(atk_terminal_priv_t *priv, const char *line)
+{
+    if (!priv || !line || terminal_history_is_blank(line))
+    {
+        terminal_history_reset_navigation(priv);
+        return;
+    }
+
+    size_t len = strlen(line);
+    char *copy = (char *)malloc(len + 1);
+    if (!copy)
+    {
+        return;
+    }
+    memcpy(copy, line, len + 1);
+
+    if (priv->history_count < ATK_TERMINAL_HISTORY_LIMIT)
+    {
+        size_t index = (priv->history_start + priv->history_count) % ATK_TERMINAL_HISTORY_LIMIT;
+        priv->history_entries[index] = copy;
+        priv->history_count++;
+    }
+    else
+    {
+        size_t index = priv->history_start;
+        if (priv->history_entries[index])
+        {
+            free(priv->history_entries[index]);
+        }
+        priv->history_entries[index] = copy;
+        priv->history_start = (priv->history_start + 1) % ATK_TERMINAL_HISTORY_LIMIT;
+    }
+
+    terminal_history_reset_navigation(priv);
+}
+
+static void terminal_history_save_current(atk_terminal_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+
+    size_t len = priv->input_length;
+    char *source = priv->input_buffer;
+    size_t alloc_len = len + 1;
+    if (alloc_len == 0)
+    {
+        alloc_len = 1;
+    }
+
+    char *copy = (char *)malloc(alloc_len);
+    if (!copy)
+    {
+        priv->history_saved_valid = false;
+        return;
+    }
+    if (len > 0 && source)
+    {
+        memcpy(copy, source, len);
+    }
+    copy[len] = '\0';
+
+    if (priv->history_saved_line)
+    {
+        free(priv->history_saved_line);
+    }
+    priv->history_saved_line = copy;
+    priv->history_saved_valid = true;
+}
+
+static void terminal_clear_input(atk_terminal_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    while (priv->input_length > 0)
+    {
+        priv->input_length--;
+        terminal_backspace(priv);
+    }
+    if (priv->input_buffer && priv->input_capacity > 0)
+    {
+        priv->input_buffer[0] = '\0';
+    }
+}
+
+static void terminal_history_load_text(atk_terminal_priv_t *priv, const char *text)
+{
+    if (!priv)
+    {
+        return;
+    }
+
+    size_t text_len = text ? strlen(text) : 0;
+    if (!terminal_ensure_input_capacity(priv, text_len))
+    {
+        return;
+    }
+
+    terminal_clear_input(priv);
+
+    if (text_len > 0 && text)
+    {
+        memcpy(priv->input_buffer, text, text_len);
+    }
+    priv->input_length = text_len;
+    if (priv->input_buffer)
+    {
+        priv->input_buffer[text_len] = '\0';
+    }
+
+    for (size_t i = 0; i < text_len; ++i)
+    {
+        terminal_handle_printable(priv, text[i]);
+    }
+}
+
+static void terminal_history_load_current(atk_terminal_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+
+    if (priv->history_cursor_from_end == 0)
+    {
+        if (priv->history_saved_valid && priv->history_saved_line)
+        {
+            terminal_history_load_text(priv, priv->history_saved_line);
+        }
+        else
+        {
+            terminal_history_load_text(priv, "");
+        }
+        if (priv->history_saved_line)
+        {
+            free(priv->history_saved_line);
+            priv->history_saved_line = NULL;
+        }
+        priv->history_saved_valid = false;
+        return;
+    }
+
+    if (priv->history_count == 0)
+    {
+        terminal_history_load_text(priv, "");
+        return;
+    }
+
+    size_t offset = priv->history_count - priv->history_cursor_from_end;
+    size_t slot = (priv->history_start + offset) % ATK_TERMINAL_HISTORY_LIMIT;
+    const char *entry = priv->history_entries[slot];
+    terminal_history_load_text(priv, entry ? entry : "");
+}
+
+static bool terminal_history_show_previous(atk_terminal_priv_t *priv)
+{
+    if (!priv || priv->history_count == 0)
+    {
+        return false;
+    }
+    if (priv->history_cursor_from_end >= priv->history_count)
+    {
+        return false;
+    }
+    if (priv->history_cursor_from_end == 0 && !priv->history_saved_valid)
+    {
+        terminal_history_save_current(priv);
+    }
+    priv->history_cursor_from_end++;
+    terminal_history_load_current(priv);
+    return true;
+}
+
+static bool terminal_history_show_next(atk_terminal_priv_t *priv)
+{
+    if (!priv || priv->history_cursor_from_end == 0)
+    {
+        return false;
+    }
+    priv->history_cursor_from_end--;
+    terminal_history_load_current(priv);
+    return true;
+}
 
 static void terminal_invalidate(const atk_widget_t *terminal)
 {
@@ -750,6 +1068,8 @@ static void terminal_reset_state(atk_terminal_priv_t *priv)
     priv->scrollback_count = 0;
     priv->scrollback_start = 0;
     priv->view_offset = 0;
+    terminal_history_clear(priv);
+    priv->input_state = TERM_INPUT_NORMAL;
     terminal_update_scrollbar(priv);
 }
 
@@ -850,11 +1170,24 @@ static void terminal_carriage_return(atk_terminal_priv_t *priv)
 
 static void terminal_backspace(atk_terminal_priv_t *priv)
 {
+    if (!priv)
+    {
+        return;
+    }
     if (priv->cursor_col > 0)
     {
         priv->cursor_col--;
-        terminal_set_cell(priv, priv->cursor_row, priv->cursor_col, ' ');
     }
+    else if (priv->cursor_row > 0)
+    {
+        priv->cursor_row--;
+        priv->cursor_col = priv->cols > 0 ? priv->cols - 1 : 0;
+    }
+    else
+    {
+        return;
+    }
+    terminal_set_cell(priv, priv->cursor_row, priv->cursor_col, ' ');
 }
 
 static void terminal_horizontal_tab(atk_terminal_priv_t *priv)

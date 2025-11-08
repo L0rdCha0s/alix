@@ -400,7 +400,7 @@ static void atk_apply_default_theme(atk_state_t *state)
         return;
     }
 
-    state->theme.background = video_make_color(0xFF, 0x80, 0x20);
+    state->theme.background = video_make_color(0x3B, 0x6E, 0xA5);
     state->theme.window_border = video_make_color(0x20, 0x20, 0x20);
     state->theme.window_title = video_make_color(0x30, 0x60, 0xA0);
     state->theme.window_title_text = video_make_color(0xFF, 0xFF, 0xFF);

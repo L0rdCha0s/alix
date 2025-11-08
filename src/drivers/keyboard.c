@@ -19,6 +19,11 @@ static volatile size_t buffer_head = 0;
 static volatile size_t buffer_tail = 0;
 static uint8_t key_down[128];
 
+#define KBD_PENDING_CHARS 16
+static char pending_chars[KBD_PENDING_CHARS];
+static size_t pending_start = 0;
+static size_t pending_count = 0;
+
 static bool buffer_empty(void)
 {
     return buffer_head == buffer_tail;
@@ -109,10 +114,48 @@ static void keyboard_reset_state(void)
         key_down[i] = 0;
     }
 
+    pending_start = 0;
+    pending_count = 0;
+
     /* Drain any outstanding scancodes the firmware may have queued. */
     uint8_t discard;
     while (read_scancode(&discard))
     {
+    }
+}
+
+static bool pending_pop_char(char *ch)
+{
+    if (pending_count == 0 || !ch)
+    {
+        return false;
+    }
+    *ch = pending_chars[pending_start];
+    pending_start = (pending_start + 1) % KBD_PENDING_CHARS;
+    pending_count--;
+    return true;
+}
+
+static void pending_push_char(char ch)
+{
+    if (pending_count >= KBD_PENDING_CHARS)
+    {
+        return;
+    }
+    size_t index = (pending_start + pending_count) % KBD_PENDING_CHARS;
+    pending_chars[index] = ch;
+    pending_count++;
+}
+
+static void pending_push_sequence(const char *seq, size_t len)
+{
+    if (!seq || len == 0)
+    {
+        return;
+    }
+    for (size_t i = 0; i < len; ++i)
+    {
+        pending_push_char(seq[i]);
     }
 }
 
@@ -124,6 +167,11 @@ void keyboard_init(void)
 
 bool keyboard_try_read(char *out_char)
 {
+    if (pending_pop_char(out_char))
+    {
+        return true;
+    }
+
     //serial_write_string("keybaord.c: keyboard_try_read\n");
 
 
@@ -211,6 +259,27 @@ bool keyboard_try_read(char *out_char)
             return false;
         }
         key_down[scancode] = 1;
+    }
+
+    if (extended && !released)
+    {
+        switch (scancode)
+        {
+            case 0x48: /* Up */
+                pending_push_sequence("\x1B[A", 3);
+                return pending_pop_char(out_char);
+            case 0x50: /* Down */
+                pending_push_sequence("\x1B[B", 3);
+                return pending_pop_char(out_char);
+            case 0x4B: /* Left */
+                pending_push_sequence("\x1B[D", 3);
+                return pending_pop_char(out_char);
+            case 0x4D: /* Right */
+                pending_push_sequence("\x1B[C", 3);
+                return pending_pop_char(out_char);
+            default:
+                break;
+        }
     }
 
     bool shift_active = (left_shift_pressed | right_shift_pressed) != 0;

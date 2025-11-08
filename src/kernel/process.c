@@ -158,6 +158,7 @@ struct process
     process_t *first_child;
     process_t *sibling_prev;
     process_t *sibling_next;
+    vfs_node_t *cwd;
     process_user_region_t *user_regions;
     uintptr_t user_entry_point;
     uintptr_t user_stack_top;
@@ -514,6 +515,7 @@ static process_t *allocate_process(const char *name, bool is_user)
     proc->first_child = NULL;
     proc->sibling_prev = NULL;
     proc->sibling_next = NULL;
+    proc->cwd = NULL;
     proc->user_regions = NULL;
     proc->user_entry_point = 0;
     proc->user_stack_top = 0;
@@ -1093,10 +1095,18 @@ static process_t *process_finalize_new_process(process_t *proc,
     g_process_list = proc;
 
     process_t *actual_parent = parent ? parent : g_current_process;
+    vfs_node_t *inherit_cwd = NULL;
     if (actual_parent)
     {
         process_attach_child(actual_parent, proc);
+        inherit_cwd = actual_parent->cwd;
     }
+
+    if (!inherit_cwd)
+    {
+        inherit_cwd = vfs_root();
+    }
+    proc->cwd = inherit_cwd;
 
     enqueue_thread(thread);
     return proc;
@@ -2194,6 +2204,35 @@ uint64_t process_current_pid(void)
         return 0;
     }
     return g_current_process->pid;
+}
+
+vfs_node_t *process_current_cwd(void)
+{
+    process_t *proc = process_current();
+    if (!proc || !proc->cwd)
+    {
+        return vfs_root();
+    }
+    return proc->cwd;
+}
+
+void process_set_cwd(process_t *process, vfs_node_t *dir)
+{
+    if (!process)
+    {
+        return;
+    }
+
+    vfs_node_t *target = dir;
+    if (target && !vfs_is_dir(target))
+    {
+        return;
+    }
+    if (!target)
+    {
+        target = vfs_root();
+    }
+    process->cwd = target;
 }
 
 uint64_t process_take_preempt_resume_rip(void)

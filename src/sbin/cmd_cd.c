@@ -27,5 +27,10 @@ bool shell_cmd_cd(shell_state_t *shell, shell_output_t *out, const char *path)
     }
 
     shell->cwd = target;
+    process_set_cwd(process_current(), target);
+    if (shell && shell->owner_process)
+    {
+        process_set_cwd(shell->owner_process, target);
+    }
     return true;
 }

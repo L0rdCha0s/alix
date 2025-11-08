@@ -66,7 +66,7 @@ bool atk_shell_open(atk_state_t *state)
     view->state = state;
     view->window = window;
     view->terminal = NULL;
-    view->shell.cwd = vfs_root();
+    view->shell.cwd = process_current_cwd();
     view->shell.stdout_fd = process_current_stdout_fd();
     view->shell.stream_fn = atk_shell_stream_write;
     view->shell.stream_context = view;

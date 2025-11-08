@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "interrupts.h"
+#include "vfs.h"
 
 #define PROCESS_NAME_MAX 32
 #define PROCESS_DEFAULT_STACK_SIZE (128UL * 1024UL)
@@ -85,6 +86,8 @@ void process_kill_tree(process_t *process);
 process_t *process_current(void);
 thread_t *thread_current(void);
 uint64_t process_current_pid(void);
+vfs_node_t *process_current_cwd(void);
+void process_set_cwd(process_t *process, vfs_node_t *dir);
 int process_current_stdout_fd(void);
 ssize_t process_stdout_write(const char *data, size_t len);
 
