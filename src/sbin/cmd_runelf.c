@@ -4,48 +4,96 @@
 #include "libc.h"
 #include "process.h"
 
-static const char *skip_spaces(const char *text)
+static void free_tokens(char **tokens, size_t count)
 {
-    while (text && (*text == ' ' || *text == '\t'))
+    if (!tokens)
     {
-        ++text;
+        return;
     }
-    return text;
+    for (size_t i = 0; i < count; ++i)
+    {
+        free(tokens[i]);
+    }
+    free(tokens);
 }
 
-static char *extract_path_argument(const char *args)
+static bool tokenize_arguments(const char *args, char ***tokens_out, size_t *count_out)
 {
-    const char *start = skip_spaces(args ? args : "");
-    if (!start || *start == '\0')
+    if (!tokens_out || !count_out)
     {
-        return NULL;
+        return false;
+    }
+    *tokens_out = NULL;
+    *count_out = 0;
+
+    const char *cursor = args ? args : "";
+    size_t capacity = 0;
+    char **tokens = NULL;
+    size_t count = 0;
+
+    while (*cursor)
+    {
+        while (*cursor == ' ' || *cursor == '\t')
+        {
+            ++cursor;
+        }
+        if (*cursor == '\0')
+        {
+            break;
+        }
+
+        const char *start = cursor;
+        while (*cursor && *cursor != ' ' && *cursor != '\t')
+        {
+            ++cursor;
+        }
+        size_t len = (size_t)(cursor - start);
+        char *token = (char *)malloc(len + 1);
+        if (!token)
+        {
+            free_tokens(tokens, count);
+            return false;
+        }
+        memcpy(token, start, len);
+        token[len] = '\0';
+
+        if (count >= capacity)
+        {
+            size_t new_capacity = (capacity == 0) ? 4 : capacity * 2;
+            char **new_tokens = (char **)realloc(tokens, new_capacity * sizeof(char *));
+            if (!new_tokens)
+            {
+                free(token);
+                free_tokens(tokens, count);
+                return false;
+            }
+            tokens = new_tokens;
+            capacity = new_capacity;
+        }
+        tokens[count++] = token;
     }
 
-    const char *end = start;
-    while (*end && *end != ' ' && *end != '\t')
-    {
-        ++end;
-    }
-
-    size_t length = (size_t)(end - start);
-    char *path = (char *)malloc(length + 1);
-    if (!path)
-    {
-        return NULL;
-    }
-    memcpy(path, start, length);
-    path[length] = '\0';
-    return path;
+    *tokens_out = tokens;
+    *count_out = count;
+    return true;
 }
 
 bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *args)
 {
-    char *path = extract_path_argument(args);
-    if (!path)
+    char **tokens = NULL;
+    size_t token_count = 0;
+    if (!tokenize_arguments(args, &tokens, &token_count))
     {
+        free_tokens(tokens, token_count);
+        return shell_output_error(out, "runelf: failed to parse args");
+    }
+    if (token_count == 0)
+    {
+        free_tokens(tokens, token_count);
         return shell_output_error(out, "runelf: path required");
     }
 
+    char *path = tokens[0];
     vfs_node_t *cwd = (shell && shell->cwd) ? shell->cwd : vfs_root();
     vfs_node_t *node = vfs_resolve(cwd, path);
     if (!node)
@@ -56,7 +104,7 @@ bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *arg
 
     if (!node || !vfs_is_file(node))
     {
-        free(path);
+        free_tokens(tokens, token_count);
         return shell_output_error(out, "runelf: file not found");
     }
 
@@ -64,7 +112,7 @@ bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *arg
     const char *data = vfs_data(node, &size);
     if (!data || size == 0)
     {
-        free(path);
+        free_tokens(tokens, token_count);
         return shell_output_error(out, "runelf: empty file");
     }
 
@@ -72,8 +120,10 @@ bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *arg
                                                           (const uint8_t *)data,
                                                           size,
                                                           -1,
-                                                          process_current());
-    free(path);
+                                                          process_current(),
+                                                          (const char *const *)tokens,
+                                                          token_count);
+    free_tokens(tokens, token_count);
 
     if (!proc)
     {
@@ -81,5 +131,6 @@ bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *arg
     }
 
     process_join(proc, NULL);
+    process_destroy(proc);
     return true;
 }

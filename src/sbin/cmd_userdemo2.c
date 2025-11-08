@@ -35,12 +35,15 @@ bool shell_cmd_userdemo2(shell_state_t *shell, shell_output_t *out, const char *
                                                           (const uint8_t *)data,
                                                           size,
                                                           -1,
-                                                          process_current());
+                                                          process_current(),
+                                                          NULL,
+                                                          0);
     if (!proc)
     {
         return shell_output_error(out, "userdemo2: failed to start process");
     }
 
     process_join(proc, NULL);
+    process_destroy(proc);
     return true;
 }

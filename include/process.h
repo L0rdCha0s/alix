@@ -111,11 +111,15 @@ bool process_map_user_segment(process_t *process,
 process_t *process_create_user_elf(const char *name,
                                    const uint8_t *image,
                                    size_t size,
-                                   int stdout_fd);
+                                   int stdout_fd,
+                                   const char *const *argv,
+                                   size_t argc);
 process_t *process_create_user_elf_with_parent(const char *name,
                                                const uint8_t *image,
                                                size_t size,
                                                int stdout_fd,
-                                               process_t *parent);
+                                               process_t *parent,
+                                               const char *const *argv,
+                                               size_t argc);
 
 #endif

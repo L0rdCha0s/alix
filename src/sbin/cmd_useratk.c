@@ -35,12 +35,15 @@ bool shell_cmd_useratk(shell_state_t *shell, shell_output_t *out, const char *ar
                                                           (const uint8_t *)data,
                                                           size,
                                                           -1,
-                                                          process_current());
+                                                          process_current(),
+                                                          NULL,
+                                                          0);
     if (!proc)
     {
         return shell_output_error(out, "useratk: failed to start process");
     }
 
     process_join(proc, NULL);
+    process_destroy(proc);
     return true;
 }

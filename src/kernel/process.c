@@ -63,6 +63,8 @@ typedef struct user_thread_bootstrap
 {
     uintptr_t entry;
     uintptr_t stack_top;
+    uint64_t argc;
+    uintptr_t argv_ptr;
 } user_thread_bootstrap_t;
 
 static const uint8_t g_user_exit_stub[] = {
@@ -156,6 +158,14 @@ struct process
     uintptr_t user_heap_base;
     uintptr_t user_heap_brk;
     uintptr_t user_heap_limit;
+    uint8_t *user_stack_host;
+    uintptr_t user_initial_stack;
+    size_t arg_count;
+    char **arg_values;
+    char *arg_storage;
+    size_t arg_storage_size;
+    size_t user_argc;
+    uintptr_t user_argv_ptr;
 };
 
 static process_t *g_process_list = NULL;
@@ -657,17 +667,19 @@ bool process_map_user_segment(process_t *process,
 
 static bool process_setup_user_stack(process_t *process)
 {
+    void *host = NULL;
     if (!process_map_user_segment(process,
                                   USER_STACK_TOP - USER_STACK_SIZE,
                                   USER_STACK_SIZE,
                                   true,
                                   false,
-                                  NULL))
+                                  &host))
     {
         return false;
     }
     process->user_stack_top = USER_STACK_TOP;
     process->user_stack_size = USER_STACK_SIZE;
+    process->user_stack_host = (uint8_t *)host;
     return true;
 }
 
@@ -686,6 +698,203 @@ static bool process_setup_user_heap(process_t *process)
     process->user_heap_base = USER_HEAP_BASE;
     process->user_heap_brk = USER_HEAP_BASE;
     process->user_heap_limit = USER_HEAP_BASE + USER_HEAP_SIZE;
+    return true;
+}
+
+static void process_clear_args(process_t *process)
+{
+    if (!process)
+    {
+        return;
+    }
+    if (process->arg_values)
+    {
+        free(process->arg_values);
+        process->arg_values = NULL;
+    }
+    if (process->arg_storage)
+    {
+        free(process->arg_storage);
+        process->arg_storage = NULL;
+    }
+    process->arg_storage_size = 0;
+    process->arg_count = 0;
+}
+
+static bool process_store_args(process_t *process,
+                               const char *const *argv,
+                               size_t argc)
+{
+    if (!process)
+    {
+        return false;
+    }
+
+    process_clear_args(process);
+
+    if (!argv || argc == 0)
+    {
+        return true;
+    }
+
+    char **values = (char **)malloc(sizeof(char *) * argc);
+    if (!values)
+    {
+        return false;
+    }
+
+    size_t total_bytes = 0;
+    for (size_t i = 0; i < argc; ++i)
+    {
+        const char *arg = argv[i] ? argv[i] : "";
+        total_bytes += strlen(arg) + 1;
+    }
+    if (total_bytes == 0)
+    {
+        total_bytes = 1;
+    }
+
+    char *storage = (char *)malloc(total_bytes);
+    if (!storage)
+    {
+        free(values);
+        return false;
+    }
+
+    size_t offset = 0;
+    for (size_t i = 0; i < argc; ++i)
+    {
+        const char *arg = argv[i] ? argv[i] : "";
+        size_t len = strlen(arg);
+        memcpy(storage + offset, arg, len);
+        storage[offset + len] = '\0';
+        values[i] = storage + offset;
+        offset += len + 1;
+    }
+
+    process->arg_values = values;
+    process->arg_storage = storage;
+    process->arg_storage_size = offset;
+    process->arg_count = argc;
+    return true;
+}
+
+static inline bool process_write_stack_uintptr(uint8_t *host_base,
+                                               uintptr_t stack_bottom,
+                                               uintptr_t stack_top,
+                                               uintptr_t addr,
+                                               uintptr_t value)
+{
+    if (!host_base || addr < stack_bottom || addr + sizeof(uintptr_t) > stack_top)
+    {
+        return false;
+    }
+    size_t offset = (size_t)(addr - stack_bottom);
+    memcpy(host_base + offset, &value, sizeof(uintptr_t));
+    return true;
+}
+
+static bool process_prepare_stack_with_args(process_t *process)
+{
+    if (!process || !process->user_stack_host || process->user_stack_size == 0)
+    {
+        return false;
+    }
+
+    uintptr_t stack_top = process->user_stack_top;
+    uintptr_t stack_bottom = stack_top - process->user_stack_size;
+    uint8_t *host = process->user_stack_host;
+
+    size_t argc = process->arg_count;
+    char **argv = process->arg_values;
+
+    uintptr_t sp = stack_top;
+    uintptr_t *arg_ptrs = NULL;
+
+    if (argc > 0)
+    {
+        arg_ptrs = (uintptr_t *)malloc(sizeof(uintptr_t) * argc);
+        if (!arg_ptrs)
+        {
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < argc; ++i)
+    {
+        const char *arg = argv[i] ? argv[i] : "";
+        size_t len = strlen(arg) + 1;
+        if (sp < stack_bottom + len)
+        {
+            free(arg_ptrs);
+            return false;
+        }
+        sp -= len;
+        uintptr_t dst = sp;
+        size_t offset = (size_t)(dst - stack_bottom);
+        memcpy(host + offset, arg, len);
+        arg_ptrs[i] = dst;
+    }
+
+    sp = align_down_uintptr(sp, 16ULL);
+
+    if (sp < stack_bottom + sizeof(uintptr_t))
+    {
+        free(arg_ptrs);
+        return false;
+    }
+
+    if (sp < stack_bottom + sizeof(uintptr_t))
+    {
+        if (arg_ptrs) free(arg_ptrs);
+        return false;
+    }
+    sp -= sizeof(uintptr_t);
+    if (!process_write_stack_uintptr(host, stack_bottom, stack_top, sp, 0))
+    {
+        free(arg_ptrs);
+        return false;
+    }
+
+    for (size_t i = argc; i > 0; --i)
+    {
+        if (sp < stack_bottom + sizeof(uintptr_t))
+        {
+            free(arg_ptrs);
+            return false;
+        }
+        sp -= sizeof(uintptr_t);
+        if (!process_write_stack_uintptr(host, stack_bottom, stack_top, sp, arg_ptrs[i - 1]))
+        {
+            free(arg_ptrs);
+            return false;
+        }
+    }
+
+    uintptr_t argv_ptr = sp;
+
+    if (sp < stack_bottom + sizeof(uintptr_t))
+    {
+        free(arg_ptrs);
+        return false;
+    }
+    sp -= sizeof(uintptr_t);
+    if (!process_write_stack_uintptr(host, stack_bottom, stack_top, sp, (uintptr_t)argc))
+    {
+        free(arg_ptrs);
+        return false;
+    }
+
+    process->user_stack_top = sp;
+    process->user_initial_stack = sp;
+    process->user_argc = argc;
+    process->user_argv_ptr = argv_ptr;
+
+    if (arg_ptrs)
+    {
+        free(arg_ptrs);
+    }
+    process_clear_args(process);
     return true;
 }
 
@@ -1187,7 +1396,9 @@ void process_preempt_hook(void)
 }
 
 static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
-                                                           uintptr_t user_stack_top)
+                                                           uintptr_t user_stack_top,
+                                                           uint64_t argc,
+                                                           uintptr_t argv_ptr)
 {
     uintptr_t aligned_stack = align_down_uintptr(user_stack_top, 16ULL);
     uintptr_t stack_value = aligned_stack;
@@ -1201,19 +1412,24 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
         "mov %[ds], %%rax\n\t"
         "mov %%ax, %%ds\n\t"
         "mov %%ax, %%es\n\t"
-        "xor %%rdi, %%rdi\n\t"
-        "xor %%rsi, %%rsi\n\t"
         "xor %%rdx, %%rdx\n\t"
         "xor %%rcx, %%rcx\n\t"
         "xor %%r8, %%r8\n\t"
         "xor %%r9, %%r9\n\t"
         "xor %%r10, %%r10\n\t"
         "xor %%r11, %%r11\n\t"
-        "push %[ss]\n\t"
-        "pushq %[stack]\n\t"
-        "push %[rflags]\n\t"
-        "push %[cs]\n\t"
-        "pushq %[entry]\n\t"
+        "mov %[ss], %%rax\n\t"
+        "push %%rax\n\t"
+        "mov %[stack], %%rax\n\t"
+        "push %%rax\n\t"
+        "mov %[rflags], %%rax\n\t"
+        "push %%rax\n\t"
+        "mov %[cs], %%rax\n\t"
+        "push %%rax\n\t"
+        "mov %[entry], %%rax\n\t"
+        "push %%rax\n\t"
+        "mov %[argc], %%rdi\n\t"
+        "mov %[argv], %%rsi\n\t"
         "iretq\n\t"
         :
         : [ds]"r"(data_sel),
@@ -1221,8 +1437,10 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
           [stack]"m"(stack_value),
           [rflags]"r"(rflags),
           [cs]"r"(cs),
-          [entry]"m"(entry_value)
-        : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
+          [entry]"m"(entry_value),
+          [argc]"r"(argc),
+          [argv]"r"(argv_ptr)
+        : "rax", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
     __builtin_unreachable();
 }
 
@@ -1238,7 +1456,7 @@ static void user_thread_entry(void *arg)
     {
         fatal("user thread bootstrap missing entry/stack");
     }
-    process_jump_to_user(params.entry, params.stack_top);
+    process_jump_to_user(params.entry, params.stack_top, params.argc, params.argv_ptr);
 }
 
 static void thread_trampoline(void)
@@ -1468,6 +1686,15 @@ static process_t *process_create_user_dummy_internal(const char *name,
         return NULL;
     }
 
+    if (!process_store_args(proc, NULL, 0) || !process_prepare_stack_with_args(proc))
+    {
+        process_clear_args(proc);
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
     user_thread_bootstrap_t *bootstrap = (user_thread_bootstrap_t *)malloc(sizeof(user_thread_bootstrap_t));
     if (!bootstrap)
     {
@@ -1477,7 +1704,9 @@ static process_t *process_create_user_dummy_internal(const char *name,
         return NULL;
     }
     bootstrap->entry = proc->user_entry_point;
-    bootstrap->stack_top = proc->user_stack_top;
+    bootstrap->stack_top = proc->user_initial_stack ? proc->user_initial_stack : proc->user_stack_top;
+    bootstrap->argc = proc->user_argc;
+    bootstrap->argv_ptr = proc->user_argv_ptr;
 
     thread_t *thread = thread_create(proc,
                                      name,
@@ -1502,7 +1731,9 @@ static process_t *process_create_user_elf_internal(const char *name,
                                                    const uint8_t *image,
                                                    size_t size,
                                                    int stdout_fd,
-                                                   process_t *parent)
+                                                   process_t *parent,
+                                                   const char *const *argv,
+                                                   size_t argc)
 {
     if (!image || size == 0)
     {
@@ -1517,6 +1748,15 @@ static process_t *process_create_user_elf_internal(const char *name,
 
     if (!process_setup_basic_user_memory(proc))
     {
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
+    if (!process_store_args(proc, argv, argc) || !process_prepare_stack_with_args(proc))
+    {
+        process_clear_args(proc);
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
         free(proc);
@@ -1551,7 +1791,9 @@ static process_t *process_create_user_elf_internal(const char *name,
         return NULL;
     }
     bootstrap->entry = proc->user_entry_point;
-    bootstrap->stack_top = proc->user_stack_top;
+    bootstrap->stack_top = proc->user_initial_stack ? proc->user_initial_stack : proc->user_stack_top;
+    bootstrap->argc = proc->user_argc;
+    bootstrap->argv_ptr = proc->user_argv_ptr;
 
     thread_t *thread = thread_create(proc,
                                      name,
@@ -1613,18 +1855,22 @@ process_t *process_create_user_dummy_with_parent(const char *name,
 process_t *process_create_user_elf(const char *name,
                                    const uint8_t *image,
                                    size_t size,
-                                   int stdout_fd)
+                                   int stdout_fd,
+                                   const char *const *argv,
+                                   size_t argc)
 {
-    return process_create_user_elf_internal(name, image, size, stdout_fd, NULL);
+    return process_create_user_elf_internal(name, image, size, stdout_fd, NULL, argv, argc);
 }
 
 process_t *process_create_user_elf_with_parent(const char *name,
                                                const uint8_t *image,
                                                size_t size,
                                                int stdout_fd,
-                                               process_t *parent)
+                                               process_t *parent,
+                                               const char *const *argv,
+                                               size_t argc)
 {
-    return process_create_user_elf_internal(name, image, size, stdout_fd, parent);
+    return process_create_user_elf_internal(name, image, size, stdout_fd, parent, argv, argc);
 }
 
 void process_yield(void)

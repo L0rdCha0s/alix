@@ -19,7 +19,7 @@ OBJDIR      := build
 CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
           -m64 -mno-red-zone -mgeneral-regs-only -Wall -Wextra -I$(INCLUDE_DIR) -I$(ATK_DIR) \
           -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
-          -fshort-wchar
+          -fshort-wchar -mfpmath=387 -mno-sse
 
 KERNEL_LD   := $(ARCH_DIR)/uefi.ld
 LOADER_DIR  := src/loader
@@ -52,14 +52,14 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/serial_stub.c \
 	$(USER_DIR)/atk_user_host_stub.c
 USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
-USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o
+USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o $(USER_OBJDIR)/kernel/ttf.o
 USER_LD_SCRIPT := $(USER_DIR)/link.ld
 USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c,$(wildcard $(ATK_DIR)/*.c))
 USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
 USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
-USER_ELFS := $(USER_OBJDIR)/userdemo2.elf $(USER_OBJDIR)/atk_demo.elf
+USER_ELFS := $(USER_OBJDIR)/userdemo2.elf $(USER_OBJDIR)/atk_demo.elf $(USER_OBJDIR)/ttf_demo.elf
 USER_BIN_DIR := build/bin
-USER_BINS := $(USER_BIN_DIR)/userdemo2 $(USER_BIN_DIR)/atk_demo
+USER_BINS := $(USER_BIN_DIR)/userdemo2 $(USER_BIN_DIR)/atk_demo $(USER_BIN_DIR)/ttf_demo
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
 EFI_DIR    := build/EFI/BOOT
@@ -110,11 +110,19 @@ $(USER_OBJDIR)/atk_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_O
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_demo.o
 
+$(USER_OBJDIR)/ttf_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/ttf_demo.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/ttf_demo.o
+
 $(USER_BIN_DIR)/userdemo2: $(USER_OBJDIR)/userdemo2.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 
 $(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/ttf_demo: $(USER_OBJDIR)/ttf_demo.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 
