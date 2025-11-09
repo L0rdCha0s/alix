@@ -11,6 +11,7 @@
 #include "elf.h"
 #include "user_atk_host.h"
 #include "syscall_defs.h"
+#include "user_memory.h"
 
 #define MSR_FS_BASE         0xC0000100
 #define MSR_GS_BASE         0xC0000101
@@ -538,9 +539,9 @@ static void process_free_user_regions(process_t *process)
     while (region)
     {
         process_user_region_t *next = region->next;
-        if (region->raw_allocation)
+        if (region->aligned_allocation && region->mapped_size > 0)
         {
-            free(region->raw_allocation);
+            user_memory_free(region->aligned_allocation, region->mapped_size);
         }
         free(region);
         region = next;
@@ -568,9 +569,9 @@ static void process_unlink_user_region(process_t *process, process_user_region_t
         }
         cursor = &(*cursor)->next;
     }
-    if (region->raw_allocation)
+    if (region->aligned_allocation && region->mapped_size > 0)
     {
-        free(region->raw_allocation);
+        user_memory_free(region->aligned_allocation, region->mapped_size);
     }
     free(region);
 }
@@ -602,24 +603,22 @@ static bool process_user_region_allocate(process_t *process,
     }
 
     size_t aligned_bytes = align_up_size(bytes, PAGE_SIZE_BYTES_LOCAL);
-    size_t raw_bytes = aligned_bytes + PAGE_SIZE_BYTES_LOCAL;
-    uint8_t *raw = (uint8_t *)malloc(raw_bytes);
-    if (!raw)
+    void *host = user_memory_alloc(aligned_bytes);
+    if (!host)
     {
         return false;
     }
-    uintptr_t aligned = align_up_uintptr((uintptr_t)raw, PAGE_SIZE_BYTES_LOCAL);
-    memset((void *)aligned, 0, aligned_bytes);
+    memset(host, 0, aligned_bytes);
 
     process_user_region_t *region = (process_user_region_t *)malloc(sizeof(process_user_region_t));
     if (!region)
     {
-        free(raw);
+        user_memory_free(host, aligned_bytes);
         return false;
     }
 
-    region->raw_allocation = raw;
-    region->aligned_allocation = (void *)aligned;
+    region->raw_allocation = host;
+    region->aligned_allocation = host;
     region->mapped_size = aligned_bytes;
     region->user_base = user_base;
     region->writable = writable;

@@ -21,6 +21,7 @@
 #include "ahci.h"
 #include "logger.h"
 #include "user_atk_host.h"
+#include "user_memory.h"
 #include "libc.h"
 
 typedef struct
@@ -194,6 +195,7 @@ void kernel_main(void)
     console_clear();
 
     heap_init();
+    user_memory_init();
     paging_init();
     serial_write_string("[alix] after paging_init\n");
     process_system_init();

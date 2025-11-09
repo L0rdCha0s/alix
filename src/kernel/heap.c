@@ -23,6 +23,19 @@ static uintptr_t g_heap_start = 0;
 static uintptr_t g_heap_end = 0;
 static bool g_heap_initialized = false;
 
+static inline uint64_t heap_lock_acquire(void)
+{
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("cli" ::: "memory");
+    return flags;
+}
+
+static inline void heap_lock_release(uint64_t flags)
+{
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc");
+}
+
 static size_t align_size(size_t size)
 {
     if (size == 0)
@@ -149,8 +162,10 @@ void heap_init(void)
 
 void *malloc(size_t size)
 {
+    uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized || size == 0)
     {
+        heap_lock_release(flags);
         return NULL;
     }
 
@@ -159,6 +174,7 @@ void *malloc(size_t size)
     heap_block_t *block = find_suitable_block(size);
     if (!block)
     {
+        heap_lock_release(flags);
         return NULL;
     }
 
@@ -168,33 +184,34 @@ void *malloc(size_t size)
     }
 
     block->free = false;
-    return (void *)((uintptr_t)block + sizeof(heap_block_t));
+    void *result = (void *)((uintptr_t)block + sizeof(heap_block_t));
+    heap_lock_release(flags);
+    return result;
 }
 
 void free(void *ptr)
 {
+    uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized || !ptr)
     {
+        heap_lock_release(flags);
         return;
     }
 
     heap_block_t *block = payload_to_block(ptr);
     if (!block || !pointer_in_heap(block) || block->free)
     {
+        heap_lock_release(flags);
         return;
     }
 
     block->free = true;
     coalesce(block);
+    heap_lock_release(flags);
 }
 
 void *calloc(size_t count, size_t size)
 {
-    if (!g_heap_initialized)
-    {
-        return NULL;
-    }
-
     if (count != 0 && size > SIZE_MAX_VALUE / count)
     {
         return NULL;
@@ -237,18 +254,22 @@ static heap_block_t *expand_block(heap_block_t *block, size_t size)
 
 void *realloc(void *ptr, size_t size)
 {
+    uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized)
     {
+        heap_lock_release(flags);
         return NULL;
     }
 
     if (!ptr)
     {
+        heap_lock_release(flags);
         return malloc(size);
     }
 
     if (size == 0)
     {
+        heap_lock_release(flags);
         free(ptr);
         return NULL;
     }
@@ -256,6 +277,7 @@ void *realloc(void *ptr, size_t size)
     heap_block_t *block = payload_to_block(ptr);
     if (!block || !pointer_in_heap(block))
     {
+        heap_lock_release(flags);
         return NULL;
     }
 
@@ -267,15 +289,19 @@ void *realloc(void *ptr, size_t size)
         {
             split_block(block, size);
         }
+        heap_lock_release(flags);
         return ptr;
     }
 
     heap_block_t *expanded = expand_block(block, size);
     if (expanded)
     {
-        return (void *)((uintptr_t)expanded + sizeof(heap_block_t));
+        void *result = (void *)((uintptr_t)expanded + sizeof(heap_block_t));
+        heap_lock_release(flags);
+        return result;
     }
 
+    heap_lock_release(flags);
     void *new_ptr = malloc(size);
     if (!new_ptr)
     {
