@@ -24,6 +24,7 @@
 #include "user_memory.h"
 #include "libc.h"
 #include "procfs.h"
+#include "startup.h"
 
 typedef struct
 {
@@ -116,13 +117,12 @@ static vfs_node_t *ensure_directory_path(const char *path)
 static void mount_default_fstab(void)
 {
     static const fstab_entry_t g_default_fstab[] = {
-        { "ahci1", "/mnt/disk1" },
+        { "ahci1", "/root" },
     };
 
     const size_t entry_count = sizeof(g_default_fstab) / sizeof(g_default_fstab[0]);
 
-    (void)ensure_directory_path("/mnt");
-    (void)ensure_directory_path("/mnt/disk1");
+    (void)ensure_directory_path("/root");
 
     for (size_t i = 0; i < entry_count; ++i)
     {
@@ -211,6 +211,7 @@ void kernel_main(void)
     serial_write_string("[alix] after acpi_init\n");
     vfs_init();
     serial_write_string("[alix] after vfs_init\n");
+    startup_init();
     procfs_init();
     serial_write_string("[alix] after procfs_init\n");
     logger_init();
@@ -255,6 +256,11 @@ void kernel_main(void)
     if (!user_demo)
     {
         serial_write_string("Failed to create demo user process\r\n");
+    }
+
+    if (!startup_schedule())
+    {
+        serial_write_string("Failed to start startup scripts\r\n");
     }
 
     serial_write_string("[alix] starting scheduler\n");

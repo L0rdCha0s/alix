@@ -10,10 +10,9 @@
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
 #include "atk/atk_terminal.h"
+#include "atk/atk_font.h"
 
 /* Forward decl for compilers if video.h doesn't expose it (no harm if duplicated). */
-void video_invalidate_rect(int x, int y, int width, int height);
-
 static void atk_log(const char *msg);
 static void format_window_title(char *buffer, size_t capacity, int id);
 static void window_get_bounds(const atk_widget_t *window, int *x, int *y, int *width, int *height);
@@ -59,7 +58,26 @@ void atk_window_reset_all(atk_state_t *state)
     state->dragging_scrollbar = NULL;
 }
 
-void atk_window_draw_all(const atk_state_t *state)
+static bool window_intersects_clip(const atk_widget_t *window, const atk_rect_t *clip)
+{
+    if (!clip || !window)
+    {
+        return true;
+    }
+    int x0 = window->x - ATK_WINDOW_BORDER;
+    int y0 = window->y - ATK_WINDOW_BORDER;
+    int x1 = x0 + window->width + ATK_WINDOW_BORDER * 2;
+    int y1 = y0 + window->height + ATK_WINDOW_BORDER * 2;
+    int clip_x1 = clip->x + clip->width;
+    int clip_y1 = clip->y + clip->height;
+    if (x1 <= clip->x || y1 <= clip->y || x0 >= clip_x1 || y0 >= clip_y1)
+    {
+        return false;
+    }
+    return true;
+}
+
+void atk_window_draw_all(const atk_state_t *state, const atk_rect_t *clip)
 {
     if (!state)
     {
@@ -71,6 +89,10 @@ void atk_window_draw_all(const atk_state_t *state)
         atk_widget_t *window = (atk_widget_t *)node->value;
         if (window && window->used)
         {
+            if (!window_intersects_clip(window, clip))
+            {
+                continue;
+            }
             window_draw_internal(state, window);
         }
     }
@@ -296,7 +318,7 @@ void atk_window_mark_dirty(const atk_widget_t *window)
     {
         return;
     }
-    video_invalidate_rect(x, y, w, h);
+    atk_dirty_mark_rect(x, y, w, h);
 }
 
 void atk_window_ensure_inside(atk_widget_t *window)
@@ -537,11 +559,12 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
                             ATK_WINDOW_TITLE_HEIGHT,
                             theme->window_border);
 
-    video_draw_text(window->x + ATK_WINDOW_TITLE_PADDING_X,
-                    window->y + ATK_WINDOW_TITLE_TEXT_Y_OFFSET,
-                    priv->title,
-                    theme->window_title_text,
-                    theme->window_title);
+    int title_baseline = atk_font_baseline_for_rect(window->y, ATK_WINDOW_TITLE_HEIGHT);
+    atk_font_draw_string(window->x + ATK_WINDOW_TITLE_PADDING_X,
+                         title_baseline,
+                         priv->title,
+                         theme->window_title_text,
+                         theme->window_title);
 
     video_draw_rect_outline(window->x,
                             window->y,

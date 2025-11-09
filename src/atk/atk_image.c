@@ -210,11 +210,11 @@ int atk_image_stride_bytes(const atk_widget_t *image)
 
 static void atk_image_invalidate(const atk_widget_t *image)
 {
-    if (!image || !image->parent)
+    if (!image)
     {
         return;
     }
-    int origin_x = image->parent->x + image->x;
-    int origin_y = image->parent->y + image->y;
-    video_invalidate_rect(origin_x, origin_y, image->width, image->height);
+    int origin_x = image->parent ? image->parent->x : 0;
+    int origin_y = image->parent ? image->parent->y : 0;
+    atk_dirty_mark_rect(origin_x + image->x, origin_y + image->y, image->width, image->height);
 }

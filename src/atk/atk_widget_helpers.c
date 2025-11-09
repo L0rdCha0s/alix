@@ -6,6 +6,7 @@
 #include "atk/atk_list_view.h"
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_tabs.h"
+#include "atk/atk_menu.h"
 #include "atk/atk_terminal.h"
 #include "atk/atk_text_input.h"
 
@@ -53,6 +54,10 @@ void atk_widget_draw_any(const atk_state_t *state, const atk_widget_t *widget)
     else if (atk_widget_is_a(widget, &ATK_TAB_VIEW_CLASS))
     {
         atk_tab_view_draw(state, widget);
+    }
+    else if (atk_widget_is_a(widget, &ATK_MENU_CLASS))
+    {
+        atk_menu_draw(state, widget);
     }
 }
 
@@ -106,6 +111,10 @@ void atk_widget_destroy_any(atk_widget_t *widget)
     {
         atk_tab_view_destroy(widget);
         atk_widget_destroy(widget);
+    }
+    else if (atk_widget_is_a(widget, &ATK_MENU_CLASS))
+    {
+        atk_menu_destroy(widget);
     }
     else
     {

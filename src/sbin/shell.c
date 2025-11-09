@@ -686,6 +686,7 @@ static char cli_get_char(void)
     while (!cli_try_read_char(&c))
     {
         mouse_poll();
+        process_sleep_ms(5);
     }
     return c;
 }

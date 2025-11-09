@@ -372,7 +372,7 @@ static void scrollbar_invalidate(const atk_widget_t *scrollbar)
     }
     int origin_x = scrollbar->parent->x + scrollbar->x;
     int origin_y = scrollbar->parent->y + scrollbar->y;
-    video_invalidate_rect(origin_x, origin_y, scrollbar->width, scrollbar->height);
+    atk_dirty_mark_rect(origin_x, origin_y, scrollbar->width, scrollbar->height);
     video_request_refresh_window(scrollbar->parent);
 }
 

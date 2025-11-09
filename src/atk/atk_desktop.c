@@ -22,7 +22,28 @@ void atk_desktop_reset(atk_state_t *state)
     state->desktop_drag_moved = false;
 }
 
-void atk_desktop_draw_buttons(const atk_state_t *state)
+static bool desktop_button_intersects(const atk_rect_t *clip,
+                                      const atk_widget_t *widget,
+                                      int effective_height)
+{
+    if (!clip || !widget)
+    {
+        return true;
+    }
+    int x0 = widget->x;
+    int y0 = widget->y;
+    int x1 = x0 + widget->width;
+    int y1 = y0 + effective_height;
+    int clip_x1 = clip->x + clip->width;
+    int clip_y1 = clip->y + clip->height;
+    if (x1 <= clip->x || y1 <= clip->y || x0 >= clip_x1 || y0 >= clip_y1)
+    {
+        return false;
+    }
+    return true;
+}
+
+void atk_desktop_draw_buttons(const atk_state_t *state, const atk_rect_t *clip)
 {
     if (!state)
     {
@@ -34,6 +55,11 @@ void atk_desktop_draw_buttons(const atk_state_t *state)
         atk_widget_t *widget = (atk_widget_t *)node->value;
         if (widget && widget->used)
         {
+            int eff_height = atk_button_effective_height(widget);
+            if (!desktop_button_intersects(clip, widget, eff_height))
+            {
+                continue;
+            }
             atk_button_draw(state, widget, 0, 0);
         }
     }
@@ -88,6 +114,7 @@ atk_widget_t *atk_desktop_add_button(atk_state_t *state,
         priv->list_node = node;
     }
 
+    atk_dirty_mark_rect(widget->x, widget->y, widget->width, atk_button_effective_height(widget));
     return widget;
 }
 

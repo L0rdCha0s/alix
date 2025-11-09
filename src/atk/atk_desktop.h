@@ -4,7 +4,7 @@
 #include "atk_button.h"
 
 void atk_desktop_reset(atk_state_t *state);
-void atk_desktop_draw_buttons(const atk_state_t *state);
+void atk_desktop_draw_buttons(const atk_state_t *state, const atk_rect_t *clip);
 atk_widget_t *atk_desktop_add_button(atk_state_t *state,
                                      int x,
                                      int y,

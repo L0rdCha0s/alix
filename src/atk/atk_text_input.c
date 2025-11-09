@@ -31,7 +31,7 @@ static void text_input_invalidate(const atk_widget_t *input)
     }
     int origin_x = input->parent->x + input->x;
     int origin_y = input->parent->y + input->y;
-    video_invalidate_rect(origin_x, origin_y, input->width, input->height);
+    atk_dirty_mark_rect(origin_x, origin_y, input->width, input->height);
 }
 
 static bool text_input_ensure_capacity(atk_text_input_priv_t *priv, size_t extra)

@@ -457,14 +457,9 @@ static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
 
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
 {
-    video_log_hex("blit x=", (uint64_t)x);
-    video_log_hex("blit y=", (uint64_t)y);
-    video_log_hex("blit w=", (uint64_t)width);
-    video_log_hex("blit h=", (uint64_t)height);
-    video_log_hex("blit src=", (uint64_t)(uintptr_t)pixels);
+
     if (!pixels || width <= 0 || height <= 0) return;
     if (stride_bytes <= 0) stride_bytes = width * 2;
-    video_log_hex("blit stride=", (uint64_t)stride_bytes);
 
     int x0 = x, y0 = y;
     int x1 = x + width, y1 = y + height;

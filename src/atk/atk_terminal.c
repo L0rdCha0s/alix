@@ -983,7 +983,7 @@ static void terminal_invalidate(const atk_widget_t *terminal)
     }
     int origin_x = terminal->parent->x + terminal->x;
     int origin_y = terminal->parent->y + terminal->y;
-    video_invalidate_rect(origin_x, origin_y, terminal->width, terminal->height);
+    atk_dirty_mark_rect(origin_x, origin_y, terminal->width, terminal->height);
     video_request_refresh_window(terminal->parent);
 }
 

@@ -4,6 +4,7 @@
 
 #include "libc.h"
 #include "video.h"
+#include "atk/atk_font.h"
 
 static void button_set_title(atk_button_priv_t *priv, const char *title);
 static atk_button_priv_t *button_priv_mut(atk_widget_t *widget);
@@ -49,7 +50,7 @@ int atk_button_effective_height(const atk_widget_t *widget)
     int height = widget->height;
     if (priv->style == ATK_BUTTON_STYLE_TITLE_BELOW)
     {
-        height += ATK_FONT_HEIGHT + 4;
+        height += atk_font_line_height() + 4;
     }
     return height;
 }
@@ -95,12 +96,9 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
     video_draw_rect(bx, by, widget->width, widget->height, face_color);
     video_draw_rect_outline(bx, by, widget->width, widget->height, border_color);
 
-    int text_x = bx + 4;
-    int text_y = by + 4;
-
     const char *title = priv->title;
-    size_t title_len = strlen(title);
-    int title_px_width = (int)(title_len * ATK_FONT_WIDTH);
+    int title_px_width = atk_font_text_width(title);
+    int text_x = bx + 4;
 
     if (priv->style == ATK_BUTTON_STYLE_TITLE_INSIDE)
     {
@@ -108,11 +106,8 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
         {
             text_x = bx + (widget->width - title_px_width) / 2;
         }
-        if (widget->height > ATK_FONT_HEIGHT)
-        {
-            text_y = by + (widget->height - ATK_FONT_HEIGHT) / 2;
-        }
-        video_draw_text(text_x, text_y, title, text_color, face_color);
+        int baseline = atk_font_baseline_for_rect(by, widget->height);
+        atk_font_draw_string(text_x, baseline, title, text_color, face_color);
     }
     else
     {
@@ -125,7 +120,9 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
         {
             text_x = bx;
         }
-        video_draw_text(text_x, label_y, title, text_color, theme->background);
+        int label_height = atk_font_line_height();
+        int baseline = atk_font_baseline_for_rect(label_y, label_height);
+        atk_font_draw_string(text_x, baseline, title, text_color, theme->background);
     }
 }
 

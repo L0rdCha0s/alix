@@ -7,6 +7,7 @@
 
 #include "atk_desktop.h"
 #include "atk_internal.h"
+#include "atk_menu_bar.h"
 #include "atk_window.h"
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_tabs.h"
@@ -31,6 +32,8 @@ void atk_init(void)
     atk_state_t *state = atk_state_get();
     atk_window_reset_all(state);
     atk_desktop_reset(state);
+    atk_menu_bar_reset(state);
+    atk_dirty_init(state);
     state->exit_requested = false;
 }
 
@@ -42,22 +45,16 @@ void atk_enter_mode(void)
 
     atk_window_reset_all(state);
     atk_desktop_reset(state);
+    atk_menu_bar_reset(state);
+    atk_menu_bar_build_default(state);
+    atk_dirty_mark_all();
 
 #ifndef ATK_NO_DESKTOP_APPS
-    atk_desktop_add_button(state,
-                           40,
-                           40,
-                           88,
-                           88,
-                           "Exit",
-                           ATK_BUTTON_STYLE_TITLE_BELOW,
-                           true,
-                           action_exit_to_text,
-                           state);
+
 
     atk_desktop_add_button(state,
                            140,
-                           40,
+                           80,
                            88,
                            88,
                            "Shell",
@@ -68,7 +65,7 @@ void atk_enter_mode(void)
 
     atk_desktop_add_button(state,
                            240,
-                           40,
+                           80,
                            88,
                            88,
                            "Tasks",
@@ -84,16 +81,40 @@ void atk_enter_mode(void)
 void atk_render(void)
 {
     atk_state_t *state = atk_state_get();
-    // serial_write_string("[atk] render state=0x");
-    // serial_write_hex64((uint64_t)(uintptr_t)state);
-    // serial_write_string(" bg=0x");
-    // serial_write_hex64(state->theme.background);
-    // serial_write_string("\r\n");
+    if (!state)
+    {
+        return;
+    }
 
-    video_invalidate_all();
-    video_fill(state->theme.background);
-    atk_desktop_draw_buttons(state);
-    atk_window_draw_all(state);
+    atk_rect_t region;
+    if (!atk_dirty_consume(&region))
+    {
+        return;
+    }
+
+    bool full = (region.x == 0 &&
+                 region.y == 0 &&
+                 region.width >= VIDEO_WIDTH &&
+                 region.height >= VIDEO_HEIGHT);
+
+    if (full)
+    {
+        video_fill(state->theme.background);
+        atk_desktop_draw_buttons(state, NULL);
+        atk_window_draw_all(state, NULL);
+        atk_menu_bar_draw(state);
+        return;
+    }
+
+    video_draw_rect(region.x, region.y, region.width, region.height, state->theme.background);
+    atk_desktop_draw_buttons(state, &region);
+    atk_window_draw_all(state, &region);
+
+    int menu_bottom = state->menu_bar_height > 0 ? state->menu_bar_height : ATK_MENU_BAR_DEFAULT_HEIGHT;
+    if (region.y < menu_bottom)
+    {
+        atk_menu_bar_draw(state);
+    }
 }
 
 atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
@@ -104,6 +125,23 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 {
     atk_state_t *state = atk_state_get();
     atk_mouse_event_result_t result = { .redraw = false, .exit_video = false };
+
+    bool menu_redraw = false;
+    bool menu_consumed = atk_menu_bar_handle_mouse(state,
+                                                   cursor_x,
+                                                   cursor_y,
+                                                   pressed_edge,
+                                                   released_edge,
+                                                   left_pressed,
+                                                   &menu_redraw);
+    if (menu_redraw)
+    {
+        result.redraw = true;
+    }
+    if (menu_consumed)
+    {
+        return result;
+    }
 
     if (pressed_edge)
     {
@@ -337,10 +375,10 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         atk_window_ensure_inside(win);
         if (win->x != old_x || win->y != old_y)
         {
-            video_invalidate_rect(old_x - ATK_WINDOW_BORDER,
-                                  old_y - ATK_WINDOW_BORDER,
-                                  old_width + ATK_WINDOW_BORDER * 2,
-                                  old_height + ATK_WINDOW_BORDER * 2);
+            atk_dirty_mark_rect(old_x - ATK_WINDOW_BORDER,
+                                old_y - ATK_WINDOW_BORDER,
+                                old_width + ATK_WINDOW_BORDER * 2,
+                                old_height + ATK_WINDOW_BORDER * 2);
             atk_window_mark_dirty(win);
             result.redraw = true;
         }
@@ -372,8 +410,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         if (btn->x != old_x || btn->y != old_y)
         {
             state->desktop_drag_moved = true;
-            video_invalidate_rect(old_x, old_y, old_width, old_height);
-            video_invalidate_rect(btn->x, btn->y, btn->width, atk_button_effective_height(btn));
+            atk_dirty_mark_rect(old_x, old_y, old_width, old_height);
+            atk_dirty_mark_rect(btn->x, btn->y, btn->width, atk_button_effective_height(btn));
             result.redraw = true;
         }
     }
@@ -416,6 +454,13 @@ static void atk_apply_default_theme(atk_state_t *state)
     state->theme.button_text = video_make_color(0x10, 0x10, 0x10);
     state->theme.desktop_icon_face = video_make_color(0x50, 0x90, 0xD0);
     state->theme.desktop_icon_text = state->theme.window_title_text;
+    state->theme.menu_bar_face = video_make_color(0x15, 0x29, 0x43);
+    state->theme.menu_bar_text = video_make_color(0xF0, 0xF4, 0xF9);
+    state->theme.menu_bar_highlight = video_make_color(0x28, 0x45, 0x6B);
+    state->theme.menu_dropdown_face = video_make_color(0xF6, 0xF6, 0xF6);
+    state->theme.menu_dropdown_border = video_make_color(0x30, 0x30, 0x30);
+    state->theme.menu_dropdown_text = video_make_color(0x20, 0x20, 0x20);
+    state->theme.menu_dropdown_highlight = video_make_color(0x36, 0x58, 0x8A);
 
 }
 

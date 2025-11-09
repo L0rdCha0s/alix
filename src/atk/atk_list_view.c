@@ -3,13 +3,12 @@
 #include "atk_internal.h"
 #include "video.h"
 #include "libc.h"
+#include "atk/atk_font.h"
 
 #if ATK_LIST_VIEW_MAX_COLUMNS < 10
 #error "ATK_LIST_VIEW_MAX_COLUMNS must be at least 10 to support task manager views"
 #endif
 
-#define ATK_LIST_VIEW_DEFAULT_HEADER_HEIGHT (ATK_FONT_HEIGHT + 6)
-#define ATK_LIST_VIEW_DEFAULT_ROW_HEIGHT    (ATK_FONT_HEIGHT + 4)
 #define ATK_LIST_VIEW_MIN_COLUMN_WIDTH      (ATK_FONT_WIDTH * 4)
 
 typedef struct
@@ -72,8 +71,9 @@ atk_widget_t *atk_list_view_create(void)
     priv->cells = NULL;
     priv->cell_capacity = 0;
     priv->row_count = 0;
-    priv->header_height = ATK_LIST_VIEW_DEFAULT_HEADER_HEIGHT;
-    priv->row_height = ATK_LIST_VIEW_DEFAULT_ROW_HEIGHT;
+    int line_height = atk_font_line_height();
+    priv->header_height = line_height + 6;
+    priv->row_height = line_height + 4;
     priv->cell_padding = 4;
     priv->list_node = NULL;
 
@@ -262,16 +262,12 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
         {
             text_x = column_x;
         }
-        int text_y = origin_y + (header_h - ATK_FONT_HEIGHT) / 2;
-        if (text_y < origin_y)
-        {
-            text_y = origin_y;
-        }
-        video_draw_text(text_x,
-                        text_y,
-                        col->title,
-                        theme->button_text,
-                        theme->button_face);
+        int baseline = atk_font_baseline_for_rect(origin_y, header_h);
+        atk_font_draw_string(text_x,
+                             baseline,
+                             col->title,
+                             theme->button_text,
+                             theme->button_face);
         column_x += col_width;
     }
 
@@ -310,13 +306,8 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
             }
 
             int text_x = cell_x + priv->cell_padding;
-            int text_y = row_y + (row_height - ATK_FONT_HEIGHT) / 2;
-            if (text_y < row_y)
-            {
-                text_y = row_y;
-            }
-
-            video_draw_text(text_x, text_y, text, theme->button_text, row_bg);
+            int baseline = atk_font_baseline_for_rect(row_y, row_height);
+            atk_font_draw_string(text_x, baseline, text, theme->button_text, row_bg);
             cell_x += col_width;
         }
 

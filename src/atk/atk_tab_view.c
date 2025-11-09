@@ -525,5 +525,5 @@ static void tab_view_invalidate(const atk_widget_t *tab_view)
     int w = 0;
     int h = 0;
     atk_widget_absolute_bounds(tab_view, &x, &y, &w, &h);
-    video_invalidate_rect(x, y, w, h);
+    atk_dirty_mark_rect(x, y, w, h);
 }

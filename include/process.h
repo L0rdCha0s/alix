@@ -73,6 +73,8 @@ process_t *process_create_user_dummy_with_parent(const char *name,
                                                  process_t *parent);
 
 void process_yield(void);
+void process_sleep_ticks(uint64_t ticks);
+void process_sleep_ms(uint32_t ms);
 void process_exit(int status) __attribute__((noreturn));
 
 int process_join(process_t *process, int *status_out);

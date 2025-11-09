@@ -6,6 +6,15 @@
 #include "atk/atk_terminal.h"
 #include "types.h"
 
+typedef struct atk_menu_bar_entry atk_menu_bar_entry_t;
+
+typedef struct
+{
+    int x;
+    int y;
+    int width;
+    int height;
+} atk_rect_t;
 #define ATK_WINDOW_TITLE_HEIGHT 28
 #define ATK_WINDOW_BORDER 2
 #define ATK_WINDOW_TITLE_PADDING_X 8
@@ -13,6 +22,7 @@
 #define ATK_FONT_WIDTH 8
 #define ATK_FONT_HEIGHT 16
 #define ATK_BUTTON_TITLE_MAX 32
+#define ATK_MENU_BAR_DEFAULT_HEIGHT 40
 
 typedef enum
 {
@@ -58,6 +68,13 @@ typedef struct
     uint16_t button_text;
     uint16_t desktop_icon_face;
     uint16_t desktop_icon_text;
+    uint16_t menu_bar_face;
+    uint16_t menu_bar_text;
+    uint16_t menu_bar_highlight;
+    uint16_t menu_dropdown_face;
+    uint16_t menu_dropdown_border;
+    uint16_t menu_dropdown_text;
+    uint16_t menu_dropdown_highlight;
 } atk_theme_t;
 
 typedef struct atk_state
@@ -84,6 +101,19 @@ typedef struct atk_state
 
     atk_theme_t theme;
     bool exit_requested;
+
+    atk_list_t menu_entries;
+    struct atk_menu_bar_entry *menu_open_entry;
+    struct atk_menu_bar_entry *menu_hover_entry;
+    atk_widget_t *menu_logo;
+    int menu_bar_height;
+
+    bool dirty_full;
+    bool dirty_active;
+    int dirty_x0;
+    int dirty_y0;
+    int dirty_x1;
+    int dirty_y1;
 } atk_state_t;
 
 extern const atk_class_t ATK_WIDGET_CLASS;
@@ -95,9 +125,14 @@ extern const atk_class_t ATK_TERMINAL_CLASS;
 extern const atk_class_t ATK_SCROLLBAR_CLASS;
 extern const atk_class_t ATK_LIST_VIEW_CLASS;
 extern const atk_class_t ATK_TAB_VIEW_CLASS;
+extern const atk_class_t ATK_MENU_CLASS;
 
 atk_state_t *atk_state_get(void);
 void atk_widget_draw_any(const atk_state_t *state, const atk_widget_t *widget);
 void atk_widget_destroy_any(atk_widget_t *widget);
+void atk_dirty_init(atk_state_t *state);
+void atk_dirty_mark_rect(int x, int y, int width, int height);
+void atk_dirty_mark_all(void);
+bool atk_dirty_consume(atk_rect_t *out_rect);
 
 #endif

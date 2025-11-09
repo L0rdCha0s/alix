@@ -12,6 +12,7 @@
 #include "user_atk_host.h"
 #include "syscall_defs.h"
 #include "user_memory.h"
+#include "timer.h"
 
 #define MSR_FS_BASE         0xC0000100
 #define MSR_GS_BASE         0xC0000101
@@ -147,6 +148,9 @@ struct thread
     uint64_t fault_error_code;
     uint64_t fault_address;
     bool fault_has_address;
+    bool sleeping;
+    uint64_t sleep_until_tick;
+    struct thread *sleep_queue_next;
 };
 
 struct process
@@ -193,6 +197,7 @@ static thread_t *g_idle_thread = NULL;
 static cpu_context_t *g_bootstrap_context = NULL;
 static thread_t *g_run_queue_head = NULL;
 static thread_t *g_run_queue_tail = NULL;
+static thread_t *g_sleep_queue_head = NULL;
 static uint64_t g_next_pid = 1;
 
 static fpu_state_t g_fpu_initial_state;
@@ -1478,6 +1483,82 @@ static void remove_from_run_queue(thread_t *thread)
     }
 }
 
+static void sleep_queue_insert(thread_t *thread)
+{
+    if (!thread)
+    {
+        return;
+    }
+    thread->sleeping = true;
+    thread->sleep_queue_next = NULL;
+
+    if (!g_sleep_queue_head || thread->sleep_until_tick < g_sleep_queue_head->sleep_until_tick)
+    {
+        thread->sleep_queue_next = g_sleep_queue_head;
+        g_sleep_queue_head = thread;
+        return;
+    }
+
+    thread_t *prev = g_sleep_queue_head;
+    thread_t *cursor = g_sleep_queue_head->sleep_queue_next;
+    while (cursor && cursor->sleep_until_tick <= thread->sleep_until_tick)
+    {
+        prev = cursor;
+        cursor = cursor->sleep_queue_next;
+    }
+    prev->sleep_queue_next = thread;
+    thread->sleep_queue_next = cursor;
+}
+
+static void sleep_queue_remove(thread_t *thread)
+{
+    if (!thread || !thread->sleeping)
+    {
+        return;
+    }
+
+    if (g_sleep_queue_head == thread)
+    {
+        g_sleep_queue_head = thread->sleep_queue_next;
+        thread->sleep_queue_next = NULL;
+        thread->sleeping = false;
+        return;
+    }
+
+    thread_t *prev = g_sleep_queue_head;
+    thread_t *cursor = g_sleep_queue_head ? g_sleep_queue_head->sleep_queue_next : NULL;
+    while (cursor)
+    {
+        if (cursor == thread)
+        {
+            prev->sleep_queue_next = cursor->sleep_queue_next;
+            thread->sleep_queue_next = NULL;
+            thread->sleeping = false;
+            return;
+        }
+        prev = cursor;
+        cursor = cursor->sleep_queue_next;
+    }
+    thread->sleeping = false;
+    thread->sleep_queue_next = NULL;
+}
+
+static void sleep_queue_wake_due(uint64_t now)
+{
+    while (g_sleep_queue_head && g_sleep_queue_head->sleep_until_tick <= now)
+    {
+        thread_t *thread = g_sleep_queue_head;
+        g_sleep_queue_head = thread->sleep_queue_next;
+        thread->sleep_queue_next = NULL;
+        thread->sleeping = false;
+        if (thread->state == THREAD_STATE_BLOCKED)
+        {
+            thread->state = THREAD_STATE_READY;
+            enqueue_thread(thread);
+        }
+    }
+}
+
 static void process_attach_child(process_t *parent, process_t *child)
 {
     if (!child)
@@ -2195,6 +2276,47 @@ void process_yield(void)
     scheduler_schedule(true);
 }
 
+void process_sleep_ticks(uint64_t ticks)
+{
+    if (ticks == 0)
+    {
+        process_yield();
+        return;
+    }
+
+    thread_t *thread = g_current_thread;
+    if (!thread || thread->is_idle)
+    {
+        process_yield();
+        return;
+    }
+
+    uint64_t wake_tick = timer_ticks() + ticks;
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    thread->state = THREAD_STATE_BLOCKED;
+    thread->sleep_until_tick = wake_tick;
+    sleep_queue_insert(thread);
+    cpu_restore_flags(flags);
+    scheduler_schedule(false);
+}
+
+void process_sleep_ms(uint32_t ms)
+{
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        process_sleep_ticks(1);
+        return;
+    }
+    uint64_t ticks = ((uint64_t)ms * (uint64_t)freq + 999ULL) / 1000ULL;
+    if (ticks == 0)
+    {
+        ticks = 1;
+    }
+    process_sleep_ticks(ticks);
+}
+
 void process_destroy(process_t *process)
 {
     if (!process || process->state != PROCESS_STATE_ZOMBIE || process->main_thread == g_idle_thread)
@@ -2220,6 +2342,10 @@ void process_destroy(process_t *process)
     thread_t *thread = process->main_thread;
     if (thread)
     {
+        if (thread->sleeping)
+        {
+            sleep_queue_remove(thread);
+        }
         if (thread->in_run_queue)
         {
             remove_from_run_queue(thread);
@@ -2621,6 +2747,8 @@ void process_on_timer_tick(interrupt_frame_t *frame)
     {
         return;
     }
+
+    sleep_queue_wake_due(timer_ticks());
 
     thread_t *thread = g_current_thread;
     if (!thread || thread->is_idle)

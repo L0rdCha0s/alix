@@ -4,7 +4,7 @@
 #include "atk_button.h"
 
 void atk_window_reset_all(atk_state_t *state);
-void atk_window_draw_all(const atk_state_t *state);
+void atk_window_draw_all(const atk_state_t *state, const atk_rect_t *clip);
 void atk_window_draw(atk_state_t *state, atk_widget_t *window);
 void atk_window_draw_from(atk_state_t *state, atk_widget_t *start_window);
 bool atk_window_contains(const atk_state_t *state, const atk_widget_t *window);

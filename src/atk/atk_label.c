@@ -76,7 +76,7 @@ static void label_invalidate(const atk_widget_t *label)
 
     int origin_x = label->parent->x + label->x;
     int origin_y = label->parent->y + label->y;
-    video_invalidate_rect(origin_x, origin_y, label->width, label->height);
+    atk_dirty_mark_rect(origin_x, origin_y, label->width, label->height);
 }
 
 static bool label_ensure_capacity(atk_label_priv_t *priv, size_t extra)
