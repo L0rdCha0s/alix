@@ -36,7 +36,7 @@
 
 typedef uint64_t cpu_context_t;
 
-#define PROCESS_TIME_SLICE_TICKS 10U
+#define PROCESS_TIME_SLICE_DEFAULT_TICKS 10U
 
 typedef struct
 {
@@ -91,6 +91,7 @@ static const uint8_t g_user_preempt_stub[] = {
     0xEB, 0xF9                                       /* jmp back to self */
 };
 
+
 struct trap_frame
 {
     uint64_t r15;
@@ -134,12 +135,18 @@ struct thread
     uint64_t fs_base;
     uint64_t gs_base;
     uint32_t time_slice_remaining;
+    thread_priority_t base_priority;
+    thread_priority_t priority;
+    thread_priority_t priority_override;
+    bool priority_override_active;
     int exit_status;
     bool in_run_queue;
     bool is_idle;
     bool exited;
     bool preempt_pending;
     bool fpu_initialized;
+    wait_queue_t *waiting_queue;
+    thread_t *wait_queue_next;
     char name[PROCESS_NAME_MAX];
     bool stack_guard_failed;
     const char *stack_guard_reason;
@@ -188,6 +195,7 @@ struct process
     size_t arg_storage_size;
     size_t user_argc;
     uintptr_t user_argv_ptr;
+    wait_queue_t wait_queue;
 };
 
 static process_t *g_process_list = NULL;
@@ -195,14 +203,24 @@ static process_t *g_current_process = NULL;
 static thread_t *g_current_thread = NULL;
 static thread_t *g_idle_thread = NULL;
 static cpu_context_t *g_bootstrap_context = NULL;
-static thread_t *g_run_queue_head = NULL;
-static thread_t *g_run_queue_tail = NULL;
+static thread_t *g_run_queue_heads[THREAD_PRIORITY_COUNT] = { NULL };
+static thread_t *g_run_queue_tails[THREAD_PRIORITY_COUNT] = { NULL };
 static thread_t *g_sleep_queue_head = NULL;
 static uint64_t g_next_pid = 1;
 
 static fpu_state_t g_fpu_initial_state;
 static bool g_fpu_template_ready = false;
 static int g_console_stdout_fd = -1;
+static uint32_t g_time_slice_ticks = PROCESS_TIME_SLICE_DEFAULT_TICKS;
+
+static inline uint32_t scheduler_time_slice_ticks(void)
+{
+    if (g_time_slice_ticks == 0)
+    {
+        return 1;
+    }
+    return g_time_slice_ticks;
+}
 
 static ssize_t console_stdout_write(void *ctx, const void *buffer, size_t count)
 {
@@ -555,6 +573,7 @@ static process_t *allocate_process(const char *name, bool is_user)
     proc->user_heap_limit = 0;
     proc->user_heap_committed = 0;
     proc->heap_pages = NULL;
+    wait_queue_init(&proc->wait_queue);
     return proc;
 }
 
@@ -1259,6 +1278,13 @@ static void thread_trampoline(void) __attribute__((noreturn));
 static void user_thread_entry(void *arg) __attribute__((noreturn));
 static void enqueue_thread(thread_t *thread);
 static void remove_from_run_queue(thread_t *thread);
+static inline uint32_t scheduler_time_slice_ticks(void);
+static void thread_refresh_priority(thread_t *thread);
+static void thread_set_base_priority(thread_t *thread, thread_priority_t priority);
+static void thread_set_priority_override(thread_t *thread, bool enabled, thread_priority_t priority);
+static void thread_remove_from_wait_queue(thread_t *thread);
+static void wait_queue_enqueue_locked(wait_queue_t *queue, thread_t *thread);
+static thread_t *wait_queue_dequeue_locked(wait_queue_t *queue);
 static void process_attach_child(process_t *parent, process_t *child);
 static void process_detach_child(process_t *child);
 static process_t *process_detach_first_child(process_t *parent);
@@ -1369,11 +1395,26 @@ static thread_t *thread_create(process_t *process,
     thread->is_idle = is_idle;
     thread->exited = false;
     thread->exit_status = 0;
-    thread->time_slice_remaining = PROCESS_TIME_SLICE_TICKS;
+    thread->time_slice_remaining = scheduler_time_slice_ticks();
+    thread_priority_t default_priority = THREAD_PRIORITY_NORMAL;
+    if (is_idle)
+    {
+        default_priority = THREAD_PRIORITY_IDLE;
+    }
+    else if (!is_user_thread)
+    {
+        default_priority = THREAD_PRIORITY_HIGH;
+    }
+    thread->base_priority = default_priority;
+    thread->priority = default_priority;
+    thread->priority_override = default_priority;
+    thread->priority_override_active = false;
     thread->preempt_pending = false;
     thread->fs_base = 0;
     thread->gs_base = (uint64_t)&thread->tls;
     thread->fpu_initialized = true;
+    thread->waiting_queue = NULL;
+    thread->wait_queue_next = NULL;
     thread->stack_guard_failed = false;
     thread->stack_guard_reason = NULL;
     thread->is_user = is_user_thread;
@@ -1418,35 +1459,47 @@ static void enqueue_thread(thread_t *thread)
     {
         return;
     }
+    thread_priority_t priority = thread->priority;
+    if (priority < THREAD_PRIORITY_IDLE || priority >= THREAD_PRIORITY_COUNT)
+    {
+        priority = THREAD_PRIORITY_NORMAL;
+        thread->priority = priority;
+    }
     thread->queue_next = NULL;
     thread->in_run_queue = true;
-    if (!g_run_queue_head)
+    thread_t **head = &g_run_queue_heads[priority];
+    thread_t **tail = &g_run_queue_tails[priority];
+    if (!*head)
     {
-        g_run_queue_head = thread;
-        g_run_queue_tail = thread;
+        *head = thread;
+        *tail = thread;
     }
     else
     {
-        g_run_queue_tail->queue_next = thread;
-        g_run_queue_tail = thread;
+        (*tail)->queue_next = thread;
+        *tail = thread;
     }
 }
 
 static thread_t *dequeue_thread(void)
 {
-    thread_t *thread = g_run_queue_head;
-    if (!thread)
+    for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE; --pr)
     {
-        return NULL;
+        thread_t *thread = g_run_queue_heads[pr];
+        if (!thread)
+        {
+            continue;
+        }
+        g_run_queue_heads[pr] = thread->queue_next;
+        if (!g_run_queue_heads[pr])
+        {
+            g_run_queue_tails[pr] = NULL;
+        }
+        thread->queue_next = NULL;
+        thread->in_run_queue = false;
+        return thread;
     }
-    g_run_queue_head = thread->queue_next;
-    if (!g_run_queue_head)
-    {
-        g_run_queue_tail = NULL;
-    }
-    thread->queue_next = NULL;
-    thread->in_run_queue = false;
-    return thread;
+    return NULL;
 }
 
 static void remove_from_run_queue(thread_t *thread)
@@ -1457,7 +1510,12 @@ static void remove_from_run_queue(thread_t *thread)
     }
 
     thread_t *prev = NULL;
-    thread_t *cursor = g_run_queue_head;
+    thread_priority_t priority = thread->priority;
+    if (priority < THREAD_PRIORITY_IDLE || priority >= THREAD_PRIORITY_COUNT)
+    {
+        priority = THREAD_PRIORITY_NORMAL;
+    }
+    thread_t *cursor = g_run_queue_heads[priority];
     while (cursor)
     {
         if (cursor == thread)
@@ -1468,11 +1526,11 @@ static void remove_from_run_queue(thread_t *thread)
             }
             else
             {
-                g_run_queue_head = thread->queue_next;
+                g_run_queue_heads[priority] = thread->queue_next;
             }
-            if (g_run_queue_tail == thread)
+            if (g_run_queue_tails[priority] == thread)
             {
-                g_run_queue_tail = prev;
+                g_run_queue_tails[priority] = prev;
             }
             thread->queue_next = NULL;
             thread->in_run_queue = false;
@@ -1481,6 +1539,121 @@ static void remove_from_run_queue(thread_t *thread)
         prev = cursor;
         cursor = cursor->queue_next;
     }
+}
+
+static thread_priority_t thread_clamp_priority(thread_priority_t priority)
+{
+    if (priority < THREAD_PRIORITY_IDLE)
+    {
+        return THREAD_PRIORITY_IDLE;
+    }
+    if (priority >= THREAD_PRIORITY_COUNT)
+    {
+        return (thread_priority_t)(THREAD_PRIORITY_COUNT - 1);
+    }
+    return priority;
+}
+
+static thread_priority_t thread_effective_priority(const thread_t *thread)
+{
+    if (!thread)
+    {
+        return THREAD_PRIORITY_NORMAL;
+    }
+    thread_priority_t priority = thread->priority_override_active
+                                 ? thread->priority_override
+                                 : thread->base_priority;
+    return thread_clamp_priority(priority);
+}
+
+static void thread_refresh_priority(thread_t *thread)
+{
+    if (!thread)
+    {
+        return;
+    }
+    thread_priority_t desired = thread_effective_priority(thread);
+    if (thread->priority == desired)
+    {
+        return;
+    }
+    if (thread->in_run_queue)
+    {
+        remove_from_run_queue(thread);
+    }
+    thread_remove_from_wait_queue(thread);
+    thread->priority = desired;
+    if (thread->state == THREAD_STATE_READY)
+    {
+        enqueue_thread(thread);
+    }
+}
+
+static void thread_set_base_priority(thread_t *thread, thread_priority_t priority)
+{
+    if (!thread)
+    {
+        return;
+    }
+    thread->base_priority = thread_clamp_priority(priority);
+    if (!thread->priority_override_active)
+    {
+        thread_refresh_priority(thread);
+    }
+}
+
+static void thread_set_priority_override(thread_t *thread, bool enabled, thread_priority_t priority)
+{
+    if (!thread)
+    {
+        return;
+    }
+    if (enabled)
+    {
+        thread->priority_override_active = true;
+        thread->priority_override = thread_clamp_priority(priority);
+    }
+    else
+    {
+        thread->priority_override_active = false;
+    }
+    thread_refresh_priority(thread);
+}
+
+static void thread_remove_from_wait_queue(thread_t *thread)
+{
+    wait_queue_t *queue = (thread && thread->waiting_queue) ? thread->waiting_queue : NULL;
+    if (!queue)
+    {
+        return;
+    }
+
+    thread_t *prev = NULL;
+    thread_t *cursor = queue->head;
+    while (cursor)
+    {
+        if (cursor == thread)
+        {
+            if (prev)
+            {
+                prev->wait_queue_next = cursor->wait_queue_next;
+            }
+            else
+            {
+                queue->head = cursor->wait_queue_next;
+            }
+            if (queue->tail == cursor)
+            {
+                queue->tail = prev;
+            }
+            break;
+        }
+        prev = cursor;
+        cursor = cursor->wait_queue_next;
+    }
+
+    thread->waiting_queue = NULL;
+    thread->wait_queue_next = NULL;
 }
 
 static void sleep_queue_insert(thread_t *thread)
@@ -1687,7 +1860,7 @@ static void switch_to_thread(thread_t *next)
             next_process->current_thread = next;
         }
 
-        next->time_slice_remaining = PROCESS_TIME_SLICE_TICKS;
+        next->time_slice_remaining = scheduler_time_slice_ticks();
         next->preempt_pending = false;
 
         sanitize_gs_base(next);
@@ -1735,7 +1908,7 @@ static void scheduler_schedule(bool requeue_current)
     if (requeue_current && current && current->state == THREAD_STATE_RUNNING)
     {
         current->state = THREAD_STATE_READY;
-        current->time_slice_remaining = PROCESS_TIME_SLICE_TICKS;
+        current->time_slice_remaining = scheduler_time_slice_ticks();
         current->preempt_pending = false;
         enqueue_thread(current);
     }
@@ -1902,6 +2075,7 @@ static void process_handle_stack_guard_fault(void)
     {
         proc->exit_status = -1;
         proc->state = PROCESS_STATE_ZOMBIE;
+        wait_queue_wake_all(&proc->wait_queue);
     }
 
     scheduler_schedule(false);
@@ -1914,6 +2088,18 @@ static void process_handle_fatal_fault(void)
     if (!current)
     {
         fatal("fatal fault handler without current thread");
+    }
+
+    current->exit_status = -1;
+    current->exited = true;
+    current->state = THREAD_STATE_ZOMBIE;
+    current->preempt_pending = false;
+    current->time_slice_remaining = 0;
+    if (current->process)
+    {
+        current->process->exit_status = -1;
+        current->process->state = PROCESS_STATE_ZOMBIE;
+        wait_queue_wake_all(&current->process->wait_queue);
     }
 
     serial_write_string("process: fatal fault in thread ");
@@ -1974,6 +2160,7 @@ bool process_handle_exception(interrupt_frame_t *frame,
     {
         proc->exit_status = -1;
         proc->state = PROCESS_STATE_ZOMBIE;
+        wait_queue_wake_all(&proc->wait_queue);
     }
 
     process_trigger_fatal_fault(thread, frame, reason, error_code, has_address, address);
@@ -2000,9 +2187,32 @@ void process_system_init(void)
     g_process_list = NULL;
     g_current_process = NULL;
     g_current_thread = NULL;
-    g_run_queue_head = NULL;
-    g_run_queue_tail = NULL;
+    for (int i = 0; i < THREAD_PRIORITY_COUNT; ++i)
+    {
+        g_run_queue_heads[i] = NULL;
+        g_run_queue_tails[i] = NULL;
+    }
     g_next_pid = 1;
+
+    uint32_t freq = timer_frequency();
+    if (freq)
+    {
+        const uint32_t desired_slice_ms = 10;
+        uint64_t ticks = ((uint64_t)freq * desired_slice_ms + 999ULL) / 1000ULL;
+        if (ticks == 0)
+        {
+            ticks = 1;
+        }
+        if (ticks > UINT32_MAX)
+        {
+            ticks = UINT32_MAX;
+        }
+        g_time_slice_ticks = (uint32_t)ticks;
+    }
+    else
+    {
+        g_time_slice_ticks = PROCESS_TIME_SLICE_DEFAULT_TICKS;
+    }
 
     process_t *idle_process = allocate_process("idle", false);
     if (!idle_process)
@@ -2342,6 +2552,9 @@ void process_destroy(process_t *process)
     thread_t *thread = process->main_thread;
     if (thread)
     {
+        process->main_thread = NULL;
+        process->current_thread = NULL;
+        thread_remove_from_wait_queue(thread);
         if (thread->sleeping)
         {
             sleep_queue_remove(thread);
@@ -2396,10 +2609,17 @@ void process_exit(int status)
     {
         current->process->exit_status = status;
         current->process->state = PROCESS_STATE_ZOMBIE;
+        wait_queue_wake_all(&current->process->wait_queue);
     }
 
     scheduler_schedule(false);
     fatal("process_exit returned");
+}
+
+static bool process_waiting_still_running(void *context)
+{
+    process_t *proc = (process_t *)context;
+    return proc && proc->state != PROCESS_STATE_ZOMBIE;
 }
 
 int process_join_with_hook(process_t *process,
@@ -2417,8 +2637,14 @@ int process_join_with_hook(process_t *process,
         if (hook)
         {
             hook(context);
+            if (process->state == PROCESS_STATE_ZOMBIE)
+            {
+                break;
+            }
+            process_yield();
+            continue;
         }
-        process_yield();
+        wait_queue_wait(&process->wait_queue, process_waiting_still_running, process);
     }
 
     if (status_out)
@@ -2473,6 +2699,7 @@ bool process_kill(process_t *process, int status)
 
     process->exit_status = status;
     process->state = PROCESS_STATE_ZOMBIE;
+    wait_queue_wake_all(&process->wait_queue);
 
     cpu_restore_flags(flags);
 
@@ -2547,6 +2774,163 @@ void process_set_cwd(process_t *process, vfs_node_t *dir)
         target = vfs_root();
     }
     process->cwd = target;
+}
+
+static void wait_queue_enqueue_locked(wait_queue_t *queue, thread_t *thread)
+{
+    if (!queue || !thread)
+    {
+        return;
+    }
+    thread->wait_queue_next = NULL;
+    if (queue->tail)
+    {
+        queue->tail->wait_queue_next = thread;
+    }
+    else
+    {
+        queue->head = thread;
+    }
+    queue->tail = thread;
+}
+
+static thread_t *wait_queue_dequeue_locked(wait_queue_t *queue)
+{
+    if (!queue)
+    {
+        return NULL;
+    }
+    thread_t *thread = queue->head;
+    if (!thread)
+    {
+        return NULL;
+    }
+    queue->head = thread->wait_queue_next;
+    if (!queue->head)
+    {
+        queue->tail = NULL;
+    }
+    thread->wait_queue_next = NULL;
+    return thread;
+}
+
+void wait_queue_init(wait_queue_t *queue)
+{
+    if (!queue)
+    {
+        return;
+    }
+    queue->head = NULL;
+    queue->tail = NULL;
+}
+
+void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void *context)
+{
+    if (!queue)
+    {
+        process_yield();
+        return;
+    }
+    thread_t *thread = g_current_thread;
+    if (!thread)
+    {
+        process_yield();
+        return;
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    if (predicate && !predicate(context))
+    {
+        cpu_restore_flags(flags);
+        return;
+    }
+
+    if (thread->in_run_queue)
+    {
+        remove_from_run_queue(thread);
+    }
+    thread->state = THREAD_STATE_BLOCKED;
+    thread->waiting_queue = queue;
+    wait_queue_enqueue_locked(queue, thread);
+
+    cpu_restore_flags(flags);
+    scheduler_schedule(false);
+}
+
+void wait_queue_wake_one(wait_queue_t *queue)
+{
+    if (!queue)
+    {
+        return;
+    }
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    thread_t *thread = wait_queue_dequeue_locked(queue);
+    if (thread)
+    {
+        thread->waiting_queue = NULL;
+        if (thread->state == THREAD_STATE_BLOCKED && !thread->exited)
+        {
+            thread->state = THREAD_STATE_READY;
+            enqueue_thread(thread);
+        }
+    }
+
+    cpu_restore_flags(flags);
+}
+
+void wait_queue_wake_all(wait_queue_t *queue)
+{
+    if (!queue)
+    {
+        return;
+    }
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    thread_t *thread = wait_queue_dequeue_locked(queue);
+    while (thread)
+    {
+        thread->waiting_queue = NULL;
+        if (thread->state == THREAD_STATE_BLOCKED && !thread->exited)
+        {
+            thread->state = THREAD_STATE_READY;
+            enqueue_thread(thread);
+        }
+        thread = wait_queue_dequeue_locked(queue);
+    }
+
+    cpu_restore_flags(flags);
+}
+
+void process_set_priority(process_t *process, thread_priority_t priority)
+{
+    if (!process || !process->main_thread)
+    {
+        return;
+    }
+    thread_set_base_priority(process->main_thread, priority);
+}
+
+void process_set_priority_override(process_t *process, thread_priority_t priority)
+{
+    if (!process || !process->main_thread)
+    {
+        return;
+    }
+    thread_set_priority_override(process->main_thread, true, priority);
+}
+
+void process_clear_priority_override(process_t *process)
+{
+    if (!process || !process->main_thread)
+    {
+        return;
+    }
+    thread_set_priority_override(process->main_thread, false, THREAD_PRIORITY_NORMAL);
 }
 
 uint64_t process_take_preempt_resume_rip(void)
@@ -2789,7 +3173,7 @@ void process_on_timer_tick(interrupt_frame_t *frame)
     }
 
     thread->preempt_pending = true;
-    thread->time_slice_remaining = PROCESS_TIME_SLICE_TICKS;
+    thread->time_slice_remaining = scheduler_time_slice_ticks();
 
     bool user_mode = frame && ((frame->cs & 0x3u) == 0x3u);
     if (!frame)

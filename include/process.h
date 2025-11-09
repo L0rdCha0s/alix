@@ -17,6 +17,24 @@ typedef void (*process_wait_hook_t)(void *context);
 
 typedef enum
 {
+    THREAD_PRIORITY_IDLE = 0,
+    THREAD_PRIORITY_BACKGROUND,
+    THREAD_PRIORITY_NORMAL,
+    THREAD_PRIORITY_HIGH,
+    THREAD_PRIORITY_UI,
+    THREAD_PRIORITY_COUNT
+} thread_priority_t;
+
+typedef struct wait_queue
+{
+    thread_t *head;
+    thread_t *tail;
+} wait_queue_t;
+
+typedef bool (*wait_queue_predicate_t)(void *context);
+
+typedef enum
+{
     THREAD_STATE_READY,
     THREAD_STATE_RUNNING,
     THREAD_STATE_BLOCKED,
@@ -132,5 +150,14 @@ process_t *process_create_user_elf_with_parent(const char *name,
                                                process_t *parent,
                                                const char *const *argv,
                                                size_t argc);
+
+void process_set_priority(process_t *process, thread_priority_t priority);
+void process_set_priority_override(process_t *process, thread_priority_t priority);
+void process_clear_priority_override(process_t *process);
+
+void wait_queue_init(wait_queue_t *queue);
+void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void *context);
+void wait_queue_wake_one(wait_queue_t *queue);
+void wait_queue_wake_all(wait_queue_t *queue);
 
 #endif

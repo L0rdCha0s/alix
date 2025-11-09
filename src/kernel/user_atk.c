@@ -28,6 +28,7 @@ typedef struct user_atk_window
     size_t event_head;
     size_t event_tail;
     size_t event_count;
+    wait_queue_t event_waiters;
     struct user_atk_window *next;
     struct user_atk_window *prev;
 } user_atk_window_t;
@@ -35,6 +36,8 @@ typedef struct user_atk_window
 static user_atk_window_t *g_windows_head = NULL;
 static user_atk_window_t *g_focus_window = NULL;
 static user_atk_window_t *g_capture_window = NULL;
+static process_t *g_focus_priority_owner = NULL;
+static process_t *g_capture_priority_owner = NULL;
 static uint32_t g_next_handle = 1;
 
 static void user_atk_log(const char *msg, uint64_t value)
@@ -54,12 +57,24 @@ static void user_atk_window_on_destroy(void *context);
 static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t *event);
 static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_event);
 static void user_atk_send_close_event(user_atk_window_t *win);
+static void user_atk_apply_priorities(void);
+static bool user_atk_event_queue_empty(void *context);
 
 void user_atk_init(void)
 {
     g_windows_head = NULL;
     g_focus_window = NULL;
     g_capture_window = NULL;
+    if (g_focus_priority_owner)
+    {
+        process_clear_priority_override(g_focus_priority_owner);
+        g_focus_priority_owner = NULL;
+    }
+    if (g_capture_priority_owner)
+    {
+        process_clear_priority_override(g_capture_priority_owner);
+        g_capture_priority_owner = NULL;
+    }
     g_next_handle = 1;
 }
 
@@ -80,15 +95,16 @@ bool user_atk_window_is_remote(const atk_widget_t *window)
 void user_atk_focus_window(const atk_widget_t *window)
 {
     user_atk_window_t *target = user_atk_from_window(window);
-    g_focus_window = target;
-    if (!target)
+    if (target && target->closed)
+    {
+        target = NULL;
+    }
+    if (g_focus_window == target)
     {
         return;
     }
-    if (target->closed)
-    {
-        g_focus_window = NULL;
-    }
+    g_focus_window = target;
+    user_atk_apply_priorities();
 }
 
 bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
@@ -98,6 +114,7 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
                                 bool released_edge,
                                 bool left_pressed)
 {
+    user_atk_window_t *previous_capture = g_capture_window;
     user_atk_window_t *target = g_capture_window;
     if (!target)
     {
@@ -151,6 +168,10 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     }
 
     user_atk_queue_event(target, &event);
+    if (previous_capture != g_capture_window)
+    {
+        user_atk_apply_priorities();
+    }
     return true;
 }
 
@@ -193,6 +214,8 @@ static void user_atk_window_on_destroy(void *context)
     {
         g_capture_window = NULL;
     }
+    wait_queue_wake_all(&win->event_waiters);
+    user_atk_apply_priorities();
     user_atk_send_close_event(win);
 }
 
@@ -244,7 +267,8 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     {
         g_capture_window = NULL;
     }
-
+    wait_queue_wake_all(&win->event_waiters);
+    user_atk_apply_priorities();
     free(win);
 }
 
@@ -351,6 +375,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     win->event_head = 0;
     win->event_tail = 0;
     win->event_count = 0;
+    wait_queue_init(&win->event_waiters);
 
     atk_window_set_context(window, win, user_atk_window_on_destroy);
     user_atk_insert(win);
@@ -417,7 +442,7 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
             memset(event_out, 0, sizeof(*event_out));
             return 0;
         }
-        process_yield();
+        wait_queue_wait(&win->event_waiters, user_atk_event_queue_empty, win);
     }
 
     *event_out = event;
@@ -466,6 +491,7 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
         win->event_count--;
     }
     win->event_count++;
+    wait_queue_wake_one(&win->event_waiters);
 }
 
 static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_event)
@@ -499,4 +525,71 @@ static void user_atk_send_close_event(user_atk_window_t *win)
         .data1 = 0,
     };
     user_atk_queue_event(win, &event);
+}
+
+static bool user_atk_event_queue_empty(void *context)
+{
+    user_atk_window_t *win = (user_atk_window_t *)context;
+    if (!win)
+    {
+        return false;
+    }
+    return (win->event_count == 0) && !win->closed;
+}
+
+static void user_atk_apply_priorities(void)
+{
+    process_t *focus_owner = (g_focus_window && !g_focus_window->closed) ? g_focus_window->owner : NULL;
+    process_t *capture_owner = (g_capture_window && !g_capture_window->closed) ? g_capture_window->owner : NULL;
+
+    if (g_capture_priority_owner && g_capture_priority_owner != capture_owner)
+    {
+        if (g_capture_priority_owner == focus_owner)
+        {
+            process_set_priority_override(g_capture_priority_owner, THREAD_PRIORITY_HIGH);
+            g_focus_priority_owner = g_capture_priority_owner;
+        }
+        else
+        {
+            process_clear_priority_override(g_capture_priority_owner);
+        }
+        g_capture_priority_owner = NULL;
+    }
+
+    if (g_focus_priority_owner &&
+        g_focus_priority_owner != focus_owner &&
+        g_focus_priority_owner != capture_owner)
+    {
+        process_clear_priority_override(g_focus_priority_owner);
+        g_focus_priority_owner = NULL;
+    }
+
+    if (capture_owner)
+    {
+        process_set_priority_override(capture_owner, THREAD_PRIORITY_UI);
+        g_capture_priority_owner = capture_owner;
+    }
+
+    if (focus_owner)
+    {
+        if (focus_owner == capture_owner)
+        {
+            g_focus_priority_owner = focus_owner;
+        }
+        else
+        {
+            process_set_priority_override(focus_owner, THREAD_PRIORITY_HIGH);
+            g_focus_priority_owner = focus_owner;
+        }
+    }
+    else if (!capture_owner && g_focus_priority_owner)
+    {
+        process_clear_priority_override(g_focus_priority_owner);
+        g_focus_priority_owner = NULL;
+    }
+
+    if (!capture_owner)
+    {
+        g_capture_priority_owner = NULL;
+    }
 }
