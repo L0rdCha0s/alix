@@ -248,11 +248,11 @@ void video_invalidate_all(void)
 
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
 {
-    surface_log("blit x=", x);
-    surface_log("blit y=", y);
-    surface_log("blit w=", width);
-    surface_log("blit h=", height);
-    surface_log("blit src=", (uintptr_t)pixels);
+    // surface_log("blit x=", x);
+    // surface_log("blit y=", y);
+    // surface_log("blit w=", width);
+    // surface_log("blit h=", height);
+    // surface_log("blit src=", (uintptr_t)pixels);
     if (!surface_ready() || !pixels || width <= 0 || height <= 0)
     {
         return;

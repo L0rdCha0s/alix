@@ -46,6 +46,10 @@ static char pending_chars[KBD_PENDING_CHARS];
 static size_t pending_start = 0;
 static size_t pending_count = 0;
 
+#define KEYBOARD_REPEAT_INITIAL_PATH "keyboard/repeat/initial"
+#define KEYBOARD_REPEAT_INTERVAL_PATH "keyboard/repeat/repeat"
+#define KEYBOARD_REPEAT_MULTI_PATH "keyboard/repeat/multi_mode"
+
 static uint32_t repeat_initial_delay_ms = 500;
 static uint32_t repeat_interval_ms = 200;
 static uint32_t repeat_initial_delay_ticks = 50;
@@ -59,9 +63,12 @@ typedef struct
     bool keypad_enter;
     uint64_t next_tick;
     bool waiting_initial;
-} keyboard_repeat_state_t;
+} keyboard_repeat_entry_t;
 
-static keyboard_repeat_state_t g_repeat_state;
+#define KEYBOARD_MAX_REPEAT_KEYS 8
+static keyboard_repeat_entry_t g_repeat_entries[KEYBOARD_MAX_REPEAT_KEYS];
+static size_t g_repeat_next_index = 0;
+static bool g_repeat_multi_mode = false;
 
 typedef struct
 {
@@ -69,14 +76,22 @@ typedef struct
     const char *name;
 } keyboard_proc_value_t;
 
+typedef struct
+{
+    bool *value;
+    void (*on_change)(bool enabled);
+} keyboard_proc_bool_entry_t;
+
 static keyboard_proc_value_t g_initial_repeat_entry = { &repeat_initial_delay_ms, "initial" };
 static keyboard_proc_value_t g_repeat_interval_entry = { &repeat_interval_ms, "repeat" };
+static keyboard_proc_bool_entry_t g_multi_repeat_entry = { &g_repeat_multi_mode, NULL };
 
 static void keyboard_repeat_reset(void);
 static void keyboard_start_repeat(uint8_t scancode, bool extended, bool keypad_enter);
 static void keyboard_stop_repeat(uint8_t scancode, bool extended);
 static bool keyboard_repeat_due(char *out_char);
 static void keyboard_update_repeat_ticks(void);
+static void keyboard_set_multi_mode(bool enabled);
 static bool keyboard_emit_char(uint8_t scancode, bool extended, bool keypad_enter, bool synthetic, char *out_char);
 static ssize_t keyboard_proc_value_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
 static ssize_t keyboard_proc_value_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
@@ -90,12 +105,11 @@ static bool keyboard_is_space(char ch)
 
 static void keyboard_repeat_reset(void)
 {
-    g_repeat_state.active = false;
-    g_repeat_state.scancode = 0;
-    g_repeat_state.extended = false;
-    g_repeat_state.keypad_enter = false;
-    g_repeat_state.next_tick = 0;
-    g_repeat_state.waiting_initial = true;
+    for (size_t i = 0; i < KEYBOARD_MAX_REPEAT_KEYS; ++i)
+    {
+        g_repeat_entries[i].active = false;
+    }
+    g_repeat_next_index = 0;
 }
 
 static uint32_t keyboard_ms_to_ticks(uint32_t ms)
@@ -118,59 +132,124 @@ static void keyboard_update_repeat_ticks(void)
     repeat_initial_delay_ticks = keyboard_ms_to_ticks(repeat_initial_delay_ms);
     repeat_interval_ticks = keyboard_ms_to_ticks(repeat_interval_ms);
 
-    if (g_repeat_state.active)
+    uint64_t now = timer_ticks();
+    for (size_t i = 0; i < KEYBOARD_MAX_REPEAT_KEYS; ++i)
     {
-        uint32_t delay = g_repeat_state.waiting_initial ? repeat_initial_delay_ticks : repeat_interval_ticks;
-        g_repeat_state.next_tick = timer_ticks() + delay;
+        keyboard_repeat_entry_t *entry = &g_repeat_entries[i];
+        if (!entry->active)
+        {
+            continue;
+        }
+        uint32_t delay = entry->waiting_initial ? repeat_initial_delay_ticks : repeat_interval_ticks;
+        entry->next_tick = now + delay;
     }
+}
+
+static keyboard_repeat_entry_t *keyboard_repeat_find(uint8_t scancode, bool extended)
+{
+    for (size_t i = 0; i < KEYBOARD_MAX_REPEAT_KEYS; ++i)
+    {
+        keyboard_repeat_entry_t *entry = &g_repeat_entries[i];
+        if (entry->active && entry->scancode == scancode && entry->extended == extended)
+        {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static keyboard_repeat_entry_t *keyboard_repeat_alloc(void)
+{
+    for (size_t i = 0; i < KEYBOARD_MAX_REPEAT_KEYS; ++i)
+    {
+        keyboard_repeat_entry_t *entry = &g_repeat_entries[i];
+        if (!entry->active)
+        {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static void keyboard_set_multi_mode(bool enabled)
+{
+    if (g_repeat_multi_mode == enabled)
+    {
+        return;
+    }
+    g_repeat_multi_mode = enabled;
+    keyboard_repeat_reset();
 }
 
 static void keyboard_start_repeat(uint8_t scancode, bool extended, bool keypad_enter)
 {
-    g_repeat_state.active = true;
-    g_repeat_state.scancode = scancode;
-    g_repeat_state.extended = extended;
-    g_repeat_state.keypad_enter = keypad_enter;
-    g_repeat_state.waiting_initial = true;
-    g_repeat_state.next_tick = timer_ticks() + repeat_initial_delay_ticks;
+    if (!g_repeat_multi_mode)
+    {
+        keyboard_repeat_reset();
+    }
+
+    keyboard_repeat_entry_t *entry = keyboard_repeat_find(scancode, extended);
+    if (!entry)
+    {
+        entry = keyboard_repeat_alloc();
+    }
+    if (!entry)
+    {
+        return;
+    }
+
+    entry->active = true;
+    entry->scancode = scancode;
+    entry->extended = extended;
+    entry->keypad_enter = keypad_enter;
+    entry->waiting_initial = true;
+    entry->next_tick = timer_ticks() + repeat_initial_delay_ticks;
 }
 
 static void keyboard_stop_repeat(uint8_t scancode, bool extended)
 {
-    if (g_repeat_state.active &&
-        g_repeat_state.scancode == scancode &&
-        g_repeat_state.extended == extended)
+    keyboard_repeat_entry_t *entry = keyboard_repeat_find(scancode, extended);
+    if (entry)
     {
-        g_repeat_state.active = false;
+        entry->active = false;
     }
 }
 
 static bool keyboard_repeat_due(char *out_char)
 {
-    if (!g_repeat_state.active)
+    if (!out_char)
     {
         return false;
     }
 
     uint64_t now = timer_ticks();
-    if (now < g_repeat_state.next_tick)
+    for (size_t i = 0; i < KEYBOARD_MAX_REPEAT_KEYS; ++i)
     {
-        return false;
+        size_t idx = (g_repeat_next_index + i) % KEYBOARD_MAX_REPEAT_KEYS;
+        keyboard_repeat_entry_t *entry = &g_repeat_entries[idx];
+        if (!entry->active)
+        {
+            continue;
+        }
+        if (now < entry->next_tick)
+        {
+            continue;
+        }
+        if (!keyboard_emit_char(entry->scancode,
+                                entry->extended,
+                                entry->keypad_enter,
+                                true,
+                                out_char))
+        {
+            entry->active = false;
+            continue;
+        }
+        entry->waiting_initial = false;
+        entry->next_tick = now + repeat_interval_ticks;
+        g_repeat_next_index = (idx + 1) % KEYBOARD_MAX_REPEAT_KEYS;
+        return true;
     }
-
-    if (!keyboard_emit_char(g_repeat_state.scancode,
-                            g_repeat_state.extended,
-                            g_repeat_state.keypad_enter,
-                            true,
-                            out_char))
-    {
-        g_repeat_state.active = false;
-        return false;
-    }
-
-    g_repeat_state.waiting_initial = false;
-    g_repeat_state.next_tick = now + repeat_interval_ticks;
-    return true;
+    return false;
 }
 
 static bool keyboard_emit_arrow_sequence(uint8_t scancode, char *out_char)
@@ -421,6 +500,80 @@ static ssize_t keyboard_proc_value_write(vfs_node_t *node, size_t offset, const 
     return (ssize_t)count;
 }
 
+static ssize_t keyboard_proc_bool_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    if (!buffer || !context)
+    {
+        return -1;
+    }
+    keyboard_proc_bool_entry_t *entry = (keyboard_proc_bool_entry_t *)context;
+    if (!entry->value)
+    {
+        return -1;
+    }
+
+    char temp[4];
+    size_t len = 0;
+    temp[len++] = *entry->value ? '1' : '0';
+    temp[len++] = '\n';
+
+    if (offset >= len || count == 0)
+    {
+        return 0;
+    }
+    if (count > len - offset)
+    {
+        count = len - offset;
+    }
+    memcpy(buffer, temp + offset, count);
+    return (ssize_t)count;
+}
+
+static ssize_t keyboard_proc_bool_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context)
+{
+    (void)node;
+    if (!buffer || !context || offset != 0)
+    {
+        return -1;
+    }
+    keyboard_proc_bool_entry_t *entry = (keyboard_proc_bool_entry_t *)context;
+    if (!entry->value)
+    {
+        return -1;
+    }
+    if (count == 0)
+    {
+        return 0;
+    }
+
+    char temp[32];
+    size_t len = count;
+    if (len >= sizeof(temp))
+    {
+        len = sizeof(temp) - 1;
+    }
+    memcpy(temp, buffer, len);
+    temp[len] = '\0';
+
+    uint32_t parsed = 0;
+    if (!keyboard_parse_single_uint(temp, &parsed))
+    {
+        return -1;
+    }
+
+    bool new_value = (parsed != 0);
+    if (*entry->value != new_value)
+    {
+        *entry->value = new_value;
+        if (entry->on_change)
+        {
+            entry->on_change(new_value);
+        }
+    }
+    return (ssize_t)count;
+}
+
 static bool buffer_empty(void)
 {
     return buffer_head == buffer_tail;
@@ -553,19 +706,28 @@ void keyboard_init(void)
         serial_write_string("[keyboard] failed to ensure /proc/keyboard/repeat\r\n");
     }
 
-    if (!procfs_create_file_at("keyboard/repeat/initial",
+    g_multi_repeat_entry.on_change = keyboard_set_multi_mode;
+
+    if (!procfs_create_file_at(KEYBOARD_REPEAT_INITIAL_PATH,
                                keyboard_proc_value_read,
                                keyboard_proc_value_write,
                                &g_initial_repeat_entry))
     {
         serial_write_string("[keyboard] failed to create /proc/keyboard/repeat/initial\r\n");
     }
-    if (!procfs_create_file_at("keyboard/repeat/repeat",
+    if (!procfs_create_file_at(KEYBOARD_REPEAT_INTERVAL_PATH,
                                keyboard_proc_value_read,
                                keyboard_proc_value_write,
                                &g_repeat_interval_entry))
     {
         serial_write_string("[keyboard] failed to create /proc/keyboard/repeat/repeat\r\n");
+    }
+    if (!procfs_create_file_at(KEYBOARD_REPEAT_MULTI_PATH,
+                               keyboard_proc_bool_read,
+                               keyboard_proc_bool_write,
+                               &g_multi_repeat_entry))
+    {
+        serial_write_string("[keyboard] failed to create /proc/keyboard/repeat/multi_mode\r\n");
     }
 }
 

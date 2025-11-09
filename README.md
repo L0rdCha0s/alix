@@ -31,4 +31,12 @@ User processes are now built with SSE2 enabled (and `mfpmath=sse`) so they can u
 
 ## Keyboard repeat controls
 
-Runtime keyboard repeat behaviour lives under `/proc/keyboard/repeat/{initial,repeat}`. Each file contains a single integer in milliseconds. For example, `cat /proc/keyboard/repeat/initial` shows the current initial delay, and `echo 150 >/proc/keyboard/repeat/repeat` shortens the steady-state cadence. Updates take effect immediately.
+Runtime keyboard repeat behaviour lives under `/proc/keyboard/repeat/{initial,repeat,multi_mode}`. Each file contains a single integer (`initial`/`repeat` in milliseconds, `multi_mode` as 0/1). For example:
+
+```
+cat /proc/keyboard/repeat/initial        # view delay
+echo 150 >/proc/keyboard/repeat/repeat   # shorten repeat interval
+echo 1 >/proc/keyboard/repeat/multi_mode # enable multi-key repeats for games
+```
+
+Changes apply immediately system-wide, so games can toggle `multi_mode` when they need true simultaneous key input.

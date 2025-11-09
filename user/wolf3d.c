@@ -14,6 +14,7 @@
 #define MAX_RAY_STEPS 64
 #define PROC_REPEAT_INITIAL "/proc/keyboard/repeat/initial"
 #define PROC_REPEAT_INTERVAL "/proc/keyboard/repeat/repeat"
+#define PROC_REPEAT_MULTI "/proc/keyboard/repeat/multi_mode"
 
 #define WOLF_ABS(value) ((value) < 0.0 ? -(value) : (value))
 
@@ -32,6 +33,7 @@ typedef struct
 {
     uint32_t initial_ms;
     uint32_t repeat_ms;
+    bool multi_enabled;
     bool valid;
 } keyboard_repeat_backup_t;
 
@@ -250,6 +252,28 @@ static bool wolf3d_write_repeat_value(const char *path, uint32_t value)
     return written == len;
 }
 
+static bool wolf3d_read_bool(const char *path, bool fallback)
+{
+    uint32_t value = wolf3d_read_repeat_value(path, fallback ? 1U : 0U);
+    return value != 0;
+}
+
+static bool wolf3d_write_bool(const char *path, bool value)
+{
+    char buffer[8];
+    int len = 0;
+    buffer[len++] = value ? '1' : '0';
+    buffer[len++] = '\n';
+    int fd = open(path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_TRUNCATE);
+    if (fd < 0)
+    {
+        return false;
+    }
+    ssize_t written = write(fd, buffer, (size_t)len);
+    close(fd);
+    return written == len;
+}
+
 static bool wolf3d_override_keyboard_repeat(keyboard_repeat_backup_t *backup)
 {
     if (!backup)
@@ -258,11 +282,13 @@ static bool wolf3d_override_keyboard_repeat(keyboard_repeat_backup_t *backup)
     }
     backup->initial_ms = wolf3d_read_repeat_value(PROC_REPEAT_INITIAL, 500);
     backup->repeat_ms = wolf3d_read_repeat_value(PROC_REPEAT_INTERVAL, 200);
+    backup->multi_enabled = wolf3d_read_bool(PROC_REPEAT_MULTI, false);
     backup->valid = true;
 
     bool initial_ok = wolf3d_write_repeat_value(PROC_REPEAT_INITIAL, 0);
     bool repeat_ok = wolf3d_write_repeat_value(PROC_REPEAT_INTERVAL, 100);
-    return initial_ok || repeat_ok;
+    bool multi_ok = wolf3d_write_bool(PROC_REPEAT_MULTI, true);
+    return initial_ok || repeat_ok || multi_ok;
 }
 
 static void wolf3d_restore_keyboard_repeat(const keyboard_repeat_backup_t *backup)
@@ -273,6 +299,7 @@ static void wolf3d_restore_keyboard_repeat(const keyboard_repeat_backup_t *backu
     }
     wolf3d_write_repeat_value(PROC_REPEAT_INITIAL, backup->initial_ms);
     wolf3d_write_repeat_value(PROC_REPEAT_INTERVAL, backup->repeat_ms);
+    wolf3d_write_bool(PROC_REPEAT_MULTI, backup->multi_enabled);
 }
 
 static bool wolf_cell_blocked(int x, int y)
