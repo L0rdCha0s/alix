@@ -1453,15 +1453,7 @@ static thread_t *thread_create(process_t *process,
     thread->exited = false;
     thread->exit_status = 0;
     thread->time_slice_remaining = scheduler_time_slice_ticks();
-    thread_priority_t default_priority = THREAD_PRIORITY_NORMAL;
-    if (is_idle)
-    {
-        default_priority = THREAD_PRIORITY_IDLE;
-    }
-    else if (!is_user_thread)
-    {
-        default_priority = THREAD_PRIORITY_HIGH;
-    }
+    thread_priority_t default_priority = is_idle ? THREAD_PRIORITY_IDLE : THREAD_PRIORITY_NORMAL;
     thread->base_priority = default_priority;
     thread->priority = default_priority;
     thread->priority_override = default_priority;
