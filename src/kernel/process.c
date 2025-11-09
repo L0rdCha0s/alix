@@ -37,6 +37,8 @@
 typedef uint64_t cpu_context_t;
 
 #define PROCESS_TIME_SLICE_DEFAULT_TICKS 10U
+#define THREAD_MAGIC 0x54485244u /* 'THRD' */
+#define PROCESS_MAGIC 0x50524353u /* 'PRCS' */
 
 typedef struct
 {
@@ -147,6 +149,7 @@ struct thread
     bool fpu_initialized;
     wait_queue_t *waiting_queue;
     thread_t *wait_queue_next;
+    uint32_t magic;
     char name[PROCESS_NAME_MAX];
     bool stack_guard_failed;
     const char *stack_guard_reason;
@@ -196,6 +199,7 @@ struct process
     size_t user_argc;
     uintptr_t user_argv_ptr;
     wait_queue_t wait_queue;
+    uint32_t magic;
 };
 
 static process_t *g_process_list = NULL;
@@ -291,6 +295,58 @@ static bool pointer_in_heap(uint64_t addr, size_t size)
     uint64_t heap_start = (uint64_t)kernel_heap_base;
     uint64_t heap_end = (uint64_t)kernel_heap_end;
     return addr >= heap_start && (addr + size) <= heap_end;
+}
+
+static bool thread_pointer_valid(const thread_t *thread)
+{
+    if (!thread)
+    {
+        return false;
+    }
+    bool valid = pointer_in_heap((uint64_t)(uintptr_t)thread, sizeof(thread_t));
+    if (!valid)
+    {
+        serial_write_string("[proc] priority thread ptr invalid addr=0x");
+        serial_write_hex64((uint64_t)(uintptr_t)thread);
+        serial_write_string("\r\n");
+        return false;
+    }
+    if (thread->magic != THREAD_MAGIC)
+    {
+        serial_write_string("[proc] priority thread magic mismatch addr=0x");
+        serial_write_hex64((uint64_t)(uintptr_t)thread);
+        serial_write_string(" magic=0x");
+        serial_write_hex64((uint64_t)thread->magic);
+        serial_write_string("\r\n");
+        return false;
+    }
+    return true;
+}
+
+static bool process_pointer_valid(const process_t *process)
+{
+    if (!process)
+    {
+        return false;
+    }
+    bool valid = pointer_in_heap((uint64_t)(uintptr_t)process, sizeof(process_t));
+    if (!valid)
+    {
+        serial_write_string("[proc] process ptr invalid addr=0x");
+        serial_write_hex64((uint64_t)(uintptr_t)process);
+        serial_write_string("\r\n");
+        return false;
+    }
+    if (process->magic != PROCESS_MAGIC)
+    {
+        serial_write_string("[proc] process magic mismatch addr=0x");
+        serial_write_hex64((uint64_t)(uintptr_t)process);
+        serial_write_string(" magic=0x");
+        serial_write_hex64((uint64_t)process->magic);
+        serial_write_string("\r\n");
+        return false;
+    }
+    return true;
 }
 
 static uint64_t sanitize_gs_base(thread_t *thread)
@@ -573,6 +629,7 @@ static process_t *allocate_process(const char *name, bool is_user)
     proc->user_heap_limit = 0;
     proc->user_heap_committed = 0;
     proc->heap_pages = NULL;
+    proc->magic = PROCESS_MAGIC;
     wait_queue_init(&proc->wait_queue);
     return proc;
 }
@@ -1415,6 +1472,7 @@ static thread_t *thread_create(process_t *process,
     thread->fpu_initialized = true;
     thread->waiting_queue = NULL;
     thread->wait_queue_next = NULL;
+    thread->magic = THREAD_MAGIC;
     thread->stack_guard_failed = false;
     thread->stack_guard_reason = NULL;
     thread->is_user = is_user_thread;
@@ -1568,7 +1626,7 @@ static thread_priority_t thread_effective_priority(const thread_t *thread)
 
 static void thread_refresh_priority(thread_t *thread)
 {
-    if (!thread)
+    if (!thread_pointer_valid(thread))
     {
         return;
     }
@@ -1591,7 +1649,7 @@ static void thread_refresh_priority(thread_t *thread)
 
 static void thread_set_base_priority(thread_t *thread, thread_priority_t priority)
 {
-    if (!thread)
+    if (!thread_pointer_valid(thread))
     {
         return;
     }
@@ -1604,7 +1662,7 @@ static void thread_set_base_priority(thread_t *thread, thread_priority_t priorit
 
 static void thread_set_priority_override(thread_t *thread, bool enabled, thread_priority_t priority)
 {
-    if (!thread)
+    if (!thread_pointer_valid(thread))
     {
         return;
     }
@@ -2563,6 +2621,7 @@ void process_destroy(process_t *process)
         {
             remove_from_run_queue(thread);
         }
+        thread->magic = 0;
         if (thread->stack_guard_base)
         {
             free(thread->stack_guard_base);
@@ -2588,6 +2647,7 @@ void process_destroy(process_t *process)
         cursor = &(*cursor)->next;
     }
 
+    process->magic = 0;
     process_free_user_regions(process);
     paging_destroy_space(&process->address_space);
     free(process);
@@ -2619,7 +2679,7 @@ void process_exit(int status)
 static bool process_waiting_still_running(void *context)
 {
     process_t *proc = (process_t *)context;
-    return proc && proc->state != PROCESS_STATE_ZOMBIE;
+    return proc && process_pointer_valid(proc) && proc->state != PROCESS_STATE_ZOMBIE;
 }
 
 int process_join_with_hook(process_t *process,
@@ -2908,7 +2968,7 @@ void wait_queue_wake_all(wait_queue_t *queue)
 
 void process_set_priority(process_t *process, thread_priority_t priority)
 {
-    if (!process || !process->main_thread)
+    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
     {
         return;
     }
@@ -2917,7 +2977,7 @@ void process_set_priority(process_t *process, thread_priority_t priority)
 
 void process_set_priority_override(process_t *process, thread_priority_t priority)
 {
-    if (!process || !process->main_thread)
+    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
     {
         return;
     }
@@ -2926,7 +2986,7 @@ void process_set_priority_override(process_t *process, thread_priority_t priorit
 
 void process_clear_priority_override(process_t *process)
 {
-    if (!process || !process->main_thread)
+    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
     {
         return;
     }
