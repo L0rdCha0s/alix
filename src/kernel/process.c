@@ -1631,7 +1631,7 @@ static void thread_refresh_priority(thread_t *thread)
     {
         remove_from_run_queue(thread);
     }
-    thread_remove_from_wait_queue(thread);
+    //thread_remove_from_wait_queue(thread);
     thread->priority = desired;
     if (thread->state == THREAD_STATE_READY)
     {
