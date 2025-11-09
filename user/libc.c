@@ -1,6 +1,7 @@
 #include <stdarg.h>
 
 #include "userlib.h"
+#include "serial.h"
 
 #define ALIGNMENT 16UL
 #define SIZE_MAX_VALUE ((size_t)-1)
@@ -15,6 +16,15 @@ typedef struct heap_block
 
 static heap_block_t *g_heap_head = NULL;
 static heap_block_t *g_heap_tail = NULL;
+
+static void user_heap_log(const char *msg, uintptr_t value)
+{
+    serial_write_string("[uheap] ");
+    serial_write_string(msg);
+    serial_write_string("0x");
+    serial_write_hex64((uint64_t)value);
+    serial_write_string("\r\n");
+}
 
 static size_t align_size(size_t size)
 {
@@ -101,8 +111,11 @@ static heap_block_t *request_block(size_t size)
     }
     size_t total = sizeof(heap_block_t) + size;
     void *base = sys_sbrk((int64_t)total);
+    user_heap_log("sbrk size=", total);
+    user_heap_log("sbrk result=", (uintptr_t)base);
     if (base == (void *)-1 || base == NULL)
     {
+        user_heap_log("sbrk failed size=", total);
         return NULL;
     }
     heap_block_t *block = (heap_block_t *)base;
@@ -276,7 +289,9 @@ static void printf_sink_puts(printf_sink_t *sink, const char *text)
 static void printf_sink_print_unsigned(printf_sink_t *sink,
                                        uint64_t value,
                                        unsigned base,
-                                       bool uppercase)
+                                       bool uppercase,
+                                       int width,
+                                       bool zero_pad)
 {
     if (base < 2 || base > 16)
     {
@@ -293,22 +308,40 @@ static void printf_sink_print_unsigned(printf_sink_t *sink,
         value /= base;
     } while (value != 0 && index < sizeof(buffer));
 
+    if (!zero_pad)
+    {
+        width = 0;
+    }
+    int pad = 0;
+    if (width > 0 && (int)index < width)
+    {
+        pad = width - (int)index;
+    }
+    while (pad-- > 0)
+    {
+        printf_sink_putc(sink, '0');
+    }
+
     while (index > 0)
     {
         printf_sink_putc(sink, buffer[--index]);
     }
 }
 
-static void printf_sink_print_signed(printf_sink_t *sink, int64_t value)
+static void printf_sink_print_signed(printf_sink_t *sink, int64_t value, int width, bool zero_pad)
 {
     if (value < 0)
     {
         printf_sink_putc(sink, '-');
+        if (zero_pad && width > 0)
+        {
+            width--;
+        }
         uint64_t magnitude = (uint64_t)(-(value + 1)) + 1;
-        printf_sink_print_unsigned(sink, magnitude, 10, false);
+        printf_sink_print_unsigned(sink, magnitude, 10, false, width, zero_pad);
         return;
     }
-    printf_sink_print_unsigned(sink, (uint64_t)value, 10, false);
+    printf_sink_print_unsigned(sink, (uint64_t)value, 10, false, width, zero_pad);
 }
 
 static void printf_format(printf_sink_t *sink, const char *format, va_list args)
@@ -334,11 +367,44 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
             continue;
         }
 
-        bool length_z = false;
-        if (*format == 'z')
+        bool zero_pad = false;
+        if (*format == '0')
         {
-            length_z = true;
+            zero_pad = true;
             ++format;
+        }
+
+        int width = 0;
+        while (*format >= '0' && *format <= '9')
+        {
+            width = width * 10 + (*format - '0');
+            ++format;
+        }
+        if (!zero_pad)
+        {
+            width = 0;
+        }
+
+        bool length_z = false;
+        bool length_l = false;
+        bool length_ll = false;
+        while (*format == 'z' || *format == 'l')
+        {
+            if (*format == 'z')
+            {
+                length_z = true;
+                ++format;
+                break;
+            }
+            if (*format == 'l')
+            {
+                if (length_l)
+                {
+                    length_ll = true;
+                }
+                length_l = true;
+                ++format;
+            }
         }
 
         char specifier = *format ? *format++ : '\0';
@@ -359,65 +425,94 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
             case 'd':
             case 'i':
             {
-                if (length_z)
+                if (length_z || length_l)
                 {
-                    ssize_t value = va_arg(args, ssize_t);
-                    printf_sink_print_signed(sink, (int64_t)value);
+                    long value = va_arg(args, long);
+                    printf_sink_print_signed(sink, (int64_t)value, width, zero_pad);
+                }
+                else if (length_ll)
+                {
+                    long long value = va_arg(args, long long);
+                    printf_sink_print_signed(sink, (int64_t)value, width, zero_pad);
                 }
                 else
                 {
                     int value = va_arg(args, int);
-                    printf_sink_print_signed(sink, (int64_t)value);
+                    printf_sink_print_signed(sink, (int64_t)value, width, zero_pad);
                 }
                 break;
             }
             case 'u':
             {
+                uint64_t value;
                 if (length_z)
                 {
-                    size_t value = va_arg(args, size_t);
-                    printf_sink_print_unsigned(sink, (uint64_t)value, 10, false);
+                    value = (uint64_t)va_arg(args, size_t);
+                }
+                else if (length_ll)
+                {
+                    value = (uint64_t)va_arg(args, unsigned long long);
+                }
+                else if (length_l)
+                {
+                    value = (uint64_t)va_arg(args, unsigned long);
                 }
                 else
                 {
-                    unsigned int value = va_arg(args, unsigned int);
-                    printf_sink_print_unsigned(sink, (uint64_t)value, 10, false);
+                    value = (uint64_t)va_arg(args, unsigned int);
                 }
+                printf_sink_print_unsigned(sink, value, 10, false, width, zero_pad);
                 break;
             }
             case 'x':
             {
+                uint64_t value;
                 if (length_z)
                 {
-                    size_t value = va_arg(args, size_t);
-                    printf_sink_print_unsigned(sink, (uint64_t)value, 16, false);
+                    value = (uint64_t)va_arg(args, size_t);
+                }
+                else if (length_ll)
+                {
+                    value = (uint64_t)va_arg(args, unsigned long long);
+                }
+                else if (length_l)
+                {
+                    value = (uint64_t)va_arg(args, unsigned long);
                 }
                 else
                 {
-                    unsigned int value = va_arg(args, unsigned int);
-                    printf_sink_print_unsigned(sink, (uint64_t)value, 16, false);
+                    value = (uint64_t)va_arg(args, unsigned int);
                 }
+                printf_sink_print_unsigned(sink, value, 16, false, width, zero_pad);
                 break;
             }
             case 'X':
             {
+                uint64_t value;
                 if (length_z)
                 {
-                    size_t value = va_arg(args, size_t);
-                    printf_sink_print_unsigned(sink, (uint64_t)value, 16, true);
+                    value = (uint64_t)va_arg(args, size_t);
+                }
+                else if (length_ll)
+                {
+                    value = (uint64_t)va_arg(args, unsigned long long);
+                }
+                else if (length_l)
+                {
+                    value = (uint64_t)va_arg(args, unsigned long);
                 }
                 else
                 {
-                    unsigned int value = va_arg(args, unsigned int);
-                    printf_sink_print_unsigned(sink, (uint64_t)value, 16, true);
+                    value = (uint64_t)va_arg(args, unsigned int);
                 }
+                printf_sink_print_unsigned(sink, value, 16, true, width, zero_pad);
                 break;
             }
             case 'p':
             {
                 uintptr_t ptr = (uintptr_t)va_arg(args, void *);
                 printf_sink_write(sink, "0x", 2);
-                printf_sink_print_unsigned(sink, ptr, 16, false);
+                printf_sink_print_unsigned(sink, ptr, 16, false, 0, false);
                 break;
             }
             case '\0':
@@ -427,6 +522,14 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
                 {
                     printf_sink_putc(sink, 'z');
                 }
+                if (length_l)
+                {
+                    printf_sink_putc(sink, 'l');
+                    if (length_ll)
+                    {
+                        printf_sink_putc(sink, 'l');
+                    }
+                }
                 return;
             }
             default:
@@ -435,6 +538,14 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
                 if (length_z)
                 {
                     printf_sink_putc(sink, 'z');
+                }
+                if (length_l)
+                {
+                    printf_sink_putc(sink, 'l');
+                    if (length_ll)
+                    {
+                        printf_sink_putc(sink, 'l');
+                    }
                 }
                 printf_sink_putc(sink, specifier);
                 break;
@@ -475,6 +586,7 @@ int printf(const char *format, ...)
 
 void *malloc(size_t size)
 {
+    user_heap_log("malloc req=", size);
     size = align_size(size);
     if (size == 0)
     {
@@ -496,14 +608,18 @@ void *malloc(size_t size)
         split_block(block, size);
     }
 
-    return (uint8_t *)block + sizeof(heap_block_t);
+    void *ptr = (uint8_t *)block + sizeof(heap_block_t);
+    user_heap_log("malloc ptr=", (uintptr_t)ptr);
+    return ptr;
 }
 
 void free(void *ptr)
 {
+    user_heap_log("free ptr=", (uintptr_t)ptr);
     heap_block_t *block = payload_to_block(ptr);
     if (!block || block->free)
     {
+        user_heap_log("free ignored ptr=", (uintptr_t)ptr);
         return;
     }
 
@@ -513,6 +629,8 @@ void free(void *ptr)
 
 void *realloc(void *ptr, size_t size)
 {
+    user_heap_log("realloc ptr=", (uintptr_t)ptr);
+    user_heap_log("realloc size=", size);
     if (!ptr)
     {
         return malloc(size);
@@ -526,6 +644,7 @@ void *realloc(void *ptr, size_t size)
     heap_block_t *block = payload_to_block(ptr);
     if (!block)
     {
+        user_heap_log("realloc invalid block ptr=", (uintptr_t)ptr);
         return NULL;
     }
 
@@ -539,6 +658,9 @@ void *realloc(void *ptr, size_t size)
     void *new_ptr = malloc(size);
     if (!new_ptr)
     {
+        user_heap_log("realloc malloc fail size=", size);
+        user_heap_log("realloc malloc fail old_size=", block->size);
+        user_heap_log("realloc malloc fail block=", (uintptr_t)block);
         return NULL;
     }
     memcpy(new_ptr, ptr, block->size);
@@ -548,6 +670,8 @@ void *realloc(void *ptr, size_t size)
 
 void *calloc(size_t count, size_t size)
 {
+    user_heap_log("calloc count=", count);
+    user_heap_log("calloc size=", size);
     if (count != 0 && size > SIZE_MAX_VALUE / count)
     {
         return NULL;

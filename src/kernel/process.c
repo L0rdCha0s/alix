@@ -30,7 +30,7 @@
 #define USER_STACK_TOP            (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)
 #define USER_STACK_SIZE           (64ULL * 1024ULL)
 #define USER_HEAP_BASE            (USER_ADDRESS_SPACE_BASE + 0x02000000ULL)
-#define USER_HEAP_SIZE            (64ULL * 1024ULL * 1024ULL)
+#define USER_HEAP_SIZE            (1024ULL * 1024ULL * 1024ULL)
 #define PAGE_SIZE_BYTES_LOCAL     4096ULL
 
 typedef uint64_t cpu_context_t;
@@ -61,6 +61,13 @@ typedef struct process_user_region
     bool executable;
     struct process_user_region *next;
 } process_user_region_t;
+
+typedef struct process_heap_page
+{
+    uintptr_t virt;
+    uintptr_t phys;
+    struct process_heap_page *next;
+} process_heap_page_t;
 
 typedef struct user_thread_bootstrap
 {
@@ -164,10 +171,11 @@ struct process
     uintptr_t user_entry_point;
     uintptr_t user_stack_top;
     size_t user_stack_size;
-    process_user_region_t *user_heap_region;
     uintptr_t user_heap_base;
     uintptr_t user_heap_brk;
     uintptr_t user_heap_limit;
+    uintptr_t user_heap_committed;
+    process_heap_page_t *heap_pages;
     uint8_t *user_stack_host;
     uintptr_t user_initial_stack;
     size_t arg_count;
@@ -297,6 +305,22 @@ static inline uintptr_t align_down_uintptr(uintptr_t value, uintptr_t alignment)
 static inline size_t align_up_size(size_t value, size_t alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static process_heap_page_t *process_heap_find_page(const process_t *process, uintptr_t virt_page);
+static bool process_heap_add_page(process_t *process, uintptr_t virt, uintptr_t phys);
+static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes);
+static void process_heap_release_from(process_t *process, uintptr_t virt_start);
+static void process_free_heap_pages(process_t *process);
+static bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t end);
+
+static void process_log(const char *msg, uint64_t value)
+{
+    serial_write_string("[proc] ");
+    serial_write_string(msg);
+    serial_write_string("0x");
+    serial_write_hex64(value);
+    serial_write_string("\r\n");
 }
 
 static void tss_set_rsp0(uint64_t rsp0)
@@ -521,10 +545,11 @@ static process_t *allocate_process(const char *name, bool is_user)
     proc->user_entry_point = 0;
     proc->user_stack_top = 0;
     proc->user_stack_size = 0;
-    proc->user_heap_region = NULL;
     proc->user_heap_base = 0;
     proc->user_heap_brk = 0;
     proc->user_heap_limit = 0;
+    proc->user_heap_committed = 0;
+    proc->heap_pages = NULL;
     return proc;
 }
 
@@ -547,10 +572,11 @@ static void process_free_user_regions(process_t *process)
         region = next;
     }
     process->user_regions = NULL;
-    process->user_heap_region = NULL;
+    process_free_heap_pages(process);
     process->user_heap_base = 0;
     process->user_heap_brk = 0;
     process->user_heap_limit = 0;
+    process->user_heap_committed = 0;
 }
 
 static void process_unlink_user_region(process_t *process, process_user_region_t *region)
@@ -590,6 +616,151 @@ static bool process_map_user_region(process_t *process, const process_user_regio
                                  region->executable);
 }
 
+static process_heap_page_t *process_heap_find_page(const process_t *process, uintptr_t virt_page)
+{
+    if (!process)
+    {
+        return NULL;
+    }
+    for (process_heap_page_t *page = process->heap_pages; page; page = page->next)
+    {
+        if (page->virt == virt_page)
+        {
+            return page;
+        }
+    }
+    return NULL;
+}
+
+static bool process_heap_add_page(process_t *process, uintptr_t virt, uintptr_t phys)
+{
+    if (!process)
+    {
+        return false;
+    }
+    process_heap_page_t *page = (process_heap_page_t *)malloc(sizeof(process_heap_page_t));
+    if (!page)
+    {
+        return false;
+    }
+    page->virt = virt;
+    page->phys = phys;
+    page->next = process->heap_pages;
+    process->heap_pages = page;
+    return true;
+}
+
+static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes)
+{
+    if (!process || bytes == 0)
+    {
+        return true;
+    }
+    uintptr_t addr = start;
+    size_t remaining = bytes;
+    while (remaining > 0)
+    {
+        uintptr_t page_base = align_down_uintptr(addr, PAGE_SIZE_BYTES_LOCAL);
+        process_heap_page_t *page = process_heap_find_page(process, page_base);
+        if (!page)
+        {
+            return false;
+        }
+        size_t page_offset = (size_t)(addr - page_base);
+        size_t chunk = PAGE_SIZE_BYTES_LOCAL - page_offset;
+        if (chunk > remaining)
+        {
+            chunk = remaining;
+        }
+        memset((uint8_t *)(uintptr_t)page->phys + page_offset, 0, chunk);
+        addr += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+static void process_heap_release_from(process_t *process, uintptr_t virt_start)
+{
+    if (!process)
+    {
+        return;
+    }
+    process_heap_page_t **cursor = &process->heap_pages;
+    while (*cursor)
+    {
+        process_heap_page_t *page = *cursor;
+        if (page->virt >= virt_start)
+        {
+            paging_unmap_user_page(&process->address_space, page->virt);
+            user_memory_free_page(page->phys);
+            *cursor = page->next;
+            free(page);
+        }
+        else
+        {
+            cursor = &page->next;
+        }
+    }
+}
+
+static void process_free_heap_pages(process_t *process)
+{
+    if (!process)
+    {
+        return;
+    }
+    process_heap_release_from(process, process->user_heap_base);
+    process->user_heap_committed = process->user_heap_base;
+    process->heap_pages = NULL;
+}
+
+static bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t end)
+{
+    if (!process || start >= end)
+    {
+        return true;
+    }
+    uintptr_t page_addr = start;
+    while (page_addr < end)
+    {
+        uintptr_t phys = 0;
+        if (!user_memory_alloc_page(&phys))
+        {
+            process_heap_release_from(process, start);
+            process->user_heap_committed = start;
+            return false;
+        }
+        process_heap_page_t *page_node = (process_heap_page_t *)malloc(sizeof(process_heap_page_t));
+        if (!page_node)
+        {
+            user_memory_free_page(phys);
+            process_heap_release_from(process, start);
+            process->user_heap_committed = start;
+            return false;
+        }
+        memset((void *)(uintptr_t)phys, 0, PAGE_SIZE_BYTES_LOCAL);
+        if (!paging_map_user_page(&process->address_space,
+                                  page_addr,
+                                  phys,
+                                  true,
+                                  false))
+        {
+            free(page_node);
+            user_memory_free_page(phys);
+            process_heap_release_from(process, start);
+             process->user_heap_committed = start;
+            return false;
+        }
+        page_node->virt = page_addr;
+        page_node->phys = phys;
+        page_node->next = process->heap_pages;
+        process->heap_pages = page_node;
+        page_addr += PAGE_SIZE_BYTES_LOCAL;
+    }
+    process->user_heap_committed = end;
+    return true;
+}
+
 static bool process_user_region_allocate(process_t *process,
                                          uintptr_t user_base,
                                          size_t bytes,
@@ -625,10 +796,33 @@ static bool process_user_region_allocate(process_t *process,
     region->executable = executable;
     region->next = process->user_regions;
     process->user_regions = region;
+    process_log("region host=", (uintptr_t)host);
+    process_log("region size=", aligned_bytes);
 
     if (region_out)
     {
         *region_out = region;
+    }
+    return true;
+}
+
+static bool process_heap_commit(process_t *process, uintptr_t commit_start, uintptr_t commit_end)
+{
+    if (!process || commit_end <= commit_start)
+    {
+        return true;
+    }
+    uintptr_t addr = commit_start;
+    while (addr < commit_end)
+    {
+        size_t chunk = commit_end - addr;
+        void *host = NULL;
+        if (!process_map_user_segment(process, addr, chunk, true, false, &host))
+        {
+            return false;
+        }
+        memset(host, 0, chunk);
+        addr += chunk;
     }
     return true;
 }
@@ -648,6 +842,8 @@ bool process_map_user_segment(process_t *process,
     uintptr_t aligned_base = align_down_uintptr(user_base, PAGE_SIZE_BYTES_LOCAL);
     size_t offset = (size_t)(user_base - aligned_base);
     size_t total = align_up_size(bytes + offset, PAGE_SIZE_BYTES_LOCAL);
+    process_log("map base=", aligned_base);
+    process_log("map bytes=", total);
 
     process_user_region_t *region = NULL;
     if (!process_user_region_allocate(process,
@@ -663,6 +859,7 @@ bool process_map_user_segment(process_t *process,
     if (!process_map_user_region(process, region))
     {
         process_unlink_user_region(process, region);
+        process_log("map fail base=", aligned_base);
         return false;
     }
 
@@ -670,6 +867,7 @@ bool process_map_user_segment(process_t *process,
     {
         uint8_t *base_ptr = (uint8_t *)region->aligned_allocation;
         *host_ptr_out = base_ptr + offset;
+        process_log("map host ptr=", (uintptr_t)*host_ptr_out);
     }
     return true;
 }
@@ -694,19 +892,10 @@ static bool process_setup_user_stack(process_t *process)
 
 static bool process_setup_user_heap(process_t *process)
 {
-    if (!process_map_user_segment(process,
-                                  USER_HEAP_BASE,
-                                  USER_HEAP_SIZE,
-                                  true,
-                                  false,
-                                  NULL))
-    {
-        return false;
-    }
-    process->user_heap_region = process->user_regions;
     process->user_heap_base = USER_HEAP_BASE;
     process->user_heap_brk = USER_HEAP_BASE;
     process->user_heap_limit = USER_HEAP_BASE + USER_HEAP_SIZE;
+    process->user_heap_committed = USER_HEAP_BASE;
     return true;
 }
 
@@ -2282,7 +2471,7 @@ bool process_query_user_layout(const process_t *process,
 
 int64_t process_user_sbrk(process_t *process, int64_t increment)
 {
-    if (!process || !process->is_user || !process->user_heap_region)
+    if (!process || !process->is_user || process->user_heap_base == 0)
     {
         return -1;
     }
@@ -2290,8 +2479,12 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
     uintptr_t base = process->user_heap_base;
     uintptr_t limit = process->user_heap_limit;
     uintptr_t current = process->user_heap_brk;
+    process_log("sbrk pid=", process->pid);
+    process_log("sbrk inc=", (uint64_t)increment);
+    process_log("sbrk current=", current);
     if (base == 0 || limit <= base || current < base || current > limit)
     {
+        process_log("sbrk invalid bounds pid=", process->pid);
         return -1;
     }
     uintptr_t new_brk = current;
@@ -2301,24 +2494,51 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
         uint64_t inc = (uint64_t)increment;
         if (inc > (limit - current))
         {
+            process_log("sbrk clamp inc=", inc);
+            process_log("sbrk avail=", limit - current);
             return -1;
         }
         new_brk = current + inc;
-        uint8_t *heap_mem = (uint8_t *)process->user_heap_region->aligned_allocation;
-        size_t offset = (size_t)(current - base);
-        memset(heap_mem + offset, 0, inc);
+        uintptr_t commit_start = process->user_heap_committed;
+        uintptr_t commit_end = align_up_uintptr(new_brk, PAGE_SIZE_BYTES_LOCAL);
+        if (commit_end > limit)
+        {
+            commit_end = limit;
+        }
+        if (commit_end > commit_start)
+        {
+            if (!process_heap_commit_range(process, commit_start, commit_end))
+            {
+                process_log("sbrk commit failed pid=", process->pid);
+                process_log("sbrk commit avail=", user_memory_available());
+                return -1;
+            }
+        }
+        if (!process_heap_zero_range(process, current, inc))
+        {
+            process_log("sbrk zero failed pid=", process->pid);
+            return -1;
+        }
     }
     else if (increment < 0)
     {
         uint64_t dec = (uint64_t)(-increment);
         if (dec > (current - base))
         {
+            process_log("sbrk negative clamp dec=", dec);
             return -1;
         }
         new_brk = current - dec;
+        uintptr_t new_commit = align_up_uintptr(new_brk, PAGE_SIZE_BYTES_LOCAL);
+        if (new_commit < process->user_heap_committed)
+        {
+            process_heap_release_from(process, new_commit);
+        }
     }
 
     process->user_heap_brk = new_brk;
+    process_log("sbrk new=", new_brk);
+    process_log("sbrk return=", current);
     return (int64_t)current;
 }
 

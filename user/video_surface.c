@@ -13,8 +13,16 @@ static uint32_t g_surface_width = VIDEO_WIDTH;
 static uint32_t g_surface_height = VIDEO_HEIGHT;
 static bool g_surface_dirty = false;
 
+static void surface_log(const char *msg, uint64_t value)
+{
+    printf("[usurf] %s0x%lx\n", msg, (unsigned long)value);
+}
+
 void video_surface_attach(uint16_t *buffer, uint32_t width, uint32_t height)
 {
+    surface_log("attach buffer=", (uintptr_t)buffer);
+    surface_log("attach width=", width);
+    surface_log("attach height=", height);
     g_surface = buffer;
     g_surface_width = width;
     g_surface_height = height;
@@ -23,6 +31,7 @@ void video_surface_attach(uint16_t *buffer, uint32_t width, uint32_t height)
 
 void video_surface_detach(void)
 {
+    surface_log("detach buffer=", (uintptr_t)g_surface);
     g_surface = NULL;
     g_surface_width = 0;
     g_surface_height = 0;
@@ -54,6 +63,7 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
 void video_fill(uint16_t color)
 {
+    surface_log("fill color=", color);
     if (!surface_ready())
     {
         return;
@@ -100,6 +110,10 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
 
 void video_draw_rect(int x, int y, int width, int height, uint16_t color)
 {
+    surface_log("rect x=", x);
+    surface_log("rect y=", y);
+    surface_log("rect w=", width);
+    surface_log("rect h=", height);
     if (!surface_ready() || width <= 0 || height <= 0)
     {
         return;
@@ -133,6 +147,10 @@ void video_draw_rect(int x, int y, int width, int height, uint16_t color)
 
 void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color)
 {
+    surface_log("rect_outline x=", x);
+    surface_log("rect_outline y=", y);
+    surface_log("rect_outline w=", width);
+    surface_log("rect_outline h=", height);
     if (width <= 0 || height <= 0)
     {
         return;
@@ -145,6 +163,8 @@ void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color
 
 void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
 {
+    surface_log("text x=", x);
+    surface_log("text y=", y);
     if (!text)
     {
         return;
@@ -228,6 +248,11 @@ void video_invalidate_all(void)
 
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
 {
+    surface_log("blit x=", x);
+    surface_log("blit y=", y);
+    surface_log("blit w=", width);
+    surface_log("blit h=", height);
+    surface_log("blit src=", (uintptr_t)pixels);
     if (!surface_ready() || !pixels || width <= 0 || height <= 0)
     {
         return;

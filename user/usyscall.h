@@ -16,5 +16,6 @@ int sys_ui_present(uint32_t handle, const void *pixels, size_t byte_len);
 int sys_ui_poll_event(uint32_t handle, user_atk_event_t *event, uint32_t flags);
 int sys_ui_close(uint32_t handle);
 int sys_yield(void);
+int sys_serial_write(const char *buffer, size_t length);
 
 #endif

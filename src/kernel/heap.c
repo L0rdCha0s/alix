@@ -1,5 +1,6 @@
 #include "heap.h"
 #include "libc.h"
+#include "serial.h"
 
 #include <stddef.h>
 
@@ -23,16 +24,27 @@ static uintptr_t g_heap_start = 0;
 static uintptr_t g_heap_end = 0;
 static bool g_heap_initialized = false;
 
+static inline void heap_log(const char *msg, uintptr_t value)
+{
+    serial_write_string("[heap] ");
+    serial_write_string(msg);
+    serial_write_string("0x");
+    serial_write_hex64(value);
+    serial_write_string("\r\n");
+}
+
 static inline uint64_t heap_lock_acquire(void)
 {
     uint64_t flags;
     __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
     __asm__ volatile ("cli" ::: "memory");
+    heap_log("lock acquire flags=", flags);
     return flags;
 }
 
 static inline void heap_lock_release(uint64_t flags)
 {
+    heap_log("lock release flags=", flags);
     __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc");
 }
 
@@ -162,6 +174,7 @@ void heap_init(void)
 
 void *malloc(size_t size)
 {
+    size_t requested = size;
     uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized || size == 0)
     {
@@ -174,6 +187,7 @@ void *malloc(size_t size)
     heap_block_t *block = find_suitable_block(size);
     if (!block)
     {
+        heap_log("malloc fail size=", requested);
         heap_lock_release(flags);
         return NULL;
     }
@@ -185,12 +199,15 @@ void *malloc(size_t size)
 
     block->free = false;
     void *result = (void *)((uintptr_t)block + sizeof(heap_block_t));
+    heap_log("malloc ptr=", (uintptr_t)result);
+    heap_log("malloc size=", requested);
     heap_lock_release(flags);
     return result;
 }
 
 void free(void *ptr)
 {
+    heap_log("free req=", (uintptr_t)ptr);
     uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized || !ptr)
     {
@@ -201,6 +218,7 @@ void free(void *ptr)
     heap_block_t *block = payload_to_block(ptr);
     if (!block || !pointer_in_heap(block) || block->free)
     {
+        heap_log("free invalid ptr=", (uintptr_t)ptr);
         heap_lock_release(flags);
         return;
     }
@@ -254,6 +272,8 @@ static heap_block_t *expand_block(heap_block_t *block, size_t size)
 
 void *realloc(void *ptr, size_t size)
 {
+    heap_log("realloc ptr=", (uintptr_t)ptr);
+    heap_log("realloc size=", size);
     uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized)
     {

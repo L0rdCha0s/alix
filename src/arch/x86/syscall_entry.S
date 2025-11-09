@@ -6,6 +6,7 @@
 .extern syscall_dispatch
 
 syscall_entry:
+    cld                     # DF = 0 for C/memcpy-safe
     push rax
     push rbx
     push rcx
@@ -22,9 +23,13 @@ syscall_entry:
     push r14
     push r15
 
-    mov rdi, rsp
-    mov rsi, 0x80
+    mov rdi, rsp            # frame -> saved regs (r15..rax, then HW frame)
+    mov rsi, 0x80           # vector (ignored by your C)
+
+    mov rbx, rsp            # save original RSP in a callee-saved reg
+    and rsp, -16            # align for the CALL
     call syscall_dispatch
+    mov rsp, rbx            # restore the exact stack pointer
 
     pop r15
     pop r14
@@ -41,5 +46,4 @@ syscall_entry:
     pop rcx
     pop rbx
     pop rax
-
     iretq

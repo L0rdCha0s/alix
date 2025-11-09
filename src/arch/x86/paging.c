@@ -643,3 +643,40 @@ bool paging_map_user_range(paging_space_t *space,
     }
     return true;
 }
+
+bool paging_unmap_user_page(paging_space_t *space,
+                            uintptr_t virtual_addr)
+{
+    if (!space || !space->tables_base)
+    {
+        return false;
+    }
+    virtual_addr = align_down(virtual_addr, PAGE_SIZE_BYTES);
+    uint64_t *pml4 = (uint64_t *)space->tables_base;
+    size_t pml4_idx = index_pml4(virtual_addr);
+    if ((pml4[pml4_idx] & PAGE_PRESENT) == 0)
+    {
+        return false;
+    }
+    uint64_t *pdpt = entry_to_table(pml4[pml4_idx]);
+    size_t pdpt_idx = index_pdpt(virtual_addr);
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0)
+    {
+        return false;
+    }
+    uint64_t *pd = entry_to_table(pdpt[pdpt_idx]);
+    size_t pd_idx = index_pd(virtual_addr);
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0 || (pd[pd_idx] & PAGE_PAGE_SIZE))
+    {
+        return false;
+    }
+    uint64_t *pt = entry_to_table(pd[pd_idx]);
+    size_t pt_idx = index_pt(virtual_addr);
+    if ((pt[pt_idx] & PAGE_PRESENT) == 0)
+    {
+        return false;
+    }
+    pt[pt_idx] = 0;
+    __asm__ volatile ("invlpg (%0)" :: "r"(virtual_addr) : "memory");
+    return true;
+}

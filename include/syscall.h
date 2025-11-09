@@ -27,6 +27,6 @@ typedef struct syscall_frame
     uint64_t ss;
 } syscall_frame_t;
 
-void syscall_dispatch(syscall_frame_t *frame, uint64_t vector);
+uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector);
 
 #endif

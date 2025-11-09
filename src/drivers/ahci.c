@@ -510,6 +510,8 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
                            bool write)
 {
     hba_port_t *port = ctx->port;
+    ahci_log_hex("cmd buffer=", (uint64_t)(uintptr_t)buffer);
+    ahci_log_hex("cmd bytes=", (uint64_t)count * AHCI_SECTOR_SIZE);
     if (!buffer)
     {
         return false;
@@ -629,6 +631,8 @@ static bool ahci_block_read(block_device_t *device, uint64_t lba, uint32_t count
 {
     ahci_port_ctx_t *ctx = (ahci_port_ctx_t *)device->driver_data;
     uint8_t *dst = (uint8_t *)buffer;
+    ahci_log_hex("block_read buf=", (uint64_t)(uintptr_t)buffer);
+    ahci_log_hex("block_read count=", count);
     if (!count)
     {
         return true;
@@ -651,6 +655,8 @@ static bool ahci_block_write(block_device_t *device, uint64_t lba, uint32_t coun
 {
     ahci_port_ctx_t *ctx = (ahci_port_ctx_t *)device->driver_data;
     const uint8_t *src = (const uint8_t *)buffer;
+    ahci_log_hex("block_write buf=", (uint64_t)(uintptr_t)buffer);
+    ahci_log_hex("block_write count=", count);
     if (!count)
     {
         return true;

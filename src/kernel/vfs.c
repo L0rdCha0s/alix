@@ -2,6 +2,7 @@
 #include "vfs.h"
 #include "libc.h"
 #include "heap.h"
+#include "serial.h"
 
 /*
  * Heap-backed VFS:
@@ -60,6 +61,15 @@ struct vfs_node
 
 static vfs_node_t *root = NULL;
 static vfs_mount_t *mounts = NULL;
+
+static void vfs_log(const char *msg, uint64_t value)
+{
+    serial_write_string("[vfs] ");
+    serial_write_string(msg);
+    serial_write_string("0x");
+    serial_write_hex64(value);
+    serial_write_string("\r\n");
+}
 
 static bool vfs_mount_sync_node(vfs_node_t *node);
 static void vfs_mark_node_dirty(vfs_node_t *node);
@@ -691,6 +701,9 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
 
 ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
 {
+    vfs_log("read file=", (uint64_t)(uintptr_t)file);
+    vfs_log("read off=", offset);
+    vfs_log("read cnt=", count);
     if (!file || file->type != VFS_NODE_FILE || !buffer)
     {
         return -1;
@@ -706,11 +719,16 @@ ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
         count = available;
     }
     memcpy(buffer, file->data + offset, count);
+    vfs_log("read dst=", (uint64_t)(uintptr_t)buffer);
+    vfs_log("read bytes=", count);
     return (ssize_t)count;
 }
 
 ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t count)
 {
+    vfs_log("write file=", (uint64_t)(uintptr_t)file);
+    vfs_log("write off=", offset);
+    vfs_log("write cnt=", count);
     if (!file || file->type != VFS_NODE_FILE)
     {
         return -1;
@@ -738,6 +756,7 @@ ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t c
         memset(file->data + file->size, 0, gap);
     }
     memcpy(file->data + offset, data, count);
+    vfs_log("write src=", (uint64_t)(uintptr_t)data);
     if (end > file->size)
     {
         file->size = end;

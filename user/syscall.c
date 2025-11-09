@@ -103,3 +103,8 @@ int sys_yield(void)
 {
     return (int)syscall0(SYSCALL_YIELD);
 }
+
+int sys_serial_write(const char *buffer, size_t length)
+{
+    return (int)syscall2(SYSCALL_SERIAL_WRITE, (long)buffer, (long)length);
+}

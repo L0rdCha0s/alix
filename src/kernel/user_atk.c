@@ -37,6 +37,15 @@ static user_atk_window_t *g_focus_window = NULL;
 static user_atk_window_t *g_capture_window = NULL;
 static uint32_t g_next_handle = 1;
 
+static void user_atk_log(const char *msg, uint64_t value)
+{
+    serial_write_string("[uatk] ");
+    serial_write_string(msg);
+    serial_write_string("0x");
+    serial_write_hex64(value);
+    serial_write_string("\r\n");
+}
+
 static user_atk_window_t *user_atk_from_window(const atk_widget_t *window);
 static user_atk_window_t *user_atk_find(uint32_t handle, process_t *owner);
 static void user_atk_insert(user_atk_window_t *win);
@@ -309,6 +318,8 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
         return -1;
     }
     memset(pixels, 0, pixel_bytes);
+    user_atk_log("alloc pixels=", (uintptr_t)pixels);
+    user_atk_log("alloc bytes=", pixel_bytes);
 
     if (!atk_image_set_pixels(image, pixels, desc.width, desc.height, desc.width * (int)sizeof(uint16_t), true))
     {
@@ -346,6 +357,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
 
     atk_window_mark_dirty(window);
     video_request_refresh_window(window);
+    user_atk_log("create handle=", win->handle);
     return (int64_t)win->handle;
 }
 
@@ -355,6 +367,9 @@ int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byt
     {
         return -1;
     }
+    user_atk_log("present handle=", handle);
+    user_atk_log("present user ptr=", (uintptr_t)pixels);
+    user_atk_log("present bytes=", byte_len);
     user_atk_window_t *win = user_atk_find(handle, process_current());
     if (!win || win->closed || !win->pixels)
     {
@@ -367,6 +382,7 @@ int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byt
     }
 
     memcpy(win->pixels, pixels, byte_len);
+    user_atk_log("present dst ptr=", (uintptr_t)win->pixels);
     if (win->window)
     {
         atk_window_mark_dirty(win->window);
@@ -410,6 +426,7 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
 
 int64_t user_atk_sys_close(uint32_t handle)
 {
+    user_atk_log("close handle=", handle);
     user_atk_window_t *win = user_atk_find(handle, process_current());
     if (!win)
     {

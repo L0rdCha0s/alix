@@ -36,5 +36,7 @@ bool paging_map_user_range(paging_space_t *space,
                            size_t length,
                            bool writable,
                            bool executable);
+bool paging_unmap_user_page(paging_space_t *space,
+                            uintptr_t virtual_addr);
 
 #endif

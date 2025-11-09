@@ -144,13 +144,13 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     return (int64_t)fd;
 }
 
-void syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
+uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
 {
     (void)vector;
 
     if (!frame)
     {
-        return;
+        return 0;
     }
 
     uint64_t syscall_id = frame->rax;
@@ -160,7 +160,7 @@ void syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
     {
         case SYSCALL_EXIT:
             process_exit((int)frame->rdi);
-            return;
+            return 0;
         case SYSCALL_WRITE:
             result = syscall_do_write(frame->rdi,
                                       (const void *)frame->rsi,
@@ -207,6 +207,26 @@ void syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_UI_CLOSE:
             result = user_atk_sys_close((uint32_t)frame->rdi);
             break;
+        case SYSCALL_SERIAL_WRITE:
+        {
+            const char *msg = (const char *)frame->rdi;
+            size_t len = (size_t)frame->rsi;
+            if (!msg)
+            {
+                result = -1;
+                break;
+            }
+            if (len == 0)
+            {
+                len = strlen(msg);
+            }
+            for (size_t i = 0; i < len; ++i)
+            {
+                serial_write_char(msg[i]);
+            }
+            result = (int64_t)len;
+            break;
+        }
         default:
             serial_write_string("syscall: unhandled id=");
             serial_write_hex64(syscall_id);
@@ -216,4 +236,5 @@ void syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
     }
 
     frame->rax = (uint64_t)result;
+    return (uint64_t)result;
 }

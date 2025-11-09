@@ -8,6 +8,7 @@
 #include "keyboard.h"
 #include "libc.h"
 #include "font.h"
+#include "console.h"
 
 typedef struct atk_state atk_state_t;
 typedef struct atk_widget atk_widget_t;
@@ -275,6 +276,8 @@ static void video_hw_disable(void)
 
 void video_fill(uint16_t color)
 {
+    video_log_hex("fill color=", color);
+    video_log_hex("fill backbuffer=", (uint64_t)(uintptr_t)backbuffer);
     for (int y = 0; y < VIDEO_HEIGHT; ++y)
     {
         uint16_t *row = &backbuffer[y * VIDEO_WIDTH];
@@ -454,8 +457,14 @@ static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
 
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
 {
+    video_log_hex("blit x=", (uint64_t)x);
+    video_log_hex("blit y=", (uint64_t)y);
+    video_log_hex("blit w=", (uint64_t)width);
+    video_log_hex("blit h=", (uint64_t)height);
+    video_log_hex("blit src=", (uint64_t)(uintptr_t)pixels);
     if (!pixels || width <= 0 || height <= 0) return;
     if (stride_bytes <= 0) stride_bytes = width * 2;
+    video_log_hex("blit stride=", (uint64_t)stride_bytes);
 
     int x0 = x, y0 = y;
     int x1 = x + width, y1 = y + height;
@@ -493,6 +502,10 @@ static void video_dirty_reset(void)
 
 void video_invalidate_rect(int x, int y, int width, int height)
 {
+    video_log_hex("invalidate x=", (uint64_t)x);
+    video_log_hex("invalidate y=", (uint64_t)y);
+    video_log_hex("invalidate w=", (uint64_t)width);
+    video_log_hex("invalidate h=", (uint64_t)height);
     int x0 = x, y0 = y, x1 = x + width, y1 = y + height;
 
     if (x0 < 0) x0 = 0;
@@ -542,11 +555,18 @@ static void video_flush_dirty(void)
 
     int w = dirty_x1 - dirty_x0;
     size_t row_bytes = (size_t)w * 2U;
+    video_log_hex("flush x0=", dirty_x0);
+    video_log_hex("flush y0=", dirty_y0);
+    video_log_hex("flush x1=", dirty_x1);
+    video_log_hex("flush y1=", dirty_y1);
+    video_log_hex("flush bytes=", row_bytes);
 
     for (int y = dirty_y0; y < dirty_y1; ++y)
     {
         volatile uint16_t *dst = &framebuffer[y * VIDEO_WIDTH + dirty_x0];
         uint16_t *src = &backbuffer[y * VIDEO_WIDTH + dirty_x0];
+        video_log_hex("flush dst=", (uint64_t)(uintptr_t)dst);
+        video_log_hex("flush src=", (uint64_t)(uintptr_t)src);
         fb_memcpy_wc((void *)dst, src, row_bytes);
     }
 
@@ -619,6 +639,7 @@ bool video_enter_mode(void)
     video_mouse_log_count = 0;
     mouse_reset_debug_counter();
     video_log("video mode enabled, preparing scene");
+    console_set_vga_enabled(false);
 
     video_dirty_reset();
     atk_enter_mode();
@@ -713,6 +734,7 @@ void video_request_refresh_window(atk_widget_t *window)
 void video_exit_mode(void)
 {
     video_hw_disable();
+    console_set_vga_enabled(true);
     vga_enter_text_mode();
     video_active = false;
     exit_requested = false;
