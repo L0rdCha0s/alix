@@ -8,7 +8,7 @@
 
 typedef struct atk_menu_bar_entry atk_menu_bar_entry_t;
 
-typedef struct
+typedef struct atk_rect
 {
     int x;
     int y;

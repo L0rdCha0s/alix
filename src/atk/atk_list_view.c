@@ -263,11 +263,13 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
             text_x = column_x;
         }
         int baseline = atk_font_baseline_for_rect(origin_y, header_h);
-        atk_font_draw_string(text_x,
-                             baseline,
-                             col->title,
-                             theme->button_text,
-                             theme->button_face);
+        atk_rect_t clip = { column_x, origin_y, col_width, header_h };
+        atk_font_draw_string_clipped(text_x,
+                                     baseline,
+                                     col->title,
+                                     theme->button_text,
+                                     theme->button_face,
+                                     &clip);
         column_x += col_width;
     }
 
@@ -307,7 +309,8 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
 
             int text_x = cell_x + priv->cell_padding;
             int baseline = atk_font_baseline_for_rect(row_y, row_height);
-            atk_font_draw_string(text_x, baseline, text, theme->button_text, row_bg);
+            atk_rect_t clip = { cell_x, row_y, col_width, row_height };
+            atk_font_draw_string_clipped(text_x, baseline, text, theme->button_text, row_bg, &clip);
             cell_x += col_width;
         }
 

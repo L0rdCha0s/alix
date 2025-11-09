@@ -88,7 +88,12 @@ int atk_font_line_height(void)
     {
         return ATK_FONT_HEIGHT;
     }
-    int line = g_font_state.metrics.ascent + g_font_state.metrics.descent;
+    int descent = g_font_state.metrics.descent;
+    if (descent < 0)
+    {
+        descent = -descent;
+    }
+    int line = g_font_state.metrics.ascent + descent;
     if (line <= 0)
     {
         line = ATK_FONT_PIXEL_SIZE;
@@ -110,6 +115,10 @@ int atk_font_baseline_for_rect(int top, int height)
 
     int ascent = g_font_state.metrics.ascent;
     int descent = g_font_state.metrics.descent;
+    if (descent < 0)
+    {
+        descent = -descent;
+    }
     int total = ascent + descent;
     if (total <= 0)
     {
@@ -121,6 +130,16 @@ int atk_font_baseline_for_rect(int top, int height)
 
 void atk_font_draw_string(int x, int baseline_y, const char *text, uint16_t fg, uint16_t bg)
 {
+    atk_font_draw_string_clipped(x, baseline_y, text, fg, bg, NULL);
+}
+
+void atk_font_draw_string_clipped(int x,
+                                  int baseline_y,
+                                  const char *text,
+                                  uint16_t fg,
+                                  uint16_t bg,
+                                  const atk_rect_t *clip)
+{
     if (!text || *text == '\0')
     {
         return;
@@ -128,9 +147,38 @@ void atk_font_draw_string(int x, int baseline_y, const char *text, uint16_t fg, 
 
     if (!atk_font_load())
     {
+        (void)clip;
         int top = baseline_y - ATK_FONT_HEIGHT;
         video_draw_text(x, top, text, fg, bg);
         return;
+    }
+
+    int clip_x0 = 0;
+    int clip_y0 = 0;
+    int clip_x1 = VIDEO_WIDTH;
+    int clip_y1 = VIDEO_HEIGHT;
+    if (clip)
+    {
+        if (clip->width <= 0 || clip->height <= 0)
+        {
+            return;
+        }
+        if (clip->x > clip_x0) clip_x0 = clip->x;
+        if (clip->y > clip_y0) clip_y0 = clip->y;
+        int cx1 = clip->x + clip->width;
+        int cy1 = clip->y + clip->height;
+        if (cx1 < clip_x1) clip_x1 = cx1;
+        if (cy1 < clip_y1) clip_y1 = cy1;
+
+        /* allow ~10% extra space vertically to avoid clipping descenders,
+           while still keeping glyphs within the broader area */
+        int margin = (atk_font_line_height() + 9) / 10;
+        clip_y0 -= margin;
+        clip_y1 += margin;
+        if (clip_x1 <= clip_x0 || clip_y1 <= clip_y0)
+        {
+            return;
+        }
     }
 
     uint16_t row_pixels[ATK_FONT_MAX_ROW_PIXELS];
@@ -160,20 +208,48 @@ void atk_font_draw_string(int x, int baseline_y, const char *text, uint16_t fg, 
         int dst_x = pen_x + glyph->bearing_x;
         int dst_y = baseline_y - glyph->bearing_y;
 
-        for (int row = 0; row < glyph->height; ++row)
+        int glyph_x0 = dst_x;
+        int glyph_y0 = dst_y;
+        int glyph_x1 = glyph_x0 + glyph->width;
+        int glyph_y1 = glyph_y0 + glyph->height;
+
+        if (glyph_x1 <= clip_x0 || glyph_x0 >= clip_x1 ||
+            glyph_y1 <= clip_y0 || glyph_y0 >= clip_y1)
         {
-            const uint8_t *src = glyph->alpha + row * glyph->stride;
-            for (int col = 0; col < glyph->width; ++col)
+            pen_x += glyph->advance;
+            continue;
+        }
+
+        int visible_x0 = (glyph_x0 < clip_x0) ? clip_x0 : glyph_x0;
+        int visible_x1 = (glyph_x1 > clip_x1) ? clip_x1 : glyph_x1;
+        int visible_y0 = (glyph_y0 < clip_y0) ? clip_y0 : glyph_y0;
+        int visible_y1 = (glyph_y1 > clip_y1) ? clip_y1 : glyph_y1;
+
+        int start_col = visible_x0 - glyph_x0;
+        int width = visible_x1 - visible_x0;
+        int start_row = visible_y0 - glyph_y0;
+        int rows = visible_y1 - visible_y0;
+
+        if (width <= 0 || rows <= 0)
+        {
+            pen_x += glyph->advance;
+            continue;
+        }
+
+        for (int row = 0; row < rows; ++row)
+        {
+            const uint8_t *src = glyph->alpha + (start_row + row) * glyph->stride + start_col;
+            for (int col = 0; col < width; ++col)
             {
                 uint8_t alpha = src[col];
                 row_pixels[col] = rgb565_blend(bg, fg, alpha);
             }
-            video_blit_rgb565(dst_x,
-                              dst_y + row,
-                              glyph->width,
+            video_blit_rgb565(visible_x0,
+                              visible_y0 + row,
+                              width,
                               1,
                               row_pixels,
-                              glyph->width * (int)sizeof(uint16_t));
+                              width * (int)sizeof(uint16_t));
         }
 
         pen_x += glyph->advance;

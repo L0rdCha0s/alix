@@ -50,7 +50,10 @@ int atk_button_effective_height(const atk_widget_t *widget)
     int height = widget->height;
     if (priv->style == ATK_BUTTON_STYLE_TITLE_BELOW)
     {
-        height += atk_font_line_height() + 4;
+        int label_height = atk_font_line_height();
+        int extra = (label_height + 9) / 10; /* ~10% padding */
+        label_height += extra;
+        height += label_height + 4;
     }
     return height;
 }
@@ -107,7 +110,8 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
             text_x = bx + (widget->width - title_px_width) / 2;
         }
         int baseline = atk_font_baseline_for_rect(by, widget->height);
-        atk_font_draw_string(text_x, baseline, title, text_color, face_color);
+        atk_rect_t clip = { bx, by, widget->width, widget->height };
+        atk_font_draw_string_clipped(text_x, baseline, title, text_color, face_color, &clip);
     }
     else
     {
@@ -121,8 +125,11 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
             text_x = bx;
         }
         int label_height = atk_font_line_height();
+        int extra = (label_height + 9) / 10;
+        label_height += extra;
         int baseline = atk_font_baseline_for_rect(label_y, label_height);
-        atk_font_draw_string(text_x, baseline, title, text_color, theme->background);
+        atk_rect_t clip = { bx, label_y, widget->width, label_height };
+        atk_font_draw_string_clipped(text_x, baseline, title, text_color, theme->background, &clip);
     }
 }
 

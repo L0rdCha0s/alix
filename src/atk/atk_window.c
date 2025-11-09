@@ -560,11 +560,13 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
                             theme->window_border);
 
     int title_baseline = atk_font_baseline_for_rect(window->y, ATK_WINDOW_TITLE_HEIGHT);
-    atk_font_draw_string(window->x + ATK_WINDOW_TITLE_PADDING_X,
-                         title_baseline,
-                         priv->title,
-                         theme->window_title_text,
-                         theme->window_title);
+    atk_rect_t clip = { window->x, window->y, window->width, ATK_WINDOW_TITLE_HEIGHT };
+    atk_font_draw_string_clipped(window->x + ATK_WINDOW_TITLE_PADDING_X,
+                                 title_baseline,
+                                 priv->title,
+                                 theme->window_title_text,
+                                 theme->window_title,
+                                 &clip);
 
     video_draw_rect_outline(window->x,
                             window->y,

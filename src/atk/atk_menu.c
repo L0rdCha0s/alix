@@ -59,7 +59,9 @@ atk_widget_t *atk_menu_create(void)
     priv->items = NULL;
     priv->count = 0;
     priv->capacity = 0;
-    priv->item_height = ATK_FONT_HEIGHT + 8;
+    int line_height = atk_font_line_height();
+    int extra = (line_height + 9) / 10;
+    priv->item_height = line_height + extra + 8;
     priv->highlighted_index = -1;
     priv->visible = false;
     priv->preferred_width = menu->width;
@@ -277,7 +279,8 @@ void atk_menu_draw(const atk_state_t *state, const atk_widget_t *menu)
         }
         int text_x = menu->x + ATK_MENU_ITEM_PADDING_X;
         int baseline = atk_font_baseline_for_rect(item_y, priv->item_height);
-        atk_font_draw_string(text_x, baseline, priv->items[i].title, fg, bg);
+        atk_rect_t clip = { menu->x, item_y, menu->width, priv->item_height };
+        atk_font_draw_string_clipped(text_x, baseline, priv->items[i].title, fg, bg, &clip);
     }
 }
 

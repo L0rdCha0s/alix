@@ -168,7 +168,8 @@ void atk_menu_bar_draw(const atk_state_t *state)
             text_x = entry->x + 2;
         }
         int baseline = atk_font_baseline_for_rect(0, height - 1);
-        atk_font_draw_string(text_x, baseline, entry->title, fg, bg);
+        atk_rect_t clip = { entry->x, 0, entry->width, height };
+        atk_font_draw_string_clipped(text_x, baseline, entry->title, fg, bg, &clip);
     }
 
     if (state->menu_open_entry && state->menu_open_entry->menu)
