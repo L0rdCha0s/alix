@@ -469,6 +469,13 @@ void atk_window_close(atk_state_t *state, atk_widget_t *window)
         priv->user_context = NULL;
     }
 
+    int dirty_x = 0, dirty_y = 0, dirty_w = 0, dirty_h = 0;
+    window_get_bounds(window, &dirty_x, &dirty_y, &dirty_w, &dirty_h);
+    if (dirty_w > 0 && dirty_h > 0)
+    {
+        atk_dirty_mark_rect(dirty_x, dirty_y, dirty_w, dirty_h);
+    }
+
     window_destroy(window);
 }
 
