@@ -24,6 +24,7 @@ static uintptr_t g_heap_start = 0;
 static uintptr_t g_heap_end = 0;
 static bool g_heap_initialized = false;
 
+#ifdef ENABLE_MEM_DEBUG_LOGS
 static inline void heap_log(const char *msg, uintptr_t value)
 {
     serial_write_string("[heap] ");
@@ -32,6 +33,13 @@ static inline void heap_log(const char *msg, uintptr_t value)
     serial_write_hex64(value);
     serial_write_string("\r\n");
 }
+#else
+static inline void heap_log(const char *msg, uintptr_t value)
+{
+    (void)msg;
+    (void)value;
+}
+#endif
 
 static inline uint64_t heap_lock_acquire(void)
 {

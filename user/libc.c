@@ -17,6 +17,7 @@ typedef struct heap_block
 static heap_block_t *g_heap_head = NULL;
 static heap_block_t *g_heap_tail = NULL;
 
+#ifdef ENABLE_USER_MEM_DEBUG_LOGS
 static void user_heap_log(const char *msg, uintptr_t value)
 {
     serial_write_string("[uheap] ");
@@ -25,6 +26,13 @@ static void user_heap_log(const char *msg, uintptr_t value)
     serial_write_hex64((uint64_t)value);
     serial_write_string("\r\n");
 }
+#else
+static void user_heap_log(const char *msg, uintptr_t value)
+{
+    (void)msg;
+    (void)value;
+}
+#endif
 
 static size_t align_size(size_t size)
 {

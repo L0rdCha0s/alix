@@ -84,11 +84,11 @@ void atk_enter_mode(void)
 void atk_render(void)
 {
     atk_state_t *state = atk_state_get();
-    serial_write_string("[atk] render state=0x");
-    serial_write_hex64((uint64_t)(uintptr_t)state);
-    serial_write_string(" bg=0x");
-    serial_write_hex64(state->theme.background);
-    serial_write_string("\r\n");
+    // serial_write_string("[atk] render state=0x");
+    // serial_write_hex64((uint64_t)(uintptr_t)state);
+    // serial_write_string(" bg=0x");
+    // serial_write_hex64(state->theme.background);
+    // serial_write_string("\r\n");
 
     video_invalidate_all();
     video_fill(state->theme.background);

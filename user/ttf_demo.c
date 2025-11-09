@@ -74,7 +74,7 @@ static uint8_t *read_entire_file(const char *path, size_t *size_out)
         return NULL;
     }
 
-    size_t capacity = 4096;
+    size_t capacity = 4194304;
     size_t size = 0;
     uint8_t *buffer = (uint8_t *)malloc(capacity);
     if (!buffer)

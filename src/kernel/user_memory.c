@@ -20,6 +20,7 @@ typedef struct user_memory_range
 static user_memory_range_t *g_free_ranges = NULL;
 static size_t g_free_bytes = 0;
 
+#ifdef ENABLE_MEM_DEBUG_LOGS
 static inline void usermem_log(const char *msg, uintptr_t value)
 {
     serial_write_string("[umem] ");
@@ -28,6 +29,13 @@ static inline void usermem_log(const char *msg, uintptr_t value)
     serial_write_hex64(value);
     serial_write_string("\r\n");
 }
+#else
+static inline void usermem_log(const char *msg, uintptr_t value)
+{
+    (void)msg;
+    (void)value;
+}
+#endif
 
 static inline uintptr_t align_up_uintptr(uintptr_t value, uintptr_t alignment)
 {
