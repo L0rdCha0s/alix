@@ -12,7 +12,8 @@ typedef enum
 {
     VFS_NODE_DIR = 0,
     VFS_NODE_FILE = 1,
-    VFS_NODE_BLOCK = 2
+    VFS_NODE_BLOCK = 2,
+    VFS_NODE_SYMLINK = 3
 } vfs_node_type_t;
 
 typedef ssize_t (*vfs_read_cb_t)(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
@@ -23,11 +24,14 @@ vfs_node_t *vfs_root(void);
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool truncate);
+vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
 bool vfs_is_dir(const vfs_node_t *node);
 bool vfs_is_file(const vfs_node_t *node);
 bool vfs_is_block(const vfs_node_t *node);
+bool vfs_is_symlink(const vfs_node_t *node);
 block_device_t *vfs_block_device(const vfs_node_t *node);
 vfs_node_type_t vfs_node_type(const vfs_node_t *node);
+const char *vfs_symlink_target(const vfs_node_t *node);
 bool vfs_truncate(vfs_node_t *file);
 bool vfs_append(vfs_node_t *file, const char *data, size_t len);
 ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count);

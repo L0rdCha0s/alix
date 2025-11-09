@@ -1531,23 +1531,23 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
         window_avail = NET_TCP_RX_MAX_CAPACITY;
     }
     uint16_t window = (uint16_t)window_avail;
-    if (window == 0)
-    {
-        serial_write_string("tcp: warn zero window seq=0x");
-        tcp_log_hex32(seq);
-        serial_write_string(" ack=0x");
-        tcp_log_hex32(socket->recv_next);
-        serial_write_string(" rx_size=0x");
-        tcp_log_hex32((uint32_t)socket->rx_size);
-        serial_write_string(" capacity=0x");
-        tcp_log_hex32((uint32_t)socket->rx_capacity);
-        serial_write_string(" avail=0x");
-        tcp_log_hex32((uint32_t)window_avail);
-        serial_write_string(" flags=0x");
-        tcp_log_hex32(flags);
-        serial_write_string("\r\n");
-        window = 1;
-    }
+    // if (window == 0)
+    // {
+    //     serial_write_string("tcp: warn zero window seq=0x");
+    //     tcp_log_hex32(seq);
+    //     serial_write_string(" ack=0x");
+    //     tcp_log_hex32(socket->recv_next);
+    //     serial_write_string(" rx_size=0x");
+    //     tcp_log_hex32((uint32_t)socket->rx_size);
+    //     serial_write_string(" capacity=0x");
+    //     tcp_log_hex32((uint32_t)socket->rx_capacity);
+    //     serial_write_string(" avail=0x");
+    //     tcp_log_hex32((uint32_t)window_avail);
+    //     serial_write_string(" flags=0x");
+    //     tcp_log_hex32(flags);
+    //     serial_write_string("\r\n");
+    //     window = 1;
+    // }
     write_be16(tcp + 14, window);
     write_be16(tcp + 16, 0);
     write_be16(tcp + 18, 0);

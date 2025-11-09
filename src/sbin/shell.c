@@ -260,8 +260,8 @@ void shell_main(void)
     };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, runelf, or ./path for binaries.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, runelf, or ./path for binaries.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, runelf, or ./path for binaries.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, runelf, or ./path for binaries.\r\n");
 
     while (1)
     {
@@ -281,6 +281,8 @@ static const shell_command_t g_commands[] = {
     { "rm",          shell_cmd_rm },
     { "mkfs",        shell_cmd_mkfs },
     { "mount",       shell_cmd_mount },
+    { "tzset",       shell_cmd_tzset },
+    { "ntpdate",     shell_cmd_ntpdate },
     { "shutdown",    shell_cmd_shutdown },
     { "ls",          shell_cmd_ls },
     { "ip",          shell_cmd_ip },

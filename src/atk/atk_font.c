@@ -32,7 +32,6 @@ typedef struct
 
 typedef struct
 {
-    bool tried;
     bool ready;
     ttf_font_t font;
     ttf_font_metrics_t metrics;
@@ -258,11 +257,10 @@ void atk_font_draw_string_clipped(int x,
 
 static bool atk_font_load(void)
 {
-    if (g_font_state.tried)
+    if (g_font_state.ready)
     {
-        return g_font_state.ready;
+        return true;
     }
-    g_font_state.tried = true;
 
 #ifndef ATK_NO_DESKTOP_APPS
     vfs_node_t *node = vfs_open_file(vfs_root(), ATK_FONT_PATH, false, false);

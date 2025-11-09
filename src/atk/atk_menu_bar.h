@@ -5,6 +5,7 @@
 
 void atk_menu_bar_reset(atk_state_t *state);
 void atk_menu_bar_build_default(atk_state_t *state);
+void atk_menu_bar_enable_clock_timer(void);
 void atk_menu_bar_draw(const atk_state_t *state);
 bool atk_menu_bar_handle_mouse(atk_state_t *state,
                                int cursor_x,

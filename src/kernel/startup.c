@@ -25,7 +25,6 @@ static void startup_process_entry(void *arg);
 
 void startup_init(void)
 {
-    (void)vfs_mkdir(vfs_root(), "/etc");
     if (!startup_ensure_default_script())
     {
         startup_log("unable to prepare default startup script");
@@ -149,7 +148,8 @@ static bool startup_ensure_default_script(void)
         "# AlixOS startup script\n"
         "# Lines that begin with # are treated as comments.\n"
         "\n"
-        "dhclient rtl0\n";
+        "dhclient rtl0\n"
+        "ntpdate\n";
 
     if (!vfs_append(file, default_script, sizeof(default_script) - 1))
     {

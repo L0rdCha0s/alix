@@ -8,11 +8,20 @@
 #include "font.h"
 #include "libc.h"
 #include "video.h"
+#ifndef ATK_NO_DESKTOP_APPS
+#include "timekeeping.h"
+#include "timer.h"
+#endif
 
 #define ATK_MENU_BAR_TITLE_PADDING 14
 #define ATK_MENU_BAR_ENTRY_SPACING 8
 #define ATK_MENU_BAR_LOGO_MARGIN_X 12
 #define ATK_MENU_BAR_LOGO_MARGIN_Y 6
+#ifdef ATK_NO_DESKTOP_APPS
+#define ATK_MENU_BAR_CLOCK_RESERVE 0
+#else
+#define ATK_MENU_BAR_CLOCK_RESERVE 140
+#endif
 
 struct atk_menu_bar_entry
 {
@@ -33,6 +42,10 @@ static int atk_menu_bar_measure_title(const char *title);
 static int atk_menu_bar_height_pixels(const atk_state_t *state);
 static void atk_menu_bar_mark_dirty(const atk_state_t *state);
 static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu);
+#ifndef ATK_NO_DESKTOP_APPS
+static void atk_menu_bar_clock_tick(void *context);
+static bool g_clock_timer_registered = false;
+#endif
 
 void atk_menu_bar_reset(atk_state_t *state)
 {
@@ -55,6 +68,29 @@ void atk_menu_bar_reset(atk_state_t *state)
 
     state->menu_bar_height = ATK_MENU_BAR_DEFAULT_HEIGHT;
 }
+
+#ifdef ATK_NO_DESKTOP_APPS
+void atk_menu_bar_enable_clock_timer(void)
+{
+}
+#else
+void atk_menu_bar_enable_clock_timer(void)
+{
+    if (g_clock_timer_registered)
+    {
+        return;
+    }
+    uint32_t interval = timer_frequency();
+    if (interval == 0)
+    {
+        interval = 100;
+    }
+    if (timer_register_periodic(atk_menu_bar_clock_tick, NULL, interval))
+    {
+        g_clock_timer_registered = true;
+    }
+}
+#endif
 
 void atk_menu_bar_build_default(atk_state_t *state)
 {
@@ -139,6 +175,8 @@ void atk_menu_bar_draw(const atk_state_t *state)
         atk_image_draw(state, state->menu_logo);
     }
 
+    int baseline = atk_font_baseline_for_rect(0, height - 1);
+
     ATK_LIST_FOR_EACH(node, &state->menu_entries)
     {
         atk_menu_bar_entry_t *entry = (atk_menu_bar_entry_t *)node->value;
@@ -167,7 +205,6 @@ void atk_menu_bar_draw(const atk_state_t *state)
         {
             text_x = entry->x + 2;
         }
-        int baseline = atk_font_baseline_for_rect(0, height - 1);
         atk_rect_t clip = { entry->x, 0, entry->width, height };
         atk_font_draw_string_clipped(text_x, baseline, entry->title, fg, bg, &clip);
     }
@@ -176,6 +213,35 @@ void atk_menu_bar_draw(const atk_state_t *state)
     {
         atk_menu_draw(state, state->menu_open_entry->menu);
     }
+
+#ifndef ATK_NO_DESKTOP_APPS
+    char clock_text[16];
+    timekeeping_format_time(clock_text, sizeof(clock_text));
+    int clock_text_width = atk_font_text_width(clock_text);
+    int clock_padding = 8;
+    int clock_box_width = clock_text_width + clock_padding * 2;
+    if (clock_box_width < ATK_MENU_BAR_CLOCK_RESERVE - ATK_MENU_BAR_ENTRY_SPACING)
+    {
+        clock_box_width = ATK_MENU_BAR_CLOCK_RESERVE - ATK_MENU_BAR_ENTRY_SPACING;
+    }
+    int clock_x = VIDEO_WIDTH - clock_box_width - ATK_MENU_BAR_ENTRY_SPACING;
+    if (clock_x < 0)
+    {
+        clock_x = 0;
+    }
+    video_draw_rect(clock_x,
+                    0,
+                    clock_box_width,
+                    height - 1,
+                    theme->menu_bar_face);
+    atk_rect_t clock_clip = { clock_x, 0, clock_box_width, height };
+    atk_font_draw_string_clipped(clock_x + clock_padding,
+                                 baseline,
+                                 clock_text,
+                                 theme->menu_bar_text,
+                                 theme->menu_bar_face,
+                                 &clock_clip);
+#endif
 }
 
 bool atk_menu_bar_handle_mouse(atk_state_t *state,
@@ -330,6 +396,11 @@ static void atk_menu_bar_update_layout(atk_state_t *state)
     {
         cursor = state->menu_logo->x + state->menu_logo->width + ATK_MENU_BAR_ENTRY_SPACING * 2;
     }
+    int max_right = VIDEO_WIDTH - ATK_MENU_BAR_CLOCK_RESERVE;
+    if (max_right < cursor)
+    {
+        max_right = cursor;
+    }
 
     ATK_LIST_FOR_EACH(node, &state->menu_entries)
     {
@@ -341,7 +412,19 @@ static void atk_menu_bar_update_layout(atk_state_t *state)
         entry->text_width = atk_font_text_width(entry->title);
         entry->width = atk_menu_bar_measure_title(entry->title);
         entry->x = cursor;
+        if (entry->x + entry->width > max_right)
+        {
+            entry->x = max_right - entry->width;
+            if (entry->x < ATK_MENU_BAR_LOGO_MARGIN_X)
+            {
+                entry->x = ATK_MENU_BAR_LOGO_MARGIN_X;
+            }
+        }
         cursor += entry->width + ATK_MENU_BAR_ENTRY_SPACING;
+        if (cursor > max_right)
+        {
+            cursor = max_right;
+        }
     }
 }
 
@@ -541,3 +624,17 @@ static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu)
     }
     atk_dirty_mark_rect(menu->x, menu->y, menu->width, menu->height);
 }
+
+#ifndef ATK_NO_DESKTOP_APPS
+static void atk_menu_bar_clock_tick(void *context)
+{
+    (void)context;
+    int height = ATK_MENU_BAR_DEFAULT_HEIGHT;
+    atk_state_t *state = atk_state_get();
+    if (state && state->menu_bar_height > 0)
+    {
+        height = state->menu_bar_height;
+    }
+    atk_dirty_mark_rect(VIDEO_WIDTH - ATK_MENU_BAR_CLOCK_RESERVE, 0, ATK_MENU_BAR_CLOCK_RESERVE, height);
+}
+#endif

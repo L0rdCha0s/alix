@@ -8,6 +8,7 @@
 #include "net/arp.h"
 #include "net/icmp.h"
 #include "net/dns.h"
+#include "net/ntp.h"
 #include "net/tcp.h"
 #include "interrupts.h"
 #include "timer.h"
@@ -117,6 +118,7 @@ static void rtl8139_log_hex8(uint8_t value);
 static void rtl8139_log_hex16(uint16_t value);
 static void rtl8139_log_hex32(uint32_t value);
 static void rtl8139_log_mac_address(void);
+static void rtl8139_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16_t frame_len);
 static void rtl8139_handle_receive(void);
 static void rtl8139_dump_state(const char *context);
 static uint16_t rtl8139_buffer_read16(uint32_t offset);
@@ -482,13 +484,16 @@ static void rtl8139_handle_receive(void)
             }
 #endif
 
-            // Hand off to upper layers as if untagged Ethernet
-            if (g_iface) {
-                net_arp_handle_frame(g_iface,  g_rx_frame, frame_len);
-                net_dhcp_handle_frame(g_iface, g_rx_frame, frame_len);
-                net_icmp_handle_frame(g_iface, g_rx_frame, frame_len);
-                net_dns_handle_frame(g_iface,  g_rx_frame, frame_len);
-                net_tcp_handle_frame(g_iface,  g_rx_frame, frame_len);
+            if (g_iface)
+            {
+                if (eth_type == 0x0806)
+                {
+                    net_arp_handle_frame(g_iface, g_rx_frame, frame_len);
+                }
+                else if (eth_type == 0x0800)
+                {
+                    rtl8139_dispatch_ipv4(g_iface, g_rx_frame, frame_len);
+                }
             }
         }
 
@@ -523,6 +528,74 @@ static void rtl8139_copy_packet(uint32_t offset, uint8_t *dest, uint16_t len)
 
     memcpy(dest,                &g_rx_buffer[start], n0);
     if (len > n0) memcpy(dest + n0, &g_rx_buffer[0], len - n0);
+}
+
+static void rtl8139_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16_t frame_len)
+{
+    if (!iface || !frame || frame_len < 34)
+    {
+        return;
+    }
+
+    const uint8_t *ip = frame + 14;
+    uint8_t version = (uint8_t)(ip[0] >> 4);
+    uint8_t ihl = (uint8_t)(ip[0] & 0x0F);
+    if (version != 4 || ihl < 5)
+    {
+        return;
+    }
+    size_t ip_hlen = (size_t)ihl * 4;
+    if ((size_t)frame_len < 14 + ip_hlen)
+    {
+        return;
+    }
+
+    uint16_t total_len = (uint16_t)((ip[2] << 8) | ip[3]);
+    if (total_len < ip_hlen)
+    {
+        return;
+    }
+    size_t ip_available = (size_t)frame_len - 14;
+    if (total_len > ip_available)
+    {
+        total_len = (uint16_t)ip_available;
+    }
+
+    uint8_t protocol = ip[9];
+    switch (protocol)
+    {
+        case 1: /* ICMP */
+            net_icmp_handle_frame(iface, frame, frame_len);
+            break;
+        case 6: /* TCP */
+            net_tcp_handle_frame(iface, frame, frame_len);
+            break;
+        case 17: /* UDP */
+        {
+            if (total_len < ip_hlen + 8)
+            {
+                break;
+            }
+            const uint8_t *udp = ip + ip_hlen;
+            uint16_t src_port = (uint16_t)((udp[0] << 8) | udp[1]);
+            uint16_t dst_port = (uint16_t)((udp[2] << 8) | udp[3]);
+            if (src_port == 67 || src_port == 68 || dst_port == 67 || dst_port == 68)
+            {
+                net_dhcp_handle_frame(iface, frame, frame_len);
+            }
+            else if (src_port == 53 || dst_port == 53)
+            {
+                net_dns_handle_frame(iface, frame, frame_len);
+            }
+            else if (src_port == 123 || dst_port == 123)
+            {
+                net_ntp_handle_frame(iface, frame, frame_len);
+            }
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 

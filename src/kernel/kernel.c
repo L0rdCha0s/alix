@@ -13,6 +13,7 @@
 #include "net/interface.h"
 #include "net/tcp.h"
 #include "net/dns.h"
+#include "net/ntp.h"
 #include "idt.h"
 #include "process.h"
 #include "block.h"
@@ -25,6 +26,7 @@
 #include "libc.h"
 #include "procfs.h"
 #include "startup.h"
+#include "timekeeping.h"
 
 typedef struct
 {
@@ -114,6 +116,47 @@ static vfs_node_t *ensure_directory_path(const char *path)
     return last_dir;
 }
 
+static void ensure_system_layout(void)
+{
+    if (!ensure_directory_path("/root"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root\r\n");
+    }
+    if (!ensure_directory_path("/root/etc"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root/etc\r\n");
+    }
+    if (!ensure_directory_path("/root/etc/timezone"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root/etc/timezone\r\n");
+    }
+    if (!ensure_directory_path("/root/etc/ntp"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root/etc/ntp\r\n");
+    }
+    if (!vfs_symlink(vfs_root(), "/root/etc", "/etc"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /etc symlink\r\n");
+    }
+    vfs_node_t *ntp_server = vfs_open_file(vfs_root(), "/etc/ntp/server", false, false);
+    if (!ntp_server)
+    {
+        ntp_server = vfs_open_file(vfs_root(), "/etc/ntp/server", true, true);
+        if (ntp_server)
+        {
+            static const char default_ntp_server[] = "pool.ntp.org\n";
+            if (!vfs_append(ntp_server, default_ntp_server, sizeof(default_ntp_server) - 1))
+            {
+                serial_write_string("[alix] warn: unable to write default ntp server\r\n");
+            }
+        }
+        else
+        {
+            serial_write_string("[alix] warn: unable to create default ntp server file\r\n");
+        }
+    }
+}
+
 static void mount_default_fstab(void)
 {
     static const fstab_entry_t g_default_fstab[] = {
@@ -168,6 +211,21 @@ static void mount_default_fstab(void)
                 serial_write_string("[alix] fstab: format failed\r\n");
             }
         }
+        else
+        {
+            ensure_system_layout();
+            if (!timekeeping_ensure_timezone_config())
+            {
+                serial_write_string("[alix] warn: timezone config missing and default creation failed\r\n");
+            }
+            else
+            {
+                if (!timekeeping_reload_timezone())
+                {
+                    serial_write_string("[alix] warn: failed to reload timezone config\r\n");
+                }
+            }
+        }
     }
 }
 
@@ -211,6 +269,7 @@ void kernel_main(void)
     serial_write_string("[alix] after acpi_init\n");
     vfs_init();
     serial_write_string("[alix] after vfs_init\n");
+    ensure_system_layout();
     startup_init();
     procfs_init();
     serial_write_string("[alix] after procfs_init\n");
@@ -221,6 +280,7 @@ void kernel_main(void)
     interrupts_enable_irq(1);
     serial_write_string("[alix] after interrupts_init\n");
     timer_init(100);
+    timekeeping_init();
     keyboard_init();
     serial_write_string("[alix] after keyboard_init\n");
     ata_init();
@@ -229,6 +289,7 @@ void kernel_main(void)
 
     net_if_init();
     net_dns_init();
+    net_ntp_init();
     net_tcp_init();
     serial_write_string("[alix] after net init\n");
 

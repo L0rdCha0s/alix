@@ -47,6 +47,7 @@ void atk_enter_mode(void)
     atk_desktop_reset(state);
     atk_menu_bar_reset(state);
     atk_menu_bar_build_default(state);
+    atk_menu_bar_enable_clock_timer();
     atk_dirty_mark_all();
 
 #ifndef ATK_NO_DESKTOP_APPS

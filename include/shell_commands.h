@@ -24,6 +24,8 @@ bool shell_cmd_logcat(shell_state_t *shell, shell_output_t *out, const char *arg
 bool shell_cmd_sha1sum(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_mkfs(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_mount(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_ntpdate(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_tzset(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_loop1(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_loop2(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_top(shell_state_t *shell, shell_output_t *out, const char *args);

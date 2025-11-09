@@ -66,6 +66,8 @@ struct vfs_node
 static vfs_node_t *root = NULL;
 static vfs_mount_t *mounts = NULL;
 
+#define VFS_MAX_SYMLINK_DEPTH 8
+
 static void vfs_log(const char *msg, uint64_t value)
 {
     serial_write_string("[vfs] ");
@@ -133,6 +135,78 @@ static bool next_component(const char **path_ptr, char **out_name)
     *out_name = name;
     *path_ptr = p;  /* now at '/' or '\0' */
     return true;
+}
+
+static const char *vfs_node_symlink_target(const vfs_node_t *node)
+{
+    if (!node || node->type != VFS_NODE_SYMLINK)
+    {
+        return NULL;
+    }
+    return node->data ? node->data : "";
+}
+
+static bool vfs_assign_symlink_target(vfs_node_t *node, const char *target)
+{
+    if (!node || node->type != VFS_NODE_SYMLINK || !target || *target == '\0')
+    {
+        return false;
+    }
+    size_t len = strlen(target);
+    char *copy = (char *)malloc(len + 1);
+    if (!copy)
+    {
+        return false;
+    }
+    memcpy(copy, target, len + 1);
+    if (node->data)
+    {
+        free(node->data);
+    }
+    node->data = copy;
+    node->size = len;
+    node->capacity = len + 1;
+    vfs_mark_node_dirty(node);
+    return true;
+}
+
+static char *vfs_combine_symlink_path(const char *target, const char *remainder)
+{
+    if (!target)
+    {
+        return NULL;
+    }
+    const char *rest = remainder ? remainder : "";
+    size_t target_len = strlen(target);
+    size_t rest_len = strlen(rest);
+    bool need_sep = false;
+    if (rest_len > 0 && target_len > 0 && target[target_len - 1] != '/')
+    {
+        need_sep = true;
+    }
+    size_t total = target_len + (need_sep ? 1 : 0) + rest_len + 1;
+    char *joined = (char *)malloc(total);
+    if (!joined)
+    {
+        return NULL;
+    }
+    size_t pos = 0;
+    if (target_len > 0)
+    {
+        memcpy(joined + pos, target, target_len);
+        pos += target_len;
+    }
+    if (need_sep)
+    {
+        joined[pos++] = '/';
+    }
+    if (rest_len > 0)
+    {
+        memcpy(joined + pos, rest, rest_len);
+        pos += rest_len;
+    }
+    joined[pos] = '\0';
+    return joined;
 }
 
 static vfs_node_t *vfs_alloc_node(vfs_node_type_t type)
@@ -221,7 +295,7 @@ static void vfs_free_subtree(vfs_node_t *node)
         free(node->name);
         node->name = NULL;
     }
-    if (node->type == VFS_NODE_FILE && node->data)
+    if ((node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK) && node->data)
     {
         free(node->data);
         node->data = NULL;
@@ -336,14 +410,15 @@ static bool vfs_measure_node(const vfs_node_t *node,
         }
     }
 
-    if (node->type == VFS_NODE_FILE && node->size > 0xFFFFFFFFu)
+    if ((node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK) &&
+        node->size > 0xFFFFFFFFu)
     {
         return false;
     }
 
     (*node_count) += 1;
     (*payload_size) += sizeof(alixfs_node_disk_t) + name_len;
-    if (node->type == VFS_NODE_FILE)
+    if (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
     {
         (*payload_size) += node->size;
     }
@@ -387,7 +462,9 @@ static bool vfs_serialize_node(const vfs_node_t *node,
         name_len_sz = node->name ? strlen(node->name) : 0;
     }
     uint32_t name_len = (uint32_t)name_len_sz;
-    uint32_t data_len = (node->type == VFS_NODE_FILE) ? (uint32_t)node->size : 0;
+    uint32_t data_len = (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
+                            ? (uint32_t)node->size
+                            : 0;
 
     uint32_t type_field = (uint32_t)(is_root ? VFS_NODE_DIR : node->type);
 
@@ -416,7 +493,7 @@ static bool vfs_serialize_node(const vfs_node_t *node,
         (*offset) += name_len;
     }
 
-    if (node->type == VFS_NODE_FILE && data_len > 0)
+    if ((node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK) && data_len > 0)
     {
         if (!node->data)
         {
@@ -441,15 +518,27 @@ static bool vfs_serialize_node(const vfs_node_t *node,
 }
 
 /* Resolve existing node by path (no creation). Returns NULL if any component is missing. */
-static vfs_node_t *resolve_node(vfs_node_t *cwd, const char *path)
+static vfs_node_t *resolve_node_internal(vfs_node_t *cwd, const char *path, int depth)
 {
-    if (!path || !*path) return cwd;
+    if (!cwd)
+    {
+        cwd = root;
+    }
+    if (depth >= VFS_MAX_SYMLINK_DEPTH)
+    {
+        return NULL;
+    }
+    if (!path || *path == '\0')
+    {
+        return cwd;
+    }
 
     vfs_node_t *node = (path[0] == '/') ? root : cwd;
-    const char *cursor = path;
-
-    cursor = skip_separators(cursor);
-    if (*cursor == '\0') return node;
+    const char *cursor = skip_separators(path);
+    if (*cursor == '\0')
+    {
+        return node;
+    }
 
     char *component = NULL;
     while (next_component(&cursor, &component))
@@ -463,18 +552,48 @@ static vfs_node_t *resolve_node(vfs_node_t *cwd, const char *path)
         }
         if (is_dot_dot(component))
         {
-            if (node && node->parent) node = node->parent;
+            if (node && node->parent)
+            {
+                node = node->parent;
+            }
             free(component);
             continue;
         }
 
         vfs_node_t *child = vfs_find_child(node, component);
         free(component);
-        if (!child) return NULL;
+        if (!child)
+        {
+            return NULL;
+        }
+
+        if (child->type == VFS_NODE_SYMLINK)
+        {
+            const char *target = vfs_node_symlink_target(child);
+            if (!target || *target == '\0')
+            {
+                return NULL;
+            }
+            char *combined = vfs_combine_symlink_path(target, cursor);
+            if (!combined)
+            {
+                return NULL;
+            }
+            vfs_node_t *base = (target[0] == '/') ? root : node;
+            vfs_node_t *resolved = resolve_node_internal(base, combined, depth + 1);
+            free(combined);
+            return resolved;
+        }
+
         node = child;
     }
 
     return node;
+}
+
+static vfs_node_t *resolve_node(vfs_node_t *cwd, const char *path)
+{
+    return resolve_node_internal(cwd ? cwd : root, path, 0);
 }
 
 /*
@@ -486,55 +605,106 @@ static vfs_node_t *resolve_node(vfs_node_t *cwd, const char *path)
 static bool split_parent_and_name(vfs_node_t *cwd, const char *path,
                                   vfs_node_t **parent_out, char **name_out)
 {
-    if (!path || !*path) return false;
-
-    vfs_node_t *current = (path[0] == '/') ? root : cwd;
-    const char *cursor = path;
-
-    cursor = skip_separators(cursor);
-    if (*cursor == '\0') return false;
-
-    char *component = NULL;
-    bool saw_any = false;
-
-    while (next_component(&cursor, &component))
+    if (!cwd)
     {
-        cursor = skip_separators(cursor);
-        bool last = (*cursor == '\0');
-        saw_any = true;
-
-        if (is_dot(component))
-        {
-            if (last) { free(component); return false; }
-            free(component);
-            continue;
-        }
-        if (is_dot_dot(component))
-        {
-            if (last) { free(component); return false; }
-            if (current && current->parent) current = current->parent;
-            free(component);
-            continue;
-        }
-
-        if (last)
-        {
-            *parent_out = current;
-            *name_out   = component; /* ownership to caller */
-            return true;
-        }
-
-        vfs_node_t *child = vfs_find_child(current, component);
-        if (!child || child->type != VFS_NODE_DIR)
-        {
-            free(component);
-            return false;
-        }
-        current = child;
-        free(component);
+        cwd = root;
+    }
+    if (!path || *path == '\0')
+    {
+        return false;
     }
 
-    return saw_any;
+    char *copy = vfs_strdup(path);
+    if (!copy)
+    {
+        return false;
+    }
+
+    size_t len = strlen(copy);
+    while (len > 1 && copy[len - 1] == '/')
+    {
+        copy[--len] = '\0';
+    }
+    if (len == 0 || (len == 1 && copy[0] == '/'))
+    {
+        free(copy);
+        return false;
+    }
+
+    char *name_part = NULL;
+    const char *parent_spec = NULL;
+    char *slash = NULL;
+    for (char *p = copy; *p; ++p)
+    {
+        if (*p == '/')
+        {
+            slash = p;
+        }
+    }
+    if (!slash)
+    {
+        name_part = copy;
+    }
+    else if (slash == copy)
+    {
+        name_part = slash + 1;
+        parent_spec = "/";
+    }
+    else
+    {
+        *slash = '\0';
+        name_part = slash + 1;
+        parent_spec = copy;
+    }
+
+    if (!name_part || *name_part == '\0' || is_dot(name_part) || is_dot_dot(name_part))
+    {
+        free(copy);
+        return false;
+    }
+
+    vfs_node_t *parent = NULL;
+    if (!parent_spec)
+    {
+        parent = (path[0] == '/') ? root : cwd;
+    }
+    else
+    {
+        parent = resolve_node(cwd, parent_spec);
+    }
+
+    if (!parent)
+    {
+        free(copy);
+        return false;
+    }
+
+    if (parent->type != VFS_NODE_DIR)
+    {
+        free(copy);
+        return false;
+    }
+
+    char *name = vfs_strdup(name_part);
+    free(copy);
+    if (!name)
+    {
+        return false;
+    }
+
+    if (parent_out)
+    {
+        *parent_out = parent;
+    }
+    if (name_out)
+    {
+        *name_out = name;
+    }
+    else
+    {
+        free(name);
+    }
+    return true;
 }
 
 /* ---------- public API ---------- */
@@ -650,6 +820,52 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
     return file;
 }
 
+vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path)
+{
+    if (!target_path || !link_path || *target_path == '\0')
+    {
+        return NULL;
+    }
+
+    vfs_node_t *parent = NULL;
+    char *name = NULL;
+    if (!split_parent_and_name(cwd ? cwd : root, link_path, &parent, &name))
+    {
+        return NULL;
+    }
+
+    vfs_node_t *existing = vfs_find_child(parent, name);
+    if (existing)
+    {
+        if (existing->type != VFS_NODE_SYMLINK)
+        {
+            free(name);
+            return NULL;
+        }
+        bool updated = vfs_assign_symlink_target(existing, target_path);
+        free(name);
+        return updated ? existing : NULL;
+    }
+
+    vfs_node_t *node = vfs_alloc_node(VFS_NODE_SYMLINK);
+    if (!node)
+    {
+        free(name);
+        return NULL;
+    }
+    node->name = name;
+    if (!vfs_assign_symlink_target(node, target_path))
+    {
+        vfs_free_subtree(node);
+        return NULL;
+    }
+
+    vfs_attach_child(parent, node);
+    vfs_mark_node_dirty(parent);
+    vfs_mark_node_dirty(node);
+    return node;
+}
+
 bool vfs_is_dir(const vfs_node_t *node)
 {
     return node ? (node->type == VFS_NODE_DIR) : false;
@@ -665,6 +881,11 @@ bool vfs_is_block(const vfs_node_t *node)
     return node ? (node->type == VFS_NODE_BLOCK) : false;
 }
 
+bool vfs_is_symlink(const vfs_node_t *node)
+{
+    return node ? (node->type == VFS_NODE_SYMLINK) : false;
+}
+
 block_device_t *vfs_block_device(const vfs_node_t *node)
 {
     if (!node || node->type != VFS_NODE_BLOCK)
@@ -677,6 +898,11 @@ block_device_t *vfs_block_device(const vfs_node_t *node)
 vfs_node_type_t vfs_node_type(const vfs_node_t *node)
 {
     return node ? node->type : VFS_NODE_FILE;
+}
+
+const char *vfs_symlink_target(const vfs_node_t *node)
+{
+    return vfs_node_symlink_target(node);
 }
 
 bool vfs_truncate(vfs_node_t *file)
@@ -834,7 +1060,7 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
 
     vfs_node_t *node = vfs_find_child(parent, name);
     free(name);
-    if (!node || node->type != VFS_NODE_FILE)
+    if (!node || (node->type != VFS_NODE_FILE && node->type != VFS_NODE_SYMLINK))
     {
         return false;
     }
@@ -1254,12 +1480,20 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
             continue;
         }
 
-        if (disk.type > VFS_NODE_FILE || disk.name_len == 0)
+        if (disk.type > VFS_NODE_SYMLINK || disk.name_len == 0)
         {
             goto cleanup;
         }
 
-        vfs_node_type_t node_type = (disk.type == VFS_NODE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
+        vfs_node_type_t node_type = VFS_NODE_FILE;
+        if (disk.type == VFS_NODE_DIR)
+        {
+            node_type = VFS_NODE_DIR;
+        }
+        else if (disk.type == VFS_NODE_SYMLINK)
+        {
+            node_type = VFS_NODE_SYMLINK;
+        }
         vfs_node_t *node = vfs_alloc_node(node_type);
         if (!node)
         {
@@ -1276,7 +1510,7 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         name[disk.name_len] = '\0';
         node->name = name;
 
-        if (node_type == VFS_NODE_FILE && disk.data_len > 0)
+        if ((node_type == VFS_NODE_FILE || node_type == VFS_NODE_SYMLINK) && disk.data_len > 0)
         {
             size_t cap = (size_t)disk.data_len + 1;
             char *data = (char *)malloc(cap);
