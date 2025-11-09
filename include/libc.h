@@ -26,6 +26,7 @@ void *realloc(void *ptr, size_t size);
 ssize_t read(int fd, void *buffer, size_t count);
 ssize_t write(int fd, const void *buffer, size_t count);
 int close(int fd);
+int open(const char *path, uint64_t flags);
 int printf(const char *format, ...);
 
 #endif

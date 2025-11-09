@@ -57,6 +57,10 @@ struct vfs_node
     /* device backing (for block nodes) */
     block_device_t *block_device;
     bool dirty;
+
+    vfs_read_cb_t read_cb;
+    vfs_write_cb_t write_cb;
+    void *callback_context;
 };
 
 static vfs_node_t *root = NULL;
@@ -708,6 +712,12 @@ ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
     {
         return -1;
     }
+
+    if (file->read_cb)
+    {
+        return file->read_cb(file, offset, buffer, count, file->callback_context);
+    }
+
     ensure_terminator(file);
     if (offset >= file->size || count == 0)
     {
@@ -733,6 +743,12 @@ ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t c
     {
         return -1;
     }
+
+    if (file->write_cb)
+    {
+        return file->write_cb(file, offset, data, count, file->callback_context);
+    }
+
     if (count > 0 && !data)
     {
         return -1;
@@ -764,6 +780,21 @@ ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t c
     ensure_terminator(file);
     vfs_mark_node_dirty(file);
     return (ssize_t)count;
+}
+
+bool vfs_set_file_callbacks(vfs_node_t *file,
+                            vfs_read_cb_t read_cb,
+                            vfs_write_cb_t write_cb,
+                            void *context)
+{
+    if (!file || file->type != VFS_NODE_FILE)
+    {
+        return false;
+    }
+    file->read_cb = read_cb;
+    file->write_cb = write_cb;
+    file->callback_context = context;
+    return true;
 }
 
 const char *vfs_data(const vfs_node_t *file, size_t *size)

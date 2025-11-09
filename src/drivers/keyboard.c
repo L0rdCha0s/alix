@@ -2,6 +2,9 @@
 #include "io.h"
 #include "interrupts.h"
 #include "serial.h"
+#include "libc.h"
+#include "timer.h"
+#include "procfs.h"
 
 #define KBD_STATUS 0x64
 #define KBD_DATA   0x60
@@ -19,10 +22,404 @@ static volatile size_t buffer_head = 0;
 static volatile size_t buffer_tail = 0;
 static uint8_t key_down[128];
 
-#define KBD_PENDING_CHARS 16
+/* Place key maps in .data, not .rodata, to avoid early-rodata issues */
+static char normal_map[128] = {
+    0,   27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b','\t',
+    'q','w','e','r','t','y','u','i','o','p','[',']','\n', 0, 'a','s',
+    'd','f','g','h','j','k','l',';','\'', '`', 0,'\\','z','x','c','v',
+    'b','n','m',',','.','/', 0,'*', 0,' ', 0,  0,   0,   0,   0,   0,
+    0,   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0
+};
+
+static char shift_map[128] = {
+    0,   27, '!','@','#','$','%','^','&','*','(',')','_','+','\b','\t',
+    'Q','W','E','R','T','Y','U','I','O','P','{','}','\n', 0, 'A','S',
+    'D','F','G','H','J','K','L',':','"','~', 0,'|','Z','X','C','V',
+    'B','N','M','<','>','?', 0,'*', 0,' ', 0,  0,   0,   0,   0,   0,
+    0,   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0
+};
+/* Place key maps in .data, not .rodata, to avoid early-rodata issues */
+#define KBD_PENDING_CHARS 64
 static char pending_chars[KBD_PENDING_CHARS];
 static size_t pending_start = 0;
 static size_t pending_count = 0;
+
+static uint32_t repeat_initial_delay_ms = 500;
+static uint32_t repeat_interval_ms = 200;
+static uint32_t repeat_initial_delay_ticks = 50;
+static uint32_t repeat_interval_ticks = 20;
+
+typedef struct
+{
+    bool active;
+    uint8_t scancode;
+    bool extended;
+    bool keypad_enter;
+    uint64_t next_tick;
+    bool waiting_initial;
+} keyboard_repeat_state_t;
+
+static keyboard_repeat_state_t g_repeat_state;
+
+typedef struct
+{
+    uint32_t *value_ms;
+    const char *name;
+} keyboard_proc_value_t;
+
+static keyboard_proc_value_t g_initial_repeat_entry = { &repeat_initial_delay_ms, "initial" };
+static keyboard_proc_value_t g_repeat_interval_entry = { &repeat_interval_ms, "repeat" };
+
+static void keyboard_repeat_reset(void);
+static void keyboard_start_repeat(uint8_t scancode, bool extended, bool keypad_enter);
+static void keyboard_stop_repeat(uint8_t scancode, bool extended);
+static bool keyboard_repeat_due(char *out_char);
+static void keyboard_update_repeat_ticks(void);
+static bool keyboard_emit_char(uint8_t scancode, bool extended, bool keypad_enter, bool synthetic, char *out_char);
+static ssize_t keyboard_proc_value_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
+static ssize_t keyboard_proc_value_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
+static bool pending_pop_char(char *ch);
+static void pending_push_sequence(const char *seq, size_t len);
+
+static bool keyboard_is_space(char ch)
+{
+    return (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r');
+}
+
+static void keyboard_repeat_reset(void)
+{
+    g_repeat_state.active = false;
+    g_repeat_state.scancode = 0;
+    g_repeat_state.extended = false;
+    g_repeat_state.keypad_enter = false;
+    g_repeat_state.next_tick = 0;
+    g_repeat_state.waiting_initial = true;
+}
+
+static uint32_t keyboard_ms_to_ticks(uint32_t ms)
+{
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 100;
+    }
+    uint64_t ticks = ((uint64_t)ms * (uint64_t)freq + 999ULL) / 1000ULL;
+    if (ticks == 0)
+    {
+        ticks = 1;
+    }
+    return (uint32_t)ticks;
+}
+
+static void keyboard_update_repeat_ticks(void)
+{
+    repeat_initial_delay_ticks = keyboard_ms_to_ticks(repeat_initial_delay_ms);
+    repeat_interval_ticks = keyboard_ms_to_ticks(repeat_interval_ms);
+
+    if (g_repeat_state.active)
+    {
+        uint32_t delay = g_repeat_state.waiting_initial ? repeat_initial_delay_ticks : repeat_interval_ticks;
+        g_repeat_state.next_tick = timer_ticks() + delay;
+    }
+}
+
+static void keyboard_start_repeat(uint8_t scancode, bool extended, bool keypad_enter)
+{
+    g_repeat_state.active = true;
+    g_repeat_state.scancode = scancode;
+    g_repeat_state.extended = extended;
+    g_repeat_state.keypad_enter = keypad_enter;
+    g_repeat_state.waiting_initial = true;
+    g_repeat_state.next_tick = timer_ticks() + repeat_initial_delay_ticks;
+}
+
+static void keyboard_stop_repeat(uint8_t scancode, bool extended)
+{
+    if (g_repeat_state.active &&
+        g_repeat_state.scancode == scancode &&
+        g_repeat_state.extended == extended)
+    {
+        g_repeat_state.active = false;
+    }
+}
+
+static bool keyboard_repeat_due(char *out_char)
+{
+    if (!g_repeat_state.active)
+    {
+        return false;
+    }
+
+    uint64_t now = timer_ticks();
+    if (now < g_repeat_state.next_tick)
+    {
+        return false;
+    }
+
+    if (!keyboard_emit_char(g_repeat_state.scancode,
+                            g_repeat_state.extended,
+                            g_repeat_state.keypad_enter,
+                            true,
+                            out_char))
+    {
+        g_repeat_state.active = false;
+        return false;
+    }
+
+    g_repeat_state.waiting_initial = false;
+    g_repeat_state.next_tick = now + repeat_interval_ticks;
+    return true;
+}
+
+static bool keyboard_emit_arrow_sequence(uint8_t scancode, char *out_char)
+{
+    switch (scancode)
+    {
+        case 0x48: /* Up */
+            pending_push_sequence("\x1B[A", 3);
+            return pending_pop_char(out_char);
+        case 0x50: /* Down */
+            pending_push_sequence("\x1B[B", 3);
+            return pending_pop_char(out_char);
+        case 0x4B: /* Left */
+            pending_push_sequence("\x1B[D", 3);
+            return pending_pop_char(out_char);
+        case 0x4D: /* Right */
+            pending_push_sequence("\x1B[C", 3);
+            return pending_pop_char(out_char);
+        default:
+            break;
+    }
+    return false;
+}
+
+static bool keyboard_emit_char(uint8_t scancode,
+                               bool extended,
+                               bool keypad_enter,
+                               bool synthetic,
+                               char *out_char)
+{
+    if (!out_char)
+    {
+        return false;
+    }
+
+    if (extended && keyboard_emit_arrow_sequence(scancode, out_char))
+    {
+        return true;
+    }
+
+    if (!synthetic && scancode < 128)
+    {
+        if (key_down[scancode])
+        {
+            return false;
+        }
+        key_down[scancode] = 1;
+    }
+
+    bool shift_active = (left_shift_pressed | right_shift_pressed) != 0;
+    bool ctrl_active = (left_ctrl_pressed | right_ctrl_pressed) != 0;
+
+    if (scancode >= sizeof(normal_map))
+    {
+        return false;
+    }
+
+    char base = normal_map[scancode];
+    if (base == 0)
+    {
+        return false;
+    }
+
+    char ch = base;
+    if (base >= 'a' && base <= 'z')
+    {
+        bool make_upper = shift_active ^ (caps_lock_enabled != 0);
+        if (make_upper)
+        {
+            char shifted = shift_map[scancode];
+            ch = (shifted != 0) ? shifted : (char)(base - ('a' - 'A'));
+        }
+    }
+    else if (keypad_enter)
+    {
+        ch = '\n';
+    }
+    else if (shift_active)
+    {
+        char shifted = shift_map[scancode];
+        if (shifted != 0)
+        {
+            ch = shifted;
+        }
+    }
+
+    if (ch == 0)
+    {
+        return false;
+    }
+
+    if (ctrl_active)
+    {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))
+        {
+            ch = (char)(ch & 0x1F);
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    *out_char = ch;
+    return true;
+}
+
+static size_t keyboard_append_uint(char *buffer, size_t capacity, size_t pos, uint32_t value)
+{
+    char tmp[16];
+    size_t len = 0;
+    if (value == 0)
+    {
+        tmp[len++] = '0';
+    }
+    else
+    {
+        while (value > 0 && len < sizeof(tmp))
+        {
+            tmp[len++] = (char)('0' + (value % 10U));
+            value /= 10U;
+        }
+    }
+    while (len > 0 && pos + 1 < capacity)
+    {
+        buffer[pos++] = tmp[--len];
+    }
+    return pos;
+}
+
+static bool keyboard_parse_single_uint(const char *text, uint32_t *value_out)
+{
+    if (!text || !value_out)
+    {
+        return false;
+    }
+    const char *cursor = text;
+    while (keyboard_is_space(*cursor))
+    {
+        ++cursor;
+    }
+    if (*cursor == '\0')
+    {
+        return false;
+    }
+    uint64_t value = 0;
+    bool any = false;
+    while (*cursor >= '0' && *cursor <= '9')
+    {
+        any = true;
+        value = value * 10ULL + (uint64_t)(*cursor - '0');
+        if (value > 1000000ULL)
+        {
+            value = 1000000ULL;
+        }
+        ++cursor;
+    }
+    while (keyboard_is_space(*cursor))
+    {
+        ++cursor;
+    }
+    if (*cursor != '\0')
+    {
+        return false;
+    }
+    if (!any)
+    {
+        return false;
+    }
+    *value_out = (uint32_t)value;
+    return true;
+}
+
+static ssize_t keyboard_proc_value_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    if (!buffer || !context)
+    {
+        return -1;
+    }
+
+    keyboard_proc_value_t *entry = (keyboard_proc_value_t *)context;
+    if (!entry || !entry->value_ms)
+    {
+        return -1;
+    }
+
+    char temp[32];
+    size_t pos = 0;
+    pos = keyboard_append_uint(temp, sizeof(temp), pos, *entry->value_ms);
+    if (pos >= sizeof(temp))
+    {
+        pos = sizeof(temp) - 1;
+    }
+    if (pos < sizeof(temp) - 1)
+    {
+        temp[pos++] = '\n';
+    }
+    temp[pos] = '\0';
+
+    if (offset >= pos || count == 0)
+    {
+        return 0;
+    }
+    if (count > pos - offset)
+    {
+        count = pos - offset;
+    }
+    memcpy(buffer, temp + offset, count);
+    return (ssize_t)count;
+}
+
+static ssize_t keyboard_proc_value_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context)
+{
+    (void)node;
+    if (!buffer || !context || offset != 0)
+    {
+        return -1;
+    }
+
+    keyboard_proc_value_t *entry = (keyboard_proc_value_t *)context;
+    if (!entry || !entry->value_ms)
+    {
+        return -1;
+    }
+    if (count == 0)
+    {
+        return 0;
+    }
+
+    char temp[64];
+    size_t len = count;
+    if (len >= sizeof(temp))
+    {
+        len = sizeof(temp) - 1;
+    }
+    memcpy(temp, buffer, len);
+    temp[len] = '\0';
+
+    uint32_t new_value = *entry->value_ms;
+    if (!keyboard_parse_single_uint(temp, &new_value))
+    {
+        return -1;
+    }
+
+    *entry->value_ms = new_value;
+    keyboard_update_repeat_ticks();
+    return (ssize_t)count;
+}
 
 static bool buffer_empty(void)
 {
@@ -60,25 +457,6 @@ static bool buffer_pop(uint8_t *code)
     buffer_tail = (buffer_tail + 1) % KBD_BUFFER_SIZE;
     return true;
 }
-
-/* Place key maps in .data, not .rodata, to avoid early-rodata issues */
-static char normal_map[128] = {
-    0,   27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b','\t',
-    'q','w','e','r','t','y','u','i','o','p','[',']','\n', 0, 'a','s',
-    'd','f','g','h','j','k','l',';','\'', '`', 0,'\\','z','x','c','v',
-    'b','n','m',',','.','/', 0,'*', 0,' ', 0,  0,   0,   0,   0,   0,
-    0,   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0
-};
-
-static char shift_map[128] = {
-    0,   27, '!','@','#','$','%','^','&','*','(',')','_','+','\b','\t',
-    'Q','W','E','R','T','Y','U','I','O','P','{','}','\n', 0, 'A','S',
-    'D','F','G','H','J','K','L',':','"','~', 0,'|','Z','X','C','V',
-    'B','N','M','<','>','?', 0,'*', 0,' ', 0,  0,   0,   0,   0,   0,
-    0,   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0
-};
 
 static bool read_scancode(uint8_t *code)
 {
@@ -122,6 +500,8 @@ static void keyboard_reset_state(void)
     while (read_scancode(&discard))
     {
     }
+
+    keyboard_repeat_reset();
 }
 
 static bool pending_pop_char(char *ch)
@@ -162,12 +542,40 @@ static void pending_push_sequence(const char *seq, size_t len)
 void keyboard_init(void)
 {
     keyboard_reset_state();
-    interrupts_enable_irq(1);
+    keyboard_update_repeat_ticks();
+
+    if (!procfs_mkdir("keyboard"))
+    {
+        serial_write_string("[keyboard] failed to ensure /proc/keyboard\r\n");
+    }
+    if (!procfs_mkdir("keyboard/repeat"))
+    {
+        serial_write_string("[keyboard] failed to ensure /proc/keyboard/repeat\r\n");
+    }
+
+    if (!procfs_create_file_at("keyboard/repeat/initial",
+                               keyboard_proc_value_read,
+                               keyboard_proc_value_write,
+                               &g_initial_repeat_entry))
+    {
+        serial_write_string("[keyboard] failed to create /proc/keyboard/repeat/initial\r\n");
+    }
+    if (!procfs_create_file_at("keyboard/repeat/repeat",
+                               keyboard_proc_value_read,
+                               keyboard_proc_value_write,
+                               &g_repeat_interval_entry))
+    {
+        serial_write_string("[keyboard] failed to create /proc/keyboard/repeat/repeat\r\n");
+    }
 }
 
 bool keyboard_try_read(char *out_char)
 {
     if (pending_pop_char(out_char))
+    {
+        return true;
+    }
+    if (keyboard_repeat_due(out_char))
     {
         return true;
     }
@@ -249,95 +657,21 @@ bool keyboard_try_read(char *out_char)
         {
             key_down[scancode] = 0;
         }
+        keyboard_stop_repeat(scancode, extended);
         return false;
     }
 
-    if (scancode < 128)
+    if (keyboard_emit_char(scancode, extended, keypad_enter, false, out_char))
     {
-        if (key_down[scancode])
-        {
-            return false;
-        }
-        key_down[scancode] = 1;
+        keyboard_start_repeat(scancode, extended, keypad_enter);
+        return true;
     }
-
-    if (extended && !released)
-    {
-        switch (scancode)
-        {
-            case 0x48: /* Up */
-                pending_push_sequence("\x1B[A", 3);
-                return pending_pop_char(out_char);
-            case 0x50: /* Down */
-                pending_push_sequence("\x1B[B", 3);
-                return pending_pop_char(out_char);
-            case 0x4B: /* Left */
-                pending_push_sequence("\x1B[D", 3);
-                return pending_pop_char(out_char);
-            case 0x4D: /* Right */
-                pending_push_sequence("\x1B[C", 3);
-                return pending_pop_char(out_char);
-            default:
-                break;
-        }
-    }
-
-    bool shift_active = (left_shift_pressed | right_shift_pressed) != 0;
-    bool ctrl_active = (left_ctrl_pressed | right_ctrl_pressed) != 0;
-    char base = normal_map[scancode];
-    if (base == 0)
-    {
-        return false;
-    }
-
-    char ch = base;
-    if (base >= 'a' && base <= 'z')
-    {
-        bool make_upper = shift_active ^ (caps_lock_enabled != 0);
-        if (make_upper)
-        {
-            char shifted = shift_map[scancode];
-            ch = (shifted != 0) ? shifted : (char)(base - ('a' - 'A'));
-        }
-    }
-    else if (keypad_enter)
-    {
-        ch = '\n';
-    }
-    else if (shift_active)
-    {
-        char shifted = shift_map[scancode];
-        if (shifted != 0)
-        {
-            ch = shifted;
-        }
-    }
-
-    if (ch == 0)
-    {
-        return false;
-    }
-
-    if (ctrl_active)
-    {
-        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))
-        {
-            ch = (char)(ch & 0x1F);
-        }
-        else
-        {
-            return false;
-        }
-    }
-
-    *out_char = ch;
-    return true;
+    return false;
 }
 
 void keyboard_buffer_push(uint8_t scancode)
 {
     //serial_write_string("keyboard.c: keyboard_buffer_push scancode=0x");
-    static const char hex[] = "0123456789ABCDEF";
     //serial_write_char(hex[(scancode >> 4) & 0xF]);
     //serial_write_char(hex[scancode & 0xF]);
     //serial_write_string("\r\n");

@@ -30,6 +30,7 @@ typedef struct
     shell_state_t *shell;
     shell_output_t *output;
     const char *args;
+    char *args_owned;
     bool (*handler)(shell_state_t *, shell_output_t *, const char *);
     bool result;
 } shell_command_task_t;
@@ -259,8 +260,8 @@ void shell_main(void)
     };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, runelf.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, runelf.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, runelf, or ./path for binaries.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, runelf, or ./path for binaries.\r\n");
 
     while (1)
     {
@@ -300,6 +301,7 @@ static const shell_command_t g_commands[] = {
     { "userdemo",    shell_cmd_userdemo },
     { "userdemo2",   shell_cmd_userdemo2 },
     { "useratk",     shell_cmd_useratk },
+    { "wolf3d",      shell_cmd_wolf3d },
     { "runelf",      shell_cmd_runelf },
 };
 
@@ -385,11 +387,24 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         args = trim_whitespace(cursor);
     }
 
+    bool is_path_command = false;
     for (char *p = line; *p; ++p)
     {
-        if (*p >= 'A' && *p <= 'Z')
+        if (*p == '/')
         {
-            *p = (char)(*p + ('a' - 'A'));
+            is_path_command = true;
+            break;
+        }
+    }
+
+    if (!is_path_command)
+    {
+        for (char *p = line; *p; ++p)
+        {
+            if (*p >= 'A' && *p <= 'Z')
+            {
+                *p = (char)(*p + ('a' - 'A'));
+            }
         }
     }
 
@@ -425,6 +440,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             task->shell = shell;
             task->output = &output;
             task->args = args;
+            task->args_owned = NULL;
             task->handler = g_commands[i].handler;
             task->result = false;
 
@@ -452,6 +468,10 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                                     shell ? shell->wait_context : NULL);
             handler_result = task->result;
             process_destroy(proc);
+            if (task->args_owned)
+            {
+                free(task->args_owned);
+            }
             free(task);
 
             if (shell && shell->foreground_process == proc)
@@ -466,16 +486,101 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
 
     if (!handler_found)
     {
-        result = shell_duplicate_string("Error: unknown command\n");
-        handler_result = false;
+        if (is_path_command)
+        {
+            handler_found = true;
+
+            size_t path_len = strlen(line);
+            size_t args_len = (args && *args) ? strlen(args) : 0;
+            size_t combined_len = path_len + (args_len ? (1 + args_len) : 0);
+            char *path_args = (char *)malloc(combined_len + 1);
+            if (!path_args)
+            {
+                handler_result = false;
+            }
+            else
+            {
+                memcpy(path_args, line, path_len);
+                if (args_len)
+                {
+                    path_args[path_len] = ' ';
+                    memcpy(path_args + path_len + 1, args, args_len);
+                    path_args[combined_len] = '\0';
+                }
+                else
+                {
+                    path_args[path_len] = '\0';
+                }
+
+                shell_command_task_t *task = (shell_command_task_t *)malloc(sizeof(shell_command_task_t));
+                if (!task)
+                {
+                    free(path_args);
+                    handler_result = false;
+                }
+                else
+                {
+                    task->shell = shell;
+                    task->output = &output;
+                    task->args = path_args;
+                    task->args_owned = path_args;
+                    task->handler = shell_cmd_runelf;
+                    task->result = false;
+
+                    process_t *proc = process_create_kernel_with_parent("runelf",
+                                                                        shell_command_runner,
+                                                                        task,
+                                                                        0,
+                                                                        shell ? shell->stdout_fd : -1,
+                                                                        shell ? shell->owner_process : NULL);
+                    if (!proc)
+                    {
+                        free(path_args);
+                        free(task);
+                        handler_result = false;
+                    }
+                    else
+                    {
+                        if (shell)
+                        {
+                            shell->foreground_process = proc;
+                        }
+                        process_join_with_hook(proc,
+                                                NULL,
+                                                shell ? shell->wait_hook : NULL,
+                                                shell ? shell->wait_context : NULL);
+                        handler_result = task->result;
+                        process_destroy(proc);
+                        if (task->args_owned)
+                        {
+                            free(task->args_owned);
+                        }
+                        if (shell && shell->foreground_process == proc)
+                        {
+                            shell->foreground_process = NULL;
+                        }
+                        free(task);
+                    }
+                }
+            }
+        }
+        else
+        {
+            result = shell_duplicate_string("Error: unknown command\n");
+            handler_result = false;
+        }
     }
-    else if (redirect_path)
+
+    if (handler_found)
     {
-        result = shell_duplicate_empty();
-    }
-    else
-    {
-        result = shell_output_take_buffer(&output);
+        if (redirect_path)
+        {
+            result = shell_duplicate_empty();
+        }
+        else if (!result)
+        {
+            result = shell_output_take_buffer(&output);
+        }
     }
 
     shell_output_reset(&output);

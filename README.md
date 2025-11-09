@@ -22,3 +22,13 @@ Run `make` and both binaries will be produced in the `build/` tree that we expor
    - Debug and trace channels enabled via `-d cpu_reset,int,guest_errors,trace:ahci_*,trace:ide_*,trace:cmd_identify`
 
 The running kernel provides a shell (`shutdown` exits cleanly). If you need to terminate QEMU manually while preserving serial logs, run `killall qemu-system-x86_64`.
+
+User binaries can be executed directly via Linux-style path invocation (for example `./bin/userdemo2 arg1`). The legacy `runelf` command still exists, but `./` is now the preferred shorthand.
+
+## SIMD / SSE support
+
+User processes are now built with SSE2 enabled (and `mfpmath=sse`) so they can use double-precision math and vector code freely. The kernel remains SSE-free for now; refer to `docs/sse.md` for the full design notes and auditing details.
+
+## Keyboard repeat controls
+
+Runtime keyboard repeat behaviour lives under `/proc/keyboard/repeat/{initial,repeat}`. Each file contains a single integer in milliseconds. For example, `cat /proc/keyboard/repeat/initial` shows the current initial delay, and `echo 150 >/proc/keyboard/repeat/repeat` shortens the steady-state cadence. Updates take effect immediately.

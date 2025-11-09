@@ -44,5 +44,10 @@ void shell_output_reset(shell_output_t *out);
 char *shell_execute_line(shell_state_t *shell, const char *line, bool *success);
 bool shell_output_error(shell_output_t *out, const char *msg);
 bool shell_request_interrupt(shell_state_t *shell);
+bool shell_execute_binary(shell_state_t *shell,
+                          shell_output_t *out,
+                          const char *path,
+                          const char *args,
+                          const char *label);
 
 #endif

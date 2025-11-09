@@ -23,6 +23,7 @@
 #include "user_atk_host.h"
 #include "user_memory.h"
 #include "libc.h"
+#include "procfs.h"
 
 typedef struct
 {
@@ -190,7 +191,6 @@ void kernel_main(void)
 {
     serial_init();
     serial_write_string("[alix] kernel_main start\n");
-    keyboard_init();
     console_init();
     console_clear();
 
@@ -211,6 +211,8 @@ void kernel_main(void)
     serial_write_string("[alix] after acpi_init\n");
     vfs_init();
     serial_write_string("[alix] after vfs_init\n");
+    procfs_init();
+    serial_write_string("[alix] after procfs_init\n");
     logger_init();
     devfs_init();
     serial_write_string("[alix] after devfs_init\n");
@@ -218,6 +220,8 @@ void kernel_main(void)
     interrupts_enable_irq(1);
     serial_write_string("[alix] after interrupts_init\n");
     timer_init(100);
+    keyboard_init();
+    serial_write_string("[alix] after keyboard_init\n");
     ata_init();
     devfs_register_block_devices();
     serial_write_string("[alix] after storage init\n");

@@ -16,10 +16,14 @@ INCLUDE_DIR := include
 USER_DIR    := user
 OBJDIR      := build
 
-CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
-          -m64 -mno-red-zone -mgeneral-regs-only -Wall -Wextra -I$(INCLUDE_DIR) -I$(ATK_DIR) \
-          -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
-          -fshort-wchar -mfpmath=387 -mno-sse
+BASE_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
+               -m64 -mno-red-zone -Wall -Wextra -I$(INCLUDE_DIR) -I$(ATK_DIR) \
+               -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
+               -fshort-wchar
+
+KERNEL_CFLAGS := $(BASE_CFLAGS) -mgeneral-regs-only -mfpmath=387 -mno-sse
+USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
+               -DVIDEO_WIDTH=640 -DVIDEO_HEIGHT=360 -msse2 -mfpmath=sse -mstackrealign
 
 KERNEL_LD   := $(ARCH_DIR)/uefi.ld
 LOADER_DIR  := src/loader
@@ -42,7 +46,6 @@ ASM_SOURCES := $(wildcard $(ARCH_DIR)/*.S)
 ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 
 USER_OBJDIR := $(OBJDIR)/user
-USER_CFLAGS := $(CFLAGS) -I$(USER_DIR) -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS -DVIDEO_WIDTH=640 -DVIDEO_HEIGHT=360
 USER_COMMON_SOURCES := \
 	$(USER_DIR)/crt0.c \
 	$(USER_DIR)/syscall.c \
@@ -57,9 +60,9 @@ USER_LD_SCRIPT := $(USER_DIR)/link.ld
 USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c,$(wildcard $(ATK_DIR)/*.c))
 USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
 USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
-USER_ELFS := $(USER_OBJDIR)/userdemo2.elf $(USER_OBJDIR)/atk_demo.elf $(USER_OBJDIR)/ttf_demo.elf
+USER_ELFS := $(USER_OBJDIR)/userdemo2.elf $(USER_OBJDIR)/atk_demo.elf $(USER_OBJDIR)/ttf_demo.elf $(USER_OBJDIR)/wolf3d.elf
 USER_BIN_DIR := build/bin
-USER_BINS := $(USER_BIN_DIR)/userdemo2 $(USER_BIN_DIR)/atk_demo $(USER_BIN_DIR)/ttf_demo
+USER_BINS := $(USER_BIN_DIR)/userdemo2 $(USER_BIN_DIR)/atk_demo $(USER_BIN_DIR)/ttf_demo $(USER_BIN_DIR)/wolf3d
 HOST_TEST_DIR := $(OBJDIR)/host-tests
 HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -I$(INCLUDE_DIR) -DTTF_HOST_BUILD
@@ -80,11 +83,11 @@ all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS) $(USER_BINS)
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.S
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
 $(USER_OBJDIR)/%.o: $(USER_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -117,6 +120,10 @@ $(USER_OBJDIR)/ttf_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_O
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/ttf_demo.o
 
+$(USER_OBJDIR)/wolf3d.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/wolf3d.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/wolf3d.o
+
 $(USER_BIN_DIR)/userdemo2: $(USER_OBJDIR)/userdemo2.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
@@ -126,6 +133,10 @@ $(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/ttf_demo: $(USER_OBJDIR)/ttf_demo.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/wolf3d: $(USER_OBJDIR)/wolf3d.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 
