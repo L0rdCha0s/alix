@@ -38,6 +38,9 @@ struct vfs_mount
     vfs_node_t *mount_point;
     struct vfs_mount *next;
     bool dirty;
+    uint8_t *image_cache;
+    size_t cache_size;
+    size_t sector_size;
 };
 
 struct vfs_node
@@ -81,7 +84,7 @@ static bool vfs_mount_sync_node(vfs_node_t *node);
 static void vfs_mark_node_dirty(vfs_node_t *node);
 static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount);
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
-static bool vfs_mount_sync(vfs_mount_t *mount);
+static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full);
 static bool vfs_device_is_mounted(block_device_t *device);
 
 /* ---------- helpers ---------- */
@@ -1206,7 +1209,7 @@ static bool vfs_device_is_mounted(block_device_t *device)
     return false;
 }
 
-static bool vfs_mount_sync(vfs_mount_t *mount)
+static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
 {
     if (!mount || !mount->device || !mount->mount_point)
     {
@@ -1289,7 +1292,63 @@ static bool vfs_mount_sync(vfs_mount_t *mount)
         return false;
     }
 
-    bool ok = block_write(mount->device, 0, sectors_to_write, buffer);
+    bool can_diff = !force_full &&
+                    mount->image_cache &&
+                    mount->cache_size == buffer_size &&
+                    mount->sector_size == sector_size;
+    bool ok = true;
+
+    if (can_diff)
+    {
+        size_t sectors = buffer_size / sector_size;
+        for (size_t s = 0; s < sectors; ++s)
+        {
+            uint8_t *new_sector = buffer + s * sector_size;
+            uint8_t *old_sector = mount->image_cache + s * sector_size;
+            if (memcmp(new_sector, old_sector, sector_size) != 0)
+            {
+                if (!block_write(mount->device, (uint64_t)s, 1, new_sector))
+                {
+                    ok = false;
+                    break;
+                }
+                memcpy(old_sector, new_sector, sector_size);
+            }
+        }
+    }
+    else
+    {
+        ok = block_write(mount->device, 0, sectors_to_write, buffer);
+        if (ok)
+        {
+            uint8_t *new_cache = (uint8_t *)realloc(mount->image_cache, buffer_size);
+            if (!new_cache)
+            {
+                free(mount->image_cache);
+                mount->image_cache = NULL;
+                mount->cache_size = 0;
+            }
+            else
+            {
+                mount->image_cache = new_cache;
+                mount->cache_size = buffer_size;
+                mount->sector_size = sector_size;
+                memcpy(mount->image_cache, buffer, buffer_size);
+            }
+        }
+    }
+
+    if (!mount->image_cache && ok)
+    {
+        mount->image_cache = (uint8_t *)malloc(buffer_size);
+        if (mount->image_cache)
+        {
+            memcpy(mount->image_cache, buffer, buffer_size);
+            mount->cache_size = buffer_size;
+            mount->sector_size = sector_size;
+        }
+    }
+
     free(buffer);
     return ok;
 }
@@ -1304,7 +1363,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         return true;
     }
-    if (!vfs_mount_sync(mount))
+    if (!vfs_mount_sync(mount, force))
     {
         return false;
     }
@@ -1559,6 +1618,11 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         vfs_attach_child_tail(parent, node);
     }
 
+    mount->image_cache = buffer;
+    mount->cache_size = buffer_size;
+    mount->sector_size = sector_size;
+    buffer = NULL;
+
     attached = true;
     success = true;
 
@@ -1624,6 +1688,9 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     mount->mount_point = mount_point;
     mount->next = NULL;
     mount->dirty = false;
+    mount->image_cache = NULL;
+    mount->cache_size = 0;
+    mount->sector_size = 0;
 
     mount_point->mount = mount;
 
@@ -1655,6 +1722,23 @@ bool vfs_sync_all(void)
     for (vfs_mount_t *mount = mounts; mount; mount = mount->next)
     {
         if (!vfs_mount_writeback(mount, true))
+        {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+bool vfs_sync_dirty(void)
+{
+    bool ok = true;
+    for (vfs_mount_t *mount = mounts; mount; mount = mount->next)
+    {
+        if (!mount->dirty)
+        {
+            continue;
+        }
+        if (!vfs_mount_writeback(mount, false))
         {
             ok = false;
         }

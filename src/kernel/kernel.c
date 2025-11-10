@@ -245,6 +245,20 @@ static void fstab_mount_process_entry(void *arg)
     process_exit(0);
 }
 
+static void storage_flush_process_entry(void *arg)
+{
+    (void)arg;
+    const uint32_t interval_ms = 2000;
+    while (1)
+    {
+        process_sleep_ms(interval_ms);
+        if (!vfs_sync_dirty())
+        {
+            serial_write_string("[flushd] warning: partial sync failure\r\n");
+        }
+    }
+}
+
 void kernel_main(void)
 {
     serial_init();
@@ -269,7 +283,6 @@ void kernel_main(void)
     serial_write_string("[alix] after acpi_init\n");
     vfs_init();
     serial_write_string("[alix] after vfs_init\n");
-    ensure_system_layout();
     startup_init();
     procfs_init();
     serial_write_string("[alix] after procfs_init\n");
@@ -317,6 +330,12 @@ void kernel_main(void)
     if (!user_demo)
     {
         serial_write_string("Failed to create demo user process\r\n");
+    }
+
+    process_t *flush_process = process_create_kernel("flushd", storage_flush_process_entry, NULL, 0, -1);
+    if (!flush_process)
+    {
+        serial_write_string("Failed to create flush daemon\r\n");
     }
 
     if (!startup_schedule())

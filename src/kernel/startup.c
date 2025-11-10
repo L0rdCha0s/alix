@@ -18,6 +18,7 @@ typedef struct
 static void startup_log(const char *message);
 static void startup_log_command(const char *command);
 static bool startup_ensure_default_script(void);
+static void startup_wait_for_environment(void);
 static char *startup_trim(char *text);
 static bool startup_collect_commands(startup_command_list_t *list);
 static void startup_command_list_reset(startup_command_list_t *list);
@@ -25,10 +26,7 @@ static void startup_process_entry(void *arg);
 
 void startup_init(void)
 {
-    if (!startup_ensure_default_script())
-    {
-        startup_log("unable to prepare default startup script");
-    }
+    /* Defer creation until the filesystem is ready. */
 }
 
 bool startup_schedule(void)
@@ -45,6 +43,8 @@ bool startup_schedule(void)
 static void startup_process_entry(void *arg)
 {
     (void)arg;
+
+    startup_wait_for_environment();
 
     startup_command_list_t list = { 0 };
     if (!startup_collect_commands(&list))
@@ -189,7 +189,16 @@ static bool startup_collect_commands(startup_command_list_t *list)
     vfs_node_t *file = vfs_open_file(vfs_root(), STARTUP_SCRIPT_PATH, false, false);
     if (!file)
     {
-        return true;
+        if (!startup_ensure_default_script())
+        {
+            startup_log("unable to create default startup script");
+            return false;
+        }
+        file = vfs_open_file(vfs_root(), STARTUP_SCRIPT_PATH, false, false);
+        if (!file)
+        {
+            return false;
+        }
     }
 
     size_t size = 0;
@@ -264,6 +273,22 @@ static bool startup_collect_commands(startup_command_list_t *list)
     list->commands = commands;
     list->count = count;
     return true;
+}
+
+static void startup_wait_for_environment(void)
+{
+    const uint32_t wait_ms = 100;
+    const uint32_t max_attempts = 200;
+    for (uint32_t attempt = 0; attempt < max_attempts; ++attempt)
+    {
+        vfs_node_t *etc = vfs_resolve(vfs_root(), "/etc");
+        if (etc)
+        {
+            return;
+        }
+        process_sleep_ms(wait_ms);
+    }
+    startup_log("warning: /etc not available, continuing anyway");
 }
 
 static void startup_command_list_reset(startup_command_list_t *list)
