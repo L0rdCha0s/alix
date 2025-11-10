@@ -158,11 +158,22 @@ static void mouse_process_byte(uint8_t byte)
 
     emit_dx = (int8_t)packet[1];
     emit_dy = (int8_t)packet[2];
+    if (packet[0] & 0xC0)
+    {
+        goto out;
+    }
     emit_left = (packet[0] & 0x01) != 0;
     emit = true;
 
 out:
-    if (emit && mouse_packet_log < 16)
+    mouse_irq_restore(irq_state);
+
+    if (!emit)
+    {
+        return;
+    }
+
+    if (mouse_packet_log < 16)
     {
         serial_write_string("mouse packet dx=");
         serial_write_hex64((uint64_t)(int64_t)emit_dx);
@@ -172,12 +183,10 @@ out:
         mouse_packet_log++;
     }
 
-    if (emit && g_listener)
+    if (g_listener)
     {
         g_listener(emit_dx, -emit_dy, emit_left);
     }
-
-    mouse_irq_restore(irq_state);
 }
 
 void mouse_on_irq(uint8_t byte)
