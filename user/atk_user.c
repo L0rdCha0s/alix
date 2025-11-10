@@ -70,6 +70,15 @@ bool atk_user_wait_event(const atk_user_window_t *win, user_atk_event_t *event)
     return sys_ui_poll_event(win->handle, event, USER_ATK_POLL_FLAG_BLOCK) == 1;
 }
 
+bool atk_user_poll_event(const atk_user_window_t *win, user_atk_event_t *event)
+{
+    if (!win || !event)
+    {
+        return false;
+    }
+    return sys_ui_poll_event(win->handle, event, 0u) == 1;
+}
+
 void atk_user_close(atk_user_window_t *win)
 {
     if (!win)

@@ -1,3 +1,5 @@
+#ifdef KERNEL_BUILD
+
 #include "atk/atk_shell.h"
 
 #include "atk_internal.h"
@@ -140,6 +142,8 @@ bool atk_shell_open(atk_state_t *state)
     atk_window_mark_dirty(window);
     return true;
 }
+
+#endif /* KERNEL_BUILD */
 
 static void atk_shell_view_destroy(void *context)
 {

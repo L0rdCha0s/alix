@@ -1,4 +1,5 @@
 #include "usyscall.h"
+#include "libc.h"
 
 static inline long syscall0(long id)
 {
@@ -36,6 +37,42 @@ static inline long syscall3(long id, long a0, long a1, long a2)
     __asm__ volatile ("int $0x80"
                       : "=a"(ret)
                       : "a"(id), "D"(a0), "S"(a1), "d"(a2)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall4(long id, long a0, long a1, long a2, long a3)
+{
+    long ret;
+    register long r10 __asm__("r10") = a3;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(id), "D"(a0), "S"(a1), "d"(a2), "r"(r10)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall5(long id, long a0, long a1, long a2, long a3, long a4)
+{
+    long ret;
+    register long r10 __asm__("r10") = a3;
+    register long r8 __asm__("r8") = a4;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(id), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long syscall6(long id, long a0, long a1, long a2, long a3, long a4, long a5)
+{
+    long ret;
+    register long r10 __asm__("r10") = a3;
+    register long r8 __asm__("r8") = a4;
+    register long r9 __asm__("r9") = a5;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(id), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9)
                       : "rcx", "r11", "memory");
     return ret;
 }
@@ -107,4 +144,48 @@ int sys_yield(void)
 int sys_serial_write(const char *buffer, size_t length)
 {
     return (int)syscall2(SYSCALL_SERIAL_WRITE, (long)buffer, (long)length);
+}
+
+int sys_shell_open(void)
+{
+    return (int)syscall0(SYSCALL_SHELL_OPEN);
+}
+
+ssize_t sys_shell_exec(int handle,
+                       const char *command,
+                       size_t command_len,
+                       char *output,
+                       size_t output_len,
+                       int *status_out)
+{
+    if (!command)
+    {
+        return -1;
+    }
+    if (command_len == 0)
+    {
+        command_len = strlen(command);
+    }
+    return (ssize_t)syscall6(SYSCALL_SHELL_EXEC,
+                              handle,
+                              (long)command,
+                              (long)command_len,
+                              (long)output,
+                              (long)output_len,
+                              (long)status_out);
+}
+
+int sys_shell_close(int handle)
+{
+    return (int)syscall1(SYSCALL_SHELL_CLOSE, handle);
+}
+
+ssize_t sys_proc_snapshot(syscall_process_info_t *buffer, size_t capacity)
+{
+    return (ssize_t)syscall2(SYSCALL_PROC_SNAPSHOT, (long)buffer, (long)capacity);
+}
+
+ssize_t sys_net_snapshot(syscall_net_stats_t *buffer, size_t capacity)
+{
+    return (ssize_t)syscall2(SYSCALL_NET_SNAPSHOT, (long)buffer, (long)capacity);
 }

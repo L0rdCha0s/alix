@@ -13,9 +13,10 @@ static uint32_t g_surface_width = VIDEO_WIDTH;
 static uint32_t g_surface_height = VIDEO_HEIGHT;
 static bool g_surface_dirty = false;
 
-static void surface_log(const char *msg, uint64_t value)
+static inline void surface_log(const char *msg, uint64_t value)
 {
-    printf("[usurf] %s0x%lx\n", msg, (unsigned long)value);
+    (void)msg;
+    (void)value;
 }
 
 void video_surface_attach(uint16_t *buffer, uint32_t width, uint32_t height)

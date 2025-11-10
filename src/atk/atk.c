@@ -14,10 +14,13 @@
 #include "atk/atk_text_input.h"
 #include "atk/atk_terminal.h"
 #include "user_atk_host.h"
+#include "libc.h"
 
 #ifndef ATK_NO_DESKTOP_APPS
 #include "atk/atk_task_manager.h"
 #include "atk/atk_shell.h"
+#include "process.h"
+#include "vfs.h"
 #endif
 
 static void atk_apply_default_theme(atk_state_t *state);
@@ -25,6 +28,25 @@ static void action_exit_to_text(atk_widget_t *button, void *context);
 #ifndef ATK_NO_DESKTOP_APPS
 static void action_open_shell(atk_widget_t *button, void *context);
 static void action_open_task_manager(atk_widget_t *button, void *context);
+static void action_open_atk_terminal(atk_widget_t *button, void *context);
+static void action_open_atk_demo(atk_widget_t *button, void *context);
+static void atk_launch_user_binary(void *arg) __attribute__((noreturn));
+
+typedef struct
+{
+    const char *path;
+    const char *name;
+} atk_user_launch_info_t;
+
+static const atk_user_launch_info_t g_atk_terminal_launch = {
+    .path = "/usr/bin/atk_shell.elf",
+    .name = "atk_shell"
+};
+
+static const atk_user_launch_info_t g_atk_demo_launch = {
+    .path = "/usr/bin/atk_demo.elf",
+    .name = "atk_demo"
+};
 #endif
 
 void atk_init(void)
@@ -73,6 +95,28 @@ void atk_enter_mode(void)
                            ATK_BUTTON_STYLE_TITLE_BELOW,
                            true,
                            action_open_task_manager,
+                           state);
+
+    atk_desktop_add_button(state,
+                           340,
+                           80,
+                           88,
+                           88,
+                           "Terminal",
+                           ATK_BUTTON_STYLE_TITLE_BELOW,
+                           true,
+                           action_open_atk_terminal,
+                           state);
+
+    atk_desktop_add_button(state,
+                           440,
+                           80,
+                           88,
+                           88,
+                           "ATK Demo",
+                           ATK_BUTTON_STYLE_TITLE_BELOW,
+                           true,
+                           action_open_atk_demo,
                            state);
 #else
     (void)action_exit_to_text;
@@ -535,5 +579,83 @@ static void action_open_task_manager(atk_widget_t *button, void *context)
         return;
     }
     atk_task_manager_open(state);
+}
+
+static void action_open_atk_terminal(atk_widget_t *button, void *context)
+{
+    (void)button;
+    (void)context;
+
+    process_t *launcher = process_create_kernel("atk_term_launcher",
+                                                atk_launch_user_binary,
+                                                (void *)&g_atk_terminal_launch,
+                                                0,
+                                                -1);
+    if (!launcher)
+    {
+        serial_write_string("atk: failed to schedule atk_terminal launcher\r\n");
+    }
+}
+
+static void action_open_atk_demo(atk_widget_t *button, void *context)
+{
+    (void)button;
+    (void)context;
+
+    process_t *launcher = process_create_kernel("atk_demo_launcher",
+                                                atk_launch_user_binary,
+                                                (void *)&g_atk_demo_launch,
+                                                0,
+                                                -1);
+    if (!launcher)
+    {
+        serial_write_string("atk: failed to schedule atk_demo launcher\r\n");
+    }
+}
+
+static void atk_launch_user_binary(void *arg)
+{
+    const atk_user_launch_info_t *info = (const atk_user_launch_info_t *)arg;
+    const char *path = info ? info->path : NULL;
+    const char *name = (info && info->name) ? info->name : "user_app";
+
+    vfs_node_t *root = vfs_root();
+    if (!root || !path)
+    {
+        serial_write_string("atk: invalid user binary request\r\n");
+        process_exit(1);
+    }
+
+    vfs_node_t *node = vfs_resolve(root, path);
+    if (!node)
+    {
+        serial_write_string("atk: binary not found\r\n");
+        process_exit(1);
+    }
+
+    size_t size = 0;
+    const uint8_t *data = (const uint8_t *)vfs_data(node, &size);
+    if (!data || size == 0)
+    {
+        serial_write_string("atk: binary empty\r\n");
+        process_exit(1);
+    }
+
+    process_t *proc = process_create_user_elf_with_parent(name,
+                                                          data,
+                                                          size,
+                                                          -1,
+                                                          process_current(),
+                                                          NULL,
+                                                          0);
+    if (!proc)
+    {
+        serial_write_string("atk: failed to start user binary\r\n");
+        process_exit(1);
+    }
+
+    process_join(proc, NULL);
+    process_destroy(proc);
+    process_exit(0);
 }
 #endif

@@ -42,11 +42,8 @@ static uint32_t g_next_handle = 1;
 
 static void user_atk_log(const char *msg, uint64_t value)
 {
-    serial_write_string("[uatk] ");
-    serial_write_string(msg);
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    (void)msg;
+    (void)value;
 }
 
 static user_atk_window_t *user_atk_from_window(const atk_widget_t *window);
@@ -383,6 +380,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     atk_window_mark_dirty(window);
     video_request_refresh_window(window);
     user_atk_log("create handle=", win->handle);
+    user_atk_focus_window(window);
     return (int64_t)win->handle;
 }
 

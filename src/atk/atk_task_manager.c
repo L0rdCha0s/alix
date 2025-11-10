@@ -1,3 +1,5 @@
+#ifdef KERNEL_BUILD
+
 #include "atk/atk_task_manager.h"
 
 #include "atk_internal.h"
@@ -92,6 +94,8 @@ bool atk_task_manager_open(atk_state_t *state)
     logger_log("taskmgr: open complete");
     return true;
 }
+
+#endif /* KERNEL_BUILD */
 
 static bool atk_task_manager_init_ui(atk_task_manager_view_t *view)
 {

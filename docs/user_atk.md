@@ -39,3 +39,8 @@ Global vs. local responsibilities are split:
 3. Runs an event loop that waits on `USER_ATK_EVENT_*`, passes mouse/key events into ATK, and redraws/presents whenever ATK sets the `redraw` flag.
 
 The command `useratk` (wired into the shell) launches `/bin/atk_demo`, letting us exercise the full path end-to-end.
+
+Two additional userland binaries are now available:
+
+* `atkshell` launches a graphical shell window backed by the kernel’s shell session service.
+* `taskmgr` opens the ATK Task Manager, showing process and network snapshots gathered via the new syscalls.

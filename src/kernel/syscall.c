@@ -8,6 +8,8 @@
 #include "vfs.h"
 #include "libc.h"
 #include "user_atk_host.h"
+#include "shell_service.h"
+#include "net/interface.h"
 
 typedef struct
 {
@@ -34,6 +36,99 @@ static ssize_t syscall_file_read(void *ctx, void *buffer, size_t count)
         handle->offset += (size_t)bytes;
     }
     return bytes;
+}
+
+static void syscall_copy_string(char *dst, size_t capacity, const char *src)
+{
+    if (!dst || capacity == 0)
+    {
+        return;
+    }
+    if (!src)
+    {
+        dst[0] = '\0';
+        return;
+    }
+    size_t len = strlen(src);
+    if (len >= capacity)
+    {
+        len = capacity - 1;
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return -1;
+    }
+
+    process_info_t *tmp = (process_info_t *)malloc(sizeof(process_info_t) * capacity);
+    if (!tmp)
+    {
+        return -1;
+    }
+
+    size_t count = process_snapshot(tmp, capacity);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const process_info_t *info = &tmp[i];
+        syscall_process_info_t *out = &buffer[i];
+        out->pid = info->pid;
+        out->process_state = (uint32_t)info->state;
+        out->thread_state = (uint32_t)info->thread_state;
+        out->time_slice_remaining = info->time_slice_remaining;
+        out->stdout_fd = info->stdout_fd;
+        out->is_idle = info->is_idle ? 1u : 0u;
+
+        const char *proc_name = info->name ? info->name : "";
+        const char *thread_name = info->thread_name ? info->thread_name : "";
+        syscall_copy_string(out->process_name, SYSCALL_PROCESS_NAME_MAX, proc_name);
+        syscall_copy_string(out->thread_name, SYSCALL_PROCESS_NAME_MAX, thread_name);
+    }
+
+    free(tmp);
+    return (int64_t)count;
+}
+
+static int64_t syscall_do_net_snapshot(syscall_net_stats_t *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return -1;
+    }
+
+    net_interface_stats_t *tmp = (net_interface_stats_t *)malloc(sizeof(net_interface_stats_t) * capacity);
+    if (!tmp)
+    {
+        return -1;
+    }
+
+    size_t count = net_if_snapshot(tmp, capacity);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const net_interface_stats_t *stats = &tmp[i];
+        syscall_net_stats_t *out = &buffer[i];
+        memset(out, 0, sizeof(*out));
+        syscall_copy_string(out->name, SYSCALL_NET_IF_NAME_MAX, stats->name);
+        out->present = stats->present ? 1u : 0u;
+        out->link_up = stats->link_up ? 1u : 0u;
+        memcpy(out->mac, stats->mac, sizeof(out->mac));
+        out->ipv4_addr = stats->ipv4_addr;
+        out->ipv4_netmask = stats->ipv4_netmask;
+        out->ipv4_gateway = stats->ipv4_gateway;
+        out->rx_bytes = stats->rx_bytes;
+        out->tx_bytes = stats->tx_bytes;
+        out->rx_packets = stats->rx_packets;
+        out->tx_packets = stats->tx_packets;
+        out->rx_errors = stats->rx_errors;
+        out->tx_errors = stats->tx_errors;
+    }
+
+    free(tmp);
+    return (int64_t)count;
 }
 
 static ssize_t syscall_file_write(void *ctx, const void *buffer, size_t count)
@@ -227,6 +322,28 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = (int64_t)len;
             break;
         }
+        case SYSCALL_SHELL_OPEN:
+            result = shell_service_open_session();
+            break;
+        case SYSCALL_SHELL_CLOSE:
+            result = shell_service_close_session((uint32_t)frame->rdi) ? 0 : -1;
+            break;
+        case SYSCALL_SHELL_EXEC:
+            result = shell_service_exec((uint32_t)frame->rdi,
+                                        (const char *)frame->rsi,
+                                        (size_t)frame->rdx,
+                                        (char *)frame->r10,
+                                        (size_t)frame->r8,
+                                        (int *)frame->r9);
+            break;
+        case SYSCALL_PROC_SNAPSHOT:
+            result = syscall_do_proc_snapshot((syscall_process_info_t *)frame->rdi,
+                                              (size_t)frame->rsi);
+            break;
+        case SYSCALL_NET_SNAPSHOT:
+            result = syscall_do_net_snapshot((syscall_net_stats_t *)frame->rdi,
+                                             (size_t)frame->rsi);
+            break;
         default:
             serial_write_string("syscall: unhandled id=");
             serial_write_hex64(syscall_id);

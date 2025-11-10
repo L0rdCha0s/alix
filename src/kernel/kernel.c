@@ -134,9 +134,17 @@ static void ensure_system_layout(void)
     {
         serial_write_string("[alix] warn: unable to ensure /root/etc/ntp\r\n");
     }
+    if (!ensure_directory_path("/root/usr"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root/usr\r\n");
+    }
     if (!vfs_symlink(vfs_root(), "/root/etc", "/etc"))
     {
         serial_write_string("[alix] warn: unable to ensure /etc symlink\r\n");
+    }
+    if (!vfs_symlink(vfs_root(), "/root/usr", "/usr"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /usr symlink\r\n");
     }
     vfs_node_t *ntp_server = vfs_open_file(vfs_root(), "/etc/ntp/server", false, false);
     if (!ntp_server)

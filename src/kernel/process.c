@@ -10,6 +10,7 @@
 #include "fd.h"
 #include "elf.h"
 #include "user_atk_host.h"
+#include "shell_service.h"
 #include "syscall_defs.h"
 #include "user_memory.h"
 #include "timer.h"
@@ -1345,6 +1346,7 @@ static thread_t *wait_queue_dequeue_locked(wait_queue_t *queue);
 static void process_attach_child(process_t *parent, process_t *child);
 static void process_detach_child(process_t *child);
 static process_t *process_detach_first_child(process_t *parent);
+static void process_reap_orphans(void);
 
 static process_t *process_finalize_new_process(process_t *proc,
                                                thread_t *thread,
@@ -1875,6 +1877,37 @@ static process_t *process_detach_first_child(process_t *parent)
     return child;
 }
 
+static void process_reap_orphans(void)
+{
+    while (1)
+    {
+        process_t *target = NULL;
+
+        uint64_t flags = cpu_save_flags();
+        cpu_cli();
+
+        for (process_t *proc = g_process_list; proc; proc = proc->next)
+        {
+            if (proc->state == PROCESS_STATE_ZOMBIE &&
+                proc->parent == NULL &&
+                proc->main_thread != g_idle_thread)
+            {
+                target = proc;
+                break;
+            }
+        }
+
+        cpu_restore_flags(flags);
+
+        if (!target)
+        {
+            break;
+        }
+
+        process_destroy(target);
+    }
+}
+
 static void switch_to_thread(thread_t *next)
 {
     thread_t *prev = g_current_thread;
@@ -1984,6 +2017,7 @@ static void scheduler_schedule(bool requeue_current)
 
     switch_to_thread(next);
     cpu_restore_flags(flags);
+    process_reap_orphans();
 }
 
 static void idle_thread_entry(void *arg)
@@ -2584,6 +2618,7 @@ void process_destroy(process_t *process)
     }
 
     user_atk_on_process_destroy(process);
+    shell_service_cleanup_process(process);
 
     if (process->first_child)
     {
