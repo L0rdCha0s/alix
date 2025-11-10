@@ -157,6 +157,11 @@ atk_widget_t *atk_window_title_hit_test(const atk_state_t *state, int x, int y)
         {
             continue;
         }
+        atk_window_priv_t *priv = window_priv_mut(window);
+        if (!priv || !priv->chrome_visible)
+        {
+            continue;
+        }
         if (x >= window->x && x < window->x + window->width &&
             y >= window->y && y < window->y + ATK_WINDOW_TITLE_HEIGHT)
         {
@@ -175,6 +180,10 @@ atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py)
 
     atk_window_priv_t *priv = window_priv_mut(window);
     if (!priv)
+    {
+        return 0;
+    }
+    if (!priv->chrome_visible)
     {
         return 0;
     }
@@ -375,6 +384,7 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     priv->list_node = 0;
     priv->user_context = NULL;
     priv->on_destroy = NULL;
+    priv->chrome_visible = true;
 
     window->used = true;
     window->width = 600;
@@ -526,6 +536,38 @@ void *atk_window_context(const atk_widget_t *window)
     return priv ? priv->user_context : NULL;
 }
 
+bool atk_window_is_chrome_visible(const atk_widget_t *window)
+{
+    const atk_window_priv_t *priv = window_priv(window);
+    return priv ? priv->chrome_visible : true;
+}
+
+void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
+{
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv || priv->chrome_visible == visible)
+    {
+        return;
+    }
+
+    if (!visible)
+    {
+        window->y -= ATK_WINDOW_TITLE_HEIGHT;
+        window->height += ATK_WINDOW_TITLE_HEIGHT;
+    }
+    else
+    {
+        window->y += ATK_WINDOW_TITLE_HEIGHT;
+        if (window->height > ATK_WINDOW_TITLE_HEIGHT)
+        {
+            window->height -= ATK_WINDOW_TITLE_HEIGHT;
+        }
+    }
+
+    priv->chrome_visible = visible;
+    atk_window_mark_dirty(window);
+}
+
 static void atk_log(const char *msg)
 {
     serial_write_string(msg);
@@ -541,45 +583,57 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
 
     const atk_theme_t *theme = &state->theme;
     const atk_window_priv_t *priv = window_priv(window);
+    bool chrome_visible = priv ? priv->chrome_visible : true;
 
-    video_draw_rect(window->x - ATK_WINDOW_BORDER,
-                    window->y - ATK_WINDOW_BORDER,
-                    window->width + ATK_WINDOW_BORDER * 2,
-                    window->height + ATK_WINDOW_BORDER * 2,
-                    theme->window_border);
+    if (chrome_visible)
+    {
+        video_draw_rect(window->x - ATK_WINDOW_BORDER,
+                        window->y - ATK_WINDOW_BORDER,
+                        window->width + ATK_WINDOW_BORDER * 2,
+                        window->height + ATK_WINDOW_BORDER * 2,
+                        theme->window_border);
 
-    video_draw_rect(window->x,
-                    window->y,
-                    window->width,
-                    window->height,
-                    theme->window_body);
+        video_draw_rect(window->x,
+                        window->y,
+                        window->width,
+                        window->height,
+                        theme->window_body);
 
-    video_draw_rect(window->x,
-                    window->y,
-                    window->width,
-                    ATK_WINDOW_TITLE_HEIGHT,
-                    theme->window_title);
+        video_draw_rect(window->x,
+                        window->y,
+                        window->width,
+                        ATK_WINDOW_TITLE_HEIGHT,
+                        theme->window_title);
 
-    video_draw_rect_outline(window->x,
-                            window->y,
-                            window->width,
-                            ATK_WINDOW_TITLE_HEIGHT,
-                            theme->window_border);
+        video_draw_rect_outline(window->x,
+                                window->y,
+                                window->width,
+                                ATK_WINDOW_TITLE_HEIGHT,
+                                theme->window_border);
 
-    int title_baseline = atk_font_baseline_for_rect(window->y, ATK_WINDOW_TITLE_HEIGHT);
-    atk_rect_t clip = { window->x, window->y, window->width, ATK_WINDOW_TITLE_HEIGHT };
-    atk_font_draw_string_clipped(window->x + ATK_WINDOW_TITLE_PADDING_X,
-                                 title_baseline,
-                                 priv->title,
-                                 theme->window_title_text,
-                                 theme->window_title,
-                                 &clip);
+        int title_baseline = atk_font_baseline_for_rect(window->y, ATK_WINDOW_TITLE_HEIGHT);
+        atk_rect_t clip = { window->x, window->y, window->width, ATK_WINDOW_TITLE_HEIGHT };
+        atk_font_draw_string_clipped(window->x + ATK_WINDOW_TITLE_PADDING_X,
+                                     title_baseline,
+                                     priv->title,
+                                     theme->window_title_text,
+                                     theme->window_title,
+                                     &clip);
 
-    video_draw_rect_outline(window->x,
-                            window->y,
-                            window->width,
-                            window->height,
-                            theme->window_border);
+        video_draw_rect_outline(window->x,
+                                window->y,
+                                window->width,
+                                window->height,
+                                theme->window_border);
+    }
+    else
+    {
+        video_draw_rect(window->x,
+                        window->y,
+                        window->width,
+                        window->height,
+                        theme->window_body);
+    }
 
     ATK_LIST_FOR_EACH(node, &priv->children)
     {
@@ -688,10 +742,24 @@ static void window_get_bounds(const atk_widget_t *window, int *x, int *y, int *w
         return;
     }
 
-    int bx = window->x - ATK_WINDOW_BORDER;
-    int by = window->y - ATK_WINDOW_BORDER;
-    int bw = window->width + ATK_WINDOW_BORDER * 2;
-    int bh = window->height + ATK_WINDOW_BORDER * 2;
+    const atk_window_priv_t *priv = window_priv(window);
+    bool chrome_visible = priv ? priv->chrome_visible : true;
+
+    int bx, by, bw, bh;
+    if (chrome_visible)
+    {
+        bx = window->x - ATK_WINDOW_BORDER;
+        by = window->y - ATK_WINDOW_BORDER;
+        bw = window->width + ATK_WINDOW_BORDER * 2;
+        bh = window->height + ATK_WINDOW_BORDER * 2;
+    }
+    else
+    {
+        bx = window->x;
+        by = window->y;
+        bw = window->width;
+        bh = window->height;
+    }
 
     if (x) *x = bx;
     if (y) *y = by;

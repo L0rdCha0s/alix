@@ -54,6 +54,7 @@ typedef struct
     atk_list_t scrollbars;
     void *user_context;
     void (*on_destroy)(void *context);
+    bool chrome_visible;
 } atk_window_priv_t;
 
 typedef struct

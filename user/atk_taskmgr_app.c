@@ -344,13 +344,15 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
     window->width = 780;
     window->height = 520 + ATK_WINDOW_TITLE_HEIGHT;
     atk_window_set_title_text(window, "Task Manager");
+    atk_window_set_chrome_visible(window, false);
 
     atk_layout_t layout;
+    int chrome_top = atk_window_is_chrome_visible(window) ? ATK_WINDOW_TITLE_HEIGHT : 0;
     atk_layout_init(&layout,
                     0,
-                    ATK_WINDOW_TITLE_HEIGHT,
+                    chrome_top,
                     window->width,
-                    window->height - ATK_WINDOW_TITLE_HEIGHT);
+                    window->height - chrome_top);
     atk_layout_set_padding(&layout, 12, 12, 12, 12);
     atk_layout_region_t content = atk_layout_content(&layout);
 

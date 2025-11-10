@@ -57,9 +57,11 @@ static bool init_ui(void)
     g_window->width = VIDEO_WIDTH;
     g_window->height = VIDEO_HEIGHT + ATK_WINDOW_TITLE_HEIGHT;
     atk_window_set_title_text(g_window, "ATK Demo");
+    atk_window_set_chrome_visible(g_window, false);
 
     int content_margin = 16;
-    int label_y = ATK_WINDOW_TITLE_HEIGHT + content_margin;
+    int chrome_top = atk_window_is_chrome_visible(g_window) ? ATK_WINDOW_TITLE_HEIGHT : 0;
+    int label_y = chrome_top + content_margin;
     g_label = atk_window_add_label(g_window,
                                    content_margin,
                                    label_y,

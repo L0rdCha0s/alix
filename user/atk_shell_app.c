@@ -218,13 +218,14 @@ static bool shell_init_ui(atk_shell_app_t *app)
     }
 
     window->x = 0;
-    window->y = -ATK_WINDOW_TITLE_HEIGHT;
+    window->y = 0;
     window->width = SHELL_WINDOW_WIDTH;
-    window->height = SHELL_WINDOW_HEIGHT + ATK_WINDOW_TITLE_HEIGHT;
+    window->height = SHELL_WINDOW_HEIGHT;
     atk_window_set_title_text(window, "ATK Shell");
+    atk_window_set_chrome_visible(window, false);
 
     int margin = 8;
-    int top = ATK_WINDOW_TITLE_HEIGHT + margin;
+    int top = margin;
     atk_widget_t *terminal = atk_window_add_terminal(window,
                                                      margin,
                                                      top,

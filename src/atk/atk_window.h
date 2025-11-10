@@ -25,5 +25,7 @@ atk_widget_t *atk_window_scrollbar_at(atk_widget_t *window, int px, int py);
 atk_widget_t *atk_window_tab_view_at(atk_widget_t *window, int px, int py);
 void atk_window_set_context(atk_widget_t *window, void *context, void (*on_destroy)(void *context));
 void *atk_window_context(const atk_widget_t *window);
+void atk_window_set_chrome_visible(atk_widget_t *window, bool visible);
+bool atk_window_is_chrome_visible(const atk_widget_t *window);
 
 #endif
