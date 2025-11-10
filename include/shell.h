@@ -28,6 +28,8 @@ struct shell_state
     process_wait_hook_t wait_hook;
     void *wait_context;
     process_t *owner_process;
+    void (*cwd_changed_fn)(void *context, vfs_node_t *cwd);
+    void *cwd_changed_context;
 };
 
 void shell_main(void);

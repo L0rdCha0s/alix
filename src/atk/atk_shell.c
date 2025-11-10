@@ -32,6 +32,8 @@ static ssize_t atk_shell_fd_write(void *ctx, const void *buffer, size_t count);
 static int atk_shell_fd_close(void *ctx);
 static void atk_shell_wait_hook(void *context);
 static void atk_shell_process_entry(void *arg);
+static void atk_shell_update_title(atk_shell_view_t *view);
+static void atk_shell_on_cwd_changed(void *context, vfs_node_t *cwd);
 
 static const fd_ops_t g_atk_shell_fd_ops = {
     .read = NULL,
@@ -125,11 +127,14 @@ bool atk_shell_open(atk_state_t *state)
     }
     view->shell_process = shell_proc;
     view->shell.owner_process = shell_proc;
+    view->shell.cwd_changed_fn = atk_shell_on_cwd_changed;
+    view->shell.cwd_changed_context = view;
 
     atk_terminal_reset(terminal);
     atk_terminal_set_submit_handler(terminal, atk_shell_on_submit, view);
     atk_terminal_set_control_handler(terminal, atk_shell_on_control, view);
     atk_terminal_focus(state, terminal);
+    atk_shell_update_title(view);
     atk_shell_append_prompt(view);
 
     atk_window_mark_dirty(window);
@@ -173,6 +178,46 @@ static void atk_shell_append_prompt(atk_shell_view_t *view)
     }
     static const char prompt[] = "alex@alix$ ";
     atk_terminal_write(view->terminal, prompt, sizeof(prompt) - 1);
+}
+
+static void atk_shell_build_path(vfs_node_t *cwd, char *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return;
+    }
+    size_t written = vfs_build_path(cwd, buffer, capacity);
+    if (written == 0)
+    {
+        buffer[0] = '/';
+        if (capacity > 1)
+        {
+            buffer[1] = '\0';
+        }
+    }
+}
+
+static void atk_shell_update_title(atk_shell_view_t *view)
+{
+    if (!view || !view->window)
+    {
+        return;
+    }
+    char title[256];
+    atk_shell_build_path(view->shell.cwd, title, sizeof(title));
+    atk_window_set_title_text(view->window, title);
+    atk_window_mark_dirty(view->window);
+}
+
+static void atk_shell_on_cwd_changed(void *context, vfs_node_t *cwd)
+{
+    atk_shell_view_t *view = (atk_shell_view_t *)context;
+    if (!view)
+    {
+        return;
+    }
+    view->shell.cwd = cwd ? cwd : vfs_root();
+    atk_shell_update_title(view);
 }
 
 static bool atk_shell_on_control(atk_widget_t *terminal_widget, void *context, char control)

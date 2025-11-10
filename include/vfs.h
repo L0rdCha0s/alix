@@ -42,6 +42,8 @@ bool vfs_set_file_callbacks(vfs_node_t *file,
                             void *context);
 const char *vfs_data(const vfs_node_t *file, size_t *size);
 const char *vfs_name(const vfs_node_t *node);
+vfs_node_t *vfs_parent(const vfs_node_t *node);
+size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity);
 bool vfs_remove_file(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_first_child(vfs_node_t *dir);
 vfs_node_t *vfs_next_sibling(vfs_node_t *node);

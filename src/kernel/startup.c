@@ -68,7 +68,9 @@ static void startup_process_entry(void *arg)
         .foreground_process = NULL,
         .wait_hook = NULL,
         .wait_context = NULL,
-        .owner_process = process_current()
+        .owner_process = process_current(),
+        .cwd_changed_fn = NULL,
+        .cwd_changed_context = NULL
     };
 
     for (size_t i = 0; i < list.count; ++i)

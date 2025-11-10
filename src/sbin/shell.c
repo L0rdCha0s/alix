@@ -256,12 +256,14 @@ void shell_main(void)
         .foreground_process = NULL,
         .wait_hook = NULL,
         .wait_context = NULL,
-        .owner_process = process_current()
+        .owner_process = process_current(),
+        .cwd_changed_fn = NULL,
+        .cwd_changed_context = NULL
     };
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, runelf, or ./path for binaries.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, runelf, or ./path for binaries.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, doom, runelf, or ./path for binaries.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, wolf3d, doom, runelf, or ./path for binaries.\r\n");
 
     while (1)
     {
@@ -303,6 +305,7 @@ static const shell_command_t g_commands[] = {
     { "userdemo",    shell_cmd_userdemo },
     { "userdemo2",   shell_cmd_userdemo2 },
     { "useratk",     shell_cmd_useratk },
+    { "doom",        shell_cmd_doom },
     { "wolf3d",      shell_cmd_wolf3d },
     { "runelf",      shell_cmd_runelf },
 };

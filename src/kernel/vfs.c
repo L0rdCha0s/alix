@@ -1042,6 +1042,75 @@ const char *vfs_name(const vfs_node_t *node)
     return node ? node->name : NULL;
 }
 
+vfs_node_t *vfs_parent(const vfs_node_t *node)
+{
+    return node ? node->parent : NULL;
+}
+
+size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return 0;
+    }
+
+    if (!node)
+    {
+        node = root;
+    }
+
+    const char *segments[64];
+    size_t count = 0;
+    const vfs_node_t *current = node;
+    while (current && current != root && count < (sizeof(segments) / sizeof(segments[0])))
+    {
+        segments[count++] = current->name ? current->name : "";
+        current = current->parent;
+    }
+
+    size_t idx = 0;
+    buffer[idx++] = '/';
+    if (idx >= capacity)
+    {
+        buffer[capacity - 1] = '\0';
+        return capacity - 1;
+    }
+
+    if (count == 0)
+    {
+        buffer[idx] = '\0';
+        return idx;
+    }
+
+    for (size_t i = 0; i < count && idx < capacity - 1; ++i)
+    {
+        const char *segment = segments[count - 1 - i];
+        if (!segment || segment[0] == '\0')
+        {
+            continue;
+        }
+        size_t seg_len = strlen(segment);
+        if (seg_len >= capacity - idx)
+        {
+            seg_len = capacity - idx - 1;
+        }
+        if (seg_len == 0)
+        {
+            break;
+        }
+        memcpy(buffer + idx, segment, seg_len);
+        idx += seg_len;
+        buffer[idx] = '\0';
+        if (i + 1 < count && idx < capacity - 1)
+        {
+            buffer[idx++] = '/';
+            buffer[idx] = '\0';
+        }
+    }
+
+    return idx;
+}
+
 bool vfs_remove_file(vfs_node_t *cwd, const char *path)
 {
     if (!path || *path == '\0')

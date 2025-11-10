@@ -33,6 +33,7 @@ bool shell_cmd_userdemo(shell_state_t *shell, shell_output_t *out, const char *a
 bool shell_cmd_userdemo2(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_useratk(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_wolf3d(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_doom(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *args);
 
 #endif

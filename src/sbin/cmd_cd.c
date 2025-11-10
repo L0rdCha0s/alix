@@ -13,6 +13,10 @@ bool shell_cmd_cd(shell_state_t *shell, shell_output_t *out, const char *path)
     if (!target_path || *target_path == '\0')
     {
         shell->cwd = vfs_root();
+        if (shell->cwd_changed_fn)
+        {
+            shell->cwd_changed_fn(shell->cwd_changed_context, shell->cwd);
+        }
         return true;
     }
 
@@ -31,6 +35,10 @@ bool shell_cmd_cd(shell_state_t *shell, shell_output_t *out, const char *path)
     if (shell && shell->owner_process)
     {
         process_set_cwd(shell->owner_process, target);
+    }
+    if (shell->cwd_changed_fn)
+    {
+        shell->cwd_changed_fn(shell->cwd_changed_context, target);
     }
     return true;
 }
