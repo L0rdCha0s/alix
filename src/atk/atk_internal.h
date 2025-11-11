@@ -3,8 +3,10 @@
 
 #include "atk/object.h"
 #include "atk/atk_list.h"
-#include "atk/atk_terminal.h"
 #include "types.h"
+#ifndef KERNEL_BUILD
+#include "atk/atk_terminal.h"
+#endif
 
 typedef struct atk_menu_bar_entry atk_menu_bar_entry_t;
 

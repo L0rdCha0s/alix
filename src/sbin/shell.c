@@ -42,6 +42,12 @@ static bool cli_handle_escape_sequence(char *buffer, size_t *len, size_t capacit
 static bool cli_wait_for_char(char *out, int attempts);
 static bool is_space(char c);
 static char *trim_whitespace(char *text);
+static char *shell_expand_arguments(shell_state_t *shell, const char *args);
+static bool shell_is_script_path(const char *path);
+static bool shell_run_script(shell_state_t *shell,
+                             shell_output_t *out,
+                             const char *path,
+                             const char *args);
 static void serial_emit_char(char c);
 static bool shell_output_redirect(shell_output_t *out, shell_state_t *shell, const char *path);
 static void shell_print_prompt(void);
@@ -246,6 +252,492 @@ void shell_output_reset(shell_output_t *out)
     out->capacity = 0;
 }
 
+typedef struct
+{
+    char **items;
+    size_t count;
+    size_t capacity;
+} shell_arg_list_t;
+
+static void shell_arg_list_reset(shell_arg_list_t *list)
+{
+    if (!list)
+    {
+        return;
+    }
+    if (list->items)
+    {
+        for (size_t i = 0; i < list->count; ++i)
+        {
+            free(list->items[i]);
+        }
+        free(list->items);
+    }
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static bool shell_arg_list_push(shell_arg_list_t *list, char *value)
+{
+    if (!list || !value)
+    {
+        return false;
+    }
+    if (list->count >= list->capacity)
+    {
+        size_t new_capacity = list->capacity ? list->capacity * 2 : 4;
+        char **new_items = (char **)realloc(list->items, new_capacity * sizeof(char *));
+        if (!new_items)
+        {
+            return false;
+        }
+        list->items = new_items;
+        list->capacity = new_capacity;
+    }
+    list->items[list->count++] = value;
+    return true;
+}
+
+static bool shell_pattern_has_wildcard(const char *text)
+{
+    if (!text)
+    {
+        return false;
+    }
+    while (*text)
+    {
+        if (*text == '*' || *text == '?')
+        {
+            return true;
+        }
+        ++text;
+    }
+    return false;
+}
+
+static bool shell_pattern_match(const char *pattern, const char *text)
+{
+    const char *star = NULL;
+    const char *match = NULL;
+
+    while (*text)
+    {
+        if (*pattern == '?' || *pattern == *text)
+        {
+            ++pattern;
+            ++text;
+        }
+        else if (*pattern == '*')
+        {
+            star = pattern++;
+            match = text;
+        }
+        else if (star)
+        {
+            pattern = star + 1;
+            text = ++match;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    while (*pattern == '*')
+    {
+        ++pattern;
+    }
+    return *pattern == '\0';
+}
+
+static vfs_node_t *shell_resolve_dir(shell_state_t *shell, const char *path)
+{
+    vfs_node_t *cwd = (shell && shell->cwd) ? shell->cwd : vfs_root();
+    if (!path || *path == '\0')
+    {
+        return cwd;
+    }
+    if (path[0] == '/')
+    {
+        return vfs_resolve(vfs_root(), path);
+    }
+    vfs_node_t *node = vfs_resolve(cwd, path);
+    if (!node)
+    {
+        node = vfs_resolve(vfs_root(), path);
+    }
+    return node;
+}
+
+static bool shell_expand_token(shell_state_t *shell, const char *token, shell_arg_list_t *list)
+{
+    if (!token || !list)
+    {
+        return false;
+    }
+
+    if (!shell_pattern_has_wildcard(token))
+    {
+        char *copy = shell_duplicate_string(token);
+        if (!copy)
+        {
+            return false;
+        }
+        if (!shell_arg_list_push(list, copy))
+        {
+            free(copy);
+            return false;
+        }
+        return true;
+    }
+
+    const char *slash = NULL;
+    for (const char *p = token; *p; ++p)
+    {
+        if (*p == '/')
+        {
+            slash = p;
+        }
+    }
+
+    char *dir_part = NULL;
+    const char *pattern = token;
+    if (slash)
+    {
+        size_t dir_len = (size_t)(slash - token);
+        if (dir_len == 0)
+        {
+            dir_part = shell_duplicate_string("/");
+        }
+        else
+        {
+            dir_part = (char *)malloc(dir_len + 1);
+            if (!dir_part)
+            {
+                return false;
+            }
+            memcpy(dir_part, token, dir_len);
+            dir_part[dir_len] = '\0';
+        }
+        pattern = slash + 1;
+    }
+
+    if (!pattern || *pattern == '\0')
+    {
+        pattern = "*";
+    }
+
+    vfs_node_t *dir = shell_resolve_dir(shell, dir_part);
+    if (!dir || !vfs_is_dir(dir))
+    {
+        if (dir_part)
+        {
+            free(dir_part);
+        }
+        char *copy = shell_duplicate_string(token);
+        if (!copy)
+        {
+            return false;
+        }
+        if (!shell_arg_list_push(list, copy))
+        {
+            free(copy);
+            return false;
+        }
+        return true;
+    }
+
+    bool matched = false;
+    for (vfs_node_t *child = vfs_first_child(dir); child; child = vfs_next_sibling(child))
+    {
+        const char *name = vfs_name(child);
+        if (!name || !shell_pattern_match(pattern, name))
+        {
+            continue;
+        }
+        matched = true;
+        size_t prefix_len = (dir_part && *dir_part) ? strlen(dir_part) : 0;
+        bool needs_separator = dir_part && prefix_len > 0 && dir_part[prefix_len - 1] != '/';
+        size_t name_len = strlen(name);
+        size_t full_len = prefix_len + (needs_separator ? 1 : 0) + name_len;
+        char *full = (char *)malloc(full_len + 1);
+        if (!full)
+        {
+            if (dir_part)
+            {
+                free(dir_part);
+            }
+            return false;
+        }
+        size_t pos = 0;
+        if (dir_part && *dir_part)
+        {
+            memcpy(full, dir_part, prefix_len);
+            pos += prefix_len;
+            if (needs_separator)
+            {
+                full[pos++] = '/';
+            }
+        }
+        memcpy(full + pos, name, name_len);
+        pos += name_len;
+        full[pos] = '\0';
+        if (!shell_arg_list_push(list, full))
+        {
+            free(full);
+            if (dir_part)
+            {
+                free(dir_part);
+            }
+            return false;
+        }
+    }
+
+    if (!matched)
+    {
+        char *copy = shell_duplicate_string(token);
+        if (!copy)
+        {
+            if (dir_part)
+            {
+                free(dir_part);
+            }
+            return false;
+        }
+        if (!shell_arg_list_push(list, copy))
+        {
+            free(copy);
+            if (dir_part)
+            {
+                free(dir_part);
+            }
+            return false;
+        }
+    }
+
+    if (dir_part)
+    {
+        free(dir_part);
+    }
+    return true;
+}
+
+static char *shell_expand_arguments(shell_state_t *shell, const char *args)
+{
+    shell_arg_list_t list = { 0 };
+    const char *cursor = args ? args : "";
+
+    while (*cursor)
+    {
+        while (is_space(*cursor))
+        {
+            ++cursor;
+        }
+        if (*cursor == '\0')
+        {
+            break;
+        }
+
+        const char *start = cursor;
+        while (*cursor && !is_space(*cursor))
+        {
+            ++cursor;
+        }
+        size_t len = (size_t)(cursor - start);
+        char *token = (char *)malloc(len + 1);
+        if (!token)
+        {
+            shell_arg_list_reset(&list);
+            return NULL;
+        }
+        memcpy(token, start, len);
+        token[len] = '\0';
+
+        if (!shell_expand_token(shell, token, &list))
+        {
+            free(token);
+            shell_arg_list_reset(&list);
+            return NULL;
+        }
+        free(token);
+    }
+
+    if (list.count == 0)
+    {
+        shell_arg_list_reset(&list);
+        return shell_duplicate_empty();
+    }
+
+    size_t total_len = 0;
+    for (size_t i = 0; i < list.count; ++i)
+    {
+        total_len += strlen(list.items[i]);
+        if (i + 1 < list.count)
+        {
+            total_len += 1;
+        }
+    }
+
+    char *result = (char *)malloc(total_len + 1);
+    if (!result)
+    {
+        shell_arg_list_reset(&list);
+        return NULL;
+    }
+
+    size_t pos = 0;
+    for (size_t i = 0; i < list.count; ++i)
+    {
+        size_t len = strlen(list.items[i]);
+        memcpy(result + pos, list.items[i], len);
+        pos += len;
+        if (i + 1 < list.count)
+        {
+            result[pos++] = ' ';
+        }
+    }
+    result[pos] = '\0';
+
+    shell_arg_list_reset(&list);
+    return result;
+}
+
+static bool shell_is_script_path(const char *path)
+{
+    if (!path)
+    {
+        return false;
+    }
+    size_t len = strlen(path);
+    if (len < 3)
+    {
+        return false;
+    }
+    char second = path[len - 2];
+    char third = path[len - 1];
+    if (second >= 'A' && second <= 'Z')
+    {
+        second = (char)(second + ('a' - 'A'));
+    }
+    if (third >= 'A' && third <= 'Z')
+    {
+        third = (char)(third + ('a' - 'A'));
+    }
+    return path[len - 3] == '.' && second == 's' && third == 'h';
+}
+
+static bool shell_run_script(shell_state_t *shell,
+                             shell_output_t *out,
+                             const char *path,
+                             const char *args)
+{
+    (void)args;
+    if (!shell || !path || *path == '\0')
+    {
+        if (out)
+        {
+            shell_output_error(out, "script: invalid path");
+        }
+        return false;
+    }
+
+    vfs_node_t *cwd = shell->cwd ? shell->cwd : vfs_root();
+    vfs_node_t *node = vfs_resolve(cwd, path);
+    if (!node)
+    {
+        node = vfs_resolve(vfs_root(), path);
+    }
+    if (!node || !vfs_is_file(node))
+    {
+        if (out)
+        {
+            shell_output_error(out, "script: file not found");
+        }
+        return false;
+    }
+
+    size_t size = 0;
+    const char *data = vfs_data(node, &size);
+    if (!data)
+    {
+        if (out)
+        {
+            shell_output_error(out, "script: unable to read");
+        }
+        return false;
+    }
+    if (size == 0)
+    {
+        return true;
+    }
+
+    char *buffer = (char *)malloc(size + 1);
+    if (!buffer)
+    {
+        if (out)
+        {
+            shell_output_error(out, "script: out of memory");
+        }
+        return false;
+    }
+    memcpy(buffer, data, size);
+    buffer[size] = '\0';
+
+    bool interactive = shell->stream_fn == shell_stream_console_write;
+    bool redirecting = out && out->to_file;
+    bool stream_immediately = interactive && !redirecting;
+    bool overall_ok = true;
+
+    char *cursor = buffer;
+    while (*cursor)
+    {
+        char *line = cursor;
+        while (*cursor && *cursor != '\n' && *cursor != '\r')
+        {
+            ++cursor;
+        }
+        char saved = *cursor;
+        *cursor = '\0';
+
+        char *trimmed = trim_whitespace(line);
+        if (*trimmed && trimmed[0] != '#')
+        {
+            bool line_success = false;
+            char *result = shell_execute_line(shell, trimmed, &line_success);
+            if (result && *result)
+            {
+                if (stream_immediately)
+                {
+                    console_write(result);
+                    serial_write_string(result);
+                }
+                else if (out)
+                {
+                    shell_output_write(out, result);
+                }
+            }
+            if (result)
+            {
+                free(result);
+            }
+            if (!line_success)
+            {
+                overall_ok = false;
+            }
+        }
+
+        *cursor = saved;
+        while (*cursor == '\n' || *cursor == '\r')
+        {
+            ++cursor;
+        }
+    }
+
+    free(buffer);
+    return overall_ok;
+}
+
 void shell_main(void)
 {
     shell_state_t shell = {
@@ -394,6 +886,14 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         args = trim_whitespace(cursor);
     }
 
+    char *args_owned = shell_expand_arguments(shell, args);
+    if (!args_owned)
+    {
+        free(working);
+        return shell_duplicate_string("Error: failed to expand arguments\n");
+    }
+    args = args_owned;
+
     bool is_path_command = false;
     for (char *p = line; *p; ++p)
     {
@@ -422,6 +922,10 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         if (!shell_output_redirect(&output, shell, redirect_path))
         {
             shell_output_reset(&output);
+            if (args_owned)
+            {
+                free(args_owned);
+            }
             free(working);
             return shell_duplicate_string("Error: redirect failed\n");
         }
@@ -446,8 +950,9 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             }
             task->shell = shell;
             task->output = &output;
-            task->args = args;
-            task->args_owned = NULL;
+            task->args = args ? args : "";
+            task->args_owned = args_owned;
+            args_owned = NULL;
             task->handler = g_commands[i].handler;
             task->result = false;
 
@@ -495,78 +1000,100 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
     {
         if (is_path_command)
         {
-            handler_found = true;
-
-            size_t path_len = strlen(line);
-            size_t args_len = (args && *args) ? strlen(args) : 0;
-            size_t combined_len = path_len + (args_len ? (1 + args_len) : 0);
-            char *path_args = (char *)malloc(combined_len + 1);
-            if (!path_args)
+            bool script_attempted = false;
+            if (shell_is_script_path(line))
             {
-                handler_result = false;
+                handler_found = true;
+                script_attempted = true;
+                handler_result = shell_run_script(shell, &output, line, args);
+                if (args_owned)
+                {
+                    free(args_owned);
+                    args_owned = NULL;
+                }
             }
-            else
-            {
-                memcpy(path_args, line, path_len);
-                if (args_len)
-                {
-                    path_args[path_len] = ' ';
-                    memcpy(path_args + path_len + 1, args, args_len);
-                    path_args[combined_len] = '\0';
-                }
-                else
-                {
-                    path_args[path_len] = '\0';
-                }
 
-                shell_command_task_t *task = (shell_command_task_t *)malloc(sizeof(shell_command_task_t));
-                if (!task)
+            if (!script_attempted)
+            {
+                handler_found = true;
+
+                size_t path_len = strlen(line);
+                size_t args_len = (args && *args) ? strlen(args) : 0;
+                size_t combined_len = path_len + (args_len ? (1 + args_len) : 0);
+                char *path_args = (char *)malloc(combined_len + 1);
+                if (!path_args)
                 {
-                    free(path_args);
                     handler_result = false;
                 }
                 else
                 {
-                    task->shell = shell;
-                    task->output = &output;
-                    task->args = path_args;
-                    task->args_owned = path_args;
-                    task->handler = shell_cmd_runelf;
-                    task->result = false;
+                    memcpy(path_args, line, path_len);
+                    if (args_len)
+                    {
+                        path_args[path_len] = ' ';
+                        memcpy(path_args + path_len + 1, args, args_len);
+                        path_args[combined_len] = '\0';
+                    }
+                    else
+                    {
+                        path_args[path_len] = '\0';
+                    }
 
-                    process_t *proc = process_create_kernel_with_parent("runelf",
-                                                                        shell_command_runner,
-                                                                        task,
-                                                                        0,
-                                                                        shell ? shell->stdout_fd : -1,
-                                                                        shell ? shell->owner_process : NULL);
-                    if (!proc)
+                    if (args_owned)
+                    {
+                        free(args_owned);
+                        args_owned = NULL;
+                    }
+
+                    shell_command_task_t *task = (shell_command_task_t *)malloc(sizeof(shell_command_task_t));
+                    if (!task)
                     {
                         free(path_args);
-                        free(task);
                         handler_result = false;
                     }
                     else
                     {
-                        if (shell)
+                        task->shell = shell;
+                        task->output = &output;
+                        task->args = path_args;
+                        task->args_owned = path_args;
+                        task->handler = shell_cmd_runelf;
+                        task->result = false;
+
+                        process_t *proc = process_create_kernel_with_parent("runelf",
+                                                                            shell_command_runner,
+                                                                            task,
+                                                                            0,
+                                                                            shell ? shell->stdout_fd : -1,
+                                                                            shell ? shell->owner_process : NULL);
+                        if (!proc)
                         {
-                            shell->foreground_process = proc;
+                            free(path_args);
+                            free(task);
+                            handler_result = false;
                         }
-                        process_join_with_hook(proc,
-                                                NULL,
-                                                shell ? shell->wait_hook : NULL,
-                                                shell ? shell->wait_context : NULL);
-                        handler_result = task->result;
-                        process_destroy(proc);
-                        if (task->args_owned)
+                        else
                         {
-                            free(task->args_owned);
+                            if (shell)
+                            {
+                                shell->foreground_process = proc;
+                            }
+                            process_join_with_hook(proc,
+                                                    NULL,
+                                                    shell ? shell->wait_hook : NULL,
+                                                    shell ? shell->wait_context : NULL);
+                            handler_result = task->result;
+                            process_destroy(proc);
+                            if (task->args_owned)
+                            {
+                                free(task->args_owned);
+                            }
+                            if (shell && shell->foreground_process == proc)
+                            {
+                                shell->foreground_process = NULL;
+                            }
+                            free(task);
                         }
-                        if (shell && shell->foreground_process == proc)
-                        {
-                            shell->foreground_process = NULL;
-                        }
-                        free(task);
                     }
                 }
             }
@@ -592,6 +1119,11 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
 
     shell_output_reset(&output);
     free(working);
+    if (args_owned)
+    {
+        free(args_owned);
+        args_owned = NULL;
+    }
 
     if (!result)
     {

@@ -4,7 +4,7 @@
 #include "libc.h"
 #include "process.h"
 
-static const char *const ATK_SHELL_PATH = "/bin/atk_shell";
+static const char *const ATK_SHELL_PATH = "/usr/bin/atk_shell.elf";
 
 bool shell_cmd_atkshell(shell_state_t *shell, shell_output_t *out, const char *args)
 {

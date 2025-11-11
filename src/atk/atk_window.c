@@ -9,7 +9,9 @@
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
+#ifndef KERNEL_BUILD
 #include "atk/atk_terminal.h"
+#endif
 #include "atk/atk_font.h"
 
 /* Forward decl for compilers if video.h doesn't expose it (no harm if duplicated). */
@@ -463,10 +465,12 @@ void atk_window_close(atk_state_t *state, atk_widget_t *window)
     {
         atk_text_input_focus(state, NULL);
     }
+#ifndef KERNEL_BUILD
     if (state->focused_terminal && state->focused_terminal->parent == window)
     {
         atk_terminal_focus(state, NULL);
     }
+#endif
     if (state->dragging_scrollbar && state->dragging_scrollbar->parent == window)
     {
         atk_scrollbar_end_drag(state->dragging_scrollbar);

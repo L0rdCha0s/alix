@@ -12,13 +12,13 @@
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
+#ifndef KERNEL_BUILD
 #include "atk/atk_terminal.h"
+#endif
 #include "user_atk_host.h"
 #include "libc.h"
 
 #ifndef ATK_NO_DESKTOP_APPS
-#include "atk/atk_task_manager.h"
-#include "atk/atk_shell.h"
 #include "process.h"
 #include "vfs.h"
 #endif
@@ -30,6 +30,7 @@ static void action_open_shell(atk_widget_t *button, void *context);
 static void action_open_task_manager(atk_widget_t *button, void *context);
 static void action_open_atk_terminal(atk_widget_t *button, void *context);
 static void action_open_atk_demo(atk_widget_t *button, void *context);
+static void atk_schedule_user_launch(const char *launcher_name, const void *info);
 static void atk_launch_user_binary(void *arg) __attribute__((noreturn));
 
 typedef struct
@@ -38,9 +39,14 @@ typedef struct
     const char *name;
 } atk_user_launch_info_t;
 
-static const atk_user_launch_info_t g_atk_terminal_launch = {
+static const atk_user_launch_info_t g_atk_shell_launch = {
     .path = "/usr/bin/atk_shell.elf",
     .name = "atk_shell"
+};
+
+static const atk_user_launch_info_t g_atk_taskmgr_launch = {
+    .path = "/usr/bin/atk_taskmgr.elf",
+    .name = "atk_taskmgr"
 };
 
 static const atk_user_launch_info_t g_atk_demo_launch = {
@@ -310,10 +316,13 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                     if (input_widget)
                     {
                         atk_text_input_focus(state, input_widget);
+#ifndef KERNEL_BUILD
                         atk_terminal_focus(state, NULL);
+#endif
                     }
                     else
                     {
+#ifndef KERNEL_BUILD
                         atk_widget_t *terminal_widget = atk_window_terminal_at(win, cursor_x, cursor_y);
                         if (terminal_widget)
                         {
@@ -321,9 +330,12 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                             atk_terminal_focus(state, terminal_widget);
                         }
                         else
+#endif
                         {
                             atk_text_input_focus(state, NULL);
+#ifndef KERNEL_BUILD
                             atk_terminal_focus(state, NULL);
+#endif
                         }
                     }
                 }
@@ -352,7 +364,9 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                     state->desktop_drag_moved = false;
                 }
                 atk_text_input_focus(state, NULL);
+#ifndef KERNEL_BUILD
                 atk_terminal_focus(state, NULL);
+#endif
                 handled = true;
             }
         }
@@ -529,6 +543,7 @@ atk_key_event_result_t atk_handle_key_char(char ch)
         return result;
     }
 
+#ifndef KERNEL_BUILD
     atk_widget_t *terminal = state->focused_terminal;
     if (terminal && terminal->used)
     {
@@ -538,6 +553,7 @@ atk_key_event_result_t atk_handle_key_char(char ch)
         }
         return result;
     }
+#endif
 
     if (user_atk_route_key_event(ch))
     {
@@ -562,54 +578,41 @@ atk_key_event_result_t atk_handle_key_char(char ch)
 static void action_open_shell(atk_widget_t *button, void *context)
 {
     (void)button;
-    atk_state_t *state = (atk_state_t *)context;
-    if (!state)
-    {
-        return;
-    }
-    atk_shell_open(state);
+    (void)context;
+    atk_schedule_user_launch("atk_shell_launcher", &g_atk_shell_launch);
 }
 
 static void action_open_task_manager(atk_widget_t *button, void *context)
 {
     (void)button;
-    atk_state_t *state = (atk_state_t *)context;
-    if (!state)
-    {
-        return;
-    }
-    atk_task_manager_open(state);
+    (void)context;
+    atk_schedule_user_launch("atk_taskmgr_launcher", &g_atk_taskmgr_launch);
 }
 
 static void action_open_atk_terminal(atk_widget_t *button, void *context)
 {
     (void)button;
     (void)context;
-
-    process_t *launcher = process_create_kernel("atk_term_launcher",
-                                                atk_launch_user_binary,
-                                                (void *)&g_atk_terminal_launch,
-                                                0,
-                                                -1);
-    if (!launcher)
-    {
-        serial_write_string("atk: failed to schedule atk_terminal launcher\r\n");
-    }
+    atk_schedule_user_launch("atk_terminal_launcher", &g_atk_shell_launch);
 }
 
 static void action_open_atk_demo(atk_widget_t *button, void *context)
 {
     (void)button;
     (void)context;
+    atk_schedule_user_launch("atk_demo_launcher", &g_atk_demo_launch);
+}
 
-    process_t *launcher = process_create_kernel("atk_demo_launcher",
+static void atk_schedule_user_launch(const char *launcher_name, const void *info)
+{
+    process_t *launcher = process_create_kernel(launcher_name ? launcher_name : "atk_user_launcher",
                                                 atk_launch_user_binary,
-                                                (void *)&g_atk_demo_launch,
+                                                (void *)info,
                                                 0,
                                                 -1);
     if (!launcher)
     {
-        serial_write_string("atk: failed to schedule atk_demo launcher\r\n");
+        serial_write_string("atk: failed to schedule user launcher\r\n");
     }
 }
 

@@ -15,6 +15,9 @@ CRYPTO_DIR  := $(SRC_DIR)/crypto
 INCLUDE_DIR := include
 USER_DIR    := user
 OBJDIR      := build
+GENERATED_DIR := $(OBJDIR)/generated
+DL_SCRIPT_SRC := $(GENERATED_DIR)/dl_script_data.c
+DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
 
 BASE_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
                -m64 -mno-red-zone -Wall -Wextra -I$(INCLUDE_DIR) -I$(ATK_DIR) \
@@ -40,8 +43,10 @@ C_SOURCES := \
 	$(wildcard $(CRYPTO_DIR)/*.c) \
 	$(ARCH_KERNEL_SOURCES) \
 	$(wildcard $(SBIN_DIR)/*.c)
+C_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(C_SOURCES))
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
+C_OBJECTS += $(DL_SCRIPT_OBJ)
 
 ASM_SOURCES := $(wildcard $(ARCH_DIR)/*.S)
 ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
@@ -58,9 +63,12 @@ USER_COMMON_SOURCES := \
 USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
 USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o $(USER_OBJDIR)/kernel/ttf.o
 USER_LD_SCRIPT := $(USER_DIR)/link.ld
-USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c,$(wildcard $(ATK_DIR)/*.c))
+USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(wildcard $(ATK_DIR)/*.c))
 USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
 USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
+USER_ATK_EXTRA_SOURCES := $(USER_DIR)/atk/atk_terminal.c
+USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
+USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
 USER_ELFS := $(USER_OBJDIR)/userdemo2.elf \
              $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
@@ -99,6 +107,10 @@ $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/generated/%.o: $(OBJDIR)/generated/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
@@ -148,6 +160,31 @@ $(USER_OBJDIR)/atk_shell.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_
 $(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_taskmgr_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_taskmgr_app.o
+
+$(DL_SCRIPT_SRC): $(USER_ELFS)
+	@mkdir -p $(GENERATED_DIR)
+	@{ \
+		echo '#include "types.h"'; \
+		echo; \
+		echo 'const char g_dl_script_content[] ='; \
+		printf '    "%s\\n"\n' '#!/bin/sh'; \
+		printf '    "%s\\n"\n' '# Auto-generated user binary downloader'; \
+		printf '    "%s\\n"\n' 'cd /usr/bin'; \
+		printf '    "%s\\n"\n' 'rm *.elf'; \
+		found=0; \
+		for elf in $(USER_OBJDIR)/*.elf; do \
+			if [ -f "$$elf" ]; then \
+				name=$$(basename "$$elf"); \
+				printf '    "wget 192.168.105.1:8000/build/user/%s\\n"\n' "$$name"; \
+				found=1; \
+			fi; \
+		done; \
+		if [ $$found -eq 0 ]; then \
+			printf '    "%s\\n"\n' '# No user ELF files were built'; \
+		fi; \
+		echo ';'; \
+		echo 'const size_t g_dl_script_content_len = sizeof(g_dl_script_content) - 1;'; \
+	} > $(DL_SCRIPT_SRC)
 
 $(USER_BIN_DIR)/userdemo2: $(USER_OBJDIR)/userdemo2.elf
 	@mkdir -p $(USER_BIN_DIR)

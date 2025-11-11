@@ -4,7 +4,7 @@
 #include "libc.h"
 #include "process.h"
 
-static const char *const ATK_TASKMGR_PATH = "/bin/atk_taskmgr";
+static const char *const ATK_TASKMGR_PATH = "/usr/bin/atk_taskmgr.elf";
 
 bool shell_cmd_atktaskmgr(shell_state_t *shell, shell_output_t *out, const char *args)
 {

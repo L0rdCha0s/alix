@@ -27,6 +27,7 @@
 #include "procfs.h"
 #include "startup.h"
 #include "timekeeping.h"
+#include "dl_script.h"
 
 typedef struct
 {
@@ -138,6 +139,10 @@ static void ensure_system_layout(void)
     {
         serial_write_string("[alix] warn: unable to ensure /root/usr\r\n");
     }
+    if (!ensure_directory_path("/root/usr/bin"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root/usr/bin\r\n");
+    }
     if (!vfs_symlink(vfs_root(), "/root/etc", "/etc"))
     {
         serial_write_string("[alix] warn: unable to ensure /etc symlink\r\n");
@@ -162,6 +167,11 @@ static void ensure_system_layout(void)
         {
             serial_write_string("[alix] warn: unable to create default ntp server file\r\n");
         }
+    }
+
+    if (!dl_script_install_default())
+    {
+        serial_write_string("[alix] warn: unable to install dl.sh\r\n");
     }
 }
 

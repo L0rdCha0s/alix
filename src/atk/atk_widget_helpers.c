@@ -7,7 +7,9 @@
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_menu.h"
+#ifndef KERNEL_BUILD
 #include "atk/atk_terminal.h"
+#endif
 #include "atk/atk_text_input.h"
 
 void atk_widget_draw_any(const atk_state_t *state, const atk_widget_t *widget)
@@ -39,10 +41,12 @@ void atk_widget_draw_any(const atk_state_t *state, const atk_widget_t *widget)
     {
         atk_text_input_draw(state, widget);
     }
+#ifndef KERNEL_BUILD
     else if (atk_widget_is_a(widget, &ATK_TERMINAL_CLASS))
     {
         atk_terminal_draw(state, widget);
     }
+#endif
     else if (atk_widget_is_a(widget, &ATK_SCROLLBAR_CLASS))
     {
         atk_scrollbar_draw(state, widget);
@@ -92,11 +96,13 @@ void atk_widget_destroy_any(atk_widget_t *widget)
         atk_text_input_destroy(widget);
         atk_widget_destroy(widget);
     }
+#ifndef KERNEL_BUILD
     else if (atk_widget_is_a(widget, &ATK_TERMINAL_CLASS))
     {
         atk_terminal_destroy(widget);
         atk_widget_destroy(widget);
     }
+#endif
     else if (atk_widget_is_a(widget, &ATK_SCROLLBAR_CLASS))
     {
         atk_scrollbar_destroy(widget);
