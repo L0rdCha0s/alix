@@ -4,6 +4,8 @@
 #include "atk_internal.h"
 
 void atk_menu_bar_reset(atk_state_t *state);
+void atk_menu_bar_set_enabled(atk_state_t *state, bool enabled);
+int atk_menu_bar_height(const atk_state_t *state);
 void atk_menu_bar_build_default(atk_state_t *state);
 void atk_menu_bar_enable_clock_timer(void);
 void atk_menu_bar_draw(const atk_state_t *state);

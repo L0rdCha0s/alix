@@ -2,6 +2,7 @@
 
 #include "atk.h"
 #include "atk_internal.h"
+#include "atk_menu_bar.h"
 #include "atk_window.h"
 #include "atk/layout.h"
 #include "atk/atk_tabs.h"
@@ -332,6 +333,7 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
 {
     atk_init();
     atk_state_t *state = atk_state_get();
+    atk_menu_bar_set_enabled(state, false);
     taskmgr_apply_theme(state);
 
     atk_widget_t *window = atk_window_create_at(state, 780, 520);
@@ -339,12 +341,12 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
     {
         return false;
     }
-    window->x = -ATK_WINDOW_TITLE_HEIGHT;
-    window->y = -ATK_WINDOW_TITLE_HEIGHT;
-    window->width = 780;
-    window->height = 520 + ATK_WINDOW_TITLE_HEIGHT;
     atk_window_set_title_text(window, "Task Manager");
     atk_window_set_chrome_visible(window, false);
+    window->x = 0;
+    window->y = 0;
+    window->width = 780;
+    window->height = 520;
 
     atk_layout_t layout;
     int chrome_top = atk_window_is_chrome_visible(window) ? ATK_WINDOW_TITLE_HEIGHT : 0;

@@ -547,6 +547,10 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
         {
             continue;
         }
+        if (!chrome_visible && atk_widget_is_a(child, &ATK_BUTTON_CLASS))
+        {
+            continue;
+        }
 
         atk_widget_draw_any(state, child);
     }

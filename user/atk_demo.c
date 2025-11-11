@@ -2,6 +2,7 @@
 
 #include "atk.h"
 #include "atk_internal.h"
+#include "atk_menu_bar.h"
 #include "atk_window.h"
 #include "atk/atk_label.h"
 #include "atk/atk_text_input.h"
@@ -44,6 +45,7 @@ static bool init_ui(void)
 {
     atk_init();
     atk_state_t *state = atk_state_get();
+    atk_menu_bar_set_enabled(state, false);
     apply_theme(state);
 
     g_window = atk_window_create_at(state, VIDEO_WIDTH / 2, VIDEO_HEIGHT / 2);
@@ -52,12 +54,12 @@ static bool init_ui(void)
         return false;
     }
 
-    g_window->x = 0;
-    g_window->y = -ATK_WINDOW_TITLE_HEIGHT;
-    g_window->width = VIDEO_WIDTH;
-    g_window->height = VIDEO_HEIGHT + ATK_WINDOW_TITLE_HEIGHT;
     atk_window_set_title_text(g_window, "ATK Demo");
     atk_window_set_chrome_visible(g_window, false);
+    g_window->x = 0;
+    g_window->y = 0;
+    g_window->width = VIDEO_WIDTH;
+    g_window->height = VIDEO_HEIGHT;
 
     int content_margin = 16;
     int chrome_top = atk_window_is_chrome_visible(g_window) ? ATK_WINDOW_TITLE_HEIGHT : 0;

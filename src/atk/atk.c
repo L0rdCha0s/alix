@@ -274,8 +274,8 @@ void atk_render(void)
     atk_desktop_draw_buttons(state, &region);
     atk_window_draw_all(state, &region);
 
-    int menu_bottom = state->menu_bar_height > 0 ? state->menu_bar_height : ATK_MENU_BAR_DEFAULT_HEIGHT;
-    if (region.y < menu_bottom)
+    int menu_bottom = atk_menu_bar_height(state);
+    if (menu_bottom > 0 && region.y < menu_bottom)
     {
         atk_menu_bar_draw(state);
     }

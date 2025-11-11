@@ -2,6 +2,7 @@
 
 #include "atk.h"
 #include "atk_internal.h"
+#include "atk_menu_bar.h"
 #include "atk_window.h"
 #include "atk/atk_terminal.h"
 #include "libc.h"
@@ -193,6 +194,7 @@ static bool shell_init_ui(atk_shell_app_t *app)
 {
     atk_init();
     atk_state_t *state = atk_state_get();
+    atk_menu_bar_set_enabled(state, false);
     shell_apply_theme(state);
 
     atk_widget_t *window = atk_window_create_at(state, SHELL_WINDOW_WIDTH, SHELL_WINDOW_HEIGHT);
@@ -201,12 +203,12 @@ static bool shell_init_ui(atk_shell_app_t *app)
         return false;
     }
 
+    atk_window_set_title_text(window, "ATK Shell");
+    atk_window_set_chrome_visible(window, false);
     window->x = 0;
     window->y = 0;
     window->width = SHELL_WINDOW_WIDTH;
     window->height = SHELL_WINDOW_HEIGHT;
-    atk_window_set_title_text(window, "ATK Shell");
-    atk_window_set_chrome_visible(window, false);
 
     int margin = 8;
     int top = margin;

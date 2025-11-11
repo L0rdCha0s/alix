@@ -69,6 +69,47 @@ void atk_menu_bar_reset(atk_state_t *state)
     state->menu_bar_height = ATK_MENU_BAR_DEFAULT_HEIGHT;
 }
 
+void atk_menu_bar_set_enabled(atk_state_t *state, bool enabled)
+{
+    if (!state)
+    {
+        return;
+    }
+
+    int previous_height = atk_menu_bar_height_pixels(state);
+    bool was_enabled = previous_height > 0;
+
+    if (enabled)
+    {
+        if (!was_enabled)
+        {
+            state->menu_bar_height = ATK_MENU_BAR_DEFAULT_HEIGHT;
+            atk_menu_bar_mark_dirty(state);
+        }
+        return;
+    }
+
+    if (!was_enabled)
+    {
+        return;
+    }
+
+    state->menu_bar_height = 0;
+    if (state->menu_open_entry && state->menu_open_entry->menu)
+    {
+        atk_menu_hide(state->menu_open_entry->menu);
+        atk_menu_bar_mark_menu_area(state->menu_open_entry->menu);
+    }
+    state->menu_open_entry = NULL;
+    state->menu_hover_entry = NULL;
+    atk_dirty_mark_rect(0, 0, VIDEO_WIDTH, previous_height);
+}
+
+int atk_menu_bar_height(const atk_state_t *state)
+{
+    return atk_menu_bar_height_pixels(state);
+}
+
 #ifdef ATK_NO_DESKTOP_APPS
 void atk_menu_bar_enable_clock_timer(void)
 {
@@ -165,6 +206,10 @@ void atk_menu_bar_draw(const atk_state_t *state)
     }
 
     int height = atk_menu_bar_height_pixels(state);
+    if (height <= 0)
+    {
+        return;
+    }
     const atk_theme_t *theme = &state->theme;
 
     video_draw_rect(0, 0, VIDEO_WIDTH, height, theme->menu_bar_face);
@@ -265,7 +310,15 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
         return false;
     }
 
-    int height = state->menu_bar_height > 0 ? state->menu_bar_height : ATK_MENU_BAR_DEFAULT_HEIGHT;
+    int height = atk_menu_bar_height(state);
+    if (height <= 0)
+    {
+        if (redraw_out)
+        {
+            *redraw_out = false;
+        }
+        return false;
+    }
     bool inside_bar = (cursor_y >= 0 && cursor_y < height);
     atk_menu_bar_entry_t *hover_entry = inside_bar ? atk_menu_bar_entry_hit_test(state, cursor_x) : NULL;
 
@@ -599,7 +652,15 @@ static int atk_menu_bar_measure_title(const char *title)
 
 static int atk_menu_bar_height_pixels(const atk_state_t *state)
 {
-    if (!state || state->menu_bar_height <= 0)
+    if (!state)
+    {
+        return ATK_MENU_BAR_DEFAULT_HEIGHT;
+    }
+    if (state->menu_bar_height == 0)
+    {
+        return 0;
+    }
+    if (state->menu_bar_height < 0)
     {
         return ATK_MENU_BAR_DEFAULT_HEIGHT;
     }
@@ -613,6 +674,10 @@ static void atk_menu_bar_mark_dirty(const atk_state_t *state)
         return;
     }
     int height = atk_menu_bar_height_pixels(state);
+    if (height <= 0)
+    {
+        return;
+    }
     atk_dirty_mark_rect(0, 0, VIDEO_WIDTH, height);
 }
 
@@ -629,11 +694,11 @@ static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu)
 static void atk_menu_bar_clock_tick(void *context)
 {
     (void)context;
-    int height = ATK_MENU_BAR_DEFAULT_HEIGHT;
     atk_state_t *state = atk_state_get();
-    if (state && state->menu_bar_height > 0)
+    int height = atk_menu_bar_height_pixels(state);
+    if (height <= 0)
     {
-        height = state->menu_bar_height;
+        return;
     }
     atk_dirty_mark_rect(VIDEO_WIDTH - ATK_MENU_BAR_CLOCK_RESERVE, 0, ATK_MENU_BAR_CLOCK_RESERVE, height);
 }
