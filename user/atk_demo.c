@@ -123,6 +123,7 @@ int main(void)
         printf("atk_demo: failed to open window\n");
         return 1;
     }
+    atk_user_enable_dirty_tracking(&g_session, true);
 
     if (!init_ui())
     {

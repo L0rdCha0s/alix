@@ -32,7 +32,7 @@ static bool atk_user_present_common(const atk_user_window_t *win, bool force_pre
     }
 
     bool dirty = video_surface_consume_dirty();
-    if (!force_present && !dirty)
+    if (win->track_dirty && !force_present && !dirty)
     {
         atk_user_trace("present_skip", win->handle, 0);
         return true;
@@ -90,8 +90,10 @@ bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t wi
     win->buffer_bytes = bytes;
     win->width = width;
     win->height = height;
+    win->track_dirty = false;
 
     video_surface_attach(buffer, width, height);
+    video_surface_set_tracking(false);
     atk_user_trace("window_open handle", win->handle, (uintptr_t)buffer);
     return true;
 }
@@ -104,6 +106,20 @@ bool atk_user_present(const atk_user_window_t *win)
 bool atk_user_present_force(const atk_user_window_t *win)
 {
     return atk_user_present_common(win, true);
+}
+
+void atk_user_enable_dirty_tracking(atk_user_window_t *win, bool enable)
+{
+    if (!win)
+    {
+        return;
+    }
+    win->track_dirty = enable;
+    video_surface_set_tracking(enable);
+    if (enable)
+    {
+        video_surface_force_dirty();
+    }
 }
 
 bool atk_user_wait_event(const atk_user_window_t *win, user_atk_event_t *event)
@@ -162,4 +178,5 @@ void atk_user_close(atk_user_window_t *win)
     win->buffer_bytes = 0;
     win->width = 0;
     win->height = 0;
+    win->track_dirty = false;
 }

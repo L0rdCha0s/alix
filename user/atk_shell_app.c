@@ -278,6 +278,7 @@ int main(void)
         printf("atk_shell: failed to open remote window\n");
         return 1;
     }
+    atk_user_enable_dirty_tracking(&app.remote, true);
 
     if (!shell_init_ui(&app))
     {

@@ -12,6 +12,7 @@ static uint16_t *g_surface = NULL;
 static uint32_t g_surface_width = VIDEO_WIDTH;
 static uint32_t g_surface_height = VIDEO_HEIGHT;
 static bool g_surface_dirty = false;
+static bool g_surface_track_dirty = false;
 
 static inline bool surface_ready(void)
 {
@@ -41,6 +42,7 @@ void video_surface_attach(uint16_t *buffer, uint32_t width, uint32_t height)
     g_surface = buffer;
     g_surface_width = width;
     g_surface_height = height;
+    g_surface_track_dirty = false;
     surface_touch();
 }
 
@@ -51,6 +53,7 @@ void video_surface_detach(void)
     g_surface_width = 0;
     g_surface_height = 0;
     g_surface_dirty = false;
+    g_surface_track_dirty = false;
 }
 
 uint16_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
@@ -328,11 +331,15 @@ void video_pump_events(void) {}
 
 bool video_surface_has_dirty(void)
 {
-    return g_surface_dirty;
+    return !g_surface_track_dirty || g_surface_dirty;
 }
 
 bool video_surface_consume_dirty(void)
 {
+    if (!g_surface_track_dirty)
+    {
+        return true;
+    }
     if (!g_surface_dirty)
     {
         return false;
@@ -347,4 +354,18 @@ void video_surface_force_dirty(void)
     {
         g_surface_dirty = true;
     }
+}
+
+void video_surface_set_tracking(bool enable)
+{
+    g_surface_track_dirty = enable;
+    if (!enable)
+    {
+        g_surface_dirty = true;
+    }
+}
+
+bool video_surface_tracking_enabled(void)
+{
+    return g_surface_track_dirty;
 }

@@ -20,9 +20,10 @@ This prototype introduces a path for running ATK-based applications in userland 
 
 * We compile the ATK sources for userland with `ATK_NO_DESKTOP_APPS` so shared code (window manager, widgets) is available without shell/task-manager dependencies. Rendering helpers (`video_*`) are provided by `user/video_surface.c`, which draws into a software buffer.
 * `atk_user.c` wraps the UI syscalls. It owns the software surface, exposes `atk_user_window_open`, `atk_user_present`, `atk_user_wait_event`, and `atk_user_close`, and wires the surface into the ATK renderer.
+* ATK-based clients that render via `atk_render()` should call `atk_user_enable_dirty_tracking()` after opening their window; this turns on automatic dirty tracking backed by the software surface so `atk_user_present()` can skip redundant uploads. Apps that paint directly into the buffer (Doom, Wolf3D, etc.) simply omit the call and continue to present every frame.
 * Because `video.h` was hard-coded, it now honours `VIDEO_WIDTH`/`VIDEO_HEIGHT` overrides. Userland builds set these constants (currently 640×360) so every ATK call uses the same logical surface size that the kernel remote window allocates.
 * User apps render exactly like the kernel: they call `atk_render()` after ATK reports a redraw, then push the buffer via `atk_user_present`. Local widgets (text input, label, etc.) behave exactly as they do in kernel space because we instantiate a regular ATK window and slide it upward (negative Y) so the chrome is clipped before blitting into the remote frame.
-* `atk_user_present()` now consults the software surface’s dirty bit and becomes a no-op when no pixels changed, eliminating redundant copies to the kernel. `atk_user_present_force()` is available when a client needs to push the buffer even if nothing was marked dirty (for example after resyncing window contents).
+* `atk_user_present()` consults the software surface’s dirty bit when tracking is enabled and becomes a no-op when no pixels changed, eliminating redundant copies to the kernel. `atk_user_present_force()` is available when a client needs to push the buffer even if nothing was marked dirty (for example after resyncing window contents).
 
 ## Event Model
 
