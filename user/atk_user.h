@@ -16,6 +16,7 @@ typedef struct
 
 bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t width, uint32_t height);
 bool atk_user_present(const atk_user_window_t *win);
+bool atk_user_present_force(const atk_user_window_t *win);
 bool atk_user_wait_event(const atk_user_window_t *win, user_atk_event_t *event);
 bool atk_user_poll_event(const atk_user_window_t *win, user_atk_event_t *event);
 void atk_user_close(atk_user_window_t *win);

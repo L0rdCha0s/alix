@@ -24,6 +24,29 @@ static void atk_user_trace(const char *msg, uint64_t a, uint64_t b)
 #define atk_user_trace(msg, a, b) (void)0
 #endif
 
+static bool atk_user_present_common(const atk_user_window_t *win, bool force_present)
+{
+    if (!win || win->handle == 0 || !win->buffer)
+    {
+        return false;
+    }
+
+    bool dirty = video_surface_consume_dirty();
+    if (!force_present && !dirty)
+    {
+        atk_user_trace("present_skip", win->handle, 0);
+        return true;
+    }
+
+    atk_user_trace(force_present ? "present_force" : "present", win->handle, win->buffer_bytes);
+    bool ok = (sys_ui_present(win->handle, win->buffer, win->buffer_bytes) == 0);
+    if (!ok && dirty)
+    {
+        video_surface_force_dirty();
+    }
+    return ok;
+}
+
 bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t width, uint32_t height)
 {
     if (!win || width == 0 || height == 0)
@@ -75,12 +98,12 @@ bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t wi
 
 bool atk_user_present(const atk_user_window_t *win)
 {
-    if (!win || win->handle == 0 || !win->buffer)
-    {
-        return false;
-    }
-    atk_user_trace("present", win->handle, win->buffer_bytes);
-    return sys_ui_present(win->handle, win->buffer, win->buffer_bytes) == 0;
+    return atk_user_present_common(win, false);
+}
+
+bool atk_user_present_force(const atk_user_window_t *win)
+{
+    return atk_user_present_common(win, true);
 }
 
 bool atk_user_wait_event(const atk_user_window_t *win, user_atk_event_t *event)

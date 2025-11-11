@@ -22,6 +22,7 @@ This prototype introduces a path for running ATK-based applications in userland 
 * `atk_user.c` wraps the UI syscalls. It owns the software surface, exposes `atk_user_window_open`, `atk_user_present`, `atk_user_wait_event`, and `atk_user_close`, and wires the surface into the ATK renderer.
 * Because `video.h` was hard-coded, it now honours `VIDEO_WIDTH`/`VIDEO_HEIGHT` overrides. Userland builds set these constants (currently 640×360) so every ATK call uses the same logical surface size that the kernel remote window allocates.
 * User apps render exactly like the kernel: they call `atk_render()` after ATK reports a redraw, then push the buffer via `atk_user_present`. Local widgets (text input, label, etc.) behave exactly as they do in kernel space because we instantiate a regular ATK window and slide it upward (negative Y) so the chrome is clipped before blitting into the remote frame.
+* `atk_user_present()` now consults the software surface’s dirty bit and becomes a no-op when no pixels changed, eliminating redundant copies to the kernel. `atk_user_present_force()` is available when a client needs to push the buffer even if nothing was marked dirty (for example after resyncing window contents).
 
 ## Event Model
 
@@ -29,6 +30,7 @@ Global vs. local responsibilities are split:
 
 * **Global**: window chrome, z-order, focus changes and capture continue to live in the kernel ATK state. Mouse presses on titles still drag windows, the desktop still receives clicks, etc.
 * **Local**: content-space events (mouse within the client area, key presses when the remote window has focus, close notifications) are delivered to the user process via the new syscalls. The user process feeds them into its ATK state (`atk_handle_mouse_event`/`atk_handle_key_char`) and decides when to redraw.
+* The kernel coalesces plain mouse-move events per window, so a client only sees the latest coordinates when the pointer is moving without new presses/releases. This keeps queues short and avoids starving UI threads when the pointer is jittery.
 
 ## Demo
 

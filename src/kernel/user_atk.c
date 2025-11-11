@@ -83,6 +83,7 @@ static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_eve
 static void user_atk_send_close_event(user_atk_window_t *win);
 static void user_atk_apply_priorities(void);
 static bool user_atk_event_queue_empty(void *context);
+static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_event_t *event);
 
 void user_atk_init(void)
 {
@@ -544,6 +545,14 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
     }
 #endif
 
+    if (user_atk_try_coalesce_mouse(win, event))
+    {
+#if USER_ATK_DEBUG
+        user_atk_log_pair("coalesce mouse", win->handle, event->flags);
+#endif
+        return;
+    }
+
     win->events[win->event_tail] = *event;
     win->event_tail = (win->event_tail + 1) % USER_ATK_EVENT_QUEUE_MAX;
     if (win->event_count == USER_ATK_EVENT_QUEUE_MAX)
@@ -601,6 +610,44 @@ static bool user_atk_event_queue_empty(void *context)
         return false;
     }
     return (win->event_count == 0) && !win->closed;
+}
+
+static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_event_t *event)
+{
+    if (!win || !event)
+    {
+        return false;
+    }
+    if (event->type != USER_ATK_EVENT_MOUSE)
+    {
+        return false;
+    }
+
+    const uint32_t edge_mask = USER_ATK_MOUSE_FLAG_PRESS | USER_ATK_MOUSE_FLAG_RELEASE;
+    if ((event->flags & edge_mask) != 0)
+    {
+        return false;
+    }
+    if (win->event_count == 0)
+    {
+        return false;
+    }
+
+    size_t last_index = (win->event_tail == 0) ? (USER_ATK_EVENT_QUEUE_MAX - 1) : (win->event_tail - 1);
+    user_atk_event_t *last = &win->events[last_index];
+    if (last->type != USER_ATK_EVENT_MOUSE)
+    {
+        return false;
+    }
+    if ((last->flags & edge_mask) != 0)
+    {
+        return false;
+    }
+
+    last->x = event->x;
+    last->y = event->y;
+    last->flags = event->flags;
+    return true;
 }
 
 static void user_atk_apply_priorities(void)

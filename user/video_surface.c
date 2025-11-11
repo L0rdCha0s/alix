@@ -13,6 +13,20 @@ static uint32_t g_surface_width = VIDEO_WIDTH;
 static uint32_t g_surface_height = VIDEO_HEIGHT;
 static bool g_surface_dirty = false;
 
+static inline bool surface_ready(void)
+{
+    return (g_surface != NULL && g_surface_width > 0 && g_surface_height > 0);
+}
+
+static inline void surface_touch(void)
+{
+    if (!surface_ready())
+    {
+        return;
+    }
+    g_surface_dirty = true;
+}
+
 static inline void surface_log(const char *msg, uint64_t value)
 {
     (void)msg;
@@ -27,7 +41,7 @@ void video_surface_attach(uint16_t *buffer, uint32_t width, uint32_t height)
     g_surface = buffer;
     g_surface_width = width;
     g_surface_height = height;
-    g_surface_dirty = true;
+    surface_touch();
 }
 
 void video_surface_detach(void)
@@ -37,11 +51,6 @@ void video_surface_detach(void)
     g_surface_width = 0;
     g_surface_height = 0;
     g_surface_dirty = false;
-}
-
-static inline bool surface_ready(void)
-{
-    return (g_surface != NULL && g_surface_width > 0 && g_surface_height > 0);
 }
 
 uint16_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
@@ -74,7 +83,7 @@ void video_fill(uint16_t color)
     {
         g_surface[i] = color;
     }
-    g_surface_dirty = true;
+    surface_touch();
 }
 
 static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
@@ -87,6 +96,7 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
     uint8_t glyph[FONT_BASIC_HEIGHT_X2];
     font_basic_copy_glyph8x16((uint8_t)c, glyph);
 
+    bool wrote = false;
     for (int row = 0; row < FONT_BASIC_HEIGHT_X2; ++row)
     {
         int dst_y = y + row;
@@ -105,7 +115,12 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
             }
             uint16_t color = (bits & (1U << (7 - col))) ? fg : bg;
             dst[dst_x] = color;
+            wrote = true;
         }
+    }
+    if (wrote)
+    {
+        surface_touch();
     }
 }
 
@@ -143,7 +158,7 @@ void video_draw_rect(int x, int y, int width, int height, uint16_t color)
             *dst++ = color;
         }
     }
-    g_surface_dirty = true;
+    surface_touch();
 }
 
 void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color)
@@ -239,12 +254,12 @@ void video_invalidate_rect(int x, int y, int width, int height)
     (void)y;
     (void)width;
     (void)height;
-    g_surface_dirty = true;
+    surface_touch();
 }
 
 void video_invalidate_all(void)
 {
-    g_surface_dirty = true;
+    surface_touch();
 }
 
 void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
@@ -290,7 +305,7 @@ void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixe
         memcpy(dst, row, (size_t)copy_w * sizeof(uint16_t));
         row += stride_bytes;
     }
-    g_surface_dirty = true;
+    surface_touch();
 }
 
 bool video_is_active(void)
@@ -300,13 +315,36 @@ bool video_is_active(void)
 
 void video_request_refresh(void)
 {
-    g_surface_dirty = true;
+    surface_touch();
 }
 
 void video_request_refresh_window(struct atk_widget *window)
 {
     (void)window;
-    g_surface_dirty = true;
+    surface_touch();
 }
 
 void video_pump_events(void) {}
+
+bool video_surface_has_dirty(void)
+{
+    return g_surface_dirty;
+}
+
+bool video_surface_consume_dirty(void)
+{
+    if (!g_surface_dirty)
+    {
+        return false;
+    }
+    g_surface_dirty = false;
+    return true;
+}
+
+void video_surface_force_dirty(void)
+{
+    if (surface_ready())
+    {
+        g_surface_dirty = true;
+    }
+}
