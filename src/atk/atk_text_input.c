@@ -20,7 +20,35 @@ typedef struct
     bool focused;
 } atk_text_input_priv_t;
 
+static atk_mouse_response_t text_input_mouse_cb(atk_widget_t *widget,
+                                                const atk_mouse_event_t *event,
+                                                void *context);
+static bool text_input_hit_test_cb(const atk_widget_t *widget,
+                                    int origin_x,
+                                    int origin_y,
+                                    int px,
+                                    int py,
+                                    void *context);
+static void text_input_draw_cb(const atk_state_t *state,
+                               const atk_widget_t *widget,
+                               int origin_x,
+                               int origin_y,
+                               void *context);
+static void text_input_destroy_cb(atk_widget_t *widget, void *context);
+static atk_key_response_t text_input_key_cb(atk_widget_t *widget,
+                                            int key,
+                                            int modifiers,
+                                            int action,
+                                            void *context);
+
 static const atk_widget_vtable_t text_input_vtable = { 0 };
+static const atk_widget_ops_t g_text_input_ops = {
+    .destroy = text_input_destroy_cb,
+    .draw = text_input_draw_cb,
+    .hit_test = text_input_hit_test_cb,
+    .on_mouse = text_input_mouse_cb,
+    .on_key = text_input_key_cb
+};
 const atk_class_t ATK_TEXT_INPUT_CLASS = { "TextInput", &ATK_WIDGET_CLASS, &text_input_vtable, sizeof(atk_text_input_priv_t) };
 
 static void text_input_invalidate(const atk_widget_t *input)
@@ -80,6 +108,7 @@ atk_widget_t *atk_window_add_text_input(atk_widget_t *window, int x, int y, int 
     input->height = ATK_FONT_HEIGHT + ATK_TEXT_INPUT_PADDING_Y * 2;
     input->parent = window;
     input->used = true;
+    atk_widget_set_ops(input, &g_text_input_ops, NULL);
 
     atk_text_input_priv_t *input_priv = (atk_text_input_priv_t *)atk_widget_priv(input, &ATK_TEXT_INPUT_CLASS);
     input_priv->submit = NULL;
@@ -168,22 +197,23 @@ void atk_text_input_focus(atk_state_t *state, atk_widget_t *input)
         return;
     }
 
-    if (state->focused_input == input)
+    atk_widget_t *current = atk_state_focus_widget(state);
+    if (current == input)
     {
         return;
     }
 
-    if (state->focused_input)
+    if (current && atk_widget_is_a(current, &ATK_TEXT_INPUT_CLASS))
     {
-        atk_text_input_priv_t *prev = (atk_text_input_priv_t *)atk_widget_priv(state->focused_input, &ATK_TEXT_INPUT_CLASS);
+        atk_text_input_priv_t *prev = (atk_text_input_priv_t *)atk_widget_priv(current, &ATK_TEXT_INPUT_CLASS);
         if (prev)
         {
             prev->focused = false;
-            text_input_invalidate(state->focused_input);
+            text_input_invalidate(current);
         }
     }
 
-    state->focused_input = input;
+    atk_state_set_focus_widget(state, input);
 
     if (input)
     {
@@ -202,7 +232,7 @@ void atk_text_input_blur(atk_state_t *state, atk_widget_t *input)
     {
         return;
     }
-    if (state->focused_input != input)
+    if (atk_state_focus_widget(state) != input)
     {
         return;
     }
@@ -309,4 +339,71 @@ void atk_text_input_destroy(atk_widget_t *input)
     priv->submit = NULL;
     priv->submit_context = NULL;
     priv->focused = false;
+}
+
+static atk_mouse_response_t text_input_mouse_cb(atk_widget_t *widget,
+                                                const atk_mouse_event_t *event,
+                                                void *context)
+{
+    (void)context;
+    if (!event || !event->pressed_edge)
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
+
+    atk_state_t *state = atk_state_get();
+    atk_text_input_focus(state, widget);
+    return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
+}
+
+static bool text_input_hit_test_cb(const atk_widget_t *widget,
+                                    int origin_x,
+                                    int origin_y,
+                                    int px,
+                                    int py,
+                                    void *context)
+{
+    (void)context;
+    return atk_text_input_hit_test(widget, origin_x, origin_y, px, py);
+}
+
+static void text_input_draw_cb(const atk_state_t *state,
+                               const atk_widget_t *widget,
+                               int origin_x,
+                               int origin_y,
+                               void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    atk_text_input_draw(state, widget);
+}
+
+static void text_input_destroy_cb(atk_widget_t *widget, void *context)
+{
+    (void)context;
+    atk_text_input_destroy(widget);
+    atk_widget_destroy(widget);
+}
+
+static atk_key_response_t text_input_key_cb(atk_widget_t *widget,
+                                            int key,
+                                            int modifiers,
+                                            int action,
+                                            void *context)
+{
+    (void)modifiers;
+    (void)action;
+    (void)context;
+    if (!widget)
+    {
+        return ATK_KEY_RESPONSE_NONE;
+    }
+
+    atk_text_input_event_t event = atk_text_input_handle_char(widget, (char)key);
+    if (event == ATK_TEXT_INPUT_EVENT_CHANGED || event == ATK_TEXT_INPUT_EVENT_SUBMIT)
+    {
+        return ATK_KEY_RESPONSE_HANDLED | ATK_KEY_RESPONSE_REDRAW;
+    }
+    return (event == ATK_TEXT_INPUT_EVENT_NONE) ? ATK_KEY_RESPONSE_NONE : ATK_KEY_RESPONSE_HANDLED;
 }

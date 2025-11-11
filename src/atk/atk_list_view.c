@@ -35,7 +35,21 @@ typedef struct
     atk_list_node_t *list_node;
 } atk_list_view_priv_t;
 
+static void list_view_draw_cb(const atk_state_t *state,
+                              const atk_widget_t *widget,
+                              int origin_x,
+                              int origin_y,
+                              void *context);
+static void list_view_destroy_cb(atk_widget_t *widget, void *context);
+
 static const atk_widget_vtable_t list_view_vtable = { 0 };
+static const atk_widget_ops_t g_list_view_ops = {
+    .destroy = list_view_destroy_cb,
+    .draw = list_view_draw_cb,
+    .hit_test = NULL,
+    .on_mouse = NULL,
+    .on_key = NULL
+};
 const atk_class_t ATK_LIST_VIEW_CLASS = { "ListView", &ATK_WIDGET_CLASS, &list_view_vtable, sizeof(atk_list_view_priv_t) };
 
 static atk_list_view_priv_t *list_priv_mut(atk_widget_t *list);
@@ -59,6 +73,7 @@ atk_widget_t *atk_list_view_create(void)
     widget->width = 0;
     widget->height = 0;
     widget->parent = NULL;
+    atk_widget_set_ops(widget, &g_list_view_ops, NULL);
 
     atk_list_view_priv_t *priv = list_priv_mut(widget);
     if (!priv)
@@ -344,6 +359,25 @@ void atk_list_view_destroy(atk_widget_t *list)
     priv->row_count = 0;
     priv->column_count = 0;
     priv->list_node = NULL;
+}
+
+static void list_view_draw_cb(const atk_state_t *state,
+                              const atk_widget_t *widget,
+                              int origin_x,
+                              int origin_y,
+                              void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    atk_list_view_draw(state, widget);
+}
+
+static void list_view_destroy_cb(atk_widget_t *widget, void *context)
+{
+    (void)context;
+    atk_list_view_destroy(widget);
+    atk_widget_destroy(widget);
 }
 
 static atk_list_view_priv_t *list_priv_mut(atk_widget_t *list)

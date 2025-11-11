@@ -20,8 +20,21 @@ static void label_invalidate(const atk_widget_t *label);
 static bool label_ensure_capacity(atk_label_priv_t *priv, size_t extra);
 static size_t label_count_wrapped_lines(const char *text, int max_chars_per_line);
 static const char *label_skip_wrapped_lines(const char *text, size_t skip, int max_chars_per_line);
+static void label_draw_cb(const atk_state_t *state,
+                          const atk_widget_t *widget,
+                          int origin_x,
+                          int origin_y,
+                          void *context);
+static void label_destroy_cb(atk_widget_t *widget, void *context);
 
 static const atk_widget_vtable_t label_vtable = { 0 };
+static const atk_widget_ops_t g_label_ops = {
+    .destroy = label_destroy_cb,
+    .draw = label_draw_cb,
+    .hit_test = NULL,
+    .on_mouse = NULL,
+    .on_key = NULL
+};
 const atk_class_t ATK_LABEL_CLASS = { "Label", &ATK_WIDGET_CLASS, &label_vtable, sizeof(atk_label_priv_t) };
 
 atk_widget_t *atk_window_add_label(atk_widget_t *window, int x, int y, int width, int height)
@@ -49,6 +62,7 @@ atk_widget_t *atk_window_add_label(atk_widget_t *window, int x, int y, int width
     label->height = height;
     label->parent = window;
     label->used = true;
+    atk_widget_set_ops(label, &g_label_ops, NULL);
 
     atk_label_priv_t *label_priv = (atk_label_priv_t *)atk_widget_priv(label, &ATK_LABEL_CLASS);
     atk_list_node_t *child_node = atk_list_push_back(&priv->children, label);
@@ -270,6 +284,25 @@ void atk_label_destroy(atk_widget_t *label)
         priv->length = 0;
         priv->capacity = 0;
     }
+}
+
+static void label_draw_cb(const atk_state_t *state,
+                          const atk_widget_t *widget,
+                          int origin_x,
+                          int origin_y,
+                          void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    atk_label_draw(state, widget);
+}
+
+static void label_destroy_cb(atk_widget_t *widget, void *context)
+{
+    (void)context;
+    atk_label_destroy(widget);
+    atk_widget_destroy(widget);
 }
 
 static size_t label_count_wrapped_lines(const char *text, int max_chars_per_line)

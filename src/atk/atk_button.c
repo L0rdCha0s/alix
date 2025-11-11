@@ -11,6 +11,26 @@ static atk_button_priv_t *button_priv_mut(atk_widget_t *widget);
 static const atk_button_priv_t *button_priv(const atk_widget_t *widget);
 
 static const atk_widget_vtable_t button_vtable = { 0 };
+static void button_draw_cb(const atk_state_t *state,
+                           const atk_widget_t *widget,
+                           int origin_x,
+                           int origin_y,
+                           void *context);
+static bool button_hit_test_cb(const atk_widget_t *widget,
+                               int origin_x,
+                               int origin_y,
+                               int px,
+                               int py,
+                               void *context);
+static void button_destroy_cb(atk_widget_t *widget, void *context);
+
+static const atk_widget_ops_t g_button_ops = {
+    .destroy = button_destroy_cb,
+    .draw = button_draw_cb,
+    .hit_test = button_hit_test_cb,
+    .on_mouse = NULL,
+    .on_key = NULL
+};
 
 const atk_class_t ATK_WIDGET_CLASS = { "Widget", 0, 0, 0 };
 const atk_class_t ATK_BUTTON_CLASS = { "Button", &ATK_WIDGET_CLASS, &button_vtable, sizeof(atk_button_priv_t) };
@@ -30,6 +50,7 @@ void atk_button_configure(atk_widget_t *widget,
 
     atk_button_priv_t *priv = button_priv_mut(widget);
     widget->used = true;
+    atk_widget_set_ops(widget, &g_button_ops, NULL);
     priv->style = style;
     priv->draggable = draggable;
     priv->absolute = absolute;
@@ -196,4 +217,36 @@ static const atk_button_priv_t *button_priv(const atk_widget_t *widget)
         return 0;
     }
     return (const atk_button_priv_t *)atk_widget_priv(widget, &ATK_BUTTON_CLASS);
+}
+
+static void button_draw_cb(const atk_state_t *state,
+                           const atk_widget_t *widget,
+                           int origin_x,
+                           int origin_y,
+                           void *context)
+{
+    (void)context;
+    atk_button_draw(state, widget, origin_x, origin_y);
+}
+
+static bool button_hit_test_cb(const atk_widget_t *widget,
+                               int origin_x,
+                               int origin_y,
+                               int px,
+                               int py,
+                               void *context)
+{
+    (void)context;
+    return atk_button_hit_test(widget, origin_x, origin_y, px, py);
+}
+
+static void button_destroy_cb(atk_widget_t *widget, void *context)
+{
+    (void)context;
+    atk_button_priv_t *priv = button_priv_mut(widget);
+    if (priv)
+    {
+        priv->list_node = NULL;
+    }
+    atk_widget_destroy(widget);
 }

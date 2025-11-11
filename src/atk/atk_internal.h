@@ -98,9 +98,8 @@ typedef struct atk_state
     int desktop_drag_offset_y;
     bool desktop_drag_moved;
 
-    atk_widget_t *focused_input;
-    atk_widget_t *focused_terminal;
-    atk_widget_t *dragging_scrollbar;
+    atk_widget_t *focus_widget;
+    atk_widget_t *mouse_capture_widget;
 
     atk_theme_t theme;
     bool exit_requested;
@@ -137,5 +136,10 @@ void atk_dirty_init(atk_state_t *state);
 void atk_dirty_mark_rect(int x, int y, int width, int height);
 void atk_dirty_mark_all(void);
 bool atk_dirty_consume(atk_rect_t *out_rect);
+atk_widget_t *atk_state_mouse_capture(const atk_state_t *state);
+void atk_state_set_mouse_capture(atk_state_t *state, atk_widget_t *widget);
+void atk_state_release_mouse_capture(atk_state_t *state, const atk_widget_t *widget);
+atk_widget_t *atk_state_focus_widget(const atk_state_t *state);
+void atk_state_set_focus_widget(atk_state_t *state, atk_widget_t *widget);
 
 #endif

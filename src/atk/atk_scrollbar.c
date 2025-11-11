@@ -20,7 +20,30 @@ typedef struct
     void *change_context;
 } atk_scrollbar_priv_t;
 
+static atk_mouse_response_t scrollbar_mouse_cb(atk_widget_t *widget,
+                                               const atk_mouse_event_t *event,
+                                               void *context);
+static void scrollbar_draw_cb(const atk_state_t *state,
+                              const atk_widget_t *widget,
+                              int origin_x,
+                              int origin_y,
+                              void *context);
+static bool scrollbar_hit_test_cb(const atk_widget_t *widget,
+                                   int origin_x,
+                                   int origin_y,
+                                   int px,
+                                   int py,
+                                   void *context);
+static void scrollbar_destroy_cb(atk_widget_t *widget, void *context);
+
 static const atk_widget_vtable_t scrollbar_vtable = { 0 };
+static const atk_widget_ops_t g_scrollbar_ops = {
+    .destroy = scrollbar_destroy_cb,
+    .draw = scrollbar_draw_cb,
+    .hit_test = scrollbar_hit_test_cb,
+    .on_mouse = scrollbar_mouse_cb,
+    .on_key = NULL
+};
 const atk_class_t ATK_SCROLLBAR_CLASS = { "Scrollbar", &ATK_WIDGET_CLASS, &scrollbar_vtable, sizeof(atk_scrollbar_priv_t) };
 
 static atk_scrollbar_priv_t *scrollbar_priv_mut(atk_widget_t *scrollbar);
@@ -70,6 +93,7 @@ atk_widget_t *atk_window_add_scrollbar(atk_widget_t *window,
     scrollbar->height = height;
     scrollbar->parent = window;
     scrollbar->used = true;
+    atk_widget_set_ops(scrollbar, &g_scrollbar_ops, NULL);
 
     atk_scrollbar_priv_t *sb_priv = scrollbar_priv_mut(scrollbar);
     sb_priv->orientation = orientation;
@@ -344,6 +368,80 @@ void atk_scrollbar_destroy(atk_widget_t *scrollbar)
     priv->change_context = NULL;
     priv->dragging = false;
     priv->drag_offset = 0;
+}
+
+static atk_mouse_response_t scrollbar_mouse_cb(atk_widget_t *widget,
+                                               const atk_mouse_event_t *event,
+                                               void *context)
+{
+    (void)context;
+    atk_scrollbar_priv_t *priv = scrollbar_priv_mut(widget);
+    if (!priv || !event)
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
+
+    atk_mouse_response_t response = ATK_MOUSE_RESPONSE_NONE;
+
+    if (event->pressed_edge)
+    {
+        bool value_changed = false;
+        if (atk_scrollbar_begin_drag(widget, event->cursor_x, event->cursor_y, &value_changed))
+        {
+            response |= ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_CAPTURE;
+            if (value_changed)
+            {
+                response |= ATK_MOUSE_RESPONSE_REDRAW;
+            }
+        }
+    }
+    else if (event->released_edge)
+    {
+        if (priv->dragging)
+        {
+            atk_scrollbar_end_drag(widget);
+            response |= ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_RELEASE;
+        }
+    }
+    else if (event->left_pressed && priv->dragging)
+    {
+        if (atk_scrollbar_drag_to(widget, event->cursor_x, event->cursor_y))
+        {
+            response |= ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
+        }
+    }
+
+    return response;
+}
+
+static void scrollbar_draw_cb(const atk_state_t *state,
+                              const atk_widget_t *widget,
+                              int origin_x,
+                              int origin_y,
+                              void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    atk_scrollbar_draw(state, widget);
+}
+
+static bool scrollbar_hit_test_cb(const atk_widget_t *widget,
+                                   int origin_x,
+                                   int origin_y,
+                                   int px,
+                                   int py,
+                                   void *context)
+{
+    (void)context;
+    return atk_scrollbar_hit_test(widget, origin_x, origin_y, px, py);
+}
+
+static void scrollbar_destroy_cb(atk_widget_t *widget, void *context)
+{
+    (void)context;
+    atk_scrollbar_destroy(widget);
+    atk_widget_destroy(widget);
 }
 
 static atk_scrollbar_priv_t *scrollbar_priv_mut(atk_widget_t *scrollbar)

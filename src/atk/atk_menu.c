@@ -25,7 +25,30 @@ typedef struct
     int preferred_width;
 } atk_menu_priv_t;
 
+static atk_mouse_response_t menu_mouse_cb(atk_widget_t *widget,
+                                          const atk_mouse_event_t *event,
+                                          void *context);
+static bool menu_hit_test_cb(const atk_widget_t *widget,
+                             int origin_x,
+                             int origin_y,
+                             int px,
+                             int py,
+                             void *context);
+static void menu_draw_cb(const atk_state_t *state,
+                         const atk_widget_t *widget,
+                         int origin_x,
+                         int origin_y,
+                         void *context);
+static void menu_destroy_cb(atk_widget_t *widget, void *context);
+
 static const atk_widget_vtable_t menu_vtable = { 0 };
+static const atk_widget_ops_t g_menu_ops = {
+    .destroy = menu_destroy_cb,
+    .draw = menu_draw_cb,
+    .hit_test = menu_hit_test_cb,
+    .on_mouse = menu_mouse_cb,
+    .on_key = NULL
+};
 const atk_class_t ATK_MENU_CLASS = { "Menu", &ATK_WIDGET_CLASS, &menu_vtable, sizeof(atk_menu_priv_t) };
 
 static atk_menu_priv_t *menu_priv_mut(atk_widget_t *menu);
@@ -65,6 +88,8 @@ atk_widget_t *atk_menu_create(void)
     priv->highlighted_index = -1;
     priv->visible = false;
     priv->preferred_width = menu->width;
+
+    atk_widget_set_ops(menu, &g_menu_ops, NULL);
 
     return menu;
 }
@@ -282,6 +307,63 @@ void atk_menu_draw(const atk_state_t *state, const atk_widget_t *menu)
         atk_rect_t clip = { menu->x, item_y, menu->width, priv->item_height };
         atk_font_draw_string_clipped(text_x, baseline, priv->items[i].title, fg, bg, &clip);
     }
+}
+
+static atk_mouse_response_t menu_mouse_cb(atk_widget_t *widget,
+                                          const atk_mouse_event_t *event,
+                                          void *context)
+{
+    (void)context;
+    if (!event)
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
+
+    atk_mouse_response_t response = ATK_MOUSE_RESPONSE_NONE;
+    if (atk_menu_update_hover(widget, event->cursor_x, event->cursor_y))
+    {
+        response |= ATK_MOUSE_RESPONSE_REDRAW;
+    }
+
+    if (event->pressed_edge)
+    {
+        if (atk_menu_handle_click(widget, event->cursor_x, event->cursor_y))
+        {
+            response |= ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
+        }
+    }
+    return response;
+}
+
+static bool menu_hit_test_cb(const atk_widget_t *widget,
+                             int origin_x,
+                             int origin_y,
+                             int px,
+                             int py,
+                             void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    return atk_menu_contains((atk_widget_t *)widget, px, py);
+}
+
+static void menu_draw_cb(const atk_state_t *state,
+                         const atk_widget_t *widget,
+                         int origin_x,
+                         int origin_y,
+                         void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    atk_menu_draw(state, widget);
+}
+
+static void menu_destroy_cb(atk_widget_t *widget, void *context)
+{
+    (void)context;
+    atk_menu_destroy(widget);
 }
 
 static atk_menu_priv_t *menu_priv_mut(atk_widget_t *menu)

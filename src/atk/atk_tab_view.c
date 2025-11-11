@@ -39,8 +39,30 @@ static void tab_view_content_bounds(const atk_widget_t *tab_view,
                                     int *height);
 static int tab_view_tab_width(const atk_tab_view_priv_t *priv, const atk_tab_view_page_t *page);
 static void tab_view_invalidate(const atk_widget_t *tab_view);
+static atk_mouse_response_t tab_view_mouse_cb(atk_widget_t *widget,
+                                              const atk_mouse_event_t *event,
+                                              void *context);
+static bool tab_view_hit_test_cb(const atk_widget_t *widget,
+                                 int origin_x,
+                                 int origin_y,
+                                 int px,
+                                 int py,
+                                 void *context);
+static void tab_view_draw_cb(const atk_state_t *state,
+                             const atk_widget_t *widget,
+                             int origin_x,
+                             int origin_y,
+                             void *context);
+static void tab_view_destroy_cb(atk_widget_t *widget, void *context);
 
 static const atk_widget_vtable_t tab_view_vtable = { 0 };
+static const atk_widget_ops_t g_tab_view_ops = {
+    .destroy = tab_view_destroy_cb,
+    .draw = tab_view_draw_cb,
+    .hit_test = tab_view_hit_test_cb,
+    .on_mouse = tab_view_mouse_cb,
+    .on_key = NULL
+};
 const atk_class_t ATK_TAB_VIEW_CLASS = { "TabView", &ATK_WIDGET_CLASS, &tab_view_vtable, sizeof(atk_tab_view_priv_t) };
 
 atk_widget_t *atk_window_add_tab_view(atk_widget_t *window, int x, int y, int width, int height)
@@ -275,6 +297,55 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, int px, int py)
     return false;
 }
 
+static atk_mouse_response_t tab_view_mouse_cb(atk_widget_t *widget,
+                                              const atk_mouse_event_t *event,
+                                              void *context)
+{
+    (void)context;
+    if (!event || !event->pressed_edge)
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
+
+    if (atk_tab_view_handle_mouse(widget, event->cursor_x, event->cursor_y))
+    {
+        return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
+    }
+    return ATK_MOUSE_RESPONSE_NONE;
+}
+
+static bool tab_view_hit_test_cb(const atk_widget_t *widget,
+                                 int origin_x,
+                                 int origin_y,
+                                 int px,
+                                 int py,
+                                 void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    return atk_tab_view_contains_point(widget, px, py);
+}
+
+static void tab_view_draw_cb(const atk_state_t *state,
+                             const atk_widget_t *widget,
+                             int origin_x,
+                             int origin_y,
+                             void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    atk_tab_view_draw(state, widget);
+}
+
+static void tab_view_destroy_cb(atk_widget_t *widget, void *context)
+{
+    (void)context;
+    atk_tab_view_destroy(widget);
+    atk_widget_destroy(widget);
+}
+
 void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
 {
     const atk_tab_view_priv_t *priv = tab_view_priv(tab_view);
@@ -389,6 +460,7 @@ static atk_widget_t *atk_tab_view_create(void)
     widget->width = 0;
     widget->height = 0;
     widget->parent = NULL;
+    atk_widget_set_ops(widget, &g_tab_view_ops, NULL);
 
     atk_tab_view_priv_t *priv = tab_view_priv_mut(widget);
     if (!priv)

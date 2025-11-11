@@ -55,9 +55,8 @@ void atk_window_reset_all(atk_state_t *state)
     state->drag_offset_y = 0;
     state->pressed_window_button_window = 0;
     state->pressed_window_button = 0;
-    state->focused_input = NULL;
-    state->focused_terminal = NULL;
-    state->dragging_scrollbar = NULL;
+    state->focus_widget = NULL;
+    state->mouse_capture_widget = NULL;
 }
 
 static bool window_intersects_clip(const atk_widget_t *window, const atk_rect_t *clip)
@@ -205,95 +204,7 @@ atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py)
     return 0;
 }
 
-atk_widget_t *atk_window_text_input_at(atk_widget_t *window, int px, int py)
-{
-    if (!window || !window->used)
-    {
-        return NULL;
-    }
-
-    atk_window_priv_t *priv = window_priv_mut(window);
-    if (!priv)
-    {
-        return NULL;
-    }
-
-    ATK_LIST_FOR_EACH_REVERSE(node, &priv->text_inputs)
-    {
-        atk_widget_t *input = (atk_widget_t *)node->value;
-        if (!input || !input->used)
-        {
-            continue;
-        }
-        if (atk_text_input_hit_test(input, window->x, window->y, px, py))
-        {
-            return input;
-        }
-    }
-    return NULL;
-}
-
-atk_widget_t *atk_window_terminal_at(atk_widget_t *window, int px, int py)
-{
-    if (!window || !window->used)
-    {
-        return NULL;
-    }
-
-    atk_window_priv_t *priv = window_priv_mut(window);
-    if (!priv)
-    {
-        return NULL;
-    }
-
-    ATK_LIST_FOR_EACH_REVERSE(node, &priv->terminals)
-    {
-        atk_widget_t *term = (atk_widget_t *)node->value;
-        if (!term || !term->used)
-        {
-            continue;
-        }
-        int x0 = window->x + term->x;
-        int y0 = window->y + term->y;
-        int x1 = x0 + term->width;
-        int y1 = y0 + term->height;
-        if (px >= x0 && px < x1 && py >= y0 && py < y1)
-        {
-            return term;
-        }
-    }
-    return NULL;
-}
-
-atk_widget_t *atk_window_scrollbar_at(atk_widget_t *window, int px, int py)
-{
-    if (!window || !window->used)
-    {
-        return NULL;
-    }
-
-    atk_window_priv_t *priv = window_priv_mut(window);
-    if (!priv)
-    {
-        return NULL;
-    }
-
-    ATK_LIST_FOR_EACH_REVERSE(node, &priv->scrollbars)
-    {
-        atk_widget_t *bar = (atk_widget_t *)node->value;
-        if (!bar || !bar->used)
-        {
-            continue;
-        }
-        if (atk_scrollbar_hit_test(bar, window->x, window->y, px, py))
-        {
-            return bar;
-        }
-    }
-    return NULL;
-}
-
-atk_widget_t *atk_window_tab_view_at(atk_widget_t *window, int px, int py)
+atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
 {
     if (!window || !window->used)
     {
@@ -309,11 +220,11 @@ atk_widget_t *atk_window_tab_view_at(atk_widget_t *window, int px, int py)
     ATK_LIST_FOR_EACH_REVERSE(node, &priv->children)
     {
         atk_widget_t *child = (atk_widget_t *)node->value;
-        if (!child || !child->used || !atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
+        if (!child || !child->used)
         {
             continue;
         }
-        if (atk_tab_view_contains_point(child, px, py))
+        if (atk_widget_hit_test(child, window->x, window->y, px, py))
         {
             return child;
         }
@@ -461,20 +372,10 @@ void atk_window_close(atk_state_t *state, atk_widget_t *window)
         priv->list_node = 0;
     }
 
-    if (state->focused_input && state->focused_input->parent == window)
+    atk_widget_t *focus = atk_state_focus_widget(state);
+    if (focus && focus->parent == window)
     {
-        atk_text_input_focus(state, NULL);
-    }
-#ifndef KERNEL_BUILD
-    if (state->focused_terminal && state->focused_terminal->parent == window)
-    {
-        atk_terminal_focus(state, NULL);
-    }
-#endif
-    if (state->dragging_scrollbar && state->dragging_scrollbar->parent == window)
-    {
-        atk_scrollbar_end_drag(state->dragging_scrollbar);
-        state->dragging_scrollbar = NULL;
+        atk_state_set_focus_widget(state, NULL);
     }
 
     if (priv && priv->on_destroy && priv->user_context)

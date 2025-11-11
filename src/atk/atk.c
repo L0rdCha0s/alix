@@ -25,6 +25,22 @@
 
 static void atk_apply_default_theme(atk_state_t *state);
 static void action_exit_to_text(atk_widget_t *button, void *context);
+static void atk_build_mouse_event(const atk_widget_t *widget,
+                                  int cursor_x,
+                                  int cursor_y,
+                                  bool pressed_edge,
+                                  bool released_edge,
+                                  bool left_pressed,
+                                  atk_mouse_event_t *event);
+static bool atk_dispatch_widget_mouse(atk_state_t *state,
+                                      atk_widget_t *widget,
+                                      int cursor_x,
+                                      int cursor_y,
+                                      bool pressed_edge,
+                                      bool released_edge,
+                                      bool left_pressed,
+                                      atk_mouse_event_result_t *result);
+static void atk_clear_focus_widget(atk_state_t *state);
 #ifndef ATK_NO_DESKTOP_APPS
 static void action_open_shell(atk_widget_t *button, void *context);
 static void action_open_task_manager(atk_widget_t *button, void *context);
@@ -54,6 +70,103 @@ static const atk_user_launch_info_t g_atk_demo_launch = {
     .name = "atk_demo"
 };
 #endif
+
+static void atk_build_mouse_event(const atk_widget_t *widget,
+                                  int cursor_x,
+                                  int cursor_y,
+                                  bool pressed_edge,
+                                  bool released_edge,
+                                  bool left_pressed,
+                                  atk_mouse_event_t *event)
+{
+    if (!event)
+    {
+        return;
+    }
+
+    int abs_x = 0;
+    int abs_y = 0;
+    if (widget)
+    {
+        atk_widget_absolute_position(widget, &abs_x, &abs_y);
+    }
+
+    int origin_x = abs_x - (widget ? widget->x : 0);
+    int origin_y = abs_y - (widget ? widget->y : 0);
+
+    event->cursor_x = cursor_x;
+    event->cursor_y = cursor_y;
+    event->origin_x = origin_x;
+    event->origin_y = origin_y;
+    event->local_x = cursor_x - abs_x;
+    event->local_y = cursor_y - abs_y;
+    event->pressed_edge = pressed_edge;
+    event->released_edge = released_edge;
+    event->left_pressed = left_pressed;
+}
+
+static bool atk_dispatch_widget_mouse(atk_state_t *state,
+                                      atk_widget_t *widget,
+                                      int cursor_x,
+                                      int cursor_y,
+                                      bool pressed_edge,
+                                      bool released_edge,
+                                      bool left_pressed,
+                                      atk_mouse_event_result_t *result)
+{
+    if (!widget || !widget->used)
+    {
+        return false;
+    }
+
+    atk_mouse_event_t event;
+    atk_build_mouse_event(widget, cursor_x, cursor_y, pressed_edge, released_edge, left_pressed, &event);
+    atk_mouse_response_t response = atk_widget_dispatch_mouse(widget, &event);
+
+    if (response & ATK_MOUSE_RESPONSE_CAPTURE)
+    {
+        atk_state_set_mouse_capture(state, widget);
+    }
+    if (response & ATK_MOUSE_RESPONSE_RELEASE)
+    {
+        atk_state_release_mouse_capture(state, widget);
+    }
+    if ((response & ATK_MOUSE_RESPONSE_REDRAW) && result)
+    {
+        result->redraw = true;
+    }
+
+    return (response & ATK_MOUSE_RESPONSE_HANDLED) != 0;
+}
+
+static void atk_clear_focus_widget(atk_state_t *state)
+{
+    if (!state)
+    {
+        return;
+    }
+
+    atk_widget_t *focus = atk_state_focus_widget(state);
+    if (!focus)
+    {
+        return;
+    }
+
+    if (atk_widget_is_a(focus, &ATK_TEXT_INPUT_CLASS))
+    {
+        atk_text_input_focus(state, NULL);
+    }
+#ifndef KERNEL_BUILD
+    else if (atk_widget_is_a(focus, &ATK_TERMINAL_CLASS))
+    {
+        atk_terminal_focus(state, NULL);
+    }
+#endif
+    else
+    {
+        atk_state_set_focus_widget(state, NULL);
+    }
+}
 
 void atk_init(void)
 {
@@ -194,228 +307,196 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         return result;
     }
 
-    if (pressed_edge)
+    atk_widget_t *capture = atk_state_mouse_capture(state);
+    if (capture && (!capture->used))
     {
-        state->dragging_window = NULL;
-        state->dragging_desktop_button = NULL;
-        state->desktop_drag_moved = false;
-        state->pressed_window_button_window = NULL;
-        state->pressed_window_button = NULL;
-        state->pressed_desktop_button = NULL;
-        if (state->dragging_scrollbar)
+        atk_state_release_mouse_capture(state, capture);
+        capture = NULL;
+    }
+
+    bool capture_consumed = false;
+    if (capture)
+    {
+        capture_consumed = atk_dispatch_widget_mouse(state,
+                                                     capture,
+                                                     cursor_x,
+                                                     cursor_y,
+                                                     pressed_edge,
+                                                     released_edge,
+                                                     left_pressed,
+                                                     &result);
+    }
+
+    if (!capture_consumed)
+    {
+        if (pressed_edge)
         {
-            atk_scrollbar_end_drag(state->dragging_scrollbar);
-            state->dragging_scrollbar = NULL;
-        }
+            state->dragging_window = NULL;
+            state->dragging_desktop_button = NULL;
+            state->desktop_drag_moved = false;
+            state->pressed_window_button_window = NULL;
+            state->pressed_window_button = NULL;
+            state->pressed_desktop_button = NULL;
 
-        bool handled = false;
+            bool handled = false;
 
-        ATK_LIST_FOR_EACH_REVERSE(win_node, &state->windows)
-        {
-            if (handled)
+            ATK_LIST_FOR_EACH_REVERSE(win_node, &state->windows)
             {
-                break;
-            }
-
-            atk_widget_t *win = (atk_widget_t *)win_node->value;
-            if (!win || !win->used)
-            {
-                continue;
-            }
-
-            atk_widget_t *btn = atk_window_get_button_at(win, cursor_x, cursor_y);
-            if (btn)
-            {
-                atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
-                bool moved = atk_window_bring_to_front(state, win);
-                if (moved)
+                if (handled)
                 {
-                    atk_window_mark_dirty(win);
-                    if (prev_top && prev_top != win)
-                    {
-                        atk_window_mark_dirty(prev_top);
-                    }
-                    result.redraw = true;
-                }
-                state->pressed_window_button_window = win;
-                state->pressed_window_button = btn;
-                atk_text_input_focus(state, NULL);
-                handled = true;
-            }
-        }
-
-        if (!handled)
-        {
-            atk_widget_t *win = atk_window_title_hit_test(state, cursor_x, cursor_y);
-            if (win && win->used)
-            {
-                atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
-                bool moved = atk_window_bring_to_front(state, win);
-                if (moved)
-                {
-                    atk_window_mark_dirty(win);
-                    if (prev_top && prev_top != win)
-                    {
-                        atk_window_mark_dirty(prev_top);
-                    }
-                    result.redraw = true;
-                }
-                state->dragging_window = win;
-                state->drag_offset_x = cursor_x - win->x;
-                state->drag_offset_y = cursor_y - win->y;
-                handled = true;
-            }
-        }
-
-        if (!handled)
-        {
-            atk_widget_t *win = atk_window_hit_test(state, cursor_x, cursor_y);
-            if (win && win->used)
-            {
-                atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
-                bool moved = atk_window_bring_to_front(state, win);
-                if (moved)
-                {
-                    atk_window_mark_dirty(win);
-                    if (prev_top && prev_top != win)
-                    {
-                        atk_window_mark_dirty(prev_top);
-                    }
-                    result.redraw = true;
+                    break;
                 }
 
-                bool consumed = false;
-                atk_widget_t *scroll_widget = atk_window_scrollbar_at(win, cursor_x, cursor_y);
-                if (scroll_widget)
+                atk_widget_t *win = (atk_widget_t *)win_node->value;
+                if (!win || !win->used)
                 {
-                    bool value_changed = false;
-                    if (atk_scrollbar_begin_drag(scroll_widget, cursor_x, cursor_y, &value_changed))
+                    continue;
+                }
+
+                atk_widget_t *btn = atk_window_get_button_at(win, cursor_x, cursor_y);
+                if (btn)
+                {
+                    atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
+                    bool moved = atk_window_bring_to_front(state, win);
+                    if (moved)
                     {
-                        state->dragging_scrollbar = scroll_widget;
-                        consumed = true;
-                        if (value_changed)
+                        atk_window_mark_dirty(win);
+                        if (prev_top && prev_top != win)
                         {
-                            result.redraw = true;
+                            atk_window_mark_dirty(prev_top);
                         }
-                    }
-                }
-
-                if (!consumed)
-                {
-                    atk_widget_t *tab_widget = atk_window_tab_view_at(win, cursor_x, cursor_y);
-                    if (tab_widget && atk_tab_view_handle_mouse(tab_widget, cursor_x, cursor_y))
-                    {
-                        consumed = true;
                         result.redraw = true;
                     }
+                    state->pressed_window_button_window = win;
+                    state->pressed_window_button = btn;
+                    handled = true;
                 }
+            }
 
-                if (!consumed)
+            if (!handled)
+            {
+                atk_widget_t *win = atk_window_title_hit_test(state, cursor_x, cursor_y);
+                if (win && win->used)
                 {
-                    atk_widget_t *input_widget = atk_window_text_input_at(win, cursor_x, cursor_y);
-                    if (input_widget)
+                    atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
+                    bool moved = atk_window_bring_to_front(state, win);
+                    if (moved)
                     {
-                        atk_text_input_focus(state, input_widget);
-#ifndef KERNEL_BUILD
-                        atk_terminal_focus(state, NULL);
-#endif
+                        atk_window_mark_dirty(win);
+                        if (prev_top && prev_top != win)
+                        {
+                            atk_window_mark_dirty(prev_top);
+                        }
+                        result.redraw = true;
                     }
-                    else
+                    state->dragging_window = win;
+                    state->drag_offset_x = cursor_x - win->x;
+                    state->drag_offset_y = cursor_y - win->y;
+                    handled = true;
+                }
+            }
+
+            if (!handled)
+            {
+                atk_widget_t *win = atk_window_hit_test(state, cursor_x, cursor_y);
+                if (win && win->used)
+                {
+                    atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
+                    bool moved = atk_window_bring_to_front(state, win);
+                    if (moved)
                     {
-#ifndef KERNEL_BUILD
-                        atk_widget_t *terminal_widget = atk_window_terminal_at(win, cursor_x, cursor_y);
-                        if (terminal_widget)
+                        atk_window_mark_dirty(win);
+                        if (prev_top && prev_top != win)
                         {
-                            atk_text_input_focus(state, NULL);
-                            atk_terminal_focus(state, terminal_widget);
+                            atk_window_mark_dirty(prev_top);
                         }
-                        else
-#endif
-                        {
-                            atk_text_input_focus(state, NULL);
-#ifndef KERNEL_BUILD
-                            atk_terminal_focus(state, NULL);
-#endif
-                        }
+                        result.redraw = true;
                     }
-                }
 
-                if (!consumed && user_atk_window_is_remote(win))
+                    bool consumed = false;
+                    atk_widget_t *child = atk_window_widget_at(win, cursor_x, cursor_y);
+                    if (child)
+                    {
+                        consumed = atk_dispatch_widget_mouse(state,
+                                                             child,
+                                                             cursor_x,
+                                                             cursor_y,
+                                                             pressed_edge,
+                                                             released_edge,
+                                                             left_pressed,
+                                                             &result);
+                    }
+
+                    if (!consumed && user_atk_window_is_remote(win))
+                    {
+                        user_atk_focus_window(win);
+                        consumed = true;
+                    }
+
+                    if (!consumed)
+                    {
+                        atk_clear_focus_widget(state);
+                    }
+
+                    handled = true;
+                }
+            }
+
+            if (!handled)
+            {
+                atk_widget_t *btn = atk_desktop_button_hit_test(state, cursor_x, cursor_y);
+                if (btn && btn->used)
                 {
-                    user_atk_focus_window(win);
-                    consumed = true;
+                    state->pressed_desktop_button = btn;
+                    if (atk_button_is_draggable(btn))
+                    {
+                        state->dragging_desktop_button = btn;
+                        state->desktop_drag_offset_x = cursor_x - btn->x;
+                        state->desktop_drag_offset_y = cursor_y - btn->y;
+                        state->desktop_drag_moved = false;
+                    }
+                    atk_clear_focus_widget(state);
+                    handled = true;
                 }
+            }
 
-                handled = true;
+            if (!handled)
+            {
+                atk_clear_focus_widget(state);
             }
         }
-
-        if (!handled)
+        else if (released_edge)
         {
-            atk_widget_t *btn = atk_desktop_button_hit_test(state, cursor_x, cursor_y);
-            if (btn && btn->used)
+            state->dragging_window = NULL;
+            if (state->dragging_desktop_button)
             {
-                state->pressed_desktop_button = btn;
-                if (atk_button_is_draggable(btn))
+                state->dragging_desktop_button = NULL;
+            }
+
+            if (state->pressed_window_button_window && state->pressed_window_button)
+            {
+                atk_widget_t *win = state->pressed_window_button_window;
+                atk_widget_t *btn = state->pressed_window_button;
+                if (win->used && btn->used && atk_button_hit_test(btn, win->x, win->y, cursor_x, cursor_y))
                 {
-                    state->dragging_desktop_button = btn;
-                    state->desktop_drag_offset_x = cursor_x - btn->x;
-                    state->desktop_drag_offset_y = cursor_y - btn->y;
-                    state->desktop_drag_moved = false;
+                    atk_button_invoke(btn);
+                    result.redraw = true;
                 }
-                atk_text_input_focus(state, NULL);
-#ifndef KERNEL_BUILD
-                atk_terminal_focus(state, NULL);
-#endif
-                handled = true;
             }
-        }
-    }
-    else if (released_edge)
-    {
-        state->dragging_window = NULL;
-        if (state->dragging_scrollbar)
-        {
-            atk_scrollbar_end_drag(state->dragging_scrollbar);
-            state->dragging_scrollbar = NULL;
-        }
+            state->pressed_window_button_window = NULL;
+            state->pressed_window_button = NULL;
 
-        if (state->dragging_desktop_button)
-        {
-            state->dragging_desktop_button = NULL;
-        }
-
-        if (state->pressed_window_button_window && state->pressed_window_button)
-        {
-            atk_widget_t *win = state->pressed_window_button_window;
-            atk_widget_t *btn = state->pressed_window_button;
-            if (win->used && btn->used && atk_button_hit_test(btn, win->x, win->y, cursor_x, cursor_y))
+            if (state->pressed_desktop_button && state->pressed_desktop_button->used)
             {
-                atk_button_invoke(btn);
-                result.redraw = true;
+                bool inside = atk_button_hit_test(state->pressed_desktop_button, 0, 0, cursor_x, cursor_y);
+                if (!state->desktop_drag_moved && inside)
+                {
+                    atk_button_invoke(state->pressed_desktop_button);
+                    result.redraw = true;
+                }
             }
-        }
-        state->pressed_window_button_window = NULL;
-        state->pressed_window_button = NULL;
-
-        if (state->pressed_desktop_button && state->pressed_desktop_button->used)
-        {
-            bool inside = atk_button_hit_test(state->pressed_desktop_button, 0, 0, cursor_x, cursor_y);
-            if (!state->desktop_drag_moved && inside)
-            {
-                atk_button_invoke(state->pressed_desktop_button);
-                result.redraw = true;
-            }
-        }
-        state->pressed_desktop_button = NULL;
-        state->desktop_drag_moved = false;
-    }
-
-    if (left_pressed && state->dragging_scrollbar && state->dragging_scrollbar->used)
-    {
-        if (atk_scrollbar_drag_to(state->dragging_scrollbar, cursor_x, cursor_y))
-        {
-            result.redraw = true;
+            state->pressed_desktop_button = NULL;
+            state->desktop_drag_moved = false;
         }
     }
 
@@ -543,31 +624,19 @@ atk_key_event_result_t atk_handle_key_char(char ch)
         return result;
     }
 
-#ifndef KERNEL_BUILD
-    atk_widget_t *terminal = state->focused_terminal;
-    if (terminal && terminal->used)
-    {
-        if (atk_terminal_handle_char(terminal, ch))
-        {
-            result.redraw = true;
-        }
-        return result;
-    }
-#endif
-
     if (user_atk_route_key_event(ch))
     {
         return result;
     }
 
-    atk_widget_t *input = state->focused_input;
-    if (!input || !input->used)
+    atk_widget_t *focus = atk_state_focus_widget(state);
+    if (!focus || !focus->used)
     {
         return result;
     }
 
-    atk_text_input_event_t event = atk_text_input_handle_char(input, ch);
-    if (event == ATK_TEXT_INPUT_EVENT_CHANGED || event == ATK_TEXT_INPUT_EVENT_SUBMIT)
+    atk_key_response_t response = atk_widget_dispatch_key(focus, (int)ch, 0, 0);
+    if (response & ATK_KEY_RESPONSE_REDRAW)
     {
         result.redraw = true;
     }

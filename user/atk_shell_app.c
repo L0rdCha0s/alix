@@ -163,10 +163,6 @@ static bool shell_handle_mouse(atk_shell_app_t *app, const user_atk_event_t *eve
                                                              press,
                                                              release,
                                                              left);
-    if (press && app && app->terminal)
-    {
-        atk_terminal_focus(atk_state_get(), app->terminal);
-    }
     return result.redraw;
 }
 
@@ -177,10 +173,10 @@ static bool shell_handle_key(atk_shell_app_t *app, const user_atk_event_t *event
         return false;
     }
 
-    if (app->terminal)
+    if (app && app->terminal)
     {
         atk_state_t *state = atk_state_get();
-        if (state && state->focused_terminal != app->terminal)
+        if (state && atk_state_focus_widget(state) != app->terminal)
         {
             atk_terminal_focus(state, app->terminal);
         }
@@ -189,20 +185,8 @@ static bool shell_handle_key(atk_shell_app_t *app, const user_atk_event_t *event
     char ch = (char)event->data0;
     shell_log_key(ch);
 
-    bool redraw = false;
-    if (app && app->terminal && atk_terminal_handle_char(app->terminal, ch))
-    {
-        redraw = true;
-    }
-    else
-    {
-        atk_key_event_result_t result = atk_handle_key_char(ch);
-        if (result.redraw)
-        {
-            redraw = true;
-        }
-    }
-    return redraw;
+    atk_key_event_result_t result = atk_handle_key_char(ch);
+    return result.redraw;
 }
 
 static bool shell_init_ui(atk_shell_app_t *app)

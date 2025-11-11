@@ -18,7 +18,20 @@ typedef struct
 
 static void atk_image_invalidate(const atk_widget_t *image);
 
+static void image_draw_cb(const atk_state_t *state,
+                          const atk_widget_t *widget,
+                          int origin_x,
+                          int origin_y,
+                          void *context);
+static void image_destroy_cb(atk_widget_t *widget, void *context);
 static const atk_widget_vtable_t image_vtable = { 0 };
+static const atk_widget_ops_t g_image_ops = {
+    .destroy = image_destroy_cb,
+    .draw = image_draw_cb,
+    .hit_test = NULL,
+    .on_mouse = NULL,
+    .on_key = NULL
+};
 const atk_class_t ATK_IMAGE_CLASS = { "Image", &ATK_WIDGET_CLASS, &image_vtable, sizeof(atk_image_priv_t) };
 
 atk_widget_t *atk_window_add_image(atk_widget_t *window, int x, int y)
@@ -46,6 +59,7 @@ atk_widget_t *atk_window_add_image(atk_widget_t *window, int x, int y)
     image->height = 0;
     image->parent = window;
     image->used = true;
+    atk_widget_set_ops(image, &g_image_ops, NULL);
 
     atk_image_priv_t *image_priv = (atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
     if (!image_priv)
@@ -217,4 +231,22 @@ static void atk_image_invalidate(const atk_widget_t *image)
     int origin_x = image->parent ? image->parent->x : 0;
     int origin_y = image->parent ? image->parent->y : 0;
     atk_dirty_mark_rect(origin_x + image->x, origin_y + image->y, image->width, image->height);
+}
+static void image_draw_cb(const atk_state_t *state,
+                          const atk_widget_t *widget,
+                          int origin_x,
+                          int origin_y,
+                          void *context)
+{
+    (void)origin_x;
+    (void)origin_y;
+    (void)context;
+    atk_image_draw(state, widget);
+}
+
+static void image_destroy_cb(atk_widget_t *widget, void *context)
+{
+    (void)context;
+    atk_image_destroy(widget);
+    atk_widget_destroy(widget);
 }
