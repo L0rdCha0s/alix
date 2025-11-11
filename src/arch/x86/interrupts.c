@@ -31,6 +31,7 @@ static void fault_report(const char *reason,
                          bool has_error,
                          bool include_cr2,
                          uint64_t cr2_value);
+static void dump_exception_stacktrace(const interrupt_frame_t *frame);
 
 static inline uint64_t read_cr2(void)
 {
@@ -44,6 +45,73 @@ static void halt_forever(void)
     for (;;)
     {
         __asm__ volatile ("cli; hlt");
+    }
+}
+
+static bool is_canonical_address(uintptr_t addr)
+{
+    uint64_t upper = addr >> 48;
+    uint64_t sign = (addr >> 47) & 1ULL;
+    if (sign == 0)
+    {
+        return upper == 0;
+    }
+    return upper == 0xFFFFULL;
+}
+
+static void dump_kernel_stack(uintptr_t rsp, size_t max_entries)
+{
+    serial_write_string("  kernel stack trace:\r\n");
+    if (rsp == 0)
+    {
+        serial_write_string("    <rsp unavailable>\r\n");
+        return;
+    }
+
+    for (size_t i = 0; i < max_entries; ++i)
+    {
+        uintptr_t addr = rsp + i * sizeof(uintptr_t);
+        if (!is_canonical_address(addr) ||
+            !is_canonical_address(addr + sizeof(uintptr_t) - 1))
+        {
+            break;
+        }
+        uintptr_t value = *((const uintptr_t *)addr);
+        serial_write_string("    [");
+        serial_write_hex64(addr);
+        serial_write_string("] = 0x");
+        serial_write_hex64(value);
+        if (i == 0)
+        {
+            serial_write_string(" <-- rsp");
+        }
+        serial_write_string("\r\n");
+    }
+}
+
+static void dump_exception_stacktrace(const interrupt_frame_t *frame)
+{
+    if (!frame)
+    {
+        return;
+    }
+
+    bool user_mode = (frame->cs & 0x3u) == 0x3u;
+    if (user_mode)
+    {
+        process_t *proc = process_current();
+        if (proc)
+        {
+            process_dump_user_stack(proc, frame->rsp, 24, 8);
+        }
+        else
+        {
+            serial_write_string("  user stack: no current process\r\n");
+        }
+    }
+    else
+    {
+        dump_kernel_stack(frame->rsp, 24);
     }
 }
 
@@ -206,6 +274,7 @@ __attribute__((interrupt)) static void invalid_opcode_handler(interrupt_frame_t 
 __attribute__((interrupt)) static void general_protection_handler(interrupt_frame_t *frame, uint64_t error_code)
 {
     fault_report("general_protection", frame, error_code, true, false, 0);
+    dump_exception_stacktrace(frame);
     if (process_handle_exception(frame, "general_protection", error_code, false, 0))
     {
         return;
@@ -217,11 +286,7 @@ __attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *fra
 {
     uint64_t fault_address = read_cr2();
     fault_report("page_fault", frame, error_code, true, true, fault_address);
-    process_t *proc = process_current();
-    if (proc)
-    {
-        process_dump_user_stack(proc, frame ? frame->rsp : 0, 24, 8);
-    }
+    dump_exception_stacktrace(frame);
     if (process_handle_exception(frame, "page_fault", error_code, true, fault_address))
     {
         return;

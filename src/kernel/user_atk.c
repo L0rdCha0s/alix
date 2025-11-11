@@ -9,6 +9,10 @@
 #include "serial.h"
 #include "video.h"
 
+#ifndef USER_ATK_DEBUG
+#define USER_ATK_DEBUG 0
+#endif
+
 typedef struct user_atk_window
 {
     uint32_t handle;
@@ -40,11 +44,34 @@ static process_t *g_focus_priority_owner = NULL;
 static process_t *g_capture_priority_owner = NULL;
 static uint32_t g_next_handle = 1;
 
+#if USER_ATK_DEBUG
+static void user_atk_log(const char *msg, uint64_t value)
+{
+    serial_write_string("[user_atk] ");
+    serial_write_string(msg);
+    serial_write_string("0x");
+    serial_write_hex64(value);
+    serial_write_string("\r\n");
+}
+
+static void user_atk_log_pair(const char *msg, uint64_t a, uint64_t b)
+{
+    serial_write_string("[user_atk] ");
+    serial_write_string(msg);
+    serial_write_string(" a=0x");
+    serial_write_hex64(a);
+    serial_write_string(" b=0x");
+    serial_write_hex64(b);
+    serial_write_string("\r\n");
+}
+#else
 static void user_atk_log(const char *msg, uint64_t value)
 {
     (void)msg;
     (void)value;
 }
+#define user_atk_log_pair(msg, a, b) (void)0
+#endif
 
 static user_atk_window_t *user_atk_from_window(const atk_widget_t *window);
 static user_atk_window_t *user_atk_find(uint32_t handle, process_t *owner);
@@ -117,6 +144,9 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     {
         target = user_atk_from_window(hover_window);
     }
+#if USER_ATK_DEBUG
+    user_atk_log_pair("route_mouse hover", (uintptr_t)hover_window, (uintptr_t)(target ? target->window : NULL));
+#endif
     if (!target || target->closed || !target->window)
     {
         return false;
@@ -134,6 +164,10 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
 
     if (!inside && !g_capture_window)
     {
+#if USER_ATK_DEBUG
+        uint64_t coord = ((uint64_t)(uint32_t)rel_x << 32) | (uint32_t)(rel_y & 0xFFFFFFFFu);
+        user_atk_log_pair("route_mouse outside", coord, (uint64_t)target->handle);
+#endif
         return false;
     }
 
@@ -154,6 +188,9 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     {
         event.flags |= USER_ATK_MOUSE_FLAG_PRESS;
         g_capture_window = target;
+#if USER_ATK_DEBUG
+        user_atk_log_pair("capture begin", target->handle, (uint64_t)event.flags);
+#endif
     }
     if (released_edge)
     {
@@ -161,9 +198,16 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
         if (g_capture_window == target && !left_pressed)
         {
             g_capture_window = NULL;
+#if USER_ATK_DEBUG
+            user_atk_log_pair("capture end", target->handle, (uint64_t)event.flags);
+#endif
         }
     }
 
+#if USER_ATK_DEBUG
+    uint64_t coord = ((uint64_t)(uint32_t)rel_x << 32) | (uint32_t)(rel_y & 0xFFFFFFFFu);
+    user_atk_log_pair("queue mouse", coord, (uint64_t)event.flags);
+#endif
     user_atk_queue_event(target, &event);
     if (previous_capture != g_capture_window)
     {
@@ -178,6 +222,9 @@ bool user_atk_route_key_event(char ch)
     {
         return false;
     }
+#if USER_ATK_DEBUG
+    user_atk_log_pair("route_key", (uint64_t)(uint8_t)ch, g_focus_window->handle);
+#endif
 
     user_atk_event_t event = {
         .type = USER_ATK_EVENT_KEY,
@@ -379,6 +426,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
 
     atk_window_mark_dirty(window);
     video_request_refresh_window(window);
+    video_pump_events();
     user_atk_log("create handle=", win->handle);
     user_atk_focus_window(window);
     return (int64_t)win->handle;
@@ -415,6 +463,7 @@ int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byt
     {
         video_request_refresh();
     }
+    video_pump_events();
     return 0;
 }
 
@@ -438,12 +487,18 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
         if (!block || win->closed)
         {
             memset(event_out, 0, sizeof(*event_out));
+#if USER_ATK_DEBUG
+            user_atk_log_pair("sys_poll_event empty", handle, flags);
+#endif
             return 0;
         }
         wait_queue_wait(&win->event_waiters, user_atk_event_queue_empty, win);
     }
 
     *event_out = event;
+#if USER_ATK_DEBUG
+    user_atk_log_pair("sys_poll_event", handle, event_out->type);
+#endif
     return 1;
 }
 
@@ -480,6 +535,14 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
     {
         return;
     }
+#if USER_ATK_DEBUG
+    user_atk_log_pair("enqueue event", win->handle, event->type);
+    if (event->type == USER_ATK_EVENT_MOUSE)
+    {
+        uint64_t coord = ((uint64_t)(uint32_t)event->x << 32) | (uint32_t)(event->y & 0xFFFFFFFFu);
+        user_atk_log_pair("enqueue mouse", coord, event->flags);
+    }
+#endif
 
     win->events[win->event_tail] = *event;
     win->event_tail = (win->event_tail + 1) % USER_ATK_EVENT_QUEUE_MAX;
@@ -498,11 +561,16 @@ static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_eve
     {
         return false;
     }
-
     if (out_event)
     {
         *out_event = win->events[win->event_head];
     }
+#if USER_ATK_DEBUG
+    if (out_event)
+    {
+        user_atk_log_pair("dequeue event", win->handle, out_event->type);
+    }
+#endif
     win->event_head = (win->event_head + 1) % USER_ATK_EVENT_QUEUE_MAX;
     win->event_count--;
     return true;

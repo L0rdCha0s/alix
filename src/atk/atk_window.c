@@ -13,6 +13,9 @@
 #include "atk/atk_terminal.h"
 #endif
 #include "atk/atk_font.h"
+#ifdef KERNEL_BUILD
+#include "user_atk_host.h"
+#endif
 
 /* Forward decl for compilers if video.h doesn't expose it (no harm if duplicated). */
 static void atk_log(const char *msg);
@@ -30,6 +33,7 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
                                        void *context);
 static void action_window_close(atk_widget_t *button, void *context);
 static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window);
+static void window_layout_close_button(atk_widget_t *window, atk_window_priv_t *priv);
 static atk_window_priv_t *window_priv_mut(atk_widget_t *window);
 static const atk_window_priv_t *window_priv(const atk_widget_t *window);
 static void window_destroy(atk_widget_t *window);
@@ -210,6 +214,12 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
     {
         return NULL;
     }
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window))
+    {
+        return NULL;
+    }
+#endif
 
     atk_window_priv_t *priv = window_priv_mut(window);
     if (!priv)
@@ -219,8 +229,24 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
 
     ATK_LIST_FOR_EACH_REVERSE(node, &priv->children)
     {
+#ifndef KERNEL_BUILD
+        if ((uintptr_t)node < ATK_USER_POINTER_MIN)
+        {
+            continue;
+        }
+#endif
         atk_widget_t *child = (atk_widget_t *)node->value;
-        if (!child || !child->used)
+        if (!child)
+        {
+            continue;
+        }
+#ifndef KERNEL_BUILD
+        if ((uintptr_t)child < ATK_USER_POINTER_MIN)
+        {
+            continue;
+        }
+#endif
+        if (!child->used)
         {
             continue;
         }
@@ -290,6 +316,7 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     }
 
     atk_list_init(&priv->buttons);
+    priv->close_button = NULL;
     atk_list_init(&priv->children);
     atk_list_init(&priv->text_inputs);
     atk_list_init(&priv->terminals);
@@ -479,6 +506,28 @@ static void atk_log(const char *msg)
     serial_write_string("\r\n");
 }
 
+static void window_layout_close_button(atk_widget_t *window, atk_window_priv_t *priv)
+{
+    if (!window || !priv || !priv->close_button)
+    {
+        return;
+    }
+
+    atk_widget_t *btn = priv->close_button;
+    if (!btn || !btn->used)
+    {
+        return;
+    }
+
+    int margin = 4;
+    int target_x = window->width - margin - btn->width;
+    if (target_x < margin)
+    {
+        target_x = margin;
+    }
+    btn->x = target_x;
+}
+
 static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window)
 {
     if (!state || !window || !window->used)
@@ -487,11 +536,14 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
     }
 
     const atk_theme_t *theme = &state->theme;
-    const atk_window_priv_t *priv = window_priv(window);
+    atk_window_priv_t *priv_mut = window_priv_mut((atk_widget_t *)window);
+    const atk_window_priv_t *priv = (const atk_window_priv_t *)priv_mut;
     bool chrome_visible = priv ? priv->chrome_visible : true;
 
     if (chrome_visible)
     {
+        window_layout_close_button((atk_widget_t *)window, priv_mut);
+
         video_draw_rect(window->x - ATK_WINDOW_BORDER,
                         window->y - ATK_WINDOW_BORDER,
                         window->width + ATK_WINDOW_BORDER * 2,
@@ -738,6 +790,11 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
         btn_priv->list_node = button_node;
     }
 
+    if (action == action_window_close)
+    {
+        priv->close_button = btn;
+    }
+
     return btn;
 }
 
@@ -795,6 +852,7 @@ static void window_destroy(atk_widget_t *window)
         priv->list_node = 0;
         priv->user_context = NULL;
         priv->on_destroy = NULL;
+        priv->close_button = NULL;
     }
 
     atk_widget_destroy(window);

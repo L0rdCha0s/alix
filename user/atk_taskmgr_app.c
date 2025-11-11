@@ -256,6 +256,10 @@ static void taskmgr_refresh_processes(atk_taskmgr_app_t *app)
         atk_list_view_clear(app->process_list);
         return;
     }
+    if ((size_t)count > TASKMGR_PROCESS_CAP)
+    {
+        count = TASKMGR_PROCESS_CAP;
+    }
 
     atk_list_view_set_row_count(app->process_list, (size_t)count);
     for (ssize_t i = 0; i < count; ++i)
@@ -288,6 +292,10 @@ static void taskmgr_refresh_network(atk_taskmgr_app_t *app)
     {
         atk_list_view_clear(app->network_list);
         return;
+    }
+    if ((size_t)count > TASKMGR_NET_CAP)
+    {
+        count = TASKMGR_NET_CAP;
     }
 
     atk_list_view_set_row_count(app->network_list, (size_t)count);

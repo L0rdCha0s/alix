@@ -3,6 +3,26 @@
 #include "libc.h"
 #include "usyscall.h"
 #include "video_surface.h"
+#include "serial.h"
+
+#ifndef ATK_USER_TRACE
+#define ATK_USER_TRACE 0
+#endif
+
+#if ATK_USER_TRACE
+static void atk_user_trace(const char *msg, uint64_t a, uint64_t b)
+{
+    serial_write_string("[atk_user] ");
+    serial_write_string(msg);
+    serial_write_string(" a=0x");
+    serial_write_hex64(a);
+    serial_write_string(" b=0x");
+    serial_write_hex64(b);
+    serial_write_string("\r\n");
+}
+#else
+#define atk_user_trace(msg, a, b) (void)0
+#endif
 
 bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t width, uint32_t height)
 {
@@ -49,6 +69,7 @@ bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t wi
     win->height = height;
 
     video_surface_attach(buffer, width, height);
+    atk_user_trace("window_open handle", win->handle, (uintptr_t)buffer);
     return true;
 }
 
@@ -58,6 +79,7 @@ bool atk_user_present(const atk_user_window_t *win)
     {
         return false;
     }
+    atk_user_trace("present", win->handle, win->buffer_bytes);
     return sys_ui_present(win->handle, win->buffer, win->buffer_bytes) == 0;
 }
 
@@ -67,7 +89,18 @@ bool atk_user_wait_event(const atk_user_window_t *win, user_atk_event_t *event)
     {
         return false;
     }
-    return sys_ui_poll_event(win->handle, event, USER_ATK_POLL_FLAG_BLOCK) == 1;
+    bool ok = sys_ui_poll_event(win->handle, event, USER_ATK_POLL_FLAG_BLOCK) == 1;
+#if ATK_USER_TRACE
+    if (ok)
+    {
+        atk_user_trace("wait_event type", event->type, ((uint64_t)(uint32_t)event->x << 32) | (uint32_t)(event->y & 0xFFFFFFFFu));
+    }
+    else
+    {
+        atk_user_trace("wait_event empty", win->handle, 0);
+    }
+#endif
+    return ok;
 }
 
 bool atk_user_poll_event(const atk_user_window_t *win, user_atk_event_t *event)
@@ -76,7 +109,14 @@ bool atk_user_poll_event(const atk_user_window_t *win, user_atk_event_t *event)
     {
         return false;
     }
-    return sys_ui_poll_event(win->handle, event, 0u) == 1;
+    bool ok = sys_ui_poll_event(win->handle, event, 0u) == 1;
+#if ATK_USER_TRACE
+    if (ok)
+    {
+        atk_user_trace("poll_event type", event->type, ((uint64_t)(uint32_t)event->x << 32) | (uint32_t)(event->y & 0xFFFFFFFFu));
+    }
+#endif
+    return ok;
 }
 
 void atk_user_close(atk_user_window_t *win)

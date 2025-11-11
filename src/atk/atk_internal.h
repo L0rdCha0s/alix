@@ -26,6 +26,14 @@ typedef struct atk_rect
 #define ATK_BUTTON_TITLE_MAX 32
 #define ATK_MENU_BAR_DEFAULT_HEIGHT 40
 
+#ifndef ATK_USER_POINTER_MIN
+#ifdef KERNEL_BUILD
+#define ATK_USER_POINTER_MIN 0ULL
+#else
+#define ATK_USER_POINTER_MIN 0x0000008000000000ULL
+#endif
+#endif
+
 typedef enum
 {
     ATK_BUTTON_STYLE_TITLE_INSIDE = 0,
@@ -49,6 +57,7 @@ typedef struct
 {
     char title[32];
     atk_list_t buttons;
+    atk_widget_t *close_button;
     atk_list_node_t *list_node;
     atk_list_t children;
     atk_list_t text_inputs;
