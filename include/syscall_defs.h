@@ -57,6 +57,8 @@ typedef struct
     uint8_t is_idle;
     char process_name[SYSCALL_PROCESS_NAME_MAX];
     char thread_name[SYSCALL_PROCESS_NAME_MAX];
+    uint64_t heap_used_bytes;
+    uint64_t heap_committed_bytes;
 } syscall_process_info_t;
 
 typedef struct

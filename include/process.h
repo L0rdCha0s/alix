@@ -59,6 +59,8 @@ typedef struct process_info
     bool is_idle;
     uint32_t time_slice_remaining;
     int stdout_fd;
+    uint64_t heap_used_bytes;
+    uint64_t heap_committed_bytes;
 } process_info_t;
 
 typedef struct process_user_layout

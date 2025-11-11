@@ -23,6 +23,7 @@ typedef struct
     atk_widget_t *window;
     atk_widget_t *tab_view;
     atk_widget_t *process_list;
+    atk_widget_t *memory_list;
     atk_widget_t *network_list;
     bool running;
     uint32_t refresh_counter;
@@ -247,22 +248,17 @@ static void taskmgr_format_ipv4(uint32_t addr, char *out, size_t len)
     taskmgr_copy_string(out, len, buf);
 }
 
-static void taskmgr_refresh_processes(atk_taskmgr_app_t *app)
+static void taskmgr_populate_process_table(atk_taskmgr_app_t *app,
+                                           const syscall_process_info_t *procs,
+                                           size_t count)
 {
-    syscall_process_info_t procs[TASKMGR_PROCESS_CAP];
-    ssize_t count = sys_proc_snapshot(procs, TASKMGR_PROCESS_CAP);
-    if (count < 0)
+    if (!app || !app->process_list)
     {
-        atk_list_view_clear(app->process_list);
         return;
     }
-    if ((size_t)count > TASKMGR_PROCESS_CAP)
-    {
-        count = TASKMGR_PROCESS_CAP;
-    }
 
-    atk_list_view_set_row_count(app->process_list, (size_t)count);
-    for (ssize_t i = 0; i < count; ++i)
+    atk_list_view_set_row_count(app->process_list, count);
+    for (size_t i = 0; i < count; ++i)
     {
         const syscall_process_info_t *info = &procs[i];
         char cells[9][32];
@@ -279,9 +275,60 @@ static void taskmgr_refresh_processes(atk_taskmgr_app_t *app)
 
         for (int col = 0; col < 9; ++col)
         {
-            atk_list_view_set_cell_text(app->process_list, (size_t)i, (size_t)col, cells[col]);
+            atk_list_view_set_cell_text(app->process_list, i, (size_t)col, cells[col]);
         }
     }
+}
+
+static void taskmgr_populate_memory_table(atk_taskmgr_app_t *app,
+                                          const syscall_process_info_t *procs,
+                                          size_t count)
+{
+    if (!app || !app->memory_list)
+    {
+        return;
+    }
+
+    atk_list_view_set_row_count(app->memory_list, count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const syscall_process_info_t *info = &procs[i];
+        char cells[5][32];
+
+        taskmgr_copy_string(cells[0], sizeof(cells[0]), info->is_idle ? "*" : "");
+        taskmgr_format_u64(info->pid, cells[1], sizeof(cells[1]));
+        taskmgr_copy_string(cells[2], sizeof(cells[2]), info->process_name);
+        taskmgr_format_bytes(info->heap_used_bytes, cells[3], sizeof(cells[3]));
+        taskmgr_format_bytes(info->heap_committed_bytes, cells[4], sizeof(cells[4]));
+
+        for (int col = 0; col < 5; ++col)
+        {
+            atk_list_view_set_cell_text(app->memory_list, i, (size_t)col, cells[col]);
+        }
+    }
+}
+
+static void taskmgr_refresh_processes(atk_taskmgr_app_t *app)
+{
+    syscall_process_info_t procs[TASKMGR_PROCESS_CAP];
+    ssize_t count = sys_proc_snapshot(procs, TASKMGR_PROCESS_CAP);
+    if (count < 0)
+    {
+        atk_list_view_clear(app->process_list);
+        if (app->memory_list)
+        {
+            atk_list_view_clear(app->memory_list);
+        }
+        return;
+    }
+    if ((size_t)count > TASKMGR_PROCESS_CAP)
+    {
+        count = TASKMGR_PROCESS_CAP;
+    }
+
+    size_t rows = (size_t)count;
+    taskmgr_populate_process_table(app, procs, rows);
+    taskmgr_populate_memory_table(app, procs, rows);
 }
 
 static void taskmgr_refresh_network(atk_taskmgr_app_t *app)
@@ -392,6 +439,22 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
     atk_list_view_configure_columns(process_list, PROCESS_COLUMNS, sizeof(PROCESS_COLUMNS) / sizeof(PROCESS_COLUMNS[0]));
     atk_tab_view_add_page(tab_view, "Processes", process_list);
     app->process_list = process_list;
+
+    atk_widget_t *memory_list = atk_list_view_create();
+    if (!memory_list)
+    {
+        return false;
+    }
+    static const atk_list_view_column_def_t MEMORY_COLUMNS[] = {
+        { "*", ATK_COL(2) },
+        { "PID", ATK_COL(6) },
+        { "PROC", ATK_COL(20) },
+        { "HEAP", ATK_COL(12) },
+        { "COMMIT", ATK_COL(12) },
+    };
+    atk_list_view_configure_columns(memory_list, MEMORY_COLUMNS, sizeof(MEMORY_COLUMNS) / sizeof(MEMORY_COLUMNS[0]));
+    atk_tab_view_add_page(tab_view, "Memory", memory_list);
+    app->memory_list = memory_list;
 
     atk_widget_t *network_list = atk_list_view_create();
     if (!network_list)

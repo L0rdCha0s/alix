@@ -82,6 +82,8 @@ static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t c
         out->time_slice_remaining = info->time_slice_remaining;
         out->stdout_fd = info->stdout_fd;
         out->is_idle = info->is_idle ? 1u : 0u;
+        out->heap_used_bytes = info->heap_used_bytes;
+        out->heap_committed_bytes = info->heap_committed_bytes;
 
         const char *proc_name = info->name ? info->name : "";
         const char *thread_name = info->thread_name ? info->thread_name : "";

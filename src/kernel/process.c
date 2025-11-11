@@ -3182,6 +3182,22 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity)
             info->time_slice_remaining = 0;
         }
         info->is_current = (proc == g_current_process);
+
+        if (proc->is_user && proc->user_heap_base != 0 && proc->user_heap_brk >= proc->user_heap_base)
+        {
+            uintptr_t committed = proc->user_heap_committed;
+            if (committed < proc->user_heap_base)
+            {
+                committed = proc->user_heap_base;
+            }
+            info->heap_used_bytes = (uint64_t)(proc->user_heap_brk - proc->user_heap_base);
+            info->heap_committed_bytes = (uint64_t)(committed - proc->user_heap_base);
+        }
+        else
+        {
+            info->heap_used_bytes = 0;
+            info->heap_committed_bytes = 0;
+        }
     }
 
     cpu_restore_flags(flags);
