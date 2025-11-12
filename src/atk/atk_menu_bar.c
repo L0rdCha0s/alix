@@ -50,6 +50,57 @@ static void atk_menu_bar_clock_tick(void *context);
 static bool g_clock_timer_registered = false;
 #endif
 
+#ifdef KERNEL_BUILD
+static void menu_log(const char *msg)
+{
+    serial_write_string("[menu] ");
+    serial_write_string(msg ? msg : "(null)");
+    serial_write_string("\r\n");
+}
+#else
+static inline void menu_log(const char *msg)
+{
+    (void)msg;
+}
+#endif
+
+#ifdef KERNEL_BUILD
+static void menu_log_pair(const char *msg, const char *detail)
+{
+    serial_write_string("[menu_bar] ");
+    serial_write_string(msg ? msg : "(null)");
+    serial_write_string(": ");
+    serial_write_string(detail ? detail : "(null)");
+    serial_write_string("\r\n");
+}
+#else
+static inline void menu_log_pair(const char *msg, const char *detail)
+{
+    (void)msg;
+    (void)detail;
+}
+#endif
+
+#ifdef KERNEL_BUILD
+static void menu_log_coords(const char *msg, int x, int y)
+{
+    serial_write_string("[menu_bar] ");
+    serial_write_string(msg ? msg : "(null)");
+    serial_write_string(" x=");
+    serial_write_hex64((uint64_t)(int64_t)x);
+    serial_write_string(" y=");
+    serial_write_hex64((uint64_t)(int64_t)y);
+    serial_write_string("\r\n");
+}
+#else
+static inline void menu_log_coords(const char *msg, int x, int y)
+{
+    (void)msg;
+    (void)x;
+    (void)y;
+}
+#endif
+
 void atk_menu_bar_reset(atk_state_t *state)
 {
     if (!state)
@@ -327,6 +378,19 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
     }
 
     int height = atk_menu_bar_height(state);
+#ifdef KERNEL_BUILD
+    if (pressed_edge || released_edge)
+    {
+        menu_log_coords("event", cursor_x, cursor_y);
+        serial_write_string("[menu_bar] flags press=");
+        serial_write_hex64(pressed_edge ? 1 : 0);
+        serial_write_string(" release=");
+        serial_write_hex64(released_edge ? 1 : 0);
+        serial_write_string(" left=");
+        serial_write_hex64(left_pressed ? 1 : 0);
+        serial_write_string("\r\n");
+    }
+#endif
     if (height <= 0)
     {
         if (redraw_out)
@@ -347,6 +411,9 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
 
     if (pressed_edge && inside_bar && hover_entry)
     {
+#ifdef KERNEL_BUILD
+        menu_log_pair("press entry", hover_entry->title);
+#endif
         consumed = true;
         if (state->menu_open_entry == hover_entry)
         {
@@ -381,7 +448,10 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
         }
         redraw = true;
     }
-    else if (pressed_edge && state->menu_open_entry && !inside_bar)
+    else if (pressed_edge &&
+             state->menu_open_entry &&
+             !inside_bar &&
+             !atk_menu_contains(state->menu_open_entry->menu, cursor_x, cursor_y))
     {
         atk_menu_hide(state->menu_open_entry->menu);
         state->menu_open_entry = NULL;
@@ -402,8 +472,24 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
 
         if (released_edge)
         {
+#ifdef KERNEL_BUILD
+            menu_log_pair("release", state->menu_open_entry->title);
+            menu_log_coords("release coords", cursor_x, cursor_y);
+            serial_write_string("[menu_bar] menu bounds x=");
+            serial_write_hex64((uint64_t)(int64_t)state->menu_open_entry->menu->x);
+            serial_write_string(" y=");
+            serial_write_hex64((uint64_t)(int64_t)state->menu_open_entry->menu->y);
+            serial_write_string(" w=");
+            serial_write_hex64((uint64_t)(int64_t)state->menu_open_entry->menu->width);
+            serial_write_string(" h=");
+            serial_write_hex64((uint64_t)(int64_t)state->menu_open_entry->menu->height);
+            serial_write_string("\r\n");
+#endif
             if (atk_menu_contains(state->menu_open_entry->menu, cursor_x, cursor_y))
             {
+#ifdef KERNEL_BUILD
+                menu_log("release inside menu");
+#endif
                 if (atk_menu_handle_click(state->menu_open_entry->menu, cursor_x, cursor_y))
                 {
                     atk_menu_hide(state->menu_open_entry->menu);
@@ -415,6 +501,9 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
             }
             else if (!inside_bar)
             {
+#ifdef KERNEL_BUILD
+                menu_log("release outside menu");
+#endif
                 atk_menu_hide(state->menu_open_entry->menu);
                 state->menu_open_entry = NULL;
                 redraw = true;
@@ -622,12 +711,15 @@ static void menu_action_welcome(void *context)
     atk_state_t *state = (atk_state_t *)context;
     if (!state)
     {
+        menu_log("welcome: missing state");
         return;
     }
 
+    menu_log("welcome: invoked");
     atk_widget_t *window = atk_window_create_at(state, VIDEO_WIDTH / 2, state->menu_bar_height + 120);
     if (!window)
     {
+        menu_log("welcome: window creation failed");
         return;
     }
 
@@ -646,8 +738,12 @@ static void menu_action_welcome(void *context)
                            "Networking now comes up automatically thanks to\n"
                            "the new startup scripts (dhclient rtl0).\n"
                            "Use the top menu bar to find Help items like this.");
+        menu_log("welcome: label set");
     }
+    atk_window_bring_to_front(state, window);
     atk_window_mark_dirty(window);
+    video_request_refresh_window(window);
+    menu_log("welcome: window queued for redraw");
 }
 
 static int atk_menu_bar_measure_title(const char *title)

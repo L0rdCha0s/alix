@@ -4,6 +4,9 @@
 #include "video.h"
 #include "libc.h"
 #include "atk/atk_font.h"
+#ifdef KERNEL_BUILD
+#include "serial.h"
+#endif
 
 #define ATK_MENU_ITEM_PADDING_X 12
 
@@ -50,6 +53,26 @@ static const atk_widget_ops_t g_menu_ops = {
     .on_key = NULL
 };
 const atk_class_t ATK_MENU_CLASS = { "Menu", &ATK_WIDGET_CLASS, &menu_vtable, sizeof(atk_menu_priv_t) };
+
+#ifdef KERNEL_BUILD
+static void atk_menu_debug_log(const char *msg, const char *detail)
+{
+    serial_write_string("[menu] ");
+    serial_write_string(msg ? msg : "(null)");
+    if (detail)
+    {
+        serial_write_string(": ");
+        serial_write_string(detail);
+    }
+    serial_write_string("\r\n");
+}
+#else
+static inline void atk_menu_debug_log(const char *msg, const char *detail)
+{
+    (void)msg;
+    (void)detail;
+}
+#endif
 
 static atk_menu_priv_t *menu_priv_mut(atk_widget_t *menu);
 static const atk_menu_priv_t *menu_priv_const(const atk_widget_t *menu);
@@ -231,6 +254,9 @@ bool atk_menu_handle_click(atk_widget_t *menu, int px, int py)
 
     priv->highlighted_index = -1;
     atk_menu_item_t *item = &priv->items[index];
+#ifdef KERNEL_BUILD
+    atk_menu_debug_log("click item", item->title);
+#endif
     if (item->action)
     {
         item->action(item->context);
