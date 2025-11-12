@@ -566,6 +566,13 @@ static void wolf_render_scene(void)
     atk_user_present(&g_window);
 }
 
+static bool wolf_handle_resize(uint32_t width, uint32_t height)
+{
+    (void)width;
+    (void)height;
+    return g_window.buffer && g_window.width > 0 && g_window.height > 0;
+}
+
 static bool wolf_handle_key(char ch, bool *running)
 {
     bool updated = false;
@@ -635,6 +642,9 @@ int main(void)
         {
             case USER_ATK_EVENT_KEY:
                 needs_redraw = wolf_handle_key((char)event.data0, &running);
+                break;
+            case USER_ATK_EVENT_RESIZE:
+                needs_redraw = wolf_handle_resize((uint32_t)event.data0, (uint32_t)event.data1);
                 break;
             case USER_ATK_EVENT_CLOSE:
                 running = false;

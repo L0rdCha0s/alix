@@ -8,6 +8,7 @@
 #include "libc.h"
 #include "video.h"
 #include "usyscall.h"
+#include "user_atk_defs.h"
 
 #define SHELL_WINDOW_WIDTH   VIDEO_WIDTH
 #define SHELL_WINDOW_HEIGHT  VIDEO_HEIGHT
@@ -27,6 +28,7 @@ static void shell_apply_theme(atk_state_t *state);
 static void shell_log_key(char ch);
 static bool shell_state_has_dirty(void);
 static bool shell_dispatch_event(atk_shell_app_t *app, const user_atk_event_t *event);
+static bool shell_handle_resize(atk_shell_app_t *app, uint32_t width, uint32_t height);
 
 static void shell_apply_theme(atk_state_t *state)
 {
@@ -50,6 +52,20 @@ static void shell_render(atk_shell_app_t *app)
     }
     atk_render();
     atk_user_present(&app->remote);
+}
+
+static bool shell_handle_resize(atk_shell_app_t *app, uint32_t width, uint32_t height)
+{
+    if (!app || !app->window || width == 0 || height == 0)
+    {
+        return false;
+    }
+
+    atk_widget_t *window = app->window;
+    window->width = (int)width;
+    window->height = (int)height;
+    atk_window_request_layout(window);
+    return true;
 }
 
 static void shell_append(atk_shell_app_t *app, const char *text)
@@ -184,7 +200,6 @@ static bool shell_handle_key(atk_shell_app_t *app, const user_atk_event_t *event
     }
 
     char ch = (char)event->data0;
-    shell_log_key(ch);
 
     atk_key_event_result_t result = atk_handle_key_char(ch);
     return result.redraw;
@@ -221,6 +236,11 @@ static bool shell_init_ui(atk_shell_app_t *app)
     {
         return false;
     }
+    atk_widget_set_layout(terminal,
+                          ATK_WIDGET_ANCHOR_LEFT |
+                          ATK_WIDGET_ANCHOR_RIGHT |
+                          ATK_WIDGET_ANCHOR_TOP |
+                          ATK_WIDGET_ANCHOR_BOTTOM);
 
     atk_terminal_reset(terminal);
     atk_terminal_set_submit_handler(terminal, shell_on_submit, app);
@@ -247,6 +267,10 @@ static bool shell_dispatch_event(atk_shell_app_t *app, const user_atk_event_t *e
             return shell_handle_mouse(app, event);
         case USER_ATK_EVENT_KEY:
             return shell_handle_key(app, event);
+        case USER_ATK_EVENT_RESIZE:
+            return shell_handle_resize(app,
+                                       (uint32_t)event->data0,
+                                       (uint32_t)event->data1);
         case USER_ATK_EVENT_CLOSE:
             app->running = false;
             return false;
@@ -273,7 +297,11 @@ int main(void)
     app.shell_handle = -1;
     app.running = true;
 
-    if (!atk_user_window_open(&app.remote, "ATK Shell", SHELL_WINDOW_WIDTH, SHELL_WINDOW_HEIGHT))
+    if (!atk_user_window_open_with_flags(&app.remote,
+                                         "ATK Shell",
+                                         SHELL_WINDOW_WIDTH,
+                                         SHELL_WINDOW_HEIGHT,
+                                         USER_ATK_WINDOW_FLAG_RESIZABLE))
     {
         printf("atk_shell: failed to open remote window\n");
         return 1;

@@ -27,6 +27,9 @@ void atk_terminal_mark_dirty(atk_widget_t *terminal);
 void atk_terminal_get_dimensions(const atk_widget_t *terminal, int *rows, int *cols);
 void atk_terminal_draw(const struct atk_state *state, const atk_widget_t *terminal);
 void atk_terminal_destroy(atk_widget_t *terminal);
+#ifndef KERNEL_BUILD
+bool atk_terminal_handle_resize(atk_widget_t *terminal);
+#endif
 
 extern const atk_class_t ATK_TERMINAL_CLASS;
 

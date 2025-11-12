@@ -672,6 +672,12 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
         {
             atk_list_view_relayout(child);
         }
+#ifndef KERNEL_BUILD
+        else if (atk_widget_is_a(child, &ATK_TERMINAL_CLASS))
+        {
+            atk_terminal_handle_resize(child);
+        }
+#endif
     }
 }
 

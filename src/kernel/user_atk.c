@@ -49,14 +49,6 @@ static uint32_t g_next_handle = 1;
 
 static void user_atk_present_dump(const char *label, const uint16_t *pixels, size_t byte_len)
 {
-    serial_write_string("[user_atk][present] ");
-    serial_write_string(label ? label : "buffer");
-    serial_write_string(" ptr=0x");
-    serial_write_hex64((uint64_t)(uintptr_t)pixels);
-    serial_write_string(" bytes=0x");
-    serial_write_hex64((uint64_t)byte_len);
-    serial_write_string(" head=");
-
     size_t words = byte_len / sizeof(uint16_t);
     if (words > USER_ATK_PRESENT_SAMPLE_WORDS)
     {

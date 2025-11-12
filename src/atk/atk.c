@@ -215,19 +215,6 @@ void atk_enter_mode(void)
 #endif
 
 #ifndef ATK_NO_DESKTOP_APPS
-
-
-    atk_desktop_add_button(state,
-                           140,
-                           80,
-                           88,
-                           88,
-                           "Shell",
-                           ATK_BUTTON_STYLE_TITLE_BELOW,
-                           true,
-                           action_open_shell,
-                           state);
-
     atk_desktop_add_button(state,
                            240,
                            80,
@@ -963,13 +950,6 @@ static void atk_update_cursor_shape(uint32_t edges)
 }
 
 #ifndef ATK_NO_DESKTOP_APPS
-static void action_open_shell(atk_widget_t *button, void *context)
-{
-    (void)button;
-    (void)context;
-    atk_schedule_user_launch("atk_shell_launcher", &g_atk_shell_launch);
-}
-
 static void action_open_task_manager(atk_widget_t *button, void *context)
 {
     (void)button;

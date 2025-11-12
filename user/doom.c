@@ -198,6 +198,7 @@ static bool doom_read_bool(const char *path, bool *value_out);
 static bool doom_write_bool(const char *path, bool value);
 static bool doom_override_repeat(doom_keyboard_repeat_t *backup);
 static void doom_restore_repeat(const doom_keyboard_repeat_t *backup);
+static bool doom_handle_resize(uint32_t width, uint32_t height);
 static bool doom_handle_key(char ch, bool *running);
 
 static inline float doom_fabs(float value)
@@ -1413,6 +1414,18 @@ static void doom_render_scene(void)
     atk_user_present(&g_window);
 }
 
+static bool doom_handle_resize(uint32_t width, uint32_t height)
+{
+    (void)width;
+    (void)height;
+    if (!g_window.buffer)
+    {
+        return false;
+    }
+    doom_update_projection();
+    return true;
+}
+
 static bool doom_handle_key(char ch, bool *running)
 {
     if (ch >= 'A' && ch <= 'Z')
@@ -1502,6 +1515,9 @@ int main(void)
         {
             case USER_ATK_EVENT_KEY:
                 needs_redraw |= doom_handle_key((char)event.data0, &running);
+                break;
+            case USER_ATK_EVENT_RESIZE:
+                needs_redraw = doom_handle_resize((uint32_t)event.data0, (uint32_t)event.data1) || needs_redraw;
                 break;
             case USER_ATK_EVENT_CLOSE:
                 running = false;
