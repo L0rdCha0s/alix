@@ -525,11 +525,6 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
         atk_window_close(state, window);
         return -1;
     }
-    atk_widget_set_layout(image,
-                          ATK_WIDGET_ANCHOR_LEFT |
-                          ATK_WIDGET_ANCHOR_TOP |
-                          ATK_WIDGET_ANCHOR_RIGHT |
-                          ATK_WIDGET_ANCHOR_BOTTOM);
 
     size_t pixel_bytes = (size_t)desc.width * (size_t)desc.height * sizeof(uint16_t);
     uint16_t *pixels = (uint16_t *)malloc(pixel_bytes);
@@ -548,6 +543,12 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
         atk_window_close(state, window);
         return -1;
     }
+
+    atk_widget_set_layout(image,
+                          ATK_WIDGET_ANCHOR_LEFT |
+                          ATK_WIDGET_ANCHOR_TOP |
+                          ATK_WIDGET_ANCHOR_RIGHT |
+                          ATK_WIDGET_ANCHOR_BOTTOM);
 
     user_atk_window_t *win = (user_atk_window_t *)calloc(1, sizeof(user_atk_window_t));
     if (!win)
