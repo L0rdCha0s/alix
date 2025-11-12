@@ -12,6 +12,7 @@ typedef enum
     USER_ATK_EVENT_MOUSE = 1,
     USER_ATK_EVENT_KEY = 2,
     USER_ATK_EVENT_CLOSE = 3,
+    USER_ATK_EVENT_RESIZE = 4,
 } user_atk_event_type_t;
 
 #define USER_ATK_MOUSE_FLAG_PRESS   (1u << 0)
@@ -25,7 +26,7 @@ typedef struct
     int32_t x;
     int32_t y;
     uint32_t data0;
-    uint32_t data1;
+    uint32_t data1;  /* resize events: data0=width, data1=height */
 } user_atk_event_t;
 
 typedef struct
@@ -37,5 +38,6 @@ typedef struct
 } user_atk_window_desc_t;
 
 #define USER_ATK_POLL_FLAG_BLOCK (1u << 0)
+#define USER_ATK_WINDOW_FLAG_RESIZABLE (1u << 0)
 
 #endif /* USER_ATK_DEFS_H */

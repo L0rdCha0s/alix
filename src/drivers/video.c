@@ -169,7 +169,7 @@ static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
                                const uint8_t *src, int stride_bytes, int src_x0, int src_y0);
 
 /* --------- Cursor shape --------- */
-static const char *cursor_shape[CURSOR_H] = {
+static const char *const cursor_shape_arrow[CURSOR_H] = {
     "X...............",
     "XX..............",
     "XOX.............",
@@ -187,6 +187,85 @@ static const char *cursor_shape[CURSOR_H] = {
     "X...............",
     "................"
 };
+
+static const char *const cursor_shape_resize_h[CURSOR_H] = {
+    "................",
+    "................",
+    "..X..........X..",
+    "..XX........XX..",
+    "..XOX......XOX..",
+    "..XOOX....XOOX..",
+    "..XOOOX..XOOOX..",
+    "..XOOOX..XOOOX..",
+    "..XOOX....XOOX..",
+    "..XOX......XOX..",
+    "..XX........XX..",
+    "..X..........X..",
+    "................",
+    "................",
+    "................",
+    "................"
+};
+
+static const char *const cursor_shape_resize_v[CURSOR_H] = {
+    ".......XX.......",
+    "......XOOX......",
+    ".....XOOOOX.....",
+    "....XOOOOOOX....",
+    "...XOOOOOOOOX...",
+    "..XOOOOOOOOOOX..",
+    ".XOOOOOOOOOOOOX.",
+    "..XOOOOOOOOOOX..",
+    "...XOOOOOOOOX...",
+    "....XOOOOOOX....",
+    ".....XOOOOX.....",
+    "......XOOX......",
+    ".......XX.......",
+    ".......XX.......",
+    ".......XX.......",
+    ".......XX......."
+};
+
+static const char *const cursor_shape_resize_ne_sw[CURSOR_H] = {
+    "..............X.",
+    ".............XOX",
+    "............XOOX",
+    "...........XOOX.",
+    "..........XOOX..",
+    ".........XOOX...",
+    "........XOOX....",
+    ".......XOOX.....",
+    "......XOOX......",
+    ".....XOOX.......",
+    "....XOOX........",
+    "...XOOX.........",
+    "..XOOX..........",
+    ".XOOX...........",
+    "XOX.............",
+    ".X.............."
+};
+
+static const char *const cursor_shape_resize_nw_se[CURSOR_H] = {
+    ".X..............",
+    "XOX.............",
+    ".XOOX...........",
+    "..XOOX..........",
+    "...XOOX.........",
+    "....XOOX........",
+    ".....XOOX.......",
+    "......XOOX......",
+    ".......XOOX.....",
+    "........XOOX....",
+    ".........XOOX...",
+    "..........XOOX..",
+    "...........XOOX.",
+    "............XOOX",
+    ".............XOX",
+    "..............X."
+};
+
+static const char *const *cursor_shape_active = cursor_shape_arrow;
+static video_cursor_shape_t cursor_shape_kind = VIDEO_CURSOR_ARROW;
 
 static uint16_t cursor_color_primary(void)
 {
@@ -307,7 +386,8 @@ static void cursor_draw_overlay(void)
             int dst_x = cursor_x + col;
             if ((unsigned)dst_x >= VIDEO_WIDTH) continue;
 
-            char pixel = cursor_shape[row][col];
+            const char *shape_row = cursor_shape_active ? cursor_shape_active[row] : cursor_shape_arrow[row];
+            char pixel = shape_row[col];
             if (pixel == '.') continue; /* leave background as last flushed */
 
             uint16_t *p = (uint16_t *)&framebuffer[dst_y * VIDEO_WIDTH + dst_x];
@@ -625,6 +705,36 @@ static void video_perform_refresh(void)
 
 out:
     video_irq_restore(irq_state);
+}
+
+void video_cursor_set_shape(video_cursor_shape_t shape)
+{
+    if (shape == cursor_shape_kind)
+    {
+        return;
+    }
+
+    cursor_shape_kind = shape;
+    switch (shape)
+    {
+        case VIDEO_CURSOR_RESIZE_H:
+            cursor_shape_active = cursor_shape_resize_h;
+            break;
+        case VIDEO_CURSOR_RESIZE_V:
+            cursor_shape_active = cursor_shape_resize_v;
+            break;
+        case VIDEO_CURSOR_RESIZE_DIAG_NE_SW:
+            cursor_shape_active = cursor_shape_resize_ne_sw;
+            break;
+        case VIDEO_CURSOR_RESIZE_DIAG_NW_SE:
+            cursor_shape_active = cursor_shape_resize_nw_se;
+            break;
+        case VIDEO_CURSOR_ARROW:
+        default:
+            cursor_shape_active = cursor_shape_arrow;
+            cursor_shape_kind = VIDEO_CURSOR_ARROW;
+            break;
+    }
 }
 
 /* --------- Mode entry/exit & loop --------- */

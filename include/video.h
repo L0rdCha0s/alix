@@ -12,6 +12,15 @@
 
 struct atk_widget;
 
+typedef enum
+{
+    VIDEO_CURSOR_ARROW = 0,
+    VIDEO_CURSOR_RESIZE_H,
+    VIDEO_CURSOR_RESIZE_V,
+    VIDEO_CURSOR_RESIZE_DIAG_NE_SW,
+    VIDEO_CURSOR_RESIZE_DIAG_NW_SE
+} video_cursor_shape_t;
+
 void video_init(void);
 bool video_enter_mode(void);
 void video_run_loop(void);
@@ -32,6 +41,7 @@ bool video_is_active(void);
 void video_request_refresh(void);
 void video_request_refresh_window(struct atk_widget *window);
 void video_pump_events(void);
+void video_cursor_set_shape(video_cursor_shape_t shape);
 
 
 #endif

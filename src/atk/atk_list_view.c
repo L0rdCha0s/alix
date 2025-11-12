@@ -4,12 +4,14 @@
 #include "video.h"
 #include "libc.h"
 #include "atk/atk_font.h"
+#include <stdint.h>
 
 #if ATK_LIST_VIEW_MAX_COLUMNS < 10
 #error "ATK_LIST_VIEW_MAX_COLUMNS must be at least 10 to support task manager views"
 #endif
 
 #define ATK_LIST_VIEW_MIN_COLUMN_WIDTH      (ATK_FONT_WIDTH * 4)
+#define ATK_LIST_VIEW_RESIZE_MARGIN         4
 
 typedef struct
 {
@@ -20,6 +22,7 @@ typedef struct
 {
     char title[ATK_LIST_VIEW_COLUMN_TITLE_MAX];
     int width;
+    bool flexible;
 } atk_list_view_column_t;
 
 typedef struct
@@ -33,6 +36,12 @@ typedef struct
     int row_height;
     int cell_padding;
     atk_list_node_t *list_node;
+    bool resizing;
+    size_t resizing_column;
+    int resize_start_x;
+    int resize_width_left;
+    int resize_width_right;
+    int last_layout_width;
 } atk_list_view_priv_t;
 
 static void list_view_draw_cb(const atk_state_t *state,
@@ -42,22 +51,31 @@ static void list_view_draw_cb(const atk_state_t *state,
                               void *context);
 static void list_view_destroy_cb(atk_widget_t *widget, void *context);
 
+static atk_list_view_priv_t *list_priv_mut(atk_widget_t *list);
+static const atk_list_view_priv_t *list_priv(const atk_widget_t *list);
+static void list_view_copy_column_widths(const atk_list_view_priv_t *priv, int *out_widths);
+static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv);
+static size_t list_view_hit_separator(const atk_widget_t *list,
+                                      const atk_list_view_priv_t *priv,
+                                      int cursor_x,
+                                      int cursor_y);
+static bool list_view_apply_column_resize(atk_widget_t *list,
+                                          atk_list_view_priv_t *priv,
+                                          int cursor_x);
+static atk_mouse_response_t list_view_mouse_cb(atk_widget_t *widget,
+                                               const atk_mouse_event_t *event,
+                                               void *context);
+static bool list_view_ensure_capacity(atk_list_view_priv_t *priv, size_t rows);
+
 static const atk_widget_vtable_t list_view_vtable = { 0 };
 static const atk_widget_ops_t g_list_view_ops = {
     .destroy = list_view_destroy_cb,
     .draw = list_view_draw_cb,
     .hit_test = NULL,
-    .on_mouse = NULL,
+    .on_mouse = list_view_mouse_cb,
     .on_key = NULL
 };
 const atk_class_t ATK_LIST_VIEW_CLASS = { "ListView", &ATK_WIDGET_CLASS, &list_view_vtable, sizeof(atk_list_view_priv_t) };
-
-static atk_list_view_priv_t *list_priv_mut(atk_widget_t *list);
-static const atk_list_view_priv_t *list_priv(const atk_widget_t *list);
-static void list_view_compute_column_widths(const atk_widget_t *list,
-                                            const atk_list_view_priv_t *priv,
-                                            int *out_widths);
-static bool list_view_ensure_capacity(atk_list_view_priv_t *priv, size_t rows);
 
 atk_widget_t *atk_list_view_create(void)
 {
@@ -91,6 +109,12 @@ atk_widget_t *atk_list_view_create(void)
     priv->row_height = line_height + 4;
     priv->cell_padding = 4;
     priv->list_node = NULL;
+    priv->resizing = false;
+    priv->resizing_column = 0;
+    priv->resize_start_x = 0;
+    priv->resize_width_left = 0;
+    priv->resize_width_right = 0;
+    priv->last_layout_width = 0;
 
     return widget;
 }
@@ -160,10 +184,20 @@ bool atk_list_view_configure_columns(atk_widget_t *list, const atk_list_view_col
         {
             col->title[0] = '\0';
         }
-        col->width = def->width;
+        if (def->width <= 0)
+        {
+            col->width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
+            col->flexible = true;
+        }
+        else
+        {
+            col->width = def->width;
+            col->flexible = false;
+        }
     }
 
     priv->row_count = 0;
+    priv->last_layout_width = 0;
     return true;
 }
 
@@ -235,11 +269,14 @@ size_t atk_list_view_column_count(const atk_widget_t *list)
 
 void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
 {
-    const atk_list_view_priv_t *priv = list_priv(list);
-    if (!state || !list || !list->used || !priv || list->width <= 0 || list->height <= 0)
+    atk_list_view_priv_t *priv_mut = list_priv_mut((atk_widget_t *)list);
+    const atk_list_view_priv_t *priv = (const atk_list_view_priv_t *)priv_mut;
+    if (!state || !list || !list->used || !priv_mut || list->width <= 0 || list->height <= 0)
     {
         return;
     }
+
+    atk_state_theme_validate(state, "atk_list_view_draw");
 
     int origin_x = 0;
     int origin_y = 0;
@@ -259,8 +296,12 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
                     list->width,
                     header_h,
                     theme->button_face);
+    if (priv_mut->last_layout_width != list->width)
+    {
+        list_view_sync_layout((atk_widget_t *)list, priv_mut);
+    }
     int column_widths[ATK_LIST_VIEW_MAX_COLUMNS] = { 0 };
-    list_view_compute_column_widths(list, priv, column_widths);
+    list_view_copy_column_widths(priv, column_widths);
 
     int column_x = origin_x;
     for (size_t c = 0; c < priv->column_count; ++c)
@@ -361,6 +402,16 @@ void atk_list_view_destroy(atk_widget_t *list)
     priv->list_node = NULL;
 }
 
+void atk_list_view_relayout(atk_widget_t *list)
+{
+    atk_list_view_priv_t *priv = list_priv_mut(list);
+    if (!priv)
+    {
+        return;
+    }
+    list_view_sync_layout(list, priv);
+}
+
 static void list_view_draw_cb(const atk_state_t *state,
                               const atk_widget_t *widget,
                               int origin_x,
@@ -378,6 +429,192 @@ static void list_view_destroy_cb(atk_widget_t *widget, void *context)
     (void)context;
     atk_list_view_destroy(widget);
     atk_widget_destroy(widget);
+}
+
+static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv)
+{
+    if (!list || !priv || priv->column_count == 0)
+    {
+        return;
+    }
+
+    int total_width = list->width;
+    if (total_width < 0)
+    {
+        total_width = 0;
+    }
+
+    int used_width = 0;
+    size_t flex_count = 0;
+    for (size_t i = 0; i < priv->column_count; ++i)
+    {
+        if (priv->columns[i].flexible)
+        {
+            flex_count++;
+        }
+        else
+        {
+            used_width += priv->columns[i].width;
+        }
+    }
+
+    int remaining = total_width - used_width;
+    if (flex_count > 0)
+    {
+        int share = (flex_count > 0) ? (remaining / (int)flex_count) : 0;
+        for (size_t i = 0; i < priv->column_count; ++i)
+        {
+            if (!priv->columns[i].flexible)
+            {
+                continue;
+            }
+            int width = share;
+            if (--flex_count == 0)
+            {
+                width = remaining;
+            }
+            if (width < ATK_LIST_VIEW_MIN_COLUMN_WIDTH)
+            {
+                width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
+            }
+            priv->columns[i].width = width;
+            remaining -= width;
+        }
+    }
+
+    if (remaining > 0 && priv->column_count > 0)
+    {
+        priv->columns[priv->column_count - 1].width += remaining;
+        remaining = 0;
+    }
+    else if (remaining < 0)
+    {
+        int deficit = -remaining;
+        for (size_t idx = priv->column_count; idx-- > 0 && deficit > 0;)
+        {
+            int available = priv->columns[idx].width - ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
+            if (available <= 0)
+            {
+                continue;
+            }
+            int delta = (available >= deficit) ? deficit : available;
+            priv->columns[idx].width -= delta;
+            deficit -= delta;
+        }
+    }
+
+    priv->last_layout_width = total_width;
+}
+
+static size_t list_view_hit_separator(const atk_widget_t *list,
+                                      const atk_list_view_priv_t *priv,
+                                      int cursor_x,
+                                      int cursor_y)
+{
+    if (!list || !priv || priv->column_count < 2)
+    {
+        return SIZE_MAX;
+    }
+    if (cursor_y < 0 || cursor_y >= priv->header_height)
+    {
+        return SIZE_MAX;
+    }
+    int boundary = 0;
+    for (size_t i = 0; i < priv->column_count - 1; ++i)
+    {
+        boundary += priv->columns[i].width;
+        if (cursor_x >= boundary - ATK_LIST_VIEW_RESIZE_MARGIN &&
+            cursor_x <= boundary + ATK_LIST_VIEW_RESIZE_MARGIN)
+        {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
+static bool list_view_apply_column_resize(atk_widget_t *list,
+                                          atk_list_view_priv_t *priv,
+                                          int cursor_x)
+{
+    if (!priv || !priv->resizing || priv->resizing_column >= priv->column_count - 1)
+    {
+        return false;
+    }
+
+    int delta = cursor_x - priv->resize_start_x;
+    int left_width = priv->resize_width_left + delta;
+    int right_width = priv->resize_width_right - delta;
+
+    if (left_width < ATK_LIST_VIEW_MIN_COLUMN_WIDTH)
+    {
+        right_width -= (ATK_LIST_VIEW_MIN_COLUMN_WIDTH - left_width);
+        left_width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
+    }
+    if (right_width < ATK_LIST_VIEW_MIN_COLUMN_WIDTH)
+    {
+        left_width -= (ATK_LIST_VIEW_MIN_COLUMN_WIDTH - right_width);
+        if (left_width < ATK_LIST_VIEW_MIN_COLUMN_WIDTH)
+        {
+            left_width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
+        }
+        right_width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
+    }
+
+    atk_list_view_column_t *left = &priv->columns[priv->resizing_column];
+    atk_list_view_column_t *right = &priv->columns[priv->resizing_column + 1];
+
+    if (left->width == left_width && right->width == right_width)
+    {
+        return false;
+    }
+
+    left->width = left_width;
+    right->width = right_width;
+    left->flexible = false;
+    right->flexible = false;
+    priv->last_layout_width = list->width;
+    return true;
+}
+
+static atk_mouse_response_t list_view_mouse_cb(atk_widget_t *widget,
+                                               const atk_mouse_event_t *event,
+                                               void *context)
+{
+    (void)context;
+    atk_list_view_priv_t *priv = list_priv_mut(widget);
+    if (!priv || !event)
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
+
+    if (event->pressed_edge)
+    {
+        size_t column = list_view_hit_separator(widget, priv, event->local_x, event->local_y);
+        if (column != SIZE_MAX)
+        {
+            priv->resizing = true;
+            priv->resizing_column = column;
+            priv->resize_start_x = event->cursor_x;
+            priv->resize_width_left = priv->columns[column].width;
+            priv->resize_width_right = priv->columns[column + 1].width;
+            return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_CAPTURE;
+        }
+    }
+    else if (event->released_edge && priv->resizing)
+    {
+        priv->resizing = false;
+        return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_RELEASE | ATK_MOUSE_RESPONSE_REDRAW;
+    }
+    else if (event->left_pressed && priv->resizing)
+    {
+        if (list_view_apply_column_resize(widget, priv, event->cursor_x))
+        {
+            return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
+        }
+        return ATK_MOUSE_RESPONSE_HANDLED;
+    }
+
+    return ATK_MOUSE_RESPONSE_NONE;
 }
 
 static atk_list_view_priv_t *list_priv_mut(atk_widget_t *list)
@@ -434,69 +671,14 @@ static bool list_view_ensure_capacity(atk_list_view_priv_t *priv, size_t rows)
     return true;
 }
 
-static void list_view_compute_column_widths(const atk_widget_t *list,
-                                            const atk_list_view_priv_t *priv,
-                                            int *out_widths)
+static void list_view_copy_column_widths(const atk_list_view_priv_t *priv, int *out_widths)
 {
-    if (!list || !priv || !out_widths)
+    if (!priv || !out_widths)
     {
         return;
     }
-
-    int total_width = list->width;
-    if (total_width < 0)
-    {
-        total_width = 0;
-    }
-
-    size_t flex_remaining = 0;
     for (size_t i = 0; i < priv->column_count; ++i)
     {
-        if (priv->columns[i].width <= 0)
-        {
-            flex_remaining++;
-        }
-    }
-
-    int consumed = 0;
-
-    for (size_t i = 0; i < priv->column_count; ++i)
-    {
-        int width = priv->columns[i].width;
-        if (width <= 0)
-        {
-            int remaining_space = total_width - consumed;
-            size_t remaining_columns = flex_remaining > 0 ? flex_remaining : 1;
-            width = (remaining_columns > 0) ? (remaining_space / (int)remaining_columns) : 0;
-            if (width < ATK_LIST_VIEW_MIN_COLUMN_WIDTH)
-            {
-                width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
-            }
-            if (flex_remaining > 0)
-            {
-                flex_remaining--;
-            }
-        }
-
-        if (width < 0)
-        {
-            width = 0;
-        }
-        if (consumed + width > total_width)
-        {
-            width = total_width - consumed;
-            if (width < 0)
-            {
-                width = 0;
-            }
-        }
-
-        out_widths[i] = width;
-        consumed += width;
-    }
-
-    if (consumed < total_width && priv->column_count > 0)
-    {
-        out_widths[priv->column_count - 1] += (total_width - consumed);
+        out_widths[i] = priv->columns[i].width;
     }
 }

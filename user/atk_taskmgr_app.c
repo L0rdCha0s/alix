@@ -10,6 +10,7 @@
 #include "libc.h"
 #include "video.h"
 #include "usyscall.h"
+#include "user_atk_defs.h"
 
 #define ATK_COL(chars) ((chars) * ATK_FONT_WIDTH)
 
@@ -419,6 +420,11 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
         return false;
     }
     app->tab_view = tab_view;
+    atk_widget_set_layout(tab_view,
+                          ATK_WIDGET_ANCHOR_LEFT |
+                          ATK_WIDGET_ANCHOR_TOP |
+                          ATK_WIDGET_ANCHOR_RIGHT |
+                          ATK_WIDGET_ANCHOR_BOTTOM);
 
     atk_widget_t *process_list = atk_list_view_create();
     if (!process_list)
@@ -513,13 +519,28 @@ static void taskmgr_render(atk_taskmgr_app_t *app)
     atk_user_present(&app->remote);
 }
 
+static void taskmgr_handle_resize(atk_taskmgr_app_t *app, uint32_t width, uint32_t height)
+{
+    if (!app || !app->window)
+    {
+        return;
+    }
+    app->window->width = (int)width;
+    app->window->height = (int)height;
+    atk_window_request_layout(app->window);
+}
+
 int main(void)
 {
     atk_taskmgr_app_t app;
     memset(&app, 0, sizeof(app));
     app.running = true;
 
-    if (!atk_user_window_open(&app.remote, "Task Manager", 780, 520))
+    if (!atk_user_window_open_with_flags(&app.remote,
+                                         "Task Manager",
+                                         780,
+                                         520,
+                                         USER_ATK_WINDOW_FLAG_RESIZABLE))
     {
         printf("atk_taskmgr: failed to open remote window\n");
         return 1;
@@ -554,6 +575,10 @@ int main(void)
                     break;
                 case USER_ATK_EVENT_CLOSE:
                     app.running = false;
+                    break;
+                case USER_ATK_EVENT_RESIZE:
+                    taskmgr_handle_resize(&app, (uint32_t)event.data0, (uint32_t)event.data1);
+                    needs_render = true;
                     break;
                 default:
                     break;

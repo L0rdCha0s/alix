@@ -19,6 +19,13 @@ typedef struct
 
 void atk_list_init(atk_list_t *list);
 void atk_list_clear(atk_list_t *list, void (*deleter)(void *value));
+void atk_list_clear_tag(atk_list_t *list, void (*deleter)(void *value), const char *tag);
+
+#ifndef ATK_LIST_DISABLE_AUTOTAG
+#undef atk_list_clear
+#define atk_list_clear(list, deleter) \
+    atk_list_clear_tag((list), (deleter), __func__)
+#endif
 atk_list_node_t *atk_list_push_back(atk_list_t *list, void *value);
 void atk_list_remove(atk_list_t *list, atk_list_node_t *node);
 atk_list_node_t *atk_list_find(const atk_list_t *list, const void *value);

@@ -29,6 +29,7 @@ size_t atk_list_view_row_count(const atk_widget_t *list);
 size_t atk_list_view_column_count(const atk_widget_t *list);
 void atk_list_view_draw(const struct atk_state *state, const atk_widget_t *list);
 void atk_list_view_destroy(atk_widget_t *list);
+void atk_list_view_relayout(atk_widget_t *list);
 
 extern const atk_class_t ATK_LIST_VIEW_CLASS;
 

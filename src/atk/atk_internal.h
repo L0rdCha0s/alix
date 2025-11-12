@@ -23,8 +23,19 @@ typedef struct atk_rect
 #define ATK_WINDOW_TITLE_TEXT_Y_OFFSET 6
 #define ATK_FONT_WIDTH 8
 #define ATK_FONT_HEIGHT 16
+#define ATK_WINDOW_MIN_WIDTH 160
+#define ATK_WINDOW_MIN_HEIGHT (ATK_WINDOW_TITLE_HEIGHT + 96)
+#define ATK_WINDOW_RESIZE_MARGIN 6
 #define ATK_BUTTON_TITLE_MAX 32
+#define ATK_MAX_WINDOWS 16
+#define ATK_MAX_WINDOW_BUTTONS 8
+#define ATK_MAX_DESKTOP_BUTTONS 16
 #define ATK_MENU_BAR_DEFAULT_HEIGHT 40
+#define ATK_GUARD_MAGIC 0x6AEBC0DE5AFECAFEULL
+
+#ifndef ATK_DEBUG
+#define ATK_DEBUG 0
+#endif
 
 #ifndef ATK_USER_POINTER_MIN
 #ifdef KERNEL_BUILD
@@ -91,16 +102,28 @@ typedef struct
 
 typedef struct atk_state
 {
+    uint64_t windows_guard_front;
     atk_list_t windows;
+    uint64_t windows_guard_back;
     int next_window_id;
     atk_widget_t *dragging_window;
     int drag_offset_x;
     int drag_offset_y;
+    atk_widget_t *resizing_window;
+    uint32_t resize_edges;
+    int resize_start_cursor_x;
+    int resize_start_cursor_y;
+    int resize_start_x;
+    int resize_start_y;
+    int resize_start_width;
+    int resize_start_height;
 
     atk_widget_t *pressed_window_button_window;
     atk_widget_t *pressed_window_button;
 
+    uint64_t desktop_guard_front;
     atk_list_t desktop_buttons;
+    uint64_t desktop_guard_back;
     atk_widget_t *pressed_desktop_button;
     atk_widget_t *dragging_desktop_button;
     int desktop_drag_offset_x;
@@ -110,10 +133,15 @@ typedef struct atk_state
     atk_widget_t *focus_widget;
     atk_widget_t *mouse_capture_widget;
 
+    uint64_t theme_guard_front;
     atk_theme_t theme;
+    uint64_t theme_guard_back;
+    uint64_t theme_crc;
     bool exit_requested;
 
+    uint64_t menu_guard_front;
     atk_list_t menu_entries;
+    uint64_t menu_guard_back;
     struct atk_menu_bar_entry *menu_open_entry;
     struct atk_menu_bar_entry *menu_hover_entry;
     atk_widget_t *menu_logo;
@@ -150,5 +178,19 @@ void atk_state_set_mouse_capture(atk_state_t *state, atk_widget_t *widget);
 void atk_state_release_mouse_capture(atk_state_t *state, const atk_widget_t *widget);
 atk_widget_t *atk_state_focus_widget(const atk_state_t *state);
 void atk_state_set_focus_widget(atk_state_t *state, atk_widget_t *widget);
+void atk_state_guard_init(atk_state_t *state);
+void atk_guard_reset(uint64_t *front, uint64_t *back);
+void atk_guard_check(uint64_t *front, uint64_t *back, const char *label);
+void atk_state_theme_commit(atk_state_t *state);
+bool atk_state_theme_validate(const atk_state_t *state, const char *label);
+#if ATK_DEBUG
+void atk_state_theme_log(const atk_state_t *state, const char *label);
+#else
+static inline void atk_state_theme_log(const atk_state_t *state, const char *label)
+{
+    (void)state;
+    (void)label;
+}
+#endif
 
 #endif

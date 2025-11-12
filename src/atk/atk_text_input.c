@@ -295,6 +295,8 @@ void atk_text_input_draw(const atk_state_t *state, const atk_widget_t *input)
         return;
     }
 
+    atk_state_theme_validate(state, "atk_text_input_draw");
+
     int origin_x = input->parent ? input->parent->x : 0;
     int origin_y = input->parent ? input->parent->y : 0;
     int x = origin_x + input->x;

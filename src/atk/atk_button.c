@@ -101,6 +101,8 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
         return;
     }
 
+    atk_state_theme_validate(state, "atk_button_draw");
+
     const atk_button_priv_t *priv = button_priv(widget);
     const atk_theme_t *theme = &state->theme;
 

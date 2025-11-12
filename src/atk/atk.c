@@ -24,7 +24,7 @@
 #endif
 
 static void atk_apply_default_theme(atk_state_t *state);
-static void action_exit_to_text(atk_widget_t *button, void *context);
+static __attribute__((unused)) void action_exit_to_text(atk_widget_t *button, void *context);
 static void atk_build_mouse_event(const atk_widget_t *widget,
                                   int cursor_x,
                                   int cursor_y,
@@ -54,22 +54,23 @@ typedef struct
     const char *path;
     const char *name;
 } atk_user_launch_info_t;
-
-static const atk_user_launch_info_t g_atk_shell_launch = {
-    .path = "/usr/bin/atk_shell.elf",
-    .name = "atk_shell"
-};
-
-static const atk_user_launch_info_t g_atk_taskmgr_launch = {
-    .path = "/usr/bin/atk_taskmgr.elf",
-    .name = "atk_taskmgr"
-};
-
-static const atk_user_launch_info_t g_atk_demo_launch = {
-    .path = "/usr/bin/atk_demo.elf",
-    .name = "atk_demo"
-};
 #endif
+
+#define ATK_RESIZE_EDGE_LEFT   (1u << 0)
+#define ATK_RESIZE_EDGE_TOP    (1u << 1)
+#define ATK_RESIZE_EDGE_RIGHT  (1u << 2)
+#define ATK_RESIZE_EDGE_BOTTOM (1u << 3)
+
+static uint32_t atk_window_resize_edges_at(const atk_widget_t *window, int cursor_x, int cursor_y);
+static bool atk_window_begin_resize(atk_state_t *state,
+                                    atk_widget_t *window,
+                                    uint32_t edges,
+                                    int cursor_x,
+                                    int cursor_y,
+                                    atk_mouse_event_result_t *result);
+static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_y);
+static video_cursor_shape_t atk_cursor_shape_for_edges(uint32_t edges);
+static void atk_update_cursor_shape(uint32_t edges);
 
 static void atk_build_mouse_event(const atk_widget_t *widget,
                                   int cursor_x,
@@ -171,6 +172,7 @@ static void atk_clear_focus_widget(atk_state_t *state)
 void atk_init(void)
 {
     atk_state_t *state = atk_state_get();
+    atk_state_guard_init(state);
     atk_window_reset_all(state);
     atk_desktop_reset(state);
     atk_menu_bar_reset(state);
@@ -183,13 +185,34 @@ void atk_enter_mode(void)
     atk_state_t *state = atk_state_get();
 
     atk_apply_default_theme(state);
+#if ATK_DEBUG
+    atk_state_theme_log(state, "post default theme");
+#endif
 
     atk_window_reset_all(state);
+#if ATK_DEBUG
+    atk_state_theme_log(state, "post window reset");
+#endif
     atk_desktop_reset(state);
+#if ATK_DEBUG
+    atk_state_theme_log(state, "post desktop reset");
+#endif
     atk_menu_bar_reset(state);
+#if ATK_DEBUG
+    atk_state_theme_log(state, "post menu bar reset");
+#endif
     atk_menu_bar_build_default(state);
+#if ATK_DEBUG
+    atk_state_theme_log(state, "post menu bar build");
+#endif
     atk_menu_bar_enable_clock_timer();
+#if ATK_DEBUG
+    atk_state_theme_log(state, "post menu bar timer");
+#endif
     atk_dirty_mark_all();
+#if ATK_DEBUG
+    atk_state_theme_log(state, "post dirty mark");
+#endif
 
 #ifndef ATK_NO_DESKTOP_APPS
 
@@ -248,6 +271,15 @@ void atk_render(void)
     if (!state)
     {
         return;
+    }
+
+    if (!atk_state_theme_validate(state, "atk_render"))
+    {
+#ifdef KERNEL_BUILD
+        serial_write_string("[atk][theme] reapplying default theme\r\n");
+#endif
+        atk_apply_default_theme(state);
+        atk_dirty_mark_all();
     }
 
     atk_rect_t region;
@@ -327,6 +359,29 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                      &result);
     }
 
+    atk_widget_t *hover_resize_window = NULL;
+    uint32_t hover_resize_edges = 0;
+    ATK_LIST_FOR_EACH_REVERSE(resize_node, &state->windows)
+    {
+        atk_widget_t *win = (atk_widget_t *)resize_node->value;
+        if (!win || !win->used)
+        {
+            continue;
+        }
+        if (!atk_window_supports_resize(win))
+        {
+            continue;
+        }
+        uint32_t edges = atk_window_resize_edges_at(win, cursor_x, cursor_y);
+        if (edges == 0)
+        {
+            continue;
+        }
+        hover_resize_window = win;
+        hover_resize_edges = edges;
+        break;
+    }
+
     if (!capture_consumed)
     {
         if (pressed_edge)
@@ -339,6 +394,16 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
             state->pressed_desktop_button = NULL;
 
             bool handled = false;
+
+            if (hover_resize_window && hover_resize_edges)
+            {
+                handled = atk_window_begin_resize(state,
+                                                  hover_resize_window,
+                                                  hover_resize_edges,
+                                                  cursor_x,
+                                                  cursor_y,
+                                                  &result);
+            }
 
             ATK_LIST_FOR_EACH_REVERSE(win_node, &state->windows)
             {
@@ -467,6 +532,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         }
         else if (released_edge)
         {
+            if (state->resizing_window)
+            {
+                state->resizing_window = NULL;
+                state->resize_edges = 0;
+            }
             state->dragging_window = NULL;
             if (state->dragging_desktop_button)
             {
@@ -500,7 +570,14 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         }
     }
 
-    if (left_pressed && state->dragging_window && state->dragging_window->used)
+    if (left_pressed && state->resizing_window && state->resizing_window->used)
+    {
+        if (atk_window_resize_drag(state, cursor_x, cursor_y))
+        {
+            result.redraw = true;
+        }
+    }
+    else if (left_pressed && state->dragging_window && state->dragging_window->used)
     {
         atk_widget_t *win = state->dragging_window;
         int old_x = win->x;
@@ -568,6 +645,17 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         user_atk_focus_window(NULL);
     }
 
+    uint32_t cursor_edges = 0;
+    if (state->resizing_window && state->resize_edges)
+    {
+        cursor_edges = state->resize_edges;
+    }
+    else
+    {
+        cursor_edges = hover_resize_edges;
+    }
+    atk_update_cursor_shape(cursor_edges);
+
     if (state->exit_requested)
     {
         result.exit_video = true;
@@ -584,6 +672,7 @@ static void atk_apply_default_theme(atk_state_t *state)
         return;
     }
 
+    atk_guard_check(&state->theme_guard_front, &state->theme_guard_back, "state->theme");
     state->theme.background = video_make_color(0x3B, 0x6E, 0xA5);
     state->theme.window_border = video_make_color(0x20, 0x20, 0x20);
     state->theme.window_title = video_make_color(0x30, 0x60, 0xA0);
@@ -601,7 +690,10 @@ static void atk_apply_default_theme(atk_state_t *state)
     state->theme.menu_dropdown_border = video_make_color(0x30, 0x30, 0x30);
     state->theme.menu_dropdown_text = video_make_color(0x20, 0x20, 0x20);
     state->theme.menu_dropdown_highlight = video_make_color(0x36, 0x58, 0x8A);
-
+    atk_state_theme_commit(state);
+#if ATK_DEBUG
+    atk_state_theme_log(state, "default theme");
+#endif
 }
 
 static void action_exit_to_text(atk_widget_t *button, void *context)
@@ -641,6 +733,233 @@ atk_key_event_result_t atk_handle_key_char(char ch)
         result.redraw = true;
     }
     return result;
+}
+
+#ifndef ATK_NO_DESKTOP_APPS
+static const atk_user_launch_info_t g_atk_shell_launch = {
+    .path = "/usr/bin/atk_shell.elf",
+    .name = "atk_shell"
+};
+
+static const atk_user_launch_info_t g_atk_taskmgr_launch = {
+    .path = "/usr/bin/atk_taskmgr.elf",
+    .name = "atk_taskmgr"
+};
+
+static const atk_user_launch_info_t g_atk_demo_launch = {
+    .path = "/usr/bin/atk_demo.elf",
+    .name = "atk_demo"
+};
+#endif
+
+static uint32_t atk_window_resize_edges_at(const atk_widget_t *window, int cursor_x, int cursor_y)
+{
+    if (!window || !window->used)
+    {
+        return 0;
+    }
+
+    const atk_window_priv_t *priv = (const atk_window_priv_t *)atk_widget_priv(window, &ATK_WINDOW_CLASS);
+    bool chrome_visible = priv ? priv->chrome_visible : true;
+    int border = chrome_visible ? ATK_WINDOW_BORDER : 0;
+    int margin = ATK_WINDOW_RESIZE_MARGIN;
+
+    int left = window->x - border;
+    int top = window->y - border;
+    int right = left + window->width + border * 2;
+    int bottom = top + window->height + border * 2;
+
+    uint32_t edges = 0;
+
+    if (cursor_x >= left - margin && cursor_x <= left + margin &&
+        cursor_y >= top - margin && cursor_y <= bottom + margin)
+    {
+        edges |= ATK_RESIZE_EDGE_LEFT;
+    }
+    if (cursor_x >= right - margin && cursor_x <= right + margin &&
+        cursor_y >= top - margin && cursor_y <= bottom + margin)
+    {
+        edges |= ATK_RESIZE_EDGE_RIGHT;
+    }
+    if (cursor_y >= top - margin && cursor_y <= top + margin &&
+        cursor_x >= left - margin && cursor_x <= right + margin)
+    {
+        edges |= ATK_RESIZE_EDGE_TOP;
+    }
+    if (cursor_y >= bottom - margin && cursor_y <= bottom + margin &&
+        cursor_x >= left - margin && cursor_x <= right + margin)
+    {
+        edges |= ATK_RESIZE_EDGE_BOTTOM;
+    }
+
+    if ((edges & (ATK_RESIZE_EDGE_LEFT | ATK_RESIZE_EDGE_RIGHT)) ==
+        (ATK_RESIZE_EDGE_LEFT | ATK_RESIZE_EDGE_RIGHT))
+    {
+        edges &= ~(ATK_RESIZE_EDGE_LEFT | ATK_RESIZE_EDGE_RIGHT);
+    }
+    if ((edges & (ATK_RESIZE_EDGE_TOP | ATK_RESIZE_EDGE_BOTTOM)) ==
+        (ATK_RESIZE_EDGE_TOP | ATK_RESIZE_EDGE_BOTTOM))
+    {
+        edges &= ~(ATK_RESIZE_EDGE_TOP | ATK_RESIZE_EDGE_BOTTOM);
+    }
+
+    return edges;
+}
+
+static bool atk_window_begin_resize(atk_state_t *state,
+                                    atk_widget_t *window,
+                                    uint32_t edges,
+                                    int cursor_x,
+                                    int cursor_y,
+                                    atk_mouse_event_result_t *result)
+{
+    if (!state || !window || edges == 0)
+    {
+        return false;
+    }
+
+    atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
+    bool moved = atk_window_bring_to_front(state, window);
+    if (moved)
+    {
+        atk_window_mark_dirty(window);
+        if (prev_top && prev_top != window)
+        {
+            atk_window_mark_dirty(prev_top);
+        }
+        if (result)
+        {
+            result->redraw = true;
+        }
+    }
+
+    state->resizing_window = window;
+    state->resize_edges = edges;
+    state->resize_start_cursor_x = cursor_x;
+    state->resize_start_cursor_y = cursor_y;
+    state->resize_start_x = window->x;
+    state->resize_start_y = window->y;
+    state->resize_start_width = window->width;
+    state->resize_start_height = window->height;
+    state->dragging_window = NULL;
+    return true;
+}
+
+static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_y)
+{
+    if (!state || !state->resizing_window || state->resize_edges == 0)
+    {
+        return false;
+    }
+
+    atk_widget_t *win = state->resizing_window;
+    if (!win->used)
+    {
+        return false;
+    }
+
+    int old_left = win->x - ATK_WINDOW_BORDER;
+    int old_top = win->y - ATK_WINDOW_BORDER;
+    int old_width = win->width + ATK_WINDOW_BORDER * 2;
+    int old_height = win->height + ATK_WINDOW_BORDER * 2;
+
+    int new_x = state->resize_start_x;
+    int new_y = state->resize_start_y;
+    int new_width = state->resize_start_width;
+    int new_height = state->resize_start_height;
+    int delta_x = cursor_x - state->resize_start_cursor_x;
+    int delta_y = cursor_y - state->resize_start_cursor_y;
+
+    if (state->resize_edges & ATK_RESIZE_EDGE_LEFT)
+    {
+        new_width = state->resize_start_width - delta_x;
+        if (new_width < ATK_WINDOW_MIN_WIDTH)
+        {
+            delta_x = state->resize_start_width - ATK_WINDOW_MIN_WIDTH;
+            new_width = ATK_WINDOW_MIN_WIDTH;
+        }
+        new_x = state->resize_start_x + delta_x;
+    }
+    else if (state->resize_edges & ATK_RESIZE_EDGE_RIGHT)
+    {
+        new_width = state->resize_start_width + delta_x;
+        if (new_width < ATK_WINDOW_MIN_WIDTH)
+        {
+            new_width = ATK_WINDOW_MIN_WIDTH;
+        }
+    }
+
+    if (state->resize_edges & ATK_RESIZE_EDGE_TOP)
+    {
+        new_height = state->resize_start_height - delta_y;
+        if (new_height < ATK_WINDOW_MIN_HEIGHT)
+        {
+            delta_y = state->resize_start_height - ATK_WINDOW_MIN_HEIGHT;
+            new_height = ATK_WINDOW_MIN_HEIGHT;
+        }
+        new_y = state->resize_start_y + delta_y;
+    }
+    else if (state->resize_edges & ATK_RESIZE_EDGE_BOTTOM)
+    {
+        new_height = state->resize_start_height + delta_y;
+        if (new_height < ATK_WINDOW_MIN_HEIGHT)
+        {
+            new_height = ATK_WINDOW_MIN_HEIGHT;
+        }
+    }
+
+    if (new_width == win->width && new_height == win->height &&
+        new_x == win->x && new_y == win->y)
+    {
+        return false;
+    }
+
+    win->x = new_x;
+    win->y = new_y;
+    win->width = new_width;
+    win->height = new_height;
+    atk_window_ensure_inside(win);
+
+    atk_dirty_mark_rect(old_left, old_top, old_width, old_height);
+    atk_window_request_layout(win);
+    return true;
+}
+
+static video_cursor_shape_t atk_cursor_shape_for_edges(uint32_t edges)
+{
+    if (edges == 0)
+    {
+        return VIDEO_CURSOR_ARROW;
+    }
+
+    bool left = (edges & ATK_RESIZE_EDGE_LEFT) != 0;
+    bool right = (edges & ATK_RESIZE_EDGE_RIGHT) != 0;
+    bool top = (edges & ATK_RESIZE_EDGE_TOP) != 0;
+    bool bottom = (edges & ATK_RESIZE_EDGE_BOTTOM) != 0;
+
+    if ((left && top) || (right && bottom))
+    {
+        return VIDEO_CURSOR_RESIZE_DIAG_NW_SE;
+    }
+    if ((right && top) || (left && bottom))
+    {
+        return VIDEO_CURSOR_RESIZE_DIAG_NE_SW;
+    }
+    if (left || right)
+    {
+        return VIDEO_CURSOR_RESIZE_H;
+    }
+    if (top || bottom)
+    {
+        return VIDEO_CURSOR_RESIZE_V;
+    }
+    return VIDEO_CURSOR_ARROW;
+}
+
+static void atk_update_cursor_shape(uint32_t edges)
+{
+    video_cursor_shape_t shape = atk_cursor_shape_for_edges(edges);
+    video_cursor_set_shape(shape);
 }
 
 #ifndef ATK_NO_DESKTOP_APPS

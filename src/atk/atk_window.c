@@ -7,6 +7,7 @@
 #include "atk/atk_image.h"
 #include "atk/atk_label.h"
 #include "atk/atk_scrollbar.h"
+#include "atk/atk_list_view.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
 #ifndef KERNEL_BUILD
@@ -19,6 +20,8 @@
 
 /* Forward decl for compilers if video.h doesn't expose it (no harm if duplicated). */
 static void atk_log(const char *msg);
+static bool window_list_pointer_valid(const void *ptr);
+static bool window_sanitize_list(atk_state_t *state);
 static void format_window_title(char *buffer, size_t capacity, int id);
 static void window_get_bounds(const atk_widget_t *window, int *x, int *y, int *width, int *height);
 static atk_widget_t *window_add_button(atk_widget_t *window,
@@ -34,6 +37,8 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
 static void action_window_close(atk_widget_t *button, void *context);
 static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window);
 static void window_layout_close_button(atk_widget_t *window, atk_window_priv_t *priv);
+static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv);
+static void window_after_size_change(atk_widget_t *window);
 static atk_window_priv_t *window_priv_mut(atk_widget_t *window);
 static const atk_window_priv_t *window_priv(const atk_widget_t *window);
 static void window_destroy(atk_widget_t *window);
@@ -50,13 +55,27 @@ void atk_window_reset_all(atk_state_t *state)
         return;
     }
 
-    atk_list_clear(&state->windows, window_destroy_value);
+    atk_guard_check(&state->windows_guard_front, &state->windows_guard_back, "state->windows");
+    bool list_safe = window_sanitize_list(state);
+    if (list_safe)
+    {
+        atk_list_clear(&state->windows, window_destroy_value);
+    }
     atk_list_init(&state->windows);
+    atk_guard_reset(&state->windows_guard_front, &state->windows_guard_back);
 
     state->next_window_id = 1;
     state->dragging_window = 0;
     state->drag_offset_x = 0;
     state->drag_offset_y = 0;
+    state->resizing_window = NULL;
+    state->resize_edges = 0;
+    state->resize_start_cursor_x = 0;
+    state->resize_start_cursor_y = 0;
+    state->resize_start_x = 0;
+    state->resize_start_y = 0;
+    state->resize_start_width = 0;
+    state->resize_start_height = 0;
     state->pressed_window_button_window = 0;
     state->pressed_window_button = 0;
     state->focus_widget = NULL;
@@ -89,6 +108,7 @@ void atk_window_draw_all(const atk_state_t *state, const atk_rect_t *clip)
         return;
     }
 
+    atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
     ATK_LIST_FOR_EACH(node, &state->windows)
     {
         atk_widget_t *window = (atk_widget_t *)node->value;
@@ -110,6 +130,7 @@ bool atk_window_bring_to_front(atk_state_t *state, atk_widget_t *window)
         return false;
     }
 
+    atk_guard_check(&state->windows_guard_front, &state->windows_guard_back, "state->windows");
     atk_window_priv_t *priv = window_priv_mut(window);
     if (!priv || !priv->list_node)
     {
@@ -132,6 +153,7 @@ atk_widget_t *atk_window_hit_test(const atk_state_t *state, int x, int y)
         return 0;
     }
 
+    atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
     ATK_LIST_FOR_EACH_REVERSE(node, &state->windows)
     {
         atk_widget_t *window = (atk_widget_t *)node->value;
@@ -155,6 +177,7 @@ atk_widget_t *atk_window_title_hit_test(const atk_state_t *state, int x, int y)
         return 0;
     }
 
+    atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
     ATK_LIST_FOR_EACH_REVERSE(node, &state->windows)
     {
         atk_widget_t *window = (atk_widget_t *)node->value;
@@ -269,6 +292,16 @@ void atk_window_mark_dirty(const atk_widget_t *window)
     atk_dirty_mark_rect(x, y, w, h);
 }
 
+void atk_window_request_layout(atk_widget_t *window)
+{
+    if (!window)
+    {
+        return;
+    }
+    window_after_size_change(window);
+    atk_window_mark_dirty(window);
+}
+
 void atk_window_ensure_inside(atk_widget_t *window)
 {
     if (!window)
@@ -292,6 +325,21 @@ void atk_window_ensure_inside(atk_widget_t *window)
     if (window->y < 0) window->y = 0;
     if (window->x > max_x) window->x = max_x;
     if (window->y > max_y) window->y = max_y;
+}
+
+bool atk_window_supports_resize(const atk_widget_t *window)
+{
+    if (!window || !window->used)
+    {
+        return false;
+    }
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window) && !user_atk_window_is_resizable(window))
+    {
+        return false;
+    }
+#endif
+    return true;
 }
 
 atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
@@ -497,6 +545,7 @@ void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
     }
 
     priv->chrome_visible = visible;
+    window_after_size_change(window);
     atk_window_mark_dirty(window);
 }
 
@@ -504,6 +553,76 @@ static void atk_log(const char *msg)
 {
     serial_write_string(msg);
     serial_write_string("\r\n");
+}
+
+static bool window_list_pointer_valid(const void *ptr)
+{
+    if (!ptr)
+    {
+        return true;
+    }
+    uintptr_t addr = (uintptr_t)ptr;
+    uint64_t top = (uint64_t)addr >> 47;
+    return (top == 0u) || (top == 0x1FFFFu);
+}
+
+static bool window_sanitize_list(atk_state_t *state)
+{
+    if (!state)
+    {
+        return true;
+    }
+
+    atk_list_t *list = &state->windows;
+    atk_list_node_t *node = list->head;
+    size_t guard = 0;
+    const size_t guard_limit = 4096;
+    bool corrupted = false;
+
+    while (node)
+    {
+        if (!window_list_pointer_valid(node))
+        {
+            corrupted = true;
+            break;
+        }
+
+        guard++;
+        if (guard > guard_limit)
+        {
+            corrupted = true;
+            break;
+        }
+
+        atk_list_node_t *next = node->next;
+        if (next && !window_list_pointer_valid(next))
+        {
+            corrupted = true;
+            break;
+        }
+
+        node = next;
+    }
+
+    if (corrupted)
+    {
+        serial_write_string("atk: window list corrupted; resetting\r\n");
+        list->head = NULL;
+        list->tail = NULL;
+        list->size = 0;
+        return false;
+    }
+
+    if (list->tail && !window_list_pointer_valid(list->tail))
+    {
+        serial_write_string("atk: window list tail corrupted; resetting\r\n");
+        list->head = NULL;
+        list->tail = NULL;
+        list->size = 0;
+        return false;
+    }
+
+    return true;
 }
 
 static void window_layout_close_button(atk_widget_t *window, atk_window_priv_t *priv)
@@ -528,6 +647,62 @@ static void window_layout_close_button(atk_widget_t *window, atk_window_priv_t *
     btn->x = target_x;
 }
 
+static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv)
+{
+    if (!window || !priv)
+    {
+        return;
+    }
+
+    ATK_LIST_FOR_EACH(node, &priv->children)
+    {
+        atk_widget_t *child = (atk_widget_t *)node->value;
+        if (!child || !child->used)
+        {
+            continue;
+        }
+
+        atk_widget_apply_layout(child);
+
+        if (atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
+        {
+            atk_tab_view_relayout(child);
+        }
+        else if (atk_widget_is_a(child, &ATK_LIST_VIEW_CLASS))
+        {
+            atk_list_view_relayout(child);
+        }
+    }
+}
+
+static void window_after_size_change(atk_widget_t *window)
+{
+    if (!window || !window->used)
+    {
+        return;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return;
+    }
+
+    if (priv->chrome_visible)
+    {
+        window_layout_close_button(window, priv);
+    }
+
+    window_layout_children(window, priv);
+
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window))
+    {
+        user_atk_window_resized(window);
+    }
+#endif
+}
+
 static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window)
 {
     if (!state || !window || !window->used)
@@ -535,6 +710,7 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
         return;
     }
 
+    atk_state_theme_validate(state, "atk_window_draw");
     const atk_theme_t *theme = &state->theme;
     atk_window_priv_t *priv_mut = window_priv_mut((atk_widget_t *)window);
     const atk_window_priv_t *priv = (const atk_window_priv_t *)priv_mut;

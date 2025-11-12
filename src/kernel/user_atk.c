@@ -16,6 +16,7 @@
 typedef struct user_atk_window
 {
     uint32_t handle;
+    uint32_t flags;
     process_t *owner;
     atk_widget_t *window;
     atk_widget_t *image;
@@ -43,6 +44,59 @@ static user_atk_window_t *g_capture_window = NULL;
 static process_t *g_focus_priority_owner = NULL;
 static process_t *g_capture_priority_owner = NULL;
 static uint32_t g_next_handle = 1;
+
+#define USER_ATK_PRESENT_SAMPLE_WORDS 8u
+
+static void user_atk_present_dump(const char *label, const uint16_t *pixels, size_t byte_len)
+{
+    serial_write_string("[user_atk][present] ");
+    serial_write_string(label ? label : "buffer");
+    serial_write_string(" ptr=0x");
+    serial_write_hex64((uint64_t)(uintptr_t)pixels);
+    serial_write_string(" bytes=0x");
+    serial_write_hex64((uint64_t)byte_len);
+    serial_write_string(" head=");
+
+    size_t words = byte_len / sizeof(uint16_t);
+    if (words > USER_ATK_PRESENT_SAMPLE_WORDS)
+    {
+        words = USER_ATK_PRESENT_SAMPLE_WORDS;
+    }
+    for (size_t i = 0; i < words; ++i)
+    {
+        serial_write_string(" ");
+        serial_write_hex64((uint64_t)pixels[i]);
+    }
+    serial_write_string("\r\n");
+}
+
+static void user_atk_present_log_summary(uint32_t handle,
+                                         size_t expected_bytes,
+                                         size_t actual_bytes,
+                                         const uint16_t *src_pixels,
+                                         const uint16_t *dst_pixels)
+{
+    serial_write_string("[user_atk][present] handle=0x");
+    serial_write_hex64((uint64_t)handle);
+    serial_write_string(" expected=0x");
+    serial_write_hex64((uint64_t)expected_bytes);
+    serial_write_string(" actual=0x");
+    serial_write_hex64((uint64_t)actual_bytes);
+    serial_write_string("\r\n");
+    user_atk_present_dump("user", src_pixels, actual_bytes);
+    user_atk_present_dump("dst", dst_pixels, expected_bytes);
+}
+
+static void user_atk_present_log_mismatch(uint32_t handle, size_t expected_bytes, size_t actual_bytes)
+{
+    serial_write_string("[user_atk][present] length_mismatch handle=0x");
+    serial_write_hex64((uint64_t)handle);
+    serial_write_string(" expected=0x");
+    serial_write_hex64((uint64_t)expected_bytes);
+    serial_write_string(" actual=0x");
+    serial_write_hex64((uint64_t)actual_bytes);
+    serial_write_string("\r\n");
+}
 
 #if USER_ATK_DEBUG
 static void user_atk_log(const char *msg, uint64_t value)
@@ -84,6 +138,7 @@ static void user_atk_send_close_event(user_atk_window_t *win);
 static void user_atk_apply_priorities(void);
 static bool user_atk_event_queue_empty(void *context);
 static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_event_t *event);
+static void user_atk_queue_resize_event(user_atk_window_t *win, uint32_t width, uint32_t height);
 
 void user_atk_init(void)
 {
@@ -115,6 +170,98 @@ static user_atk_window_t *user_atk_from_window(const atk_widget_t *window)
 bool user_atk_window_is_remote(const atk_widget_t *window)
 {
     return user_atk_from_window(window) != NULL;
+}
+
+bool user_atk_window_is_resizable(const atk_widget_t *window)
+{
+    user_atk_window_t *win = user_atk_from_window(window);
+    if (!win)
+    {
+        return false;
+    }
+    return (win->flags & USER_ATK_WINDOW_FLAG_RESIZABLE) != 0;
+}
+
+void user_atk_window_resized(const atk_widget_t *window)
+{
+    user_atk_window_t *win = user_atk_from_window(window);
+    if (!win || (win->flags & USER_ATK_WINDOW_FLAG_RESIZABLE) == 0)
+    {
+        return;
+    }
+    if (!win->image || !win->window)
+    {
+        return;
+    }
+
+    atk_widget_t *image = win->image;
+    int new_width = image->width;
+    int new_height = image->height;
+    if (new_width <= 0 || new_height <= 0)
+    {
+        return;
+    }
+
+    bool size_changed = (new_width != win->content_width) || (new_height != win->content_height);
+    bool offset_changed = (win->content_offset_x != image->x) || (win->content_offset_y != image->y);
+
+    if (!size_changed && !offset_changed)
+    {
+        return;
+    }
+
+    if (size_changed)
+    {
+        size_t new_bytes = (size_t)new_width * (size_t)new_height * sizeof(uint16_t);
+        uint16_t *pixels = (uint16_t *)malloc(new_bytes);
+        if (!pixels)
+        {
+            image->width = win->content_width;
+            image->height = win->content_height;
+            return;
+        }
+        memset(pixels, 0, new_bytes);
+
+        if (win->pixels && win->content_width > 0 && win->content_height > 0)
+        {
+            int copy_w = (new_width < win->content_width) ? new_width : win->content_width;
+            int copy_h = (new_height < win->content_height) ? new_height : win->content_height;
+            for (int row = 0; row < copy_h; ++row)
+            {
+                size_t dst_offset = (size_t)row * (size_t)new_width * sizeof(uint16_t);
+                size_t src_offset = (size_t)row * (size_t)win->stride_bytes;
+                memcpy((uint8_t *)pixels + dst_offset,
+                       (const uint8_t *)win->pixels + src_offset,
+                       (size_t)copy_w * sizeof(uint16_t));
+            }
+        }
+
+        if (!atk_image_set_pixels(image,
+                                  pixels,
+                                  new_width,
+                                  new_height,
+                                  new_width * (int)sizeof(uint16_t),
+                                  true))
+        {
+            free(pixels);
+            image->width = win->content_width;
+            image->height = win->content_height;
+            return;
+        }
+
+        win->pixels = atk_image_pixels(image);
+        win->pixel_bytes = new_bytes;
+        win->stride_bytes = new_width * (int)sizeof(uint16_t);
+        win->content_width = new_width;
+        win->content_height = new_height;
+    }
+
+    win->content_offset_x = image->x;
+    win->content_offset_y = image->y;
+
+    user_atk_queue_resize_event(win, (uint32_t)win->content_width, (uint32_t)win->content_height);
+    atk_window_mark_dirty(win->window);
+    video_request_refresh_window(win->window);
 }
 
 void user_atk_focus_window(const atk_widget_t *window)
@@ -378,6 +525,11 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
         atk_window_close(state, window);
         return -1;
     }
+    atk_widget_set_layout(image,
+                          ATK_WIDGET_ANCHOR_LEFT |
+                          ATK_WIDGET_ANCHOR_TOP |
+                          ATK_WIDGET_ANCHOR_RIGHT |
+                          ATK_WIDGET_ANCHOR_BOTTOM);
 
     size_t pixel_bytes = (size_t)desc.width * (size_t)desc.height * sizeof(uint16_t);
     uint16_t *pixels = (uint16_t *)malloc(pixel_bytes);
@@ -405,6 +557,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     }
 
     win->handle = g_next_handle++;
+    win->flags = desc.flags & USER_ATK_WINDOW_FLAG_RESIZABLE;
     win->owner = process_current();
     win->window = window;
     win->image = image;
@@ -448,8 +601,11 @@ int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byt
         return -1;
     }
 
+    user_atk_present_log_summary(handle, win->pixel_bytes, byte_len, pixels, win->pixels);
+
     if (byte_len != win->pixel_bytes)
     {
+        user_atk_present_log_mismatch(handle, win->pixel_bytes, byte_len);
         return -1;
     }
 
@@ -528,6 +684,24 @@ void user_atk_on_process_destroy(process_t *process)
         }
         win = next;
     }
+}
+
+static void user_atk_queue_resize_event(user_atk_window_t *win, uint32_t width, uint32_t height)
+{
+    if (!win)
+    {
+        return;
+    }
+
+    user_atk_event_t event = {
+        .type = USER_ATK_EVENT_RESIZE,
+        .flags = 0,
+        .x = 0,
+        .y = 0,
+        .data0 = width,
+        .data1 = height
+    };
+    user_atk_queue_event(win, &event);
 }
 
 static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t *event)

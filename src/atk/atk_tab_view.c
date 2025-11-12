@@ -354,6 +354,8 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
         return;
     }
 
+    atk_state_theme_validate(state, "atk_tab_view_draw");
+
     int origin_x = 0;
     int origin_y = 0;
     atk_widget_absolute_position(tab_view, &origin_x, &origin_y);

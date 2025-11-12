@@ -308,6 +308,10 @@ void atk_scrollbar_draw(const atk_state_t *state, const atk_widget_t *scrollbar)
     int x = origin_x + scrollbar->x;
     int y = origin_y + scrollbar->y;
 
+    if (state)
+    {
+        atk_state_theme_validate(state, "atk_scrollbar_draw");
+    }
     const atk_theme_t *theme = state ? &state->theme : NULL;
     uint16_t track_color = theme ? theme->window_body : video_make_color(0xD0, 0xD0, 0xD0);
     uint16_t track_border = theme ? theme->window_border : video_make_color(0x70, 0x70, 0x70);

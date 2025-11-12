@@ -74,6 +74,11 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     (void)left_pressed;
 }
 
+void video_cursor_set_shape(video_cursor_shape_t shape)
+{
+    (void)shape;
+}
+
 void video_fill(uint16_t color)
 {
     surface_log("fill color=", color);

@@ -81,13 +81,22 @@ void atk_dirty_mark_all(void)
     {
         return;
     }
+#if ATK_DEBUG
+    atk_state_theme_log(state, "dirty mark start");
+#endif
     state->dirty_full = true;
     state->dirty_active = false;
     state->dirty_x0 = 0;
     state->dirty_y0 = 0;
     state->dirty_x1 = VIDEO_WIDTH;
     state->dirty_y1 = VIDEO_HEIGHT;
+#if ATK_DEBUG
+    atk_state_theme_log(state, "dirty mark pre invalidate");
+#endif
     video_invalidate_all();
+#if ATK_DEBUG
+    atk_state_theme_log(state, "dirty mark post invalidate");
+#endif
 }
 
 bool atk_dirty_consume(atk_rect_t *out)

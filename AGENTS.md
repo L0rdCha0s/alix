@@ -8,7 +8,7 @@
 - If you need to modify memory layout, make sure you keep STAGE2_BASE and STACK_TOP up-to-date to avoid smashing memory through overlaps in stage2.asm
 - If you want to boot the kernel, the shell has a variety of commands (including shutdown) - which you can use to stop the kernel and return to your thinking
 - Always run "make" to check your work before handing back to the user
-- Use x86_64-elf-addr2line in order to look for lines in stacktraces in compiled code
+- Use x86_64-elf-addr2line and x86_64-elf-objdump in order to look for lines in stacktraces in compiled code and analyse ELF binaries.
 
 Thanks!
 

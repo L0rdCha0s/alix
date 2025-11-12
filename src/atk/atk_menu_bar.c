@@ -8,6 +8,9 @@
 #include "font.h"
 #include "libc.h"
 #include "video.h"
+#ifdef KERNEL_BUILD
+#include "serial.h"
+#endif
 #ifndef ATK_NO_DESKTOP_APPS
 #include "timekeeping.h"
 #include "timer.h"
@@ -54,8 +57,10 @@ void atk_menu_bar_reset(atk_state_t *state)
         return;
     }
 
+    atk_guard_check(&state->menu_guard_front, &state->menu_guard_back, "state->menu_entries");
     atk_list_clear(&state->menu_entries, atk_menu_bar_entry_destroy);
     atk_list_init(&state->menu_entries);
+    atk_guard_reset(&state->menu_guard_front, &state->menu_guard_back);
     state->menu_open_entry = NULL;
     state->menu_hover_entry = NULL;
 
@@ -140,6 +145,7 @@ void atk_menu_bar_build_default(atk_state_t *state)
         return;
     }
 
+    atk_guard_check(&state->menu_guard_front, &state->menu_guard_back, "state->menu_entries");
     if (state->menu_bar_height <= 0)
     {
         state->menu_bar_height = ATK_MENU_BAR_DEFAULT_HEIGHT;
@@ -166,6 +172,14 @@ void atk_menu_bar_build_default(atk_state_t *state)
         if (entry)
         {
             memset(entry, 0, sizeof(*entry));
+#ifdef KERNEL_BUILD
+            if (state->menu_entries.size > 8)
+            {
+                serial_write_string("atk_menu_bar: entry count=");
+                serial_write_hex64(state->menu_entries.size);
+                serial_write_string("\r\n");
+            }
+#endif
             const char help_title[] = "Help";
             size_t len = strlen(help_title);
             if (len >= sizeof(entry->title))
@@ -205,6 +219,8 @@ void atk_menu_bar_draw(const atk_state_t *state)
         return;
     }
 
+    atk_guard_check((uint64_t *)&state->menu_guard_front, (uint64_t *)&state->menu_guard_back, "state->menu_entries");
+    atk_state_theme_validate(state, "atk_menu_bar_draw");
     int height = atk_menu_bar_height_pixels(state);
     if (height <= 0)
     {

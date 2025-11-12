@@ -275,6 +275,8 @@ void atk_menu_draw(const atk_state_t *state, const atk_widget_t *menu)
         return;
     }
 
+    atk_state_theme_validate(state, "atk_menu_draw");
+
     const atk_theme_t *theme = &state->theme;
     video_draw_rect(menu->x,
                     menu->y,

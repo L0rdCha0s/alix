@@ -2,6 +2,9 @@
 
 #include "libc.h"
 #include "video.h"
+#ifdef KERNEL_BUILD
+#include "serial.h"
+#endif
 
 static void desktop_button_destroy(void *value);
 
@@ -12,8 +15,10 @@ void atk_desktop_reset(atk_state_t *state)
         return;
     }
 
+    atk_guard_check(&state->desktop_guard_front, &state->desktop_guard_back, "state->desktop_buttons");
     atk_list_clear(&state->desktop_buttons, desktop_button_destroy);
     atk_list_init(&state->desktop_buttons);
+    atk_guard_reset(&state->desktop_guard_front, &state->desktop_guard_back);
 
     state->pressed_desktop_button = 0;
     state->dragging_desktop_button = 0;
@@ -50,6 +55,7 @@ void atk_desktop_draw_buttons(const atk_state_t *state, const atk_rect_t *clip)
         return;
     }
 
+    atk_guard_check((uint64_t *)&state->desktop_guard_front, (uint64_t *)&state->desktop_guard_back, "state->desktop_buttons");
     ATK_LIST_FOR_EACH(node, &state->desktop_buttons)
     {
         atk_widget_t *widget = (atk_widget_t *)node->value;
@@ -80,6 +86,16 @@ atk_widget_t *atk_desktop_add_button(atk_state_t *state,
     {
         return 0;
     }
+
+    atk_guard_check(&state->desktop_guard_front, &state->desktop_guard_back, "state->desktop_buttons");
+#ifdef KERNEL_BUILD
+    if (state->desktop_buttons.size > (size_t)ATK_MAX_DESKTOP_BUTTONS)
+    {
+        serial_write_string("atk_desktop: button list size=");
+        serial_write_hex64(state->desktop_buttons.size);
+        serial_write_string("\r\n");
+    }
+#endif
 
     atk_widget_t *widget = atk_widget_create(&ATK_BUTTON_CLASS);
     if (!widget)

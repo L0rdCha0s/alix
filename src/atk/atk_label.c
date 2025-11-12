@@ -172,12 +172,13 @@ const char *atk_label_text(const atk_widget_t *label)
 
 void atk_label_draw(const atk_state_t *state, const atk_widget_t *label)
 {
-    (void)state;
     atk_label_priv_t *priv = (atk_label_priv_t *)atk_widget_priv(label, &ATK_LABEL_CLASS);
-    if (!label || !label->used || !priv)
+    if (!state || !label || !label->used || !priv)
     {
         return;
     }
+
+    atk_state_theme_validate(state, "atk_label_draw");
 
     int origin_x = label->parent ? label->parent->x : 0;
     int origin_y = label->parent ? label->parent->y : 0;

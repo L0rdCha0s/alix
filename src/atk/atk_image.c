@@ -6,6 +6,10 @@
 #include "libc.h"
 #include "heap.h"
 
+#ifdef KERNEL_BUILD
+#include "serial.h"
+#endif
+
 typedef struct
 {
     uint16_t *pixels;
@@ -17,6 +21,51 @@ typedef struct
 } atk_image_priv_t;
 
 static void atk_image_invalidate(const atk_widget_t *image);
+
+#ifdef KERNEL_BUILD
+static void atk_image_log_guard(const char *label, const char *msg, const atk_widget_t *ptr)
+{
+    serial_write_string("[atk_image] ");
+    serial_write_string(label ? label : "check");
+    serial_write_string(": ");
+    serial_write_string(msg ? msg : "invalid");
+    serial_write_string(" ptr=0x");
+    serial_write_hex64((uint64_t)(uintptr_t)ptr);
+    serial_write_string("\r\n");
+}
+#else
+static void atk_image_log_guard(const char *label, const char *msg, const atk_widget_t *ptr)
+{
+    (void)label;
+    (void)msg;
+    (void)ptr;
+}
+#endif
+
+static bool atk_image_validate_widget(const atk_widget_t *image,
+                                      const char *label,
+                                      const atk_widget_t **parent_out)
+{
+    if (!image)
+    {
+        return false;
+    }
+    if (!atk_widget_validate(image, label))
+    {
+        return false;
+    }
+    const atk_widget_t *parent = image->parent;
+    if (parent && !atk_widget_validate(parent, "atk_image parent"))
+    {
+        atk_image_log_guard(label, "invalid parent", parent);
+        return false;
+    }
+    if (parent_out)
+    {
+        *parent_out = parent;
+    }
+    return true;
+}
 
 static void image_draw_cb(const atk_state_t *state,
                           const atk_widget_t *widget,
@@ -140,14 +189,22 @@ void atk_image_draw(const atk_state_t *state, const atk_widget_t *image)
         return;
     }
 
+    atk_state_theme_validate(state, "atk_image_draw");
+
+    const atk_widget_t *parent = NULL;
+    if (!atk_image_validate_widget(image, "atk_image_draw", &parent))
+    {
+        return;
+    }
+
     const atk_image_priv_t *priv = (const atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
     if (!priv)
     {
         return;
     }
 
-    int origin_x = image->parent ? image->parent->x : 0;
-    int origin_y = image->parent ? image->parent->y : 0;
+    int origin_x = parent ? parent->x : 0;
+    int origin_y = parent ? parent->y : 0;
     int draw_x = origin_x + image->x;
     int draw_y = origin_y + image->y;
 
@@ -228,8 +285,13 @@ static void atk_image_invalidate(const atk_widget_t *image)
     {
         return;
     }
-    int origin_x = image->parent ? image->parent->x : 0;
-    int origin_y = image->parent ? image->parent->y : 0;
+    const atk_widget_t *parent = NULL;
+    if (!atk_image_validate_widget(image, "atk_image_invalidate", &parent))
+    {
+        return;
+    }
+    int origin_x = parent ? parent->x : 0;
+    int origin_y = parent ? parent->y : 0;
     atk_dirty_mark_rect(origin_x + image->x, origin_y + image->y, image->width, image->height);
 }
 static void image_draw_cb(const atk_state_t *state,

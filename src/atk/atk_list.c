@@ -1,8 +1,39 @@
+#define ATK_LIST_DISABLE_AUTOTAG
 #include "atk/atk_list.h"
+#undef ATK_LIST_DISABLE_AUTOTAG
 
 #include <stddef.h>
 
 #include "libc.h"
+#include "serial.h"
+
+static bool atk_list_pointer_is_canonical(const void *ptr)
+{
+    if (!ptr)
+    {
+        return true;
+    }
+
+    uint64_t value = (uint64_t)(uintptr_t)ptr;
+    uint64_t top = value >> 47;
+    return (top == 0u) || (top == 0x1FFFFu);
+}
+
+static void atk_list_log_corruption(const char *what, const void *ptr, const char *tag)
+{
+    serial_write_string("atk_list");
+    if (tag)
+    {
+        serial_write_string("[");
+        serial_write_string(tag);
+        serial_write_string("]");
+    }
+    serial_write_string(": corrupted pointer (");
+    serial_write_string(what ? what : "ptr");
+    serial_write_string(")=0x");
+    serial_write_hex64((uint64_t)(uintptr_t)ptr);
+    serial_write_string("\r\n");
+}
 
 void atk_list_init(atk_list_t *list)
 {
@@ -17,21 +48,48 @@ void atk_list_init(atk_list_t *list)
 
 void atk_list_clear(atk_list_t *list, void (*deleter)(void *value))
 {
+    atk_list_clear_tag(list, deleter, NULL);
+}
+
+void atk_list_clear_tag(atk_list_t *list, void (*deleter)(void *value), const char *tag)
+{
     if (!list)
     {
         return;
     }
 
     atk_list_node_t *node = list->head;
+    size_t guard = 0;
+    const size_t guard_limit = 4096;
+
     while (node)
     {
+        if (!atk_list_pointer_is_canonical(node))
+        {
+            atk_list_log_corruption("node", node, tag);
+            break;
+        }
+
         atk_list_node_t *next = node->next;
+        if (next && !atk_list_pointer_is_canonical(next))
+        {
+            atk_list_log_corruption("next", next, tag);
+            next = NULL;
+        }
+
         if (deleter && node->value)
         {
             deleter(node->value);
         }
         free(node);
         node = next;
+
+        guard++;
+        if (guard > guard_limit)
+        {
+            atk_list_log_corruption("guard", (void *)(uintptr_t)guard, tag);
+            break;
+        }
     }
 
     list->head = NULL;

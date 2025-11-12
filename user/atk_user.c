@@ -9,6 +9,13 @@
 #define ATK_USER_TRACE 0
 #endif
 
+static bool atk_user_window_open_internal(atk_user_window_t *win,
+                                          const char *title,
+                                          uint32_t width,
+                                          uint32_t height,
+                                          uint32_t flags);
+static void atk_user_handle_resize_event(atk_user_window_t *win, const user_atk_event_t *event);
+
 #if ATK_USER_TRACE
 static void atk_user_trace(const char *msg, uint64_t a, uint64_t b)
 {
@@ -49,6 +56,115 @@ static bool atk_user_present_common(const atk_user_window_t *win, bool force_pre
 
 bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t width, uint32_t height)
 {
+    return atk_user_window_open_with_flags(win, title, width, height, 0);
+}
+
+bool atk_user_window_open_with_flags(atk_user_window_t *win,
+                                     const char *title,
+                                     uint32_t width,
+                                     uint32_t height,
+                                     uint32_t flags)
+{
+    return atk_user_window_open_internal(win, title, width, height, flags);
+}
+
+bool atk_user_present(const atk_user_window_t *win)
+{
+    return atk_user_present_common(win, false);
+}
+
+bool atk_user_present_force(const atk_user_window_t *win)
+{
+    return atk_user_present_common(win, true);
+}
+
+void atk_user_enable_dirty_tracking(atk_user_window_t *win, bool enable)
+{
+    if (!win)
+    {
+        return;
+    }
+    win->track_dirty = enable;
+    video_surface_set_tracking(enable);
+    if (enable)
+    {
+        video_surface_force_dirty();
+    }
+}
+
+bool atk_user_wait_event(atk_user_window_t *win, user_atk_event_t *event)
+{
+    if (!win || !event)
+    {
+        return false;
+    }
+    bool ok = sys_ui_poll_event(win->handle, event, USER_ATK_POLL_FLAG_BLOCK) == 1;
+#if ATK_USER_TRACE
+    if (ok)
+    {
+        atk_user_trace("wait_event type", event->type, ((uint64_t)(uint32_t)event->x << 32) | (uint32_t)(event->y & 0xFFFFFFFFu));
+    }
+    else
+    {
+        atk_user_trace("wait_event empty", win->handle, 0);
+    }
+#endif
+    if (ok && event->type == USER_ATK_EVENT_RESIZE)
+    {
+        atk_user_handle_resize_event(win, event);
+    }
+    return ok;
+}
+
+bool atk_user_poll_event(atk_user_window_t *win, user_atk_event_t *event)
+{
+    if (!win || !event)
+    {
+        return false;
+    }
+    bool ok = sys_ui_poll_event(win->handle, event, 0u) == 1;
+#if ATK_USER_TRACE
+    if (ok)
+    {
+        atk_user_trace("poll_event type", event->type, ((uint64_t)(uint32_t)event->x << 32) | (uint32_t)(event->y & 0xFFFFFFFFu));
+    }
+#endif
+    if (ok && event->type == USER_ATK_EVENT_RESIZE)
+    {
+        atk_user_handle_resize_event(win, event);
+    }
+    return ok;
+}
+
+void atk_user_close(atk_user_window_t *win)
+{
+    if (!win)
+    {
+        return;
+    }
+    if (win->handle)
+    {
+        sys_ui_close(win->handle);
+        win->handle = 0;
+    }
+    if (win->buffer)
+    {
+        video_surface_detach();
+        free(win->buffer);
+        win->buffer = NULL;
+    }
+    win->buffer_bytes = 0;
+    win->width = 0;
+    win->height = 0;
+    win->track_dirty = false;
+}
+
+static bool atk_user_window_open_internal(atk_user_window_t *win,
+                                          const char *title,
+                                          uint32_t width,
+                                          uint32_t height,
+                                          uint32_t flags)
+{
     if (!win || width == 0 || height == 0)
     {
         return false;
@@ -57,7 +173,7 @@ bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t wi
     user_atk_window_desc_t desc = {
         .width = width,
         .height = height,
-        .flags = 0,
+        .flags = flags,
     };
     if (title)
     {
@@ -98,85 +214,44 @@ bool atk_user_window_open(atk_user_window_t *win, const char *title, uint32_t wi
     return true;
 }
 
-bool atk_user_present(const atk_user_window_t *win)
+static void atk_user_handle_resize_event(atk_user_window_t *win, const user_atk_event_t *event)
 {
-    return atk_user_present_common(win, false);
-}
-
-bool atk_user_present_force(const atk_user_window_t *win)
-{
-    return atk_user_present_common(win, true);
-}
-
-void atk_user_enable_dirty_tracking(atk_user_window_t *win, bool enable)
-{
-    if (!win)
+    if (!win || !event || event->type != USER_ATK_EVENT_RESIZE)
     {
         return;
     }
-    win->track_dirty = enable;
-    video_surface_set_tracking(enable);
-    if (enable)
-    {
-        video_surface_force_dirty();
-    }
-}
-
-bool atk_user_wait_event(const atk_user_window_t *win, user_atk_event_t *event)
-{
-    if (!win || !event)
-    {
-        return false;
-    }
-    bool ok = sys_ui_poll_event(win->handle, event, USER_ATK_POLL_FLAG_BLOCK) == 1;
-#if ATK_USER_TRACE
-    if (ok)
-    {
-        atk_user_trace("wait_event type", event->type, ((uint64_t)(uint32_t)event->x << 32) | (uint32_t)(event->y & 0xFFFFFFFFu));
-    }
-    else
-    {
-        atk_user_trace("wait_event empty", win->handle, 0);
-    }
-#endif
-    return ok;
-}
-
-bool atk_user_poll_event(const atk_user_window_t *win, user_atk_event_t *event)
-{
-    if (!win || !event)
-    {
-        return false;
-    }
-    bool ok = sys_ui_poll_event(win->handle, event, 0u) == 1;
-#if ATK_USER_TRACE
-    if (ok)
-    {
-        atk_user_trace("poll_event type", event->type, ((uint64_t)(uint32_t)event->x << 32) | (uint32_t)(event->y & 0xFFFFFFFFu));
-    }
-#endif
-    return ok;
-}
-
-void atk_user_close(atk_user_window_t *win)
-{
-    if (!win)
+    uint32_t width = event->data0;
+    uint32_t height = event->data1;
+    if (width == 0 || height == 0)
     {
         return;
     }
-    if (win->handle)
+
+    size_t bytes = (size_t)width * (size_t)height * sizeof(uint16_t);
+    uint16_t *buffer = (uint16_t *)realloc(win->buffer, bytes);
+    if (!buffer)
     {
-        sys_ui_close(win->handle);
-        win->handle = 0;
+        buffer = (uint16_t *)malloc(bytes);
+        if (!buffer)
+        {
+            return;
+        }
+        if (win->buffer)
+        {
+            size_t copy = win->buffer_bytes < bytes ? win->buffer_bytes : bytes;
+            memcpy(buffer, win->buffer, copy);
+            free(win->buffer);
+        }
     }
-    if (win->buffer)
-    {
-        video_surface_detach();
-        free(win->buffer);
-        win->buffer = NULL;
-    }
-    win->buffer_bytes = 0;
-    win->width = 0;
-    win->height = 0;
-    win->track_dirty = false;
+    memset(buffer, 0, bytes);
+
+    video_surface_detach();
+    win->buffer = buffer;
+    win->buffer_bytes = bytes;
+    win->width = width;
+    win->height = height;
+    video_surface_attach(buffer, width, height);
+    video_surface_set_tracking(win->track_dirty);
+    video_surface_force_dirty();
+    atk_user_trace("window_resize handle", win->handle, ((uint64_t)width << 32) | height);
 }

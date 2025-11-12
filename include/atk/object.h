@@ -8,6 +8,11 @@ typedef struct atk_widget atk_widget_t;
 typedef struct atk_class atk_class_t;
 struct atk_state;
 
+#define ATK_WIDGET_ANCHOR_LEFT    (1u << 0)
+#define ATK_WIDGET_ANCHOR_TOP     (1u << 1)
+#define ATK_WIDGET_ANCHOR_RIGHT   (1u << 2)
+#define ATK_WIDGET_ANCHOR_BOTTOM  (1u << 3)
+
 typedef struct atk_mouse_event
 {
     int cursor_x;
@@ -88,6 +93,10 @@ struct atk_widget
     int width;
     int height;
     uint32_t flags;
+    int layout_margin_left;
+    int layout_margin_top;
+    int layout_margin_right;
+    int layout_margin_bottom;
     atk_widget_t *parent;
     const atk_widget_ops_t *ops;
     void *ops_context;
@@ -97,6 +106,7 @@ size_t atk_class_total_payload(const atk_class_t *cls);
 atk_widget_t *atk_widget_init(void *memory, const atk_class_t *cls);
 atk_widget_t *atk_widget_create(const atk_class_t *cls);
 void atk_widget_destroy(atk_widget_t *widget);
+bool atk_widget_validate(const atk_widget_t *widget, const char *label);
 bool atk_widget_is_a(const atk_widget_t *widget, const atk_class_t *cls);
 void *atk_widget_priv(const atk_widget_t *widget, const atk_class_t *cls);
 void atk_widget_absolute_position(const atk_widget_t *widget, int *x_out, int *y_out);
@@ -108,5 +118,7 @@ void *atk_widget_ops_context(const atk_widget_t *widget);
 bool atk_widget_hit_test(const atk_widget_t *widget, int origin_x, int origin_y, int px, int py);
 atk_mouse_response_t atk_widget_dispatch_mouse(atk_widget_t *widget, const atk_mouse_event_t *event);
 atk_key_response_t atk_widget_dispatch_key(atk_widget_t *widget, int key, int modifiers, int action);
+void atk_widget_set_layout(atk_widget_t *widget, uint32_t anchors);
+void atk_widget_apply_layout(atk_widget_t *widget);
 
 #endif

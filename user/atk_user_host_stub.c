@@ -14,6 +14,12 @@ bool user_atk_window_is_remote(const atk_widget_t *window)
     return false;
 }
 
+bool user_atk_window_is_resizable(const atk_widget_t *window)
+{
+    (void)window;
+    return false;
+}
+
 void user_atk_focus_window(const atk_widget_t *window)
 {
     (void)window;
@@ -39,6 +45,11 @@ bool user_atk_route_key_event(char ch)
 {
     (void)ch;
     return false;
+}
+
+void user_atk_window_resized(const atk_widget_t *window)
+{
+    (void)window;
 }
 
 int64_t user_atk_sys_create(const user_atk_window_desc_t *desc)

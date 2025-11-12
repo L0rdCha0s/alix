@@ -16,6 +16,8 @@ atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py);
 atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py);
 void atk_window_mark_dirty(const atk_widget_t *window);
 void atk_window_ensure_inside(atk_widget_t *window);
+void atk_window_request_layout(atk_widget_t *window);
+bool atk_window_supports_resize(const atk_widget_t *window);
 atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y);
 void atk_window_close(atk_state_t *state, atk_widget_t *window);
 const char *atk_window_title(const atk_widget_t *window);
