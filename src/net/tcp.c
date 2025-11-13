@@ -14,6 +14,8 @@
 #define TCP_TRACE_VERBOSE 0
 #endif
 
+static void tcp_log_hex32(uint32_t value);
+
 static inline uint64_t tcp_irq_save(void)
 {
     uint64_t flags;
@@ -78,9 +80,8 @@ struct net_tcp_socket
     bool have_mac;
     bool awaiting_ack;
     uint8_t pending_flags;
-    uint8_t *pending_payload;
+    uint8_t pending_payload[NET_TCP_MAX_PAYLOAD];
     size_t pending_payload_len;
-    size_t pending_payload_capacity;
     uint16_t remote_window;
     uint8_t *rx_buffer;
     size_t rx_size;
@@ -102,6 +103,26 @@ struct net_tcp_socket
     uint8_t retry_count;
     uint8_t max_retries;
 };
+
+static void tcp_log_send_block(const net_tcp_socket_t *socket, const char *reason, size_t len)
+{
+    serial_write_string("tcp: send blocked ");
+    serial_write_string(reason ? reason : "unknown");
+    serial_write_string(" len=0x");
+    tcp_log_hex32((uint32_t)len);
+    if (socket)
+    {
+        serial_write_string(" state=0x");
+        tcp_log_hex32((uint32_t)socket->state);
+        serial_write_string(" await=0x");
+        tcp_log_hex32(socket->awaiting_ack ? 1U : 0U);
+        serial_write_string(" remote_win=0x");
+        tcp_log_hex32((uint32_t)socket->remote_window);
+        serial_write_string(" pending_len=0x");
+        tcp_log_hex32((uint32_t)socket->pending_payload_len);
+    }
+    serial_write_string("\r\n");
+}
 
 static net_tcp_socket_t g_sockets[NET_TCP_MAX_SOCKETS];
 static uint16_t g_next_ephemeral_port = 49152;
@@ -132,11 +153,9 @@ static void tcp_send_ack(net_tcp_socket_t *socket);
 static void tcp_retransmit(net_tcp_socket_t *socket);
 static void tcp_mark_error(net_tcp_socket_t *socket, const char *reason);
 static bool tcp_ensure_rx_capacity(net_tcp_socket_t *socket, size_t needed);
-static bool tcp_ensure_pending_capacity(net_tcp_socket_t *socket, size_t needed);
 static void tcp_reassembly_clear(net_tcp_socket_t *socket);
 static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const uint8_t *data, size_t len);
 static void tcp_reassembly_drain(net_tcp_socket_t *socket);
-static void tcp_log_hex32(uint32_t value);
 static void tcp_log_size(const char *label, size_t value) __attribute__((unused));
 static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
 static ssize_t tcp_fd_read(void *ctx, void *buffer, size_t count);
@@ -179,10 +198,6 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
     int fd = socket->fd;
     bool fd_registered = socket->fd_registered;
     tcp_reassembly_clear(socket);
-    if (socket->pending_payload)
-    {
-        free(socket->pending_payload);
-    }
     if (socket->rx_buffer)
     {
         free(socket->rx_buffer);
@@ -198,38 +213,6 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
     {
         fd_release(fd);
     }
-}
-
-static bool tcp_ensure_pending_capacity(net_tcp_socket_t *socket, size_t needed)
-{
-    if (!socket)
-    {
-        return false;
-    }
-    if (needed == 0)
-    {
-        return true;
-    }
-    if (socket->pending_payload_capacity >= needed)
-    {
-        return true;
-    }
-
-    size_t new_capacity = socket->pending_payload_capacity ? socket->pending_payload_capacity : NET_TCP_MAX_PAYLOAD;
-    if (new_capacity < needed)
-    {
-        new_capacity = needed;
-    }
-
-    uint8_t *buffer = (uint8_t *)realloc(socket->pending_payload, new_capacity);
-    if (!buffer)
-    {
-        return false;
-    }
-
-    socket->pending_payload = buffer;
-    socket->pending_payload_capacity = new_capacity;
-    return true;
 }
 
 static void tcp_reassembly_clear(net_tcp_socket_t *socket)
@@ -643,27 +626,49 @@ bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t l
 {
     if (!socket || !data || len == 0)
     {
+        tcp_log_send_block(socket, "invalid", len);
         return false;
     }
     if (len > NET_TCP_MAX_PAYLOAD)
     {
+        tcp_log_send_block(socket, "oversize", len);
         return false;
     }
     if (socket->state != TCP_STATE_ESTABLISHED)
     {
-        return false;
-    }
-    if (socket->awaiting_ack)
-    {
+        tcp_log_send_block(socket, "state", len);
         return false;
     }
     if (socket->remote_closed)
     {
+        tcp_log_send_block(socket, "remote_closed", len);
         return false;
     }
     if (socket->remote_window != 0 && socket->remote_window < len)
     {
+        tcp_log_send_block(socket, "remote_window", len);
         return false;
+    }
+
+    if (socket->awaiting_ack)
+    {
+        size_t outstanding = socket->pending_payload_len;
+        if (outstanding + len > sizeof(socket->pending_payload))
+        {
+            tcp_log_send_block(socket, "pending_capacity", len);
+            return false;
+        }
+        if (!tcp_send_segment(socket, socket->seq_next, TCP_FLAG_ACK | TCP_FLAG_PSH,
+                              data, len, true, false))
+        {
+            tcp_log_send_block(socket, "segment_fail", len);
+            return false;
+        }
+        memcpy(socket->pending_payload + outstanding, data, len);
+        socket->pending_payload_len += len;
+        socket->unacked_len += len;
+        socket->pending_flags |= (TCP_FLAG_ACK | TCP_FLAG_PSH);
+        return true;
     }
 
     return tcp_send_segment(socket, socket->seq_next, TCP_FLAG_ACK | TCP_FLAG_PSH,
@@ -716,9 +721,11 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
     {
         window_avail = socket->rx_capacity - socket->rx_size;
     }
+    uint16_t prev_window = socket->advertised_window;
+#if TCP_TRACE_VERBOSE
     size_t rx_size_now = socket->rx_size;
     size_t rx_capacity_now = socket->rx_capacity;
-    uint16_t prev_window = socket->advertised_window;
+#endif
     tcp_irq_restore(irq_flags);
 
 #if TCP_TRACE_VERBOSE
@@ -1382,12 +1389,15 @@ static void tcp_send_ack(net_tcp_socket_t *socket)
         return;
     }
 
+    
+#if TCP_TRACE_VERBOSE
     size_t window_avail = 0;
     if (socket->rx_capacity > socket->rx_size)
     {
         window_avail = socket->rx_capacity - socket->rx_size;
     }
     uint16_t prev_window = socket->advertised_window;
+#endif
 
     uint8_t flags = TCP_FLAG_ACK;
     if (tcp_send_segment(socket, socket->seq_next, flags, NULL, 0, false, false))
@@ -1481,13 +1491,10 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     {
         return false;
     }
-    if (track_retransmit && payload_len > 0)
+    if (track_retransmit && payload_len > sizeof(socket->pending_payload))
     {
-        if (!tcp_ensure_pending_capacity(socket, payload_len))
-        {
-            tcp_mark_error(socket, "tx alloc failed");
-            return false;
-        }
+        tcp_mark_error(socket, "payload too large");
+        return false;
     }
 
     uint8_t frame[14 + 20 + 20 + NET_TCP_MAX_PAYLOAD];
@@ -1645,7 +1652,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     {
         socket->pending_flags = flags;
         socket->pending_payload_len = payload_len;
-        if (payload_len > 0 && socket->pending_payload && payload)
+        if (payload_len > 0 && payload)
         {
             memcpy(socket->pending_payload, payload, payload_len);
         }

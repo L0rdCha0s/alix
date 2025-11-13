@@ -19,5 +19,8 @@ bool rsa_encrypt_pkcs1_v15(const rsa_public_key_t *key,
                            const uint8_t *message, size_t message_len,
                            uint8_t *out, size_t out_len,
                            rsa_random_cb random_cb, void *random_ctx);
+bool rsa_verify_pkcs1_v15_sha256(const rsa_public_key_t *key,
+                                 const uint8_t *data, size_t data_len,
+                                 const uint8_t *signature, size_t signature_len);
 
 #endif

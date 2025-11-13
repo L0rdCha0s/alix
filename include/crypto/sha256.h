@@ -1,12 +1,18 @@
 #ifndef CRYPTO_SHA256_H
 #define CRYPTO_SHA256_H
 
+#ifdef TTF_HOST_BUILD
+#include <stdint.h>
+#include <stddef.h>
+#else
 #include "types.h"
+#endif
 
 typedef struct
 {
     uint32_t state[8];
     uint64_t bitcount;
+    uint32_t datalen;
     uint8_t buffer[64];
 } sha256_ctx_t;
 

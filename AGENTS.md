@@ -9,6 +9,7 @@
 - If you want to boot the kernel, the shell has a variety of commands (including shutdown) - which you can use to stop the kernel and return to your thinking
 - Always run "make" to check your work before handing back to the user
 - Use x86_64-elf-addr2line and x86_64-elf-objdump in order to look for lines in stacktraces in compiled code and analyse ELF binaries.
+- Use tcpdump to analyse qemu-net.pcap when looking at network traffic.
 
 Thanks!
 

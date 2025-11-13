@@ -239,6 +239,7 @@ static void load_tss(void)
     __asm__ volatile ("ltr %0" :: "r"(tss_selector));
 }
 
+__attribute__((noinline, used))
 static void kernel_entry_main(bootinfo_t *loader_info)
 {
     serial_init();

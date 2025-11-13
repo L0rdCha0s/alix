@@ -2,6 +2,14 @@
 
 #include "libc.h"
 
+#define ROTRIGHT(x, n) (((x) >> (n)) | ((x) << (32U - (n))))
+#define CH(x, y, z) ((((x) & (y)) ^ (~(x) & (z))) & 0xFFFFFFFFU)
+#define MAJ(x, y, z) ((((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z))) & 0xFFFFFFFFU)
+#define EP0(x) (ROTRIGHT((x), 2) ^ ROTRIGHT((x), 13) ^ ROTRIGHT((x), 22))
+#define EP1(x) (ROTRIGHT((x), 6) ^ ROTRIGHT((x), 11) ^ ROTRIGHT((x), 25))
+#define SIG0(x) (ROTRIGHT((x), 7) ^ ROTRIGHT((x), 18) ^ ((x) >> 3))
+#define SIG1(x) (ROTRIGHT((x), 17) ^ ROTRIGHT((x), 19) ^ ((x) >> 10))
+
 static const uint32_t k_table[64] = {
     0x428A2F98U, 0x71374491U, 0xB5C0FBCFU, 0xE9B5DBA5U,
     0x3956C25BU, 0x59F111F1U, 0x923F82A4U, 0xAB1C5ED5U,
@@ -18,29 +26,29 @@ static const uint32_t k_table[64] = {
     0x19A4C116U, 0x1E376C08U, 0x2748774CU, 0x34B0BCB5U,
     0x391C0CB3U, 0x4ED8AA4AU, 0x5B9CCA4FU, 0x682E6FF3U,
     0x748F82EEU, 0x78A5636FU, 0x84C87814U, 0x8CC70208U,
-    0x90BEFFF9U, 0xA4506CEBU, 0xBEF9A3F7U, 0xC67178F2U
+    0x90BEFFFAU, 0xA4506CEBU, 0xBEF9A3F7U, 0xC67178F2U
 };
 
-static uint32_t rotr32(uint32_t value, uint32_t bits)
-{
-    return (value >> bits) | (value << (32U - bits));
-}
+#ifdef SHA256_DEBUG_EXPOSE
+uint32_t sha256_debug_w0 = 0;
+#endif
 
-static void sha256_process_block(sha256_ctx_t *ctx, const uint8_t block[64])
+static void sha256_transform(sha256_ctx_t *ctx, const uint8_t data[64])
 {
     uint32_t w[64];
     for (uint32_t i = 0; i < 16; ++i)
     {
-        w[i] = ((uint32_t)block[i * 4 + 0] << 24) |
-               ((uint32_t)block[i * 4 + 1] << 16) |
-               ((uint32_t)block[i * 4 + 2] << 8) |
-               ((uint32_t)block[i * 4 + 3]);
+        w[i] = ((uint32_t)data[i * 4 + 0] << 24) |
+               ((uint32_t)data[i * 4 + 1] << 16) |
+               ((uint32_t)data[i * 4 + 2] << 8) |
+               ((uint32_t)data[i * 4 + 3]);
     }
+#ifdef SHA256_DEBUG_EXPOSE
+    sha256_debug_w0 = w[0];
+#endif
     for (uint32_t i = 16; i < 64; ++i)
     {
-        uint32_t s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        uint32_t s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        w[i] = (SIG1(w[i - 2]) + w[i - 7] + SIG0(w[i - 15]) + w[i - 16]) & 0xFFFFFFFFU;
     }
 
     uint32_t a = ctx->state[0];
@@ -54,35 +62,34 @@ static void sha256_process_block(sha256_ctx_t *ctx, const uint8_t block[64])
 
     for (uint32_t i = 0; i < 64; ++i)
     {
-        uint32_t s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
-        uint32_t ch = (e & f) ^ ((~e) & g);
-        uint32_t temp1 = h + s1 + ch + k_table[i] + w[i];
-        uint32_t s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
-        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t temp2 = s0 + maj;
-
+        uint32_t t1 = (h + EP1(e) + CH(e, f, g) + k_table[i] + w[i]) & 0xFFFFFFFFU;
+        uint32_t t2 = (EP0(a) + MAJ(a, b, c)) & 0xFFFFFFFFU;
         h = g;
         g = f;
         f = e;
-        e = d + temp1;
+        e = (d + t1) & 0xFFFFFFFFU;
         d = c;
         c = b;
         b = a;
-        a = temp1 + temp2;
+        a = (t1 + t2) & 0xFFFFFFFFU;
     }
 
-    ctx->state[0] += a;
-    ctx->state[1] += b;
-    ctx->state[2] += c;
-    ctx->state[3] += d;
-    ctx->state[4] += e;
-    ctx->state[5] += f;
-    ctx->state[6] += g;
-    ctx->state[7] += h;
+    ctx->state[0] = (ctx->state[0] + a) & 0xFFFFFFFFU;
+    ctx->state[1] = (ctx->state[1] + b) & 0xFFFFFFFFU;
+    ctx->state[2] = (ctx->state[2] + c) & 0xFFFFFFFFU;
+    ctx->state[3] = (ctx->state[3] + d) & 0xFFFFFFFFU;
+    ctx->state[4] = (ctx->state[4] + e) & 0xFFFFFFFFU;
+    ctx->state[5] = (ctx->state[5] + f) & 0xFFFFFFFFU;
+    ctx->state[6] = (ctx->state[6] + g) & 0xFFFFFFFFU;
+    ctx->state[7] = (ctx->state[7] + h) & 0xFFFFFFFFU;
 }
 
 void sha256_init(sha256_ctx_t *ctx)
 {
+    if (!ctx)
+    {
+        return;
+    }
     ctx->state[0] = 0x6A09E667U;
     ctx->state[1] = 0xBB67AE85U;
     ctx->state[2] = 0x3C6EF372U;
@@ -92,68 +99,64 @@ void sha256_init(sha256_ctx_t *ctx)
     ctx->state[6] = 0x1F83D9ABU;
     ctx->state[7] = 0x5BE0CD19U;
     ctx->bitcount = 0;
+    ctx->datalen = 0;
     memset(ctx->buffer, 0, sizeof(ctx->buffer));
 }
 
 void sha256_update(sha256_ctx_t *ctx, const void *data, size_t len)
 {
+    if (!ctx || (!data && len != 0))
+    {
+        return;
+    }
+
     const uint8_t *bytes = (const uint8_t *)data;
-    size_t buffer_len = (size_t)((ctx->bitcount >> 3) & 0x3F);
-    ctx->bitcount += ((uint64_t)len) << 3;
-
-    size_t offset = 0;
-    if (buffer_len > 0)
+    for (size_t i = 0; i < len; ++i)
     {
-        size_t to_copy = 64 - buffer_len;
-        if (to_copy > len)
+        ctx->buffer[ctx->datalen] = bytes[i];
+        ctx->datalen++;
+        if (ctx->datalen == 64)
         {
-            to_copy = len;
+            sha256_transform(ctx, ctx->buffer);
+            ctx->bitcount += 512;
+            ctx->datalen = 0;
         }
-        memcpy(ctx->buffer + buffer_len, bytes, to_copy);
-        buffer_len += to_copy;
-        offset += to_copy;
-        if (buffer_len == 64)
-        {
-            sha256_process_block(ctx, ctx->buffer);
-            buffer_len = 0;
-        }
-    }
-
-    while (offset + 64 <= len)
-    {
-        sha256_process_block(ctx, bytes + offset);
-        offset += 64;
-    }
-
-    if (offset < len)
-    {
-        memcpy(ctx->buffer, bytes + offset, len - offset);
     }
 }
 
 void sha256_final(sha256_ctx_t *ctx, uint8_t out[32])
 {
-    size_t buffer_len = (size_t)((ctx->bitcount >> 3) & 0x3F);
-    ctx->buffer[buffer_len++] = 0x80;
-
-    if (buffer_len > 56)
+    if (!ctx || !out)
     {
-        memset(ctx->buffer + buffer_len, 0, 64 - buffer_len);
-        sha256_process_block(ctx, ctx->buffer);
-        buffer_len = 0;
+        return;
     }
 
-    memset(ctx->buffer + buffer_len, 0, 56 - buffer_len);
-    uint64_t bitcount_be = (ctx->bitcount);
-    ctx->buffer[56] = (uint8_t)(bitcount_be >> 56);
-    ctx->buffer[57] = (uint8_t)(bitcount_be >> 48);
-    ctx->buffer[58] = (uint8_t)(bitcount_be >> 40);
-    ctx->buffer[59] = (uint8_t)(bitcount_be >> 32);
-    ctx->buffer[60] = (uint8_t)(bitcount_be >> 24);
-    ctx->buffer[61] = (uint8_t)(bitcount_be >> 16);
-    ctx->buffer[62] = (uint8_t)(bitcount_be >> 8);
-    ctx->buffer[63] = (uint8_t)(bitcount_be);
-    sha256_process_block(ctx, ctx->buffer);
+    ctx->bitcount += (uint64_t)ctx->datalen * 8ULL;
+
+    ctx->buffer[ctx->datalen++] = 0x80;
+    if (ctx->datalen > 56)
+    {
+        while (ctx->datalen < 64)
+        {
+            ctx->buffer[ctx->datalen++] = 0x00;
+        }
+        sha256_transform(ctx, ctx->buffer);
+        ctx->datalen = 0;
+    }
+    while (ctx->datalen < 56)
+    {
+        ctx->buffer[ctx->datalen++] = 0x00;
+    }
+
+    ctx->buffer[56] = (uint8_t)(ctx->bitcount >> 56);
+    ctx->buffer[57] = (uint8_t)(ctx->bitcount >> 48);
+    ctx->buffer[58] = (uint8_t)(ctx->bitcount >> 40);
+    ctx->buffer[59] = (uint8_t)(ctx->bitcount >> 32);
+    ctx->buffer[60] = (uint8_t)(ctx->bitcount >> 24);
+    ctx->buffer[61] = (uint8_t)(ctx->bitcount >> 16);
+    ctx->buffer[62] = (uint8_t)(ctx->bitcount >> 8);
+    ctx->buffer[63] = (uint8_t)(ctx->bitcount);
+    sha256_transform(ctx, ctx->buffer);
 
     for (uint32_t i = 0; i < 8; ++i)
     {
@@ -162,6 +165,8 @@ void sha256_final(sha256_ctx_t *ctx, uint8_t out[32])
         out[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
         out[i * 4 + 3] = (uint8_t)(ctx->state[i]);
     }
+
+    sha256_init(ctx);
 }
 
 void sha256_digest(const void *data, size_t len, uint8_t out[32])

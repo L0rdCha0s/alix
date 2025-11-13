@@ -3,6 +3,8 @@
 
 #include "types.h"
 
+#define TIMEKEEPING_TZ_NAME_MAX 32
+
 typedef struct
 {
     int hour;
@@ -20,12 +22,14 @@ typedef struct
 
 typedef struct
 {
-    const char *name;
+    char name[TIMEKEEPING_TZ_NAME_MAX];
     int standard_offset_minutes;
     bool dst_enabled;
     int dst_offset_minutes;
     timekeeping_dst_rule_t dst_start;
     timekeeping_dst_rule_t dst_end;
+    bool use_zone;
+    char zone_name[TIMEKEEPING_TZ_NAME_MAX];
 } timekeeping_timezone_spec_t;
 
 void timekeeping_init(void);
@@ -38,6 +42,8 @@ bool timekeeping_reload_timezone(void);
 bool timekeeping_ensure_timezone_config(void);
 const char *timekeeping_timezone_name(void);
 int timekeeping_timezone_offset_minutes(void);
+bool timekeeping_timezone_has_zone(void);
+const char *timekeeping_timezone_zone(void);
 bool timekeeping_local_time(timekeeping_time_of_day_t *out);
 void timekeeping_format_time(char *buffer, size_t length);
 bool timekeeping_is_valid_timezone_offset(int offset_minutes);

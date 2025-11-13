@@ -19,7 +19,7 @@ GENERATED_DIR := $(OBJDIR)/generated
 DL_SCRIPT_SRC := $(GENERATED_DIR)/dl_script_data.c
 DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
 
-BASE_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
+BASE_CFLAGS := -O4 -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
                -m64 -mno-red-zone -Wall -Wextra -I$(INCLUDE_DIR) -I$(ATK_DIR) \
                -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
                -fshort-wchar
@@ -86,6 +86,7 @@ USER_BINS := $(USER_BIN_DIR)/userdemo2 \
              $(USER_BIN_DIR)/atk_taskmgr
 HOST_TEST_DIR := $(OBJDIR)/host-tests
 HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
+SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
 HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -I$(INCLUDE_DIR) -DTTF_HOST_BUILD
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
@@ -218,6 +219,10 @@ $(HOST_TEST_BIN): tests/ttf_host_test.c src/kernel/ttf.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/ttf_host_test.c src/kernel/ttf.c -o $@
 
+$(SHA256_TEST_BIN): tests/sha256_host_test.c src/crypto/sha256.c include/crypto/sha256.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/sha256_host_test.c src/crypto/sha256.c -o $@
+
 LOADER_HEADERS := \
 	$(INCLUDE_DIR)/uefi.h \
 	$(INCLUDE_DIR)/bootinfo.h \
@@ -311,4 +316,7 @@ test-dhcp: tests/dhcp_packet_test
 ttf-test: $(HOST_TEST_BIN)
 	$(HOST_TEST_BIN) SF-Pro.ttf
 
-.PHONY: all run run-hdd clean test-dhcp ttf-test
+sha256-test: $(SHA256_TEST_BIN)
+	$(SHA256_TEST_BIN)
+
+.PHONY: all run run-hdd clean test-dhcp ttf-test sha256-test

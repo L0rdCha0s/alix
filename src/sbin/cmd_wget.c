@@ -17,6 +17,10 @@
 #define WGET_TRACE_ENABLE 0
 #endif
 
+#ifndef WGET_TLS_TRACE_ENABLE
+#define WGET_TLS_TRACE_ENABLE 1
+#endif
+
 #define WGET_HEADER_CAP 2048
 #define WGET_CHUNK_SIZE 4096
 
@@ -37,6 +41,31 @@ static bool find_header_value(const char *headers, const char *name_lower,
 static bool parse_http_status(const char *headers, int *status_out);
 static const char *string_chr(const char *s, char ch);
 static const char *string_rchr(const char *s, char ch);
+
+#if WGET_TLS_TRACE_ENABLE
+static bool format_decimal_u64(char *buf, size_t cap, uint64_t value, size_t *out_len);
+static void wget_tls_trace_line(shell_output_t *out, const char *text);
+static void wget_tls_trace_label_value(shell_output_t *out, const char *label, const char *value);
+static void wget_tls_trace_label_bool(shell_output_t *out, const char *label, bool value);
+static void wget_tls_trace_label_u64(shell_output_t *out, const char *label, uint64_t value);
+static void wget_tls_trace_label_int(shell_output_t *out, const char *label, int value);
+static void wget_tls_trace_ipv4(shell_output_t *out, const char *label, uint32_t addr);
+static void wget_tls_trace_hex(shell_output_t *out, const char *label,
+                               const uint8_t *data, size_t len, size_t max_len);
+static size_t wget_tls_bignum_bits(const bignum_t *num);
+static void wget_tls_trace_state(shell_output_t *out, const char *label, const tls_session_t *session);
+static void wget_tls_trace_server_key(shell_output_t *out, const tls_session_t *session);
+static void wget_tls_trace_socket_state(shell_output_t *out, const net_tcp_socket_t *socket);
+static void wget_tls_trace_request(shell_output_t *out, const uint8_t *data, size_t len);
+static void wget_tls_trace_payload_preview(shell_output_t *out, const uint8_t *data, size_t len);
+static bool wget_tls_handshake(shell_output_t *out,
+                               tls_session_t *session,
+                               const char *hostname,
+                               const net_interface_t *iface,
+                               net_tcp_socket_t *socket,
+                               uint32_t remote_ip,
+                               uint16_t remote_port);
+#endif
 
 static bool ensure_arp(net_interface_t *iface, uint32_t next_hop_ip, uint64_t timeout_ticks);
 static bool append_body_chunk(vfs_node_t *file, const uint8_t *data, size_t len,
@@ -230,6 +259,339 @@ static bool chunked_consume(chunked_state_t *st,
     return true;
 }
 
+#if WGET_TLS_TRACE_ENABLE
+static bool format_decimal_u64(char *buf, size_t cap, uint64_t value, size_t *out_len)
+{
+    if (!buf || cap == 0)
+    {
+        return false;
+    }
+    char tmp[32];
+    size_t count = 0;
+    do
+    {
+        if (count >= sizeof(tmp))
+        {
+            return false;
+        }
+        uint8_t digit = (uint8_t)(value % 10ULL);
+        tmp[count++] = (char)('0' + digit);
+        value /= 10ULL;
+    } while (value != 0ULL);
+
+    if (count + 1 > cap)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        buf[i] = tmp[count - 1 - i];
+    }
+    buf[count] = '\0';
+    if (out_len)
+    {
+        *out_len = count;
+    }
+    return true;
+}
+
+static void wget_tls_trace_line(shell_output_t *out, const char *text)
+{
+    shell_output_write(out, "[tls] ");
+    shell_output_write(out, text ? text : "(null)");
+    shell_output_write(out, "\n");
+}
+
+static void wget_tls_trace_label_value(shell_output_t *out, const char *label, const char *value)
+{
+    shell_output_write(out, "[tls] ");
+    shell_output_write(out, label ? label : "(null)");
+    shell_output_write(out, ": ");
+    shell_output_write(out, value ? value : "(null)");
+    shell_output_write(out, "\n");
+}
+
+static void wget_tls_trace_label_bool(shell_output_t *out, const char *label, bool value)
+{
+    wget_tls_trace_label_value(out, label, value ? "true" : "false");
+}
+
+static void wget_tls_trace_label_u64(shell_output_t *out, const char *label, uint64_t value)
+{
+    char buf[32];
+    if (!format_decimal_u64(buf, sizeof(buf), value, NULL))
+    {
+        buf[0] = '?';
+        buf[1] = '\0';
+    }
+    wget_tls_trace_label_value(out, label, buf);
+}
+
+static void wget_tls_trace_label_int(shell_output_t *out, const char *label, int value)
+{
+    char buf[24];
+    if (value < 0)
+    {
+        unsigned magnitude = (unsigned)(-(value + 1)) + 1;
+        buf[0] = '-';
+        if (!format_decimal(buf + 1, sizeof(buf) - 1, magnitude, NULL))
+        {
+            buf[0] = '?';
+            buf[1] = '\0';
+        }
+    }
+    else
+    {
+        if (!format_decimal(buf, sizeof(buf), (unsigned)value, NULL))
+        {
+            buf[0] = '?';
+            buf[1] = '\0';
+        }
+    }
+    wget_tls_trace_label_value(out, label, buf);
+}
+
+static void wget_tls_trace_ipv4(shell_output_t *out, const char *label, uint32_t addr)
+{
+    char ipbuf[16];
+    net_format_ipv4(addr, ipbuf);
+    wget_tls_trace_label_value(out, label, ipbuf);
+}
+
+static void wget_tls_trace_hex(shell_output_t *out, const char *label,
+                               const uint8_t *data, size_t len, size_t max_len)
+{
+    shell_output_write(out, "[tls] ");
+    shell_output_write(out, label ? label : "(null)");
+    shell_output_write(out, ": ");
+    if (!data || len == 0)
+    {
+        shell_output_write(out, "(empty)\n");
+        return;
+    }
+    size_t limit = len;
+    if (max_len > 0 && limit > max_len)
+    {
+        limit = max_len;
+    }
+    static const char hex_digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < limit; ++i)
+    {
+        char hex[3];
+        hex[0] = hex_digits[(data[i] >> 4) & 0xF];
+        hex[1] = hex_digits[data[i] & 0xF];
+        hex[2] = '\0';
+        shell_output_write(out, hex);
+        if (i + 1 < limit)
+        {
+            shell_output_write(out, " ");
+        }
+    }
+    if (limit < len)
+    {
+        shell_output_write(out, " ...");
+    }
+    shell_output_write(out, "\n");
+}
+
+static size_t wget_tls_bignum_bits(const bignum_t *num)
+{
+    if (!num || num->length == 0)
+    {
+        return 0;
+    }
+    size_t idx = num->length;
+    while (idx > 0 && num->words[idx - 1] == 0)
+    {
+        --idx;
+    }
+    if (idx == 0)
+    {
+        return 0;
+    }
+    size_t bits = idx * 32;
+    uint32_t top = num->words[idx - 1];
+    while ((top & 0x80000000U) == 0)
+    {
+        top <<= 1;
+        if (bits == 0)
+        {
+            break;
+        }
+        --bits;
+    }
+    return bits;
+}
+
+static void wget_tls_trace_state(shell_output_t *out, const char *label, const tls_session_t *session)
+{
+    if (!session)
+    {
+        wget_tls_trace_line(out, "TLS state unavailable (null session)");
+        return;
+    }
+    wget_tls_trace_line(out, label ? label : "TLS state");
+    wget_tls_trace_label_bool(out, "handshake_complete", session->handshake_complete);
+    wget_tls_trace_label_bool(out, "keys_ready", session->keys_ready);
+    wget_tls_trace_label_u64(out, "client_seq", session->client_seq);
+    wget_tls_trace_label_u64(out, "server_seq", session->server_seq);
+    wget_tls_trace_label_int(out, "socket_fd", session->socket_fd);
+}
+
+static void wget_tls_trace_server_key(shell_output_t *out, const tls_session_t *session)
+{
+    if (!session)
+    {
+        return;
+    }
+    size_t modulus_bytes = rsa_public_key_size(&session->server_key);
+    size_t modulus_bits = wget_tls_bignum_bits(&session->server_key.modulus);
+    size_t exponent_bits = wget_tls_bignum_bits(&session->server_key.exponent);
+    wget_tls_trace_label_u64(out, "server_rsa_modulus_bytes", modulus_bytes);
+    wget_tls_trace_label_u64(out, "server_rsa_modulus_bits", modulus_bits);
+    wget_tls_trace_label_u64(out, "server_rsa_exponent_bits", exponent_bits);
+}
+
+static void wget_tls_trace_socket_state(shell_output_t *out, const net_tcp_socket_t *socket)
+{
+    if (!socket)
+    {
+        wget_tls_trace_label_value(out, "tcp_state", "(null socket)");
+        return;
+    }
+    const char *state = net_tcp_socket_state(socket);
+    if (!state)
+    {
+        state = "(unknown)";
+    }
+    wget_tls_trace_label_value(out, "tcp_state", state);
+}
+
+static void wget_tls_trace_request(shell_output_t *out, const uint8_t *data, size_t len)
+{
+    if (!data || len == 0)
+    {
+        wget_tls_trace_line(out, "HTTPS request buffer empty");
+        return;
+    }
+    wget_tls_trace_label_u64(out, "https_request_bytes", len);
+    char line[96];
+    size_t line_len = 0;
+    while (line_len < len && line_len + 1 < sizeof(line))
+    {
+        char ch = (char)data[line_len];
+        if (ch == '\r' || ch == '\n')
+        {
+            break;
+        }
+        line[line_len++] = ch;
+    }
+    line[line_len] = '\0';
+    if (line_len > 0)
+    {
+        wget_tls_trace_label_value(out, "https_request_line", line);
+    }
+    wget_tls_trace_hex(out, "https_request_preview", data, len, 64);
+}
+
+static void wget_tls_trace_payload_preview(shell_output_t *out, const uint8_t *data, size_t len)
+{
+    wget_tls_trace_label_u64(out, "first_tls_payload_bytes", len);
+    wget_tls_trace_hex(out, "first_tls_payload", data, len, 64);
+}
+
+static bool wget_tls_handshake(shell_output_t *out,
+                               tls_session_t *session,
+                               const char *hostname,
+                               const net_interface_t *iface,
+                               net_tcp_socket_t *socket,
+                               uint32_t remote_ip,
+                               uint16_t remote_port)
+{
+    if (!session)
+    {
+        wget_tls_trace_line(out, "No TLS session available for handshake");
+        return false;
+    }
+
+    wget_tls_trace_label_value(out, "hostname", hostname && hostname[0] ? hostname : "(none)");
+    char port_buf[16];
+    if (!format_decimal(port_buf, sizeof(port_buf), remote_port, NULL))
+    {
+        port_buf[0] = '?';
+        port_buf[1] = '\0';
+    }
+    wget_tls_trace_label_value(out, "port", port_buf);
+    wget_tls_trace_ipv4(out, "remote_ip", remote_ip);
+
+    if (iface)
+    {
+        char ifname[NET_IF_NAME_MAX + 1];
+        size_t name_len = 0;
+        while (name_len < NET_IF_NAME_MAX && iface->name[name_len] != '\0')
+        {
+            ifname[name_len] = iface->name[name_len];
+            ++name_len;
+        }
+        if (name_len == NET_IF_NAME_MAX)
+        {
+            ifname[NET_IF_NAME_MAX] = '\0';
+        }
+        else
+        {
+            ifname[name_len] = '\0';
+        }
+        if (name_len == 0)
+        {
+            wget_tls_trace_label_value(out, "interface", "(unnamed)");
+        }
+        else
+        {
+            wget_tls_trace_label_value(out, "interface", ifname);
+        }
+        wget_tls_trace_ipv4(out, "interface_ipv4", iface->ipv4_addr);
+    }
+    else
+    {
+        wget_tls_trace_label_value(out, "interface", "(none)");
+    }
+
+    wget_tls_trace_socket_state(out, socket);
+
+    uint64_t start = timer_ticks();
+    bool ok = tls_session_handshake(session, hostname);
+    uint64_t elapsed = timer_ticks() - start;
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 100;
+    }
+    uint64_t elapsed_ms = (elapsed * 1000ULL) / (uint64_t)freq;
+
+    wget_tls_trace_label_u64(out, "handshake_ticks", elapsed);
+    wget_tls_trace_label_u64(out, "handshake_ms", elapsed_ms);
+
+    if (ok)
+    {
+        wget_tls_trace_line(out, "handshake outcome: success");
+        wget_tls_trace_state(out, "post-handshake state", session);
+        wget_tls_trace_server_key(out, session);
+        wget_tls_trace_hex(out, "client_random", session->client_random, sizeof(session->client_random), 32);
+        wget_tls_trace_hex(out, "server_random", session->server_random, sizeof(session->server_random), 32);
+    }
+    else
+    {
+        wget_tls_trace_line(out, "handshake outcome: failure");
+        wget_tls_trace_state(out, "failure snapshot", session);
+        wget_tls_trace_socket_state(out, socket);
+        wget_tls_trace_hex(out, "last_record_preview", session->record_buffer,
+                           sizeof(session->record_buffer), 32);
+    }
+
+    return ok;
+}
+#endif
+
 bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 {
     const char *cursor = args ? args : "";
@@ -351,6 +713,12 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     }
 
     bool use_tls = tls_via_scheme || (remote_port == 443);
+#if WGET_TLS_TRACE_ENABLE
+    if (use_tls)
+    {
+        wget_tls_trace_line(out, "HTTPS selected; supported cipher: TLS_RSA_WITH_AES_128_CBC_SHA256");
+    }
+#endif
 
     uint32_t remote_ip = 0;
     if (!net_parse_ipv4(host_name, &remote_ip))
@@ -405,6 +773,9 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     tls_session_t *tls_session = NULL;
     vfs_node_t *file = NULL;
     size_t written = 0;
+#if WGET_TLS_TRACE_ENABLE
+    bool tls_trace_logged_first_payload = false;
+#endif
 
     if (!net_tcp_socket_connect(socket, remote_ip, remote_port))
     {
@@ -445,7 +816,11 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             goto cleanup;
         }
         shell_output_write(out, "Negotiating TLS...\n");
+#if WGET_TLS_TRACE_ENABLE
+        if (!wget_tls_handshake(out, tls_session, host_name, iface, socket, remote_ip, remote_port))
+#else
         if (!tls_session_handshake(tls_session, host_name))
+#endif
         {
             shell_output_error(out, "TLS handshake failed");
             goto cleanup;
@@ -514,6 +889,9 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 
     if (tls_active)
     {
+#if WGET_TLS_TRACE_ENABLE
+        wget_tls_trace_request(out, (const uint8_t *)request, req_len);
+#endif
         if (!tls_session_send(tls_session, (const uint8_t *)request, req_len))
         {
             shell_output_error(out, "failed to send HTTPS request");
@@ -555,6 +933,13 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         if (tls_active)
         {
             bytes_read = tls_session_recv(tls_session, chunk, sizeof(chunk));
+#if WGET_TLS_TRACE_ENABLE
+            if (bytes_read > 0 && !tls_trace_logged_first_payload)
+            {
+                tls_trace_logged_first_payload = true;
+                wget_tls_trace_payload_preview(out, chunk, bytes_read);
+            }
+#endif
             if (bytes_read == 0)
             {
                 if (net_tcp_socket_remote_closed(socket))

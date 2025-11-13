@@ -3,9 +3,9 @@
 #include "libc.h"
 #include "serial.h"
 #include "timer.h"
+#include "tzdb.h"
 #include "vfs.h"
 
-#define TIMEKEEPING_TZ_NAME_MAX 32
 #define TIMEKEEPING_CONFIG_PATH "/etc/timezone/current"
 #define TIMEKEEPING_DAY_SECONDS (24 * 60 * 60)
 
@@ -19,6 +19,9 @@ static uint32_t g_tick_frequency = 1000;
 typedef struct
 {
     char name[TIMEKEEPING_TZ_NAME_MAX];
+    char zone_name[TIMEKEEPING_TZ_NAME_MAX];
+    bool use_zone;
+    const tzdb_zone_t *tz_zone;
     int standard_offset_minutes;
     bool dst_enabled;
     int dst_offset_minutes;
@@ -28,6 +31,9 @@ typedef struct
 
 static timekeeping_timezone_state_t g_timezone = {
     .name = "UTC",
+    .zone_name = "",
+    .use_zone = false,
+    .tz_zone = NULL,
     .standard_offset_minutes = 0,
     .dst_enabled = false,
     .dst_offset_minutes = 0,
@@ -57,24 +63,81 @@ static void timekeeping_log(const char *msg)
     serial_write_string("\r\n");
 }
 
+static void timekeeping_copy_string(char *dest, size_t capacity, const char *src)
+{
+    if (!dest || capacity == 0)
+    {
+        return;
+    }
+    if (!src)
+    {
+        dest[0] = '\0';
+        return;
+    }
+    size_t len = strlen(src);
+    if (len >= capacity)
+    {
+        len = capacity - 1;
+    }
+    memcpy(dest, src, len);
+    dest[len] = '\0';
+}
+
+static int timekeeping_tzdb_offset(const tzdb_zone_t *zone, uint64_t utc_seconds)
+{
+    if (!zone)
+    {
+        return 0;
+    }
+    int offset = zone->initial_offset_minutes;
+    const tzdb_transition_record_t *transitions = zone->transitions;
+    int64_t query = (int64_t)utc_seconds;
+    size_t left = 0;
+    size_t right = zone->transition_count;
+    while (left < right)
+    {
+        size_t mid = left + (right - left) / 2;
+        int64_t ts = transitions[mid].utc_seconds;
+        if (ts <= query)
+        {
+            offset = transitions[mid].offset_minutes;
+            left = mid + 1;
+        }
+        else
+        {
+            right = mid;
+        }
+    }
+    return offset;
+}
+
 static void timekeeping_set_timezone_internal(const char *name,
                                               int standard_offset,
                                               bool dst_enabled,
                                               int dst_offset,
                                               const timekeeping_dst_rule_t *start,
-                                              const timekeeping_dst_rule_t *end)
+                                              const timekeeping_dst_rule_t *end,
+                                              const char *zone_name,
+                                              const tzdb_zone_t *zone)
 {
     if (!name || *name == '\0')
     {
         name = "UTC";
     }
-    size_t len = strlen(name);
-    if (len >= TIMEKEEPING_TZ_NAME_MAX)
+    const char *display_name = zone && zone->name ? zone->name : name;
+    timekeeping_copy_string(g_timezone.name, sizeof(g_timezone.name), display_name);
+
+    if (zone_name && *zone_name)
     {
-        len = TIMEKEEPING_TZ_NAME_MAX - 1;
+        timekeeping_copy_string(g_timezone.zone_name, sizeof(g_timezone.zone_name), zone_name);
     }
-    memcpy(g_timezone.name, name, len);
-    g_timezone.name[len] = '\0';
+    else
+    {
+        g_timezone.zone_name[0] = '\0';
+    }
+
+    g_timezone.use_zone = (zone != NULL);
+    g_timezone.tz_zone = zone;
 
     g_timezone.standard_offset_minutes = standard_offset;
     g_timezone.dst_enabled = dst_enabled;
@@ -469,6 +532,10 @@ static bool timekeeping_is_dst_active(uint64_t utc_seconds)
 
 static int timekeeping_effective_offset_minutes(uint64_t utc_seconds)
 {
+    if (g_timezone.use_zone && g_timezone.tz_zone)
+    {
+        return timekeeping_tzdb_offset(g_timezone.tz_zone, utc_seconds);
+    }
     if (g_timezone.dst_enabled && timekeeping_is_dst_active(utc_seconds))
     {
         return g_timezone.dst_offset_minutes;
@@ -478,16 +545,16 @@ static int timekeeping_effective_offset_minutes(uint64_t utc_seconds)
 
 static bool timekeeping_parse_timezone(const char *data,
                                        size_t size,
-                                       timekeeping_timezone_state_t *state_out)
+                                       timekeeping_timezone_spec_t *spec_out)
 {
-    if (!data || size == 0 || !state_out)
+    if (!data || size == 0 || !spec_out)
     {
         return false;
     }
 
     size_t pos = 0;
     char line[128];
-    timekeeping_timezone_state_t parsed = { 0 };
+    timekeeping_timezone_spec_t parsed = { 0 };
 
     if (!timekeeping_read_line(data, size, &pos, line, sizeof(line)))
     {
@@ -502,6 +569,7 @@ static bool timekeeping_parse_timezone(const char *data,
     {
         name_len = TIMEKEEPING_TZ_NAME_MAX - 1;
     }
+    memset(parsed.name, 0, sizeof(parsed.name));
     memcpy(parsed.name, line, name_len);
     parsed.name[name_len] = '\0';
 
@@ -522,6 +590,8 @@ static bool timekeeping_parse_timezone(const char *data,
     parsed.dst_offset_minutes = parsed.standard_offset_minutes;
     memset(&parsed.dst_start, 0, sizeof(parsed.dst_start));
     memset(&parsed.dst_end, 0, sizeof(parsed.dst_end));
+    parsed.use_zone = false;
+    parsed.zone_name[0] = '\0';
 
     size_t saved_pos = pos;
     if (timekeeping_read_line(data, size, &pos, line, sizeof(line)))
@@ -556,7 +626,32 @@ static bool timekeeping_parse_timezone(const char *data,
         pos = saved_pos;
     }
 
-    *state_out = parsed;
+    while (timekeeping_read_line(data, size, &pos, line, sizeof(line)))
+    {
+        const char *cursor = line;
+        while (*cursor == ' ' || *cursor == '\t')
+        {
+            ++cursor;
+        }
+        if (strncmp(cursor, "ZONE", 4) == 0)
+        {
+            cursor += 4;
+            while (*cursor == ' ' || *cursor == '\t' || *cursor == '=')
+            {
+                ++cursor;
+            }
+            size_t zone_len = strlen(cursor);
+            if (zone_len >= TIMEKEEPING_TZ_NAME_MAX)
+            {
+                zone_len = TIMEKEEPING_TZ_NAME_MAX - 1;
+            }
+            memcpy(parsed.zone_name, cursor, zone_len);
+            parsed.zone_name[zone_len] = '\0';
+            parsed.use_zone = (zone_len > 0);
+        }
+    }
+
+    *spec_out = parsed;
     return true;
 }
 
@@ -646,7 +741,8 @@ void timekeeping_init(void)
     }
     g_tick_base = timer_ticks();
     g_time_base_ms = 0;
-    timekeeping_set_timezone_internal("UTC", 0, false, 0, NULL, NULL);
+    (void)tzdb_load();
+    timekeeping_set_timezone_internal("UTC", 0, false, 0, NULL, NULL, NULL, NULL);
     if (!timekeeping_ensure_timezone_config())
     {
         timekeeping_log("failed to ensure timezone config");
@@ -683,13 +779,27 @@ bool timekeeping_set_utc_seconds(uint64_t seconds)
 
 bool timekeeping_save_timezone_spec(const timekeeping_timezone_spec_t *spec)
 {
-    if (!spec || !spec->name || *spec->name == '\0')
+    if (!spec || spec->name[0] == '\0')
     {
         return false;
     }
     if (!timekeeping_is_valid_timezone_offset(spec->standard_offset_minutes))
     {
         return false;
+    }
+
+    const tzdb_zone_t *zone = NULL;
+    if (spec->use_zone && spec->zone_name[0] != '\0')
+    {
+        if (!tzdb_load())
+        {
+            return false;
+        }
+        zone = tzdb_find_zone(spec->zone_name);
+        if (!zone)
+        {
+            return false;
+        }
     }
 
     bool dst_enabled = spec->dst_enabled;
@@ -726,26 +836,50 @@ bool timekeeping_save_timezone_spec(const timekeeping_timezone_spec_t *spec)
         if (!timekeeping_write_rule_line(file, &start_rule)) return false;
         if (!timekeeping_write_rule_line(file, &end_rule)) return false;
     }
+    if (zone)
+    {
+        char zone_line[TIMEKEEPING_TZ_NAME_MAX + 8];
+        size_t prefix = 5;
+        memcpy(zone_line, "ZONE ", prefix);
+        size_t zone_len = strlen(spec->zone_name);
+        if (zone_len >= TIMEKEEPING_TZ_NAME_MAX)
+        {
+            zone_len = TIMEKEEPING_TZ_NAME_MAX - 1;
+        }
+        memcpy(zone_line + prefix, spec->zone_name, zone_len);
+        zone_line[prefix + zone_len] = '\n';
+        if (!vfs_append(file, zone_line, prefix + zone_len + 1))
+        {
+            return false;
+        }
+    }
 
     timekeeping_set_timezone_internal(spec->name,
                                       spec->standard_offset_minutes,
                                       dst_enabled,
                                       dst_enabled ? dst_offset : spec->standard_offset_minutes,
                                       dst_enabled ? &start_rule : NULL,
-                                      dst_enabled ? &end_rule : NULL);
+                                      dst_enabled ? &end_rule : NULL,
+                                      zone ? spec->zone_name : NULL,
+                                      zone);
     return true;
 }
 
 bool timekeeping_save_timezone(const char *name, int offset_minutes)
 {
-    timekeeping_timezone_spec_t spec = {
-        .name = name,
-        .standard_offset_minutes = offset_minutes,
-        .dst_enabled = false,
-        .dst_offset_minutes = offset_minutes,
-        .dst_start = { 0 },
-        .dst_end = { 0 }
-    };
+    if (!name)
+    {
+        return false;
+    }
+    timekeeping_timezone_spec_t spec;
+    memset(&spec, 0, sizeof(spec));
+    timekeeping_copy_string(spec.name, sizeof(spec.name), name);
+    spec.standard_offset_minutes = offset_minutes;
+    spec.dst_enabled = false;
+    spec.dst_offset_minutes = offset_minutes;
+    spec.dst_start = (timekeeping_dst_rule_t){ 0 };
+    spec.dst_end = (timekeeping_dst_rule_t){ 0 };
+    spec.use_zone = false;
     return timekeeping_save_timezone_spec(&spec);
 }
 
@@ -762,17 +896,45 @@ bool timekeeping_reload_timezone(void)
     {
         return false;
     }
-    timekeeping_timezone_state_t parsed;
+    timekeeping_timezone_spec_t parsed;
+    memset(&parsed, 0, sizeof(parsed));
     if (!timekeeping_parse_timezone(data, size, &parsed))
     {
         return false;
     }
+
+    const tzdb_zone_t *zone = NULL;
+    if (parsed.use_zone && parsed.zone_name[0] != '\0')
+    {
+        if (tzdb_load())
+        {
+            zone = tzdb_find_zone(parsed.zone_name);
+        }
+        if (!zone)
+        {
+            timekeeping_log("configured tzdb zone not found, using fallback");
+        }
+    }
+
+    bool dst_enabled = parsed.dst_enabled;
+    int dst_offset = parsed.dst_offset_minutes;
+    if (!dst_enabled ||
+        !timekeeping_is_valid_timezone_offset(dst_offset) ||
+        dst_offset == parsed.standard_offset_minutes ||
+        !timekeeping_rule_valid(&parsed.dst_start) ||
+        !timekeeping_rule_valid(&parsed.dst_end))
+    {
+        dst_enabled = false;
+    }
+
     timekeeping_set_timezone_internal(parsed.name,
                                       parsed.standard_offset_minutes,
-                                      parsed.dst_enabled,
-                                      parsed.dst_offset_minutes,
-                                      parsed.dst_enabled ? &parsed.dst_start : NULL,
-                                      parsed.dst_enabled ? &parsed.dst_end : NULL);
+                                      dst_enabled,
+                                      dst_enabled ? dst_offset : parsed.standard_offset_minutes,
+                                      dst_enabled ? &parsed.dst_start : NULL,
+                                      dst_enabled ? &parsed.dst_end : NULL,
+                                      parsed.use_zone ? parsed.zone_name : NULL,
+                                      zone);
     return true;
 }
 
@@ -789,6 +951,20 @@ bool timekeeping_ensure_timezone_config(void)
 const char *timekeeping_timezone_name(void)
 {
     return g_timezone.name;
+}
+
+bool timekeeping_timezone_has_zone(void)
+{
+    return g_timezone.use_zone && g_timezone.zone_name[0] != '\0';
+}
+
+const char *timekeeping_timezone_zone(void)
+{
+    if (!timekeeping_timezone_has_zone())
+    {
+        return NULL;
+    }
+    return g_timezone.zone_name;
 }
 
 int timekeeping_timezone_offset_minutes(void)

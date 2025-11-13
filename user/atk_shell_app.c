@@ -123,8 +123,6 @@ static void shell_on_submit(atk_widget_t *terminal, void *context, const char *l
     }
 
     const char *command = (line && *line) ? line : "";
-    shell_append(app, command);
-    shell_append(app, "\n");
 
     char buffer[SHELL_OUTPUT_BUFFER];
     int status = 0;

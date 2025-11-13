@@ -93,14 +93,12 @@ static void mix_columns(uint8_t state[16])
         uint8_t b = col[1];
         uint8_t c = col[2];
         uint8_t d = col[3];
-        uint8_t ab = a ^ b;
-        uint8_t bc = b ^ c;
-        uint8_t cd = c ^ d;
-        uint8_t da = d ^ a;
-        col[0] ^= xtime(ab) ^ xtime(da);
-        col[1] ^= xtime(ab) ^ xtime(bc);
-        col[2] ^= xtime(bc) ^ xtime(cd);
-        col[3] ^= xtime(cd) ^ xtime(da);
+        uint8_t t = a ^ b ^ c ^ d;
+        uint8_t u = a;
+        col[0] ^= t ^ xtime(a ^ b);
+        col[1] ^= t ^ xtime(b ^ c);
+        col[2] ^= t ^ xtime(c ^ d);
+        col[3] ^= t ^ xtime(d ^ u);
     }
 }
 

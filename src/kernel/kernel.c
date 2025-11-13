@@ -143,6 +143,18 @@ static void ensure_system_layout(void)
     {
         serial_write_string("[alix] warn: unable to ensure /root/usr/bin\r\n");
     }
+    if (!ensure_directory_path("/root/usr/share"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root/usr/share\r\n");
+    }
+    if (!ensure_directory_path("/root/usr/share/zoneinfo"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root/usr/share/zoneinfo\r\n");
+    }
+    if (!ensure_directory_path("/root/usr/share/zoneinfo/src"))
+    {
+        serial_write_string("[alix] warn: unable to ensure /root/usr/share/zoneinfo/src\r\n");
+    }
     if (!vfs_symlink(vfs_root(), "/root/etc", "/etc"))
     {
         serial_write_string("[alix] warn: unable to ensure /etc symlink\r\n");

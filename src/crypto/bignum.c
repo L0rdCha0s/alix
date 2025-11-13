@@ -1,6 +1,7 @@
 #include "crypto/bignum.h"
 
 #include "libc.h"
+#include "serial.h"
 
 typedef struct
 {
@@ -16,6 +17,68 @@ static void bignum_normalize(bignum_t *num)
     }
 }
 
+static size_t bignum_words_normalize(uint32_t *words, size_t len)
+{
+    while (len > 0 && words[len - 1] == 0)
+    {
+        len--;
+    }
+    return len;
+}
+
+static size_t bignum_words_shift_left1(uint32_t *words, size_t len, uint32_t bit)
+{
+    uint64_t carry = bit & 0x1U;
+    for (size_t i = 0; i < len; ++i)
+    {
+        uint64_t value = ((uint64_t)words[i] << 1) | carry;
+        words[i] = (uint32_t)value;
+        carry = value >> 32;
+    }
+    if (carry != 0)
+    {
+        words[len++] = (uint32_t)carry;
+    }
+    else if (len == 0 && bit)
+    {
+        words[0] = 1;
+        len = 1;
+    }
+    return len;
+}
+
+static int bignum_words_compare(const uint32_t *a, size_t a_len,
+                                const uint32_t *b, size_t b_len)
+{
+    if (a_len != b_len)
+    {
+        return (a_len > b_len) ? 1 : -1;
+    }
+    for (size_t i = a_len; i-- > 0;)
+    {
+        if (a[i] != b[i])
+        {
+            return (a[i] > b[i]) ? 1 : -1;
+        }
+    }
+    return 0;
+}
+
+static size_t bignum_words_sub(uint32_t *a, size_t a_len,
+                               const uint32_t *b, size_t b_len)
+{
+    uint64_t borrow = 0;
+    for (size_t i = 0; i < a_len; ++i)
+    {
+        uint64_t av = a[i];
+        uint64_t bv = (i < b_len) ? b[i] : 0;
+        uint64_t result = av - bv - borrow;
+        a[i] = (uint32_t)result;
+        borrow = (result >> 63) & 0x1U;
+    }
+    return bignum_words_normalize(a, a_len);
+}
+
 void bignum_init(bignum_t *num)
 {
     memset(num->words, 0, sizeof(num->words));
@@ -25,28 +88,37 @@ void bignum_init(bignum_t *num)
 void bignum_from_bytes(bignum_t *num, const uint8_t *data, size_t len)
 {
     bignum_init(num);
+    if (!data || len == 0)
+    {
+        return;
+    }
+
+    size_t max_bytes = BIGNUM_MAX_WORDS * 4;
+    if (len > max_bytes)
+    {
+        data += (len - max_bytes);
+        len = max_bytes;
+    }
+
     size_t word_count = (len + 3) / 4;
     if (word_count > BIGNUM_MAX_WORDS)
     {
         word_count = BIGNUM_MAX_WORDS;
     }
     num->length = word_count;
+
+    size_t byte_index = len;
     for (size_t i = 0; i < word_count; ++i)
     {
-        size_t index = len - (i + 1) * 4;
         uint32_t word = 0;
         for (size_t j = 0; j < 4; ++j)
         {
-            size_t pos = index + j;
-            if (index + j < len)
+            if (byte_index == 0)
             {
-                word <<= 8;
-                word |= data[pos];
+                break;
             }
-            else
-            {
-                word <<= 8;
-            }
+            uint8_t byte = data[--byte_index];
+            word |= ((uint32_t)byte) << (j * 8);
         }
         num->words[i] = word;
     }
@@ -100,102 +172,41 @@ void bignum_sub(bignum_t *a, const bignum_t *b)
     bignum_normalize(a);
 }
 
-static void bignum_add_word(bignum_t *num, uint32_t word)
-{
-    uint64_t carry = word;
-    size_t i = 0;
-    while (carry != 0)
-    {
-        if (i >= num->length)
-        {
-            if (i >= BIGNUM_MAX_WORDS)
-            {
-                return;
-            }
-            num->words[i] = 0;
-            num->length = i + 1;
-        }
-        uint64_t sum = (uint64_t)num->words[i] + carry;
-        num->words[i] = (uint32_t)sum;
-        carry = sum >> 32;
-        ++i;
-    }
-    if (i > num->length)
-    {
-        num->length = i;
-    }
-}
-
-static void bignum_shift_words_up(bignum_t *num, size_t count)
-{
-    if (count == 0 || num->length == 0)
-    {
-        if (num->length == 0)
-        {
-            num->length = 0;
-        }
-        return;
-    }
-    if (num->length + count > BIGNUM_MAX_WORDS)
-    {
-        count = BIGNUM_MAX_WORDS - num->length;
-    }
-    for (size_t i = num->length; i-- > 0;)
-    {
-        num->words[i + count] = num->words[i];
-    }
-    for (size_t i = 0; i < count; ++i)
-    {
-        num->words[i] = 0;
-    }
-    num->length += count;
-}
-
-static void bignum_mul_base_add(bignum_t *num, uint32_t word)
-{
-    if (num->length == 0 && word == 0)
-    {
-        return;
-    }
-    if (num->length + 1 > BIGNUM_MAX_WORDS)
-    {
-        return;
-    }
-    if (num->length > 0)
-    {
-        bignum_shift_words_up(num, 1);
-    }
-    else
-    {
-        num->length = 1;
-        num->words[0] = 0;
-    }
-    bignum_add_word(num, word);
-}
-
 static void bignum_mul_wide(const bignum_t *a, const bignum_t *b, bignum_wide_t *out)
 {
     memset(out->words, 0, sizeof(out->words));
-    out->length = a->length + b->length;
-    if (out->length > BIGNUM_MAX_WORDS * 2)
-    {
-        out->length = BIGNUM_MAX_WORDS * 2;
-    }
+    out->length = 0;
     for (size_t i = 0; i < a->length; ++i)
     {
         uint64_t carry = 0;
         for (size_t j = 0; j < b->length && i + j < BIGNUM_MAX_WORDS * 2; ++j)
         {
             size_t idx = i + j;
-            uint64_t current = out->words[idx];
-            uint64_t product = (uint64_t)a->words[i] * (uint64_t)b->words[j] + current + carry;
+            unsigned __int128 product = (unsigned __int128)a->words[i] * (unsigned __int128)b->words[j];
+            product += (unsigned __int128)out->words[idx] + carry;
             out->words[idx] = (uint32_t)product;
-            carry = product >> 32;
+            carry = (uint64_t)(product >> 32);
         }
-        if (i + b->length < BIGNUM_MAX_WORDS * 2)
+        size_t idx = i + b->length;
+        while (carry != 0 && idx < BIGNUM_MAX_WORDS * 2)
         {
-            out->words[i + b->length] = (uint32_t)carry;
+            uint64_t value = (uint64_t)out->words[idx] + carry;
+            out->words[idx] = (uint32_t)value;
+            carry = value >> 32;
+            idx++;
         }
+        if (idx > out->length)
+        {
+            out->length = idx;
+        }
+    }
+    if (out->length == 0)
+    {
+        out->length = a->length + b->length;
+    }
+    if (out->length > BIGNUM_MAX_WORDS * 2)
+    {
+        out->length = BIGNUM_MAX_WORDS * 2;
     }
     while (out->length > 0 && out->words[out->length - 1] == 0)
     {
@@ -205,18 +216,44 @@ static void bignum_mul_wide(const bignum_t *a, const bignum_t *b, bignum_wide_t 
 
 static void bignum_reduce_wide(const bignum_wide_t *value, const bignum_t *mod, bignum_t *out)
 {
-    bignum_init(out);
-    for (size_t i = value->length; i-- > 0;)
+    if (mod->length == 0)
     {
-        bignum_mul_base_add(out, value->words[i]);
-        while (bignum_compare(out, mod) >= 0)
+        bignum_init(out);
+        return;
+    }
+    uint32_t rem[BIGNUM_MAX_WORDS + 1];
+    memset(rem, 0, sizeof(rem));
+    size_t rem_len = 0;
+
+    if (value->length == 0)
+    {
+        bignum_init(out);
+        return;
+    }
+
+    for (size_t word_index = value->length; word_index-- > 0;)
+    {
+        uint32_t word = value->words[word_index];
+        for (int bit = 31; bit >= 0; --bit)
         {
-            bignum_sub(out, mod);
+            uint32_t incoming = (word >> bit) & 0x1U;
+            rem_len = bignum_words_shift_left1(rem, rem_len, incoming);
+            if (rem_len > mod->length ||
+                (rem_len == mod->length &&
+                 bignum_words_compare(rem, rem_len, mod->words, mod->length) >= 0))
+            {
+                rem_len = bignum_words_sub(rem, rem_len, mod->words, mod->length);
+            }
         }
     }
+
+    size_t copy_len = (rem_len > BIGNUM_MAX_WORDS) ? BIGNUM_MAX_WORDS : rem_len;
+    memcpy(out->words, rem, copy_len * sizeof(uint32_t));
+    out->length = copy_len;
+    bignum_normalize(out);
 }
 
-static void bignum_mulmod(const bignum_t *a, const bignum_t *b, const bignum_t *mod, bignum_t *out)
+void bignum_mulmod(const bignum_t *a, const bignum_t *b, const bignum_t *mod, bignum_t *out)
 {
     bignum_wide_t wide;
     bignum_mul_wide(a, b, &wide);

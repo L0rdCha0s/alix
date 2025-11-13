@@ -13,11 +13,17 @@
 #include "net/tls.h"
 
 #include "crypto/hmac.h"
+#include "crypto/p256.h"
 #include "net/tls_asn1.h"
 #include "timer.h"
 #include "serial.h"
 #include "libc.h"
+#include "process.h"
 #include <stddef.h>
+
+#ifndef TLS_DEBUG_SIG
+#define TLS_DEBUG_SIG 1
+#endif
 
 #define TLS_VERSION_MAJOR 0x03
 #define TLS_VERSION_MINOR 0x03
@@ -30,6 +36,7 @@
 #define TLS_HANDSHAKE_CLIENT_HELLO    1
 #define TLS_HANDSHAKE_SERVER_HELLO    2
 #define TLS_HANDSHAKE_CERTIFICATE     11
+#define TLS_HANDSHAKE_SERVER_KEY_EXCHANGE 12
 #define TLS_HANDSHAKE_SERVER_HELLO_DONE 14
 #define TLS_HANDSHAKE_CLIENT_KEY_EXCHANGE 16
 #define TLS_HANDSHAKE_FINISHED        20
@@ -38,12 +45,24 @@
 #define TLS_ALERT_LEVEL_FATAL         2
 #define TLS_ALERT_CLOSE_NOTIFY        0
 
-#define TLS_CIPHER_SUITE              0x003C /* TLS_RSA_WITH_AES_128_CBC_SHA256 */
+#define TLS_CIPHER_RSA_WITH_AES_128_CBC_SHA256    0x003C
+#define TLS_CIPHER_ECDHE_RSA_WITH_AES_128_CBC_SHA256 0xC027
+#define TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256 0xC02F
+
+#define TLS_EXT_SERVER_NAME           0x0000
+#define TLS_EXT_SUPPORTED_GROUPS      0x000A
+#define TLS_EXT_EC_POINT_FORMATS      0x000B
+#define TLS_EXT_SIGNATURE_ALGORITHMS  0x000D
+
+#define TLS_NAMED_CURVE_SECP256R1     23
 
 #define TLS_MAX_FRAGMENT              16384
 #define TLS_MAC_SIZE                  32
 #define TLS_BLOCK_SIZE                16
 #define TLS_EXPLICIT_IV_SIZE          16
+#define TLS_GCM_FIXED_IV_SIZE         4
+#define TLS_GCM_EXPLICIT_IV_SIZE      8
+#define TLS_GCM_TAG_SIZE              16
 #define TLS_MAX_RECORD                (TLS_EXPLICIT_IV_SIZE + TLS_MAX_FRAGMENT + TLS_MAC_SIZE + TLS_BLOCK_SIZE + 5)
 #define TLS_APPLICATION_CHUNK         1024
 
@@ -53,6 +72,11 @@
 #define TLS_LABEL_SERVER_FINISHED     "server finished"
 
 static uint32_t g_tls_prng_state = 0xC3E4ED12U;
+
+static bool tls_cipher_is_aead(uint16_t suite)
+{
+    return suite == TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+}
 
 static void tls_prng_mix(uint32_t value)
 {
@@ -126,6 +150,51 @@ static void tls_log_hex(const char *prefix, uint64_t value)
     serial_write_string("\r\n");
 }
 
+#if TLS_DEBUG_SIG
+static void tls_log_hexdump(const char *label, const uint8_t *data, size_t len)
+{
+    static const char hex_digits[] = "0123456789abcdef";
+    serial_write_string(label);
+    serial_write_string(": ");
+    if (!data || len == 0)
+    {
+        serial_write_string("<empty>\r\n");
+        return;
+    }
+    for (size_t i = 0; i < len; ++i)
+    {
+        char buf[3];
+        uint8_t byte = data[i];
+        buf[0] = hex_digits[(byte >> 4) & 0x0F];
+        buf[1] = hex_digits[byte & 0x0F];
+        buf[2] = '\0';
+        serial_write_string(buf);
+    }
+    serial_write_string("\r\n");
+}
+
+static void tls_log_sha256_digest(const char *label, const uint8_t *data, size_t len)
+{
+    uint8_t digest[32];
+    sha256_digest(data, len, digest);
+    tls_log_hexdump(label, digest, sizeof(digest));
+}
+#else
+static inline void tls_log_hexdump(const char *label, const uint8_t *data, size_t len)
+{
+    (void)label;
+    (void)data;
+    (void)len;
+}
+
+static inline void tls_log_sha256_digest(const char *label, const uint8_t *data, size_t len)
+{
+    (void)label;
+    (void)data;
+    (void)len;
+}
+#endif
+
 #define TLS_FAIL(msg) do { tls_log(msg); return false; } while (0)
 
 static void tls_handshake_hash_update(tls_session_t *session, const uint8_t *data, size_t len)
@@ -171,13 +240,14 @@ static uint64_t tls_default_timeout_ticks(void)
     {
         freq = 100;
     }
-    return (uint64_t)freq * 5;
+    return (uint64_t)freq * 15;
 }
 
 static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t len, uint64_t timeout_ticks)
 {
     if (!session || session->socket_fd < 0)
     {
+        tls_log("TLS: socket read invalid session/fd");
         return false;
     }
 
@@ -187,6 +257,7 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
     {
         if (net_tcp_socket_has_error(session->socket))
         {
+            tls_log("TLS: socket read detected tcp error");
             return false;
         }
 
@@ -195,6 +266,7 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
         {
             if (timer_ticks() - start >= timeout_ticks)
             {
+                tls_log("TLS: socket read timeout waiting for data");
                 return false;
             }
             continue;
@@ -203,10 +275,12 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
         {
             if (net_tcp_socket_remote_closed(session->socket))
             {
+                tls_log("TLS: socket read saw remote close");
                 return false;
             }
             if (timer_ticks() - start >= timeout_ticks)
             {
+                tls_log("TLS: socket read timeout while idle");
                 return false;
             }
             continue;
@@ -215,8 +289,43 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
         out += got;
         remaining -= (size_t)got;
         start = timer_ticks();
+        process_yield();
     }
     return true;
+}
+
+static bool tls_socket_write_all(tls_session_t *session, const uint8_t *data, size_t len, uint64_t timeout_ticks)
+{
+    if (!session || !session->socket || !data || len == 0)
+    {
+        tls_log("TLS: socket write invalid args");
+        return false;
+    }
+
+    uint64_t start = timer_ticks();
+    while (true)
+    {
+        if (net_tcp_socket_has_error(session->socket))
+        {
+            tls_log("TLS: socket has error during write");
+            return false;
+        }
+        if (net_tcp_socket_remote_closed(session->socket))
+        {
+            tls_log("TLS: socket remote closed during write");
+            return false;
+        }
+        if (net_tcp_socket_send(session->socket, data, len))
+        {
+            return true;
+        }
+        if (timer_ticks() - start >= timeout_ticks)
+        {
+            tls_log("TLS: socket write timeout");
+            return false;
+        }
+        process_yield();
+    }
 }
 
 static bool tls_write_record_plain(tls_session_t *session, uint8_t type, const uint8_t *data, size_t len)
@@ -234,7 +343,7 @@ static bool tls_write_record_plain(tls_session_t *session, uint8_t type, const u
     {
         memcpy(record + 5, data, len);
     }
-    return net_tcp_socket_send(session->socket, record, 5 + len);
+    return tls_socket_write_all(session, record, 5 + len, tls_default_timeout_ticks());
 }
 
 static bool tls_read_record_plain(tls_session_t *session, uint8_t *type, size_t *length, uint64_t timeout)
@@ -242,15 +351,18 @@ static bool tls_read_record_plain(tls_session_t *session, uint8_t *type, size_t 
     uint8_t header[5];
     if (!tls_socket_read_exact(session, header, sizeof(header), timeout))
     {
+        tls_log("TLS: failed to read record header (plain)");
         return false;
     }
     size_t len = ((size_t)header[3] << 8) | (size_t)header[4];
     if (len > sizeof(session->record_buffer))
     {
+        tls_log("TLS: record length exceeds buffer (plain)");
         return false;
     }
     if (!tls_socket_read_exact(session, session->record_buffer, len, timeout))
     {
+        tls_log("TLS: failed to read record body (plain)");
         return false;
     }
     if (type)
@@ -307,13 +419,22 @@ static bool tls_prf(const uint8_t *secret, size_t secret_len,
     return true;
 }
 
-static bool tls_compute_master_secret(tls_session_t *session, const uint8_t *pre_master)
+static bool tls_compute_master_secret(tls_session_t *session,
+                                      const uint8_t *pre_master,
+                                      size_t pre_master_len)
 {
     uint8_t seed[64];
     memcpy(seed, session->client_random, 32);
     memcpy(seed + 32, session->server_random, 32);
-    return tls_prf(pre_master, 48, TLS_LABEL_MASTER_SECRET, seed, sizeof(seed),
-                   session->master_secret, sizeof(session->master_secret));
+    bool ok = tls_prf(pre_master, pre_master_len, TLS_LABEL_MASTER_SECRET, seed, sizeof(seed),
+                      session->master_secret, sizeof(session->master_secret));
+#if TLS_DEBUG_SIG
+    if (ok)
+    {
+        tls_log_hexdump("TLS: master secret", session->master_secret, sizeof(session->master_secret));
+    }
+#endif
+    return ok;
 }
 
 static bool tls_compute_key_block(tls_session_t *session)
@@ -321,31 +442,81 @@ static bool tls_compute_key_block(tls_session_t *session)
     uint8_t seed[64];
     memcpy(seed, session->server_random, 32);
     memcpy(seed + 32, session->client_random, 32);
+#if TLS_DEBUG_SIG
+    tls_log_hexdump("TLS: key block server_random", session->server_random, 32);
+    tls_log_hexdump("TLS: key block client_random", session->client_random, 32);
+#endif
 
-    uint8_t key_block[128];
-    if (!tls_prf(session->master_secret, sizeof(session->master_secret),
-                 TLS_LABEL_KEY_EXPANSION, seed, sizeof(seed),
-                 key_block, sizeof(key_block)))
+    if (tls_cipher_is_aead(session->cipher_suite))
     {
-        return false;
+        uint8_t key_block[16 + 16 + TLS_GCM_FIXED_IV_SIZE + TLS_GCM_FIXED_IV_SIZE];
+        if (!tls_prf(session->master_secret, sizeof(session->master_secret),
+                     TLS_LABEL_KEY_EXPANSION, seed, sizeof(seed),
+                     key_block, sizeof(key_block)))
+        {
+            return false;
+        }
+        size_t offset = 0;
+        memcpy(session->client_write_key, key_block + offset, 16);
+        offset += 16;
+        memcpy(session->server_write_key, key_block + offset, 16);
+        offset += 16;
+        memcpy(session->client_write_iv, key_block + offset, TLS_GCM_FIXED_IV_SIZE);
+        offset += TLS_GCM_FIXED_IV_SIZE;
+        memcpy(session->server_write_iv, key_block + offset, TLS_GCM_FIXED_IV_SIZE);
+
+        memset(session->client_write_mac, 0, TLS_MAC_SIZE);
+        memset(session->server_write_mac, 0, TLS_MAC_SIZE);
+
+        aes128_init_encrypt(&session->client_enc, session->client_write_key);
+        aes128_init_encrypt(&session->server_enc, session->server_write_key);
+
+        uint8_t zero_block[16] = {0};
+        memcpy(session->client_gcm_H, zero_block, sizeof(zero_block));
+        aes128_encrypt_block(&session->client_enc, session->client_gcm_H);
+        memset(zero_block, 0, sizeof(zero_block));
+        memcpy(session->server_gcm_H, zero_block, sizeof(zero_block));
+        aes128_encrypt_block(&session->server_enc, session->server_gcm_H);
+
+        memset(key_block, 0, sizeof(key_block));
     }
+    else
+    {
+        uint8_t key_block[128];
+        if (!tls_prf(session->master_secret, sizeof(session->master_secret),
+                     TLS_LABEL_KEY_EXPANSION, seed, sizeof(seed),
+                     key_block, sizeof(key_block)))
+        {
+            return false;
+        }
 
-    size_t offset = 0;
-    memcpy(session->client_write_mac, key_block + offset, TLS_MAC_SIZE);
-    offset += TLS_MAC_SIZE;
-    memcpy(session->server_write_mac, key_block + offset, TLS_MAC_SIZE);
-    offset += TLS_MAC_SIZE;
-    memcpy(session->client_write_key, key_block + offset, 16);
-    offset += 16;
-    memcpy(session->server_write_key, key_block + offset, 16);
-    offset += 16;
-    memcpy(session->client_write_iv, key_block + offset, TLS_BLOCK_SIZE);
-    offset += TLS_BLOCK_SIZE;
-    memcpy(session->server_write_iv, key_block + offset, TLS_BLOCK_SIZE);
+        size_t offset = 0;
+        memcpy(session->client_write_mac, key_block + offset, TLS_MAC_SIZE);
+        offset += TLS_MAC_SIZE;
+        memcpy(session->server_write_mac, key_block + offset, TLS_MAC_SIZE);
+        offset += TLS_MAC_SIZE;
+        memcpy(session->client_write_key, key_block + offset, 16);
+        offset += 16;
+        memcpy(session->server_write_key, key_block + offset, 16);
+        offset += 16;
+        memcpy(session->client_write_iv, key_block + offset, TLS_BLOCK_SIZE);
+        offset += TLS_BLOCK_SIZE;
+        memcpy(session->server_write_iv, key_block + offset, TLS_BLOCK_SIZE);
 
-    aes128_init_encrypt(&session->client_enc, session->client_write_key);
-    aes128_init_decrypt(&session->server_dec, session->server_write_key);
-    memset(key_block, 0, sizeof(key_block));
+        aes128_init_encrypt(&session->client_enc, session->client_write_key);
+        aes128_init_encrypt(&session->server_enc, session->server_write_key);
+        aes128_init_decrypt(&session->server_dec, session->server_write_key);
+        memset(session->client_gcm_H, 0, sizeof(session->client_gcm_H));
+        memset(session->server_gcm_H, 0, sizeof(session->server_gcm_H));
+        memset(key_block, 0, sizeof(key_block));
+    }
+#if TLS_DEBUG_SIG
+    tls_log_hexdump("TLS: client_write_key", session->client_write_key, sizeof(session->client_write_key));
+    tls_log_hexdump("TLS: server_write_key", session->server_write_key, sizeof(session->server_write_key));
+    size_t iv_len = tls_cipher_is_aead(session->cipher_suite) ? TLS_GCM_FIXED_IV_SIZE : TLS_BLOCK_SIZE;
+    tls_log_hexdump("TLS: client_write_iv", session->client_write_iv, iv_len);
+    tls_log_hexdump("TLS: server_write_iv", session->server_write_iv, iv_len);
+#endif
     return true;
 }
 
@@ -383,6 +554,16 @@ static void tls_cbc_decrypt(const aes128_dec_ctx_t *ctx, uint8_t *data, size_t l
     }
 }
 
+static void tls_build_additional_data(uint8_t out[13], uint64_t seq, uint8_t type, size_t length)
+{
+    tls_serialize_seq(seq, out);
+    out[8] = type;
+    out[9] = TLS_VERSION_MAJOR;
+    out[10] = TLS_VERSION_MINOR;
+    out[11] = (uint8_t)((length >> 8) & 0xFF);
+    out[12] = (uint8_t)(length & 0xFF);
+}
+
 static bool tls_calculate_mac(uint8_t *mac_out,
                               const uint8_t *mac_key,
                               uint64_t seq,
@@ -391,18 +572,291 @@ static bool tls_calculate_mac(uint8_t *mac_out,
                               const uint8_t *fragment)
 {
     uint8_t mac_input[13 + TLS_MAX_FRAGMENT];
-    uint8_t seq_bytes[8];
-    tls_serialize_seq(seq, seq_bytes);
-    memcpy(mac_input, seq_bytes, 8);
-    mac_input[8] = type;
-    mac_input[9] = TLS_VERSION_MAJOR;
-    mac_input[10] = TLS_VERSION_MINOR;
-    mac_input[11] = (uint8_t)((length >> 8) & 0xFF);
-    mac_input[12] = (uint8_t)(length & 0xFF);
+    tls_build_additional_data(mac_input, seq, type, length);
     memcpy(mac_input + 13, fragment, length);
 
     hmac_sha256(mac_key, TLS_MAC_SIZE, mac_input, 13 + length, mac_out);
     memset(mac_input, 0, sizeof(mac_input));
+    return true;
+}
+
+static void gcm_mult(uint8_t out[16], const uint8_t x[16], const uint8_t h[16])
+{
+    uint8_t z[16] = {0};
+    uint8_t v[16];
+    memcpy(v, h, 16);
+
+    for (int i = 0; i < 16; ++i)
+    {
+        uint8_t xi = x[i];
+        for (int bit = 7; bit >= 0; --bit)
+        {
+            if ((xi >> bit) & 1U)
+            {
+                for (int j = 0; j < 16; ++j)
+                {
+                    z[j] ^= v[j];
+                }
+            }
+            bool lsb = (v[15] & 1U) != 0;
+            for (int j = 15; j > 0; --j)
+            {
+                v[j] = (uint8_t)((v[j] >> 1) | ((v[j - 1] & 1U) << 7));
+            }
+            v[0] >>= 1;
+            if (lsb)
+            {
+                v[0] ^= 0xE1U;
+            }
+        }
+    }
+
+    memcpy(out, z, 16);
+    memset(v, 0, sizeof(v));
+}
+
+static void ghash_accumulate(uint8_t y[16], const uint8_t h[16], const uint8_t *data, size_t len)
+{
+    uint8_t block[16];
+    uint8_t tmp[16];
+    while (len > 0)
+    {
+        size_t take = (len < 16) ? len : 16;
+        memset(block, 0, sizeof(block));
+        memcpy(block, data, take);
+        for (int i = 0; i < 16; ++i)
+        {
+            block[i] ^= y[i];
+        }
+        gcm_mult(tmp, block, h);
+        memcpy(y, tmp, 16);
+        data += take;
+        len -= take;
+    }
+    memset(block, 0, sizeof(block));
+    memset(tmp, 0, sizeof(tmp));
+}
+
+static void gcm_add_length_block(uint8_t y[16], const uint8_t h[16], size_t aad_len, size_t text_len)
+{
+    uint8_t block[16];
+    uint64_t aad_bits = (uint64_t)aad_len * 8U;
+    uint64_t text_bits = (uint64_t)text_len * 8U;
+    for (int i = 0; i < 8; ++i)
+    {
+        block[i] = (uint8_t)(aad_bits >> (56 - i * 8));
+        block[8 + i] = (uint8_t)(text_bits >> (56 - i * 8));
+    }
+    for (int i = 0; i < 16; ++i)
+    {
+        block[i] ^= y[i];
+    }
+    gcm_mult(y, block, h);
+    memset(block, 0, sizeof(block));
+}
+
+static void gcm_inc32(uint8_t counter[16])
+{
+    for (int i = 15; i >= 12; --i)
+    {
+        counter[i]++;
+        if (counter[i] != 0)
+        {
+            break;
+        }
+    }
+}
+
+static void gcm_crypt(const aes128_enc_ctx_t *ctx,
+                      const uint8_t *input,
+                      uint8_t *output,
+                      size_t len,
+                      uint8_t counter[16])
+{
+    size_t offset = 0;
+    while (offset < len)
+    {
+        gcm_inc32(counter);
+        uint8_t stream[16];
+        memcpy(stream, counter, sizeof(stream));
+        aes128_encrypt_block(ctx, stream);
+        size_t block = len - offset;
+        if (block > 16)
+        {
+            block = 16;
+        }
+        for (size_t i = 0; i < block; ++i)
+        {
+            output[offset + i] = input[offset + i] ^ stream[i];
+        }
+        memset(stream, 0, sizeof(stream));
+        offset += block;
+    }
+}
+
+static void gcm_build_j0(const uint8_t *nonce, uint8_t out[16])
+{
+    memcpy(out, nonce, TLS_GCM_FIXED_IV_SIZE + TLS_GCM_EXPLICIT_IV_SIZE);
+    out[12] = 0x00;
+    out[13] = 0x00;
+    out[14] = 0x00;
+    out[15] = 0x01;
+}
+
+static void gcm_compute_tag(const aes128_enc_ctx_t *ctx,
+                            const uint8_t H[16],
+                            const uint8_t *nonce,
+                            const uint8_t *aad,
+                            size_t aad_len,
+                            const uint8_t *ciphertext,
+                            size_t cipher_len,
+                            uint8_t out_tag[16])
+{
+    uint8_t y[16] = {0};
+    if (aad_len > 0)
+    {
+        ghash_accumulate(y, H, aad, aad_len);
+    }
+    if (cipher_len > 0)
+    {
+        ghash_accumulate(y, H, ciphertext, cipher_len);
+    }
+    gcm_add_length_block(y, H, aad_len, cipher_len);
+
+    uint8_t j0[16];
+    gcm_build_j0(nonce, j0);
+    aes128_encrypt_block(ctx, j0);
+    for (int i = 0; i < 16; ++i)
+    {
+        out_tag[i] = j0[i] ^ y[i];
+    }
+    memset(j0, 0, sizeof(j0));
+    memset(y, 0, sizeof(y));
+}
+
+static bool gcm_seal(const aes128_enc_ctx_t *ctx,
+                     const uint8_t H[16],
+                     const uint8_t *nonce,
+                     const uint8_t *aad,
+                     size_t aad_len,
+                     const uint8_t *plaintext,
+                     size_t plaintext_len,
+                     uint8_t *ciphertext,
+                     uint8_t tag[16])
+{
+    uint8_t j0[16];
+    gcm_build_j0(nonce, j0);
+    uint8_t counter[16];
+    memcpy(counter, j0, sizeof(counter));
+    gcm_crypt(ctx, plaintext, ciphertext, plaintext_len, counter);
+    memset(counter, 0, sizeof(counter));
+    gcm_compute_tag(ctx, H, nonce, aad, aad_len, ciphertext, plaintext_len, tag);
+    memset(j0, 0, sizeof(j0));
+    return true;
+}
+
+static bool gcm_open(const aes128_enc_ctx_t *ctx,
+                     const uint8_t H[16],
+                     const uint8_t *nonce,
+                     const uint8_t *aad,
+                     size_t aad_len,
+                     const uint8_t *ciphertext,
+                     size_t ciphertext_len,
+                     const uint8_t tag[16],
+                     uint8_t *plaintext)
+{
+    uint8_t expected[16];
+    gcm_compute_tag(ctx, H, nonce, aad, aad_len, ciphertext, ciphertext_len, expected);
+    bool match = (memcmp(expected, tag, 16) == 0);
+    if (!match)
+    {
+        memset(expected, 0, sizeof(expected));
+        return false;
+    }
+    uint8_t j0[16];
+    gcm_build_j0(nonce, j0);
+    uint8_t counter[16];
+    memcpy(counter, j0, sizeof(counter));
+    gcm_crypt(ctx, ciphertext, plaintext, ciphertext_len, counter);
+    memset(counter, 0, sizeof(counter));
+    memset(j0, 0, sizeof(j0));
+    memset(expected, 0, sizeof(expected));
+    return true;
+}
+
+static bool tls_encrypt_record_gcm(tls_session_t *session,
+                                   uint8_t type,
+                                   const uint8_t *data,
+                                   size_t len,
+                                   uint8_t *out,
+                                   size_t *out_len)
+{
+    if (len > TLS_MAX_FRAGMENT)
+    {
+        return false;
+    }
+
+#if TLS_DEBUG_SIG
+    tls_log_hex("TLS: GCM encrypt seq 0x", session->client_seq);
+    tls_log_hexdump("TLS: GCM client_write_key", session->client_write_key, 16);
+    tls_log_hexdump("TLS: GCM client_write_iv", session->client_write_iv, TLS_GCM_FIXED_IV_SIZE);
+    tls_log_hexdump("TLS: GCM plaintext", data, len);
+#endif
+
+    uint8_t explicit_iv[TLS_GCM_EXPLICIT_IV_SIZE];
+    tls_serialize_seq(session->client_seq, explicit_iv);
+
+    uint8_t nonce[TLS_GCM_FIXED_IV_SIZE + TLS_GCM_EXPLICIT_IV_SIZE];
+    memcpy(nonce, session->client_write_iv, TLS_GCM_FIXED_IV_SIZE);
+    memcpy(nonce + TLS_GCM_FIXED_IV_SIZE, explicit_iv, TLS_GCM_EXPLICIT_IV_SIZE);
+
+    uint8_t ciphertext[TLS_MAX_FRAGMENT];
+    uint8_t tag[TLS_GCM_TAG_SIZE];
+    uint8_t aad[13];
+    tls_build_additional_data(aad, session->client_seq, type, len);
+#if TLS_DEBUG_SIG
+    tls_log_hexdump("TLS: GCM explicit_iv", explicit_iv, sizeof(explicit_iv));
+    tls_log_hexdump("TLS: GCM nonce", nonce, sizeof(nonce));
+    tls_log_hexdump("TLS: GCM AAD", aad, sizeof(aad));
+#endif
+    if (!gcm_seal(&session->client_enc, session->client_gcm_H,
+                  nonce, aad, sizeof(aad),
+                  data, len, ciphertext, tag))
+    {
+        memset(ciphertext, 0, sizeof(ciphertext));
+        memset(tag, 0, sizeof(tag));
+        memset(nonce, 0, sizeof(nonce));
+        memset(aad, 0, sizeof(aad));
+        memset(explicit_iv, 0, sizeof(explicit_iv));
+        return false;
+    }
+
+#if TLS_DEBUG_SIG
+    tls_log_hexdump("TLS: GCM ciphertext", ciphertext, len);
+    tls_log_hexdump("TLS: GCM tag", tag, sizeof(tag));
+#endif
+
+    uint8_t header[5];
+    size_t record_payload = TLS_GCM_EXPLICIT_IV_SIZE + len + TLS_GCM_TAG_SIZE;
+    header[0] = type;
+    header[1] = TLS_VERSION_MAJOR;
+    header[2] = TLS_VERSION_MINOR;
+    header[3] = (uint8_t)((record_payload >> 8) & 0xFF);
+    header[4] = (uint8_t)(record_payload & 0xFF);
+
+    memcpy(out, header, 5);
+    memcpy(out + 5, explicit_iv, TLS_GCM_EXPLICIT_IV_SIZE);
+    memcpy(out + 5 + TLS_GCM_EXPLICIT_IV_SIZE, ciphertext, len);
+    memcpy(out + 5 + TLS_GCM_EXPLICIT_IV_SIZE + len, tag, TLS_GCM_TAG_SIZE);
+    *out_len = 5 + record_payload;
+
+    tls_increment_seq(&session->client_seq);
+
+    memset(ciphertext, 0, sizeof(ciphertext));
+    memset(tag, 0, sizeof(tag));
+    memset(nonce, 0, sizeof(nonce));
+    memset(aad, 0, sizeof(aad));
+    memset(explicit_iv, 0, sizeof(explicit_iv));
     return true;
 }
 
@@ -413,6 +867,11 @@ static bool tls_encrypt_record(tls_session_t *session,
                                uint8_t *out,
                                size_t *out_len)
 {
+    if (tls_cipher_is_aead(session->cipher_suite))
+    {
+        return tls_encrypt_record_gcm(session, type, data, len, out, out_len);
+    }
+
     if (len > TLS_MAX_FRAGMENT)
     {
         return false;
@@ -465,11 +924,54 @@ static bool tls_encrypt_record(tls_session_t *session,
     return true;
 }
 
+static bool tls_decrypt_record_gcm(tls_session_t *session,
+                                   uint8_t type,
+                                   uint8_t *data,
+                                   size_t *len)
+{
+    if (*len < TLS_GCM_EXPLICIT_IV_SIZE + TLS_GCM_TAG_SIZE)
+    {
+        return false;
+    }
+
+    size_t cipher_len = *len - TLS_GCM_EXPLICIT_IV_SIZE - TLS_GCM_TAG_SIZE;
+    uint8_t *explicit_iv = data;
+    uint8_t *ciphertext = data + TLS_GCM_EXPLICIT_IV_SIZE;
+    uint8_t *tag = ciphertext + cipher_len;
+
+    uint8_t nonce[TLS_GCM_FIXED_IV_SIZE + TLS_GCM_EXPLICIT_IV_SIZE];
+    memcpy(nonce, session->server_write_iv, TLS_GCM_FIXED_IV_SIZE);
+    memcpy(nonce + TLS_GCM_FIXED_IV_SIZE, explicit_iv, TLS_GCM_EXPLICIT_IV_SIZE);
+
+    uint8_t aad[13];
+    tls_build_additional_data(aad, session->server_seq, type, cipher_len);
+    bool ok = gcm_open(&session->server_enc, session->server_gcm_H,
+                       nonce, aad, sizeof(aad),
+                       ciphertext, cipher_len, tag,
+                       ciphertext);
+    memset(nonce, 0, sizeof(nonce));
+    memset(aad, 0, sizeof(aad));
+    if (!ok)
+    {
+        return false;
+    }
+
+    memmove(data, ciphertext, cipher_len);
+    *len = cipher_len;
+    tls_increment_seq(&session->server_seq);
+    return true;
+}
+
 static bool tls_decrypt_record(tls_session_t *session,
                                uint8_t type,
                                uint8_t *data,
                                size_t *len)
 {
+    if (tls_cipher_is_aead(session->cipher_suite))
+    {
+        return tls_decrypt_record_gcm(session, type, data, len);
+    }
+
     if (*len < TLS_EXPLICIT_IV_SIZE || ((*len - TLS_EXPLICIT_IV_SIZE) % TLS_BLOCK_SIZE) != 0)
     {
         return false;
@@ -527,15 +1029,18 @@ static bool tls_read_record_encrypted(tls_session_t *session, uint8_t *type, siz
     uint8_t header[5];
     if (!tls_socket_read_exact(session, header, sizeof(header), timeout))
     {
+        tls_log("TLS: failed to read record header (enc)");
         return false;
     }
     size_t len = ((size_t)header[3] << 8) | (size_t)header[4];
     if (len > sizeof(session->record_buffer))
     {
+        tls_log("TLS: record length exceeds buffer (enc)");
         return false;
     }
     if (!tls_socket_read_exact(session, session->record_buffer, len, timeout))
     {
+        tls_log("TLS: failed to read record body (enc)");
         return false;
     }
 
@@ -659,7 +1164,141 @@ static bool tls_parse_certificate_rsa(tls_session_t *session, const uint8_t *cer
         exp_len--;
     }
 
-    rsa_public_key_set(&session->server_key, mod_ptr, mod_len, exp_ptr, exp_len);
+rsa_public_key_set(&session->server_key, mod_ptr, mod_len, exp_ptr, exp_len);
+    return true;
+}
+
+static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
+                                                  const uint8_t *body,
+                                                  size_t hs_len)
+{
+    if (!session || !body || hs_len < 8)
+    {
+        TLS_FAIL("TLS: invalid ServerKeyExchange data");
+    }
+
+    size_t cursor = 0;
+    const uint8_t *params_start = body;
+    if (body[cursor++] != 0x03)
+    {
+        TLS_FAIL("TLS: server curve type unsupported");
+    }
+    if (cursor + 2 > hs_len)
+    {
+        TLS_FAIL("TLS: missing curve id");
+    }
+    uint16_t named_curve = tls_read_uint16(body + cursor);
+    cursor += 2;
+    if (named_curve != TLS_NAMED_CURVE_SECP256R1)
+    {
+        TLS_FAIL("TLS: server advertised unsupported curve");
+    }
+    if (cursor >= hs_len)
+    {
+        TLS_FAIL("TLS: missing ECDHE public length");
+    }
+    uint8_t pub_len = body[cursor++];
+    if (cursor + pub_len > hs_len)
+    {
+        TLS_FAIL("TLS: truncated ECDHE public key");
+    }
+    const uint8_t *pub = body + cursor;
+    cursor += pub_len;
+    size_t params_len = cursor;
+#if TLS_DEBUG_SIG
+    tls_log_hex("TLS: ECDHE pub_len 0x", pub_len);
+    tls_log_hexdump("TLS: ECDHE pub", pub, pub_len);
+#endif
+#if TLS_DEBUG_SIG
+    tls_log_hex("TLS: ECDHE params_len 0x", params_len);
+#endif
+
+    if (cursor + 2 > hs_len)
+    {
+        TLS_FAIL("TLS: missing signature scheme");
+    }
+    uint8_t hash_algo = body[cursor++];
+    uint8_t sig_algo = body[cursor++];
+#if TLS_DEBUG_SIG
+    tls_log_hex("TLS: signature hash algo 0x", hash_algo);
+    tls_log_hex("TLS: signature sig algo 0x", sig_algo);
+#endif
+    if (hash_algo != 0x04 || sig_algo != 0x01)
+    {
+        TLS_FAIL("TLS: server signature scheme unsupported");
+    }
+    if (cursor + 2 > hs_len)
+    {
+        TLS_FAIL("TLS: missing signature length");
+    }
+    uint16_t sig_len = tls_read_uint16(body + cursor);
+    cursor += 2;
+    if (cursor + sig_len > hs_len)
+    {
+        TLS_FAIL("TLS: truncated signature");
+    }
+    const uint8_t *signature = body + cursor;
+#if TLS_DEBUG_SIG
+    tls_log_hex("TLS: signature length 0x", sig_len);
+    tls_log_hexdump("TLS: signature preview", signature, sig_len < 64 ? sig_len : 64);
+#endif
+
+    uint8_t signed_data[64 + 128];
+    size_t signed_len = 0;
+    memcpy(signed_data + signed_len, session->client_random, 32);
+    signed_len += 32;
+    memcpy(signed_data + signed_len, session->server_random, 32);
+    signed_len += 32;
+    if (params_len > sizeof(signed_data) - signed_len)
+    {
+        TLS_FAIL("TLS: signed params too large");
+    }
+    memcpy(signed_data + signed_len, params_start, params_len);
+    signed_len += params_len;
+#if TLS_DEBUG_SIG
+    tls_log_hex("TLS: signed_data length 0x", signed_len);
+    tls_log_hexdump("TLS: signed_data", signed_data, signed_len);
+    tls_log_sha256_digest("TLS: digest client|server", signed_data, signed_len);
+
+    sha256_ctx_t dbg_ctx;
+    uint8_t dbg_digest[32];
+    sha256_init(&dbg_ctx);
+    sha256_update(&dbg_ctx, session->server_random, 32);
+    sha256_update(&dbg_ctx, session->client_random, 32);
+    sha256_update(&dbg_ctx, params_start, params_len);
+    sha256_final(&dbg_ctx, dbg_digest);
+    tls_log_hexdump("TLS: digest server|client", dbg_digest, sizeof(dbg_digest));
+
+    uint8_t header_bytes[4];
+    header_bytes[0] = TLS_HANDSHAKE_SERVER_KEY_EXCHANGE;
+    header_bytes[1] = (uint8_t)((hs_len >> 16) & 0xFF);
+    header_bytes[2] = (uint8_t)((hs_len >> 8) & 0xFF);
+    header_bytes[3] = (uint8_t)(hs_len & 0xFF);
+
+    sha256_init(&dbg_ctx);
+    sha256_update(&dbg_ctx, session->client_random, 32);
+    sha256_update(&dbg_ctx, session->server_random, 32);
+    sha256_update(&dbg_ctx, header_bytes, sizeof(header_bytes));
+    sha256_update(&dbg_ctx, body, hs_len);
+    sha256_final(&dbg_ctx, dbg_digest);
+    tls_log_hexdump("TLS: digest client|server|hdr", dbg_digest, sizeof(dbg_digest));
+#endif
+
+    if (!rsa_verify_pkcs1_v15_sha256(&session->server_key,
+                                     signed_data, signed_len,
+                                     signature, sig_len))
+    {
+        TLS_FAIL("TLS: ECDHE signature verification failed");
+    }
+
+    if (!p256_is_valid_public(pub, pub_len))
+    {
+        TLS_FAIL("TLS: server ECDHE key invalid");
+    }
+    memcpy(session->ecdhe_server_public, pub, pub_len);
+    session->ecdhe_server_public_len = pub_len;
+    session->ecdhe_named_curve = named_curve;
+    session->ecdhe_server_params_ready = true;
     return true;
 }
 
@@ -668,6 +1307,7 @@ static bool tls_process_server_handshake(tls_session_t *session,
                                          size_t len,
                                          bool *got_server_hello,
                                          bool *got_certificate,
+                                         bool *got_server_key_exchange,
                                          bool *got_hello_done)
 {
     size_t offset = 0;
@@ -706,7 +1346,28 @@ static bool tls_process_server_handshake(tls_session_t *session,
                 }
                 uint16_t cipher = tls_read_uint16(body + cursor);
                 cursor += 2;
-                if (cipher != TLS_CIPHER_SUITE)
+                session->cipher_suite = cipher;
+                session->ecdhe_client_keys_ready = false;
+                session->ecdhe_server_params_ready = false;
+                if (cipher == TLS_CIPHER_RSA_WITH_AES_128_CBC_SHA256)
+                {
+                    session->key_exchange = TLS_KEY_EXCHANGE_RSA;
+                    if (got_server_key_exchange)
+                    {
+                        *got_server_key_exchange = true;
+                    }
+                }
+                else if (cipher == TLS_CIPHER_ECDHE_RSA_WITH_AES_128_CBC_SHA256 ||
+                         cipher == TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+                {
+                    session->key_exchange = TLS_KEY_EXCHANGE_ECDHE_RSA;
+                    session->ecdhe_server_public_len = 0;
+                    if (got_server_key_exchange)
+                    {
+                        *got_server_key_exchange = false;
+                    }
+                }
+                else
                 {
                     TLS_FAIL("TLS: server chose unsupported cipher");
                 }
@@ -755,6 +1416,22 @@ static bool tls_process_server_handshake(tls_session_t *session,
                 *got_certificate = true;
                 break;
             }
+            case TLS_HANDSHAKE_SERVER_KEY_EXCHANGE:
+            {
+                if (session->key_exchange != TLS_KEY_EXCHANGE_ECDHE_RSA)
+                {
+                    TLS_FAIL("TLS: unexpected ServerKeyExchange");
+                }
+                if (!tls_process_server_key_exchange_ecdhe(session, body, hs_len))
+                {
+                    TLS_FAIL("TLS: failed to parse ServerKeyExchange");
+                }
+                if (got_server_key_exchange)
+                {
+                    *got_server_key_exchange = true;
+                }
+                break;
+            }
             case TLS_HANDSHAKE_SERVER_HELLO_DONE:
             {
                 *got_hello_done = true;
@@ -788,9 +1465,13 @@ static bool tls_send_client_hello(tls_session_t *session, const char *hostname)
     body[offset++] = 0x00; /* session id length */
 
     body[offset++] = 0x00;
-    body[offset++] = 0x02;
-    body[offset++] = (uint8_t)(TLS_CIPHER_SUITE >> 8);
-    body[offset++] = (uint8_t)(TLS_CIPHER_SUITE & 0xFF);
+    body[offset++] = 0x06;
+    body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256 >> 8);
+    body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256 & 0xFF);
+    body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_RSA_WITH_AES_128_CBC_SHA256 >> 8);
+    body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_RSA_WITH_AES_128_CBC_SHA256 & 0xFF);
+    body[offset++] = (uint8_t)(TLS_CIPHER_RSA_WITH_AES_128_CBC_SHA256 >> 8);
+    body[offset++] = (uint8_t)(TLS_CIPHER_RSA_WITH_AES_128_CBC_SHA256 & 0xFF);
 
     body[offset++] = 0x01;
     body[offset++] = 0x00; /* null compression */
@@ -804,19 +1485,46 @@ static bool tls_send_client_hello(tls_session_t *session, const char *hostname)
     if (hostname && hostname[0] != '\0')
     {
         size_t host_len = strlen(hostname);
-        size_t sni_len = 2 + 2 + 1 + 2 + host_len;
+        size_t server_name_struct_len = 1 + 2 + host_len;
+        size_t sni_payload_len = 2 + server_name_struct_len;
+        size_t sni_total_len = 4 + sni_payload_len;
+
         body[offset++] = 0x00;
         body[offset++] = 0x00;
-        body[offset++] = (uint8_t)((sni_len - 4) >> 8);
-        body[offset++] = (uint8_t)((sni_len - 4) & 0xFF);
-        body[offset++] = (uint8_t)((host_len + 3) >> 8);
-        body[offset++] = (uint8_t)((host_len + 3) & 0xFF);
+        body[offset++] = (uint8_t)(sni_payload_len >> 8);
+        body[offset++] = (uint8_t)(sni_payload_len & 0xFF);
+        body[offset++] = (uint8_t)(server_name_struct_len >> 8);
+        body[offset++] = (uint8_t)(server_name_struct_len & 0xFF);
         body[offset++] = 0x00;
         body[offset++] = (uint8_t)(host_len >> 8);
         body[offset++] = (uint8_t)(host_len & 0xFF);
         memcpy(body + offset, hostname, host_len);
         offset += host_len;
-        extensions_len += sni_len;
+        extensions_len += sni_total_len;
+    }
+
+    /* supported_groups: secp256r1 */
+    {
+        body[offset++] = 0x00;
+        body[offset++] = 0x0A;
+        body[offset++] = 0x00;
+        body[offset++] = 0x04;
+        body[offset++] = 0x00;
+        body[offset++] = 0x02;
+        body[offset++] = 0x00;
+        body[offset++] = TLS_NAMED_CURVE_SECP256R1;
+        extensions_len += 8;
+    }
+
+    /* ec_point_formats: uncompressed */
+    {
+        body[offset++] = 0x00;
+        body[offset++] = 0x0B;
+        body[offset++] = 0x00;
+        body[offset++] = 0x02;
+        body[offset++] = 0x01;
+        body[offset++] = 0x00;
+        extensions_len += 6;
     }
 
     /* signature_algorithms: sha256+rsa, sha1+rsa */
@@ -848,9 +1556,9 @@ static bool tls_send_client_hello(tls_session_t *session, const char *hostname)
     return tls_write_record_plain(session, TLS_CONTENT_HANDSHAKE, handshake, 4 + body_len);
 }
 
-static bool tls_send_client_key_exchange(tls_session_t *session,
-                                         const uint8_t *encrypted,
-                                         size_t encrypted_len)
+static bool tls_send_client_key_exchange_rsa(tls_session_t *session,
+                                             const uint8_t *encrypted,
+                                             size_t encrypted_len)
 {
     uint8_t body[2 + 512];
     body[0] = (uint8_t)(encrypted_len >> 8);
@@ -865,6 +1573,79 @@ static bool tls_send_client_key_exchange(tls_session_t *session,
 
     tls_handshake_hash_update(session, handshake, 4 + body_len);
     return tls_write_record_plain(session, TLS_CONTENT_HANDSHAKE, handshake, 4 + body_len);
+}
+
+static bool tls_send_client_key_exchange_ecdhe(tls_session_t *session)
+{
+    if (!session || !session->ecdhe_client_keys_ready)
+    {
+        return false;
+    }
+    uint8_t body[1 + P256_POINT_SIZE];
+    body[0] = (uint8_t)session->ecdhe_public_len;
+    memcpy(body + 1, session->ecdhe_public, session->ecdhe_public_len);
+    size_t body_len = 1 + session->ecdhe_public_len;
+
+    uint8_t handshake[4 + sizeof(body)];
+    handshake[0] = TLS_HANDSHAKE_CLIENT_KEY_EXCHANGE;
+    tls_serialize_uint24(handshake + 1, body_len);
+    memcpy(handshake + 4, body, body_len);
+
+    tls_handshake_hash_update(session, handshake, 4 + body_len);
+    return tls_write_record_plain(session, TLS_CONTENT_HANDSHAKE, handshake, 4 + body_len);
+}
+
+static bool tls_generate_ecdhe_keypair(tls_session_t *session)
+{
+    if (!session || session->ecdhe_client_keys_ready)
+    {
+        return session && session->ecdhe_client_keys_ready;
+    }
+
+    uint8_t scalar[P256_SCALAR_SIZE];
+    do
+    {
+        if (!tls_random_bytes(scalar, sizeof(scalar)))
+        {
+            return false;
+        }
+    } while (!p256_scalar_is_valid(scalar));
+
+    memcpy(session->ecdhe_private, scalar, sizeof(scalar));
+    memset(scalar, 0, sizeof(scalar));
+
+    if (!p256_generate_public(session->ecdhe_private, session->ecdhe_public))
+    {
+        memset(session->ecdhe_private, 0, sizeof(session->ecdhe_private));
+        return false;
+    }
+    session->ecdhe_public_len = P256_POINT_SIZE;
+    session->ecdhe_client_keys_ready = true;
+#if TLS_DEBUG_SIG
+    tls_log_hexdump("TLS: ECDHE private", session->ecdhe_private, sizeof(session->ecdhe_private));
+    tls_log_hexdump("TLS: ECDHE public", session->ecdhe_public, session->ecdhe_public_len);
+#endif
+    return true;
+}
+
+static bool tls_ecdhe_compute_shared_secret(tls_session_t *session,
+                                            uint8_t out_secret[P256_SCALAR_SIZE])
+{
+    if (!session || !session->ecdhe_client_keys_ready || !session->ecdhe_server_params_ready)
+    {
+        return false;
+    }
+    bool ok = p256_compute_shared(session->ecdhe_private,
+                                  session->ecdhe_server_public,
+                                  session->ecdhe_server_public_len,
+                                  out_secret);
+#if TLS_DEBUG_SIG
+    if (ok)
+    {
+        tls_log_hexdump("TLS: ECDHE shared secret", out_secret, P256_SCALAR_SIZE);
+    }
+#endif
+    return ok;
 }
 
 static bool tls_send_change_cipher_spec(tls_session_t *session)
@@ -886,6 +1667,10 @@ static bool tls_send_finished(tls_session_t *session, const char *label)
     {
         return false;
     }
+#if TLS_DEBUG_SIG
+    tls_log_hexdump("TLS: Finished digest", digest, sizeof(digest));
+    tls_log_hexdump("TLS: Finished verify_data", verify_data, sizeof(verify_data));
+#endif
 
     uint8_t handshake[4 + sizeof(verify_data)];
     handshake[0] = TLS_HANDSHAKE_FINISHED;
@@ -901,7 +1686,7 @@ static bool tls_send_finished(tls_session_t *session, const char *label)
         return false;
     }
 
-    if (!net_tcp_socket_send(session->socket, record, record_len))
+    if (!tls_socket_write_all(session, record, record_len, tls_default_timeout_ticks()))
     {
         return false;
     }
@@ -970,6 +1755,8 @@ bool tls_session_init(tls_session_t *session, net_tcp_socket_t *socket)
     }
     sha256_init(&session->handshake_hash);
     rsa_public_key_init(&session->server_key);
+    session->key_exchange = TLS_KEY_EXCHANGE_NONE;
+    session->cipher_suite = 0;
     return true;
 }
 
@@ -991,6 +1778,7 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
 
     bool got_server_hello = false;
     bool got_certificate = false;
+    bool got_server_key_exchange = false;
     bool got_hello_done = false;
     bool client_key_sent = false;
     bool waiting_encrypted = false;
@@ -1030,8 +1818,8 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
             {
                 if (len >= 2)
                 {
-                    tls_log_hex("TLS: alert level 0x", session->record_buffer[1]);
-                    tls_log_hex("TLS: alert description 0x", session->record_buffer[0]);
+                    tls_log_hex("TLS: alert level 0x", session->record_buffer[0]);
+                    tls_log_hex("TLS: alert description 0x", session->record_buffer[1]);
                 }
                 else
                 {
@@ -1050,10 +1838,16 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
             if (type == TLS_CONTENT_HANDSHAKE)
             {
                 if (!tls_process_server_handshake(session, session->record_buffer, len,
-                                                  &got_server_hello, &got_certificate, &got_hello_done))
+                                                  &got_server_hello, &got_certificate,
+                                                  &got_server_key_exchange, &got_hello_done))
                 {
                     tls_log("TLS: error processing server handshake");
                     return false;
+                }
+                if (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA &&
+                    session->ecdhe_server_params_ready)
+                {
+                    got_server_key_exchange = true;
                 }
             }
             else if (type == TLS_CONTENT_CHANGE_CIPHER_SPEC)
@@ -1082,39 +1876,87 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
             }
         }
 
-        if (got_server_hello && got_certificate && got_hello_done && !client_key_sent)
+        bool have_server_params = (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA)
+                                    ? session->ecdhe_server_params_ready
+                                    : true;
+        bool server_done_ready = got_hello_done;
+        if (got_server_hello && got_certificate && have_server_params && server_done_ready && !client_key_sent)
         {
             uint8_t pre_master[48];
-            pre_master[0] = TLS_VERSION_MAJOR;
-            pre_master[1] = TLS_VERSION_MINOR;
-            if (!tls_random_bytes(pre_master + 2, sizeof(pre_master) - 2))
+            size_t pre_master_len = 0;
+
+            if (session->key_exchange == TLS_KEY_EXCHANGE_RSA)
             {
-                tls_log("TLS: failed to generate pre-master secret");
+                pre_master_len = sizeof(pre_master);
+                pre_master[0] = TLS_VERSION_MAJOR;
+                pre_master[1] = TLS_VERSION_MINOR;
+                if (!tls_random_bytes(pre_master + 2, sizeof(pre_master) - 2))
+                {
+                    tls_log("TLS: failed to generate pre-master secret");
+                    return false;
+                }
+
+                size_t modulus_bytes = rsa_public_key_size(&session->server_key);
+                uint8_t encrypted[512];
+                if (!rsa_encrypt_pkcs1_v15(&session->server_key,
+                                           pre_master, pre_master_len,
+                                           encrypted, modulus_bytes,
+                                           tls_random_fill, NULL))
+                {
+                    tls_log("TLS: RSA encryption failed");
+                    return false;
+                }
+
+                if (!tls_send_client_key_exchange_rsa(session, encrypted, modulus_bytes))
+                {
+                    tls_log("TLS: failed to send ClientKeyExchange");
+                    return false;
+                }
+                memset(encrypted, 0, sizeof(encrypted));
+            }
+            else if (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA)
+            {
+                if (!session->ecdhe_server_params_ready)
+                {
+                    tls_log("TLS: missing server ECDHE params");
+                    return false;
+                }
+                if (!tls_generate_ecdhe_keypair(session))
+                {
+                    tls_log("TLS: failed to generate ECDHE keypair");
+                    return false;
+                }
+                if (!tls_send_client_key_exchange_ecdhe(session))
+                {
+                    tls_log("TLS: failed to send ECDHE ClientKeyExchange");
+                    return false;
+                }
+                uint8_t shared[P256_SCALAR_SIZE];
+                if (!tls_ecdhe_compute_shared_secret(session, shared))
+                {
+                    tls_log("TLS: failed to compute shared secret");
+                    return false;
+                }
+                memcpy(pre_master, shared, sizeof(shared));
+#if TLS_DEBUG_SIG
+                tls_log_hexdump("TLS: pre-master (ECDHE)", pre_master, sizeof(shared));
+#endif
+                memset(shared, 0, sizeof(shared));
+                pre_master_len = P256_SCALAR_SIZE;
+            }
+            else
+            {
+                tls_log("TLS: unsupported key exchange");
                 return false;
             }
 
-            size_t modulus_bytes = rsa_public_key_size(&session->server_key);
-            uint8_t encrypted[512];
-            if (!rsa_encrypt_pkcs1_v15(&session->server_key,
-                                       pre_master, sizeof(pre_master),
-                                       encrypted, modulus_bytes,
-                                       tls_random_fill, NULL))
-            {
-                tls_log("TLS: RSA encryption failed");
-                return false;
-            }
-
-            if (!tls_send_client_key_exchange(session, encrypted, modulus_bytes))
-            {
-                tls_log("TLS: failed to send ClientKeyExchange");
-                return false;
-            }
-
-            if (!tls_compute_master_secret(session, pre_master))
+            if (!tls_compute_master_secret(session, pre_master, pre_master_len))
             {
                 tls_log("TLS: failed computing master secret");
                 return false;
             }
+            memset(pre_master, 0, sizeof(pre_master));
+
             if (!tls_compute_key_block(session))
             {
                 tls_log("TLS: failed computing key block");
@@ -1132,10 +1974,7 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
                 return false;
             }
             tls_log("TLS: sent ClientKeyExchange/Finished");
-            waiting_encrypted = true;
             client_key_sent = true;
-            memset(pre_master, 0, sizeof(pre_master));
-            memset(encrypted, 0, sizeof(encrypted));
         }
     }
 
@@ -1166,7 +2005,7 @@ bool tls_session_send(tls_session_t *session, const uint8_t *data, size_t length
         {
             return false;
         }
-        if (!net_tcp_socket_send(session->socket, record, record_len))
+        if (!tls_socket_write_all(session, record, record_len, tls_default_timeout_ticks()))
         {
             return false;
         }
@@ -1249,6 +2088,13 @@ void tls_session_close(tls_session_t *session)
     memset(session->client_write_iv, 0, sizeof(session->client_write_iv));
     memset(session->server_write_iv, 0, sizeof(session->server_write_iv));
     memset(session->master_secret, 0, sizeof(session->master_secret));
+    memset(session->ecdhe_private, 0, sizeof(session->ecdhe_private));
+    memset(session->ecdhe_public, 0, sizeof(session->ecdhe_public));
+    memset(session->ecdhe_server_public, 0, sizeof(session->ecdhe_server_public));
+    memset(session->client_gcm_H, 0, sizeof(session->client_gcm_H));
+    memset(session->server_gcm_H, 0, sizeof(session->server_gcm_H));
+    session->ecdhe_client_keys_ready = false;
+    session->ecdhe_server_params_ready = false;
     session->handshake_complete = false;
     session->keys_ready = false;
 }
