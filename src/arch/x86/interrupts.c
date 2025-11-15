@@ -10,7 +10,11 @@
 #include "process.h"
 #include "console.h"
 #include "syscall.h"
+#include "smp.h"
+#include "lapic.h"
 #include "ahci.h"
+#include "arch/x86/smp_boot.h"
+#include "arch/x86/cpu.h"
 
 extern void syscall_entry(void);
 
@@ -31,6 +35,7 @@ static void fault_report(const char *reason,
                          bool has_error,
                          bool include_cr2,
                          uint64_t cr2_value);
+static void fault_dump_bytes(uint64_t rip);
 static void dump_exception_stacktrace(const interrupt_frame_t *frame);
 
 static inline uint64_t read_cr2(void)
@@ -59,6 +64,40 @@ static bool is_canonical_address(uintptr_t addr)
     return upper == 0xFFFFULL;
 }
 
+static void log_kernel_stack_bounds(const char *label, const interrupt_frame_t *frame)
+{
+    thread_t *thread = thread_current();
+    if (!thread)
+    {
+        return;
+    }
+    uintptr_t base = 0;
+    uintptr_t top = 0;
+    if (!process_thread_stack_bounds(thread, &base, &top))
+    {
+        return;
+    }
+    uint32_t cpu = smp_current_cpu_index();
+    uint64_t rsp0 = arch_cpu_get_kernel_stack(cpu);
+
+    serial_write_string("[stack] label=");
+    serial_write_string(label ? label : "<none>");
+    serial_write_string(" cpu=0x");
+    serial_write_hex64(cpu);
+    serial_write_string(" base=0x");
+    serial_write_hex64(base);
+    serial_write_string(" top=0x");
+    serial_write_hex64(top);
+    serial_write_string(" rsp0=0x");
+    serial_write_hex64(rsp0);
+    if (frame)
+    {
+        serial_write_string(" rsp=0x");
+        serial_write_hex64(frame->rsp);
+    }
+    serial_write_string("\r\n");
+}
+
 static void dump_kernel_stack(uintptr_t rsp, size_t max_entries)
 {
     serial_write_string("  kernel stack trace:\r\n");
@@ -70,7 +109,7 @@ static void dump_kernel_stack(uintptr_t rsp, size_t max_entries)
 
     for (size_t i = 0; i < max_entries; ++i)
     {
-        uintptr_t addr = rsp + i * sizeof(uintptr_t);
+        uintptr_t addr = rsp - (i * sizeof(uintptr_t));
         if (!is_canonical_address(addr) ||
             !is_canonical_address(addr + sizeof(uintptr_t) - 1))
         {
@@ -112,6 +151,7 @@ static void dump_exception_stacktrace(const interrupt_frame_t *frame)
     else
     {
         dump_kernel_stack(frame->rsp, 24);
+        process_debug_scan_current_kernel_stack("exception", frame->rsp, true);
     }
 }
 
@@ -126,6 +166,10 @@ static void fault_report(const char *reason,
     serial_write_string("\r\n=== CPU EXCEPTION ===\r\n");
     serial_write_string("reason: ");
     serial_write_string(reason);
+    serial_write_string("\r\n");
+    uint32_t cpu_idx = smp_current_cpu_index();
+    serial_write_string("  cpu_index=0x");
+    serial_write_hex64(cpu_idx);
     serial_write_string("\r\n");
     if (frame)
     {
@@ -157,7 +201,30 @@ static void fault_report(const char *reason,
     serial_write_string("  current_pid=0x");
     serial_write_hex64(pid);
     serial_write_string("\r\n");
+    process_dump_current_thread();
+    if (frame)
+    {
+        fault_dump_bytes(frame->rip);
+    }
     serial_write_string("======================\r\n");
+}
+
+static void fault_dump_bytes(uint64_t rip)
+{
+    const uintptr_t IDENTITY_DUMP_LIMIT = 4ULL * 1024ULL * 1024ULL * 1024ULL;
+    if (!is_canonical_address((uintptr_t)rip) || rip >= IDENTITY_DUMP_LIMIT)
+    {
+        return;
+    }
+    serial_write_string("  instr bytes:");
+    for (size_t i = 0; i < 16; ++i)
+    {
+        uintptr_t addr = (uintptr_t)(rip + i);
+        uint8_t byte = *((volatile uint8_t *)addr);
+        serial_write_string(" ");
+        serial_write_hex8(byte);
+    }
+    serial_write_string("\r\n");
 }
 
 static void pic_remap(void)
@@ -205,8 +272,9 @@ __attribute__((interrupt)) static void irq1_handler(interrupt_frame_t *frame)
 
 __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
 {
+    (void)frame;
     timer_on_tick();
-    process_on_timer_tick(frame);
+    smp_broadcast_schedule_ipi();
     pic_send_eoi(0);
 }
 
@@ -264,6 +332,20 @@ __attribute__((interrupt)) static void divide_error_handler(interrupt_frame_t *f
 __attribute__((interrupt)) static void invalid_opcode_handler(interrupt_frame_t *frame)
 {
     fault_report("invalid_opcode", frame, 0, false, false, 0);
+    if (frame && frame->rip >= SMP_BOOT_DATA_PHYS && frame->rip < SMP_BOOT_DATA_PHYS + 0x100)
+    {
+        serial_write_string("  smp_boot data dump:\r\n");
+        const uint64_t *words = (const uint64_t *)(uintptr_t)SMP_BOOT_DATA_PHYS;
+        for (size_t i = 0; i < 6; ++i)
+        {
+            serial_write_string("    word[");
+            serial_write_hex64(i);
+            serial_write_string("]=0x");
+            serial_write_hex64(words[i]);
+            serial_write_string("\r\n");
+        }
+    }
+    dump_exception_stacktrace(frame);
     if (process_handle_exception(frame, "invalid_opcode", 0, false, 0))
     {
         return;
@@ -282,10 +364,37 @@ __attribute__((interrupt)) static void general_protection_handler(interrupt_fram
     halt_forever();
 }
 
+__attribute__((interrupt)) static void stack_fault_handler(interrupt_frame_t *frame, uint64_t error_code)
+{
+    uint32_t cpu = smp_current_cpu_index();
+    uint64_t rsp0 = arch_cpu_get_kernel_stack(cpu);
+    fault_report("stack_fault", frame, error_code, true, false, 0);
+    serial_write_string("  cpu_index=0x");
+    serial_write_hex64(cpu);
+    serial_write_string(" kernel_rsp0=0x");
+    serial_write_hex64(rsp0);
+    serial_write_string("\r\n");
+    log_kernel_stack_bounds("stack_fault", frame);
+    dump_exception_stacktrace(frame);
+    if (process_handle_exception(frame, "stack_fault", error_code, false, 0))
+    {
+        return;
+    }
+    halt_forever();
+}
+
 __attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *frame, uint64_t error_code)
 {
     uint64_t fault_address = read_cr2();
     fault_report("page_fault", frame, error_code, true, true, fault_address);
+    if (frame && ((frame->cs & 0x3u) == 0))
+    {
+        log_kernel_stack_bounds("page_fault", frame);
+    }
+    if (process_handle_stack_watch_fault(fault_address, frame, error_code))
+    {
+        return;
+    }
     dump_exception_stacktrace(frame);
     if (process_handle_exception(frame, "page_fault", error_code, true, fault_address))
     {
@@ -294,17 +403,25 @@ __attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *fra
     halt_forever();
 }
 
+__attribute__((interrupt)) static void smp_schedule_ipi_handler(interrupt_frame_t *frame)
+{
+    smp_handle_schedule_ipi(frame);
+    lapic_eoi();
+}
+
 void interrupts_init(void)
 {
     idt_init();
     idt_set_gate(0, (void *)divide_error_handler);
     idt_set_gate(6, (void *)invalid_opcode_handler);
+    idt_set_gate(12, (void *)stack_fault_handler);
     idt_set_gate(13, (void *)general_protection_handler);
     idt_set_gate(14, (void *)page_fault_handler);
     idt_set_gate(32, (void *)irq0_handler);
     idt_set_gate(33, (void *)irq1_handler);
     idt_set_gate(43, (void *)irq11_handler);
     idt_set_gate(44, (void *)irq12_handler);
+    idt_set_gate(SMP_SCHEDULE_IPI_VECTOR, (void *)smp_schedule_ipi_handler);
     idt_set_gate_dpl(0x80, syscall_entry, 3);
     idt_load();
     pic_remap();

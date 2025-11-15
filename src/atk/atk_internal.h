@@ -183,6 +183,9 @@ void atk_guard_reset(uint64_t *front, uint64_t *back);
 void atk_guard_check(uint64_t *front, uint64_t *back, const char *label);
 void atk_state_theme_commit(atk_state_t *state);
 bool atk_state_theme_validate(const atk_state_t *state, const char *label);
+void atk_state_lock_init(void);
+uint64_t atk_state_lock_acquire(void);
+void atk_state_lock_release(uint64_t flags);
 #if ATK_DEBUG
 void atk_state_theme_log(const atk_state_t *state, const char *label);
 #else

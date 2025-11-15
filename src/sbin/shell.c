@@ -740,22 +740,28 @@ static bool shell_run_script(shell_state_t *shell,
 
 void shell_main(void)
 {
-    shell_state_t shell = {
-        .cwd = process_current_cwd(),
-        .stream_fn = shell_stream_console_write,
-        .stream_context = NULL,
-        .stdout_fd = process_current_stdout_fd(),
-        .foreground_process = NULL,
-        .wait_hook = NULL,
-        .wait_context = NULL,
-        .owner_process = process_current(),
-        .cwd_changed_fn = NULL,
-        .cwd_changed_context = NULL
-    };
+    /* Commands run in separate threads mutate shell state, so keep it off-stack. */
+    shell_state_t *shell = (shell_state_t *)malloc(sizeof(shell_state_t));
+    if (!shell)
+    {
+        console_write("Shell: unable to allocate state\n");
+        serial_write_string("Shell: unable to allocate state\r\n");
+        return;
+    }
+    shell->cwd = process_current_cwd();
+    shell->stream_fn = shell_stream_console_write;
+    shell->stream_context = NULL;
+    shell->stdout_fd = process_current_stdout_fd();
+    shell->foreground_process = NULL;
+    shell->wait_hook = NULL;
+    shell->wait_context = NULL;
+    shell->owner_process = process_current();
+    shell->cwd_changed_fn = NULL;
+    shell->cwd_changed_context = NULL;
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, atkshell, taskmgr, wolf3d, doom, runelf, or ./path for binaries.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, alloc1m, free, loop1, loop2, top, userdemo, userdemo2, useratk, atkshell, taskmgr, wolf3d, doom, runelf, or ./path for binaries.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, top, useratk, atkshell, taskmgr, wolf3d, doom, runelf, or ./path for binaries.\n");
+    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, top, useratk, atkshell, taskmgr, wolf3d, doom, runelf, or ./path for binaries.\r\n");
 
     while (1)
     {
@@ -763,7 +769,7 @@ void shell_main(void)
         size_t len = cli_read_line(input, INPUT_CAPACITY);
         (void)len;
         cli_history_record(input);
-        shell_run_and_display(&shell, input);
+        shell_run_and_display(shell, input);
     }
 }
 
@@ -791,13 +797,12 @@ static const shell_command_t g_commands[] = {
     { "dhclient",    shell_cmd_dhclient },
     { "start_video", shell_cmd_start_video },
     { "net_mac",     shell_cmd_net_mac },
+    { "dnsdebug",    shell_cmd_dnsdebug },
     { "alloc1m",     shell_cmd_alloc1m },
     { "free",        shell_cmd_free },
     { "loop1",       shell_cmd_loop1 },
     { "loop2",       shell_cmd_loop2 },
     { "top",         shell_cmd_top },
-    { "userdemo",    shell_cmd_userdemo },
-    { "userdemo2",   shell_cmd_userdemo2 },
     { "useratk",     shell_cmd_useratk },
     { "atkshell",    shell_cmd_atkshell },
     { "taskmgr",     shell_cmd_atktaskmgr },
@@ -917,13 +922,23 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         }
     }
 
-    shell_output_t output;
+    shell_output_t *output = (shell_output_t *)malloc(sizeof(shell_output_t));
+    if (!output)
+    {
+        if (args_owned)
+        {
+            free(args_owned);
+        }
+        free(working);
+        return shell_duplicate_string("Error: out of memory\n");
+    }
     if (redirect_path)
     {
-        shell_output_init_buffer(&output);
-        if (!shell_output_redirect(&output, shell, redirect_path))
+        shell_output_init_buffer(output);
+        if (!shell_output_redirect(output, shell, redirect_path))
         {
-            shell_output_reset(&output);
+            shell_output_reset(output);
+            free(output);
             if (args_owned)
             {
                 free(args_owned);
@@ -934,7 +949,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
     }
     else
     {
-        shell_output_init_buffer(&output);
+        shell_output_init_buffer(output);
     }
 
     bool handler_found = false;
@@ -951,7 +966,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                 break;
             }
             task->shell = shell;
-            task->output = &output;
+            task->output = output;
             task->args = args ? args : "";
             task->args_owned = args_owned;
             args_owned = NULL;
@@ -1007,7 +1022,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             {
                 handler_found = true;
                 script_attempted = true;
-                handler_result = shell_run_script(shell, &output, line, args);
+                handler_result = shell_run_script(shell, output, line, args);
                 if (args_owned)
                 {
                     free(args_owned);
@@ -1056,7 +1071,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                     else
                     {
                         task->shell = shell;
-                        task->output = &output;
+                        task->output = output;
                         task->args = path_args;
                         task->args_owned = path_args;
                         task->handler = shell_cmd_runelf;
@@ -1115,11 +1130,12 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         }
         else if (!result)
         {
-            result = shell_output_take_buffer(&output);
+            result = shell_output_take_buffer(output);
         }
     }
 
-    shell_output_reset(&output);
+    shell_output_reset(output);
+    free(output);
     free(working);
     if (args_owned)
     {

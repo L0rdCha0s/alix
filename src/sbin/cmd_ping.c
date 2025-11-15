@@ -15,121 +15,142 @@ static bool read_token(const char **cursor, char *out, size_t capacity);
 static void ping_stdout_write(const char *text);
 static void ping_stdout_write_uint(unsigned value);
 
+typedef struct
+{
+    char token1[64];
+    char token2[64];
+    char iface_name[NET_IF_NAME_MAX];
+    char ip_token[64];
+    char target_str[32];
+    char source_str[32];
+    uint8_t target_mac[6];
+} ping_state_t;
+
 bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 {
     (void)shell;
     const char *cursor = args ? args : "";
 
-    char token1[32];
-    char token2[32];
-    char iface_name[NET_IF_NAME_MAX];
-    char ip_token[32];
+    ping_state_t *state = (ping_state_t *)malloc(sizeof(ping_state_t));
+    if (!state)
+    {
+        return shell_output_error(out, "out of memory");
+    }
+
     bool have_iface = false;
 
-    if (!read_token(&cursor, token1, sizeof(token1)))
+    if (!read_token(&cursor, state->token1, sizeof(state->token1)))
     {
+        free(state);
         return shell_output_error(out, "Usage: ping [iface] <host>");
     }
 
-    if (!read_token(&cursor, token2, sizeof(token2)))
+    if (!read_token(&cursor, state->token2, sizeof(state->token2)))
     {
-        size_t ip_len = strlen(token1);
-        if (ip_len == 0 || ip_len >= sizeof(ip_token))
+        size_t ip_len = strlen(state->token1);
+        if (ip_len == 0 || ip_len >= sizeof(state->ip_token))
         {
+            free(state);
             return shell_output_error(out, "invalid host");
         }
-        memcpy(ip_token, token1, ip_len + 1);
+        memcpy(state->ip_token, state->token1, ip_len + 1);
     }
     else
     {
         have_iface = true;
-        size_t name_len = strlen(token1);
+        size_t name_len = strlen(state->token1);
         if (name_len == 0 || name_len >= NET_IF_NAME_MAX)
         {
+            free(state);
             return shell_output_error(out, "invalid interface name");
         }
-        memcpy(iface_name, token1, name_len + 1);
+        memcpy(state->iface_name, state->token1, name_len + 1);
 
-        size_t ip_len = strlen(token2);
-        if (ip_len == 0 || ip_len >= sizeof(ip_token))
+        size_t ip_len = strlen(state->token2);
+        if (ip_len == 0 || ip_len >= sizeof(state->ip_token))
         {
+            free(state);
             return shell_output_error(out, "invalid host");
         }
-        memcpy(ip_token, token2, ip_len + 1);
+        memcpy(state->ip_token, state->token2, ip_len + 1);
     }
 
     cursor = skip_ws(cursor);
     if (*cursor != '\0')
     {
+        free(state);
         return shell_output_error(out, "Usage: ping [iface] <host>");
     }
 
     net_interface_t *requested_iface = NULL;
     if (have_iface)
     {
-        requested_iface = net_if_by_name(iface_name);
+        requested_iface = net_if_by_name(state->iface_name);
         if (!requested_iface || !requested_iface->present)
         {
+            free(state);
             return shell_output_error(out, "interface not found");
         }
         if (!requested_iface->link_up)
         {
+            free(state);
             return shell_output_error(out, "interface is down");
         }
         if (requested_iface->ipv4_addr == 0)
         {
+            free(state);
             return shell_output_error(out, "interface has no IPv4 address");
         }
     }
 
     uint32_t target_ip = 0;
     bool resolved_host = false;
-    if (!net_parse_ipv4(ip_token, &target_ip))
+    if (!net_parse_ipv4(state->ip_token, &target_ip))
     {
         ping_stdout_write("Resolving ");
-        ping_stdout_write(ip_token);
+        ping_stdout_write(state->ip_token);
         ping_stdout_write("...\n");
-        if (!net_dns_resolve_ipv4(ip_token, requested_iface, &target_ip))
+        if (!net_dns_resolve_ipv4(state->ip_token, requested_iface, &target_ip))
         {
+            free(state);
             return shell_output_error(out, "unable to resolve host");
         }
         resolved_host = true;
     }
 
-    char target_str[32];
-    char source_str[32];
-    net_format_ipv4(target_ip, target_str);
+    net_format_ipv4(target_ip, state->target_str);
     net_interface_t *iface = requested_iface;
     uint32_t next_hop_ip = target_ip;
     if (!net_route_next_hop(iface, target_ip, &iface, &next_hop_ip))
     {
+        free(state);
         return shell_output_error(out, "no route to host");
     }
     if (!iface || !iface->present || !iface->link_up || iface->ipv4_addr == 0)
     {
+        free(state);
         return shell_output_error(out, "no route to host");
     }
 
-    net_format_ipv4(iface->ipv4_addr, source_str);
+    net_format_ipv4(iface->ipv4_addr, state->source_str);
 
     ping_stdout_write("PING ");
     if (resolved_host)
     {
-        ping_stdout_write(ip_token);
+        ping_stdout_write(state->ip_token);
         ping_stdout_write(" (");
-        ping_stdout_write(target_str);
+        ping_stdout_write(state->target_str);
         ping_stdout_write(")");
     }
     else
     {
-        ping_stdout_write(target_str);
+        ping_stdout_write(state->target_str);
     }
     ping_stdout_write(" from ");
-    ping_stdout_write(source_str);
+    ping_stdout_write(state->source_str);
     ping_stdout_write(":\n");
 
-    uint8_t target_mac[6];
-    bool have_mac = net_arp_lookup(next_hop_ip, target_mac);
+    bool have_mac = net_arp_lookup(next_hop_ip, state->target_mac);
     uint32_t frequency = timer_frequency();
     if (frequency == 0)
     {
@@ -142,13 +163,14 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         ping_stdout_write("  Resolving ARP...\n");
         if (!net_arp_send_request(iface, next_hop_ip))
         {
+            free(state);
             return shell_output_error(out, "failed to send ARP request");
         }
 
         uint64_t start = timer_ticks();
         while (timer_ticks() - start < timeout_ticks)
         {
-            if (net_arp_lookup(next_hop_ip, target_mac))
+            if (net_arp_lookup(next_hop_ip, state->target_mac))
             {
                 have_mac = true;
                 break;
@@ -159,6 +181,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         if (!have_mac)
         {
             ping_stdout_write("  Request timed out (ARP)\n");
+            free(state);
             return false;
         }
     }
@@ -176,8 +199,9 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
     while (1)
     {
-        if (!net_icmp_send_echo(iface, target_mac, target_ip, identifier, sequence, payload_len))
+        if (!net_icmp_send_echo(iface, state->target_mac, target_ip, identifier, sequence, payload_len))
         {
+            free(state);
             return shell_output_error(out, "failed to send ICMP echo request");
         }
 
@@ -217,6 +241,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
         }
     }
 
+    free(state);
     return true;
 }
 

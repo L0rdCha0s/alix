@@ -567,7 +567,8 @@ static bool parse_DHT(bitreader_t *br, jpg_t *jpg)
         dht_t *H = (tc == 0) ? &jpg->HTDC[th] : &jpg->HTAC[th];
         int total = 0;
         for (int i = 0; i < 16; ++i) { int c = br_read_u8(br); if (c < 0) return false; H->counts[i]=(uint8_t)c; total+=c; }
-        if (rem < 16) return false; rem -= 16;
+        if (rem < 16) return false; 
+        rem -= 16;
         if (total > 256 || rem < (size_t)total) return false;
         for (int i = 0; i < total; ++i) { int s = br_read_u8(br); if (s < 0) return false; H->symbols[i]=(uint8_t)s; }
         rem -= total; H->present = true; dht_build(H);
@@ -872,7 +873,8 @@ static bool prog_ac_refine(bitreader_t *br, const jpg_t *jpg, const comp_t *c,
         for (; k <= Se; ++k) {
             int16_t *p = &blk[zigzag[k]];
             if (*p) { int bit=(int)br_get(br,1); if (bit) *p += (*p>0)?(int16_t)(1<<Al):(int16_t)-(1<<Al); continue; }
-            if (zeros_seen == r) break; ++zeros_seen;
+            if (zeros_seen == r) break; 
+            ++zeros_seen;
         }
         if (k > Se) break;
 

@@ -7,6 +7,12 @@
 #include "net/arp.h"
 #include "net/route.h"
 #include "net/dns.h"
+#include "net/net_debug.h"
+#include "heap.h"
+#include "process.h"
+
+#define DHCP_TRACE(label, dest, len) \
+    process_debug_log_stack_write(label, __builtin_return_address(0), (dest), (len))
 
 #define DHCP_OP_REQUEST 1
 #define DHCP_OP_REPLY   2
@@ -272,7 +278,7 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
     {
         g_offer_addr = yiaddr;
         g_server_id = server_id;
-        memcpy(g_server_mac, frame + 6, 6); /* source MAC of offer */
+        net_debug_memcpy("dhcp_offer_mac", g_server_mac, frame + 6, 6); /* source MAC of offer */
         g_have_server_mac = mac_is_sane(g_server_mac);
         /* Try to learn the server's L2 via ARP as well (more reliable). */
         if (g_server_id != 0) {
@@ -358,8 +364,13 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
         return false;
     }
 
-    uint8_t buffer[548];
-    memset(buffer, 0, sizeof(buffer));
+    uint8_t *buffer = (uint8_t *)malloc(548);
+    if (!buffer)
+    {
+        serial_write_string("dhcp: failed to allocate tx buffer\r\n");
+        return false;
+    }
+    memset(buffer, 0, 548);
 
     uint8_t *eth = buffer;
     uint8_t *ip = buffer + 14;
@@ -388,13 +399,13 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
     /* Ethernet header */
     if (dest_mac)
     {
-        memcpy(eth, dest_mac, 6);
+        net_debug_memcpy("dhcp_eth_dst", eth, dest_mac, 6);
     }
     else
     {
         memset(eth, 0xFF, 6);
     }
-    memcpy(eth + 6, g_active_iface->mac, 6);
+    net_debug_memcpy("dhcp_eth_src", eth + 6, g_active_iface->mac, 6);
     eth[12] = 0x08;
     eth[13] = 0x00;
 
@@ -416,7 +427,7 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
     write_be32(dhcp + 16, 0);
     write_be32(dhcp + 20, 0);
     write_be32(dhcp + 24, 0);
-    memcpy(dhcp + 28, g_active_iface->mac, 6);
+    net_debug_memcpy("dhcp_hwaddr", dhcp + 28, g_active_iface->mac, 6);
     write_be32(dhcp + 236, DHCP_MAGIC_COOKIE);
 
     uint8_t *opt = dhcp + 240;
@@ -491,9 +502,15 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
     serial_write_char((char)('0' + msg_type));
     serial_write_string("\r\n");
 
-    if (!net_if_send(g_active_iface, buffer, frame_len))
+    bool ok = net_if_send_copy(g_active_iface, buffer, frame_len);
+    if (!ok)
     {
         serial_write_string("dhcp: failed to transmit frame\r\n");
+    }
+
+    free(buffer);
+    if (!ok)
+    {
         return false;
     }
 
@@ -572,12 +589,20 @@ static uint32_t read_be32(const uint8_t *p)
 
 static void write_be16(uint8_t *p, uint16_t value)
 {
+    if (p)
+    {
+        DHCP_TRACE("dhcp_write_be16", p, sizeof(uint16_t));
+    }
     p[0] = (uint8_t)(value >> 8);
     p[1] = (uint8_t)(value & 0xFF);
 }
 
 static void write_be32(uint8_t *p, uint32_t value)
 {
+    if (p)
+    {
+        DHCP_TRACE("dhcp_write_be32", p, sizeof(uint32_t));
+    }
     p[0] = (uint8_t)(value >> 24);
     p[1] = (uint8_t)((value >> 16) & 0xFF);
     p[2] = (uint8_t)((value >> 8) & 0xFF);

@@ -7,6 +7,7 @@ void serial_init(void);
 void serial_write_char(char c);
 void serial_write_string(const char *s);
 void serial_write_hex64(uint64_t value);
+void serial_write_hex8(uint8_t value);
 char serial_read_char(void);
 bool serial_has_char(void);
 bool serial_is_ready(void);

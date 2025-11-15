@@ -3,6 +3,8 @@
 #include "vfs.h"
 #include "libc.h"
 
+#define CAT_CHUNK_SIZE 4096
+
 bool shell_cmd_cat(shell_state_t *shell, shell_output_t *out, const char *path)
 {
     if (!path || *path == '\0')
@@ -24,17 +26,40 @@ bool shell_cmd_cat(shell_state_t *shell, shell_output_t *out, const char *path)
         return shell_output_error(out, "path is a block device");
     }
 
-    size_t size = 0;
-    const char *data = vfs_data(node, &size);
-    if (!data)
+    char *buffer = (char *)malloc(CAT_CHUNK_SIZE);
+    if (!buffer)
     {
-        return true;
+        return shell_output_error(out, "out of memory");
     }
-    if (!shell_output_write_len(out, data, size))
+
+    size_t offset = 0;
+    bool saw_data = false;
+    char last_char = '\0';
+    while (1)
     {
-        return shell_output_error(out, "write failed");
+        ssize_t read = vfs_read_at(node, offset, buffer, CAT_CHUNK_SIZE);
+        if (read < 0)
+        {
+            free(buffer);
+            return shell_output_error(out, "read failed");
+        }
+        if (read == 0)
+        {
+            break;
+        }
+        if (!shell_output_write_len(out, buffer, (size_t)read))
+        {
+            free(buffer);
+            return shell_output_error(out, "write failed");
+        }
+        saw_data = true;
+        last_char = buffer[read - 1];
+        offset += (size_t)read;
     }
-    if (!out->to_file && (size == 0 || data[size - 1] != '\n'))
+
+    free(buffer);
+
+    if (!out->to_file && (!saw_data || last_char != '\n'))
     {
         shell_output_write(out, "\n");
     }

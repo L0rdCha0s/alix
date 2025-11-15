@@ -3,6 +3,7 @@
 #include "userlib.h"
 #include "serial.h"
 
+#define ENABLE_USER_MEM_DEBUG_LOGS
 #define ALIGNMENT 16UL
 #define SIZE_MAX_VALUE ((size_t)-1)
 

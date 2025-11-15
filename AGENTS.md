@@ -1,10 +1,9 @@
 # Agent Notes
 
-- To run the OS in QEMU, use `make run-hdd`.
-  - Prefer this over `make run`; the HDD target is the intended path for interactive runs.
-- If you run `make run-hdd`, you won't be able to continue, because the process won't finish.  If you want to run it then kill it to get serial output, run `killall qemu-system-x86_64`
+- To run the OS in QEMU, use `bash -lc cd /Users/alex/Documents/Projects/alix && (make run-hdd > qemu-serial.log 2>&1 &) ; pid=$!; sleep 60; killall qemu-system-x86_64 || true; kill $pid || true`.
 - Standard build remains `make` (produces `os.img` and `hdd.img`).
-- We have our own libc implementation (src/kernel/libc.c), and memory/heap management (malloc, calloc, realloc, free) in src/kernel/heap.c.  Use heap operations rather than trying to use fixed memory assigned in stage2.asm unless absolutely necessary.
+- We have our own libc implementation (src/kernel/libc.c), and memory/heap management (malloc, calloc, realloc, free) in src/kernel/heap.c.  Use heap operations rather than trying to use stack unless absolutely necessary.
+- Remember that we're writing code for an SMP kernel, so considering stack usage and CPUs interacting with stacks is important.  Deeply understand process.c, paging.c and heap.c and smp.c
 - If you need to modify memory layout, make sure you keep STAGE2_BASE and STACK_TOP up-to-date to avoid smashing memory through overlaps in stage2.asm
 - If you want to boot the kernel, the shell has a variety of commands (including shutdown) - which you can use to stop the kernel and return to your thinking
 - Always run "make" to check your work before handing back to the user

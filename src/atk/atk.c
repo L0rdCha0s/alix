@@ -171,6 +171,8 @@ static void atk_clear_focus_widget(atk_state_t *state)
 
 void atk_init(void)
 {
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     atk_state_guard_init(state);
     atk_window_reset_all(state);
@@ -178,10 +180,13 @@ void atk_init(void)
     atk_menu_bar_reset(state);
     atk_dirty_init(state);
     state->exit_requested = false;
+    atk_state_lock_release(irq_state);
 }
 
 void atk_enter_mode(void)
 {
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
 
     atk_apply_default_theme(state);
@@ -250,14 +255,18 @@ void atk_enter_mode(void)
 #else
     (void)action_exit_to_text;
 #endif
+
+    atk_state_lock_release(irq_state);
 }
 
 void atk_render(void)
 {
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     if (!state)
     {
-        return;
+        goto out;
     }
 
     if (!atk_state_theme_validate(state, "atk_render"))
@@ -272,7 +281,7 @@ void atk_render(void)
     atk_rect_t region;
     if (!atk_dirty_consume(&region))
     {
-        return;
+        goto out;
     }
 
     bool full = (region.x == 0 &&
@@ -286,7 +295,7 @@ void atk_render(void)
         atk_desktop_draw_buttons(state, NULL);
         atk_window_draw_all(state, NULL);
         atk_menu_bar_draw(state);
-        return;
+        goto out;
     }
 
     video_draw_rect(region.x, region.y, region.width, region.height, state->theme.background);
@@ -298,6 +307,9 @@ void atk_render(void)
     {
         atk_menu_bar_draw(state);
     }
+
+out:
+    atk_state_lock_release(irq_state);
 }
 
 atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
@@ -306,6 +318,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                 bool released_edge,
                                                 bool left_pressed)
 {
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     atk_mouse_event_result_t result = { .redraw = false, .exit_video = false };
 
@@ -323,7 +337,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
     }
     if (menu_consumed)
     {
-        return result;
+        goto out;
     }
 
     atk_widget_t *capture = atk_state_mouse_capture(state);
@@ -649,6 +663,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         state->exit_requested = false;
     }
 
+out:
+    atk_state_lock_release(irq_state);
     return result;
 }
 
@@ -695,23 +711,25 @@ static void action_exit_to_text(atk_widget_t *button, void *context)
 
 atk_key_event_result_t atk_handle_key_char(char ch)
 {
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     atk_key_event_result_t result = { .redraw = false, .exit_video = false };
 
     if (!state)
     {
-        return result;
+        goto out;
     }
 
     if (user_atk_route_key_event(ch))
     {
-        return result;
+        goto out;
     }
 
     atk_widget_t *focus = atk_state_focus_widget(state);
     if (!focus || !focus->used)
     {
-        return result;
+        goto out;
     }
 
     atk_key_response_t response = atk_widget_dispatch_key(focus, (int)ch, 0, 0);
@@ -719,6 +737,9 @@ atk_key_event_result_t atk_handle_key_char(char ch)
     {
         result.redraw = true;
     }
+
+out:
+    atk_state_lock_release(irq_state);
     return result;
 }
 

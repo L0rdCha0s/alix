@@ -30,5 +30,7 @@ bool net_dns_resolve_cname(const char *hostname, net_interface_t *preferred_ifac
                            char *out_buffer, size_t buffer_len);
 
 void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length);
+void net_dns_set_debug(bool enable);
+bool net_dns_debug_enabled(void);
 
 #endif

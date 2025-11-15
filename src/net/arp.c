@@ -5,7 +5,13 @@
 #include "libc.h"
 #include "serial.h"
 #include "net/dhcp.h"
+#include "net/net_debug.h"
 #include "timer.h"
+#include "heap.h"
+#include "process.h"
+
+#define ARP_TRACE(label, dest, len) \
+    process_debug_log_stack_write(label, __builtin_return_address(0), (dest), (len))
 
 #define ARP_CACHE_SIZE 8
 
@@ -98,7 +104,7 @@ bool net_arp_lookup_fresh(uint32_t ip, uint8_t mac_out[6], uint64_t max_age_tick
                 // stale
                 return false;
             }
-            memcpy(mac_out, g_cache[i].mac, 6);
+            net_debug_memcpy("arp_lookup_hit", mac_out, g_cache[i].mac, 6);
             arp_log_entry("cache hit", ip, g_cache[i].mac);
             return true;
         }
@@ -117,7 +123,7 @@ bool net_arp_lookup(uint32_t ip, uint8_t mac_out[6])
     {
         if (g_cache[i].valid && g_cache[i].ip == ip)
         {
-            memcpy(mac_out, g_cache[i].mac, 6);
+            net_debug_memcpy("arp_lookup_stale", mac_out, g_cache[i].mac, 6);
             arp_log_entry("cache hit", ip, g_cache[i].mac);
             return true;
         }
@@ -133,9 +139,6 @@ bool net_arp_send_request(net_interface_t *iface, uint32_t target_ip)
         serial_write_string("arp: send_request invalid iface\r\n");
         return false;
     }
-
-    uint8_t buffer[60];
-    memset(buffer, 0, sizeof(buffer));
 
     uint8_t broadcast[6];
     memset(broadcast, 0xFF, sizeof(broadcast));
@@ -252,7 +255,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
     {
         if (g_cache[i].valid && g_cache[i].ip == ip)
         {
-            memcpy(g_cache[i].mac, mac, 6);
+            net_debug_memcpy("arp_store_update", g_cache[i].mac, mac, 6);
             g_cache[i].last_tick = now;
             arp_log_entry("updated entry", ip, mac);
             serial_write_string("arp: store updated index=");
@@ -268,7 +271,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
         {
             g_cache[i].valid = true;
             g_cache[i].ip = ip;
-            memcpy(g_cache[i].mac, mac, 6);
+            net_debug_memcpy("arp_store_reuse", g_cache[i].mac, mac, 6);
             g_cache[i].last_tick = now;
             arp_log_entry("added entry", ip, mac);
             serial_write_string("arp: store new index=");
@@ -281,7 +284,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
     /* Simple replacement: overwrite entry 0 if cache is full. */
     g_cache[0].valid = true;
     g_cache[0].ip = ip;
-    memcpy(g_cache[0].mac, mac, 6);
+    net_debug_memcpy("arp_store_evicted", g_cache[0].mac, mac, 6);
     g_cache[0].last_tick = now;
     arp_log_entry("replaced entry", ip, mac);
     serial_write_string("arp: store replaced index=0\r\n");
@@ -322,14 +325,20 @@ static bool net_arp_send_generic(net_interface_t *iface, const uint8_t *dest_mac
         return false;
     }
 
-    uint8_t buffer[60];
-    memset(buffer, 0, sizeof(buffer));
+    const size_t frame_len = 60;
+    uint8_t *buffer = (uint8_t *)malloc(frame_len);
+    if (!buffer)
+    {
+        serial_write_string("arp: failed to allocate tx buffer\r\n");
+        return false;
+    }
+    memset(buffer, 0, frame_len);
 
     uint8_t *eth = buffer;
     uint8_t *arp = buffer + 14;
 
-    memcpy(eth, dest_mac, 6);
-    memcpy(eth + 6, iface->mac, 6);
+    net_debug_memcpy("arp_eth_dst", eth, dest_mac, 6);
+    net_debug_memcpy("arp_eth_src", eth + 6, iface->mac, 6);
     eth[12] = 0x08;
     eth[13] = 0x06;
 
@@ -338,12 +347,14 @@ static bool net_arp_send_generic(net_interface_t *iface, const uint8_t *dest_mac
     arp[4] = 6;
     arp[5] = 4;
     write_be16(arp + 6, opcode);
-    memcpy(arp + 8, iface->mac, 6);
+    net_debug_memcpy("arp_sender_mac", arp + 8, iface->mac, 6);
     write_be32(arp + 14, source_ip);
-    memcpy(arp + 18, target_mac, 6);
+    net_debug_memcpy("arp_target_mac", arp + 18, target_mac, 6);
     write_be32(arp + 24, target_ip);
 
-    return net_if_send(iface, buffer, sizeof(buffer));
+    bool ok = net_if_send_copy(iface, buffer, frame_len);
+    free(buffer);
+    return ok;
 }
 
 static uint16_t read_be16(const uint8_t *p)
@@ -361,12 +372,20 @@ static uint32_t read_be32(const uint8_t *p)
 
 static void write_be16(uint8_t *p, uint16_t value)
 {
+    if (p)
+    {
+        ARP_TRACE("arp_write_be16", p, sizeof(uint16_t));
+    }
     p[0] = (uint8_t)((value >> 8) & 0xFF);
     p[1] = (uint8_t)(value & 0xFF);
 }
 
 static void write_be32(uint8_t *p, uint32_t value)
 {
+    if (p)
+    {
+        ARP_TRACE("arp_write_be32", p, sizeof(uint32_t));
+    }
     p[0] = (uint8_t)((value >> 24) & 0xFF);
     p[1] = (uint8_t)((value >> 16) & 0xFF);
     p[2] = (uint8_t)((value >> 8) & 0xFF);

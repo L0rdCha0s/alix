@@ -28,12 +28,44 @@
 #include "startup.h"
 #include "timekeeping.h"
 #include "dl_script.h"
+#include "smp.h"
+#include "build_features.h"
+
+static void shell_process_entry(void *arg);
+static void storage_flush_process_entry(void *arg);
+
+static volatile bool g_fstab_ready =
+#if ENABLE_FSTAB_MOUNT
+    false;
+#else
+    true;
+#endif
+;
 
 typedef struct
 {
     const char *device_name;
     const char *mount_path;
 } fstab_entry_t;
+
+static block_device_t *fstab_find_device(const char *name)
+{
+    if (!name)
+    {
+        return NULL;
+    }
+    const char *device = name;
+    const char prefix[] = "/dev/";
+    if (strncmp(name, prefix, sizeof(prefix) - 1) == 0)
+    {
+        device = name + (sizeof(prefix) - 1);
+        if (*device == '\0')
+        {
+            device = name;
+        }
+    }
+    return block_find(device);
+}
 
 static vfs_node_t *ensure_directory_path(const char *path)
 {
@@ -98,11 +130,19 @@ static vfs_node_t *ensure_directory_path(const char *path)
         partial[partial_len] = '\0';
 
         vfs_node_t *dir = vfs_resolve(vfs_root(), partial);
+        if (dir && !vfs_is_dir(dir))
+        {
+            if (!vfs_remove_file(vfs_root(), partial))
+            {
+                return NULL;
+            }
+            dir = NULL;
+        }
         if (!dir)
         {
             dir = vfs_mkdir(vfs_root(), partial);
         }
-        if (!dir)
+        if (!dir || !vfs_is_dir(dir))
         {
             return NULL;
         }
@@ -187,10 +227,17 @@ static void ensure_system_layout(void)
     }
 }
 
+static void vfs_spin_up(void)
+{
+    (void)ensure_directory_path("/root");
+    (void)ensure_directory_path("/etc");
+    (void)ensure_directory_path("/usr");
+}
+
 static void mount_default_fstab(void)
 {
     static const fstab_entry_t g_default_fstab[] = {
-        { "ahci1", "/root" },
+        { "/dev/ahci1", "/root" },
     };
 
     const size_t entry_count = sizeof(g_default_fstab) / sizeof(g_default_fstab[0]);
@@ -213,7 +260,15 @@ static void mount_default_fstab(void)
             continue;
         }
 
-        block_device_t *device = block_find(entry->device_name);
+        /*
+         * Ensure we mount onto a clean directory tree. When the automatic
+         * mounts were disabled we still created files under /root, which
+         * now prevents vfs_mount_device from succeeding because the mount
+         * point is not empty.
+         */
+        vfs_clear_directory(mount_point);
+
+        block_device_t *device = fstab_find_device(entry->device_name);
         if (!device)
         {
             serial_write_string("[alix] fstab: device ");
@@ -259,6 +314,65 @@ static void mount_default_fstab(void)
     }
 }
 
+static void fstab_mount_run(void)
+{
+    ahci_set_interrupt_mode(false);
+    mount_default_fstab();
+    ahci_set_interrupt_mode(true);
+}
+
+static void warmup_run_sequence(void)
+{
+#if ENABLE_FSTAB_MOUNT
+    vfs_spin_up();
+    fstab_mount_run();
+    g_fstab_ready = true;
+#else
+    g_fstab_ready = true;
+    serial_write_string("[alix] fstab mount disabled; skipping\r\n");
+#endif
+
+#if ENABLE_STARTUP_SCRIPT
+    if (!startup_schedule())
+    {
+        serial_write_string("Failed to start startup scripts\r\n");
+    }
+#endif
+
+    process_t *shell_process = process_create_kernel("shell", shell_process_entry, NULL, 0, -1);
+    if (!shell_process)
+    {
+        serial_write_string("Failed to create shell process; halting\r\n");
+        for (;;)
+        {
+            __asm__ volatile ("hlt");
+        }
+    }
+    process_stack_watch_process(shell_process, "shell_boot");
+
+#if ENABLE_FLUSHD
+    process_t *flush_process = process_create_kernel("flushd", storage_flush_process_entry, NULL, 0, -1);
+    if (!flush_process)
+    {
+        serial_write_string("Failed to create flush daemon\r\n");
+    }
+    else
+    {
+        process_stack_watch_process(flush_process, "flushd_boot");
+    }
+#else
+    serial_write_string("[alix] flushd disabled; skipping\r\n");
+#endif
+}
+
+static void warmup_process_entry(void *arg)
+{
+    (void)arg;
+    warmup_run_sequence();
+    process_exit(0);
+
+}
+
 static void shell_process_entry(void *arg)
 {
     (void)arg;
@@ -266,19 +380,14 @@ static void shell_process_entry(void *arg)
     process_exit(0);
 }
 
-static void fstab_mount_process_entry(void *arg)
-{
-    (void)arg;
-    ahci_set_interrupt_mode(false);
-    mount_default_fstab();
-    ahci_set_interrupt_mode(true);
-    process_exit(0);
-}
-
 static void storage_flush_process_entry(void *arg)
 {
     (void)arg;
     const uint32_t interval_ms = 2000;
+    while (!g_fstab_ready)
+    {
+        process_sleep_ms(100);
+    }
     while (1)
     {
         process_sleep_ms(interval_ms);
@@ -300,6 +409,12 @@ void kernel_main(void)
     user_memory_init();
     paging_init();
     serial_write_string("[alix] after paging_init\n");
+    hwinfo_print_boot_summary();
+    serial_write_string("[alix] after hwinfo\n");
+    acpi_init();
+    serial_write_string("[alix] after acpi_init\n");
+    smp_init();
+    serial_write_string("[alix] after smp_init\n");
     process_system_init();
     serial_write_string("[alix] after process_system_init\n");
     user_atk_init();
@@ -307,13 +422,11 @@ void kernel_main(void)
     ahci_init();
     serial_write_string("[alix] after block_init\n");
 
-    hwinfo_print_boot_summary();
-    serial_write_string("[alix] after hwinfo\n");
-    acpi_init();
-    serial_write_string("[alix] after acpi_init\n");
     vfs_init();
     serial_write_string("[alix] after vfs_init\n");
+#if ENABLE_STARTUP_SCRIPT
     startup_init();
+#endif
     procfs_init();
     serial_write_string("[alix] after procfs_init\n");
     logger_init();
@@ -337,40 +450,22 @@ void kernel_main(void)
     serial_write_string("[alix] after net init\n");
 
     rtl8139_init();
+    if (!smp_start_secondary_cpus())
+    {
+        serial_write_string("[alix] warn: smp_start_secondary_cpus failed\r\n");
+    }
     interrupts_enable();
     serial_write_string("[alix] after rtl8139_init\n");
 
-    process_t *fstab_process = process_create_kernel("fstab", fstab_mount_process_entry, NULL, 0, -1);
-    if (!fstab_process)
+    process_t *warmup_process = process_create_kernel("warmup", warmup_process_entry, NULL, 0, -1);
+    if (!warmup_process)
     {
-        serial_write_string("Failed to create fstab process\r\n");
+        serial_write_string("Failed to create warmup process; running inline\r\n");
+        warmup_run_sequence();
     }
-
-    process_t *shell_process = process_create_kernel("shell", shell_process_entry, NULL, 0, -1);
-    if (!shell_process)
+    else
     {
-        serial_write_string("Failed to create shell process\r\n");
-        for (;;)
-        {
-            __asm__ volatile ("hlt");
-        }
-    }
-
-    process_t *user_demo = process_create_user_dummy("user_demo", -1);
-    if (!user_demo)
-    {
-        serial_write_string("Failed to create demo user process\r\n");
-    }
-
-    process_t *flush_process = process_create_kernel("flushd", storage_flush_process_entry, NULL, 0, -1);
-    if (!flush_process)
-    {
-        serial_write_string("Failed to create flush daemon\r\n");
-    }
-
-    if (!startup_schedule())
-    {
-        serial_write_string("Failed to start startup scripts\r\n");
+        process_stack_watch_process(warmup_process, "warmup_boot");
     }
 
     serial_write_string("[alix] starting scheduler\n");

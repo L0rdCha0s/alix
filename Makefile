@@ -48,7 +48,7 @@ C_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
 
-ASM_SOURCES := $(wildcard $(ARCH_DIR)/*.S)
+ASM_SOURCES := $(filter-out $(ARCH_DIR)/ap_trampoline.S,$(wildcard $(ARCH_DIR)/*.S))
 ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 
 USER_OBJDIR := $(OBJDIR)/user
@@ -69,16 +69,14 @@ USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOUR
 USER_ATK_EXTRA_SOURCES := $(USER_DIR)/atk/atk_terminal.c
 USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
 USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
-USER_ELFS := $(USER_OBJDIR)/userdemo2.elf \
-             $(USER_OBJDIR)/atk_demo.elf \
+USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
              $(USER_OBJDIR)/doom.elf \
              $(USER_OBJDIR)/atk_shell.elf \
              $(USER_OBJDIR)/atk_taskmgr.elf
 USER_BIN_DIR := build/bin
-USER_BINS := $(USER_BIN_DIR)/userdemo2 \
-             $(USER_BIN_DIR)/atk_demo \
+USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
              $(USER_BIN_DIR)/wolf3d \
              $(USER_BIN_DIR)/doom \
@@ -101,6 +99,11 @@ LOADER_LDFLAGS := -nostdlib -Wl,--dll -Wl,--entry=efi_main -Wl,--subsystem,10 \
                   -Wl,--image-base,0x4000000 -Wl,--file-alignment,0x200 -Wl,--section-alignment,0x1000 \
                   -Wl,--major-subsystem-version,10 -Wl,--minor-subsystem-version,0
 
+CPU_TYPE ?= EPYC
+TCG_CPU_TYPE ?= qemu64
+SMP_CORES ?= 8
+QEMU_SMP_OPTS := -smp $(SMP_CORES),sockets=1,cores=$(SMP_CORES),threads=1
+
 all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS) $(USER_BINS)
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.c
@@ -110,6 +113,19 @@ $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 $(OBJDIR)/%.o: $(SRC_DIR)/%.S
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+NASM ?= nasm
+AP_TRAMP_BIN := $(OBJDIR)/arch/x86/ap_trampoline.bin
+AP_TRAMP_OBJ := $(OBJDIR)/arch/x86/ap_trampoline.o
+
+$(AP_TRAMP_BIN): src/arch/x86/ap_trampoline.asm
+	@mkdir -p $(dir $@)
+	$(NASM) -f bin -o $@ $<
+
+$(AP_TRAMP_OBJ): $(AP_TRAMP_BIN)
+	$(LD) -r -b binary -o $@ $<
+
+ASM_OBJECTS += $(AP_TRAMP_OBJ)
 
 $(OBJDIR)/generated/%.o: $(OBJDIR)/generated/%.c
 	@mkdir -p $(dir $@)
@@ -133,10 +149,6 @@ $(USER_OBJDIR)/kernel/%.o: $(KERNEL_DIR)/%.c
 
 $(KERNEL_ELF): $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_LD)
 	$(LD) -nostdlib -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
-
-$(USER_OBJDIR)/userdemo2.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/userdemo2.o $(USER_LD_SCRIPT)
-	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/userdemo2.o
 
 $(USER_OBJDIR)/atk_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_demo.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
@@ -187,9 +199,6 @@ $(DL_SCRIPT_SRC): $(USER_ELFS)
 		echo 'const size_t g_dl_script_content_len = sizeof(g_dl_script_content) - 1;'; \
 	} > $(DL_SCRIPT_SRC)
 
-$(USER_BIN_DIR)/userdemo2: $(USER_OBJDIR)/userdemo2.elf
-	@mkdir -p $(USER_BIN_DIR)
-	cp $< $@
 
 $(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
 	@mkdir -p $(USER_BIN_DIR)
@@ -239,8 +248,32 @@ RAM ?= 4G
 OVMF_CODE ?= vendor/OVMF_CODE.fd
 OVMF_VARS ?= vendor/OVMF_VARS-1024x768.fd
 QEMU_DEBUG_LOG   ?= qemu.log
-QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors,trace:ahci_*,trace:ide_*,trace:cmd_identify -D $(QEMU_DEBUG_LOG)
+QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors,trace:ahci_*,trace:ide_* -D $(QEMU_DEBUG_LOG)
 HOMEBREW_PREFIX  := $(shell brew --prefix)
+UNAME_S          := $(shell uname -s)
+
+ifndef QEMU_ACCEL
+  ifeq ($(UNAME_S),Linux)
+    QEMU_ACCEL := kvm:tcg
+  else ifeq ($(UNAME_S),Darwin)
+    QEMU_HAS_HVF := $(shell $(QEMU) -accel help 2>/dev/null | grep -w hvf)
+    ifneq ($(strip $(QEMU_HAS_HVF)),)
+      QEMU_ACCEL := hvf:tcg
+    else
+      QEMU_ACCEL := tcg
+    endif
+  else
+    QEMU_ACCEL := tcg
+  endif
+endif
+
+ACCEL_PRIMARY := $(firstword $(subst :, ,$(QEMU_ACCEL)))
+ifeq ($(ACCEL_PRIMARY),tcg)
+  QEMU_CPU_OPTS := -cpu $(TCG_CPU_TYPE)
+else
+  QEMU_CPU_OPTS := -cpu $(CPU_TYPE)
+endif
+QEMU_MACHINE_OPTS := -machine q35,accel=$(QEMU_ACCEL)
 
 # --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)
 NET_BACKEND ?= vmnet-shared
@@ -275,7 +308,7 @@ NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
 
 run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -nodefaults -m $(RAM) -machine q35,accel=kvm:tcg \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
@@ -288,7 +321,7 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 
 run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -nodefaults -m $(RAM) -machine q35,accel=kvm:tcg \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \

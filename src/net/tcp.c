@@ -9,10 +9,15 @@
 #include "timer.h"
 #include "libc.h"
 #include "fd.h"
+#include "heap.h"
+#include "process.h"
 
 #ifndef TCP_TRACE_VERBOSE
 #define TCP_TRACE_VERBOSE 0
 #endif
+
+#define TCP_TRACE(label, dest, len) \
+    process_debug_log_stack_write(label, __builtin_return_address(0), (dest), (len))
 
 static void tcp_log_hex32(uint32_t value);
 
@@ -1497,8 +1502,18 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
         return false;
     }
 
-    uint8_t frame[14 + 20 + 20 + NET_TCP_MAX_PAYLOAD];
-    memset(frame, 0, sizeof(frame));
+    size_t frame_len = 14 + 20 + 20 + payload_len;
+    if (frame_len < 60)
+    {
+        frame_len = 60;
+    }
+    uint8_t *frame = (uint8_t *)malloc(frame_len);
+    if (!frame)
+    {
+        serial_write_string("tcp: alloc frame failed\r\n");
+        return false;
+    }
+    memset(frame, 0, frame_len);
 
     uint8_t *eth = frame;
     uint8_t *ip = frame + 14;
@@ -1566,13 +1581,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
 
     write_be16(tcp + 16, tcp_checksum(socket, tcp, 20 + payload_len));
 
-    size_t frame_len = 14 + 20 + 20 + payload_len;
-    if (frame_len < 60)
-    {
-        frame_len = 60;
-    }
-
-    if (!net_if_send(socket->iface, frame, frame_len))
+    if (!net_if_send_copy(socket->iface, frame, frame_len))
     {
         serial_write_string("tcp: send failed len=0x");
         tcp_log_hex32((uint32_t)frame_len);
@@ -1630,8 +1639,10 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
         serial_write_string(" pending_flags=0x");
         tcp_log_hex32((uint32_t)socket->pending_flags);
         serial_write_string("\r\n");
+        free(frame);
         return false;
     }
+    free(frame);
     socket->advertised_window = window;
 
     if (advance_seq)
@@ -1690,12 +1701,22 @@ static uint32_t read_be32(const uint8_t *p)
 
 static void write_be16(uint8_t *p, uint16_t value)
 {
+    if (!p)
+    {
+        return;
+    }
+    TCP_TRACE("tcp_write_be16", p, sizeof(uint16_t));
     p[0] = (uint8_t)((value >> 8) & 0xFF);
     p[1] = (uint8_t)(value & 0xFF);
 }
 
 static void write_be32(uint8_t *p, uint32_t value)
 {
+    if (!p)
+    {
+        return;
+    }
+    TCP_TRACE("tcp_write_be32", p, sizeof(uint32_t));
     p[0] = (uint8_t)((value >> 24) & 0xFF);
     p[1] = (uint8_t)((value >> 16) & 0xFF);
     p[2] = (uint8_t)((value >> 8) & 0xFF);

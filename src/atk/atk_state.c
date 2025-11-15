@@ -1,6 +1,7 @@
 #include "atk_internal.h"
 #ifdef KERNEL_BUILD
 #include "serial.h"
+#include "spinlock.h"
 #endif
 
 static void atk_guard_log(const char *label, uint64_t front, uint64_t back)
@@ -211,3 +212,51 @@ void atk_state_set_focus_widget(atk_state_t *state, atk_widget_t *widget)
     }
     state->focus_widget = widget;
 }
+#ifdef KERNEL_BUILD
+static spinlock_t g_atk_lock;
+static bool g_atk_lock_ready = false;
+
+static inline void atk_global_lock_ensure(void)
+{
+    if (!g_atk_lock_ready)
+    {
+        spinlock_init(&g_atk_lock);
+        g_atk_lock_ready = true;
+    }
+}
+
+void atk_state_lock_init(void)
+{
+    atk_global_lock_ensure();
+}
+
+uint64_t atk_state_lock_acquire(void)
+{
+    atk_global_lock_ensure();
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("cli" ::: "memory");
+    spinlock_lock(&g_atk_lock);
+    return flags;
+}
+
+void atk_state_lock_release(uint64_t flags)
+{
+    spinlock_unlock(&g_atk_lock);
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc");
+}
+#else
+void atk_state_lock_init(void)
+{
+}
+
+uint64_t atk_state_lock_acquire(void)
+{
+    return 0;
+}
+
+void atk_state_lock_release(uint64_t flags)
+{
+    (void)flags;
+}
+#endif

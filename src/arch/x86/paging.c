@@ -4,6 +4,7 @@
 #include "serial.h"
 #include "msr.h"
 #include "types.h"
+#include "arch/x86/smp_boot.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -27,6 +28,7 @@ extern uint8_t __kernel_data_end[];
 #define PAGE_ADDRESS_MASK             0x000FFFFFFFFFF000ULL
 
 #define IDENTITY_LIMIT                (4ULL * 1024ULL * 1024ULL * 1024ULL)
+#define LOW_EXECUTABLE_LIMIT          PAGE_LARGE_SIZE /* keep low identity (e.g. SMP trampoline) executable */
 
 typedef struct
 {
@@ -129,6 +131,11 @@ static inline uint64_t read_cr3(void)
     uint64_t value;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(value));
     return value;
+}
+
+static inline void invalidate_page(uintptr_t addr)
+{
+    __asm__ volatile ("invlpg (%0)" :: "r"(addr) : "memory");
 }
 
 static void paging_panic(const char *msg) __attribute__((noreturn));
@@ -454,7 +461,8 @@ static void map_identity_space(page_tables_t *tables)
         size_t pde_index = (size_t)((addr >> 21) & 0x1FF);
         uint64_t chunk_base = addr;
         uint64_t chunk_end = chunk_base + PAGE_LARGE_SIZE;
-        bool chunk_executable = chunk_base < text_actual_end;
+        bool chunk_executable = (chunk_base < LOW_EXECUTABLE_LIMIT) ||
+                                (chunk_base < text_actual_end);
 
         bool needs_small = !(chunk_end <= fine_start || chunk_base >= fine_end);
         if (!needs_small)
@@ -477,7 +485,7 @@ static void map_identity_space(page_tables_t *tables)
                            page_addr < text_actual_end;
             bool in_data = page_addr + PAGE_SIZE_BYTES > data_actual_start &&
                            page_addr < data_actual_end;
-            bool exec = in_text;
+            bool exec = in_text || (page_addr < LOW_EXECUTABLE_LIMIT);
             bool writable = !in_text;
             if (in_data)
             {
@@ -612,6 +620,10 @@ bool paging_map_user_page(paging_space_t *space,
 
     size_t pt_idx = index_pt(virtual_addr);
     apply_small_mapping(&pt[pt_idx], physical_addr, writable, executable, true);
+    if (space->cr3 == read_cr3())
+    {
+        invalidate_page(virtual_addr);
+    }
     return true;
 }
 
@@ -678,5 +690,48 @@ bool paging_unmap_user_page(paging_space_t *space,
     }
     pt[pt_idx] = 0;
     __asm__ volatile ("invlpg (%0)" :: "r"(virtual_addr) : "memory");
+    return true;
+}
+
+bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
+                                      size_t length,
+                                      bool writable)
+{
+    if (!g_paging_ready || !g_kernel_space.tables_base || length == 0)
+    {
+        return false;
+    }
+
+    paging_space_t *space = &g_kernel_space;
+    uintptr_t start = align_down(virtual_addr, PAGE_SIZE_BYTES);
+    uintptr_t end = align_up(virtual_addr + length, PAGE_SIZE_BYTES);
+
+    while (start < end)
+    {
+        uint64_t *pt = NULL;
+        if (!ensure_page_table(space, start, false, &pt))
+        {
+            return false;
+        }
+        size_t pt_idx = index_pt(start);
+        if ((pt[pt_idx] & PAGE_PRESENT) == 0)
+        {
+            return false;
+        }
+        if (writable)
+        {
+            pt[pt_idx] |= PAGE_WRITABLE;
+        }
+        else
+        {
+            pt[pt_idx] &= ~PAGE_WRITABLE;
+        }
+        if (space->cr3 == read_cr3())
+        {
+            invalidate_page(start);
+        }
+        start += PAGE_SIZE_BYTES;
+    }
+
     return true;
 }

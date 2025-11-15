@@ -121,6 +121,9 @@ static struct
     uint16_t           slp_typb;
 } g_acpi_state = { 0 };
 
+static acpi_sdt_header_t *g_acpi_rsdt = NULL;
+static acpi_sdt_header_t *g_acpi_xsdt = NULL;
+
 static bool acpi_checksum(const void *table, size_t length);
 static uintptr_t acpi_ebda_address(void);
 static acpi_rsdp_v2_t *acpi_scan_region(uintptr_t start, uintptr_t end);
@@ -605,12 +608,14 @@ bool acpi_init(void)
         if (xsdt)
         {
             acpi_log("XSDT mapped");
+            g_acpi_xsdt = xsdt;
         }
     }
     acpi_sdt_header_t *rsdt = acpi_map_sdt(rsdp->first.rsdt_address, "RSDT");
     if (rsdt)
     {
         acpi_log("RSDT mapped");
+        g_acpi_rsdt = rsdt;
     }
 
     acpi_sdt_header_t *fadt_header = NULL;
@@ -720,4 +725,27 @@ bool acpi_shutdown(void)
     }
 
     return true;
+}
+
+const void *acpi_find_table_cached(const char *signature, size_t *length_out)
+{
+    if (!signature)
+    {
+        return NULL;
+    }
+
+    acpi_sdt_header_t *table = NULL;
+    if (g_acpi_xsdt)
+    {
+        table = acpi_find_table(g_acpi_xsdt, true, signature);
+    }
+    if (!table && g_acpi_rsdt)
+    {
+        table = acpi_find_table(g_acpi_rsdt, false, signature);
+    }
+    if (table && length_out)
+    {
+        *length_out = table->length;
+    }
+    return table;
 }

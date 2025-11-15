@@ -4,6 +4,7 @@
 #include "mouse.h"
 #include "console.h"
 #include "serial.h"
+#include "process.h"
 
 
 bool shell_cmd_start_video(shell_state_t *shell, shell_output_t *out, const char *args)
@@ -11,6 +12,7 @@ bool shell_cmd_start_video(shell_state_t *shell, shell_output_t *out, const char
     (void)shell;
     (void)args;
 
+    thread_disable_context_guard(thread_current());
     serial_write_string("Starting video mode...\r\n");
     video_init();
     mouse_register_listener(video_on_mouse_event);

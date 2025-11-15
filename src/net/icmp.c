@@ -2,10 +2,15 @@
 
 #include "libc.h"
 #include "serial.h"
+#include "process.h"
 #include "timer.h"
+#include "heap.h"
 
 static uint16_t read_be16(const uint8_t *p);
 static uint32_t read_be32(const uint8_t *p);
+#define ICMP_TRACE(label, dest, len) \
+    process_debug_log_stack_write(label, __builtin_return_address(0), (dest), (len))
+
 static void write_be16(uint8_t *p, uint16_t value);
 static void write_be32(uint8_t *p, uint32_t value);
 static uint16_t checksum16(const uint8_t *data, size_t len);
@@ -43,9 +48,18 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
 
     const size_t icmp_len = 8 + payload_len;
     const size_t ip_len = 20 + icmp_len;
-    const size_t frame_len = 14 + ip_len;
-    uint8_t buffer[128];
-    memset(buffer, 0, sizeof(buffer));
+    size_t frame_len = 14 + ip_len;
+    if (frame_len < 60)
+    {
+        frame_len = 60;
+    }
+    uint8_t *buffer = (uint8_t *)malloc(frame_len);
+    if (!buffer)
+    {
+        serial_write_string("icmp: alloc frame failed\r\n");
+        return false;
+    }
+    memset(buffer, 0, frame_len);
 
     uint8_t *eth = buffer;
     uint8_t *ip = buffer + 14;
@@ -79,12 +93,6 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     }
     write_be16(icmp + 2, checksum16(icmp, icmp_len));
 
-    size_t send_len = frame_len;
-    if (send_len < 60)
-    {
-        send_len = 60;
-    }
-
     g_pending.active = true;
     g_pending.received = false;
     g_pending.identifier = identifier;
@@ -113,7 +121,7 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     serial_write_string(" len=");
     char lenbuf[12];
     size_t len_idx = 0;
-    size_t send_len_copy = send_len;
+    size_t send_len_copy = frame_len;
     if (send_len_copy == 0)
     {
         lenbuf[len_idx++] = '0';
@@ -136,7 +144,7 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     serial_write_string(lenbuf);
     serial_write_string("\r\n");
 
-    size_t dump_len = send_len < 64 ? send_len : 64;
+    size_t dump_len = frame_len < 64 ? frame_len : 64;
     serial_write_string("icmp: frame data=");
     for (size_t i = 0; i < dump_len; ++i)
     {
@@ -161,13 +169,16 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
         }
     }
 
-    if (!net_if_send(iface, buffer, send_len))
+    bool ok = net_if_send_copy(iface, buffer, frame_len);
+    if (!ok)
     {
         g_pending.active = false;
         serial_write_string("icmp: send failed\r\n");
+        free(buffer);
         return false;
     }
 
+    free(buffer);
     serial_write_string("icmp: send queued\r\n");
     return true;
 }
@@ -203,12 +214,7 @@ static uint16_t ones_sum(const uint8_t *p, size_t n) {
 
 static bool icmp_checksum_ok(const uint8_t *icmp, size_t len) {
     if (len < 8) return false;
-    // sum with checksum field zeroed
-    uint8_t tmp[1536];
-    if (len > sizeof(tmp)) return false;
-    memcpy(tmp, icmp, len);
-    tmp[2] = tmp[3] = 0;
-    return (uint16_t)~ones_sum(tmp, len) == read_be16(icmp + 2);
+    return ones_sum(icmp, len) == 0xFFFFU;
 }
 
 void net_icmp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length)
@@ -277,9 +283,15 @@ void net_icmp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         uint32_t dest_ip = read_be32(ip + 16);
         if (iface->ipv4_addr == 0 || dest_ip != iface->ipv4_addr) return;
 
-        uint8_t reply[128];
-        if (sizeof(reply) < 14 + ip_effective) return;
-
+        size_t out_len = 14 + ip_effective;
+        if (out_len < 60) out_len = 60;
+        uint8_t *reply = (uint8_t *)malloc(out_len);
+        if (!reply)
+        {
+            serial_write_string("icmp: reply alloc failed\r\n");
+            return;
+        }
+        memset(reply, 0, out_len);
         memcpy(reply, frame, 14 + ip_effective);
         uint8_t *rep_eth  = reply;
         uint8_t *rep_ip   = reply + 14;
@@ -302,9 +314,8 @@ void net_icmp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         write_be16(rep_icmp + 2, 0);
         write_be16(rep_icmp + 2, checksum16(rep_icmp, icmp_len));
 
-        size_t out_len = 14 + ip_effective;
-        if (out_len < 60) out_len = 60;
-        net_if_send(iface, reply, out_len);
+        net_if_send_copy(iface, reply, out_len);
+        free(reply);
         return;
     }
 }
@@ -326,12 +337,20 @@ static uint32_t read_be32(const uint8_t *p)
 
 static void write_be16(uint8_t *p, uint16_t value)
 {
+    if (p)
+    {
+        ICMP_TRACE("icmp_write_be16", p, sizeof(uint16_t));
+    }
     p[0] = (uint8_t)((value >> 8) & 0xFF);
     p[1] = (uint8_t)(value & 0xFF);
 }
 
 static void write_be32(uint8_t *p, uint32_t value)
 {
+    if (p)
+    {
+        ICMP_TRACE("icmp_write_be32", p, sizeof(uint32_t));
+    }
     p[0] = (uint8_t)((value >> 24) & 0xFF);
     p[1] = (uint8_t)((value >> 16) & 0xFF);
     p[2] = (uint8_t)((value >> 8) & 0xFF);

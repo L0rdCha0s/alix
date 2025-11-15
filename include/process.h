@@ -74,6 +74,7 @@ typedef struct process_user_layout
 
 void process_system_init(void);
 void process_start_scheduler(void);
+void process_run_secondary_cpu(uint32_t cpu_index);
 
 process_t *process_create_kernel(const char *name,
                                  thread_entry_t entry,
@@ -107,6 +108,16 @@ void process_kill_tree(process_t *process);
 
 process_t *process_current(void);
 thread_t *thread_current(void);
+bool process_thread_stack_bounds(const thread_t *thread,
+                                 uintptr_t *base_out,
+                                 uintptr_t *top_out);
+const char *process_thread_name_const(const thread_t *thread);
+process_t *process_thread_owner(const thread_t *thread);
+bool process_stack_watch_thread(thread_t *thread, const char *context);
+bool process_stack_watch_process(process_t *process, const char *context);
+bool process_handle_stack_watch_fault(uintptr_t fault_addr,
+                                      interrupt_frame_t *frame,
+                                      uint64_t error_code);
 uint64_t process_current_pid(void);
 vfs_node_t *process_current_cwd(void);
 void process_set_cwd(process_t *process, vfs_node_t *dir);
@@ -120,6 +131,7 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity);
 const char *process_state_name(process_state_t state);
 const char *thread_state_name(thread_state_t state);
 uint64_t process_get_pid(const process_t *process);
+void process_dump_current_thread(void);
 bool process_handle_exception(interrupt_frame_t *frame,
                               const char *reason,
                               uint64_t error_code,
@@ -139,6 +151,10 @@ void process_dump_user_stack(process_t *process,
                              uintptr_t rsp,
                              size_t max_entries_above,
                              size_t max_entries_below);
+void process_debug_scan_current_kernel_stack(const char *context,
+                                             uintptr_t rsp_hint,
+                                             bool full_stack);
+void thread_disable_context_guard(thread_t *thread);
 process_t *process_create_user_elf(const char *name,
                                    const uint8_t *image,
                                    size_t size,
@@ -161,5 +177,12 @@ void wait_queue_init(wait_queue_t *queue);
 void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void *context);
 void wait_queue_wake_one(wait_queue_t *queue);
 void wait_queue_wake_all(wait_queue_t *queue);
+
+thread_t *process_find_stack_owner(const void *ptr, size_t len);
+bool process_pointer_on_stack(const void *ptr, size_t len);
+void process_debug_log_stack_write(const char *label,
+                                   const void *caller,
+                                   void *dest,
+                                   size_t len);
 
 #endif

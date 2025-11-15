@@ -840,14 +840,24 @@ vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *li
     vfs_node_t *existing = vfs_find_child(parent, name);
     if (existing)
     {
-        if (existing->type != VFS_NODE_SYMLINK)
+        if (existing->type == VFS_NODE_SYMLINK)
+        {
+            bool updated = vfs_assign_symlink_target(existing, target_path);
+            free(name);
+            return updated ? existing : NULL;
+        }
+        if (existing->type == VFS_NODE_DIR && vfs_is_mount_point(existing))
         {
             free(name);
             return NULL;
         }
-        bool updated = vfs_assign_symlink_target(existing, target_path);
-        free(name);
-        return updated ? existing : NULL;
+        if (existing->type == VFS_NODE_DIR && existing->first_child)
+        {
+            vfs_clear_directory(existing);
+        }
+        vfs_detach_child(existing);
+        vfs_free_subtree(existing);
+        existing = NULL;
     }
 
     vfs_node_t *node = vfs_alloc_node(VFS_NODE_SYMLINK);
@@ -1034,6 +1044,7 @@ const char *vfs_data(const vfs_node_t *file, size_t *size)
         return NULL;
     }
     if (size) *size = file->size;
+    ensure_terminator((vfs_node_t *)file);
     return file->data ? file->data : "";
 }
 

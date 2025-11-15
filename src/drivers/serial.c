@@ -44,6 +44,13 @@ void serial_write_hex64(uint64_t v)
     }
 }
 
+void serial_write_hex8(uint8_t v)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    serial_write_char(hex[(v >> 4) & 0xF]);
+    serial_write_char(hex[v & 0xF]);
+}
+
 static bool is_canonical(uint64_t addr)
 {
     uint64_t mask = addr & CANONICAL_MASK;

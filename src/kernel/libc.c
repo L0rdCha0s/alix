@@ -1,11 +1,22 @@
 #include "libc.h"
 
 #include "fd.h"
+#include "process.h"
+
+static inline void libc_mem_debug(const char *label, void *dst, size_t count)
+{
+    if (!dst || count == 0)
+    {
+        return;
+    }
+    process_debug_log_stack_write(label, __builtin_return_address(0), dst, count);
+}
 
 void *memset(void *dst, int value, size_t count)
 {
     uint8_t *ptr = (uint8_t *)dst;
     uint8_t byte = (uint8_t)value;
+    libc_mem_debug("memset", dst, count);
     for (size_t i = 0; i < count; ++i)
     {
         ptr[i] = byte;
@@ -17,6 +28,8 @@ void *memmove(void *dst, const void *src, size_t count)
 {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
+
+    libc_mem_debug("memmove", dst, count);
 
     if (d == s || count == 0)
     {
@@ -45,6 +58,7 @@ void *memcpy(void *dst, const void *src, size_t count)
 {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
+    libc_mem_debug("memcpy", dst, count);
     for (size_t i = 0; i < count; ++i)
     {
         d[i] = s[i];

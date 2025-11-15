@@ -48,8 +48,11 @@ size_t net_if_count(void);
 net_interface_t *net_if_at(size_t index);
 void net_if_set_link_up(net_interface_t *iface, bool up);
 void net_if_set_ipv4(net_interface_t *iface, uint32_t addr, uint32_t netmask, uint32_t gateway);
-void net_if_set_tx_handler(net_interface_t *iface, bool (*handler)(net_interface_t *, const uint8_t *, size_t));
-bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len);
+void net_if_set_tx_handler(net_interface_t *iface,
+                           bool (*handler)(net_interface_t *,
+                                           const uint8_t *,
+                                           size_t));
+bool net_if_send_copy(net_interface_t *iface, const uint8_t *data, size_t len);
 void net_if_record_rx(net_interface_t *iface, size_t bytes);
 void net_if_record_rx_error(net_interface_t *iface);
 void net_if_record_tx_error(net_interface_t *iface);

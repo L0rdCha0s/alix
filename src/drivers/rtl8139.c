@@ -12,6 +12,8 @@
 #include "net/tcp.h"
 #include "interrupts.h"
 #include "timer.h"
+#include "spinlock.h"
+#include "process.h"
 
 #ifndef RTL8139_TRACE_ENABLE
 #define RTL8139_TRACE_ENABLE 0
@@ -75,6 +77,43 @@ static uint16_t g_io_base = 0;
 static uint8_t g_mac[6];
 static uint32_t g_rx_offset = 0;
 static net_interface_t *g_iface = NULL;
+static spinlock_t g_tx_lock;
+
+static inline uint64_t rtl8139_save_flags(void)
+{
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static inline void rtl8139_restore_flags(uint64_t flags)
+{
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "memory", "cc");
+}
+
+static inline void rtl8139_cli(void)
+{
+    __asm__ volatile ("cli" ::: "memory");
+}
+
+static inline void rtl8139_sti(void)
+{
+    __asm__ volatile ("sti" ::: "memory");
+}
+
+static inline uint64_t rtl8139_acquire_tx(void)
+{
+    uint64_t flags = rtl8139_save_flags();
+    rtl8139_cli();
+    spinlock_lock(&g_tx_lock);
+    return flags;
+}
+
+static inline void rtl8139_release_tx(uint64_t flags)
+{
+    spinlock_unlock(&g_tx_lock);
+    rtl8139_restore_flags(flags);
+}
 
 #define RTL_TX_SLOT_COUNT 4
 static __attribute__((aligned(16))) uint8_t g_tx_buffer[RTL_TX_SLOT_COUNT][2048];
@@ -85,12 +124,15 @@ static uint32_t g_tx_phys[RTL_TX_SLOT_COUNT];
 static __attribute__((aligned(256))) uint8_t g_rx_buffer[RTL_RX_BUFFER_SIZE];
 static int g_log_rx_count = 0;
 #define RTL_RX_FRAME_MAX  12288
-static uint8_t g_rx_frame[RTL_RX_FRAME_MAX];
 static int g_state_dump_budget = 12;
 static int g_tx_dump_budget = 32;
 static int g_hw_tx_cursor = 0; // which TSD/TSAD pair the NIC expects next
 static int g_tx_tail_cursor = 0; // oldest descriptor that might still be owned by NIC
 static int g_tx_inflight = 0;    // number of descriptors handed to NIC
+
+#define RTL_RX_BOUNCE_COUNT 4
+static uint8_t g_rx_bounce[RTL_RX_BOUNCE_COUNT][RTL_RX_FRAME_MAX];
+static volatile bool g_rx_bounce_in_use[RTL_RX_BOUNCE_COUNT];
 
 #define RTL_TX_QUEUE_MAX 16
 #define RTL_TX_FRAME_MAX 1600
@@ -131,6 +173,11 @@ static void rtl8139_reclaim_tx(void);
 static void rtl8139_hw_send_slot(int slot, const uint8_t *data, size_t len);
 static bool rtl8139_tx_queue_push(const uint8_t *data, size_t len);
 static void rtl8139_tx_flush_queue(void);
+static void rtl8139_log_stack_source(const thread_t *owner, const void *ptr, size_t len);
+static void rtl8139_log_dma_target(const char *context,
+                                   int slot,
+                                   const uint8_t *buffer,
+                                   size_t len);
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len);
 static void rtl8139_timer_task(void *context);
 static void rtl8139_log_tx_state(const char *context);
@@ -139,6 +186,8 @@ static void rtl8139_tx_meta_capture(int slot, const uint8_t *frame, size_t len);
 static void rtl8139_tx_meta_clear(int slot);
 static void rtl8139_tx_check_stuck(const char *context);
 static void rtl8139_tx_force_release(const char *context);
+static uint8_t *rtl8139_rx_bounce_acquire(void);
+static void rtl8139_rx_bounce_release(uint8_t *buffer);
 
 void rtl8139_init(void)
 {
@@ -146,6 +195,7 @@ void rtl8139_init(void)
     g_io_base = 0;
     g_rx_offset = 0;
     g_log_rx_count = 0;
+    spinlock_init(&g_tx_lock);
 
     if (!pci_find_device(RTL_VENDOR_ID, RTL_DEVICE_ID, &g_device))
     {
@@ -300,8 +350,10 @@ void rtl8139_on_irq(void)
 
     if (status & (RTL_ISR_TOK | RTL_ISR_TER))
     {
+        uint64_t irq_flags = rtl8139_acquire_tx();
         rtl8139_reclaim_tx();
         rtl8139_tx_flush_queue();
+        rtl8139_release_tx(irq_flags);
     }
 
     net_tcp_poll();
@@ -314,8 +366,10 @@ void rtl8139_poll(void)
         return;
     }
     rtl8139_handle_receive();
+    uint64_t irq_flags = rtl8139_acquire_tx();
     rtl8139_reclaim_tx();
     rtl8139_tx_flush_queue();
+    rtl8139_release_tx(irq_flags);
     net_tcp_poll();
 }
 
@@ -351,6 +405,7 @@ static void rtl8139_handle_receive(void)
     while ((inb(g_io_base + RTL_REG_CR) & RTL_CR_RX_EMPTY) == 0 && safety-- > 0)
     {
         uint32_t offset = g_rx_offset;
+        uint8_t *frame = NULL;
 
         uint16_t rsr   = rtl8139_buffer_read16(offset + 0);
         uint16_t rxlen = rtl8139_buffer_read16(offset + 2);   // includes CRC
@@ -363,7 +418,7 @@ static void rtl8139_handle_receive(void)
                 net_if_record_rx_error(g_iface);
             }
             rtl8139_dump_state("rx invalid");
-            goto advance_ring;
+            goto release_frame;
         }
 
         uint16_t frame_len = (uint16_t)(rxlen - 4);  // strip CRC
@@ -372,49 +427,38 @@ static void rtl8139_handle_receive(void)
             {
                 net_if_record_rx_error(g_iface);
             }
-            goto advance_ring;
+            goto release_frame;
         }
 
-        // Peek first up to 18 bytes
-        uint8_t hdr[18];
+        frame = rtl8139_rx_bounce_acquire();
+        if (!frame)
         {
-            uint32_t start = (offset + 4) & (RTL_RX_RING_SIZE - 1);
-            uint32_t first = (frame_len < sizeof(hdr)) ? frame_len : (uint32_t)sizeof(hdr);
-            uint32_t head  = RTL_RX_RING_SIZE - start;
-            uint32_t n0    = (first <= head) ? first : head;
-            memcpy(hdr,                &g_rx_buffer[start], n0);
-            if (first > n0) memcpy(hdr + n0, &g_rx_buffer[0], first - n0);
+            if (g_iface)
+            {
+                net_if_record_rx_error(g_iface);
+            }
+            serial_write_string("rtl8139: rx bounce exhausted\r\n");
+            goto release_frame;
         }
+
+        rtl8139_copy_packet(offset, frame, frame_len);
 
         if (frame_len >= 14) {
-            uint16_t eth_type = (uint16_t)((hdr[12] << 8) | hdr[13]);
-            uint32_t l2_off = 14;
+            uint16_t eth_type = (uint16_t)((frame[12] << 8) | frame[13]);
+#if RTL8139_TRACE_ENABLE
+            const uint32_t l2_off = 14;
+#endif
             bool vlan = false;
-
-            // Copy full frame into linear buffer
-            if (frame_len > sizeof(g_rx_frame)) {
-                if (g_iface)
-                {
-                    net_if_record_rx_error(g_iface);
-                }
-                serial_write_string("rtl8139: frame too large len=0x");
-                rtl8139_log_hex16(frame_len);
-                serial_write_string(" cap=0x");
-                rtl8139_log_hex16((uint16_t)sizeof(g_rx_frame));
-                serial_write_string("\r\n");
-                goto advance_ring;
-            }
-            rtl8139_copy_packet(offset, g_rx_frame, frame_len);
 
             // If VLAN tagged, strip one 802.1Q header (4 bytes) and rebase EtherType
             if (eth_type == 0x8100 && frame_len >= 18)
             {
                 vlan = true;
-                uint16_t inner = (uint16_t)((g_rx_frame[16] << 8) | g_rx_frame[17]);
+                uint16_t inner = (uint16_t)((frame[16] << 8) | frame[17]);
 
                 // shift bytes [18..end) down to [14..)
                 size_t tail = (size_t)frame_len - 18;
-                memmove(&g_rx_frame[14], &g_rx_frame[18], tail);
+                memmove(&frame[14], &frame[18], tail);
                 frame_len = (uint16_t)(frame_len - 4);
                 eth_type = inner;
                 // l2_off remains 14 (we presented an untagged frame to upper layers)
@@ -439,18 +483,18 @@ static void rtl8139_handle_receive(void)
             uint16_t dport = 0;
 
             if (eth_type == 0x0800 && frame_len >= l2_off + 20) {
-                uint8_t ihl = (uint8_t)(g_rx_frame[l2_off] & 0x0F);
+                uint8_t ihl = (uint8_t)(frame[l2_off] & 0x0F);
                 size_t ip_hlen = (size_t)ihl * 4;
                 if (frame_len >= l2_off + ip_hlen) {
-                    proto = g_rx_frame[l2_off + 9];
+                    proto = frame[l2_off + 9];
                     have_proto = true;
                     if ((proto == 6 /*TCP*/ || proto == 17 /*UDP*/) &&
                         frame_len >= l2_off + ip_hlen + 4)
                     {
-                        sport = (uint16_t)((g_rx_frame[l2_off + ip_hlen + 0] << 8) |
-                                           g_rx_frame[l2_off + ip_hlen + 1]);
-                        dport = (uint16_t)((g_rx_frame[l2_off + ip_hlen + 2] << 8) |
-                                           g_rx_frame[l2_off + ip_hlen + 3]);
+                        sport = (uint16_t)((frame[l2_off + ip_hlen + 0] << 8) |
+                                           frame[l2_off + ip_hlen + 1]);
+                        dport = (uint16_t)((frame[l2_off + ip_hlen + 2] << 8) |
+                                           frame[l2_off + ip_hlen + 3]);
                         have_ports = true;
                         if (proto == 17 &&
                             (sport == 0x0043 || sport == 0x0044 ||
@@ -483,18 +527,28 @@ static void rtl8139_handle_receive(void)
                 }
             }
 #endif
+#if !RTL8139_TRACE_ENABLE
+            (void)vlan;
+#endif
 
             if (g_iface)
             {
                 if (eth_type == 0x0806)
                 {
-                    net_arp_handle_frame(g_iface, g_rx_frame, frame_len);
+                    net_arp_handle_frame(g_iface, frame, frame_len);
                 }
                 else if (eth_type == 0x0800)
                 {
-                    rtl8139_dispatch_ipv4(g_iface, g_rx_frame, frame_len);
+                    rtl8139_dispatch_ipv4(g_iface, frame, frame_len);
                 }
             }
+        }
+
+release_frame:
+        if (frame)
+        {
+            rtl8139_rx_bounce_release(frame);
+            frame = NULL;
         }
 
     advance_ring:
@@ -603,7 +657,10 @@ static void rtl8139_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16
 static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t len)
 {
     (void)iface;
-    if (!g_rtl_present || !data || len == 0) return false;
+    if (!g_rtl_present || !data || len == 0)
+    {
+        return false;
+    }
 
     if (len > sizeof(g_tx_buffer[0]))
     {
@@ -611,18 +668,41 @@ static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t 
         return false;
     }
 
+    const uint8_t *payload = data;
+    uint8_t *stack_clone = NULL;
+    thread_t *stack_owner = NULL;
+    if (len > 0)
+    {
+        stack_owner = process_find_stack_owner(data, len);
+    }
+    if (stack_owner)
+    {
+        rtl8139_log_stack_source(stack_owner, data, len);
+        stack_clone = (uint8_t *)malloc(len);
+        if (!stack_clone)
+        {
+            return false;
+        }
+        memcpy(stack_clone, data, len);
+        payload = stack_clone;
+    }
+
+    bool ok = false;
+    uint64_t irq_flags = rtl8139_acquire_tx();
     rtl8139_reclaim_tx();
     if (g_tx_inflight < RTL_TX_SLOT_COUNT && rtl8139_tx_slot_ready(g_hw_tx_cursor))
     {
-        rtl8139_hw_send_slot(g_hw_tx_cursor, data, len);
+        rtl8139_hw_send_slot(g_hw_tx_cursor, payload, len);
         rtl8139_tx_flush_queue();
-        return true;
+        ok = true;
+        goto out;
     }
 
-    if (rtl8139_tx_queue_push(data, len))
+    if (rtl8139_tx_queue_push(payload, len))
     {
         rtl8139_tx_flush_queue();
-        return true;
+        ok = true;
+        goto out;
     }
 
     rtl8139_log("tx ring saturated");
@@ -630,12 +710,19 @@ static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t 
     rtl8139_tx_check_stuck("ring_saturated");
     rtl8139_tx_force_release("ring_saturated");
     rtl8139_reclaim_tx();
-    if (rtl8139_tx_queue_push(data, len))
+    if (rtl8139_tx_queue_push(payload, len))
     {
         rtl8139_tx_flush_queue();
-        return true;
+        ok = true;
     }
-    return false;
+
+out:
+    rtl8139_release_tx(irq_flags);
+    if (stack_clone)
+    {
+        free(stack_clone);
+    }
+    return ok;
 }
 
 
@@ -643,6 +730,52 @@ static void rtl8139_log(const char *msg)
 {
     serial_write_string("rtl8139: ");
     serial_write_string(msg);
+    serial_write_string("\r\n");
+}
+
+static void rtl8139_log_thread_owner(const thread_t *owner)
+{
+    if (!owner)
+    {
+        serial_write_string("<none>");
+        return;
+    }
+    const char *name = process_thread_name_const(owner);
+    serial_write_string(name && name[0] ? name : "<unnamed>");
+    serial_write_string(" pid=0x");
+    process_t *proc = process_thread_owner(owner);
+    serial_write_hex64(proc ? process_get_pid(proc) : 0);
+}
+
+static void rtl8139_log_stack_source(const thread_t *owner, const void *ptr, size_t len)
+{
+    serial_write_string("rtl8139: stack tx buffer ptr=0x");
+    serial_write_hex64((uintptr_t)ptr);
+    serial_write_string(" len=0x");
+    serial_write_hex64(len);
+    serial_write_string(" owner=");
+    rtl8139_log_thread_owner(owner);
+    serial_write_string("\r\n");
+}
+
+static void rtl8139_log_dma_target(const char *context,
+                                   int slot,
+                                   const uint8_t *buffer,
+                                   size_t len)
+{
+    serial_write_string("rtl8139: dma context=");
+    serial_write_string(context ? context : "<none>");
+    serial_write_string(" slot=0x");
+    serial_write_hex64((uint64_t)slot);
+    serial_write_string(" virt=0x");
+    serial_write_hex64((uintptr_t)buffer);
+    serial_write_string(" phys=0x");
+    serial_write_hex64((uint64_t)g_tx_phys[slot]);
+    serial_write_string(" len=0x");
+    serial_write_hex64(len);
+    serial_write_string(" owner=");
+    thread_t *owner = process_find_stack_owner(buffer, len);
+    rtl8139_log_thread_owner(owner);
     serial_write_string("\r\n");
 }
 
@@ -1044,6 +1177,34 @@ static void rtl8139_log_tsd_status(uint32_t tsd) {
     serial_write_string("]");
 }
 
+static uint8_t *rtl8139_rx_bounce_acquire(void)
+{
+    for (int i = 0; i < RTL_RX_BOUNCE_COUNT; ++i)
+    {
+        if (__sync_bool_compare_and_swap(&g_rx_bounce_in_use[i], false, true))
+        {
+            return g_rx_bounce[i];
+        }
+    }
+    return NULL;
+}
+
+static void rtl8139_rx_bounce_release(uint8_t *buffer)
+{
+    if (!buffer)
+    {
+        return;
+    }
+    for (int i = 0; i < RTL_RX_BOUNCE_COUNT; ++i)
+    {
+        if (g_rx_bounce[i] == buffer)
+        {
+            __sync_bool_compare_and_swap(&g_rx_bounce_in_use[i], true, false);
+            return;
+        }
+    }
+}
+
 static void rtl8139_dump_state(const char *context);
 
 static bool rtl8139_tx_slot_ready(int slot)
@@ -1084,6 +1245,7 @@ static void rtl8139_hw_send_slot(int slot, const uint8_t *data, size_t len)
 
     rtl8139_dump_frame(slot, frame_len, g_tx_buffer[slot]);
     rtl8139_tx_meta_capture(slot, g_tx_buffer[slot], frame_len);
+    rtl8139_log_dma_target("hw_send", slot, g_tx_buffer[slot], frame_len);
 
     outl(g_io_base + RTL_REG_TSD0 + slot * 4, (uint32_t)frame_len & 0x1FFFU);
     rtl8139_dump_state("after tx");

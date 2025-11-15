@@ -4,6 +4,11 @@ KERNEL_VMA_BASE = 0x0000000000100000;
 
 SECTIONS
 {
+  .ap_trampoline 0x0000000000006000 :
+  {
+    KEEP(*(.ap_trampoline))
+  }
+
   . = KERNEL_VMA_BASE;
 
   .text ALIGN(16) :

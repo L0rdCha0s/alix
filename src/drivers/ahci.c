@@ -200,6 +200,67 @@ static void ahci_log_port_hex(uint32_t port_no, const char *msg, uint64_t value)
     serial_write_string("\r\n");
 }
 
+static void ahci_log_owner_details(const thread_t *owner)
+{
+    if (!owner)
+    {
+        serial_write_string("<none>");
+        return;
+    }
+    const char *name = process_thread_name_const(owner);
+    serial_write_string(name && name[0] ? name : "<unnamed>");
+    serial_write_string(" pid=0x");
+    process_t *proc = process_thread_owner(owner);
+    serial_write_hex64(proc ? process_get_pid(proc) : 0);
+}
+
+static void ahci_log_stack_bounce(uint32_t port_no,
+                                  const thread_t *owner,
+                                  const void *original,
+                                  const void *bounce,
+                                  size_t len,
+                                  bool write)
+{
+    serial_write_string("[ahci] port ");
+    serial_write_hex64(port_no);
+    serial_write_string(": stack buffer redirected action=");
+    serial_write_string(write ? "write" : "read");
+    serial_write_string(" owner=");
+    ahci_log_owner_details(owner);
+    serial_write_string(" original=0x");
+    serial_write_hex64((uintptr_t)original);
+    serial_write_string(" bounce=0x");
+    serial_write_hex64((uintptr_t)bounce);
+    serial_write_string(" len=0x");
+    serial_write_hex64(len);
+    serial_write_string("\r\n");
+}
+
+static void ahci_log_prdt_entry(uint32_t port_no,
+                                int slot,
+                                uint32_t index,
+                                uintptr_t virt_addr,
+                                uint64_t phys_addr,
+                                uint32_t len)
+{
+    serial_write_string("[ahci] port ");
+    serial_write_hex64(port_no);
+    serial_write_string(" slot=0x");
+    serial_write_hex64((uint64_t)slot);
+    serial_write_string(" prdt=0x");
+    serial_write_hex64((uint64_t)index);
+    serial_write_string(" virt=0x");
+    serial_write_hex64(virt_addr);
+    serial_write_string(" phys=0x");
+    serial_write_hex64(phys_addr);
+    serial_write_string(" len=0x");
+    serial_write_hex64(len);
+    serial_write_string(" owner=");
+    thread_t *owner = process_find_stack_owner((const void *)virt_addr, len);
+    ahci_log_owner_details(owner);
+    serial_write_string("\r\n");
+}
+
 static void ahci_request_os_ownership(void)
 {
     if (!g_hba)
@@ -509,26 +570,55 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
                            void *buffer,
                            bool write)
 {
+    bool result = false;
     hba_port_t *port = ctx->port;
     ahci_log_hex("cmd buffer=", (uint64_t)(uintptr_t)buffer);
     ahci_log_hex("cmd bytes=", (uint64_t)count * AHCI_SECTOR_SIZE);
     if (!buffer)
     {
-        return false;
+        goto cleanup;
     }
     if (count > AHCI_MAX_TRANSFER_SECTORS)
     {
-        return false;
+        goto cleanup;
+    }
+    uint64_t total_bytes = count ? ((uint64_t)count * AHCI_SECTOR_SIZE) : AHCI_SECTOR_SIZE;
+    if (total_bytes == 0)
+    {
+        total_bytes = AHCI_SECTOR_SIZE;
+    }
+    void *original_buffer = buffer;
+    uint8_t *bounce_alloc = NULL;
+    thread_t *stack_owner = process_find_stack_owner(buffer, (size_t)total_bytes);
+    if (stack_owner)
+    {
+        bounce_alloc = (uint8_t *)malloc((size_t)total_bytes);
+        if (!bounce_alloc)
+        {
+            ahci_log_port(ctx->port_no, "stack bounce allocation failed");
+            goto cleanup;
+        }
+        if (write)
+        {
+            memcpy(bounce_alloc, buffer, (size_t)total_bytes);
+        }
+        ahci_log_stack_bounce(ctx->port_no,
+                              stack_owner,
+                              buffer,
+                              bounce_alloc,
+                              (size_t)total_bytes,
+                              write);
+        buffer = bounce_alloc;
     }
     if (!ahci_wait_ready(port))
     {
-        return false;
+        goto cleanup;
     }
 
     int slot = ahci_port_find_slot(port);
     if (slot < 0)
     {
-        return false;
+        goto cleanup;
     }
 
     hba_cmd_header_t *hdr = &ctx->cmd_headers[slot];
@@ -541,23 +631,26 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     memset(tbl, 0, sizeof(hba_cmd_tbl_t));
 
     uintptr_t buf_addr = (uintptr_t)buffer;
-    uint64_t total_bytes = count ? ((uint64_t)count * AHCI_SECTOR_SIZE) : AHCI_SECTOR_SIZE;
+    uint64_t remaining = total_bytes;
     uint32_t prdt_index = 0;
-    while (total_bytes && prdt_index < AHCI_MAX_PRDT_ENTRIES)
+    while (remaining && prdt_index < AHCI_MAX_PRDT_ENTRIES)
     {
-        uint32_t chunk = (total_bytes > AHCI_PRDT_MAX_BYTES) ? AHCI_PRDT_MAX_BYTES : (uint32_t)total_bytes;
+        uint32_t chunk = (remaining > AHCI_PRDT_MAX_BYTES) ? AHCI_PRDT_MAX_BYTES : (uint32_t)remaining;
         hba_prdt_entry_t *entry = &tbl->prdt_entry[prdt_index];
-        entry->dba = (uint32_t)buf_addr;
-        entry->dbau = (uint32_t)(buf_addr >> 32);
+        uintptr_t virt_addr = buf_addr;
+        entry->dba = (uint32_t)virt_addr;
+        entry->dbau = (uint32_t)(virt_addr >> 32);
         entry->dbc = chunk - 1;
-        entry->i = (total_bytes <= chunk) ? 1 : 0;
+        entry->i = (remaining <= chunk) ? 1 : 0;
+        uint64_t phys_addr = ((uint64_t)entry->dbau << 32) | entry->dba;
+        ahci_log_prdt_entry(ctx->port_no, slot, prdt_index, virt_addr, phys_addr, chunk);
         buf_addr += chunk;
-        total_bytes -= chunk;
+        remaining -= chunk;
         ++prdt_index;
     }
-    if (total_bytes)
+    if (remaining)
     {
-        return false;
+        goto cleanup;
     }
     hdr->prdtl = (uint16_t)prdt_index;
 
@@ -605,7 +698,8 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
         }
         if (ctx->wait_success)
         {
-            return true;
+            result = true;
+            goto cleanup;
         }
         ahci_log_port(ctx->port_no, "irq wait failed, retrying with polling");
     }
@@ -615,16 +709,27 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
         if (port->is & HBA_PxIS_TFES)
         {
             port->is = HBA_PxIS_TFES;
-            return false;
+            goto cleanup;
         }
         process_yield();
     }
     if (port->is & HBA_PxIS_TFES)
     {
         port->is = HBA_PxIS_TFES;
-        return false;
+        goto cleanup;
     }
-    return true;
+    result = true;
+
+cleanup:
+    if (bounce_alloc)
+    {
+        if (result && !write && original_buffer)
+        {
+            memcpy(original_buffer, bounce_alloc, (size_t)total_bytes);
+        }
+        free(bounce_alloc);
+    }
+    return result;
 }
 
 static bool ahci_block_read(block_device_t *device, uint64_t lba, uint32_t count, void *buffer)

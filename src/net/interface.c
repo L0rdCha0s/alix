@@ -4,6 +4,9 @@
 #include "net/route.h"
 
 #include "libc.h"
+#include "heap.h"
+#include "process.h"
+#include "serial.h"
 
 static net_interface_t g_interfaces[NET_MAX_INTERFACES];
 static size_t g_interface_count = 0;
@@ -144,13 +147,67 @@ void net_if_set_tx_handler(net_interface_t *iface, bool (*handler)(net_interface
     iface->send = handler;
 }
 
-bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
+static bool net_pointer_on_stack(const void *ptr, size_t len, thread_t **owner_out)
+{
+    thread_t *owner = process_find_stack_owner(ptr, len);
+    if (owner_out)
+    {
+        *owner_out = owner;
+    }
+    return owner != NULL;
+}
+
+static void net_log_stack_dma_guard(const char *tag,
+                                    const thread_t *owner,
+                                    const void *ptr,
+                                    size_t len)
+{
+    serial_write_string("[net-dma] tag=");
+    serial_write_string(tag ? tag : "<none>");
+    serial_write_string(" ptr=0x");
+    serial_write_hex64((uintptr_t)ptr);
+    serial_write_string(" len=0x");
+    serial_write_hex64(len);
+    serial_write_string(" owner=");
+    if (owner)
+    {
+        const char *name = process_thread_name_const(owner);
+        serial_write_string(name && name[0] ? name : "<unnamed>");
+        serial_write_string(" pid=0x");
+        process_t *proc = process_thread_owner(owner);
+        serial_write_hex64(proc ? process_get_pid(proc) : 0);
+    }
+    else
+    {
+        serial_write_string("<none>");
+    }
+    serial_write_string("\r\n");
+}
+
+static bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
 {
     if (!iface || !iface->send)
     {
         return false;
     }
-    bool ok = iface->send(iface, data, len);
+
+    const uint8_t *payload = data;
+    uint8_t *clone = NULL;
+    thread_t *owner = NULL;
+    if (len > 0 && net_pointer_on_stack(data, len, &owner))
+    {
+        clone = (uint8_t *)malloc(len);
+        if (!clone)
+        {
+            iface->tx_errors++;
+            return false;
+        }
+        memcpy(clone, data, len);
+        payload = clone;
+        net_log_stack_dma_guard("net_if_send", owner, data, len);
+    }
+
+    bool ok = iface->send(iface, payload, len);
     if (ok)
     {
         iface->tx_packets++;
@@ -160,6 +217,34 @@ bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
     {
         iface->tx_errors++;
     }
+
+    if (clone)
+    {
+        free(clone);
+    }
+    return ok;
+}
+
+bool net_if_send_copy(net_interface_t *iface, const uint8_t *data, size_t len)
+{
+    if (!iface || !iface->send)
+    {
+        return false;
+    }
+    if (len == 0 || !data)
+    {
+        return net_if_send(iface, data, 0);
+    }
+
+    uint8_t *clone = (uint8_t *)malloc(len);
+    if (!clone)
+    {
+        iface->tx_errors++;
+        return false;
+    }
+    memcpy(clone, data, len);
+    bool ok = net_if_send(iface, clone, len);
+    free(clone);
     return ok;
 }
 

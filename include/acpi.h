@@ -5,5 +5,6 @@
 
 bool acpi_init(void);
 bool acpi_shutdown(void);
+const void *acpi_find_table_cached(const char *signature, size_t *length_out);
 
 #endif

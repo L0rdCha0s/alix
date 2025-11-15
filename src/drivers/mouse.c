@@ -35,6 +35,19 @@ static void mouse_log(const char *msg)
     serial_write_string("\r\n");
 }
 
+static bool mouse_listener_valid(mouse_listener_t listener)
+{
+    if (!listener)
+    {
+        return true;
+    }
+    extern uint8_t __kernel_text_start[];
+    extern uint8_t __kernel_text_end[];
+    uintptr_t addr = (uintptr_t)listener;
+    return addr >= (uintptr_t)__kernel_text_start &&
+           addr < (uintptr_t)__kernel_text_end;
+}
+
 static void mouse_log_packet(int dx, int dy, bool left, uint8_t status)
 {
     char buf[64];
@@ -92,6 +105,13 @@ static void mouse_write(uint8_t value)
 
 void mouse_register_listener(mouse_listener_t listener)
 {
+    if (listener && !mouse_listener_valid(listener))
+    {
+        serial_write_string("mouse listener rejected ptr=0x");
+        serial_write_hex64((uint64_t)(uintptr_t)listener);
+        serial_write_string("\r\n");
+        return;
+    }
     g_listener = listener;
 }
 

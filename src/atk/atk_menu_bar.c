@@ -806,12 +806,16 @@ static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu)
 static void atk_menu_bar_clock_tick(void *context)
 {
     (void)context;
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     int height = atk_menu_bar_height_pixels(state);
     if (height <= 0)
     {
-        return;
+        goto out;
     }
     atk_dirty_mark_rect(VIDEO_WIDTH - ATK_MENU_BAR_CLOCK_RESERVE, 0, ATK_MENU_BAR_CLOCK_RESERVE, height);
+out:
+    atk_state_lock_release(irq_state);
 }
 #endif

@@ -3,12 +3,16 @@
 #include <stddef.h>
 
 #include "libc.h"
+#include "process.h"
 #include "serial.h"
 #include "timer.h"
+#include "heap.h"
+#include "process.h"
 
 #include "net/arp.h"
 #include "net/interface.h"
 #include "net/route.h"
+#include "spinlock.h"
 
 #define NET_DNS_MAX_SERVERS 4
 #define NET_DNS_MAX_PENDING 4
@@ -27,7 +31,7 @@
 
 typedef struct
 {
-    bool active;
+    volatile bool active;
     uint16_t id;
     uint16_t qtype;
     uint16_t local_port;
@@ -42,9 +46,15 @@ typedef struct
     uint64_t sent_tick;
     uint32_t retries;
     uint32_t timeout_ticks;
-    bool completed;
-    bool success;
+    volatile bool completed;
+    volatile bool success;
     net_dns_result_t result;
+    uint32_t server_snapshot[NET_DNS_MAX_SERVERS];
+    size_t server_snapshot_count;
+    char scratch_qname[NET_DNS_NAME_MAX + 1];
+    char scratch_target[NET_DNS_NAME_MAX + 1];
+    char scratch_rr[NET_DNS_NAME_MAX + 1];
+    char scratch_tmp[NET_DNS_NAME_MAX + 1];
 } dns_pending_t;
 
 
@@ -54,9 +64,15 @@ static dns_pending_t g_pending[NET_DNS_MAX_PENDING];
 static uint16_t g_next_id = 0x1234;
 static uint32_t g_retry_count = 3;
 static uint16_t g_next_port = 0xC000;
+static spinlock_t g_dns_lock;
+static bool g_dns_debug_enabled = false;
 
 static void dns_log(const char *msg);
+static void dns_debug_log(const char *msg);
 static uint16_t read_be16(const uint8_t *p);
+#define DNS_TRACE(label, dest, len) \
+    process_debug_log_stack_write(label, __builtin_return_address(0), (dest), (len))
+
 static void write_be16(uint8_t *p, uint16_t value);
 static void write_be32(uint8_t *p, uint32_t value);
 static bool dns_encode_question(const char *hostname, uint16_t qtype,
@@ -69,15 +85,31 @@ static bool dns_send_query(dns_pending_t *pending);
 static bool dns_prepare_route(dns_pending_t *pending);
 static uint16_t checksum16(const uint8_t *data, size_t len);
 static uint16_t dns_allocate_port(void);
+static uint16_t dns_allocate_id(void);
 static void dns_log_ipv4(const char *prefix, uint32_t addr);
+static void dns_debug_ipv4(const char *prefix, uint32_t addr);
 
 void net_dns_init(void)
 {
+    spinlock_init(&g_dns_lock);
+    spinlock_lock(&g_dns_lock);
     g_server_count = 0;
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
         g_pending[i].active = false;
     }
+    spinlock_unlock(&g_dns_lock);
+}
+
+void net_dns_set_debug(bool enable)
+{
+    g_dns_debug_enabled = enable;
+    dns_log(enable ? "debug: enabled" : "debug: disabled");
+}
+
+bool net_dns_debug_enabled(void)
+{
+    return g_dns_debug_enabled;
 }
 
 static bool dns_name_equal(const char *a, const char *b)
@@ -101,9 +133,11 @@ static bool dns_name_equal(const char *a, const char *b)
 
 void net_dns_set_servers(const uint32_t *servers, size_t count)
 {
+    spinlock_lock(&g_dns_lock);
     g_server_count = 0;
     if (!servers || count == 0)
     {
+        spinlock_unlock(&g_dns_lock);
         dns_log("set_servers: empty input");
         return;
     }
@@ -115,7 +149,9 @@ void net_dns_set_servers(const uint32_t *servers, size_t count)
             dns_log_ipv4("set_servers: added", servers[i]);
         }
     }
-    if (g_server_count == 0)
+    size_t total = g_server_count;
+    spinlock_unlock(&g_dns_lock);
+    if (total == 0)
     {
         dns_log("set_servers: no usable servers");
     }
@@ -124,7 +160,7 @@ void net_dns_set_servers(const uint32_t *servers, size_t count)
         char buf[64];
         size_t len = strlen("set_servers: total=");
         memcpy(buf, "set_servers: total=", len);
-        buf[len++] = (char)('0' + (int)g_server_count);
+        buf[len++] = (char)('0' + (int)total);
         buf[len] = '\0';
         dns_log(buf);
     }
@@ -132,29 +168,40 @@ void net_dns_set_servers(const uint32_t *servers, size_t count)
 
 size_t net_dns_server_count(void)
 {
-    return g_server_count;
+    spinlock_lock(&g_dns_lock);
+    size_t count = g_server_count;
+    spinlock_unlock(&g_dns_lock);
+    return count;
 }
 
 static dns_pending_t *dns_allocate_pending(void)
 {
+    dns_pending_t *pending = NULL;
+    spinlock_lock(&g_dns_lock);
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
         if (!g_pending[i].active)
         {
             memset(&g_pending[i], 0, sizeof(g_pending[i]));
             g_pending[i].active = true;
-            return &g_pending[i];
+            pending = &g_pending[i];
+            break;
         }
     }
-    return NULL;
+    spinlock_unlock(&g_dns_lock);
+    return pending;
 }
 
 static void dns_release_pending(dns_pending_t *pending)
 {
     if (pending)
     {
+        spinlock_lock(&g_dns_lock);
         pending->active = false;
         pending->local_port = 0;
+        pending->server_snapshot_count = 0;
+        pending->iface = NULL;
+        spinlock_unlock(&g_dns_lock);
     }
 }
 
@@ -172,7 +219,11 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
         dns_log("resolve: hostname invalid length");
         return false;
     }
-    if (g_server_count == 0)
+
+    spinlock_lock(&g_dns_lock);
+    size_t configured_servers = g_server_count;
+    spinlock_unlock(&g_dns_lock);
+    if (configured_servers == 0)
     {
         dns_log("no dns servers configured");
         return false;
@@ -181,6 +232,26 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
     dns_pending_t *pending = dns_allocate_pending();
     if (!pending)
     {
+        return false;
+    }
+
+    spinlock_lock(&g_dns_lock);
+    pending->server_snapshot_count = g_server_count;
+    if (pending->server_snapshot_count > NET_DNS_MAX_SERVERS)
+    {
+        pending->server_snapshot_count = NET_DNS_MAX_SERVERS;
+    }
+    if (pending->server_snapshot_count > 0)
+    {
+        memcpy(pending->server_snapshot,
+               g_servers,
+               pending->server_snapshot_count * sizeof(uint32_t));
+    }
+    spinlock_unlock(&g_dns_lock);
+    if (pending->server_snapshot_count == 0)
+    {
+        dns_log("no dns servers available");
+        dns_release_pending(pending);
         return false;
     }
 
@@ -195,15 +266,15 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
     memcpy(pending->qname_current, hostname, len + 1);
     pending->cname_hops = 0;
     pending->qtype = qtype;
-    pending->id = g_next_id++;
+    pending->id = dns_allocate_id();
     pending->iface = preferred_iface;
     pending->timeout_ticks = timer_frequency();
     if (pending->timeout_ticks == 0) pending->timeout_ticks = 100;
 
     bool sent = false;
-    for (size_t i = 0; i < g_server_count; ++i)
+    for (size_t i = 0; i < pending->server_snapshot_count; ++i)
     {
-        pending->server_ip = g_servers[i];
+        pending->server_ip = pending->server_snapshot[i];
         pending->have_mac = false;
         pending->retries = 0;
         pending->completed = false;
@@ -248,7 +319,7 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
                 break;
             }
         }
-        __asm__ volatile ("pause");
+        process_yield();
     }
 
     bool success = pending->completed && pending->success;
@@ -319,6 +390,18 @@ static void dns_finish_pending(dns_pending_t *pending, bool success, const net_d
     {
         pending->result = *result;
     }
+    if (g_dns_debug_enabled)
+    {
+        serial_write_string("[dns-debug] finish: host=");
+        serial_write_string(pending->hostname[0] ? pending->hostname : "<none>");
+        serial_write_string(" success=0x");
+        serial_write_hex64(success ? 1 : 0);
+        serial_write_string(" id=0x");
+        serial_write_hex64(pending->id);
+        serial_write_string(" type=0x");
+        serial_write_hex64(result ? result->rr_type : 0);
+        serial_write_string("\r\n");
+    }
 }
 
 static bool dns_prepare_route(dns_pending_t *pending)
@@ -335,15 +418,26 @@ static bool dns_prepare_route(dns_pending_t *pending)
         dns_log("prepare_route: interface unusable");
         return false;
     }
-    dns_log_ipv4("prepare_route: using iface ip", iface->ipv4_addr);
-    dns_log_ipv4("prepare_route: next hop", next_hop);
     pending->iface = iface;
     pending->next_hop = next_hop;
-
-    uint8_t mac[6];
-    if (net_arp_lookup(next_hop, mac))
+    if (g_dns_debug_enabled)
     {
-        memcpy(pending->server_mac, mac, 6);
+        char *tmp = pending->scratch_tmp;
+        net_format_ipv4(iface->ipv4_addr, tmp);
+        serial_write_string("[dns-debug] prepare_route: iface=");
+        serial_write_string(iface->name[0] ? iface->name : "<noname>");
+        serial_write_string(" present=0x");
+        serial_write_hex64(iface->present ? 1 : 0);
+        serial_write_string(" link=0x");
+        serial_write_hex64(iface->link_up ? 1 : 0);
+        serial_write_string(" ip=");
+        serial_write_string(tmp);
+        serial_write_string("\r\n");
+        dns_debug_ipv4("prepare_route: next hop", next_hop);
+    }
+
+    if (net_arp_lookup(next_hop, pending->server_mac))
+    {
         pending->have_mac = true;
     }
     else
@@ -365,9 +459,11 @@ static bool dns_send_query(dns_pending_t *pending)
     if (!pending->have_mac)
     {
         dns_log_ipv4("send_query: resolving via ARP for", pending->next_hop);
+        dns_debug_log("send_query: waiting for ARP response");
         if (!net_arp_send_request(iface, pending->next_hop))
         {
             dns_log("send_query: failed to start ARP");
+            dns_debug_log("send_query: net_arp_send_request failed");
             return false;
         }
         uint64_t start = timer_ticks();
@@ -375,26 +471,37 @@ static bool dns_send_query(dns_pending_t *pending)
         if (wait_ticks == 0) wait_ticks = 20;
         while (timer_ticks() - start < wait_ticks)
         {
-            uint8_t mac[6];
-            if (net_arp_lookup(pending->next_hop, mac))
+            if (net_arp_lookup(pending->next_hop, pending->server_mac))
             {
-                memcpy(pending->server_mac, mac, 6);
                 pending->have_mac = true;
+                if (g_dns_debug_enabled)
+                {
+                    char *macbuf = pending->scratch_tmp;
+                    net_format_mac(pending->server_mac, macbuf);
+                    serial_write_string("[dns-debug] send_query: ARP resolved mac=");
+                    serial_write_string(macbuf);
+                    serial_write_string("\r\n");
+                }
                 break;
             }
-            __asm__ volatile ("pause");
+            process_yield();
         }
         if (!pending->have_mac)
         {
             dns_log("send_query: ARP resolution timeout");
+            dns_debug_log("send_query: ARP timed out");
             return false;
         }
         dns_log("send_query: ARP resolved");
     }
 
-    uint8_t packet[NET_DNS_MAX_PACKET];
-    memset(packet, 0, sizeof(packet));
-    if (sizeof(packet) < 64) return false;
+    uint8_t *packet = (uint8_t *)malloc(NET_DNS_MAX_PACKET);
+    if (!packet)
+    {
+        dns_log("send_query: alloc failed");
+        return false;
+    }
+    memset(packet, 0, NET_DNS_MAX_PACKET);
 
     uint8_t *eth = packet;
     uint8_t *ip  = packet + 14;
@@ -414,6 +521,7 @@ static bool dns_send_query(dns_pending_t *pending)
     if (!dns_encode_question(pending->qname_current, pending->qtype, dns + dns_len, &qlen))
     {
         dns_log("send_query: encode_question failed");
+        free(packet);
         return false;
     }
     dns_len += qlen;
@@ -461,24 +569,57 @@ static bool dns_send_query(dns_pending_t *pending)
     while (sum >> 16) sum = (sum & 0xFFFFU) + (sum >> 16);
     write_be16(udp + 6, (uint16_t)(~sum));
 
-    if (!net_if_send(iface, packet, frame_len))
+    if (g_dns_debug_enabled)
+    {
+        char ipbuf[32];
+        char macbuf[32];
+        net_format_ipv4(pending->server_ip, ipbuf);
+        net_format_mac(pending->server_mac, macbuf);
+        serial_write_string("[dns-debug] send_query: id=0x");
+        serial_write_hex64(pending->id);
+        serial_write_string(" port=0x");
+        serial_write_hex64(pending->local_port);
+        serial_write_string(" iface=");
+        serial_write_string(iface->name[0] ? iface->name : "<noname>");
+        serial_write_string(" server=");
+        serial_write_string(ipbuf);
+        serial_write_string(" mac=");
+        serial_write_string(macbuf);
+        serial_write_string(" len=0x");
+        serial_write_hex64(frame_len);
+        serial_write_string("\r\n");
+    }
+
+    if (!net_if_send_copy(iface, packet, frame_len))
     {
         dns_log("send_query: net_if_send failed");
+        dns_debug_log("send_query: net_if_send_copy returned false");
+        free(packet);
         return false;
     }
 
     pending->sent_tick = timer_ticks();
     pending->retries++;
+    if (g_dns_debug_enabled)
+    {
+        serial_write_string("[dns-debug] send_query: dispatched id=0x");
+        serial_write_hex64(pending->id);
+        serial_write_string(" retries=0x");
+        serial_write_hex64(pending->retries);
+        serial_write_string("\r\n");
+    }
+    free(packet);
     return true;
 }
 
-static bool dns_skip_rrs(const uint8_t *dns, size_t dns_len, size_t *off, uint16_t count)
+static bool dns_skip_rrs(const uint8_t *dns, size_t dns_len, size_t *off,
+                         uint16_t count, char *scratch, size_t scratch_cap)
 {
     size_t o = *off;
     for (uint16_t i = 0; i < count; ++i)
     {
-        char tmp[NET_DNS_NAME_MAX + 1];
-        if (!dns_decode_name(dns, dns_len, &o, tmp, sizeof(tmp))) return false;
+        if (!scratch || scratch_cap == 0) return false;
+        if (!dns_decode_name(dns, dns_len, &o, scratch, scratch_cap)) return false;
         if (o + 10 > dns_len) return false;
         uint16_t rdlen = read_be16(dns + o + 8);
         o += 10;
@@ -518,6 +659,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     if (udp_len < 8 || (size_t)(udp - ip) + udp_len > ip_total_len) return;
 
     dns_pending_t *pending = NULL;
+    spinlock_lock(&g_dns_lock);
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
         if (g_pending[i].active && g_pending[i].local_port == dst_port)
@@ -526,8 +668,23 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             break;
         }
     }
+    spinlock_unlock(&g_dns_lock);
     if (!pending) return;
     if (src_port != 53) return;
+    if (g_dns_debug_enabled)
+    {
+        serial_write_string("[dns-debug] handle_frame: iface=");
+        serial_write_string(iface->name[0] ? iface->name : "<noname>");
+        serial_write_string(" id=0x");
+        serial_write_hex64(pending->id);
+        serial_write_string(" src_port=0x");
+        serial_write_hex64(src_port);
+        serial_write_string(" dst_port=0x");
+        serial_write_hex64(dst_port);
+        serial_write_string(" udp_len=0x");
+        serial_write_hex64(udp_len);
+        serial_write_string("\r\n");
+    }
 
     const uint8_t *dns = udp + 8;
     size_t dns_len = udp_len - 8;
@@ -544,20 +701,35 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     uint16_t ancount = read_be16(dns + 6);
     uint16_t nscount = read_be16(dns + 8);
     uint16_t arcount = read_be16(dns + 10);
+    if (g_dns_debug_enabled)
+    {
+        serial_write_string("[dns-debug] handle_frame: flags=0x");
+        serial_write_hex64(flags);
+        serial_write_string(" qd=0x");
+        serial_write_hex64(qdcount);
+        serial_write_string(" an=0x");
+        serial_write_hex64(ancount);
+        serial_write_string(" ns=0x");
+        serial_write_hex64(nscount);
+        serial_write_string(" ar=0x");
+        serial_write_hex64(arcount);
+        serial_write_string("\r\n");
+    }
 
     size_t offset = 12;
 
     /* Decode first question to get the owner name we asked for */
-    char qname[NET_DNS_NAME_MAX + 1]; qname[0] = '\0';
+    char *qname = pending->scratch_qname;
+    qname[0] = '\0';
     if (qdcount > 0)
     {
-        if (!dns_decode_name(dns, dns_len, &offset, qname, sizeof(qname))) { dns_finish_pending(pending, false, NULL); return; }
+        if (!dns_decode_name(dns, dns_len, &offset, qname, sizeof(pending->scratch_qname))) { dns_finish_pending(pending, false, NULL); return; }
         if (offset + 4 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
         offset += 4; /* QTYPE/QCLASS */
         /* Skip any extra questions if present */
         for (uint16_t qi = 1; qi < qdcount; ++qi)
         {
-            if (!dns_decode_name(dns, dns_len, &offset, qname, sizeof(qname))) { dns_finish_pending(pending, false, NULL); return; }
+            if (!dns_decode_name(dns, dns_len, &offset, qname, sizeof(pending->scratch_qname))) { dns_finish_pending(pending, false, NULL); return; }
             if (offset + 4 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
             offset += 4;
         }
@@ -568,16 +740,24 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
     /* Compute section boundaries (without parsing) */
     size_t after_answers = answers_start;
-    if (!dns_skip_rrs(dns, dns_len, &after_answers, ancount)) { dns_finish_pending(pending, false, NULL); return; }
+    if (!dns_skip_rrs(dns, dns_len, &after_answers, ancount,
+                      pending->scratch_rr, sizeof(pending->scratch_rr))) { dns_finish_pending(pending, false, NULL); return; }
     size_t after_authority = after_answers;
-    if (!dns_skip_rrs(dns, dns_len, &after_authority, nscount)) { dns_finish_pending(pending, false, NULL); return; }
+    if (!dns_skip_rrs(dns, dns_len, &after_authority, nscount,
+                      pending->scratch_rr, sizeof(pending->scratch_rr))) { dns_finish_pending(pending, false, NULL); return; }
 
     /* Follow CNAME chain within this message (order-independent) */
-    char target[NET_DNS_NAME_MAX + 1];
+    char *target = pending->scratch_target;
     if (pending->qname_current[0]) {
-        memcpy(target, pending->qname_current, strlen(pending->qname_current) + 1);
+        size_t copy = strlen(pending->qname_current);
+        if (copy > NET_DNS_NAME_MAX) copy = NET_DNS_NAME_MAX;
+        memcpy(target, pending->qname_current, copy);
+        target[copy] = '\0';
     } else {
-        memcpy(target, qname, strlen(qname) + 1);
+        size_t copy = strlen(qname);
+        if (copy > NET_DNS_NAME_MAX) copy = NET_DNS_NAME_MAX;
+        memcpy(target, qname, copy);
+        target[copy] = '\0';
     }
 
     for (int hop = 0; hop < NET_DNS_MAX_CNAME_HOPS; ++hop)
@@ -586,8 +766,8 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         size_t o = answers_start;
         for (uint16_t i = 0; i < ancount; ++i)
         {
-            char rr_name[NET_DNS_NAME_MAX + 1];
-            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(rr_name))) { dns_finish_pending(pending, false, NULL); return; }
+            char *rr_name = pending->scratch_rr;
+            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(pending->scratch_rr))) { dns_finish_pending(pending, false, NULL); return; }
             if (o + 10 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
             uint16_t type   = read_be16(dns + o + 0);
             uint16_t rr_cls = read_be16(dns + o + 2);
@@ -598,12 +778,15 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             if (rr_cls == 1 && type == NET_DNS_TYPE_CNAME)
             {
                 size_t ro = o;
-                char cname_tgt[NET_DNS_NAME_MAX + 1];
-                if (dns_decode_name(dns, dns_len, &ro, cname_tgt, sizeof(cname_tgt)))
+                char *cname_tgt = pending->scratch_tmp;
+                if (dns_decode_name(dns, dns_len, &ro, cname_tgt, sizeof(pending->scratch_tmp)))
                 {
                     if (dns_name_equal(rr_name, target) && !dns_name_equal(cname_tgt, target))
                     {
-                        memcpy(target, cname_tgt, strlen(cname_tgt) + 1);
+                        size_t cname_len = strlen(cname_tgt);
+                        if (cname_len > NET_DNS_NAME_MAX) cname_len = NET_DNS_NAME_MAX;
+                        memcpy(target, cname_tgt, cname_len);
+                        target[cname_len] = '\0';
                         changed = true;
                     }
                 }
@@ -620,8 +803,8 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         size_t o = answers_start;
         for (uint16_t i = 0; i < ancount; ++i)
         {
-            char rr_name[NET_DNS_NAME_MAX + 1];
-            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(rr_name))) { dns_finish_pending(pending, false, NULL); return; }
+            char *rr_name = pending->scratch_rr;
+            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(pending->scratch_rr))) { dns_finish_pending(pending, false, NULL); return; }
             if (o + 10 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
             uint16_t type   = read_be16(dns + o + 0);
             uint16_t rr_cls = read_be16(dns + o + 2);
@@ -645,8 +828,8 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         size_t o = after_authority;
         for (uint16_t i = 0; i < arcount; ++i)
         {
-            char rr_name[NET_DNS_NAME_MAX + 1];
-            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(rr_name))) { dns_finish_pending(pending, false, NULL); return; }
+            char *rr_name = pending->scratch_rr;
+            if (!dns_decode_name(dns, dns_len, &o, rr_name, sizeof(pending->scratch_rr))) { dns_finish_pending(pending, false, NULL); return; }
             if (o + 10 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
             uint16_t type   = read_be16(dns + o + 0);
             uint16_t rr_cls = read_be16(dns + o + 2);
@@ -687,7 +870,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         if (tlen > NET_DNS_NAME_MAX) { dns_finish_pending(pending, false, NULL); return; }
         memcpy(pending->qname_current, target, tlen + 1);
         pending->cname_hops++;
-        pending->id = g_next_id++;
+        pending->id = dns_allocate_id();
         pending->retries = 0;
         pending->sent_tick = 0;
 
@@ -847,6 +1030,10 @@ static bool dns_decode_name(const uint8_t *packet, size_t packet_len,
 
 static void write_be32(uint8_t *p, uint32_t value)
 {
+    if (p)
+    {
+        DNS_TRACE("dns_write_be32", p, sizeof(uint32_t));
+    }
     p[0] = (uint8_t)((value >> 24) & 0xFF);
     p[1] = (uint8_t)((value >> 16) & 0xFF);
     p[2] = (uint8_t)((value >> 8) & 0xFF);
@@ -860,6 +1047,10 @@ static uint16_t read_be16(const uint8_t *p)
 
 static void write_be16(uint8_t *p, uint16_t value)
 {
+    if (p)
+    {
+        DNS_TRACE("dns_write_be16", p, sizeof(uint16_t));
+    }
     p[0] = (uint8_t)((value >> 8) & 0xFF);
     p[1] = (uint8_t)(value & 0xFF);
 }
@@ -871,32 +1062,109 @@ static void dns_log(const char *msg)
     serial_write_string("\r\n");
 }
 
+static void dns_debug_log(const char *msg)
+{
+    if (!g_dns_debug_enabled || !msg)
+    {
+        return;
+    }
+    serial_write_string("[dns-debug] ");
+    serial_write_string(msg);
+    serial_write_string("\r\n");
+}
+
 static void dns_log_ipv4(const char *prefix, uint32_t addr)
 {
     char buf[64];
     char ip[32];
     net_format_ipv4(addr, ip);
+
+    const size_t capacity = sizeof(buf);
     size_t len = 0;
-    while (prefix[len] && len < sizeof(buf) - 1)
+
+    if (prefix)
     {
-        buf[len] = prefix[len];
-        ++len;
+        for (size_t i = 0; prefix[i] && len < capacity - 1; ++i)
+        {
+            buf[len++] = prefix[i];
+        }
     }
-    if (len < sizeof(buf) - 2)
+
+    const char sep[] = " = ";
+    const size_t sep_len = sizeof(sep) - 1;
+    if (len + sep_len < capacity)
     {
-        buf[len++] = ' ';
-        buf[len++] = '=';
-        buf[len++] = ' ';
+        memcpy(buf + len, sep, sep_len);
+        len += sep_len;
     }
-    size_t ip_len = strlen(ip);
-    if (len + ip_len >= sizeof(buf))
+
+    size_t remaining = (len < capacity) ? (capacity - len - 1) : 0;
+    if (remaining > 0)
     {
-        ip_len = sizeof(buf) - len - 1;
+        size_t ip_len = strlen(ip);
+        if (ip_len > remaining)
+        {
+            ip_len = remaining;
+        }
+        memcpy(buf + len, ip, ip_len);
+        len += ip_len;
     }
-    memcpy(buf + len, ip, ip_len);
-    len += ip_len;
+
+    if (len >= capacity)
+    {
+        len = capacity - 1;
+    }
     buf[len] = '\0';
     dns_log(buf);
+}
+
+static void dns_debug_ipv4(const char *prefix, uint32_t addr)
+{
+    if (!g_dns_debug_enabled)
+    {
+        return;
+    }
+    char buf[64];
+    char ip[32];
+    net_format_ipv4(addr, ip);
+
+    const size_t capacity = sizeof(buf);
+    size_t len = 0;
+
+    if (prefix)
+    {
+        for (size_t i = 0; prefix[i] && len < capacity - 1; ++i)
+        {
+            buf[len++] = prefix[i];
+        }
+    }
+
+    const char sep[] = " = ";
+    const size_t sep_len = sizeof(sep) - 1;
+    if (len + sep_len < capacity)
+    {
+        memcpy(buf + len, sep, sep_len);
+        len += sep_len;
+    }
+
+    size_t remaining = (len < capacity) ? (capacity - len - 1) : 0;
+    if (remaining > 0)
+    {
+        size_t ip_len = strlen(ip);
+        if (ip_len > remaining)
+        {
+            ip_len = remaining;
+        }
+        memcpy(buf + len, ip, ip_len);
+        len += ip_len;
+    }
+
+    if (len >= capacity)
+    {
+        len = capacity - 1;
+    }
+    buf[len] = '\0';
+    dns_debug_log(buf);
 }
 
 static uint16_t checksum16(const uint8_t *data, size_t len)
@@ -922,6 +1190,8 @@ static uint16_t checksum16(const uint8_t *data, size_t len)
 
 static uint16_t dns_allocate_port(void)
 {
+    spinlock_lock(&g_dns_lock);
+    uint16_t result = 0;
     for (size_t attempt = 0; attempt < 0x8000; ++attempt)
     {
         if (g_next_port < 0xC000)
@@ -944,8 +1214,22 @@ static uint16_t dns_allocate_port(void)
         }
         if (!in_use)
         {
-            return candidate;
+            result = candidate;
+            break;
         }
     }
-    return 0;
+    spinlock_unlock(&g_dns_lock);
+    return result;
+}
+
+static uint16_t dns_allocate_id(void)
+{
+    spinlock_lock(&g_dns_lock);
+    uint16_t id = g_next_id++;
+    if (g_next_id == 0)
+    {
+        g_next_id = 0x1234;
+    }
+    spinlock_unlock(&g_dns_lock);
+    return id;
 }
