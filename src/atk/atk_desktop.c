@@ -91,9 +91,9 @@ atk_widget_t *atk_desktop_add_button(atk_state_t *state,
 #ifdef KERNEL_BUILD
     if (state->desktop_buttons.size > (size_t)ATK_MAX_DESKTOP_BUTTONS)
     {
-        serial_write_string("atk_desktop: button list size=");
-        serial_write_hex64(state->desktop_buttons.size);
-        serial_write_string("\r\n");
+        serial_printf("%s", "atk_desktop: button list size=");
+        serial_printf("%016llX", (unsigned long long)(state->desktop_buttons.size));
+        serial_printf("%s", "\r\n");
     }
 #endif
 

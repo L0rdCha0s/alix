@@ -21,18 +21,18 @@ static bool atk_list_pointer_is_canonical(const void *ptr)
 
 static void atk_list_log_corruption(const char *what, const void *ptr, const char *tag)
 {
-    serial_write_string("atk_list");
+    serial_printf("%s", "atk_list");
     if (tag)
     {
-        serial_write_string("[");
-        serial_write_string(tag);
-        serial_write_string("]");
+        serial_printf("%s", "[");
+        serial_printf("%s", tag);
+        serial_printf("%s", "]");
     }
-    serial_write_string(": corrupted pointer (");
-    serial_write_string(what ? what : "ptr");
-    serial_write_string(")=0x");
-    serial_write_hex64((uint64_t)(uintptr_t)ptr);
-    serial_write_string("\r\n");
+    serial_printf("%s", ": corrupted pointer (");
+    serial_printf("%s", what ? what : "ptr");
+    serial_printf("%s", ")=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)ptr));
+    serial_printf("%s", "\r\n");
 }
 
 void atk_list_init(atk_list_t *list)

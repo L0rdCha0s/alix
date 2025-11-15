@@ -288,15 +288,15 @@ void rtl8139_init(void)
         rtl8139_log("failed to register timer task");
     }
 
-    serial_write_string("rtl8139: found at bus ");
+    serial_printf("%s", "rtl8139: found at bus ");
     rtl8139_log_hex8(g_device.bus);
-    serial_write_string(" device ");
+    serial_printf("%s", " device ");
     rtl8139_log_hex8(g_device.device);
-    serial_write_string(" function ");
+    serial_printf("%s", " function ");
     rtl8139_log_hex8(g_device.function);
-    serial_write_string(" io=0x");
+    serial_printf("%s", " io=0x");
     rtl8139_log_hex16(g_io_base);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
     rtl8139_log_mac_address();
     rtl8139_dump_state("after init");
 }
@@ -315,9 +315,9 @@ void rtl8139_on_irq(void)
     }
 
 #if RTL8139_TRACE_ENABLE
-    serial_write_string("rtl8139: irq status=0x");
+    serial_printf("%s", "rtl8139: irq status=0x");
     rtl8139_log_hex16(status);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 #endif
 
     outw(g_io_base + RTL_REG_ISR, status);
@@ -437,7 +437,7 @@ static void rtl8139_handle_receive(void)
             {
                 net_if_record_rx_error(g_iface);
             }
-            serial_write_string("rtl8139: rx bounce exhausted\r\n");
+            serial_printf("%s", "rtl8139: rx bounce exhausted\r\n");
             goto release_frame;
         }
 
@@ -507,23 +507,23 @@ static void rtl8139_handle_receive(void)
             }
 
             if (log_frame) {
-                serial_write_string("rtl8139: rx frame eth_type=0x");
+                serial_printf("%s", "rtl8139: rx frame eth_type=0x");
                 rtl8139_log_hex16(eth_type);
-                serial_write_string(" len=0x");
+                serial_printf("%s", " len=0x");
                 rtl8139_log_hex16(frame_len);
-                if (vlan) serial_write_string(" (vlan-stripped)");
-                serial_write_string("\r\n");
+                if (vlan) serial_printf("%s", " (vlan-stripped)");
+                serial_printf("%s", "\r\n");
 
                 if (have_proto) {
-                    serial_write_string("rtl8139: ip proto=0x");
+                    serial_printf("%s", "rtl8139: ip proto=0x");
                     rtl8139_log_hex16(proto);
                     if (have_ports) {
-                        serial_write_string(" src_port=0x");
+                        serial_printf("%s", " src_port=0x");
                         rtl8139_log_hex16(sport);
-                        serial_write_string(" dst_port=0x");
+                        serial_printf("%s", " dst_port=0x");
                         rtl8139_log_hex16(dport);
                     }
-                    serial_write_string("\r\n");
+                    serial_printf("%s", "\r\n");
                 }
             }
 #endif
@@ -728,34 +728,34 @@ out:
 
 static void rtl8139_log(const char *msg)
 {
-    serial_write_string("rtl8139: ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", "rtl8139: ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static void rtl8139_log_thread_owner(const thread_t *owner)
 {
     if (!owner)
     {
-        serial_write_string("<none>");
+        serial_printf("%s", "<none>");
         return;
     }
     const char *name = process_thread_name_const(owner);
-    serial_write_string(name && name[0] ? name : "<unnamed>");
-    serial_write_string(" pid=0x");
+    serial_printf("%s", name && name[0] ? name : "<unnamed>");
+    serial_printf("%s", " pid=0x");
     process_t *proc = process_thread_owner(owner);
-    serial_write_hex64(proc ? process_get_pid(proc) : 0);
+    serial_printf("%016llX", (unsigned long long)(proc ? process_get_pid(proc) : 0));
 }
 
 static void rtl8139_log_stack_source(const thread_t *owner, const void *ptr, size_t len)
 {
-    serial_write_string("rtl8139: stack tx buffer ptr=0x");
-    serial_write_hex64((uintptr_t)ptr);
-    serial_write_string(" len=0x");
-    serial_write_hex64(len);
-    serial_write_string(" owner=");
+    serial_printf("%s", "rtl8139: stack tx buffer ptr=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)ptr));
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)(len));
+    serial_printf("%s", " owner=");
     rtl8139_log_thread_owner(owner);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void rtl8139_log_dma_target(const char *context,
@@ -763,20 +763,20 @@ static void rtl8139_log_dma_target(const char *context,
                                    const uint8_t *buffer,
                                    size_t len)
 {
-    serial_write_string("rtl8139: dma context=");
-    serial_write_string(context ? context : "<none>");
-    serial_write_string(" slot=0x");
-    serial_write_hex64((uint64_t)slot);
-    serial_write_string(" virt=0x");
-    serial_write_hex64((uintptr_t)buffer);
-    serial_write_string(" phys=0x");
-    serial_write_hex64((uint64_t)g_tx_phys[slot]);
-    serial_write_string(" len=0x");
-    serial_write_hex64(len);
-    serial_write_string(" owner=");
+    serial_printf("%s", "rtl8139: dma context=");
+    serial_printf("%s", context ? context : "<none>");
+    serial_printf("%s", " slot=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)slot));
+    serial_printf("%s", " virt=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)buffer));
+    serial_printf("%s", " phys=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)g_tx_phys[slot]));
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)(len));
+    serial_printf("%s", " owner=");
     thread_t *owner = process_find_stack_owner(buffer, len);
     rtl8139_log_thread_owner(owner);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void rtl8139_log_hex8(uint8_t value)
@@ -786,7 +786,7 @@ static void rtl8139_log_hex8(uint8_t value)
     buf[0] = hex[(value >> 4) & 0xF];
     buf[1] = hex[value & 0xF];
     buf[2] = '\0';
-    serial_write_string(buf);
+    serial_printf("%s", buf);
 }
 
 static void rtl8139_log_hex16(uint16_t value)
@@ -803,16 +803,16 @@ static void rtl8139_log_hex32(uint32_t value)
 
 static void rtl8139_log_mac_address(void)
 {
-    serial_write_string("rtl8139: mac ");
+    serial_printf("%s", "rtl8139: mac ");
     for (int i = 0; i < 6; ++i)
     {
         rtl8139_log_hex8(g_mac[i]);
         if (i != 5)
         {
-            serial_write_char(':');
+            serial_printf("%c", ':');
         }
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void rtl8139_dump_state(const char *context)
@@ -836,27 +836,27 @@ static void rtl8139_dump_state(const char *context)
     uint32_t tcr = inl(g_io_base + RTL_REG_TCR);
     uint32_t tsad0 = inl(g_io_base + RTL_REG_TSAD0);
 
-    serial_write_string("rtl8139: regs[");
-    serial_write_string(context);
-    serial_write_string("] CR=0x");
+    serial_printf("%s", "rtl8139: regs[");
+    serial_printf("%s", context);
+    serial_printf("%s", "] CR=0x");
     rtl8139_log_hex8(cr);
-    serial_write_string(" RCR=0x");
+    serial_printf("%s", " RCR=0x");
     rtl8139_log_hex32(rcr);
-    serial_write_string(" CAPR=0x");
+    serial_printf("%s", " CAPR=0x");
     rtl8139_log_hex16(capr);
-    serial_write_string(" CBR=0x");
+    serial_printf("%s", " CBR=0x");
     rtl8139_log_hex16(cbr);
-    serial_write_string(" ISR=0x");
+    serial_printf("%s", " ISR=0x");
     rtl8139_log_hex16(isr);
-    serial_write_string(" IMR=0x");
+    serial_printf("%s", " IMR=0x");
     rtl8139_log_hex16(imr);
-    serial_write_string(" MSR=0x");
+    serial_printf("%s", " MSR=0x");
     rtl8139_log_hex8(msr);
-    serial_write_string(" TCR=0x");
+    serial_printf("%s", " TCR=0x");
     rtl8139_log_hex32(tcr);
-    serial_write_string(" TSAD0=0x");
+    serial_printf("%s", " TSAD0=0x");
     rtl8139_log_hex32(tsad0);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 
     g_state_dump_budget--;
 #endif
@@ -869,33 +869,33 @@ static void rtl8139_log_tx_state(const char *context)
         return;
     }
 
-    serial_write_string("rtl8139: tx state[");
+    serial_printf("%s", "rtl8139: tx state[");
     if (context)
     {
-        serial_write_string(context);
+        serial_printf("%s", context);
     }
-    serial_write_string("] inflight=0x");
+    serial_printf("%s", "] inflight=0x");
     rtl8139_log_hex16((uint16_t)g_tx_inflight);
-    serial_write_string(" queue=0x");
+    serial_printf("%s", " queue=0x");
     rtl8139_log_hex16((uint16_t)g_tx_queue_count);
-    serial_write_string(" head=0x");
+    serial_printf("%s", " head=0x");
     rtl8139_log_hex16((uint16_t)g_tx_queue_head);
-    serial_write_string(" tail=0x");
+    serial_printf("%s", " tail=0x");
     rtl8139_log_hex16((uint16_t)g_tx_queue_tail);
-    serial_write_string(" hw_cur=0x");
+    serial_printf("%s", " hw_cur=0x");
     rtl8139_log_hex16((uint16_t)g_hw_tx_cursor);
-    serial_write_string(" tail_cur=0x");
+    serial_printf("%s", " tail_cur=0x");
     rtl8139_log_hex16((uint16_t)g_tx_tail_cursor);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 
     for (int i = 0; i < RTL_TX_SLOT_COUNT; ++i)
     {
         uint32_t tsd = inl(g_io_base + RTL_REG_TSD0 + i * 4);
-        serial_write_string("rtl8139:   slot=");
+        serial_printf("%s", "rtl8139:   slot=");
         rtl8139_log_hex8((uint8_t)i);
-        serial_write_string(" tsd=0x");
+        serial_printf("%s", " tsd=0x");
         rtl8139_log_hex32(tsd);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
     }
 
     g_tx_dump_budget--;
@@ -988,28 +988,28 @@ static void rtl8139_tx_log_meta(const char *context, int slot, const rtl8139_tx_
         return;
     }
 
-    serial_write_string("rtl8139: tx meta[");
+    serial_printf("%s", "rtl8139: tx meta[");
     if (context)
     {
-        serial_write_string(context);
+        serial_printf("%s", context);
     }
-    serial_write_string("] slot=0x");
+    serial_printf("%s", "] slot=0x");
     rtl8139_log_hex8((uint8_t)slot);
-    serial_write_string(" seq=0x");
+    serial_printf("%s", " seq=0x");
     rtl8139_log_hex32(meta->seq);
-    serial_write_string(" ack=0x");
+    serial_printf("%s", " ack=0x");
     rtl8139_log_hex32(meta->ack);
-    serial_write_string(" flags=0x");
+    serial_printf("%s", " flags=0x");
     rtl8139_log_hex16(meta->flags);
-    serial_write_string(" len=0x");
+    serial_printf("%s", " len=0x");
     rtl8139_log_hex16(meta->length);
-    serial_write_string(" dticks=0x");
+    serial_printf("%s", " dticks=0x");
     rtl8139_log_hex32((uint32_t)delta);
-    serial_write_string(" tsd=0x");
+    serial_printf("%s", " tsd=0x");
     rtl8139_log_hex32(tsd);
-    serial_write_string(" ");
+    serial_printf("%s", " ");
     rtl8139_log_tsd_status(tsd);
-    serial_write_string("]\r\n");
+    serial_printf("%s", "]\r\n");
 
     g_tx_dump_budget--;
 #endif
@@ -1072,20 +1072,20 @@ static void rtl8139_tx_force_release(const char *context)
         }
         if (g_tx_dump_budget > 0)
         {
-            serial_write_string("rtl8139: tx force release[");
+            serial_printf("%s", "rtl8139: tx force release[");
             if (context)
             {
-                serial_write_string(context);
+                serial_printf("%s", context);
             }
-            serial_write_string("] slot=0x");
+            serial_printf("%s", "] slot=0x");
             rtl8139_log_hex8((uint8_t)slot);
-            serial_write_string(" dticks=0x");
+            serial_printf("%s", " dticks=0x");
             rtl8139_log_hex32((uint32_t)delta);
-            serial_write_string(" tsd=0x");
+            serial_printf("%s", " tsd=0x");
             rtl8139_log_hex32(tsd);
-            serial_write_string(" ");
+            serial_printf("%s", " ");
             rtl8139_log_tsd_status(tsd);
-            serial_write_string("\r\n");
+            serial_printf("%s", "\r\n");
             g_tx_dump_budget--;
         }
         outl(g_io_base + RTL_REG_TSD0 + slot * 4, 0x00002000U);
@@ -1113,24 +1113,24 @@ static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t l
     }
 
     size_t limit = (len < 64) ? len : 64;
-    serial_write_string(prefix);
-    serial_write_string(" len=0x");
+    serial_printf("%s", prefix);
+    serial_printf("%s", " len=0x");
     rtl8139_log_hex16((uint16_t)len);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 
     size_t idx = 0;
     while (idx < limit)
     {
-        serial_write_string("rtl8139:   ");
+        serial_printf("%s", "rtl8139:   ");
         for (size_t j = 0; j < 16 && idx < limit; ++j, ++idx)
         {
             rtl8139_log_hex8(data[idx]);
             if (j != 15 && idx < limit)
             {
-                serial_write_char(' ');
+                serial_printf("%c", ' ');
             }
         }
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
     }
 #endif
 }
@@ -1143,38 +1143,38 @@ static void rtl8139_dump_frame(int slot, size_t len, const uint8_t *data)
     (void)data;
     return;
 #else
-    serial_write_string("rtl8139: frame[slot=");
+    serial_printf("%s", "rtl8139: frame[slot=");
     rtl8139_log_hex8((uint8_t)slot);
-    serial_write_string("] len=0x");
+    serial_printf("%s", "] len=0x");
     rtl8139_log_hex16((uint16_t)len);
-    serial_write_string(" data=");
+    serial_printf("%s", " data=");
     size_t preview = (len < 64) ? len : 64;
     for (size_t i = 0; i < preview; ++i)
     {
         rtl8139_log_hex8(data[i]);
         if ((i & 0x0F) == 0x0F || i + 1 == preview)
         {
-            serial_write_string("\r\n");
+            serial_printf("%s", "\r\n");
             if (i + 1 < preview)
             {
-                serial_write_string("rtl8139: ");
+                serial_printf("%s", "rtl8139: ");
             }
         }
         else
         {
-            serial_write_char(' ');
+            serial_printf("%c", ' ');
         }
     }
 #endif
 }
 
 static void rtl8139_log_tsd_status(uint32_t tsd) {
-    serial_write_string("[");
-    if (tsd & 0x40000000U) serial_write_string("TABT ");    // abort
-    if (tsd & 0x00004000U) serial_write_string("TUN ");     // underrun
-    if (tsd & 0x00008000U) serial_write_string("TOK ");     // tx ok
-    if (tsd & 0x00002000U) serial_write_string("OWN=host "); // free
-    serial_write_string("]");
+    serial_printf("%s", "[");
+    if (tsd & 0x40000000U) serial_printf("%s", "TABT ");    // abort
+    if (tsd & 0x00004000U) serial_printf("%s", "TUN ");     // underrun
+    if (tsd & 0x00008000U) serial_printf("%s", "TOK ");     // tx ok
+    if (tsd & 0x00002000U) serial_printf("%s", "OWN=host "); // free
+    serial_printf("%s", "]");
 }
 
 static uint8_t *rtl8139_rx_bounce_acquire(void)

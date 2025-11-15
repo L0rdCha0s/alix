@@ -20,6 +20,7 @@
 #include "smp.h"
 #include "spinlock.h"
 #include "build_features.h"
+#include <stddef.h>
 
 extern uintptr_t kernel_heap_end;
 
@@ -31,26 +32,40 @@ extern uintptr_t kernel_heap_end;
 
 #define PROCESS_STACK_GUARD_SIZE         (4096UL)
 #define STACK_GUARD_PATTERN              0x5A
-#define ENABLE_SMP_BOOT_STACK_SCAN         1
+#define ENABLE_SMP_BOOT_STACK_SCAN         0
 #define SMP_BOOT_STACK_SCAN_MAX_QWORDS     8192ULL
 #define STACK_SCAN_DUMP_CONTEXT_QWORDS     16ULL
 #ifndef ENABLE_SCHEDULER_STACK_DUMP
 #define ENABLE_SCHEDULER_STACK_DUMP      0
 #endif
 #define SCHEDULER_STACK_DUMP_QWORDS      32ULL
-#define ENABLE_CONTEXT_GUARD             1
+#ifndef ENABLE_CONTEXT_GUARD
+#define ENABLE_CONTEXT_GUARD             0
+#endif
 #define CONTEXT_GUARD_WORDS              8ULL
-#define ENABLE_STACK_WRITE_DEBUG         1
+#ifndef ENABLE_STACK_WRITE_DEBUG
+#define ENABLE_STACK_WRITE_DEBUG         0
+#endif
+#ifndef STACK_WATCH_SNAPSHOT_BYTES
 #define STACK_WATCH_SNAPSHOT_BYTES       128ULL
+#endif
+#ifndef STACK_WATCH_TIMEOUT_LIMIT
 #define STACK_WATCH_TIMEOUT_LIMIT        20U
+#endif
 #ifndef ENABLE_STACK_WRITE_DEBUG_LOGS
-#define ENABLE_STACK_WRITE_DEBUG_LOGS    1
+#define ENABLE_STACK_WRITE_DEBUG_LOGS    0
 #endif
 #ifndef ENABLE_STACK_SCAN_LOGS
 #define ENABLE_STACK_SCAN_LOGS           0
 #endif
 #ifndef ENABLE_STACK_GUARD_PROTECT
 #define ENABLE_STACK_GUARD_PROTECT       0
+#endif
+#ifndef CONTEXT_GUARD_STRICT
+#define CONTEXT_GUARD_STRICT             0
+#endif
+#ifndef THREAD_CREATE_DEBUG
+#define THREAD_CREATE_DEBUG              1
 #endif
 
 #define STATIC_ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
@@ -65,7 +80,11 @@ static const char *const g_context_guard_reg_names[] = {
     "rflags"
 };
 
+static void thread_trampoline(void) __attribute__((noreturn));
+
 static void fatal(const char *msg) __attribute__((noreturn));
+static bool string_name_equals(const char *lhs, const char *rhs);
+static void process_create_log(const char *name, const char *event);
 
 #define USER_ADDRESS_SPACE_BASE   0x0000008000000000ULL
 #define USER_STUB_CODE_BASE       (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
@@ -169,6 +188,7 @@ struct thread
     thread_tls_t tls;
     process_t *process;
     cpu_context_t *context;
+    bool context_valid;
     uint8_t *stack_base;
     uint8_t *stack_guard_base;
     uint8_t *stack_allocation_raw;
@@ -179,6 +199,7 @@ struct thread
     void *arg;
     thread_state_t state;
     struct thread *queue_next;
+    struct thread *registry_next;
     fpu_state_t fpu_state;
     uint64_t fs_base;
     uint64_t gs_base;
@@ -191,6 +212,7 @@ struct thread
     bool in_run_queue;
     bool is_idle;
     bool exited;
+    bool in_transition;
     bool preempt_pending;
     bool fpu_initialized;
     wait_queue_t *waiting_queue;
@@ -296,11 +318,15 @@ static spinlock_t g_run_queue_lock;
 static spinlock_t g_sleep_queue_lock;
 static spinlock_t g_process_lock;
 
+static volatile bool g_scheduler_boot_ready = false;
+
 static fpu_state_t g_fpu_initial_state;
 static bool g_fpu_template_ready = false;
 static int g_console_stdout_fd = -1;
 static uint32_t g_time_slice_ticks = PROCESS_TIME_SLICE_DEFAULT_TICKS;
 static thread_t *g_stack_watch_frozen_head = NULL;
+static thread_t *g_thread_registry_head = NULL;
+static spinlock_t g_thread_registry_lock;
 
 static void thread_freeze_for_stack_watch(thread_t *thread, const char *context);
 static void thread_unfreeze_after_stack_watch(thread_t *thread);
@@ -350,6 +376,8 @@ static void thread_scan_stack_for_suspicious_values(thread_t *thread,
                                                     uintptr_t rsp,
                                                     bool full_stack,
                                                     const char *context);
+static bool thread_context_in_bounds(thread_t *thread,
+                                     const char *reason);
 
 static ssize_t console_stdout_write(void *ctx, const void *buffer, size_t count)
 {
@@ -363,11 +391,7 @@ static ssize_t console_stdout_write(void *ctx, const void *buffer, size_t count)
     {
         char c = data[i];
         console_putc(c);
-        if (c == '\n')
-        {
-            serial_write_char('\r');
-        }
-        serial_write_char(c);
+        serial_printf("%c", c);
     }
     return (ssize_t)count;
 }
@@ -430,18 +454,18 @@ static bool thread_pointer_valid(const thread_t *thread)
     bool valid = pointer_in_heap((uint64_t)(uintptr_t)thread, sizeof(thread_t));
     if (!valid)
     {
-        serial_write_string("[proc] priority thread ptr invalid addr=0x");
-        serial_write_hex64((uint64_t)(uintptr_t)thread);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[proc] priority thread ptr invalid addr=0x");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)thread));
+        serial_printf("%s", "\r\n");
         return false;
     }
     if (thread->magic != THREAD_MAGIC)
     {
-        serial_write_string("[proc] priority thread magic mismatch addr=0x");
-        serial_write_hex64((uint64_t)(uintptr_t)thread);
-        serial_write_string(" magic=0x");
-        serial_write_hex64((uint64_t)thread->magic);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[proc] priority thread magic mismatch addr=0x");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)thread));
+        serial_printf("%s", " magic=0x");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)thread->magic));
+        serial_printf("%s", "\r\n");
         return false;
     }
     return true;
@@ -456,18 +480,18 @@ static bool process_pointer_valid(const process_t *process)
     bool valid = pointer_in_heap((uint64_t)(uintptr_t)process, sizeof(process_t));
     if (!valid)
     {
-        serial_write_string("[proc] process ptr invalid addr=0x");
-        serial_write_hex64((uint64_t)(uintptr_t)process);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[proc] process ptr invalid addr=0x");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)process));
+        serial_printf("%s", "\r\n");
         return false;
     }
     if (process->magic != PROCESS_MAGIC)
     {
-        serial_write_string("[proc] process magic mismatch addr=0x");
-        serial_write_hex64((uint64_t)(uintptr_t)process);
-        serial_write_string(" magic=0x");
-        serial_write_hex64((uint64_t)process->magic);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[proc] process magic mismatch addr=0x");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)process));
+        serial_printf("%s", " magic=0x");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)process->magic));
+        serial_printf("%s", "\r\n");
         return false;
     }
     return true;
@@ -484,13 +508,13 @@ static uint64_t sanitize_gs_base(thread_t *thread)
     {
         uint64_t old_base = thread->gs_base;
         thread->gs_base = (uint64_t)&thread->tls;
-        serial_write_string("process: repaired GS base for thread ");
-        serial_write_string(thread->name);
-        serial_write_string(" old=0x");
-        serial_write_hex64(old_base);
-        serial_write_string(" new=0x");
-        serial_write_hex64(thread->gs_base);
-        serial_write_string("\r\n");
+        serial_printf("%s", "process: repaired GS base for thread ");
+        serial_printf("%s", thread->name);
+        serial_printf("%s", " old=0x");
+        serial_printf("%016llX", (unsigned long long)(old_base));
+        serial_printf("%s", " new=0x");
+        serial_printf("%016llX", (unsigned long long)(thread->gs_base));
+        serial_printf("%s", "\r\n");
     }
     return thread->gs_base;
 }
@@ -519,11 +543,11 @@ static bool process_heap_commit_range(process_t *process, uintptr_t start, uintp
 
 static void process_log(const char *msg, uint64_t value)
 {
-    serial_write_string("[proc] ");
-    serial_write_string(msg);
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[proc] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 
 static void process_handle_stack_guard_fault(void) __attribute__((noreturn));
@@ -729,57 +753,18 @@ static bool thread_stack_candidate_matches(thread_t *thread,
 static thread_t *thread_find_stack_owner(uintptr_t addr, size_t len)
 {
     thread_t *owner = NULL;
-    process_t *proc = g_process_list;
-    while (proc)
+    spinlock_lock(&g_thread_registry_lock);
+    thread_t *cursor = g_thread_registry_head;
+    while (cursor)
     {
-        if (thread_stack_candidate_matches(proc->main_thread, addr, len, &owner))
+        if (thread_stack_candidate_matches(cursor, addr, len, &owner))
         {
-            return owner;
+            break;
         }
-        if (proc->current_thread && proc->current_thread != proc->main_thread &&
-            thread_stack_candidate_matches(proc->current_thread, addr, len, &owner))
-        {
-            return owner;
-        }
-        proc = proc->next;
+        cursor = cursor->registry_next;
     }
-
-    for (int pr = THREAD_PRIORITY_IDLE; pr < THREAD_PRIORITY_COUNT; ++pr)
-    {
-        thread_t *cursor = g_run_queue_heads[pr];
-        while (cursor)
-        {
-            if (thread_stack_candidate_matches(cursor, addr, len, &owner))
-            {
-                return owner;
-            }
-            cursor = cursor->queue_next;
-        }
-    }
-
-    thread_t *sleep_cursor = g_sleep_queue_head;
-    while (sleep_cursor)
-    {
-        if (thread_stack_candidate_matches(sleep_cursor, addr, len, &owner))
-        {
-            return owner;
-        }
-        sleep_cursor = sleep_cursor->sleep_queue_next;
-    }
-
-    for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; ++cpu)
-    {
-        if (thread_stack_candidate_matches(g_current_threads[cpu], addr, len, &owner))
-        {
-            return owner;
-        }
-        if (thread_stack_candidate_matches(g_idle_threads[cpu], addr, len, &owner))
-        {
-            return owner;
-        }
-    }
-
-    return NULL;
+    spinlock_unlock(&g_thread_registry_lock);
+    return owner;
 }
 #endif
 
@@ -805,6 +790,39 @@ static void thread_free_resources(thread_t *thread);
 static void thread_enqueue_deferred_free(thread_t *thread);
 static void thread_process_deferred_frees(uint32_t cpu_index);
 
+static void thread_registry_add(thread_t *thread)
+{
+    if (!thread)
+    {
+        return;
+    }
+    spinlock_lock(&g_thread_registry_lock);
+    thread->registry_next = g_thread_registry_head;
+    g_thread_registry_head = thread;
+    spinlock_unlock(&g_thread_registry_lock);
+}
+
+static void thread_registry_remove(thread_t *thread)
+{
+    if (!thread)
+    {
+        return;
+    }
+    spinlock_lock(&g_thread_registry_lock);
+    thread_t **cursor = &g_thread_registry_head;
+    while (*cursor)
+    {
+        if (*cursor == thread)
+        {
+            *cursor = thread->registry_next;
+            break;
+        }
+        cursor = &(*cursor)->registry_next;
+    }
+    thread->registry_next = NULL;
+    spinlock_unlock(&g_thread_registry_lock);
+}
+
 #if ENABLE_STACK_WRITE_DEBUG
 static bool thread_stack_watch_can_arm_now(const thread_t *thread)
 {
@@ -813,6 +831,10 @@ static bool thread_stack_watch_can_arm_now(const thread_t *thread)
         return false;
     }
     if (thread == current_thread_local())
+    {
+        return false;
+    }
+    if (thread->state == THREAD_STATE_RUNNING)
     {
         return false;
     }
@@ -834,7 +856,7 @@ static bool thread_stack_watch_arm_now(thread_t *thread)
     size_t length = (size_t)(top - base);
     if (!paging_set_kernel_range_writable(base, length, false))
     {
-        serial_write_string("[sched] warning: unable to arm stack watch\r\n");
+        serial_printf("%s", "[sched] warning: unable to arm stack watch\r\n");
         return false;
     }
     thread->stack_watch_active = true;
@@ -842,26 +864,26 @@ static bool thread_stack_watch_arm_now(thread_t *thread)
     thread->stack_watch_len = length;
 
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
-    serial_write_string("[sched] stack watch armed thread=");
+    serial_printf("%s", "[sched] stack watch armed thread=");
     if (thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(thread->process ? thread->process->pid : 0);
-    serial_write_string(" context=");
-    serial_write_string(thread->stack_watch_context ? thread->stack_watch_context : "<none>");
-    serial_write_string(" suspect=0x");
-    serial_write_hex64(thread->stack_watch_suspect);
-    serial_write_string(" base=0x");
-    serial_write_hex64(base);
-    serial_write_string(" top=0x");
-    serial_write_hex64(top);
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " context=");
+    serial_printf("%s", thread->stack_watch_context ? thread->stack_watch_context : "<none>");
+    serial_printf("%s", " suspect=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->stack_watch_suspect));
+    serial_printf("%s", " base=0x");
+    serial_printf("%016llX", (unsigned long long)(base));
+    serial_printf("%s", " top=0x");
+    serial_printf("%016llX", (unsigned long long)(top));
+    serial_printf("%s", "\r\n");
 #endif
     thread->stack_watch_timeout_logged = false;
     thread_stack_watch_capture_snapshot(thread);
@@ -902,20 +924,20 @@ static bool thread_stack_watch_activate(thread_t *thread,
     if (!was_enabled)
     {
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
-        serial_write_string("[sched] stack watch pending thread=");
+        serial_printf("%s", "[sched] stack watch pending thread=");
         if (thread->name[0])
         {
-            serial_write_string(thread->name);
+            serial_printf("%s", thread->name);
         }
         else
         {
-            serial_write_string("<unnamed>");
+            serial_printf("%s", "<unnamed>");
         }
-        serial_write_string(" pid=0x");
-        serial_write_hex64(thread->process ? thread->process->pid : 0);
-        serial_write_string(" context=");
-        serial_write_string(thread->stack_watch_context ? thread->stack_watch_context : "<none>");
-        serial_write_string("\r\n");
+        serial_printf("%s", " pid=0x");
+        serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+        serial_printf("%s", " context=");
+        serial_printf("%s", thread->stack_watch_context ? thread->stack_watch_context : "<none>");
+        serial_printf("%s", "\r\n");
 #endif
     }
     return true;
@@ -948,21 +970,21 @@ static void thread_stack_watch_deactivate(thread_t *thread)
                                           thread->stack_watch_len,
                                           true))
     {
-        serial_write_string("[sched] warning: unable to disarm stack watch\r\n");
+        serial_printf("%s", "[sched] warning: unable to disarm stack watch\r\n");
     }
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
-    serial_write_string("[sched] stack watch cleared thread=");
+    serial_printf("%s", "[sched] stack watch cleared thread=");
     if (thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(thread->process ? thread->process->pid : 0);
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", "\r\n");
 #endif
     thread->stack_watch_active = false;
     thread->stack_watch_base = 0;
@@ -984,6 +1006,7 @@ static void thread_free_resources(thread_t *thread)
     {
         return;
     }
+    thread_registry_remove(thread);
     if (thread->stack_allocation_raw)
     {
         free(thread->stack_allocation_raw);
@@ -1037,6 +1060,41 @@ static void thread_process_deferred_frees(uint32_t cpu_index)
     }
 }
 
+static bool thread_context_in_bounds(thread_t *thread,
+                                     const char *reason)
+{
+    if (!thread)
+    {
+        return true;
+    }
+    uintptr_t ctx = (uintptr_t)thread->context;
+    uintptr_t lower = (uintptr_t)thread->stack_base;
+    uintptr_t upper = thread->kernel_stack_top;
+    if (lower == 0 || upper <= lower)
+    {
+        return true;
+    }
+    if (ctx >= lower && ctx < upper)
+    {
+        return true;
+    }
+
+    serial_printf("%s", "[sched] context pointer out of bounds ");
+    serial_printf("%s", reason ? reason : "<none>");
+    serial_printf("%s", " thread=");
+    serial_printf("%s", thread->name[0] ? thread->name : "<unnamed>");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " ctx=0x");
+    serial_printf("%016llX", (unsigned long long)ctx);
+    serial_printf("%s", " stack=[0x");
+    serial_printf("%016llX", (unsigned long long)lower);
+    serial_printf("%s", ",0x");
+    serial_printf("%016llX", (unsigned long long)upper);
+    serial_printf("%s", ")\r\n");
+    fatal("context pointer out of bounds");
+}
+
 static void thread_check_context_bounds(const thread_t *thread,
                                         const char *label)
 {
@@ -1057,43 +1115,43 @@ static void thread_check_context_bounds(const thread_t *thread,
         return;
     }
 
-    serial_write_string("[sched] context ptr out of range label=");
-    serial_write_string(label ? label : "<none>");
-    serial_write_string(" thread=");
+    serial_printf("%s", "[sched] context ptr out of range label=");
+    serial_printf("%s", label ? label : "<none>");
+    serial_printf("%s", " thread=");
     if (thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(thread->process ? thread->process->pid : 0);
-    serial_write_string(" ptr=0x");
-    serial_write_hex64(ctx);
-    serial_write_string(" stack_base=0x");
-    serial_write_hex64(lower);
-    serial_write_string(" stack_top=0x");
-    serial_write_hex64(upper);
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " ptr=0x");
+    serial_printf("%016llX", (unsigned long long)(ctx));
+    serial_printf("%s", " stack_base=0x");
+    serial_printf("%016llX", (unsigned long long)(lower));
+    serial_printf("%s", " stack_top=0x");
+    serial_printf("%016llX", (unsigned long long)(upper));
+    serial_printf("%s", "\r\n");
 
 #if ENABLE_STACK_WRITE_DEBUG
     thread_t *owner = thread_find_stack_owner(ctx, 0);
     if (owner)
     {
-        serial_write_string("  ctx points into stack owned by thread=");
+        serial_printf("%s", "  ctx points into stack owned by thread=");
         if (owner->name[0])
         {
-            serial_write_string(owner->name);
+            serial_printf("%s", owner->name);
         }
         else
         {
-            serial_write_string("<unnamed>");
+            serial_printf("%s", "<unnamed>");
         }
-        serial_write_string(" pid=0x");
-        serial_write_hex64(owner->process ? owner->process->pid : 0);
-        serial_write_string("\r\n");
+        serial_printf("%s", " pid=0x");
+        serial_printf("%016llX", (unsigned long long)(owner->process ? owner->process->pid : 0));
+        serial_printf("%s", "\r\n");
     }
 #endif
     fatal("thread context pointer corrupt");
@@ -1157,24 +1215,24 @@ static void thread_log_stack_issue(const thread_t *thread,
                                    const char *context,
                                    const char *reason)
 {
-    serial_write_string("[proc] stack issue thread=");
+    serial_printf("%s", "[proc] stack issue thread=");
     if (thread && thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" ctx=");
-    serial_write_string(context ? context : "<none>");
-    serial_write_string(" reason=");
-    serial_write_string(reason ? reason : "<unknown>");
-    serial_write_string(" stack_base=0x");
-    serial_write_hex64((uintptr_t)(thread ? thread->stack_base : 0));
-    serial_write_string(" stack_top=0x");
-    serial_write_hex64(thread ? thread->kernel_stack_top : 0);
-    serial_write_string("\r\n");
+    serial_printf("%s", " ctx=");
+    serial_printf("%s", context ? context : "<none>");
+    serial_printf("%s", " reason=");
+    serial_printf("%s", reason ? reason : "<unknown>");
+    serial_printf("%s", " stack_base=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)(thread ? thread->stack_base : 0)));
+    serial_printf("%s", " stack_top=0x");
+    serial_printf("%016llX", (unsigned long long)(thread ? thread->kernel_stack_top : 0));
+    serial_printf("%s", "\r\n");
 }
 
 static void thread_assert_stack_current(thread_t *thread, const char *context)
@@ -1219,11 +1277,11 @@ static void scheduler_debug_dump_stack(const uint64_t *base, size_t count)
     }
     for (size_t i = 0; i < count; ++i)
     {
-        serial_write_string("    [0x");
-        serial_write_hex64((uintptr_t)(base + i));
-        serial_write_string("] = 0x");
-        serial_write_hex64(base[i]);
-        serial_write_string("\r\n");
+        serial_printf("%s", "    [0x");
+        serial_printf("%016llX", (unsigned long long)((uintptr_t)(base + i)));
+        serial_printf("%s", "] = 0x");
+        serial_printf("%016llX", (unsigned long long)(base[i]));
+        serial_printf("%s", "\r\n");
     }
 }
 
@@ -1282,24 +1340,24 @@ static void scheduler_debug_dump_thread_stack(thread_t *thread, const char *labe
     }
 
     const uint64_t *start = (const uint64_t *)start_addr;
-    serial_write_string("[sched] stack snapshot label=");
-    serial_write_string(label ? label : "<none>");
-    serial_write_string(" thread=");
+    serial_printf("%s", "[sched] stack snapshot label=");
+    serial_printf("%s", label ? label : "<none>");
+    serial_printf("%s", " thread=");
     if (thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(thread->process ? thread->process->pid : 0);
-    serial_write_string(" entries=");
-    serial_write_hex64(dump_qwords);
-    serial_write_string(" ctx=0x");
-    serial_write_hex64(ctx_ptr);
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " entries=");
+    serial_printf("%016llX", (unsigned long long)(dump_qwords));
+    serial_printf("%s", " ctx=0x");
+    serial_printf("%016llX", (unsigned long long)(ctx_ptr));
+    serial_printf("%s", "\r\n");
     scheduler_debug_dump_stack(start, dump_qwords);
 #else
     (void)thread;
@@ -1328,26 +1386,26 @@ static void thread_log_stack_scan_hit(thread_t *thread,
                                       uint64_t value)
 {
 #if ENABLE_STACK_SCAN_LOGS
-    serial_write_string("[proc] stack scan hit reason=");
-    serial_write_string(reason ? reason : "<unknown>");
-    serial_write_string(" ctx=");
-    serial_write_string(context ? context : "<none>");
-    serial_write_string(" thread=");
+    serial_printf("%s", "[proc] stack scan hit reason=");
+    serial_printf("%s", reason ? reason : "<unknown>");
+    serial_printf("%s", " ctx=");
+    serial_printf("%s", context ? context : "<none>");
+    serial_printf("%s", " thread=");
     if (thread && thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(thread && thread->process ? thread->process->pid : 0);
-    serial_write_string(" addr=0x");
-    serial_write_hex64(addr);
-    serial_write_string(" value=0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread && thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " addr=0x");
+    serial_printf("%016llX", (unsigned long long)(addr));
+    serial_printf("%s", " value=0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 
     if (thread && thread->stack_base)
     {
@@ -1390,6 +1448,8 @@ static void scheduler_debug_check_resume(thread_t *thread, const char *label)
         return;
     }
 
+    thread_context_in_bounds(thread, "resume_check");
+
     const size_t saved_context_words = 7; /* pushfq + rbp + rbx + r12-15 */
     const uint64_t *context_words = (const uint64_t *)thread->context;
     uint64_t resume_rip = context_words[saved_context_words];
@@ -1402,32 +1462,32 @@ static void scheduler_debug_check_resume(thread_t *thread, const char *label)
     }
 
     process_t *proc = thread->process;
-    serial_write_string("[sched] resume rip anomaly label=");
-    serial_write_string(label ? label : "<none>");
-    serial_write_string(" reason=");
-    serial_write_string(resume_zero ? "zero" : "smp_boot");
-    serial_write_string(" cpu=");
-    serial_write_hex64(current_cpu_index());
-    serial_write_string(" thread=");
+    serial_printf("%s", "[sched] resume rip anomaly label=");
+    serial_printf("%s", label ? label : "<none>");
+    serial_printf("%s", " reason=");
+    serial_printf("%s", resume_zero ? "zero" : "smp_boot");
+    serial_printf("%s", " cpu=");
+    serial_printf("%016llX", (unsigned long long)(current_cpu_index()));
+    serial_printf("%s", " thread=");
     if (thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(proc ? proc->pid : 0);
-    serial_write_string(" resume_rip=0x");
-    serial_write_hex64(resume_rip);
-    serial_write_string(" ctx=0x");
-    serial_write_hex64((uintptr_t)thread->context);
-    serial_write_string(" stack_base=0x");
-    serial_write_hex64((uintptr_t)thread->stack_base);
-    serial_write_string(" stack_top=0x");
-    serial_write_hex64(thread->kernel_stack_top);
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(proc ? proc->pid : 0));
+    serial_printf("%s", " resume_rip=0x");
+    serial_printf("%016llX", (unsigned long long)(resume_rip));
+    serial_printf("%s", " ctx=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->context));
+    serial_printf("%s", " stack_base=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
+    serial_printf("%s", " stack_top=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->kernel_stack_top));
+    serial_printf("%s", "\r\n");
 
     const uint64_t *stack_dump = context_words + saved_context_words;
     scheduler_debug_dump_stack(stack_dump, 16);
@@ -1473,7 +1533,9 @@ static void thread_scan_stack_for_suspicious_values(thread_t *thread,
         if (stack_value_is_suspicious(value, &reason))
         {
             thread_log_stack_scan_hit(thread, context, reason, (uintptr_t)cursor, value);
+#if ENABLE_STACK_WRITE_DEBUG
             thread_stack_watch_activate(thread, context, (uintptr_t)cursor);
+#endif
             return;
         }
         cursor++;
@@ -1563,35 +1625,35 @@ static void context_guard_dump_window(thread_t *thread,
     {
         end = upper;
     }
-    serial_write_string("[sched] context_guard window thread=");
+    serial_printf("%s", "[sched] context_guard window thread=");
     if (thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(thread->process ? thread->process->pid : 0);
-    serial_write_string(" focus=0x");
-    serial_write_hex64(focus_addr);
-    serial_write_string(" range=[0x");
-    serial_write_hex64(start);
-    serial_write_string(",0x");
-    serial_write_hex64(end);
-    serial_write_string(")\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " focus=0x");
+    serial_printf("%016llX", (unsigned long long)(focus_addr));
+    serial_printf("%s", " range=[0x");
+    serial_printf("%016llX", (unsigned long long)(start));
+    serial_printf("%s", ",0x");
+    serial_printf("%016llX", (unsigned long long)(end));
+    serial_printf("%s", ")\r\n");
     for (uintptr_t addr = start; addr + sizeof(uint64_t) <= end; addr += sizeof(uint64_t))
     {
-        serial_write_string("  [");
-        serial_write_hex64(addr);
-        serial_write_string("] = 0x");
-        serial_write_hex64(*(const uint64_t *)addr);
+        serial_printf("%s", "  [");
+        serial_printf("%016llX", (unsigned long long)(addr));
+        serial_printf("%s", "] = 0x");
+        serial_printf("%016llX", (unsigned long long)(*(const uint64_t *)addr));
         if (addr == focus_addr)
         {
-            serial_write_string(" <-- target");
+            serial_printf("%s", " <-- target");
         }
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
     }
 #else
     (void)thread;
@@ -1635,7 +1697,7 @@ static void thread_context_guard_release_pages(thread_t *thread)
                                           thread->context_guard_protect_len,
                                           true))
     {
-        serial_write_string("[sched] warning: failed to unprotect stack guard region\r\n");
+        serial_printf("%s", "[sched] warning: failed to unprotect stack guard region\r\n");
     }
     thread->context_guard_protected = false;
     thread->context_guard_protect_base = 0;
@@ -1669,7 +1731,7 @@ static void thread_context_guard_protect_pages(thread_t *thread)
     }
     if (!paging_set_kernel_range_writable(start, length, false))
     {
-        serial_write_string("[sched] warning: failed to protect stack guard region\r\n");
+        serial_printf("%s", "[sched] warning: failed to protect stack guard region\r\n");
         return;
     }
     thread->context_guard_protect_base = start;
@@ -1781,6 +1843,25 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
     {
         return;
     }
+#if !CONTEXT_GUARD_STRICT
+    serial_printf("%s", "[sched] context guard mismatch (resync) label=");
+    serial_printf("%s", label ? label : "<none>");
+    serial_printf("%s", " thread=");
+    serial_printf("%s", thread->name[0] ? thread->name : "<unnamed>");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " saved_ptr=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->context_guard_ptr));
+    serial_printf("%s", " current_ptr=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->context));
+    serial_printf("%s", " saved_hash=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->context_guard_hash));
+    serial_printf("%s", " current_hash=0x");
+    serial_printf("%016llX", (unsigned long long)(current_hash));
+    serial_printf("%s", "\r\n");
+    thread_context_guard_update(thread, "context_guard_resync_soft");
+    return;
+#endif
     size_t diff_index = (size_t)-1;
     for (size_t i = 0; i < compare_words; ++i)
     {
@@ -1795,41 +1876,41 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
         thread_context_guard_update(thread, "context_guard_r14");
         return;
     }
-    serial_write_string("[sched] context guard mismatch label=");
-    serial_write_string(label ? label : "<none>");
-    serial_write_string(" thread=");
+    serial_printf("%s", "[sched] context guard mismatch label=");
+    serial_printf("%s", label ? label : "<none>");
+    serial_printf("%s", " thread=");
     if (thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(thread->process ? thread->process->pid : 0);
-    serial_write_string(" saved_ptr=0x");
-    serial_write_hex64(thread->context_guard_ptr);
-    serial_write_string(" current_ptr=0x");
-    serial_write_hex64((uintptr_t)thread->context);
-    serial_write_string(" saved_hash=0x");
-    serial_write_hex64(thread->context_guard_hash);
-    serial_write_string(" current_hash=0x");
-    serial_write_hex64(current_hash);
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " saved_ptr=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->context_guard_ptr));
+    serial_printf("%s", " current_ptr=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->context));
+    serial_printf("%s", " saved_hash=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->context_guard_hash));
+    serial_printf("%s", " current_hash=0x");
+    serial_printf("%016llX", (unsigned long long)(current_hash));
+    serial_printf("%s", "\r\n");
     uintptr_t diff_addr = 0;
     if (diff_index != (size_t)-1)
     {
         diff_addr = thread->context_guard_ptr + diff_index * sizeof(uint64_t);
-        serial_write_string("  diff_index=0x");
-        serial_write_hex64(diff_index);
-        serial_write_string(" addr=0x");
-        serial_write_hex64(diff_addr);
-        serial_write_string(" saved=0x");
-        serial_write_hex64(thread->context_guard_words[diff_index]);
-        serial_write_string(" current=0x");
-        serial_write_hex64(current_words[diff_index]);
-        serial_write_string("\r\n");
+        serial_printf("%s", "  diff_index=0x");
+        serial_printf("%016llX", (unsigned long long)(diff_index));
+        serial_printf("%s", " addr=0x");
+        serial_printf("%016llX", (unsigned long long)(diff_addr));
+        serial_printf("%s", " saved=0x");
+        serial_printf("%016llX", (unsigned long long)(thread->context_guard_words[diff_index]));
+        serial_printf("%s", " current=0x");
+        serial_printf("%016llX", (unsigned long long)(current_words[diff_index]));
+        serial_printf("%s", "\r\n");
     }
     const char *reg_name = "<unknown>";
     if (diff_index != (size_t)-1 &&
@@ -1837,9 +1918,9 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
     {
         reg_name = g_context_guard_reg_names[diff_index];
     }
-    serial_write_string("  register=");
-    serial_write_string(reg_name);
-    serial_write_string("\r\n");
+    serial_printf("%s", "  register=");
+    serial_printf("%s", reg_name);
+    serial_printf("%s", "\r\n");
     if (diff_addr)
     {
         context_guard_dump_window(thread, diff_addr, 4, 4);
@@ -1857,7 +1938,7 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
     {
         thread_freeze_for_stack_watch(thread, label);
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
-        serial_write_string("[sched] context_guard mismatch -> stack watch armed\r\n");
+        serial_printf("%s", "[sched] context_guard mismatch -> stack watch armed\r\n");
 #endif
         thread_context_guard_release_pages(thread);
         thread_context_guard_update(thread, "context_guard_watch");
@@ -1892,26 +1973,34 @@ static void process_trigger_fatal_fault(thread_t *thread,
     frame->rflags &= ~RFLAGS_IF_BIT;
 }
 
-__attribute__((naked)) static void context_switch(cpu_context_t **, cpu_context_t *)
+__attribute__((naked)) static void context_switch(cpu_context_t **,
+                                                 cpu_context_t *,
+                                                 uint8_t *)
 {
     __asm__ volatile (
         "pushfq\n\t"
-        "push %rbp\n\t"
-        "push %rbx\n\t"
-        "push %r12\n\t"
-        "push %r13\n\t"
-        "push %r14\n\t"
-        "push %r15\n\t"
-        "mov %rsp, (%rdi)\n\t"
-        "mov %rsi, %rsp\n\t"
-        "pop %r15\n\t"
-        "pop %r14\n\t"
-        "pop %r13\n\t"
-        "pop %r12\n\t"
-        "pop %rbx\n\t"
-        "pop %rbp\n\t"
+        "push %%rbp\n\t"
+        "push %%rbx\n\t"
+        "push %%r12\n\t"
+        "push %%r13\n\t"
+        "push %%r14\n\t"
+        "push %%r15\n\t"
+        "mov %%rsp, (%%rdi)\n\t"
+        "mov %%rsi, %%rsp\n\t"
+        "test %%rdx, %%rdx\n\t"
+        "jz 1f\n\t"
+        "movb $0, (%%rdx)\n\t"
+        "1:\n\t"
+        "pop %%r15\n\t"
+        "pop %%r14\n\t"
+        "pop %%r13\n\t"
+        "pop %%r12\n\t"
+        "pop %%rbx\n\t"
+        "pop %%rbp\n\t"
         "popfq\n\t"
         "ret\n\t"
+        :
+        :
     );
 }
 
@@ -1938,9 +2027,9 @@ static inline void fpu_restore_state(const fpu_state_t *state)
 
 static void fatal(const char *msg)
 {
-    serial_write_string("process fatal: ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", "process fatal: ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
     for (;;)
     {
         __asm__ volatile ("hlt");
@@ -1949,19 +2038,62 @@ static void fatal(const char *msg)
 
 static process_t *allocate_process(const char *name, bool is_user)
 {
+    bool needs_clone = is_user;
+    bool trace_clone = needs_clone && string_name_equals(name, "shell");
+    if (trace_clone)
+    {
+        heap_debug_verify("shell_pre_alloc_verify");
+        heap_debug_dump("shell_pre_alloc_dump");
+        serial_printf("%s", "[process] paging trace enabled\r\n");
+        paging_set_clone_trace(true);
+    }
     process_t *proc = (process_t *)malloc(sizeof(process_t));
     if (!proc)
     {
+        if (trace_clone)
+        {
+            serial_printf("%s", "[process] shell malloc failed\r\n");
+            paging_set_clone_trace(false);
+        }
         return NULL;
     }
     memset(proc, 0, sizeof(*proc));
+    serial_printf("%s", "[process] allocate name=");
+    if (name && name[0])
+    {
+        serial_printf("%s", name);
+    }
+    else
+    {
+        serial_printf("%s", "<unnamed>");
+    }
+    serial_printf("%s", "\r\n");
     proc->pid = g_next_pid++;
     proc->state = PROCESS_STATE_READY;
-    if (!paging_clone_kernel_space(&proc->address_space))
+    bool space_ready = false;
+    if (needs_clone)
+    {
+        process_create_log(name, "clone_start");
+        space_ready = paging_clone_kernel_space(&proc->address_space);
+    }
+    else
+    {
+        process_create_log(name, "share_kernel");
+        space_ready = paging_share_kernel_space(&proc->address_space);
+    }
+    if (trace_clone)
+    {
+        heap_debug_verify("shell_post_clone_verify");
+        serial_printf("%s", "[process] paging trace disabled\r\n");
+        paging_set_clone_trace(false);
+    }
+    if (!space_ready)
     {
         free(proc);
+        process_create_log(name, "space_fail");
         return NULL;
     }
+    process_create_log(name, needs_clone ? "clone_done" : "share_done");
     proc->cr3 = proc->address_space.cr3;
     if (name)
     {
@@ -2428,15 +2560,15 @@ static bool process_store_args(process_t *process,
 
 static void process_dump_stack_entry(uintptr_t addr, uintptr_t value, bool mark_rsp)
 {
-    serial_write_string("    [");
-    serial_write_hex64(addr);
-    serial_write_string("] = 0x");
-    serial_write_hex64(value);
+    serial_printf("%s", "    [");
+    serial_printf("%016llX", (unsigned long long)(addr));
+    serial_printf("%s", "] = 0x");
+    serial_printf("%016llX", (unsigned long long)(value));
     if (mark_rsp)
     {
-        serial_write_string(" <-- rsp");
+        serial_printf("%s", " <-- rsp");
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static inline bool process_write_stack_uintptr(uint8_t *host_base,
@@ -2488,24 +2620,24 @@ void process_dump_user_stack(process_t *process,
     }
     if (!process->user_stack_host || process->user_stack_size == 0 || rsp == 0)
     {
-        serial_write_string("  user stack: unavailable\r\n");
+        serial_printf("%s", "  user stack: unavailable\r\n");
         return;
     }
 
     uintptr_t stack_top = process->user_stack_top;
     uintptr_t stack_bottom = stack_top - process->user_stack_size;
 
-    serial_write_string("  user stack: range=[");
-    serial_write_hex64(stack_bottom);
-    serial_write_string(", ");
-    serial_write_hex64(stack_top);
-    serial_write_string(") rsp=");
-    serial_write_hex64(rsp);
-    serial_write_string("\r\n");
+    serial_printf("%s", "  user stack: range=[");
+    serial_printf("%016llX", (unsigned long long)(stack_bottom));
+    serial_printf("%s", ", ");
+    serial_printf("%016llX", (unsigned long long)(stack_top));
+    serial_printf("%s", ") rsp=");
+    serial_printf("%016llX", (unsigned long long)(rsp));
+    serial_printf("%s", "\r\n");
 
     if (rsp < stack_bottom || rsp >= stack_top)
     {
-        serial_write_string("  user stack: rsp outside stack bounds\r\n");
+        serial_printf("%s", "  user stack: rsp outside stack bounds\r\n");
         return;
     }
 
@@ -2715,6 +2847,97 @@ static void process_detach_child(process_t *child);
 static process_t *process_detach_first_child(process_t *parent);
 static void process_reap_orphans(void);
 
+#define SCHEDULER_TRACE_LIMIT 64U
+
+static uint32_t g_scheduler_trace_logs = 0;
+
+static void scheduler_trace(const char *prefix, thread_t *thread)
+{
+    if (!prefix || !thread || g_scheduler_trace_logs >= SCHEDULER_TRACE_LIMIT)
+    {
+        return;
+    }
+    g_scheduler_trace_logs++;
+
+    serial_printf("%s", prefix);
+    serial_printf("%s", " thread=");
+    if (thread->name[0])
+    {
+        serial_printf("%s", thread->name);
+    }
+    else
+    {
+        serial_printf("%s", "<unnamed>");
+    }
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    serial_printf("%s", " state=");
+    serial_printf("%s", thread_state_name(thread->state));
+    serial_printf("%s", " ctx_valid=");
+    serial_printf("%s", thread->context_valid ? "true" : "false");
+    serial_printf("%s", " stack=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
+    serial_printf("%s", "\r\n");
+}
+
+static bool thread_name_equals(const thread_t *thread, const char *name)
+{
+    if (!thread || !name)
+    {
+        return false;
+    }
+    return strncmp(thread->name, name, PROCESS_NAME_MAX) == 0;
+}
+
+static bool string_name_equals(const char *lhs, const char *rhs)
+{
+    if (!lhs || !rhs)
+    {
+        return false;
+    }
+    return strncmp(lhs, rhs, PROCESS_NAME_MAX) == 0;
+}
+
+#define ENABLE_SHELL_TRACE 1
+
+static void process_create_log(const char *name, const char *event)
+{
+    if (!ENABLE_SHELL_TRACE || !string_name_equals(name, "shell"))
+    {
+        return;
+    }
+
+    serial_printf("%s", "[shell] process_create ");
+    serial_printf("%s", event ? event : "<none>");
+    serial_printf("%s", "\r\n");
+}
+
+static void scheduler_shell_log(const char *event, thread_t *thread)
+{
+    if (!ENABLE_SHELL_TRACE || !thread_name_equals(thread, "shell"))
+    {
+        return;
+    }
+
+    serial_printf("%s", "[shell] ");
+    serial_printf("%s", event);
+    serial_printf("%s", " state=");
+    serial_printf("%s", thread_state_name(thread->state));
+    serial_printf("%s", " ctx_valid=");
+    serial_printf("%s", thread->context_valid ? "true" : "false");
+    serial_printf("%s", " rsp0=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)thread->kernel_stack_top));
+    serial_printf("%s", "\r\n");
+}
+
+static void scheduler_wait_for_boot_ready(void)
+{
+    while (!__atomic_load_n(&g_scheduler_boot_ready, __ATOMIC_ACQUIRE))
+    {
+        __asm__ volatile ("hlt");
+    }
+}
+
 static process_t *process_finalize_new_process(process_t *proc,
                                                thread_t *thread,
                                                int stdout_fd,
@@ -2792,18 +3015,51 @@ static thread_t *thread_create(process_t *process,
     size_t aligned_stack = align_up_uintptr(requested_stack, PAGE_SIZE_BYTES_LOCAL);
     size_t allocation_size = guard_bytes + aligned_stack + PAGE_SIZE_BYTES_LOCAL;
     const uintptr_t heap_limit = (uintptr_t)kernel_heap_end;
+#if THREAD_CREATE_DEBUG
+    serial_printf("%s", "[thread_create] begin name=");
+    serial_printf("%s", name ? name : "<null>");
+    serial_printf("%s", " stack=0x");
+    serial_printf("%016llX", (unsigned long long)requested_stack);
+    serial_printf("%s", " aligned=0x");
+    serial_printf("%016llX", (unsigned long long)aligned_stack);
+    serial_printf("%s", " alloc=0x");
+    serial_printf("%016llX", (unsigned long long)allocation_size);
+    serial_printf("%s", " is_user=");
+    serial_printf("%s", is_user_thread ? "true" : "false");
+    serial_printf("%s", " is_idle=");
+    serial_printf("%s", is_idle ? "true" : "false");
+    serial_printf("%s", "\r\n");
+#endif
     uint8_t *raw_allocation = NULL;
     uint8_t *guard_base = NULL;
     const int max_layout_attempts = 4;
     for (int attempt = 0; attempt < max_layout_attempts; ++attempt)
     {
         raw_allocation = (uint8_t *)malloc(allocation_size);
+#if THREAD_CREATE_DEBUG
+        serial_printf("%s", "[thread_create] attempt=");
+        serial_printf("%016llX", (unsigned long long)attempt);
+        serial_printf("%s", " raw=");
+        serial_printf("%016llX", (unsigned long long)((uintptr_t)raw_allocation));
+        serial_printf("%s", "\r\n");
+#endif
         if (!raw_allocation)
         {
             break;
         }
         guard_base = (uint8_t *)align_up_uintptr((uintptr_t)raw_allocation, PAGE_SIZE_BYTES_LOCAL);
         uintptr_t stack_end = (uintptr_t)(guard_base + guard_bytes + aligned_stack);
+#if THREAD_CREATE_DEBUG
+        serial_printf("%s", "[thread_create] layout raw=");
+        serial_printf("%016llX", (unsigned long long)((uintptr_t)raw_allocation));
+        serial_printf("%s", " guard_base=");
+        serial_printf("%016llX", (unsigned long long)((uintptr_t)guard_base));
+        serial_printf("%s", " stack_end=0x");
+        serial_printf("%016llX", (unsigned long long)stack_end);
+        serial_printf("%s", " heap_limit=0x");
+        serial_printf("%016llX", (unsigned long long)heap_limit);
+        serial_printf("%s", "\r\n");
+#endif
         if (stack_end <= heap_limit)
         {
             break;
@@ -2814,9 +3070,28 @@ static thread_t *thread_create(process_t *process,
 
     if (!raw_allocation)
     {
+#if THREAD_CREATE_DEBUG
+        serial_printf("%s", "[thread_create] alloc_failed name=");
+        serial_printf("%s", name ? name : "<null>");
+        serial_printf("%s", " alloc_size=0x");
+        serial_printf("%016llX", (unsigned long long)allocation_size);
+        serial_printf("%s", "\r\n");
+#endif
         free(thread);
         return NULL;
     }
+
+#if THREAD_CREATE_DEBUG
+    serial_printf("%s", "[thread_create] using_allocation raw=");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)raw_allocation));
+    serial_printf("%s", " guard_base=");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)guard_base));
+    serial_printf("%s", " guard_bytes=0x");
+    serial_printf("%016llX", (unsigned long long)guard_bytes);
+    serial_printf("%s", " aligned_stack=0x");
+    serial_printf("%016llX", (unsigned long long)aligned_stack);
+    serial_printf("%s", "\r\n");
+#endif
 
     memset(guard_base, STACK_GUARD_PATTERN, guard_bytes);
     thread->stack_allocation_raw = raw_allocation;
@@ -2824,6 +3099,13 @@ static thread_t *thread_create(process_t *process,
     thread->stack_guard_base = guard_base;
     thread->stack_base = guard_base + guard_bytes;
     thread->stack_size = aligned_stack;
+#if THREAD_CREATE_DEBUG
+    serial_printf("%s", "[thread_create] guard_filled base=");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
+    serial_printf("%s", " size=0x");
+    serial_printf("%016llX", (unsigned long long)thread->stack_size);
+    serial_printf("%s", "\r\n");
+#endif
 
     uintptr_t stack_limit = ((uintptr_t)thread->stack_base + aligned_stack) & ~(uintptr_t)0xF;
     uintptr_t usable_limit = stack_limit;
@@ -2851,6 +3133,7 @@ static thread_t *thread_create(process_t *process,
 
     thread->tls.preempt_resume_rip = 0;
     thread->context = (cpu_context_t *)stack64;
+    thread->context_valid = true;
     thread->kernel_stack_top = stack_limit;
     thread->process = process;
     thread->entry = entry;
@@ -2867,6 +3150,7 @@ static thread_t *thread_create(process_t *process,
     thread->priority = default_priority;
     thread->priority_override = default_priority;
     thread->priority_override_active = false;
+    thread->in_transition = false;
     thread->preempt_pending = false;
     thread->fs_base = 0;
     thread->gs_base = (uint64_t)&thread->tls;
@@ -2883,6 +3167,30 @@ static thread_t *thread_create(process_t *process,
     thread->fault_address = 0;
     thread->fault_has_address = false;
     memcpy(&thread->fpu_state, &g_fpu_initial_state, sizeof(fpu_state_t));
+#if THREAD_CREATE_DEBUG
+    serial_printf("%s", "[thread_create] stack_frame built sp=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)stack64));
+    serial_printf("%s", " limit=0x");
+    serial_printf("%016llX", (unsigned long long)stack_limit);
+    serial_printf("%s", " usable_limit=0x");
+    serial_printf("%016llX", (unsigned long long)usable_limit);
+    serial_printf("%s", "\r\n");
+    serial_printf("%s", "[thread_create] context set name=");
+    serial_printf("%s", name ? name : "<null>");
+    serial_printf("%s", " stack_base=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
+    serial_printf("%s", " stack_top=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->kernel_stack_top));
+    serial_printf("%s", " context=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->context));
+    serial_printf("%s", "\r\n");
+#endif
+
+#if THREAD_CREATE_DEBUG
+    serial_printf("%s", "[thread_create] pre_watch name=");
+    serial_printf("%s", name ? name : "<null>");
+    serial_printf("%s", "\r\n");
+#endif
 
     if (name)
     {
@@ -2902,11 +3210,11 @@ static thread_t *thread_create(process_t *process,
     static int thread_log_count = 0;
     if (thread_log_count < 8)
     {
-        serial_write_string("process: thread created gs base=0x");
-        serial_write_hex64(thread->gs_base);
-        serial_write_string(" name=");
-        serial_write_string(thread->name);
-        serial_write_string("\r\n");
+        serial_printf("%s", "process: thread created gs base=0x");
+        serial_printf("%016llX", (unsigned long long)(thread->gs_base));
+        serial_printf("%s", " name=");
+        serial_printf("%s", thread->name);
+        serial_printf("%s", "\r\n");
         thread_log_count++;
     }
 
@@ -2917,6 +3225,13 @@ static thread_t *thread_create(process_t *process,
         uintptr_t watch_addr = thread->context
                                ? (uintptr_t)thread->context
                                : (uintptr_t)thread->stack_base;
+#if THREAD_CREATE_DEBUG
+        serial_printf("%s", "[thread_create] activating_stack_watch ctx=");
+        serial_printf("%s", watch_context);
+        serial_printf("%s", " addr=0x");
+        serial_printf("%016llX", (unsigned long long)watch_addr);
+        serial_printf("%s", "\r\n");
+#endif
         thread_stack_watch_activate(thread, watch_context, watch_addr);
     }
 #endif
@@ -2924,10 +3239,24 @@ static thread_t *thread_create(process_t *process,
 #if ENABLE_CONTEXT_GUARD
     if (thread->context_guard_enabled)
     {
+#if THREAD_CREATE_DEBUG
+        serial_printf("%s", "[thread_create] context_guard_update name=");
+        serial_printf("%s", thread->name);
+        serial_printf("%s", "\r\n");
+#endif
         thread_context_guard_update(thread, "thread_create");
     }
 #endif
 
+    thread_registry_add(thread);
+    scheduler_shell_log("created", thread);
+#if THREAD_CREATE_DEBUG
+    serial_printf("%s", "[thread_create] done name=");
+    serial_printf("%s", thread->name);
+    serial_printf("%s", " thread=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread));
+    serial_printf("%s", "\r\n");
+#endif
     return thread;
 }
 
@@ -2959,6 +3288,7 @@ static void enqueue_thread(thread_t *thread)
         *tail = thread;
     }
     spinlock_unlock(&g_run_queue_lock);
+    scheduler_shell_log("enqueued", thread);
 }
 
 static void thread_freeze_for_stack_watch(thread_t *thread, const char *context)
@@ -2989,20 +3319,20 @@ static void thread_freeze_for_stack_watch(thread_t *thread, const char *context)
         thread->in_run_queue = false;
         thread->stack_watch_next = g_stack_watch_frozen_head;
         g_stack_watch_frozen_head = thread;
-        serial_write_string("[sched] stack watch freeze thread=");
+        serial_printf("%s", "[sched] stack watch freeze thread=");
         if (thread->name[0])
         {
-            serial_write_string(thread->name);
+            serial_printf("%s", thread->name);
         }
         else
         {
-            serial_write_string("<unnamed>");
+            serial_printf("%s", "<unnamed>");
         }
-        serial_write_string(" pid=0x");
-        serial_write_hex64(thread->process ? thread->process->pid : 0);
-        serial_write_string(" context=");
-        serial_write_string(context ? context : "<none>");
-        serial_write_string("\r\n");
+        serial_printf("%s", " pid=0x");
+        serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+        serial_printf("%s", " context=");
+        serial_printf("%s", context ? context : "<none>");
+        serial_printf("%s", "\r\n");
     }
     thread->stack_watch_freeze_deadline = now + timeout_ticks;
 #else
@@ -3088,24 +3418,24 @@ static void stack_watch_check_timeouts(void)
             uint8_t new_byte = 0;
             if (thread_stack_watch_snapshot_changed(thread, &delta_addr, &old_byte, &new_byte))
             {
-                serial_write_string("[sched] stack watch delta thread=");
+                serial_printf("%s", "[sched] stack watch delta thread=");
                 if (thread->name[0])
                 {
-                    serial_write_string(thread->name);
+                    serial_printf("%s", thread->name);
                 }
                 else
                 {
-                    serial_write_string("<unnamed>");
+                    serial_printf("%s", "<unnamed>");
                 }
-                serial_write_string(" pid=0x");
-                serial_write_hex64(thread->process ? thread->process->pid : 0);
-                serial_write_string(" addr=0x");
-                serial_write_hex64(delta_addr);
-                serial_write_string(" old=0x");
-                serial_write_hex8(old_byte);
-                serial_write_string(" new=0x");
-                serial_write_hex8(new_byte);
-                serial_write_string("\r\n");
+                serial_printf("%s", " pid=0x");
+                serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+                serial_printf("%s", " addr=0x");
+                serial_printf("%016llX", (unsigned long long)(delta_addr));
+                serial_printf("%s", " old=0x");
+                serial_printf("%02X", (unsigned int)(old_byte));
+                serial_printf("%s", " new=0x");
+                serial_printf("%02X", (unsigned int)(new_byte));
+                serial_printf("%s", "\r\n");
                 thread_scan_stack_for_suspicious_values(thread,
                                                         delta_addr,
                                                         true,
@@ -3117,38 +3447,38 @@ static void stack_watch_check_timeouts(void)
 
             if (!thread->stack_watch_timeout_logged)
             {
-                serial_write_string("[sched] stack watch timeout thread=");
+                serial_printf("%s", "[sched] stack watch timeout thread=");
                 if (thread->name[0])
                 {
-                    serial_write_string(thread->name);
+                    serial_printf("%s", thread->name);
                 }
                 else
                 {
-                    serial_write_string("<unnamed>");
+                    serial_printf("%s", "<unnamed>");
                 }
-                serial_write_string(" pid=0x");
-                serial_write_hex64(thread->process ? thread->process->pid : 0);
-                serial_write_string(" suspect=0x");
-                serial_write_hex64(thread->stack_watch_suspect);
-                serial_write_string("\r\n");
+                serial_printf("%s", " pid=0x");
+                serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+                serial_printf("%s", " suspect=0x");
+                serial_printf("%016llX", (unsigned long long)(thread->stack_watch_suspect));
+                serial_printf("%s", "\r\n");
                 thread->stack_watch_timeout_logged = true;
             }
 
             thread->stack_watch_timeout_count++;
             if (thread->stack_watch_timeout_count >= STACK_WATCH_TIMEOUT_LIMIT)
             {
-                serial_write_string("[sched] stack watch release thread=");
+                serial_printf("%s", "[sched] stack watch release thread=");
                 if (thread->name[0])
                 {
-                    serial_write_string(thread->name);
+                    serial_printf("%s", thread->name);
                 }
                 else
                 {
-                    serial_write_string("<unnamed>");
+                    serial_printf("%s", "<unnamed>");
                 }
-                serial_write_string(" pid=0x");
-                serial_write_hex64(thread->process ? thread->process->pid : 0);
-                serial_write_string(" reason=timeout_limit\r\n");
+                serial_printf("%s", " pid=0x");
+                serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+                serial_printf("%s", " reason=timeout_limit\r\n");
                 thread_stack_watch_deactivate(thread);
                 thread_unfreeze_after_stack_watch(thread);
                 continue;
@@ -3175,27 +3505,68 @@ static void stack_watch_check_timeouts(void)
 #endif
 }
 
+static bool thread_can_run(const thread_t *thread)
+{
+    if (!thread)
+    {
+        return false;
+    }
+    if (thread->in_transition)
+    {
+        return false;
+    }
+    if (thread->state != THREAD_STATE_READY)
+    {
+        return false;
+    }
+    return true;
+}
+
 static thread_t *dequeue_thread(void)
 {
     spinlock_lock(&g_run_queue_lock);
     for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE; --pr)
     {
+        thread_t *prev = NULL;
         thread_t *thread = g_run_queue_heads[pr];
-        if (!thread)
+        while (thread)
         {
-            continue;
+            thread_t *next = thread->queue_next;
+            if (!thread_can_run(thread))
+            {
+                prev = thread;
+                thread = next;
+                continue;
+            }
+            if (prev)
+            {
+                prev->queue_next = next;
+            }
+            else
+            {
+                g_run_queue_heads[pr] = next;
+            }
+            if (!next)
+            {
+                g_run_queue_tails[pr] = prev;
+            }
+            thread->queue_next = NULL;
+            thread->in_run_queue = false;
+            if (!thread->context_valid)
+            {
+                scheduler_trace("[sched] dequeue forcing context_valid=true;", thread);
+                thread->context_valid = true;
+            }
+            spinlock_unlock(&g_run_queue_lock);
+            return thread;
         }
-        g_run_queue_heads[pr] = thread->queue_next;
-        if (!g_run_queue_heads[pr])
-        {
-            g_run_queue_tails[pr] = NULL;
-        }
-        thread->queue_next = NULL;
-        thread->in_run_queue = false;
-        spinlock_unlock(&g_run_queue_lock);
-        return thread;
     }
     spinlock_unlock(&g_run_queue_lock);
+    if (g_scheduler_trace_logs < SCHEDULER_TRACE_LIMIT)
+    {
+        serial_printf("%s", "[sched] dequeue: no runnable threads\n");
+        g_scheduler_trace_logs++;
+    }
     return NULL;
 }
 
@@ -3577,6 +3948,15 @@ static bool switch_to_thread(thread_t *next)
 
     if (prev)
     {
+        thread_context_in_bounds(prev, "switch_from");
+    }
+    if (next)
+    {
+        thread_context_in_bounds(next, "switch_to");
+    }
+
+    if (prev)
+    {
         prev->last_cpu_index = current_cpu_index();
         thread_assert_stack_current(prev, "switch_from");
         fpu_save_state(&prev->fpu_state);
@@ -3600,6 +3980,8 @@ static bool switch_to_thread(thread_t *next)
     {
         next->last_cpu_index = current_cpu_index();
         next->state = THREAD_STATE_RUNNING;
+        next->context_valid = false;
+        scheduler_shell_log("context_valid=false (switch_to)", next);
         if (next_process)
         {
             next_process->state = PROCESS_STATE_RUNNING;
@@ -3613,20 +3995,22 @@ static bool switch_to_thread(thread_t *next)
         thread_context_guard_verify(next, "switch_to");
         if (next->stack_watch_blocked)
         {
-            serial_write_string("[sched] switch_to cancelled: stack watch active thread=");
+            serial_printf("%s", "[sched] switch_to cancelled: stack watch active thread=");
             if (next->name[0])
             {
-                serial_write_string(next->name);
+                serial_printf("%s", next->name);
             }
             else
             {
-                serial_write_string("<unnamed>");
+                serial_printf("%s", "<unnamed>");
             }
-            serial_write_string(" pid=0x");
-            serial_write_hex64(next->process ? next->process->pid : 0);
-            serial_write_string(" context=");
-            serial_write_string(next->context_guard_freeze_label ? next->context_guard_freeze_label : "<none>");
-            serial_write_string("\r\n");
+            serial_printf("%s", " pid=0x");
+            serial_printf("%016llX", (unsigned long long)(next->process ? next->process->pid : 0));
+            serial_printf("%s", " context=");
+            serial_printf("%s", next->context_guard_freeze_label ? next->context_guard_freeze_label : "<none>");
+            serial_printf("%s", "\r\n");
+            next->context_valid = true;
+            next->state = THREAD_STATE_BLOCKED;
             if (prev)
             {
                 prev->state = THREAD_STATE_RUNNING;
@@ -3670,17 +4054,20 @@ static bool switch_to_thread(thread_t *next)
         return false;
     }
 
-    context_switch(prev_ctx, next_ctx);
+    uint8_t *prev_transition_flag = prev ? (uint8_t *)&prev->in_transition : NULL;
+    context_switch(prev_ctx, next_ctx, prev_transition_flag);
 
     thread_t *resumed = current_thread_local();
     if (resumed)
     {
         thread_context_guard_release_pages(resumed);
+        resumed->context_valid = true;
+        scheduler_shell_log("context_valid=true (resumed)", resumed);
     }
 #if ENABLE_STACK_WRITE_DEBUG
-    if (next)
+    if (prev)
     {
-        thread_stack_watch_maybe_arm(next);
+        thread_stack_watch_maybe_arm(prev);
     }
 #endif
 #if ENABLE_CONTEXT_GUARD
@@ -3719,9 +4106,14 @@ static void scheduler_schedule(bool requeue_current)
 
     if (requeue_current && current && current->state == THREAD_STATE_RUNNING)
     {
+        thread_context_in_bounds(current, "requeue_current");
         current->state = THREAD_STATE_READY;
         current->time_slice_remaining = scheduler_time_slice_ticks();
         current->preempt_pending = false;
+        current->context_valid = true;
+        current->in_transition = true;
+        scheduler_shell_log("context_valid=true (requeue)", current);
+        scheduler_trace("[sched] requeue current;", current);
         enqueue_thread(current);
     }
 
@@ -3746,12 +4138,15 @@ static void scheduler_schedule(bool requeue_current)
     {
         current->state = THREAD_STATE_RUNNING;
         current->preempt_pending = false;
+        current->context_valid = true;
+        current->in_transition = false;
         cpu_restore_flags(flags);
         return;
     }
 
     while (!switch_to_thread(next))
     {
+        scheduler_trace("[sched] switch_to failed; retry", next);
         next = dequeue_thread();
         if (!next)
         {
@@ -3771,6 +4166,8 @@ static void scheduler_schedule(bool requeue_current)
         {
             current->state = THREAD_STATE_RUNNING;
             current->preempt_pending = false;
+            current->context_valid = true;
+            current->in_transition = false;
             cpu_restore_flags(flags);
             return;
         }
@@ -3890,21 +4287,21 @@ static void process_handle_stack_guard_fault(void)
         fatal("stack guard fault with no current thread");
     }
 
-    serial_write_string("process: stack guard violation in thread ");
+    serial_printf("%s", "process: stack guard violation in thread ");
     if (current->name[0] != '\0')
     {
-        serial_write_string(current->name);
+        serial_printf("%s", current->name);
     }
     else
     {
-        serial_write_string("(anon)");
+        serial_printf("%s", "(anon)");
     }
     if (current->stack_guard_reason)
     {
-        serial_write_string(" reason=");
-        serial_write_string(current->stack_guard_reason);
+        serial_printf("%s", " reason=");
+        serial_printf("%s", current->stack_guard_reason);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 
     current->exit_status = -1;
     current->exited = true;
@@ -3944,32 +4341,32 @@ static void process_handle_fatal_fault(void)
         wait_queue_wake_all(&current->process->wait_queue);
     }
 
-    serial_write_string("process: fatal fault in thread ");
+    serial_printf("%s", "process: fatal fault in thread ");
     if (current->name[0] != '\0')
     {
-        serial_write_string(current->name);
+        serial_printf("%s", current->name);
     }
     else
     {
-        serial_write_string("(anon)");
+        serial_printf("%s", "(anon)");
     }
-    serial_write_string(" reason=");
+    serial_printf("%s", " reason=");
     if (current->fault_reason)
     {
-        serial_write_string(current->fault_reason);
+        serial_printf("%s", current->fault_reason);
     }
     else
     {
-        serial_write_string("unknown");
+        serial_printf("%s", "unknown");
     }
-    serial_write_string(" error=0x");
-    serial_write_hex64(current->fault_error_code);
+    serial_printf("%s", " error=0x");
+    serial_printf("%016llX", (unsigned long long)(current->fault_error_code));
     if (current->fault_has_address)
     {
-        serial_write_string(" addr=0x");
-        serial_write_hex64(current->fault_address);
+        serial_printf("%s", " addr=0x");
+        serial_printf("%016llX", (unsigned long long)(current->fault_address));
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 
     scheduler_schedule(false);
     fatal("fatal fault handler returned");
@@ -4036,6 +4433,8 @@ void process_system_init(void)
     spinlock_init(&g_run_queue_lock);
     spinlock_init(&g_sleep_queue_lock);
     spinlock_init(&g_process_lock);
+    spinlock_init(&g_thread_registry_lock);
+    g_thread_registry_head = NULL;
     for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
     {
         spinlock_init(&g_deferred_free_locks[i]);
@@ -4140,6 +4539,7 @@ void process_system_init(void)
 
 static void scheduler_main_loop(void)
 {
+    scheduler_wait_for_boot_ready();
     while (1)
     {
         scheduler_schedule(false);
@@ -4159,6 +4559,11 @@ void process_run_secondary_cpu(uint32_t cpu_index)
     scheduler_main_loop();
 }
 
+void process_scheduler_set_ready(void)
+{
+    __atomic_store_n(&g_scheduler_boot_ready, true, __ATOMIC_RELEASE);
+}
+
 static process_t *process_create_kernel_internal(const char *name,
                                                  thread_entry_t entry,
                                                  void *arg,
@@ -4166,26 +4571,36 @@ static process_t *process_create_kernel_internal(const char *name,
                                                  int stdout_fd,
                                                  process_t *parent)
 {
+    process_create_log(name, "begin");
     if (!entry)
     {
+        process_create_log(name, "no_entry");
         return NULL;
     }
 
+    process_create_log(name, "alloc_start");
     process_t *proc = allocate_process(name, false);
     if (!proc)
     {
+        process_create_log(name, "alloc_fail");
         return NULL;
     }
 
+    process_create_log(name, "thread_create_start");
     thread_t *thread = thread_create(proc, name, entry, arg, stack_size, false, proc->is_user);
     if (!thread)
     {
         paging_destroy_space(&proc->address_space);
         free(proc);
+        process_create_log(name, "thread_create_fail");
         return NULL;
     }
 
-    return process_finalize_new_process(proc, thread, stdout_fd, parent);
+    process_create_log(name, "thread_create_done");
+    process_create_log(name, "finalize_start");
+    process_t *result = process_finalize_new_process(proc, thread, stdout_fd, parent);
+    process_create_log(name, result ? "success" : "finalize_fail");
+    return result;
 }
 
 static process_t *process_create_user_dummy_internal(const char *name,
@@ -5091,27 +5506,27 @@ void process_dump_current_thread(void)
     thread_t *thread = current_thread_local();
     if (!thread)
     {
-        serial_write_string("  thread: <none>\r\n");
+        serial_printf("%s", "  thread: <none>\r\n");
         return;
     }
-    serial_write_string("  thread name=");
+    serial_printf("%s", "  thread name=");
     if (thread->name[0])
     {
-        serial_write_string(thread->name);
+        serial_printf("%s", thread->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" state=");
-    serial_write_string(thread_state_name(thread->state));
-    serial_write_string(" stack_base=0x");
-    serial_write_hex64((uintptr_t)thread->stack_base);
-    serial_write_string(" stack_top=0x");
-    serial_write_hex64(thread->kernel_stack_top);
-    serial_write_string(" guard=");
-    serial_write_string(thread_stack_guard_intact(thread) ? "ok" : "CORRUPT");
-    serial_write_string("\r\n");
+    serial_printf("%s", " state=");
+    serial_printf("%s", thread_state_name(thread->state));
+    serial_printf("%s", " stack_base=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
+    serial_printf("%s", " stack_top=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->kernel_stack_top));
+    serial_printf("%s", " guard=");
+    serial_printf("%s", thread_stack_guard_intact(thread) ? "ok" : "CORRUPT");
+    serial_printf("%s", "\r\n");
 }
 
 void process_debug_scan_current_kernel_stack(const char *context,
@@ -5139,46 +5554,46 @@ bool process_handle_stack_watch_fault(uintptr_t fault_addr,
     }
 
     thread_t *writer = current_thread_local();
-    serial_write_string("[sched] stack watch fault hit\r\n");
-    serial_write_string("  target=");
+    serial_printf("%s", "[sched] stack watch fault hit\r\n");
+    serial_printf("%s", "  target=");
     if (target->name[0])
     {
-        serial_write_string(target->name);
+        serial_printf("%s", target->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(target->process ? target->process->pid : 0);
-    serial_write_string(" addr=0x");
-    serial_write_hex64(fault_addr);
-    serial_write_string(" watch_base=0x");
-    serial_write_hex64(target->stack_watch_base);
-    serial_write_string(" watch_len=0x");
-    serial_write_hex64(target->stack_watch_len);
-    serial_write_string(" suspect=0x");
-    serial_write_hex64(target->stack_watch_suspect);
-    serial_write_string(" context=");
-    serial_write_string(target->stack_watch_context ? target->stack_watch_context : "<none>");
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(target->process ? target->process->pid : 0));
+    serial_printf("%s", " addr=0x");
+    serial_printf("%016llX", (unsigned long long)(fault_addr));
+    serial_printf("%s", " watch_base=0x");
+    serial_printf("%016llX", (unsigned long long)(target->stack_watch_base));
+    serial_printf("%s", " watch_len=0x");
+    serial_printf("%016llX", (unsigned long long)(target->stack_watch_len));
+    serial_printf("%s", " suspect=0x");
+    serial_printf("%016llX", (unsigned long long)(target->stack_watch_suspect));
+    serial_printf("%s", " context=");
+    serial_printf("%s", target->stack_watch_context ? target->stack_watch_context : "<none>");
+    serial_printf("%s", "\r\n");
 
-    serial_write_string("  writer=");
+    serial_printf("%s", "  writer=");
     if (writer && writer->name[0])
     {
-        serial_write_string(writer->name);
+        serial_printf("%s", writer->name);
     }
     else
     {
-        serial_write_string(writer ? "<unnamed>" : "<none>");
+        serial_printf("%s", writer ? "<unnamed>" : "<none>");
     }
-    serial_write_string(" pid=0x");
-    serial_write_hex64(writer && writer->process ? writer->process->pid : 0);
-    serial_write_string(" rip=0x");
-    serial_write_hex64(frame ? frame->rip : 0);
-    serial_write_string(" err=0x");
-    serial_write_hex64(error_code);
-    serial_write_string("\r\n");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(writer && writer->process ? writer->process->pid : 0));
+    serial_printf("%s", " rip=0x");
+    serial_printf("%016llX", (unsigned long long)(frame ? frame->rip : 0));
+    serial_printf("%s", " err=0x");
+    serial_printf("%016llX", (unsigned long long)(error_code));
+    serial_printf("%s", "\r\n");
 
     target->stack_watch_enabled = false;
     thread_stack_watch_deactivate(target);
@@ -5341,42 +5756,42 @@ void process_debug_log_stack_write(const char *label,
         return;
     }
 
-    serial_write_string(self_write ? "[stack-write-self] label="
+    serial_printf("%s", self_write ? "[stack-write-self] label="
                                    : (cross_write ? "[stack-write-cross] label=" : "[stack-write] label="));
-    serial_write_string(label ? label : "<none>");
-    serial_write_string(" writer=");
+    serial_printf("%s", label ? label : "<none>");
+    serial_printf("%s", " writer=");
     if (writer && writer->name[0])
     {
-        serial_write_string(writer->name);
+        serial_printf("%s", writer->name);
     }
     else
     {
-        serial_write_string("<none>");
+        serial_printf("%s", "<none>");
     }
-    serial_write_string(" writer_pid=0x");
-    serial_write_hex64(writer && writer->process ? writer->process->pid : 0);
-    serial_write_string(" target=");
+    serial_printf("%s", " writer_pid=0x");
+    serial_printf("%016llX", (unsigned long long)(writer && writer->process ? writer->process->pid : 0));
+    serial_printf("%s", " target=");
     if (owner->name[0])
     {
-        serial_write_string(owner->name);
+        serial_printf("%s", owner->name);
     }
     else
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
-    serial_write_string(" target_pid=0x");
-    serial_write_hex64(owner->process ? owner->process->pid : 0);
-    serial_write_string(" dest=0x");
-    serial_write_hex64(addr);
-    serial_write_string(" len=0x");
-    serial_write_hex64(len);
-    serial_write_string(" stack_base=0x");
-    serial_write_hex64((uintptr_t)owner->stack_base);
-    serial_write_string(" stack_top=0x");
-    serial_write_hex64(owner->kernel_stack_top);
-    serial_write_string(" caller=0x");
-    serial_write_hex64((uintptr_t)caller);
-    serial_write_string("\r\n");
+    serial_printf("%s", " target_pid=0x");
+    serial_printf("%016llX", (unsigned long long)(owner->process ? owner->process->pid : 0));
+    serial_printf("%s", " dest=0x");
+    serial_printf("%016llX", (unsigned long long)(addr));
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)(len));
+    serial_printf("%s", " stack_base=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)owner->stack_base));
+    serial_printf("%s", " stack_top=0x");
+    serial_printf("%016llX", (unsigned long long)(owner->kernel_stack_top));
+    serial_printf("%s", " caller=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)caller));
+    serial_printf("%s", "\r\n");
 }
 #else
 void process_debug_log_stack_write(const char *label,

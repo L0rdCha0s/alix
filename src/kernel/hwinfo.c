@@ -7,7 +7,7 @@
 #include "bootinfo.h"
 #include <stddef.h>
 
-#define E820_MAX_ENTRIES    64
+#define HWINFO_E820_MAX    BOOTINFO_MAX_E820_ENTRIES
 
 typedef struct
 {
@@ -26,7 +26,7 @@ typedef struct
     uint32_t bus_mhz;
 } cpu_info_t;
 
-static e820_entry_t g_e820[E820_MAX_ENTRIES];
+static e820_entry_t g_e820[HWINFO_E820_MAX];
 static uint32_t g_e820_count = 0;
 static cpu_info_t g_cpu_info;
 
@@ -49,14 +49,14 @@ static void log_dual(const char *text)
         return;
     }
     console_write(text);
-    serial_write_string(text);
+    serial_printf("%s", text);
 }
 
 static void log_dual_line(const char *text)
 {
     log_dual(text);
     console_putc('\n');
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void append_text(char *buffer, size_t *index, size_t capacity, const char *text)
@@ -144,9 +144,9 @@ static void load_e820(void)
         return;
     }
     uint32_t count = boot_info.e820_entry_count;
-    if (count > E820_MAX_ENTRIES)
+    if (count > HWINFO_E820_MAX)
     {
-        count = E820_MAX_ENTRIES;
+        count = HWINFO_E820_MAX;
     }
     for (uint32_t i = 0; i < count; ++i)
     {

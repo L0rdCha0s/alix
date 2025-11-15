@@ -21,11 +21,11 @@ static heap_block_t *g_heap_tail = NULL;
 #ifdef ENABLE_USER_MEM_DEBUG_LOGS
 static void user_heap_log(const char *msg, uintptr_t value)
 {
-    serial_write_string("[uheap] ");
-    serial_write_string(msg);
-    serial_write_string("0x");
-    serial_write_hex64((uint64_t)value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[uheap] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)value));
+    serial_printf("%s", "\r\n");
 }
 #else
 static void user_heap_log(const char *msg, uintptr_t value)

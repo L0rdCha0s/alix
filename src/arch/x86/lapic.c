@@ -62,7 +62,7 @@ bool lapic_init(void)
     g_lapic_base = (volatile uint32_t *)(uintptr_t)(apic_base & LAPIC_BASE_MASK);
     if (!g_lapic_base)
     {
-        serial_write_string("[lapic] base pointer null\r\n");
+        serial_printf("%s", "[lapic] base pointer null\r\n");
         return false;
     }
 

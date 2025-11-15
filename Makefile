@@ -20,7 +20,7 @@ DL_SCRIPT_SRC := $(GENERATED_DIR)/dl_script_data.c
 DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
 
 BASE_CFLAGS := -O4 -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
-               -m64 -mno-red-zone -Wall -Wextra -I$(INCLUDE_DIR) -I$(ATK_DIR) \
+               -m64 -mno-red-zone -Wall -Wextra -g -I$(INCLUDE_DIR) -I$(ATK_DIR) \
                -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
                -fshort-wchar
 
@@ -249,6 +249,7 @@ OVMF_CODE ?= vendor/OVMF_CODE.fd
 OVMF_VARS ?= vendor/OVMF_VARS-1024x768.fd
 QEMU_DEBUG_LOG   ?= qemu.log
 QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors,trace:ahci_*,trace:ide_* -D $(QEMU_DEBUG_LOG)
+QEMU_GDB_FLAGS   ?=
 HOMEBREW_PREFIX  := $(shell brew --prefix)
 UNAME_S          := $(shell uname -s)
 
@@ -308,7 +309,7 @@ NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
 
 run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
@@ -321,7 +322,7 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 
 run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
@@ -331,6 +332,9 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=data,bus=ahci0.1 \
 		-no-reboot -monitor vc:1280x1024 -serial stdio -vga std \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
+
+run-hdd-gdb: QEMU_GDB_FLAGS = -s -S
+run-hdd-gdb: run-hdd
 
 clean:
 	rm -rf $(OBJDIR) $(USER_BIN_DIR)
@@ -352,4 +356,4 @@ ttf-test: $(HOST_TEST_BIN)
 sha256-test: $(SHA256_TEST_BIN)
 	$(SHA256_TEST_BIN)
 
-.PHONY: all run run-hdd clean test-dhcp ttf-test sha256-test
+.PHONY: all run run-hdd run-hdd-gdb clean test-dhcp ttf-test sha256-test

@@ -160,58 +160,58 @@ static bool g_ahci_use_interrupts = false;
 
 static void ahci_log(const char *msg)
 {
-    serial_write_string("[ahci] ");
-    serial_write_string(msg ? msg : "(null)");
-    serial_write_string("\r\n");
+    serial_printf("%s", "[ahci] ");
+    serial_printf("%s", msg ? msg : "(null)");
+    serial_printf("%s", "\r\n");
 }
 
 static void ahci_log_hex(const char *msg, uint64_t value)
 {
-    serial_write_string("[ahci] ");
+    serial_printf("%s", "[ahci] ");
     if (msg)
     {
-        serial_write_string(msg);
+        serial_printf("%s", msg);
     }
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 
 static void ahci_log_port(uint32_t port_no, const char *msg)
 {
-    serial_write_string("[ahci] port ");
-    serial_write_hex64(port_no);
-    serial_write_string(": ");
-    serial_write_string(msg ? msg : "(null)");
-    serial_write_string("\r\n");
+    serial_printf("%s", "[ahci] port ");
+    serial_printf("%016llX", (unsigned long long)(port_no));
+    serial_printf("%s", ": ");
+    serial_printf("%s", msg ? msg : "(null)");
+    serial_printf("%s", "\r\n");
 }
 
 static void ahci_log_port_hex(uint32_t port_no, const char *msg, uint64_t value)
 {
-    serial_write_string("[ahci] port ");
-    serial_write_hex64(port_no);
-    serial_write_string(": ");
+    serial_printf("%s", "[ahci] port ");
+    serial_printf("%016llX", (unsigned long long)(port_no));
+    serial_printf("%s", ": ");
     if (msg)
     {
-        serial_write_string(msg);
+        serial_printf("%s", msg);
     }
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 
 static void ahci_log_owner_details(const thread_t *owner)
 {
     if (!owner)
     {
-        serial_write_string("<none>");
+        serial_printf("%s", "<none>");
         return;
     }
     const char *name = process_thread_name_const(owner);
-    serial_write_string(name && name[0] ? name : "<unnamed>");
-    serial_write_string(" pid=0x");
+    serial_printf("%s", name && name[0] ? name : "<unnamed>");
+    serial_printf("%s", " pid=0x");
     process_t *proc = process_thread_owner(owner);
-    serial_write_hex64(proc ? process_get_pid(proc) : 0);
+    serial_printf("%016llX", (unsigned long long)(proc ? process_get_pid(proc) : 0));
 }
 
 static void ahci_log_stack_bounce(uint32_t port_no,
@@ -221,19 +221,19 @@ static void ahci_log_stack_bounce(uint32_t port_no,
                                   size_t len,
                                   bool write)
 {
-    serial_write_string("[ahci] port ");
-    serial_write_hex64(port_no);
-    serial_write_string(": stack buffer redirected action=");
-    serial_write_string(write ? "write" : "read");
-    serial_write_string(" owner=");
+    serial_printf("%s", "[ahci] port ");
+    serial_printf("%016llX", (unsigned long long)(port_no));
+    serial_printf("%s", ": stack buffer redirected action=");
+    serial_printf("%s", write ? "write" : "read");
+    serial_printf("%s", " owner=");
     ahci_log_owner_details(owner);
-    serial_write_string(" original=0x");
-    serial_write_hex64((uintptr_t)original);
-    serial_write_string(" bounce=0x");
-    serial_write_hex64((uintptr_t)bounce);
-    serial_write_string(" len=0x");
-    serial_write_hex64(len);
-    serial_write_string("\r\n");
+    serial_printf("%s", " original=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)original));
+    serial_printf("%s", " bounce=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)bounce));
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)(len));
+    serial_printf("%s", "\r\n");
 }
 
 static void ahci_log_prdt_entry(uint32_t port_no,
@@ -243,22 +243,22 @@ static void ahci_log_prdt_entry(uint32_t port_no,
                                 uint64_t phys_addr,
                                 uint32_t len)
 {
-    serial_write_string("[ahci] port ");
-    serial_write_hex64(port_no);
-    serial_write_string(" slot=0x");
-    serial_write_hex64((uint64_t)slot);
-    serial_write_string(" prdt=0x");
-    serial_write_hex64((uint64_t)index);
-    serial_write_string(" virt=0x");
-    serial_write_hex64(virt_addr);
-    serial_write_string(" phys=0x");
-    serial_write_hex64(phys_addr);
-    serial_write_string(" len=0x");
-    serial_write_hex64(len);
-    serial_write_string(" owner=");
+    serial_printf("%s", "[ahci] port ");
+    serial_printf("%016llX", (unsigned long long)(port_no));
+    serial_printf("%s", " slot=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)slot));
+    serial_printf("%s", " prdt=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)index));
+    serial_printf("%s", " virt=0x");
+    serial_printf("%016llX", (unsigned long long)(virt_addr));
+    serial_printf("%s", " phys=0x");
+    serial_printf("%016llX", (unsigned long long)(phys_addr));
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)(len));
+    serial_printf("%s", " owner=");
     thread_t *owner = process_find_stack_owner((const void *)virt_addr, len);
     ahci_log_owner_details(owner);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void ahci_request_os_ownership(void)
@@ -797,7 +797,7 @@ static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
     ahci_port_ctx_t *ctx = (ahci_port_ctx_t *)calloc(1, sizeof(ahci_port_ctx_t));
     if (!ctx)
     {
-        serial_write_string("[ahci] failed to allocate port context\r\n");
+        serial_printf("%s", "[ahci] failed to allocate port context\r\n");
         return;
     }
     ctx->port = (hba_port_t *)port;
@@ -938,7 +938,7 @@ void ahci_init(void)
     pci_device_t dev;
     if (!pci_find_ahci(&dev))
     {
-        serial_write_string("[ahci] controller not found\r\n");
+        serial_printf("%s", "[ahci] controller not found\r\n");
         return;
     }
 
@@ -949,13 +949,13 @@ void ahci_init(void)
     ahci_log_hex("controller BAR5=", bar5);
     if (!bar5)
     {
-        serial_write_string("[ahci] BAR5 invalid\r\n");
+        serial_printf("%s", "[ahci] BAR5 invalid\r\n");
         return;
     }
     g_hba = (volatile hba_mem_t *)(uintptr_t)bar5;
     if (!g_hba)
     {
-        serial_write_string("[ahci] BAR5 invalid\r\n");
+        serial_printf("%s", "[ahci] BAR5 invalid\r\n");
         return;
     }
 

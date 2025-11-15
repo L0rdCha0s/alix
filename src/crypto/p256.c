@@ -111,14 +111,14 @@ static void bignum_add_raw(bignum_t *out, const bignum_t *a, const bignum_t *b)
 
 static void p256_log_bignum(const char *label, const bignum_t *num)
 {
-    serial_write_string("[p256] ");
-    serial_write_string(label);
-    serial_write_string(" len=0x");
-    serial_write_hex64(num->length);
-    serial_write_string(" value=0x");
+    serial_printf("%s", "[p256] ");
+    serial_printf("%s", label);
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)(num->length));
+    serial_printf("%s", " value=0x");
     if (num->length == 0)
     {
-        serial_write_string("0\r\n");
+        serial_printf("%s", "0\r\n");
         return;
     }
     for (size_t i = num->length; i-- > 0;)
@@ -131,9 +131,9 @@ static void p256_log_bignum(const char *label, const bignum_t *num)
             hex[7 - nibble] = digits[(word >> (nibble * 4)) & 0xF];
         }
         hex[8] = '\0';
-        serial_write_string(hex);
+        serial_printf("%s", hex);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void p256_field_reduce(bignum_t *x)
@@ -205,7 +205,7 @@ static bool p256_point_is_on_curve(const p256_point_t *p)
     if (bignum_compare(&p->x, &g_p256_p) >= 0 ||
         bignum_compare(&p->y, &g_p256_p) >= 0)
     {
-        serial_write_string("[p256] point coordinate >= p\r\n");
+        serial_printf("%s", "[p256] point coordinate >= p\r\n");
         p256_log_bignum("x", &p->x);
         p256_log_bignum("y", &p->y);
         return false;
@@ -227,7 +227,7 @@ static bool p256_point_is_on_curve(const p256_point_t *p)
 
     if (bignum_compare(&y2, &rhs) != 0)
     {
-        serial_write_string("[p256] point not on curve\r\n");
+        serial_printf("%s", "[p256] point not on curve\r\n");
         p256_log_bignum("x", &p->x);
         p256_log_bignum("y", &p->y);
         p256_log_bignum("y^2", &y2);
@@ -389,13 +389,13 @@ bool p256_is_valid_public(const uint8_t *point, size_t length)
     p256_init();
     if (!point || length != P256_POINT_SIZE || point[0] != 0x04)
     {
-        serial_write_string("[p256] invalid public key: ");
-        serial_write_string(point ? "" : "null ");
-        serial_write_string("len=0x");
-        serial_write_hex64(length);
-        serial_write_string(" first=0x");
-        serial_write_hex64(point ? point[0] : 0);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[p256] invalid public key: ");
+        serial_printf("%s", point ? "" : "null ");
+        serial_printf("%s", "len=0x");
+        serial_printf("%016llX", (unsigned long long)(length));
+        serial_printf("%s", " first=0x");
+        serial_printf("%016llX", (unsigned long long)(point ? point[0] : 0));
+        serial_printf("%s", "\r\n");
         return false;
     }
     p256_point_t p;
@@ -406,7 +406,7 @@ bool p256_is_valid_public(const uint8_t *point, size_t length)
     p256_log_bignum("public y", &p.y);
     if (!p256_point_is_on_curve(&p))
     {
-        serial_write_string("[p256] warning: accepting point that failed curve check\r\n");
+        serial_printf("%s", "[p256] warning: accepting point that failed curve check\r\n");
     }
     return true;
 }

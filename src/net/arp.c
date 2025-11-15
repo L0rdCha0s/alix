@@ -44,9 +44,9 @@ static void arp_log_reason(const char *reason)
     {
         return;
     }
-    serial_write_string("arp: ");
-    serial_write_string(reason);
-    serial_write_string("\r\n");
+    serial_printf("%s", "arp: ");
+    serial_printf("%s", reason);
+    serial_printf("%s", "\r\n");
 }
 
 
@@ -67,16 +67,16 @@ static void arp_log_entry(const char *prefix, uint32_t ip, const uint8_t mac[6])
     {
         macbuf[0] = '\0';
     }
-    serial_write_string("arp: ");
-    serial_write_string(prefix);
-    serial_write_string(" ip=");
-    serial_write_string(ipbuf);
+    serial_printf("%s", "arp: ");
+    serial_printf("%s", prefix);
+    serial_printf("%s", " ip=");
+    serial_printf("%s", ipbuf);
     if (mac)
     {
-        serial_write_string(" mac=");
-        serial_write_string(macbuf);
+        serial_printf("%s", " mac=");
+        serial_printf("%s", macbuf);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 void net_arp_flush(void)
@@ -136,7 +136,7 @@ bool net_arp_send_request(net_interface_t *iface, uint32_t target_ip)
 {
     if (!iface || !iface->present)
     {
-        serial_write_string("arp: send_request invalid iface\r\n");
+        serial_printf("%s", "arp: send_request invalid iface\r\n");
         return false;
     }
 
@@ -147,15 +147,15 @@ bool net_arp_send_request(net_interface_t *iface, uint32_t target_ip)
     bool ok = net_arp_send_generic(iface, broadcast, zero_mac, target_ip, source_ip, 0x0001);
     if (ok)
     {
-        serial_write_string("arp: request sent for ");
+        serial_printf("%s", "arp: request sent for ");
         char ipbuf[32];
         net_format_ipv4(target_ip, ipbuf);
-        serial_write_string(ipbuf);
-        serial_write_string("\r\n");
+        serial_printf("%s", ipbuf);
+        serial_printf("%s", "\r\n");
     }
     else
     {
-        serial_write_string("arp: request send failed\r\n");
+        serial_printf("%s", "arp: request send failed\r\n");
     }
     return ok;
 }
@@ -219,11 +219,11 @@ void net_arp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
         if (respond)
         {
-            serial_write_string("arp: replying for ip ");
+            serial_printf("%s", "arp: replying for ip ");
             char ipbuf[32];
             net_format_ipv4(reply_ip, ipbuf);
-            serial_write_string(ipbuf);
-            serial_write_string("\r\n");
+            serial_printf("%s", ipbuf);
+            serial_printf("%s", "\r\n");
             net_arp_send_reply(iface, sender_mac, sender_ip, reply_ip);
         }
     }
@@ -239,9 +239,9 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
 
     char ipbuf[32];
     net_format_ipv4(ip, ipbuf);
-    serial_write_string("arp: store request ip=");
-    serial_write_string(ipbuf);
-    serial_write_string("\r\n");
+    serial_printf("%s", "arp: store request ip=");
+    serial_printf("%s", ipbuf);
+    serial_printf("%s", "\r\n");
 
     if (ip == 0)
     {
@@ -258,9 +258,9 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
             net_debug_memcpy("arp_store_update", g_cache[i].mac, mac, 6);
             g_cache[i].last_tick = now;
             arp_log_entry("updated entry", ip, mac);
-            serial_write_string("arp: store updated index=");
-            serial_write_char('0' + (char)i);
-            serial_write_string("\r\n");
+            serial_printf("%s", "arp: store updated index=");
+            serial_printf("%c", '0' + (char)i);
+            serial_printf("%s", "\r\n");
             return;
         }
     }
@@ -274,9 +274,9 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
             net_debug_memcpy("arp_store_reuse", g_cache[i].mac, mac, 6);
             g_cache[i].last_tick = now;
             arp_log_entry("added entry", ip, mac);
-            serial_write_string("arp: store new index=");
-            serial_write_char('0' + (char)i);
-            serial_write_string("\r\n");
+            serial_printf("%s", "arp: store new index=");
+            serial_printf("%c", '0' + (char)i);
+            serial_printf("%s", "\r\n");
             return;
         }
     }
@@ -287,7 +287,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
     net_debug_memcpy("arp_store_evicted", g_cache[0].mac, mac, 6);
     g_cache[0].last_tick = now;
     arp_log_entry("replaced entry", ip, mac);
-    serial_write_string("arp: store replaced index=0\r\n");
+    serial_printf("%s", "arp: store replaced index=0\r\n");
 }
 
 
@@ -329,7 +329,7 @@ static bool net_arp_send_generic(net_interface_t *iface, const uint8_t *dest_mac
     uint8_t *buffer = (uint8_t *)malloc(frame_len);
     if (!buffer)
     {
-        serial_write_string("arp: failed to allocate tx buffer\r\n");
+        serial_printf("%s", "arp: failed to allocate tx buffer\r\n");
         return false;
     }
     memset(buffer, 0, frame_len);

@@ -699,11 +699,11 @@ void keyboard_init(void)
 
     if (!procfs_mkdir("keyboard"))
     {
-        serial_write_string("[keyboard] failed to ensure /proc/keyboard\r\n");
+        serial_printf("%s", "[keyboard] failed to ensure /proc/keyboard\r\n");
     }
     if (!procfs_mkdir("keyboard/repeat"))
     {
-        serial_write_string("[keyboard] failed to ensure /proc/keyboard/repeat\r\n");
+        serial_printf("%s", "[keyboard] failed to ensure /proc/keyboard/repeat\r\n");
     }
 
     g_multi_repeat_entry.on_change = keyboard_set_multi_mode;
@@ -713,21 +713,21 @@ void keyboard_init(void)
                                keyboard_proc_value_write,
                                &g_initial_repeat_entry))
     {
-        serial_write_string("[keyboard] failed to create /proc/keyboard/repeat/initial\r\n");
+        serial_printf("%s", "[keyboard] failed to create /proc/keyboard/repeat/initial\r\n");
     }
     if (!procfs_create_file_at(KEYBOARD_REPEAT_INTERVAL_PATH,
                                keyboard_proc_value_read,
                                keyboard_proc_value_write,
                                &g_repeat_interval_entry))
     {
-        serial_write_string("[keyboard] failed to create /proc/keyboard/repeat/repeat\r\n");
+        serial_printf("%s", "[keyboard] failed to create /proc/keyboard/repeat/repeat\r\n");
     }
     if (!procfs_create_file_at(KEYBOARD_REPEAT_MULTI_PATH,
                                keyboard_proc_bool_read,
                                keyboard_proc_bool_write,
                                &g_multi_repeat_entry))
     {
-        serial_write_string("[keyboard] failed to create /proc/keyboard/repeat/multi_mode\r\n");
+        serial_printf("%s", "[keyboard] failed to create /proc/keyboard/repeat/multi_mode\r\n");
     }
 }
 

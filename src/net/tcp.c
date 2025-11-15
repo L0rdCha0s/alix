@@ -111,22 +111,22 @@ struct net_tcp_socket
 
 static void tcp_log_send_block(const net_tcp_socket_t *socket, const char *reason, size_t len)
 {
-    serial_write_string("tcp: send blocked ");
-    serial_write_string(reason ? reason : "unknown");
-    serial_write_string(" len=0x");
+    serial_printf("%s", "tcp: send blocked ");
+    serial_printf("%s", reason ? reason : "unknown");
+    serial_printf("%s", " len=0x");
     tcp_log_hex32((uint32_t)len);
     if (socket)
     {
-        serial_write_string(" state=0x");
+        serial_printf("%s", " state=0x");
         tcp_log_hex32((uint32_t)socket->state);
-        serial_write_string(" await=0x");
+        serial_printf("%s", " await=0x");
         tcp_log_hex32(socket->awaiting_ack ? 1U : 0U);
-        serial_write_string(" remote_win=0x");
+        serial_printf("%s", " remote_win=0x");
         tcp_log_hex32((uint32_t)socket->remote_window);
-        serial_write_string(" pending_len=0x");
+        serial_printf("%s", " pending_len=0x");
         tcp_log_hex32((uint32_t)socket->pending_payload_len);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static net_tcp_socket_t g_sockets[NET_TCP_MAX_SOCKETS];
@@ -314,9 +314,9 @@ static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const u
     if (socket->reass_segments >= NET_TCP_REASS_MAX_SEGMENTS ||
         socket->reass_bytes + len > NET_TCP_REASS_LIMIT)
     {
-        serial_write_string("tcp: reassembly drop len=0x");
+        serial_printf("%s", "tcp: reassembly drop len=0x");
         tcp_log_hex32((uint32_t)len);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
         return false;
     }
 
@@ -347,15 +347,15 @@ static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const u
     socket->reass_bytes += len;
     socket->reass_segments += 1;
 #if TCP_TRACE_VERBOSE
-    serial_write_string("tcp: reassembly store seq=0x");
+    serial_printf("%s", "tcp: reassembly store seq=0x");
     tcp_log_hex32(seq);
-    serial_write_string(" len=0x");
+    serial_printf("%s", " len=0x");
     tcp_log_hex32((uint32_t)len);
-    serial_write_string(" total=0x");
+    serial_printf("%s", " total=0x");
     tcp_log_hex32((uint32_t)socket->reass_bytes);
-    serial_write_string(" segs=");
+    serial_printf("%s", " segs=");
     tcp_log_hex32((uint32_t)socket->reass_segments);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 #endif
     return true;
 }
@@ -385,15 +385,15 @@ static void tcp_reassembly_drain(net_tcp_socket_t *socket)
         socket->reass_segments -= 1;
     }
 #if TCP_TRACE_VERBOSE
-        serial_write_string("tcp: reassembly drain seq=0x");
+        serial_printf("%s", "tcp: reassembly drain seq=0x");
         tcp_log_hex32(seg->seq);
-        serial_write_string(" len=0x");
+        serial_printf("%s", " len=0x");
         tcp_log_hex32((uint32_t)seg->len);
-        serial_write_string(" next=0x");
+        serial_printf("%s", " next=0x");
         tcp_log_hex32(socket->recv_next);
-        serial_write_string(" remain=0x");
+        serial_printf("%s", " remain=0x");
         tcp_log_hex32((uint32_t)socket->reass_bytes);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
 #endif
         free(seg->data);
         free(seg);
@@ -455,11 +455,11 @@ static bool tcp_ensure_rx_capacity(net_tcp_socket_t *socket, size_t needed)
     if (socket->rx_capacity != target)
     {
 #if TCP_TRACE_VERBOSE
-        serial_write_string("tcp: rx buffer resize old=0x");
+        serial_printf("%s", "tcp: rx buffer resize old=0x");
         tcp_log_hex32((uint32_t)socket->rx_capacity);
-        serial_write_string(" new=0x");
+        serial_printf("%s", " new=0x");
         tcp_log_hex32((uint32_t)target);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
 #endif
     }
     socket->rx_capacity = target;
@@ -477,14 +477,14 @@ static void tcp_log_hex32(uint32_t value)
     }
     for (int i = 0; i < 8; ++i)
     {
-        serial_write_char(buf[i]);
+        serial_printf("%c", buf[i]);
     }
 }
 
 static __attribute__((unused)) void tcp_log_size(const char *label, size_t value)
 {
-    serial_write_string(label);
-    serial_write_string("0x");
+    serial_printf("%s", label);
+    serial_printf("%s", "0x");
     tcp_log_hex32((uint32_t)value);
 }
 
@@ -734,17 +734,17 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
     tcp_irq_restore(irq_flags);
 
 #if TCP_TRACE_VERBOSE
-    serial_write_string("tcp: app read len=0x");
+    serial_printf("%s", "tcp: app read len=0x");
     tcp_log_hex32((uint32_t)to_copy);
-    serial_write_string(" remain=0x");
+    serial_printf("%s", " remain=0x");
     tcp_log_hex32((uint32_t)rx_size_now);
-    serial_write_string(" capacity=0x");
+    serial_printf("%s", " capacity=0x");
     tcp_log_hex32((uint32_t)rx_capacity_now);
-    serial_write_string(" window_avail=0x");
+    serial_printf("%s", " window_avail=0x");
     tcp_log_hex32((uint32_t)window_avail);
-    serial_write_string(" advertised=0x");
+    serial_printf("%s", " advertised=0x");
     tcp_log_hex32((uint32_t)prev_window);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 #endif
 
     size_t available = window_avail;
@@ -758,11 +758,11 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
         (socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT))
     {
 #if TCP_TRACE_VERBOSE
-        serial_write_string("tcp: window update ack win=0x");
+        serial_printf("%s", "tcp: window update ack win=0x");
         tcp_log_hex32((uint32_t)window);
-        serial_write_string(" prev=0x");
+        serial_printf("%s", " prev=0x");
         tcp_log_hex32((uint32_t)prev_window);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
 #endif
         tcp_send_ack(socket);
     }
@@ -1306,13 +1306,13 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
     }
 
 #if TCP_TRACE_VERBOSE
-    serial_write_string("tcp: rx payload_len=");
+    serial_printf("%s", "tcp: rx payload_len=");
     tcp_log_size("", payload_len);
-    serial_write_string(" rx_size=");
+    serial_printf("%s", " rx_size=");
     tcp_log_size("", socket->rx_size);
-    serial_write_string(" capacity=");
+    serial_printf("%s", " capacity=");
     tcp_log_size("", socket->rx_capacity);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 #endif
 
     if (socket->state != TCP_STATE_ESTABLISHED && socket->state != TCP_STATE_CLOSE_WAIT)
@@ -1343,16 +1343,16 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
 
     if (seq_num != socket->recv_next)
     {
-        serial_write_string("tcp: out-of-order exp=0x");
+        serial_printf("%s", "tcp: out-of-order exp=0x");
         tcp_log_hex32(socket->recv_next);
-        serial_write_string(" got=0x");
+        serial_printf("%s", " got=0x");
         tcp_log_hex32(seq_num);
-        serial_write_string(" len=0x");
+        serial_printf("%s", " len=0x");
         tcp_log_hex32((uint32_t)payload_len);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
         if (!tcp_reassembly_store(socket, seq_num, payload, payload_len))
         {
-            serial_write_string("tcp: reassembly store failed\r\n");
+            serial_printf("%s", "tcp: reassembly store failed\r\n");
         }
         tcp_send_ack(socket);
         return;
@@ -1371,11 +1371,11 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
     }
 
 #if TCP_TRACE_VERBOSE
-    serial_write_string("tcp: rx ensured capacity=");
+    serial_printf("%s", "tcp: rx ensured capacity=");
     tcp_log_size("", socket->rx_capacity);
-    serial_write_string(" needed=");
+    serial_printf("%s", " needed=");
     tcp_log_size("", needed);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 #endif
 
     memcpy(socket->rx_buffer + socket->rx_size, payload, payload_len);
@@ -1408,21 +1408,21 @@ static void tcp_send_ack(net_tcp_socket_t *socket)
     if (tcp_send_segment(socket, socket->seq_next, flags, NULL, 0, false, false))
     {
 #if TCP_TRACE_VERBOSE
-        serial_write_string("tcp: send ack seq=0x");
+        serial_printf("%s", "tcp: send ack seq=0x");
         tcp_log_hex32(socket->seq_next);
-        serial_write_string(" ack=0x");
+        serial_printf("%s", " ack=0x");
         tcp_log_hex32(socket->recv_next);
-        serial_write_string(" win=0x");
+        serial_printf("%s", " win=0x");
         tcp_log_hex32((uint32_t)socket->advertised_window);
-        serial_write_string(" avail=0x");
+        serial_printf("%s", " avail=0x");
         tcp_log_hex32((uint32_t)window_avail);
-        serial_write_string(" prev=0x");
+        serial_printf("%s", " prev=0x");
         tcp_log_hex32((uint32_t)prev_window);
-        serial_write_string(" rx_size=0x");
+        serial_printf("%s", " rx_size=0x");
         tcp_log_hex32((uint32_t)socket->rx_size);
-        serial_write_string(" capacity=0x");
+        serial_printf("%s", " capacity=0x");
         tcp_log_hex32((uint32_t)socket->rx_capacity);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
 #endif
         if (socket->reass_head)
         {
@@ -1470,9 +1470,9 @@ static void tcp_mark_error(net_tcp_socket_t *socket, const char *reason)
     }
     if (reason)
     {
-        serial_write_string("tcp: error ");
-        serial_write_string(reason);
-        serial_write_string("\r\n");
+        serial_printf("%s", "tcp: error ");
+        serial_printf("%s", reason);
+        serial_printf("%s", "\r\n");
     }
     socket->error = true;
     socket->state = TCP_STATE_ERROR;
@@ -1510,7 +1510,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     uint8_t *frame = (uint8_t *)malloc(frame_len);
     if (!frame)
     {
-        serial_write_string("tcp: alloc frame failed\r\n");
+        serial_printf("%s", "tcp: alloc frame failed\r\n");
         return false;
     }
     memset(frame, 0, frame_len);
@@ -1583,11 +1583,11 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
 
     if (!net_if_send_copy(socket->iface, frame, frame_len))
     {
-        serial_write_string("tcp: send failed len=0x");
+        serial_printf("%s", "tcp: send failed len=0x");
         tcp_log_hex32((uint32_t)frame_len);
-        serial_write_string(" flags=0x");
+        serial_printf("%s", " flags=0x");
         tcp_log_hex32(flags);
-        serial_write_string(" iface=");
+        serial_printf("%s", " iface=");
         if (socket->iface)
         {
             for (int i = 0; i < NET_IF_NAME_MAX; ++i)
@@ -1597,48 +1597,48 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
                 {
                     break;
                 }
-                serial_write_char(c);
+                serial_printf("%c", c);
             }
         }
         else
         {
-            serial_write_string("null");
+            serial_printf("%s", "null");
         }
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
 
-        serial_write_string("tcp: send fail state=0x");
+        serial_printf("%s", "tcp: send fail state=0x");
         tcp_log_hex32((uint32_t)socket->state);
-        serial_write_string(" seq=0x");
+        serial_printf("%s", " seq=0x");
         tcp_log_hex32(seq);
-        serial_write_string(" next=0x");
+        serial_printf("%s", " next=0x");
         tcp_log_hex32(socket->seq_next);
-        serial_write_string(" unacked_seq=0x");
+        serial_printf("%s", " unacked_seq=0x");
         tcp_log_hex32(socket->unacked_seq);
-        serial_write_string(" unacked_len=0x");
+        serial_printf("%s", " unacked_len=0x");
         tcp_log_hex32(socket->unacked_len);
-        serial_write_string(" pending_len=0x");
+        serial_printf("%s", " pending_len=0x");
         tcp_log_hex32((uint32_t)socket->pending_payload_len);
-        serial_write_string(" rx_size=0x");
+        serial_printf("%s", " rx_size=0x");
         tcp_log_hex32((uint32_t)socket->rx_size);
-        serial_write_string(" rx_capacity=0x");
+        serial_printf("%s", " rx_capacity=0x");
         tcp_log_hex32((uint32_t)socket->rx_capacity);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
 
-        serial_write_string("tcp: send fail ports local=0x");
+        serial_printf("%s", "tcp: send fail ports local=0x");
         tcp_log_hex32((uint32_t)socket->local_port);
-        serial_write_string(" remote=0x");
+        serial_printf("%s", " remote=0x");
         tcp_log_hex32((uint32_t)socket->remote_port);
-        serial_write_string(" remote_ip=0x");
+        serial_printf("%s", " remote_ip=0x");
         tcp_log_hex32(socket->remote_ip);
-        serial_write_string(" remote_win=0x");
+        serial_printf("%s", " remote_win=0x");
         tcp_log_hex32((uint32_t)socket->remote_window);
-        serial_write_string(" advertised=0x");
+        serial_printf("%s", " advertised=0x");
         tcp_log_hex32((uint32_t)socket->advertised_window);
-        serial_write_string(" awaiting_ack=0x");
+        serial_printf("%s", " awaiting_ack=0x");
         tcp_log_hex32(socket->awaiting_ack ? 1U : 0U);
-        serial_write_string(" pending_flags=0x");
+        serial_printf("%s", " pending_flags=0x");
         tcp_log_hex32((uint32_t)socket->pending_flags);
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
         free(frame);
         return false;
     }

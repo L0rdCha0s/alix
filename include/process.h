@@ -75,6 +75,7 @@ typedef struct process_user_layout
 void process_system_init(void);
 void process_start_scheduler(void);
 void process_run_secondary_cpu(uint32_t cpu_index);
+void process_scheduler_set_ready(void);
 
 process_t *process_create_kernel(const char *name,
                                  thread_entry_t entry,

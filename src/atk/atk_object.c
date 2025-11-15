@@ -110,16 +110,16 @@ static const char *atk_widget_guard_class_name(const atk_widget_guard_header_t *
 
 static void atk_widget_guard_log_ptr(const char *label, const atk_widget_t *widget, const char *reason)
 {
-    serial_write_string("[atk][guard] ptr=0x");
-    serial_write_hex64((uint64_t)(uintptr_t)widget);
-    serial_write_string(" reason=");
-    serial_write_string(reason ? reason : "invalid");
+    serial_printf("%s", "[atk][guard] ptr=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)widget));
+    serial_printf("%s", " reason=");
+    serial_printf("%s", reason ? reason : "invalid");
     if (label)
     {
-        serial_write_string(" via=");
-        serial_write_string(label);
+        serial_printf("%s", " via=");
+        serial_printf("%s", label);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void atk_widget_guard_log_violation(const atk_widget_guard_header_t *header,
@@ -129,22 +129,22 @@ static void atk_widget_guard_log_violation(const atk_widget_guard_header_t *head
                                            uint64_t actual,
                                            uint64_t expected)
 {
-    serial_write_string("[atk][guard] class=");
-    serial_write_string(atk_widget_guard_class_name(header));
-    serial_write_string(" widget=0x");
-    serial_write_hex64((uint64_t)(uintptr_t)widget);
-    serial_write_string(" field=");
-    serial_write_string(field ? field : "unknown");
-    serial_write_string(" actual=0x");
-    serial_write_hex64(actual);
-    serial_write_string(" expected=0x");
-    serial_write_hex64(expected);
+    serial_printf("%s", "[atk][guard] class=");
+    serial_printf("%s", atk_widget_guard_class_name(header));
+    serial_printf("%s", " widget=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)widget));
+    serial_printf("%s", " field=");
+    serial_printf("%s", field ? field : "unknown");
+    serial_printf("%s", " actual=0x");
+    serial_printf("%016llX", (unsigned long long)(actual));
+    serial_printf("%s", " expected=0x");
+    serial_printf("%016llX", (unsigned long long)(expected));
     if (label)
     {
-        serial_write_string(" via=");
-        serial_write_string(label);
+        serial_printf("%s", " via=");
+        serial_printf("%s", label);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 #else
 static void atk_widget_guard_log_ptr(const char *label, const atk_widget_t *widget, const char *reason)
@@ -358,13 +358,13 @@ void atk_widget_absolute_position(const atk_widget_t *widget, int *x_out, int *y
         if (!atk_widget_validate(current, "atk_widget_absolute_position"))
         {
 #if ATK_DEBUG && defined(KERNEL_BUILD)
-            serial_write_string("[atk][debug] abs_pos invalid widget=0x");
-            serial_write_hex64((uint64_t)(uintptr_t)widget);
-            serial_write_string(" current=0x");
-            serial_write_hex64((uint64_t)(uintptr_t)current);
-            serial_write_string(" caller=0x");
-            serial_write_hex64((uint64_t)(uintptr_t)__builtin_return_address(0));
-            serial_write_string("\r\n");
+            serial_printf("%s", "[atk][debug] abs_pos invalid widget=0x");
+            serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)widget));
+            serial_printf("%s", " current=0x");
+            serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)current));
+            serial_printf("%s", " caller=0x");
+            serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)__builtin_return_address(0)));
+            serial_printf("%s", "\r\n");
 #endif
             break;
         }

@@ -139,26 +139,26 @@ static bool tls_random_fill(uint8_t *buffer, size_t length, void *context)
 
 static void tls_log(const char *msg)
 {
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static void tls_log_hex(const char *prefix, uint64_t value)
 {
-    serial_write_string(prefix);
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", prefix);
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 
 #if TLS_DEBUG_SIG
 static void tls_log_hexdump(const char *label, const uint8_t *data, size_t len)
 {
     static const char hex_digits[] = "0123456789abcdef";
-    serial_write_string(label);
-    serial_write_string(": ");
+    serial_printf("%s", label);
+    serial_printf("%s", ": ");
     if (!data || len == 0)
     {
-        serial_write_string("<empty>\r\n");
+        serial_printf("%s", "<empty>\r\n");
         return;
     }
     for (size_t i = 0; i < len; ++i)
@@ -168,9 +168,9 @@ static void tls_log_hexdump(const char *label, const uint8_t *data, size_t len)
         buf[0] = hex_digits[(byte >> 4) & 0x0F];
         buf[1] = hex_digits[byte & 0x0F];
         buf[2] = '\0';
-        serial_write_string(buf);
+        serial_printf("%s", buf);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void tls_log_sha256_digest(const char *label, const uint8_t *data, size_t len)

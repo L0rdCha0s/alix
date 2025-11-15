@@ -161,47 +161,47 @@ static void ensure_system_layout(void)
 {
     if (!ensure_directory_path("/root"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root\r\n");
     }
     if (!ensure_directory_path("/root/etc"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root/etc\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root/etc\r\n");
     }
     if (!ensure_directory_path("/root/etc/timezone"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root/etc/timezone\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root/etc/timezone\r\n");
     }
     if (!ensure_directory_path("/root/etc/ntp"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root/etc/ntp\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root/etc/ntp\r\n");
     }
     if (!ensure_directory_path("/root/usr"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root/usr\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root/usr\r\n");
     }
     if (!ensure_directory_path("/root/usr/bin"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root/usr/bin\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root/usr/bin\r\n");
     }
     if (!ensure_directory_path("/root/usr/share"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root/usr/share\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root/usr/share\r\n");
     }
     if (!ensure_directory_path("/root/usr/share/zoneinfo"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root/usr/share/zoneinfo\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root/usr/share/zoneinfo\r\n");
     }
     if (!ensure_directory_path("/root/usr/share/zoneinfo/src"))
     {
-        serial_write_string("[alix] warn: unable to ensure /root/usr/share/zoneinfo/src\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /root/usr/share/zoneinfo/src\r\n");
     }
     if (!vfs_symlink(vfs_root(), "/root/etc", "/etc"))
     {
-        serial_write_string("[alix] warn: unable to ensure /etc symlink\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /etc symlink\r\n");
     }
     if (!vfs_symlink(vfs_root(), "/root/usr", "/usr"))
     {
-        serial_write_string("[alix] warn: unable to ensure /usr symlink\r\n");
+        serial_printf("%s", "[alix] warn: unable to ensure /usr symlink\r\n");
     }
     vfs_node_t *ntp_server = vfs_open_file(vfs_root(), "/etc/ntp/server", false, false);
     if (!ntp_server)
@@ -212,18 +212,18 @@ static void ensure_system_layout(void)
             static const char default_ntp_server[] = "pool.ntp.org\n";
             if (!vfs_append(ntp_server, default_ntp_server, sizeof(default_ntp_server) - 1))
             {
-                serial_write_string("[alix] warn: unable to write default ntp server\r\n");
+                serial_printf("%s", "[alix] warn: unable to write default ntp server\r\n");
             }
         }
         else
         {
-            serial_write_string("[alix] warn: unable to create default ntp server file\r\n");
+            serial_printf("%s", "[alix] warn: unable to create default ntp server file\r\n");
         }
     }
 
     if (!dl_script_install_default())
     {
-        serial_write_string("[alix] warn: unable to install dl.sh\r\n");
+        serial_printf("%s", "[alix] warn: unable to install dl.sh\r\n");
     }
 }
 
@@ -250,9 +250,9 @@ static void mount_default_fstab(void)
         vfs_node_t *mount_point = ensure_directory_path(entry->mount_path);
         if (!mount_point)
         {
-            serial_write_string("[alix] fstab: failed to prepare mount point ");
-            serial_write_string(entry->mount_path);
-            serial_write_string("\r\n");
+            serial_printf("%s", "[alix] fstab: failed to prepare mount point ");
+            serial_printf("%s", entry->mount_path);
+            serial_printf("%s", "\r\n");
             continue;
         }
         if (vfs_is_mount_point(mount_point))
@@ -271,29 +271,29 @@ static void mount_default_fstab(void)
         block_device_t *device = fstab_find_device(entry->device_name);
         if (!device)
         {
-            serial_write_string("[alix] fstab: device ");
-            serial_write_string(entry->device_name);
-            serial_write_string(" not found\r\n");
+            serial_printf("%s", "[alix] fstab: device ");
+            serial_printf("%s", entry->device_name);
+            serial_printf("%s", " not found\r\n");
             continue;
         }
 
         if (!vfs_mount_device(device, mount_point))
         {
-            serial_write_string("[alix] fstab: mount failed for ");
-            serial_write_string(entry->device_name);
-            serial_write_string(" -> ");
-            serial_write_string(entry->mount_path);
-            serial_write_string(", attempting format\r\n");
+            serial_printf("%s", "[alix] fstab: mount failed for ");
+            serial_printf("%s", entry->device_name);
+            serial_printf("%s", " -> ");
+            serial_printf("%s", entry->mount_path);
+            serial_printf("%s", ", attempting format\r\n");
             if (vfs_format(device))
             {
                 if (!vfs_mount_device(device, mount_point))
                 {
-                    serial_write_string("[alix] fstab: mount still failing after format\r\n");
+                    serial_printf("%s", "[alix] fstab: mount still failing after format\r\n");
                 }
             }
             else
             {
-                serial_write_string("[alix] fstab: format failed\r\n");
+                serial_printf("%s", "[alix] fstab: format failed\r\n");
             }
         }
         else
@@ -301,13 +301,13 @@ static void mount_default_fstab(void)
             ensure_system_layout();
             if (!timekeeping_ensure_timezone_config())
             {
-                serial_write_string("[alix] warn: timezone config missing and default creation failed\r\n");
+                serial_printf("%s", "[alix] warn: timezone config missing and default creation failed\r\n");
             }
             else
             {
                 if (!timekeeping_reload_timezone())
                 {
-                    serial_write_string("[alix] warn: failed to reload timezone config\r\n");
+                    serial_printf("%s", "[alix] warn: failed to reload timezone config\r\n");
                 }
             }
         }
@@ -323,46 +323,51 @@ static void fstab_mount_run(void)
 
 static void warmup_run_sequence(void)
 {
+    serial_printf("%s", "[warmup] sequence start\r\n");
 #if ENABLE_FSTAB_MOUNT
     vfs_spin_up();
     fstab_mount_run();
     g_fstab_ready = true;
 #else
     g_fstab_ready = true;
-    serial_write_string("[alix] fstab mount disabled; skipping\r\n");
+    serial_printf("%s", "[alix] fstab mount disabled; skipping\r\n");
 #endif
 
 #if ENABLE_STARTUP_SCRIPT
     if (!startup_schedule())
     {
-        serial_write_string("Failed to start startup scripts\r\n");
+        serial_printf("%s", "Failed to start startup scripts\r\n");
     }
 #endif
 
+    serial_printf("%s", "[warmup] creating shell process\r\n");
     process_t *shell_process = process_create_kernel("shell", shell_process_entry, NULL, 0, -1);
     if (!shell_process)
     {
-        serial_write_string("Failed to create shell process; halting\r\n");
+        serial_printf("%s", "Failed to create shell process; halting\r\n");
         for (;;)
         {
             __asm__ volatile ("hlt");
         }
     }
+    serial_printf("%s", "[warmup] shell process created\r\n");
     process_stack_watch_process(shell_process, "shell_boot");
 
 #if ENABLE_FLUSHD
     process_t *flush_process = process_create_kernel("flushd", storage_flush_process_entry, NULL, 0, -1);
     if (!flush_process)
     {
-        serial_write_string("Failed to create flush daemon\r\n");
+        serial_printf("%s", "Failed to create flush daemon\r\n");
     }
     else
     {
         process_stack_watch_process(flush_process, "flushd_boot");
+        serial_printf("%s", "[warmup] flush daemon started\r\n");
     }
 #else
-    serial_write_string("[alix] flushd disabled; skipping\r\n");
+    serial_printf("%s", "[alix] flushd disabled; skipping\r\n");
 #endif
+    serial_printf("%s", "[warmup] sequence complete\r\n");
 }
 
 static void warmup_process_entry(void *arg)
@@ -393,7 +398,7 @@ static void storage_flush_process_entry(void *arg)
         process_sleep_ms(interval_ms);
         if (!vfs_sync_dirty())
         {
-            serial_write_string("[flushd] warning: partial sync failure\r\n");
+            serial_printf("%s", "[flushd] warning: partial sync failure\r\n");
         }
     }
 }
@@ -401,66 +406,66 @@ static void storage_flush_process_entry(void *arg)
 void kernel_main(void)
 {
     serial_init();
-    serial_write_string("[alix] kernel_main start\n");
+    serial_printf("%s", "[alix] kernel_main start\n");
     console_init();
     console_clear();
 
     heap_init();
     user_memory_init();
     paging_init();
-    serial_write_string("[alix] after paging_init\n");
+    serial_printf("%s", "[alix] after paging_init\n");
     hwinfo_print_boot_summary();
-    serial_write_string("[alix] after hwinfo\n");
+    serial_printf("%s", "[alix] after hwinfo\n");
     acpi_init();
-    serial_write_string("[alix] after acpi_init\n");
+    serial_printf("%s", "[alix] after acpi_init\n");
     smp_init();
-    serial_write_string("[alix] after smp_init\n");
+    serial_printf("%s", "[alix] after smp_init\n");
     process_system_init();
-    serial_write_string("[alix] after process_system_init\n");
+    serial_printf("%s", "[alix] after process_system_init\n");
     user_atk_init();
     block_init();
     ahci_init();
-    serial_write_string("[alix] after block_init\n");
+    serial_printf("%s", "[alix] after block_init\n");
 
     vfs_init();
-    serial_write_string("[alix] after vfs_init\n");
+    serial_printf("%s", "[alix] after vfs_init\n");
 #if ENABLE_STARTUP_SCRIPT
     startup_init();
 #endif
     procfs_init();
-    serial_write_string("[alix] after procfs_init\n");
+    serial_printf("%s", "[alix] after procfs_init\n");
     logger_init();
     devfs_init();
-    serial_write_string("[alix] after devfs_init\n");
+    serial_printf("%s", "[alix] after devfs_init\n");
     interrupts_init();
     interrupts_enable_irq(1);
-    serial_write_string("[alix] after interrupts_init\n");
+    serial_printf("%s", "[alix] after interrupts_init\n");
     timer_init(100);
     timekeeping_init();
     keyboard_init();
-    serial_write_string("[alix] after keyboard_init\n");
+    serial_printf("%s", "[alix] after keyboard_init\n");
     ata_init();
     devfs_register_block_devices();
-    serial_write_string("[alix] after storage init\n");
+    serial_printf("%s", "[alix] after storage init\n");
 
     net_if_init();
     net_dns_init();
     net_ntp_init();
     net_tcp_init();
-    serial_write_string("[alix] after net init\n");
+    serial_printf("%s", "[alix] after net init\n");
 
     rtl8139_init();
     if (!smp_start_secondary_cpus())
     {
-        serial_write_string("[alix] warn: smp_start_secondary_cpus failed\r\n");
+        serial_printf("%s", "[alix] warn: smp_start_secondary_cpus failed\r\n");
     }
     interrupts_enable();
-    serial_write_string("[alix] after rtl8139_init\n");
+    serial_printf("%s", "[alix] after rtl8139_init\n");
 
     process_t *warmup_process = process_create_kernel("warmup", warmup_process_entry, NULL, 0, -1);
     if (!warmup_process)
     {
-        serial_write_string("Failed to create warmup process; running inline\r\n");
+        serial_printf("%s", "Failed to create warmup process; running inline\r\n");
         warmup_run_sequence();
     }
     else
@@ -468,7 +473,11 @@ void kernel_main(void)
         process_stack_watch_process(warmup_process, "warmup_boot");
     }
 
-    serial_write_string("[alix] starting scheduler\n");
+    serial_start_async_worker();
+    serial_printf("%s", "[alix] enabling scheduler\n");
+    process_scheduler_set_ready();
+
+    serial_printf("%s", "[alix] starting scheduler\n");
     process_start_scheduler();
 
     for (;;)

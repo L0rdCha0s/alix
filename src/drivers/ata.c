@@ -298,11 +298,11 @@ static bool ata_block_write(block_device_t *device, uint64_t lba, uint32_t count
 
 static void ata_log_device(const char *name, uint64_t sectors)
 {
-    serial_write_string("ATA device ");
-    serial_write_string(name);
-    serial_write_string(" sectors=");
-    serial_write_hex64(sectors);
-    serial_write_string("\r\n");
+    serial_printf("%s", "ATA device ");
+    serial_printf("%s", name);
+    serial_printf("%s", " sectors=");
+    serial_printf("%016llX", (unsigned long long)(sectors));
+    serial_printf("%s", "\r\n");
 }
 
 static void ata_register_from_identify(ata_channel_t *channel, uint8_t drive, uint16_t *identify, uint32_t index)

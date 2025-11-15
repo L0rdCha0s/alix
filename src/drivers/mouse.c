@@ -31,8 +31,8 @@ static inline void mouse_irq_restore(uint64_t flags)
 
 static void mouse_log(const char *msg)
 {
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static bool mouse_listener_valid(mouse_listener_t listener)
@@ -72,7 +72,7 @@ static void mouse_log_packet(int dx, int dy, bool left, uint8_t status)
     buf[idx++] = ' ';
     buf[idx++] = 'L'; buf[idx++] = left ? '1' : '0';
     buf[idx++] = '\0';
-    serial_write_string(buf);
+    serial_printf("%s", buf);
 }
 
 static void mouse_wait(uint8_t type)
@@ -107,9 +107,9 @@ void mouse_register_listener(mouse_listener_t listener)
 {
     if (listener && !mouse_listener_valid(listener))
     {
-        serial_write_string("mouse listener rejected ptr=0x");
-        serial_write_hex64((uint64_t)(uintptr_t)listener);
-        serial_write_string("\r\n");
+        serial_printf("%s", "mouse listener rejected ptr=0x");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)listener));
+        serial_printf("%s", "\r\n");
         return;
     }
     g_listener = listener;
@@ -195,11 +195,11 @@ out:
 
     if (mouse_packet_log < 16)
     {
-        serial_write_string("mouse packet dx=");
-        serial_write_hex64((uint64_t)(int64_t)emit_dx);
-        serial_write_string(" dy=");
-        serial_write_hex64((uint64_t)(int64_t)emit_dy);
-        serial_write_string(emit_left ? " left=1\r\n" : " left=0\r\n");
+        serial_printf("%s", "mouse packet dx=");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)emit_dx));
+        serial_printf("%s", " dy=");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)emit_dy));
+        serial_printf("%s", emit_left ? " left=1\r\n" : " left=0\r\n");
         mouse_packet_log++;
     }
 
@@ -218,11 +218,11 @@ void mouse_on_irq(uint8_t byte)
     }
     if (mouse_irq_byte_log < 32)
     {
-        serial_write_string("mouse irq byte=0x");
+        serial_printf("%s", "mouse irq byte=0x");
         static const char hex[] = "0123456789ABCDEF";
-        serial_write_char(hex[(byte >> 4) & 0xF]);
-        serial_write_char(hex[byte & 0xF]);
-        serial_write_string("\r\n");
+        serial_printf("%c", hex[(byte >> 4) & 0xF]);
+        serial_printf("%c", hex[byte & 0xF]);
+        serial_printf("%s", "\r\n");
         mouse_irq_byte_log++;
     }
     mouse_process_byte(byte);

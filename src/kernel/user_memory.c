@@ -23,11 +23,11 @@ static size_t g_free_bytes = 0;
 #ifdef ENABLE_MEM_DEBUG_LOGS
 static inline void usermem_log(const char *msg, uintptr_t value)
 {
-    serial_write_string("[umem] ");
-    serial_write_string(msg);
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[umem] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 #else
 static inline void usermem_log(const char *msg, uintptr_t value)
@@ -125,7 +125,7 @@ static void user_memory_add_range(uintptr_t base, uintptr_t end)
     user_memory_range_t *node = (user_memory_range_t *)malloc(sizeof(user_memory_range_t));
     if (!node)
     {
-        serial_write_string("user_memory: failed to allocate range node\r\n");
+        serial_printf("%s", "user_memory: failed to allocate range node\r\n");
         return;
     }
     node->base = base;
@@ -181,9 +181,9 @@ void user_memory_init(void)
         user_memory_add_range((uintptr_t)start, (uintptr_t)end);
     }
 
-    serial_write_string("user_memory: available 0x");
-    serial_write_hex64((uint64_t)g_free_bytes);
-    serial_write_string(" bytes\r\n");
+    serial_printf("%s", "user_memory: available 0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
+    serial_printf("%s", " bytes\r\n");
 }
 
 void *user_memory_alloc(size_t bytes)
@@ -215,10 +215,10 @@ void *user_memory_alloc(size_t bytes)
         }
         cursor = &range->next;
     }
-    serial_write_string("user_memory: allocation failed\r\n");
-    serial_write_string("user_memory: free bytes 0x");
-    serial_write_hex64((uint64_t)g_free_bytes);
-    serial_write_string("\r\n");
+    serial_printf("%s", "user_memory: allocation failed\r\n");
+    serial_printf("%s", "user_memory: free bytes 0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
+    serial_printf("%s", "\r\n");
     return NULL;
 }
 
@@ -237,7 +237,7 @@ void user_memory_free(void *addr, size_t bytes)
     user_memory_range_t *node = (user_memory_range_t *)malloc(sizeof(user_memory_range_t));
     if (!node)
     {
-        serial_write_string("user_memory: failed to allocate free node\r\n");
+        serial_printf("%s", "user_memory: failed to allocate free node\r\n");
         return;
     }
     node->base = base;
@@ -267,10 +267,10 @@ bool user_memory_alloc_page(uintptr_t *phys_out)
     }
     if (!range)
     {
-        serial_write_string("user_memory: no free pages\r\n");
-        serial_write_string("user_memory: free bytes 0x");
-        serial_write_hex64((uint64_t)g_free_bytes);
-        serial_write_string("\r\n");
+        serial_printf("%s", "user_memory: no free pages\r\n");
+        serial_printf("%s", "user_memory: free bytes 0x");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
+        serial_printf("%s", "\r\n");
         return false;
     }
     uintptr_t addr = range->base;

@@ -56,10 +56,10 @@ static void user_atk_present_dump(const char *label, const uint16_t *pixels, siz
     }
     for (size_t i = 0; i < words; ++i)
     {
-        serial_write_string(" ");
-        serial_write_hex64((uint64_t)pixels[i]);
+        serial_printf("%s", " ");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)pixels[i]));
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void user_atk_present_log_summary(uint32_t handle,
@@ -68,47 +68,47 @@ static void user_atk_present_log_summary(uint32_t handle,
                                          const uint16_t *src_pixels,
                                          const uint16_t *dst_pixels)
 {
-    serial_write_string("[user_atk][present] handle=0x");
-    serial_write_hex64((uint64_t)handle);
-    serial_write_string(" expected=0x");
-    serial_write_hex64((uint64_t)expected_bytes);
-    serial_write_string(" actual=0x");
-    serial_write_hex64((uint64_t)actual_bytes);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[user_atk][present] handle=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)handle));
+    serial_printf("%s", " expected=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)expected_bytes));
+    serial_printf("%s", " actual=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)actual_bytes));
+    serial_printf("%s", "\r\n");
     user_atk_present_dump("user", src_pixels, actual_bytes);
     user_atk_present_dump("dst", dst_pixels, expected_bytes);
 }
 
 static void user_atk_present_log_mismatch(uint32_t handle, size_t expected_bytes, size_t actual_bytes)
 {
-    serial_write_string("[user_atk][present] length_mismatch handle=0x");
-    serial_write_hex64((uint64_t)handle);
-    serial_write_string(" expected=0x");
-    serial_write_hex64((uint64_t)expected_bytes);
-    serial_write_string(" actual=0x");
-    serial_write_hex64((uint64_t)actual_bytes);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[user_atk][present] length_mismatch handle=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)handle));
+    serial_printf("%s", " expected=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)expected_bytes));
+    serial_printf("%s", " actual=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)actual_bytes));
+    serial_printf("%s", "\r\n");
 }
 
 #if USER_ATK_DEBUG
 static void user_atk_log(const char *msg, uint64_t value)
 {
-    serial_write_string("[user_atk] ");
-    serial_write_string(msg);
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[user_atk] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 
 static void user_atk_log_pair(const char *msg, uint64_t a, uint64_t b)
 {
-    serial_write_string("[user_atk] ");
-    serial_write_string(msg);
-    serial_write_string(" a=0x");
-    serial_write_hex64(a);
-    serial_write_string(" b=0x");
-    serial_write_hex64(b);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[user_atk] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", " a=0x");
+    serial_printf("%016llX", (unsigned long long)(a));
+    serial_printf("%s", " b=0x");
+    serial_printf("%016llX", (unsigned long long)(b));
+    serial_printf("%s", "\r\n");
 }
 #else
 static void user_atk_log(const char *msg, uint64_t value)

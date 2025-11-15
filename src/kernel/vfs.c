@@ -73,11 +73,11 @@ static vfs_mount_t *mounts = NULL;
 
 static void vfs_log(const char *msg, uint64_t value)
 {
-    serial_write_string("[vfs] ");
-    serial_write_string(msg);
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[vfs] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 
 static bool vfs_mount_sync_node(vfs_node_t *node);

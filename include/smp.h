@@ -6,6 +6,7 @@
 
 #define SMP_MAX_CPUS 32
 #define SMP_SCHEDULE_IPI_VECTOR 0xF0
+#define SMP_TLB_FLUSH_IPI_VECTOR 0xEF
 
 typedef struct
 {
@@ -23,6 +24,7 @@ uint32_t smp_current_cpu_index(void);
 const smp_cpu_t *smp_cpu_by_index(uint32_t index);
 void smp_handle_schedule_ipi(interrupt_frame_t *frame);
 void smp_broadcast_schedule_ipi(void);
+void smp_broadcast_tlb_flush(void);
 void smp_secondary_entry(uint32_t apic_id);
 
 #endif /* SMP_H */

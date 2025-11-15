@@ -59,6 +59,58 @@ static inline void write_cr4(uint64_t value)
     __asm__ volatile ("mov %0, %%cr4" :: "r"(value) : "memory");
 }
 
+static void configure_heap_from_e820(void)
+{
+    const uint32_t max_entries = BOOTINFO_MAX_E820_ENTRIES;
+    uint32_t count = boot_info.e820_entry_count;
+    if (count > max_entries)
+    {
+        count = max_entries;
+    }
+    if (count == 0)
+    {
+        return;
+    }
+
+    uint64_t desired_base = (uint64_t)kernel_heap_base;
+    uint64_t best_end = desired_base;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        if (boot_info.e820[i].type != 1)
+        {
+            continue;
+        }
+        uint64_t entry_base = boot_info.e820[i].base;
+        uint64_t entry_length = boot_info.e820[i].length;
+        uint64_t entry_end = entry_base + entry_length;
+        if (entry_end <= entry_base)
+        {
+            continue;
+        }
+        if (entry_base <= desired_base && entry_end > best_end)
+        {
+            best_end = entry_end;
+        }
+    }
+
+    if (best_end > desired_base)
+    {
+        if (best_end > (uint64_t)UINTPTR_MAX)
+        {
+            best_end = (uint64_t)UINTPTR_MAX;
+        }
+        kernel_heap_end = (uintptr_t)best_end;
+        kernel_heap_size = kernel_heap_end - kernel_heap_base;
+        serial_printf("%s", "[alix] heap range ");
+        serial_printf("%016llX", (unsigned long long)(kernel_heap_base));
+        serial_printf("%s", " - ");
+        serial_printf("%016llX", (unsigned long long)(kernel_heap_end));
+        serial_printf("%s", " (");
+        serial_printf("%016llX", (unsigned long long)(kernel_heap_size));
+        serial_printf("%s", " bytes)\r\n");
+    }
+}
+
 static void zero_bytes(uint8_t *ptr, size_t size)
 {
     for (size_t i = 0; i < size; ++i)
@@ -146,7 +198,7 @@ __attribute__((noinline, used))
 static void kernel_entry_main(bootinfo_t *loader_info)
 {
     serial_init();
-    serial_write_string("[alix] kernel_entry_main\n");
+    serial_printf("%s", "[alix] kernel_entry_main\n");
 
     size_t bss_size = (size_t)(__bss_end - __bss_start);
 
@@ -157,13 +209,14 @@ static void kernel_entry_main(bootinfo_t *loader_info)
                    (const uint8_t *)loader_info,
                    sizeof(bootinfo_t));
     }
+    configure_heap_from_e820();
 
     build_page_tables();
-    serial_write_string("[alix] page tables built\n");
+    serial_printf("%s", "[alix] page tables built\n");
     arch_cpu_init_bsp(STACK_TOP);
-    serial_write_string("[alix] cpu segments ready\n");
+    serial_printf("%s", "[alix] cpu segments ready\n");
 
-    serial_write_string("[alix] entering kernel_main\n");
+    serial_printf("%s", "[alix] entering kernel_main\n");
     kernel_main();
 }
 

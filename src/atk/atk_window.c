@@ -551,8 +551,8 @@ void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
 
 static void atk_log(const char *msg)
 {
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static bool window_list_pointer_valid(const void *ptr)
@@ -606,7 +606,7 @@ static bool window_sanitize_list(atk_state_t *state)
 
     if (corrupted)
     {
-        serial_write_string("atk: window list corrupted; resetting\r\n");
+        serial_printf("%s", "atk: window list corrupted; resetting\r\n");
         list->head = NULL;
         list->tail = NULL;
         list->size = 0;
@@ -615,7 +615,7 @@ static bool window_sanitize_list(atk_state_t *state)
 
     if (list->tail && !window_list_pointer_valid(list->tail))
     {
-        serial_write_string("atk: window list tail corrupted; resetting\r\n");
+        serial_printf("%s", "atk: window list tail corrupted; resetting\r\n");
         list->head = NULL;
         list->tail = NULL;
         list->size = 0;

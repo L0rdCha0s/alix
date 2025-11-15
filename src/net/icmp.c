@@ -56,7 +56,7 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     uint8_t *buffer = (uint8_t *)malloc(frame_len);
     if (!buffer)
     {
-        serial_write_string("icmp: alloc frame failed\r\n");
+        serial_printf("%s", "icmp: alloc frame failed\r\n");
         return false;
     }
     memset(buffer, 0, frame_len);
@@ -104,21 +104,21 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     char macbuf[13];
     net_format_ipv4(target_ip, ipbuf);
     net_format_mac(target_mac, macbuf);
-    serial_write_string("icmp: send echo id=0x");
-    serial_write_char("0123456789ABCDEF"[(identifier >> 12) & 0xF]);
-    serial_write_char("0123456789ABCDEF"[(identifier >> 8) & 0xF]);
-    serial_write_char("0123456789ABCDEF"[(identifier >> 4) & 0xF]);
-    serial_write_char("0123456789ABCDEF"[identifier & 0xF]);
-    serial_write_string(" seq=0x");
-    serial_write_char("0123456789ABCDEF"[(sequence >> 12) & 0xF]);
-    serial_write_char("0123456789ABCDEF"[(sequence >> 8) & 0xF]);
-    serial_write_char("0123456789ABCDEF"[(sequence >> 4) & 0xF]);
-    serial_write_char("0123456789ABCDEF"[sequence & 0xF]);
-    serial_write_string(" target=");
-    serial_write_string(ipbuf);
-    serial_write_string(" mac=");
-    serial_write_string(macbuf);
-    serial_write_string(" len=");
+    serial_printf("%s", "icmp: send echo id=0x");
+    serial_printf("%c", "0123456789ABCDEF"[(identifier >> 12) & 0xF]);
+    serial_printf("%c", "0123456789ABCDEF"[(identifier >> 8) & 0xF]);
+    serial_printf("%c", "0123456789ABCDEF"[(identifier >> 4) & 0xF]);
+    serial_printf("%c", "0123456789ABCDEF"[identifier & 0xF]);
+    serial_printf("%s", " seq=0x");
+    serial_printf("%c", "0123456789ABCDEF"[(sequence >> 12) & 0xF]);
+    serial_printf("%c", "0123456789ABCDEF"[(sequence >> 8) & 0xF]);
+    serial_printf("%c", "0123456789ABCDEF"[(sequence >> 4) & 0xF]);
+    serial_printf("%c", "0123456789ABCDEF"[sequence & 0xF]);
+    serial_printf("%s", " target=");
+    serial_printf("%s", ipbuf);
+    serial_printf("%s", " mac=");
+    serial_printf("%s", macbuf);
+    serial_printf("%s", " len=");
     char lenbuf[12];
     size_t len_idx = 0;
     size_t send_len_copy = frame_len;
@@ -141,11 +141,11 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
         }
     }
     lenbuf[len_idx] = '\0';
-    serial_write_string(lenbuf);
-    serial_write_string("\r\n");
+    serial_printf("%s", lenbuf);
+    serial_printf("%s", "\r\n");
 
     size_t dump_len = frame_len < 64 ? frame_len : 64;
-    serial_write_string("icmp: frame data=");
+    serial_printf("%s", "icmp: frame data=");
     for (size_t i = 0; i < dump_len; ++i)
     {
         uint8_t byte = buffer[i];
@@ -154,18 +154,18 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
         out[0] = hex[(byte >> 4) & 0xF];
         out[1] = hex[byte & 0xF];
         out[2] = '\0';
-        serial_write_string(out);
+        serial_printf("%s", out);
         if ((i & 0x0F) == 0x0F || i + 1 == dump_len)
         {
-            serial_write_string("\r\n");
+            serial_printf("%s", "\r\n");
             if (i + 1 < dump_len)
             {
-                serial_write_string("icmp: frame data=");
+                serial_printf("%s", "icmp: frame data=");
             }
         }
         else
         {
-            serial_write_char(' ');
+            serial_printf("%c", ' ');
         }
     }
 
@@ -173,13 +173,13 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     if (!ok)
     {
         g_pending.active = false;
-        serial_write_string("icmp: send failed\r\n");
+        serial_printf("%s", "icmp: send failed\r\n");
         free(buffer);
         return false;
     }
 
     free(buffer);
-    serial_write_string("icmp: send queued\r\n");
+    serial_printf("%s", "icmp: send queued\r\n");
     return true;
 }
 
@@ -265,15 +265,15 @@ void net_icmp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
 
             char ipbuf[32];
             net_format_ipv4(g_pending.reply.from_ip, ipbuf);
-            serial_write_string("icmp: reply from ");
-            serial_write_string(ipbuf);
-            serial_write_string(" bytes=");
+            serial_printf("%s", "icmp: reply from ");
+            serial_printf("%s", ipbuf);
+            serial_printf("%s", " bytes=");
             // (keep your existing decimal print helper if you prefer)
             char nbuf[12]; size_t n=0, v=g_pending.reply.bytes;
             if (!v) nbuf[n++]='0'; else { char t[12]; size_t ti=0; while (v && ti<sizeof t){t[ti++]=(char)('0'+(v%10)); v/=10;} while(ti) nbuf[n++]=t[--ti]; }
             nbuf[n]='\0';
-            serial_write_string(nbuf);
-            serial_write_string("\r\n");
+            serial_printf("%s", nbuf);
+            serial_printf("%s", "\r\n");
         }
         return;
     }
@@ -288,7 +288,7 @@ void net_icmp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         uint8_t *reply = (uint8_t *)malloc(out_len);
         if (!reply)
         {
-            serial_write_string("icmp: reply alloc failed\r\n");
+            serial_printf("%s", "icmp: reply alloc failed\r\n");
             return;
         }
         memset(reply, 0, out_len);

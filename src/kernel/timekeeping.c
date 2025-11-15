@@ -55,12 +55,12 @@ typedef struct
 
 static void timekeeping_log(const char *msg)
 {
-    serial_write_string("[time] ");
+    serial_printf("%s", "[time] ");
     if (msg)
     {
-        serial_write_string(msg);
+        serial_printf("%s", msg);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void timekeeping_copy_string(char *dest, size_t capacity, const char *src)

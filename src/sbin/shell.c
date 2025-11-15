@@ -710,7 +710,7 @@ static bool shell_run_script(shell_state_t *shell,
                 if (stream_immediately)
                 {
                     console_write(result);
-                    serial_write_string(result);
+                    serial_printf("%s", result);
                 }
                 else if (out)
                 {
@@ -745,7 +745,7 @@ void shell_main(void)
     if (!shell)
     {
         console_write("Shell: unable to allocate state\n");
-        serial_write_string("Shell: unable to allocate state\r\n");
+        serial_printf("%s", "Shell: unable to allocate state\r\n");
         return;
     }
     shell->cwd = process_current_cwd();
@@ -760,8 +760,8 @@ void shell_main(void)
     shell->cwd_changed_context = NULL;
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, top, useratk, atkshell, taskmgr, wolf3d, doom, runelf, or ./path for binaries.\n");
-    serial_write_string("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, top, useratk, atkshell, taskmgr, wolf3d, doom, runelf, or ./path for binaries.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, runelf, or ./path for binaries.\n");
+    serial_printf("%s", "In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, runelf, or ./path for binaries.\r\n");
 
     while (1)
     {
@@ -802,6 +802,7 @@ static const shell_command_t g_commands[] = {
     { "free",        shell_cmd_free },
     { "loop1",       shell_cmd_loop1 },
     { "loop2",       shell_cmd_loop2 },
+    { "letters",     shell_cmd_letters },
     { "top",         shell_cmd_top },
     { "useratk",     shell_cmd_useratk },
     { "atkshell",    shell_cmd_atkshell },
@@ -1176,7 +1177,7 @@ static void shell_run_and_display(shell_state_t *shell, const char *input)
     if (result && *result)
     {
         console_write(result);
-        serial_write_string(result);
+        serial_printf("%s", result);
     }
     if (result)
     {
@@ -1214,7 +1215,7 @@ static char *shell_duplicate_string(const char *text)
 static void shell_print_prompt(void)
 {
     console_write("alex@alix$ ");
-    serial_write_string("alex@alix$ ");
+    serial_printf("%s", "alex@alix$ ");
 }
 
 static bool cli_try_read_char(char *out)
@@ -1289,7 +1290,7 @@ static size_t cli_read_line(char *buffer, size_t capacity)
             {
                 --len;
                 console_backspace();
-                serial_write_string("\b \b");
+                serial_printf("%s", "\b \b");
             }
             continue;
         }
@@ -1306,7 +1307,7 @@ static size_t cli_read_line(char *buffer, size_t capacity)
         {
             buffer[len++] = c;
             console_putc(c);
-            serial_write_char(c);
+            serial_printf("%c", c);
         }
     }
 
@@ -1376,11 +1377,7 @@ static char *trim_whitespace(char *text)
 
 static void serial_emit_char(char c)
 {
-    if (c == '\n')
-    {
-        serial_write_char('\r');
-    }
-    serial_write_char(c);
+    serial_printf("%c", c);
 }
 
 static void shell_stream_console_write(void *context, const char *data, size_t len)
@@ -1474,7 +1471,7 @@ static void cli_history_load_text(const char *text,
     {
         --(*len);
         console_backspace();
-        serial_write_string("\b \b");
+        serial_printf("%s", "\b \b");
     }
 
     size_t copy_len = 0;
@@ -1497,7 +1494,7 @@ static void cli_history_load_text(const char *text,
     {
         char ch = buffer[i];
         console_putc(ch);
-        serial_write_char(ch);
+        serial_printf("%c", ch);
     }
 }
 

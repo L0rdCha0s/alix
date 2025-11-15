@@ -23,6 +23,7 @@ typedef struct paging_space
 
 void paging_init(void);
 bool paging_clone_kernel_space(paging_space_t *space);
+bool paging_share_kernel_space(paging_space_t *space);
 void paging_destroy_space(paging_space_t *space);
 uintptr_t paging_kernel_cr3(void);
 bool paging_map_user_page(paging_space_t *space,
@@ -41,5 +42,8 @@ bool paging_unmap_user_page(paging_space_t *space,
 bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
                                       size_t length,
                                       bool writable);
+void paging_flush_global_tlb(void);
+void paging_handle_remote_tlb_flush(void);
+void paging_set_clone_trace(bool enable);
 
 #endif

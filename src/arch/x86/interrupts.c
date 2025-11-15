@@ -11,6 +11,7 @@
 #include "console.h"
 #include "syscall.h"
 #include "smp.h"
+#include "paging.h"
 #include "lapic.h"
 #include "ahci.h"
 #include "arch/x86/smp_boot.h"
@@ -80,30 +81,30 @@ static void log_kernel_stack_bounds(const char *label, const interrupt_frame_t *
     uint32_t cpu = smp_current_cpu_index();
     uint64_t rsp0 = arch_cpu_get_kernel_stack(cpu);
 
-    serial_write_string("[stack] label=");
-    serial_write_string(label ? label : "<none>");
-    serial_write_string(" cpu=0x");
-    serial_write_hex64(cpu);
-    serial_write_string(" base=0x");
-    serial_write_hex64(base);
-    serial_write_string(" top=0x");
-    serial_write_hex64(top);
-    serial_write_string(" rsp0=0x");
-    serial_write_hex64(rsp0);
+    serial_printf("%s", "[stack] label=");
+    serial_printf("%s", label ? label : "<none>");
+    serial_printf("%s", " cpu=0x");
+    serial_printf("%016llX", (unsigned long long)(cpu));
+    serial_printf("%s", " base=0x");
+    serial_printf("%016llX", (unsigned long long)(base));
+    serial_printf("%s", " top=0x");
+    serial_printf("%016llX", (unsigned long long)(top));
+    serial_printf("%s", " rsp0=0x");
+    serial_printf("%016llX", (unsigned long long)(rsp0));
     if (frame)
     {
-        serial_write_string(" rsp=0x");
-        serial_write_hex64(frame->rsp);
+        serial_printf("%s", " rsp=0x");
+        serial_printf("%016llX", (unsigned long long)(frame->rsp));
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void dump_kernel_stack(uintptr_t rsp, size_t max_entries)
 {
-    serial_write_string("  kernel stack trace:\r\n");
+    serial_printf("%s", "  kernel stack trace:\r\n");
     if (rsp == 0)
     {
-        serial_write_string("    <rsp unavailable>\r\n");
+        serial_printf("%s", "    <rsp unavailable>\r\n");
         return;
     }
 
@@ -116,15 +117,15 @@ static void dump_kernel_stack(uintptr_t rsp, size_t max_entries)
             break;
         }
         uintptr_t value = *((const uintptr_t *)addr);
-        serial_write_string("    [");
-        serial_write_hex64(addr);
-        serial_write_string("] = 0x");
-        serial_write_hex64(value);
+        serial_printf("%s", "    [");
+        serial_printf("%016llX", (unsigned long long)(addr));
+        serial_printf("%s", "] = 0x");
+        serial_printf("%016llX", (unsigned long long)(value));
         if (i == 0)
         {
-            serial_write_string(" <-- rsp");
+            serial_printf("%s", " <-- rsp");
         }
-        serial_write_string("\r\n");
+        serial_printf("%s", "\r\n");
     }
 }
 
@@ -145,7 +146,7 @@ static void dump_exception_stacktrace(const interrupt_frame_t *frame)
         }
         else
         {
-            serial_write_string("  user stack: no current process\r\n");
+            serial_printf("%s", "  user stack: no current process\r\n");
         }
     }
     else
@@ -162,51 +163,59 @@ static void fault_report(const char *reason,
                          bool include_cr2,
                          uint64_t cr2_value)
 {
+    /* Emit a minimal banner synchronously in case we halt before the queue drains. */
+    serial_early_write_string("\r\nCPU exception encountered.\r\n");
+    if (reason)
+    {
+        serial_early_write_string("reason: ");
+        serial_early_write_string(reason);
+        serial_early_write_string("\r\n");
+    }
     console_write("CPU exception encountered, see serial log.\n");
-    serial_write_string("\r\n=== CPU EXCEPTION ===\r\n");
-    serial_write_string("reason: ");
-    serial_write_string(reason);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n=== CPU EXCEPTION ===\r\n");
+    serial_printf("%s", "reason: ");
+    serial_printf("%s", reason);
+    serial_printf("%s", "\r\n");
     uint32_t cpu_idx = smp_current_cpu_index();
-    serial_write_string("  cpu_index=0x");
-    serial_write_hex64(cpu_idx);
-    serial_write_string("\r\n");
+    serial_printf("%s", "  cpu_index=0x");
+    serial_printf("%016llX", (unsigned long long)(cpu_idx));
+    serial_printf("%s", "\r\n");
     if (frame)
     {
-        serial_write_string("  RIP=");
-        serial_write_hex64(frame->rip);
-        serial_write_string(" RSP=");
-        serial_write_hex64(frame->rsp);
-        serial_write_string(" RFLAGS=");
-        serial_write_hex64(frame->rflags);
-        serial_write_string(" CS=");
-        serial_write_hex64(frame->cs);
-        serial_write_string(" SS=");
-        serial_write_hex64(frame->ss);
-        serial_write_string("\r\n");
+        serial_printf("%s", "  RIP=");
+        serial_printf("%016llX", (unsigned long long)(frame->rip));
+        serial_printf("%s", " RSP=");
+        serial_printf("%016llX", (unsigned long long)(frame->rsp));
+        serial_printf("%s", " RFLAGS=");
+        serial_printf("%016llX", (unsigned long long)(frame->rflags));
+        serial_printf("%s", " CS=");
+        serial_printf("%016llX", (unsigned long long)(frame->cs));
+        serial_printf("%s", " SS=");
+        serial_printf("%016llX", (unsigned long long)(frame->ss));
+        serial_printf("%s", "\r\n");
     }
     if (has_error)
     {
-        serial_write_string("  ERR=");
-        serial_write_hex64(error_code);
-        serial_write_string("\r\n");
+        serial_printf("%s", "  ERR=");
+        serial_printf("%016llX", (unsigned long long)(error_code));
+        serial_printf("%s", "\r\n");
     }
     if (include_cr2)
     {
-        serial_write_string("  CR2=");
-        serial_write_hex64(cr2_value);
-        serial_write_string("\r\n");
+        serial_printf("%s", "  CR2=");
+        serial_printf("%016llX", (unsigned long long)(cr2_value));
+        serial_printf("%s", "\r\n");
     }
     uint64_t pid = process_current_pid();
-    serial_write_string("  current_pid=0x");
-    serial_write_hex64(pid);
-    serial_write_string("\r\n");
+    serial_printf("%s", "  current_pid=0x");
+    serial_printf("%016llX", (unsigned long long)(pid));
+    serial_printf("%s", "\r\n");
     process_dump_current_thread();
     if (frame)
     {
         fault_dump_bytes(frame->rip);
     }
-    serial_write_string("======================\r\n");
+    serial_printf("%s", "======================\r\n");
 }
 
 static void fault_dump_bytes(uint64_t rip)
@@ -216,15 +225,15 @@ static void fault_dump_bytes(uint64_t rip)
     {
         return;
     }
-    serial_write_string("  instr bytes:");
+    serial_printf("%s", "  instr bytes:");
     for (size_t i = 0; i < 16; ++i)
     {
         uintptr_t addr = (uintptr_t)(rip + i);
         uint8_t byte = *((volatile uint8_t *)addr);
-        serial_write_string(" ");
-        serial_write_hex8(byte);
+        serial_printf("%s", " ");
+        serial_printf("%02X", (unsigned int)(byte));
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void pic_remap(void)
@@ -292,11 +301,11 @@ __attribute__((interrupt)) static void irq12_handler(interrupt_frame_t *frame)
     uint8_t status = inb(0x64);
     if (irq12_log_count < 16)
     {
-        serial_write_string("irq12 status=0x");
+        serial_printf("%s", "irq12 status=0x");
         static const char hex[] = "0123456789ABCDEF";
-        serial_write_char(hex[(status >> 4) & 0xF]);
-        serial_write_char(hex[status & 0xF]);
-        serial_write_string("\r\n");
+        serial_printf("%c", hex[(status >> 4) & 0xF]);
+        serial_printf("%c", hex[status & 0xF]);
+        serial_printf("%s", "\r\n");
     }
     if ((status & 0x20) == 0)
     {
@@ -307,11 +316,11 @@ __attribute__((interrupt)) static void irq12_handler(interrupt_frame_t *frame)
     uint8_t data = inb(0x60);
     if (irq12_log_count < 16)
     {
-        serial_write_string("irq12 data=0x");
+        serial_printf("%s", "irq12 data=0x");
         static const char hex[] = "0123456789ABCDEF";
-        serial_write_char(hex[(data >> 4) & 0xF]);
-        serial_write_char(hex[data & 0xF]);
-        serial_write_string("\r\n");
+        serial_printf("%c", hex[(data >> 4) & 0xF]);
+        serial_printf("%c", hex[data & 0xF]);
+        serial_printf("%s", "\r\n");
     }
     mouse_on_irq(data);
     pic_send_eoi(12);
@@ -334,15 +343,15 @@ __attribute__((interrupt)) static void invalid_opcode_handler(interrupt_frame_t 
     fault_report("invalid_opcode", frame, 0, false, false, 0);
     if (frame && frame->rip >= SMP_BOOT_DATA_PHYS && frame->rip < SMP_BOOT_DATA_PHYS + 0x100)
     {
-        serial_write_string("  smp_boot data dump:\r\n");
+        serial_printf("%s", "  smp_boot data dump:\r\n");
         const uint64_t *words = (const uint64_t *)(uintptr_t)SMP_BOOT_DATA_PHYS;
         for (size_t i = 0; i < 6; ++i)
         {
-            serial_write_string("    word[");
-            serial_write_hex64(i);
-            serial_write_string("]=0x");
-            serial_write_hex64(words[i]);
-            serial_write_string("\r\n");
+            serial_printf("%s", "    word[");
+            serial_printf("%016llX", (unsigned long long)(i));
+            serial_printf("%s", "]=0x");
+            serial_printf("%016llX", (unsigned long long)(words[i]));
+            serial_printf("%s", "\r\n");
         }
     }
     dump_exception_stacktrace(frame);
@@ -369,11 +378,11 @@ __attribute__((interrupt)) static void stack_fault_handler(interrupt_frame_t *fr
     uint32_t cpu = smp_current_cpu_index();
     uint64_t rsp0 = arch_cpu_get_kernel_stack(cpu);
     fault_report("stack_fault", frame, error_code, true, false, 0);
-    serial_write_string("  cpu_index=0x");
-    serial_write_hex64(cpu);
-    serial_write_string(" kernel_rsp0=0x");
-    serial_write_hex64(rsp0);
-    serial_write_string("\r\n");
+    serial_printf("%s", "  cpu_index=0x");
+    serial_printf("%016llX", (unsigned long long)(cpu));
+    serial_printf("%s", " kernel_rsp0=0x");
+    serial_printf("%016llX", (unsigned long long)(rsp0));
+    serial_printf("%s", "\r\n");
     log_kernel_stack_bounds("stack_fault", frame);
     dump_exception_stacktrace(frame);
     if (process_handle_exception(frame, "stack_fault", error_code, false, 0))
@@ -409,6 +418,13 @@ __attribute__((interrupt)) static void smp_schedule_ipi_handler(interrupt_frame_
     lapic_eoi();
 }
 
+__attribute__((interrupt)) static void smp_tlb_flush_ipi_handler(interrupt_frame_t *frame)
+{
+    (void)frame;
+    paging_handle_remote_tlb_flush();
+    lapic_eoi();
+}
+
 void interrupts_init(void)
 {
     idt_init();
@@ -422,6 +438,7 @@ void interrupts_init(void)
     idt_set_gate(43, (void *)irq11_handler);
     idt_set_gate(44, (void *)irq12_handler);
     idt_set_gate(SMP_SCHEDULE_IPI_VECTOR, (void *)smp_schedule_ipi_handler);
+    idt_set_gate(SMP_TLB_FLUSH_IPI_VECTOR, (void *)smp_tlb_flush_ipi_handler);
     idt_set_gate_dpl(0x80, syscall_entry, 3);
     idt_load();
     pic_remap();
@@ -448,17 +465,17 @@ void interrupts_enable_irq(uint8_t irq)
     }
     if (log_count < 8)
     {
-        serial_write_string("PIC masks: PIC1=0x");
+        serial_printf("%s", "PIC masks: PIC1=0x");
         static const char hex[] = "0123456789ABCDEF";
-        serial_write_char(hex[(pic1_mask >> 4) & 0xF]);
-        serial_write_char(hex[pic1_mask & 0xF]);
-        serial_write_string(" PIC2=0x");
-        serial_write_char(hex[(pic2_mask >> 4) & 0xF]);
-        serial_write_char(hex[pic2_mask & 0xF]);
-        serial_write_string(" irq=");
-        serial_write_char(hex[(irq >> 4) & 0xF]);
-        serial_write_char(hex[irq & 0xF]);
-        serial_write_string("\r\n");
+        serial_printf("%c", hex[(pic1_mask >> 4) & 0xF]);
+        serial_printf("%c", hex[pic1_mask & 0xF]);
+        serial_printf("%s", " PIC2=0x");
+        serial_printf("%c", hex[(pic2_mask >> 4) & 0xF]);
+        serial_printf("%c", hex[pic2_mask & 0xF]);
+        serial_printf("%s", " irq=");
+        serial_printf("%c", hex[(irq >> 4) & 0xF]);
+        serial_printf("%c", hex[irq & 0xF]);
+        serial_printf("%s", "\r\n");
         log_count++;
     }
 }

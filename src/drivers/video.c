@@ -951,8 +951,8 @@ out:
 /* --------- Logging & detection --------- */
 static void video_log(const char *msg)
 {
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static void video_log_hex(const char *prefix, uint64_t value)
@@ -965,9 +965,9 @@ static void video_log_hex(const char *prefix, uint64_t value)
         buf[i] = hex[value & 0xF];
         value >>= 4;
     }
-    serial_write_string(prefix);
-    serial_write_string(buf);
-    serial_write_string("\r\n");
+    serial_printf("%s", prefix);
+    serial_printf("%s", buf);
+    serial_printf("%s", "\r\n");
 }
 
 static void detect_framebuffer(void)
@@ -996,17 +996,17 @@ static void video_log_mouse_event(int dx, int dy, bool left_pressed)
 #if VIDEO_MOUSE_LOG
     if (video_mouse_log_count >= 16) return;
     ++video_mouse_log_count;
-    serial_write_string("mouse event dx=");
-    serial_write_char((dx >= 0) ? '+' : '-');
+    serial_printf("%s", "mouse event dx=");
+    serial_printf("%c", (dx >= 0) ? '+' : '-');
     int abs_dx = dx >= 0 ? dx : -dx;
-    serial_write_char('0' + (abs_dx / 10));
-    serial_write_char('0' + (abs_dx % 10));
-    serial_write_string(" dy=");
-    serial_write_char((dy >= 0) ? '+' : '-');
+    serial_printf("%c", '0' + (abs_dx / 10));
+    serial_printf("%c", '0' + (abs_dx % 10));
+    serial_printf("%s", " dy=");
+    serial_printf("%c", (dy >= 0) ? '+' : '-');
     int abs_dy = dy >= 0 ? dy : -dy;
-    serial_write_char('0' + (abs_dy / 10));
-    serial_write_char('0' + (abs_dy % 10));
-    serial_write_string(left_pressed ? " left=1\r\n" : " left=0\r\n");
+    serial_printf("%c", '0' + (abs_dy / 10));
+    serial_printf("%c", '0' + (abs_dy % 10));
+    serial_printf("%s", left_pressed ? " left=1\r\n" : " left=0\r\n");
 #else
     (void)dx; (void)dy; (void)left_pressed;
 #endif

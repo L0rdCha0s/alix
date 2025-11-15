@@ -32,39 +32,39 @@ static void net_debug_log_copy(const char *tag,
                                uintptr_t dest,
                                size_t len)
 {
-    serial_write_string("[net-copy] tag=");
-    serial_write_string(tag ? tag : "<none>");
-    serial_write_string(" thread=");
+    serial_printf("%s", "[net-copy] tag=");
+    serial_printf("%s", tag ? tag : "<none>");
+    serial_printf("%s", " thread=");
     const char *name = process_thread_name_const(thread);
     if (name)
     {
-        serial_write_string(name);
+        serial_printf("%s", name);
     }
     else if (thread)
     {
-        serial_write_string("<unnamed>");
+        serial_printf("%s", "<unnamed>");
     }
     else
     {
-        serial_write_string("<none>");
+        serial_printf("%s", "<none>");
     }
-    serial_write_string(" pid=0x");
+    serial_printf("%s", " pid=0x");
     process_t *owner = process_thread_owner(thread);
-    serial_write_hex64(owner ? process_get_pid(owner) : 0);
-    serial_write_string(" dest=0x");
-    serial_write_hex64(dest);
-    serial_write_string(" len=0x");
-    serial_write_hex64(len);
+    serial_printf("%016llX", (unsigned long long)(owner ? process_get_pid(owner) : 0));
+    serial_printf("%s", " dest=0x");
+    serial_printf("%016llX", (unsigned long long)(dest));
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)(len));
     uintptr_t lower = 0;
     uintptr_t upper = 0;
     if (process_thread_stack_bounds(thread, &lower, &upper))
     {
-        serial_write_string(" stack_base=0x");
-        serial_write_hex64(lower);
-        serial_write_string(" stack_top=0x");
-        serial_write_hex64(upper);
+        serial_printf("%s", " stack_base=0x");
+        serial_printf("%016llX", (unsigned long long)(lower));
+        serial_printf("%s", " stack_top=0x");
+        serial_printf("%016llX", (unsigned long long)(upper));
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 void *net_debug_memcpy(const char *tag, void *dest, const void *src, size_t len)

@@ -5,6 +5,7 @@
 #include "msr.h"
 #include "types.h"
 #include "arch/x86/smp_boot.h"
+#include "smp.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -29,6 +30,47 @@ extern uint8_t __kernel_data_end[];
 
 #define IDENTITY_LIMIT                (4ULL * 1024ULL * 1024ULL * 1024ULL)
 #define LOW_EXECUTABLE_LIMIT          PAGE_LARGE_SIZE /* keep low identity (e.g. SMP trampoline) executable */
+
+#ifndef ENABLE_PAGING_DEBUG_LOGS
+#define ENABLE_PAGING_DEBUG_LOGS 1
+#endif
+
+static bool g_paging_trace_active = false;
+
+#if ENABLE_PAGING_DEBUG_LOGS
+static uint32_t g_paging_debug_budget = 256;
+void paging_set_clone_trace(bool enable)
+{
+    g_paging_trace_active = enable;
+}
+static void paging_debug_log(const char *msg)
+{
+    if (!msg)
+    {
+        return;
+    }
+    if (!g_paging_trace_active)
+    {
+        if (g_paging_debug_budget == 0)
+        {
+            return;
+        }
+        g_paging_debug_budget--;
+    }
+    serial_printf("%s", "[paging] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
+}
+#else
+void paging_set_clone_trace(bool enable)
+{
+    g_paging_trace_active = enable;
+}
+static inline void paging_debug_log(const char *msg)
+{
+    (void)msg;
+}
+#endif
 
 typedef struct
 {
@@ -138,12 +180,17 @@ static inline void invalidate_page(uintptr_t addr)
     __asm__ volatile ("invlpg (%0)" :: "r"(addr) : "memory");
 }
 
+static inline void flush_local_tlb(void)
+{
+    write_cr3(read_cr3());
+}
+
 static void paging_panic(const char *msg) __attribute__((noreturn));
 static void paging_panic(const char *msg)
 {
-    serial_write_string("paging panic: ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", "paging panic: ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
     for (;;)
     {
         __asm__ volatile ("cli; hlt");
@@ -227,7 +274,19 @@ static bool allocate_tables(page_tables_t *tables, paging_space_t *space)
     size_t table_pages = 2 + pd_tables;
     size_t table_bytes = (size_t)(table_pages * PAGE_SIZE_BYTES);
     size_t raw_bytes = table_bytes + PAGE_TABLE_ALIGNMENT;
+    if (g_paging_trace_active)
+    {
+        serial_printf("%s", "[paging] allocate_tables malloc bytes=0x");
+        serial_printf("%016llX", (unsigned long long)(raw_bytes));
+        serial_printf("%s", "\r\n");
+    }
     uint8_t *raw = (uint8_t *)malloc(raw_bytes);
+    if (g_paging_trace_active)
+    {
+        serial_printf("%s", "[paging] allocate_tables malloc result=0x");
+        serial_printf("%016llX", (unsigned long long)((uintptr_t)raw));
+        serial_printf("%s", "\r\n");
+    }
     if (!raw)
     {
         return false;
@@ -452,6 +511,12 @@ static void map_identity_space(page_tables_t *tables)
 
     for (uint64_t addr = 0; addr < IDENTITY_LIMIT; addr += PAGE_LARGE_SIZE)
     {
+        if (g_paging_trace_active && ((addr & ((1ULL << 30) - 1)) == 0))
+        {
+            serial_printf("%s", "[paging] map_progress addr=0x");
+            serial_printf("%016llX", (unsigned long long)(addr));
+            serial_printf("%s", "\r\n");
+        }
         size_t pd_index = (size_t)(addr >> 30);
         uint64_t *pd = ensure_pd(tables, pd_index);
         if (!pd)
@@ -503,6 +568,7 @@ static bool build_identity_space(paging_space_t *space)
     {
         return false;
     }
+    paging_debug_log("build_identity_space start");
     space->extra_page_count = 0;
     for (size_t i = 0; i < PAGING_MAX_EXTRA_PAGES; ++i)
     {
@@ -513,15 +579,18 @@ static bool build_identity_space(paging_space_t *space)
     memset(&tables, 0, sizeof(tables));
     if (!allocate_tables(&tables, space))
     {
+        paging_debug_log("build_identity_space alloc_tables_failed");
         return false;
     }
 
     map_identity_space(&tables);
+    paging_debug_log("build_identity_space mapped");
 
     space->cr3 = (uintptr_t)tables.pml4;
     space->allocation_base = tables.raw_allocation;
     space->allocation_size = tables.raw_bytes;
     space->tables_base = tables.pml4;
+    paging_debug_log("build_identity_space complete");
     return true;
 }
 
@@ -554,11 +623,28 @@ bool paging_clone_kernel_space(paging_space_t *space)
     {
         return false;
     }
+    paging_debug_log("clone_kernel_space begin");
     memset(space, 0, sizeof(*space));
     if (!build_identity_space(space))
     {
+        paging_debug_log("clone_kernel_space build_failed");
         return false;
     }
+    paging_debug_log("clone_kernel_space success");
+    return true;
+}
+
+bool paging_share_kernel_space(paging_space_t *space)
+{
+    if (!g_paging_ready || !space)
+    {
+        return false;
+    }
+    memset(space, 0, sizeof(*space));
+    space->cr3 = g_kernel_space.cr3;
+    space->allocation_base = g_kernel_space.allocation_base;
+    space->allocation_size = g_kernel_space.allocation_size;
+    space->tables_base = g_kernel_space.tables_base;
     return true;
 }
 
@@ -705,6 +791,7 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
     paging_space_t *space = &g_kernel_space;
     uintptr_t start = align_down(virtual_addr, PAGE_SIZE_BYTES);
     uintptr_t end = align_up(virtual_addr + length, PAGE_SIZE_BYTES);
+    bool changed = false;
 
     while (start < end)
     {
@@ -720,11 +807,19 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
         }
         if (writable)
         {
-            pt[pt_idx] |= PAGE_WRITABLE;
+            if ((pt[pt_idx] & PAGE_WRITABLE) == 0)
+            {
+                pt[pt_idx] |= PAGE_WRITABLE;
+                changed = true;
+            }
         }
         else
         {
-            pt[pt_idx] &= ~PAGE_WRITABLE;
+            if (pt[pt_idx] & PAGE_WRITABLE)
+            {
+                pt[pt_idx] &= ~PAGE_WRITABLE;
+                changed = true;
+            }
         }
         if (space->cr3 == read_cr3())
         {
@@ -733,5 +828,21 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
         start += PAGE_SIZE_BYTES;
     }
 
+    if (changed)
+    {
+        paging_flush_global_tlb();
+    }
+
     return true;
+}
+
+void paging_handle_remote_tlb_flush(void)
+{
+    flush_local_tlb();
+}
+
+void paging_flush_global_tlb(void)
+{
+    flush_local_tlb();
+    smp_broadcast_tlb_flush();
 }

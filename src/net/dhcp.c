@@ -71,12 +71,12 @@ bool net_dhcp_acquire(net_interface_t *iface)
 {
     if (!iface)
     {
-        serial_write_string("dhcp: no interface provided\r\n");
+        serial_printf("%s", "dhcp: no interface provided\r\n");
         return false;
     }
-    serial_write_string("dhcp: starting discovery on interface ");
-    serial_write_string(iface->name);
-    serial_write_string("\r\n");
+    serial_printf("%s", "dhcp: starting discovery on interface ");
+    serial_printf("%s", iface->name);
+    serial_printf("%s", "\r\n");
 
     g_active_iface = iface;
     g_prev_xid = g_xid;
@@ -89,11 +89,11 @@ bool net_dhcp_acquire(net_interface_t *iface)
     g_state = DHCP_WAIT_OFFER;
     if (!dhcp_send_discover())
     {
-        serial_write_string("dhcp: failed to send discover\r\n");
+        serial_printf("%s", "dhcp: failed to send discover\r\n");
         g_state = DHCP_IDLE;
         return false;
     }
-    serial_write_string("dhcp: discover sent\r\n");
+    serial_printf("%s", "dhcp: discover sent\r\n");
     return true;
 }
 
@@ -176,7 +176,7 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
     bool xid_previous = (!xid_current && g_prev_xid != 0 && xid == g_prev_xid);
     if (!xid_current && !xid_previous)
     {
-        serial_write_string("dhcp: transaction id mismatch\r\n");
+        serial_printf("%s", "dhcp: transaction id mismatch\r\n");
         return;
     }
     if (xid_previous)
@@ -262,12 +262,12 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
 
     char ipbuf[32];
     net_format_ipv4(yiaddr, ipbuf);
-    serial_write_string("dhcp: received response type=");
+    serial_printf("%s", "dhcp: received response type=");
     char mt = (char)('0' + message_type);
-    serial_write_char(mt);
-    serial_write_string(" yiaddr=");
-    serial_write_string(ipbuf);
-    serial_write_string("\r\n");
+    serial_printf("%c", mt);
+    serial_printf("%s", " yiaddr=");
+    serial_printf("%s", ipbuf);
+    serial_printf("%s", "\r\n");
 
     if (server_id == 0)
     {
@@ -287,12 +287,12 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         g_state = DHCP_WAIT_ACK;
         if (dhcp_send_request())
         {
-            serial_write_string("dhcp: sent request\r\n");
+            serial_printf("%s", "dhcp: sent request\r\n");
             net_arp_announce(iface, g_offer_addr);
         }
         else
         {
-            serial_write_string("dhcp: failed to send request\r\n");
+            serial_printf("%s", "dhcp: failed to send request\r\n");
             g_state = DHCP_IDLE;
         }
         return;
@@ -323,16 +323,16 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
         {
             net_dns_set_servers(dns_servers, dns_count);
         }
-        serial_write_string("dhcp: lease acquired. address=");
+        serial_printf("%s", "dhcp: lease acquired. address=");
         net_format_ipv4(yiaddr, ipbuf);
-        serial_write_string(ipbuf);
-        serial_write_string(" netmask=");
+        serial_printf("%s", ipbuf);
+        serial_printf("%s", " netmask=");
         net_format_ipv4(subnet_mask, ipbuf);
-        serial_write_string(ipbuf);
-        serial_write_string(" gateway=");
+        serial_printf("%s", ipbuf);
+        serial_printf("%s", " gateway=");
         net_format_ipv4(router, ipbuf);
-        serial_write_string(ipbuf);
-        serial_write_string("\r\n");
+        serial_printf("%s", ipbuf);
+        serial_printf("%s", "\r\n");
         g_state = DHCP_IDLE;
         g_active_iface = NULL;
         g_prev_xid = 0;
@@ -367,7 +367,7 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
     uint8_t *buffer = (uint8_t *)malloc(548);
     if (!buffer)
     {
-        serial_write_string("dhcp: failed to allocate tx buffer\r\n");
+        serial_printf("%s", "dhcp: failed to allocate tx buffer\r\n");
         return false;
     }
     memset(buffer, 0, 548);
@@ -498,14 +498,14 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
         frame_len = 60;
     }
 
-    serial_write_string("dhcp: transmitting message type ");
-    serial_write_char((char)('0' + msg_type));
-    serial_write_string("\r\n");
+    serial_printf("%s", "dhcp: transmitting message type ");
+    serial_printf("%c", (char)('0' + msg_type));
+    serial_printf("%s", "\r\n");
 
     bool ok = net_if_send_copy(g_active_iface, buffer, frame_len);
     if (!ok)
     {
-        serial_write_string("dhcp: failed to transmit frame\r\n");
+        serial_printf("%s", "dhcp: failed to transmit frame\r\n");
     }
 
     free(buffer);

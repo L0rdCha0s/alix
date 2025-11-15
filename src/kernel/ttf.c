@@ -118,31 +118,31 @@ static void __attribute__((unused)) ttf_log_u32(const char *prefix, uint32_t val
 #else
 static void ttf_log(const char *msg)
 {
-    serial_write_string("[ttf] ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[ttf] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static void ttf_log_tag(const char *prefix, uint32_t tag)
 {
     char name[5];
     ttf_tag_to_string(tag, name);
-    serial_write_string("[ttf] ");
-    serial_write_string(prefix);
+    serial_printf("%s", "[ttf] ");
+    serial_printf("%s", prefix);
     for (int i = 0; i < 4 && name[i] != '\0'; ++i)
     {
-        serial_write_char(name[i]);
+        serial_printf("%c", name[i]);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static void __attribute__((unused)) ttf_log_u32(const char *prefix, uint32_t value)
 {
-    serial_write_string("[ttf] ");
-    serial_write_string(prefix);
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[ttf] ");
+    serial_printf("%s", prefix);
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 #endif
 

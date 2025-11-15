@@ -5,12 +5,14 @@
 
 static const char loop1_sequence[] = { '0','1','2','3','4','5','6','7','8','9' };
 static const char loop2_sequence[] = { 'A','B','C','D','E','F','G','H','I','J' };
+static const char letters_sequence[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 static bool start_loop(shell_state_t *shell,
                        shell_output_t *out,
                        const char *name,
                        const char *sequence,
-                       size_t length)
+                       size_t length,
+                       uint64_t delay_ms)
 {
     (void)shell;
 
@@ -26,7 +28,7 @@ static bool start_loop(shell_state_t *shell,
     process_stdout_write(suffix, sizeof(suffix) - 1);
 
     uint64_t freq = timer_frequency();
-    uint64_t delay_ticks = (freq * 500 + 999) / 1000;
+    uint64_t delay_ticks = (freq * delay_ms + 999) / 1000;
     if (delay_ticks == 0)
     {
         delay_ticks = 1;
@@ -53,11 +55,32 @@ static bool start_loop(shell_state_t *shell,
 bool shell_cmd_loop1(shell_state_t *shell, shell_output_t *out, const char *args)
 {
     (void)args;
-    return start_loop(shell, out, "loop1", loop1_sequence, sizeof(loop1_sequence));
+    return start_loop(shell,
+                      out,
+                      "loop1",
+                      loop1_sequence,
+                      sizeof(loop1_sequence),
+                      500);
 }
 
 bool shell_cmd_loop2(shell_state_t *shell, shell_output_t *out, const char *args)
 {
     (void)args;
-    return start_loop(shell, out, "loop2", loop2_sequence, sizeof(loop2_sequence));
+    return start_loop(shell,
+                      out,
+                      "loop2",
+                      loop2_sequence,
+                      sizeof(loop2_sequence),
+                      500);
+}
+
+bool shell_cmd_letters(shell_state_t *shell, shell_output_t *out, const char *args)
+{
+    (void)args;
+    return start_loop(shell,
+                      out,
+                      "letters",
+                      letters_sequence,
+                      sizeof(letters_sequence) - 1,
+                      200);
 }

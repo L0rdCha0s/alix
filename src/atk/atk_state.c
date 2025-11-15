@@ -7,13 +7,13 @@
 static void atk_guard_log(const char *label, uint64_t front, uint64_t back)
 {
 #ifdef KERNEL_BUILD
-    serial_write_string("atk_guard violation: ");
-    serial_write_string(label ? label : "unknown");
-    serial_write_string(" front=0x");
-    serial_write_hex64(front);
-    serial_write_string(" back=0x");
-    serial_write_hex64(back);
-    serial_write_string("\r\n");
+    serial_printf("%s", "atk_guard violation: ");
+    serial_printf("%s", label ? label : "unknown");
+    serial_printf("%s", " front=0x");
+    serial_printf("%016llX", (unsigned long long)(front));
+    serial_printf("%s", " back=0x");
+    serial_printf("%016llX", (unsigned long long)(back));
+    serial_printf("%s", "\r\n");
 #else
     (void)label;
     (void)front;
@@ -84,23 +84,23 @@ static void atk_theme_log_values(const atk_theme_t *theme, const char *label)
     {
         return;
     }
-    serial_write_string("[atk][theme] ");
-    serial_write_string(label ? label : "values");
-    serial_write_string(" bg=0x");
-    serial_write_hex64(theme->background);
-    serial_write_string(" icon_face=0x");
-    serial_write_hex64(theme->desktop_icon_face);
-    serial_write_string(" icon_text=0x");
-    serial_write_hex64(theme->desktop_icon_text);
-    serial_write_string(" title=0x");
-    serial_write_hex64(theme->window_title);
-    serial_write_string(" body=0x");
-    serial_write_hex64(theme->window_body);
-    serial_write_string(" menu_face=0x");
-    serial_write_hex64(theme->menu_bar_face);
-    serial_write_string(" menu_text=0x");
-    serial_write_hex64(theme->menu_bar_text);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[atk][theme] ");
+    serial_printf("%s", label ? label : "values");
+    serial_printf("%s", " bg=0x");
+    serial_printf("%016llX", (unsigned long long)(theme->background));
+    serial_printf("%s", " icon_face=0x");
+    serial_printf("%016llX", (unsigned long long)(theme->desktop_icon_face));
+    serial_printf("%s", " icon_text=0x");
+    serial_printf("%016llX", (unsigned long long)(theme->desktop_icon_text));
+    serial_printf("%s", " title=0x");
+    serial_printf("%016llX", (unsigned long long)(theme->window_title));
+    serial_printf("%s", " body=0x");
+    serial_printf("%016llX", (unsigned long long)(theme->window_body));
+    serial_printf("%s", " menu_face=0x");
+    serial_printf("%016llX", (unsigned long long)(theme->menu_bar_face));
+    serial_printf("%s", " menu_text=0x");
+    serial_printf("%016llX", (unsigned long long)(theme->menu_bar_text));
+    serial_printf("%s", "\r\n");
 }
 #endif /* ATK_DEBUG && KERNEL_BUILD */
 
@@ -150,17 +150,17 @@ bool atk_state_theme_validate(const atk_state_t *state, const char *label)
     }
 
 #if ATK_DEBUG && defined(KERNEL_BUILD)
-    serial_write_string("[atk][theme] checksum mismatch");
+    serial_printf("%s", "[atk][theme] checksum mismatch");
     if (label)
     {
-        serial_write_string(" label=");
-        serial_write_string(label);
+        serial_printf("%s", " label=");
+        serial_printf("%s", label);
     }
-    serial_write_string(" expected=0x");
-    serial_write_hex64(state->theme_crc);
-    serial_write_string(" actual=0x");
-    serial_write_hex64(actual);
-    serial_write_string("\r\n");
+    serial_printf("%s", " expected=0x");
+    serial_printf("%016llX", (unsigned long long)(state->theme_crc));
+    serial_printf("%s", " actual=0x");
+    serial_printf("%016llX", (unsigned long long)(actual));
+    serial_printf("%s", "\r\n");
     atk_theme_log_values(&state->theme, "current");
 #else
     (void)label;

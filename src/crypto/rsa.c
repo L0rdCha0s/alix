@@ -13,30 +13,30 @@
 #if RSA_DEBUG_LOG
 static void rsa_log_msg(const char *msg)
 {
-    serial_write_string("[rsa] ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[rsa] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static void rsa_log_value(const char *msg, uint64_t value)
 {
-    serial_write_string("[rsa] ");
-    serial_write_string(msg);
-    serial_write_string("0x");
-    serial_write_hex64(value);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[rsa] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "0x");
+    serial_printf("%016llX", (unsigned long long)(value));
+    serial_printf("%s", "\r\n");
 }
 
 static void rsa_log_bytes(const char *label, const uint8_t *data, size_t len)
 {
     static const char hex_digits[] = "0123456789abcdef";
     const size_t max_dump = 32;
-    serial_write_string("[rsa] ");
-    serial_write_string(label);
-    serial_write_string(": ");
+    serial_printf("%s", "[rsa] ");
+    serial_printf("%s", label);
+    serial_printf("%s", ": ");
     if (!data || len == 0)
     {
-        serial_write_string("<empty>\r\n");
+        serial_printf("%s", "<empty>\r\n");
         return;
     }
     size_t limit = (len < max_dump) ? len : max_dump;
@@ -47,13 +47,13 @@ static void rsa_log_bytes(const char *label, const uint8_t *data, size_t len)
         buf[0] = hex_digits[byte >> 4];
         buf[1] = hex_digits[byte & 0x0F];
         buf[2] = '\0';
-        serial_write_string(buf);
+        serial_printf("%s", buf);
     }
     if (len > limit)
     {
-        serial_write_string("...");
+        serial_printf("%s", "...");
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 #else
 static inline void rsa_log_msg(const char *msg) { (void)msg; }

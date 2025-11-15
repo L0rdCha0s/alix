@@ -4,11 +4,13 @@ KERNEL_VMA_BASE = 0x0000000000100000;
 
 SECTIONS
 {
-  .ap_trampoline 0x0000000000006000 :
+  /* SMP AP trampoline lives in low physical memory at 0x8000 */
+  .ap_trampoline 0x0000000000008000 :
   {
     KEEP(*(.ap_trampoline))
   }
 
+  /* Kernel proper starts here */
   . = KERNEL_VMA_BASE;
 
   .text ALIGN(16) :
@@ -18,6 +20,7 @@ SECTIONS
     __kernel_text_end = .;
   }
 
+  /* Align to page before data */
   . = ALIGN(0x1000);
 
   .data ALIGN(0x1000) :
@@ -28,7 +31,8 @@ SECTIONS
     __kernel_data_end = .;
   }
 
-  . = ALIGN(16);
+  /* Page-align start of BSS, keep 16-byte alignment inside if needed */
+  . = ALIGN(0x1000);
   __bss_start = .;
   .bss ALIGN(16) :
   {
@@ -38,5 +42,6 @@ SECTIONS
   __bss_end = .;
 
   __kernel_vma_start = KERNEL_VMA_BASE;
-  __kernel_vma_end = __bss_end;
+  /* Page-aligned end-of-kernel for heap / page allocator */
+  __kernel_vma_end   = ALIGN(__bss_end, 0x1000);
 }

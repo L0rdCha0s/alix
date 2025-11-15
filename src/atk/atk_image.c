@@ -25,13 +25,13 @@ static void atk_image_invalidate(const atk_widget_t *image);
 #ifdef KERNEL_BUILD
 static void atk_image_log_guard(const char *label, const char *msg, const atk_widget_t *ptr)
 {
-    serial_write_string("[atk_image] ");
-    serial_write_string(label ? label : "check");
-    serial_write_string(": ");
-    serial_write_string(msg ? msg : "invalid");
-    serial_write_string(" ptr=0x");
-    serial_write_hex64((uint64_t)(uintptr_t)ptr);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[atk_image] ");
+    serial_printf("%s", label ? label : "check");
+    serial_printf("%s", ": ");
+    serial_printf("%s", msg ? msg : "invalid");
+    serial_printf("%s", " ptr=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)ptr));
+    serial_printf("%s", "\r\n");
 }
 #else
 static void atk_image_log_guard(const char *label, const char *msg, const atk_widget_t *ptr)

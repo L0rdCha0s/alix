@@ -162,26 +162,26 @@ static void net_log_stack_dma_guard(const char *tag,
                                     const void *ptr,
                                     size_t len)
 {
-    serial_write_string("[net-dma] tag=");
-    serial_write_string(tag ? tag : "<none>");
-    serial_write_string(" ptr=0x");
-    serial_write_hex64((uintptr_t)ptr);
-    serial_write_string(" len=0x");
-    serial_write_hex64(len);
-    serial_write_string(" owner=");
+    serial_printf("%s", "[net-dma] tag=");
+    serial_printf("%s", tag ? tag : "<none>");
+    serial_printf("%s", " ptr=0x");
+    serial_printf("%016llX", (unsigned long long)((uintptr_t)ptr));
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)(len));
+    serial_printf("%s", " owner=");
     if (owner)
     {
         const char *name = process_thread_name_const(owner);
-        serial_write_string(name && name[0] ? name : "<unnamed>");
-        serial_write_string(" pid=0x");
+        serial_printf("%s", name && name[0] ? name : "<unnamed>");
+        serial_printf("%s", " pid=0x");
         process_t *proc = process_thread_owner(owner);
-        serial_write_hex64(proc ? process_get_pid(proc) : 0);
+        serial_printf("%016llX", (unsigned long long)(proc ? process_get_pid(proc) : 0));
     }
     else
     {
-        serial_write_string("<none>");
+        serial_printf("%s", "<none>");
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 
 static bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)

@@ -10,14 +10,14 @@ bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *path)
 {
     vfs_node_t *target = NULL;
 
-    serial_write_char('{');
-    serial_write_hex64((uint64_t)shell);
-    serial_write_char('/');
-    serial_write_hex64((uint64_t)shell->cwd);
-    serial_write_char('}');
+    serial_printf("%c", '{');
+    serial_printf("%016llX", (unsigned long long)((uint64_t)shell));
+    serial_printf("%c", '/');
+    serial_printf("%016llX", (unsigned long long)((uint64_t)shell->cwd));
+    serial_printf("%c", '}');
 
-    serial_write_string("Trying path..\n");
-    serial_write_string("...");
+    serial_printf("%s", "Trying path..\n");
+    serial_printf("%s", "...");
 
     if (!path || *path == '\0')
     {
@@ -28,7 +28,7 @@ bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *path)
         target = vfs_resolve(shell->cwd, path);
     }
 
-    serial_write_string("In shell command ls\n");
+    serial_printf("%s", "In shell command ls\n");
 
     if (!target)
     {
@@ -39,7 +39,7 @@ bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *path)
         return shell_output_error(out, "path is not a directory");
     }
 
-    serial_write_string("In shell command ls 2\n");
+    serial_printf("%s", "In shell command ls 2\n");
     for (vfs_node_t *child = vfs_first_child(target); child; child = vfs_next_sibling(child))
     {
         const char *name = vfs_name(child);

@@ -48,17 +48,17 @@ static jpeg_dbg_stats_t g_dbg = {0};
 static void serial_write_dec(int v)
 {
     char buf[32]; int i = 0; unsigned int x;
-    if (v < 0) { serial_write_string("-"); x = (unsigned int)(-v); }
+    if (v < 0) { serial_printf("%s", "-"); x = (unsigned int)(-v); }
     else x = (unsigned int)v;
     do { buf[i++] = (char)('0' + (x % 10)); x /= 10; } while (x && i < (int)sizeof(buf));
     if (i == 0) buf[i++] = '0';
-    while (i--) { char s[2] = { buf[i], 0 }; serial_write_string(s); }
+    while (i--) { char s[2] = { buf[i], 0 }; serial_printf("%s", s); }
 }
 static void jpeg_dbg_kv(const char *k, int v)
 {
 #if JPEG_DEBUG
-    serial_write_string(k); serial_write_string("=");
-    serial_write_dec(v); serial_write_string(" ");
+    serial_printf("%s", k); serial_printf("%s", "=");
+    serial_write_dec(v); serial_printf("%s", " ");
 #else
     (void)k; (void)v;
 #endif
@@ -66,9 +66,9 @@ static void jpeg_dbg_kv(const char *k, int v)
 static void jpeg_dbg_line(const char *s)
 {
 #if JPEG_DEBUG
-    serial_write_string("jpeg: ");
-    serial_write_string(s);
-    serial_write_string("\r\n");
+    serial_printf("%s", "jpeg: ");
+    serial_printf("%s", s);
+    serial_printf("%s", "\r\n");
 #else
     (void)s;
 #endif
@@ -470,9 +470,9 @@ static void resolve_component_mapping(jpg_t *jpg)
     jpg->use_rgb = jpeg_should_treat_as_rgb(jpg);
 
 #if JPEG_DEBUG_MAPPING
-    serial_write_string("jpeg: APP14 present="); serial_write_dec(jpg->adobe_transform_present ? 1 : 0);
-    serial_write_string(" transform="); serial_write_dec(jpg->color_transform);
-    serial_write_string("\r\n");
+    serial_printf("%s", "jpeg: APP14 present="); serial_write_dec(jpg->adobe_transform_present ? 1 : 0);
+    serial_printf("%s", " transform="); serial_write_dec(jpg->color_transform);
+    serial_printf("%s", "\r\n");
 #endif
 
     if (jpg->use_rgb) {
@@ -486,10 +486,10 @@ static void resolve_component_mapping(jpg_t *jpg)
             jpg->idxR = 0; jpg->idxG = 1; jpg->idxB = 2;
         }
 #if JPEG_DEBUG_MAPPING
-        serial_write_string("jpeg: mapping RGB idxR=");
-        serial_write_dec(jpg->idxR); serial_write_string(" idxG=");
-        serial_write_dec(jpg->idxG); serial_write_string(" idxB=");
-        serial_write_dec(jpg->idxB); serial_write_string("\r\n");
+        serial_printf("%s", "jpeg: mapping RGB idxR=");
+        serial_write_dec(jpg->idxR); serial_printf("%s", " idxG=");
+        serial_write_dec(jpg->idxG); serial_printf("%s", " idxB=");
+        serial_write_dec(jpg->idxB); serial_printf("%s", "\r\n");
 #endif
         return;
     }
@@ -511,10 +511,10 @@ static void resolve_component_mapping(jpg_t *jpg)
     }
 
 #if JPEG_DEBUG_MAPPING
-    serial_write_string("jpeg: mapping Y=");
-    serial_write_dec(jpg->idxY); serial_write_string(" Cb=");
-    serial_write_dec(jpg->idxCb); serial_write_string(" Cr=");
-    serial_write_dec(jpg->idxCr); serial_write_string("\r\n");
+    serial_printf("%s", "jpeg: mapping Y=");
+    serial_write_dec(jpg->idxY); serial_printf("%s", " Cb=");
+    serial_write_dec(jpg->idxCb); serial_printf("%s", " Cr=");
+    serial_write_dec(jpg->idxCr); serial_printf("%s", "\r\n");
 #endif
 }
 
@@ -591,9 +591,9 @@ static bool parse_SOF_common(bitreader_t *br, jpg_t *jpg)
     jpg->width = X; jpg->height = Y; jpg->comps = N; jpg->Hmax = jpg->Vmax = 1;
 
 #if JPEG_DEBUG_MARKERS
-    serial_write_string("jpeg: SOF dims ");
+    serial_printf("%s", "jpeg: SOF dims ");
     jpeg_dbg_kv("W", X); jpeg_dbg_kv("H", Y); jpeg_dbg_kv("N", N);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 #endif
 
     for (int i = 0; i < N; ++i) {
@@ -613,13 +613,13 @@ static bool parse_SOF_common(bitreader_t *br, jpg_t *jpg)
         if (jpg->C[i].V > jpg->Vmax) jpg->Vmax = jpg->C[i].V;
 
 #if JPEG_DEBUG_MARKERS
-        serial_write_string("jpeg:   C");
+        serial_printf("%s", "jpeg:   C");
         serial_write_dec(i);
-        serial_write_string(" id=0x"); serial_write_hex64(jpg->C[i].id);
-        serial_write_string(" H="); serial_write_dec(jpg->C[i].H);
-        serial_write_string(" V="); serial_write_dec(jpg->C[i].V);
-        serial_write_string(" Tq="); serial_write_dec(jpg->C[i].tq);
-        serial_write_string("\r\n");
+        serial_printf("%s", " id=0x"); serial_printf("%016llX", (unsigned long long)(jpg->C[i].id));
+        serial_printf("%s", " H="); serial_write_dec(jpg->C[i].H);
+        serial_printf("%s", " V="); serial_write_dec(jpg->C[i].V);
+        serial_printf("%s", " Tq="); serial_write_dec(jpg->C[i].tq);
+        serial_printf("%s", "\r\n");
 #endif
     }
 
@@ -629,10 +629,10 @@ static bool parse_SOF_common(bitreader_t *br, jpg_t *jpg)
     jpg->mcus_y = (jpg->height + jpg->mcu_h - 1) / jpg->mcu_h;
 
 #if JPEG_DEBUG_MARKERS
-    serial_write_string("jpeg: MCU ");
+    serial_printf("%s", "jpeg: MCU ");
     jpeg_dbg_kv("mcu_w", jpg->mcu_w); jpeg_dbg_kv("mcu_h", jpg->mcu_h);
     jpeg_dbg_kv("mcus_x", jpg->mcus_x); jpeg_dbg_kv("mcus_y", jpg->mcus_y);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 #endif
 
     (void)L;
@@ -644,9 +644,9 @@ static bool parse_DRI(bitreader_t *br, jpg_t *jpg)
     uint16_t L = read_be16(br); if (L != 4) return false;
     jpg->restart_interval = (int)read_be16(br);
 #if JPEG_DEBUG_MARKERS
-    serial_write_string("jpeg: DRI restart_interval=");
+    serial_printf("%s", "jpeg: DRI restart_interval=");
     serial_write_dec(jpg->restart_interval);
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 #endif
     return true;
 }
@@ -659,7 +659,7 @@ static bool read_scan_header(bitreader_t *br, jpg_t *jpg,
     int Ns = br_read_u8(br); if (Ns <= 0 || Ns > jpg->comps) return false;
 
 #if JPEG_DEBUG_SOS
-    serial_write_string("jpeg: SOS Ns="); serial_write_dec(Ns); serial_write_string("\r\n");
+    serial_printf("%s", "jpeg: SOS Ns="); serial_write_dec(Ns); serial_printf("%s", "\r\n");
 #endif
 
     for (int i = 0; i < Ns; ++i)
@@ -678,12 +678,12 @@ static bool read_scan_header(bitreader_t *br, jpg_t *jpg,
         jpg->C[idx].ta =  Tda       & 0xF;
 
 #if JPEG_DEBUG_SOS
-        serial_write_string("jpeg:   comp["); serial_write_dec(i);
-        serial_write_string("] id=0x"); serial_write_hex64((uint64_t)Cs);
-        serial_write_string(" ci="); serial_write_dec(idx);
-        serial_write_string(" td="); serial_write_dec(jpg->C[idx].td);
-        serial_write_string(" ta="); serial_write_dec(jpg->C[idx].ta);
-        serial_write_string("\r\n");
+        serial_printf("%s", "jpeg:   comp["); serial_write_dec(i);
+        serial_printf("%s", "] id=0x"); serial_printf("%016llX", (unsigned long long)((uint64_t)Cs));
+        serial_printf("%s", " ci="); serial_write_dec(idx);
+        serial_printf("%s", " td="); serial_write_dec(jpg->C[idx].td);
+        serial_printf("%s", " ta="); serial_write_dec(jpg->C[idx].ta);
+        serial_printf("%s", "\r\n");
 #endif
     }
 
@@ -695,11 +695,11 @@ static bool read_scan_header(bitreader_t *br, jpg_t *jpg,
     *pNs = Ns; *pSs = Ss; *pSe = Se; *pAh = (AhAl >> 4) & 0xF; *pAl = AhAl & 0xF;
 
 #if JPEG_DEBUG_SOS
-    serial_write_string("jpeg:   Ss="); serial_write_dec(*pSs);
-    serial_write_string(" Se="); serial_write_dec(*pSe);
-    serial_write_string(" Ah="); serial_write_dec(*pAh);
-    serial_write_string(" Al="); serial_write_dec(*pAl);
-    serial_write_string("\r\n");
+    serial_printf("%s", "jpeg:   Ss="); serial_write_dec(*pSs);
+    serial_printf("%s", " Se="); serial_write_dec(*pSe);
+    serial_printf("%s", " Ah="); serial_write_dec(*pAh);
+    serial_printf("%s", " Al="); serial_write_dec(*pAl);
+    serial_printf("%s", "\r\n");
 #endif
 
     (void)L; return true;
@@ -945,17 +945,17 @@ static void upsample_and_store_RGB565(const jpg_t *jpg,
 #endif
 
                 if (log_this_mcu && ( (y==0 && x==0) || (y==mH-1 && x==mW-1) )) {
-                    serial_write_string("jpeg: MCU(");
-                    serial_write_dec(mx); serial_write_string(",");
-                    serial_write_dec(my); serial_write_string(") px(");
-                    serial_write_dec(ox); serial_write_string(",");
-                    serial_write_dec(oy); serial_write_string(")  Y=");
-                    serial_write_dec(Yi); serial_write_string(" Cb=");
-                    serial_write_dec(Cbi); serial_write_string(" Cr=");
-                    serial_write_dec(Cri); serial_write_string(" -> r=");
-                    serial_write_dec(r); serial_write_string(" g=");
-                    serial_write_dec(g); serial_write_string(" b=");
-                    serial_write_dec(b); serial_write_string("\r\n");
+                    serial_printf("%s", "jpeg: MCU(");
+                    serial_write_dec(mx); serial_printf("%s", ",");
+                    serial_write_dec(my); serial_printf("%s", ") px(");
+                    serial_write_dec(ox); serial_printf("%s", ",");
+                    serial_write_dec(oy); serial_printf("%s", ")  Y=");
+                    serial_write_dec(Yi); serial_printf("%s", " Cb=");
+                    serial_write_dec(Cbi); serial_printf("%s", " Cr=");
+                    serial_write_dec(Cri); serial_printf("%s", " -> r=");
+                    serial_write_dec(r); serial_printf("%s", " g=");
+                    serial_write_dec(g); serial_printf("%s", " b=");
+                    serial_write_dec(b); serial_printf("%s", "\r\n");
                 }
 
                 row[ox] = pack_rgb565(r, g, b);
@@ -1337,9 +1337,9 @@ int jpeg_decode_rgb565(const uint8_t *jpeg, size_t len,
                     jpg.color_transform = header[11];
                     jpg.adobe_transform_present = true;
 #if JPEG_DEBUG_MARKERS
-                    serial_write_string("jpeg: APP14 transform=0x");
-                    serial_write_hex64((uint64_t)(uint32_t)jpg.color_transform);
-                    serial_write_string("\r\n");
+                    serial_printf("%s", "jpeg: APP14 transform=0x");
+                    serial_printf("%016llX", (unsigned long long)((uint64_t)(uint32_t)jpg.color_transform));
+                    serial_printf("%s", "\r\n");
 #endif
                 }
                 size_t remain = (size_t)L - 2 - sizeof(header);
@@ -1436,14 +1436,14 @@ int jpeg_decode_rgb565(const uint8_t *jpeg, size_t len,
             jpeg_set_error("ok");
 
 #if JPEG_DEBUG
-            serial_write_string("jpeg: SUMMARY ");
+            serial_printf("%s", "jpeg: SUMMARY ");
             jpeg_dbg_kv("blocks", (int)g_dbg.blocks_decoded);
             jpeg_dbg_kv("idct_clamps", (int)g_dbg.idct_clamp);
             jpeg_dbg_kv("r_clamps", (int)g_dbg.color_r_clamp);
             jpeg_dbg_kv("g_clamps", (int)g_dbg.color_g_clamp);
             jpeg_dbg_kv("b_clamps", (int)g_dbg.color_b_clamp);
             jpeg_dbg_kv("rst", (int)g_dbg.rst_seen);
-            serial_write_string("\r\n");
+            serial_printf("%s", "\r\n");
 #endif
 
             for (int ci = 0; ci < jpg.comps; ++ci) { free(jpg.coef[ci]); jpg.coef[ci] = NULL; }

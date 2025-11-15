@@ -64,14 +64,14 @@ void procfs_init(void)
     vfs_node_t *root = vfs_root();
     if (!root)
     {
-        serial_write_string("[procfs] missing VFS root\r\n");
+        serial_printf("%s", "[procfs] missing VFS root\r\n");
         return;
     }
 
     g_proc_dir = vfs_mkdir(root, "proc");
     if (!g_proc_dir)
     {
-        serial_write_string("[procfs] failed to create /proc\r\n");
+        serial_printf("%s", "[procfs] failed to create /proc\r\n");
     }
 }
 

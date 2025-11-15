@@ -106,7 +106,7 @@ static void startup_process_entry(void *arg)
         if (output && *output)
         {
             console_write(output);
-            serial_write_string(output);
+            serial_printf("%s", output);
         }
         if (output)
         {
@@ -136,9 +136,9 @@ static void startup_log(const char *message)
     console_write(message);
     console_write("\n");
 
-    serial_write_string("[startup] ");
-    serial_write_string(message);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[startup] ");
+    serial_printf("%s", message);
+    serial_printf("%s", "\r\n");
 }
 
 static void startup_log_command(const char *command)
@@ -151,9 +151,9 @@ static void startup_log_command(const char *command)
     console_write(command);
     console_write("\n");
 
-    serial_write_string("[startup] running ");
-    serial_write_string(command);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[startup] running ");
+    serial_printf("%s", command);
+    serial_printf("%s", "\r\n");
 }
 
 static bool startup_ensure_default_script(void)

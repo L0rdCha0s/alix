@@ -317,10 +317,7 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             {
                 len = strlen(msg);
             }
-            for (size_t i = 0; i < len; ++i)
-            {
-                serial_write_char(msg[i]);
-            }
+            serial_output_bytes(msg, len);
             result = (int64_t)len;
             break;
         }
@@ -347,9 +344,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                                              (size_t)frame->rsi);
             break;
         default:
-            serial_write_string("syscall: unhandled id=");
-            serial_write_hex64(syscall_id);
-            serial_write_string("\r\n");
+            serial_printf("%s", "syscall: unhandled id=");
+            serial_printf("%016llX", (unsigned long long)(syscall_id));
+            serial_printf("%s", "\r\n");
             result = -1;
             break;
     }

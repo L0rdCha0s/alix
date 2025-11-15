@@ -392,15 +392,15 @@ static void dns_finish_pending(dns_pending_t *pending, bool success, const net_d
     }
     if (g_dns_debug_enabled)
     {
-        serial_write_string("[dns-debug] finish: host=");
-        serial_write_string(pending->hostname[0] ? pending->hostname : "<none>");
-        serial_write_string(" success=0x");
-        serial_write_hex64(success ? 1 : 0);
-        serial_write_string(" id=0x");
-        serial_write_hex64(pending->id);
-        serial_write_string(" type=0x");
-        serial_write_hex64(result ? result->rr_type : 0);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[dns-debug] finish: host=");
+        serial_printf("%s", pending->hostname[0] ? pending->hostname : "<none>");
+        serial_printf("%s", " success=0x");
+        serial_printf("%016llX", (unsigned long long)(success ? 1 : 0));
+        serial_printf("%s", " id=0x");
+        serial_printf("%016llX", (unsigned long long)(pending->id));
+        serial_printf("%s", " type=0x");
+        serial_printf("%016llX", (unsigned long long)(result ? result->rr_type : 0));
+        serial_printf("%s", "\r\n");
     }
 }
 
@@ -424,15 +424,15 @@ static bool dns_prepare_route(dns_pending_t *pending)
     {
         char *tmp = pending->scratch_tmp;
         net_format_ipv4(iface->ipv4_addr, tmp);
-        serial_write_string("[dns-debug] prepare_route: iface=");
-        serial_write_string(iface->name[0] ? iface->name : "<noname>");
-        serial_write_string(" present=0x");
-        serial_write_hex64(iface->present ? 1 : 0);
-        serial_write_string(" link=0x");
-        serial_write_hex64(iface->link_up ? 1 : 0);
-        serial_write_string(" ip=");
-        serial_write_string(tmp);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[dns-debug] prepare_route: iface=");
+        serial_printf("%s", iface->name[0] ? iface->name : "<noname>");
+        serial_printf("%s", " present=0x");
+        serial_printf("%016llX", (unsigned long long)(iface->present ? 1 : 0));
+        serial_printf("%s", " link=0x");
+        serial_printf("%016llX", (unsigned long long)(iface->link_up ? 1 : 0));
+        serial_printf("%s", " ip=");
+        serial_printf("%s", tmp);
+        serial_printf("%s", "\r\n");
         dns_debug_ipv4("prepare_route: next hop", next_hop);
     }
 
@@ -478,9 +478,9 @@ static bool dns_send_query(dns_pending_t *pending)
                 {
                     char *macbuf = pending->scratch_tmp;
                     net_format_mac(pending->server_mac, macbuf);
-                    serial_write_string("[dns-debug] send_query: ARP resolved mac=");
-                    serial_write_string(macbuf);
-                    serial_write_string("\r\n");
+                    serial_printf("%s", "[dns-debug] send_query: ARP resolved mac=");
+                    serial_printf("%s", macbuf);
+                    serial_printf("%s", "\r\n");
                 }
                 break;
             }
@@ -575,19 +575,19 @@ static bool dns_send_query(dns_pending_t *pending)
         char macbuf[32];
         net_format_ipv4(pending->server_ip, ipbuf);
         net_format_mac(pending->server_mac, macbuf);
-        serial_write_string("[dns-debug] send_query: id=0x");
-        serial_write_hex64(pending->id);
-        serial_write_string(" port=0x");
-        serial_write_hex64(pending->local_port);
-        serial_write_string(" iface=");
-        serial_write_string(iface->name[0] ? iface->name : "<noname>");
-        serial_write_string(" server=");
-        serial_write_string(ipbuf);
-        serial_write_string(" mac=");
-        serial_write_string(macbuf);
-        serial_write_string(" len=0x");
-        serial_write_hex64(frame_len);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[dns-debug] send_query: id=0x");
+        serial_printf("%016llX", (unsigned long long)(pending->id));
+        serial_printf("%s", " port=0x");
+        serial_printf("%016llX", (unsigned long long)(pending->local_port));
+        serial_printf("%s", " iface=");
+        serial_printf("%s", iface->name[0] ? iface->name : "<noname>");
+        serial_printf("%s", " server=");
+        serial_printf("%s", ipbuf);
+        serial_printf("%s", " mac=");
+        serial_printf("%s", macbuf);
+        serial_printf("%s", " len=0x");
+        serial_printf("%016llX", (unsigned long long)(frame_len));
+        serial_printf("%s", "\r\n");
     }
 
     if (!net_if_send_copy(iface, packet, frame_len))
@@ -602,11 +602,11 @@ static bool dns_send_query(dns_pending_t *pending)
     pending->retries++;
     if (g_dns_debug_enabled)
     {
-        serial_write_string("[dns-debug] send_query: dispatched id=0x");
-        serial_write_hex64(pending->id);
-        serial_write_string(" retries=0x");
-        serial_write_hex64(pending->retries);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[dns-debug] send_query: dispatched id=0x");
+        serial_printf("%016llX", (unsigned long long)(pending->id));
+        serial_printf("%s", " retries=0x");
+        serial_printf("%016llX", (unsigned long long)(pending->retries));
+        serial_printf("%s", "\r\n");
     }
     free(packet);
     return true;
@@ -673,17 +673,17 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     if (src_port != 53) return;
     if (g_dns_debug_enabled)
     {
-        serial_write_string("[dns-debug] handle_frame: iface=");
-        serial_write_string(iface->name[0] ? iface->name : "<noname>");
-        serial_write_string(" id=0x");
-        serial_write_hex64(pending->id);
-        serial_write_string(" src_port=0x");
-        serial_write_hex64(src_port);
-        serial_write_string(" dst_port=0x");
-        serial_write_hex64(dst_port);
-        serial_write_string(" udp_len=0x");
-        serial_write_hex64(udp_len);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[dns-debug] handle_frame: iface=");
+        serial_printf("%s", iface->name[0] ? iface->name : "<noname>");
+        serial_printf("%s", " id=0x");
+        serial_printf("%016llX", (unsigned long long)(pending->id));
+        serial_printf("%s", " src_port=0x");
+        serial_printf("%016llX", (unsigned long long)(src_port));
+        serial_printf("%s", " dst_port=0x");
+        serial_printf("%016llX", (unsigned long long)(dst_port));
+        serial_printf("%s", " udp_len=0x");
+        serial_printf("%016llX", (unsigned long long)(udp_len));
+        serial_printf("%s", "\r\n");
     }
 
     const uint8_t *dns = udp + 8;
@@ -703,17 +703,17 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     uint16_t arcount = read_be16(dns + 10);
     if (g_dns_debug_enabled)
     {
-        serial_write_string("[dns-debug] handle_frame: flags=0x");
-        serial_write_hex64(flags);
-        serial_write_string(" qd=0x");
-        serial_write_hex64(qdcount);
-        serial_write_string(" an=0x");
-        serial_write_hex64(ancount);
-        serial_write_string(" ns=0x");
-        serial_write_hex64(nscount);
-        serial_write_string(" ar=0x");
-        serial_write_hex64(arcount);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[dns-debug] handle_frame: flags=0x");
+        serial_printf("%016llX", (unsigned long long)(flags));
+        serial_printf("%s", " qd=0x");
+        serial_printf("%016llX", (unsigned long long)(qdcount));
+        serial_printf("%s", " an=0x");
+        serial_printf("%016llX", (unsigned long long)(ancount));
+        serial_printf("%s", " ns=0x");
+        serial_printf("%016llX", (unsigned long long)(nscount));
+        serial_printf("%s", " ar=0x");
+        serial_printf("%016llX", (unsigned long long)(arcount));
+        serial_printf("%s", "\r\n");
     }
 
     size_t offset = 12;
@@ -1057,9 +1057,9 @@ static void write_be16(uint8_t *p, uint16_t value)
 
 static void dns_log(const char *msg)
 {
-    serial_write_string("dns: ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", "dns: ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static void dns_debug_log(const char *msg)
@@ -1068,9 +1068,9 @@ static void dns_debug_log(const char *msg)
     {
         return;
     }
-    serial_write_string("[dns-debug] ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[dns-debug] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 
 static void dns_log_ipv4(const char *prefix, uint32_t addr)

@@ -1,5 +1,5 @@
 #include "serial.h"
-#include "libc.h"
+#include "serial_format.h"
 #include "usyscall.h"
 
 static void serial_sys_write(const char *buffer, size_t length)
@@ -13,37 +13,44 @@ static void serial_sys_write(const char *buffer, size_t length)
 
 void serial_init(void) {}
 
-void serial_write_char(char c)
+static void serial_stub_putc(void *ctx, char c)
 {
-    char tmp = c;
-    serial_sys_write(&tmp, 1);
+    (void)ctx;
+    if (c == '\n')
+    {
+        char seq[2] = {'\r', '\n'};
+        serial_sys_write(seq, 2);
+        return;
+    }
+    serial_sys_write(&c, 1);
 }
 
-void serial_write_string(const char *s)
+void serial_printf(const char *format, ...)
 {
-    if (!s)
+    if (!format)
     {
         return;
     }
-    size_t len = strlen(s);
-    if (len == 0)
+    serial_format_ctx_t ctx = {
+        .putc = serial_stub_putc,
+        .validate = NULL,
+        .ctx = NULL,
+        .count = 0,
+        .error = false
+    };
+    va_list args;
+    va_start(args, format);
+    serial_format_vprintf(&ctx, format, args);
+    va_end(args);
+}
+
+void serial_output_bytes(const char *data, size_t length)
+{
+    if (!data || length == 0)
     {
         return;
     }
-    serial_sys_write(s, len);
-}
-
-void serial_write_hex64(uint64_t value)
-{
-    char buffer[17];
-    buffer[16] = '\0';
-    static const char hex[] = "0123456789ABCDEF";
-    for (int i = 15; i >= 0; --i)
-    {
-        buffer[i] = hex[value & 0xF];
-        value >>= 4;
-    }
-    serial_sys_write(buffer, 16);
+    serial_sys_write(data, length);
 }
 
 char serial_read_char(void)

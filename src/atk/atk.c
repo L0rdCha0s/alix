@@ -272,7 +272,7 @@ void atk_render(void)
     if (!atk_state_theme_validate(state, "atk_render"))
     {
 #ifdef KERNEL_BUILD
-        serial_write_string("[atk][theme] reapplying default theme\r\n");
+        serial_printf("%s", "[atk][theme] reapplying default theme\r\n");
 #endif
         atk_apply_default_theme(state);
         atk_dirty_mark_all();
@@ -1001,7 +1001,7 @@ static void atk_schedule_user_launch(const char *launcher_name, const void *info
                                                 -1);
     if (!launcher)
     {
-        serial_write_string("atk: failed to schedule user launcher\r\n");
+        serial_printf("%s", "atk: failed to schedule user launcher\r\n");
     }
 }
 
@@ -1014,14 +1014,14 @@ static void atk_launch_user_binary(void *arg)
     vfs_node_t *root = vfs_root();
     if (!root || !path)
     {
-        serial_write_string("atk: invalid user binary request\r\n");
+        serial_printf("%s", "atk: invalid user binary request\r\n");
         process_exit(1);
     }
 
     vfs_node_t *node = vfs_resolve(root, path);
     if (!node)
     {
-        serial_write_string("atk: binary not found\r\n");
+        serial_printf("%s", "atk: binary not found\r\n");
         process_exit(1);
     }
 
@@ -1029,7 +1029,7 @@ static void atk_launch_user_binary(void *arg)
     const uint8_t *data = (const uint8_t *)vfs_data(node, &size);
     if (!data || size == 0)
     {
-        serial_write_string("atk: binary empty\r\n");
+        serial_printf("%s", "atk: binary empty\r\n");
         process_exit(1);
     }
 
@@ -1042,7 +1042,7 @@ static void atk_launch_user_binary(void *arg)
                                                           0);
     if (!proc)
     {
-        serial_write_string("atk: failed to start user binary\r\n");
+        serial_printf("%s", "atk: failed to start user binary\r\n");
         process_exit(1);
     }
 

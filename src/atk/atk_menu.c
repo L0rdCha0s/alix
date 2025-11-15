@@ -57,14 +57,14 @@ const atk_class_t ATK_MENU_CLASS = { "Menu", &ATK_WIDGET_CLASS, &menu_vtable, si
 #ifdef KERNEL_BUILD
 static void atk_menu_debug_log(const char *msg, const char *detail)
 {
-    serial_write_string("[menu] ");
-    serial_write_string(msg ? msg : "(null)");
+    serial_printf("%s", "[menu] ");
+    serial_printf("%s", msg ? msg : "(null)");
     if (detail)
     {
-        serial_write_string(": ");
-        serial_write_string(detail);
+        serial_printf("%s", ": ");
+        serial_printf("%s", detail);
     }
-    serial_write_string("\r\n");
+    serial_printf("%s", "\r\n");
 }
 #else
 static inline void atk_menu_debug_log(const char *msg, const char *detail)

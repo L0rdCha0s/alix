@@ -141,14 +141,14 @@ static void acpi_enable_if_needed(const acpi_fadt_t *fadt);
 
 static void acpi_log(const char *msg)
 {
-    serial_write_string("[acpi] ");
-    serial_write_string(msg);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[acpi] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", "\r\n");
 }
 static void acpi_log_hex(const char *prefix, uint64_t value)
 {
-    serial_write_string("[acpi] ");
-    serial_write_string(prefix);
+    serial_printf("%s", "[acpi] ");
+    serial_printf("%s", prefix);
     char buf[17];
     for (int i = 15; i >= 0; --i)
     {
@@ -157,8 +157,8 @@ static void acpi_log_hex(const char *prefix, uint64_t value)
         value >>= 4;
     }
     buf[16] = '\0';
-    serial_write_string(buf);
-    serial_write_string("\r\n");
+    serial_printf("%s", buf);
+    serial_printf("%s", "\r\n");
 }
 
 static bool acpi_checksum(const void *table, size_t length)

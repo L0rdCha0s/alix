@@ -32,23 +32,23 @@ void idt_init(void)
     size_t idt_bytes = sizeof(struct idt_entry) * 256;
     if (!idt)
     {
-        serial_write_string("IDT alloc request\r\n");
+        serial_printf("%s", "IDT alloc request\r\n");
         idt = malloc(idt_bytes);
-        serial_write_string("IDT alloc ptr=\r\n");
-        serial_write_hex64((uint64_t)idt);
-        serial_write_string("\r\n");
+        serial_printf("%s", "IDT alloc ptr=\r\n");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)idt));
+        serial_printf("%s", "\r\n");
         if (!idt)
         {
-            serial_write_string("IDT allocation failed\r\n");
+            serial_printf("%s", "IDT allocation failed\r\n");
             for (;;)
             {
                 __asm__ volatile ("hlt");
             }
         }
     }
-    serial_write_string("IDT memset ptr=\r\n");
-    serial_write_hex64((uint64_t)idt);
-    serial_write_string("\r\n");
+    serial_printf("%s", "IDT memset ptr=\r\n");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)idt));
+    serial_printf("%s", "\r\n");
     memset(idt, 0, idt_bytes);
 }
 

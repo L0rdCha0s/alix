@@ -53,9 +53,9 @@ static bool g_clock_timer_registered = false;
 #ifdef KERNEL_BUILD
 static void menu_log(const char *msg)
 {
-    serial_write_string("[menu] ");
-    serial_write_string(msg ? msg : "(null)");
-    serial_write_string("\r\n");
+    serial_printf("%s", "[menu] ");
+    serial_printf("%s", msg ? msg : "(null)");
+    serial_printf("%s", "\r\n");
 }
 #else
 static inline void menu_log(const char *msg)
@@ -67,11 +67,11 @@ static inline void menu_log(const char *msg)
 #ifdef KERNEL_BUILD
 static void menu_log_pair(const char *msg, const char *detail)
 {
-    serial_write_string("[menu_bar] ");
-    serial_write_string(msg ? msg : "(null)");
-    serial_write_string(": ");
-    serial_write_string(detail ? detail : "(null)");
-    serial_write_string("\r\n");
+    serial_printf("%s", "[menu_bar] ");
+    serial_printf("%s", msg ? msg : "(null)");
+    serial_printf("%s", ": ");
+    serial_printf("%s", detail ? detail : "(null)");
+    serial_printf("%s", "\r\n");
 }
 #else
 static inline void menu_log_pair(const char *msg, const char *detail)
@@ -84,13 +84,13 @@ static inline void menu_log_pair(const char *msg, const char *detail)
 #ifdef KERNEL_BUILD
 static void menu_log_coords(const char *msg, int x, int y)
 {
-    serial_write_string("[menu_bar] ");
-    serial_write_string(msg ? msg : "(null)");
-    serial_write_string(" x=");
-    serial_write_hex64((uint64_t)(int64_t)x);
-    serial_write_string(" y=");
-    serial_write_hex64((uint64_t)(int64_t)y);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[menu_bar] ");
+    serial_printf("%s", msg ? msg : "(null)");
+    serial_printf("%s", " x=");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)x));
+    serial_printf("%s", " y=");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)y));
+    serial_printf("%s", "\r\n");
 }
 #else
 static inline void menu_log_coords(const char *msg, int x, int y)
@@ -226,9 +226,9 @@ void atk_menu_bar_build_default(atk_state_t *state)
 #ifdef KERNEL_BUILD
             if (state->menu_entries.size > 8)
             {
-                serial_write_string("atk_menu_bar: entry count=");
-                serial_write_hex64(state->menu_entries.size);
-                serial_write_string("\r\n");
+                serial_printf("%s", "atk_menu_bar: entry count=");
+                serial_printf("%016llX", (unsigned long long)(state->menu_entries.size));
+                serial_printf("%s", "\r\n");
             }
 #endif
             const char help_title[] = "Help";
@@ -382,13 +382,13 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
     if (pressed_edge || released_edge)
     {
         menu_log_coords("event", cursor_x, cursor_y);
-        serial_write_string("[menu_bar] flags press=");
-        serial_write_hex64(pressed_edge ? 1 : 0);
-        serial_write_string(" release=");
-        serial_write_hex64(released_edge ? 1 : 0);
-        serial_write_string(" left=");
-        serial_write_hex64(left_pressed ? 1 : 0);
-        serial_write_string("\r\n");
+        serial_printf("%s", "[menu_bar] flags press=");
+        serial_printf("%016llX", (unsigned long long)(pressed_edge ? 1 : 0));
+        serial_printf("%s", " release=");
+        serial_printf("%016llX", (unsigned long long)(released_edge ? 1 : 0));
+        serial_printf("%s", " left=");
+        serial_printf("%016llX", (unsigned long long)(left_pressed ? 1 : 0));
+        serial_printf("%s", "\r\n");
     }
 #endif
     if (height <= 0)
@@ -475,15 +475,15 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
 #ifdef KERNEL_BUILD
             menu_log_pair("release", state->menu_open_entry->title);
             menu_log_coords("release coords", cursor_x, cursor_y);
-            serial_write_string("[menu_bar] menu bounds x=");
-            serial_write_hex64((uint64_t)(int64_t)state->menu_open_entry->menu->x);
-            serial_write_string(" y=");
-            serial_write_hex64((uint64_t)(int64_t)state->menu_open_entry->menu->y);
-            serial_write_string(" w=");
-            serial_write_hex64((uint64_t)(int64_t)state->menu_open_entry->menu->width);
-            serial_write_string(" h=");
-            serial_write_hex64((uint64_t)(int64_t)state->menu_open_entry->menu->height);
-            serial_write_string("\r\n");
+            serial_printf("%s", "[menu_bar] menu bounds x=");
+            serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->x));
+            serial_printf("%s", " y=");
+            serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->y));
+            serial_printf("%s", " w=");
+            serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->width));
+            serial_printf("%s", " h=");
+            serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->height));
+            serial_printf("%s", "\r\n");
 #endif
             if (atk_menu_contains(state->menu_open_entry->menu, cursor_x, cursor_y))
             {

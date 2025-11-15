@@ -19,13 +19,13 @@ static void atk_user_handle_resize_event(atk_user_window_t *win, const user_atk_
 #if ATK_USER_TRACE
 static void atk_user_trace(const char *msg, uint64_t a, uint64_t b)
 {
-    serial_write_string("[atk_user] ");
-    serial_write_string(msg);
-    serial_write_string(" a=0x");
-    serial_write_hex64(a);
-    serial_write_string(" b=0x");
-    serial_write_hex64(b);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[atk_user] ");
+    serial_printf("%s", msg);
+    serial_printf("%s", " a=0x");
+    serial_printf("%016llX", (unsigned long long)(a));
+    serial_printf("%s", " b=0x");
+    serial_printf("%016llX", (unsigned long long)(b));
+    serial_printf("%s", "\r\n");
 }
 #else
 #define atk_user_trace(msg, a, b) (void)0

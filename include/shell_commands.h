@@ -31,6 +31,7 @@ bool shell_cmd_tzstatus(shell_state_t *shell, shell_output_t *out, const char *a
 bool shell_cmd_tzsync(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_loop1(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_loop2(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_letters(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_top(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_userdemo(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_userdemo2(shell_state_t *shell, shell_output_t *out, const char *args);

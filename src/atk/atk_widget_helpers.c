@@ -27,13 +27,13 @@ static const char *atk_widget_class_name(const atk_widget_t *widget)
 
 static void atk_widget_log_invalid(const char *label, const atk_widget_t *widget)
 {
-    serial_write_string("[atk][widget] invalid ");
-    serial_write_string(label ? label : "ptr");
-    serial_write_string(" class=");
-    serial_write_string(atk_widget_class_name(widget));
-    serial_write_string(" ptr=0x");
-    serial_write_hex64((uint64_t)(uintptr_t)widget);
-    serial_write_string("\r\n");
+    serial_printf("%s", "[atk][widget] invalid ");
+    serial_printf("%s", label ? label : "ptr");
+    serial_printf("%s", " class=");
+    serial_printf("%s", atk_widget_class_name(widget));
+    serial_printf("%s", " ptr=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)widget));
+    serial_printf("%s", "\r\n");
 }
 #else
 #define atk_widget_log_invalid(label, widget) ((void)0)
