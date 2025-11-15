@@ -596,6 +596,28 @@ static bool thread_stack_range_contains(const thread_t *thread,
     return true;
 }
 
+static uintptr_t thread_stack_watch_default_suspect(thread_t *thread)
+{
+    if (!thread)
+    {
+        return 0;
+    }
+
+    uintptr_t suspect = thread->context ? (uintptr_t)thread->context : 0;
+    if (suspect && thread_stack_range_contains(thread, suspect, 1))
+    {
+        return suspect;
+    }
+
+    if (thread->stack_base &&
+        thread_stack_range_contains(thread, (uintptr_t)thread->stack_base, 1))
+    {
+        return (uintptr_t)thread->stack_base;
+    }
+
+    return 0;
+}
+
 static void thread_stack_watch_clear_snapshot(thread_t *thread)
 {
 #if ENABLE_STACK_WRITE_DEBUG
@@ -854,6 +876,11 @@ static bool thread_stack_watch_activate(thread_t *thread,
     {
         return false;
     }
+    if (suspect_addr == 0)
+    {
+        suspect_addr = thread_stack_watch_default_suspect(thread);
+    }
+
     bool was_enabled = thread->stack_watch_enabled;
     thread->stack_watch_enabled = true;
     thread->stack_watch_context = context;
@@ -899,6 +926,11 @@ static void thread_stack_watch_maybe_arm(thread_t *thread)
     if (!thread || !thread->stack_watch_enabled || thread->stack_watch_active)
     {
         return;
+    }
+    uintptr_t suspect = thread_stack_watch_default_suspect(thread);
+    if (suspect)
+    {
+        thread->stack_watch_suspect = suspect;
     }
     (void)thread_stack_watch_arm_now(thread);
 }
@@ -2882,7 +2914,10 @@ static thread_t *thread_create(process_t *process,
     const char *watch_context = thread->name[0] ? thread->name : "thread";
     if (!thread->is_idle)
     {
-        thread_stack_watch_activate(thread, watch_context, 0);
+        uintptr_t watch_addr = thread->context
+                               ? (uintptr_t)thread->context
+                               : (uintptr_t)thread->stack_base;
+        thread_stack_watch_activate(thread, watch_context, watch_addr);
     }
 #endif
 
@@ -3643,9 +3678,9 @@ static bool switch_to_thread(thread_t *next)
         thread_context_guard_release_pages(resumed);
     }
 #if ENABLE_STACK_WRITE_DEBUG
-    if (prev)
+    if (next)
     {
-        thread_stack_watch_maybe_arm(prev);
+        thread_stack_watch_maybe_arm(next);
     }
 #endif
 #if ENABLE_CONTEXT_GUARD

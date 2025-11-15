@@ -745,7 +745,7 @@ out:
 
 #ifndef ATK_NO_DESKTOP_APPS
 static const atk_user_launch_info_t g_atk_shell_launch = {
-    .path = "/usr/bin/atk_shell.elf",
+    .path = "/root/usr/bin/atk_shell.elf",
     .name = "atk_shell"
 };
 
