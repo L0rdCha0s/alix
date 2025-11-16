@@ -160,8 +160,22 @@ static void shell_on_submit(atk_widget_t *terminal, void *context, const char *l
 static bool shell_on_control(atk_widget_t *terminal, void *context, char control)
 {
     (void)terminal;
-    (void)context;
-    (void)control;
+    atk_shell_app_t *app = (atk_shell_app_t *)context;
+    if (!app || app->shell_handle < 0)
+    {
+        return false;
+    }
+
+    if (control == 0x03)
+    {
+        if (sys_shell_interrupt(app->shell_handle) == 0)
+        {
+            shell_poll_output(app);
+            shell_render(app);
+            return true;
+        }
+        return false;
+    }
     return false;
 }
 

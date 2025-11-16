@@ -366,6 +366,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                                         (int *)frame->r10,
                                         (int *)frame->r8);
             break;
+        case SYSCALL_SHELL_INTERRUPT:
+            result = shell_service_interrupt((uint32_t)frame->rdi);
+            break;
         case SYSCALL_PROC_SNAPSHOT:
             result = syscall_do_proc_snapshot((syscall_process_info_t *)frame->rdi,
                                               (size_t)frame->rsi);

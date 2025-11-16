@@ -181,6 +181,11 @@ ssize_t sys_shell_poll(int handle,
                               (long)running_out);
 }
 
+int sys_shell_interrupt(int handle)
+{
+    return (int)syscall1(SYSCALL_SHELL_INTERRUPT, handle);
+}
+
 int sys_shell_close(int handle)
 {
     return (int)syscall1(SYSCALL_SHELL_CLOSE, handle);

@@ -1106,6 +1106,10 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
     {
         return true;
     }
+    if (contour_count > 2048)
+    {
+        return false;
+    }
 
     const uint8_t *cursor = glyph_data + 10;
     if ((uint32_t)(cursor - glyph_data) + contour_count * 2 > glyph_length)
@@ -1145,9 +1149,22 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         free(end_points);
         return true;
     }
+    /* Sanity-check outline size to avoid runaway allocations on corrupt fonts. */
+    const uint32_t max_points = 32768;
+    if (point_count > max_points)
+    {
+        free(end_points);
+        return false;
+    }
+    size_t point_bytes = (size_t)point_count * sizeof(ttf_point_t);
+    if (point_bytes / sizeof(ttf_point_t) != point_count)
+    {
+        free(end_points);
+        return false;
+    }
 
     uint8_t *flags = (uint8_t *)malloc(point_count);
-    ttf_point_t *points = (ttf_point_t *)malloc(point_count * sizeof(ttf_point_t));
+    ttf_point_t *points = (ttf_point_t *)malloc(point_bytes);
     if (!flags || !points)
     {
         free(flags);

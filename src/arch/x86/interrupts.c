@@ -240,16 +240,25 @@ static void fault_report(const char *reason,
     if (frame)
     {
         serial_early_write_string("  stack (top 8 qwords):\r\n");
-        uint64_t *sp = (uint64_t *)(uintptr_t)frame->rsp;
-        for (int i = 0; i < 8; ++i)
+        bool user_mode = (frame->cs & 0x3u) != 0;
+        if (user_mode)
         {
-            serial_early_write_string("    [");
-            serial_format_hex64(buf, sizeof(buf), frame->rsp + (uint64_t)(i * 8));
-            serial_early_write_string(buf);
-            serial_early_write_string("] = 0x");
-            serial_format_hex64(buf, sizeof(buf), sp ? sp[i] : 0);
-            serial_early_write_string(buf);
-            serial_early_write_string("\r\n");
+            process_t *proc = process_current();
+            process_dump_user_stack(proc, frame->rsp, 0, 8);
+        }
+        else
+        {
+            uint64_t *sp = (uint64_t *)(uintptr_t)frame->rsp;
+            for (int i = 0; i < 8; ++i)
+            {
+                serial_early_write_string("    [");
+                serial_format_hex64(buf, sizeof(buf), frame->rsp + (uint64_t)(i * 8));
+                serial_early_write_string(buf);
+                serial_early_write_string("] = 0x");
+                serial_format_hex64(buf, sizeof(buf), sp ? sp[i] : 0);
+                serial_early_write_string(buf);
+                serial_early_write_string("\r\n");
+            }
         }
     }
 

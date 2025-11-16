@@ -14,6 +14,7 @@ ssize_t shell_service_poll(uint32_t handle,
                            size_t output_capacity,
                            int *status_out,
                            int *running_out);
+int shell_service_interrupt(uint32_t handle);
 bool shell_service_close_session(uint32_t handle);
 void shell_service_cleanup_process(struct process *process);
 

@@ -561,3 +561,21 @@ static process_t *shell_session_cleanup_runner_locked(shell_session_t *session)
     }
     return runner;
 }
+
+int shell_service_interrupt(uint32_t handle)
+{
+    process_t *owner = process_current();
+    shell_session_t *session = shell_session_find_locked(handle, owner);
+    if (!session)
+    {
+        return -1;
+    }
+
+    bool ok = false;
+    if (session->running)
+    {
+        ok = shell_request_interrupt(&session->state);
+    }
+    shell_session_unlock(session);
+    return ok ? 0 : -1;
+}

@@ -3,6 +3,8 @@
 #include "libc.h"
 #include "heap.h"
 #include "serial.h"
+#include <limits.h>
+#include <stdint.h>
 
 /*
  * Heap-backed VFS:
@@ -38,9 +40,12 @@ struct vfs_mount
     vfs_node_t *mount_point;
     struct vfs_mount *next;
     bool dirty;
+    bool needs_full_sync;
     uint8_t *image_cache;
     size_t cache_size;
     size_t sector_size;
+    uint8_t *dirty_sectors;
+    size_t dirty_sector_count;
 };
 
 struct vfs_node
@@ -56,6 +61,10 @@ struct vfs_node
     size_t size;                     /* bytes used (not incl. '\0') */
     size_t capacity;                 /* bytes allocated in data[] */
     char *data;                      /* dynamically allocated, NUL-terminated when capacity > 0 */
+    uint32_t image_offset;           /* offset of Node record in serialized image */
+    uint32_t image_total_len;        /* total bytes of Node record + name + data */
+    uint32_t image_data_offset;      /* offset of file data inside image (0xFFFFFFFF if none) */
+    uint32_t image_data_len;         /* bytes of data in image */
 
     /* device backing (for block nodes) */
     block_device_t *block_device;
@@ -86,6 +95,7 @@ static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount);
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full);
 static bool vfs_device_is_mounted(block_device_t *device);
+static void vfs_mark_sectors_dirty(vfs_mount_t *mount, uint32_t first_sector, uint32_t count);
 
 /* ---------- helpers ---------- */
 
@@ -218,6 +228,7 @@ static vfs_node_t *vfs_alloc_node(vfs_node_type_t type)
     if (n)
     {
         n->type = type;
+        n->image_data_offset = 0xFFFFFFFFu;
     }
     return n;
 }
@@ -360,7 +371,77 @@ static void vfs_mark_node_dirty(vfs_node_t *node)
     if (node->mount)
     {
         node->mount->dirty = true;
+        if (node->type != VFS_NODE_FILE)
+        {
+            node->mount->needs_full_sync = true;
+        }
     }
+}
+
+static void vfs_mark_sectors_dirty(vfs_mount_t *mount, uint32_t first_sector, uint32_t count)
+{
+    if (!mount || count == 0)
+    {
+        return;
+    }
+    if (first_sector >= mount->dirty_sector_count)
+    {
+        size_t new_count = first_sector + count;
+        uint8_t *new_bits = (uint8_t *)realloc(mount->dirty_sectors, new_count);
+        if (!new_bits)
+        {
+            mount->needs_full_sync = true;
+            return;
+        }
+        /* zero new area */
+        if (new_count > mount->dirty_sector_count)
+        {
+            memset(new_bits + mount->dirty_sector_count, 0, new_count - mount->dirty_sector_count);
+        }
+        mount->dirty_sectors = new_bits;
+        mount->dirty_sector_count = new_count;
+    }
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        if (first_sector + i < mount->dirty_sector_count)
+        {
+            mount->dirty_sectors[first_sector + i] = 1;
+        }
+    }
+}
+
+static void vfs_note_file_dirty(vfs_node_t *node, size_t start, size_t len, bool size_changed)
+{
+    if (!node || node->type != VFS_NODE_FILE)
+    {
+        return;
+    }
+    vfs_mount_t *mount = node->mount;
+    vfs_mark_node_dirty(node);
+    if (!mount)
+    {
+        return;
+    }
+    if (size_changed ||
+        !mount->image_cache ||
+        mount->sector_size == 0 ||
+        node->image_data_offset == 0xFFFFFFFFu ||
+        node->image_data_len != node->size ||
+        node->image_data_offset + start + len > mount->cache_size)
+    {
+        mount->needs_full_sync = true;
+        return;
+    }
+
+    memcpy(mount->image_cache + node->image_data_offset + start,
+           node->data + start,
+           len);
+
+    uint32_t sector_size = (uint32_t)mount->sector_size;
+    uint32_t first_sector = (uint32_t)((node->image_data_offset + start) / sector_size);
+    uint32_t last_byte = (uint32_t)(node->image_data_offset + start + len - 1);
+    uint32_t last_sector = last_byte / sector_size;
+    vfs_mark_sectors_dirty(mount, first_sector, last_sector - first_sector + 1);
 }
 
 static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount)
@@ -439,6 +520,7 @@ static bool vfs_measure_node(const vfs_node_t *node,
 typedef struct
 {
     block_device_t *device;
+    uint8_t *buffer;
     uint64_t sector_index;
     size_t sector_size;
     size_t max_bytes;
@@ -446,6 +528,7 @@ typedef struct
     uint8_t *sector_buf;
     size_t fill;
     bool ok;
+    bool to_buffer;
 } vfs_stream_writer_t;
 
 static void vfs_stream_writer_init(vfs_stream_writer_t *w,
@@ -458,6 +541,7 @@ static void vfs_stream_writer_init(vfs_stream_writer_t *w,
         return;
     }
     w->device = device;
+    w->buffer = NULL;
     w->sector_index = 0;
     w->sector_size = sector_size;
     w->max_bytes = max_bytes;
@@ -465,10 +549,42 @@ static void vfs_stream_writer_init(vfs_stream_writer_t *w,
     w->sector_buf = (uint8_t *)malloc(sector_size);
     w->fill = 0;
     w->ok = (w->sector_buf != NULL);
+    w->to_buffer = false;
     if (w->sector_buf)
     {
         memset(w->sector_buf, 0, sector_size);
     }
+}
+
+static void vfs_stream_writer_init_buffer(vfs_stream_writer_t *w,
+                                           uint8_t *buffer,
+                                           size_t buffer_size,
+                                           size_t sector_size)
+{
+    if (!w)
+    {
+        return;
+    }
+    vfs_stream_writer_init(w, NULL, sector_size, buffer_size);
+    w->buffer = buffer;
+    w->to_buffer = true;
+    if (!buffer || buffer_size == 0)
+    {
+        w->ok = false;
+    }
+    if (w->sector_buf)
+    {
+        memset(w->sector_buf, 0, sector_size);
+    }
+}
+
+static size_t vfs_stream_writer_offset(const vfs_stream_writer_t *w)
+{
+    if (!w)
+    {
+        return 0;
+    }
+    return w->total_bytes + w->fill;
 }
 
 static bool vfs_stream_writer_flush(vfs_stream_writer_t *w)
@@ -481,10 +597,23 @@ static bool vfs_stream_writer_flush(vfs_stream_writer_t *w)
     {
         return true;
     }
-    if (!block_write(w->device, w->sector_index, 1, w->sector_buf))
+    if (w->to_buffer)
     {
-        w->ok = false;
-        return false;
+        size_t offset = (size_t)(w->sector_index * w->sector_size);
+        if (!w->buffer || offset + w->sector_size > w->max_bytes)
+        {
+            w->ok = false;
+            return false;
+        }
+        memcpy(w->buffer + offset, w->sector_buf, w->sector_size);
+    }
+    else
+    {
+        if (!block_write(w->device, w->sector_index, 1, w->sector_buf))
+        {
+            w->ok = false;
+            return false;
+        }
     }
     w->total_bytes += w->fill;
     w->sector_index++;
@@ -550,7 +679,7 @@ static void vfs_stream_writer_destroy(vfs_stream_writer_t *w)
     w->sector_buf = NULL;
 }
 
-static bool vfs_serialize_node_stream(const vfs_node_t *node,
+static bool vfs_serialize_node_stream(vfs_node_t *node,
                                       vfs_mount_t *mount,
                                       bool is_root,
                                       uint32_t parent_id,
@@ -579,6 +708,7 @@ static bool vfs_serialize_node_stream(const vfs_node_t *node,
 
     uint32_t type_field = (uint32_t)(is_root ? VFS_NODE_DIR : node->type);
 
+    size_t node_offset = vfs_stream_writer_offset(writer);
     alixfs_node_disk_t disk = {
         .id = node_id,
         .parent_id = parent_id,
@@ -600,19 +730,34 @@ static bool vfs_serialize_node_stream(const vfs_node_t *node,
         }
     }
 
+    size_t data_offset = 0;
     if ((node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK) && data_len > 0)
     {
         if (!node->data)
         {
             return false;
         }
+        data_offset = vfs_stream_writer_offset(writer);
         if (!vfs_stream_writer_write(writer, node->data, data_len))
         {
             return false;
         }
     }
 
-    for (const vfs_node_t *child = node->first_child; child; child = child->next_sibling)
+    node->image_offset = (uint32_t)node_offset;
+    node->image_total_len = (uint32_t)(vfs_stream_writer_offset(writer) - node_offset);
+    if (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
+    {
+        node->image_data_offset = (data_len > 0) ? (uint32_t)data_offset : 0xFFFFFFFFu;
+        node->image_data_len = data_len;
+    }
+    else
+    {
+        node->image_data_offset = 0xFFFFFFFFu;
+        node->image_data_len = 0;
+    }
+
+    for (vfs_node_t *child = node->first_child; child; child = child->next_sibling)
     {
         if (!vfs_serialize_node_stream(child, mount, false, node_id, next_id, writer))
         {
@@ -828,6 +973,10 @@ void vfs_init(void)
     node->size = 0;
     node->capacity = 0;
     node->data = NULL;
+    node->image_offset = 0;
+    node->image_total_len = 0;
+    node->image_data_offset = 0xFFFFFFFFu;
+    node->image_data_len = 0;
 
     root = node;
 }
@@ -868,6 +1017,10 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     dir->size = 0;
     dir->capacity = 0;
     dir->data = NULL;
+    dir->image_offset = 0;
+    dir->image_total_len = 0;
+    dir->image_data_offset = 0xFFFFFFFFu;
+    dir->image_data_len = 0;
 
     vfs_attach_child(parent, dir);
     vfs_mark_node_dirty(parent);
@@ -1026,7 +1179,7 @@ bool vfs_truncate(vfs_node_t *file)
     file->size = 0;
     if (!ensure_capacity(file, 0)) return false;
     file->data[0] = '\0';
-    vfs_mark_node_dirty(file);
+    vfs_note_file_dirty(file, 0, 0, true);
     return true;
 }
 
@@ -1038,9 +1191,10 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
     if (!ensure_capacity(file, file->size + len)) return false;
 
     memmove(file->data + file->size, data, len);
+    size_t start = file->size;
     file->size += len;
     ensure_terminator(file);
-    vfs_mark_node_dirty(file);
+    vfs_note_file_dirty(file, start, len, true);
     return true;
 }
 
@@ -1119,7 +1273,8 @@ ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t c
         file->size = end;
     }
     ensure_terminator(file);
-    vfs_mark_node_dirty(file);
+    bool size_changed = (file->size != file->image_data_len);
+    vfs_note_file_dirty(file, offset, count, size_changed);
     return (ssize_t)count;
 }
 
@@ -1431,11 +1586,20 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     }
 
     size_t max_bytes = (size_t)sectors_needed * sector_size;
+    uint8_t *image = (uint8_t *)malloc(max_bytes);
+    if (!image)
+    {
+        serial_printf("%s", "[vfs] sync fail: image alloc\r\n");
+        return false;
+    }
+    memset(image, 0, max_bytes);
+
     vfs_stream_writer_t writer;
-    vfs_stream_writer_init(&writer, mount->device, sector_size, max_bytes);
+    vfs_stream_writer_init_buffer(&writer, image, max_bytes, sector_size);
     if (!writer.ok)
     {
         serial_printf("%s", "[vfs] sync fail: stream buffer alloc\r\n");
+        free(image);
         return false;
     }
 
@@ -1465,14 +1629,99 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
 
     vfs_stream_writer_destroy(&writer);
 
-    if (mount->image_cache)
+    if (!ok)
     {
-        free(mount->image_cache);
-        mount->image_cache = NULL;
-        mount->cache_size = 0;
+        free(image);
+        return false;
     }
+
+    /* Write only sectors that changed vs cached image. */
+    size_t new_size = (size_t)sectors_needed * sector_size;
+    uint8_t *old = mount->image_cache;
+    size_t old_size = mount->cache_size;
+    uint32_t run_start = UINT32_MAX;
+    uint32_t run_len = 0;
+    for (uint32_t sector = 0; sector < sectors_needed; ++sector)
+    {
+        size_t offset = (size_t)sector * sector_size;
+        bool changed = true;
+        if (old && offset + sector_size <= old_size)
+        {
+            if (memcmp(old + offset, image + offset, sector_size) == 0)
+            {
+                changed = false;
+            }
+        }
+        if (changed)
+        {
+            if (run_start == UINT32_MAX)
+            {
+                run_start = sector;
+                run_len = 1;
+            }
+            else if (run_start + run_len == sector)
+            {
+                run_len++;
+            }
+            else
+            {
+                if (!block_write(mount->device, run_start, run_len, image + (size_t)run_start * sector_size))
+                {
+                    free(image);
+                    return false;
+                }
+                run_start = sector;
+                run_len = 1;
+            }
+        }
+    }
+    if (run_start != UINT32_MAX)
+    {
+        if (!block_write(mount->device, run_start, run_len, image + (size_t)run_start * sector_size))
+        {
+            free(image);
+            return false;
+        }
+    }
+
+    /* If the new image shrank, clear trailing old sectors. */
+    uint32_t old_sectors = (old_size > 0 && sector_size > 0) ? (uint32_t)(old_size / sector_size) : 0;
+    if (old_sectors > sectors_needed)
+    {
+        size_t zeros_len = sector_size;
+        uint8_t *zero_buf = (uint8_t *)calloc(1, zeros_len);
+        if (!zero_buf)
+        {
+            free(image);
+            return false;
+        }
+        uint32_t start = sectors_needed;
+        uint32_t len = old_sectors - sectors_needed;
+        /* Write in as few calls as possible. */
+        while (len > 0)
+        {
+            uint32_t chunk = len;
+            if (!block_write(mount->device, start, chunk, zero_buf))
+            {
+                free(zero_buf);
+                free(image);
+                return false;
+            }
+            start += chunk;
+            len = 0;
+        }
+        free(zero_buf);
+    }
+
+    free(mount->image_cache);
+    mount->image_cache = image;
+    mount->cache_size = new_size;
     mount->sector_size = sector_size;
-    return ok;
+    free(mount->dirty_sectors);
+    mount->dirty_sectors = (uint8_t *)calloc(sectors_needed, 1);
+    mount->dirty_sector_count = sectors_needed;
+    mount->needs_full_sync = false;
+    return true;
 }
 
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
@@ -1485,12 +1734,63 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         return true;
     }
-    if (!vfs_mount_sync(mount, force))
+    bool did_full = false;
+    if (force || mount->needs_full_sync || !mount->image_cache || mount->sector_size == 0)
     {
-        return false;
+        if (!vfs_mount_sync(mount, true))
+        {
+            return false;
+        }
+        did_full = true;
+    }
+    else
+    {
+        /* Incremental: flush marked dirty sectors from cache. */
+        uint32_t sectors = (uint32_t)(mount->cache_size / mount->sector_size);
+        uint32_t run_start = UINT32_MAX;
+        uint32_t run_len = 0;
+        for (uint32_t i = 0; i < sectors && i < mount->dirty_sector_count; ++i)
+        {
+            if (mount->dirty_sectors && mount->dirty_sectors[i])
+            {
+                if (run_start == UINT32_MAX)
+                {
+                    run_start = i;
+                    run_len = 1;
+                }
+                else if (run_start + run_len == i)
+                {
+                    run_len++;
+                }
+                else
+                {
+                    if (!block_write(mount->device, run_start, run_len, mount->image_cache + (size_t)run_start * mount->sector_size))
+                    {
+                        mount->needs_full_sync = true;
+                        return false;
+                    }
+                    run_start = i;
+                    run_len = 1;
+                }
+            }
+        }
+        if (run_start != UINT32_MAX)
+        {
+            if (!block_write(mount->device, run_start, run_len, mount->image_cache + (size_t)run_start * mount->sector_size))
+            {
+                mount->needs_full_sync = true;
+                return false;
+            }
+        }
     }
     mount->dirty = false;
+    mount->needs_full_sync = false;
+    if (mount->dirty_sectors && mount->dirty_sector_count > 0)
+    {
+        memset(mount->dirty_sectors, 0, mount->dirty_sector_count);
+    }
     vfs_clear_dirty_subtree(mount->mount_point, mount);
+    (void)did_full;
     return true;
 }
 
@@ -1620,6 +1920,7 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
             goto cleanup;
         }
 
+        size_t node_offset = offset;
         alixfs_node_disk_t disk;
         memcpy(&disk, buffer + offset, sizeof(disk));
         offset += sizeof(disk);
@@ -1644,12 +1945,15 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         const uint8_t *name_bytes = buffer + offset;
         offset += disk.name_len;
 
-        if (offset + disk.data_len > header_total_bytes)
+        uint32_t data_len = disk.data_len;
+        size_t data_offset = 0;
+        if (offset + data_len > header_total_bytes)
         {
             goto cleanup;
         }
         const uint8_t *data_bytes = buffer + offset;
-        offset += disk.data_len;
+        data_offset = offset;
+        offset += data_len;
 
         if (disk.id == header->root_id)
         {
@@ -1691,20 +1995,33 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         name[disk.name_len] = '\0';
         node->name = name;
 
-        if ((node_type == VFS_NODE_FILE || node_type == VFS_NODE_SYMLINK) && disk.data_len > 0)
+        if ((node_type == VFS_NODE_FILE || node_type == VFS_NODE_SYMLINK) && data_len > 0)
         {
-            size_t cap = (size_t)disk.data_len + 1;
+            size_t cap = (size_t)data_len + 1;
             char *data = (char *)malloc(cap);
             if (!data)
             {
                 vfs_free_subtree(node);
                 goto cleanup;
             }
-            memcpy(data, data_bytes, disk.data_len);
-            data[disk.data_len] = '\0';
+            memcpy(data, data_bytes, data_len);
+            data[data_len] = '\0';
             node->data = data;
-            node->size = disk.data_len;
+            node->size = data_len;
             node->capacity = cap;
+        }
+
+        node->image_offset = (uint32_t)node_offset;
+        node->image_total_len = (uint32_t)(offset - node_offset);
+        if (node_type == VFS_NODE_FILE || node_type == VFS_NODE_SYMLINK)
+        {
+            node->image_data_offset = (data_len > 0) ? (uint32_t)data_offset : 0xFFFFFFFFu;
+            node->image_data_len = data_len;
+        }
+        else
+        {
+            node->image_data_offset = 0xFFFFFFFFu;
+            node->image_data_len = 0;
         }
 
         nodes[disk.id] = node;
@@ -1743,6 +2060,10 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
     mount->image_cache = buffer;
     mount->cache_size = buffer_size;
     mount->sector_size = sector_size;
+    free(mount->dirty_sectors);
+    uint32_t sectors = (uint32_t)(buffer_size / sector_size);
+    mount->dirty_sectors = (uint8_t *)calloc(sectors, 1);
+    mount->dirty_sector_count = sectors;
     buffer = NULL;
 
     attached = true;
@@ -1810,9 +2131,12 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     mount->mount_point = mount_point;
     mount->next = NULL;
     mount->dirty = false;
+    mount->needs_full_sync = false;
     mount->image_cache = NULL;
     mount->cache_size = 0;
     mount->sector_size = 0;
+    mount->dirty_sectors = NULL;
+    mount->dirty_sector_count = 0;
 
     mount_point->mount = mount;
 

@@ -4384,14 +4384,20 @@ bool process_handle_exception(interrupt_frame_t *frame,
                               bool has_address,
                               uint64_t address)
 {
+    bool user_mode = frame && ((frame->cs & 0x3u) == 0x3u);
     if (!frame)
     {
         return false;
     }
     thread_t *thread = current_thread_local();
-    if (!thread || !thread->is_user)
+    if (!thread || !(thread->is_user || user_mode))
     {
         return false;
+    }
+    /* If the thread came from CPL=3 but was mislabeled, forgive the flag so we can unwind it. */
+    if (user_mode)
+    {
+        thread->is_user = true;
     }
 
     thread->exit_status = -1;
