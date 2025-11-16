@@ -3,6 +3,7 @@
 #include "libc.h"
 #include "heap.h"
 #include "serial.h"
+#include "spinlock.h"
 #include <limits.h>
 #include <stdint.h>
 
@@ -77,6 +78,7 @@ struct vfs_node
 
 static vfs_node_t *root = NULL;
 static vfs_mount_t *mounts = NULL;
+static spinlock_t g_vfs_dirty_lock;
 
 #define VFS_MAX_SYMLINK_DEPTH 8
 
@@ -367,6 +369,7 @@ static void vfs_mark_node_dirty(vfs_node_t *node)
     {
         return;
     }
+    spinlock_lock(&g_vfs_dirty_lock);
     node->dirty = true;
     if (node->mount)
     {
@@ -376,6 +379,7 @@ static void vfs_mark_node_dirty(vfs_node_t *node)
             node->mount->needs_full_sync = true;
         }
     }
+    spinlock_unlock(&g_vfs_dirty_lock);
 }
 
 static void vfs_mark_sectors_dirty(vfs_mount_t *mount, uint32_t first_sector, uint32_t count)
@@ -384,6 +388,7 @@ static void vfs_mark_sectors_dirty(vfs_mount_t *mount, uint32_t first_sector, ui
     {
         return;
     }
+    spinlock_lock(&g_vfs_dirty_lock);
     if (first_sector >= mount->dirty_sector_count)
     {
         size_t new_count = first_sector + count;
@@ -391,6 +396,7 @@ static void vfs_mark_sectors_dirty(vfs_mount_t *mount, uint32_t first_sector, ui
         if (!new_bits)
         {
             mount->needs_full_sync = true;
+            spinlock_unlock(&g_vfs_dirty_lock);
             return;
         }
         /* zero new area */
@@ -408,6 +414,7 @@ static void vfs_mark_sectors_dirty(vfs_mount_t *mount, uint32_t first_sector, ui
             mount->dirty_sectors[first_sector + i] = 1;
         }
     }
+    spinlock_unlock(&g_vfs_dirty_lock);
 }
 
 static void vfs_note_file_dirty(vfs_node_t *node, size_t start, size_t len, bool size_changed)
@@ -962,6 +969,8 @@ static bool split_parent_and_name(vfs_node_t *cwd, const char *path,
 void vfs_init(void)
 {
     if (root) return;
+
+    spinlock_init(&g_vfs_dirty_lock);
 
     vfs_node_t *node = vfs_alloc_node(VFS_NODE_DIR);
     if (!node) return; /* OOM: VFS disabled */
@@ -1730,8 +1739,13 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         return true;
     }
+
+    bool ok = true;
+    spinlock_lock(&g_vfs_dirty_lock);
+
     if (!mount->dirty && !force)
     {
+        spinlock_unlock(&g_vfs_dirty_lock);
         return true;
     }
     bool did_full = false;
@@ -1739,7 +1753,8 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         if (!vfs_mount_sync(mount, true))
         {
-            return false;
+            ok = false;
+            goto out;
         }
         did_full = true;
     }
@@ -1767,7 +1782,8 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
                     if (!block_write(mount->device, run_start, run_len, mount->image_cache + (size_t)run_start * mount->sector_size))
                     {
                         mount->needs_full_sync = true;
-                        return false;
+                        ok = false;
+                        goto out;
                     }
                     run_start = i;
                     run_len = 1;
@@ -1779,7 +1795,8 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
             if (!block_write(mount->device, run_start, run_len, mount->image_cache + (size_t)run_start * mount->sector_size))
             {
                 mount->needs_full_sync = true;
-                return false;
+                ok = false;
+                goto out;
             }
         }
     }
@@ -1791,7 +1808,9 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     }
     vfs_clear_dirty_subtree(mount->mount_point, mount);
     (void)did_full;
-    return true;
+out:
+    spinlock_unlock(&g_vfs_dirty_lock);
+    return ok;
 }
 
 static bool vfs_mount_sync_node(vfs_node_t *node)
