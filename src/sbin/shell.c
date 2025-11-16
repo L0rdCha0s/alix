@@ -658,7 +658,7 @@ static bool shell_run_script(shell_state_t *shell,
     }
 
     size_t size = 0;
-    const char *data = vfs_data(node, &size);
+    char *data = vfs_data(node, &size);
     if (!data)
     {
         if (out)

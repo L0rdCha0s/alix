@@ -19,7 +19,7 @@ bool dl_script_install_default(void)
     if (file)
     {
         size_t size = 0;
-        const char *data = vfs_data(file, &size);
+        char *data = vfs_data(file, &size);
         if (data && size == g_dl_script_content_len &&
             memcmp(data, g_dl_script_content, size) == 0)
         {

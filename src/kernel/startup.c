@@ -228,7 +228,7 @@ static bool startup_collect_commands(startup_command_list_t *list)
     }
 
     size_t size = 0;
-    const char *data = vfs_data(file, &size);
+    char *data = vfs_data(file, &size);
     if (!data || size == 0)
     {
         return true;

@@ -167,7 +167,7 @@ bool shell_execute_binary(shell_state_t *shell,
     }
 
     size_t size = 0;
-    const char *data = vfs_data(node, &size);
+    char *data = vfs_data(node, &size);
     if (!data || size == 0)
     {
         free_tokens(tokens, token_count);

@@ -891,7 +891,7 @@ bool timekeeping_reload_timezone(void)
         return false;
     }
     size_t size = 0;
-    const char *data = vfs_data(file, &size);
+    char *data = vfs_data(file, &size);
     if (!data || size == 0)
     {
         return false;

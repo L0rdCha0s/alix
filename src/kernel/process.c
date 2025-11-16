@@ -1006,18 +1006,47 @@ static void thread_free_resources(thread_t *thread)
     {
         return;
     }
+    const char *name = thread->name[0] ? thread->name : "<unnamed>";
+    uint64_t pid = thread->process ? thread->process->pid : 0;
+    uintptr_t ctx_ptr = (uintptr_t)thread->context;
+    uintptr_t stack_base = (uintptr_t)thread->stack_base;
+    uintptr_t stack_top = thread->kernel_stack_top;
+    serial_printf("%s", "[sched] thread_free_resources name=");
+    serial_printf("%s", name);
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)pid);
+    serial_printf("%s", " context=0x");
+    serial_printf("%016llX", (unsigned long long)ctx_ptr);
+    serial_printf("%s", " stack=[0x");
+    serial_printf("%016llX", (unsigned long long)stack_base);
+    serial_printf("%s", ",0x");
+    serial_printf("%016llX", (unsigned long long)stack_top);
+    serial_printf("%s", ")\r\n");
+    uint8_t *stack_allocation_raw = thread->stack_allocation_raw;
+    uint8_t *stack_guard_base = thread->stack_guard_base;
+    uint8_t *stack_base_ptr = thread->stack_base;
+    thread->context = NULL;
+    thread->context_valid = false;
+    thread->kernel_stack_top = 0;
+    thread->stack_base = NULL;
+    thread->stack_guard_base = NULL;
+    thread->stack_allocation_raw = NULL;
+    thread->stack_size = 0;
+    thread->stack_allocation_size = 0;
+    thread->magic = 0;
+    thread->process = NULL;
     thread_registry_remove(thread);
-    if (thread->stack_allocation_raw)
+    if (stack_allocation_raw)
     {
-        free(thread->stack_allocation_raw);
+        free(stack_allocation_raw);
     }
-    else if (thread->stack_guard_base)
+    else if (stack_guard_base)
     {
-        free(thread->stack_guard_base);
+        free(stack_guard_base);
     }
-    else if (thread->stack_base)
+    else if (stack_base_ptr)
     {
-        free(thread->stack_base);
+        free(stack_base_ptr);
     }
     free(thread);
 }
@@ -1046,18 +1075,72 @@ static void thread_process_deferred_frees(uint32_t cpu_index)
     {
         cpu_index = 0;
     }
+
+    /* Disable interrupts so current-thread observations stay consistent. */
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    /* Build a temporary list of items we can actually free this pass. */
     spinlock_lock(&g_deferred_free_locks[cpu_index]);
     thread_t *list = g_deferred_thread_frees[cpu_index];
     g_deferred_thread_frees[cpu_index] = NULL;
     spinlock_unlock(&g_deferred_free_locks[cpu_index]);
 
-    while (list)
+    thread_t *pending = NULL;
+    thread_t *tail = NULL;
+    thread_t *cursor = list;
+    while (cursor)
     {
-        thread_t *next = list->deferred_next;
-        list->deferred_next = NULL;
-        thread_free_resources(list);
-        list = next;
+        thread_t *next = cursor->deferred_next;
+        cursor->deferred_next = NULL;
+
+        bool in_use = false;
+        /* Avoid freeing anything still running or referenced as current. */
+        for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
+        {
+            if (g_current_threads[i] == cursor)
+            {
+                in_use = true;
+                break;
+            }
+        }
+        if (cursor->state != THREAD_STATE_ZOMBIE || cursor->in_run_queue || cursor->sleeping ||
+            cursor->waiting_queue || cursor->in_transition)
+        {
+            in_use = true;
+        }
+
+        if (in_use)
+        {
+            /* Keep for later retry. */
+            if (!pending)
+            {
+                pending = cursor;
+                tail = cursor;
+            }
+            else
+            {
+                tail->deferred_next = cursor;
+                tail = cursor;
+            }
+        }
+        else
+        {
+            thread_free_resources(cursor);
+        }
+        cursor = next;
     }
+
+    /* Requeue anything we could not safely free yet. */
+    if (pending)
+    {
+        spinlock_lock(&g_deferred_free_locks[cpu_index]);
+        tail->deferred_next = g_deferred_thread_frees[cpu_index];
+        g_deferred_thread_frees[cpu_index] = pending;
+        spinlock_unlock(&g_deferred_free_locks[cpu_index]);
+    }
+
+    cpu_restore_flags(flags);
 }
 
 static bool thread_context_in_bounds(thread_t *thread,
@@ -3957,6 +4040,28 @@ static bool switch_to_thread(thread_t *next)
         scheduler_trace("[sched] switch_to: invalid next pointer;", next);
         return false;
     }
+    if (next && (!next->context || !next->stack_base || next->kernel_stack_top == 0))
+    {
+        serial_printf("%s", "[sched] switch_to cancelled: missing context thread=");
+        if (next->name[0])
+        {
+            serial_printf("%s", next->name);
+        }
+        else
+        {
+            serial_printf("%s", "<unnamed>");
+        }
+        serial_printf("%s", " pid=0x");
+        serial_printf("%016llX", (unsigned long long)(next->process ? next->process->pid : 0));
+        serial_printf("%s", " context=0x");
+        serial_printf("%016llX", (unsigned long long)(uintptr_t)next->context);
+        serial_printf("%s", " stack_base=0x");
+        serial_printf("%016llX", (unsigned long long)(uintptr_t)next->stack_base);
+        serial_printf("%s", " stack_top=0x");
+        serial_printf("%016llX", (unsigned long long)next->kernel_stack_top);
+        serial_printf("%s", "\r\n");
+        return false;
+    }
 
     if (prev)
     {
@@ -4879,6 +4984,14 @@ void process_destroy(process_t *process)
     {
         return;
     }
+
+    serial_printf("%s", "[proc] destroy pid=0x");
+    serial_printf("%016llX", (unsigned long long)process->pid);
+    serial_printf("%s", " name=");
+    serial_printf("%s", process->name);
+    serial_printf("%s", " main_thread=0x");
+    serial_printf("%016llX", (unsigned long long)(uintptr_t)process->main_thread);
+    serial_printf("%s", "\r\n");
 
     user_atk_on_process_destroy(process);
     shell_service_cleanup_process(process);

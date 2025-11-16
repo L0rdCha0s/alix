@@ -14,7 +14,7 @@ bool shell_cmd_logcat(shell_state_t *shell, shell_output_t *out, const char *arg
     }
 
     size_t size = 0;
-    const char *data = vfs_data(file, &size);
+    char *data = vfs_data(file, &size);
     if (!data)
     {
         return shell_output_error(out, "unable to read log");

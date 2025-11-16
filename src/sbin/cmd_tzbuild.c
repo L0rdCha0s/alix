@@ -201,7 +201,7 @@ bool shell_cmd_tzbuild(shell_state_t *shell, shell_output_t *out, const char *ar
         return shell_output_error(out, "tzdata.zi missing, run tzsync first");
     }
     size_t data_size = 0;
-    const char *data = vfs_data(tzdata_file, &data_size);
+    char *data = vfs_data(tzdata_file, &data_size);
     if (!data || data_size == 0)
     {
         return shell_output_error(out, "tzdata.zi empty");
@@ -329,7 +329,7 @@ static bool tz_parse_manifest_release(char *buffer, size_t capacity)
         return false;
     }
     size_t size = 0;
-    const char *data = vfs_data(file, &size);
+    char *data = vfs_data(file, &size);
     if (!data || size == 0)
     {
         return false;

@@ -40,7 +40,7 @@ bool vfs_set_file_callbacks(vfs_node_t *file,
                             vfs_read_cb_t read_cb,
                             vfs_write_cb_t write_cb,
                             void *context);
-const char *vfs_data(const vfs_node_t *file, size_t *size);
+char *vfs_data(vfs_node_t *file, size_t *size);
 const char *vfs_name(const vfs_node_t *node);
 vfs_node_t *vfs_parent(const vfs_node_t *node);
 size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity);

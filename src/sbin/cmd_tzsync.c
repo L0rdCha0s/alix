@@ -276,7 +276,7 @@ static bool tzsync_detect_version(const char *tzdata_path, char *buffer, size_t 
         return false;
     }
     size_t size = 0;
-    const char *data = vfs_data(file, &size);
+    char *data = vfs_data(file, &size);
     if (!data || size == 0)
     {
         return false;

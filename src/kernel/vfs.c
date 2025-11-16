@@ -47,6 +47,8 @@ struct vfs_mount
     size_t sector_size;
     uint8_t *dirty_sectors;
     size_t dirty_sector_count;
+    spinlock_t dirty_lock;
+    spinlock_t sync_lock;
 };
 
 struct vfs_node
@@ -78,7 +80,7 @@ struct vfs_node
 
 static vfs_node_t *root = NULL;
 static vfs_mount_t *mounts = NULL;
-static spinlock_t g_vfs_dirty_lock;
+static spinlock_t g_vfs_tree_lock;
 
 #define VFS_MAX_SYMLINK_DEPTH 8
 
@@ -97,7 +99,6 @@ static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount);
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full);
 static bool vfs_device_is_mounted(block_device_t *device);
-static void vfs_mark_sectors_dirty(vfs_mount_t *mount, uint32_t first_sector, uint32_t count);
 
 /* ---------- helpers ---------- */
 
@@ -369,56 +370,24 @@ static void vfs_mark_node_dirty(vfs_node_t *node)
     {
         return;
     }
-    spinlock_lock(&g_vfs_dirty_lock);
     node->dirty = true;
     if (node->mount)
     {
+        spinlock_lock(&node->mount->dirty_lock);
         node->mount->dirty = true;
         if (node->type != VFS_NODE_FILE)
         {
             node->mount->needs_full_sync = true;
         }
+        spinlock_unlock(&node->mount->dirty_lock);
     }
-    spinlock_unlock(&g_vfs_dirty_lock);
-}
-
-static void vfs_mark_sectors_dirty(vfs_mount_t *mount, uint32_t first_sector, uint32_t count)
-{
-    if (!mount || count == 0)
-    {
-        return;
-    }
-    spinlock_lock(&g_vfs_dirty_lock);
-    if (first_sector >= mount->dirty_sector_count)
-    {
-        size_t new_count = first_sector + count;
-        uint8_t *new_bits = (uint8_t *)realloc(mount->dirty_sectors, new_count);
-        if (!new_bits)
-        {
-            mount->needs_full_sync = true;
-            spinlock_unlock(&g_vfs_dirty_lock);
-            return;
-        }
-        /* zero new area */
-        if (new_count > mount->dirty_sector_count)
-        {
-            memset(new_bits + mount->dirty_sector_count, 0, new_count - mount->dirty_sector_count);
-        }
-        mount->dirty_sectors = new_bits;
-        mount->dirty_sector_count = new_count;
-    }
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        if (first_sector + i < mount->dirty_sector_count)
-        {
-            mount->dirty_sectors[first_sector + i] = 1;
-        }
-    }
-    spinlock_unlock(&g_vfs_dirty_lock);
 }
 
 static void vfs_note_file_dirty(vfs_node_t *node, size_t start, size_t len, bool size_changed)
 {
+    (void)start;
+    (void)len;
+    (void)size_changed;
     if (!node || node->type != VFS_NODE_FILE)
     {
         return;
@@ -429,26 +398,11 @@ static void vfs_note_file_dirty(vfs_node_t *node, size_t start, size_t len, bool
     {
         return;
     }
-    if (size_changed ||
-        !mount->image_cache ||
-        mount->sector_size == 0 ||
-        node->image_data_offset == 0xFFFFFFFFu ||
-        node->image_data_len != node->size ||
-        node->image_data_offset + start + len > mount->cache_size)
-    {
-        mount->needs_full_sync = true;
-        return;
-    }
-
-    memcpy(mount->image_cache + node->image_data_offset + start,
-           node->data + start,
-           len);
-
-    uint32_t sector_size = (uint32_t)mount->sector_size;
-    uint32_t first_sector = (uint32_t)((node->image_data_offset + start) / sector_size);
-    uint32_t last_byte = (uint32_t)(node->image_data_offset + start + len - 1);
-    uint32_t last_sector = last_byte / sector_size;
-    vfs_mark_sectors_dirty(mount, first_sector, last_sector - first_sector + 1);
+    /* For stability, defer to full sync rather than incremental cache updates. */
+    spinlock_lock(&mount->dirty_lock);
+    mount->needs_full_sync = true;
+    mount->dirty = true;
+    spinlock_unlock(&mount->dirty_lock);
 }
 
 static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount)
@@ -507,12 +461,17 @@ static bool vfs_measure_node(const vfs_node_t *node,
         return false;
     }
 
-    (*node_count) += 1;
-    (*payload_size) += sizeof(alixfs_node_disk_t) + name_len;
+    size_t add = sizeof(alixfs_node_disk_t) + name_len;
     if (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
     {
-        (*payload_size) += node->size;
+        add += node->size;
     }
+    if (*payload_size > UINT32_MAX - add)
+    {
+        return false;
+    }
+    (*node_count) += 1;
+    (*payload_size) += add;
 
     for (const vfs_node_t *child = node->first_child; child; child = child->next_sibling)
     {
@@ -531,7 +490,7 @@ typedef struct
     uint64_t sector_index;
     size_t sector_size;
     size_t max_bytes;
-    size_t total_bytes;
+    size_t total_bytes;   /* logical bytes written (excludes zero padding) */
     uint8_t *sector_buf;
     size_t fill;
     bool ok;
@@ -970,7 +929,7 @@ void vfs_init(void)
 {
     if (root) return;
 
-    spinlock_init(&g_vfs_dirty_lock);
+    spinlock_init(&g_vfs_tree_lock);
 
     vfs_node_t *node = vfs_alloc_node(VFS_NODE_DIR);
     if (!node) return; /* OOM: VFS disabled */
@@ -997,7 +956,10 @@ vfs_node_t *vfs_root(void)
 
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
 {
-    return resolve_node(cwd ? cwd : root, path);
+    spinlock_lock(&g_vfs_tree_lock);
+    vfs_node_t *res = resolve_node(cwd ? cwd : root, path);
+    spinlock_unlock(&g_vfs_tree_lock);
+    return res;
 }
 
 vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
@@ -1005,13 +967,19 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     vfs_node_t *parent = NULL;
     char *name = NULL;
 
+    spinlock_lock(&g_vfs_tree_lock);
+
     if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
+    {
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
+    }
 
     vfs_node_t *existing = vfs_find_child(parent, name);
     if (existing)
     {
         free(name);
+        spinlock_unlock(&g_vfs_tree_lock);
         return (existing->type == VFS_NODE_DIR) ? existing : NULL;
     }
 
@@ -1019,6 +987,7 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     if (!dir)
     {
         free(name);
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
 
@@ -1034,6 +1003,7 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     vfs_attach_child(parent, dir);
     vfs_mark_node_dirty(parent);
     vfs_mark_node_dirty(dir);
+    spinlock_unlock(&g_vfs_tree_lock);
     return dir;
 }
 
@@ -1042,8 +1012,13 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
     vfs_node_t *parent = NULL;
     char *name = NULL;
 
+    spinlock_lock(&g_vfs_tree_lock);
+
     if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
+    {
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
+    }
 
     vfs_node_t *file = vfs_find_child(parent, name);
     if (!file)
@@ -1051,12 +1026,14 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
         if (!create)
         {
             free(name);
+            spinlock_unlock(&g_vfs_tree_lock);
             return NULL;
         }
         file = vfs_alloc_node(VFS_NODE_FILE);
         if (!file)
         {
             free(name);
+            spinlock_unlock(&g_vfs_tree_lock);
             return NULL;
         }
         file->name   = name;   /* take ownership */
@@ -1073,17 +1050,25 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
     }
 
     if (file->type != VFS_NODE_FILE)
+    {
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
+    }
 
     if (truncate)
     {
         file->size = 0;
-        if (!ensure_capacity(file, 0)) return NULL;
+        if (!ensure_capacity(file, 0))
+        {
+            spinlock_unlock(&g_vfs_tree_lock);
+            return NULL;
+        }
         file->data[0] = '\0';
         vfs_mark_node_dirty(file);
     }
 
     ensure_terminator(file);
+    spinlock_unlock(&g_vfs_tree_lock);
     return file;
 }
 
@@ -1096,8 +1081,10 @@ vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *li
 
     vfs_node_t *parent = NULL;
     char *name = NULL;
+    spinlock_lock(&g_vfs_tree_lock);
     if (!split_parent_and_name(cwd ? cwd : root, link_path, &parent, &name))
     {
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
 
@@ -1108,11 +1095,13 @@ vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *li
         {
             bool updated = vfs_assign_symlink_target(existing, target_path);
             free(name);
+            spinlock_unlock(&g_vfs_tree_lock);
             return updated ? existing : NULL;
         }
         if (existing->type == VFS_NODE_DIR && vfs_is_mount_point(existing))
         {
             free(name);
+            spinlock_unlock(&g_vfs_tree_lock);
             return NULL;
         }
         if (existing->type == VFS_NODE_DIR && existing->first_child)
@@ -1128,18 +1117,21 @@ vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *li
     if (!node)
     {
         free(name);
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
     node->name = name;
     if (!vfs_assign_symlink_target(node, target_path))
     {
         vfs_free_subtree(node);
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
 
     vfs_attach_child(parent, node);
     vfs_mark_node_dirty(parent);
     vfs_mark_node_dirty(node);
+    spinlock_unlock(&g_vfs_tree_lock);
     return node;
 }
 
@@ -1302,16 +1294,16 @@ bool vfs_set_file_callbacks(vfs_node_t *file,
     return true;
 }
 
-const char *vfs_data(const vfs_node_t *file, size_t *size)
+char *vfs_data(vfs_node_t *file, size_t *size)
 {
     if (!file || file->type != VFS_NODE_FILE)
     {
         if (size) *size = 0;
         return NULL;
     }
+    ensure_terminator(file);
     if (size) *size = file->size;
-    ensure_terminator((vfs_node_t *)file);
-    return file->data ? file->data : "";
+    return file->data;
 }
 
 const char *vfs_name(const vfs_node_t *node)
@@ -1395,15 +1387,19 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
         return false;
     }
 
+    spinlock_lock(&g_vfs_tree_lock);
+
     vfs_node_t *parent = NULL;
     char *name = NULL;
     if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
     {
+        spinlock_unlock(&g_vfs_tree_lock);
         return false;
     }
     if (!parent)
     {
         free(name);
+        spinlock_unlock(&g_vfs_tree_lock);
         return false;
     }
 
@@ -1411,6 +1407,7 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
     free(name);
     if (!node || (node->type != VFS_NODE_FILE && node->type != VFS_NODE_SYMLINK))
     {
+        spinlock_unlock(&g_vfs_tree_lock);
         return false;
     }
 
@@ -1418,6 +1415,7 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
     vfs_free_subtree(node);
 
     vfs_mark_node_dirty(parent);
+    spinlock_unlock(&g_vfs_tree_lock);
     return true;
 }
 
@@ -1439,20 +1437,25 @@ vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device
         return NULL;
     }
 
+    spinlock_lock(&g_vfs_tree_lock);
+
     vfs_node_t *existing = vfs_find_child(dir, name);
     if (existing)
     {
         if (existing->type == VFS_NODE_BLOCK)
         {
             existing->block_device = device;
+            spinlock_unlock(&g_vfs_tree_lock);
             return existing;
         }
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
 
     vfs_node_t *node = vfs_alloc_node(VFS_NODE_BLOCK);
     if (!node)
     {
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
 
@@ -1460,6 +1463,7 @@ vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device
     if (!node->name)
     {
         free(node);
+        spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
     node->block_device = device;
@@ -1468,6 +1472,7 @@ vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device
     node->data = NULL;
 
     vfs_attach_child_tail(dir, node);
+    spinlock_unlock(&g_vfs_tree_lock);
     return node;
 }
 
@@ -1497,7 +1502,15 @@ static size_t vfs_sector_size(block_device_t *device)
 
 bool vfs_format(block_device_t *device)
 {
-    if (!device || vfs_device_is_mounted(device))
+    if (!device)
+    {
+        return false;
+    }
+
+    spinlock_lock(&g_vfs_tree_lock);
+    bool mounted = vfs_device_is_mounted(device);
+    spinlock_unlock(&g_vfs_tree_lock);
+    if (mounted)
     {
         return false;
     }
@@ -1566,7 +1579,10 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
 
     size_t node_count = 0;
     size_t payload_size = 0;
-    if (!vfs_measure_node(mount->mount_point, mount, true, &node_count, &payload_size))
+    spinlock_lock(&g_vfs_tree_lock);
+    bool measured = vfs_measure_node(mount->mount_point, mount, true, &node_count, &payload_size);
+    spinlock_unlock(&g_vfs_tree_lock);
+    if (!measured)
     {
         serial_printf("%s", "[vfs] sync measure failed\r\n");
         return false;
@@ -1574,6 +1590,11 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     if (node_count == 0)
     {
         serial_printf("%s", "[vfs] sync measure produced zero nodes\r\n");
+        return false;
+    }
+    if (node_count > UINT32_MAX)
+    {
+        serial_printf("%s", "[vfs] sync fail: node_count overflow\r\n");
         return false;
     }
 
@@ -1624,12 +1645,14 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     uint32_t next_id = 0;
     if (ok)
     {
+        spinlock_lock(&g_vfs_tree_lock);
         ok = vfs_serialize_node_stream(mount->mount_point,
                                        mount,
                                        true,
                                        0xFFFFFFFFu,
                                        &next_id,
                                        &writer);
+        spinlock_unlock(&g_vfs_tree_lock);
     }
     if (ok)
     {
@@ -1706,18 +1729,16 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
         }
         uint32_t start = sectors_needed;
         uint32_t len = old_sectors - sectors_needed;
-        /* Write in as few calls as possible. */
         while (len > 0)
         {
-            uint32_t chunk = len;
-            if (!block_write(mount->device, start, chunk, zero_buf))
+            if (!block_write(mount->device, start, 1, zero_buf))
             {
                 free(zero_buf);
                 free(image);
                 return false;
             }
-            start += chunk;
-            len = 0;
+            start += 1;
+            len -= 1;
         }
         free(zero_buf);
     }
@@ -1739,78 +1760,43 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         return true;
     }
+    bool dirty = false;
 
-    bool ok = true;
-    spinlock_lock(&g_vfs_dirty_lock);
-
-    if (!mount->dirty && !force)
-    {
-        spinlock_unlock(&g_vfs_dirty_lock);
-        return true;
-    }
-    bool did_full = false;
-    if (force || mount->needs_full_sync || !mount->image_cache || mount->sector_size == 0)
-    {
-        if (!vfs_mount_sync(mount, true))
-        {
-            ok = false;
-            goto out;
-        }
-        did_full = true;
-    }
-    else
-    {
-        /* Incremental: flush marked dirty sectors from cache. */
-        uint32_t sectors = (uint32_t)(mount->cache_size / mount->sector_size);
-        uint32_t run_start = UINT32_MAX;
-        uint32_t run_len = 0;
-        for (uint32_t i = 0; i < sectors && i < mount->dirty_sector_count; ++i)
-        {
-            if (mount->dirty_sectors && mount->dirty_sectors[i])
-            {
-                if (run_start == UINT32_MAX)
-                {
-                    run_start = i;
-                    run_len = 1;
-                }
-                else if (run_start + run_len == i)
-                {
-                    run_len++;
-                }
-                else
-                {
-                    if (!block_write(mount->device, run_start, run_len, mount->image_cache + (size_t)run_start * mount->sector_size))
-                    {
-                        mount->needs_full_sync = true;
-                        ok = false;
-                        goto out;
-                    }
-                    run_start = i;
-                    run_len = 1;
-                }
-            }
-        }
-        if (run_start != UINT32_MAX)
-        {
-            if (!block_write(mount->device, run_start, run_len, mount->image_cache + (size_t)run_start * mount->sector_size))
-            {
-                mount->needs_full_sync = true;
-                ok = false;
-                goto out;
-            }
-        }
-    }
+    spinlock_lock(&mount->dirty_lock);
+    dirty = mount->dirty || force;
     mount->dirty = false;
     mount->needs_full_sync = false;
+    spinlock_unlock(&mount->dirty_lock);
+
+    if (!dirty)
+    {
+        return true;
+    }
+
+    spinlock_lock(&mount->sync_lock);
+    bool ok_sync = vfs_mount_sync(mount, true);
+    spinlock_unlock(&mount->sync_lock);
+
+    if (!ok_sync)
+    {
+        spinlock_lock(&mount->dirty_lock);
+        mount->needs_full_sync = true;
+        mount->dirty = true;
+        spinlock_unlock(&mount->dirty_lock);
+        return false;
+    }
+
+    spinlock_lock(&g_vfs_tree_lock);
+    vfs_clear_dirty_subtree(mount->mount_point, mount);
+    spinlock_unlock(&g_vfs_tree_lock);
+
+    spinlock_lock(&mount->dirty_lock);
     if (mount->dirty_sectors && mount->dirty_sector_count > 0)
     {
         memset(mount->dirty_sectors, 0, mount->dirty_sector_count);
     }
-    vfs_clear_dirty_subtree(mount->mount_point, mount);
-    (void)did_full;
-out:
-    spinlock_unlock(&g_vfs_dirty_lock);
-    return ok;
+    spinlock_unlock(&mount->dirty_lock);
+    return true;
 }
 
 static bool vfs_mount_sync_node(vfs_node_t *node)
@@ -1824,7 +1810,11 @@ static bool vfs_mount_sync_node(vfs_node_t *node)
     {
         return true;
     }
-    if (!mount->dirty)
+    bool dirty = false;
+    spinlock_lock(&mount->dirty_lock);
+    dirty = mount->dirty;
+    spinlock_unlock(&mount->dirty_lock);
+    if (!dirty)
     {
         node->dirty = false;
         return true;
@@ -1929,7 +1919,6 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
     parents[header->root_id] = 0xFFFFFFFFu;
 
     bool success = false;
-    bool attached = false;
     size_t offset = sizeof(alixfs_header_t);
 
     for (uint32_t idx = 0; idx < node_count; ++idx)
@@ -2074,6 +2063,8 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
             goto cleanup;
         }
         vfs_attach_child_tail(parent, node);
+        /* Ownership transferred to tree; avoid double free on cleanup. */
+        nodes[i] = NULL;
     }
 
     mount->image_cache = buffer;
@@ -2084,29 +2075,22 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
     mount->dirty_sectors = (uint8_t *)calloc(sectors, 1);
     mount->dirty_sector_count = sectors;
     buffer = NULL;
-
-    attached = true;
     success = true;
 
 cleanup:
     if (!success)
     {
-        if (attached)
+        /* Detach anything we may have attached and free remaining nodes. */
+        vfs_clear_directory(mount->mount_point);
+        for (uint32_t i = 0; i < node_count; ++i)
         {
-            vfs_clear_directory(mount->mount_point);
-        }
-        else
-        {
-            for (uint32_t i = 0; i < node_count; ++i)
+            if (i == header->root_id)
             {
-                if (i == header->root_id)
-                {
-                    continue;
-                }
-                if (nodes[i])
-                {
-                    vfs_free_subtree(nodes[i]);
-                }
+                continue;
+            }
+            if (nodes[i])
+            {
+                vfs_free_subtree(nodes[i]);
             }
         }
     }
@@ -2123,26 +2107,22 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     {
         return false;
     }
-    if (vfs_is_mount_point(mount_point))
+
+    spinlock_lock(&g_vfs_tree_lock);
+
+    if (vfs_is_mount_point(mount_point) ||
+        mount_point->first_child ||
+        mount_point->mount ||
+        vfs_device_is_mounted(device))
     {
-        return false;
-    }
-    if (mount_point->first_child)
-    {
-        return false; /* require empty mount location */
-    }
-    if (mount_point->mount)
-    {
-        return false;
-    }
-    if (vfs_device_is_mounted(device))
-    {
+        spinlock_unlock(&g_vfs_tree_lock);
         return false;
     }
 
     vfs_mount_t *mount = (vfs_mount_t *)malloc(sizeof(vfs_mount_t));
     if (!mount)
     {
+        spinlock_unlock(&g_vfs_tree_lock);
         return false;
     }
 
@@ -2156,6 +2136,8 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     mount->sector_size = 0;
     mount->dirty_sectors = NULL;
     mount->dirty_sector_count = 0;
+    spinlock_init(&mount->dirty_lock);
+    spinlock_init(&mount->sync_lock);
 
     mount_point->mount = mount;
 
@@ -2163,11 +2145,13 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     {
         mount_point->mount = NULL;
         free(mount);
+        spinlock_unlock(&g_vfs_tree_lock);
         return false;
     }
 
     mount->next = mounts;
     mounts = mount;
+    spinlock_unlock(&g_vfs_tree_lock);
     return true;
 }
 
@@ -2184,12 +2168,16 @@ bool vfs_is_mount_point(const vfs_node_t *node)
 bool vfs_sync_all(void)
 {
     bool ok = true;
-    for (vfs_mount_t *mount = mounts; mount; mount = mount->next)
+    spinlock_lock(&g_vfs_tree_lock);
+    vfs_mount_t *head = mounts;
+    spinlock_unlock(&g_vfs_tree_lock);
+
+    for (vfs_mount_t *mount = head; mount; mount = mount->next)
     {
-        if (!vfs_mount_writeback(mount, true))
-        {
-            ok = false;
-        }
+    if (!vfs_mount_writeback(mount, true))
+    {
+        ok = false;
+    }
     }
     return ok;
 }
@@ -2197,9 +2185,18 @@ bool vfs_sync_all(void)
 bool vfs_sync_dirty(void)
 {
     bool ok = true;
-    for (vfs_mount_t *mount = mounts; mount; mount = mount->next)
+    spinlock_lock(&g_vfs_tree_lock);
+    vfs_mount_t *head = mounts;
+    spinlock_unlock(&g_vfs_tree_lock);
+
+    for (vfs_mount_t *mount = head; mount; mount = mount->next)
     {
-        if (!mount->dirty)
+        bool dirty = false;
+        spinlock_lock(&mount->dirty_lock);
+        dirty = mount->dirty;
+        spinlock_unlock(&mount->dirty_lock);
+
+        if (!dirty)
         {
             continue;
         }

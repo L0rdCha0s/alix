@@ -25,7 +25,7 @@ bool shell_cmd_useratk(shell_state_t *shell, shell_output_t *out, const char *ar
     }
 
     size_t size = 0;
-    const char *data = vfs_data(node, &size);
+    char *data = vfs_data(node, &size);
     if (!data || size == 0)
     {
         return shell_output_error(out, "useratk: empty binary");
