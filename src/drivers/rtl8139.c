@@ -1245,7 +1245,10 @@ static void rtl8139_hw_send_slot(int slot, const uint8_t *data, size_t len)
 
     rtl8139_dump_frame(slot, frame_len, g_tx_buffer[slot]);
     rtl8139_tx_meta_capture(slot, g_tx_buffer[slot], frame_len);
+
+    #if RTL8139_TRACE_ENABLE
     rtl8139_log_dma_target("hw_send", slot, g_tx_buffer[slot], frame_len);
+    #endif
 
     outl(g_io_base + RTL_REG_TSD0 + slot * 4, (uint32_t)frame_len & 0x1FFFU);
     rtl8139_dump_state("after tx");

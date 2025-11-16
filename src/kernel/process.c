@@ -2898,7 +2898,7 @@ static bool string_name_equals(const char *lhs, const char *rhs)
     return strncmp(lhs, rhs, PROCESS_NAME_MAX) == 0;
 }
 
-#define ENABLE_SHELL_TRACE 1
+#define ENABLE_SHELL_TRACE 0
 
 static void process_create_log(const char *name, const char *event)
 {
