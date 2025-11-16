@@ -11,6 +11,11 @@
 #include "shell_service.h"
 #include "net/interface.h"
 
+static process_info_t *g_proc_snapshot_buf = NULL;
+static size_t g_proc_snapshot_cap = 0;
+static net_interface_stats_t *g_net_snapshot_buf = NULL;
+static size_t g_net_snapshot_cap = 0;
+
 typedef struct
 {
     vfs_node_t *node;
@@ -65,7 +70,19 @@ static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t c
         return -1;
     }
 
-    process_info_t *tmp = (process_info_t *)malloc(sizeof(process_info_t) * capacity);
+    if (capacity > g_proc_snapshot_cap)
+    {
+        size_t bytes = sizeof(process_info_t) * capacity;
+        process_info_t *new_buf = (process_info_t *)realloc(g_proc_snapshot_buf, bytes);
+        if (!new_buf)
+        {
+            return -1;
+        }
+        g_proc_snapshot_buf = new_buf;
+        g_proc_snapshot_cap = capacity;
+    }
+
+    process_info_t *tmp = g_proc_snapshot_buf;
     if (!tmp)
     {
         return -1;
@@ -91,7 +108,6 @@ static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t c
         syscall_copy_string(out->thread_name, SYSCALL_PROCESS_NAME_MAX, thread_name);
     }
 
-    free(tmp);
     return (int64_t)count;
 }
 
@@ -102,7 +118,19 @@ static int64_t syscall_do_net_snapshot(syscall_net_stats_t *buffer, size_t capac
         return -1;
     }
 
-    net_interface_stats_t *tmp = (net_interface_stats_t *)malloc(sizeof(net_interface_stats_t) * capacity);
+    if (capacity > g_net_snapshot_cap)
+    {
+        size_t bytes = sizeof(net_interface_stats_t) * capacity;
+        net_interface_stats_t *new_buf = (net_interface_stats_t *)realloc(g_net_snapshot_buf, bytes);
+        if (!new_buf)
+        {
+            return -1;
+        }
+        g_net_snapshot_buf = new_buf;
+        g_net_snapshot_cap = capacity;
+    }
+
+    net_interface_stats_t *tmp = g_net_snapshot_buf;
     if (!tmp)
     {
         return -1;
@@ -129,7 +157,6 @@ static int64_t syscall_do_net_snapshot(syscall_net_stats_t *buffer, size_t capac
         out->tx_errors = stats->tx_errors;
     }
 
-    free(tmp);
     return (int64_t)count;
 }
 
@@ -330,10 +357,14 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_SHELL_EXEC:
             result = shell_service_exec((uint32_t)frame->rdi,
                                         (const char *)frame->rsi,
+                                        (size_t)frame->rdx);
+            break;
+        case SYSCALL_SHELL_POLL:
+            result = shell_service_poll((uint32_t)frame->rdi,
+                                        (char *)frame->rsi,
                                         (size_t)frame->rdx,
-                                        (char *)frame->r10,
-                                        (size_t)frame->r8,
-                                        (int *)frame->r9);
+                                        (int *)frame->r10,
+                                        (int *)frame->r8);
             break;
         case SYSCALL_PROC_SNAPSHOT:
             result = syscall_do_proc_snapshot((syscall_process_info_t *)frame->rdi,

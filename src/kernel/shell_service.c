@@ -33,6 +33,11 @@ typedef struct shell_session
     char *capture;
     size_t capture_len;
     size_t capture_cap;
+    size_t read_offset;
+    bool running;
+    bool completed;
+    int last_status;
+    process_t *runner;
     struct shell_session *next;
 } shell_session_t;
 
@@ -46,12 +51,20 @@ static bool shell_session_append(shell_session_t *session, const char *data, siz
 static ssize_t shell_session_fd_write(void *ctx, const void *buffer, size_t count);
 static int shell_session_fd_close(void *ctx);
 static void shell_session_stream(void *context, const char *data, size_t len);
+static void shell_session_exec_task(void *arg);
+static void shell_session_cleanup_runner(shell_session_t *session);
 
 static const fd_ops_t g_shell_session_fd_ops = {
     .read = NULL,
     .write = shell_session_fd_write,
     .close = shell_session_fd_close,
 };
+
+typedef struct shell_exec_task
+{
+    shell_session_t *session;
+    char *line;
+} shell_exec_task_t;
 
 int shell_service_open_session(void)
 {
@@ -71,6 +84,11 @@ int shell_service_open_session(void)
     session->capture_cap = 0;
     session->capture_len = 0;
     session->capture = NULL;
+    session->read_offset = 0;
+    session->running = false;
+    session->completed = false;
+    session->last_status = 0;
+    session->runner = NULL;
 
     int fd = fd_allocate(&g_shell_session_fd_ops, session);
     if (fd < 0)
@@ -91,6 +109,7 @@ int shell_service_open_session(void)
     session->state.stream_context = session;
     session->state.stdout_fd = fd;
     session->state.owner_process = owner;
+    session->state.wait_hook = NULL;
 
     session->owner = owner;
 
@@ -104,12 +123,9 @@ int shell_service_open_session(void)
     return (int)session->handle;
 }
 
-ssize_t shell_service_exec(uint32_t handle,
-                           const char *command,
-                           size_t command_len,
-                           char *output,
-                           size_t output_capacity,
-                           int *status_out)
+int shell_service_exec(uint32_t handle,
+                       const char *command,
+                       size_t command_len)
 {
     if (!command)
     {
@@ -136,46 +152,42 @@ ssize_t shell_service_exec(uint32_t handle,
     memcpy(line, command, command_len);
     line[command_len] = '\0';
 
+    if (session->running)
+    {
+        return -1;
+    }
+
+    shell_session_cleanup_runner(session);
     shell_session_reset(session);
+    session->completed = false;
+    session->last_status = 0;
 
-    bool success = false;
-    char *result = shell_execute_line(&session->state, line, &success);
-    free(line);
-    if (result)
+    shell_exec_task_t *task = (shell_exec_task_t *)malloc(sizeof(shell_exec_task_t));
+    if (!task)
     {
-        if (!shell_session_append(session, result, strlen(result)))
-        {
-            free(result);
-            return -1;
-        }
-        free(result);
+        free(line);
+        return -1;
+    }
+    task->session = session;
+    task->line = line;
+
+    process_t *proc = process_create_kernel_with_parent("shell_exec",
+                                                        shell_session_exec_task,
+                                                        task,
+                                                        0,
+                                                        session->stdout_fd,
+                                                        session->owner);
+    if (!proc)
+    {
+        free(task->line);
+        free(task);
+        return -1;
     }
 
-    size_t available = session->capture_len;
-    size_t to_copy = 0;
-    if (output && output_capacity > 0)
-    {
-        if (available < output_capacity - 1)
-        {
-            to_copy = available;
-        }
-        else if (output_capacity > 0)
-        {
-            to_copy = output_capacity - 1;
-        }
-        if (to_copy > 0)
-        {
-            memcpy(output, session->capture, to_copy);
-        }
-        output[to_copy] = '\0';
-    }
-
-    if (status_out)
-    {
-        *status_out = success ? 0 : -1;
-    }
-
-    return (ssize_t)available;
+    session->runner = proc;
+    session->running = true;
+    session->completed = false;
+    return 0;
 }
 
 bool shell_service_close_session(uint32_t handle)
@@ -193,6 +205,10 @@ bool shell_service_close_session(uint32_t handle)
             *cursor = session->next;
             shell_cpu_restore_flags(flags);
 
+            if (session->runner)
+            {
+                shell_session_cleanup_runner(session);
+            }
             if (session->stdout_fd >= 0)
             {
                 fd_close(session->stdout_fd);
@@ -206,6 +222,71 @@ bool shell_service_close_session(uint32_t handle)
 
     shell_cpu_restore_flags(flags);
     return false;
+}
+
+ssize_t shell_service_poll(uint32_t handle,
+                           char *output,
+                           size_t output_capacity,
+                           int *status_out,
+                           int *running_out)
+{
+    process_t *owner = process_current();
+    shell_session_t *session = shell_session_find(handle, owner);
+    if (!session)
+    {
+        return -1;
+    }
+
+    shell_session_cleanup_runner(session);
+
+    size_t available = 0;
+    if (session->capture_len > session->read_offset)
+    {
+        available = session->capture_len - session->read_offset;
+    }
+
+    size_t copied = 0;
+    if (output && output_capacity > 0)
+    {
+        size_t to_copy = available;
+        if (to_copy >= output_capacity)
+        {
+            to_copy = output_capacity - 1;
+        }
+        if (to_copy > 0)
+        {
+            memcpy(output, session->capture + session->read_offset, to_copy);
+            copied = to_copy;
+            session->read_offset += to_copy;
+            output[to_copy] = '\0';
+        }
+        else
+        {
+            output[0] = '\0';
+        }
+    }
+
+    if (session->read_offset && session->read_offset == session->capture_len)
+    {
+        /* Compact to avoid unbounded growth when polling frequently. */
+        session->capture_len = 0;
+        session->read_offset = 0;
+        if (session->capture)
+        {
+            session->capture[0] = '\0';
+        }
+    }
+
+    if (status_out)
+    {
+        *status_out = session->completed ? session->last_status : 0;
+    }
+    if (running_out)
+    {
+        *running_out = session->running ? 1 : 0;
+    }
+
+    return (ssize_t)copied;
 }
 
 void shell_service_cleanup_process(process_t *process)
@@ -227,6 +308,10 @@ void shell_service_cleanup_process(process_t *process)
             *cursor = session->next;
             shell_cpu_restore_flags(flags);
 
+            if (session->runner)
+            {
+                shell_session_cleanup_runner(session);
+            }
             if (session->stdout_fd >= 0)
             {
                 fd_close(session->stdout_fd);
@@ -294,6 +379,7 @@ static void shell_session_reset(shell_session_t *session)
         return;
     }
     session->capture_len = 0;
+    session->read_offset = 0;
     if (session->capture)
     {
         session->capture[0] = '\0';
@@ -343,4 +429,42 @@ static int shell_session_fd_close(void *ctx)
 static void shell_session_stream(void *context, const char *data, size_t len)
 {
     shell_session_append((shell_session_t *)context, data, len);
+}
+
+static void shell_session_exec_task(void *arg)
+{
+    shell_exec_task_t *task = (shell_exec_task_t *)arg;
+    if (!task || !task->session || !task->line)
+    {
+        process_exit(-1);
+    }
+
+    shell_session_t *session = task->session;
+    bool success = false;
+    char *result = shell_execute_line(&session->state, task->line, &success);
+    if (result)
+    {
+        shell_session_append(session, result, strlen(result));
+        free(result);
+    }
+    free(task->line);
+    free(task);
+
+    uint64_t flags = shell_cpu_save_flags();
+    shell_cpu_cli();
+    session->running = false;
+    session->completed = true;
+    session->last_status = success ? 0 : -1;
+    shell_cpu_restore_flags(flags);
+    process_exit(0);
+}
+
+static void shell_session_cleanup_runner(shell_session_t *session)
+{
+    if (!session || !session->runner)
+    {
+        return;
+    }
+    process_destroy(session->runner);
+    session->runner = NULL;
 }

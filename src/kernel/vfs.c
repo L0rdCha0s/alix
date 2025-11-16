@@ -1293,6 +1293,7 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
 {
     if (!mount || !mount->device || !mount->mount_point)
     {
+        serial_printf("%s", "[vfs] sync abort: invalid mount\r\n");
         return false;
     }
 
@@ -1300,10 +1301,12 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     size_t payload_size = 0;
     if (!vfs_measure_node(mount->mount_point, mount, true, &node_count, &payload_size))
     {
+        serial_printf("%s", "[vfs] sync measure failed\r\n");
         return false;
     }
     if (node_count == 0)
     {
+        serial_printf("%s", "[vfs] sync measure produced zero nodes\r\n");
         return false;
     }
 
@@ -1316,6 +1319,11 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     }
     if ((uint64_t)sectors_needed > mount->device->sector_count)
     {
+        serial_printf("%s", "[vfs] sync fail: capacity exhausted sectors_needed=0x");
+        serial_printf("%016llX", (unsigned long long)sectors_needed);
+        serial_printf("%s", " sector_count=0x");
+        serial_printf("%016llX", (unsigned long long)mount->device->sector_count);
+        serial_printf("%s", "\r\n");
         return false;
     }
 
@@ -1323,6 +1331,9 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     uint8_t *buffer = (uint8_t *)malloc(buffer_size);
     if (!buffer)
     {
+        serial_printf("%s", "[vfs] sync fail: buffer alloc 0x");
+        serial_printf("%016llX", (unsigned long long)buffer_size);
+        serial_printf("%s", " bytes\r\n");
         return false;
     }
     memset(buffer, 0, buffer_size);
@@ -1390,6 +1401,9 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
                 if (!block_write(mount->device, (uint64_t)s, 1, new_sector))
                 {
                     ok = false;
+                    serial_printf("%s", "[vfs] sync write fail sector=0x");
+                    serial_printf("%016llX", (unsigned long long)s);
+                    serial_printf("%s", "\r\n");
                     break;
                 }
                 memcpy(old_sector, new_sector, sector_size);
@@ -1415,6 +1429,12 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
                 mount->sector_size = sector_size;
                 memcpy(mount->image_cache, buffer, buffer_size);
             }
+        }
+        else
+        {
+            serial_printf("%s", "[vfs] sync bulk write fail sectors=0x");
+            serial_printf("%016llX", (unsigned long long)sectors_to_write);
+            serial_printf("%s", "\r\n");
         }
     }
 

@@ -18,12 +18,14 @@ int sys_ui_close(uint32_t handle);
 int sys_yield(void);
 int sys_serial_write(const char *buffer, size_t length);
 int sys_shell_open(void);
-ssize_t sys_shell_exec(int handle,
-                       const char *command,
-                       size_t command_len,
+int sys_shell_exec(int handle,
+                   const char *command,
+                   size_t command_len);
+ssize_t sys_shell_poll(int handle,
                        char *output,
                        size_t output_len,
-                       int *status_out);
+                       int *status_out,
+                       int *running_out);
 int sys_shell_close(int handle);
 ssize_t sys_proc_snapshot(syscall_process_info_t *buffer, size_t capacity);
 ssize_t sys_net_snapshot(syscall_net_stats_t *buffer, size_t capacity);

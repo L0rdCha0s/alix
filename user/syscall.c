@@ -151,12 +151,7 @@ int sys_shell_open(void)
     return (int)syscall0(SYSCALL_SHELL_OPEN);
 }
 
-ssize_t sys_shell_exec(int handle,
-                       const char *command,
-                       size_t command_len,
-                       char *output,
-                       size_t output_len,
-                       int *status_out)
+int sys_shell_exec(int handle, const char *command, size_t command_len)
 {
     if (!command)
     {
@@ -166,13 +161,24 @@ ssize_t sys_shell_exec(int handle,
     {
         command_len = strlen(command);
     }
-    return (ssize_t)syscall6(SYSCALL_SHELL_EXEC,
+    return (int)syscall3(SYSCALL_SHELL_EXEC,
+                         handle,
+                         (long)command,
+                         (long)command_len);
+}
+
+ssize_t sys_shell_poll(int handle,
+                       char *output,
+                       size_t output_len,
+                       int *status_out,
+                       int *running_out)
+{
+    return (ssize_t)syscall5(SYSCALL_SHELL_POLL,
                               handle,
-                              (long)command,
-                              (long)command_len,
                               (long)output,
                               (long)output_len,
-                              (long)status_out);
+                              (long)status_out,
+                              (long)running_out);
 }
 
 int sys_shell_close(int handle)

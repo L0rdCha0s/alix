@@ -22,6 +22,8 @@ typedef struct
     atk_widget_t *terminal;
     bool running;
     int shell_handle;
+    bool command_active;
+    bool last_output_newline;
 } atk_shell_app_t;
 
 static void shell_apply_theme(atk_state_t *state);
@@ -29,6 +31,7 @@ static void shell_log_key(char ch);
 static bool shell_state_has_dirty(void);
 static bool shell_dispatch_event(atk_shell_app_t *app, const user_atk_event_t *event);
 static bool shell_handle_resize(atk_shell_app_t *app, uint32_t width, uint32_t height);
+static void shell_poll_output(atk_shell_app_t *app);
 
 static void shell_apply_theme(atk_state_t *state)
 {
@@ -75,11 +78,23 @@ static void shell_append(atk_shell_app_t *app, const char *text)
         return;
     }
     atk_terminal_write(app->terminal, text, strlen(text));
+    if (app)
+    {
+        size_t len = strlen(text);
+        if (len > 0)
+        {
+            app->last_output_newline = text[len - 1] == '\n';
+        }
+    }
 }
 
 static void shell_append_prompt(atk_shell_app_t *app)
 {
     shell_append(app, SHELL_PROMPT);
+    if (app)
+    {
+        app->last_output_newline = false;
+    }
 }
 
 static void shell_handle_output(atk_shell_app_t *app, const char *buffer, size_t len)
@@ -123,36 +138,16 @@ static void shell_on_submit(atk_widget_t *terminal, void *context, const char *l
     }
 
     const char *command = (line && *line) ? line : "";
-
-    char buffer[SHELL_OUTPUT_BUFFER];
-    int status = 0;
-    ssize_t written = sys_shell_exec(app->shell_handle,
-                                     command,
-                                     0,
-                                     buffer,
-                                     sizeof(buffer),
-                                     &status);
-    if (written > 0)
-    {
-        size_t copy_len = (size_t)written;
-        if (copy_len >= sizeof(buffer))
-        {
-            copy_len = sizeof(buffer) - 1;
-        }
-        buffer[copy_len] = '\0';
-        shell_handle_output(app, buffer, copy_len);
-        if (copy_len == 0 || buffer[copy_len - 1] != '\n')
-        {
-            shell_append(app, "\n");
-        }
-    }
-    else if (written < 0)
+    int start = sys_shell_exec(app->shell_handle, command, 0);
+    if (start < 0)
     {
         shell_append(app, "Error: shell exec failed\n");
+        shell_append_prompt(app);
     }
-
-    (void)status;
-    shell_append_prompt(app);
+    else
+    {
+        app->command_active = true;
+    }
     shell_render(app);
 }
 
@@ -252,6 +247,36 @@ static bool shell_init_ui(atk_shell_app_t *app)
     return true;
 }
 
+static void shell_poll_output(atk_shell_app_t *app)
+{
+    if (!app || app->shell_handle < 0)
+    {
+        return;
+    }
+    char buffer[SHELL_OUTPUT_BUFFER];
+    int status = 0;
+    int running = 0;
+    ssize_t copied = sys_shell_poll(app->shell_handle,
+                                    buffer,
+                                    sizeof(buffer),
+                                    &status,
+                                    &running);
+    if (copied > 0)
+    {
+        shell_handle_output(app, buffer, (size_t)copied);
+    }
+
+    if (!running && app->command_active)
+    {
+        app->command_active = false;
+        if (!app->last_output_newline)
+        {
+            shell_append(app, "\n");
+        }
+        shell_append_prompt(app);
+    }
+}
+
 static bool shell_dispatch_event(atk_shell_app_t *app, const user_atk_event_t *event)
 {
     if (!app || !event)
@@ -294,6 +319,8 @@ int main(void)
     memset(&app, 0, sizeof(app));
     app.shell_handle = -1;
     app.running = true;
+    app.command_active = false;
+    app.last_output_newline = true;
 
     if (!atk_user_window_open_with_flags(&app.remote,
                                          "ATK Shell",
@@ -340,6 +367,8 @@ int main(void)
         {
             redraw |= shell_dispatch_event(&app, &event);
         }
+
+        shell_poll_output(&app);
 
         if (redraw || shell_state_has_dirty())
         {
