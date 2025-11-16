@@ -2902,29 +2902,35 @@ static bool string_name_equals(const char *lhs, const char *rhs)
 
 static void process_create_log(const char *name, const char *event)
 {
-    if (!ENABLE_SHELL_TRACE || !string_name_equals(name, "shell"))
+    if (!ENABLE_SHELL_TRACE)
     {
         return;
     }
 
-    serial_printf("%s", "[shell] process_create ");
+    serial_printf("%s", "[proc-trace] process_create ");
     serial_printf("%s", event ? event : "<none>");
+    serial_printf("%s", " name=");
+    serial_printf("%s", name ? name : "<none>");
     serial_printf("%s", "\r\n");
 }
 
 static void scheduler_shell_log(const char *event, thread_t *thread)
 {
-    if (!ENABLE_SHELL_TRACE || !thread_name_equals(thread, "shell"))
+    if (!ENABLE_SHELL_TRACE || !thread)
     {
         return;
     }
 
-    serial_printf("%s", "[shell] ");
+    serial_printf("%s", "[sched-trace] ");
     serial_printf("%s", event);
     serial_printf("%s", " state=");
     serial_printf("%s", thread_state_name(thread->state));
     serial_printf("%s", " ctx_valid=");
     serial_printf("%s", thread->context_valid ? "true" : "false");
+    serial_printf("%s", " name=");
+    serial_printf("%s", thread->name[0] ? thread->name : "<unnamed>");
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
     serial_printf("%s", " rsp0=0x");
     serial_printf("%016llX", (unsigned long long)((uint64_t)thread->kernel_stack_top));
     serial_printf("%s", "\r\n");
