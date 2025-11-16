@@ -20,6 +20,8 @@
 #endif
 
 #define ALIGNMENT 16UL
+#define HEAP_BIN_COUNT 32U
+#define HEAP_MIN_SPLIT_REMAINDER ALIGNMENT
 #define SIZE_MAX_VALUE ((size_t)-1)
 
 typedef struct heap_block
@@ -27,8 +29,11 @@ typedef struct heap_block
     size_t size;
     struct heap_block *next;
     struct heap_block *prev;
+    struct heap_block *free_next;
+    struct heap_block *free_prev;
     bool free;
 } heap_block_t;
+_Static_assert((sizeof(heap_block_t) % ALIGNMENT) == 0, "heap_block_t must be ALIGNMENT sized");
 
 extern uintptr_t kernel_heap_base;
 extern uintptr_t kernel_heap_end;
@@ -37,8 +42,10 @@ extern uintptr_t kernel_heap_size;
 static heap_block_t *g_heap_head = NULL;
 static uintptr_t g_heap_start = 0;
 static uintptr_t g_heap_end = 0;
-static bool g_heap_initialized = false;
+static bool g_heap_initialized = false; /* Initialized once on BSP before SMP bring-up. */
+/* Do not touch g_heap_lock directly; always use heap_lock_acquire/release. */
 static spinlock_t g_heap_lock;
+static heap_block_t *g_free_bins[HEAP_BIN_COUNT];
 #if ENABLE_HEAP_TRACE
 static bool g_heap_trace_enabled = true;
 static size_t g_heap_trace_threshold = HEAP_TRACE_THRESHOLD;
@@ -54,11 +61,19 @@ typedef struct
     size_t size;
     uintptr_t next;
     uintptr_t prev;
+    uintptr_t free_next;
+    uintptr_t free_prev;
     bool free;
 } heap_block_snapshot_t;
 
 #define HEAP_DUMP_SNAPSHOT_MAX 32U
 
+static inline size_t heap_bin_index(size_t size);
+static void free_list_init(void);
+static void free_list_insert(heap_block_t *block);
+static void free_list_remove(heap_block_t *block);
+static bool heap_free_list_contains(const heap_block_t *block);
+static bool heap_verify_free_bins_locked(size_t *count_out);
 static size_t heap_capture_snapshot(heap_block_snapshot_t *out, size_t max, bool *truncated);
 static bool heap_verify_locked(const char *context);
 #if ENABLE_HEAP_TRACE
@@ -84,16 +99,20 @@ static inline void heap_log(const char *msg, uintptr_t value)
 }
 #endif
 
-static uint32_t g_heap_lock_owner = UINT32_MAX;
-static uint32_t g_heap_lock_depth = 0;
-static uint64_t g_heap_lock_saved_flags[SMP_MAX_CPUS];
+static volatile uint32_t g_heap_lock_owner = UINT32_MAX;
+static volatile uint32_t g_heap_lock_depth = 0;
+static volatile uint64_t g_heap_lock_saved_flags[SMP_MAX_CPUS];
 
 static inline uint64_t heap_lock_acquire(void)
 {
     uint64_t flags;
     __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
     uint32_t cpu = smp_current_cpu_index();
-
+    /* Invariants while holding g_heap_lock:
+     * - Interrupts remain disabled (no sti/cli/popfq that changes IF).
+     * - Do not sleep, block, or call into code that can reschedule.
+     * - Heap must not be entered from NMI/MCE contexts. */
+    __asm__ volatile ("" ::: "memory");
     if (g_heap_lock_owner == cpu)
     {
         g_heap_lock_depth++;
@@ -101,13 +120,11 @@ static inline uint64_t heap_lock_acquire(void)
     }
 
     __asm__ volatile ("cli" ::: "memory");
-    uint64_t spins = 0;
     while (__sync_lock_test_and_set(&g_heap_lock.value, 1) != 0)
     {
         while (g_heap_lock.value)
         {
             __asm__ volatile ("pause");
-            spins++;
         }
     }
     g_heap_lock_owner = cpu;
@@ -149,25 +166,205 @@ static size_t align_size(size_t size)
         return 0;
     }
     size_t mask = ALIGNMENT - 1;
+    if (size > SIZE_MAX_VALUE - mask)
+    {
+        return 0;
+    }
     return (size + mask) & ~mask;
 }
 
 static bool pointer_in_heap(const void *ptr)
 {
+    if (!g_heap_initialized)
+    {
+        return false;
+    }
     uintptr_t addr = (uintptr_t)ptr;
-    return addr >= g_heap_start && addr < g_heap_end;
+    if (g_heap_end < (uintptr_t)sizeof(heap_block_t))
+    {
+        return false;
+    }
+    uintptr_t max_addr = g_heap_end - (uintptr_t)sizeof(heap_block_t);
+    return addr >= g_heap_start && addr <= max_addr;
 }
 
-static void merge_with_next(heap_block_t *block)
+static inline size_t heap_bin_index(size_t size)
+{
+    size_t normalized = (size + (ALIGNMENT - 1)) >> 4; /* group by 16-byte multiples */
+    if (normalized <= 1)
+    {
+        return 0;
+    }
+
+    size_t msb = (8 * sizeof(size_t) - 1) - (size_t)__builtin_clzll(normalized - 1);
+    if (msb >= HEAP_BIN_COUNT)
+    {
+        return HEAP_BIN_COUNT - 1;
+    }
+    return msb;
+}
+
+static void free_list_init(void)
+{
+    for (size_t i = 0; i < HEAP_BIN_COUNT; ++i)
+    {
+        g_free_bins[i] = NULL;
+    }
+}
+
+static void free_list_remove(heap_block_t *block)
 {
     if (!block)
     {
         return;
     }
+    size_t bin = heap_bin_index(block->size);
+    if (block->free_prev)
+    {
+        block->free_prev->free_next = block->free_next;
+    }
+    else if (g_free_bins[bin] == block)
+    {
+        g_free_bins[bin] = block->free_next;
+    }
+    if (block->free_next)
+    {
+        block->free_next->free_prev = block->free_prev;
+    }
+    block->free_next = NULL;
+    block->free_prev = NULL;
+}
+
+static void free_list_insert(heap_block_t *block)
+{
+    if (!block)
+    {
+        return;
+    }
+    size_t bin = heap_bin_index(block->size);
+    block->free = true;
+    block->free_prev = NULL;
+    block->free_next = g_free_bins[bin];
+    if (g_free_bins[bin])
+    {
+        g_free_bins[bin]->free_prev = block;
+    }
+    g_free_bins[bin] = block;
+}
+
+static bool heap_free_list_contains(const heap_block_t *block)
+{
+    if (!block)
+    {
+        return false;
+    }
+    size_t bin = heap_bin_index(block->size);
+    heap_block_t *cursor = g_free_bins[bin];
+    size_t guard = 0;
+    while (cursor)
+    {
+        if (cursor == block)
+        {
+            return true;
+        }
+        cursor = cursor->free_next;
+        guard++;
+        if (guard > 65536)
+        {
+            break;
+        }
+    }
+    return false;
+}
+
+static bool heap_verify_free_bins_locked(size_t *count_out)
+{
+    size_t bin_count = 0;
+    for (size_t bin = 0; bin < HEAP_BIN_COUNT; ++bin)
+    {
+        heap_block_t *cursor = g_free_bins[bin];
+        size_t guard = 0;
+        while (cursor)
+        {
+            if (!cursor->free)
+            {
+                serial_printf("%s", "[heap] verify bin contains allocated block bin=");
+                serial_printf("%016llX", (unsigned long long)(bin));
+                serial_printf("%s", " block=0x");
+                serial_printf("%016llX", (unsigned long long)((uintptr_t)cursor));
+                serial_printf("%s", "\r\n");
+                return false;
+            }
+            if (!pointer_in_heap(cursor))
+            {
+                serial_printf("%s", "[heap] verify bin out_of_bounds bin=");
+                serial_printf("%016llX", (unsigned long long)(bin));
+                serial_printf("%s", " block=0x");
+                serial_printf("%016llX", (unsigned long long)((uintptr_t)cursor));
+                serial_printf("%s", "\r\n");
+                return false;
+            }
+            if (heap_bin_index(cursor->size) != bin)
+            {
+                serial_printf("%s", "[heap] verify bin mismatch bin=");
+                serial_printf("%016llX", (unsigned long long)(bin));
+                serial_printf("%s", " block_size=0x");
+                serial_printf("%016llX", (unsigned long long)(cursor->size));
+                serial_printf("%s", "\r\n");
+                return false;
+            }
+            if (cursor->free_next && cursor->free_next->free_prev != cursor)
+            {
+                serial_printf("%s", "[heap] verify bin linkage mismatch bin=");
+                serial_printf("%016llX", (unsigned long long)(bin));
+                serial_printf("%s", " block=0x");
+                serial_printf("%016llX", (unsigned long long)((uintptr_t)cursor));
+                serial_printf("%s", "\r\n");
+                return false;
+            }
+            bin_count++;
+            cursor = cursor->free_next;
+            guard++;
+            if (guard > 65536)
+            {
+                serial_printf("%s", "[heap] verify bin guard exceeded bin=");
+                serial_printf("%016llX", (unsigned long long)(bin));
+                serial_printf("%s", "\r\n");
+                return false;
+            }
+        }
+    }
+    if (count_out)
+    {
+        *count_out = bin_count;
+    }
+    return true;
+}
+
+static heap_block_t *coalesce(heap_block_t *block)
+{
+    if (!block)
+    {
+        return NULL;
+    }
+
+    if (block->prev && block->prev->free)
+    {
+        heap_block_t *prev = block->prev;
+        free_list_remove(prev);
+        prev->size += sizeof(heap_block_t) + block->size;
+        prev->next = block->next;
+        if (block->next)
+        {
+            block->next->prev = prev;
+        }
+        block = prev;
+    }
 
     while (block->next && block->next->free)
     {
         heap_block_t *next = block->next;
+        free_list_remove(next);
         block->size += sizeof(heap_block_t) + next->size;
         block->next = next->next;
         if (block->next)
@@ -175,21 +372,10 @@ static void merge_with_next(heap_block_t *block)
             block->next->prev = block;
         }
     }
-}
 
-static void coalesce(heap_block_t *block)
-{
-    if (!block)
-    {
-        return;
-    }
-
-    merge_with_next(block);
-
-    if (block->prev && block->prev->free)
-    {
-        merge_with_next(block->prev);
-    }
+    block->free_next = NULL;
+    block->free_prev = NULL;
+    return block;
 }
 
 static heap_block_t *payload_to_block(void *ptr)
@@ -206,7 +392,7 @@ static heap_block_t *payload_to_block(void *ptr)
     return (heap_block_t *)(addr - sizeof(heap_block_t));
 }
 
-static void split_block(heap_block_t *block, size_t size)
+static heap_block_t *split_block(heap_block_t *block, size_t size)
 {
     uintptr_t block_addr = (uintptr_t)block;
     uintptr_t new_block_addr = block_addr + sizeof(heap_block_t) + size;
@@ -214,6 +400,8 @@ static void split_block(heap_block_t *block, size_t size)
 
     new_block->size = block->size - size - sizeof(heap_block_t);
     new_block->free = true;
+    new_block->free_next = NULL;
+    new_block->free_prev = NULL;
     new_block->next = block->next;
     new_block->prev = block;
     if (new_block->next)
@@ -223,36 +411,43 @@ static void split_block(heap_block_t *block, size_t size)
 
     block->size = size;
     block->next = new_block;
+    return new_block;
 }
 
 static heap_block_t *find_suitable_block(size_t size, void *caller)
 {
-    heap_block_t *block = g_heap_head;
     uint64_t iterations = 0;
     bool watchdog_triggered = false;
-    while (block)
+    size_t start_bin = heap_bin_index(size);
+
+    for (size_t bin = start_bin; bin < HEAP_BIN_COUNT; ++bin)
     {
-        if (block->free && block->size >= size)
+        heap_block_t *block = g_free_bins[bin];
+        while (block)
         {
-            return block;
-        }
-        block = block->next;
-        iterations++;
-        if (!watchdog_triggered && iterations >= HEAP_FIND_WATCHDOG_THRESHOLD)
-        {
-#if ENABLE_HEAP_TRACE
-            if (g_heap_trace_enabled)
+            if (block->size >= size)
             {
-                heap_trace_log_stall(size, block, iterations, caller);
+                return block;
             }
+
+            block = block->free_next;
+            iterations++;
+            if (!watchdog_triggered && iterations >= HEAP_FIND_WATCHDOG_THRESHOLD)
+            {
+#if ENABLE_HEAP_TRACE
+                if (g_heap_trace_enabled)
+                {
+                    heap_trace_log_stall(size, block, iterations, caller);
+                }
 #else
-            serial_printf("%s", "[heap] find_suitable_block stall size=0x");
-            serial_printf("%016llX", (unsigned long long)(size));
-            serial_printf("%s", " block=0x");
-            serial_printf("%016llX", (unsigned long long)((uintptr_t)(block ? block : 0)));
-            serial_printf("%s", "\r\n");
+                serial_printf("%s", "[heap] find_suitable_block stall size=0x");
+                serial_printf("%016llX", (unsigned long long)(size));
+                serial_printf("%s", " block=0x");
+                serial_printf("%016llX", (unsigned long long)((uintptr_t)(block ? block : 0)));
+                serial_printf("%s", "\r\n");
 #endif
-            watchdog_triggered = true;
+                watchdog_triggered = true;
+            }
         }
     }
     return NULL;
@@ -260,14 +455,20 @@ static heap_block_t *find_suitable_block(size_t size, void *caller)
 
 void heap_init(void)
 {
+    /* Must be called once on the BSP before APs start using the heap. */
     if (g_heap_initialized)
     {
         return;
     }
 
     spinlock_init(&g_heap_lock);
+    free_list_init();
 
     g_heap_start = (uintptr_t)kernel_heap_base;
+    if (g_heap_start & (ALIGNMENT - 1))
+    {
+        g_heap_start = (g_heap_start + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1);
+    }
     g_heap_end = (uintptr_t)kernel_heap_end;
 
     if (g_heap_end <= g_heap_start ||
@@ -283,7 +484,11 @@ void heap_init(void)
     g_heap_head->next = NULL;
     g_heap_head->prev = NULL;
     g_heap_head->free = true;
+    g_heap_head->free_next = NULL;
+    g_heap_head->free_prev = NULL;
+    free_list_insert(g_heap_head);
 
+    kernel_heap_size = g_heap_end - g_heap_start;
     g_heap_initialized = true;
 }
 
@@ -303,6 +508,8 @@ static size_t heap_capture_snapshot(heap_block_snapshot_t *out,
         out[count].size = cursor->size;
         out[count].next = (uintptr_t)cursor->next;
         out[count].prev = (uintptr_t)cursor->prev;
+        out[count].free_next = (uintptr_t)cursor->free_next;
+        out[count].free_prev = (uintptr_t)cursor->free_prev;
         out[count].free = cursor->free;
         cursor = cursor->next;
         count++;
@@ -330,12 +537,16 @@ static void heap_print_snapshot(const char *context,
         serial_printf("%016llX", (unsigned long long)(blocks[i].addr));
         serial_printf("%s", " size=0x");
         serial_printf("%016llX", (unsigned long long)(blocks[i].size));
-        serial_printf("%s", " free=");
-        serial_printf("%s", blocks[i].free ? "true" : "false");
         serial_printf("%s", " next=0x");
         serial_printf("%016llX", (unsigned long long)(blocks[i].next));
         serial_printf("%s", " prev=0x");
         serial_printf("%016llX", (unsigned long long)(blocks[i].prev));
+        serial_printf("%s", " free_next=0x");
+        serial_printf("%016llX", (unsigned long long)(blocks[i].free_next));
+        serial_printf("%s", " free_prev=0x");
+        serial_printf("%016llX", (unsigned long long)(blocks[i].free_prev));
+        serial_printf("%s", " free=");
+        serial_printf("%s", blocks[i].free ? "true" : "false");
         serial_printf("%s", "\r\n");
     }
     if (truncated)
@@ -353,6 +564,7 @@ static bool heap_verify_locked(const char *context)
     heap_block_t *cursor = g_heap_head;
     uintptr_t expected_min = g_heap_start;
     size_t count = 0;
+    size_t free_count = 0;
     while (cursor)
     {
         uintptr_t addr = (uintptr_t)cursor;
@@ -387,6 +599,28 @@ static bool heap_verify_locked(const char *context)
             serial_printf("%s", "\r\n");
             return false;
         }
+        if (cursor->free)
+        {
+            free_count++;
+            if (!heap_free_list_contains(cursor))
+            {
+                serial_printf("%s", "[heap] verify missing free bin entry context=");
+                serial_printf("%s", context ? context : "<none>");
+                serial_printf("%s", " block=0x");
+                serial_printf("%016llX", (unsigned long long)((uintptr_t)cursor));
+                serial_printf("%s", "\r\n");
+                return false;
+            }
+        }
+        else if (cursor->free_next || cursor->free_prev)
+        {
+            serial_printf("%s", "[heap] verify allocated block on free list context=");
+            serial_printf("%s", context ? context : "<none>");
+            serial_printf("%s", " block=0x");
+            serial_printf("%016llX", (unsigned long long)((uintptr_t)cursor));
+            serial_printf("%s", "\r\n");
+            return false;
+        }
         expected_min = addr + sizeof(heap_block_t) + cursor->size;
         cursor = cursor->next;
         count++;
@@ -397,6 +631,22 @@ static bool heap_verify_locked(const char *context)
             serial_printf("%s", "\r\n");
             return false;
         }
+    }
+    size_t bin_count = 0;
+    if (!heap_verify_free_bins_locked(&bin_count))
+    {
+        return false;
+    }
+    if (bin_count != free_count)
+    {
+        serial_printf("%s", "[heap] verify free count mismatch context=");
+        serial_printf("%s", context ? context : "<none>");
+        serial_printf("%s", " free_count=0x");
+        serial_printf("%016llX", (unsigned long long)(free_count));
+        serial_printf("%s", " bin_count=0x");
+        serial_printf("%016llX", (unsigned long long)(bin_count));
+        serial_printf("%s", "\r\n");
+        return false;
     }
     return true;
 }
@@ -453,6 +703,11 @@ void *malloc(size_t size)
     }
 
     size = align_size(size);
+    if (size == 0)
+    {
+        heap_lock_release(flags);
+        return NULL;
+    }
 
     heap_block_t *block = find_suitable_block(size, trace_caller);
     if (!block)
@@ -462,12 +717,16 @@ void *malloc(size_t size)
         return NULL;
     }
 
-    if (block->size >= size + sizeof(heap_block_t) + ALIGNMENT)
+    free_list_remove(block);
+    if (block->size >= size + sizeof(heap_block_t) + HEAP_MIN_SPLIT_REMAINDER)
     {
-        split_block(block, size);
+        heap_block_t *new_block = split_block(block, size);
+        free_list_insert(new_block);
     }
 
     block->free = false;
+    block->free_next = NULL;
+    block->free_prev = NULL;
 #if ENABLE_HEAP_TRACE
     if (g_heap_trace_enabled)
     {
@@ -511,7 +770,7 @@ void free(void *ptr)
     }
 
     heap_block_t *block = payload_to_block(ptr);
-    if (!block || !pointer_in_heap(block) || block->free)
+    if (!block || !pointer_in_heap(block) || (((uintptr_t)block & (ALIGNMENT - 1)) != 0) || block->free)
     {
         heap_log("free invalid ptr=", (uintptr_t)ptr);
         heap_lock_release(flags);
@@ -536,7 +795,10 @@ void free(void *ptr)
 #endif
 
     block->free = true;
-    coalesce(block);
+    block->free_next = NULL;
+    block->free_prev = NULL;
+    heap_block_t *merged = coalesce(block);
+    free_list_insert(merged);
     heap_lock_release(flags);
 #if ENABLE_HEAP_TRACE
     if (trace_log && trace_size >= g_heap_trace_threshold)
@@ -670,11 +932,22 @@ static heap_block_t *expand_block(heap_block_t *block, size_t size)
     if (block->next && block->next->free &&
         (block->size + sizeof(heap_block_t) + block->next->size) >= size)
     {
-        merge_with_next(block);
-        if (block->size >= size + sizeof(heap_block_t) + ALIGNMENT)
+        heap_block_t *next = block->next;
+        free_list_remove(next);
+        block->size += sizeof(heap_block_t) + next->size;
+        block->next = next->next;
+        if (block->next)
         {
-            split_block(block, size);
+            block->next->prev = block;
         }
+
+        if (block->size >= size + sizeof(heap_block_t) + HEAP_MIN_SPLIT_REMAINDER)
+        {
+            heap_block_t *new_block = split_block(block, size);
+            free_list_insert(new_block);
+        }
+        block->free_next = NULL;
+        block->free_prev = NULL;
         return block;
     }
 
@@ -685,6 +958,19 @@ void *realloc(void *ptr, size_t size)
 {
     heap_log("realloc ptr=", (uintptr_t)ptr);
     heap_log("realloc size=", size);
+    /* C semantics: realloc(NULL, size) == malloc(size) */
+    if (!ptr)
+    {
+        return malloc(size);
+    }
+
+    /* C semantics: realloc(ptr, 0) == free(ptr) and return NULL */
+    if (size == 0)
+    {
+        free(ptr);
+        return NULL;
+    }
+
     uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized)
     {
@@ -692,34 +978,32 @@ void *realloc(void *ptr, size_t size)
         return NULL;
     }
 
-    if (!ptr)
-    {
-        heap_lock_release(flags);
-        return malloc(size);
-    }
-
-    if (size == 0)
-    {
-        heap_lock_release(flags);
-        free(ptr);
-        return NULL;
-    }
-
     heap_block_t *block = payload_to_block(ptr);
-    if (!block || !pointer_in_heap(block))
+    if (!block ||
+        !pointer_in_heap(block) ||
+        (((uintptr_t)block & (ALIGNMENT - 1)) != 0) ||
+        block->free)
     {
         heap_lock_release(flags);
         return NULL;
     }
 
     size = align_size(size);
+    if (size == 0)
+    {
+        heap_lock_release(flags);
+        return NULL;
+    }
 
     if (block->size >= size)
     {
-        if (block->size >= size + sizeof(heap_block_t) + ALIGNMENT)
+        if (block->size >= size + sizeof(heap_block_t) + HEAP_MIN_SPLIT_REMAINDER)
         {
-            split_block(block, size);
+            heap_block_t *new_block = split_block(block, size);
+            free_list_insert(new_block);
         }
+        block->free_next = NULL;
+        block->free_prev = NULL;
         heap_lock_release(flags);
         return ptr;
     }
@@ -732,6 +1016,7 @@ void *realloc(void *ptr, size_t size)
         return result;
     }
 
+    size_t old_size = block->size;
     heap_lock_release(flags);
     void *new_ptr = malloc(size);
     if (!new_ptr)
@@ -739,7 +1024,7 @@ void *realloc(void *ptr, size_t size)
         return NULL;
     }
 
-    size_t copy_size = block->size < size ? block->size : size;
+    size_t copy_size = old_size < size ? old_size : size;
     memcpy(new_ptr, ptr, copy_size);
     free(ptr);
     return new_ptr;
