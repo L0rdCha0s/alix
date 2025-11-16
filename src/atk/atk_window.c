@@ -980,6 +980,20 @@ static atk_widget_t *window_add_button(atk_widget_t *window,
     return btn;
 }
 
+atk_widget_t *atk_window_add_button(atk_widget_t *window,
+                                    const char *title,
+                                    int rel_x,
+                                    int rel_y,
+                                    int width,
+                                    int height,
+                                    atk_button_style_t style,
+                                    bool draggable,
+                                    atk_button_action_t action,
+                                    void *context)
+{
+    return window_add_button(window, title, rel_x, rel_y, width, height, style, draggable, action, context);
+}
+
 static void action_window_close(atk_widget_t *button, void *context)
 {
     (void)button;

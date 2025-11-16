@@ -10,6 +10,7 @@
 #include "video.h"
 #ifdef KERNEL_BUILD
 #include "serial.h"
+#include "power.h"
 #endif
 #ifndef ATK_NO_DESKTOP_APPS
 #include "timekeeping.h"
@@ -34,6 +35,7 @@ struct atk_menu_bar_entry
     int x;
     int width;
     int text_width;
+    bool is_logo;
 };
 
 static void atk_menu_bar_entry_destroy(void *value);
@@ -41,6 +43,9 @@ static void atk_menu_bar_update_layout(atk_state_t *state);
 static atk_menu_bar_entry_t *atk_menu_bar_entry_hit_test(atk_state_t *state, int px);
 static bool atk_menu_bar_build_logo(atk_state_t *state);
 static void menu_action_welcome(void *context);
+#ifdef KERNEL_BUILD
+static void menu_action_shutdown(void *context);
+#endif
 static int atk_menu_bar_measure_title(const char *title);
 static int atk_menu_bar_height_pixels(const atk_state_t *state);
 static void atk_menu_bar_mark_dirty(const atk_state_t *state);
@@ -207,6 +212,54 @@ void atk_menu_bar_build_default(atk_state_t *state)
         state->menu_logo = NULL;
     }
 
+#ifdef KERNEL_BUILD
+    atk_widget_t *logo_menu = atk_menu_create();
+    if (logo_menu)
+    {
+        if (!atk_menu_add_item(logo_menu, "Shutdown", menu_action_shutdown, state))
+        {
+            atk_menu_destroy(logo_menu);
+            logo_menu = NULL;
+        }
+    }
+
+    if (logo_menu)
+    {
+        atk_menu_bar_entry_t *entry = (atk_menu_bar_entry_t *)malloc(sizeof(atk_menu_bar_entry_t));
+        if (entry)
+        {
+            memset(entry, 0, sizeof(*entry));
+            const char logo_title[] = "AlixOS";
+            size_t len = strlen(logo_title);
+            if (len >= sizeof(entry->title))
+            {
+                len = sizeof(entry->title) - 1;
+            }
+            memcpy(entry->title, logo_title, len);
+            entry->title[len] = '\0';
+            entry->menu = logo_menu;
+            entry->text_width = 0;
+            entry->is_logo = true;
+            entry->width = (state->menu_logo ? state->menu_logo->width : atk_menu_bar_measure_title(entry->title)) +
+                           ATK_MENU_BAR_ENTRY_SPACING;
+            atk_list_node_t *node = atk_list_push_back(&state->menu_entries, entry);
+            if (!node)
+            {
+                atk_menu_destroy(logo_menu);
+                free(entry);
+            }
+            else
+            {
+                entry->list_node = node;
+            }
+        }
+        else
+        {
+            atk_menu_destroy(logo_menu);
+        }
+    }
+#endif
+
     atk_widget_t *help_menu = atk_menu_create();
     if (help_menu)
     {
@@ -297,6 +350,22 @@ void atk_menu_bar_draw(const atk_state_t *state)
             continue;
         }
         bool highlighted = (entry == state->menu_hover_entry) || (entry == state->menu_open_entry);
+        if (entry->is_logo)
+        {
+            if (highlighted)
+            {
+                video_draw_rect(entry->x,
+                                0,
+                                entry->width,
+                                height - 1,
+                                theme->menu_bar_highlight);
+                if (state->menu_logo && state->menu_logo->used)
+                {
+                    atk_image_draw(state, state->menu_logo);
+                }
+            }
+            continue;
+        }
         if (highlighted)
         {
             video_draw_rect(entry->x,
@@ -550,10 +619,6 @@ static void atk_menu_bar_update_layout(atk_state_t *state)
         return;
     }
     int cursor = ATK_MENU_BAR_LOGO_MARGIN_X;
-    if (state->menu_logo)
-    {
-        cursor = state->menu_logo->x + state->menu_logo->width + ATK_MENU_BAR_ENTRY_SPACING * 2;
-    }
     int max_right = VIDEO_WIDTH - ATK_MENU_BAR_CLOCK_RESERVE;
     if (max_right < cursor)
     {
@@ -567,8 +632,16 @@ static void atk_menu_bar_update_layout(atk_state_t *state)
         {
             continue;
         }
-        entry->text_width = atk_font_text_width(entry->title);
-        entry->width = atk_menu_bar_measure_title(entry->title);
+        entry->text_width = entry->is_logo ? 0 : atk_font_text_width(entry->title);
+        if (entry->is_logo)
+        {
+            int logo_width = state->menu_logo ? state->menu_logo->width : atk_menu_bar_measure_title(entry->title);
+            entry->width = logo_width + ATK_MENU_BAR_ENTRY_SPACING;
+        }
+        else
+        {
+            entry->width = atk_menu_bar_measure_title(entry->title);
+        }
         entry->x = cursor;
         if (entry->x + entry->width > max_right)
         {
@@ -705,6 +778,129 @@ static bool atk_menu_bar_build_logo(atk_state_t *state)
     state->menu_logo = image;
     return true;
 }
+
+#ifdef KERNEL_BUILD
+typedef struct
+{
+    atk_widget_t *window;
+} shutdown_dialog_ctx_t;
+
+static void shutdown_dialog_on_destroy(void *context)
+{
+    shutdown_dialog_ctx_t *ctx = (shutdown_dialog_ctx_t *)context;
+    if (ctx)
+    {
+        free(ctx);
+    }
+}
+
+static void shutdown_dialog_cancel(atk_widget_t *button, void *context)
+{
+    (void)button;
+    shutdown_dialog_ctx_t *ctx = (shutdown_dialog_ctx_t *)context;
+    if (!ctx || !ctx->window)
+    {
+        return;
+    }
+    atk_state_t *state = atk_state_get();
+    atk_window_close(state, ctx->window);
+}
+
+static void shutdown_dialog_confirm(atk_widget_t *button, void *context)
+{
+    (void)button;
+    shutdown_dialog_ctx_t *ctx = (shutdown_dialog_ctx_t *)context;
+    if (ctx && ctx->window)
+    {
+        atk_widget_t *window = ctx->window;
+        ctx->window = NULL;
+        atk_window_set_context(window, NULL, NULL);
+        atk_state_t *state = atk_state_get();
+        atk_window_close(state, window);
+        free(ctx);
+    }
+    power_shutdown();
+}
+
+static void menu_action_shutdown(void *context)
+{
+    atk_state_t *state = (atk_state_t *)context;
+    if (!state)
+    {
+        return;
+    }
+
+    atk_widget_t *window = atk_window_create_at(state, VIDEO_WIDTH / 2, state->menu_bar_height + 120);
+    if (!window)
+    {
+        return;
+    }
+
+    shutdown_dialog_ctx_t *ctx = (shutdown_dialog_ctx_t *)calloc(1, sizeof(shutdown_dialog_ctx_t));
+    if (!ctx)
+    {
+        atk_window_close(state, window);
+        return;
+    }
+
+    ctx->window = window;
+    atk_window_set_context(window, ctx, shutdown_dialog_on_destroy);
+    atk_window_set_title_text(window, "Shutdown");
+    window->width = 360;
+    window->height = 180;
+    atk_window_ensure_inside(window);
+    atk_window_request_layout(window);
+
+    int padding = 20;
+    int label_y = ATK_WINDOW_TITLE_HEIGHT + 12;
+    atk_widget_t *label = atk_window_add_label(window,
+                                               padding,
+                                               label_y,
+                                               window->width - padding * 2,
+                                               60);
+    if (label)
+    {
+        atk_label_set_text(label, "Are you sure you want to shutdown?");
+    }
+
+    int button_height = 32;
+    int button_width = 100;
+    int button_y = window->height - padding - button_height;
+    int cancel_x = window->width - padding - button_width;
+    int yes_x = cancel_x - button_width - 12;
+
+    if (!atk_window_add_button(window,
+                               "Yes",
+                               yes_x,
+                               button_y,
+                               button_width,
+                               button_height,
+                               ATK_BUTTON_STYLE_TITLE_INSIDE,
+                               false,
+                               shutdown_dialog_confirm,
+                               ctx) ||
+        !atk_window_add_button(window,
+                               "Cancel",
+                               cancel_x,
+                               button_y,
+                               button_width,
+                               button_height,
+                               ATK_BUTTON_STYLE_TITLE_INSIDE,
+                               false,
+                               shutdown_dialog_cancel,
+                               ctx))
+    {
+        atk_window_set_context(window, NULL, NULL);
+        atk_window_close(state, window);
+        free(ctx);
+        return;
+    }
+
+    atk_window_bring_to_front(state, window);
+    atk_window_mark_dirty(window);
+    video_request_refresh_window(window);
+}
+#endif
 
 static void menu_action_welcome(void *context)
 {

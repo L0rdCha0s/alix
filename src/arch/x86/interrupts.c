@@ -83,6 +83,38 @@ static bool is_canonical_address(uintptr_t addr)
     return upper == 0xFFFFULL;
 }
 
+static bool kernel_rsp_valid(uintptr_t rsp, uintptr_t *base_out, uintptr_t *top_out)
+{
+    if (!is_canonical_address(rsp) || !is_canonical_address(rsp + sizeof(uintptr_t) - 1))
+    {
+        return false;
+    }
+    thread_t *thread = thread_current();
+    if (!thread)
+    {
+        return false;
+    }
+    uintptr_t base = 0;
+    uintptr_t top = 0;
+    if (!process_thread_stack_bounds(thread, &base, &top))
+    {
+        return false;
+    }
+    if (rsp < base || rsp >= top)
+    {
+        return false;
+    }
+    if (base_out)
+    {
+        *base_out = base;
+    }
+    if (top_out)
+    {
+        *top_out = top;
+    }
+    return true;
+}
+
 static void log_kernel_stack_bounds(const char *label, const interrupt_frame_t *frame)
 {
     thread_t *thread = thread_current();
@@ -120,7 +152,9 @@ static void log_kernel_stack_bounds(const char *label, const interrupt_frame_t *
 static void dump_kernel_stack(uintptr_t rsp, size_t max_entries)
 {
     serial_printf("%s", "  kernel stack trace:\r\n");
-    if (rsp == 0)
+    uintptr_t base = 0;
+    uintptr_t top = 0;
+    if (!kernel_rsp_valid(rsp, &base, &top))
     {
         serial_printf("%s", "    <rsp unavailable>\r\n");
         return;
@@ -128,9 +162,14 @@ static void dump_kernel_stack(uintptr_t rsp, size_t max_entries)
 
     for (size_t i = 0; i < max_entries; ++i)
     {
+        if (rsp < base + i * sizeof(uintptr_t))
+        {
+            break;
+        }
         uintptr_t addr = rsp - (i * sizeof(uintptr_t));
         if (!is_canonical_address(addr) ||
-            !is_canonical_address(addr + sizeof(uintptr_t) - 1))
+            !is_canonical_address(addr + sizeof(uintptr_t) - 1) ||
+            addr < base)
         {
             break;
         }
@@ -248,16 +287,25 @@ static void fault_report(const char *reason,
         }
         else
         {
-            uint64_t *sp = (uint64_t *)(uintptr_t)frame->rsp;
-            for (int i = 0; i < 8; ++i)
+            uintptr_t base = 0;
+            uintptr_t top = 0;
+            if (!kernel_rsp_valid(frame->rsp, &base, &top))
             {
-                serial_early_write_string("    [");
-                serial_format_hex64(buf, sizeof(buf), frame->rsp + (uint64_t)(i * 8));
-                serial_early_write_string(buf);
-                serial_early_write_string("] = 0x");
-                serial_format_hex64(buf, sizeof(buf), sp ? sp[i] : 0);
-                serial_early_write_string(buf);
-                serial_early_write_string("\r\n");
+                serial_early_write_string("    <rsp unavailable>\r\n");
+            }
+            else
+            {
+                uint64_t *sp = (uint64_t *)(uintptr_t)frame->rsp;
+                for (int i = 0; i < 8 && frame->rsp + (uint64_t)(i * 8) < top; ++i)
+                {
+                    serial_early_write_string("    [");
+                    serial_format_hex64(buf, sizeof(buf), frame->rsp + (uint64_t)(i * 8));
+                    serial_early_write_string(buf);
+                    serial_early_write_string("] = 0x");
+                    serial_format_hex64(buf, sizeof(buf), sp ? sp[i] : 0);
+                    serial_early_write_string(buf);
+                    serial_early_write_string("\r\n");
+                }
             }
         }
     }

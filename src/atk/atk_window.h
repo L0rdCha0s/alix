@@ -22,6 +22,16 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y);
 void atk_window_close(atk_state_t *state, atk_widget_t *window);
 const char *atk_window_title(const atk_widget_t *window);
 void atk_window_set_title_text(atk_widget_t *window, const char *title);
+atk_widget_t *atk_window_add_button(atk_widget_t *window,
+                                    const char *title,
+                                    int rel_x,
+                                    int rel_y,
+                                    int width,
+                                    int height,
+                                    atk_button_style_t style,
+                                    bool draggable,
+                                    atk_button_action_t action,
+                                    void *context);
 void atk_window_set_context(atk_widget_t *window, void *context, void (*on_destroy)(void *context));
 void *atk_window_context(const atk_widget_t *window);
 void atk_window_set_chrome_visible(atk_widget_t *window, bool visible);

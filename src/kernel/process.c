@@ -3952,6 +3952,12 @@ static bool switch_to_thread(thread_t *next)
     process_t *prev_process = prev ? prev->process : NULL;
     process_t *next_process = next ? next->process : NULL;
 
+    if (next && !thread_pointer_valid(next))
+    {
+        scheduler_trace("[sched] switch_to: invalid next pointer;", next);
+        return false;
+    }
+
     if (prev)
     {
         thread_context_in_bounds(prev, "switch_from");
