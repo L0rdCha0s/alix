@@ -114,6 +114,7 @@ bool process_thread_stack_bounds(const thread_t *thread,
                                  uintptr_t *top_out);
 const char *process_thread_name_const(const thread_t *thread);
 process_t *process_thread_owner(const thread_t *thread);
+bool process_is_zombie(const process_t *process);
 bool process_stack_watch_thread(thread_t *thread, const char *context);
 bool process_stack_watch_process(process_t *process, const char *context);
 bool process_handle_stack_watch_fault(uintptr_t fault_addr,

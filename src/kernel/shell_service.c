@@ -5,24 +5,8 @@
 #include "libc.h"
 #include "process.h"
 #include "shell.h"
+#include "spinlock.h"
 #include "vfs.h"
-
-static inline uint64_t shell_cpu_save_flags(void)
-{
-    uint64_t flags;
-    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
-    return flags;
-}
-
-static inline void shell_cpu_restore_flags(uint64_t flags)
-{
-    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc");
-}
-
-static inline void shell_cpu_cli(void)
-{
-    __asm__ volatile ("cli" ::: "memory");
-}
 
 typedef struct shell_session
 {
@@ -39,12 +23,31 @@ typedef struct shell_session
     int last_status;
     process_t *runner;
     struct shell_session *next;
+    spinlock_t lock;
 } shell_session_t;
 
 static shell_session_t *g_shell_sessions = NULL;
 static uint32_t g_next_shell_handle = 1;
+static spinlock_t g_shell_list_lock;
+static bool g_shell_list_lock_initialized = false;
+
+static inline void shell_list_lock(void)
+{
+    if (!__atomic_load_n(&g_shell_list_lock_initialized, __ATOMIC_ACQUIRE))
+    {
+        spinlock_init(&g_shell_list_lock);
+        __atomic_store_n(&g_shell_list_lock_initialized, true, __ATOMIC_RELEASE);
+    }
+    spinlock_lock(&g_shell_list_lock);
+}
+
+static inline void shell_list_unlock(void)
+{
+    spinlock_unlock(&g_shell_list_lock);
+}
 
 static shell_session_t *shell_session_find(uint32_t handle, process_t *owner);
+static shell_session_t *shell_session_find_locked(uint32_t handle, process_t *owner);
 static bool shell_session_reserve(shell_session_t *session, size_t extra);
 static void shell_session_reset(shell_session_t *session);
 static bool shell_session_append(shell_session_t *session, const char *data, size_t len);
@@ -52,13 +55,29 @@ static ssize_t shell_session_fd_write(void *ctx, const void *buffer, size_t coun
 static int shell_session_fd_close(void *ctx);
 static void shell_session_stream(void *context, const char *data, size_t len);
 static void shell_session_exec_task(void *arg);
-static void shell_session_cleanup_runner(shell_session_t *session);
+static process_t *shell_session_cleanup_runner_locked(shell_session_t *session);
 
 static const fd_ops_t g_shell_session_fd_ops = {
     .read = NULL,
     .write = shell_session_fd_write,
     .close = shell_session_fd_close,
 };
+
+static inline void shell_session_lock(shell_session_t *session)
+{
+    if (session)
+    {
+        spinlock_lock(&session->lock);
+    }
+}
+
+static inline void shell_session_unlock(shell_session_t *session)
+{
+    if (session)
+    {
+        spinlock_unlock(&session->lock);
+    }
+}
 
 typedef struct shell_exec_task
 {
@@ -89,6 +108,7 @@ int shell_service_open_session(void)
     session->completed = false;
     session->last_status = 0;
     session->runner = NULL;
+    spinlock_init(&session->lock);
 
     int fd = fd_allocate(&g_shell_session_fd_ops, session);
     if (fd < 0)
@@ -113,12 +133,11 @@ int shell_service_open_session(void)
 
     session->owner = owner;
 
-    uint64_t flags = shell_cpu_save_flags();
-    shell_cpu_cli();
+    shell_list_lock();
     session->handle = g_next_shell_handle++;
     session->next = g_shell_sessions;
     g_shell_sessions = session;
-    shell_cpu_restore_flags(flags);
+    shell_list_unlock();
 
     return (int)session->handle;
 }
@@ -128,13 +147,6 @@ int shell_service_exec(uint32_t handle,
                        size_t command_len)
 {
     if (!command)
-    {
-        return -1;
-    }
-
-    process_t *owner = process_current();
-    shell_session_t *session = shell_session_find(handle, owner);
-    if (!session)
     {
         return -1;
     }
@@ -152,19 +164,39 @@ int shell_service_exec(uint32_t handle,
     memcpy(line, command, command_len);
     line[command_len] = '\0';
 
-    if (session->running)
+    process_t *owner = process_current();
+    shell_session_t *session = shell_session_find_locked(handle, owner);
+    if (!session)
     {
+        free(line);
         return -1;
     }
 
-    shell_session_cleanup_runner(session);
+    if (session->running)
+    {
+        shell_session_unlock(session);
+        free(line);
+        return -1;
+    }
+
+    process_t *zombie = shell_session_cleanup_runner_locked(session);
     shell_session_reset(session);
+    session->running = true;
     session->completed = false;
     session->last_status = 0;
+    shell_session_unlock(session);
+
+    if (zombie)
+    {
+        process_destroy(zombie);
+    }
 
     shell_exec_task_t *task = (shell_exec_task_t *)malloc(sizeof(shell_exec_task_t));
     if (!task)
     {
+        shell_session_lock(session);
+        session->running = false;
+        shell_session_unlock(session);
         free(line);
         return -1;
     }
@@ -179,22 +211,24 @@ int shell_service_exec(uint32_t handle,
                                                         session->owner);
     if (!proc)
     {
+        shell_session_lock(session);
+        session->running = false;
+        shell_session_unlock(session);
         free(task->line);
         free(task);
         return -1;
     }
 
+    shell_session_lock(session);
     session->runner = proc;
-    session->running = true;
-    session->completed = false;
+    shell_session_unlock(session);
     return 0;
 }
 
 bool shell_service_close_session(uint32_t handle)
 {
     process_t *owner = process_current();
-    uint64_t flags = shell_cpu_save_flags();
-    shell_cpu_cli();
+    shell_list_lock();
 
     shell_session_t **cursor = &g_shell_sessions;
     while (*cursor)
@@ -202,25 +236,43 @@ bool shell_service_close_session(uint32_t handle)
         shell_session_t *session = *cursor;
         if (session->handle == handle && session->owner == owner)
         {
-            *cursor = session->next;
-            shell_cpu_restore_flags(flags);
-
-            if (session->runner)
+            shell_session_lock(session);
+            if (session->running && (!session->runner || !process_is_zombie(session->runner)))
             {
-                shell_session_cleanup_runner(session);
+                if (session->runner)
+                {
+                    process_kill(session->runner, -1);
+                }
+                shell_session_unlock(session);
+                shell_list_unlock();
+                return false;
             }
+
+            process_t *zombie = shell_session_cleanup_runner_locked(session);
+            if (!session->runner)
+            {
+                session->running = false;
+            }
+            *cursor = session->next;
+            shell_session_unlock(session);
+
             if (session->stdout_fd >= 0)
             {
                 fd_close(session->stdout_fd);
             }
             free(session->capture);
             free(session);
+            shell_list_unlock();
+            if (zombie)
+            {
+                process_destroy(zombie);
+            }
             return true;
         }
         cursor = &session->next;
     }
 
-    shell_cpu_restore_flags(flags);
+    shell_list_unlock();
     return false;
 }
 
@@ -231,13 +283,17 @@ ssize_t shell_service_poll(uint32_t handle,
                            int *running_out)
 {
     process_t *owner = process_current();
-    shell_session_t *session = shell_session_find(handle, owner);
+    shell_session_t *session = shell_session_find_locked(handle, owner);
     if (!session)
     {
         return -1;
     }
 
-    shell_session_cleanup_runner(session);
+    process_t *zombie = shell_session_cleanup_runner_locked(session);
+    if (!session->runner)
+    {
+        session->running = false;
+    }
 
     size_t available = 0;
     if (session->capture_len > session->read_offset)
@@ -286,6 +342,11 @@ ssize_t shell_service_poll(uint32_t handle,
         *running_out = session->running ? 1 : 0;
     }
 
+    shell_session_unlock(session);
+    if (zombie)
+    {
+        process_destroy(zombie);
+    }
     return (ssize_t)copied;
 }
 
@@ -296,8 +357,7 @@ void shell_service_cleanup_process(process_t *process)
         return;
     }
 
-    uint64_t flags = shell_cpu_save_flags();
-    shell_cpu_cli();
+    shell_list_lock();
 
     shell_session_t **cursor = &g_shell_sessions;
     while (*cursor)
@@ -305,13 +365,26 @@ void shell_service_cleanup_process(process_t *process)
         shell_session_t *session = *cursor;
         if (session->owner == process)
         {
-            *cursor = session->next;
-            shell_cpu_restore_flags(flags);
-
-            if (session->runner)
+            shell_session_lock(session);
+            if (session->runner && !process_is_zombie(session->runner))
             {
-                shell_session_cleanup_runner(session);
+                process_t *runner = session->runner;
+                shell_session_unlock(session);
+                shell_list_unlock();
+                process_kill(runner, -1);
+                process_join(runner, NULL);
+                shell_list_lock();
+                continue;
             }
+
+            process_t *zombie = shell_session_cleanup_runner_locked(session);
+            if (!session->runner)
+            {
+                session->running = false;
+            }
+            *cursor = session->next;
+            shell_session_unlock(session);
+
             if (session->stdout_fd >= 0)
             {
                 fd_close(session->stdout_fd);
@@ -319,31 +392,43 @@ void shell_service_cleanup_process(process_t *process)
             free(session->capture);
             free(session);
 
-            flags = shell_cpu_save_flags();
-            shell_cpu_cli();
+            shell_list_unlock();
+            if (zombie)
+            {
+                process_destroy(zombie);
+            }
+            shell_list_lock();
             cursor = &g_shell_sessions;
             continue;
         }
         cursor = &session->next;
     }
 
-    shell_cpu_restore_flags(flags);
+    shell_list_unlock();
 }
 
 static shell_session_t *shell_session_find(uint32_t handle, process_t *owner)
 {
-    uint64_t flags = shell_cpu_save_flags();
-    shell_cpu_cli();
     for (shell_session_t *session = g_shell_sessions; session; session = session->next)
     {
         if (session->handle == handle && session->owner == owner)
         {
-            shell_cpu_restore_flags(flags);
             return session;
         }
     }
-    shell_cpu_restore_flags(flags);
     return NULL;
+}
+
+static shell_session_t *shell_session_find_locked(uint32_t handle, process_t *owner)
+{
+    shell_list_lock();
+    shell_session_t *session = shell_session_find(handle, owner);
+    if (session)
+    {
+        shell_session_lock(session);
+    }
+    shell_list_unlock();
+    return session;
 }
 
 static bool shell_session_reserve(shell_session_t *session, size_t extra)
@@ -392,13 +477,16 @@ static bool shell_session_append(shell_session_t *session, const char *data, siz
     {
         return true;
     }
+    shell_session_lock(session);
     if (!shell_session_reserve(session, len))
     {
+        shell_session_unlock(session);
         return false;
     }
     memcpy(session->capture + session->capture_len, data, len);
     session->capture_len += len;
     session->capture[session->capture_len] = '\0';
+    shell_session_unlock(session);
     return true;
 }
 
@@ -450,21 +538,26 @@ static void shell_session_exec_task(void *arg)
     free(task->line);
     free(task);
 
-    uint64_t flags = shell_cpu_save_flags();
-    shell_cpu_cli();
+    shell_session_lock(session);
     session->running = false;
     session->completed = true;
     session->last_status = success ? 0 : -1;
-    shell_cpu_restore_flags(flags);
+    shell_session_unlock(session);
     process_exit(0);
 }
 
-static void shell_session_cleanup_runner(shell_session_t *session)
+static process_t *shell_session_cleanup_runner_locked(shell_session_t *session)
 {
-    if (!session || !session->runner)
+    if (!session)
     {
-        return;
+        return NULL;
     }
-    process_destroy(session->runner);
-    session->runner = NULL;
+    process_t *runner = NULL;
+    if (session->runner && process_is_zombie(session->runner))
+    {
+        runner = session->runner;
+        session->runner = NULL;
+        session->running = false;
+    }
+    return runner;
 }

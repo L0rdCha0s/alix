@@ -31,7 +31,7 @@ static void shell_log_key(char ch);
 static bool shell_state_has_dirty(void);
 static bool shell_dispatch_event(atk_shell_app_t *app, const user_atk_event_t *event);
 static bool shell_handle_resize(atk_shell_app_t *app, uint32_t width, uint32_t height);
-static void shell_poll_output(atk_shell_app_t *app);
+static bool shell_poll_output(atk_shell_app_t *app);
 
 static void shell_apply_theme(atk_state_t *state)
 {
@@ -104,6 +104,12 @@ static void shell_handle_output(atk_shell_app_t *app, const char *buffer, size_t
         return;
     }
     atk_terminal_write(app->terminal, buffer, len);
+    /* Mark terminal region dirty and request a refresh so output appears promptly. */
+    if (app->window)
+    {
+        atk_window_mark_dirty(app->window);
+        video_request_refresh_window(app->window);
+    }
 }
 
 static void shell_log_key(char ch)
@@ -247,15 +253,16 @@ static bool shell_init_ui(atk_shell_app_t *app)
     return true;
 }
 
-static void shell_poll_output(atk_shell_app_t *app)
+static bool shell_poll_output(atk_shell_app_t *app)
 {
     if (!app || app->shell_handle < 0)
     {
-        return;
+        return false;
     }
     char buffer[SHELL_OUTPUT_BUFFER];
     int status = 0;
     int running = 0;
+    bool changed = false;
     ssize_t copied = sys_shell_poll(app->shell_handle,
                                     buffer,
                                     sizeof(buffer),
@@ -264,6 +271,7 @@ static void shell_poll_output(atk_shell_app_t *app)
     if (copied > 0)
     {
         shell_handle_output(app, buffer, (size_t)copied);
+        changed = true;
     }
 
     if (!running && app->command_active)
@@ -274,7 +282,9 @@ static void shell_poll_output(atk_shell_app_t *app)
             shell_append(app, "\n");
         }
         shell_append_prompt(app);
+        changed = true;
     }
+    return changed;
 }
 
 static bool shell_dispatch_event(atk_shell_app_t *app, const user_atk_event_t *event)
@@ -353,26 +363,25 @@ int main(void)
     while (app.running)
     {
         bool redraw = false;
+        bool had_event = false;
         user_atk_event_t event;
-
-        if (!atk_user_wait_event(&app.remote, &event))
-        {
-            sys_yield();
-            continue;
-        }
-
-        redraw |= shell_dispatch_event(&app, &event);
 
         while (atk_user_poll_event(&app.remote, &event))
         {
+            had_event = true;
             redraw |= shell_dispatch_event(&app, &event);
         }
 
-        shell_poll_output(&app);
+        redraw |= shell_poll_output(&app);
 
         if (redraw || shell_state_has_dirty())
         {
             shell_render(&app);
+        }
+        else if (!had_event)
+        {
+            /* Avoid busy-spin when idle, but still allow output polling. */
+            sys_yield();
         }
     }
 

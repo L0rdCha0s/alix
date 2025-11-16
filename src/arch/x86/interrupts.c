@@ -19,6 +19,24 @@
 
 extern void syscall_entry(void);
 
+#if KERNEL_BUILD
+static void serial_format_hex64(char *out, size_t cap, uint64_t value)
+{
+    if (!out || cap < 2)
+    {
+        return;
+    }
+    const char *digits = "0123456789ABCDEF";
+    size_t len = (cap - 1 < 16) ? (cap - 1) : 16;
+    for (size_t i = 0; i < len; ++i)
+    {
+        out[len - 1 - i] = digits[value & 0xF];
+        value >>= 4;
+    }
+    out[len] = '\0';
+}
+#endif
+
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
 #define PIC2_COMMAND 0xA0
@@ -163,59 +181,84 @@ static void fault_report(const char *reason,
                          bool include_cr2,
                          uint64_t cr2_value)
 {
-    /* Emit a minimal banner synchronously in case we halt before the queue drains. */
-    serial_early_write_string("\r\nCPU exception encountered.\r\n");
-    if (reason)
-    {
-        serial_early_write_string("reason: ");
-        serial_early_write_string(reason);
-        serial_early_write_string("\r\n");
-    }
-    console_write("CPU exception encountered, see serial log.\n");
-    serial_printf("%s", "\r\n=== CPU EXCEPTION ===\r\n");
-    serial_printf("%s", "reason: ");
-    serial_printf("%s", reason);
-    serial_printf("%s", "\r\n");
+    /* Emit synchronously with early serial to avoid queue loss before halting. */
+    char buf[32];
+    serial_early_write_string("\r\n=== CPU EXCEPTION ===\r\n");
+    serial_early_write_string("reason: ");
+    serial_early_write_string(reason ? reason : "<unknown>");
+    serial_early_write_string("\r\n");
+
     uint32_t cpu_idx = smp_current_cpu_index();
-    serial_printf("%s", "  cpu_index=0x");
-    serial_printf("%016llX", (unsigned long long)(cpu_idx));
-    serial_printf("%s", "\r\n");
+    serial_early_write_string("  cpu_index=0x");
+    serial_format_hex64(buf, sizeof(buf), cpu_idx);
+    serial_early_write_string(buf);
+    serial_early_write_string("\r\n");
+
     if (frame)
     {
-        serial_printf("%s", "  RIP=");
-        serial_printf("%016llX", (unsigned long long)(frame->rip));
-        serial_printf("%s", " RSP=");
-        serial_printf("%016llX", (unsigned long long)(frame->rsp));
-        serial_printf("%s", " RFLAGS=");
-        serial_printf("%016llX", (unsigned long long)(frame->rflags));
-        serial_printf("%s", " CS=");
-        serial_printf("%016llX", (unsigned long long)(frame->cs));
-        serial_printf("%s", " SS=");
-        serial_printf("%016llX", (unsigned long long)(frame->ss));
-        serial_printf("%s", "\r\n");
+        serial_early_write_string("  RIP=");
+        serial_format_hex64(buf, sizeof(buf), frame->rip);
+        serial_early_write_string(buf);
+
+        serial_early_write_string(" RSP=");
+        serial_format_hex64(buf, sizeof(buf), frame->rsp);
+        serial_early_write_string(buf);
+
+        serial_early_write_string(" RFLAGS=");
+        serial_format_hex64(buf, sizeof(buf), frame->rflags);
+        serial_early_write_string(buf);
+
+        serial_early_write_string(" CS=");
+        serial_format_hex64(buf, sizeof(buf), frame->cs);
+        serial_early_write_string(buf);
+
+        serial_early_write_string(" SS=");
+        serial_format_hex64(buf, sizeof(buf), frame->ss);
+        serial_early_write_string(buf);
+        serial_early_write_string("\r\n");
     }
     if (has_error)
     {
-        serial_printf("%s", "  ERR=");
-        serial_printf("%016llX", (unsigned long long)(error_code));
-        serial_printf("%s", "\r\n");
+        serial_early_write_string("  ERR=");
+        serial_format_hex64(buf, sizeof(buf), error_code);
+        serial_early_write_string(buf);
+        serial_early_write_string("\r\n");
     }
     if (include_cr2)
     {
-        serial_printf("%s", "  CR2=");
-        serial_printf("%016llX", (unsigned long long)(cr2_value));
-        serial_printf("%s", "\r\n");
+        serial_early_write_string("  CR2=");
+        serial_format_hex64(buf, sizeof(buf), cr2_value);
+        serial_early_write_string(buf);
+        serial_early_write_string("\r\n");
     }
     uint64_t pid = process_current_pid();
-    serial_printf("%s", "  current_pid=0x");
-    serial_printf("%016llX", (unsigned long long)(pid));
-    serial_printf("%s", "\r\n");
+    serial_early_write_string("  current_pid=0x");
+    serial_format_hex64(buf, sizeof(buf), pid);
+    serial_early_write_string(buf);
+    serial_early_write_string("\r\n");
+
+    if (frame)
+    {
+        serial_early_write_string("  stack (top 8 qwords):\r\n");
+        uint64_t *sp = (uint64_t *)(uintptr_t)frame->rsp;
+        for (int i = 0; i < 8; ++i)
+        {
+            serial_early_write_string("    [");
+            serial_format_hex64(buf, sizeof(buf), frame->rsp + (uint64_t)(i * 8));
+            serial_early_write_string(buf);
+            serial_early_write_string("] = 0x");
+            serial_format_hex64(buf, sizeof(buf), sp ? sp[i] : 0);
+            serial_early_write_string(buf);
+            serial_early_write_string("\r\n");
+        }
+    }
+
     process_dump_current_thread();
     if (frame)
     {
         fault_dump_bytes(frame->rip);
     }
-    serial_printf("%s", "======================\r\n");
+    serial_early_write_string("======================\r\n");
 }
 
 static void fault_dump_bytes(uint64_t rip)

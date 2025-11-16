@@ -72,8 +72,12 @@ static void configure_heap_from_e820(void)
         return;
     }
 
-    uint64_t desired_base = (uint64_t)kernel_heap_base;
-    uint64_t best_end = desired_base;
+    const uint64_t desired_size = KERNEL_HEAP_SIZE;
+    const uint64_t max_addr = 0xFFFFFFFFULL; /* identity mapped limit */
+    const uint64_t min_base = 0x02000000ULL; /* avoid low memory */
+    uint64_t best_base = 0;
+    uint64_t best_size = 0;
+
     for (uint32_t i = 0; i < count; ++i)
     {
         if (boot_info.e820[i].type != 1)
@@ -81,34 +85,65 @@ static void configure_heap_from_e820(void)
             continue;
         }
         uint64_t entry_base = boot_info.e820[i].base;
-        uint64_t entry_length = boot_info.e820[i].length;
-        uint64_t entry_end = entry_base + entry_length;
+        uint64_t entry_end = entry_base + boot_info.e820[i].length;
         if (entry_end <= entry_base)
         {
             continue;
         }
-        if (entry_base <= desired_base && entry_end > best_end)
+        if (entry_base >= max_addr)
         {
-            best_end = entry_end;
+            continue;
+        }
+        if (entry_end > max_addr)
+        {
+            entry_end = max_addr;
+        }
+
+        uint64_t candidate_base = entry_base;
+        if (candidate_base < min_base)
+        {
+            candidate_base = min_base;
+        }
+        /* Align to 2 MiB to reduce fragmentation and respect hugepage boundaries. */
+        const uint64_t align = 0x200000ULL;
+        candidate_base = (candidate_base + (align - 1)) & ~(align - 1);
+        if (candidate_base >= entry_end)
+        {
+            continue;
+        }
+
+        uint64_t available = entry_end - candidate_base;
+        if (available >= desired_size)
+        {
+            /* Prefer a region that can fit the full desired size. Pick the largest. */
+            if (available > best_size || best_size < desired_size)
+            {
+                best_base = candidate_base;
+                best_size = desired_size;
+                break;
+            }
+        }
+        else if (available > best_size)
+        {
+            best_base = candidate_base;
+            best_size = available;
         }
     }
 
-    if (best_end > desired_base)
+    if (best_size > 0)
     {
-        if (best_end > (uint64_t)UINTPTR_MAX)
-        {
-            best_end = (uint64_t)UINTPTR_MAX;
-        }
-        kernel_heap_end = (uintptr_t)best_end;
-        kernel_heap_size = kernel_heap_end - kernel_heap_base;
-        serial_printf("%s", "[alix] heap range ");
-        serial_printf("%016llX", (unsigned long long)(kernel_heap_base));
-        serial_printf("%s", " - ");
-        serial_printf("%016llX", (unsigned long long)(kernel_heap_end));
-        serial_printf("%s", " (");
-        serial_printf("%016llX", (unsigned long long)(kernel_heap_size));
-        serial_printf("%s", " bytes)\r\n");
+        kernel_heap_base = (uintptr_t)best_base;
+        kernel_heap_end = (uintptr_t)(best_base + best_size);
+        kernel_heap_size = (uintptr_t)best_size;
     }
+
+    serial_printf("%s", "[alix] heap range ");
+    serial_printf("%016llX", (unsigned long long)(kernel_heap_base));
+    serial_printf("%s", " - ");
+    serial_printf("%016llX", (unsigned long long)(kernel_heap_end));
+    serial_printf("%s", " (");
+    serial_printf("%016llX", (unsigned long long)(kernel_heap_size));
+    serial_printf("%s", " bytes)\r\n");
 }
 
 static void zero_bytes(uint8_t *ptr, size_t size)

@@ -96,6 +96,11 @@ atk_widget_t *atk_window_add_scrollbar(atk_widget_t *window,
     atk_widget_set_ops(scrollbar, &g_scrollbar_ops, NULL);
 
     atk_scrollbar_priv_t *sb_priv = scrollbar_priv_mut(scrollbar);
+    if (!sb_priv)
+    {
+        atk_widget_destroy(scrollbar);
+        return NULL;
+    }
     sb_priv->orientation = orientation;
     sb_priv->min_value = 0;
     sb_priv->max_value = 0;

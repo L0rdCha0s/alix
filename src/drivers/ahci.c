@@ -15,6 +15,11 @@
 #define AHCI_TRACE_WAIT 0
 #endif
 
+#ifndef AHCI_DEBUG
+#define AHCI_DEBUG 0
+#endif
+
+
 #define AHCI_MAX_PORTS            32
 #define AHCI_MAX_COMMANDS         32
 #define AHCI_SECTOR_SIZE          512
@@ -160,13 +165,16 @@ static bool g_ahci_use_interrupts = false;
 
 static void ahci_log(const char *msg)
 {
+    #if AHCI_DEBUG
     serial_printf("%s", "[ahci] ");
     serial_printf("%s", msg ? msg : "(null)");
     serial_printf("%s", "\r\n");
+    #endif
 }
 
 static void ahci_log_hex(const char *msg, uint64_t value)
 {
+    #if AHCI_DEBUG
     serial_printf("%s", "[ahci] ");
     if (msg)
     {
@@ -175,19 +183,23 @@ static void ahci_log_hex(const char *msg, uint64_t value)
     serial_printf("%s", "0x");
     serial_printf("%016llX", (unsigned long long)(value));
     serial_printf("%s", "\r\n");
+    #endif
 }
 
 static void ahci_log_port(uint32_t port_no, const char *msg)
 {
+    #if AHCI_DEBUG
     serial_printf("%s", "[ahci] port ");
     serial_printf("%016llX", (unsigned long long)(port_no));
     serial_printf("%s", ": ");
     serial_printf("%s", msg ? msg : "(null)");
     serial_printf("%s", "\r\n");
+    #endif
 }
 
 static void ahci_log_port_hex(uint32_t port_no, const char *msg, uint64_t value)
 {
+    #if AHCI_DEBUG
     serial_printf("%s", "[ahci] port ");
     serial_printf("%016llX", (unsigned long long)(port_no));
     serial_printf("%s", ": ");
@@ -198,6 +210,7 @@ static void ahci_log_port_hex(uint32_t port_no, const char *msg, uint64_t value)
     serial_printf("%s", "0x");
     serial_printf("%016llX", (unsigned long long)(value));
     serial_printf("%s", "\r\n");
+    #endif
 }
 
 static void ahci_log_owner_details(const thread_t *owner)
@@ -221,6 +234,7 @@ static void ahci_log_stack_bounce(uint32_t port_no,
                                   size_t len,
                                   bool write)
 {
+    #if AHCI_DEBUG
     serial_printf("%s", "[ahci] port ");
     serial_printf("%016llX", (unsigned long long)(port_no));
     serial_printf("%s", ": stack buffer redirected action=");
@@ -234,6 +248,7 @@ static void ahci_log_stack_bounce(uint32_t port_no,
     serial_printf("%s", " len=0x");
     serial_printf("%016llX", (unsigned long long)(len));
     serial_printf("%s", "\r\n");
+    #endif
 }
 
 static void ahci_log_prdt_entry(uint32_t port_no,
@@ -243,6 +258,7 @@ static void ahci_log_prdt_entry(uint32_t port_no,
                                 uint64_t phys_addr,
                                 uint32_t len)
 {
+    #if AHCI_DEBUG
     serial_printf("%s", "[ahci] port ");
     serial_printf("%016llX", (unsigned long long)(port_no));
     serial_printf("%s", " slot=0x");
@@ -259,6 +275,7 @@ static void ahci_log_prdt_entry(uint32_t port_no,
     thread_t *owner = process_find_stack_owner((const void *)virt_addr, len);
     ahci_log_owner_details(owner);
     serial_printf("%s", "\r\n");
+    #endif
 }
 
 static void ahci_request_os_ownership(void)

@@ -436,16 +436,128 @@ static bool vfs_measure_node(const vfs_node_t *node,
     return true;
 }
 
-static bool vfs_serialize_node(const vfs_node_t *node,
-                               vfs_mount_t *mount,
-                               bool is_root,
-                               uint32_t parent_id,
-                               uint8_t *buffer,
-                               size_t buffer_size,
-                               size_t *offset,
-                               uint32_t *next_id)
+typedef struct
 {
-    if (!node || !buffer || !offset || !next_id)
+    block_device_t *device;
+    uint64_t sector_index;
+    size_t sector_size;
+    size_t max_bytes;
+    size_t total_bytes;
+    uint8_t *sector_buf;
+    size_t fill;
+    bool ok;
+} vfs_stream_writer_t;
+
+static void vfs_stream_writer_init(vfs_stream_writer_t *w,
+                                   block_device_t *device,
+                                   size_t sector_size,
+                                   size_t max_bytes)
+{
+    if (!w)
+    {
+        return;
+    }
+    w->device = device;
+    w->sector_index = 0;
+    w->sector_size = sector_size;
+    w->max_bytes = max_bytes;
+    w->total_bytes = 0;
+    w->sector_buf = (uint8_t *)malloc(sector_size);
+    w->fill = 0;
+    w->ok = (w->sector_buf != NULL);
+    if (w->sector_buf)
+    {
+        memset(w->sector_buf, 0, sector_size);
+    }
+}
+
+static bool vfs_stream_writer_flush(vfs_stream_writer_t *w)
+{
+    if (!w || !w->ok)
+    {
+        return false;
+    }
+    if (w->fill == 0)
+    {
+        return true;
+    }
+    if (!block_write(w->device, w->sector_index, 1, w->sector_buf))
+    {
+        w->ok = false;
+        return false;
+    }
+    w->total_bytes += w->fill;
+    w->sector_index++;
+    memset(w->sector_buf, 0, w->sector_size);
+    w->fill = 0;
+    return true;
+}
+
+static bool vfs_stream_writer_write(vfs_stream_writer_t *w,
+                                    const void *data,
+                                    size_t len)
+{
+    if (!w || !w->ok || !data || len == 0)
+    {
+        return true;
+    }
+
+    const uint8_t *bytes = (const uint8_t *)data;
+    size_t remaining = len;
+    while (remaining > 0)
+    {
+        if (w->total_bytes + w->fill >= w->max_bytes)
+        {
+            w->ok = false;
+            return false;
+        }
+        size_t space = w->sector_size - w->fill;
+        size_t chunk = (remaining < space) ? remaining : space;
+        if (w->total_bytes + w->fill + chunk > w->max_bytes)
+        {
+            chunk = w->max_bytes - w->total_bytes - w->fill;
+            if (chunk == 0)
+            {
+                w->ok = false;
+                return false;
+            }
+        }
+        memcpy(w->sector_buf + w->fill, bytes, chunk);
+        w->fill += chunk;
+        bytes += chunk;
+        remaining -= chunk;
+        if (w->fill == w->sector_size)
+        {
+            if (!vfs_stream_writer_flush(w))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static void vfs_stream_writer_destroy(vfs_stream_writer_t *w)
+{
+    if (!w)
+    {
+        return;
+    }
+    if (w->sector_buf)
+    {
+        free(w->sector_buf);
+    }
+    w->sector_buf = NULL;
+}
+
+static bool vfs_serialize_node_stream(const vfs_node_t *node,
+                                      vfs_mount_t *mount,
+                                      bool is_root,
+                                      uint32_t parent_id,
+                                      uint32_t *next_id,
+                                      vfs_stream_writer_t *writer)
+{
+    if (!node || !next_id || !writer || !writer->ok)
     {
         return false;
     }
@@ -459,11 +571,7 @@ static bool vfs_serialize_node(const vfs_node_t *node,
     }
 
     uint32_t node_id = (*next_id)++;
-    size_t name_len_sz = 0;
-    if (!is_root)
-    {
-        name_len_sz = node->name ? strlen(node->name) : 0;
-    }
+    size_t name_len_sz = (!is_root && node->name) ? strlen(node->name) : 0;
     uint32_t name_len = (uint32_t)name_len_sz;
     uint32_t data_len = (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
                             ? (uint32_t)node->size
@@ -479,21 +587,17 @@ static bool vfs_serialize_node(const vfs_node_t *node,
         .data_len = data_len
     };
 
-    if ((*offset) + sizeof(disk) > buffer_size)
+    if (!vfs_stream_writer_write(writer, &disk, sizeof(disk)))
     {
         return false;
     }
-    memcpy(buffer + (*offset), &disk, sizeof(disk));
-    (*offset) += sizeof(disk);
 
     if (!is_root && name_len > 0)
     {
-        if ((*offset) + name_len > buffer_size)
+        if (!vfs_stream_writer_write(writer, node->name, name_len))
         {
             return false;
         }
-        memcpy(buffer + (*offset), node->name, name_len);
-        (*offset) += name_len;
     }
 
     if ((node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK) && data_len > 0)
@@ -502,17 +606,15 @@ static bool vfs_serialize_node(const vfs_node_t *node,
         {
             return false;
         }
-        if ((*offset) + data_len > buffer_size)
+        if (!vfs_stream_writer_write(writer, node->data, data_len))
         {
             return false;
         }
-        memcpy(buffer + (*offset), node->data, data_len);
-        (*offset) += data_len;
     }
 
     for (const vfs_node_t *child = node->first_child; child; child = child->next_sibling)
     {
-        if (!vfs_serialize_node(child, mount, false, node_id, buffer, buffer_size, offset, next_id))
+        if (!vfs_serialize_node_stream(child, mount, false, node_id, next_id, writer))
         {
             return false;
         }
@@ -1291,6 +1393,7 @@ static bool vfs_device_is_mounted(block_device_t *device)
 
 static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
 {
+    (void)force_full;
     if (!mount || !mount->device || !mount->mount_point)
     {
         serial_printf("%s", "[vfs] sync abort: invalid mount\r\n");
@@ -1327,129 +1430,48 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
         return false;
     }
 
-    size_t buffer_size = (size_t)sectors_needed * sector_size;
-    uint8_t *buffer = (uint8_t *)malloc(buffer_size);
-    if (!buffer)
+    size_t max_bytes = (size_t)sectors_needed * sector_size;
+    vfs_stream_writer_t writer;
+    vfs_stream_writer_init(&writer, mount->device, sector_size, max_bytes);
+    if (!writer.ok)
     {
-        serial_printf("%s", "[vfs] sync fail: buffer alloc 0x");
-        serial_printf("%016llX", (unsigned long long)buffer_size);
-        serial_printf("%s", " bytes\r\n");
+        serial_printf("%s", "[vfs] sync fail: stream buffer alloc\r\n");
         return false;
     }
-    memset(buffer, 0, buffer_size);
 
-    alixfs_header_t *header = (alixfs_header_t *)buffer;
-    memcpy(header->magic, ALIXFS_MAGIC, sizeof(header->magic));
-    header->version = 1;
-    header->node_count = 0;
-    header->payload_size = 0;
-    header->root_id = 0;
-    header->reserved[0] = header->reserved[1] = header->reserved[2] = 0;
+    alixfs_header_t header;
+    memcpy(header.magic, ALIXFS_MAGIC, sizeof(header.magic));
+    header.version = 1;
+    header.node_count = (uint32_t)node_count;
+    header.payload_size = (uint32_t)payload_size;
+    header.root_id = 0;
+    header.reserved[0] = header.reserved[1] = header.reserved[2] = 0;
 
-    size_t offset = sizeof(alixfs_header_t);
+    bool ok = vfs_stream_writer_write(&writer, &header, sizeof(header));
     uint32_t next_id = 0;
-    if (!vfs_serialize_node(mount->mount_point,
-                            mount,
-                            true,
-                            0xFFFFFFFFu,
-                            buffer,
-                            buffer_size,
-                            &offset,
-                            &next_id))
+    if (ok)
     {
-        free(buffer);
-        return false;
+        ok = vfs_serialize_node_stream(mount->mount_point,
+                                       mount,
+                                       true,
+                                       0xFFFFFFFFu,
+                                       &next_id,
+                                       &writer);
+    }
+    if (ok)
+    {
+        ok = vfs_stream_writer_flush(&writer);
     }
 
-    size_t payload_written = offset - sizeof(alixfs_header_t);
-    if (payload_written > 0xFFFFFFFFu)
-    {
-        free(buffer);
-        return false;
-    }
+    vfs_stream_writer_destroy(&writer);
 
-    header->node_count = next_id;
-    header->payload_size = (uint32_t)payload_written;
-
-    size_t written_bytes = sizeof(alixfs_header_t) + payload_written;
-    uint32_t sectors_to_write = (uint32_t)((written_bytes + sector_size - 1) / sector_size);
-    if (sectors_to_write == 0)
+    if (mount->image_cache)
     {
-        sectors_to_write = 1;
+        free(mount->image_cache);
+        mount->image_cache = NULL;
+        mount->cache_size = 0;
     }
-    if (sectors_to_write > sectors_needed)
-    {
-        free(buffer);
-        return false;
-    }
-
-    bool can_diff = !force_full &&
-                    mount->image_cache &&
-                    mount->cache_size == buffer_size &&
-                    mount->sector_size == sector_size;
-    bool ok = true;
-
-    if (can_diff)
-    {
-        size_t sectors = buffer_size / sector_size;
-        for (size_t s = 0; s < sectors; ++s)
-        {
-            uint8_t *new_sector = buffer + s * sector_size;
-            uint8_t *old_sector = mount->image_cache + s * sector_size;
-            if (memcmp(new_sector, old_sector, sector_size) != 0)
-            {
-                if (!block_write(mount->device, (uint64_t)s, 1, new_sector))
-                {
-                    ok = false;
-                    serial_printf("%s", "[vfs] sync write fail sector=0x");
-                    serial_printf("%016llX", (unsigned long long)s);
-                    serial_printf("%s", "\r\n");
-                    break;
-                }
-                memcpy(old_sector, new_sector, sector_size);
-            }
-        }
-    }
-    else
-    {
-        ok = block_write(mount->device, 0, sectors_to_write, buffer);
-        if (ok)
-        {
-            uint8_t *new_cache = (uint8_t *)realloc(mount->image_cache, buffer_size);
-            if (!new_cache)
-            {
-                free(mount->image_cache);
-                mount->image_cache = NULL;
-                mount->cache_size = 0;
-            }
-            else
-            {
-                mount->image_cache = new_cache;
-                mount->cache_size = buffer_size;
-                mount->sector_size = sector_size;
-                memcpy(mount->image_cache, buffer, buffer_size);
-            }
-        }
-        else
-        {
-            serial_printf("%s", "[vfs] sync bulk write fail sectors=0x");
-            serial_printf("%016llX", (unsigned long long)sectors_to_write);
-            serial_printf("%s", "\r\n");
-        }
-    }
-
-    if (!mount->image_cache && ok)
-    {
-        mount->image_cache = (uint8_t *)malloc(buffer_size);
-        if (mount->image_cache)
-        {
-            memcpy(mount->image_cache, buffer, buffer_size);
-            mount->cache_size = buffer_size;
-            mount->sector_size = sector_size;
-        }
-    }
-
-    free(buffer);
+    mount->sector_size = sector_size;
     return ok;
 }
 

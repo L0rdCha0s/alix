@@ -5101,6 +5101,11 @@ process_t *process_thread_owner(const thread_t *thread)
     return thread ? thread->process : NULL;
 }
 
+bool process_is_zombie(const process_t *process)
+{
+    return process && process->state == PROCESS_STATE_ZOMBIE;
+}
+
 uint64_t process_current_pid(void)
 {
     process_t *proc = current_process_local();
