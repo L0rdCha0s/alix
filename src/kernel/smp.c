@@ -368,6 +368,9 @@ uint32_t smp_current_cpu_index(void)
     uint32_t idx = resolve_apic_to_index(apic, false);
     if (idx >= SMP_MAX_CPUS)
     {
+        serial_printf("%s", "[smp] warning: bogus APIC id 0x");
+        serial_printf("%016llX", (unsigned long long)apic);
+        serial_printf("%s", " -> using BSP index\r\n");
         return g_boot_cpu_index;
     }
     return idx;

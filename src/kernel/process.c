@@ -1352,6 +1352,8 @@ static void thread_log_stack_issue(const thread_t *thread,
                                    const char *context,
                                    const char *reason)
 {
+    uint64_t rsp = 0;
+    __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp));
     serial_printf("%s", "[proc] stack issue thread=");
     if (thread && thread->name[0])
     {
@@ -1369,6 +1371,8 @@ static void thread_log_stack_issue(const thread_t *thread,
     serial_printf("%016llX", (unsigned long long)((uintptr_t)(thread ? thread->stack_base : 0)));
     serial_printf("%s", " stack_top=0x");
     serial_printf("%016llX", (unsigned long long)(thread ? thread->kernel_stack_top : 0));
+    serial_printf("%s", " rsp=0x");
+    serial_printf("%016llX", (unsigned long long)rsp);
     serial_printf("%s", "\r\n");
 }
 
@@ -4266,6 +4270,23 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
     thread_t *resumed = current_thread_local();
     if (resumed)
     {
+        /*
+         * Be defensive: ensure segment registers are sane after a context
+         * switch. If a corrupted context ever clobbers SS/DS/ES, reload them
+         * here so subsequent checks and stack accesses stay in kernel space.
+         */
+        if (!resumed->is_idle)
+        {
+            uint16_t kdata = GDT_SELECTOR_KERNEL_DATA;
+            __asm__ volatile (
+                "mov %0, %%ds\n\t"
+                "mov %0, %%es\n\t"
+                "mov %0, %%ss\n\t"
+                :
+                : "r"(kdata)
+                : "memory");
+        }
+
         /* Validate that we resumed on a sane stack to catch corruption early. */
         uintptr_t rsp_after = 0;
         __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp_after));

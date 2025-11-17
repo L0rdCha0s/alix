@@ -566,7 +566,10 @@ static int scrollbar_thumb_start(const atk_widget_t *scrollbar,
 
 static int scrollbar_axis_coord(const atk_widget_t *scrollbar, const atk_scrollbar_priv_t *priv, int px, int py)
 {
-    (void)priv;
+    if (!scrollbar || !priv)
+    {
+        return 0;
+    }
     int origin_x = scrollbar->parent ? scrollbar->parent->x : 0;
     int origin_y = scrollbar->parent ? scrollbar->parent->y : 0;
     int local_x = px - (origin_x + scrollbar->x);
