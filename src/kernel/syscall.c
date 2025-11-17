@@ -582,44 +582,22 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             size_t output_capacity = (size_t)frame->rdx;
             int *status_user = (int *)frame->r10;
             int *running_user = (int *)frame->r8;
-            if (output_user && !user_ptr_range_valid(output_user, output_capacity))
+            if (output_user && output_capacity > 0 &&
+                !user_ptr_range_valid(output_user, output_capacity))
             {
                 result = -1;
                 break;
             }
 
-            char *output = NULL;
-            if (output_capacity > 0 && output_user)
-            {
-                output = (char *)malloc(output_capacity);
-                if (!output)
-                {
-                    result = -1;
-                    break;
-                }
-            }
-
             int status_tmp = 0;
             int running_tmp = 0;
             ssize_t poll_res = shell_service_poll((uint32_t)frame->rdi,
-                                                  output,
+                                                  output_user,
                                                   output_capacity,
                                                   status_user ? &status_tmp : NULL,
                                                   running_user ? &running_tmp : NULL);
             if (poll_res >= 0)
             {
-                if (output && output_capacity > 0)
-                {
-                    size_t to_copy = (size_t)poll_res + 1;
-                    if (to_copy > output_capacity)
-                    {
-                        to_copy = output_capacity;
-                    }
-                    if (!user_copy_to_user(output_user, output, to_copy))
-                    {
-                        poll_res = -1;
-                    }
-                }
                 if (poll_res >= 0 && status_user)
                 {
                     if (!user_copy_to_user(status_user, &status_tmp, sizeof(status_tmp)))
@@ -636,7 +614,6 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                 }
             }
 
-            free(output);
             result = (poll_res >= 0) ? (int64_t)poll_res : -1;
             break;
         }

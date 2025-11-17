@@ -308,16 +308,37 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
                                 bool left_pressed)
 {
     user_atk_window_t *previous_capture = g_capture_window;
+    if (previous_capture)
+    {
+        user_atk_window_retain(previous_capture);
+    }
+
     user_atk_window_t *target = g_capture_window;
     if (!target)
     {
         target = user_atk_from_window(hover_window);
+        if (target)
+        {
+            user_atk_window_retain(target);
+        }
+    }
+    else
+    {
+        /* target is already retained via previous_capture */
     }
 #if USER_ATK_DEBUG
     user_atk_log_pair("route_mouse hover", (uintptr_t)hover_window, (uintptr_t)(target ? target->window : NULL));
 #endif
     if (!target || target->closed || !target->window)
     {
+        if (target && target != previous_capture)
+        {
+            user_atk_window_release(target);
+        }
+        if (previous_capture)
+        {
+            user_atk_window_release(previous_capture);
+        }
         return false;
     }
 
@@ -337,6 +358,14 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
         uint64_t coord = ((uint64_t)(uint32_t)rel_x << 32) | (uint32_t)(rel_y & 0xFFFFFFFFu);
         user_atk_log_pair("route_mouse outside", coord, (uint64_t)target->handle);
 #endif
+        if (target && target != previous_capture)
+        {
+            user_atk_window_release(target);
+        }
+        if (previous_capture)
+        {
+            user_atk_window_release(previous_capture);
+        }
         return false;
     }
 
@@ -381,6 +410,14 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     if (previous_capture != g_capture_window)
     {
         user_atk_apply_priorities();
+    }
+    if (target && target != previous_capture)
+    {
+        user_atk_window_release(target);
+    }
+    if (previous_capture)
+    {
+        user_atk_window_release(previous_capture);
     }
     return true;
 }
