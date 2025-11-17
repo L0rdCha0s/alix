@@ -231,6 +231,16 @@ void user_memory_free(void *addr, size_t bytes)
 
     uintptr_t base = align_down_uintptr((uintptr_t)addr, USER_MEMORY_PAGE_SIZE);
     size_t length = (size_t)align_up_uintptr(bytes, USER_MEMORY_PAGE_SIZE);
+    uintptr_t end = base + length;
+    if (end < base || base < USER_MEMORY_MIN_ADDR || end > USER_MEMORY_IDENTITY_LIMIT)
+    {
+        serial_printf("%s", "user_memory: reject free outside user region base=0x");
+        serial_printf("%016llX", (unsigned long long)base);
+        serial_printf("%s", " len=0x");
+        serial_printf("%016llX", (unsigned long long)length);
+        serial_printf("%s", "\r\n");
+        return;
+    }
     usermem_log("free base=", base);
     usermem_log("free len=", length);
 

@@ -15,6 +15,7 @@
 #include "shell_service.h"
 #include "syscall_defs.h"
 #include "user_memory.h"
+#include "user_copy.h"
 #include "timer.h"
 #include "interrupts.h"
 #include "smp.h"
@@ -87,7 +88,7 @@ static void fatal(const char *msg) __attribute__((noreturn));
 static bool string_name_equals(const char *lhs, const char *rhs);
 static void process_create_log(const char *name, const char *event);
 
-#define USER_ADDRESS_SPACE_BASE   0x0000008000000000ULL
+#define USER_ADDRESS_SPACE_BASE   USER_POINTER_BASE
 #define USER_STUB_CODE_BASE       (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
 #define USER_PREEMPT_STUB_BASE    (USER_ADDRESS_SPACE_BASE + 0x00110000ULL)
 #define USER_STACK_TOP            (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)

@@ -8,7 +8,7 @@
 #include "process.h"
 #include "serial.h"
 #include "video.h"
-#include "arch/x86/bootlayout.h"
+#include "user_copy.h"
 
 #ifndef USER_ATK_DEBUG
 #define USER_ATK_DEBUG 0
@@ -18,6 +18,7 @@ typedef struct user_atk_window
 {
     uint32_t handle;
     uint32_t flags;
+    uint32_t refcount;
     process_t *owner;
     atk_widget_t *window;
     atk_widget_t *image;
@@ -132,7 +133,6 @@ static void user_atk_apply_priorities(void);
 static bool user_atk_event_queue_empty(void *context);
 static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_event_t *event);
 static void user_atk_queue_resize_event(user_atk_window_t *win, uint32_t width, uint32_t height);
-static bool user_atk_buffer_overlaps_kernel_heap(const void *ptr, size_t len, const char *context);
 
 void user_atk_init(void)
 {
@@ -152,45 +152,31 @@ void user_atk_init(void)
     g_next_handle = 1;
 }
 
-static bool user_atk_buffer_overlaps_kernel_heap(const void *ptr, size_t len, const char *context)
+static void user_atk_window_retain(user_atk_window_t *win)
 {
-    if (!ptr || len == 0)
+    if (!win)
     {
-        return false;
+        return;
     }
-    uintptr_t start = (uintptr_t)ptr;
-    uintptr_t end = start + len - 1;
-    /* Detect overflow and any overlap with the kernel heap region (where kernel stacks live). */
-    if (end < start)
-    {
-        serial_printf("%s", "[user_atk] reject pointer overflow context=");
-        serial_printf("%s", context ? context : "<unknown>");
-        serial_printf("%s", " ptr=0x");
-        serial_printf("%016llX", (unsigned long long)start);
-        serial_printf("%s", " len=0x");
-        serial_printf("%016llX", (unsigned long long)len);
-        serial_printf("%s", " caller=0x");
-        serial_printf("%016llX", (unsigned long long)(uintptr_t)__builtin_return_address(0));
-        serial_printf("%s", "\r\n");
-        return true;
-    }
-    uintptr_t heap_lo = (uintptr_t)KERNEL_HEAP_BASE;
-    uintptr_t heap_hi = heap_lo + (uintptr_t)KERNEL_HEAP_SIZE - 1;
-    if (end < heap_lo || start > heap_hi)
-    {
-        return false;
-    }
+    __atomic_fetch_add(&win->refcount, 1u, __ATOMIC_SEQ_CST);
+}
 
-    serial_printf("%s", "[user_atk] reject pointer into kernel heap context=");
-    serial_printf("%s", context ? context : "<unknown>");
-    serial_printf("%s", " ptr=0x");
-    serial_printf("%016llX", (unsigned long long)start);
-    serial_printf("%s", " len=0x");
-    serial_printf("%016llX", (unsigned long long)len);
-    serial_printf("%s", " caller=0x");
-    serial_printf("%016llX", (unsigned long long)(uintptr_t)__builtin_return_address(0));
-    serial_printf("%s", "\r\n");
-    return true;
+static void user_atk_window_release(user_atk_window_t *win)
+{
+    if (!win)
+    {
+        return;
+    }
+    uint32_t prev = __atomic_fetch_sub(&win->refcount, 1u, __ATOMIC_SEQ_CST);
+    if (prev == 0)
+    {
+        __atomic_fetch_add(&win->refcount, 1u, __ATOMIC_SEQ_CST);
+        return;
+    }
+    if (prev == 1)
+    {
+        free(win);
+    }
 }
 
 static user_atk_window_t *user_atk_from_window(const atk_widget_t *window)
@@ -429,6 +415,7 @@ static void user_atk_window_on_destroy(void *context)
         return;
     }
 
+    bool send_close_event = !win->destroying;
     win->window = NULL;
     win->image = NULL;
     win->pixels = NULL;
@@ -443,7 +430,10 @@ static void user_atk_window_on_destroy(void *context)
     }
     wait_queue_wake_all(&win->event_waiters);
     user_atk_apply_priorities();
-    user_atk_send_close_event(win);
+    if (send_close_event)
+    {
+        user_atk_send_close_event(win);
+    }
 }
 
 static void user_atk_insert(user_atk_window_t *win)
@@ -463,6 +453,7 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     {
         return;
     }
+    (void)closing_kernel;
 
     if (win->prev)
     {
@@ -479,7 +470,7 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     win->next = NULL;
     win->prev = NULL;
 
-    if (!closing_kernel && win->window)
+    if (win->window)
     {
         win->destroying = true;
         atk_window_close(atk_state_get(), win->window);
@@ -496,7 +487,7 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     }
     wait_queue_wake_all(&win->event_waiters);
     user_atk_apply_priorities();
-    free(win);
+    user_atk_window_release(win);
 }
 
 static user_atk_window_t *user_atk_find(uint32_t handle, process_t *owner)
@@ -505,6 +496,7 @@ static user_atk_window_t *user_atk_find(uint32_t handle, process_t *owner)
     {
         if (win->handle == handle && win->owner == owner)
         {
+            user_atk_window_retain(win);
             return win;
         }
     }
@@ -517,13 +509,11 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     {
         return -1;
     }
-    if (user_atk_buffer_overlaps_kernel_heap(desc_user, sizeof(*desc_user), "user_atk_sys_create"))
+    user_atk_window_desc_t desc = { 0 };
+    if (!user_copy_from_user(&desc, desc_user, sizeof(desc)))
     {
         return -1;
     }
-
-    user_atk_window_desc_t desc;
-    memcpy(&desc, desc_user, sizeof(desc));
 
     if (desc.width == 0 || desc.height == 0)
     {
@@ -598,6 +588,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
 
     win->handle = g_next_handle++;
     win->flags = desc.flags & USER_ATK_WINDOW_FLAG_RESIZABLE;
+    win->refcount = 1;
     win->owner = process_current();
     win->window = window;
     win->image = image;
@@ -632,16 +623,16 @@ int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byt
     {
         return -1;
     }
-    if (user_atk_buffer_overlaps_kernel_heap(pixels, byte_len, "user_atk_sys_present"))
-    {
-        return -1;
-    }
     user_atk_log("present handle=", handle);
     user_atk_log("present user ptr=", (uintptr_t)pixels);
     user_atk_log("present bytes=", byte_len);
     user_atk_window_t *win = user_atk_find(handle, process_current());
     if (!win || win->closed || !win->pixels)
     {
+        if (win)
+        {
+            user_atk_window_release(win);
+        }
         return -1;
     }
 
@@ -650,10 +641,15 @@ int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byt
     if (byte_len != win->pixel_bytes)
     {
         user_atk_present_log_mismatch(handle, win->pixel_bytes, byte_len);
+        user_atk_window_release(win);
         return -1;
     }
 
-    memcpy(win->pixels, pixels, byte_len);
+    if (!user_copy_from_user(win->pixels, pixels, byte_len))
+    {
+        user_atk_window_release(win);
+        return -1;
+    }
     user_atk_log("present dst ptr=", (uintptr_t)win->pixels);
     if (win->window)
     {
@@ -665,6 +661,7 @@ int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byt
         video_request_refresh();
     }
     video_pump_events();
+    user_atk_window_release(win);
     return 0;
 }
 
@@ -674,7 +671,7 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
     {
         return -1;
     }
-    if (user_atk_buffer_overlaps_kernel_heap(event_out, sizeof(*event_out), "user_atk_sys_poll_event"))
+    if (!user_ptr_range_valid(event_out, sizeof(*event_out)))
     {
         return -1;
     }
@@ -691,19 +688,26 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
     {
         if (!block || win->closed)
         {
-            memset(event_out, 0, sizeof(*event_out));
+            user_atk_event_t zero = { 0 };
+            user_copy_to_user(event_out, &zero, sizeof(zero));
 #if USER_ATK_DEBUG
             user_atk_log_pair("sys_poll_event empty", handle, flags);
 #endif
+            user_atk_window_release(win);
             return 0;
         }
         wait_queue_wait(&win->event_waiters, user_atk_event_queue_empty, win);
     }
 
-    *event_out = event;
+    if (!user_copy_to_user(event_out, &event, sizeof(event)))
+    {
+        user_atk_window_release(win);
+        return -1;
+    }
 #if USER_ATK_DEBUG
-    user_atk_log_pair("sys_poll_event", handle, event_out->type);
+    user_atk_log_pair("sys_poll_event", handle, event.type);
 #endif
+    user_atk_window_release(win);
     return 1;
 }
 
@@ -717,6 +721,7 @@ int64_t user_atk_sys_close(uint32_t handle)
     }
 
     user_atk_remove(win, false);
+    user_atk_window_release(win);
     return 0;
 }
 
@@ -728,7 +733,9 @@ void user_atk_on_process_destroy(process_t *process)
         user_atk_window_t *next = win->next;
         if (win->owner == process)
         {
+            user_atk_window_retain(win);
             user_atk_remove(win, false);
+            user_atk_window_release(win);
         }
         win = next;
     }
