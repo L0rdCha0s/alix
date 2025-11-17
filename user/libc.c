@@ -17,6 +17,7 @@ typedef struct heap_block
 
 static heap_block_t *g_heap_head = NULL;
 static heap_block_t *g_heap_tail = NULL;
+static volatile int g_heap_lock = 0;
 
 #ifdef ENABLE_USER_MEM_DEBUG_LOGS
 static void user_heap_log(const char *msg, uintptr_t value)
@@ -152,6 +153,96 @@ static heap_block_t *payload_to_block(void *ptr)
         return NULL;
     }
     return (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+}
+
+static void user_heap_lock_acquire(void)
+{
+    while (__sync_lock_test_and_set(&g_heap_lock, 1) != 0)
+    {
+        while (g_heap_lock)
+        {
+            __asm__ volatile ("pause");
+        }
+    }
+}
+
+static void user_heap_lock_release(void)
+{
+    __sync_lock_release(&g_heap_lock);
+}
+
+static void *malloc_locked(size_t size)
+{
+    size = align_size(size);
+    if (size == 0)
+    {
+        return NULL;
+    }
+
+    heap_block_t *block = find_free_block(size);
+    if (!block)
+    {
+        block = request_block(size);
+        if (!block)
+        {
+            return NULL;
+        }
+    }
+    else
+    {
+        block->free = false;
+        split_block(block, size);
+    }
+
+    return (uint8_t *)block + sizeof(heap_block_t);
+}
+
+static void free_locked(void *ptr)
+{
+    heap_block_t *block = payload_to_block(ptr);
+    if (!block || block->free)
+    {
+        return;
+    }
+
+    block->free = true;
+    coalesce(block);
+}
+
+static void *realloc_locked(void *ptr, size_t size)
+{
+    if (!ptr)
+    {
+        return malloc_locked(size);
+    }
+    if (size == 0)
+    {
+        free_locked(ptr);
+        return NULL;
+    }
+
+    heap_block_t *block = payload_to_block(ptr);
+    if (!block)
+    {
+        return NULL;
+    }
+
+    size = align_size(size);
+    if (size <= block->size)
+    {
+        split_block(block, size);
+        return ptr;
+    }
+
+    void *new_ptr = malloc_locked(size);
+    if (!new_ptr)
+    {
+        return NULL;
+    }
+    memcpy(new_ptr, ptr, block->size);
+    block->free = true;
+    coalesce(block);
+    return new_ptr;
 }
 
 void *memset(void *dst, int value, size_t count)
@@ -596,28 +687,9 @@ int printf(const char *format, ...)
 void *malloc(size_t size)
 {
     user_heap_log("malloc req=", size);
-    size = align_size(size);
-    if (size == 0)
-    {
-        return NULL;
-    }
-
-    heap_block_t *block = find_free_block(size);
-    if (!block)
-    {
-        block = request_block(size);
-        if (!block)
-        {
-            return NULL;
-        }
-    }
-    else
-    {
-        block->free = false;
-        split_block(block, size);
-    }
-
-    void *ptr = (uint8_t *)block + sizeof(heap_block_t);
+    user_heap_lock_acquire();
+    void *ptr = malloc_locked(size);
+    user_heap_lock_release();
     user_heap_log("malloc ptr=", (uintptr_t)ptr);
     return ptr;
 }
@@ -625,56 +697,19 @@ void *malloc(size_t size)
 void free(void *ptr)
 {
     user_heap_log("free ptr=", (uintptr_t)ptr);
-    heap_block_t *block = payload_to_block(ptr);
-    if (!block || block->free)
-    {
-        user_heap_log("free ignored ptr=", (uintptr_t)ptr);
-        return;
-    }
-
-    block->free = true;
-    coalesce(block);
+    user_heap_lock_acquire();
+    free_locked(ptr);
+    user_heap_lock_release();
 }
 
 void *realloc(void *ptr, size_t size)
 {
     user_heap_log("realloc ptr=", (uintptr_t)ptr);
     user_heap_log("realloc size=", size);
-    if (!ptr)
-    {
-        return malloc(size);
-    }
-    if (size == 0)
-    {
-        free(ptr);
-        return NULL;
-    }
-
-    heap_block_t *block = payload_to_block(ptr);
-    if (!block)
-    {
-        user_heap_log("realloc invalid block ptr=", (uintptr_t)ptr);
-        return NULL;
-    }
-
-    size = align_size(size);
-    if (size <= block->size)
-    {
-        split_block(block, size);
-        return ptr;
-    }
-
-    void *new_ptr = malloc(size);
-    if (!new_ptr)
-    {
-        user_heap_log("realloc malloc fail size=", size);
-        user_heap_log("realloc malloc fail old_size=", block->size);
-        user_heap_log("realloc malloc fail block=", (uintptr_t)block);
-        return NULL;
-    }
-    memcpy(new_ptr, ptr, block->size);
-    free(ptr);
-    return new_ptr;
+    user_heap_lock_acquire();
+    void *res = realloc_locked(ptr, size);
+    user_heap_lock_release();
+    return res;
 }
 
 void *calloc(size_t count, size_t size)
@@ -686,7 +721,9 @@ void *calloc(size_t count, size_t size)
         return NULL;
     }
     size_t total = count * size;
-    void *ptr = malloc(total);
+    user_heap_lock_acquire();
+    void *ptr = malloc_locked(total);
+    user_heap_lock_release();
     if (!ptr)
     {
         return NULL;

@@ -471,6 +471,16 @@ static bool thread_pointer_valid(const thread_t *thread)
     return true;
 }
 
+static bool thread_fpu_region_valid(const thread_t *thread)
+{
+    if (!thread)
+    {
+        return false;
+    }
+    uintptr_t addr = (uintptr_t)&thread->fpu_state;
+    return pointer_in_heap(addr, sizeof(fpu_state_t));
+}
+
 static bool process_pointer_valid(const process_t *process)
 {
     if (!process)
@@ -4040,6 +4050,16 @@ static bool switch_to_thread(thread_t *next)
         scheduler_trace("[sched] switch_to: invalid next pointer;", next);
         return false;
     }
+    if (next && (next->state == THREAD_STATE_ZOMBIE || next->pending_destroy))
+    {
+        scheduler_trace("[sched] switch_to: next is zombie/pending_destroy;", next);
+        return false;
+    }
+    if (next && !thread_fpu_region_valid(next))
+    {
+        scheduler_trace("[sched] switch_to: invalid fpu region;", next);
+        return false;
+    }
     if (next && (!next->context || !next->stack_base || next->kernel_stack_top == 0))
     {
         serial_printf("%s", "[sched] switch_to cancelled: missing context thread=");
@@ -4177,6 +4197,41 @@ static bool switch_to_thread(thread_t *next)
     thread_t *resumed = current_thread_local();
     if (resumed)
     {
+        /* Validate that we resumed on a sane stack to catch corruption early. */
+        uintptr_t rsp_after = 0;
+        __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp_after));
+        uint16_t ss_after = 0;
+        __asm__ volatile ("mov %%ss, %0" : "=r"(ss_after));
+        if (!thread_stack_pointer_valid(resumed, rsp_after))
+        {
+            serial_printf("%s", "[sched] fatal: resumed with invalid RSP thread=");
+            serial_printf("%s", resumed->name[0] ? resumed->name : "<unnamed>");
+            serial_printf("%s", " pid=0x");
+            serial_printf("%016llX", (unsigned long long)(resumed->process ? resumed->process->pid : 0));
+            serial_printf("%s", " rsp=0x");
+            serial_printf("%016llX", (unsigned long long)rsp_after);
+            serial_printf("%s", " stack=[0x");
+            serial_printf("%016llX", (unsigned long long)(uintptr_t)resumed->stack_base);
+            serial_printf("%s", ",0x");
+            serial_printf("%016llX", (unsigned long long)resumed->kernel_stack_top);
+            serial_printf("%s", ")\r\n");
+            fatal("resumed with invalid stack pointer");
+        }
+        if (!resumed->is_idle && ss_after != GDT_SELECTOR_KERNEL_DATA)
+        {
+            serial_printf("%s", "[sched] fatal: resumed with invalid SS thread=");
+            serial_printf("%s", resumed->name[0] ? resumed->name : "<unnamed>");
+            serial_printf("%s", " pid=0x");
+            serial_printf("%016llX", (unsigned long long)(resumed->process ? resumed->process->pid : 0));
+            serial_printf("%s", " ss=0x");
+            serial_printf("%04X", ss_after);
+            serial_printf("%s", " stack=[0x");
+            serial_printf("%016llX", (unsigned long long)(uintptr_t)resumed->stack_base);
+            serial_printf("%s", ",0x");
+            serial_printf("%016llX", (unsigned long long)resumed->kernel_stack_top);
+            serial_printf("%s", ")\r\n");
+            fatal("resumed with invalid stack segment");
+        }
         thread_context_guard_release_pages(resumed);
         resumed->context_valid = true;
         scheduler_shell_log("context_valid=true (resumed)", resumed);
