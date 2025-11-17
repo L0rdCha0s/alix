@@ -11,7 +11,7 @@
 #include "syscall_defs.h"
 #endif
 
-#define ATK_FONT_PATH "/usr/share/fonts/SF-Pro.ttf"
+#define ATK_FONT_PATH "/usr/share/fonts/PublicSans.ttf"
 #define ATK_FONT_PIXEL_SIZE 22
 #define ATK_FONT_CACHE_FIRST 32
 #define ATK_FONT_CACHE_LAST  126
