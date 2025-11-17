@@ -3,7 +3,6 @@
 #include "userlib.h"
 #include "serial.h"
 
-#define ENABLE_USER_MEM_DEBUG_LOGS
 #define ALIGNMENT 16UL
 #define SIZE_MAX_VALUE ((size_t)-1)
 
@@ -113,7 +112,7 @@ static heap_block_t *find_free_block(size_t size)
     return NULL;
 }
 
-static heap_block_t *request_block(size_t size)
+static heap_block_t *request_block_unlinked(size_t size)
 {
     if (size > SIZE_MAX_VALUE - sizeof(heap_block_t))
     {
@@ -131,18 +130,8 @@ static heap_block_t *request_block(size_t size)
     heap_block_t *block = (heap_block_t *)base;
     block->size = size;
     block->next = NULL;
-    block->prev = g_heap_tail;
+    block->prev = NULL;
     block->free = false;
-
-    if (g_heap_tail)
-    {
-        g_heap_tail->next = block;
-    }
-    else
-    {
-        g_heap_head = block;
-    }
-    g_heap_tail = block;
     return block;
 }
 
@@ -180,21 +169,38 @@ static void *malloc_locked(size_t size)
     }
 
     heap_block_t *block = find_free_block(size);
-    if (!block)
-    {
-        block = request_block(size);
-        if (!block)
-        {
-            return NULL;
-        }
-    }
-    else
+    if (block)
     {
         block->free = false;
         split_block(block, size);
+        return (uint8_t *)block + sizeof(heap_block_t);
     }
 
-    return (uint8_t *)block + sizeof(heap_block_t);
+    /*
+     * Grow the heap without holding the spinlock across the syscall, then
+     * re-acquire the lock to splice the new block. This keeps list mutation
+     * serialized while avoiding blocking in sbrk with the lock held.
+     */
+    user_heap_lock_release();
+    heap_block_t *new_block = request_block_unlinked(size);
+    user_heap_lock_acquire();
+    if (!new_block)
+    {
+        return NULL;
+    }
+
+    new_block->prev = g_heap_tail;
+    new_block->next = NULL;
+    if (g_heap_tail)
+    {
+        g_heap_tail->next = new_block;
+    }
+    else
+    {
+        g_heap_head = new_block;
+    }
+    g_heap_tail = new_block;
+    return (uint8_t *)new_block + sizeof(heap_block_t);
 }
 
 static void free_locked(void *ptr)

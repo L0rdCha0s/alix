@@ -328,6 +328,7 @@ static uint32_t g_time_slice_ticks = PROCESS_TIME_SLICE_DEFAULT_TICKS;
 static thread_t *g_stack_watch_frozen_head = NULL;
 static thread_t *g_thread_registry_head = NULL;
 static spinlock_t g_thread_registry_lock;
+static uint8_t g_context_switch_dummy_flag = 0;
 
 static void thread_freeze_for_stack_watch(thread_t *thread, const char *context);
 static void thread_unfreeze_after_stack_watch(thread_t *thread);
@@ -346,31 +347,47 @@ static inline uint32_t scheduler_time_slice_ticks(void)
 static inline uint32_t current_cpu_index(void)
 {
     uint32_t idx = smp_current_cpu_index();
-    if (idx >= SMP_MAX_CPUS)
-    {
-        idx = 0;
-    }
-    return idx;
+    return (idx < SMP_MAX_CPUS) ? idx : 0;
 }
 
 static inline thread_t *current_thread_local(void)
 {
-    return g_current_threads[current_cpu_index()];
+    uint32_t idx = smp_current_cpu_index();
+    if (idx >= SMP_MAX_CPUS)
+    {
+        idx = 0;
+    }
+    return g_current_threads[idx];
 }
 
 static inline process_t *current_process_local(void)
 {
-    return g_current_processes[current_cpu_index()];
+    uint32_t idx = smp_current_cpu_index();
+    if (idx >= SMP_MAX_CPUS)
+    {
+        idx = 0;
+    }
+    return g_current_processes[idx];
 }
 
 static inline void set_current_thread_local(thread_t *thread)
 {
-    g_current_threads[current_cpu_index()] = thread;
+    uint32_t idx = smp_current_cpu_index();
+    if (idx >= SMP_MAX_CPUS)
+    {
+        idx = 0;
+    }
+    g_current_threads[idx] = thread;
 }
 
 static inline void set_current_process_local(process_t *process)
 {
-    g_current_processes[current_cpu_index()] = process;
+    uint32_t idx = smp_current_cpu_index();
+    if (idx >= SMP_MAX_CPUS)
+    {
+        idx = 0;
+    }
+    g_current_processes[idx] = process;
 }
 
 static void thread_scan_stack_for_suspicious_values(thread_t *thread,
@@ -4232,18 +4249,18 @@ static bool switch_to_thread(thread_t *next)
         wrmsr(MSR_GS_BASE, next->gs_base);
         fpu_restore_state(&next->fpu_state);
 
-        scheduler_debug_check_resume(next, "switch_to");
-    }
+    scheduler_debug_check_resume(next, "switch_to");
+}
 
-    cpu_context_t **prev_ctx = prev ? &prev->context : &g_bootstrap_context;
-    cpu_context_t *next_ctx = next ? next->context : NULL;
+cpu_context_t **prev_ctx = prev ? &prev->context : &g_bootstrap_context;
+cpu_context_t *next_ctx = next ? next->context : NULL;
+    uint8_t *prev_transition_flag = prev ? (uint8_t *)&prev->in_transition : &g_context_switch_dummy_flag;
 
     if (!next_ctx)
     {
         return false;
     }
 
-    uint8_t *prev_transition_flag = prev ? (uint8_t *)&prev->in_transition : NULL;
     context_switch(prev_ctx, next_ctx, prev_transition_flag);
 
     thread_t *resumed = current_thread_local();

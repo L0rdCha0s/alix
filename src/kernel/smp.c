@@ -15,6 +15,16 @@
 #include "serial.h"
 #include "idt.h"
 
+static inline uint32_t smp_cpuid_apic_id(void)
+{
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    __asm__ volatile ("cpuid"
+                      : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                      : "a"(1), "c"(0));
+    (void)eax; (void)ecx; (void)edx;
+    return ebx >> 24;
+}
+
 #define SMP_BOOT_STACK_SIZE (32 * 1024)
 #define IA32_EFER 0xC0000080u
 
@@ -353,8 +363,14 @@ static uint32_t resolve_apic_to_index(uint32_t apic_id, bool strict)
 
 uint32_t smp_current_cpu_index(void)
 {
-    uint32_t apic = lapic_get_id();
-    return resolve_apic_to_index(apic, false);
+    /* Prefer CPUID-reported APIC ID to avoid MMIO reads that could fault. */
+    uint32_t apic = smp_cpuid_apic_id();
+    uint32_t idx = resolve_apic_to_index(apic, false);
+    if (idx >= SMP_MAX_CPUS)
+    {
+        return g_boot_cpu_index;
+    }
+    return idx;
 }
 
 static void prepare_bootstrap_data(uint32_t cpu_index, uint64_t stack_top)
