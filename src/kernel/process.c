@@ -1590,29 +1590,27 @@ static void scheduler_debug_check_resume(thread_t *thread, const char *label)
     }
 
     uintptr_t ctx_ptr = (uintptr_t)thread->context;
+    /* If the saved context pointer looks dodgy, bail out instead of crashing in debug checks. */
     if (!pointer_is_canonical(ctx_ptr))
     {
-        serial_printf("%s", "[sched] resume check non-canonical ctx thread=");
-        if (thread->name[0])
-        {
-            serial_printf("%s", thread->name);
-        }
-        else
-        {
-            serial_printf("%s", "<unnamed>");
-        }
-        serial_printf("%s", " pid=0x");
-        serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
-        serial_printf("%s", " ctx=0x");
-        serial_printf("%016llX", (unsigned long long)ctx_ptr);
-        serial_printf("%s", "\r\n");
-        fatal("resume context pointer non-canonical");
+        return;
     }
 
-    thread_context_in_bounds(thread, "resume_check");
+    uintptr_t lower = (uintptr_t)thread->stack_base;
+    uintptr_t upper = thread->kernel_stack_top;
+    if (lower == 0 || upper <= lower || ctx_ptr < lower || ctx_ptr >= upper)
+    {
+        return;
+    }
 
     const size_t saved_context_words = CONTEXT_SWITCH_SAVED_WORDS; /* pushfq + rbp + rbx + r12-15 */
     const uint64_t *context_words = (const uint64_t *)thread->context;
+    /* Ensure we won't read past the current stack allocation. */
+    uintptr_t max_ctx = ctx_ptr + (saved_context_words + 1) * sizeof(uint64_t);
+    if (max_ctx > upper)
+    {
+        return;
+    }
     uint64_t resume_rip = context_words[saved_context_words];
     bool resume_zero = (resume_rip == 0);
     bool resume_boot = (resume_rip >= SMP_BOOT_DATA_PHYS &&

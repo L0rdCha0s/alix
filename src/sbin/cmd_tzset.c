@@ -131,6 +131,37 @@ static bool tzset_contains_ignore_case(const char *text, const char *needle)
     return false;
 }
 
+static bool tzset_parse_int(const char *text, int *value)
+{
+    if (!text || !value || *text == '\0')
+    {
+        return false;
+    }
+    int sign = 1;
+    size_t idx = 0;
+    if (text[idx] == '+' || text[idx] == '-')
+    {
+        sign = (text[idx] == '-') ? -1 : 1;
+        idx++;
+    }
+    if (text[idx] == '\0')
+    {
+        return false;
+    }
+    int result = 0;
+    for (; text[idx]; ++idx)
+    {
+        char c = text[idx];
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+        result = result * 10 + (c - '0');
+    }
+    *value = result * sign;
+    return true;
+}
+
 static void tzset_copy_string(char *dest, size_t capacity, const char *src)
 {
     if (!dest || capacity == 0)
@@ -289,7 +320,7 @@ static void tzset_print_legacy_options(shell_output_t *out)
         shell_output_write(out, opt->description);
         shell_output_write(out, "\n");
     }
-    shell_output_write(out, "Usage: tzset <name>, tzset list [filter], or tzset legacy <preset>\n");
+    shell_output_write(out, "Usage: tzset <name>, tzset list [filter], or tzset legacy <preset> [dst_offset_minutes]\n");
 }
 
 bool shell_cmd_tzset(shell_state_t *shell, shell_output_t *out, const char *args)
@@ -335,11 +366,50 @@ bool shell_cmd_tzset(shell_state_t *shell, shell_output_t *out, const char *args
         }
     }
 
+    const char *name_start = trimmed;
+    const char *name_end = name_start;
+    while (*name_end && *name_end != ' ' && *name_end != '\t')
+    {
+        ++name_end;
+    }
+    if (name_end == name_start)
+    {
+        shell_output_write(out, "Usage: tzset <name> [dst_offset_minutes]\n");
+        return false;
+    }
+
+    char tz_name[TIMEKEEPING_TZ_NAME_MAX];
+    size_t name_len = (size_t)(name_end - name_start);
+    if (name_len >= sizeof(tz_name))
+    {
+        name_len = sizeof(tz_name) - 1;
+    }
+    memcpy(tz_name, name_start, name_len);
+    tz_name[name_len] = '\0';
+
+    const char *dst_arg = tzset_skip_spaces(name_end);
+    bool has_dst_override = (*dst_arg != '\0');
+    int dst_override_minutes = 0;
+    if (has_dst_override)
+    {
+        if (!tzset_parse_int(dst_arg, &dst_override_minutes) ||
+            !timekeeping_is_valid_timezone_offset(dst_override_minutes))
+        {
+            shell_output_write(out, "Invalid DST offset. Provide minutes relative to UTC (e.g., -240).\n");
+            return false;
+        }
+    }
+
     if (!legacy_mode && tzdb_load())
     {
-        const tzdb_zone_t *zone = tzdb_find_zone(trimmed);
+        const tzdb_zone_t *zone = tzdb_find_zone(tz_name);
         if (zone)
         {
+            if (has_dst_override)
+            {
+                shell_output_write(out, "DST offset overrides are only supported for legacy presets.\n");
+                return false;
+            }
             timekeeping_timezone_spec_t spec;
             memset(&spec, 0, sizeof(spec));
             tzset_copy_string(spec.name, sizeof(spec.name), zone->name);
@@ -360,7 +430,7 @@ bool shell_cmd_tzset(shell_state_t *shell, shell_output_t *out, const char *args
         }
     }
 
-    const tzset_option_t *option = tzset_find_option(trimmed);
+    const tzset_option_t *option = tzset_find_option(tz_name);
     if (!option)
     {
         shell_output_write(out, "Unknown timezone. Use 'tzset list' or 'tzset legacy <name>'.\n");
@@ -376,6 +446,21 @@ bool shell_cmd_tzset(shell_state_t *shell, shell_output_t *out, const char *args
     spec.dst_start = option->dst_start;
     spec.dst_end = option->dst_end;
     spec.use_zone = false;
+    if (has_dst_override)
+    {
+        if (!option->dst_enabled)
+        {
+            shell_output_write(out, "DST offset overrides require a preset with DST rules.\n");
+            return false;
+        }
+        if (dst_override_minutes == spec.standard_offset_minutes)
+        {
+            shell_output_write(out, "DST offset must differ from the standard offset.\n");
+            return false;
+        }
+        spec.dst_offset_minutes = dst_override_minutes;
+        spec.dst_enabled = true;
+    }
     if (!timekeeping_save_timezone_spec(&spec))
     {
         shell_output_write(out, "Failed to update timezone.\n");
@@ -384,6 +469,12 @@ bool shell_cmd_tzset(shell_state_t *shell, shell_output_t *out, const char *args
 
     shell_output_write(out, "Timezone updated to ");
     shell_output_write(out, option->name);
+    if (has_dst_override && spec.dst_enabled)
+    {
+        shell_output_write(out, " (DST offset ");
+        tzset_write_offset(out, spec.dst_offset_minutes);
+        shell_output_write(out, ")");
+    }
     shell_output_write(out, ".\n");
     return true;
 }

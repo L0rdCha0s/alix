@@ -187,6 +187,10 @@ static void ensure_system_layout(void)
     {
         serial_printf("%s", "[alix] warn: unable to ensure /root/usr/share\r\n");
     }
+    if (!ensure_directory_path("/root/usr/share/fonts"))
+    {
+        serial_printf("%s", "[alix] warn: unable to ensure /root/usr/share/fonts\r\n");
+    }
     if (!ensure_directory_path("/root/usr/share/zoneinfo"))
     {
         serial_printf("%s", "[alix] warn: unable to ensure /root/usr/share/zoneinfo\r\n");

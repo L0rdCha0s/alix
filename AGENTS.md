@@ -10,6 +10,7 @@
 - Always run "make" to check your work before handing back to the user
 - Use x86_64-elf-addr2line and x86_64-elf-objdump in order to look for lines in stacktraces in compiled code and analyse ELF binaries.
 - Use tcpdump to analyse qemu-net.pcap when looking at network traffic.
+- We are still building our libc - if there's a function that should be either in the kernel or the user libc, add it in, rather than putting a function that should be in libc in a seperate place
 
 Thanks!
 

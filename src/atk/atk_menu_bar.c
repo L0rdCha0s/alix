@@ -11,6 +11,7 @@
 #ifdef KERNEL_BUILD
 #include "serial.h"
 #include "power.h"
+#include "vfs.h"
 #endif
 #ifndef ATK_NO_DESKTOP_APPS
 #include "timekeeping.h"
@@ -819,6 +820,15 @@ static void shutdown_dialog_confirm(atk_widget_t *button, void *context)
         atk_window_close(state, window);
         free(ctx);
     }
+#ifdef KERNEL_BUILD
+    serial_printf("%s", "[shutdown] syncing filesystems...\r\n");
+    if (!vfs_sync_all())
+    {
+        serial_printf("%s", "[shutdown] vfs_sync_all failed; aborting shutdown\r\n");
+        return;
+    }
+    serial_printf("%s", "[shutdown] powering off\r\n");
+#endif
     power_shutdown();
 }
 

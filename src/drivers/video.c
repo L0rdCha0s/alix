@@ -880,9 +880,7 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     if (!video_active)
     {
-#if VIDEO_MOUSE_LOG
-        if (dx != 0 || dy != 0 || left_pressed) video_log("mouse event ignored (video inactive)");
-#endif
+        /* Do not log inside IRQ handlers; serial output here has triggered faults. */
         goto out;
     }
 
@@ -928,14 +926,7 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     cursor_draw_overlay();
 
-#if VIDEO_MOUSE_LOG
-    if (!logged_first_mouse)
-    {
-        video_log("mouse movement detected in video");
-        logged_first_mouse = true;
-    }
-    video_log_mouse_event(dx, dy, left_pressed);
-#endif
+    /* Mouse IRQ logging disabled; avoid serial I/O in interrupt context. */
 
     if (result.exit_video)
     {
