@@ -290,6 +290,21 @@ static void mount_default_fstab(void)
                 {
                     serial_printf("%s", "[alix] fstab: mount still failing after format\r\n");
                 }
+                else
+                {
+                    ensure_system_layout();
+                    if (!timekeeping_ensure_timezone_config())
+                    {
+                        serial_printf("%s", "[alix] warn: timezone config missing and default creation failed\r\n");
+                    }
+                    else
+                    {
+                        if (!timekeeping_reload_timezone())
+                        {
+                            serial_printf("%s", "[alix] warn: failed to reload timezone config\r\n");
+                        }
+                    }
+                }
             }
             else
             {
@@ -396,9 +411,46 @@ static void storage_flush_process_entry(void *arg)
     while (1)
     {
         process_sleep_ms(interval_ms);
+        const size_t max_mounts = 8;
+        vfs_mount_info_t mounts[max_mounts];
+        size_t total_mounts = vfs_snapshot_mounts(mounts, max_mounts);
+        size_t dirty_mounts = 0;
+        bool any = false;
+        for (size_t i = 0; i < total_mounts && i < max_mounts; ++i)
+        {
+            if (mounts[i].dirty)
+            {
+                dirty_mounts++;
+                char path[128];
+                vfs_build_path(mounts[i].mount_point, path, sizeof(path));
+                const char *dev = mounts[i].device ? mounts[i].device->name : "(none)";
+                serial_printf("%s", "[flushd] dirty: ");
+                serial_printf("%s", dev);
+                serial_printf("%s", " -> ");
+                serial_printf("%s", path);
+                if (mounts[i].needs_full_sync)
+                {
+                    serial_printf("%s", " (full)");
+                }
+                serial_printf("%s", "\r\n");
+                any = true;
+            }
+        }
+        if (!any)
+        {
+            serial_printf("%s", "[flushd] no dirty mounts\r\n");
+        }
         if (!vfs_sync_dirty())
         {
             serial_printf("%s", "[flushd] warning: partial sync failure\r\n");
+        }
+        else if (dirty_mounts)
+        {
+            serial_printf("%s", "[flushd] sync complete\r\n");
+        }
+        else
+        {
+            serial_printf("%s", "[flushd] nothing to sync\r\n");
         }
     }
 }

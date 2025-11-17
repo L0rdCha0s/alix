@@ -446,6 +446,12 @@ static bool pointer_in_heap(uint64_t addr, size_t size)
     return addr >= heap_start && (addr + size) <= heap_end;
 }
 
+static inline bool pointer_is_canonical(uintptr_t addr)
+{
+    /* Sign-extend bit 47 for canonical kernel/user pointers. */
+    return ((addr >> 47) == 0) || ((addr >> 47) == 0x1FFFF);
+}
+
 static bool thread_pointer_valid(const thread_t *thread)
 {
     if (!thread)
@@ -1117,6 +1123,24 @@ static void thread_process_deferred_frees(uint32_t cpu_index)
                 break;
             }
         }
+        /* Belt-and-suspenders: confirm the thread is not still linked in any run queue
+         * even if its in_run_queue flag was cleared incorrectly. */
+        if (!in_use)
+        {
+            spinlock_lock(&g_run_queue_lock);
+            for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE && !in_use; --pr)
+            {
+                for (thread_t *rq = g_run_queue_heads[pr]; rq; rq = rq->queue_next)
+                {
+                    if (rq == cursor)
+                    {
+                        in_use = true;
+                        break;
+                    }
+                }
+            }
+            spinlock_unlock(&g_run_queue_lock);
+        }
         if (cursor->state != THREAD_STATE_ZOMBIE || cursor->in_run_queue || cursor->sleeping ||
             cursor->waiting_queue || cursor->in_transition)
         {
@@ -1542,6 +1566,26 @@ static void scheduler_debug_check_resume(thread_t *thread, const char *label)
     if (!thread || !thread->context)
     {
         return;
+    }
+
+    uintptr_t ctx_ptr = (uintptr_t)thread->context;
+    if (!pointer_is_canonical(ctx_ptr))
+    {
+        serial_printf("%s", "[sched] resume check non-canonical ctx thread=");
+        if (thread->name[0])
+        {
+            serial_printf("%s", thread->name);
+        }
+        else
+        {
+            serial_printf("%s", "<unnamed>");
+        }
+        serial_printf("%s", " pid=0x");
+        serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+        serial_printf("%s", " ctx=0x");
+        serial_printf("%016llX", (unsigned long long)ctx_ptr);
+        serial_printf("%s", "\r\n");
+        fatal("resume context pointer non-canonical");
     }
 
     thread_context_in_bounds(thread, "resume_check");

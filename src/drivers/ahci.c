@@ -59,8 +59,9 @@
 #define HBA_BOHC_OOS    (1U << 1)
 
 #define FIS_TYPE_REG_H2D 0x27
-#define ATA_CMD_READ_DMA_EXT  0x25
-#define ATA_CMD_WRITE_DMA_EXT 0x35
+#define ATA_CMD_READ_DMA_EXT     0x25
+#define ATA_CMD_WRITE_DMA_EXT    0x35
+#define ATA_CMD_FLUSH_CACHE_EXT  0xEA
 
 #define ATA_CMD_IDENTIFY 0xEC
 
@@ -591,41 +592,43 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     hba_port_t *port = ctx->port;
     ahci_log_hex("cmd buffer=", (uint64_t)(uintptr_t)buffer);
     ahci_log_hex("cmd bytes=", (uint64_t)count * AHCI_SECTOR_SIZE);
-    if (!buffer)
-    {
-        goto cleanup;
-    }
     if (count > AHCI_MAX_TRANSFER_SECTORS)
     {
         goto cleanup;
     }
-    uint64_t total_bytes = count ? ((uint64_t)count * AHCI_SECTOR_SIZE) : AHCI_SECTOR_SIZE;
-    if (total_bytes == 0)
+
+    uint64_t total_bytes = count ? ((uint64_t)count * AHCI_SECTOR_SIZE) : 0;
+    bool has_payload = (total_bytes > 0);
+    if (has_payload && !buffer)
     {
-        total_bytes = AHCI_SECTOR_SIZE;
+        goto cleanup;
     }
-    void *original_buffer = buffer;
+
+    void *original_buffer = has_payload ? buffer : NULL;
     uint8_t *bounce_alloc = NULL;
-    thread_t *stack_owner = process_find_stack_owner(buffer, (size_t)total_bytes);
-    if (stack_owner)
+    if (has_payload)
     {
-        bounce_alloc = (uint8_t *)malloc((size_t)total_bytes);
-        if (!bounce_alloc)
+        thread_t *stack_owner = process_find_stack_owner(buffer, (size_t)total_bytes);
+        if (stack_owner)
         {
-            ahci_log_port(ctx->port_no, "stack bounce allocation failed");
-            goto cleanup;
+            bounce_alloc = (uint8_t *)malloc((size_t)total_bytes);
+            if (!bounce_alloc)
+            {
+                ahci_log_port(ctx->port_no, "stack bounce allocation failed");
+                goto cleanup;
+            }
+            if (write)
+            {
+                memcpy(bounce_alloc, buffer, (size_t)total_bytes);
+            }
+            ahci_log_stack_bounce(ctx->port_no,
+                                  stack_owner,
+                                  buffer,
+                                  bounce_alloc,
+                                  (size_t)total_bytes,
+                                  write);
+            buffer = bounce_alloc;
         }
-        if (write)
-        {
-            memcpy(bounce_alloc, buffer, (size_t)total_bytes);
-        }
-        ahci_log_stack_bounce(ctx->port_no,
-                              stack_owner,
-                              buffer,
-                              bounce_alloc,
-                              (size_t)total_bytes,
-                              write);
-        buffer = bounce_alloc;
     }
     if (!ahci_wait_ready(port))
     {
@@ -643,33 +646,39 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     hdr->atapi = 0;
     hdr->write = write ? 1 : 0;
     hdr->prdbc = 0;
-
     hba_cmd_tbl_t *tbl = ctx->cmd_tables[slot];
     memset(tbl, 0, sizeof(hba_cmd_tbl_t));
 
-    uintptr_t buf_addr = (uintptr_t)buffer;
-    uint64_t remaining = total_bytes;
-    uint32_t prdt_index = 0;
-    while (remaining && prdt_index < AHCI_MAX_PRDT_ENTRIES)
+    if (has_payload)
     {
-        uint32_t chunk = (remaining > AHCI_PRDT_MAX_BYTES) ? AHCI_PRDT_MAX_BYTES : (uint32_t)remaining;
-        hba_prdt_entry_t *entry = &tbl->prdt_entry[prdt_index];
-        uintptr_t virt_addr = buf_addr;
-        entry->dba = (uint32_t)virt_addr;
-        entry->dbau = (uint32_t)(virt_addr >> 32);
-        entry->dbc = chunk - 1;
-        entry->i = (remaining <= chunk) ? 1 : 0;
-        uint64_t phys_addr = ((uint64_t)entry->dbau << 32) | entry->dba;
-        ahci_log_prdt_entry(ctx->port_no, slot, prdt_index, virt_addr, phys_addr, chunk);
-        buf_addr += chunk;
-        remaining -= chunk;
-        ++prdt_index;
+        uintptr_t buf_addr = (uintptr_t)buffer;
+        uint64_t remaining = total_bytes;
+        uint32_t prdt_index = 0;
+        while (remaining && prdt_index < AHCI_MAX_PRDT_ENTRIES)
+        {
+            uint32_t chunk = (remaining > AHCI_PRDT_MAX_BYTES) ? AHCI_PRDT_MAX_BYTES : (uint32_t)remaining;
+            hba_prdt_entry_t *entry = &tbl->prdt_entry[prdt_index];
+            uintptr_t virt_addr = buf_addr;
+            entry->dba = (uint32_t)virt_addr;
+            entry->dbau = (uint32_t)(virt_addr >> 32);
+            entry->dbc = chunk - 1;
+            entry->i = (remaining <= chunk) ? 1 : 0;
+            uint64_t phys_addr = ((uint64_t)entry->dbau << 32) | entry->dba;
+            ahci_log_prdt_entry(ctx->port_no, slot, prdt_index, virt_addr, phys_addr, chunk);
+            buf_addr += chunk;
+            remaining -= chunk;
+            ++prdt_index;
+        }
+        if (remaining)
+        {
+            goto cleanup;
+        }
+        hdr->prdtl = (uint16_t)prdt_index;
     }
-    if (remaining)
+    else
     {
-        goto cleanup;
+        hdr->prdtl = 0;
     }
-    hdr->prdtl = (uint16_t)prdt_index;
 
     uint8_t *cfis = tbl->cfis;
     memset(cfis, 0, sizeof(tbl->cfis));
@@ -794,7 +803,8 @@ static bool ahci_block_write(block_device_t *device, uint64_t lba, uint32_t coun
         src += chunk * device->sector_size;
         count -= chunk;
     }
-    return true;
+    /* Ensure device write cache is persisted. */
+    return ahci_issue_cmd(ctx, ATA_CMD_FLUSH_CACHE_EXT, 0, 0, NULL, false);
 }
 
 static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
@@ -1002,7 +1012,8 @@ void ahci_init(void)
 }
 static bool ahci_identify_port(ahci_port_ctx_t *ctx, uint16_t *identify)
 {
-    return ahci_issue_cmd(ctx, ATA_CMD_IDENTIFY, 0, 0, identify, false);
+    /* IDENTIFY transfers one 512-byte sector. */
+    return ahci_issue_cmd(ctx, ATA_CMD_IDENTIFY, 0, 1, identify, false);
 }
 
 void ahci_on_irq(void)

@@ -53,6 +53,62 @@ bool shell_cmd_mount(shell_state_t *shell, shell_output_t *out, const char *args
     char *target_path = next_token(&cursor);
     char *extra = next_token(&cursor);
 
+    if (!device_path && !target_path && !extra)
+    {
+        /* List mounts. */
+        size_t total = vfs_snapshot_mounts(NULL, 0);
+        if (total == 0)
+        {
+            return shell_output_write(out, "no mounts\n");
+        }
+        vfs_mount_info_t *entries = (vfs_mount_info_t *)calloc(total, sizeof(vfs_mount_info_t));
+        if (!entries)
+        {
+            return shell_output_error(out, "out of memory");
+        }
+        size_t filled = vfs_snapshot_mounts(entries, total);
+        for (size_t i = 0; i < filled; ++i)
+        {
+            char path_buf[256];
+            size_t len = vfs_build_path(entries[i].mount_point, path_buf, sizeof(path_buf));
+            (void)len;
+            const char *dev = (entries[i].device && entries[i].device->name[0]) ? entries[i].device->name : "(none)";
+            char line[320];
+            size_t pos = 0;
+            size_t dev_len = strlen(dev);
+            if (dev_len >= sizeof(line)) dev_len = sizeof(line) - 1;
+            memmove(line + pos, dev, dev_len);
+            pos += dev_len;
+            const char arrow[] = " -> ";
+            size_t arrow_len = sizeof(arrow) - 1;
+            if (pos + arrow_len < sizeof(line))
+            {
+                memmove(line + pos, arrow, arrow_len);
+                pos += arrow_len;
+            }
+            size_t path_len = strlen(path_buf);
+            if (path_len >= sizeof(line) - pos) path_len = sizeof(line) - pos - 1;
+            memmove(line + pos, path_buf, path_len);
+            pos += path_len;
+            if (entries[i].dirty && pos + 16 < sizeof(line))
+            {
+                const char *dirty = entries[i].needs_full_sync ? " (dirty,full)" : " (dirty)";
+                size_t dlen = strlen(dirty);
+                if (dlen >= sizeof(line) - pos) dlen = sizeof(line) - pos - 1;
+                memmove(line + pos, dirty, dlen);
+                pos += dlen;
+            }
+            if (pos < sizeof(line) - 1)
+            {
+                line[pos++] = '\n';
+            }
+            line[pos] = '\0';
+            shell_output_write(out, line);
+        }
+        free(entries);
+        return true;
+    }
+
     if (!device_path || !target_path || extra)
     {
         if (device_path) free(device_path);

@@ -99,6 +99,8 @@ static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount);
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full);
 static bool vfs_device_is_mounted(block_device_t *device);
+size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max);
+bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
 
 /* ---------- helpers ---------- */
 
@@ -1577,6 +1579,8 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
         return false;
     }
 
+    const char *dev_name = (mount->device->name[0]) ? mount->device->name : "(anon)";
+
     size_t node_count = 0;
     size_t payload_size = 0;
     spinlock_lock(&g_vfs_tree_lock);
@@ -1614,6 +1618,14 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
         serial_printf("%s", "\r\n");
         return false;
     }
+
+    serial_printf("%s", "[vfs] writeback start dev=");
+    serial_printf("%s", dev_name);
+    serial_printf("%s", " sectors_needed=");
+    serial_printf("%016llX", (unsigned long long)sectors_needed);
+    serial_printf("%s", " total_bytes=");
+    serial_printf("%016llX", (unsigned long long)total_bytes);
+    serial_printf("%s", "\r\n");
 
     size_t max_bytes = (size_t)sectors_needed * sector_size;
     uint8_t *image = (uint8_t *)malloc(max_bytes);
@@ -1699,8 +1711,25 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
             {
                 if (!block_write(mount->device, run_start, run_len, image + (size_t)run_start * sector_size))
                 {
+                    serial_printf("%s", "[vfs] block_write failed dev=");
+                    serial_printf("%s", dev_name);
+                    serial_printf("%s", " lba=");
+                    serial_printf("%016llX", (unsigned long long)run_start);
+                    serial_printf("%s", " count=");
+                    serial_printf("%016llX", (unsigned long long)run_len);
+                    serial_printf("%s", "\r\n");
                     free(image);
                     return false;
+                }
+                else
+                {
+                    serial_printf("%s", "[vfs] block_write dev=");
+                    serial_printf("%s", dev_name);
+                    serial_printf("%s", " lba=");
+                    serial_printf("%016llX", (unsigned long long)run_start);
+                    serial_printf("%s", " count=");
+                    serial_printf("%016llX", (unsigned long long)run_len);
+                    serial_printf("%s", "\r\n");
                 }
                 run_start = sector;
                 run_len = 1;
@@ -1711,8 +1740,25 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     {
         if (!block_write(mount->device, run_start, run_len, image + (size_t)run_start * sector_size))
         {
+            serial_printf("%s", "[vfs] block_write failed dev=");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", " lba=");
+            serial_printf("%016llX", (unsigned long long)run_start);
+            serial_printf("%s", " count=");
+            serial_printf("%016llX", (unsigned long long)run_len);
+            serial_printf("%s", "\r\n");
             free(image);
             return false;
+        }
+        else
+        {
+            serial_printf("%s", "[vfs] block_write dev=");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", " lba=");
+            serial_printf("%016llX", (unsigned long long)run_start);
+            serial_printf("%s", " count=");
+            serial_printf("%016llX", (unsigned long long)run_len);
+            serial_printf("%s", "\r\n");
         }
     }
 
@@ -1777,18 +1823,21 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     bool ok_sync = vfs_mount_sync(mount, true);
     spinlock_unlock(&mount->sync_lock);
 
-    if (!ok_sync)
-    {
-        spinlock_lock(&mount->dirty_lock);
-        mount->needs_full_sync = true;
-        mount->dirty = true;
-        spinlock_unlock(&mount->dirty_lock);
-        return false;
-    }
+        if (!ok_sync)
+        {
+            spinlock_lock(&mount->dirty_lock);
+            mount->needs_full_sync = true;
+            mount->dirty = true;
+            spinlock_unlock(&mount->dirty_lock);
+            serial_printf("%s", "[vfs] writeback FAILED dev=");
+            serial_printf("%s", (mount && mount->device && mount->device->name[0]) ? mount->device->name : "(anon)");
+            serial_printf("%s", "\r\n");
+            return false;
+        }
 
-    spinlock_lock(&g_vfs_tree_lock);
-    vfs_clear_dirty_subtree(mount->mount_point, mount);
-    spinlock_unlock(&g_vfs_tree_lock);
+        spinlock_lock(&g_vfs_tree_lock);
+        vfs_clear_dirty_subtree(mount->mount_point, mount);
+        spinlock_unlock(&g_vfs_tree_lock);
 
     spinlock_lock(&mount->dirty_lock);
     if (mount->dirty_sectors && mount->dirty_sector_count > 0)
@@ -1796,6 +1845,9 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
         memset(mount->dirty_sectors, 0, mount->dirty_sector_count);
     }
     spinlock_unlock(&mount->dirty_lock);
+    serial_printf("%s", "[vfs] writeback OK dev=");
+    serial_printf("%s", (mount && mount->device && mount->device->name[0]) ? mount->device->name : "(anon)");
+    serial_printf("%s", "\r\n");
     return true;
 }
 
@@ -1829,6 +1881,8 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         return false;
     }
 
+    const char *dev_name = device->name[0] ? device->name : "(anon)";
+
     size_t sector_size = vfs_sector_size(device);
     uint8_t *first_sector = (uint8_t *)malloc(sector_size);
     if (!first_sector)
@@ -1838,6 +1892,9 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
 
     if (!block_read(device, 0, 1, first_sector))
     {
+        serial_printf("%s", "[vfs] mount ");
+        serial_printf("%s", dev_name);
+        serial_printf("%s", ": block_read sector0 failed\r\n");
         free(first_sector);
         return false;
     }
@@ -1850,6 +1907,9 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         header_copy.version != 1 ||
         header_copy.node_count == 0)
     {
+        serial_printf("%s", "[vfs] mount ");
+        serial_printf("%s", dev_name);
+        serial_printf("%s", ": bad header (magic/version/node_count)\r\n");
         return false;
     }
 
@@ -1861,6 +1921,9 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
     }
     if ((uint64_t)sectors_needed > device->sector_count)
     {
+        serial_printf("%s", "[vfs] mount ");
+        serial_printf("%s", dev_name);
+        serial_printf("%s", ": header exceeds device capacity\r\n");
         return false;
     }
 
@@ -1873,6 +1936,9 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
 
     if (!block_read(device, 0, sectors_needed, buffer))
     {
+        serial_printf("%s", "[vfs] mount ");
+        serial_printf("%s", dev_name);
+        serial_printf("%s", ": block_read image failed\r\n");
         free(buffer);
         return false;
     }
@@ -1882,6 +1948,9 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         header->version != 1 ||
         header->node_count == 0)
     {
+        serial_printf("%s", "[vfs] mount ");
+        serial_printf("%s", dev_name);
+        serial_printf("%s", ": bad header after read\r\n");
         free(buffer);
         return false;
     }
@@ -1889,6 +1958,9 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
     uint32_t node_count = header->node_count;
     if (header->root_id >= node_count)
     {
+        serial_printf("%s", "[vfs] mount ");
+        serial_printf("%s", dev_name);
+        serial_printf("%s", ": invalid root_id\r\n");
         free(buffer);
         return false;
     }
@@ -1896,6 +1968,9 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
     size_t header_total_bytes = sizeof(alixfs_header_t) + header->payload_size;
     if (header_total_bytes > buffer_size)
     {
+        serial_printf("%s", "[vfs] mount ");
+        serial_printf("%s", dev_name);
+        serial_printf("%s", ": payload overflow\r\n");
         free(buffer);
         return false;
     }
@@ -1920,11 +1995,22 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
 
     bool success = false;
     size_t offset = sizeof(alixfs_header_t);
+    bool failure_logged = false;
 
     for (uint32_t idx = 0; idx < node_count; ++idx)
     {
         if (offset + sizeof(alixfs_node_disk_t) > header_total_bytes)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": node header overflow idx=");
+            serial_printf("%016llX", (unsigned long long)idx);
+            serial_printf("%s", " off=");
+            serial_printf("%016llX", (unsigned long long)offset);
+            serial_printf("%s", " total=");
+            serial_printf("%016llX", (unsigned long long)header_total_bytes);
+            serial_printf("%s", "\r\n");
+            failure_logged = true;
             goto cleanup;
         }
 
@@ -1935,19 +2021,35 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
 
         if (disk.id >= node_count)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": invalid node id\r\n");
+            failure_logged = true;
             goto cleanup;
         }
         if (nodes[disk.id] && disk.id != header->root_id)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": duplicate node id\r\n");
+            failure_logged = true;
             goto cleanup;
         }
         if (disk.parent_id != 0xFFFFFFFFu && disk.parent_id >= node_count)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": invalid parent id\r\n");
+            failure_logged = true;
             goto cleanup;
         }
 
         if (offset + disk.name_len > header_total_bytes)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": name overflow\r\n");
+            failure_logged = true;
             goto cleanup;
         }
         const uint8_t *name_bytes = buffer + offset;
@@ -1957,6 +2059,10 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         size_t data_offset = 0;
         if (offset + data_len > header_total_bytes)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": data overflow\r\n");
+            failure_logged = true;
             goto cleanup;
         }
         const uint8_t *data_bytes = buffer + offset;
@@ -1967,6 +2073,10 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         {
             if (disk.type != VFS_NODE_DIR)
             {
+                serial_printf("%s", "[vfs] mount ");
+                serial_printf("%s", dev_name);
+                serial_printf("%s", ": root not dir\r\n");
+                failure_logged = true;
                 goto cleanup;
             }
             parents[disk.id] = disk.parent_id;
@@ -1975,6 +2085,10 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
 
         if (disk.type > VFS_NODE_SYMLINK || disk.name_len == 0)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": invalid node type or name_len\r\n");
+            failure_logged = true;
             goto cleanup;
         }
 
@@ -1990,6 +2104,10 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         vfs_node_t *node = vfs_alloc_node(node_type);
         if (!node)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": node alloc failed\r\n");
+            failure_logged = true;
             goto cleanup;
         }
 
@@ -1997,6 +2115,10 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         if (!name)
         {
             vfs_free_subtree(node);
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": name alloc failed\r\n");
+            failure_logged = true;
             goto cleanup;
         }
         memcpy(name, name_bytes, disk.name_len);
@@ -2010,6 +2132,10 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
             if (!data)
             {
                 vfs_free_subtree(node);
+                serial_printf("%s", "[vfs] mount ");
+                serial_printf("%s", dev_name);
+                serial_printf("%s", ": data alloc failed\r\n");
+                failure_logged = true;
                 goto cleanup;
             }
             memcpy(data, data_bytes, data_len);
@@ -2038,6 +2164,10 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
 
     if (parents[header->root_id] != 0xFFFFFFFFu)
     {
+        serial_printf("%s", "[vfs] mount ");
+        serial_printf("%s", dev_name);
+        serial_printf("%s", ": root parent mismatch\r\n");
+        failure_logged = true;
         goto cleanup;
     }
 
@@ -2050,21 +2180,31 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
         vfs_node_t *node = nodes[i];
         if (!node)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": missing node in table\r\n");
+            failure_logged = true;
             goto cleanup;
         }
         uint32_t parent_id = parents[i];
         if (parent_id >= node_count)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": parent id overflow\r\n");
+            failure_logged = true;
             goto cleanup;
         }
         vfs_node_t *parent = nodes[parent_id];
         if (!parent || parent->type != VFS_NODE_DIR)
         {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": parent missing or not dir\r\n");
+            failure_logged = true;
             goto cleanup;
         }
         vfs_attach_child_tail(parent, node);
-        /* Ownership transferred to tree; avoid double free on cleanup. */
-        nodes[i] = NULL;
     }
 
     mount->image_cache = buffer;
@@ -2080,18 +2220,25 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
 cleanup:
     if (!success)
     {
-        /* Detach anything we may have attached and free remaining nodes. */
+        /* Detach anything we may have attached. */
         vfs_clear_directory(mount->mount_point);
+        /* Free any nodes that were allocated but never attached. */
         for (uint32_t i = 0; i < node_count; ++i)
         {
             if (i == header->root_id)
             {
                 continue;
             }
-            if (nodes[i])
+            if (nodes[i] && nodes[i]->parent == NULL)
             {
                 vfs_free_subtree(nodes[i]);
             }
+        }
+        if (!failure_logged)
+        {
+            serial_printf("%s", "[vfs] mount ");
+            serial_printf("%s", dev_name);
+            serial_printf("%s", ": aborted\r\n");
         }
     }
 
@@ -2211,4 +2358,25 @@ bool vfs_sync_dirty(void)
 bool vfs_flush_node(vfs_node_t *node)
 {
     return vfs_mount_sync_node(node);
+}
+
+size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max)
+{
+    size_t count = 0;
+    spinlock_lock(&g_vfs_tree_lock);
+    for (vfs_mount_t *m = mounts; m; m = m->next)
+    {
+        if (out && count < max)
+        {
+            out[count].mount_point = m->mount_point;
+            out[count].device = m->device;
+            spinlock_lock(&m->dirty_lock);
+            out[count].dirty = m->dirty;
+            out[count].needs_full_sync = m->needs_full_sync;
+            spinlock_unlock(&m->dirty_lock);
+        }
+        count++;
+    }
+    spinlock_unlock(&g_vfs_tree_lock);
+    return count;
 }

@@ -8,6 +8,14 @@
 typedef struct vfs_node vfs_node_t;
 typedef struct vfs_mount vfs_mount_t;
 
+typedef struct
+{
+    vfs_node_t *mount_point;
+    block_device_t *device;
+    bool dirty;
+    bool needs_full_sync;
+} vfs_mount_info_t;
+
 typedef enum
 {
     VFS_NODE_DIR = 0,
@@ -55,5 +63,9 @@ bool vfs_is_mount_point(const vfs_node_t *node);
 bool vfs_sync_all(void);
 bool vfs_sync_dirty(void);
 bool vfs_flush_node(vfs_node_t *node);
+/* Snapshot current mounts; returns total count, fills up to max entries. */
+size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max);
+/* Replace link_path with a symlink to target_path, removing an existing node if needed (but never a mount). */
+bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
 
 #endif
