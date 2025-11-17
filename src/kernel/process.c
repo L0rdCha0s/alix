@@ -29,6 +29,7 @@ extern uintptr_t kernel_heap_end;
 #define RFLAGS_RESERVED_BIT (1ULL << 1)
 #define RFLAGS_IF_BIT       (1ULL << 9)
 #define RFLAGS_DEFAULT      (RFLAGS_RESERVED_BIT | RFLAGS_IF_BIT)
+#define CONTEXT_SWITCH_SAVED_WORDS 7ULL
 
 #define PROCESS_STACK_GUARD_SIZE         (4096UL)
 #define STACK_GUARD_PATTERN              0x5A
@@ -514,10 +515,12 @@ static uint64_t sanitize_gs_base(thread_t *thread)
         return 0;
     }
 
-    if (!pointer_in_heap(thread->gs_base, sizeof(thread_tls_t)))
+    uint64_t expected_base = (uint64_t)&thread->tls;
+    bool valid = pointer_in_heap(thread->gs_base, sizeof(thread_tls_t));
+    if (!valid || thread->gs_base != expected_base)
     {
         uint64_t old_base = thread->gs_base;
-        thread->gs_base = (uint64_t)&thread->tls;
+        thread->gs_base = expected_base;
         serial_printf("%s", "process: repaired GS base for thread ");
         serial_printf("%s", thread->name);
         serial_printf("%s", " old=0x");
@@ -1543,7 +1546,7 @@ static void scheduler_debug_check_resume(thread_t *thread, const char *label)
 
     thread_context_in_bounds(thread, "resume_check");
 
-    const size_t saved_context_words = 7; /* pushfq + rbp + rbx + r12-15 */
+    const size_t saved_context_words = CONTEXT_SWITCH_SAVED_WORDS; /* pushfq + rbp + rbx + r12-15 */
     const uint64_t *context_words = (const uint64_t *)thread->context;
     uint64_t resume_rip = context_words[saved_context_words];
     bool resume_zero = (resume_rip == 0);
@@ -3218,10 +3221,15 @@ static thread_t *thread_create(process_t *process,
         usable_limit -= redzone;
         usable_limit &= ~(uintptr_t)0xF;
     }
-    uintptr_t stack_ptr = usable_limit - 8;
+    uintptr_t stack_ptr = usable_limit;
     uint64_t *stack64 = (uint64_t *)stack_ptr;
 
-    *(--stack64) = (uint64_t)thread_trampoline; /* return address */
+    /*
+     * Build the initial context frame to exactly mirror context_switch:
+     * low addresses -> r15, r14, r13, r12, rbx, rbp, rflags, return RIP <- high.
+     * After the first return, RSP will be restored to usable_limit.
+     */
+    *(--stack64) = (uint64_t)thread_trampoline; /* return address (below saved frame) */
     *(--stack64) = RFLAGS_DEFAULT;              /* rflags */
     *(--stack64) = 0;                           /* rbp */
     *(--stack64) = 0;                           /* rbx */
