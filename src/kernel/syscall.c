@@ -363,11 +363,20 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     {
         return -1;
     }
-    if (!user_copy_string_from_user(path_buf, SYSCALL_MAX_PATH_LEN, path, NULL))
+    size_t copied_len = 0;
+    if (!user_copy_string_from_user(path_buf, SYSCALL_MAX_PATH_LEN, path, &copied_len))
     {
+        serial_printf("%s", "[sys_open] copy failed\r\n");
         free(path_buf);
         return -1;
     }
+    serial_printf("%s", "[sys_open] path=");
+    serial_printf("%s", path_buf);
+    serial_printf("%s", " len=0x");
+    serial_printf("%016llX", (unsigned long long)copied_len);
+    serial_printf("%s", " flags=0x");
+    serial_printf("%016llX", (unsigned long long)flags);
+    serial_printf("%s", "\r\n");
 
     file_handle_t *handle = (file_handle_t *)malloc(sizeof(file_handle_t));
     if (!handle)
@@ -381,7 +390,32 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     {
         cwd = vfs_root();
     }
+
+    bool proc_devices_path = (path_buf && strncmp(path_buf, "/proc/devices", 13) == 0);
+    if (proc_devices_path)
+    {
+        serial_printf("%s", "[sys_open] attempt ");
+        serial_printf("%s", path_buf);
+        serial_printf("%s", " flags=0x");
+        serial_printf("%016llX", (unsigned long long)flags);
+        serial_printf("%s", "\r\n");
+    }
+
     vfs_node_t *node = vfs_open_file(cwd, path_buf, create, truncate && writable);
+    if (!node && proc_devices_path)
+    {
+        serial_printf("%s", "[sys_open] fail ");
+        serial_printf("%s", path_buf);
+        serial_printf("%s", " flags=");
+        serial_printf("%016llX", (unsigned long long)flags);
+        serial_printf("%s", "\r\n");
+    }
+    if (node && proc_devices_path)
+    {
+        serial_printf("%s", "[sys_open] ok ");
+        serial_printf("%s", path_buf);
+        serial_printf("%s", "\r\n");
+    }
     free(path_buf);
     if (!node)
     {

@@ -811,7 +811,16 @@ static vfs_node_t *resolve_node_internal(vfs_node_t *cwd, const char *path, int 
 
 static vfs_node_t *resolve_node(vfs_node_t *cwd, const char *path)
 {
-    return resolve_node_internal(cwd ? cwd : root, path, 0);
+    vfs_node_t *base = NULL;
+    if (path && path[0] == '/')
+    {
+        base = root;
+    }
+    else
+    {
+        base = cwd ? cwd : root;
+    }
+    return resolve_node_internal(base, path, 0);
 }
 
 /*
@@ -1014,10 +1023,18 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
     vfs_node_t *parent = NULL;
     char *name = NULL;
 
+    bool trace_proc = (path && strncmp(path, "/proc/devices", 13) == 0);
+
     spinlock_lock(&g_vfs_tree_lock);
 
     if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
     {
+        if (trace_proc)
+        {
+            serial_printf("%s", "[vfs] split failed ");
+            serial_printf("%s", path ? path : "<null>");
+            serial_printf("%s", "\r\n");
+        }
         spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
@@ -1027,6 +1044,14 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
     {
         if (!create)
         {
+            if (trace_proc)
+            {
+                serial_printf("%s", "[vfs] missing child name=");
+                serial_printf("%s", name ? name : "<null>");
+                serial_printf("%s", " path=");
+                serial_printf("%s", path ? path : "<null>");
+                serial_printf("%s", "\r\n");
+            }
             free(name);
             spinlock_unlock(&g_vfs_tree_lock);
             return NULL;
@@ -1053,6 +1078,14 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
 
     if (file->type != VFS_NODE_FILE)
     {
+        if (trace_proc)
+        {
+            serial_printf("%s", "[vfs] wrong type name=");
+            serial_printf("%s", file->name ? file->name : "<noname>");
+            serial_printf("%s", " type=");
+            serial_printf("%016llX", (unsigned long long)file->type);
+            serial_printf("%s", "\r\n");
+        }
         spinlock_unlock(&g_vfs_tree_lock);
         return NULL;
     }
@@ -1062,6 +1095,12 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
         file->size = 0;
         if (!ensure_capacity(file, 0))
         {
+            if (trace_proc)
+            {
+                serial_printf("%s", "[vfs] ensure_capacity failed ");
+                serial_printf("%s", file->name ? file->name : "<noname>");
+                serial_printf("%s", "\r\n");
+            }
             spinlock_unlock(&g_vfs_tree_lock);
             return NULL;
         }

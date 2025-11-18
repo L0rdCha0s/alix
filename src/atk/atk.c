@@ -42,10 +42,10 @@ static bool atk_dispatch_widget_mouse(atk_state_t *state,
                                       atk_mouse_event_result_t *result);
 static void atk_clear_focus_widget(atk_state_t *state);
 #ifndef ATK_NO_DESKTOP_APPS
-static void action_open_shell(atk_widget_t *button, void *context);
 static void action_open_task_manager(atk_widget_t *button, void *context);
 static void action_open_atk_terminal(atk_widget_t *button, void *context);
 static void action_open_atk_demo(atk_widget_t *button, void *context);
+static void action_open_control_panel(atk_widget_t *button, void *context);
 static void atk_schedule_user_launch(const char *launcher_name, const void *info);
 static void atk_launch_user_binary(void *arg) __attribute__((noreturn));
 
@@ -252,6 +252,17 @@ void atk_enter_mode(void)
                            ATK_BUTTON_STYLE_TITLE_BELOW,
                            true,
                            action_open_atk_demo,
+                           state);
+
+    atk_desktop_add_button(state,
+                           540,
+                           80,
+                           88,
+                           88,
+                           "Control Panel",
+                           ATK_BUTTON_STYLE_TITLE_BELOW,
+                           true,
+                           action_open_control_panel,
                            state);
 #else
     (void)action_exit_to_text;
@@ -771,6 +782,11 @@ static const atk_user_launch_info_t g_atk_demo_launch = {
     .path = "/usr/bin/atk_demo.elf",
     .name = "atk_demo"
 };
+
+static const atk_user_launch_info_t g_control_panel_launch = {
+    .path = "/usr/bin/control_panel.elf",
+    .name = "control_panel"
+};
 #endif
 
 static uint32_t atk_window_resize_edges_at(const atk_widget_t *window, int cursor_x, int cursor_y)
@@ -942,6 +958,8 @@ static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_
     atk_window_ensure_inside(win);
 
     atk_dirty_mark_rect(old_left, old_top, old_width, old_height);
+    /* Redraw the full scene during resize to avoid flicker across windows. */
+    atk_dirty_mark_rect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
     atk_window_request_layout(win);
     return true;
 }
@@ -1003,6 +1021,13 @@ static void action_open_atk_demo(atk_widget_t *button, void *context)
     (void)button;
     (void)context;
     atk_schedule_user_launch("atk_demo_launcher", &g_atk_demo_launch);
+}
+
+static void action_open_control_panel(atk_widget_t *button, void *context)
+{
+    (void)button;
+    (void)context;
+    atk_schedule_user_launch("control_panel_launcher", &g_control_panel_launch);
 }
 
 static void atk_schedule_user_launch(const char *launcher_name, const void *info)

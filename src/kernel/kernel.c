@@ -29,6 +29,7 @@
 #include "timekeeping.h"
 #include "dl_script.h"
 #include "smp.h"
+#include "proc_devices.h"
 #include "build_features.h"
 
 static void shell_process_entry(void *arg);
@@ -516,6 +517,7 @@ void kernel_main(void)
         serial_printf("%s", "[alix] warn: smp_start_secondary_cpus failed\r\n");
     }
     interrupts_enable();
+    proc_devices_init();
     serial_printf("%s", "[alix] after rtl8139_init\n");
 
     process_t *warmup_process = process_create_kernel("warmup", warmup_process_entry, NULL, 0, -1);

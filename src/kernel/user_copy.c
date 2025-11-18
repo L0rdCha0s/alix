@@ -8,16 +8,6 @@ static inline bool user_pointer_canonical(uintptr_t addr)
     return sign == 0 || sign == 0x1FFFFu;
 }
 
-static size_t user_copy_strnlen(const char *str, size_t max_len)
-{
-    size_t len = 0;
-    while (len < max_len && str[len] != '\0')
-    {
-        ++len;
-    }
-    return len;
-}
-
 bool user_ptr_range_valid(const void *ptr, size_t len)
 {
     if (len == 0)
@@ -87,22 +77,28 @@ bool user_copy_string_from_user(char *dst,
     }
 
     size_t max_copy = capacity - 1;
-    if (!user_ptr_range_valid(src_user, max_copy))
+    size_t len = 0;
+
+    /* Walk byte-by-byte so we don't require the entire max_copy range to be valid up front. */
+    while (len < max_copy)
     {
-        return false;
+        if (!user_ptr_range_valid(src_user + len, 1))
+        {
+            return false;
+        }
+        char c = ((const char *)src_user)[len];
+        dst[len] = c;
+        if (c == '\0')
+        {
+            if (out_len)
+            {
+                *out_len = len;
+            }
+            return true;
+        }
+        ++len;
     }
 
-    size_t len = user_copy_strnlen(src_user, max_copy);
-    if (len >= max_copy)
-    {
-        return false;
-    }
-
-    memcpy(dst, src_user, len);
-    dst[len] = '\0';
-    if (out_len)
-    {
-        *out_len = len;
-    }
-    return true;
+    /* No terminator found within capacity. */
+    return false;
 }

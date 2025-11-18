@@ -17,18 +17,10 @@ typedef struct
     uint32_t attr;
 } __attribute__((packed)) e820_entry_t;
 
-typedef struct
-{
-    char vendor[13];
-    char brand[49];
-    uint32_t base_mhz;
-    uint32_t max_mhz;
-    uint32_t bus_mhz;
-} cpu_info_t;
-
 static e820_entry_t g_e820[HWINFO_E820_MAX];
 static uint32_t g_e820_count = 0;
-static cpu_info_t g_cpu_info;
+static hwinfo_cpu_info_t g_cpu_info;
+static bool g_hwinfo_ready = false;
 
 static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
@@ -202,6 +194,17 @@ static void query_cpu(void)
         g_cpu_info.max_mhz = 0;
         g_cpu_info.bus_mhz = 0;
     }
+}
+
+static void hwinfo_ensure_initialized(void)
+{
+    if (g_hwinfo_ready)
+    {
+        return;
+    }
+    load_e820();
+    query_cpu();
+    g_hwinfo_ready = true;
 }
 
 static uint64_t total_usable_bytes(void)
@@ -389,8 +392,7 @@ static void log_pci_devices(void)
 
 void hwinfo_print_boot_summary(void)
 {
-    load_e820();
-    query_cpu();
+    hwinfo_ensure_initialized();
 
     log_dual_line("");
     log_dual_line("Hardware summary:");
@@ -398,4 +400,33 @@ void hwinfo_print_boot_summary(void)
     log_memory_summary();
     log_pci_devices();
     log_dual_line("");
+}
+
+void hwinfo_init(void)
+{
+    hwinfo_ensure_initialized();
+}
+
+bool hwinfo_get_cpu_info(hwinfo_cpu_info_t *out)
+{
+    hwinfo_ensure_initialized();
+    if (!out || !g_hwinfo_ready)
+    {
+        return false;
+    }
+    memcpy(out, &g_cpu_info, sizeof(hwinfo_cpu_info_t));
+    return true;
+}
+
+bool hwinfo_get_memory_info(hwinfo_memory_info_t *out)
+{
+    hwinfo_ensure_initialized();
+    if (!out || !g_hwinfo_ready)
+    {
+        return false;
+    }
+    out->usable_bytes = total_usable_bytes();
+    out->total_bytes = total_physical_bytes();
+    out->e820_entries = g_e820_count;
+    return true;
 }
