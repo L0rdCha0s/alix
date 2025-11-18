@@ -4,6 +4,7 @@
 #include "serial.h"
 #include "arch/x86/segments.h"
 #include "arch/x86/cpu.h"
+#include "memory_layout.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -22,6 +23,20 @@ extern bootinfo_t boot_info;
 uintptr_t kernel_heap_base = KERNEL_HEAP_BASE;
 uintptr_t kernel_heap_end = KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE;
 uintptr_t kernel_heap_size = KERNEL_HEAP_SIZE;
+
+memory_layout_t g_mem_layout = {
+    .kernel_heap_base = KERNEL_HEAP_BASE,
+    .kernel_heap_end = KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE,
+    .kernel_heap_size = KERNEL_HEAP_SIZE,
+    .user_pointer_base = USER_DEFAULT_POINTER_BASE,
+    .user_pointer_limit = USER_DEFAULT_POINTER_LIMIT,
+    .user_stack_top = USER_DEFAULT_POINTER_BASE + USER_DEFAULT_STACK_TOP_OFFSET,
+    .user_stack_size = USER_DEFAULT_STACK_SIZE,
+    .user_heap_base = USER_DEFAULT_POINTER_BASE + USER_DEFAULT_HEAP_BASE_OFFSET,
+    .user_heap_size = USER_DEFAULT_HEAP_SIZE,
+    .user_phys_min = KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE,
+    .identity_map_limit = 0x100000000ULL
+};
 
 static inline uint64_t read_cr0(void)
 {
@@ -57,6 +72,201 @@ static inline uint64_t read_cr4(void)
 static inline void write_cr4(uint64_t value)
 {
     __asm__ volatile ("mov %0, %%cr4" :: "r"(value) : "memory");
+}
+
+static uint64_t e820_identity_limit(void)
+{
+    const uint64_t max_identity = 0x100000000ULL;
+    uint32_t count = boot_info.e820_entry_count;
+    if (count > BOOTINFO_MAX_E820_ENTRIES)
+    {
+        count = BOOTINFO_MAX_E820_ENTRIES;
+    }
+    uint64_t limit = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const bootinfo_e820_entry_t *entry = &boot_info.e820[i];
+        if (entry->type != 1)
+        {
+            continue;
+        }
+        uint64_t base = entry->base;
+        uint64_t end = entry->base + entry->length;
+        if (end < base)
+        {
+            continue;
+        }
+        if (base >= max_identity)
+        {
+            continue;
+        }
+        if (end > max_identity)
+        {
+            end = max_identity;
+        }
+        if (end > limit)
+        {
+            limit = end;
+        }
+    }
+    if (limit == 0)
+    {
+        limit = max_identity;
+    }
+    return limit;
+}
+
+static bool chunk_overlaps_framebuffer(uint64_t base, uint64_t end)
+{
+    if (!boot_info.framebuffer_enabled)
+    {
+        return false;
+    }
+    uint64_t fb_base = boot_info.framebuffer_base;
+    uint64_t fb_end = fb_base + boot_info.framebuffer_size;
+    if (fb_end < fb_base)
+    {
+        return false;
+    }
+    return end > fb_base && base < fb_end;
+}
+
+static bool e820_chunk_usable(uint64_t base, uint64_t size)
+{
+    if (size == 0)
+    {
+        return false;
+    }
+    const uint64_t max_identity = 0x100000000ULL;
+    if (base >= g_mem_layout.identity_map_limit)
+    {
+        return false;
+    }
+    if (base + size < base)
+    {
+        return false;
+    }
+    uint64_t end = base + size;
+    if (end > g_mem_layout.identity_map_limit)
+    {
+        end = g_mem_layout.identity_map_limit;
+    }
+    if (end > max_identity)
+    {
+        end = max_identity;
+    }
+    if (end <= base)
+    {
+        return false;
+    }
+
+    uint32_t count = boot_info.e820_entry_count;
+    if (count > BOOTINFO_MAX_E820_ENTRIES)
+    {
+        count = BOOTINFO_MAX_E820_ENTRIES;
+    }
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const bootinfo_e820_entry_t *entry = &boot_info.e820[i];
+        if (entry->type != 1)
+        {
+            continue;
+        }
+        uint64_t entry_base = entry->base;
+        uint64_t entry_end = entry->base + entry->length;
+        if (entry_end < entry_base)
+        {
+            continue;
+        }
+        if (entry_base >= max_identity)
+        {
+            continue;
+        }
+        if (entry_end > max_identity)
+        {
+            entry_end = max_identity;
+        }
+        uint64_t intersect_start = (base > entry_base) ? base : entry_base;
+        uint64_t intersect_end = (end < entry_end) ? end : entry_end;
+        if (intersect_end > intersect_start)
+        {
+            return true;
+        }
+    }
+
+    /* Allow identity mapping of framebuffer even if not marked usable RAM. */
+    if (chunk_overlaps_framebuffer(base, end))
+    {
+        return true;
+    }
+    return false;
+}
+
+static void configure_memory_layout_from_e820(void)
+{
+    memory_layout_t layout = g_mem_layout;
+
+    layout.kernel_heap_base = kernel_heap_base;
+    layout.kernel_heap_end = kernel_heap_end;
+    layout.kernel_heap_size = kernel_heap_size;
+    layout.user_phys_min = kernel_heap_end;
+    layout.identity_map_limit = e820_identity_limit();
+    if (boot_info.framebuffer_enabled)
+    {
+        uint64_t fb_end = boot_info.framebuffer_base + boot_info.framebuffer_size;
+        const uint64_t max_identity = 0x100000000ULL;
+        if (fb_end > max_identity)
+        {
+            fb_end = max_identity;
+        }
+        if (fb_end > layout.identity_map_limit)
+        {
+            layout.identity_map_limit = fb_end;
+        }
+    }
+
+    layout.user_pointer_base = USER_DEFAULT_POINTER_BASE;
+    uint64_t pointer_limit = USER_DEFAULT_POINTER_LIMIT;
+    if (layout.identity_map_limit > layout.user_pointer_base)
+    {
+        uint64_t capped = layout.identity_map_limit - 1ULL;
+        if (capped < pointer_limit)
+        {
+            pointer_limit = capped;
+        }
+    }
+    layout.user_pointer_limit = pointer_limit;
+
+    layout.user_stack_size = USER_DEFAULT_STACK_SIZE;
+    layout.user_stack_top = layout.user_pointer_base + USER_DEFAULT_STACK_TOP_OFFSET;
+    if (layout.user_stack_top > layout.user_pointer_limit + 1ULL)
+    {
+        layout.user_stack_top = layout.user_pointer_limit + 1ULL;
+    }
+    if (layout.user_stack_top < layout.user_pointer_base)
+    {
+        layout.user_stack_top = layout.user_pointer_base;
+        layout.user_stack_size = 0;
+    }
+
+    layout.user_heap_base = layout.user_pointer_base + USER_DEFAULT_HEAP_BASE_OFFSET;
+    layout.user_heap_size = USER_DEFAULT_HEAP_SIZE;
+    uint64_t heap_max = layout.user_pointer_limit + 1ULL;
+    if (layout.user_heap_base > heap_max)
+    {
+        layout.user_heap_base = heap_max;
+        layout.user_heap_size = 0;
+    }
+    else if (layout.user_heap_base + layout.user_heap_size < layout.user_heap_base)
+    {
+        layout.user_heap_size = 0;
+    }
+    else if (layout.user_heap_base + layout.user_heap_size > heap_max)
+    {
+        layout.user_heap_size = heap_max - layout.user_heap_base;
+    }
+
+    g_mem_layout = layout;
 }
 
 static void configure_heap_from_e820(void)
@@ -187,29 +397,43 @@ static void build_page_tables(void)
     pdp[2] = (uint64_t)PD2_PHYS | present_rw;
     pdp[3] = (uint64_t)PD3_PHYS | present_rw;
 
+    const uint64_t chunk_size = 0x200000ULL;
+
     uint64_t addr = 0;
     for (int i = 0; i < 512; ++i)
     {
-        pd0[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
-        addr += 0x200000ULL;
+        if (e820_chunk_usable(addr, chunk_size))
+        {
+            pd0[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
+        }
+        addr += chunk_size;
     }
     addr = 0x40000000ULL;
     for (int i = 0; i < 512; ++i)
     {
-        pd1[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
-        addr += 0x200000ULL;
+        if (e820_chunk_usable(addr, chunk_size))
+        {
+            pd1[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
+        }
+        addr += chunk_size;
     }
     addr = 0x80000000ULL;
     for (int i = 0; i < 512; ++i)
     {
-        pd2[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
-        addr += 0x200000ULL;
+        if (e820_chunk_usable(addr, chunk_size))
+        {
+            pd2[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
+        }
+        addr += chunk_size;
     }
     addr = 0xC0000000ULL;
     for (int i = 0; i < 512; ++i)
     {
-        pd3[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
-        addr += 0x200000ULL;
+        if (e820_chunk_usable(addr, chunk_size))
+        {
+            pd3[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
+        }
+        addr += chunk_size;
     }
 
     uint64_t cr4 = read_cr4();
@@ -245,6 +469,7 @@ static void kernel_entry_main(bootinfo_t *loader_info)
                    sizeof(bootinfo_t));
     }
     configure_heap_from_e820();
+    configure_memory_layout_from_e820();
 
     build_page_tables();
     serial_printf("%s", "[alix] page tables built\n");

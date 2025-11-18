@@ -2,11 +2,10 @@
 #define USER_COPY_H
 
 #include "types.h"
+#include "memory_layout.h"
 
-/* User binaries are loaded low (link.ld bases at 0x400000). */
-#define USER_POINTER_BASE  0x0000000000400000ULL
-/* User virtual space lives in the low 4 GiB; block anything above that. */
-#define USER_POINTER_LIMIT 0x00000000FFFFFFFFULL
+#define USER_POINTER_BASE  (g_mem_layout.user_pointer_base)
+#define USER_POINTER_LIMIT (g_mem_layout.user_pointer_limit)
 
 bool user_ptr_range_valid(const void *ptr, size_t len);
 bool user_copy_from_user(void *dst, const void *src_user, size_t len);

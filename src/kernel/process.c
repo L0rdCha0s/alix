@@ -16,6 +16,7 @@
 #include "syscall_defs.h"
 #include "user_memory.h"
 #include "user_copy.h"
+#include "memory_layout.h"
 #include "timer.h"
 #include "interrupts.h"
 #include "smp.h"
@@ -88,13 +89,13 @@ static void fatal(const char *msg) __attribute__((noreturn));
 static bool string_name_equals(const char *lhs, const char *rhs);
 static void process_create_log(const char *name, const char *event);
 
-#define USER_ADDRESS_SPACE_BASE   USER_POINTER_BASE
+#define USER_ADDRESS_SPACE_BASE   (g_mem_layout.user_pointer_base)
 #define USER_STUB_CODE_BASE       (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
 #define USER_PREEMPT_STUB_BASE    (USER_ADDRESS_SPACE_BASE + 0x00110000ULL)
-#define USER_STACK_TOP            (USER_ADDRESS_SPACE_BASE + 0x01000000ULL)
-#define USER_STACK_SIZE           (64ULL * 1024ULL)
-#define USER_HEAP_BASE            (USER_ADDRESS_SPACE_BASE + 0x02000000ULL)
-#define USER_HEAP_SIZE            (1024ULL * 1024ULL * 1024ULL)
+#define USER_STACK_TOP            (g_mem_layout.user_stack_top)
+#define USER_STACK_SIZE           (g_mem_layout.user_stack_size)
+#define USER_HEAP_BASE            (g_mem_layout.user_heap_base)
+#define USER_HEAP_SIZE            (g_mem_layout.user_heap_size)
 #define PAGE_SIZE_BYTES_LOCAL     4096ULL
 
 typedef uint64_t cpu_context_t;

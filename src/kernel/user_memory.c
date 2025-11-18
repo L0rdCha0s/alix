@@ -1,14 +1,12 @@
 #include "user_memory.h"
 
-#include "arch/x86/bootlayout.h"
 #include "bootinfo.h"
 #include "heap.h"
 #include "libc.h"
+#include "memory_layout.h"
 #include "serial.h"
 
 #define USER_MEMORY_PAGE_SIZE 4096ULL
-#define USER_MEMORY_MIN_ADDR (KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE)
-#define USER_MEMORY_IDENTITY_LIMIT (4ULL * 1024ULL * 1024ULL * 1024ULL)
 
 typedef struct user_memory_range
 {
@@ -142,6 +140,13 @@ void user_memory_init(void)
     g_free_ranges = NULL;
     g_free_bytes = 0;
 
+    uintptr_t min_addr = g_mem_layout.user_phys_min;
+    uintptr_t identity_limit = g_mem_layout.identity_map_limit ? g_mem_layout.identity_map_limit : (4ULL * 1024ULL * 1024ULL * 1024ULL);
+    if (identity_limit < min_addr)
+    {
+        identity_limit = min_addr;
+    }
+
     uint32_t count = boot_info.e820_entry_count;
     if (count > BOOTINFO_MAX_E820_ENTRIES)
     {
@@ -158,21 +163,21 @@ void user_memory_init(void)
 
         uint64_t start = entry->base;
         uint64_t end = entry->base + entry->length;
-        if (end <= USER_MEMORY_MIN_ADDR)
+        if (end <= min_addr)
         {
             continue;
         }
-        if (start < USER_MEMORY_MIN_ADDR)
+        if (start < min_addr)
         {
-            start = USER_MEMORY_MIN_ADDR;
+            start = min_addr;
         }
-        if (start >= USER_MEMORY_IDENTITY_LIMIT)
+        if (start >= identity_limit)
         {
             continue;
         }
-        if (end > USER_MEMORY_IDENTITY_LIMIT)
+        if (end > identity_limit)
         {
-            end = USER_MEMORY_IDENTITY_LIMIT;
+            end = identity_limit;
         }
         if (end <= start)
         {
@@ -232,7 +237,10 @@ void user_memory_free(void *addr, size_t bytes)
     uintptr_t base = align_down_uintptr((uintptr_t)addr, USER_MEMORY_PAGE_SIZE);
     size_t length = (size_t)align_up_uintptr(bytes, USER_MEMORY_PAGE_SIZE);
     uintptr_t end = base + length;
-    if (end < base || base < USER_MEMORY_MIN_ADDR || end > USER_MEMORY_IDENTITY_LIMIT)
+    uintptr_t min_addr = g_mem_layout.user_phys_min;
+    uintptr_t identity_limit = g_mem_layout.identity_map_limit ? g_mem_layout.identity_map_limit : (4ULL * 1024ULL * 1024ULL * 1024ULL);
+
+    if (end < base || base < min_addr || end > identity_limit)
     {
         serial_printf("%s", "user_memory: reject free outside user region base=0x");
         serial_printf("%016llX", (unsigned long long)base);

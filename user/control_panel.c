@@ -1112,12 +1112,12 @@ int main(void)
             needs_render = true;
         }
 
-        if (app.refresh_pending)
-        {
-            cp_refresh_data(&app);
-            needs_render = true;
-            app.refresh_pending = false;
-        }
+        // if (app.refresh_pending)
+        // {
+        //     cp_refresh_data(&app);
+        //     needs_render = true;
+        //     app.refresh_pending = false;
+        // }
 
         if (needs_render)
         {
