@@ -36,5 +36,7 @@ void atk_window_set_context(atk_widget_t *window, void *context, void (*on_destr
 void *atk_window_context(const atk_widget_t *window);
 void atk_window_set_chrome_visible(atk_widget_t *window, bool visible);
 bool atk_window_is_chrome_visible(const atk_widget_t *window);
+bool atk_window_list_validate(atk_state_t *state);
+void atk_window_list_dump(atk_state_t *state, const char *label);
 
 #endif

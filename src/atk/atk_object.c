@@ -562,11 +562,15 @@ void atk_widget_set_layout(atk_widget_t *widget, uint32_t anchors)
 
 void atk_widget_apply_layout(atk_widget_t *widget)
 {
-    if (!widget || !widget->parent || widget->flags == 0)
+    if (!widget)
     {
         return;
     }
     if (!atk_widget_validate(widget, "atk_widget_apply_layout"))
+    {
+        return;
+    }
+    if (!widget->parent || widget->flags == 0)
     {
         return;
     }

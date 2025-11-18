@@ -43,6 +43,7 @@ static atk_window_priv_t *window_priv_mut(atk_widget_t *window);
 static const atk_window_priv_t *window_priv(const atk_widget_t *window);
 static void window_destroy(atk_widget_t *window);
 static void window_destroy_value(void *value);
+static void window_debug_dump_node(const atk_list_node_t *node, size_t index);
 
 extern const atk_class_t ATK_BUTTON_CLASS;
 static const atk_widget_vtable_t window_vtable = { 0 };
@@ -623,6 +624,71 @@ static bool window_sanitize_list(atk_state_t *state)
     }
 
     return true;
+}
+
+bool atk_window_list_validate(atk_state_t *state)
+{
+    return window_sanitize_list(state);
+}
+
+static void window_debug_dump_node(const atk_list_node_t *node, size_t index)
+{
+    const atk_widget_t *win = node ? (const atk_widget_t *)node->value : NULL;
+    serial_printf("%s", "[atk][winlist] idx=");
+    serial_printf("%016llX", (unsigned long long)index);
+    serial_printf("%s", " node=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)node));
+    serial_printf("%s", " next=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)(node ? node->next : NULL)));
+    serial_printf("%s", " win=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)win));
+    if (win)
+    {
+        serial_printf("%s", " used=");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)win->used));
+        serial_printf("%s", " x=");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)win->x));
+        serial_printf("%s", " y=");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)win->y));
+        serial_printf("%s", " w=");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)win->width));
+        serial_printf("%s", " h=");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)win->height));
+    }
+    serial_printf("%s", "\r\n");
+}
+
+void atk_window_list_dump(atk_state_t *state, const char *label)
+{
+    serial_printf("%s", "[atk][winlist] dump label=");
+    serial_printf("%s", label ? label : "?");
+    serial_printf("%s", "\r\n");
+
+    if (!state)
+    {
+        serial_printf("%s", "[atk][winlist] state null\r\n");
+        return;
+    }
+
+    atk_list_t *list = &state->windows;
+    serial_printf("%s", "[atk][winlist] head=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)list->head));
+    serial_printf("%s", " tail=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)list->tail));
+    serial_printf("%s", " size=");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)list->size));
+    serial_printf("%s", "\r\n");
+
+    const size_t max_nodes = 32;
+    size_t idx = 0;
+    for (atk_list_node_t *node = list->head; node && idx < max_nodes; node = node->next, ++idx)
+    {
+        window_debug_dump_node(node, idx);
+    }
+    if (idx >= max_nodes)
+    {
+        serial_printf("%s", "[atk][winlist] truncated\r\n");
+    }
 }
 
 static void window_layout_close_button(atk_widget_t *window, atk_window_priv_t *priv)

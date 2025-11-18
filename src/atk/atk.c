@@ -71,6 +71,7 @@ static bool atk_window_begin_resize(atk_state_t *state,
 static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_y);
 static video_cursor_shape_t atk_cursor_shape_for_edges(uint32_t edges);
 static void atk_update_cursor_shape(uint32_t edges);
+static int g_mouse_dump_budget = 4;
 
 static void atk_build_mouse_event(const atk_widget_t *widget,
                                   int cursor_x,
@@ -322,6 +323,18 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
     uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     atk_mouse_event_result_t result = { .redraw = false, .exit_video = false };
+
+    if (!atk_window_list_validate(state))
+    {
+        atk_window_list_dump(state, "mouse_event_corrupt");
+        result.redraw = true;
+        goto out;
+    }
+    if (g_mouse_dump_budget > 0)
+    {
+        atk_window_list_dump(state, "mouse_event");
+        g_mouse_dump_budget--;
+    }
 
     bool menu_redraw = false;
     bool menu_consumed = atk_menu_bar_handle_mouse(state,

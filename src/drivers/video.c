@@ -778,6 +778,7 @@ void video_run_loop(void)
     while (video_active && !exit_requested)
     {
         mouse_poll();
+        mouse_dispatch_events();
         video_poll_keyboard();
         if (refresh_requested)
         {
@@ -797,6 +798,7 @@ void video_pump_events(void)
     }
 
     mouse_poll();
+    mouse_dispatch_events();
     video_poll_keyboard();
     if (refresh_requested)
     {

@@ -3,6 +3,7 @@
 #include "serial.h"
 #include "interrupts.h"
 #include "keyboard.h"
+#include "spinlock.h"
 
 #define KBD_STATUS 0x64
 #define KBD_COMMAND 0x64
@@ -15,6 +16,21 @@ static int mouse_irq_log_count = 0;
 static int mouse_irq_byte_log = 0;
 static int mouse_poll_log = 0;
 static int mouse_packet_log = 0;
+static spinlock_t g_mouse_lock = { 0 };
+
+typedef struct
+{
+    int dx;
+    int dy;
+    bool left;
+} mouse_event_t;
+
+#define MOUSE_QUEUE_CAP 128
+static mouse_event_t g_mouse_queue[MOUSE_QUEUE_CAP];
+static uint32_t g_mouse_queue_head = 0;
+static uint32_t g_mouse_queue_tail = 0;
+static spinlock_t g_mouse_queue_lock = { 0 };
+static bool g_mouse_queue_overflow_logged = false;
 
 static inline uint64_t mouse_irq_save(void)
 {
@@ -73,6 +89,88 @@ static void mouse_log_packet(int dx, int dy, bool left, uint8_t status)
     buf[idx++] = 'L'; buf[idx++] = left ? '1' : '0';
     buf[idx++] = '\0';
     serial_printf("%s", buf);
+}
+
+static void mouse_queue_reset(void)
+{
+    uint64_t flags = mouse_irq_save();
+    spinlock_lock(&g_mouse_queue_lock);
+    g_mouse_queue_head = 0;
+    g_mouse_queue_tail = 0;
+    g_mouse_queue_overflow_logged = false;
+    spinlock_unlock(&g_mouse_queue_lock);
+    mouse_irq_restore(flags);
+}
+
+static void mouse_queue_push(int dx, int dy, bool left)
+{
+    uint64_t flags = mouse_irq_save();
+    spinlock_lock(&g_mouse_queue_lock);
+
+    uint32_t next_head = (g_mouse_queue_head + 1u) % MOUSE_QUEUE_CAP;
+    if (next_head == g_mouse_queue_tail)
+    {
+        /* Drop oldest to keep newest input responsive. */
+        g_mouse_queue_tail = (g_mouse_queue_tail + 1u) % MOUSE_QUEUE_CAP;
+        if (!g_mouse_queue_overflow_logged)
+        {
+            mouse_log("mouse queue overflow (dropping oldest)");
+            g_mouse_queue_overflow_logged = true;
+        }
+    }
+
+    g_mouse_queue[g_mouse_queue_head].dx = dx;
+    g_mouse_queue[g_mouse_queue_head].dy = dy;
+    g_mouse_queue[g_mouse_queue_head].left = left;
+    g_mouse_queue_head = next_head;
+
+    spinlock_unlock(&g_mouse_queue_lock);
+    mouse_irq_restore(flags);
+}
+
+static bool mouse_queue_pop(mouse_event_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+
+    uint64_t flags = mouse_irq_save();
+    spinlock_lock(&g_mouse_queue_lock);
+
+    if (g_mouse_queue_head == g_mouse_queue_tail)
+    {
+        spinlock_unlock(&g_mouse_queue_lock);
+        mouse_irq_restore(flags);
+        return false;
+    }
+
+    *out = g_mouse_queue[g_mouse_queue_tail];
+    g_mouse_queue_tail = (g_mouse_queue_tail + 1u) % MOUSE_QUEUE_CAP;
+    if (g_mouse_queue_head == g_mouse_queue_tail)
+    {
+        g_mouse_queue_overflow_logged = false;
+    }
+
+    spinlock_unlock(&g_mouse_queue_lock);
+    mouse_irq_restore(flags);
+    return true;
+}
+
+void mouse_dispatch_events(void)
+{
+    /* Fast drop if nothing is interested. */
+    if (!g_listener)
+    {
+        mouse_queue_reset();
+        return;
+    }
+
+    mouse_event_t ev;
+    while (mouse_queue_pop(&ev))
+    {
+        g_listener(ev.dx, ev.dy, ev.left);
+    }
 }
 
 static void mouse_wait(uint8_t type)
@@ -139,6 +237,7 @@ void mouse_init(void)
     packet_index = 0;
     mouse_irq_log_count = 0;
     mouse_log("mouse_init: streaming enabled");
+    mouse_queue_reset();
     interrupts_enable_irq(12);
 }
 
@@ -152,40 +251,42 @@ void mouse_reset_debug_counter(void)
 
 static void mouse_process_byte(uint8_t byte)
 {
-    uint64_t irq_state = mouse_irq_save();
+    int out_dx = 0;
+    int out_dy = 0;
+    bool out_left = false;
     bool emit = false;
-    int emit_dx = 0;
-    int emit_dy = 0;
-    bool emit_left = false;
+    uint64_t irq_state = mouse_irq_save();
+    spinlock_lock(&g_mouse_lock);
 
     if (byte == 0xFA || byte == 0xAA)
     {
         packet_index = 0;
-        goto out;
+        goto unlock;
     }
     if ((packet_index == 0) && ((byte & 0x08) == 0))
     {
-        goto out; /* sync */
+        goto unlock; /* sync */
     }
 
     packet[packet_index++] = byte;
     if (packet_index < 3)
     {
-        goto out;
+        goto unlock;
     }
 
     packet_index = 0;
 
-    emit_dx = (int8_t)packet[1];
-    emit_dy = (int8_t)packet[2];
+    out_dx = (int8_t)packet[1];
+    out_dy = (int8_t)packet[2];
     if (packet[0] & 0xC0)
     {
-        goto out;
+        goto unlock;
     }
-    emit_left = (packet[0] & 0x01) != 0;
+    out_left = (packet[0] & 0x01) != 0;
     emit = true;
 
-out:
+unlock:
+    spinlock_unlock(&g_mouse_lock);
     mouse_irq_restore(irq_state);
 
     if (!emit)
@@ -196,17 +297,14 @@ out:
     if (mouse_packet_log < 16)
     {
         serial_printf("%s", "mouse packet dx=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)emit_dx));
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)out_dx));
         serial_printf("%s", " dy=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)emit_dy));
-        serial_printf("%s", emit_left ? " left=1\r\n" : " left=0\r\n");
+        serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)out_dy));
+        serial_printf("%s", out_left ? " left=1\r\n" : " left=0\r\n");
         mouse_packet_log++;
     }
 
-    if (g_listener)
-    {
-        g_listener(emit_dx, -emit_dy, emit_left);
-    }
+    mouse_queue_push(out_dx, -out_dy, out_left);
 }
 
 void mouse_on_irq(uint8_t byte)

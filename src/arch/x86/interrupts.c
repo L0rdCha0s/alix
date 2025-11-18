@@ -205,6 +205,17 @@ static void dump_exception_stacktrace(const interrupt_frame_t *frame)
         {
             serial_printf("%s", "  user stack: no current process\r\n");
         }
+
+        /* Also emit kernel stack bounds/contents to catch bad return paths. */
+        log_kernel_stack_bounds("exception", frame);
+        thread_t *thread = thread_current();
+        uintptr_t base = 0;
+        uintptr_t top = 0;
+        if (thread && process_thread_stack_bounds(thread, &base, &top))
+        {
+            uintptr_t probe = (top >= 8) ? (top - 8) : top;
+            dump_kernel_stack(probe, 16);
+        }
     }
     else
     {
@@ -441,6 +452,7 @@ __attribute__((interrupt)) static void divide_error_handler(interrupt_frame_t *f
 __attribute__((interrupt)) static void invalid_opcode_handler(interrupt_frame_t *frame)
 {
     fault_report("invalid_opcode", frame, 0, false, false, 0);
+    log_kernel_stack_bounds("invalid_opcode", frame);
     if (frame && frame->rip >= SMP_BOOT_DATA_PHYS && frame->rip < SMP_BOOT_DATA_PHYS + 0x100)
     {
         serial_printf("%s", "  smp_boot data dump:\r\n");

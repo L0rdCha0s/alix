@@ -74,14 +74,16 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
              $(USER_OBJDIR)/doom.elf \
              $(USER_OBJDIR)/atk_shell.elf \
-             $(USER_OBJDIR)/atk_taskmgr.elf
+             $(USER_OBJDIR)/atk_taskmgr.elf \
+             $(USER_OBJDIR)/loop.elf
 USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
              $(USER_BIN_DIR)/wolf3d \
              $(USER_BIN_DIR)/doom \
              $(USER_BIN_DIR)/atk_shell \
-             $(USER_BIN_DIR)/atk_taskmgr
+             $(USER_BIN_DIR)/atk_taskmgr \
+             $(USER_BIN_DIR)/loop
 HOST_TEST_DIR := $(OBJDIR)/host-tests
 HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
@@ -174,6 +176,10 @@ $(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USE
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_taskmgr_app.o
 
+$(USER_OBJDIR)/loop.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/loop.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/loop.o
+
 $(DL_SCRIPT_SRC): $(USER_ELFS)
 	@mkdir -p $(GENERATED_DIR)
 	@{ \
@@ -221,6 +227,10 @@ $(USER_BIN_DIR)/atk_shell: $(USER_OBJDIR)/atk_shell.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/atk_taskmgr: $(USER_OBJDIR)/atk_taskmgr.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/loop: $(USER_OBJDIR)/loop.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 
