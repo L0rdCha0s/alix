@@ -722,9 +722,19 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
 
     ATK_LIST_FOR_EACH(node, &priv->children)
     {
+        if (!window_list_pointer_valid(node))
+        {
+            serial_printf("%s", "[atk][layout] invalid child node; skipping\r\n");
+            continue;
+        }
         atk_widget_t *child = (atk_widget_t *)node->value;
         if (!child || !child->used)
         {
+            continue;
+        }
+        if (!atk_widget_validate(child, "window_layout_children child"))
+        {
+            serial_printf("%s", "[atk][layout] invalid child widget; skipping\r\n");
             continue;
         }
 
