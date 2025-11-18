@@ -78,6 +78,7 @@ static uint8_t g_mac[6];
 static uint32_t g_rx_offset = 0;
 static net_interface_t *g_iface = NULL;
 static spinlock_t g_tx_lock;
+static spinlock_t g_rx_lock;
 
 static inline uint64_t rtl8139_save_flags(void)
 {
@@ -196,6 +197,7 @@ void rtl8139_init(void)
     g_rx_offset = 0;
     g_log_rx_count = 0;
     spinlock_init(&g_tx_lock);
+    spinlock_init(&g_rx_lock);
 
     if (!pci_find_device(RTL_VENDOR_ID, RTL_DEVICE_ID, &g_device))
     {
@@ -402,6 +404,7 @@ static void rtl8139_handle_receive(void)
 
     int safety = 4096;
 
+    spinlock_lock(&g_rx_lock);
     while ((inb(g_io_base + RTL_REG_CR) & RTL_CR_RX_EMPTY) == 0 && safety-- > 0)
     {
         uint32_t offset = g_rx_offset;
@@ -558,6 +561,7 @@ release_frame:
             outw(g_io_base + RTL_REG_CAPR, (uint16_t)((g_rx_offset - 16) & 0xFFFF));
         }
     }
+    spinlock_unlock(&g_rx_lock);
 }
 
 

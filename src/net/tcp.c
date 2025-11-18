@@ -11,6 +11,7 @@
 #include "fd.h"
 #include "heap.h"
 #include "process.h"
+#include "spinlock.h"
 
 #ifndef TCP_TRACE_VERBOSE
 #define TCP_TRACE_VERBOSE 0
@@ -173,8 +174,24 @@ static const fd_ops_t g_tcp_fd_ops = {
     .close = tcp_fd_close,
 };
 
+static spinlock_t g_tcp_lock;
+
+static inline uint64_t tcp_lock(void)
+{
+    uint64_t flags = tcp_irq_save();
+    spinlock_lock(&g_tcp_lock);
+    return flags;
+}
+
+static inline void tcp_unlock(uint64_t flags)
+{
+    spinlock_unlock(&g_tcp_lock);
+    tcp_irq_restore(flags);
+}
+
 void net_tcp_init(void)
 {
+    spinlock_init(&g_tcp_lock);
     for (size_t i = 0; i < NET_TCP_MAX_SOCKETS; ++i)
     {
         tcp_reset_socket(&g_sockets[i]);
@@ -629,29 +646,35 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
 
 bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t len)
 {
+    uint64_t lock_flags = tcp_lock();
     if (!socket || !data || len == 0)
     {
         tcp_log_send_block(socket, "invalid", len);
+        tcp_unlock(lock_flags);
         return false;
     }
     if (len > NET_TCP_MAX_PAYLOAD)
     {
         tcp_log_send_block(socket, "oversize", len);
+        tcp_unlock(lock_flags);
         return false;
     }
     if (socket->state != TCP_STATE_ESTABLISHED)
     {
         tcp_log_send_block(socket, "state", len);
+        tcp_unlock(lock_flags);
         return false;
     }
     if (socket->remote_closed)
     {
         tcp_log_send_block(socket, "remote_closed", len);
+        tcp_unlock(lock_flags);
         return false;
     }
     if (socket->remote_window != 0 && socket->remote_window < len)
     {
         tcp_log_send_block(socket, "remote_window", len);
+        tcp_unlock(lock_flags);
         return false;
     }
 
@@ -661,23 +684,28 @@ bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t l
         if (outstanding + len > sizeof(socket->pending_payload))
         {
             tcp_log_send_block(socket, "pending_capacity", len);
+            tcp_unlock(lock_flags);
             return false;
         }
         if (!tcp_send_segment(socket, socket->seq_next, TCP_FLAG_ACK | TCP_FLAG_PSH,
                               data, len, true, false))
         {
             tcp_log_send_block(socket, "segment_fail", len);
+            tcp_unlock(lock_flags);
             return false;
         }
         memcpy(socket->pending_payload + outstanding, data, len);
         socket->pending_payload_len += len;
         socket->unacked_len += len;
         socket->pending_flags |= (TCP_FLAG_ACK | TCP_FLAG_PSH);
+        tcp_unlock(lock_flags);
         return true;
     }
 
-    return tcp_send_segment(socket, socket->seq_next, TCP_FLAG_ACK | TCP_FLAG_PSH,
-                            data, len, true, true);
+    bool rv = tcp_send_segment(socket, socket->seq_next, TCP_FLAG_ACK | TCP_FLAG_PSH,
+                               data, len, true, true);
+    tcp_unlock(lock_flags);
+    return rv;
 }
 
 size_t net_tcp_socket_available(const net_tcp_socket_t *socket)
@@ -699,10 +727,12 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
         return 0;
     }
 
+    uint64_t lock_flags = tcp_lock();
     uint64_t irq_flags = tcp_irq_save();
     if (socket->rx_size == 0 || !socket->rx_buffer)
     {
         tcp_irq_restore(irq_flags);
+        tcp_unlock(lock_flags);
         return 0;
     }
 
@@ -732,6 +762,7 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
     size_t rx_capacity_now = socket->rx_capacity;
 #endif
     tcp_irq_restore(irq_flags);
+    tcp_unlock(lock_flags);
 
 #if TCP_TRACE_VERBOSE
     serial_printf("%s", "tcp: app read len=0x");
@@ -924,7 +955,10 @@ int net_tcp_socket_fd(const net_tcp_socket_t *socket)
 
 ssize_t net_tcp_socket_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
 {
-    return tcp_read_blocking(socket, buffer, capacity);
+    uint64_t lock_flags = tcp_lock();
+    ssize_t rv = tcp_read_blocking(socket, buffer, capacity);
+    tcp_unlock(lock_flags);
+    return rv;
 }
 
 static ssize_t tcp_fd_read(void *ctx, void *buffer, size_t count)
@@ -967,6 +1001,7 @@ static int tcp_fd_close(void *ctx)
 
 void net_tcp_poll(void)
 {
+    uint64_t lock_flags = tcp_lock();
     uint64_t now = timer_ticks();
     for (size_t i = 0; i < NET_TCP_MAX_SOCKETS; ++i)
     {
@@ -1029,6 +1064,7 @@ void net_tcp_poll(void)
             socket->state = TCP_STATE_CLOSED;
         }
     }
+    tcp_unlock(lock_flags);
 }
 
 static bool tcp_prepare_route(net_tcp_socket_t *socket, uint32_t remote_ip, uint16_t remote_port)
@@ -1115,16 +1151,17 @@ static void tcp_retransmit(net_tcp_socket_t *socket)
 
 void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length)
 {
+    uint64_t lock_flags = tcp_lock();
     if (!iface || !frame || length < 54)
     {
-        return;
+        goto out;
     }
 
     const uint8_t *eth = frame;
     uint16_t eth_type = (uint16_t)((eth[12] << 8) | eth[13]);
     if (eth_type != 0x0800)
     {
-        return;
+        goto out;
     }
 
     const uint8_t *ip = frame + 14;
@@ -1132,17 +1169,17 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     uint8_t ihl = (uint8_t)(ip[0] & 0x0F);
     if (version != 4 || ihl < 5)
     {
-        return;
+        goto out;
     }
     size_t ip_header_len = (size_t)ihl * 4U;
     if (14 + ip_header_len > length)
     {
-        return;
+        goto out;
     }
     uint16_t total_len = read_be16(ip + 2);
     if (total_len < ip_header_len + 20U)
     {
-        return;
+        goto out;
     }
     size_t ip_available = length - 14;
     if (total_len > ip_available)
@@ -1151,21 +1188,21 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     }
     if (ip[9] != 6)
     {
-        return;
+        goto out;
     }
 
     const uint8_t *tcp = ip + ip_header_len;
     size_t tcp_bytes = total_len - ip_header_len;
     if (tcp_bytes < 20)
     {
-        return;
+        goto out;
     }
 
     uint8_t data_offset = (uint8_t)(tcp[12] >> 4);
     size_t tcp_header_len = (size_t)data_offset * 4U;
     if (tcp_header_len < 20 || tcp_header_len > tcp_bytes)
     {
-        return;
+        goto out;
     }
     size_t payload_len = tcp_bytes - tcp_header_len;
 
@@ -1182,12 +1219,12 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     net_tcp_socket_t *socket = tcp_find_socket(iface, dst_port, src_ip, src_port);
     if (!socket)
     {
-        return;
+        goto out;
     }
 
     if (socket->iface && socket->iface->ipv4_addr != 0 && dst_ip != socket->iface->ipv4_addr)
     {
-        return;
+        goto out;
     }
 
     /* Validate checksum */
@@ -1195,7 +1232,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     uint8_t tcp_copy[20 + NET_TCP_MAX_PAYLOAD];
     if (tcp_len > sizeof(tcp_copy))
     {
-        return;
+        goto out;
     }
     memcpy(tcp_copy, tcp, tcp_len);
     tcp_copy[16] = 0;
@@ -1203,7 +1240,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     uint16_t calc = tcp_checksum(socket, tcp_copy, tcp_len);
     if (calc != read_be16(tcp + 16))
     {
-        return;
+        goto out;
     }
 
     socket->remote_window = window ? window : 1;
@@ -1212,7 +1249,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     if (flags & TCP_FLAG_RST)
     {
         tcp_mark_error(socket, "peer reset");
-        return;
+        goto out;
     }
 
     if ((flags & TCP_FLAG_ACK) != 0)
@@ -1266,6 +1303,9 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             tcp_send_ack(socket);
         }
     }
+
+out:
+    tcp_unlock(lock_flags);
 }
 
 static void tcp_handle_ack(net_tcp_socket_t *socket, uint32_t ack_num)
