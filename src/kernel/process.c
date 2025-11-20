@@ -97,6 +97,11 @@ static void process_create_log(const char *name, const char *event);
 #define USER_HEAP_BASE            (g_mem_layout.user_heap_base)
 #define USER_HEAP_SIZE            (g_mem_layout.user_heap_size)
 #define PAGE_SIZE_BYTES_LOCAL     4096ULL
+#define PROCESS_HEAP_L2_SHIFT     9ULL
+#define PROCESS_HEAP_L2_ENTRIES   (1ULL << PROCESS_HEAP_L2_SHIFT)
+#define PROCESS_HEAP_L2_MASK      (PROCESS_HEAP_L2_ENTRIES - 1ULL)
+#define PROCESS_HEAP_PRESENT_WORDS ((PROCESS_HEAP_L2_ENTRIES + 63ULL) / 64ULL)
+#define PROCESS_HEAP_L2_SPAN      (PROCESS_HEAP_L2_ENTRIES * PAGE_SIZE_BYTES_LOCAL)
 
 typedef uint64_t cpu_context_t;
 
@@ -130,13 +135,10 @@ typedef struct process_user_region
 } process_user_region_t;
 
 #define THREAD_CONTEXT_REDZONE_BYTES (64ULL * 1024ULL)
-
-typedef struct process_heap_page
-{
-    uintptr_t virt;
-    uintptr_t phys;
-    struct process_heap_page *next;
-} process_heap_page_t;
+#define STACK_OWNER_BUCKET_SHIFT 15
+#define STACK_OWNER_BUCKET_SIZE (1UL << STACK_OWNER_BUCKET_SHIFT)
+#define STACK_OWNER_BUCKET_COUNT 256u
+#define STACK_OWNER_BUCKET_MASK (STACK_OWNER_BUCKET_COUNT - 1)
 
 typedef struct user_thread_bootstrap
 {
@@ -145,6 +147,8 @@ typedef struct user_thread_bootstrap
     uint64_t argc;
     uintptr_t argv_ptr;
 } user_thread_bootstrap_t;
+
+typedef struct stack_owner_entry stack_owner_entry_t;
 
 static const uint8_t g_user_exit_stub[] = {
     0x31, 0xFF,       /* xor edi, edi */
@@ -202,7 +206,9 @@ struct thread
     void *arg;
     thread_state_t state;
     struct thread *queue_next;
+    struct thread *queue_prev;
     struct thread *registry_next;
+    uint32_t run_queue_cpu;
     fpu_state_t fpu_state;
     uint64_t fs_base;
     uint64_t gs_base;
@@ -228,6 +234,7 @@ struct thread
     bool stack_watch_blocked;
     bool stack_watch_timeout_logged;
     uint32_t stack_watch_timeout_count;
+    stack_owner_entry_t *stack_owner_entries;
     bool context_guard_frozen;
     const char *context_guard_freeze_label;
     const char *fault_reason;
@@ -263,6 +270,22 @@ struct thread
     uint8_t stack_watch_snapshot[STACK_WATCH_SNAPSHOT_BYTES];
 };
 
+struct stack_owner_entry
+{
+    struct stack_owner_entry *bucket_next;
+    struct stack_owner_entry *thread_next;
+    thread_t *thread;
+    uintptr_t base;
+    uintptr_t top;
+    uint32_t bucket_index;
+};
+
+typedef struct process_heap_l2
+{
+    uintptr_t phys[PROCESS_HEAP_L2_ENTRIES];
+    uint64_t present[PROCESS_HEAP_PRESENT_WORDS];
+} process_heap_l2_t;
+
 struct process
 {
     uint64_t pid;
@@ -289,7 +312,8 @@ struct process
     uintptr_t user_heap_brk;
     uintptr_t user_heap_limit;
     uintptr_t user_heap_committed;
-    process_heap_page_t *heap_pages;
+    process_heap_l2_t **heap_page_dirs;
+    size_t heap_dir_count;
     uint8_t *user_stack_host;
     uintptr_t user_initial_stack;
     size_t arg_count;
@@ -302,6 +326,20 @@ struct process
     uint32_t magic;
 };
 
+typedef struct run_queue
+{
+    spinlock_t lock;
+    thread_t *heads[THREAD_PRIORITY_COUNT];
+    thread_t *tails[THREAD_PRIORITY_COUNT];
+    uint32_t counts[THREAD_PRIORITY_COUNT];
+    uint32_t total;
+    thread_t *lock_owner;
+    const char *lock_owner_label;
+    const void *lock_owner_caller;
+    uint64_t lock_acquired_ticks;
+    uint32_t cpu_index;
+} run_queue_t;
+
 static process_t *g_process_list = NULL;
 static process_t *g_current_processes[SMP_MAX_CPUS] = { NULL };
 static thread_t *g_current_threads[SMP_MAX_CPUS] = { NULL };
@@ -310,14 +348,14 @@ static thread_t *g_deferred_thread_frees[SMP_MAX_CPUS] = { NULL };
 static spinlock_t g_deferred_free_locks[SMP_MAX_CPUS];
 #if ENABLE_STACK_WRITE_DEBUG
 static bool g_stack_write_debug_enabled = false;
+static stack_owner_entry_t *g_stack_owner_buckets[STACK_OWNER_BUCKET_COUNT] = { NULL };
+static spinlock_t g_stack_owner_locks[STACK_OWNER_BUCKET_COUNT];
 #endif
 static process_t *g_idle_process = NULL;
 static cpu_context_t *g_bootstrap_context = NULL;
-static thread_t *g_run_queue_heads[THREAD_PRIORITY_COUNT] = { NULL };
-static thread_t *g_run_queue_tails[THREAD_PRIORITY_COUNT] = { NULL };
+static run_queue_t g_run_queues[SMP_MAX_CPUS];
 static thread_t *g_sleep_queue_head = NULL;
 static uint64_t g_next_pid = 1;
-static spinlock_t g_run_queue_lock;
 static spinlock_t g_sleep_queue_lock;
 static spinlock_t g_process_lock;
 
@@ -331,11 +369,52 @@ static thread_t *g_stack_watch_frozen_head = NULL;
 static thread_t *g_thread_registry_head = NULL;
 static spinlock_t g_thread_registry_lock;
 static uint8_t g_context_switch_dummy_flag = 0;
+static const uint64_t SCHEDULER_STALL_LOG_MS = 2000ULL;
+static const uint64_t RUN_QUEUE_LOCK_WARN_MS = 1000ULL;
+static const uint64_t SCHED_SWITCH_WARN_MS = 500ULL;
+static const uint64_t DEFERRED_FREE_WARN_MS = 250ULL;
+
+typedef struct deferred_free_stats
+{
+    uint32_t cpu_index;
+    size_t grabbed;
+    size_t freed;
+    size_t requeued;
+    uint64_t duration_ticks;
+} deferred_free_stats_t;
 
 static void thread_freeze_for_stack_watch(thread_t *thread, const char *context);
 static void thread_unfreeze_after_stack_watch(thread_t *thread);
 static void stack_watch_check_timeouts(void);
 static void stack_watch_remove_frozen(thread_t *thread);
+
+static inline uint64_t scheduler_ticks_to_ms(uint64_t ticks)
+{
+    uint64_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 1000;
+    }
+    return (ticks * 1000ULL) / freq;
+}
+
+static void scheduler_log_if_stalled(const char *label, uint64_t start_ticks)
+{
+    if (!label || start_ticks == 0)
+    {
+        return;
+    }
+    uint64_t elapsed = timer_ticks() - start_ticks;
+    uint64_t ms = scheduler_ticks_to_ms(elapsed);
+    if (ms >= SCHEDULER_STALL_LOG_MS)
+    {
+        serial_printf("%s", "[sched] stall label=");
+        serial_printf("%s", label);
+        serial_printf("%s", " duration=");
+        serial_printf("%llu", (unsigned long long)ms);
+        serial_printf("%s", "ms\r\n");
+    }
+}
 
 static inline uint32_t scheduler_time_slice_ticks(void)
 {
@@ -390,6 +469,24 @@ static inline void set_current_process_local(process_t *process)
         idx = 0;
     }
     g_current_processes[idx] = process;
+}
+
+static inline void paging_space_mark_active_cpu(paging_space_t *space, uint32_t cpu_index)
+{
+    if (!space || cpu_index >= SMP_MAX_CPUS)
+    {
+        return;
+    }
+    __atomic_fetch_or(&space->active_cpu_mask, (1u << cpu_index), __ATOMIC_RELEASE);
+}
+
+static inline void paging_space_clear_active_cpu(paging_space_t *space, uint32_t cpu_index)
+{
+    if (!space || cpu_index >= SMP_MAX_CPUS)
+    {
+        return;
+    }
+    __atomic_fetch_and(&space->active_cpu_mask, ~(1u << cpu_index), __ATOMIC_RELEASE);
 }
 
 static void thread_scan_stack_for_suspicious_values(thread_t *thread,
@@ -572,8 +669,41 @@ static inline size_t align_up_size(size_t value, size_t alignment)
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-static process_heap_page_t *process_heap_find_page(const process_t *process, uintptr_t virt_page);
-static bool process_heap_add_page(process_t *process, uintptr_t virt, uintptr_t phys);
+#if ENABLE_STACK_WRITE_DEBUG
+static void stack_owner_register_impl(thread_t *thread);
+static void stack_owner_unregister_impl(thread_t *thread);
+static thread_t *thread_find_stack_owner_impl(uintptr_t addr, size_t len);
+#endif
+static inline void stack_owner_register(thread_t *thread)
+{
+#if ENABLE_STACK_WRITE_DEBUG
+    stack_owner_register_impl(thread);
+#else
+    (void)thread;
+#endif
+}
+
+static inline void stack_owner_unregister(thread_t *thread)
+{
+#if ENABLE_STACK_WRITE_DEBUG
+    stack_owner_unregister_impl(thread);
+#else
+    (void)thread;
+#endif
+}
+
+static inline thread_t *thread_find_stack_owner(uintptr_t addr, size_t len)
+{
+#if ENABLE_STACK_WRITE_DEBUG
+    return thread_find_stack_owner_impl(addr, len);
+#else
+    (void)addr;
+    (void)len;
+    return NULL;
+#endif
+}
+static bool thread_can_run(const thread_t *thread);
+static bool scheduler_thread_in_any_queue(thread_t *thread);
 static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes);
 static void process_heap_release_from(process_t *process, uintptr_t virt_start);
 static void process_free_heap_pages(process_t *process);
@@ -788,23 +918,92 @@ static bool thread_stack_candidate_matches(thread_t *thread,
     return false;
 }
 
-static thread_t *thread_find_stack_owner(uintptr_t addr, size_t len)
+static uint32_t stack_owner_bucket_index(uintptr_t addr)
 {
-    thread_t *owner = NULL;
-    spinlock_lock(&g_thread_registry_lock);
-    thread_t *cursor = g_thread_registry_head;
-    while (cursor)
+    return (uint32_t)((addr >> STACK_OWNER_BUCKET_SHIFT) & STACK_OWNER_BUCKET_MASK);
+}
+
+static void stack_owner_register_impl(thread_t *thread)
+{
+    if (!thread || !thread->stack_base || thread->kernel_stack_top == 0)
     {
-        if (thread_stack_candidate_matches(cursor, addr, len, &owner))
+        return;
+    }
+
+    uintptr_t base = (uintptr_t)thread->stack_base;
+    uintptr_t top = thread->kernel_stack_top;
+    uintptr_t start = align_down_uintptr(base, STACK_OWNER_BUCKET_SIZE);
+    uintptr_t end = align_up_uintptr(top, STACK_OWNER_BUCKET_SIZE);
+
+    for (uintptr_t bucket = start; bucket < end; bucket += STACK_OWNER_BUCKET_SIZE)
+    {
+        uint32_t idx = stack_owner_bucket_index(bucket);
+        stack_owner_entry_t *entry = (stack_owner_entry_t *)malloc(sizeof(stack_owner_entry_t));
+        if (!entry)
+        {
+            continue;
+        }
+        entry->bucket_index = idx;
+        entry->thread = thread;
+        entry->base = base;
+        entry->top = top;
+        entry->thread_next = thread->stack_owner_entries;
+        thread->stack_owner_entries = entry;
+
+        spinlock_lock(&g_stack_owner_locks[idx]);
+        entry->bucket_next = g_stack_owner_buckets[idx];
+        g_stack_owner_buckets[idx] = entry;
+        spinlock_unlock(&g_stack_owner_locks[idx]);
+    }
+}
+
+static void stack_owner_unregister_impl(thread_t *thread)
+{
+    stack_owner_entry_t *entry = thread ? thread->stack_owner_entries : NULL;
+    while (entry)
+    {
+        uint32_t idx = entry->bucket_index;
+        spinlock_lock(&g_stack_owner_locks[idx]);
+        stack_owner_entry_t **cursor = &g_stack_owner_buckets[idx];
+        while (*cursor)
+        {
+            if (*cursor == entry)
+            {
+                *cursor = entry->bucket_next;
+                break;
+            }
+            cursor = &(*cursor)->bucket_next;
+        }
+        spinlock_unlock(&g_stack_owner_locks[idx]);
+        stack_owner_entry_t *next = entry->thread_next;
+        free(entry);
+        entry = next;
+    }
+    if (thread)
+    {
+        thread->stack_owner_entries = NULL;
+    }
+}
+
+static thread_t *thread_find_stack_owner_impl(uintptr_t addr, size_t len)
+{
+    uint32_t bucket = stack_owner_bucket_index(addr);
+    thread_t *owner = NULL;
+    spinlock_lock(&g_stack_owner_locks[bucket]);
+    stack_owner_entry_t *entry = g_stack_owner_buckets[bucket];
+    while (entry)
+    {
+        if (thread_stack_candidate_matches(entry->thread, addr, len, &owner))
         {
             break;
         }
-        cursor = cursor->registry_next;
+        entry = entry->bucket_next;
     }
-    spinlock_unlock(&g_thread_registry_lock);
+    spinlock_unlock(&g_stack_owner_locks[bucket]);
     return owner;
 }
-#endif
+
+#endif /* ENABLE_STACK_WRITE_DEBUG */
 
 thread_t *process_find_stack_owner(const void *ptr, size_t len)
 {
@@ -826,7 +1025,7 @@ static void thread_stack_watch_deactivate(thread_t *thread);
 
 static void thread_free_resources(thread_t *thread);
 static void thread_enqueue_deferred_free(thread_t *thread);
-static void thread_process_deferred_frees(uint32_t cpu_index);
+static bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *stats);
 
 static void thread_registry_add(thread_t *thread)
 {
@@ -1063,6 +1262,7 @@ static void thread_free_resources(thread_t *thread)
     uint8_t *stack_allocation_raw = thread->stack_allocation_raw;
     uint8_t *stack_guard_base = thread->stack_guard_base;
     uint8_t *stack_base_ptr = thread->stack_base;
+    stack_owner_unregister(thread);
     thread->context = NULL;
     thread->context_valid = false;
     thread->kernel_stack_top = 0;
@@ -1107,12 +1307,22 @@ static void thread_enqueue_deferred_free(thread_t *thread)
     spinlock_unlock(&g_deferred_free_locks[owner]);
 }
 
-static void thread_process_deferred_frees(uint32_t cpu_index)
+static bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *stats)
 {
     if (cpu_index >= SMP_MAX_CPUS)
     {
         cpu_index = 0;
     }
+
+    deferred_free_stats_t local_stats = {
+        .cpu_index = cpu_index,
+        .grabbed = 0,
+        .freed = 0,
+        .requeued = 0,
+        .duration_ticks = 0
+    };
+
+    uint64_t start_ticks = timer_ticks();
 
     /* Disable interrupts so current-thread observations stay consistent. */
     uint64_t flags = cpu_save_flags();
@@ -1131,6 +1341,7 @@ static void thread_process_deferred_frees(uint32_t cpu_index)
     {
         thread_t *next = cursor->deferred_next;
         cursor->deferred_next = NULL;
+        local_stats.grabbed++;
 
         bool in_use = false;
         /* Avoid freeing anything still running or referenced as current. */
@@ -1146,19 +1357,7 @@ static void thread_process_deferred_frees(uint32_t cpu_index)
          * even if its in_run_queue flag was cleared incorrectly. */
         if (!in_use)
         {
-            spinlock_lock(&g_run_queue_lock);
-            for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE && !in_use; --pr)
-            {
-                for (thread_t *rq = g_run_queue_heads[pr]; rq; rq = rq->queue_next)
-                {
-                    if (rq == cursor)
-                    {
-                        in_use = true;
-                        break;
-                    }
-                }
-            }
-            spinlock_unlock(&g_run_queue_lock);
+            in_use = scheduler_thread_in_any_queue(cursor);
         }
         if (cursor->state != THREAD_STATE_ZOMBIE || cursor->in_run_queue || cursor->sleeping ||
             cursor->waiting_queue || cursor->in_transition)
@@ -1168,6 +1367,7 @@ static void thread_process_deferred_frees(uint32_t cpu_index)
 
         if (in_use)
         {
+            local_stats.requeued++;
             /* Keep for later retry. */
             if (!pending)
             {
@@ -1183,6 +1383,7 @@ static void thread_process_deferred_frees(uint32_t cpu_index)
         else
         {
             thread_free_resources(cursor);
+            local_stats.freed++;
         }
         cursor = next;
     }
@@ -1197,6 +1398,37 @@ static void thread_process_deferred_frees(uint32_t cpu_index)
     }
 
     cpu_restore_flags(flags);
+
+    local_stats.duration_ticks = timer_ticks() - start_ticks;
+
+    bool did_work = (local_stats.grabbed > 0);
+    if (stats)
+    {
+        *stats = local_stats;
+    }
+
+    if (did_work)
+    {
+        uint64_t ms = scheduler_ticks_to_ms(local_stats.duration_ticks);
+        serial_printf("%s", "[sched] deferred_free cpu=");
+        serial_printf("%u", local_stats.cpu_index);
+        serial_printf("%s", " grabbed=");
+        serial_printf("%016llX", (unsigned long long)local_stats.grabbed);
+        serial_printf("%s", " freed=");
+        serial_printf("%016llX", (unsigned long long)local_stats.freed);
+        serial_printf("%s", " requeued=");
+        serial_printf("%016llX", (unsigned long long)local_stats.requeued);
+        serial_printf("%s", " duration=");
+        serial_printf("%llu", (unsigned long long)ms);
+        serial_printf("%s", "ms");
+        if (ms >= DEFERRED_FREE_WARN_MS)
+        {
+            serial_printf("%s", " (slow)");
+        }
+        serial_printf("%s", "\r\n");
+    }
+
+    return did_work;
 }
 
 static bool thread_context_in_bounds(thread_t *thread,
@@ -2289,7 +2521,8 @@ static process_t *allocate_process(const char *name, bool is_user)
     proc->user_heap_brk = 0;
     proc->user_heap_limit = 0;
     proc->user_heap_committed = 0;
-    proc->heap_pages = NULL;
+    proc->heap_page_dirs = NULL;
+    proc->heap_dir_count = 0;
     proc->magic = PROCESS_MAGIC;
     wait_queue_init(&proc->wait_queue);
     return proc;
@@ -2358,38 +2591,121 @@ static bool process_map_user_region(process_t *process, const process_user_regio
                                  region->executable);
 }
 
-static process_heap_page_t *process_heap_find_page(const process_t *process, uintptr_t virt_page)
+static size_t process_heap_dir_capacity(const process_t *process)
 {
-    if (!process)
+    return process ? process->heap_dir_count : 0;
+}
+
+static process_heap_l2_t *process_heap_table(process_t *process, size_t dir_index, bool create)
+{
+    if (!process || !process->heap_page_dirs || dir_index >= process->heap_dir_count)
     {
         return NULL;
     }
-    for (process_heap_page_t *page = process->heap_pages; page; page = page->next)
+    process_heap_l2_t *table = process->heap_page_dirs[dir_index];
+    if (!table && create)
     {
-        if (page->virt == virt_page)
+        table = (process_heap_l2_t *)malloc(sizeof(process_heap_l2_t));
+        if (!table)
         {
-            return page;
+            return NULL;
         }
+        memset(table, 0, sizeof(*table));
+        process->heap_page_dirs[dir_index] = table;
     }
-    return NULL;
+    return table;
 }
 
-static bool process_heap_add_page(process_t *process, uintptr_t virt, uintptr_t phys)
+static inline bool process_heap_entry_present(const process_heap_l2_t *table, size_t index)
+{
+    if (!table || index >= PROCESS_HEAP_L2_ENTRIES)
+    {
+        return false;
+    }
+    return (table->present[index / 64] >> (index % 64)) & 1ULL;
+}
+
+static inline void process_heap_entry_set(process_heap_l2_t *table, size_t index, uintptr_t phys)
+{
+    if (!table || index >= PROCESS_HEAP_L2_ENTRIES)
+    {
+        return;
+    }
+    table->phys[index] = phys;
+    table->present[index / 64] |= (1ULL << (index % 64));
+}
+
+static inline void process_heap_entry_clear(process_heap_l2_t *table, size_t index)
+{
+    if (!table || index >= PROCESS_HEAP_L2_ENTRIES)
+    {
+        return;
+    }
+    table->phys[index] = 0;
+    table->present[index / 64] &= ~(1ULL << (index % 64));
+}
+
+static bool process_heap_table_empty(const process_heap_l2_t *table)
+{
+    if (!table)
+    {
+        return true;
+    }
+    for (size_t i = 0; i < PROCESS_HEAP_PRESENT_WORDS; ++i)
+    {
+        if (table->present[i])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool process_heap_lookup(const process_t *process, uintptr_t virt_page, uintptr_t *phys_out)
+{
+    if (!process || virt_page < process->user_heap_base || virt_page >= process->user_heap_limit)
+    {
+        return false;
+    }
+    uintptr_t offset = (virt_page - process->user_heap_base) / PAGE_SIZE_BYTES_LOCAL;
+    size_t dir_index = (size_t)(offset >> PROCESS_HEAP_L2_SHIFT);
+    size_t entry_index = (size_t)(offset & PROCESS_HEAP_L2_MASK);
+    if (!process->heap_page_dirs || dir_index >= process->heap_dir_count)
+    {
+        return false;
+    }
+    process_heap_l2_t *table = process->heap_page_dirs[dir_index];
+    if (!process_heap_entry_present(table, entry_index))
+    {
+        return false;
+    }
+    if (phys_out)
+    {
+        *phys_out = table->phys[entry_index];
+    }
+    return true;
+}
+
+static void process_heap_free_map(process_t *process)
 {
     if (!process)
     {
-        return false;
+        return;
     }
-    process_heap_page_t *page = (process_heap_page_t *)malloc(sizeof(process_heap_page_t));
-    if (!page)
+    if (process->heap_page_dirs)
     {
-        return false;
+        for (size_t i = 0; i < process->heap_dir_count; ++i)
+        {
+            if (process->heap_page_dirs[i])
+            {
+                free(process->heap_page_dirs[i]);
+                process->heap_page_dirs[i] = NULL;
+            }
+        }
+        free(process->heap_page_dirs);
     }
-    page->virt = virt;
-    page->phys = phys;
-    page->next = process->heap_pages;
-    process->heap_pages = page;
-    return true;
+    process->heap_page_dirs = NULL;
+    process->heap_dir_count = 0;
 }
 
 static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes)
@@ -2403,8 +2719,8 @@ static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t 
     while (remaining > 0)
     {
         uintptr_t page_base = align_down_uintptr(addr, PAGE_SIZE_BYTES_LOCAL);
-        process_heap_page_t *page = process_heap_find_page(process, page_base);
-        if (!page)
+        uintptr_t phys = 0;
+        if (!process_heap_lookup(process, page_base, &phys))
         {
             return false;
         }
@@ -2414,7 +2730,7 @@ static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t 
         {
             chunk = remaining;
         }
-        memset((uint8_t *)(uintptr_t)page->phys + page_offset, 0, chunk);
+        memset((uint8_t *)(uintptr_t)phys + page_offset, 0, chunk);
         addr += chunk;
         remaining -= chunk;
     }
@@ -2423,24 +2739,45 @@ static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t 
 
 static void process_heap_release_from(process_t *process, uintptr_t virt_start)
 {
-    if (!process)
+    if (!process || !process->heap_page_dirs)
     {
         return;
     }
-    process_heap_page_t **cursor = &process->heap_pages;
-    while (*cursor)
+
+    if (virt_start < process->user_heap_base)
     {
-        process_heap_page_t *page = *cursor;
-        if (page->virt >= virt_start)
+        virt_start = process->user_heap_base;
+    }
+
+    uintptr_t aligned_start = align_down_uintptr(virt_start, PAGE_SIZE_BYTES_LOCAL);
+    size_t start_page = (size_t)((aligned_start - process->user_heap_base) / PAGE_SIZE_BYTES_LOCAL);
+    size_t max_pages = process_heap_dir_capacity(process) * PROCESS_HEAP_L2_ENTRIES;
+
+    for (size_t page = start_page; page < max_pages; ++page)
+    {
+        uintptr_t virt = process->user_heap_base + page * PAGE_SIZE_BYTES_LOCAL;
+        if (virt >= process->user_heap_limit)
         {
-            paging_unmap_user_page(&process->address_space, page->virt);
-            user_memory_free_page(page->phys);
-            *cursor = page->next;
-            free(page);
+            break;
         }
-        else
+
+        size_t dir_index = page >> PROCESS_HEAP_L2_SHIFT;
+        size_t entry_index = page & PROCESS_HEAP_L2_MASK;
+        process_heap_l2_t *table = process_heap_table(process, dir_index, false);
+        if (!table || !process_heap_entry_present(table, entry_index))
         {
-            cursor = &page->next;
+            continue;
+        }
+
+        uintptr_t phys = table->phys[entry_index];
+        process_heap_entry_clear(table, entry_index);
+        paging_unmap_user_page(&process->address_space, virt);
+        user_memory_free_page(phys);
+
+        if (process_heap_table_empty(table))
+        {
+            free(table);
+            process->heap_page_dirs[dir_index] = NULL;
         }
     }
 }
@@ -2453,7 +2790,7 @@ static void process_free_heap_pages(process_t *process)
     }
     process_heap_release_from(process, process->user_heap_base);
     process->user_heap_committed = process->user_heap_base;
-    process->heap_pages = NULL;
+    process_heap_free_map(process);
 }
 
 static bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t end)
@@ -2466,16 +2803,33 @@ static bool process_heap_commit_range(process_t *process, uintptr_t start, uintp
     while (page_addr < end)
     {
         uintptr_t phys = 0;
-        if (!user_memory_alloc_page(&phys))
+        uintptr_t offset = (page_addr - process->user_heap_base) / PAGE_SIZE_BYTES_LOCAL;
+        size_t dir_index = (size_t)(offset >> PROCESS_HEAP_L2_SHIFT);
+        size_t entry_index = (size_t)(offset & PROCESS_HEAP_L2_MASK);
+
+        if (dir_index >= process->heap_dir_count)
         {
             process_heap_release_from(process, start);
             process->user_heap_committed = start;
             return false;
         }
-        process_heap_page_t *page_node = (process_heap_page_t *)malloc(sizeof(process_heap_page_t));
-        if (!page_node)
+
+        process_heap_l2_t *table = process_heap_table(process, dir_index, true);
+        if (!table)
         {
-            user_memory_free_page(phys);
+            process_heap_release_from(process, start);
+            process->user_heap_committed = start;
+            return false;
+        }
+
+        if (process_heap_entry_present(table, entry_index))
+        {
+            page_addr += PAGE_SIZE_BYTES_LOCAL;
+            continue;
+        }
+
+        if (!user_memory_alloc_page(&phys))
+        {
             process_heap_release_from(process, start);
             process->user_heap_committed = start;
             return false;
@@ -2487,16 +2841,12 @@ static bool process_heap_commit_range(process_t *process, uintptr_t start, uintp
                                   true,
                                   false))
         {
-            free(page_node);
             user_memory_free_page(phys);
             process_heap_release_from(process, start);
              process->user_heap_committed = start;
             return false;
         }
-        page_node->virt = page_addr;
-        page_node->phys = phys;
-        page_node->next = process->heap_pages;
-        process->heap_pages = page_node;
+        process_heap_entry_set(table, entry_index, phys);
         page_addr += PAGE_SIZE_BYTES_LOCAL;
     }
     process->user_heap_committed = end;
@@ -2634,10 +2984,27 @@ static bool process_setup_user_stack(process_t *process)
 
 static bool process_setup_user_heap(process_t *process)
 {
+    if (!process)
+    {
+        return false;
+    }
     process->user_heap_base = USER_HEAP_BASE;
     process->user_heap_brk = USER_HEAP_BASE;
     process->user_heap_limit = USER_HEAP_BASE + USER_HEAP_SIZE;
     process->user_heap_committed = USER_HEAP_BASE;
+    size_t dir_count = (USER_HEAP_SIZE + PROCESS_HEAP_L2_SPAN - 1) / PROCESS_HEAP_L2_SPAN;
+    if (dir_count == 0)
+    {
+        dir_count = 1;
+    }
+    process->heap_dir_count = dir_count;
+    process->heap_page_dirs = (process_heap_l2_t **)malloc(sizeof(process_heap_l2_t *) * dir_count);
+    if (!process->heap_page_dirs)
+    {
+        process->heap_dir_count = 0;
+        return false;
+    }
+    memset(process->heap_page_dirs, 0, sizeof(process_heap_l2_t *) * dir_count);
     return true;
 }
 
@@ -3008,17 +3375,12 @@ static void process_detach_child(process_t *child);
 static process_t *process_detach_first_child(process_t *parent);
 static void process_reap_orphans(void);
 
-#define SCHEDULER_TRACE_LIMIT 64U
-
-static uint32_t g_scheduler_trace_logs = 0;
-
 static void scheduler_trace(const char *prefix, thread_t *thread)
 {
-    if (!prefix || !thread || g_scheduler_trace_logs >= SCHEDULER_TRACE_LIMIT)
+    if (!prefix || !thread)
     {
         return;
     }
-    g_scheduler_trace_logs++;
 
     serial_printf("%s", prefix);
     serial_printf("%s", " thread=");
@@ -3420,6 +3782,7 @@ static thread_t *thread_create(process_t *process,
     }
 #endif
 
+    stack_owner_register(thread);
     thread_registry_add(thread);
     scheduler_shell_log("created", thread);
 #if THREAD_CREATE_DEBUG
@@ -3432,35 +3795,424 @@ static thread_t *thread_create(process_t *process,
     return thread;
 }
 
-static void enqueue_thread(thread_t *thread)
+static inline uint32_t scheduler_cpu_limit(void)
+{
+    uint32_t count = smp_cpu_count();
+    if (count == 0 || count > SMP_MAX_CPUS)
+    {
+        count = SMP_MAX_CPUS;
+    }
+    return count;
+}
+
+static inline run_queue_t *scheduler_run_queue(uint32_t cpu_index)
+{
+    if (cpu_index >= SMP_MAX_CPUS)
+    {
+        cpu_index = 0;
+    }
+    return &g_run_queues[cpu_index];
+}
+
+static void scheduler_log_run_queue_lock_warning(const run_queue_t *queue,
+                                                 uint64_t ms,
+                                                 const thread_t *owner,
+                                                 const char *label,
+                                                 const void *caller)
+{
+    serial_printf("%s", "[sched] run_queue lock held ");
+    serial_printf("%llu", (unsigned long long)ms);
+    serial_printf("%s", "ms cpu=");
+    serial_printf("%u", queue ? queue->cpu_index : 0);
+    serial_printf("%s", " owner=");
+    if (owner)
+    {
+        if (owner->name[0])
+        {
+            serial_printf("%s", owner->name);
+        }
+        else
+        {
+            serial_printf("%s", "<unnamed>");
+        }
+        serial_printf("%s", " pid=0x");
+        serial_printf("%016llX", (unsigned long long)(owner->process ? owner->process->pid : 0));
+    }
+    else
+    {
+        serial_printf("%s", "<none>");
+    }
+    serial_printf("%s", " label=");
+    serial_printf("%s", label ? label : "<unset>");
+    serial_printf("%s", " caller=0x");
+    serial_printf("%016llX", (unsigned long long)(uintptr_t)caller);
+    serial_printf("%s", "\r\n");
+}
+
+static void scheduler_log_run_queue_lock_wait(const run_queue_t *queue,
+                                              uint64_t ms,
+                                              const thread_t *owner,
+                                              const char *owner_label,
+                                              const void *owner_caller,
+                                              const thread_t *waiter,
+                                              const char *wait_label)
+{
+    serial_printf("%s", "[sched] run_queue lock wait ");
+    serial_printf("%llu", (unsigned long long)ms);
+    serial_printf("%s", "ms cpu=");
+    serial_printf("%u", queue ? queue->cpu_index : 0);
+    serial_printf("%s", " owner=");
+    if (owner)
+    {
+        if (owner->name[0])
+        {
+            serial_printf("%s", owner->name);
+        }
+        else
+        {
+            serial_printf("%s", "<unnamed>");
+        }
+        serial_printf("%s", " pid=0x");
+        serial_printf("%016llX", (unsigned long long)(owner->process ? owner->process->pid : 0));
+    }
+    else
+    {
+        serial_printf("%s", "<none>");
+    }
+    serial_printf("%s", " owner_label=");
+    serial_printf("%s", owner_label ? owner_label : "<unset>");
+    serial_printf("%s", " owner_caller=0x");
+    serial_printf("%016llX", (unsigned long long)(uintptr_t)owner_caller);
+    serial_printf("%s", " waiter=");
+    if (waiter)
+    {
+        if (waiter->name[0])
+        {
+            serial_printf("%s", waiter->name);
+        }
+        else
+        {
+            serial_printf("%s", "<unnamed>");
+        }
+        serial_printf("%s", " pid=0x");
+        serial_printf("%016llX", (unsigned long long)(waiter->process ? waiter->process->pid : 0));
+    }
+    else
+    {
+        serial_printf("%s", "<none>");
+    }
+    serial_printf("%s", " waiter_label=");
+    serial_printf("%s", wait_label ? wait_label : "<unset>");
+    serial_printf("%s", "\r\n");
+}
+
+static void scheduler_log_thread_brief(const thread_t *thread)
+{
+    if (!thread)
+    {
+        serial_printf("%s", "<none>");
+        return;
+    }
+    if (thread->name[0])
+    {
+        serial_printf("%s", thread->name);
+    }
+    else
+    {
+        serial_printf("%s", "<unnamed>");
+    }
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+}
+
+static void scheduler_log_switch_latency(uint64_t ms,
+                                         const thread_t *prev,
+                                         const thread_t *next,
+                                         bool deferred_work,
+                                         const deferred_free_stats_t *stats)
+{
+    serial_printf("%s", "[sched] switch latency ");
+    serial_printf("%llu", (unsigned long long)ms);
+    serial_printf("%s", "ms prev=");
+    scheduler_log_thread_brief(prev);
+    serial_printf("%s", " next=");
+    scheduler_log_thread_brief(next);
+    serial_printf("%s", " deferred=");
+    serial_printf("%s", deferred_work ? "true" : "false");
+    if (stats && stats->grabbed > 0)
+    {
+        serial_printf("%s", " grabbed=");
+        serial_printf("%016llX", (unsigned long long)stats->grabbed);
+        serial_printf("%s", " freed=");
+        serial_printf("%016llX", (unsigned long long)stats->freed);
+        serial_printf("%s", " requeued=");
+        serial_printf("%016llX", (unsigned long long)stats->requeued);
+        serial_printf("%s", " df_ms=");
+        uint64_t df_ms = scheduler_ticks_to_ms(stats->duration_ticks);
+        serial_printf("%llu", (unsigned long long)df_ms);
+    }
+    serial_printf("%s", "\r\n");
+}
+
+static inline void run_queue_lock_acquire(run_queue_t *queue, const char *label)
+{
+    if (!queue)
+    {
+        return;
+    }
+    uint64_t start = timer_ticks();
+    bool wait_logged = false;
+    thread_t *waiter = current_thread_local();
+    while (__sync_lock_test_and_set(&queue->lock.value, 1) != 0)
+    {
+        while (queue->lock.value)
+        {
+            __asm__ volatile ("pause");
+            if (!wait_logged)
+            {
+                uint64_t now = timer_ticks();
+                uint64_t ms = scheduler_ticks_to_ms(now - start);
+                if (ms >= RUN_QUEUE_LOCK_WARN_MS)
+                {
+                    scheduler_log_run_queue_lock_wait(queue,
+                                                      ms,
+                                                      queue->lock_owner,
+                                                      queue->lock_owner_label,
+                                                      queue->lock_owner_caller,
+                                                      waiter,
+                                                      label);
+                    wait_logged = true;
+                }
+            }
+        }
+    }
+    queue->lock_owner = current_thread_local();
+    queue->lock_owner_label = label;
+    queue->lock_owner_caller = __builtin_return_address(0);
+    queue->lock_acquired_ticks = timer_ticks();
+}
+
+static inline void run_queue_lock_release(run_queue_t *queue)
+{
+    if (!queue)
+    {
+        return;
+    }
+    uint64_t start = queue->lock_acquired_ticks;
+    thread_t *owner = queue->lock_owner;
+    const char *label = queue->lock_owner_label;
+    const void *caller = queue->lock_owner_caller;
+    queue->lock_owner = NULL;
+    queue->lock_owner_label = NULL;
+    queue->lock_owner_caller = NULL;
+    queue->lock_acquired_ticks = 0;
+    spinlock_unlock(&queue->lock);
+    if (start)
+    {
+        uint64_t delta = timer_ticks() - start;
+        uint64_t ms = scheduler_ticks_to_ms(delta);
+        if (ms >= RUN_QUEUE_LOCK_WARN_MS)
+        {
+            scheduler_log_run_queue_lock_warning(queue, ms, owner, label, caller);
+        }
+    }
+}
+
+static uint32_t scheduler_select_target_cpu(thread_t *thread)
+{
+    uint32_t preferred = current_cpu_index();
+    uint32_t cpu_count = scheduler_cpu_limit();
+    if (thread && thread->last_cpu_index < cpu_count)
+    {
+        preferred = thread->last_cpu_index;
+    }
+    if (preferred >= cpu_count)
+    {
+        preferred = 0;
+    }
+    return preferred;
+}
+
+static bool run_queue_detach_locked(run_queue_t *queue, thread_t *thread)
+{
+    if (!queue || !thread)
+    {
+        return false;
+    }
+
+    thread_priority_t priority = thread->priority;
+    if (priority < THREAD_PRIORITY_IDLE || priority >= THREAD_PRIORITY_COUNT)
+    {
+        priority = THREAD_PRIORITY_NORMAL;
+    }
+
+    thread_t *head = queue->heads[priority];
+    thread_t *prev = thread->queue_prev;
+    thread_t *next = thread->queue_next;
+
+    if (prev || head == thread)
+    {
+        if (prev)
+        {
+            prev->queue_next = next;
+        }
+        else
+        {
+            queue->heads[priority] = next;
+        }
+        if (next)
+        {
+            next->queue_prev = prev;
+        }
+        else if (queue->tails[priority] == thread)
+        {
+            queue->tails[priority] = prev;
+        }
+    }
+    else
+    {
+        thread_t *cursor = head;
+        thread_t *cursor_prev = NULL;
+        while (cursor)
+        {
+            if (cursor == thread)
+            {
+                thread_t *cursor_next = cursor->queue_next;
+                if (cursor_prev)
+                {
+                    cursor_prev->queue_next = cursor_next;
+                }
+                else
+                {
+                    queue->heads[priority] = cursor_next;
+                }
+                if (cursor_next)
+                {
+                    cursor_next->queue_prev = cursor_prev;
+                }
+                else
+                {
+                    queue->tails[priority] = cursor_prev;
+                }
+                break;
+            }
+            cursor_prev = cursor;
+            cursor = cursor->queue_next;
+        }
+        if (!cursor)
+        {
+            return false;
+        }
+    }
+
+    if (queue->counts[priority] > 0)
+    {
+        queue->counts[priority]--;
+    }
+    if (queue->total > 0)
+    {
+        queue->total--;
+    }
+    thread->in_run_queue = false;
+    thread->queue_next = NULL;
+    thread->queue_prev = NULL;
+    return true;
+}
+
+static thread_t *run_queue_pop_locked(run_queue_t *queue)
+{
+    if (!queue)
+    {
+        return NULL;
+    }
+
+    for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE; --pr)
+    {
+        thread_t *thread = queue->heads[pr];
+        while (thread)
+        {
+            thread_t *next = thread->queue_next;
+            if (!thread_can_run(thread))
+            {
+                thread = next;
+                continue;
+            }
+
+            if (!run_queue_detach_locked(queue, thread))
+            {
+                return NULL;
+            }
+
+            if (!thread->context_valid)
+            {
+                scheduler_trace("[sched] dequeue forcing context_valid=true;", thread);
+                thread->context_valid = true;
+            }
+            return thread;
+        }
+    }
+    return NULL;
+}
+
+static thread_t *dequeue_thread_for_cpu(uint32_t cpu_index)
+{
+    run_queue_t *local = scheduler_run_queue(cpu_index);
+    run_queue_lock_acquire(local, "dequeue");
+    thread_t *thread = run_queue_pop_locked(local);
+    run_queue_lock_release(local);
+    if (thread)
+    {
+        thread->run_queue_cpu = cpu_index;
+        return thread;
+    }
+
+    //serial_printf("%s", "[sched] dequeue: no runnable threads\n");
+    return NULL;
+}
+
+static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
 {
     if (!thread || thread->in_run_queue)
     {
         return;
     }
-    spinlock_lock(&g_run_queue_lock);
+
+    run_queue_t *queue = scheduler_run_queue(cpu_index);
+    run_queue_lock_acquire(queue, "enqueue");
     thread_priority_t priority = thread->priority;
     if (priority < THREAD_PRIORITY_IDLE || priority >= THREAD_PRIORITY_COUNT)
     {
         priority = THREAD_PRIORITY_NORMAL;
         thread->priority = priority;
     }
+    thread->queue_prev = queue->tails[priority];
     thread->queue_next = NULL;
+    thread->run_queue_cpu = cpu_index;
     thread->in_run_queue = true;
-    thread_t **head = &g_run_queue_heads[priority];
-    thread_t **tail = &g_run_queue_tails[priority];
-    if (!*head)
+    if (!queue->heads[priority])
     {
-        *head = thread;
-        *tail = thread;
+        queue->heads[priority] = thread;
+        queue->tails[priority] = thread;
     }
     else
     {
-        (*tail)->queue_next = thread;
-        *tail = thread;
+        queue->tails[priority]->queue_next = thread;
+        queue->tails[priority] = thread;
     }
-    spinlock_unlock(&g_run_queue_lock);
+    queue->counts[priority]++;
+    queue->total++;
+    run_queue_lock_release(queue);
     scheduler_shell_log("enqueued", thread);
+}
+
+static void enqueue_thread(thread_t *thread)
+{
+    if (!thread || thread->in_run_queue)
+    {
+        return;
+    }
+    uint32_t cpu_index = scheduler_select_target_cpu(thread);
+    enqueue_thread_on_cpu(thread, cpu_index);
 }
 
 static void thread_freeze_for_stack_watch(thread_t *thread, const char *context)
@@ -3694,54 +4446,6 @@ static bool thread_can_run(const thread_t *thread)
     return true;
 }
 
-static thread_t *dequeue_thread(void)
-{
-    spinlock_lock(&g_run_queue_lock);
-    for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE; --pr)
-    {
-        thread_t *prev = NULL;
-        thread_t *thread = g_run_queue_heads[pr];
-        while (thread)
-        {
-            thread_t *next = thread->queue_next;
-            if (!thread_can_run(thread))
-            {
-                prev = thread;
-                thread = next;
-                continue;
-            }
-            if (prev)
-            {
-                prev->queue_next = next;
-            }
-            else
-            {
-                g_run_queue_heads[pr] = next;
-            }
-            if (!next)
-            {
-                g_run_queue_tails[pr] = prev;
-            }
-            thread->queue_next = NULL;
-            thread->in_run_queue = false;
-            if (!thread->context_valid)
-            {
-                scheduler_trace("[sched] dequeue forcing context_valid=true;", thread);
-                thread->context_valid = true;
-            }
-            spinlock_unlock(&g_run_queue_lock);
-            return thread;
-        }
-    }
-    spinlock_unlock(&g_run_queue_lock);
-    if (g_scheduler_trace_logs < SCHEDULER_TRACE_LIMIT)
-    {
-        serial_printf("%s", "[sched] dequeue: no runnable threads\n");
-        g_scheduler_trace_logs++;
-    }
-    return NULL;
-}
-
 static void remove_from_run_queue(thread_t *thread)
 {
     if (!thread || !thread->in_run_queue)
@@ -3749,39 +4453,49 @@ static void remove_from_run_queue(thread_t *thread)
         return;
     }
 
-    spinlock_lock(&g_run_queue_lock);
-    thread_t *prev = NULL;
-    thread_priority_t priority = thread->priority;
-    if (priority < THREAD_PRIORITY_IDLE || priority >= THREAD_PRIORITY_COUNT)
+    uint32_t cpu_index = thread->run_queue_cpu;
+    uint32_t cpu_count = scheduler_cpu_limit();
+    for (uint32_t attempt = 0; attempt < cpu_count; ++attempt)
     {
-        priority = THREAD_PRIORITY_NORMAL;
-    }
-    thread_t *cursor = g_run_queue_heads[priority];
-    while (cursor)
-    {
-        if (cursor == thread)
+        uint32_t target = (cpu_index + attempt) % cpu_count;
+        run_queue_t *queue = scheduler_run_queue(target);
+        run_queue_lock_acquire(queue, "remove");
+        bool removed = run_queue_detach_locked(queue, thread);
+        run_queue_lock_release(queue);
+        if (removed)
         {
-            if (prev)
-            {
-                prev->queue_next = thread->queue_next;
-            }
-            else
-            {
-                g_run_queue_heads[priority] = thread->queue_next;
-            }
-            if (g_run_queue_tails[priority] == thread)
-            {
-                g_run_queue_tails[priority] = prev;
-            }
-            thread->queue_next = NULL;
-            thread->in_run_queue = false;
-            spinlock_unlock(&g_run_queue_lock);
             return;
         }
-        prev = cursor;
-        cursor = cursor->queue_next;
     }
-    spinlock_unlock(&g_run_queue_lock);
+}
+
+static bool scheduler_thread_in_any_queue(thread_t *thread)
+{
+    if (!thread)
+    {
+        return false;
+    }
+
+    uint32_t cpu_count = scheduler_cpu_limit();
+    for (uint32_t cpu = 0; cpu < cpu_count; ++cpu)
+    {
+        run_queue_t *queue = scheduler_run_queue(cpu);
+        run_queue_lock_acquire(queue, "contains");
+        for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE; --pr)
+        {
+            for (thread_t *cursor = queue->heads[pr]; cursor; cursor = cursor->queue_next)
+            {
+                if (cursor == thread)
+                {
+                    run_queue_lock_release(queue);
+                    return true;
+                }
+            }
+        }
+        run_queue_lock_release(queue);
+    }
+
+    return false;
 }
 
 static thread_priority_t thread_clamp_priority(thread_priority_t priority)
@@ -4114,6 +4828,9 @@ static void process_reap_orphans(void)
 
 static bool switch_to_thread(thread_t *next)
 {
+    uint64_t switch_start_ticks = timer_ticks();
+    deferred_free_stats_t deferred_stats = { 0 };
+    bool deferred_work = false;
     thread_t *prev = current_thread_local();
     process_t *prev_process = prev ? prev->process : NULL;
     process_t *next_process = next ? next->process : NULL;
@@ -4185,6 +4902,15 @@ static bool switch_to_thread(thread_t *next)
 
     set_current_thread_local(next);
     set_current_process_local(next_process);
+    uint32_t cpu_idx = current_cpu_index();
+    if (prev_process && prev_process != next_process)
+    {
+        paging_space_clear_active_cpu(&prev_process->address_space, cpu_idx);
+    }
+    if (next_process)
+    {
+        paging_space_mark_active_cpu(&next_process->address_space, cpu_idx);
+    }
 
     if (next)
     {
@@ -4231,6 +4957,10 @@ static bool switch_to_thread(thread_t *next)
             }
             set_current_thread_local(prev);
             set_current_process_local(prev_process);
+            if (prev_process && prev_process != next_process)
+            {
+                paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
+            }
             return false;
         }
         thread_assert_stack_guard_only(next, "switch_to");
@@ -4262,6 +4992,10 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
 
     if (!next_ctx)
     {
+        if (prev_process && prev_process != next_process)
+        {
+            paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
+        }
         return false;
     }
 
@@ -4344,16 +5078,24 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
         thread_context_guard_protect_pages(prev);
     }
 #endif
-    thread_process_deferred_frees(current_cpu_index());
+    deferred_work = thread_process_deferred_frees(current_cpu_index(), &deferred_stats);
+
+    uint64_t switch_elapsed_ms = scheduler_ticks_to_ms(timer_ticks() - switch_start_ticks);
+    if (switch_elapsed_ms >= SCHED_SWITCH_WARN_MS)
+    {
+        scheduler_log_switch_latency(switch_elapsed_ms, prev, next, deferred_work, &deferred_stats);
+    }
 
     return true;
 }
 
 static void scheduler_schedule(bool requeue_current)
 {
+    uint64_t sched_watch = timer_ticks();
     uint64_t flags = cpu_save_flags();
     cpu_cli();
 
+    uint32_t cpu_index = current_cpu_index();
     thread_t *current = current_thread_local();
 
     if (!current)
@@ -4374,15 +5116,15 @@ static void scheduler_schedule(bool requeue_current)
         current->preempt_pending = false;
         current->context_valid = true;
         current->in_transition = true;
-        scheduler_shell_log("context_valid=true (requeue)", current);
-        scheduler_trace("[sched] requeue current;", current);
-        enqueue_thread(current);
+        // scheduler_shell_log("context_valid=true (requeue)", current);
+        // scheduler_trace("[sched] requeue current;", current);
+        enqueue_thread_on_cpu(current, cpu_index);
     }
 
-    thread_t *next = dequeue_thread();
+    thread_t *next = dequeue_thread_for_cpu(cpu_index);
     if (!next)
     {
-        thread_t *idle = g_idle_threads[current_cpu_index()];
+        thread_t *idle = g_idle_threads[cpu_index];
         if (!idle)
         {
             idle = g_idle_threads[0];
@@ -4393,6 +5135,7 @@ static void scheduler_schedule(bool requeue_current)
     if (!next)
     {
         cpu_restore_flags(flags);
+        scheduler_log_if_stalled("scheduler_schedule(no_next)", sched_watch);
         return;
     }
 
@@ -4403,16 +5146,17 @@ static void scheduler_schedule(bool requeue_current)
         current->context_valid = true;
         current->in_transition = false;
         cpu_restore_flags(flags);
+        scheduler_log_if_stalled("scheduler_schedule(run_current)", sched_watch);
         return;
     }
 
     while (!switch_to_thread(next))
     {
         scheduler_trace("[sched] switch_to failed; retry", next);
-        next = dequeue_thread();
+        next = dequeue_thread_for_cpu(cpu_index);
         if (!next)
         {
-            thread_t *idle = g_idle_threads[current_cpu_index()];
+            thread_t *idle = g_idle_threads[cpu_index];
             if (!idle)
             {
                 idle = g_idle_threads[0];
@@ -4421,20 +5165,23 @@ static void scheduler_schedule(bool requeue_current)
             if (!next)
             {
                 cpu_restore_flags(flags);
+                scheduler_log_if_stalled("scheduler_schedule(no_next_retry)", sched_watch);
                 return;
             }
         }
-        if (next == current)
-        {
-            current->state = THREAD_STATE_RUNNING;
-            current->preempt_pending = false;
-            current->context_valid = true;
-            current->in_transition = false;
-            cpu_restore_flags(flags);
-            return;
-        }
+            if (next == current)
+            {
+                current->state = THREAD_STATE_RUNNING;
+                current->preempt_pending = false;
+                current->context_valid = true;
+                current->in_transition = false;
+                cpu_restore_flags(flags);
+                scheduler_log_if_stalled("scheduler_schedule(requeue)", sched_watch);
+                return;
+            }
     }
     cpu_restore_flags(flags);
+    scheduler_log_if_stalled("scheduler_schedule", sched_watch);
     process_reap_orphans();
 }
 
@@ -4698,7 +5445,30 @@ void process_system_init(void)
         g_current_threads[i] = NULL;
         g_idle_threads[i] = NULL;
     }
-    spinlock_init(&g_run_queue_lock);
+    for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
+    {
+        run_queue_t *queue = &g_run_queues[i];
+        spinlock_init(&queue->lock);
+        queue->total = 0;
+        queue->lock_owner = NULL;
+        queue->lock_owner_label = NULL;
+        queue->lock_owner_caller = NULL;
+        queue->lock_acquired_ticks = 0;
+        queue->cpu_index = i;
+        for (int pr = 0; pr < THREAD_PRIORITY_COUNT; ++pr)
+        {
+            queue->heads[pr] = NULL;
+            queue->tails[pr] = NULL;
+            queue->counts[pr] = 0;
+        }
+    }
+#if ENABLE_STACK_WRITE_DEBUG
+    for (uint32_t i = 0; i < STACK_OWNER_BUCKET_COUNT; ++i)
+    {
+        g_stack_owner_buckets[i] = NULL;
+        spinlock_init(&g_stack_owner_locks[i]);
+    }
+#endif
     spinlock_init(&g_sleep_queue_lock);
     spinlock_init(&g_process_lock);
     spinlock_init(&g_thread_registry_lock);
@@ -4707,11 +5477,6 @@ void process_system_init(void)
     {
         spinlock_init(&g_deferred_free_locks[i]);
         g_deferred_thread_frees[i] = NULL;
-    }
-    for (int i = 0; i < THREAD_PRIORITY_COUNT; ++i)
-    {
-        g_run_queue_heads[i] = NULL;
-        g_run_queue_tails[i] = NULL;
     }
     g_sleep_queue_head = NULL;
     g_next_pid = 1;
@@ -5216,10 +5981,10 @@ void process_exit(int status)
     fatal("process_exit returned");
 }
 
-static bool process_waiting_still_running(void *context)
+static bool process_has_exited(void *context)
 {
     process_t *proc = (process_t *)context;
-    return proc && process_pointer_valid(proc) && proc->state != PROCESS_STATE_ZOMBIE;
+    return !proc || !process_pointer_valid(proc) || proc->state == PROCESS_STATE_ZOMBIE;
 }
 
 int process_join_with_hook(process_t *process,
@@ -5244,7 +6009,7 @@ int process_join_with_hook(process_t *process,
             process_yield();
             continue;
         }
-        wait_queue_wait(&process->wait_queue, process_waiting_still_running, process);
+        wait_queue_wait(&process->wait_queue, process_has_exited, process);
     }
 
     if (status_out)
@@ -5455,8 +6220,41 @@ void wait_queue_init(wait_queue_t *queue)
     {
         return;
     }
+    spinlock_init(&queue->lock);
     queue->head = NULL;
     queue->tail = NULL;
+}
+
+static void wait_queue_remove_thread_locked(wait_queue_t *queue, thread_t *thread)
+{
+    if (!queue || !thread)
+    {
+        return;
+    }
+    if (queue->head == thread)
+    {
+        queue->head = thread->wait_queue_next;
+        if (!queue->head)
+        {
+            queue->tail = NULL;
+        }
+        thread->wait_queue_next = NULL;
+        return;
+    }
+    thread_t *prev = queue->head;
+    while (prev && prev->wait_queue_next != thread)
+    {
+        prev = prev->wait_queue_next;
+    }
+    if (prev)
+    {
+        prev->wait_queue_next = thread->wait_queue_next;
+        if (queue->tail == thread)
+        {
+            queue->tail = prev;
+        }
+        thread->wait_queue_next = NULL;
+    }
 }
 
 void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void *context)
@@ -5476,11 +6274,7 @@ void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void
     uint64_t flags = cpu_save_flags();
     cpu_cli();
 
-    if (predicate && !predicate(context))
-    {
-        cpu_restore_flags(flags);
-        return;
-    }
+    spinlock_lock(&queue->lock);
 
     if (thread->in_run_queue)
     {
@@ -5490,8 +6284,25 @@ void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void
     thread->waiting_queue = queue;
     wait_queue_enqueue_locked(queue, thread);
 
-    cpu_restore_flags(flags);
+    spinlock_unlock(&queue->lock);
+
+    if (predicate && predicate(context))
+    {
+        spinlock_lock(&queue->lock);
+        if (thread->waiting_queue == queue)
+        {
+            wait_queue_remove_thread_locked(queue, thread);
+            thread->waiting_queue = NULL;
+        }
+        thread->state = THREAD_STATE_RUNNING;
+        spinlock_unlock(&queue->lock);
+
+        cpu_restore_flags(flags);
+        return;
+    }
+
     scheduler_schedule(false);
+    cpu_restore_flags(flags);
 }
 
 void wait_queue_wake_one(wait_queue_t *queue)
@@ -5502,6 +6313,7 @@ void wait_queue_wake_one(wait_queue_t *queue)
     }
     uint64_t flags = cpu_save_flags();
     cpu_cli();
+    spinlock_lock(&queue->lock);
 
     thread_t *thread = wait_queue_dequeue_locked(queue);
     if (thread)
@@ -5514,6 +6326,7 @@ void wait_queue_wake_one(wait_queue_t *queue)
         }
     }
 
+    spinlock_unlock(&queue->lock);
     cpu_restore_flags(flags);
 }
 
@@ -5525,6 +6338,7 @@ void wait_queue_wake_all(wait_queue_t *queue)
     }
     uint64_t flags = cpu_save_flags();
     cpu_cli();
+    spinlock_lock(&queue->lock);
 
     thread_t *thread = wait_queue_dequeue_locked(queue);
     while (thread)
@@ -5538,6 +6352,7 @@ void wait_queue_wake_all(wait_queue_t *queue)
         thread = wait_queue_dequeue_locked(queue);
     }
 
+    spinlock_unlock(&queue->lock);
     cpu_restore_flags(flags);
 }
 
@@ -5679,6 +6494,7 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
         if (new_commit < process->user_heap_committed)
         {
             process_heap_release_from(process, new_commit);
+            process->user_heap_committed = new_commit;
         }
     }
 

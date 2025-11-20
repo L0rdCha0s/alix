@@ -52,6 +52,7 @@ void net_if_set_tx_handler(net_interface_t *iface,
                            bool (*handler)(net_interface_t *,
                                            const uint8_t *,
                                            size_t));
+bool net_if_send_direct(net_interface_t *iface, const uint8_t *data, size_t len);
 bool net_if_send_copy(net_interface_t *iface, const uint8_t *data, size_t len);
 void net_if_record_rx(net_interface_t *iface, size_t bytes);
 void net_if_record_rx_error(net_interface_t *iface);

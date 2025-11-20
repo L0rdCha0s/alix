@@ -9,12 +9,18 @@
 #include "net/dns.h"
 #include "net/tcp.h"
 #include "net/tls.h"
+#include "serial.h"
 #include "timer.h"
+#include "timekeeping.h"
 #include "vfs.h"
 #include "libc.h"
 
 #ifndef WGET_TRACE_ENABLE
 #define WGET_TRACE_ENABLE 0
+#endif
+
+#ifndef WGET_PROGRESS_LOG
+#define WGET_PROGRESS_LOG 1
 #endif
 
 #ifndef WGET_TLS_TRACE_ENABLE
@@ -95,6 +101,16 @@ typedef struct
     size_t line_len;          // bytes in linebuf
     int    trailer_stage;     // 0,1,2,3 progressing toward CRLFCRLF
 } chunked_state_t;
+
+static uint64_t wget_ticks_to_ms(uint64_t ticks)
+{
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 1000;
+    }
+    return (ticks * 1000ULL) / (uint64_t)freq;
+}
 
 static void chunked_init(chunked_state_t *st)
 {
@@ -712,6 +728,13 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         dest_token[name_len] = '\0';
     }
 
+#if WGET_PROGRESS_LOG
+    serial_printf("[wget] start url=%s dest=%s iface=%s\r\n",
+                  url_arg,
+                  dest_token,
+                  (have_iface && iface) ? iface->name : "<auto>");
+#endif
+
     bool use_tls = tls_via_scheme || (remote_port == 443);
 #if WGET_TLS_TRACE_ENABLE
     if (use_tls)
@@ -755,6 +778,19 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     {
         return shell_output_error(out, "ARP resolution failed");
     }
+#if WGET_PROGRESS_LOG
+    {
+        char ip_remote[32];
+        char ip_next[32];
+        net_format_ipv4(remote_ip, ip_remote);
+        net_format_ipv4(next_hop_ip, ip_next);
+        serial_printf("[wget] route iface=%s remote=%s:%u next_hop=%s\r\n",
+                      iface ? iface->name : "<none>",
+                      ip_remote,
+                      (unsigned)remote_port,
+                      ip_next);
+    }
+#endif
 
     net_tcp_socket_t *socket = net_tcp_socket_open(iface);
     if (!socket)
@@ -773,6 +809,11 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     tls_session_t *tls_session = NULL;
     vfs_node_t *file = NULL;
     size_t written = 0;
+#if WGET_PROGRESS_LOG
+    uint64_t log_start_ticks = timer_ticks();
+    uint64_t last_wait_log = 0;
+    size_t next_progress_bytes = 64 * 1024;
+#endif
 #if WGET_TLS_TRACE_ENABLE
     bool tls_trace_logged_first_payload = false;
 #endif
@@ -800,6 +841,12 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         }
         __asm__ volatile ("pause");
     }
+#if WGET_PROGRESS_LOG
+    {
+        uint64_t connect_ms = wget_ticks_to_ms(timer_ticks() - start);
+        serial_printf("[wget] tcp connected in %llums\r\n", (unsigned long long)connect_ms);
+    }
+#endif
 
     if (use_tls)
     {
@@ -816,15 +863,26 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             goto cleanup;
         }
         shell_output_write(out, "Negotiating TLS...\n");
+#if WGET_PROGRESS_LOG
+        serial_printf("%s", "[wget] tls handshake begin\r\n");
+#endif
 #if WGET_TLS_TRACE_ENABLE
+        uint64_t tls_start = timer_ticks();
         if (!wget_tls_handshake(out, tls_session, host_name, iface, socket, remote_ip, remote_port))
 #else
+        uint64_t tls_start = timer_ticks();
         if (!tls_session_handshake(tls_session, host_name))
 #endif
         {
             shell_output_error(out, "TLS handshake failed");
             goto cleanup;
         }
+#if WGET_PROGRESS_LOG
+        {
+            uint64_t tls_ms = wget_ticks_to_ms(timer_ticks() - tls_start);
+            serial_printf("[wget] tls handshake done in %llums\r\n", (unsigned long long)tls_ms);
+        }
+#endif
         tls_active = true;
     }
 
@@ -906,6 +964,9 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             goto cleanup;
         }
     }
+#if WGET_PROGRESS_LOG
+    serial_printf("[wget] sent request bytes=%zu\r\n", req_len);
+#endif
     shell_output_write(out, "Request sent, awaiting response...\n");
 
     char header_buf[WGET_HEADER_CAP];
@@ -913,6 +974,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     bool header_done = false;
     bool header_parsed = false;
     bool have_length = false;
+    bool file_preallocated = false;
     size_t content_length = 0;
     bool is_chunked = false;
     chunked_state_t cstate;
@@ -957,7 +1019,18 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     break;
                 }
 
-                if (timer_ticks() - last_progress >= data_timeout)
+                uint64_t now = timer_ticks();
+#if WGET_PROGRESS_LOG
+                if (now - last_wait_log >= timer_frequency())
+                {
+                    serial_printf("[wget] waiting for data... elapsed=%llums written=%zu\r\n",
+                                  (unsigned long long)wget_ticks_to_ms(now - log_start_ticks),
+                                  written);
+                    last_wait_log = now;
+                }
+#endif
+
+                if (now - last_progress >= data_timeout)
                 {
                     shell_output_error(out, "no data received (timeout)");
                     goto cleanup;
@@ -990,7 +1063,18 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     break;
                 }
 
-                if (timer_ticks() - last_progress >= data_timeout)
+                uint64_t now = timer_ticks();
+#if WGET_PROGRESS_LOG
+                if (now - last_wait_log >= timer_frequency())
+                {
+                    serial_printf("[wget] waiting for data... elapsed=%llums written=%zu\r\n",
+                                  (unsigned long long)wget_ticks_to_ms(now - log_start_ticks),
+                                  written);
+                    last_wait_log = now;
+                }
+#endif
+
+                if (now - last_progress >= data_timeout)
                 {
                     shell_output_error(out, "no data received (timeout)");
                     goto cleanup;
@@ -1084,6 +1168,15 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                 shell_output_write(out, "\n");
 #endif
                 have_length = true;
+                if (file && !file_preallocated)
+                {
+                    if (!vfs_reserve(file, content_length))
+                    {
+                        shell_output_error(out, "failed to reserve file storage");
+                        goto cleanup;
+                    }
+                    file_preallocated = true;
+                }
             }
 
                 header_parsed = true;
@@ -1136,6 +1229,16 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             }
         }
 
+#if WGET_PROGRESS_LOG
+        if (written >= next_progress_bytes)
+        {
+            serial_printf("[wget] progress=%zu bytes elapsed=%llums\r\n",
+                          written,
+                          (unsigned long long)wget_ticks_to_ms(timer_ticks() - log_start_ticks));
+            next_progress_bytes += 64 * 1024;
+        }
+#endif
+
         if ((is_chunked && chunked_done) ||
             (have_length && written >= content_length))
         {
@@ -1144,6 +1247,14 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     }
 
     success = true;
+#if WGET_PROGRESS_LOG
+    {
+        uint64_t total_ms = wget_ticks_to_ms(timer_ticks() - log_start_ticks);
+        serial_printf("[wget] complete bytes=%zu duration=%llums\r\n",
+                      written,
+                      (unsigned long long)total_ms);
+    }
+#endif
     shell_output_write(out, "Saved ");
     char size_buf[16];
     size_t temp = written;

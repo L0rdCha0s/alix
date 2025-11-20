@@ -4,8 +4,10 @@
 #include "heap.h"
 #include "serial.h"
 #include "spinlock.h"
+#include "process.h"
 #include <limits.h>
 #include <stdint.h>
+#include "timer.h"
 
 /*
  * Heap-backed VFS:
@@ -15,6 +17,8 @@
  */
 
 #define ALIXFS_MAGIC "ALIXFS__"
+
+#define VFS_DIRTY_BACKPRESSURE_LIMIT   (2ULL * 1024ULL * 1024ULL)
 
 typedef struct __attribute__((packed))
 {
@@ -44,11 +48,16 @@ struct vfs_mount
     bool needs_full_sync;
     uint8_t *image_cache;
     size_t cache_size;
+    size_t cache_capacity;
+    uint8_t *sync_buffer;
+    size_t sync_capacity;
     size_t sector_size;
     uint8_t *dirty_sectors;
     size_t dirty_sector_count;
     spinlock_t dirty_lock;
     spinlock_t sync_lock;
+    size_t dirty_bytes;
+    size_t dirty_bytes_limit;
 };
 
 struct vfs_node
@@ -81,8 +90,44 @@ struct vfs_node
 static vfs_node_t *root = NULL;
 static vfs_mount_t *mounts = NULL;
 static spinlock_t g_vfs_tree_lock;
+static const uint64_t VFS_SYNC_LOG_MS_THRESHOLD = 100ULL;
 
 #define VFS_MAX_SYMLINK_DEPTH 8
+
+static uint64_t vfs_ticks_to_ms(uint64_t ticks)
+{
+    uint64_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 1000;
+    }
+    return (ticks * 1000ULL) / freq;
+}
+
+static void vfs_log_sync_result(const char *dev_name,
+                                const char *status,
+                                uint64_t start_ticks,
+                                size_t total_bytes)
+{
+    if (!dev_name || !status || start_ticks == 0)
+    {
+        return;
+    }
+    uint64_t elapsed_ms = vfs_ticks_to_ms(timer_ticks() - start_ticks);
+    if (elapsed_ms < VFS_SYNC_LOG_MS_THRESHOLD && status[0] != 'f')
+    {
+        return;
+    }
+    serial_printf("%s", "[vfs] sync ");
+    serial_printf("%s", status);
+    serial_printf("%s", " dev=");
+    serial_printf("%s", dev_name);
+    serial_printf("%s", " bytes=0x");
+    serial_printf("%016llX", (unsigned long long)total_bytes);
+    serial_printf("%s", " duration=");
+    serial_printf("%llu", (unsigned long long)elapsed_ms);
+    serial_printf("%s", "ms\r\n");
+}
 
 static void vfs_log(const char *msg, uint64_t value)
 {
@@ -101,6 +146,9 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full);
 static bool vfs_device_is_mounted(block_device_t *device);
 size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max);
 bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
+static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes);
+static void vfs_account_dirty_bytes(vfs_mount_t *mount, size_t bytes);
+static void vfs_reset_dirty_bytes(vfs_mount_t *mount);
 
 /* ---------- helpers ---------- */
 
@@ -128,6 +176,61 @@ static char *vfs_strdup(const char *s)
     if (!p) return NULL;
     memcpy(p, s, len + 1);
     return p;
+}
+
+static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
+{
+    if (!mount || pending_bytes == 0)
+    {
+        return;
+    }
+    while (1)
+    {
+        bool over = false;
+        spinlock_lock(&mount->dirty_lock);
+        size_t limit = mount->dirty_bytes_limit;
+        if (limit == 0 || mount->dirty_bytes + pending_bytes <= limit)
+        {
+            over = false;
+        }
+        else
+        {
+            over = true;
+        }
+        spinlock_unlock(&mount->dirty_lock);
+        if (!over)
+        {
+            break;
+        }
+        process_yield();
+    }
+}
+
+static void vfs_account_dirty_bytes(vfs_mount_t *mount, size_t bytes)
+{
+    if (!mount || bytes == 0)
+    {
+        return;
+    }
+    spinlock_lock(&mount->dirty_lock);
+    mount->dirty_bytes += bytes;
+    if (mount->dirty_bytes_limit &&
+        mount->dirty_bytes > mount->dirty_bytes_limit)
+    {
+        mount->needs_full_sync = true;
+    }
+    spinlock_unlock(&mount->dirty_lock);
+}
+
+static void vfs_reset_dirty_bytes(vfs_mount_t *mount)
+{
+    if (!mount)
+    {
+        return;
+    }
+    spinlock_lock(&mount->dirty_lock);
+    mount->dirty_bytes = 0;
+    spinlock_unlock(&mount->dirty_lock);
 }
 
 /* Extract next path component into a freshly malloc'd string; caller must free(). */
@@ -351,6 +454,15 @@ static bool ensure_capacity(vfs_node_t *file, size_t need)
     return true;
 }
 
+bool vfs_reserve(vfs_node_t *file, size_t size_hint)
+{
+    if (size_hint == 0)
+    {
+        return true;
+    }
+    return ensure_capacity(file, size_hint);
+}
+
 static void ensure_terminator(vfs_node_t *node)
 {
     if (!node || node->type != VFS_NODE_FILE) return;
@@ -388,7 +500,6 @@ static void vfs_mark_node_dirty(vfs_node_t *node)
 static void vfs_note_file_dirty(vfs_node_t *node, size_t start, size_t len, bool size_changed)
 {
     (void)start;
-    (void)len;
     (void)size_changed;
     if (!node || node->type != VFS_NODE_FILE)
     {
@@ -405,6 +516,7 @@ static void vfs_note_file_dirty(vfs_node_t *node, size_t start, size_t len, bool
     mount->needs_full_sync = true;
     mount->dirty = true;
     spinlock_unlock(&mount->dirty_lock);
+    vfs_account_dirty_bytes(mount, len);
 }
 
 static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount)
@@ -1230,6 +1342,10 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
     if (!file || file->type != VFS_NODE_FILE) return false;
     if (!data || len == 0) { ensure_terminator(file); return true; }
 
+    if (file->mount)
+    {
+        vfs_backpressure_wait(file->mount, len);
+    }
     if (!ensure_capacity(file, file->size + len)) return false;
 
     memmove(file->data + file->size, data, len);
@@ -1299,6 +1415,10 @@ ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t c
         return -1;
     }
     size_t end = offset + count;
+    if (file->mount)
+    {
+        vfs_backpressure_wait(file->mount, count);
+    }
     if (!ensure_capacity(file, end))
     {
         return -1;
@@ -1667,20 +1787,48 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     serial_printf("%s", "\r\n");
 
     size_t max_bytes = (size_t)sectors_needed * sector_size;
-    uint8_t *image = (uint8_t *)malloc(max_bytes);
-    if (!image)
+    uint8_t *scratch = mount->sync_buffer;
+    size_t scratch_capacity = mount->sync_capacity;
+    if (!scratch || scratch_capacity < max_bytes)
     {
-        serial_printf("%s", "[vfs] sync fail: image alloc\r\n");
-        return false;
+        uint8_t *new_buf = (uint8_t *)realloc(scratch, max_bytes);
+        if (!new_buf)
+        {
+            serial_printf("%s", "[vfs] sync fail: scratch alloc\r\n");
+            return false;
+        }
+        scratch = new_buf;
+        scratch_capacity = max_bytes;
+        mount->sync_buffer = scratch;
+        mount->sync_capacity = scratch_capacity;
     }
-    memset(image, 0, max_bytes);
+    memset(scratch, 0, max_bytes);
+    if (!mount->dirty_sectors || mount->dirty_sector_count < sectors_needed)
+    {
+        uint8_t *dirty = (uint8_t *)realloc(mount->dirty_sectors, sectors_needed);
+        if (!dirty)
+        {
+            serial_printf("%s", "[vfs] sync fail: dirty map alloc\r\n");
+            return false;
+        }
+        mount->dirty_sectors = dirty;
+        mount->dirty_sector_count = sectors_needed;
+    }
+    else
+    {
+        /* Keep tracking capacity but clamp logical span to new requirement. */
+        mount->dirty_sector_count = sectors_needed;
+    }
+    if (mount->dirty_sectors && mount->dirty_sector_count > 0)
+    {
+        memset(mount->dirty_sectors, 0, mount->dirty_sector_count);
+    }
 
     vfs_stream_writer_t writer;
-    vfs_stream_writer_init_buffer(&writer, image, max_bytes, sector_size);
+    vfs_stream_writer_init_buffer(&writer, scratch, max_bytes, sector_size);
     if (!writer.ok)
     {
         serial_printf("%s", "[vfs] sync fail: stream buffer alloc\r\n");
-        free(image);
         return false;
     }
 
@@ -1714,7 +1862,6 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
 
     if (!ok)
     {
-        free(image);
         return false;
     }
 
@@ -1722,6 +1869,7 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     size_t new_size = (size_t)sectors_needed * sector_size;
     uint8_t *old = mount->image_cache;
     size_t old_size = mount->cache_size;
+    size_t old_capacity = mount->cache_capacity;
     uint32_t run_start = UINT32_MAX;
     uint32_t run_len = 0;
     for (uint32_t sector = 0; sector < sectors_needed; ++sector)
@@ -1730,7 +1878,7 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
         bool changed = true;
         if (old && offset + sector_size <= old_size)
         {
-            if (memcmp(old + offset, image + offset, sector_size) == 0)
+            if (memcmp(old + offset, scratch + offset, sector_size) == 0)
             {
                 changed = false;
             }
@@ -1748,7 +1896,7 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
             }
             else
             {
-                if (!block_write(mount->device, run_start, run_len, image + (size_t)run_start * sector_size))
+                if (!block_write(mount->device, run_start, run_len, scratch + (size_t)run_start * sector_size))
                 {
                     serial_printf("%s", "[vfs] block_write failed dev=");
                     serial_printf("%s", dev_name);
@@ -1757,7 +1905,6 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
                     serial_printf("%s", " count=");
                     serial_printf("%016llX", (unsigned long long)run_len);
                     serial_printf("%s", "\r\n");
-                    free(image);
                     return false;
                 }
                 else
@@ -1777,7 +1924,7 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
     }
     if (run_start != UINT32_MAX)
     {
-        if (!block_write(mount->device, run_start, run_len, image + (size_t)run_start * sector_size))
+        if (!block_write(mount->device, run_start, run_len, scratch + (size_t)run_start * sector_size))
         {
             serial_printf("%s", "[vfs] block_write failed dev=");
             serial_printf("%s", dev_name);
@@ -1786,7 +1933,6 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
             serial_printf("%s", " count=");
             serial_printf("%016llX", (unsigned long long)run_len);
             serial_printf("%s", "\r\n");
-            free(image);
             return false;
         }
         else
@@ -1809,7 +1955,6 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
         uint8_t *zero_buf = (uint8_t *)calloc(1, zeros_len);
         if (!zero_buf)
         {
-            free(image);
             return false;
         }
         uint32_t start = sectors_needed;
@@ -1819,7 +1964,6 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
             if (!block_write(mount->device, start, 1, zero_buf))
             {
                 free(zero_buf);
-                free(image);
                 return false;
             }
             start += 1;
@@ -1828,13 +1972,12 @@ static bool vfs_mount_sync(vfs_mount_t *mount, bool force_full)
         free(zero_buf);
     }
 
-    free(mount->image_cache);
-    mount->image_cache = image;
+    uint8_t *previous_cache = mount->image_cache;
+    mount->image_cache = scratch;
     mount->cache_size = new_size;
-    mount->sector_size = sector_size;
-    free(mount->dirty_sectors);
-    mount->dirty_sectors = (uint8_t *)calloc(sectors_needed, 1);
-    mount->dirty_sector_count = sectors_needed;
+    mount->cache_capacity = scratch_capacity;
+    mount->sync_buffer = previous_cache;
+    mount->sync_capacity = old_capacity;
     mount->needs_full_sync = false;
     return true;
 }
@@ -1846,6 +1989,11 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
         return true;
     }
     bool dirty = false;
+    const char *dev_name = (mount && mount->device && mount->device->name[0]) ? mount->device->name : "(anon)";
+    uint64_t sync_start = timer_ticks();
+    serial_printf("%s", "[vfs] writeback acquire dev=");
+    serial_printf("%s", dev_name);
+    serial_printf("%s", "\r\n");
 
     spinlock_lock(&mount->dirty_lock);
     dirty = mount->dirty || force;
@@ -1861,6 +2009,14 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     spinlock_lock(&mount->sync_lock);
     bool ok_sync = vfs_mount_sync(mount, true);
     spinlock_unlock(&mount->sync_lock);
+    uint64_t sync_ms = vfs_ticks_to_ms(timer_ticks() - sync_start);
+    serial_printf("%s", "[vfs] writeback ");
+    serial_printf("%s", ok_sync ? "ok" : "fail");
+    serial_printf("%s", " dev=");
+    serial_printf("%s", dev_name);
+    serial_printf("%s", " duration=");
+    serial_printf("%llu", (unsigned long long)sync_ms);
+    serial_printf("%s", "ms\r\n");
 
         if (!ok_sync)
         {
@@ -1877,6 +2033,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
         spinlock_lock(&g_vfs_tree_lock);
         vfs_clear_dirty_subtree(mount->mount_point, mount);
         spinlock_unlock(&g_vfs_tree_lock);
+        vfs_reset_dirty_bytes(mount);
 
     spinlock_lock(&mount->dirty_lock);
     if (mount->dirty_sectors && mount->dirty_sector_count > 0)
@@ -2248,6 +2405,7 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
 
     mount->image_cache = buffer;
     mount->cache_size = buffer_size;
+    mount->cache_capacity = buffer_size;
     mount->sector_size = sector_size;
     free(mount->dirty_sectors);
     uint32_t sectors = (uint32_t)(buffer_size / sector_size);
@@ -2319,9 +2477,14 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     mount->needs_full_sync = false;
     mount->image_cache = NULL;
     mount->cache_size = 0;
+    mount->cache_capacity = 0;
+    mount->sync_buffer = NULL;
+    mount->sync_capacity = 0;
     mount->sector_size = 0;
     mount->dirty_sectors = NULL;
     mount->dirty_sector_count = 0;
+    mount->dirty_bytes = 0;
+    mount->dirty_bytes_limit = VFS_DIRTY_BACKPRESSURE_LIMIT;
     spinlock_init(&mount->dirty_lock);
     spinlock_init(&mount->sync_lock);
 

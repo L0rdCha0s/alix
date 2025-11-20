@@ -569,6 +569,7 @@ static bool build_identity_space(paging_space_t *space)
         return false;
     }
     paging_debug_log("build_identity_space start");
+    space->active_cpu_mask = 0;
     space->extra_page_count = 0;
     for (size_t i = 0; i < PAGING_MAX_EXTRA_PAGES; ++i)
     {
@@ -645,6 +646,7 @@ bool paging_share_kernel_space(paging_space_t *space)
     space->allocation_base = g_kernel_space.allocation_base;
     space->allocation_size = g_kernel_space.allocation_size;
     space->tables_base = g_kernel_space.tables_base;
+    space->active_cpu_mask = 0;
     return true;
 }
 
@@ -673,6 +675,7 @@ void paging_destroy_space(paging_space_t *space)
     space->allocation_size = 0;
     space->tables_base = NULL;
     space->cr3 = 0;
+    space->active_cpu_mask = 0;
 }
 
 uintptr_t paging_kernel_cr3(void)
@@ -776,6 +779,7 @@ bool paging_unmap_user_page(paging_space_t *space,
     }
     pt[pt_idx] = 0;
     __asm__ volatile ("invlpg (%0)" :: "r"(virtual_addr) : "memory");
+    paging_flush_space_tlb(space);
     return true;
 }
 
@@ -830,7 +834,7 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
 
     if (changed)
     {
-        paging_flush_global_tlb();
+        paging_flush_space_tlb(&g_kernel_space);
     }
 
     return true;
@@ -843,6 +847,29 @@ void paging_handle_remote_tlb_flush(void)
 
 void paging_flush_global_tlb(void)
 {
+    paging_flush_space_tlb(&g_kernel_space);
+}
+
+void paging_flush_space_tlb(paging_space_t *space)
+{
     flush_local_tlb();
-    smp_broadcast_tlb_flush();
+    if (!space)
+    {
+        return;
+    }
+    if (space == &g_kernel_space)
+    {
+        smp_broadcast_tlb_flush();
+        return;
+    }
+    uint32_t mask = __atomic_load_n(&space->active_cpu_mask, __ATOMIC_ACQUIRE);
+    uint32_t self = smp_current_cpu_index();
+    if (self < SMP_MAX_CPUS)
+    {
+        mask &= ~(1u << self);
+    }
+    if (mask)
+    {
+        smp_tlb_flush_mask(mask);
+    }
 }

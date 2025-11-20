@@ -6,6 +6,8 @@
 #include "process.h"
 #include "smp.h"
 #include "arch/x86/cpu.h"
+#include "timer.h"
+#include "timekeeping.h"
 #include <stdint.h>
 
 #define COM1 0x3F8
@@ -128,6 +130,61 @@ static void serial_output_char(char c)
     serial_queue_push(c);
 }
 
+static void serial_output_decimal(uint64_t value)
+{
+    char buf[32];
+    size_t pos = 0;
+    do
+    {
+        buf[pos++] = (char)('0' + (value % 10ULL));
+        value /= 10ULL;
+    } while (value > 0 && pos < sizeof(buf));
+
+    while (pos > 0)
+    {
+        serial_output_char(buf[--pos]);
+    }
+}
+
+static uint64_t serial_now_millis(void)
+{
+    uint64_t ms = timekeeping_now_millis();
+    if (ms != 0)
+    {
+        return ms;
+    }
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        return 0;
+    }
+    uint64_t ticks = timer_ticks();
+    return (ticks * 1000ULL) / (uint64_t)freq;
+}
+
+static void serial_log_prefix(void)
+{
+    uint64_t ms = serial_now_millis();
+    uint64_t seconds = ms / 1000ULL;
+    uint64_t millis_part = ms % 1000ULL;
+    uint32_t cpu = smp_current_cpu_index();
+
+    serial_output_char('[');
+    serial_output_decimal(seconds);
+    serial_output_char('.');
+    serial_output_char((char)('0' + (millis_part / 100ULL) % 10ULL));
+    serial_output_char((char)('0' + (millis_part / 10ULL) % 10ULL));
+    serial_output_char((char)('0' + (millis_part % 10ULL)));
+    serial_output_char(']');
+    serial_output_char('[');
+    serial_output_char('c');
+    serial_output_char('p');
+    serial_output_char('u');
+    serial_output_decimal(cpu);
+    serial_output_char(']');
+    serial_output_char(' ');
+}
+
 static void serial_output_hex64(uint64_t value)
 {
     static const char hex[] = "0123456789ABCDEF";
@@ -223,6 +280,7 @@ void serial_printf(const char *format, ...)
         return;
     }
     serial_log_lock();
+    serial_log_prefix();
     va_list args;
     va_start(args, format);
     uint64_t caller = (uint64_t)__builtin_return_address(0);

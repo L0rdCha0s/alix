@@ -19,6 +19,7 @@ typedef struct paging_space
     void *tables_base;
     paging_extra_page_t extra_pages[PAGING_MAX_EXTRA_PAGES];
     size_t extra_page_count;
+    uint32_t active_cpu_mask;
 } paging_space_t;
 
 void paging_init(void);
@@ -42,6 +43,7 @@ bool paging_unmap_user_page(paging_space_t *space,
 bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
                                       size_t length,
                                       bool writable);
+void paging_flush_space_tlb(paging_space_t *space);
 void paging_flush_global_tlb(void);
 void paging_handle_remote_tlb_flush(void);
 void paging_set_clone_trace(bool enable);

@@ -920,6 +920,9 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
         video_flush_dirty();
     }
 
+    /* Track button state even if we bail out for a refresh to keep edge detection consistent. */
+    last_left_down = left_pressed;
+
     if (refresh_requested)
     {
         video_perform_refresh();
@@ -934,8 +937,6 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     {
         exit_requested = true;
     }
-
-    last_left_down = left_pressed;
 
 out:
     video_irq_restore(irq_state);

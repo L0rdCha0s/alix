@@ -184,9 +184,30 @@ static void net_log_stack_dma_guard(const char *tag,
     serial_printf("%s", "\r\n");
 }
 
-static bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
+static uint32_t g_net_dma_guard_budget = 16;
+
+static bool net_if_send_inner(net_interface_t *iface, const uint8_t *payload, size_t len)
 {
     if (!iface || !iface->send)
+    {
+        return false;
+    }
+    bool ok = iface->send(iface, payload, len);
+    if (ok)
+    {
+        iface->tx_packets++;
+        iface->tx_bytes += (uint64_t)len;
+    }
+    else
+    {
+        iface->tx_errors++;
+    }
+    return ok;
+}
+
+static bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
+{
+    if (!iface)
     {
         return false;
     }
@@ -204,23 +225,32 @@ static bool net_if_send(net_interface_t *iface, const uint8_t *data, size_t len)
         }
         memcpy(clone, data, len);
         payload = clone;
-        net_log_stack_dma_guard("net_if_send", owner, data, len);
+        if (owner && g_net_dma_guard_budget > 0)
+        {
+            net_log_stack_dma_guard("net_if_send", owner, data, len);
+            g_net_dma_guard_budget--;
+        }
     }
 
-    bool ok = iface->send(iface, payload, len);
-    if (ok)
-    {
-        iface->tx_packets++;
-        iface->tx_bytes += (uint64_t)len;
-    }
-    else
-    {
-        iface->tx_errors++;
-    }
+    bool ok = net_if_send_inner(iface, payload, len);
 
     if (clone)
     {
         free(clone);
+    }
+    return ok;
+}
+
+bool net_if_send_direct(net_interface_t *iface, const uint8_t *data, size_t len)
+{
+    bool ok = net_if_send_inner(iface, data, len);
+    if (!ok)
+    {
+        serial_printf("%s", "[net-if] direct send failed iface=");
+        serial_printf("%s", iface ? iface->name : "<null>");
+        serial_printf("%s", " len=0x");
+        serial_printf("%016llX", (unsigned long long)len);
+        serial_printf("%s", "\r\n");
     }
     return ok;
 }

@@ -42,6 +42,7 @@ vfs_node_type_t vfs_node_type(const vfs_node_t *node);
 const char *vfs_symlink_target(const vfs_node_t *node);
 bool vfs_truncate(vfs_node_t *file);
 bool vfs_append(vfs_node_t *file, const char *data, size_t len);
+bool vfs_reserve(vfs_node_t *file, size_t size_hint);
 ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count);
 ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t count);
 bool vfs_set_file_callbacks(vfs_node_t *file,

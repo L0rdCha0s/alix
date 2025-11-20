@@ -1,10 +1,12 @@
 #include "atk/atk_tabs.h"
 
 #include "atk_internal.h"
+#include "serial.h"
 #include "video.h"
 #include "libc.h"
 
 #define ATK_TAB_VIEW_MIN_WIDTH   (ATK_FONT_WIDTH * 6)
+#define ATK_TAB_VIEW_TRACE 1
 
 typedef struct
 {
@@ -54,6 +56,7 @@ static void tab_view_draw_cb(const atk_state_t *state,
                              int origin_y,
                              void *context);
 static void tab_view_destroy_cb(atk_widget_t *widget, void *context);
+static void tab_view_log(const char *msg);
 
 static const atk_widget_vtable_t tab_view_vtable = { 0 };
 static const atk_widget_ops_t g_tab_view_ops = {
@@ -257,8 +260,21 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, int px, int py)
     int origin_y = 0;
     atk_widget_absolute_position(tab_view, &origin_x, &origin_y);
 
+#if ATK_TAB_VIEW_TRACE
+    serial_printf("[tab_view] handle px=%d py=%d origin=(%d,%d) tabs=%zu active=%zu\r\n",
+                  px,
+                  py,
+                  origin_x,
+                  origin_y,
+                  priv->page_count,
+                  priv->active_index);
+#endif
+
     if (py < origin_y || py >= origin_y + priv->tab_height)
     {
+#if ATK_TAB_VIEW_TRACE
+        tab_view_log("miss outside tab bar");
+#endif
         return false;
     }
 
@@ -285,6 +301,12 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, int px, int py)
         int x1 = tab_x + width;
         if (px >= x0 && px < x1)
         {
+#if ATK_TAB_VIEW_TRACE
+            serial_printf("[tab_view] hit tab=%zu title=\"%s\" current=%zu\r\n",
+                          index,
+                          page->title,
+                          priv->active_index);
+#endif
             if (index != priv->active_index)
             {
                 atk_tab_view_set_active(tab_view, index);
@@ -306,6 +328,14 @@ static atk_mouse_response_t tab_view_mouse_cb(atk_widget_t *widget,
     {
         return ATK_MOUSE_RESPONSE_NONE;
     }
+
+#if ATK_TAB_VIEW_TRACE
+    serial_printf("[tab_view] mouse pressed cursor=(%d,%d) local=(%d,%d)\r\n",
+                  event->cursor_x,
+                  event->cursor_y,
+                  event->local_x,
+                  event->local_y);
+#endif
 
     if (atk_tab_view_handle_mouse(widget, event->cursor_x, event->cursor_y))
     {
@@ -344,6 +374,20 @@ static void tab_view_destroy_cb(atk_widget_t *widget, void *context)
     (void)context;
     atk_tab_view_destroy(widget);
     atk_widget_destroy(widget);
+}
+
+static void tab_view_log(const char *msg)
+{
+#if ATK_TAB_VIEW_TRACE
+    serial_printf("%s", "[tab_view] ");
+    if (msg)
+    {
+        serial_printf("%s", msg);
+    }
+    serial_printf("%s", "\r\n");
+#else
+    (void)msg;
+#endif
 }
 
 void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)

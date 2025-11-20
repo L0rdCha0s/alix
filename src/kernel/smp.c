@@ -114,6 +114,7 @@ static uint8_t g_apic_to_index[256];
 static uint8_t *g_bootstrap_stacks[SMP_MAX_CPUS] = { 0 };
 static uint64_t g_bootstrap_stack_tops[SMP_MAX_CPUS] = { 0 };
 static uint32_t g_online_cpus = 0;
+static uint32_t g_online_cpu_mask = 0;
 static bool g_trampoline_ready = false;
 static bool g_bootstrap_page_protected = false;
 static bool g_warned_unmapped_apic = false;
@@ -241,6 +242,10 @@ static void ensure_boot_cpu_present(void)
     g_cpus[bsp_index].present = true;
     __atomic_store_n(&g_cpus[bsp_index].online, true, __ATOMIC_RELEASE);
     g_online_cpus = 1;
+    if (bsp_index < SMP_MAX_CPUS)
+    {
+        g_online_cpu_mask = (1u << bsp_index);
+    }
 }
 
 bool smp_init(void)
@@ -501,6 +506,10 @@ void smp_secondary_entry(uint32_t apic_id)
 
     __atomic_store_n(&g_cpus[cpu_index].online, true, __ATOMIC_RELEASE);
     __sync_fetch_and_add(&g_online_cpus, 1);
+    if (cpu_index < SMP_MAX_CPUS)
+    {
+        __atomic_fetch_or(&g_online_cpu_mask, (1u << cpu_index), __ATOMIC_RELEASE);
+    }
 
     process_run_secondary_cpu(cpu_index);
 
@@ -528,4 +537,34 @@ void smp_broadcast_tlb_flush(void)
         return;
     }
     lapic_broadcast_ipi(SMP_TLB_FLUSH_IPI_VECTOR, true);
+}
+
+void smp_tlb_flush_mask(uint32_t cpu_mask)
+{
+    if (cpu_mask == 0)
+    {
+        return;
+    }
+
+    uint32_t online_mask = __atomic_load_n(&g_online_cpu_mask, __ATOMIC_ACQUIRE);
+    uint32_t cpu_count = smp_cpu_count();
+    uint32_t self = smp_current_cpu_index();
+
+    for (uint32_t i = 0; i < cpu_count && i < SMP_MAX_CPUS; ++i)
+    {
+        uint32_t bit = (1u << i);
+        if ((cpu_mask & bit) == 0)
+        {
+            continue;
+        }
+        if ((online_mask & bit) == 0)
+        {
+            continue;
+        }
+        if (i == self)
+        {
+            continue;
+        }
+        lapic_send_ipi(g_cpus[i].apic_id, SMP_TLB_FLUSH_IPI_VECTOR);
+    }
 }
