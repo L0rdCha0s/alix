@@ -4020,8 +4020,13 @@ static inline void run_queue_lock_release(run_queue_t *queue)
 
 static uint32_t scheduler_select_target_cpu(thread_t *thread)
 {
-    uint32_t preferred = current_cpu_index();
     uint32_t cpu_count = scheduler_cpu_limit();
+    if (cpu_count <= 1)
+    {
+        return 0;
+    }
+
+    uint32_t preferred = current_cpu_index();
     if (thread && thread->last_cpu_index < cpu_count)
     {
         preferred = thread->last_cpu_index;
@@ -4030,7 +4035,31 @@ static uint32_t scheduler_select_target_cpu(thread_t *thread)
     {
         preferred = 0;
     }
-    return preferred;
+
+    uint32_t best_cpu = preferred;
+    run_queue_t *best_queue = scheduler_run_queue(best_cpu);
+    uint32_t best_load = __atomic_load_n(&best_queue->total, __ATOMIC_RELAXED);
+
+    for (uint32_t i = 0; i < cpu_count; ++i)
+    {
+        if (i == preferred)
+        {
+            continue;
+        }
+        run_queue_t *queue = scheduler_run_queue(i);
+        uint32_t load = __atomic_load_n(&queue->total, __ATOMIC_RELAXED);
+        if (load == 0)
+        {
+            return i;
+        }
+        if (load < best_load)
+        {
+            best_cpu = i;
+            best_load = load;
+        }
+    }
+
+    return best_cpu;
 }
 
 static bool run_queue_detach_locked(run_queue_t *queue, thread_t *thread)
@@ -4172,7 +4201,7 @@ static thread_t *dequeue_thread_for_cpu(uint32_t cpu_index)
 
 static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
 {
-    if (!thread || thread->in_run_queue)
+    if (!thread || thread->in_run_queue || thread->is_idle)
     {
         return;
     }
@@ -4207,7 +4236,7 @@ static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
 
 static void enqueue_thread(thread_t *thread)
 {
-    if (!thread || thread->in_run_queue)
+    if (!thread || thread->in_run_queue || thread->is_idle)
     {
         return;
     }
