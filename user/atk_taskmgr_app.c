@@ -16,7 +16,7 @@
 
 #define TASKMGR_PROCESS_CAP 64
 #define TASKMGR_NET_CAP     8
-#define TASKMGR_REFRESH_TICKS 20
+#define TASKMGR_REFRESH_MS 5000
 
 typedef struct
 {
@@ -27,7 +27,7 @@ typedef struct
     atk_widget_t *memory_list;
     atk_widget_t *network_list;
     bool running;
-    uint32_t refresh_counter;
+    uint64_t next_refresh_ms;
 } atk_taskmgr_app_t;
 
 typedef struct
@@ -330,6 +330,10 @@ static void taskmgr_refresh_processes(atk_taskmgr_app_t *app)
     size_t rows = (size_t)count;
     taskmgr_populate_process_table(app, procs, rows);
     taskmgr_populate_memory_table(app, procs, rows);
+    if (app->window)
+    {
+        atk_window_mark_dirty(app->window);
+    }
 }
 
 static void taskmgr_refresh_network(atk_taskmgr_app_t *app)
@@ -339,6 +343,10 @@ static void taskmgr_refresh_network(atk_taskmgr_app_t *app)
     if (count < 0)
     {
         atk_list_view_clear(app->network_list);
+        if (app->window)
+        {
+            atk_window_mark_dirty(app->window);
+        }
         return;
     }
     if ((size_t)count > TASKMGR_NET_CAP)
@@ -382,6 +390,10 @@ static void taskmgr_refresh_network(atk_taskmgr_app_t *app)
         {
             atk_list_view_set_cell_text(app->network_list, (size_t)i, (size_t)col, cells[col]);
         }
+    }
+    if (app->window)
+    {
+        atk_window_mark_dirty(app->window);
     }
 }
 
@@ -558,6 +570,7 @@ int main(void)
     taskmgr_refresh_processes(&app);
     taskmgr_refresh_network(&app);
     taskmgr_render(&app);
+    app.next_refresh_ms = sys_time_millis() + TASKMGR_REFRESH_MS;
 
     while (app.running)
     {
@@ -590,13 +603,13 @@ int main(void)
             break;
         }
 
-        app.refresh_counter++;
-        if (app.refresh_counter >= TASKMGR_REFRESH_TICKS)
+        uint64_t now_ms = sys_time_millis();
+        if (app.next_refresh_ms == 0 || now_ms >= app.next_refresh_ms)
         {
             taskmgr_refresh_processes(&app);
             taskmgr_refresh_network(&app);
             needs_render = true;
-            app.refresh_counter = 0;
+            app.next_refresh_ms = now_ms + TASKMGR_REFRESH_MS;
         }
 
         if (needs_render)

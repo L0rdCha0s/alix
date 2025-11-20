@@ -24,6 +24,7 @@ typedef struct atk_mouse_event
     bool pressed_edge;
     bool released_edge;
     bool left_pressed;
+    uint64_t id;
 } atk_mouse_event_t;
 
 typedef enum

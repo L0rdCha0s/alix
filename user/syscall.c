@@ -200,3 +200,8 @@ ssize_t sys_net_snapshot(syscall_net_stats_t *buffer, size_t capacity)
 {
     return (ssize_t)syscall2(SYSCALL_NET_SNAPSHOT, (long)buffer, (long)capacity);
 }
+
+uint64_t sys_time_millis(void)
+{
+    return (uint64_t)syscall0(SYSCALL_TIME_MILLIS);
+}

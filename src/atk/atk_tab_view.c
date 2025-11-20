@@ -1,12 +1,11 @@
 #include "atk/atk_tabs.h"
 
 #include "atk_internal.h"
-#include "serial.h"
+#include "atk_event_debug.h"
 #include "video.h"
 #include "libc.h"
 
 #define ATK_TAB_VIEW_MIN_WIDTH   (ATK_FONT_WIDTH * 6)
-#define ATK_TAB_VIEW_TRACE 1
 
 typedef struct
 {
@@ -56,7 +55,6 @@ static void tab_view_draw_cb(const atk_state_t *state,
                              int origin_y,
                              void *context);
 static void tab_view_destroy_cb(atk_widget_t *widget, void *context);
-static void tab_view_log(const char *msg);
 
 static const atk_widget_vtable_t tab_view_vtable = { 0 };
 static const atk_widget_ops_t g_tab_view_ops = {
@@ -248,10 +246,10 @@ bool atk_tab_view_contains_point(const atk_widget_t *tab_view, int px, int py)
     return (px >= x && px < x + w && py >= y && py < y + h);
 }
 
-bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, int px, int py)
+bool atk_tab_view_point_in_tab_bar(const atk_widget_t *tab_view, int px, int py)
 {
-    atk_tab_view_priv_t *priv = tab_view_priv_mut(tab_view);
-    if (!priv || priv->page_count == 0)
+    const atk_tab_view_priv_t *priv = tab_view_priv(tab_view);
+    if (!priv)
     {
         return false;
     }
@@ -260,26 +258,36 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, int px, int py)
     int origin_y = 0;
     atk_widget_absolute_position(tab_view, &origin_x, &origin_y);
 
-#if ATK_TAB_VIEW_TRACE
-    serial_printf("[tab_view] handle px=%d py=%d origin=(%d,%d) tabs=%zu active=%zu\r\n",
-                  px,
-                  py,
-                  origin_x,
-                  origin_y,
-                  priv->page_count,
-                  priv->active_index);
-#endif
-
-    if (py < origin_y || py >= origin_y + priv->tab_height)
+    if (px < origin_x || px >= origin_x + tab_view->width)
     {
-#if ATK_TAB_VIEW_TRACE
-        tab_view_log("miss outside tab bar");
-#endif
+        return false;
+    }
+    return (py >= origin_y && py < origin_y + priv->tab_height);
+}
+
+bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, const atk_mouse_event_t *event)
+{
+    atk_tab_view_priv_t *priv = tab_view_priv_mut(tab_view);
+    if (!priv || !event || priv->page_count == 0)
+    {
         return false;
     }
 
-    int tab_x = origin_x + priv->content_padding;
-    int max_x = origin_x + tab_view->width;
+    if (!atk_tab_view_point_in_tab_bar(tab_view, event->cursor_x, event->cursor_y))
+    {
+        atk_event_debug_tab_miss(event->id, tab_view, event->local_x, event->local_y, "outside_tab_bar");
+        return false;
+    }
+
+    int origin_x = 0;
+    int origin_y = 0;
+    atk_widget_absolute_position(tab_view, &origin_x, &origin_y);
+
+    int local_x = event->cursor_x - origin_x;
+    int local_y = event->cursor_y - origin_y;
+
+    int tab_x = priv->content_padding;
+    int max_x = tab_view->width;
     size_t index = 0;
     ATK_LIST_FOR_EACH(node, &priv->pages)
     {
@@ -299,14 +307,9 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, int px, int py)
         }
         int x0 = tab_x;
         int x1 = tab_x + width;
-        if (px >= x0 && px < x1)
+        if (local_x >= x0 && local_x < x1)
         {
-#if ATK_TAB_VIEW_TRACE
-            serial_printf("[tab_view] hit tab=%zu title=\"%s\" current=%zu\r\n",
-                          index,
-                          page->title,
-                          priv->active_index);
-#endif
+            atk_event_debug_tab_hit(event->id, tab_view, index, page->title, priv->active_index);
             if (index != priv->active_index)
             {
                 atk_tab_view_set_active(tab_view, index);
@@ -316,6 +319,8 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, int px, int py)
         tab_x = x1 + priv->tab_spacing;
         index++;
     }
+
+    atk_event_debug_tab_miss(event->id, tab_view, local_x, local_y, "no_tab_match");
     return false;
 }
 
@@ -329,15 +334,7 @@ static atk_mouse_response_t tab_view_mouse_cb(atk_widget_t *widget,
         return ATK_MOUSE_RESPONSE_NONE;
     }
 
-#if ATK_TAB_VIEW_TRACE
-    serial_printf("[tab_view] mouse pressed cursor=(%d,%d) local=(%d,%d)\r\n",
-                  event->cursor_x,
-                  event->cursor_y,
-                  event->local_x,
-                  event->local_y);
-#endif
-
-    if (atk_tab_view_handle_mouse(widget, event->cursor_x, event->cursor_y))
+    if (atk_tab_view_handle_mouse(widget, event))
     {
         return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
     }
@@ -374,20 +371,6 @@ static void tab_view_destroy_cb(atk_widget_t *widget, void *context)
     (void)context;
     atk_tab_view_destroy(widget);
     atk_widget_destroy(widget);
-}
-
-static void tab_view_log(const char *msg)
-{
-#if ATK_TAB_VIEW_TRACE
-    serial_printf("%s", "[tab_view] ");
-    if (msg)
-    {
-        serial_printf("%s", msg);
-    }
-    serial_printf("%s", "\r\n");
-#else
-    (void)msg;
-#endif
 }
 
 void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)

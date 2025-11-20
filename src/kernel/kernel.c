@@ -55,6 +55,7 @@ static volatile bool g_fstab_ready =
     true;
 #endif
 ;
+static bool g_slash_locked = false;
 
 typedef struct
 {
@@ -79,6 +80,21 @@ static block_device_t *fstab_find_device(const char *name)
         }
     }
     return block_find(device);
+}
+
+static void lock_slash_root_once(void)
+{
+    if (g_slash_locked)
+    {
+        return;
+    }
+    vfs_node_t *proc_root = procfs_root();
+    if (proc_root)
+    {
+        vfs_set_subtree_mutable(proc_root, true);
+    }
+    vfs_set_subtree_mutable(vfs_root(), false);
+    g_slash_locked = true;
 }
 
 static vfs_node_t *ensure_directory_path(const char *path)
@@ -213,11 +229,11 @@ static void ensure_system_layout(void)
     {
         serial_printf("%s", "[alix] warn: unable to ensure /root/usr/share/zoneinfo/src\r\n");
     }
-    if (!vfs_symlink(vfs_root(), "/root/etc", "/etc"))
+    if (!vfs_force_symlink(vfs_root(), "/root/etc", "/etc"))
     {
         serial_printf("%s", "[alix] warn: unable to ensure /etc symlink\r\n");
     }
-    if (!vfs_symlink(vfs_root(), "/root/usr", "/usr"))
+    if (!vfs_force_symlink(vfs_root(), "/root/usr", "/usr"))
     {
         serial_printf("%s", "[alix] warn: unable to ensure /usr symlink\r\n");
     }
@@ -243,6 +259,8 @@ static void ensure_system_layout(void)
     {
         serial_printf("%s", "[alix] warn: unable to install dl.sh\r\n");
     }
+
+    lock_slash_root_once();
 }
 
 static void vfs_spin_up(void)

@@ -17,7 +17,8 @@ atk_widget_t *atk_tab_view_active_content(const atk_widget_t *tab_view);
 void atk_tab_view_set_change_handler(atk_widget_t *tab_view, atk_tab_view_change_t handler, void *context);
 void atk_tab_view_relayout(atk_widget_t *tab_view);
 bool atk_tab_view_contains_point(const atk_widget_t *tab_view, int px, int py);
-bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, int px, int py);
+bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, const atk_mouse_event_t *event);
+bool atk_tab_view_point_in_tab_bar(const atk_widget_t *tab_view, int px, int py);
 void atk_tab_view_draw(const struct atk_state *state, const atk_widget_t *tab_view);
 void atk_tab_view_destroy(atk_widget_t *tab_view);
 

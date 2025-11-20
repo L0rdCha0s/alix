@@ -11,6 +11,7 @@
 #include "shell_service.h"
 #include "net/interface.h"
 #include "user_copy.h"
+#include "timekeeping.h"
 
 static process_info_t *g_proc_snapshot_buf = NULL;
 static size_t g_proc_snapshot_cap = 0;
@@ -263,6 +264,7 @@ static int syscall_file_close(void *ctx)
         if (handle->node)
         {
             vfs_flush_node(handle->node);
+            vfs_node_release(handle->node);
         }
         free(handle);
     }
@@ -423,6 +425,7 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
         return -1;
     }
 
+    vfs_node_retain(node);
     handle->node = node;
     handle->offset = 0;
     handle->readable = readable;
@@ -431,6 +434,7 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     int fd = fd_allocate(&g_syscall_file_ops, handle);
     if (fd < 0)
     {
+        vfs_node_release(node);
         free(handle);
         return -1;
     }
@@ -661,6 +665,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_NET_SNAPSHOT:
             result = syscall_do_net_snapshot((syscall_net_stats_t *)frame->rdi,
                                              (size_t)frame->rsi);
+            break;
+        case SYSCALL_TIME_MILLIS:
+            result = (int64_t)timekeeping_now_millis();
             break;
         default:
             serial_printf("%s", "syscall: unhandled id=");

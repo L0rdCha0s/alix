@@ -274,6 +274,33 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
         {
             continue;
         }
+        if (atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
+        {
+            if (!atk_tab_view_contains_point(child, px, py))
+            {
+                continue;
+            }
+
+            if (!atk_tab_view_point_in_tab_bar(child, px, py))
+            {
+                atk_widget_t *content = atk_tab_view_active_content(child);
+                if (content && content->used)
+                {
+                    int cx = 0;
+                    int cy = 0;
+                    int cw = 0;
+                    int ch = 0;
+                    atk_widget_absolute_bounds(content, &cx, &cy, &cw, &ch);
+                    if (px >= cx && px < cx + cw && py >= cy && py < cy + ch)
+                    {
+                        return content;
+                    }
+                }
+            }
+
+            return child;
+        }
+
         if (atk_widget_hit_test(child, window->x, window->y, px, py))
         {
             return child;

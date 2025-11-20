@@ -12,6 +12,7 @@
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
+#include "atk_event_debug.h"
 #ifndef KERNEL_BUILD
 #include "atk/atk_terminal.h"
 #endif
@@ -31,6 +32,7 @@ static void atk_build_mouse_event(const atk_widget_t *widget,
                                   bool pressed_edge,
                                   bool released_edge,
                                   bool left_pressed,
+                                  uint64_t event_id,
                                   atk_mouse_event_t *event);
 static bool atk_dispatch_widget_mouse(atk_state_t *state,
                                       atk_widget_t *widget,
@@ -39,6 +41,8 @@ static bool atk_dispatch_widget_mouse(atk_state_t *state,
                                       bool pressed_edge,
                                       bool released_edge,
                                       bool left_pressed,
+                                      const char *stage,
+                                      uint64_t event_id,
                                       atk_mouse_event_result_t *result);
 static void atk_clear_focus_widget(atk_state_t *state);
 #ifndef ATK_NO_DESKTOP_APPS
@@ -79,6 +83,7 @@ static void atk_build_mouse_event(const atk_widget_t *widget,
                                   bool pressed_edge,
                                   bool released_edge,
                                   bool left_pressed,
+                                  uint64_t event_id,
                                   atk_mouse_event_t *event)
 {
     if (!event)
@@ -105,6 +110,7 @@ static void atk_build_mouse_event(const atk_widget_t *widget,
     event->pressed_edge = pressed_edge;
     event->released_edge = released_edge;
     event->left_pressed = left_pressed;
+    event->id = event_id;
 }
 
 static bool atk_dispatch_widget_mouse(atk_state_t *state,
@@ -114,6 +120,8 @@ static bool atk_dispatch_widget_mouse(atk_state_t *state,
                                       bool pressed_edge,
                                       bool released_edge,
                                       bool left_pressed,
+                                      const char *stage,
+                                      uint64_t event_id,
                                       atk_mouse_event_result_t *result)
 {
     if (!widget || !widget->used)
@@ -122,8 +130,16 @@ static bool atk_dispatch_widget_mouse(atk_state_t *state,
     }
 
     atk_mouse_event_t event;
-    atk_build_mouse_event(widget, cursor_x, cursor_y, pressed_edge, released_edge, left_pressed, &event);
+    atk_build_mouse_event(widget,
+                          cursor_x,
+                          cursor_y,
+                          pressed_edge,
+                          released_edge,
+                          left_pressed,
+                          event_id,
+                          &event);
     atk_mouse_response_t response = atk_widget_dispatch_mouse(widget, &event);
+    atk_event_debug_mouse_dispatch(event_id, stage, widget, &event, response);
 
     if (response & ATK_MOUSE_RESPONSE_CAPTURE)
     {
@@ -334,6 +350,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
     uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     atk_mouse_event_result_t result = { .redraw = false, .exit_video = false };
+    uint64_t event_id = atk_event_debug_next_id();
+    atk_event_debug_mouse_begin(event_id, cursor_x, cursor_y, pressed_edge, released_edge, left_pressed);
 
     if (!atk_window_list_validate(state))
     {
@@ -381,6 +399,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                      pressed_edge,
                                                      released_edge,
                                                      left_pressed,
+                                                     "capture",
+                                                     event_id,
                                                      &result);
     }
 
@@ -514,6 +534,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                              pressed_edge,
                                                              released_edge,
                                                              left_pressed,
+                                                             "child",
+                                                             event_id,
                                                              &result);
                     }
 
@@ -665,6 +687,10 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                      pressed_edge,
                                                      released_edge,
                                                      left_pressed);
+    if (pressed_edge || released_edge)
+    {
+        atk_event_debug_remote(event_id, hover_window, remote_handled);
+    }
     if (pressed_edge && !remote_handled)
     {
         user_atk_focus_window(NULL);

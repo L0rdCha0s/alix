@@ -408,11 +408,9 @@ static void scheduler_log_if_stalled(const char *label, uint64_t start_ticks)
     uint64_t ms = scheduler_ticks_to_ms(elapsed);
     if (ms >= SCHEDULER_STALL_LOG_MS)
     {
-        serial_printf("%s", "[sched] stall label=");
-        serial_printf("%s", label);
-        serial_printf("%s", " duration=");
-        serial_printf("%llu", (unsigned long long)ms);
-        serial_printf("%s", "ms\r\n");
+        serial_printf("[sched] stall label=%s duration=%llu ms\r\n",
+                      label,
+                      (unsigned long long)ms);
     }
 }
 
@@ -1248,17 +1246,12 @@ static void thread_free_resources(thread_t *thread)
     uintptr_t ctx_ptr = (uintptr_t)thread->context;
     uintptr_t stack_base = (uintptr_t)thread->stack_base;
     uintptr_t stack_top = thread->kernel_stack_top;
-    serial_printf("%s", "[sched] thread_free_resources name=");
-    serial_printf("%s", name);
-    serial_printf("%s", " pid=0x");
-    serial_printf("%016llX", (unsigned long long)pid);
-    serial_printf("%s", " context=0x");
-    serial_printf("%016llX", (unsigned long long)ctx_ptr);
-    serial_printf("%s", " stack=[0x");
-    serial_printf("%016llX", (unsigned long long)stack_base);
-    serial_printf("%s", ",0x");
-    serial_printf("%016llX", (unsigned long long)stack_top);
-    serial_printf("%s", ")\r\n");
+    serial_printf("[sched] thread_free_resources name=%s pid=0x%016llX context=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+                  name,
+                  (unsigned long long)pid,
+                  (unsigned long long)ctx_ptr,
+                  (unsigned long long)stack_base,
+                  (unsigned long long)stack_top);
     uint8_t *stack_allocation_raw = thread->stack_allocation_raw;
     uint8_t *stack_guard_base = thread->stack_guard_base;
     uint8_t *stack_base_ptr = thread->stack_base;
@@ -1410,22 +1403,13 @@ static bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stat
     if (did_work)
     {
         uint64_t ms = scheduler_ticks_to_ms(local_stats.duration_ticks);
-        serial_printf("%s", "[sched] deferred_free cpu=");
-        serial_printf("%u", local_stats.cpu_index);
-        serial_printf("%s", " grabbed=");
-        serial_printf("%016llX", (unsigned long long)local_stats.grabbed);
-        serial_printf("%s", " freed=");
-        serial_printf("%016llX", (unsigned long long)local_stats.freed);
-        serial_printf("%s", " requeued=");
-        serial_printf("%016llX", (unsigned long long)local_stats.requeued);
-        serial_printf("%s", " duration=");
-        serial_printf("%llu", (unsigned long long)ms);
-        serial_printf("%s", "ms");
-        if (ms >= DEFERRED_FREE_WARN_MS)
-        {
-            serial_printf("%s", " (slow)");
-        }
-        serial_printf("%s", "\r\n");
+        serial_printf("[sched] deferred_free cpu=%u grabbed=0x%016llX freed=0x%016llX requeued=0x%016llX duration=%llu ms%s\r\n",
+                      local_stats.cpu_index,
+                      (unsigned long long)local_stats.grabbed,
+                      (unsigned long long)local_stats.freed,
+                      (unsigned long long)local_stats.requeued,
+                      (unsigned long long)ms,
+                      (ms >= DEFERRED_FREE_WARN_MS) ? " (slow)" : "");
     }
 
     return did_work;
@@ -3382,25 +3366,15 @@ static void scheduler_trace(const char *prefix, thread_t *thread)
         return;
     }
 
-    serial_printf("%s", prefix);
-    serial_printf("%s", " thread=");
-    if (thread->name[0])
-    {
-        serial_printf("%s", thread->name);
-    }
-    else
-    {
-        serial_printf("%s", "<unnamed>");
-    }
-    serial_printf("%s", " pid=0x");
-    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
-    serial_printf("%s", " state=");
-    serial_printf("%s", thread_state_name(thread->state));
-    serial_printf("%s", " ctx_valid=");
-    serial_printf("%s", thread->context_valid ? "true" : "false");
-    serial_printf("%s", " stack=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
-    serial_printf("%s", "\r\n");
+    const char *name = thread->name[0] ? thread->name : "<unnamed>";
+    uint64_t pid = thread->process ? thread->process->pid : 0;
+    serial_printf("%s thread=%s pid=0x%016llX state=%s ctx_valid=%s stack=0x%016llX\r\n",
+                  prefix,
+                  name,
+                  (unsigned long long)pid,
+                  thread_state_name(thread->state),
+                  thread->context_valid ? "true" : "false",
+                  (unsigned long long)((uintptr_t)thread->stack_base));
 }
 
 static bool thread_name_equals(const thread_t *thread, const char *name)
@@ -3913,16 +3887,9 @@ static void scheduler_log_thread_brief(const thread_t *thread)
         serial_printf("%s", "<none>");
         return;
     }
-    if (thread->name[0])
-    {
-        serial_printf("%s", thread->name);
-    }
-    else
-    {
-        serial_printf("%s", "<unnamed>");
-    }
-    serial_printf("%s", " pid=0x");
-    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
+    const char *name = (thread->name[0] != '\0') ? thread->name : "<unnamed>";
+    uint64_t pid = thread->process ? thread->process->pid : 0;
+    serial_printf("%s pid=0x%016llX", name, (unsigned long long)pid);
 }
 
 static void scheduler_log_switch_latency(uint64_t ms,
@@ -3931,27 +3898,36 @@ static void scheduler_log_switch_latency(uint64_t ms,
                                          bool deferred_work,
                                          const deferred_free_stats_t *stats)
 {
-    serial_printf("%s", "[sched] switch latency ");
-    serial_printf("%llu", (unsigned long long)ms);
-    serial_printf("%s", "ms prev=");
-    scheduler_log_thread_brief(prev);
-    serial_printf("%s", " next=");
-    scheduler_log_thread_brief(next);
-    serial_printf("%s", " deferred=");
-    serial_printf("%s", deferred_work ? "true" : "false");
+    const char *pname = (prev && prev->name[0] != '\0') ? prev->name : (prev ? "<unnamed>" : "<none>");
+    uint64_t ppid = (prev && prev->process) ? prev->process->pid : 0;
+    const char *nname = (next && next->name[0] != '\0') ? next->name : (next ? "<unnamed>" : "<none>");
+    uint64_t npid = (next && next->process) ? next->process->pid : 0;
+
     if (stats && stats->grabbed > 0)
     {
-        serial_printf("%s", " grabbed=");
-        serial_printf("%016llX", (unsigned long long)stats->grabbed);
-        serial_printf("%s", " freed=");
-        serial_printf("%016llX", (unsigned long long)stats->freed);
-        serial_printf("%s", " requeued=");
-        serial_printf("%016llX", (unsigned long long)stats->requeued);
-        serial_printf("%s", " df_ms=");
         uint64_t df_ms = scheduler_ticks_to_ms(stats->duration_ticks);
-        serial_printf("%llu", (unsigned long long)df_ms);
+        serial_printf("[sched] switch latency %llu ms prev=%s pid=0x%016llX next=%s pid=0x%016llX deferred=%s grabbed=0x%016llX freed=0x%016llX requeued=0x%016llX df_ms=%llu\r\n",
+                      (unsigned long long)ms,
+                      pname,
+                      (unsigned long long)ppid,
+                      nname,
+                      (unsigned long long)npid,
+                      deferred_work ? "true" : "false",
+                      (unsigned long long)stats->grabbed,
+                      (unsigned long long)stats->freed,
+                      (unsigned long long)stats->requeued,
+                      (unsigned long long)df_ms);
     }
-    serial_printf("%s", "\r\n");
+    else
+    {
+        serial_printf("[sched] switch latency %llu ms prev=%s pid=0x%016llX next=%s pid=0x%016llX deferred=%s\r\n",
+                      (unsigned long long)ms,
+                      pname,
+                      (unsigned long long)ppid,
+                      nname,
+                      (unsigned long long)npid,
+                      deferred_work ? "true" : "false");
+    }
 }
 
 static inline void run_queue_lock_acquire(run_queue_t *queue, const char *label)
@@ -5924,13 +5900,10 @@ void process_destroy(process_t *process)
         return;
     }
 
-    serial_printf("%s", "[proc] destroy pid=0x");
-    serial_printf("%016llX", (unsigned long long)process->pid);
-    serial_printf("%s", " name=");
-    serial_printf("%s", process->name);
-    serial_printf("%s", " main_thread=0x");
-    serial_printf("%016llX", (unsigned long long)(uintptr_t)process->main_thread);
-    serial_printf("%s", "\r\n");
+    serial_printf("[proc] destroy pid=0x%016llX name=%s main_thread=0x%016llX\r\n",
+                  (unsigned long long)process->pid,
+                  process->name,
+                  (unsigned long long)(uintptr_t)process->main_thread);
 
     user_atk_on_process_destroy(process);
     shell_service_cleanup_process(process);
@@ -6348,7 +6321,9 @@ void wait_queue_wake_one(wait_queue_t *queue)
     if (thread)
     {
         thread->waiting_queue = NULL;
-        if (thread->state == THREAD_STATE_BLOCKED && !thread->exited)
+        if (thread->state == THREAD_STATE_BLOCKED &&
+            !thread->exited &&
+            !thread->in_run_queue)
         {
             thread->state = THREAD_STATE_READY;
             enqueue_thread(thread);
@@ -6373,7 +6348,9 @@ void wait_queue_wake_all(wait_queue_t *queue)
     while (thread)
     {
         thread->waiting_queue = NULL;
-        if (thread->state == THREAD_STATE_BLOCKED && !thread->exited)
+        if (thread->state == THREAD_STATE_BLOCKED &&
+            !thread->exited &&
+            !thread->in_run_queue)
         {
             thread->state = THREAD_STATE_READY;
             enqueue_thread(thread);

@@ -3,6 +3,14 @@
 
 static vfs_node_t *g_dev_root = NULL;
 
+static void devfs_set_mutable(bool allow)
+{
+    if (g_dev_root)
+    {
+        vfs_set_subtree_mutable(g_dev_root, allow);
+    }
+}
+
 static vfs_node_t *devfs_root_node(void)
 {
     if (g_dev_root && vfs_is_dir(g_dev_root))
@@ -44,11 +52,14 @@ void devfs_register_block_device(block_device_t *device)
     {
         return;
     }
+    devfs_set_mutable(true);
     if (!device->name[0])
     {
+        devfs_set_mutable(false);
         return;
     }
     vfs_add_block_device(dev_dir, device->name, device);
+    devfs_set_mutable(false);
 }
 
 void devfs_register_block_devices(void)
@@ -58,6 +69,7 @@ void devfs_register_block_devices(void)
     {
         return;
     }
+    devfs_set_mutable(true);
     for (block_device_t *device = block_first(); device; device = block_next(device))
     {
         if (device->name[0])
@@ -65,4 +77,5 @@ void devfs_register_block_devices(void)
             vfs_add_block_device(dev_dir, device->name, device);
         }
     }
+    devfs_set_mutable(false);
 }

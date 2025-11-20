@@ -72,7 +72,10 @@ void procfs_init(void)
     if (!g_proc_dir)
     {
         serial_printf("%s", "[procfs] failed to create /proc\r\n");
+        return;
     }
+
+    vfs_set_subtree_mutable(g_proc_dir, true);
 }
 
 vfs_node_t *procfs_root(void)

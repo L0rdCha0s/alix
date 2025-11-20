@@ -68,5 +68,10 @@ bool vfs_flush_node(vfs_node_t *node);
 size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max);
 /* Replace link_path with a symlink to target_path, removing an existing node if needed (but never a mount). */
 bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
+/* Allow or disallow mutations within a subtree (used to lock slash while leaving /proc mutable). */
+void vfs_set_subtree_mutable(vfs_node_t *node, bool allow);
+/* Acquire/release references; nodes live until the last ref (tree + FDs) is released. */
+void vfs_node_retain(vfs_node_t *node);
+void vfs_node_release(vfs_node_t *node);
 
 #endif

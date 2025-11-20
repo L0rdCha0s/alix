@@ -15,6 +15,9 @@
 static const uint64_t CANONICAL_MASK = 0xFFFF800000000000ULL;
 
 #define SERIAL_QUEUE_SIZE 8192
+#ifndef SERIAL_LOG_PREFIX_ENABLE
+#define SERIAL_LOG_PREFIX_ENABLE 1
+#endif
 
 static char g_serial_queue[SERIAL_QUEUE_SIZE];
 static size_t g_serial_queue_head = 0;
@@ -164,6 +167,9 @@ static uint64_t serial_now_millis(void)
 
 static void serial_log_prefix(void)
 {
+#if !SERIAL_LOG_PREFIX_ENABLE
+    return;
+#endif
     uint64_t ms = serial_now_millis();
     uint64_t seconds = ms / 1000ULL;
     uint64_t millis_part = ms % 1000ULL;
@@ -286,6 +292,13 @@ void serial_printf(const char *format, ...)
     uint64_t caller = (uint64_t)__builtin_return_address(0);
     serial_vprintf_locked(format, args, caller);
     va_end(args);
+    size_t fmt_len = strlen(format);
+    bool has_trailing_nl = (fmt_len > 0 && format[fmt_len - 1] == '\n');
+    if (!has_trailing_nl)
+    {
+        serial_output_char('\r');
+        serial_output_char('\n');
+    }
     serial_log_unlock();
 }
 

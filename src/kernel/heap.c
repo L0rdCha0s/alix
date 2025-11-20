@@ -832,15 +832,11 @@ static void heap_trace_log_alloc(size_t requested, const heap_block_t *block, vo
 
 static void heap_trace_log_free(size_t size, uintptr_t block_addr, void *caller)
 {
-    serial_printf("%s", "[heap] free size=0x");
-    serial_printf("%016llX", (unsigned long long)(size));
-    serial_printf("%s", " block=0x");
-    serial_printf("%016llX", (unsigned long long)(block_addr));
-    serial_printf("%s", " caller=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)caller));
-    serial_printf("%s", " in_use=0x");
-    serial_printf("%016llX", (unsigned long long)(g_heap_trace_bytes_in_use));
-    serial_printf("%s", "\r\n");
+    serial_printf("[heap] free size=0x%016llX block=0x%016llX caller=0x%016llX in_use=0x%016llX\r\n",
+                  (unsigned long long)(size),
+                  (unsigned long long)(block_addr),
+                  (unsigned long long)((uintptr_t)caller),
+                  (unsigned long long)(g_heap_trace_bytes_in_use));
 }
 
 static void heap_trace_log_stall(size_t requested, const heap_block_t *cursor, uint64_t iterations, void *caller)
