@@ -22,6 +22,8 @@
     process_debug_log_stack_write(label, __builtin_return_address(0), (dest), (len))
 
 static void tcp_log_hex32(uint32_t value);
+static uint64_t tcp_ticks_to_ms(uint64_t ticks);
+static void tcp_log_wait_event(const char *phase, net_tcp_socket_t *socket, uint64_t waited_ticks);
 
 static inline uint64_t tcp_irq_save(void)
 {
@@ -572,17 +574,92 @@ static void tcp_rx_consume(net_tcp_socket_t *socket, size_t consumed)
 
 static void tcp_log_hex32(uint32_t value)
 {
-    static const char hex[] = "0123456789ABCDEF";
-    char buf[8];
-    for (int i = 0; i < 8; ++i)
+    serial_printf("%08X", (unsigned int)value);
+}
+
+static uint64_t tcp_ticks_to_ms(uint64_t ticks)
+{
+    if (ticks == 0)
     {
-        buf[7 - i] = hex[value & 0xF];
-        value >>= 4;
+        return 0;
     }
-    for (int i = 0; i < 8; ++i)
+    uint64_t freq = timer_frequency();
+    if (freq == 0)
     {
-        serial_printf("%c", buf[i]);
+        freq = 1000ULL;
     }
+    return (ticks * 1000ULL) / freq;
+}
+
+static void tcp_log_wait_event(const char *phase, net_tcp_socket_t *socket, uint64_t waited_ticks)
+{
+    if (!socket)
+    {
+        return;
+    }
+
+    size_t rx_size = 0;
+    size_t rx_capacity = 0;
+    bool remote_closed = false;
+    bool error = false;
+    bool awaiting_ack = false;
+    bool rx_backpressure = false;
+    uint16_t remote_window = 0;
+    uint16_t advertised = 0;
+    uint16_t local_port = 0;
+    uint16_t remote_port = 0;
+    uint32_t remote_ip = 0;
+
+    uint64_t lock_flags = tcp_lock();
+    rx_size = socket->rx_size;
+    rx_capacity = socket->rx_capacity;
+    remote_closed = socket->remote_closed;
+    error = socket->error || socket->state == TCP_STATE_ERROR;
+    awaiting_ack = socket->awaiting_ack;
+    rx_backpressure = socket->rx_backpressure;
+    remote_window = socket->remote_window;
+    advertised = socket->advertised_window;
+    local_port = socket->local_port;
+    remote_port = socket->remote_port;
+    remote_ip = socket->remote_ip;
+    tcp_unlock(lock_flags);
+
+    thread_t *thread = thread_current();
+    const char *thread_name = thread ? process_thread_name_const(thread) : NULL;
+    if (!thread_name || thread_name[0] == '\0')
+    {
+        thread_name = "<thread>";
+    }
+    process_t *proc = process_thread_owner(thread);
+    uint64_t pid = proc ? process_get_pid(proc) : 0;
+
+    const char *state_name = net_tcp_socket_state(socket);
+    uint8_t ip_a = (uint8_t)((remote_ip >> 24) & 0xFF);
+    uint8_t ip_b = (uint8_t)((remote_ip >> 16) & 0xFF);
+    uint8_t ip_c = (uint8_t)((remote_ip >> 8) & 0xFF);
+    uint8_t ip_d = (uint8_t)(remote_ip & 0xFF);
+    uint64_t waited_ms = tcp_ticks_to_ms(waited_ticks);
+
+    serial_printf("[tcp] wait %s pid=0x%016llX thread=%s local=%u remote=%u remote_ip=%u.%u.%u.%u state=%s waited_ms=%llu rx_size=%zu rx_capacity=%zu remote_win=0x%04X advertised=0x%04X awaiting_ack=%u remote_closed=%u error=%u rx_backpressure=%u\r\n",
+                  phase ? phase : "?",
+                  (unsigned long long)pid,
+                  thread_name,
+                  (unsigned)local_port,
+                  (unsigned)remote_port,
+                  (unsigned)ip_a,
+                  (unsigned)ip_b,
+                  (unsigned)ip_c,
+                  (unsigned)ip_d,
+                  state_name ? state_name : "<unknown>",
+                  (unsigned long long)waited_ms,
+                  rx_size,
+                  rx_capacity,
+                  (unsigned int)remote_window,
+                  (unsigned int)advertised,
+                  awaiting_ack ? 1U : 0U,
+                  remote_closed ? 1U : 0U,
+                  error ? 1U : 0U,
+                  rx_backpressure ? 1U : 0U);
 }
 
 static __attribute__((unused)) void tcp_log_size(const char *label, size_t value)
@@ -939,8 +1016,6 @@ static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size
 
     for (;;)
     {
-        wait_queue_wait(&socket->wait_queue, tcp_can_read, socket);
-
         uint64_t flags = tcp_lock();
         bool error = socket->error || socket->state == TCP_STATE_ERROR;
         bool closed = socket->remote_closed && socket->rx_size == 0;
@@ -958,12 +1033,17 @@ static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size
         }
         if (closed)
         {
+            tcp_log_wait_event("eof", socket, 0);
             return 0;
         }
-        
-        // If we woke up but nothing is available/error/closed, loop again.
-        // This can happen if we were woken up but someone else consumed the data,
-        // or spurious wakeup.
+
+        uint64_t wait_start = timer_ticks();
+        wait_queue_wait(&socket->wait_queue, tcp_can_read, socket);
+        uint64_t waited = timer_ticks() - wait_start;
+        if (waited > 0)
+        {
+            tcp_log_wait_event("wait", socket, waited);
+        }
     }
 }
 
@@ -1240,6 +1320,22 @@ static void tcp_retransmit(net_tcp_socket_t *socket)
     {
         return;
     }
+
+    serial_printf("%s", "[tcp] retransmit state=");
+    tcp_log_hex32((uint32_t)socket->state);
+    serial_printf("%s", " retry=");
+    serial_printf("%llu", (unsigned long long)socket->retry_count);
+    serial_printf("%s", "/");
+    serial_printf("%llu", (unsigned long long)socket->max_retries);
+    serial_printf("%s", " unacked_len=");
+    tcp_log_hex32(socket->unacked_len);
+    serial_printf("%s", " pending_len=");
+    tcp_log_hex32((uint32_t)socket->pending_payload_len);
+    serial_printf("%s", " remote_win=");
+    tcp_log_hex32((uint32_t)socket->remote_window);
+    serial_printf("%s", " advertised=");
+    tcp_log_hex32((uint32_t)socket->advertised_window);
+    serial_printf("%s", "\r\n");
 
     if (socket->retry_count >= socket->max_retries)
     {

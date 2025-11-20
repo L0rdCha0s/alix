@@ -8,6 +8,9 @@
 #include <limits.h>
 #include <stdint.h>
 #include "timer.h"
+#include "build_features.h"
+
+extern void storage_request_flush(void);
 
 /*
  * Heap-backed VFS:
@@ -59,6 +62,8 @@ struct vfs_mount
     size_t dirty_bytes;
     size_t dirty_bytes_limit;
 };
+
+static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 
 struct vfs_node
 {
@@ -178,31 +183,113 @@ static char *vfs_strdup(const char *s)
     return p;
 }
 
+static void vfs_log_backpressure_event(const vfs_mount_t *mount,
+                                       const char *phase,
+                                       size_t dirty_bytes,
+                                       size_t limit,
+                                       size_t pending_bytes)
+{
+    char path[128];
+    path[0] = '\0';
+    if (mount && mount->mount_point)
+    {
+        vfs_build_path(mount->mount_point, path, sizeof(path));
+    }
+    if (path[0] == '\0')
+    {
+        const char fallback[] = "<unknown>";
+        size_t copy_len = sizeof(fallback);
+        if (copy_len > sizeof(path))
+        {
+            copy_len = sizeof(path);
+        }
+        memcpy(path, fallback, copy_len);
+        path[sizeof(fallback) - 1] = '\0';
+    }
+
+    thread_t *thread = thread_current();
+    const char *thread_name = thread ? process_thread_name_const(thread) : NULL;
+    if (!thread_name || thread_name[0] == '\0')
+    {
+        thread_name = "<thread>";
+    }
+    process_t *proc = thread ? process_thread_owner(thread) : NULL;
+    uint64_t pid = proc ? process_get_pid(proc) : 0;
+
+    serial_printf("%s", "[vfs] backpressure ");
+    serial_printf("%s", phase ? phase : "?");
+    serial_printf("%s", " mount=");
+    serial_printf("%s", path);
+    serial_printf("%s", " dirty=");
+    serial_printf("%016llX", (unsigned long long)dirty_bytes);
+    serial_printf("%s", " limit=");
+    serial_printf("%016llX", (unsigned long long)limit);
+    serial_printf("%s", " pending=");
+    serial_printf("%016llX", (unsigned long long)pending_bytes);
+    serial_printf("%s", " thread=");
+    serial_printf("%s", thread_name);
+    serial_printf("%s", " pid=0x");
+    serial_printf("%016llX", (unsigned long long)pid);
+    serial_printf("%s", "\r\n");
+}
+
 static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
 {
     if (!mount || pending_bytes == 0)
     {
         return;
     }
+    bool logged_wait = false;
+#if !ENABLE_FLUSHD
+    bool flushed = false;
+#endif
     while (1)
     {
         bool over = false;
+        size_t dirty = 0;
+        size_t limit = 0;
         spinlock_lock(&mount->dirty_lock);
-        size_t limit = mount->dirty_bytes_limit;
-        if (limit == 0 || mount->dirty_bytes + pending_bytes <= limit)
+        limit = mount->dirty_bytes_limit;
+        dirty = mount->dirty_bytes;
+        if (limit == 0 || dirty + pending_bytes <= limit)
         {
             over = false;
         }
         else
         {
             over = true;
+            mount->needs_full_sync = true;
         }
         spinlock_unlock(&mount->dirty_lock);
         if (!over)
         {
+            if (logged_wait)
+            {
+                vfs_log_backpressure_event(mount, "resume", dirty, limit, pending_bytes);
+                logged_wait = false;
+            }
             break;
         }
+        if (!logged_wait)
+        {
+            vfs_log_backpressure_event(mount, "wait", dirty, limit, pending_bytes);
+            logged_wait = true;
+        }
+#if ENABLE_FLUSHD
+        storage_request_flush();
         process_yield();
+#else
+        if (!flushed)
+        {
+            flushed = true;
+            if (!vfs_mount_writeback(mount, false))
+            {
+                process_yield();
+            }
+            continue;
+        }
+        process_yield();
+#endif
     }
 }
 

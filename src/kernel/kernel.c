@@ -34,6 +34,19 @@
 
 static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
+#if ENABLE_FLUSHD
+static void storage_flush_wait(uint32_t interval_ms);
+static volatile bool g_flushd_wake_requested = false;
+static wait_queue_t g_flushd_wait_queue;
+static volatile bool g_flushd_wait_queue_ready = false;
+static volatile bool g_flushd_timer_registered = false;
+static volatile bool g_flushd_timer_failed = false;
+static volatile uint64_t g_flushd_wait_deadline = 0;
+static void storage_flush_signal_init(void);
+static bool storage_flush_should_wake(void *context);
+static void storage_flush_timer_callback(void *context);
+static uint64_t storage_flush_ms_to_ticks(uint32_t ms);
+#endif
 
 static volatile bool g_fstab_ready =
 #if ENABLE_FSTAB_MOUNT
@@ -405,6 +418,126 @@ static void shell_process_entry(void *arg)
     process_exit(0);
 }
 
+#if ENABLE_FLUSHD
+static uint64_t storage_flush_ms_to_ticks(uint32_t ms)
+{
+    if (ms == 0)
+    {
+        return 0;
+    }
+    uint64_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 1000ULL;
+    }
+    uint64_t ticks = ((uint64_t)ms * freq + 999ULL) / 1000ULL;
+    if (ticks == 0)
+    {
+        ticks = 1;
+    }
+    return ticks;
+}
+
+static bool storage_flush_should_wake(void *context)
+{
+    (void)context;
+    if (__atomic_load_n(&g_flushd_wake_requested, __ATOMIC_ACQUIRE))
+    {
+        return true;
+    }
+    uint64_t deadline = __atomic_load_n(&g_flushd_wait_deadline, __ATOMIC_ACQUIRE);
+    if (deadline == 0)
+    {
+        return false;
+    }
+    return timer_ticks() >= deadline;
+}
+
+static void storage_flush_timer_callback(void *context)
+{
+    (void)context;
+    if (!__atomic_load_n(&g_flushd_wait_queue_ready, __ATOMIC_ACQUIRE))
+    {
+        return;
+    }
+    if (storage_flush_should_wake(NULL))
+    {
+        wait_queue_wake_all(&g_flushd_wait_queue);
+    }
+}
+
+static void storage_flush_signal_init(void)
+{
+    if (!__atomic_load_n(&g_flushd_wait_queue_ready, __ATOMIC_ACQUIRE))
+    {
+        wait_queue_init(&g_flushd_wait_queue);
+        __atomic_store_n(&g_flushd_wait_queue_ready, true, __ATOMIC_RELEASE);
+    }
+    if (!__atomic_load_n(&g_flushd_timer_registered, __ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&g_flushd_timer_failed, __ATOMIC_ACQUIRE))
+    {
+        uint32_t freq = timer_frequency();
+        if (freq == 0)
+        {
+            freq = 1000;
+        }
+        uint32_t interval = freq / 100U;
+        if (interval == 0)
+        {
+            interval = 1;
+        }
+        if (timer_register_periodic(storage_flush_timer_callback, NULL, interval))
+        {
+            __atomic_store_n(&g_flushd_timer_registered, true, __ATOMIC_RELEASE);
+        }
+        else
+        {
+            serial_printf("%s", "[flushd] warn: unable to register wake timer\r\n");
+            __atomic_store_n(&g_flushd_timer_failed, true, __ATOMIC_RELEASE);
+        }
+    }
+}
+
+static void storage_flush_wait(uint32_t interval_ms)
+{
+    storage_flush_signal_init();
+    __atomic_store_n(&g_flushd_wait_deadline, 0, __ATOMIC_RELEASE);
+    if (storage_flush_should_wake(NULL))
+    {
+        return;
+    }
+    uint64_t ticks = storage_flush_ms_to_ticks(interval_ms);
+    if (ticks == 0)
+    {
+        return;
+    }
+    uint64_t deadline = timer_ticks() + ticks;
+    __atomic_store_n(&g_flushd_wait_deadline, deadline, __ATOMIC_RELEASE);
+
+    while (!storage_flush_should_wake(NULL))
+    {
+        wait_queue_wait(&g_flushd_wait_queue, storage_flush_should_wake, NULL);
+    }
+
+    __atomic_store_n(&g_flushd_wait_deadline, 0, __ATOMIC_RELEASE);
+}
+#endif
+
+#if ENABLE_FLUSHD
+void storage_request_flush(void)
+{
+    __atomic_store_n(&g_flushd_wake_requested, true, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&g_flushd_wait_queue_ready, __ATOMIC_ACQUIRE))
+    {
+        wait_queue_wake_all(&g_flushd_wait_queue);
+    }
+}
+#else
+void storage_request_flush(void)
+{
+}
+#endif
+
 static void storage_flush_process_entry(void *arg)
 {
     (void)arg;
@@ -415,7 +548,12 @@ static void storage_flush_process_entry(void *arg)
     }
     while (1)
     {
+#if ENABLE_FLUSHD
+        storage_flush_wait(interval_ms);
+        __atomic_store_n(&g_flushd_wake_requested, false, __ATOMIC_RELEASE);
+#else
         process_sleep_ms(interval_ms);
+#endif
         const size_t max_mounts = 8;
         vfs_mount_info_t mounts[max_mounts];
         size_t total_mounts = vfs_snapshot_mounts(mounts, max_mounts);
