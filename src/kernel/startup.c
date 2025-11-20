@@ -17,6 +17,7 @@ typedef struct
 {
     char **commands;
     size_t count;
+    char *buffer;
 } startup_command_list_t;
 
 static void startup_log(const char *message);
@@ -211,6 +212,7 @@ static bool startup_collect_commands(startup_command_list_t *list)
 
     list->commands = NULL;
     list->count = 0;
+    list->buffer = NULL;
 
     vfs_node_t *file = vfs_open_file(vfs_root(), STARTUP_SCRIPT_PATH, false, false);
     if (!file)
@@ -264,8 +266,11 @@ static bool startup_collect_commands(startup_command_list_t *list)
             char *entry = (char *)malloc(len + 1);
             if (!entry)
             {
-                free(buffer);
-                startup_command_list_reset(&(startup_command_list_t){ .commands = commands, .count = count });
+                startup_command_list_reset(&(startup_command_list_t){
+                    .commands = commands,
+                    .count = count,
+                    .buffer = buffer
+                });
                 return false;
             }
             memcpy(entry, trimmed, len + 1);
@@ -277,8 +282,11 @@ static bool startup_collect_commands(startup_command_list_t *list)
                 if (!new_commands)
                 {
                     free(entry);
-                    free(buffer);
-                    startup_command_list_reset(&(startup_command_list_t){ .commands = commands, .count = count });
+                    startup_command_list_reset(&(startup_command_list_t){
+                        .commands = commands,
+                        .count = count,
+                        .buffer = buffer
+                    });
                     return false;
                 }
                 commands = new_commands;
@@ -295,9 +303,9 @@ static bool startup_collect_commands(startup_command_list_t *list)
         }
     }
 
-    free(buffer);
     list->commands = commands;
     list->count = count;
+    list->buffer = buffer;
     return true;
 }
 
@@ -462,8 +470,13 @@ static void startup_command_list_reset(startup_command_list_t *list)
         }
         free(list->commands);
     }
+    if (list->buffer)
+    {
+        free(list->buffer);
+    }
     list->commands = NULL;
     list->count = 0;
+    list->buffer = NULL;
 }
 
 #endif /* ENABLE_STARTUP_SCRIPT */
