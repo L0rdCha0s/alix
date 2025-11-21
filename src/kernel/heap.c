@@ -85,11 +85,7 @@ static void heap_trace_log_stall(size_t requested, const heap_block_t *cursor, u
 #ifdef ENABLE_MEM_DEBUG_LOGS
 static inline void heap_log(const char *msg, uintptr_t value)
 {
-    serial_printf("%s", "[heap] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", "0x");
-    serial_printf("%016llX", (unsigned long long)(value));
-    serial_printf("%s", "\r\n");
+    serial_printf("[heap] %s0x%016llX\r\n", msg, (unsigned long long)(value));
 }
 #else
 static inline void heap_log(const char *msg, uintptr_t value)
@@ -815,19 +811,15 @@ static void heap_trace_log_alloc(size_t requested, const heap_block_t *block, vo
     {
         return;
     }
-    serial_printf("%s", "[heap] alloc requested=0x");
-    serial_printf("%016llX", (unsigned long long)(requested));
-    serial_printf("%s", " actual=0x");
-    serial_printf("%016llX", (unsigned long long)(block->size));
-    serial_printf("%s", " block=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)block));
-    serial_printf("%s", " caller=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)caller));
-    serial_printf("%s", " in_use=0x");
-    serial_printf("%016llX", (unsigned long long)(g_heap_trace_bytes_in_use));
-    serial_printf("%s", " peak=0x");
-    serial_printf("%016llX", (unsigned long long)(g_heap_trace_peak_bytes));
-    serial_printf("%s", "\r\n");
+    serial_printf(
+        "[heap] alloc requested=0x%016llX actual=0x%016llX block=0x%016llX caller=0x%016llX "
+        "in_use=0x%016llX peak=0x%016llX\r\n",
+        (unsigned long long)(requested),
+        (unsigned long long)(block->size),
+        (unsigned long long)((uintptr_t)block),
+        (unsigned long long)((uintptr_t)caller),
+        (unsigned long long)(g_heap_trace_bytes_in_use),
+        (unsigned long long)(g_heap_trace_peak_bytes));
 }
 
 static void heap_trace_log_free(size_t size, uintptr_t block_addr, void *caller)
@@ -841,15 +833,13 @@ static void heap_trace_log_free(size_t size, uintptr_t block_addr, void *caller)
 
 static void heap_trace_log_stall(size_t requested, const heap_block_t *cursor, uint64_t iterations, void *caller)
 {
-    serial_printf("%s", "[heap] find_suitable_block stall size=0x");
-    serial_printf("%016llX", (unsigned long long)(requested));
-    serial_printf("%s", " iterations=0x");
-    serial_printf("%016llX", (unsigned long long)(iterations));
-    serial_printf("%s", " cursor=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)(cursor ? cursor : 0)));
-    serial_printf("%s", " caller=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)caller));
-    serial_printf("%s", "\r\n");
+    serial_printf(
+        "[heap] find_suitable_block stall size=0x%016llX iterations=0x%016llX cursor=0x%016llX "
+        "caller=0x%016llX\r\n",
+        (unsigned long long)(requested),
+        (unsigned long long)(iterations),
+        (unsigned long long)((uintptr_t)(cursor ? cursor : 0)),
+        (unsigned long long)((uintptr_t)caller));
 }
 
 void heap_trace_set_enabled(bool enable)
@@ -868,17 +858,13 @@ void heap_trace_set_threshold(size_t threshold)
 
 void heap_trace_dump_stats(const char *context)
 {
-    serial_printf("%s", "[heap] stats context=");
-    serial_printf("%s", context ? context : "<none>");
-    serial_printf("%s", " allocs=0x");
-    serial_printf("%016llX", (unsigned long long)(g_heap_trace_allocations));
-    serial_printf("%s", " frees=0x");
-    serial_printf("%016llX", (unsigned long long)(g_heap_trace_frees));
-    serial_printf("%s", " in_use=0x");
-    serial_printf("%016llX", (unsigned long long)(g_heap_trace_bytes_in_use));
-    serial_printf("%s", " peak=0x");
-    serial_printf("%016llX", (unsigned long long)(g_heap_trace_peak_bytes));
-    serial_printf("%s", "\r\n");
+    serial_printf("[heap] stats context=%s allocs=0x%016llX frees=0x%016llX in_use=0x%016llX "
+                  "peak=0x%016llX\r\n",
+                  context ? context : "<none>",
+                  (unsigned long long)(g_heap_trace_allocations),
+                  (unsigned long long)(g_heap_trace_frees),
+                  (unsigned long long)(g_heap_trace_bytes_in_use),
+                  (unsigned long long)(g_heap_trace_peak_bytes));
 }
 #else
 void heap_trace_set_enabled(bool enable)

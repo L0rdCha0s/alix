@@ -4,6 +4,15 @@
 #include "atk_event_debug.h"
 #include "video.h"
 #include "libc.h"
+#ifdef KERNEL_BUILD
+#include "serial.h"
+#endif
+
+#ifdef KERNEL_BUILD
+#define TAB_LOG(...) serial_printf(__VA_ARGS__)
+#else
+#define TAB_LOG(...) ((void)0)
+#endif
 
 #define ATK_TAB_VIEW_MIN_WIDTH   (ATK_FONT_WIDTH * 6)
 
@@ -273,18 +282,19 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, const atk_mouse_event_t *
         return false;
     }
 
-    if (!atk_tab_view_point_in_tab_bar(tab_view, event->cursor_x, event->cursor_y))
+    int local_x = event->local_x;
+    int local_y = event->local_y;
+
+    if (local_y < 0 || local_y >= priv->tab_height)
     {
-        atk_event_debug_tab_miss(event->id, tab_view, event->local_x, event->local_y, "outside_tab_bar");
+        atk_event_debug_tab_miss(event->id, tab_view, local_x, local_y, "outside_tab_bar");
+        TAB_LOG("[atk][tab_view] miss outside bar id=%016llX local=(%d,%d) tab_h=%d\r\n",
+                (unsigned long long)event->id,
+                local_x,
+                local_y,
+                priv->tab_height);
         return false;
     }
-
-    int origin_x = 0;
-    int origin_y = 0;
-    atk_widget_absolute_position(tab_view, &origin_x, &origin_y);
-
-    int local_x = event->cursor_x - origin_x;
-    int local_y = event->cursor_y - origin_y;
 
     int tab_x = priv->content_padding;
     int max_x = tab_view->width;
@@ -314,6 +324,10 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, const atk_mouse_event_t *
             {
                 atk_tab_view_set_active(tab_view, index);
             }
+            TAB_LOG("[atk][tab_view] hit id=%016llX tab=%llu title=%s\r\n",
+                    (unsigned long long)event->id,
+                    (unsigned long long)index,
+                    page->title[0] ? page->title : "<empty>");
             return true;
         }
         tab_x = x1 + priv->tab_spacing;
@@ -321,6 +335,10 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, const atk_mouse_event_t *
     }
 
     atk_event_debug_tab_miss(event->id, tab_view, local_x, local_y, "no_tab_match");
+    TAB_LOG("[atk][tab_view] miss no match id=%016llX local=(%d,%d)\r\n",
+            (unsigned long long)event->id,
+            local_x,
+            local_y);
     return false;
 }
 
@@ -334,10 +352,22 @@ static atk_mouse_response_t tab_view_mouse_cb(atk_widget_t *widget,
         return ATK_MOUSE_RESPONSE_NONE;
     }
 
+    TAB_LOG("[atk][tab_view] mouse id=%016llX cursor=(%d,%d) local=(%d,%d) left=%d\r\n",
+            (unsigned long long)event->id,
+            event->cursor_x,
+            event->cursor_y,
+            event->local_x,
+            event->local_y,
+            event->left_pressed ? 1 : 0);
+
     if (atk_tab_view_handle_mouse(widget, event))
     {
+        TAB_LOG("[atk][tab_view] handled id=%016llX\r\n",
+                (unsigned long long)event->id);
         return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
     }
+    TAB_LOG("[atk][tab_view] ignored id=%016llX\r\n",
+            (unsigned long long)event->id);
     return ATK_MOUSE_RESPONSE_NONE;
 }
 

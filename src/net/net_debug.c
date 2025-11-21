@@ -32,39 +32,31 @@ static void net_debug_log_copy(const char *tag,
                                uintptr_t dest,
                                size_t len)
 {
-    serial_printf("%s", "[net-copy] tag=");
-    serial_printf("%s", tag ? tag : "<none>");
-    serial_printf("%s", " thread=");
     const char *name = process_thread_name_const(thread);
-    if (name)
-    {
-        serial_printf("%s", name);
-    }
-    else if (thread)
-    {
-        serial_printf("%s", "<unnamed>");
-    }
-    else
-    {
-        serial_printf("%s", "<none>");
-    }
-    serial_printf("%s", " pid=0x");
     process_t *owner = process_thread_owner(thread);
-    serial_printf("%016llX", (unsigned long long)(owner ? process_get_pid(owner) : 0));
-    serial_printf("%s", " dest=0x");
-    serial_printf("%016llX", (unsigned long long)(dest));
-    serial_printf("%s", " len=0x");
-    serial_printf("%016llX", (unsigned long long)(len));
+    const char *thread_name = name ? name : (thread ? "<unnamed>" : "<none>");
+    uint64_t pid = owner ? process_get_pid(owner) : 0;
     uintptr_t lower = 0;
     uintptr_t upper = 0;
     if (process_thread_stack_bounds(thread, &lower, &upper))
     {
-        serial_printf("%s", " stack_base=0x");
-        serial_printf("%016llX", (unsigned long long)(lower));
-        serial_printf("%s", " stack_top=0x");
-        serial_printf("%016llX", (unsigned long long)(upper));
+        serial_printf("[net-copy] tag=%s thread=%s pid=0x%016llX dest=0x%016llX len=0x%016llX "
+                      "stack_base=0x%016llX stack_top=0x%016llX\r\n",
+                      tag ? tag : "<none>",
+                      thread_name,
+                      (unsigned long long)pid,
+                      (unsigned long long)dest,
+                      (unsigned long long)len,
+                      (unsigned long long)lower,
+                      (unsigned long long)upper);
+        return;
     }
-    serial_printf("%s", "\r\n");
+    serial_printf("[net-copy] tag=%s thread=%s pid=0x%016llX dest=0x%016llX len=0x%016llX\r\n",
+                  tag ? tag : "<none>",
+                  thread_name,
+                  (unsigned long long)pid,
+                  (unsigned long long)dest,
+                  (unsigned long long)len);
 }
 
 void *net_debug_memcpy(const char *tag, void *dest, const void *src, size_t len)

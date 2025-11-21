@@ -498,6 +498,19 @@ atk_mouse_response_t atk_widget_dispatch_mouse(atk_widget_t *widget, const atk_m
         return ATK_MOUSE_RESPONSE_NONE;
     }
 
+#ifdef KERNEL_BUILD
+    serial_printf("[atk][mouse] dispatch cls=%s id=%016llX cursor=(%d,%d) local=(%d,%d) pressed=%d released=%d left=%d\r\n",
+                  widget->cls ? widget->cls->name : "<none>",
+                  (unsigned long long)event->id,
+                  event->cursor_x,
+                  event->cursor_y,
+                  event->local_x,
+                  event->local_y,
+                  event->pressed_edge ? 1 : 0,
+                  event->released_edge ? 1 : 0,
+                  event->left_pressed ? 1 : 0);
+#endif
+
     const atk_widget_ops_t *ops = widget->ops;
     if (!ops || !ops->on_mouse)
     {

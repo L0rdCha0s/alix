@@ -87,6 +87,8 @@ typedef struct __attribute__((packed))
     uint64_t cr4;
     uint64_t efer;
     uint64_t cr0;
+    uint16_t idt_limit;
+    uint64_t idt_base;
 } smp_bootstrap_data_t;
 
 static smp_bootstrap_data_t *const g_bootstrap_data =
@@ -100,6 +102,8 @@ _Static_assert(offsetof(smp_bootstrap_data_t, stage)   == SMP_BOOT_STAGE_OFFSET,
 _Static_assert(offsetof(smp_bootstrap_data_t, cr4)     == SMP_BOOT_CR4_OFFSET, "cr4 offset mismatch");
 _Static_assert(offsetof(smp_bootstrap_data_t, efer)    == SMP_BOOT_EFER_OFFSET, "efer offset mismatch");
 _Static_assert(offsetof(smp_bootstrap_data_t, cr0)     == SMP_BOOT_CR0_OFFSET, "cr0 offset mismatch");
+_Static_assert(offsetof(smp_bootstrap_data_t, idt_limit) == SMP_BOOT_IDT_LIMIT_OFFSET, "idt_limit offset mismatch");
+_Static_assert(offsetof(smp_bootstrap_data_t, idt_base)  == SMP_BOOT_IDT_BASE_OFFSET, "idt_base offset mismatch");
 
 extern uint8_t _binary_build_arch_x86_ap_trampoline_bin_start[];
 extern uint8_t _binary_build_arch_x86_ap_trampoline_bin_end[];
@@ -111,13 +115,14 @@ static smp_cpu_t g_cpus[SMP_MAX_CPUS];
 static uint32_t g_cpu_count = 0;
 static uint32_t g_boot_cpu_index = 0;
 static uint8_t g_apic_to_index[256];
-static uint8_t *g_bootstrap_stacks[SMP_MAX_CPUS] = { 0 };
+static uint8_t g_bootstrap_stacks[SMP_MAX_CPUS][SMP_BOOT_STACK_SIZE] __attribute__((aligned(16))) = { 0 };
 static uint64_t g_bootstrap_stack_tops[SMP_MAX_CPUS] = { 0 };
 static uint32_t g_online_cpus = 0;
 static uint32_t g_online_cpu_mask = 0;
 static bool g_trampoline_ready = false;
 static bool g_bootstrap_page_protected = false;
 static bool g_warned_unmapped_apic = false;
+static bool g_smp_initialized = false;
 
 static inline uint64_t read_cr3(void)
 {
@@ -142,18 +147,12 @@ static inline uint64_t read_cr4(void)
 
 static void smp_log(const char *msg)
 {
-    serial_printf("%s", "[smp] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", "\r\n");
+    serial_printf("[smp] %s\r\n", msg);
 }
 
 static void smp_log_value(const char *prefix, uint64_t value)
 {
-    serial_printf("%s", "[smp] ");
-    serial_printf("%s", prefix);
-    serial_printf("%s", "0x");
-    serial_printf("%016llX", (unsigned long long)(value));
-    serial_printf("%s", "\r\n");
+    serial_printf("[smp] %s0x%016llX\r\n", prefix, (unsigned long long)(value));
 }
 
 static void copy_trampoline_blob(void)
@@ -306,6 +305,7 @@ bool smp_init(void)
     }
 
     ensure_boot_cpu_present();
+    g_smp_initialized = true;
     return true;
 }
 
@@ -341,12 +341,20 @@ static void smp_panic(const char *msg, uint32_t apic_id)
 
 static uint32_t resolve_apic_to_index(uint32_t apic_id, bool strict)
 {
-    if (apic_id < (uint32_t)sizeof(g_apic_to_index))
+    /* Always linear-scan the CPU table; robust even if g_cpu_count is stale. */
+    for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
     {
-        uint8_t idx = g_apic_to_index[apic_id];
-        if (idx != 0xFF)
+        if (!g_cpus[i].present && i >= g_cpu_count)
         {
-            return idx;
+            continue;
+        }
+        if (g_cpus[i].apic_id == (uint8_t)apic_id)
+        {
+            if (apic_id < (uint32_t)sizeof(g_apic_to_index))
+            {
+                g_apic_to_index[apic_id] = (uint8_t)i;
+            }
+            return i;
         }
     }
 
@@ -368,17 +376,57 @@ static uint32_t resolve_apic_to_index(uint32_t apic_id, bool strict)
 
 uint32_t smp_current_cpu_index(void)
 {
-    /* Prefer CPUID-reported APIC ID to avoid MMIO reads that could fault. */
-    uint32_t apic = smp_cpuid_apic_id();
-    uint32_t idx = resolve_apic_to_index(apic, false);
-    if (idx >= SMP_MAX_CPUS)
+    static bool warned_unmapped = false;
+    static bool dumped_map = false;
+
+    if (!g_smp_initialized)
     {
-        serial_printf("%s", "[smp] warning: bogus APIC id 0x");
-        serial_printf("%016llX", (unsigned long long)apic);
-        serial_printf("%s", " -> using BSP index\r\n");
         return g_boot_cpu_index;
     }
-    return idx;
+
+    uint32_t apic = lapic_get_id();
+    uint32_t idx = resolve_apic_to_index(apic, false);
+    if (idx < SMP_MAX_CPUS && __atomic_load_n(&g_cpus[idx].online, __ATOMIC_ACQUIRE))
+    {
+        return idx;
+    }
+
+    if (!warned_unmapped)
+    {
+        serial_printf("%s", "[smp] warning: unmapped current CPU apic=0x");
+        serial_printf("%016llX", (unsigned long long)apic);
+        serial_printf("%s", " -> using BSP index\r\n");
+        if (!dumped_map)
+        {
+            dumped_map = true;
+            serial_printf("%s", "[smp] map dump g_cpu_count=0x");
+            serial_printf("%016llX", (unsigned long long)g_cpu_count);
+            serial_printf("%s", "\r\n");
+            uint32_t max_dump = (g_cpu_count < SMP_MAX_CPUS) ? g_cpu_count : SMP_MAX_CPUS;
+            if (max_dump > 8)
+            {
+                max_dump = 8;
+            }
+            for (uint32_t i = 0; i < max_dump; ++i)
+            {
+                serial_printf("%s", "  idx=0x");
+                serial_printf("%016llX", (unsigned long long)i);
+                serial_printf("%s", " apic=0x");
+                serial_printf("%016llX", (unsigned long long)g_cpus[i].apic_id);
+                serial_printf("%s", " present=");
+                serial_printf("%s", g_cpus[i].present ? "1" : "0");
+                serial_printf("%s", " online=");
+                serial_printf("%s", __atomic_load_n(&g_cpus[i].online, __ATOMIC_ACQUIRE) ? "1" : "0");
+                serial_printf("%s", "\r\n");
+            }
+            serial_printf("%s", "  apic_to_index[apic]=0x");
+            uint8_t map = (apic < (uint32_t)sizeof(g_apic_to_index)) ? g_apic_to_index[apic] : 0xFF;
+            serial_printf("%02X", (unsigned int)map);
+            serial_printf("%s", "\r\n");
+        }
+        warned_unmapped = true;
+    }
+    return g_boot_cpu_index;
 }
 
 static void prepare_bootstrap_data(uint32_t cpu_index, uint64_t stack_top)
@@ -391,6 +439,10 @@ static void prepare_bootstrap_data(uint32_t cpu_index, uint64_t stack_top)
     g_bootstrap_data->cr4     = read_cr4();
     g_bootstrap_data->efer    = rdmsr(IA32_EFER);
     g_bootstrap_data->cr0     = read_cr0();
+    arch_idtr_t idtr = { 0 };
+    arch_cpu_get_idtr(&idtr);
+    g_bootstrap_data->idt_limit = idtr.limit;
+    g_bootstrap_data->idt_base = idtr.base;
     g_bootstrap_data->stage   = 0;
 
     /* Ensure all writes are visible before sending SIPIs */
@@ -417,17 +469,6 @@ bool smp_start_secondary_cpus(void)
         }
         if (!g_cpus[i].present)
         {
-            continue;
-        }
-
-        if (!g_bootstrap_stacks[i])
-        {
-            g_bootstrap_stacks[i] = malloc(SMP_BOOT_STACK_SIZE);
-        }
-        if (!g_bootstrap_stacks[i])
-        {
-            smp_log("unable to allocate bootstrap stack");
-            all_started = false;
             continue;
         }
 
@@ -488,22 +529,15 @@ bool smp_start_secondary_cpus(void)
 void smp_secondary_entry(uint32_t apic_id)
 {
     uint32_t cpu_index = resolve_apic_to_index(apic_id, true);
-    smp_log_value("secondary entry apic=", apic_id);
 
-    uint64_t stack_top = (cpu_index < SMP_MAX_CPUS) ? g_bootstrap_stack_tops[cpu_index] : 0;
-    if (!stack_top && cpu_index < SMP_MAX_CPUS && g_bootstrap_stacks[cpu_index])
-    {
-        stack_top = (uint64_t)(uintptr_t)(g_bootstrap_stacks[cpu_index] + SMP_BOOT_STACK_SIZE);
-    }
-    if (!stack_top)
-    {
-        stack_top = g_bootstrap_data->stack;
-    }
+    uint64_t stack_top = (cpu_index < SMP_MAX_CPUS) ? g_bootstrap_stack_tops[cpu_index] : g_bootstrap_data->stack;
 
     arch_cpu_init_ap(cpu_index, stack_top);
     idt_load();
     lapic_enable();
+    lapic_set_tpr(0xFF); /* Mask AP interrupts until scheduler stack is live. */
 
+    g_cpus[cpu_index].present = true;
     __atomic_store_n(&g_cpus[cpu_index].online, true, __ATOMIC_RELEASE);
     __sync_fetch_and_add(&g_online_cpus, 1);
     if (cpu_index < SMP_MAX_CPUS)

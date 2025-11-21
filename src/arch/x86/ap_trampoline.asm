@@ -13,6 +13,8 @@ ORG 0
 %define SMP_BOOT_CR4_OFFSET      0x28
 %define SMP_BOOT_EFER_OFFSET     0x30
 %define SMP_BOOT_CR0_OFFSET      0x38
+%define SMP_BOOT_IDT_LIMIT_OFFSET 0x40
+%define SMP_BOOT_IDT_BASE_OFFSET  0x42
 
 %define PROTECTED_MODE_CS        0x08
 %define KERNEL_DS                0x10
@@ -96,6 +98,9 @@ long_mode_entry:
 
     mov rax, qword [rsi + SMP_BOOT_STACK_OFFSET]
     mov rsp, rax
+
+    lea rax, [rsi + SMP_BOOT_IDT_LIMIT_OFFSET]
+    lidt [rax]
 
     mov byte [rsi + SMP_BOOT_STAGE_OFFSET], 3
 

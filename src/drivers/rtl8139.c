@@ -290,15 +290,11 @@ void rtl8139_init(void)
         rtl8139_log("failed to register timer task");
     }
 
-    serial_printf("%s", "rtl8139: found at bus ");
-    rtl8139_log_hex8(g_device.bus);
-    serial_printf("%s", " device ");
-    rtl8139_log_hex8(g_device.device);
-    serial_printf("%s", " function ");
-    rtl8139_log_hex8(g_device.function);
-    serial_printf("%s", " io=0x");
-    rtl8139_log_hex16(g_io_base);
-    serial_printf("%s", "\r\n");
+    serial_printf("rtl8139: found at bus %02X device %02X function %02X io=0x%04X\r\n",
+                  (unsigned)g_device.bus,
+                  (unsigned)g_device.device,
+                  (unsigned)g_device.function,
+                  (unsigned)g_io_base);
     rtl8139_log_mac_address();
     rtl8139_dump_state("after init");
 }
@@ -807,16 +803,13 @@ static void rtl8139_log_hex32(uint32_t value)
 
 static void rtl8139_log_mac_address(void)
 {
-    serial_printf("%s", "rtl8139: mac ");
-    for (int i = 0; i < 6; ++i)
-    {
-        rtl8139_log_hex8(g_mac[i]);
-        if (i != 5)
-        {
-            serial_printf("%c", ':');
-        }
-    }
-    serial_printf("%s", "\r\n");
+    serial_printf("rtl8139: mac %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+                  (unsigned)g_mac[0],
+                  (unsigned)g_mac[1],
+                  (unsigned)g_mac[2],
+                  (unsigned)g_mac[3],
+                  (unsigned)g_mac[4],
+                  (unsigned)g_mac[5]);
 }
 
 static void rtl8139_dump_state(const char *context)

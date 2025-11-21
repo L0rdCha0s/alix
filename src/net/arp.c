@@ -67,16 +67,11 @@ static void arp_log_entry(const char *prefix, uint32_t ip, const uint8_t mac[6])
     {
         macbuf[0] = '\0';
     }
-    serial_printf("%s", "arp: ");
-    serial_printf("%s", prefix);
-    serial_printf("%s", " ip=");
-    serial_printf("%s", ipbuf);
-    if (mac)
-    {
-        serial_printf("%s", " mac=");
-        serial_printf("%s", macbuf);
-    }
-    serial_printf("%s", "\r\n");
+    serial_printf("arp: %s ip=%s%s%s\r\n",
+                  prefix,
+                  ipbuf,
+                  mac ? " mac=" : "",
+                  mac ? macbuf : "");
 }
 
 void net_arp_flush(void)
@@ -147,11 +142,9 @@ bool net_arp_send_request(net_interface_t *iface, uint32_t target_ip)
     bool ok = net_arp_send_generic(iface, broadcast, zero_mac, target_ip, source_ip, 0x0001);
     if (ok)
     {
-        serial_printf("%s", "arp: request sent for ");
         char ipbuf[32];
         net_format_ipv4(target_ip, ipbuf);
-        serial_printf("%s", ipbuf);
-        serial_printf("%s", "\r\n");
+        serial_printf("arp: request sent for %s\r\n", ipbuf);
     }
     else
     {

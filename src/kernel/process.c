@@ -20,6 +20,7 @@
 #include "timer.h"
 #include "interrupts.h"
 #include "smp.h"
+#include "lapic.h"
 #include "spinlock.h"
 #include "build_features.h"
 #include <stddef.h>
@@ -2435,16 +2436,8 @@ static process_t *allocate_process(const char *name, bool is_user)
         return NULL;
     }
     memset(proc, 0, sizeof(*proc));
-    serial_printf("%s", "[process] allocate name=");
-    if (name && name[0])
-    {
-        serial_printf("%s", name);
-    }
-    else
-    {
-        serial_printf("%s", "<unnamed>");
-    }
-    serial_printf("%s", "\r\n");
+    serial_printf("[process] allocate name=%s\r\n",
+                  (name && name[0]) ? name : "<unnamed>");
     proc->pid = g_next_pid++;
     proc->state = PROCESS_STATE_READY;
     bool space_ready = false;
@@ -3519,19 +3512,14 @@ static thread_t *thread_create(process_t *process,
     size_t allocation_size = guard_bytes + aligned_stack + PAGE_SIZE_BYTES_LOCAL;
     const uintptr_t heap_limit = (uintptr_t)kernel_heap_end;
 #if THREAD_CREATE_DEBUG
-    serial_printf("%s", "[thread_create] begin name=");
-    serial_printf("%s", name ? name : "<null>");
-    serial_printf("%s", " stack=0x");
-    serial_printf("%016llX", (unsigned long long)requested_stack);
-    serial_printf("%s", " aligned=0x");
-    serial_printf("%016llX", (unsigned long long)aligned_stack);
-    serial_printf("%s", " alloc=0x");
-    serial_printf("%016llX", (unsigned long long)allocation_size);
-    serial_printf("%s", " is_user=");
-    serial_printf("%s", is_user_thread ? "true" : "false");
-    serial_printf("%s", " is_idle=");
-    serial_printf("%s", is_idle ? "true" : "false");
-    serial_printf("%s", "\r\n");
+    serial_printf("[thread_create] begin name=%s stack=0x%016llX aligned=0x%016llX alloc=0x%016llX "
+                  "is_user=%s is_idle=%s\r\n",
+                  name ? name : "<null>",
+                  (unsigned long long)requested_stack,
+                  (unsigned long long)aligned_stack,
+                  (unsigned long long)allocation_size,
+                  is_user_thread ? "true" : "false",
+                  is_idle ? "true" : "false");
 #endif
     uint8_t *raw_allocation = NULL;
     uint8_t *guard_base = NULL;
@@ -3540,11 +3528,9 @@ static thread_t *thread_create(process_t *process,
     {
         raw_allocation = (uint8_t *)malloc(allocation_size);
 #if THREAD_CREATE_DEBUG
-        serial_printf("%s", "[thread_create] attempt=");
-        serial_printf("%016llX", (unsigned long long)attempt);
-        serial_printf("%s", " raw=");
-        serial_printf("%016llX", (unsigned long long)((uintptr_t)raw_allocation));
-        serial_printf("%s", "\r\n");
+        serial_printf("[thread_create] attempt=%016llX raw=%016llX\r\n",
+                      (unsigned long long)attempt,
+                      (unsigned long long)((uintptr_t)raw_allocation));
 #endif
         if (!raw_allocation)
         {
@@ -3553,15 +3539,12 @@ static thread_t *thread_create(process_t *process,
         guard_base = (uint8_t *)align_up_uintptr((uintptr_t)raw_allocation, PAGE_SIZE_BYTES_LOCAL);
         uintptr_t stack_end = (uintptr_t)(guard_base + guard_bytes + aligned_stack);
 #if THREAD_CREATE_DEBUG
-        serial_printf("%s", "[thread_create] layout raw=");
-        serial_printf("%016llX", (unsigned long long)((uintptr_t)raw_allocation));
-        serial_printf("%s", " guard_base=");
-        serial_printf("%016llX", (unsigned long long)((uintptr_t)guard_base));
-        serial_printf("%s", " stack_end=0x");
-        serial_printf("%016llX", (unsigned long long)stack_end);
-        serial_printf("%s", " heap_limit=0x");
-        serial_printf("%016llX", (unsigned long long)heap_limit);
-        serial_printf("%s", "\r\n");
+        serial_printf("[thread_create] layout raw=%016llX guard_base=%016llX stack_end=0x%016llX "
+                      "heap_limit=0x%016llX\r\n",
+                      (unsigned long long)((uintptr_t)raw_allocation),
+                      (unsigned long long)((uintptr_t)guard_base),
+                      (unsigned long long)stack_end,
+                      (unsigned long long)heap_limit);
 #endif
         if (stack_end <= heap_limit)
         {
@@ -3574,26 +3557,21 @@ static thread_t *thread_create(process_t *process,
     if (!raw_allocation)
     {
 #if THREAD_CREATE_DEBUG
-        serial_printf("%s", "[thread_create] alloc_failed name=");
-        serial_printf("%s", name ? name : "<null>");
-        serial_printf("%s", " alloc_size=0x");
-        serial_printf("%016llX", (unsigned long long)allocation_size);
-        serial_printf("%s", "\r\n");
+        serial_printf("[thread_create] alloc_failed name=%s alloc_size=0x%016llX\r\n",
+                      name ? name : "<null>",
+                      (unsigned long long)allocation_size);
 #endif
         free(thread);
         return NULL;
     }
 
 #if THREAD_CREATE_DEBUG
-    serial_printf("%s", "[thread_create] using_allocation raw=");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)raw_allocation));
-    serial_printf("%s", " guard_base=");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)guard_base));
-    serial_printf("%s", " guard_bytes=0x");
-    serial_printf("%016llX", (unsigned long long)guard_bytes);
-    serial_printf("%s", " aligned_stack=0x");
-    serial_printf("%016llX", (unsigned long long)aligned_stack);
-    serial_printf("%s", "\r\n");
+    serial_printf("[thread_create] using_allocation raw=%016llX guard_base=%016llX guard_bytes=0x%016llX "
+                  "aligned_stack=0x%016llX\r\n",
+                  (unsigned long long)((uintptr_t)raw_allocation),
+                  (unsigned long long)((uintptr_t)guard_base),
+                  (unsigned long long)guard_bytes,
+                  (unsigned long long)aligned_stack);
 #endif
 
     memset(guard_base, STACK_GUARD_PATTERN, guard_bytes);
@@ -3603,11 +3581,9 @@ static thread_t *thread_create(process_t *process,
     thread->stack_base = guard_base + guard_bytes;
     thread->stack_size = aligned_stack;
 #if THREAD_CREATE_DEBUG
-    serial_printf("%s", "[thread_create] guard_filled base=");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
-    serial_printf("%s", " size=0x");
-    serial_printf("%016llX", (unsigned long long)thread->stack_size);
-    serial_printf("%s", "\r\n");
+    serial_printf("[thread_create] guard_filled base=%016llX size=0x%016llX\r\n",
+                  (unsigned long long)((uintptr_t)thread->stack_base),
+                  (unsigned long long)thread->stack_size);
 #endif
 
     uintptr_t stack_limit = ((uintptr_t)thread->stack_base + aligned_stack) & ~(uintptr_t)0xF;
@@ -3676,28 +3652,19 @@ static thread_t *thread_create(process_t *process,
     thread->fault_has_address = false;
     memcpy(&thread->fpu_state, &g_fpu_initial_state, sizeof(fpu_state_t));
 #if THREAD_CREATE_DEBUG
-    serial_printf("%s", "[thread_create] stack_frame built sp=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)stack64));
-    serial_printf("%s", " limit=0x");
-    serial_printf("%016llX", (unsigned long long)stack_limit);
-    serial_printf("%s", " usable_limit=0x");
-    serial_printf("%016llX", (unsigned long long)usable_limit);
-    serial_printf("%s", "\r\n");
-    serial_printf("%s", "[thread_create] context set name=");
-    serial_printf("%s", name ? name : "<null>");
-    serial_printf("%s", " stack_base=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
-    serial_printf("%s", " stack_top=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->kernel_stack_top));
-    serial_printf("%s", " context=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->context));
-    serial_printf("%s", "\r\n");
+    serial_printf("[thread_create] stack_frame built sp=0x%016llX limit=0x%016llX usable_limit=0x%016llX\r\n",
+                  (unsigned long long)((uintptr_t)stack64),
+                  (unsigned long long)stack_limit,
+                  (unsigned long long)usable_limit);
+    serial_printf("[thread_create] context set name=%s stack_base=0x%016llX stack_top=0x%016llX context=0x%016llX\r\n",
+                  name ? name : "<null>",
+                  (unsigned long long)((uintptr_t)thread->stack_base),
+                  (unsigned long long)((uintptr_t)thread->kernel_stack_top),
+                  (unsigned long long)((uintptr_t)thread->context));
 #endif
 
 #if THREAD_CREATE_DEBUG
-    serial_printf("%s", "[thread_create] pre_watch name=");
-    serial_printf("%s", name ? name : "<null>");
-    serial_printf("%s", "\r\n");
+    serial_printf("[thread_create] pre_watch name=%s\r\n", name ? name : "<null>");
 #endif
 
     if (name)
@@ -3718,11 +3685,9 @@ static thread_t *thread_create(process_t *process,
     static int thread_log_count = 0;
     if (thread_log_count < 8)
     {
-        serial_printf("%s", "process: thread created gs base=0x");
-        serial_printf("%016llX", (unsigned long long)(thread->gs_base));
-        serial_printf("%s", " name=");
-        serial_printf("%s", thread->name);
-        serial_printf("%s", "\r\n");
+        serial_printf("process: thread created gs base=0x%016llX name=%s\r\n",
+                      (unsigned long long)(thread->gs_base),
+                      thread->name);
         thread_log_count++;
     }
 
@@ -3734,11 +3699,9 @@ static thread_t *thread_create(process_t *process,
                                ? (uintptr_t)thread->context
                                : (uintptr_t)thread->stack_base;
 #if THREAD_CREATE_DEBUG
-        serial_printf("%s", "[thread_create] activating_stack_watch ctx=");
-        serial_printf("%s", watch_context);
-        serial_printf("%s", " addr=0x");
-        serial_printf("%016llX", (unsigned long long)watch_addr);
-        serial_printf("%s", "\r\n");
+        serial_printf("[thread_create] activating_stack_watch ctx=%s addr=0x%016llX\r\n",
+                      watch_context,
+                      (unsigned long long)watch_addr);
 #endif
         thread_stack_watch_activate(thread, watch_context, watch_addr);
     }
@@ -3748,9 +3711,7 @@ static thread_t *thread_create(process_t *process,
     if (thread->context_guard_enabled)
     {
 #if THREAD_CREATE_DEBUG
-        serial_printf("%s", "[thread_create] context_guard_update name=");
-        serial_printf("%s", thread->name);
-        serial_printf("%s", "\r\n");
+        serial_printf("[thread_create] context_guard_update name=%s\r\n", thread->name);
 #endif
         thread_context_guard_update(thread, "thread_create");
     }
@@ -3760,11 +3721,9 @@ static thread_t *thread_create(process_t *process,
     thread_registry_add(thread);
     scheduler_shell_log("created", thread);
 #if THREAD_CREATE_DEBUG
-    serial_printf("%s", "[thread_create] done name=");
-    serial_printf("%s", thread->name);
-    serial_printf("%s", " thread=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread));
-    serial_printf("%s", "\r\n");
+    serial_printf("[thread_create] done name=%s thread=0x%016llX\r\n",
+                  thread->name,
+                  (unsigned long long)((uintptr_t)thread));
 #endif
     return thread;
 }
@@ -3777,6 +3736,16 @@ static inline uint32_t scheduler_cpu_limit(void)
         count = SMP_MAX_CPUS;
     }
     return count;
+}
+
+static inline bool scheduler_cpu_online(uint32_t cpu_index)
+{
+    const smp_cpu_t *cpu = smp_cpu_by_index(cpu_index);
+    if (!cpu || !cpu->present)
+    {
+        return false;
+    }
+    return __atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE);
 }
 
 static inline run_queue_t *scheduler_run_queue(uint32_t cpu_index)
@@ -4012,13 +3981,27 @@ static uint32_t scheduler_select_target_cpu(thread_t *thread)
         preferred = 0;
     }
 
+    if (!scheduler_cpu_online(preferred))
+    {
+        for (uint32_t i = 0; i < cpu_count; ++i)
+        {
+            if (scheduler_cpu_online(i))
+            {
+                preferred = i;
+                break;
+            }
+        }
+    }
+
     uint32_t best_cpu = preferred;
     run_queue_t *best_queue = scheduler_run_queue(best_cpu);
-    uint32_t best_load = __atomic_load_n(&best_queue->total, __ATOMIC_RELAXED);
+    uint32_t best_load = scheduler_cpu_online(best_cpu)
+                         ? __atomic_load_n(&best_queue->total, __ATOMIC_RELAXED)
+                         : 0xFFFFFFFFu;
 
     for (uint32_t i = 0; i < cpu_count; ++i)
     {
-        if (i == preferred)
+        if (i == preferred || !scheduler_cpu_online(i))
         {
             continue;
         }
@@ -5577,6 +5560,7 @@ void process_system_init(void)
 
 static void scheduler_main_loop(void)
 {
+    lapic_set_tpr(0);
     scheduler_wait_for_boot_ready();
     while (1)
     {
@@ -5592,9 +5576,38 @@ void process_start_scheduler(void)
 
 void process_run_secondary_cpu(uint32_t cpu_index)
 {
-    (void)cpu_index;
-    interrupts_enable();
-    scheduler_main_loop();
+    uint32_t cpu = (cpu_index < SMP_MAX_CPUS) ? cpu_index : 0;
+    thread_t *idle = g_idle_threads[cpu];
+    if (!idle)
+    {
+        fatal("no idle thread for secondary CPU");
+    }
+
+    __asm__ volatile ("cli" ::: "memory");
+
+    set_current_thread_local(idle);
+    set_current_process_local(idle->process);
+    idle->state = THREAD_STATE_RUNNING;
+    idle->context_valid = true;
+    idle->preempt_pending = false;
+    idle->time_slice_remaining = scheduler_time_slice_ticks();
+
+    arch_cpu_set_kernel_stack(cpu, idle->kernel_stack_top);
+    wrmsr(MSR_GS_BASE, idle->gs_base);
+    wrmsr(MSR_FS_BASE, idle->fs_base);
+    lapic_set_tpr(0xFF); /* Mask external IRQs until ready. */
+
+    uint64_t new_rsp = idle->kernel_stack_top;
+    uint64_t target = (uint64_t)scheduler_main_loop;
+
+    lapic_set_tpr(0x00); /* Unmask now that stack and GS are valid. */
+    __asm__ volatile (
+        "mov %0, %%rsp\n\t"
+        "sti\n\t"
+        "jmp *%1\n\t"
+        :
+        : "r"(new_rsp), "r"(target)
+        : "rsp", "memory");
 }
 
 void process_scheduler_set_ready(void)

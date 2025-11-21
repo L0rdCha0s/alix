@@ -168,3 +168,12 @@ void arch_cpu_get_gdtr(uint32_t cpu_index, arch_gdtr_t *gdtr_out)
     }
     *gdtr_out = gdt_descriptors[cpu_index];
 }
+
+void arch_cpu_get_idtr(arch_idtr_t *idtr_out)
+{
+    if (!idtr_out)
+    {
+        return;
+    }
+    __asm__ volatile ("sidt %0" : "=m"(*idtr_out));
+}

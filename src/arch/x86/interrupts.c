@@ -577,17 +577,10 @@ void interrupts_enable_irq(uint8_t irq)
     }
     if (log_count < 8)
     {
-        serial_printf("%s", "PIC masks: PIC1=0x");
-        static const char hex[] = "0123456789ABCDEF";
-        serial_printf("%c", hex[(pic1_mask >> 4) & 0xF]);
-        serial_printf("%c", hex[pic1_mask & 0xF]);
-        serial_printf("%s", " PIC2=0x");
-        serial_printf("%c", hex[(pic2_mask >> 4) & 0xF]);
-        serial_printf("%c", hex[pic2_mask & 0xF]);
-        serial_printf("%s", " irq=");
-        serial_printf("%c", hex[(irq >> 4) & 0xF]);
-        serial_printf("%c", hex[irq & 0xF]);
-        serial_printf("%s", "\r\n");
+        serial_printf("PIC masks: PIC1=0x%02X PIC2=0x%02X irq=%02X\r\n",
+                      (unsigned)(pic1_mask),
+                      (unsigned)(pic2_mask),
+                      (unsigned)irq);
         log_count++;
     }
 }

@@ -26,6 +26,16 @@
 
 static volatile uint32_t *g_lapic_base = NULL;
 
+static inline uint32_t lapic_cpuid_apic_id(void)
+{
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    __asm__ volatile ("cpuid"
+                      : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                      : "a"(1), "c"(0));
+    (void)eax; (void)ecx; (void)edx;
+    return ebx >> 24;
+}
+
 static inline void lapic_write(uint32_t reg, uint32_t value)
 {
     if (!g_lapic_base)
@@ -84,6 +94,10 @@ void lapic_enable(void)
 
 uint32_t lapic_get_id(void)
 {
+    if (!g_lapic_base)
+    {
+        return lapic_cpuid_apic_id();
+    }
     uint32_t value = lapic_read(LAPIC_REG_ID);
     return value >> 24;
 }
@@ -130,4 +144,9 @@ void lapic_broadcast_ipi(uint8_t vector, bool include_self)
     lapic_wait_for_icr();
     lapic_write(LAPIC_REG_ICR_HIGH, 0);
     lapic_write(LAPIC_REG_ICR_LOW, icr);
+}
+
+void lapic_set_tpr(uint8_t value)
+{
+    lapic_write(LAPIC_REG_TPR, (uint32_t)value);
 }

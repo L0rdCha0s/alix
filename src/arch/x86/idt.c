@@ -34,9 +34,7 @@ void idt_init(void)
     {
         serial_printf("%s", "IDT alloc request\r\n");
         idt = malloc(idt_bytes);
-        serial_printf("%s", "IDT alloc ptr=\r\n");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)idt));
-        serial_printf("%s", "\r\n");
+        serial_printf("IDT alloc ptr=%016llX\r\n", (unsigned long long)((uint64_t)idt));
         if (!idt)
         {
             serial_printf("%s", "IDT allocation failed\r\n");
@@ -46,9 +44,7 @@ void idt_init(void)
             }
         }
     }
-    serial_printf("%s", "IDT memset ptr=\r\n");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)idt));
-    serial_printf("%s", "\r\n");
+    serial_printf("IDT memset ptr=%016llX\r\n", (unsigned long long)((uint64_t)idt));
     memset(idt, 0, idt_bytes);
 }
 

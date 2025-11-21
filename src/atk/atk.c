@@ -24,6 +24,12 @@
 #include "vfs.h"
 #endif
 
+#ifdef KERNEL_BUILD
+#define ATK_MOUSE_LOG(...) serial_printf(__VA_ARGS__)
+#else
+#define ATK_MOUSE_LOG(...) ((void)0)
+#endif
+
 static void atk_apply_default_theme(atk_state_t *state);
 static __attribute__((unused)) void action_exit_to_text(atk_widget_t *button, void *context);
 static void atk_build_mouse_event(const atk_widget_t *widget,
@@ -373,6 +379,15 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                    released_edge,
                                                    left_pressed,
                                                    &menu_redraw);
+    ATK_MOUSE_LOG("[atk][mouse] menu consumed=%d redraw=%d id=%016llX cursor=(%d,%d) pressed=%d released=%d left=%d\r\n",
+                  menu_consumed ? 1 : 0,
+                  menu_redraw ? 1 : 0,
+                  (unsigned long long)event_id,
+                  cursor_x,
+                  cursor_y,
+                  pressed_edge ? 1 : 0,
+                  released_edge ? 1 : 0,
+                  left_pressed ? 1 : 0);
     if (menu_redraw)
     {
         result.redraw = true;
@@ -402,6 +417,10 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                      "capture",
                                                      event_id,
                                                      &result);
+        ATK_MOUSE_LOG("[atk][mouse] capture cls=%s consumed=%d id=%016llX\r\n",
+                      capture->cls ? capture->cls->name : "<none>",
+                      capture_consumed ? 1 : 0,
+                      (unsigned long long)event_id);
     }
 
     atk_widget_t *hover_resize_window = NULL;

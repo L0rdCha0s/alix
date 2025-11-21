@@ -11,7 +11,7 @@
 #include "user_copy.h"
 
 #ifndef USER_ATK_DEBUG
-#define USER_ATK_DEBUG 0
+#define USER_ATK_DEBUG 1
 #endif
 
 typedef struct user_atk_window

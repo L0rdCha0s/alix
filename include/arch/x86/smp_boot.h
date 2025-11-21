@@ -17,5 +17,7 @@
 #define SMP_BOOT_CR4_OFFSET           0x28
 #define SMP_BOOT_EFER_OFFSET          0x30
 #define SMP_BOOT_CR0_OFFSET           0x38
+#define SMP_BOOT_IDT_LIMIT_OFFSET     0x40
+#define SMP_BOOT_IDT_BASE_OFFSET      0x42
 
 #endif /* ARCH_X86_SMP_BOOT_H */

@@ -262,12 +262,9 @@ void net_dhcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
 
     char ipbuf[32];
     net_format_ipv4(yiaddr, ipbuf);
-    serial_printf("%s", "dhcp: received response type=");
-    char mt = (char)('0' + message_type);
-    serial_printf("%c", mt);
-    serial_printf("%s", " yiaddr=");
-    serial_printf("%s", ipbuf);
-    serial_printf("%s", "\r\n");
+    serial_printf("dhcp: received response type=%c yiaddr=%s\r\n",
+                  (char)('0' + message_type),
+                  ipbuf);
 
     if (server_id == 0)
     {
@@ -498,9 +495,7 @@ static bool dhcp_send_message(uint8_t msg_type, uint32_t requested_ip, uint32_t 
         frame_len = 60;
     }
 
-    serial_printf("%s", "dhcp: transmitting message type ");
-    serial_printf("%c", (char)('0' + msg_type));
-    serial_printf("%s", "\r\n");
+    serial_printf("dhcp: transmitting message type %c\r\n", (char)('0' + msg_type));
 
     bool ok = net_if_send_copy(g_active_iface, buffer, frame_len);
     if (!ok)
