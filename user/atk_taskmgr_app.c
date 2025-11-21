@@ -444,15 +444,15 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
         return false;
     }
     static const atk_list_view_column_def_t PROCESS_COLUMNS[] = {
-        { "*", ATK_COL(2) },
+        { "*", ATK_COL(3) },
         { "PID", ATK_COL(6) },
-        { "PSTATE", ATK_COL(8) },
-        { "TSTATE", ATK_COL(8) },
+        { "PSTATE", ATK_COL(9) },
+        { "TSTATE", ATK_COL(9) },
         { "IDLE", ATK_COL(5) },
-        { "FD", ATK_COL(4) },
-        { "PROC", ATK_COL(16) },
-        { "THREAD", ATK_COL(16) },
-        { "REM", ATK_COL(6) },
+        { "FD", ATK_COL(6) },
+        { "PROC", ATK_COL(22) },
+        { "THREAD", ATK_COL(22) },
+        { "REM", ATK_COL(10) },
     };
     atk_list_view_configure_columns(process_list, PROCESS_COLUMNS, sizeof(PROCESS_COLUMNS) / sizeof(PROCESS_COLUMNS[0]));
     atk_tab_view_add_page(tab_view, "Processes", process_list);
@@ -464,11 +464,11 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
         return false;
     }
     static const atk_list_view_column_def_t MEMORY_COLUMNS[] = {
-        { "*", ATK_COL(2) },
+        { "*", ATK_COL(3) },
         { "PID", ATK_COL(6) },
-        { "PROC", ATK_COL(20) },
-        { "HEAP", ATK_COL(12) },
-        { "COMMIT", ATK_COL(12) },
+        { "PROC", ATK_COL(26) },
+        { "HEAP", ATK_COL(14) },
+        { "COMMIT", ATK_COL(14) },
     };
     atk_list_view_configure_columns(memory_list, MEMORY_COLUMNS, sizeof(MEMORY_COLUMNS) / sizeof(MEMORY_COLUMNS[0]));
     atk_tab_view_add_page(tab_view, "Memory", memory_list);
@@ -480,16 +480,16 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
         return false;
     }
     static const atk_list_view_column_def_t NETWORK_COLUMNS[] = {
-        { "IFACE", ATK_COL(6) },
+        { "IFACE", ATK_COL(8) },
         { "LINK", ATK_COL(6) },
         { "MAC", ATK_COL(18) },
-        { "IPv4", ATK_COL(15) },
-        { "RXpkts", ATK_COL(10) },
-        { "TXpkts", ATK_COL(10) },
-        { "RXbytes", ATK_COL(12) },
-        { "TXbytes", ATK_COL(12) },
-        { "ΔRX", ATK_COL(10) },
-        { "ΔTX", ATK_COL(10) },
+        { "IPv4", ATK_COL(16) },
+        { "RXpkts", ATK_COL(12) },
+        { "TXpkts", ATK_COL(12) },
+        { "RXbytes", ATK_COL(14) },
+        { "TXbytes", ATK_COL(14) },
+        { "ΔRX", ATK_COL(12) },
+        { "ΔTX", ATK_COL(12) },
     };
     atk_list_view_configure_columns(network_list, NETWORK_COLUMNS, sizeof(NETWORK_COLUMNS) / sizeof(NETWORK_COLUMNS[0]));
     atk_tab_view_add_page(tab_view, "Network", network_list);

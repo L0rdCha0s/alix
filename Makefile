@@ -212,7 +212,6 @@ $(DL_SCRIPT_SRC): $(USER_ELFS)
 		echo 'const size_t g_dl_script_content_len = sizeof(g_dl_script_content) - 1;'; \
 	} > $(DL_SCRIPT_SRC)
 
-
 $(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@

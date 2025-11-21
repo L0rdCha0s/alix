@@ -30,6 +30,7 @@ size_t atk_list_view_column_count(const atk_widget_t *list);
 void atk_list_view_draw(const struct atk_state *state, const atk_widget_t *list);
 void atk_list_view_destroy(atk_widget_t *list);
 void atk_list_view_relayout(atk_widget_t *list);
+bool atk_list_view_is_over_separator(const atk_widget_t *list, int local_x, int local_y);
 
 extern const atk_class_t ATK_LIST_VIEW_CLASS;
 

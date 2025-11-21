@@ -36,7 +36,7 @@ extern uintptr_t kernel_heap_end;
 
 #define PROCESS_STACK_GUARD_SIZE         (4096UL)
 #define STACK_GUARD_PATTERN              0x5A
-#define ENABLE_SMP_BOOT_STACK_SCAN         0
+#define ENABLE_SMP_BOOT_STACK_SCAN         1
 #define SMP_BOOT_STACK_SCAN_MAX_QWORDS     8192ULL
 #define STACK_SCAN_DUMP_CONTEXT_QWORDS     16ULL
 #ifndef ENABLE_SCHEDULER_STACK_DUMP
@@ -1905,7 +1905,12 @@ static void thread_scan_stack_for_suspicious_values(thread_t *thread,
                                                     const char *context)
 {
 #if ENABLE_SMP_BOOT_STACK_SCAN
-    if (!thread || !thread->stack_base || thread->is_idle)
+    if (!thread ||
+        !thread->stack_base ||
+        !thread->stack_allocation_raw ||
+        thread->is_idle ||
+        thread->pending_destroy ||
+        thread->state == THREAD_STATE_ZOMBIE)
     {
         return;
     }

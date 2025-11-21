@@ -2,6 +2,7 @@
 
 #include "atk_internal.h"
 #include "atk_event_debug.h"
+#include "atk/atk_font.h"
 #include "video.h"
 #include "libc.h"
 #include "serial.h"
@@ -450,13 +451,23 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
 
         video_draw_rect(tab_x, tab_y, width, priv->tab_height, bg);
         video_draw_rect_outline(tab_x, tab_y, width, priv->tab_height, border);
+
+        int line_height = atk_font_line_height();
+        int text_width = atk_font_text_width(page->title);
+        int available = width - priv->tab_padding;
         int text_x = tab_x + priv->tab_padding / 2;
-        int text_y = tab_y + (priv->tab_height - ATK_FONT_HEIGHT) / 2;
+        if (available > 0 && text_width < available)
+        {
+            text_x = tab_x + (width - text_width) / 2;
+        }
+        int text_y = tab_y + (priv->tab_height - line_height) / 2;
         if (text_y < tab_y)
         {
             text_y = tab_y;
         }
-        video_draw_text(text_x, text_y, page->title, text, bg);
+        atk_rect_t clip = { tab_x, tab_y, width, priv->tab_height };
+        int baseline = atk_font_baseline_for_rect(text_y, line_height);
+        atk_font_draw_string_clipped(text_x, baseline, page->title, text, bg, &clip);
 
         if (active)
         {
@@ -529,7 +540,8 @@ static atk_widget_t *atk_tab_view_create(void)
     atk_list_init(&priv->pages);
     priv->page_count = 0;
     priv->active_index = 0;
-    priv->tab_height = ATK_FONT_HEIGHT + 10;
+    int line_height = atk_font_line_height();
+    priv->tab_height = line_height + 10;
     priv->tab_padding = 12;
     priv->tab_spacing = 6;
     priv->content_padding = 8;
@@ -618,8 +630,7 @@ static int tab_view_tab_width(const atk_tab_view_priv_t *priv, const atk_tab_vie
     {
         return ATK_TAB_VIEW_MIN_WIDTH;
     }
-    size_t len = strlen(page->title);
-    int text_width = (int)len * ATK_FONT_WIDTH;
+    int text_width = atk_font_text_width(page->title);
     int width = text_width + priv->tab_padding * 2;
     if (width < ATK_TAB_VIEW_MIN_WIDTH)
     {

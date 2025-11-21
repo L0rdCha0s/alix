@@ -9,6 +9,7 @@
 #include "atk_internal.h"
 #include "atk_menu_bar.h"
 #include "atk_window.h"
+#include "atk/atk_list_view.h"
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
@@ -925,6 +926,32 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
     else
     {
         cursor_edges = hover_resize_edges;
+    }
+
+    if (cursor_edges == 0)
+    {
+        atk_widget_t *cursor_widget = NULL;
+        if (capture && capture->used)
+        {
+            cursor_widget = capture;
+        }
+        else if (hover_window)
+        {
+            cursor_widget = atk_window_widget_at(hover_window, cursor_x, cursor_y);
+        }
+
+        if (cursor_widget && cursor_widget->used && atk_widget_is_a(cursor_widget, &ATK_LIST_VIEW_CLASS))
+        {
+            int abs_x = 0;
+            int abs_y = 0;
+            atk_widget_absolute_position(cursor_widget, &abs_x, &abs_y);
+            int local_x = cursor_x - abs_x;
+            int local_y = cursor_y - abs_y;
+            if (atk_list_view_is_over_separator(cursor_widget, local_x, local_y))
+            {
+                cursor_edges = ATK_RESIZE_EDGE_LEFT;
+            }
+        }
     }
     atk_update_cursor_shape(cursor_edges);
 

@@ -260,6 +260,7 @@ static void ensure_system_layout(void)
         serial_printf("%s", "[alix] warn: unable to install dl.sh\r\n");
     }
 
+
     lock_slash_root_once();
 }
 

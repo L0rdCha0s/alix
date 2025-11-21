@@ -42,7 +42,6 @@ static atk_font_state_t g_font_state = { 0 };
 
 static bool atk_font_load(void);
 static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint);
-static video_color_t rgba_blend(video_color_t bg, video_color_t fg, uint8_t alpha);
 
 #ifdef ATK_NO_DESKTOP_APPS
 static bool atk_font_read_user(uint8_t **data_out, size_t *size_out);
@@ -241,7 +240,7 @@ void atk_font_draw_string_clipped(int x,
             for (int col = 0; col < width; ++col)
             {
                 uint8_t alpha = src[col];
-                row_pixels[col] = rgba_blend(bg, fg, alpha);
+                row_pixels[col] = ((video_color_t)alpha << 24) | (fg & 0x00FFFFFFU);
             }
             video_blit_rgba32(visible_x0,
                               visible_y0 + row,
@@ -374,32 +373,6 @@ static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint)
 
     ttf_bitmap_destroy(&bitmap);
     return glyph;
-}
-
-static video_color_t rgba_blend(video_color_t bg, video_color_t fg, uint8_t alpha)
-{
-    if (alpha == 0)
-    {
-        return bg;
-    }
-    if (alpha == 255)
-    {
-        return fg;
-    }
-
-    uint8_t br = (uint8_t)(bg >> 16);
-    uint8_t bgc = (uint8_t)(bg >> 8);
-    uint8_t bb = (uint8_t)bg;
-
-    uint8_t fr = (uint8_t)(fg >> 16);
-    uint8_t fgx = (uint8_t)(fg >> 8);
-    uint8_t fb = (uint8_t)fg;
-
-    uint8_t rr = (uint8_t)((fr * alpha + br * (255 - alpha)) / 255);
-    uint8_t rg = (uint8_t)((fgx * alpha + bgc * (255 - alpha)) / 255);
-    uint8_t rb = (uint8_t)((fb * alpha + bb * (255 - alpha)) / 255);
-
-    return 0xFF000000U | ((video_color_t)rr << 16) | ((video_color_t)rg << 8) | (video_color_t)rb;
 }
 
 #ifdef ATK_NO_DESKTOP_APPS

@@ -50,28 +50,22 @@ static void atk_menu_bar_update_layout(atk_state_t *state);
 static atk_menu_bar_entry_t *atk_menu_bar_entry_hit_test(atk_state_t *state, int px);
 static bool atk_menu_bar_build_logo(atk_state_t *state);
 static void menu_action_welcome(void *context);
-static void menu_action_shutdown(void *context)
-{
-    (void)context;
-    shell_output_t out;
-    shell_output_init_console(&out);
-    shell_cmd_shutdown(NULL, &out, "");
-}
+#ifdef KERNEL_BUILD
+static void menu_action_shutdown(void *context);
+static void menu_shutdown_thread(void *arg);
+#endif
+static int atk_menu_bar_measure_title(const char *title);
+static int atk_menu_bar_height_pixels(const atk_state_t *state);
+static void atk_menu_bar_mark_dirty(const atk_state_t *state);
+static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu);
+#ifndef ATK_NO_DESKTOP_APPS
+static void atk_menu_bar_clock_tick(void *context);
+static bool g_clock_timer_registered = false;
+#endif
 
-
-static inline void menu_log_pair(const char *msg, const char *detail)
-{
-    (void)msg;
-    (void)detail;
-}
-
-static inline void menu_log_coords(const char *msg, int x, int y)
-{
-    (void)msg;
-    (void)x;
-    (void)y;
-}
-
+static inline void menu_log(const char *msg) { (void)msg; }
+static inline void menu_log_pair(const char *msg, const char *detail) { (void)msg; (void)detail; }
+static inline void menu_log_coords(const char *msg, int x, int y) { (void)msg; (void)x; (void)y; }
 void atk_menu_bar_reset(atk_state_t *state)
 {
     if (!state)
@@ -744,134 +738,34 @@ static bool atk_menu_bar_build_logo(atk_state_t *state)
 }
 
 #ifdef KERNEL_BUILD
-typedef struct
-{
-    atk_widget_t *window;
-} shutdown_dialog_ctx_t;
-
-static void shutdown_dialog_on_destroy(void *context)
-{
-    shutdown_dialog_ctx_t *ctx = (shutdown_dialog_ctx_t *)context;
-    if (ctx)
-    {
-        free(ctx);
-    }
-}
-
-static void shutdown_dialog_cancel(atk_widget_t *button, void *context)
-{
-    (void)button;
-    shutdown_dialog_ctx_t *ctx = (shutdown_dialog_ctx_t *)context;
-    if (!ctx || !ctx->window)
-    {
-        return;
-    }
-    atk_state_t *state = atk_state_get();
-    atk_window_close(state, ctx->window);
-}
-
-static void shutdown_dialog_confirm(atk_widget_t *button, void *context)
-{
-    (void)button;
-    shutdown_dialog_ctx_t *ctx = (shutdown_dialog_ctx_t *)context;
-    if (ctx && ctx->window)
-    {
-        atk_widget_t *window = ctx->window;
-        ctx->window = NULL;
-        atk_window_set_context(window, NULL, NULL);
-        atk_state_t *state = atk_state_get();
-        atk_window_close(state, window);
-        free(ctx);
-    }
-#ifdef KERNEL_BUILD
-    serial_printf("%s", "[shutdown] syncing filesystems...\r\n");
-    bool sync_ok = vfs_sync_all();
-    if (!sync_ok)
-    {
-        serial_printf("%s", "[shutdown] vfs_sync_all failed; continuing shutdown\r\n");
-    }
-    serial_printf("%s", "[shutdown] powering off\r\n");
-#endif
-    power_shutdown();
-}
-
 static void menu_action_shutdown(void *context)
 {
-    atk_state_t *state = (atk_state_t *)context;
-    if (!state)
+    (void)context;
+    static volatile bool shutdown_started = false;
+    if (shutdown_started)
     {
         return;
     }
+    shutdown_started = true;
 
-    atk_widget_t *window = atk_window_create_at(state, VIDEO_WIDTH / 2, state->menu_bar_height + 120);
-    if (!window)
+    process_t *proc = process_create_kernel("shutdown",
+                                            menu_shutdown_thread,
+                                            NULL,
+                                            PROCESS_DEFAULT_STACK_SIZE,
+                                            -1);
+    if (!proc)
     {
-        return;
+        /* Fall back to synchronous shutdown if we failed to spawn a worker. */
+        menu_shutdown_thread(NULL);
     }
+}
 
-    shutdown_dialog_ctx_t *ctx = (shutdown_dialog_ctx_t *)calloc(1, sizeof(shutdown_dialog_ctx_t));
-    if (!ctx)
-    {
-        atk_window_close(state, window);
-        return;
-    }
-
-    ctx->window = window;
-    atk_window_set_context(window, ctx, shutdown_dialog_on_destroy);
-    atk_window_set_title_text(window, "Shutdown");
-    window->width = 360;
-    window->height = 180;
-    atk_window_ensure_inside(window);
-    atk_window_request_layout(window);
-
-    int padding = 20;
-    int label_y = ATK_WINDOW_TITLE_HEIGHT + 12;
-    atk_widget_t *label = atk_window_add_label(window,
-                                               padding,
-                                               label_y,
-                                               window->width - padding * 2,
-                                               60);
-    if (label)
-    {
-        atk_label_set_text(label, "Are you sure you want to shutdown?");
-    }
-
-    int button_height = 32;
-    int button_width = 100;
-    int button_y = window->height - padding - button_height;
-    int cancel_x = window->width - padding - button_width;
-    int yes_x = cancel_x - button_width - 12;
-
-    if (!atk_window_add_button(window,
-                               "Yes",
-                               yes_x,
-                               button_y,
-                               button_width,
-                               button_height,
-                               ATK_BUTTON_STYLE_TITLE_INSIDE,
-                               false,
-                               shutdown_dialog_confirm,
-                               ctx) ||
-        !atk_window_add_button(window,
-                               "Cancel",
-                               cancel_x,
-                               button_y,
-                               button_width,
-                               button_height,
-                               ATK_BUTTON_STYLE_TITLE_INSIDE,
-                               false,
-                               shutdown_dialog_cancel,
-                               ctx))
-    {
-        atk_window_set_context(window, NULL, NULL);
-        atk_window_close(state, window);
-        free(ctx);
-        return;
-    }
-
-    atk_window_bring_to_front(state, window);
-    atk_window_mark_dirty(window);
-    video_request_refresh_window(window);
+static void menu_shutdown_thread(void *arg)
+{
+    (void)arg;
+    shell_output_t out;
+    shell_output_init_console(&out);
+    shell_cmd_shutdown(NULL, &out, "");
 }
 #endif
 
