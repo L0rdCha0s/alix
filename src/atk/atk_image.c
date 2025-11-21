@@ -2,6 +2,7 @@
 
 #include "atk_internal.h"
 #include "atk/util/jpeg.h"
+#include "atk/util/png.h"
 #include "video.h"
 #include "libc.h"
 #include "heap.h"
@@ -10,9 +11,20 @@
 #include "serial.h"
 #endif
 
+static bool atk_image_is_png(const uint8_t *data, size_t size)
+{
+    static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    return data && size >= sizeof(sig) && memcmp(data, sig, sizeof(sig)) == 0;
+}
+
+static bool atk_image_is_jpeg(const uint8_t *data, size_t size)
+{
+    return data && size >= 3 && data[0] == 0xFF && data[1] == 0xD8;
+}
+
 typedef struct
 {
-    uint16_t *pixels;
+    video_color_t *pixels;
     int img_width;
     int img_height;
     int stride_bytes;
@@ -146,17 +158,61 @@ bool atk_image_load_jpeg(atk_widget_t *image, const uint8_t *data, size_t size)
         return false;
     }
 
-    uint16_t *pixels = NULL;
+    video_color_t *pixels = NULL;
     int width = 0;
     int height = 0;
     int stride_bytes = 0;
-    int rc = jpeg_decode_rgb565(data, size, &pixels, &width, &height, &stride_bytes);
+    int rc = jpeg_decode_rgba32(data, size, &pixels, &width, &height, &stride_bytes);
     if (rc != 0 || !pixels)
     {
         return false;
     }
 
     return atk_image_set_pixels(image, pixels, width, height, stride_bytes, true);
+}
+
+bool atk_image_load_png(atk_widget_t *image, const uint8_t *data, size_t size)
+{
+    if (!image || !data || size == 0)
+    {
+        return false;
+    }
+
+    atk_image_priv_t *priv = (atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
+    if (!priv)
+    {
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int width = 0;
+    int height = 0;
+    int stride_bytes = 0;
+    int rc = png_decode_rgba32(data, size, &pixels, &width, &height, &stride_bytes);
+    if (rc != 0 || !pixels)
+    {
+        return false;
+    }
+
+    return atk_image_set_pixels(image, pixels, width, height, stride_bytes, true);
+}
+
+bool atk_image_load_image(atk_widget_t *image, const uint8_t *data, size_t size)
+{
+    if (atk_image_is_png(data, size))
+    {
+        return atk_image_load_png(image, data, size);
+    }
+    if (atk_image_is_jpeg(data, size))
+    {
+        return atk_image_load_jpeg(image, data, size);
+    }
+
+    if (atk_image_load_png(image, data, size))
+    {
+        return true;
+    }
+    return atk_image_load_jpeg(image, data, size);
 }
 
 void atk_image_destroy(atk_widget_t *image)
@@ -215,7 +271,13 @@ void atk_image_draw(const atk_state_t *state, const atk_widget_t *image)
 
     if (priv->pixels && priv->img_width > 0 && priv->img_height > 0)
     {
-        video_blit_rgb565(draw_x, draw_y, priv->img_width, priv->img_height, priv->pixels, priv->stride_bytes);
+        video_blit_rgba32(draw_x,
+                          draw_y,
+                          priv->img_width,
+                          priv->img_height,
+                          priv->pixels,
+                          priv->stride_bytes,
+                          true);
     }
 }
 
@@ -232,7 +294,7 @@ int atk_image_height(const atk_widget_t *image)
 }
 
 bool atk_image_set_pixels(atk_widget_t *image,
-                          uint16_t *pixels,
+                          video_color_t *pixels,
                           int width,
                           int height,
                           int stride_bytes,
@@ -267,7 +329,7 @@ bool atk_image_set_pixels(atk_widget_t *image,
     return true;
 }
 
-uint16_t *atk_image_pixels(const atk_widget_t *image)
+video_color_t *atk_image_pixels(const atk_widget_t *image)
 {
     const atk_image_priv_t *priv = (const atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
     return priv ? priv->pixels : NULL;

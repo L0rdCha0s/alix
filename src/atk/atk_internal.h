@@ -4,6 +4,7 @@
 #include "atk/object.h"
 #include "atk/atk_list.h"
 #include "types.h"
+#include "video.h"
 #ifndef KERNEL_BUILD
 #include "atk/atk_terminal.h"
 #endif
@@ -77,23 +78,23 @@ typedef struct
 
 typedef struct
 {
-    uint16_t background;
-    uint16_t window_border;
-    uint16_t window_title;
-    uint16_t window_title_text;
-    uint16_t window_body;
-    uint16_t button_face;
-    uint16_t button_border;
-    uint16_t button_text;
-    uint16_t desktop_icon_face;
-    uint16_t desktop_icon_text;
-    uint16_t menu_bar_face;
-    uint16_t menu_bar_text;
-    uint16_t menu_bar_highlight;
-    uint16_t menu_dropdown_face;
-    uint16_t menu_dropdown_border;
-    uint16_t menu_dropdown_text;
-    uint16_t menu_dropdown_highlight;
+    video_color_t background;
+    video_color_t window_border;
+    video_color_t window_title;
+    video_color_t window_title_text;
+    video_color_t window_body;
+    video_color_t button_face;
+    video_color_t button_border;
+    video_color_t button_text;
+    video_color_t desktop_icon_face;
+    video_color_t desktop_icon_text;
+    video_color_t menu_bar_face;
+    video_color_t menu_bar_text;
+    video_color_t menu_bar_highlight;
+    video_color_t menu_dropdown_face;
+    video_color_t menu_dropdown_border;
+    video_color_t menu_dropdown_text;
+    video_color_t menu_dropdown_highlight;
 } atk_theme_t;
 
 typedef struct atk_state

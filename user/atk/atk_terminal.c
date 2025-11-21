@@ -35,8 +35,8 @@ typedef struct
     int cols;
     int rows;
     char *cells;
-    uint16_t *fg;
-    uint16_t *bg;
+    video_color_t *fg;
+    video_color_t *bg;
     atk_widget_t *scrollbar;
     int scrollbar_width;
     int view_offset;
@@ -44,8 +44,8 @@ typedef struct
     int scrollback_count;
     int scrollback_start;
     char *scrollback_cells;
-    uint16_t *scrollback_fg;
-    uint16_t *scrollback_bg;
+    video_color_t *scrollback_fg;
+    video_color_t *scrollback_bg;
 
     int cursor_row;
     int cursor_col;
@@ -61,11 +61,11 @@ typedef struct
     bool param_question;
     bool attr_bold;
 
-    uint16_t palette[16];
-    uint16_t default_fg;
-    uint16_t default_bg;
-    uint16_t current_fg;
-    uint16_t current_bg;
+    video_color_t palette[16];
+    video_color_t default_fg;
+    video_color_t default_bg;
+    video_color_t current_fg;
+    video_color_t current_bg;
 
     char *input_buffer;
     size_t input_length;
@@ -126,7 +126,7 @@ static void terminal_handle_printable(atk_terminal_priv_t *priv, char ch);
 static void terminal_reset_params(atk_terminal_priv_t *priv);
 static void terminal_csi_dispatch(atk_terminal_priv_t *priv, char command);
 static int terminal_get_param(const atk_terminal_priv_t *priv, int index, int default_value);
-static uint16_t terminal_color_from_code(atk_terminal_priv_t *priv, int code);
+static video_color_t terminal_color_from_code(atk_terminal_priv_t *priv, int code);
 static bool terminal_ensure_input_capacity(atk_terminal_priv_t *priv, size_t extra);
 static void terminal_store_scrollback_line(atk_terminal_priv_t *priv, int row);
 static void terminal_clamp_view_offset(atk_terminal_priv_t *priv);
@@ -659,8 +659,8 @@ void atk_terminal_draw(const atk_state_t *state, const atk_widget_t *terminal)
         int draw_y = y + row * line_height;
         int global_index = top_index + row;
         const char *line_cells = NULL;
-        const uint16_t *line_fg = NULL;
-        const uint16_t *line_bg = NULL;
+        const video_color_t *line_fg = NULL;
+        const video_color_t *line_bg = NULL;
         int screen_row = -1;
 
         if (global_index < priv->scrollback_count)
@@ -684,8 +684,8 @@ void atk_terminal_draw(const atk_state_t *state, const atk_widget_t *terminal)
         for (int col = 0; col < priv->cols; ++col)
         {
             char ch = line_cells[col];
-            uint16_t fg = line_fg[col];
-            uint16_t bg = line_bg[col];
+            video_color_t fg = line_fg[col];
+            video_color_t bg = line_bg[col];
 
             bool cursor_here = (cursor_visible &&
                                 screen_row >= 0 &&
@@ -695,7 +695,7 @@ void atk_terminal_draw(const atk_state_t *state, const atk_widget_t *terminal)
                                 priv->focused);
             if (cursor_here)
             {
-                uint16_t tmp = fg;
+                video_color_t tmp = fg;
                 fg = bg;
                 bg = tmp;
             }
@@ -1104,14 +1104,14 @@ static bool terminal_allocate_buffers(atk_terminal_priv_t *priv)
 {
     size_t count = (size_t)priv->rows * (size_t)priv->cols;
     priv->cells = (char *)malloc(count);
-    priv->fg = (uint16_t *)malloc(sizeof(uint16_t) * count);
-    priv->bg = (uint16_t *)malloc(sizeof(uint16_t) * count);
+    priv->fg = (video_color_t *)malloc(sizeof(video_color_t) * count);
+    priv->bg = (video_color_t *)malloc(sizeof(video_color_t) * count);
     size_t scrollback_total = (size_t)priv->scrollback_capacity * (size_t)priv->cols;
     if (priv->scrollback_capacity > 0 && priv->cols > 0)
     {
         priv->scrollback_cells = (char *)malloc(scrollback_total);
-        priv->scrollback_fg = (uint16_t *)malloc(sizeof(uint16_t) * scrollback_total);
-        priv->scrollback_bg = (uint16_t *)malloc(sizeof(uint16_t) * scrollback_total);
+        priv->scrollback_fg = (video_color_t *)malloc(sizeof(video_color_t) * scrollback_total);
+        priv->scrollback_bg = (video_color_t *)malloc(sizeof(video_color_t) * scrollback_total);
     }
     else
     {
@@ -1243,8 +1243,8 @@ static void terminal_scroll_up(atk_terminal_priv_t *priv, int lines)
     {
         size_t count = (size_t)cols * (size_t)remaining_rows;
         memmove(priv->cells, priv->cells + lines * cols, count);
-        memmove(priv->fg, priv->fg + lines * cols, count * sizeof(uint16_t));
-        memmove(priv->bg, priv->bg + lines * cols, count * sizeof(uint16_t));
+        memmove(priv->fg, priv->fg + lines * cols, count * sizeof(video_color_t));
+        memmove(priv->bg, priv->bg + lines * cols, count * sizeof(video_color_t));
     }
 
     for (int row = rows - lines; row < rows; ++row)
@@ -1347,7 +1347,7 @@ static int terminal_get_param(const atk_terminal_priv_t *priv, int index, int de
     return priv->params[index];
 }
 
-static uint16_t terminal_color_from_code(atk_terminal_priv_t *priv, int code)
+static video_color_t terminal_color_from_code(atk_terminal_priv_t *priv, int code)
 {
     if (code < 0) code = 0;
     if (code > 15) code = 15;
@@ -1604,8 +1604,8 @@ static void terminal_store_scrollback_line(atk_terminal_priv_t *priv, int row)
     }
 
     memcpy(priv->scrollback_cells + insert_offset, priv->cells + line_offset, (size_t)priv->cols);
-    memcpy(priv->scrollback_fg + insert_offset, priv->fg + line_offset, sizeof(uint16_t) * (size_t)priv->cols);
-    memcpy(priv->scrollback_bg + insert_offset, priv->bg + line_offset, sizeof(uint16_t) * (size_t)priv->cols);
+    memcpy(priv->scrollback_fg + insert_offset, priv->fg + line_offset, sizeof(video_color_t) * (size_t)priv->cols);
+    memcpy(priv->scrollback_bg + insert_offset, priv->bg + line_offset, sizeof(video_color_t) * (size_t)priv->cols);
 }
 
 static void terminal_clamp_view_offset(atk_terminal_priv_t *priv)
@@ -1737,8 +1737,8 @@ static bool terminal_resize_storage(atk_terminal_priv_t *priv, int new_cols, int
 
     size_t new_count = (size_t)new_cols * (size_t)new_rows;
     char *cells = (char *)malloc(new_count);
-    uint16_t *fg = (uint16_t *)malloc(sizeof(uint16_t) * new_count);
-    uint16_t *bg = (uint16_t *)malloc(sizeof(uint16_t) * new_count);
+    video_color_t *fg = (video_color_t *)malloc(sizeof(video_color_t) * new_count);
+    video_color_t *bg = (video_color_t *)malloc(sizeof(video_color_t) * new_count);
     if (!cells || !fg || !bg)
     {
         goto fail;
@@ -1759,20 +1759,20 @@ static bool terminal_resize_storage(atk_terminal_priv_t *priv, int new_cols, int
             size_t old_offset = (size_t)row * (size_t)old_cols;
             size_t new_offset = (size_t)row * (size_t)new_cols;
             memcpy(cells + new_offset, priv->cells + old_offset, (size_t)copy_cols);
-            memcpy(fg + new_offset, priv->fg + old_offset, sizeof(uint16_t) * (size_t)copy_cols);
-            memcpy(bg + new_offset, priv->bg + old_offset, sizeof(uint16_t) * (size_t)copy_cols);
+            memcpy(fg + new_offset, priv->fg + old_offset, sizeof(video_color_t) * (size_t)copy_cols);
+            memcpy(bg + new_offset, priv->bg + old_offset, sizeof(video_color_t) * (size_t)copy_cols);
         }
     }
 
     char *scroll_cells = NULL;
-    uint16_t *scroll_fg = NULL;
-    uint16_t *scroll_bg = NULL;
+    video_color_t *scroll_fg = NULL;
+    video_color_t *scroll_bg = NULL;
     if (priv->scrollback_capacity > 0)
     {
         size_t total = (size_t)priv->scrollback_capacity * (size_t)new_cols;
         scroll_cells = (char *)malloc(total);
-        scroll_fg = (uint16_t *)malloc(sizeof(uint16_t) * total);
-        scroll_bg = (uint16_t *)malloc(sizeof(uint16_t) * total);
+        scroll_fg = (video_color_t *)malloc(sizeof(video_color_t) * total);
+        scroll_bg = (video_color_t *)malloc(sizeof(video_color_t) * total);
         if (!scroll_cells || !scroll_fg || !scroll_bg)
         {
             goto fail;
@@ -1797,10 +1797,10 @@ static bool terminal_resize_storage(atk_terminal_priv_t *priv, int new_cols, int
                        (size_t)copy_cols);
                 memcpy(scroll_fg + new_offset,
                        priv->scrollback_fg + old_offset,
-                       sizeof(uint16_t) * (size_t)copy_cols);
+                       sizeof(video_color_t) * (size_t)copy_cols);
                 memcpy(scroll_bg + new_offset,
                        priv->scrollback_bg + old_offset,
-                       sizeof(uint16_t) * (size_t)copy_cols);
+                       sizeof(video_color_t) * (size_t)copy_cols);
             }
         }
     }

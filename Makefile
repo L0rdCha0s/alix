@@ -89,6 +89,7 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
 HOST_TEST_DIR := $(OBJDIR)/host-tests
 HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
+PNG_TEST_BIN := $(HOST_TEST_DIR)/png_host_test
 HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -I$(INCLUDE_DIR) -DTTF_HOST_BUILD
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
@@ -252,6 +253,10 @@ $(SHA256_TEST_BIN): tests/sha256_host_test.c src/crypto/sha256.c include/crypto/
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/sha256_host_test.c src/crypto/sha256.c -o $@
 
+$(PNG_TEST_BIN): tests/png_host_test.c src/atk/util/png.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD tests/png_host_test.c src/atk/util/png.c -o $@
+
 LOADER_HEADERS := \
 	$(INCLUDE_DIR)/uefi.h \
 	$(INCLUDE_DIR)/bootinfo.h \
@@ -376,4 +381,7 @@ ttf-test: $(HOST_TEST_BIN)
 sha256-test: $(SHA256_TEST_BIN)
 	$(SHA256_TEST_BIN)
 
-.PHONY: all run run-hdd run-hdd-gdb clean test-dhcp ttf-test sha256-test
+png-test: $(PNG_TEST_BIN)
+	$(PNG_TEST_BIN) lenna.png
+
+.PHONY: all run run-hdd run-hdd-gdb clean test-dhcp ttf-test sha256-test png-test

@@ -58,7 +58,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc)
     return -1;
 }
 
-int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byte_len)
+int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_t byte_len)
 {
     (void)handle;
     (void)pixels;

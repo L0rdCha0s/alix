@@ -226,7 +226,7 @@ static inline int doom_fast_ceil(float value)
     return i;
 }
 
-static inline uint16_t doom_pack_color(doom_color_t color, float shade)
+static inline video_color_t doom_pack_color(doom_color_t color, float shade)
 {
     if (shade < 0.0f)
     {
@@ -242,7 +242,7 @@ static inline uint16_t doom_pack_color(doom_color_t color, float shade)
     return video_make_color(r, g, b);
 }
 
-static inline uint16_t doom_color_from_depth(doom_color_t color, float depth)
+static inline video_color_t doom_color_from_depth(doom_color_t color, float depth)
 {
     if (depth < 0.01f)
     {
@@ -1041,8 +1041,8 @@ static void doom_clear_background(void)
             float t = (span > 0) ? ((float)(y - half) / (float)span) : 0.0f;
             shade = 0.5f + 0.5f * (1.0f - t);
         }
-        uint16_t packed = doom_pack_color(base, shade);
-        uint16_t *row = g_window.buffer + (size_t)y * (size_t)width;
+        video_color_t packed = doom_pack_color(base, shade);
+        video_color_t *row = g_window.buffer + (size_t)y * (size_t)width;
         for (int x = 0; x < width; ++x)
         {
             row[x] = packed;
@@ -1073,8 +1073,8 @@ static void doom_draw_span(int x, int y0, int y1, doom_color_t color, float dept
         return;
     }
 
-    uint16_t color16 = doom_color_from_depth(color, depth);
-    uint16_t *buffer = g_window.buffer;
+    video_color_t color16 = doom_color_from_depth(color, depth);
+    video_color_t *buffer = g_window.buffer;
     int stride = g_projection.screen_width;
     for (int y = y0; y < y1; ++y)
     {

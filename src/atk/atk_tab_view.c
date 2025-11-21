@@ -444,9 +444,9 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
         }
 
         bool active = (index == priv->active_index);
-        uint16_t bg = active ? theme->window_body : theme->button_face;
-        uint16_t border = theme->window_border;
-        uint16_t text = theme->button_text;
+        video_color_t bg = active ? theme->window_body : theme->button_face;
+        video_color_t border = theme->window_border;
+        video_color_t text = theme->button_text;
 
         video_draw_rect(tab_x, tab_y, width, priv->tab_height, bg);
         video_draw_rect_outline(tab_x, tab_y, width, priv->tab_height, border);

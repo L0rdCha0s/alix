@@ -3,12 +3,13 @@
 
 #include "types.h"
 #include "user_atk_defs.h"
+#include "video.h"
 #include <stdbool.h>
 
 typedef struct
 {
     uint32_t handle;
-    uint16_t *buffer;
+    video_color_t *buffer;
     size_t buffer_bytes;
     uint32_t width;
     uint32_t height;

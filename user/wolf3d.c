@@ -367,7 +367,7 @@ static bool wolf_rotate(double delta)
     return true;
 }
 
-static uint16_t wolf_color_shade(uint8_t r, uint8_t g, uint8_t b, double shade)
+static video_color_t wolf_color_shade(uint8_t r, uint8_t g, uint8_t b, double shade)
 {
     if (shade < 0.0)
     {
@@ -383,7 +383,7 @@ static uint16_t wolf_color_shade(uint8_t r, uint8_t g, uint8_t b, double shade)
     return video_make_color(sr, sg, sb);
 }
 
-static uint16_t wolf_wall_color(int tile, int side)
+static video_color_t wolf_wall_color(int tile, int side)
 {
     static const struct
     {
@@ -406,7 +406,7 @@ static uint16_t wolf_wall_color(int tile, int side)
     return wolf_color_shade(palette[index].r, palette[index].g, palette[index].b, shade);
 }
 
-static void wolf_fill_background(uint16_t *buffer, int width, int height)
+static void wolf_fill_background(video_color_t *buffer, int width, int height)
 {
     int half = height / 2;
     for (int y = 0; y < height; ++y)
@@ -438,8 +438,8 @@ static void wolf_fill_background(uint16_t *buffer, int width, int height)
             b = (uint8_t)(20.0 + 60.0 * t);
         }
 
-        uint16_t color = video_make_color(r, g, b);
-        uint16_t *row = buffer + (size_t)y * (size_t)width;
+        video_color_t color = video_make_color(r, g, b);
+        video_color_t *row = buffer + (size_t)y * (size_t)width;
         for (int x = 0; x < width; ++x)
         {
             row[x] = color;
@@ -447,7 +447,7 @@ static void wolf_fill_background(uint16_t *buffer, int width, int height)
     }
 }
 
-static void wolf_draw_column(uint16_t *buffer, int width, int height, int x)
+static void wolf_draw_column(video_color_t *buffer, int width, int height, int x)
 {
     double camera_x = 2.0 * (double)x / (double)width - 1.0;
     double ray_dir_x = g_player.dir_x + g_player.plane_x * camera_x;
@@ -540,7 +540,7 @@ static void wolf_draw_column(uint16_t *buffer, int width, int height, int x)
         draw_end = height - 1;
     }
 
-    uint16_t color = wolf_wall_color(tile, side);
+    video_color_t color = wolf_wall_color(tile, side);
     for (int y = draw_start; y <= draw_end; ++y)
     {
         buffer[(size_t)y * (size_t)width + (size_t)x] = color;

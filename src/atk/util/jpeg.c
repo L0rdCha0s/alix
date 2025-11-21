@@ -1,11 +1,11 @@
 /*
- * jpeg.c — tiny baseline (SOF0) + progressive (SOF2) JPEG → RGB565 decoder
+ * jpeg.c — tiny baseline (SOF0) + progressive (SOF2) JPEG → RGBA32 decoder
  * with full instrumentation (no FP/SSE; freestanding-friendly)
  *
  * Highlights:
  *  - Baseline & Progressive decoding (Huffman, no arithmetic coding)
  *  - Libjpeg-like AAN integer IDCT with clamp to [0,255]
- *  - YCbCr→RGB uses integer tables (no float) and rounded RGB565 packing
+ *  - YCbCr→RGB uses integer tables (no float) and rounded 8-bit packing
  *  - Respects APP14 Adobe transform and SOS scan component order
  *  - Rich debug logging via serial (toggle with JPEG_DEBUG flags below)
  */
@@ -229,16 +229,13 @@ static const uint8_t zigzag[64] = {
 
 static inline int clampi(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
-/* rounded scaling to 5/6/5 (avoids bias near thresholds) */
-static inline uint16_t pack_rgb565(int r, int g, int b)
+/* rounded scaling to 8-bit channels (avoid bias near thresholds) */
+static inline video_color_t pack_rgba32(int r, int g, int b)
 {
     r = clampi(r, 0, 255);
     g = clampi(g, 0, 255);
     b = clampi(b, 0, 255);
-    uint16_t R = (uint16_t)((r * 31 + 127) / 255);
-    uint16_t G = (uint16_t)((g * 63 + 127) / 255);
-    uint16_t B = (uint16_t)((b * 31 + 127) / 255);
-    return (uint16_t)((R << 11) | (G << 5) | B);
+    return 0xFF000000U | ((video_color_t)r << 16) | ((video_color_t)g << 8) | (video_color_t)b;
 }
 
 static inline int u8_saturate(int v) { return (v & ~0xFF) ? (v < 0 ? 0 : 255) : v; }
@@ -999,9 +996,9 @@ static bool prog_ac_refine(bitreader_t *br, const jpg_t *jpg, const comp_t *c,
 
 /* ========================== Color writeout ========================== */
 
-static void upsample_and_store_RGB565(const jpg_t *jpg,
+static void upsample_and_store_RGBA32(const jpg_t *jpg,
                                       const int16_t *P0, const int16_t *P1, const int16_t *P2,
-                                      int y0, int x0, uint16_t *dst, int stride_bytes,
+                                      int y0, int x0, video_color_t *dst, int stride_bytes,
                                       bool treat_rgb)
 {
     const int W = jpg->width, H = jpg->height;
@@ -1022,7 +1019,7 @@ static void upsample_and_store_RGB565(const jpg_t *jpg,
     for (int y = 0; y < mH; ++y)
     {
         int oy = y0 + y; if (oy >= H) break;
-        uint16_t *row = (uint16_t *)((uint8_t *)dst + oy * stride_bytes);
+        video_color_t *row = (video_color_t *)((uint8_t *)dst + oy * stride_bytes);
 
         for (int x = 0; x < mW; ++x)
         {
@@ -1033,7 +1030,7 @@ static void upsample_and_store_RGB565(const jpg_t *jpg,
                 int r = u8_saturate(P0[y*mW+x]);
                 int g = u8_saturate(P1[y*mW+x]);
                 int b = u8_saturate(P2[y*mW+x]);
-                row[ox] = pack_rgb565(r,g,b);
+                row[ox] = pack_rgba32(r,g,b);
             }
             else
             {
@@ -1080,7 +1077,7 @@ static void upsample_and_store_RGB565(const jpg_t *jpg,
                     serial_write_dec(b); serial_printf("%s", "\r\n");
                 }
 
-                row[ox] = pack_rgb565(r, g, b);
+                row[ox] = pack_rgba32(r, g, b);
             }
         }
     }
@@ -1088,7 +1085,7 @@ static void upsample_and_store_RGB565(const jpg_t *jpg,
 
 /* Decode a sequential scan. Respect SOS scan order. */
 static bool decode_scan_sequential(bitreader_t *br, jpg_t *jpg,
-                                   uint16_t *dst, int stride_bytes,
+                                   video_color_t *dst, int stride_bytes,
                                    int Ns, const int *scan_comp_idx)
 {
     const int mW = jpg->mcu_w, mH = jpg->mcu_h;
@@ -1181,7 +1178,7 @@ static bool decode_scan_sequential(bitreader_t *br, jpg_t *jpg,
                 }
             }
 
-            upsample_and_store_RGB565(jpg, plane0, plane1, plane2,
+            upsample_and_store_RGBA32(jpg, plane0, plane1, plane2,
                                       my * jpg->mcu_h, mx * jpg->mcu_w,
                                       dst, stride_bytes, treat_rgb);
         }
@@ -1323,8 +1320,8 @@ static bool decode_progressive_scan(bitreader_t *br, jpg_t *jpg,
     return true;
 }
 
-/* After all progressive scans, convert coef planes → RGB565 */
-static bool progressive_output_to_rgb565(const jpg_t *jpg, uint16_t *dst, int stride_bytes)
+/* After all progressive scans, convert coef planes → RGBA32 */
+static bool progressive_output_to_rgba32(const jpg_t *jpg, video_color_t *dst, int stride_bytes)
 {
     const int mW = jpg->mcu_w, mH = jpg->mcu_h;
     int16_t *plane0  = (int16_t *)malloc((size_t)mW * mH * sizeof(int16_t));
@@ -1398,7 +1395,7 @@ static bool progressive_output_to_rgb565(const jpg_t *jpg, uint16_t *dst, int st
                 }
             }
 
-            upsample_and_store_RGB565(jpg, plane0, plane1, plane2,
+            upsample_and_store_RGBA32(jpg, plane0, plane1, plane2,
                                       my * jpg->mcu_h, mx * jpg->mcu_w,
                                       dst, stride_bytes, treat_rgb);
         }
@@ -1410,8 +1407,8 @@ static bool progressive_output_to_rgb565(const jpg_t *jpg, uint16_t *dst, int st
 
 /* ========================== Public entry ========================== */
 
-int jpeg_decode_rgb565(const uint8_t *jpeg, size_t len,
-                       uint16_t **out_pixels, int *out_w, int *out_h, int *out_stride_bytes)
+int jpeg_decode_rgba32(const uint8_t *jpeg, size_t len,
+                       video_color_t **out_pixels, int *out_w, int *out_h, int *out_stride_bytes)
 {
     if (!jpeg || len < 4 || !out_pixels || !out_w || !out_h || !out_stride_bytes)
     { jpeg_set_error("invalid arguments"); return -1; }
@@ -1429,7 +1426,7 @@ int jpeg_decode_rgb565(const uint8_t *jpeg, size_t len,
     if (mrk != 0xFFD8) { jpeg_set_error("missing SOI"); return -2; }
 
     bool have_SOF = false;
-    uint16_t *pixels = NULL;
+    video_color_t *pixels = NULL;
     int stride_bytes = 0;
 
     for (;;)
@@ -1526,8 +1523,8 @@ int jpeg_decode_rgb565(const uint8_t *jpeg, size_t len,
             {
                 if (!pixels)
                 {
-                    stride_bytes = jpg.width * 2;
-                    pixels = (uint16_t *)malloc((size_t)jpg.height * stride_bytes);
+                    stride_bytes = jpg.width * (int)sizeof(video_color_t);
+                    pixels = (video_color_t *)malloc((size_t)jpg.height * stride_bytes);
                     if (!pixels) { jpeg_set_error("pixel alloc failed"); goto fail; }
                     memset(pixels, 0, (size_t)jpg.height * stride_bytes);
                 }
@@ -1542,12 +1539,12 @@ int jpeg_decode_rgb565(const uint8_t *jpeg, size_t len,
         case 0xFFD9: /* EOI */
             if (jpg.progressive)
             {
-                stride_bytes = jpg.width * 2;
-                pixels = (uint16_t *)malloc((size_t)jpg.height * stride_bytes);
+                stride_bytes = jpg.width * (int)sizeof(video_color_t);
+                pixels = (video_color_t *)malloc((size_t)jpg.height * stride_bytes);
                 if (!pixels) { jpeg_set_error("pixel alloc failed"); goto fail; }
                 memset(pixels, 0, (size_t)jpg.height * stride_bytes);
 
-                if (!progressive_output_to_rgb565(&jpg, pixels, stride_bytes))
+                if (!progressive_output_to_rgba32(&jpg, pixels, stride_bytes))
                 { jpeg_set_error("progressive output failed"); goto fail; }
             }
 

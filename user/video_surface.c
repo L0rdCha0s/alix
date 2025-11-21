@@ -8,7 +8,7 @@
 #define FONT_WIDTH 8
 #define FONT_HEIGHT 16
 
-static uint16_t *g_surface = NULL;
+static video_color_t *g_surface = NULL;
 static uint32_t g_surface_width = VIDEO_WIDTH;
 static uint32_t g_surface_height = VIDEO_HEIGHT;
 static bool g_surface_dirty = false;
@@ -34,7 +34,7 @@ static inline void surface_log(const char *msg, uint64_t value)
     (void)value;
 }
 
-void video_surface_attach(uint16_t *buffer, uint32_t width, uint32_t height)
+void video_surface_attach(video_color_t *buffer, uint32_t width, uint32_t height)
 {
     surface_log("attach buffer=", (uintptr_t)buffer);
     surface_log("attach width=", width);
@@ -56,11 +56,9 @@ void video_surface_detach(void)
     g_surface_track_dirty = false;
 }
 
-uint16_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
+video_color_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
 {
-    return (uint16_t)(((uint16_t)(r & 0xF8) << 8) |
-                      ((uint16_t)(g & 0xFC) << 3) |
-                      ((uint16_t)(b >> 3)));
+    return 0xFF000000U | ((video_color_t)r << 16) | ((video_color_t)g << 8) | (video_color_t)b;
 }
 
 void video_init(void) {}
@@ -79,7 +77,7 @@ void video_cursor_set_shape(video_cursor_shape_t shape)
     (void)shape;
 }
 
-void video_fill(uint16_t color)
+void video_fill(video_color_t color)
 {
     surface_log("fill color=", color);
     if (!surface_ready())
@@ -94,7 +92,7 @@ void video_fill(uint16_t color)
     surface_touch();
 }
 
-static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
+static void video_draw_char(int x, int y, char c, video_color_t fg, video_color_t bg)
 {
     if (!surface_ready())
     {
@@ -112,7 +110,7 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
         {
             continue;
         }
-        uint16_t *dst = &g_surface[(size_t)dst_y * g_surface_width];
+        video_color_t *dst = &g_surface[(size_t)dst_y * g_surface_width];
         uint8_t bits = glyph[row];
         for (int col = 0; col < FONT_WIDTH; ++col)
         {
@@ -121,7 +119,7 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
             {
                 continue;
             }
-            uint16_t color = (bits & (1U << (7 - col))) ? fg : bg;
+            video_color_t color = (bits & (1U << (7 - col))) ? fg : bg;
             dst[dst_x] = color;
             wrote = true;
         }
@@ -132,7 +130,7 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
     }
 }
 
-void video_draw_rect(int x, int y, int width, int height, uint16_t color)
+void video_draw_rect(int x, int y, int width, int height, video_color_t color)
 {
     surface_log("rect x=", x);
     surface_log("rect y=", y);
@@ -160,7 +158,7 @@ void video_draw_rect(int x, int y, int width, int height, uint16_t color)
 
     for (int row = y0; row < y1; ++row)
     {
-        uint16_t *dst = &g_surface[(size_t)row * g_surface_width + x0];
+        video_color_t *dst = &g_surface[(size_t)row * g_surface_width + x0];
         for (int col = x0; col < x1; ++col)
         {
             *dst++ = color;
@@ -169,7 +167,7 @@ void video_draw_rect(int x, int y, int width, int height, uint16_t color)
     surface_touch();
 }
 
-void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color)
+void video_draw_rect_outline(int x, int y, int width, int height, video_color_t color)
 {
     surface_log("rect_outline x=", x);
     surface_log("rect_outline y=", y);
@@ -185,7 +183,7 @@ void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color
     video_draw_rect(x + width - 1, y, 1, height, color);
 }
 
-void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
+void video_draw_text(int x, int y, const char *text, video_color_t fg, video_color_t bg)
 {
     surface_log("text x=", x);
     surface_log("text y=", y);
@@ -200,7 +198,7 @@ void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
 }
 
 void video_draw_text_clipped(int x, int y, int width, int height,
-                             const char *text, uint16_t fg, uint16_t bg)
+                             const char *text, video_color_t fg, video_color_t bg)
 {
     if (!text || width <= 0 || height <= 0)
     {
@@ -270,13 +268,14 @@ void video_invalidate_all(void)
     surface_touch();
 }
 
-void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
+void video_blit_rgba32(int x,
+                       int y,
+                       int width,
+                       int height,
+                       const video_color_t *pixels,
+                       int stride_bytes,
+                       bool use_alpha)
 {
-    // surface_log("blit x=", x);
-    // surface_log("blit y=", y);
-    // surface_log("blit w=", width);
-    // surface_log("blit h=", height);
-    // surface_log("blit src=", (uintptr_t)pixels);
     if (!surface_ready() || !pixels || width <= 0 || height <= 0)
     {
         return;
@@ -284,7 +283,7 @@ void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixe
 
     if (stride_bytes <= 0)
     {
-        stride_bytes = width * (int)sizeof(uint16_t);
+        stride_bytes = width * (int)sizeof(video_color_t);
     }
 
     int x0 = x;
@@ -306,11 +305,50 @@ void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixe
         return;
     }
 
-    const uint8_t *row = (const uint8_t *)pixels + (size_t)src_y * (size_t)stride_bytes + (size_t)src_x * sizeof(uint16_t);
+    const uint8_t *row = (const uint8_t *)pixels +
+                         (size_t)src_y * (size_t)stride_bytes +
+                         (size_t)src_x * sizeof(video_color_t);
     for (int row_idx = 0; row_idx < copy_h; ++row_idx)
     {
-        uint16_t *dst = &g_surface[(size_t)(y0 + row_idx) * g_surface_width + x0];
-        memcpy(dst, row, (size_t)copy_w * sizeof(uint16_t));
+        const video_color_t *src_row = (const video_color_t *)row;
+        video_color_t *dst = &g_surface[(size_t)(y0 + row_idx) * g_surface_width + x0];
+        if (!use_alpha)
+        {
+            memcpy(dst, src_row, (size_t)copy_w * sizeof(video_color_t));
+        }
+        else
+        {
+            for (int col = 0; col < copy_w; ++col)
+            {
+                video_color_t src_px = src_row[col];
+                uint8_t a = (uint8_t)(src_px >> 24);
+                if (a == 0)
+                {
+                    continue;
+                }
+                if (a == 255)
+                {
+                    dst[col] = src_px;
+                    continue;
+                }
+                uint8_t sr = (uint8_t)(src_px >> 16);
+                uint8_t sg = (uint8_t)(src_px >> 8);
+                uint8_t sb = (uint8_t)src_px;
+
+                video_color_t dst_px = dst[col];
+                uint8_t dr = (uint8_t)(dst_px >> 16);
+                uint8_t dg = (uint8_t)(dst_px >> 8);
+                uint8_t db = (uint8_t)dst_px;
+
+                uint8_t ia = (uint8_t)(255 - a);
+                uint8_t rr = (uint8_t)((sr * a + dr * ia) / 255);
+                uint8_t rg = (uint8_t)((sg * a + dg * ia) / 255);
+                uint8_t rb = (uint8_t)((sb * a + db * ia) / 255);
+
+                dst[col] = 0xFF000000U | ((video_color_t)rr << 16) |
+                           ((video_color_t)rg << 8) | (video_color_t)rb;
+            }
+        }
         row += stride_bytes;
     }
     surface_touch();

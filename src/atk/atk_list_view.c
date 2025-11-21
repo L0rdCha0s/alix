@@ -331,7 +331,7 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
 
     int row_y = origin_y + header_h;
     int row_bottom_limit = origin_y + list->height;
-    uint16_t stripe_colors[2] = { theme->window_body, theme->button_face };
+    video_color_t stripe_colors[2] = { theme->window_body, theme->button_face };
 
     for (size_t row = 0; row < priv->row_count; ++row)
     {
@@ -339,7 +339,7 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
         {
             break;
         }
-        uint16_t row_bg = stripe_colors[row % 2];
+        video_color_t row_bg = stripe_colors[row % 2];
         int row_height = priv->row_height;
         if (row_y + row_height > row_bottom_limit)
         {

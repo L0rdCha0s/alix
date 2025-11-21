@@ -304,8 +304,8 @@ void atk_text_input_draw(const atk_state_t *state, const atk_widget_t *input)
     int width = input->width;
     int height = input->height;
 
-    uint16_t face = state->theme.window_body;
-    uint16_t border = priv->focused ? state->theme.window_title : state->theme.button_border;
+    video_color_t face = state->theme.window_body;
+    video_color_t border = priv->focused ? state->theme.window_title : state->theme.button_border;
 
     video_draw_rect(x, y, width, height, face);
     video_draw_rect_outline(x, y, width, height, border);

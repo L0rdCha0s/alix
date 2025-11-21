@@ -12,6 +12,8 @@
 #include "serial.h"
 #include "power.h"
 #include "vfs.h"
+#include "process.h"
+#include "shell_commands.h"
 #endif
 #ifndef ATK_NO_DESKTOP_APPS
 #include "timekeeping.h"
@@ -48,68 +50,27 @@ static void atk_menu_bar_update_layout(atk_state_t *state);
 static atk_menu_bar_entry_t *atk_menu_bar_entry_hit_test(atk_state_t *state, int px);
 static bool atk_menu_bar_build_logo(atk_state_t *state);
 static void menu_action_welcome(void *context);
-#ifdef KERNEL_BUILD
-static void menu_action_shutdown(void *context);
-#endif
-static int atk_menu_bar_measure_title(const char *title);
-static int atk_menu_bar_height_pixels(const atk_state_t *state);
-static void atk_menu_bar_mark_dirty(const atk_state_t *state);
-static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu);
-#ifndef ATK_NO_DESKTOP_APPS
-static void atk_menu_bar_clock_tick(void *context);
-static bool g_clock_timer_registered = false;
-#endif
+static void menu_action_shutdown(void *context)
+{
+    (void)context;
+    shell_output_t out;
+    shell_output_init_console(&out);
+    shell_cmd_shutdown(NULL, &out, "");
+}
 
-#if defined(KERNEL_BUILD) && MENU_BAR_TRACE
-static void menu_log(const char *msg)
-{
-    serial_printf("%s", "[menu] ");
-    serial_printf("%s", msg ? msg : "(null)");
-    serial_printf("%s", "\r\n");
-}
-#else
-static inline void menu_log(const char *msg)
-{
-    (void)msg;
-}
-#endif
 
-#if defined(KERNEL_BUILD) && MENU_BAR_TRACE
-static void menu_log_pair(const char *msg, const char *detail)
-{
-    serial_printf("%s", "[menu_bar] ");
-    serial_printf("%s", msg ? msg : "(null)");
-    serial_printf("%s", ": ");
-    serial_printf("%s", detail ? detail : "(null)");
-    serial_printf("%s", "\r\n");
-}
-#else
 static inline void menu_log_pair(const char *msg, const char *detail)
 {
     (void)msg;
     (void)detail;
 }
-#endif
 
-#if defined(KERNEL_BUILD) && MENU_BAR_TRACE
-static void menu_log_coords(const char *msg, int x, int y)
-{
-    serial_printf("%s", "[menu_bar] ");
-    serial_printf("%s", msg ? msg : "(null)");
-    serial_printf("%s", " x=");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)x));
-    serial_printf("%s", " y=");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)y));
-    serial_printf("%s", "\r\n");
-}
-#else
 static inline void menu_log_coords(const char *msg, int x, int y)
 {
     (void)msg;
     (void)x;
     (void)y;
 }
-#endif
 
 void atk_menu_bar_reset(atk_state_t *state)
 {
@@ -379,8 +340,8 @@ void atk_menu_bar_draw(const atk_state_t *state)
                             height - 1,
                             theme->menu_bar_highlight);
         }
-        uint16_t fg = highlighted ? theme->menu_dropdown_border : theme->menu_bar_text;
-        uint16_t bg = highlighted ? theme->menu_bar_highlight : theme->menu_bar_face;
+        video_color_t fg = highlighted ? theme->menu_dropdown_border : theme->menu_bar_text;
+        video_color_t bg = highlighted ? theme->menu_bar_highlight : theme->menu_bar_face;
         int text_width = entry->text_width;
         if (text_width <= 0)
         {
@@ -706,15 +667,15 @@ static bool atk_menu_bar_build_logo(atk_state_t *state)
     int height = margin_y * 2 + glyph_height;
 
     size_t pixel_count = (size_t)width * (size_t)height;
-    uint16_t *pixels = (uint16_t *)malloc(pixel_count * sizeof(uint16_t));
+    video_color_t *pixels = (video_color_t *)malloc(pixel_count * sizeof(video_color_t));
     if (!pixels)
     {
         return false;
     }
 
-    uint16_t bg = video_make_color(0x18, 0x2F, 0x4C);
-    uint16_t fg_primary = video_make_color(0xF2, 0xF4, 0xF8);
-    uint16_t fg_accent = video_make_color(0xFF, 0xA3, 0x3C);
+    video_color_t bg = video_make_color(0x18, 0x2F, 0x4C);
+    video_color_t fg_primary = video_make_color(0xF2, 0xF4, 0xF8);
+    video_color_t fg_accent = video_make_color(0xFF, 0xA3, 0x3C);
     for (size_t i = 0; i < pixel_count; ++i)
     {
         pixels[i] = bg;
@@ -731,7 +692,7 @@ static bool atk_menu_bar_build_logo(atk_state_t *state)
 
         uint8_t glyph[FONT_BASIC_HEIGHT_X2];
         font_basic_copy_glyph8x16((uint8_t)ch, glyph);
-        uint16_t fg = (idx < 3) ? fg_primary : fg_accent;
+        video_color_t fg = (idx < 3) ? fg_primary : fg_accent;
 
         for (int row = 0; row < glyph_height; ++row)
         {
@@ -771,7 +732,7 @@ static bool atk_menu_bar_build_logo(atk_state_t *state)
         image->y = 0;
     }
 
-    if (!atk_image_set_pixels(image, pixels, width, height, width * (int)sizeof(uint16_t), true))
+    if (!atk_image_set_pixels(image, pixels, width, height, width * (int)sizeof(video_color_t), true))
     {
         free(pixels);
         atk_widget_destroy(image);

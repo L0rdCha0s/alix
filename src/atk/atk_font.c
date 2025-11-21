@@ -42,7 +42,7 @@ static atk_font_state_t g_font_state = { 0 };
 
 static bool atk_font_load(void);
 static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint);
-static uint16_t rgb565_blend(uint16_t bg, uint16_t fg, uint8_t alpha);
+static video_color_t rgba_blend(video_color_t bg, video_color_t fg, uint8_t alpha);
 
 #ifdef ATK_NO_DESKTOP_APPS
 static bool atk_font_read_user(uint8_t **data_out, size_t *size_out);
@@ -127,7 +127,7 @@ int atk_font_baseline_for_rect(int top, int height)
     return top + offset;
 }
 
-void atk_font_draw_string(int x, int baseline_y, const char *text, uint16_t fg, uint16_t bg)
+void atk_font_draw_string(int x, int baseline_y, const char *text, video_color_t fg, video_color_t bg)
 {
     atk_font_draw_string_clipped(x, baseline_y, text, fg, bg, NULL);
 }
@@ -135,8 +135,8 @@ void atk_font_draw_string(int x, int baseline_y, const char *text, uint16_t fg, 
 void atk_font_draw_string_clipped(int x,
                                   int baseline_y,
                                   const char *text,
-                                  uint16_t fg,
-                                  uint16_t bg,
+                                  video_color_t fg,
+                                  video_color_t bg,
                                   const atk_rect_t *clip)
 {
     if (!text || *text == '\0')
@@ -180,7 +180,7 @@ void atk_font_draw_string_clipped(int x,
         }
     }
 
-    uint16_t row_pixels[ATK_FONT_MAX_ROW_PIXELS];
+    video_color_t row_pixels[ATK_FONT_MAX_ROW_PIXELS];
     int pen_x = x;
 
     for (const unsigned char *cursor = (const unsigned char *)text; *cursor; ++cursor)
@@ -241,14 +241,15 @@ void atk_font_draw_string_clipped(int x,
             for (int col = 0; col < width; ++col)
             {
                 uint8_t alpha = src[col];
-                row_pixels[col] = rgb565_blend(bg, fg, alpha);
+                row_pixels[col] = rgba_blend(bg, fg, alpha);
             }
-            video_blit_rgb565(visible_x0,
+            video_blit_rgba32(visible_x0,
                               visible_y0 + row,
                               width,
                               1,
                               row_pixels,
-                              width * (int)sizeof(uint16_t));
+                              width * (int)sizeof(video_color_t),
+                              true);
         }
 
         pen_x += glyph->advance;
@@ -375,7 +376,7 @@ static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint)
     return glyph;
 }
 
-static uint16_t rgb565_blend(uint16_t bg, uint16_t fg, uint8_t alpha)
+static video_color_t rgba_blend(video_color_t bg, video_color_t fg, uint8_t alpha)
 {
     if (alpha == 0)
     {
@@ -386,19 +387,19 @@ static uint16_t rgb565_blend(uint16_t bg, uint16_t fg, uint8_t alpha)
         return fg;
     }
 
-    uint16_t br = (uint16_t)((((bg >> 11) & 0x1F) * 527 + 23) >> 6);
-    uint16_t bgc = (uint16_t)((((bg >> 5) & 0x3F) * 259 + 33) >> 6);
-    uint16_t bb = (uint16_t)(((bg & 0x1F) * 527 + 23) >> 6);
+    uint8_t br = (uint8_t)(bg >> 16);
+    uint8_t bgc = (uint8_t)(bg >> 8);
+    uint8_t bb = (uint8_t)bg;
 
-    uint16_t fr = (uint16_t)((((fg >> 11) & 0x1F) * 527 + 23) >> 6);
-    uint16_t fgc = (uint16_t)((((fg >> 5) & 0x3F) * 259 + 33) >> 6);
-    uint16_t fb = (uint16_t)(((fg & 0x1F) * 527 + 23) >> 6);
+    uint8_t fr = (uint8_t)(fg >> 16);
+    uint8_t fgx = (uint8_t)(fg >> 8);
+    uint8_t fb = (uint8_t)fg;
 
-    uint16_t rr = (uint16_t)((fr * alpha + br * (255 - alpha)) / 255);
-    uint16_t rg = (uint16_t)((fgc * alpha + bgc * (255 - alpha)) / 255);
-    uint16_t rb = (uint16_t)((fb * alpha + bb * (255 - alpha)) / 255);
+    uint8_t rr = (uint8_t)((fr * alpha + br * (255 - alpha)) / 255);
+    uint8_t rg = (uint8_t)((fgx * alpha + bgc * (255 - alpha)) / 255);
+    uint8_t rb = (uint8_t)((fb * alpha + bb * (255 - alpha)) / 255);
 
-    return (uint16_t)(((rr & 0xF8) << 8) | ((rg & 0xFC) << 3) | (rb >> 3));
+    return 0xFF000000U | ((video_color_t)rr << 16) | ((video_color_t)rg << 8) | (video_color_t)rb;
 }
 
 #ifdef ATK_NO_DESKTOP_APPS

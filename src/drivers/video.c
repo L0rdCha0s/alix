@@ -19,12 +19,6 @@ void atk_window_draw_from(atk_state_t *state, atk_widget_t *start_window);
 void atk_window_mark_dirty(const atk_widget_t *window);
 bool atk_window_contains(const atk_state_t *state, const atk_widget_t *window);
 bool atk_window_is_topmost(const atk_state_t *state, const atk_widget_t *window);
-typedef struct atk_state atk_state_t;
-typedef struct atk_widget atk_widget_t;
-
-atk_state_t *atk_state_get(void);
-void atk_window_draw(atk_state_t *state, atk_widget_t *window);
-void atk_window_mark_dirty(const atk_widget_t *window);
 
 static inline uint64_t video_irq_save(void)
 {
@@ -52,7 +46,7 @@ static inline void video_irq_restore(uint64_t flags)
 #define BGA_REG_X_OFFSET    0x8
 #define BGA_REG_Y_OFFSET    0x9
 
-#define VIDEO_BPP    16
+#define VIDEO_BPP    32
 
 #define CURSOR_W 16
 #define CURSOR_H 16
@@ -63,10 +57,10 @@ static inline void video_irq_restore(uint64_t flags)
 #define VIDEO_FONT_CHAR_COUNT 256
 #define VIDEO_FONT_BYTES      (VIDEO_FONT_CHAR_COUNT * FONT_HEIGHT)
 
-#define BACKBUFFER_ADDR 0x0000000000E00000ULL  /* 14 MiB: above kernel stack, below VFS pool */
-static uint16_t *backbuffer = (uint16_t *)(uintptr_t)BACKBUFFER_ADDR;
+#define BACKBUFFER_ADDR 0x0000000001800000ULL  /* 24 MiB: above VFS pool (16 MiB), below kernel heap (32 MiB) */
+static uint32_t *backbuffer = (uint32_t *)(uintptr_t)BACKBUFFER_ADDR;
 
-static volatile uint16_t *framebuffer = 0;
+static volatile uint32_t *framebuffer = 0;
 static uint64_t framebuffer_phys = 0;
 static bool framebuffer_detected = false;
 
@@ -164,9 +158,9 @@ static void video_perform_refresh(void);
 static void cursor_draw_overlay(void);
 static void cursor_restore_background(void);
 static void video_prepare_font(void);
-static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg);
+static void video_draw_char(int x, int y, char c, video_color_t fg, video_color_t bg);
 static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
-                               const uint8_t *src, int stride_bytes, int src_x0, int src_y0);
+                               const video_color_t *src, int stride_bytes, int src_x0, int src_y0);
 
 /* --------- Cursor shape --------- */
 static const char *const cursor_shape_arrow[CURSOR_H] = {
@@ -267,19 +261,19 @@ static const char *const cursor_shape_resize_nw_se[CURSOR_H] = {
 static const char *const *cursor_shape_active = cursor_shape_arrow;
 static video_cursor_shape_t cursor_shape_kind = VIDEO_CURSOR_ARROW;
 
-static uint16_t cursor_color_primary(void)
+static video_color_t cursor_color_primary(void)
 {
-    return (uint16_t)(((0xFF & 0xF8) << 8) | ((0xFF & 0xFC) << 3) | (0xFF >> 3));
+    return 0xFF000000U | (0xFFU << 16) | (0xFFU << 8) | 0xFFU;
 }
-static uint16_t cursor_color_shadow(void)
+static video_color_t cursor_color_shadow(void)
 {
     uint8_t r = 0x40, g = 0x40, b = 0x40;
-    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    return 0xFF000000U | ((video_color_t)r << 16) | ((video_color_t)g << 8) | (video_color_t)b;
 }
 
-uint16_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
+video_color_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
 {
-    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    return 0xFF000000U | ((video_color_t)r << 16) | ((video_color_t)g << 8) | (video_color_t)b;
 }
 
 /* --------- BGA helpers --------- */
@@ -320,7 +314,7 @@ static bool video_hw_enable(void)
     /* Enable write-combining over the LFB aperture (16 MiB typical) */
     video_enable_wc(framebuffer_phys, 16ULL * 1024 * 1024ULL);
 
-    framebuffer = (volatile uint16_t *)(uintptr_t)framebuffer_phys;
+    framebuffer = (volatile uint32_t *)(uintptr_t)framebuffer_phys;
     video_log_hex("Framebuffer phys base: 0x", framebuffer_phys);
 
     if (!bga_available())
@@ -353,13 +347,13 @@ static void video_hw_disable(void)
     bga_write(BGA_REG_ENABLE, 0x00);
 }
 
-void video_fill(uint16_t color)
+void video_fill(video_color_t color)
 {
     //video_log_hex("fill color=", color);
     //video_log_hex("fill backbuffer=", (uint64_t)(uintptr_t)backbuffer);
     for (int y = 0; y < VIDEO_HEIGHT; ++y)
     {
-        uint16_t *row = &backbuffer[y * VIDEO_WIDTH];
+        video_color_t *row = &backbuffer[y * VIDEO_WIDTH];
         for (int x = 0; x < VIDEO_WIDTH; ++x)
         {
             row[x] = color;
@@ -390,7 +384,7 @@ static void cursor_draw_overlay(void)
             char pixel = shape_row[col];
             if (pixel == '.') continue; /* leave background as last flushed */
 
-            uint16_t *p = (uint16_t *)&framebuffer[dst_y * VIDEO_WIDTH + dst_x];
+            volatile uint32_t *p = &framebuffer[dst_y * VIDEO_WIDTH + dst_x];
             *p = (pixel == 'X') ? cursor_color_primary() : cursor_color_shadow();
         }
     }
@@ -442,7 +436,7 @@ static void video_prepare_font(void)
     }
 }
 
-static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
+static void video_draw_char(int x, int y, char c, video_color_t fg, video_color_t bg)
 {
     unsigned char ch = (unsigned char)c;
     size_t glyph_offset = (size_t)ch * FONT_HEIGHT;
@@ -462,13 +456,13 @@ static void video_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg)
         for (int col = 0; col < FONT_WIDTH; ++col, ++dst_x)
         {
             if ((unsigned)dst_x >= VIDEO_WIDTH) continue;
-            uint16_t color = (bits & (0x80 >> col)) ? fg : bg;
+            video_color_t color = (bits & (0x80 >> col)) ? fg : bg;
             backbuffer[dst_y * VIDEO_WIDTH + dst_x] = color;
         }
     }
 }
 
-void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
+void video_draw_text(int x, int y, const char *text, video_color_t fg, video_color_t bg)
 {
     if (!text) return;
     for (size_t i = 0; text[i] != '\0'; ++i)
@@ -478,7 +472,7 @@ void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg)
 }
 
 void video_draw_text_clipped(int x, int y, int width, int height,
-                             const char *text, uint16_t fg, uint16_t bg)
+                             const char *text, video_color_t fg, video_color_t bg)
 {
     if (!text || width <= 0 || height <= 0) return;
 
@@ -524,22 +518,28 @@ void video_draw_text_clipped(int x, int y, int width, int height,
 }
 
 static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
-                               const uint8_t *src, int stride_bytes, int src_x0, int src_y0)
+                               const video_color_t *src, int stride_bytes, int src_x0, int src_y0)
 {
-    const uint8_t *row_ptr = src + (size_t)src_y0 * (size_t)stride_bytes + (size_t)src_x0 * 2U;
+    const uint8_t *row_ptr = (const uint8_t *)src + (size_t)src_y0 * (size_t)stride_bytes +
+                             (size_t)src_x0 * sizeof(video_color_t);
     for (int row = 0; row < copy_h; ++row)
     {
-        uint16_t *dst = &backbuffer[(dst_y0 + row) * VIDEO_WIDTH + dst_x0];
-        memcpy(dst, row_ptr, (size_t)copy_w * 2U);
+        video_color_t *dst = &backbuffer[(dst_y0 + row) * VIDEO_WIDTH + dst_x0];
+        memcpy(dst, row_ptr, (size_t)copy_w * sizeof(video_color_t));
         row_ptr += stride_bytes;
     }
 }
 
-void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes)
+void video_blit_rgba32(int x,
+                       int y,
+                       int width,
+                       int height,
+                       const video_color_t *pixels,
+                       int stride_bytes,
+                       bool use_alpha)
 {
-
     if (!pixels || width <= 0 || height <= 0) return;
-    if (stride_bytes <= 0) stride_bytes = width * 2;
+    if (stride_bytes <= 0) stride_bytes = width * (int)sizeof(video_color_t);
 
     int x0 = x, y0 = y;
     int x1 = x + width, y1 = y + height;
@@ -560,7 +560,54 @@ void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixe
     if (copy_h > max_copy_h) copy_h = max_copy_h;
     if (copy_w <= 0 || copy_h <= 0) return;
 
-    video_blit_clipped(x0, y0, copy_w, copy_h, (const uint8_t *)pixels, stride_bytes, src_x, src_y);
+    if (!use_alpha)
+    {
+        video_blit_clipped(x0, y0, copy_w, copy_h, pixels, stride_bytes, src_x, src_y);
+        video_invalidate_rect(x0, y0, copy_w, copy_h);
+        return;
+    }
+
+    const uint8_t *row_ptr = (const uint8_t *)pixels +
+                             (size_t)src_y * (size_t)stride_bytes +
+                             (size_t)src_x * sizeof(video_color_t);
+    for (int row = 0; row < copy_h; ++row)
+    {
+        const video_color_t *src_row = (const video_color_t *)row_ptr;
+        video_color_t *dst_row = &backbuffer[(y0 + row) * VIDEO_WIDTH + x0];
+        for (int col = 0; col < copy_w; ++col)
+        {
+            video_color_t src_px = src_row[col];
+            uint8_t a = (uint8_t)(src_px >> 24);
+            if (a == 0)
+            {
+                continue;
+            }
+            if (a == 255)
+            {
+                dst_row[col] = src_px;
+                continue;
+            }
+
+            uint8_t sr = (uint8_t)(src_px >> 16);
+            uint8_t sg = (uint8_t)(src_px >> 8);
+            uint8_t sb = (uint8_t)(src_px);
+
+            video_color_t dst_px = dst_row[col];
+            uint8_t dr = (uint8_t)(dst_px >> 16);
+            uint8_t dg = (uint8_t)(dst_px >> 8);
+            uint8_t db = (uint8_t)(dst_px);
+
+            uint8_t ia = (uint8_t)(255 - a);
+            uint8_t rr = (uint8_t)((sr * a + dr * ia) / 255);
+            uint8_t rg = (uint8_t)((sg * a + dg * ia) / 255);
+            uint8_t rb = (uint8_t)((sb * a + db * ia) / 255);
+
+            dst_row[col] = 0xFF000000U | ((video_color_t)rr << 16) |
+                           ((video_color_t)rg << 8) | (video_color_t)rb;
+        }
+        row_ptr += stride_bytes;
+    }
+
     video_invalidate_rect(x0, y0, copy_w, copy_h);
 }
 
@@ -629,7 +676,7 @@ static void video_flush_dirty(void)
     if (!dirty_active || !framebuffer) return;
 
     int w = dirty_x1 - dirty_x0;
-    size_t row_bytes = (size_t)w * 2U;
+    size_t row_bytes = (size_t)w * sizeof(video_color_t);
 #ifdef ENABLE_MEM_DEBUG_LOGS
     video_log_hex("flush x0=", dirty_x0);
     video_log_hex("flush y0=", dirty_y0);
@@ -640,8 +687,8 @@ static void video_flush_dirty(void)
 
     for (int y = dirty_y0; y < dirty_y1; ++y)
     {
-        volatile uint16_t *dst = &framebuffer[y * VIDEO_WIDTH + dirty_x0];
-        uint16_t *src = &backbuffer[y * VIDEO_WIDTH + dirty_x0];
+        volatile uint32_t *dst = &framebuffer[y * VIDEO_WIDTH + dirty_x0];
+        uint32_t *src = &backbuffer[y * VIDEO_WIDTH + dirty_x0];
 #ifdef ENABLE_MEM_DEBUG_LOGS
         video_log_hex("flush dst=", (uint64_t)(uintptr_t)dst);
         video_log_hex("flush src=", (uint64_t)(uintptr_t)src);
@@ -755,7 +802,7 @@ bool video_enter_mode(void)
     atk_render();
     video_flush_dirty();
 
-    uint16_t sample = backbuffer[(VIDEO_WIDTH * VIDEO_HEIGHT) / 2];
+    video_color_t sample = backbuffer[(VIDEO_WIDTH * VIDEO_HEIGHT) / 2];
     video_log_hex("Sample pixel mid-screen: 0x", sample);
 
     cursor_x = VIDEO_WIDTH / 2;
@@ -1212,7 +1259,7 @@ static void vga_enter_text_mode(void)
     vga_restore_font();
 }
 
-void video_draw_rect(int x, int y, int width, int height, uint16_t color)
+void video_draw_rect(int x, int y, int width, int height, video_color_t color)
 {
     if (width <= 0 || height <= 0) return;
 
@@ -1230,7 +1277,7 @@ void video_draw_rect(int x, int y, int width, int height, uint16_t color)
 
     for (int row = y0; row < y1; ++row)
     {
-        uint16_t *dst = &backbuffer[row * VIDEO_WIDTH + x0];
+        video_color_t *dst = &backbuffer[row * VIDEO_WIDTH + x0];
         for (int col = x0; col < x1; ++col)
         {
             *dst++ = color;
@@ -1240,7 +1287,7 @@ void video_draw_rect(int x, int y, int width, int height, uint16_t color)
     // NOTE: No video_invalidate_rect() here — callers mark dirty as needed.
 }
 
-void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color)
+void video_draw_rect_outline(int x, int y, int width, int height, video_color_t color)
 {
     if (width <= 0 || height <= 0) return;
 
@@ -1257,4 +1304,3 @@ bool video_is_active(void)
 {
     return video_active;
 }
-#include "atk/atk_label.h" /* for forward decls? maybe not needed but safe? */

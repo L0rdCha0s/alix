@@ -3,9 +3,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "video.h"
 
-int jpeg_decode_rgb565(const uint8_t *jpeg, size_t len,
-                       uint16_t **out_pixels, int *out_w, int *out_h, int *out_stride_bytes);
+int jpeg_decode_rgba32(const uint8_t *jpeg, size_t len,
+                       video_color_t **out_pixels, int *out_w, int *out_h, int *out_stride_bytes);
 
 const char *jpeg_last_error(void);
 

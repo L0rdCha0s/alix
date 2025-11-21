@@ -3,6 +3,8 @@
 
 #include "types.h"
 
+typedef uint32_t video_color_t;
+
 #ifndef VIDEO_WIDTH
 #define VIDEO_WIDTH  1280
 #endif
@@ -27,16 +29,22 @@ void video_run_loop(void);
 void video_exit_mode(void);
 void video_on_mouse_event(int dx, int dy, bool left_pressed);
 
-uint16_t video_make_color(uint8_t r, uint8_t g, uint8_t b);
-void video_fill(uint16_t color);
-void video_draw_rect(int x, int y, int width, int height, uint16_t color);
-void video_draw_rect_outline(int x, int y, int width, int height, uint16_t color);
-void video_draw_text(int x, int y, const char *text, uint16_t fg, uint16_t bg);
+video_color_t video_make_color(uint8_t r, uint8_t g, uint8_t b);
+void video_fill(video_color_t color);
+void video_draw_rect(int x, int y, int width, int height, video_color_t color);
+void video_draw_rect_outline(int x, int y, int width, int height, video_color_t color);
+void video_draw_text(int x, int y, const char *text, video_color_t fg, video_color_t bg);
 void video_draw_text_clipped(int x, int y, int width, int height,
-                             const char *text, uint16_t fg, uint16_t bg);
+                             const char *text, video_color_t fg, video_color_t bg);
 void video_invalidate_rect(int x, int y, int width, int height);
 void video_invalidate_all(void);
-void video_blit_rgb565(int x, int y, int width, int height, const uint16_t *pixels, int stride_bytes);
+void video_blit_rgba32(int x,
+                       int y,
+                       int width,
+                       int height,
+                       const video_color_t *pixels,
+                       int stride_bytes,
+                       bool use_alpha);
 bool video_is_active(void);
 void video_request_refresh(void);
 void video_request_refresh_window(struct atk_widget *window);

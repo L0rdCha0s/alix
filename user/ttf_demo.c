@@ -148,7 +148,7 @@ static int parse_font_size(const char *text, int fallback)
     return value;
 }
 
-static uint16_t rgb565_blend(uint16_t bg, uint16_t fg, uint8_t alpha)
+static video_color_t rgba_blend(video_color_t bg, video_color_t fg, uint8_t alpha)
 {
     if (alpha == 0)
     {
@@ -158,19 +158,21 @@ static uint16_t rgb565_blend(uint16_t bg, uint16_t fg, uint8_t alpha)
     {
         return fg;
     }
-    uint16_t br = (uint16_t)((((bg >> 11) & 0x1F) * 527 + 23) >> 6);
-    uint16_t bgc = (uint16_t)((((bg >> 5) & 0x3F) * 259 + 33) >> 6);
-    uint16_t bb = (uint16_t)(((bg & 0x1F) * 527 + 23) >> 6);
 
-    uint16_t fr = (uint16_t)((((fg >> 11) & 0x1F) * 527 + 23) >> 6);
-    uint16_t fgc = (uint16_t)((((fg >> 5) & 0x3F) * 259 + 33) >> 6);
-    uint16_t fb = (uint16_t)(((fg & 0x1F) * 527 + 23) >> 6);
+    uint8_t br = (uint8_t)(bg >> 16);
+    uint8_t bgc = (uint8_t)(bg >> 8);
+    uint8_t bb = (uint8_t)bg;
 
-    uint16_t rr = (uint16_t)((fr * alpha + br * (255 - alpha)) / 255);
-    uint16_t rg = (uint16_t)((fgc * alpha + bgc * (255 - alpha)) / 255);
-    uint16_t rb = (uint16_t)((fb * alpha + bb * (255 - alpha)) / 255);
+    uint8_t fr = (uint8_t)(fg >> 16);
+    uint8_t fgx = (uint8_t)(fg >> 8);
+    uint8_t fb = (uint8_t)fg;
 
-    return (uint16_t)(((rr & 0xF8) << 8) | ((rg & 0xFC) << 3) | (rb >> 3));
+    uint8_t ia = (uint8_t)(255 - alpha);
+    uint8_t rr = (uint8_t)((fr * alpha + br * ia) / 255);
+    uint8_t rg = (uint8_t)((fgx * alpha + bgc * ia) / 255);
+    uint8_t rb = (uint8_t)((fb * alpha + bb * ia) / 255);
+
+    return 0xFF000000U | ((video_color_t)rr << 16) | ((video_color_t)rg << 8) | (video_color_t)rb;
 }
 
 static bool render_glyphs(ttf_font_t *font,
@@ -205,11 +207,11 @@ static bool render_glyphs(ttf_font_t *font,
 
 static bool build_atlas(const glyph_entry_t *entries,
                         size_t count,
-                        uint16_t fg,
-                        uint16_t bg,
+                        video_color_t fg,
+                        video_color_t bg,
                         int *out_width,
                         int *out_height,
-                        uint16_t **out_pixels,
+                        video_color_t **out_pixels,
                         int cell_padding,
                         int *out_cell_width,
                         int *out_cell_height,
@@ -261,7 +263,7 @@ static bool build_atlas(const glyph_entry_t *entries,
     int atlas_height = cell_height * rows;
 
     size_t total_pixels = (size_t)atlas_width * (size_t)atlas_height;
-    uint16_t *pixels = (uint16_t *)malloc(total_pixels * sizeof(uint16_t));
+    video_color_t *pixels = (video_color_t *)malloc(total_pixels * sizeof(video_color_t));
     if (!pixels)
     {
         return false;
@@ -308,7 +310,7 @@ static bool build_atlas(const glyph_entry_t *entries,
                     continue;
                 }
                 size_t offset = (size_t)dst_y * (size_t)atlas_width + (size_t)dst_x;
-                pixels[offset] = rgb565_blend(pixels[offset], fg, alpha);
+                pixels[offset] = rgba_blend(pixels[offset], fg, alpha);
             }
         }
     }
@@ -342,7 +344,7 @@ static inline bool surface_ready(const atk_user_window_t *session)
     return session && session->buffer && session->width > 0 && session->height > 0;
 }
 
-static void surface_fill(const atk_user_window_t *session, uint16_t color)
+static void surface_fill(const atk_user_window_t *session, video_color_t color)
 {
     if (!surface_ready(session))
     {
@@ -360,7 +362,7 @@ static void surface_draw_rect(const atk_user_window_t *session,
                               int y,
                               int width,
                               int height,
-                              uint16_t color)
+                              video_color_t color)
 {
     if (!surface_ready(session) || width <= 0 || height <= 0)
     {
@@ -383,7 +385,7 @@ static void surface_draw_rect(const atk_user_window_t *session,
 
     for (int row = y0; row < y1; ++row)
     {
-        uint16_t *dst = session->buffer + (size_t)row * session->width + x0;
+        video_color_t *dst = session->buffer + (size_t)row * session->width + x0;
         for (int col = x0; col < x1; ++col)
         {
             *dst++ = color;
@@ -396,7 +398,7 @@ static void surface_draw_rect_outline(const atk_user_window_t *session,
                                       int y,
                                       int width,
                                       int height,
-                                      uint16_t color)
+                                      video_color_t color)
 {
     if (width <= 0 || height <= 0)
     {
@@ -412,8 +414,8 @@ static void surface_draw_char(const atk_user_window_t *session,
                               int x,
                               int y,
                               char c,
-                              uint16_t fg,
-                              uint16_t bg)
+                              video_color_t fg,
+                              video_color_t bg)
 {
     if (!surface_ready(session))
     {
@@ -430,7 +432,7 @@ static void surface_draw_char(const atk_user_window_t *session,
             continue;
         }
         uint8_t bits = glyph[row];
-        uint16_t *dst = session->buffer + (size_t)dst_y * session->width;
+        video_color_t *dst = session->buffer + (size_t)dst_y * session->width;
         for (int col = 0; col < FONT_BASIC_WIDTH; ++col)
         {
             int dst_x = x + col;
@@ -438,7 +440,7 @@ static void surface_draw_char(const atk_user_window_t *session,
             {
                 continue;
             }
-            uint16_t color = (bits & (1U << (7 - col))) ? fg : bg;
+            video_color_t color = (bits & (1U << (7 - col))) ? fg : bg;
             dst[dst_x] = color;
         }
     }
@@ -448,8 +450,8 @@ static void surface_draw_text(const atk_user_window_t *session,
                               int x,
                               int y,
                               const char *text,
-                              uint16_t fg,
-                              uint16_t bg)
+                              video_color_t fg,
+                              video_color_t bg)
 {
     if (!surface_ready(session) || !text)
     {
@@ -466,7 +468,7 @@ static void surface_draw_text(const atk_user_window_t *session,
 static void blit_atlas_into_window(const atk_user_window_t *session,
                                    int dst_x,
                                    int dst_y,
-                                   const uint16_t *atlas_pixels,
+                                   const video_color_t *atlas_pixels,
                                    int atlas_width,
                                    int atlas_height)
 {
@@ -483,8 +485,8 @@ static void blit_atlas_into_window(const atk_user_window_t *session,
             continue;
         }
 
-        const uint16_t *src_row = atlas_pixels + (size_t)y * (size_t)atlas_width;
-        uint16_t *dst_row = session->buffer + (size_t)target_y * session->width;
+        const video_color_t *src_row = atlas_pixels + (size_t)y * (size_t)atlas_width;
+        video_color_t *dst_row = session->buffer + (size_t)target_y * session->width;
 
         int start_x = dst_x;
         int copy_width = atlas_width;
@@ -505,14 +507,14 @@ static void blit_atlas_into_window(const atk_user_window_t *session,
             continue;
         }
 
-        memcpy(dst_row + start_x, src_row, (size_t)copy_width * sizeof(uint16_t));
+        memcpy(dst_row + start_x, src_row, (size_t)copy_width * sizeof(video_color_t));
     }
 }
 
 static void render_scene(const atk_user_window_t *session,
                          const char *font_path,
                          int font_size,
-                         const uint16_t *atlas_pixels,
+                         const video_color_t *atlas_pixels,
                          int atlas_width,
                          int atlas_height)
 {
@@ -521,10 +523,10 @@ static void render_scene(const atk_user_window_t *session,
         return;
     }
 
-    uint16_t bg = video_make_color(0x21, 0x25, 0x30);
-    uint16_t text = video_make_color(0xF4, 0xF4, 0xF4);
-    uint16_t accent = video_make_color(0x15, 0x19, 0x24);
-    uint16_t border = video_make_color(0x30, 0x34, 0x40);
+    video_color_t bg = video_make_color(0x21, 0x25, 0x30);
+    video_color_t text = video_make_color(0xF4, 0xF4, 0xF4);
+    video_color_t accent = video_make_color(0x15, 0x19, 0x24);
+    video_color_t border = video_make_color(0x30, 0x34, 0x40);
 
     surface_fill(session, bg);
 
@@ -623,9 +625,9 @@ int main(int argc, char **argv)
     int cell_width = 0;
     int cell_height = 0;
     int max_above = 0;
-    uint16_t *atlas_pixels = NULL;
-    uint16_t fg = video_make_color(0xF4, 0xF4, 0xF4);
-    uint16_t bg = video_make_color(0x18, 0x1C, 0x27);
+    video_color_t *atlas_pixels = NULL;
+    video_color_t fg = video_make_color(0xF4, 0xF4, 0xF4);
+    video_color_t bg = video_make_color(0x18, 0x1C, 0x27);
 
     if (!build_atlas(entries,
                      glyph_count,

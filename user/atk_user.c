@@ -192,8 +192,8 @@ static bool atk_user_window_open_internal(atk_user_window_t *win,
         return false;
     }
 
-    size_t bytes = (size_t)width * (size_t)height * sizeof(uint16_t);
-    uint16_t *buffer = (uint16_t *)malloc(bytes);
+    size_t bytes = (size_t)width * (size_t)height * sizeof(video_color_t);
+    video_color_t *buffer = (video_color_t *)malloc(bytes);
     if (!buffer)
     {
         sys_ui_close((uint32_t)handle);
@@ -227,11 +227,11 @@ static void atk_user_handle_resize_event(atk_user_window_t *win, const user_atk_
         return;
     }
 
-    size_t bytes = (size_t)width * (size_t)height * sizeof(uint16_t);
-    uint16_t *buffer = (uint16_t *)realloc(win->buffer, bytes);
+    size_t bytes = (size_t)width * (size_t)height * sizeof(video_color_t);
+    video_color_t *buffer = (video_color_t *)realloc(win->buffer, bytes);
     if (!buffer)
     {
-        buffer = (uint16_t *)malloc(bytes);
+        buffer = (video_color_t *)malloc(bytes);
         if (!buffer)
         {
             return;

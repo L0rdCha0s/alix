@@ -109,9 +109,9 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
     int bx = origin_x + widget->x;
     int by = origin_y + widget->y;
 
-    uint16_t border_color = priv->absolute ? theme->button_border : theme->window_border;
-    uint16_t face_color = priv->absolute ? theme->desktop_icon_face : theme->button_face;
-    uint16_t text_color = priv->absolute ? theme->desktop_icon_text : theme->button_text;
+    video_color_t border_color = priv->absolute ? theme->button_border : theme->window_border;
+    video_color_t face_color = priv->absolute ? theme->desktop_icon_face : theme->button_face;
+    video_color_t text_color = priv->absolute ? theme->desktop_icon_text : theme->button_text;
 
     if (!priv->absolute && priv->style == ATK_BUTTON_STYLE_TITLE_INSIDE)
     {

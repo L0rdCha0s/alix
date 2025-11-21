@@ -5,6 +5,7 @@
 #include "video.h"
 #include "atk/atk_image.h"
 #include "atk/util/jpeg.h"
+#include "atk/util/png.h"
 #include "../atk/atk_window.h"
 #include "../atk/atk_internal.h"
 
@@ -71,15 +72,39 @@ bool shell_cmd_imgview(shell_state_t *shell, shell_output_t *out, const char *ar
         return shell_output_error(out, "failed to create image widget");
     }
 
-    if (!atk_image_load_jpeg(image_widget, (const uint8_t *)file_data, file_size))
+    bool loaded = false;
+    const uint8_t *bytes = (const uint8_t *)file_data;
+    const char *reason = "unknown format";
+
+    if (file_size >= 8 && bytes[0] == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G')
+    {
+        loaded = atk_image_load_png(image_widget, bytes, file_size);
+        reason = png_last_error();
+    }
+    else if (file_size >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8)
+    {
+        loaded = atk_image_load_jpeg(image_widget, bytes, file_size);
+        reason = jpeg_last_error();
+    }
+    else
+    {
+        loaded = atk_image_load_png(image_widget, bytes, file_size);
+        reason = png_last_error();
+        if (!loaded)
+        {
+            loaded = atk_image_load_jpeg(image_widget, bytes, file_size);
+            reason = jpeg_last_error();
+        }
+    }
+
+    if (!loaded)
     {
         atk_window_close(state, window);
-        const char *reason = jpeg_last_error();
         if (!reason)
         {
             reason = "unknown";
         }
-        shell_output_write(out, "Error: failed to decode jpeg: ");
+        shell_output_write(out, "Error: failed to decode image: ");
         shell_output_write(out, reason);
         shell_output_write(out, "\n");
         return false;
@@ -90,7 +115,7 @@ bool shell_cmd_imgview(shell_state_t *shell, shell_output_t *out, const char *ar
     if (img_w <= 0 || img_h <= 0)
     {
         atk_window_close(state, window);
-        return shell_output_error(out, "jpeg produced empty image");
+        return shell_output_error(out, "image produced empty result");
     }
 
     int desired_width = img_w + padding * 2;

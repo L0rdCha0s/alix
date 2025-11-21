@@ -493,7 +493,7 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_UI_PRESENT:
             result = user_atk_sys_present((uint32_t)frame->rdi,
-                                          (const uint16_t *)frame->rsi,
+                                          (const video_color_t *)frame->rsi,
                                           (size_t)frame->rdx);
             break;
         case SYSCALL_UI_POLL_EVENT:

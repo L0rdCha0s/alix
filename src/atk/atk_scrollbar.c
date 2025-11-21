@@ -318,10 +318,10 @@ void atk_scrollbar_draw(const atk_state_t *state, const atk_widget_t *scrollbar)
         atk_state_theme_validate(state, "atk_scrollbar_draw");
     }
     const atk_theme_t *theme = state ? &state->theme : NULL;
-    uint16_t track_color = theme ? theme->window_body : video_make_color(0xD0, 0xD0, 0xD0);
-    uint16_t track_border = theme ? theme->window_border : video_make_color(0x70, 0x70, 0x70);
-    uint16_t thumb_face = theme ? theme->button_face : video_make_color(0xB0, 0xB0, 0xB0);
-    uint16_t thumb_border = theme ? theme->button_border : video_make_color(0x50, 0x50, 0x50);
+    video_color_t track_color = theme ? theme->window_body : video_make_color(0xD0, 0xD0, 0xD0);
+    video_color_t track_border = theme ? theme->window_border : video_make_color(0x70, 0x70, 0x70);
+    video_color_t thumb_face = theme ? theme->button_face : video_make_color(0xB0, 0xB0, 0xB0);
+    video_color_t thumb_border = theme ? theme->button_border : video_make_color(0x50, 0x50, 0x50);
 
     video_draw_rect(x, y, scrollbar->width, scrollbar->height, track_color);
     video_draw_rect_outline(x, y, scrollbar->width, scrollbar->height, track_border);

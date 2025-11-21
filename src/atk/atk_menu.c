@@ -318,8 +318,8 @@ void atk_menu_draw(const atk_state_t *state, const atk_widget_t *menu)
     for (size_t i = 0; i < priv->count; ++i)
     {
         int item_y = menu->y + (int)i * priv->item_height;
-        uint16_t bg = theme->menu_dropdown_face;
-        uint16_t fg = theme->menu_dropdown_text;
+        video_color_t bg = theme->menu_dropdown_face;
+        video_color_t fg = theme->menu_dropdown_text;
         if ((int)i == priv->highlighted_index)
         {
             bg = theme->menu_dropdown_highlight;

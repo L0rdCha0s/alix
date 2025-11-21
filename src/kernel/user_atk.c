@@ -22,7 +22,7 @@ typedef struct user_atk_window
     process_t *owner;
     atk_widget_t *window;
     atk_widget_t *image;
-    uint16_t *pixels;
+    video_color_t *pixels;
     size_t pixel_bytes;
     int content_width;
     int content_height;
@@ -49,7 +49,7 @@ static uint32_t g_next_handle = 1;
 
 #define USER_ATK_PRESENT_SAMPLE_WORDS 8u
 
-static void user_atk_present_dump(const char *label, const uint16_t *pixels, size_t byte_len)
+static void user_atk_present_dump(const char *label, const video_color_t *pixels, size_t byte_len)
 {
     serial_printf("%s", "[user_atk][present] ");
     serial_printf("%s", label ? label : "buffer");
@@ -63,8 +63,8 @@ static void user_atk_present_dump(const char *label, const uint16_t *pixels, siz
 static void user_atk_present_log_summary(uint32_t handle,
                                          size_t expected_bytes,
                                          size_t actual_bytes,
-                                         const uint16_t *src_pixels,
-                                         const uint16_t *dst_pixels)
+                                         const video_color_t *src_pixels,
+                                         const video_color_t *dst_pixels)
 {
     serial_printf("[user_atk][present] handle=0x%016llX expected=0x%016llX actual=0x%016llX\r\n",
                   (unsigned long long)((uint64_t)handle),
@@ -218,8 +218,8 @@ void user_atk_window_resized(const atk_widget_t *window)
 
     if (size_changed)
     {
-        size_t new_bytes = (size_t)new_width * (size_t)new_height * sizeof(uint16_t);
-        uint16_t *pixels = (uint16_t *)malloc(new_bytes);
+        size_t new_bytes = (size_t)new_width * (size_t)new_height * sizeof(video_color_t);
+        video_color_t *pixels = (video_color_t *)malloc(new_bytes);
         if (!pixels)
         {
             image->width = win->content_width;
@@ -234,11 +234,11 @@ void user_atk_window_resized(const atk_widget_t *window)
             int copy_h = (new_height < win->content_height) ? new_height : win->content_height;
             for (int row = 0; row < copy_h; ++row)
             {
-                size_t dst_offset = (size_t)row * (size_t)new_width * sizeof(uint16_t);
+                size_t dst_offset = (size_t)row * (size_t)new_width * sizeof(video_color_t);
                 size_t src_offset = (size_t)row * (size_t)win->stride_bytes;
                 memcpy((uint8_t *)pixels + dst_offset,
                        (const uint8_t *)win->pixels + src_offset,
-                       (size_t)copy_w * sizeof(uint16_t));
+                       (size_t)copy_w * sizeof(video_color_t));
             }
         }
 
@@ -246,7 +246,7 @@ void user_atk_window_resized(const atk_widget_t *window)
                                   pixels,
                                   new_width,
                                   new_height,
-                                  new_width * (int)sizeof(uint16_t),
+                                  new_width * (int)sizeof(video_color_t),
                                   true))
         {
             free(pixels);
@@ -257,7 +257,7 @@ void user_atk_window_resized(const atk_widget_t *window)
 
         win->pixels = atk_image_pixels(image);
         win->pixel_bytes = new_bytes;
-        win->stride_bytes = new_width * (int)sizeof(uint16_t);
+        win->stride_bytes = new_width * (int)sizeof(video_color_t);
         win->content_width = new_width;
         win->content_height = new_height;
     }
@@ -577,8 +577,8 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
         return -1;
     }
 
-    size_t pixel_bytes = (size_t)desc.width * (size_t)desc.height * sizeof(uint16_t);
-    uint16_t *pixels = (uint16_t *)malloc(pixel_bytes);
+    size_t pixel_bytes = (size_t)desc.width * (size_t)desc.height * sizeof(video_color_t);
+    video_color_t *pixels = (video_color_t *)malloc(pixel_bytes);
     if (!pixels)
     {
         atk_window_close(state, window);
@@ -588,7 +588,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     user_atk_log("alloc pixels=", (uintptr_t)pixels);
     user_atk_log("alloc bytes=", pixel_bytes);
 
-    if (!atk_image_set_pixels(image, pixels, desc.width, desc.height, desc.width * (int)sizeof(uint16_t), true))
+    if (!atk_image_set_pixels(image, pixels, desc.width, desc.height, desc.width * (int)sizeof(video_color_t), true))
     {
         free(pixels);
         atk_window_close(state, window);
@@ -620,7 +620,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     win->content_height = desc.height;
     win->content_offset_x = content_offset_x;
     win->content_offset_y = content_offset_y;
-    win->stride_bytes = desc.width * (int)sizeof(uint16_t);
+    win->stride_bytes = desc.width * (int)sizeof(video_color_t);
     win->closed = false;
     win->destroying = false;
     win->event_head = 0;
@@ -639,7 +639,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     return (int64_t)win->handle;
 }
 
-int64_t user_atk_sys_present(uint32_t handle, const uint16_t *pixels, size_t byte_len)
+int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_t byte_len)
 {
     if (!pixels)
     {

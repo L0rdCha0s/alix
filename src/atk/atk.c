@@ -13,6 +13,10 @@
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
 #include "atk_event_debug.h"
+#ifdef KERNEL_BUILD
+#include "vfs.h"
+#include "atk/util/png.h"
+#endif
 #ifndef KERNEL_BUILD
 #include "atk/atk_terminal.h"
 #endif
@@ -64,6 +68,200 @@ typedef struct
     const char *path;
     const char *name;
 } atk_user_launch_info_t;
+#endif
+
+#ifdef KERNEL_BUILD
+typedef struct
+{
+    video_color_t *pixels;
+    int width;
+    int height;
+    int stride_bytes;
+    char path[256];
+    bool loaded;
+} atk_background_image_t;
+
+static atk_background_image_t g_atk_background = { 0 };
+
+static void atk_background_free(void)
+{
+    if (g_atk_background.pixels)
+    {
+        free(g_atk_background.pixels);
+    }
+    g_atk_background.pixels = NULL;
+    g_atk_background.width = 0;
+    g_atk_background.height = 0;
+    g_atk_background.stride_bytes = 0;
+    g_atk_background.path[0] = '\0';
+    g_atk_background.loaded = false;
+}
+
+static void atk_background_clear(void)
+{
+    if (g_atk_background.loaded)
+    {
+        atk_background_free();
+        atk_dirty_mark_all();
+    }
+}
+
+static bool atk_background_load_path(const char *path)
+{
+    if (!path || *path == '\0')
+    {
+        return false;
+    }
+
+    vfs_node_t *node = vfs_resolve(vfs_root(), path);
+    if (!node || !vfs_is_file(node))
+    {
+        return false;
+    }
+    size_t size = 0;
+    const char *data = vfs_data(node, &size);
+    if (!data || size == 0)
+    {
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0, h = 0, stride = 0;
+    int rc = png_decode_rgba32((const uint8_t *)data, size, &pixels, &w, &h, &stride);
+    if (rc != 0 || !pixels)
+    {
+        return false;
+    }
+
+    atk_background_free();
+    g_atk_background.pixels = pixels;
+    g_atk_background.width = w;
+    g_atk_background.height = h;
+    g_atk_background.stride_bytes = stride;
+    g_atk_background.loaded = true;
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof(g_atk_background.path))
+    {
+        path_len = sizeof(g_atk_background.path) - 1;
+    }
+    memcpy(g_atk_background.path, path, path_len);
+    g_atk_background.path[path_len] = '\0';
+    return true;
+}
+
+static void atk_background_reload_if_needed(void)
+{
+    vfs_node_t *bgfile = vfs_resolve(vfs_root(), "/etc/display/background");
+    if (!bgfile || !vfs_is_file(bgfile))
+    {
+        atk_background_clear();
+        return;
+    }
+
+    size_t size = 0;
+    const char *data = vfs_data(bgfile, &size);
+    if (!data || size == 0)
+    {
+        atk_background_clear();
+        return;
+    }
+
+    char path[256];
+    size_t copy = (size < sizeof(path) - 1) ? size : (sizeof(path) - 1);
+    memcpy(path, data, copy);
+    path[copy] = '\0';
+
+    while (copy > 0 && (path[copy - 1] == '\n' || path[copy - 1] == '\r' || path[copy - 1] == ' ' || path[copy - 1] == '\t'))
+    {
+        path[--copy] = '\0';
+    }
+
+    if (path[0] == '\0')
+    {
+        atk_background_clear();
+        return;
+    }
+
+    if (g_atk_background.loaded && strcmp(path, g_atk_background.path) == 0)
+    {
+        return;
+    }
+
+    if (atk_background_load_path(path))
+    {
+        atk_dirty_mark_all();
+    }
+    else
+    {
+        atk_background_clear();
+    }
+}
+
+static void atk_paint_background_region(const atk_state_t *state, int x, int y, int width, int height)
+{
+    if (!state || width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    video_draw_rect(x, y, width, height, state->theme.background);
+
+    if (!g_atk_background.loaded || !g_atk_background.pixels)
+    {
+        return;
+    }
+
+    int dst_x0 = x < 0 ? 0 : x;
+    int dst_y0 = y < 0 ? 0 : y;
+    int dst_x1 = x + width;
+    int dst_y1 = y + height;
+
+    if (dst_x1 > VIDEO_WIDTH) dst_x1 = VIDEO_WIDTH;
+    if (dst_y1 > VIDEO_HEIGHT) dst_y1 = VIDEO_HEIGHT;
+
+    int src_x0 = dst_x0;
+    int src_y0 = dst_y0;
+    if (src_x0 >= g_atk_background.width || src_y0 >= g_atk_background.height)
+    {
+        return;
+    }
+
+    int copy_w = dst_x1 - dst_x0;
+    int copy_h = dst_y1 - dst_y0;
+    if (copy_w > g_atk_background.width - src_x0)
+    {
+        copy_w = g_atk_background.width - src_x0;
+    }
+    if (copy_h > g_atk_background.height - src_y0)
+    {
+        copy_h = g_atk_background.height - src_y0;
+    }
+    if (copy_w <= 0 || copy_h <= 0)
+    {
+        return;
+    }
+
+    const uint8_t *src_row = (const uint8_t *)g_atk_background.pixels +
+                             (size_t)src_y0 * (size_t)g_atk_background.stride_bytes +
+                             (size_t)src_x0 * sizeof(video_color_t);
+    video_blit_rgba32(dst_x0,
+                      dst_y0,
+                      copy_w,
+                      copy_h,
+                      (const video_color_t *)src_row,
+                      g_atk_background.stride_bytes,
+                      true);
+}
+#else
+static __attribute__((unused)) void atk_background_reload_if_needed(void) {}
+static void atk_paint_background_region(const atk_state_t *state, int x, int y, int width, int height)
+{
+    if (!state || width <= 0 || height <= 0)
+    {
+        return;
+    }
+    video_draw_rect(x, y, width, height, state->theme.background);
+}
 #endif
 
 #define ATK_RESIZE_EDGE_LEFT   (1u << 0)
@@ -312,6 +510,10 @@ void atk_render(void)
         atk_dirty_mark_all();
     }
 
+#ifdef KERNEL_BUILD
+    atk_background_reload_if_needed();
+#endif
+
     atk_rect_t region;
     if (!atk_dirty_consume(&region))
     {
@@ -325,14 +527,14 @@ void atk_render(void)
 
     if (full)
     {
-        video_fill(state->theme.background);
+        atk_paint_background_region(state, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
         atk_desktop_draw_buttons(state, NULL);
         atk_window_draw_all(state, NULL);
         atk_menu_bar_draw(state);
         goto out;
     }
 
-    video_draw_rect(region.x, region.y, region.width, region.height, state->theme.background);
+    atk_paint_background_region(state, region.x, region.y, region.width, region.height);
     atk_desktop_draw_buttons(state, &region);
     atk_window_draw_all(state, &region);
 
