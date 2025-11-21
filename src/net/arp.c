@@ -232,9 +232,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
 
     char ipbuf[32];
     net_format_ipv4(ip, ipbuf);
-    serial_printf("%s", "arp: store request ip=");
-    serial_printf("%s", ipbuf);
-    serial_printf("%s", "\r\n");
+    serial_printf("arp: store request ip=%s\r\n", ipbuf);
 
     if (ip == 0)
     {
@@ -251,9 +249,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
             net_debug_memcpy("arp_store_update", g_cache[i].mac, mac, 6);
             g_cache[i].last_tick = now;
             arp_log_entry("updated entry", ip, mac);
-            serial_printf("%s", "arp: store updated index=");
-            serial_printf("%c", '0' + (char)i);
-            serial_printf("%s", "\r\n");
+            serial_printf("arp: store updated index=%zu\r\n", i);
             return;
         }
     }
@@ -267,9 +263,7 @@ static void net_arp_store(uint32_t ip, const uint8_t mac[6])
             net_debug_memcpy("arp_store_reuse", g_cache[i].mac, mac, 6);
             g_cache[i].last_tick = now;
             arp_log_entry("added entry", ip, mac);
-            serial_printf("%s", "arp: store new index=");
-            serial_printf("%c", '0' + (char)i);
-            serial_printf("%s", "\r\n");
+            serial_printf("arp: store new index=%zu\r\n", i);
             return;
         }
     }

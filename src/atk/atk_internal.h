@@ -38,11 +38,7 @@ typedef struct atk_rect
 #endif
 
 #ifndef ATK_USER_POINTER_MIN
-#ifdef KERNEL_BUILD
 #define ATK_USER_POINTER_MIN 0ULL
-#else
-#define ATK_USER_POINTER_MIN 0x0000008000000000ULL
-#endif
 #endif
 
 typedef enum

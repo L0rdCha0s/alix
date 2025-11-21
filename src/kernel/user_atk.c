@@ -11,7 +11,7 @@
 #include "user_copy.h"
 
 #ifndef USER_ATK_DEBUG
-#define USER_ATK_DEBUG 1
+#define USER_ATK_DEBUG 0
 #endif
 
 typedef struct user_atk_window
@@ -51,16 +51,12 @@ static uint32_t g_next_handle = 1;
 
 static void user_atk_present_dump(const char *label, const uint16_t *pixels, size_t byte_len)
 {
-    size_t words = byte_len / sizeof(uint16_t);
-    if (words > USER_ATK_PRESENT_SAMPLE_WORDS)
-    {
-        words = USER_ATK_PRESENT_SAMPLE_WORDS;
-    }
-    for (size_t i = 0; i < words; ++i)
-    {
-        serial_printf("%s", " ");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)pixels[i]));
-    }
+    serial_printf("%s", "[user_atk][present] ");
+    serial_printf("%s", label ? label : "buffer");
+    serial_printf("%s", " ptr=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)pixels));
+    serial_printf("%s", " bytes=0x");
+    serial_printf("%016llX", (unsigned long long)((uint64_t)byte_len));
     serial_printf("%s", "\r\n");
 }
 
@@ -70,47 +66,36 @@ static void user_atk_present_log_summary(uint32_t handle,
                                          const uint16_t *src_pixels,
                                          const uint16_t *dst_pixels)
 {
-    serial_printf("%s", "[user_atk][present] handle=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)handle));
-    serial_printf("%s", " expected=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)expected_bytes));
-    serial_printf("%s", " actual=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)actual_bytes));
-    serial_printf("%s", "\r\n");
+    serial_printf("[user_atk][present] handle=0x%016llX expected=0x%016llX actual=0x%016llX\r\n",
+                  (unsigned long long)((uint64_t)handle),
+                  (unsigned long long)((uint64_t)expected_bytes),
+                  (unsigned long long)((uint64_t)actual_bytes));
     user_atk_present_dump("user", src_pixels, actual_bytes);
     user_atk_present_dump("dst", dst_pixels, expected_bytes);
 }
 
 static void user_atk_present_log_mismatch(uint32_t handle, size_t expected_bytes, size_t actual_bytes)
 {
-    serial_printf("%s", "[user_atk][present] length_mismatch handle=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)handle));
-    serial_printf("%s", " expected=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)expected_bytes));
-    serial_printf("%s", " actual=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)actual_bytes));
-    serial_printf("%s", "\r\n");
+    serial_printf("[user_atk][present] length_mismatch handle=0x%016llX expected=0x%016llX actual=0x%016llX\r\n",
+                  (unsigned long long)((uint64_t)handle),
+                  (unsigned long long)((uint64_t)expected_bytes),
+                  (unsigned long long)((uint64_t)actual_bytes));
 }
 
 #if USER_ATK_DEBUG
 static void user_atk_log(const char *msg, uint64_t value)
 {
-    serial_printf("%s", "[user_atk] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", "0x");
-    serial_printf("%016llX", (unsigned long long)(value));
-    serial_printf("%s", "\r\n");
+    serial_printf("[user_atk] %s0x%016llX\r\n",
+                  msg ? msg : "",
+                  (unsigned long long)value);
 }
 
 static void user_atk_log_pair(const char *msg, uint64_t a, uint64_t b)
 {
-    serial_printf("%s", "[user_atk] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", " a=0x");
-    serial_printf("%016llX", (unsigned long long)(a));
-    serial_printf("%s", " b=0x");
-    serial_printf("%016llX", (unsigned long long)(b));
-    serial_printf("%s", "\r\n");
+    serial_printf("[user_atk] %s a=0x%016llX b=0x%016llX\r\n",
+                  msg ? msg : "",
+                  (unsigned long long)a,
+                  (unsigned long long)b);
 }
 #else
 static void user_atk_log(const char *msg, uint64_t value)
@@ -727,9 +712,9 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
         {
             user_atk_event_t zero = { 0 };
             user_copy_to_user(event_out, &zero, sizeof(zero));
-#if USER_ATK_DEBUG
-            user_atk_log_pair("sys_poll_event empty", handle, flags);
-#endif
+// #if USER_ATK_DEBUG
+//             user_atk_log_pair("sys_poll_event empty", handle, flags);
+// #endif
             user_atk_window_release(win);
             return 0;
         }

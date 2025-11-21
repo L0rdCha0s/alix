@@ -1696,7 +1696,28 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     }
 
     uint64_t start = timer_ticks();
-    spinlock_lock(&mount->sync_lock);
+    uint64_t lock_wait_start = timer_ticks();
+    while (__sync_lock_test_and_set(&mount->sync_lock.value, 1) != 0)
+    {
+        while (mount->sync_lock.value)
+        {
+            __asm__ volatile ("pause");
+            uint64_t elapsed_ticks = timer_ticks() - lock_wait_start;
+            uint64_t freq = timer_frequency();
+            if (freq == 0)
+            {
+                freq = 1000;
+            }
+            uint64_t elapsed_ms = (elapsed_ticks * 1000ULL) / freq;
+            if (elapsed_ms >= 2000ULL)
+            {
+                serial_printf("[vfs] sync_lock wait timeout dev=%s force=%d\r\n",
+                              dev_name,
+                              force ? 1 : 0);
+                return false;
+            }
+        }
+    }
     bool ok = vfs_mount_flush_tree(mount, force_all);
     if (ok && mount->backend)
     {

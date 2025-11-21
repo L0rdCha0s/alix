@@ -296,11 +296,10 @@ unlock:
 
     if (mouse_packet_log < 16)
     {
-        serial_printf("%s", "mouse packet dx=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)out_dx));
-        serial_printf("%s", " dy=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)out_dy));
-        serial_printf("%s", out_left ? " left=1\r\n" : " left=0\r\n");
+        serial_printf("mouse packet dx=%016llX dy=%016llX left=%d\r\n",
+                      (unsigned long long)((uint64_t)(int64_t)out_dx),
+                      (unsigned long long)((uint64_t)(int64_t)out_dy),
+                      out_left ? 1 : 0);
         mouse_packet_log++;
     }
 
@@ -316,11 +315,7 @@ void mouse_on_irq(uint8_t byte)
     }
     if (mouse_irq_byte_log < 32)
     {
-        serial_printf("%s", "mouse irq byte=0x");
-        static const char hex[] = "0123456789ABCDEF";
-        serial_printf("%c", hex[(byte >> 4) & 0xF]);
-        serial_printf("%c", hex[byte & 0xF]);
-        serial_printf("%s", "\r\n");
+        serial_printf("mouse irq byte=0x%02X\r\n", byte);
         mouse_irq_byte_log++;
     }
     mouse_process_byte(byte);

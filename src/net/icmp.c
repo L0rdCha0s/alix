@@ -144,30 +144,14 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     serial_printf("%s", lenbuf);
     serial_printf("%s", "\r\n");
 
-    size_t dump_len = frame_len < 64 ? frame_len : 64;
+    const size_t dump_len = frame_len < 64 ? frame_len : 64;
     serial_printf("%s", "icmp: frame data=");
     for (size_t i = 0; i < dump_len; ++i)
     {
         uint8_t byte = buffer[i];
-        static const char hex[] = "0123456789ABCDEF";
-        char out[3];
-        out[0] = hex[(byte >> 4) & 0xF];
-        out[1] = hex[byte & 0xF];
-        out[2] = '\0';
-        serial_printf("%s", out);
-        if ((i & 0x0F) == 0x0F || i + 1 == dump_len)
-        {
-            serial_printf("%s", "\r\n");
-            if (i + 1 < dump_len)
-            {
-                serial_printf("%s", "icmp: frame data=");
-            }
-        }
-        else
-        {
-            serial_printf("%c", ' ');
-        }
+        serial_printf("%s%02X", (i == 0) ? "" : " ", byte);
     }
+    serial_printf("%s", "\r\n");
 
     bool ok = net_if_send_copy(iface, buffer, frame_len);
     if (!ok)
@@ -265,15 +249,10 @@ void net_icmp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t 
 
             char ipbuf[32];
             net_format_ipv4(g_pending.reply.from_ip, ipbuf);
-            serial_printf("%s", "icmp: reply from ");
-            serial_printf("%s", ipbuf);
-            serial_printf("%s", " bytes=");
-            // (keep your existing decimal print helper if you prefer)
             char nbuf[12]; size_t n=0, v=g_pending.reply.bytes;
             if (!v) nbuf[n++]='0'; else { char t[12]; size_t ti=0; while (v && ti<sizeof t){t[ti++]=(char)('0'+(v%10)); v/=10;} while(ti) nbuf[n++]=t[--ti]; }
             nbuf[n]='\0';
-            serial_printf("%s", nbuf);
-            serial_printf("%s", "\r\n");
+            serial_printf("icmp: reply from %s bytes=%s\r\n", ipbuf, nbuf);
         }
         return;
     }

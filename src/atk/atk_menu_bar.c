@@ -28,6 +28,10 @@
 #define ATK_MENU_BAR_CLOCK_RESERVE 140
 #endif
 
+#ifndef MENU_BAR_TRACE
+#define MENU_BAR_TRACE 0
+#endif
+
 struct atk_menu_bar_entry
 {
     char title[ATK_MENU_ITEM_TITLE_MAX];
@@ -56,7 +60,7 @@ static void atk_menu_bar_clock_tick(void *context);
 static bool g_clock_timer_registered = false;
 #endif
 
-#ifdef KERNEL_BUILD
+#if defined(KERNEL_BUILD) && MENU_BAR_TRACE
 static void menu_log(const char *msg)
 {
     serial_printf("%s", "[menu] ");
@@ -70,7 +74,7 @@ static inline void menu_log(const char *msg)
 }
 #endif
 
-#ifdef KERNEL_BUILD
+#if defined(KERNEL_BUILD) && MENU_BAR_TRACE
 static void menu_log_pair(const char *msg, const char *detail)
 {
     serial_printf("%s", "[menu_bar] ");
@@ -87,7 +91,7 @@ static inline void menu_log_pair(const char *msg, const char *detail)
 }
 #endif
 
-#ifdef KERNEL_BUILD
+#if defined(KERNEL_BUILD) && MENU_BAR_TRACE
 static void menu_log_coords(const char *msg, int x, int y)
 {
     serial_printf("%s", "[menu_bar] ");
@@ -448,17 +452,15 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
     }
 
     int height = atk_menu_bar_height(state);
-#ifdef KERNEL_BUILD
+#if defined(KERNEL_BUILD) && MENU_BAR_TRACE
     if (pressed_edge || released_edge)
     {
-        menu_log_coords("event", cursor_x, cursor_y);
-        serial_printf("%s", "[menu_bar] flags press=");
-        serial_printf("%016llX", (unsigned long long)(pressed_edge ? 1 : 0));
-        serial_printf("%s", " release=");
-        serial_printf("%016llX", (unsigned long long)(released_edge ? 1 : 0));
-        serial_printf("%s", " left=");
-        serial_printf("%016llX", (unsigned long long)(left_pressed ? 1 : 0));
-        serial_printf("%s", "\r\n");
+        serial_printf("[menu_bar] event x=%016llX y=%016llX press=%016llX release=%016llX left=%016llX\r\n",
+                      (unsigned long long)((uint64_t)(int64_t)cursor_x),
+                      (unsigned long long)((uint64_t)(int64_t)cursor_y),
+                      (unsigned long long)(pressed_edge ? 1 : 0),
+                      (unsigned long long)(released_edge ? 1 : 0),
+                      (unsigned long long)(left_pressed ? 1 : 0));
     }
 #endif
     if (height <= 0)
@@ -481,8 +483,8 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
 
     if (pressed_edge && inside_bar && hover_entry)
     {
-#ifdef KERNEL_BUILD
-        menu_log_pair("press entry", hover_entry->title);
+#if defined(KERNEL_BUILD) && MENU_BAR_TRACE
+        serial_printf("[menu_bar] press entry: %s\r\n", hover_entry->title ? hover_entry->title : "(null)");
 #endif
         consumed = true;
         if (state->menu_open_entry == hover_entry)
@@ -822,10 +824,10 @@ static void shutdown_dialog_confirm(atk_widget_t *button, void *context)
     }
 #ifdef KERNEL_BUILD
     serial_printf("%s", "[shutdown] syncing filesystems...\r\n");
-    if (!vfs_sync_all())
+    bool sync_ok = vfs_sync_all();
+    if (!sync_ok)
     {
-        serial_printf("%s", "[shutdown] vfs_sync_all failed; aborting shutdown\r\n");
-        return;
+        serial_printf("%s", "[shutdown] vfs_sync_all failed; continuing shutdown\r\n");
     }
     serial_printf("%s", "[shutdown] powering off\r\n");
 #endif

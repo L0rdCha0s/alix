@@ -4,14 +4,12 @@
 #include "atk_event_debug.h"
 #include "video.h"
 #include "libc.h"
-#ifdef KERNEL_BUILD
 #include "serial.h"
-#endif
 
-#ifdef KERNEL_BUILD
+#if ATK_DEBUG
 #define TAB_LOG(...) serial_printf(__VA_ARGS__)
 #else
-#define TAB_LOG(...) ((void)0)
+#define TAB_LOG(...) (void)0
 #endif
 
 #define ATK_TAB_VIEW_MIN_WIDTH   (ATK_FONT_WIDTH * 6)

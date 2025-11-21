@@ -24,7 +24,7 @@
 #include "vfs.h"
 #endif
 
-#ifdef KERNEL_BUILD
+#if defined(KERNEL_BUILD) && ATK_DEBUG
 #define ATK_MOUSE_LOG(...) serial_printf(__VA_ARGS__)
 #else
 #define ATK_MOUSE_LOG(...) ((void)0)

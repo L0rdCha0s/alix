@@ -427,7 +427,26 @@ static inline uint32_t scheduler_time_slice_ticks(void)
 static inline uint32_t current_cpu_index(void)
 {
     uint32_t idx = smp_current_cpu_index();
-    return (idx < SMP_MAX_CPUS) ? idx : 0;
+    if (idx < SMP_MAX_CPUS)
+    {
+        return idx;
+    }
+
+    /* Capture corruption as early as possible. */
+    serial_printf("[sched] bad cpu index=0x%08X caller=0x%016llX\r\n",
+                  idx,
+                  (unsigned long long)(uintptr_t)__builtin_return_address(0));
+    for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
+    {
+        thread_t *t = g_current_threads[i];
+        process_t *p = g_current_processes[i];
+        serial_printf("[sched] slot=%u thread=0x%016llX pid=0x%016llX lock=0x%08X\r\n",
+                      (unsigned)i,
+                      (unsigned long long)(uintptr_t)t,
+                      (unsigned long long)(p ? p->pid : 0),
+                      g_deferred_free_locks[i].value);
+    }
+    return 0;
 }
 
 static inline thread_t *current_thread_local(void)
