@@ -319,106 +319,216 @@ static int huff_decode_symbol(bitreader_t *br, const dht_t *h)
     return -1;
 }
 
-/* ========================== IDCT (AAN integer, like libjpeg jidctint) ========================== */
+/* ========================== IDCT (integer AAN, SSE-free) ========================== */
 
-#define FIX(x) ((int32_t)((x) * 16384 + 0.5))
-#define DESCALE(x, n) ((int32_t)((x) + (1 << ((n) - 1))) >> (n))
+#define CONST_BITS 13
+#define PASS1_BITS 2
+#define FIX(x)    ((int32_t)((x) * (1 << CONST_BITS) + 0.5))
+#define MULTIPLY(a,b) ((int64_t)(a) * (int64_t)(b))
+#define DESCALE64(x,n) ((int32_t)(((x) + ((int64_t)1 << ((n) - 1))) >> (n)))
 
+static const int32_t C0_298631336 = FIX(0.298631336);
+static const int32_t C0_390180644 = FIX(0.390180644);
 static const int32_t C0_541196100 = FIX(0.541196100);
 static const int32_t C0_765366865 = FIX(0.765366865);
+static const int32_t C0_899976223 = FIX(0.899976223);
 static const int32_t C1_175875602 = FIX(1.175875602);
 static const int32_t C1_501321110 = FIX(1.501321110);
 static const int32_t C1_847759065 = FIX(1.847759065);
 static const int32_t C1_961570560 = FIX(1.961570560);
-static const int32_t C0_390180644 = FIX(0.390180644);
-static const int32_t C0_899976223 = FIX(0.899976223);
+static const int32_t C2_053119869 = FIX(2.053119869);
+static const int32_t C2_562915447 = FIX(2.562915447);
+static const int32_t C3_072711026 = FIX(3.072711026);
 
-static void idct_1d(int32_t *d)
-{
-    int32_t x0 = (d[0] << 13);
-    int32_t x1 = (d[4] << 13);
-    int32_t x2 = d[2];
-    int32_t x3 = d[6];
-    int32_t x4 = d[1];
-    int32_t x5 = d[7];
-    int32_t x6 = d[5];
-    int32_t x7 = d[3];
-    int32_t x8;
+/* AAN scaling factors (scaled by 14 bits, like libjpeg) */
+static const uint16_t aanscales[64] = {
+    16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
+    22725, 31521, 29692, 26722, 22725, 17855, 12299,  6270,
+    21407, 29692, 27969, 25172, 21407, 16819, 11585,  5906,
+    19266, 26722, 25172, 22654, 19266, 15137, 10426,  5315,
+    16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
+    12873, 17855, 16819, 15137, 12873, 10114,  6977,  3552,
+     8867, 12299, 11585, 10426,  8867,  6977,  4816,  2459,
+     4520,  6270,  5906,  5315,  4520,  3552,  2459,  1259
+};
 
-    if ((x2 | x3 | x4 | x5 | x6 | x7) == 0)
-    {
-        int32_t dc = DESCALE(x0 + x1, 13);
-        d[0]=d[1]=d[2]=d[3]=d[4]=d[5]=d[6]=d[7]=dc;
-        return;
-    }
-
-    x8 = C0_541196100 * (x2 + x3);
-    x2 = x8 + (C0_765366865 - C0_541196100) * x2;
-    x3 = x8 - (C0_765366865 + C0_541196100) * x3;
-
-    x8 = x0 + x1;
-    x0 -= x1;
-
-    x1 = C1_175875602 * (x4 + x5);
-    x4 = x1 + (-C1_961570560 + C1_175875602) * x4;
-    x5 = x1 + (-C0_390180644 - C1_175875602) * x5;
-
-    x1 = C1_501321110 * (x6 + x7);
-    x6 = x1 + (-C1_847759065 + C1_501321110) * x6;
-    x7 = x1 + (-C0_899976223 - C1_501321110) * x7;
-
-    int32_t t0 = x8 + x2;
-    int32_t t3 = x8 - x2;
-    int32_t t1 = x0 + x3;
-    int32_t t2 = x0 - x3;
-
-    int32_t t4 = x4 + x6;
-    int32_t t7 = x4 - x6;
-    int32_t t5 = x5 + x7;
-    int32_t t6 = x5 - x7;
-
-    d[0] = DESCALE(t0 + t4, 13);
-    d[7] = DESCALE(t0 - t4, 13);
-    d[1] = DESCALE(t1 + t5, 13);
-    d[6] = DESCALE(t1 - t5, 13);
-    d[2] = DESCALE(t2 + t6, 13);
-    d[5] = DESCALE(t2 - t6, 13);
-    d[3] = DESCALE(t3 + t7, 13);
-    d[4] = DESCALE(t3 - t7, 13);
-}
-
-/* IDCT with 32-bit input coefficients (pre-dequantized), output clamped 0..255 */
-/* IDCT with 32-bit input coefficients (pre-dequantized), output clamped 0..255.
-   NOTE: Apply the missing 1/8 scale at the very end (>>3 with rounding). */
+/* IDCT with 32-bit input coefficients (already dequantized), output clamped to 0..255 */
 static void idct_8x8(const int32_t *in, int16_t *out)
 {
-    int32_t tmp[64];
-    /* Row pass */
-    for (int i = 0; i < 8; ++i) {
-        for (int j = 0; j < 8; ++j) tmp[i*8 + j] = in[i*8 + j];
-        idct_1d(&tmp[i*8]);
+    int32_t workspace[64];
+
+    /* Pre-scale to match AAN expected quant scaling. aanscales[] are 14-bit. */
+    int32_t pre[64];
+    for (int i = 0; i < 64; ++i) {
+        int64_t v = MULTIPLY(in[i], aanscales[i]);
+        pre[i] = (int32_t)((v + (1 << 13)) >> 14); /* round back to 32-bit */
     }
 
-    /* Column pass + final scaling and level shift */
-    for (int j = 0; j < 8; ++j) {
-        int32_t col[8];
-        for (int i = 0; i < 8; ++i) col[i] = tmp[i*8 + j];
-        idct_1d(col);
+    /* Pass 1: columns */
+    for (int col = 0; col < 8; ++col)
+    {
+        const int32_t *ip = pre + col;
 
-        for (int i = 0; i < 8; ++i) {
-            /* Missing factor in previous code: overall 1/8 for 2-D IDCT.
-               Do a rounded >>3 here, then add 128 level shift, then clamp. */
-            int32_t v = (col[i] + 4) >> 3;   /* divide by 8 with rounding */
-            v += 128;                        /* level shift to unsigned */
+        if (ip[8] == 0 && ip[16] == 0 && ip[24] == 0 && ip[32] == 0 &&
+            ip[40] == 0 && ip[48] == 0 && ip[56] == 0)
+        {
+            int32_t dc = ip[0] << PASS1_BITS;
+            for (int i = 0; i < 8; ++i) workspace[i * 8 + col] = dc;
+            continue;
+        }
+
+        int64_t z2 = ip[16];
+        int64_t z3 = ip[48];
+        int64_t z1 = MULTIPLY(z2 + z3, C0_541196100);
+        int64_t tmp2 = z1 + MULTIPLY(z3, -C1_847759065);
+        int64_t tmp3 = z1 + MULTIPLY(z2,  C0_765366865);
+
+        int64_t tmp0 = ((int64_t)ip[0] + (int64_t)ip[32]) << CONST_BITS;
+        int64_t tmp1 = ((int64_t)ip[0] - (int64_t)ip[32]) << CONST_BITS;
+
+        int64_t tmp10 = tmp0 + tmp3;
+        int64_t tmp13 = tmp0 - tmp3;
+        int64_t tmp11 = tmp1 + tmp2;
+        int64_t tmp12 = tmp1 - tmp2;
+
+        int64_t tmp0o = ip[56];
+        int64_t tmp1o = ip[40];
+        int64_t tmp2o = ip[24];
+        int64_t tmp3o = ip[8];
+
+        int64_t z1o = tmp0o + tmp3o;
+        int64_t z2o = tmp1o + tmp2o;
+        int64_t z3o = tmp0o + tmp2o;
+        int64_t z4o = tmp1o + tmp3o;
+        int64_t z5  = MULTIPLY(z3o + z4o, C1_175875602);
+
+        tmp0o = MULTIPLY(tmp0o, C0_298631336);
+        tmp1o = MULTIPLY(tmp1o, C2_053119869);
+        tmp2o = MULTIPLY(tmp2o, C3_072711026);
+        tmp3o = MULTIPLY(tmp3o, C1_501321110);
+
+        z1o = MULTIPLY(z1o, -C0_899976223);
+        z2o = MULTIPLY(z2o, -C2_562915447);
+        z3o = MULTIPLY(z3o, -C1_961570560);
+        z4o = MULTIPLY(z4o, -C0_390180644);
+
+        z3o += z5;
+        z4o += z5;
+
+        tmp0o += z1o + z3o;
+        tmp1o += z2o + z4o;
+        tmp2o += z2o + z3o;
+        tmp3o += z1o + z4o;
+
+        workspace[0 * 8 + col] = DESCALE64(tmp10 + tmp3o, CONST_BITS - PASS1_BITS);
+        workspace[7 * 8 + col] = DESCALE64(tmp10 - tmp3o, CONST_BITS - PASS1_BITS);
+        workspace[1 * 8 + col] = DESCALE64(tmp11 + tmp2o, CONST_BITS - PASS1_BITS);
+        workspace[6 * 8 + col] = DESCALE64(tmp11 - tmp2o, CONST_BITS - PASS1_BITS);
+        workspace[2 * 8 + col] = DESCALE64(tmp12 + tmp1o, CONST_BITS - PASS1_BITS);
+        workspace[5 * 8 + col] = DESCALE64(tmp12 - tmp1o, CONST_BITS - PASS1_BITS);
+        workspace[3 * 8 + col] = DESCALE64(tmp13 + tmp0o, CONST_BITS - PASS1_BITS);
+        workspace[4 * 8 + col] = DESCALE64(tmp13 - tmp0o, CONST_BITS - PASS1_BITS);
+    }
+
+    /* Pass 2: rows */
+    for (int row = 0; row < 8; ++row)
+    {
+        int32_t *rp = workspace + row * 8;
+
+        if (rp[1] == 0 && rp[2] == 0 && rp[3] == 0 && rp[4] == 0 &&
+            rp[5] == 0 && rp[6] == 0 && rp[7] == 0)
+        {
+            int32_t dc = DESCALE64((int64_t)rp[0], PASS1_BITS + 3) + 128;
+#if JPEG_DEBUG_IDCT_CLAMP
+            if (dc < 0) { ++g_dbg.idct_clamp; dc = 0; }
+            else if (dc > 255) { ++g_dbg.idct_clamp; dc = 255; }
+#else
+            if (dc < 0) dc = 0; else if (dc > 255) dc = 255;
+#endif
+            for (int i = 0; i < 8; ++i) out[row * 8 + i] = (int16_t)dc;
+            continue;
+        }
+
+        int64_t z2 = rp[2];
+        int64_t z3 = rp[6];
+        int64_t z1 = MULTIPLY(z2 + z3, C0_541196100);
+        int64_t tmp2 = z1 + MULTIPLY(z3, -C1_847759065);
+        int64_t tmp3 = z1 + MULTIPLY(z2,  C0_765366865);
+
+        int64_t tmp0 = ((int64_t)rp[0] + (int64_t)rp[4]) << CONST_BITS;
+        int64_t tmp1 = ((int64_t)rp[0] - (int64_t)rp[4]) << CONST_BITS;
+
+        int64_t tmp10 = tmp0 + tmp3;
+        int64_t tmp13 = tmp0 - tmp3;
+        int64_t tmp11 = tmp1 + tmp2;
+        int64_t tmp12 = tmp1 - tmp2;
+
+        int64_t tmp0o = rp[7];
+        int64_t tmp1o = rp[5];
+        int64_t tmp2o = rp[3];
+        int64_t tmp3o = rp[1];
+
+        int64_t z1o = tmp0o + tmp3o;
+        int64_t z2o = tmp1o + tmp2o;
+        int64_t z3o = tmp0o + tmp2o;
+        int64_t z4o = tmp1o + tmp3o;
+        int64_t z5  = MULTIPLY(z3o + z4o, C1_175875602);
+
+        tmp0o = MULTIPLY(tmp0o, C0_298631336);
+        tmp1o = MULTIPLY(tmp1o, C2_053119869);
+        tmp2o = MULTIPLY(tmp2o, C3_072711026);
+        tmp3o = MULTIPLY(tmp3o, C1_501321110);
+
+        z1o = MULTIPLY(z1o, -C0_899976223);
+        z2o = MULTIPLY(z2o, -C2_562915447);
+        z3o = MULTIPLY(z3o, -C1_961570560);
+        z4o = MULTIPLY(z4o, -C0_390180644);
+
+        z3o += z5;
+        z4o += z5;
+
+        tmp0o += z1o + z3o;
+        tmp1o += z2o + z4o;
+        tmp2o += z2o + z3o;
+        tmp3o += z1o + z4o;
+
+        int32_t v0 = DESCALE64(tmp10 + tmp3o, CONST_BITS + PASS1_BITS + 3) + 128;
+        int32_t v7 = DESCALE64(tmp10 - tmp3o, CONST_BITS + PASS1_BITS + 3) + 128;
+        int32_t v1 = DESCALE64(tmp11 + tmp2o, CONST_BITS + PASS1_BITS + 3) + 128;
+        int32_t v6 = DESCALE64(tmp11 - tmp2o, CONST_BITS + PASS1_BITS + 3) + 128;
+        int32_t v2 = DESCALE64(tmp12 + tmp1o, CONST_BITS + PASS1_BITS + 3) + 128;
+        int32_t v5 = DESCALE64(tmp12 - tmp1o, CONST_BITS + PASS1_BITS + 3) + 128;
+        int32_t v3 = DESCALE64(tmp13 + tmp0o, CONST_BITS + PASS1_BITS + 3) + 128;
+        int32_t v4 = DESCALE64(tmp13 - tmp0o, CONST_BITS + PASS1_BITS + 3) + 128;
 
 #if JPEG_DEBUG_IDCT_CLAMP
-            if (v < 0) { ++g_dbg.idct_clamp; v = 0; }
-            else if (v > 255) { ++g_dbg.idct_clamp; v = 255; }
+        if (v0 < 0) { ++g_dbg.idct_clamp; v0 = 0; } else if (v0 > 255) { ++g_dbg.idct_clamp; v0 = 255; }
+        if (v1 < 0) { ++g_dbg.idct_clamp; v1 = 0; } else if (v1 > 255) { ++g_dbg.idct_clamp; v1 = 255; }
+        if (v2 < 0) { ++g_dbg.idct_clamp; v2 = 0; } else if (v2 > 255) { ++g_dbg.idct_clamp; v2 = 255; }
+        if (v3 < 0) { ++g_dbg.idct_clamp; v3 = 0; } else if (v3 > 255) { ++g_dbg.idct_clamp; v3 = 255; }
+        if (v4 < 0) { ++g_dbg.idct_clamp; v4 = 0; } else if (v4 > 255) { ++g_dbg.idct_clamp; v4 = 255; }
+        if (v5 < 0) { ++g_dbg.idct_clamp; v5 = 0; } else if (v5 > 255) { ++g_dbg.idct_clamp; v5 = 255; }
+        if (v6 < 0) { ++g_dbg.idct_clamp; v6 = 0; } else if (v6 > 255) { ++g_dbg.idct_clamp; v6 = 255; }
+        if (v7 < 0) { ++g_dbg.idct_clamp; v7 = 0; } else if (v7 > 255) { ++g_dbg.idct_clamp; v7 = 255; }
 #else
-            if (v < 0) v = 0; else if (v > 255) v = 255;
+        if (v0 < 0) v0 = 0; else if (v0 > 255) v0 = 255;
+        if (v1 < 0) v1 = 0; else if (v1 > 255) v1 = 255;
+        if (v2 < 0) v2 = 0; else if (v2 > 255) v2 = 255;
+        if (v3 < 0) v3 = 0; else if (v3 > 255) v3 = 255;
+        if (v4 < 0) v4 = 0; else if (v4 > 255) v4 = 255;
+        if (v5 < 0) v5 = 0; else if (v5 > 255) v5 = 255;
+        if (v6 < 0) v6 = 0; else if (v6 > 255) v6 = 255;
+        if (v7 < 0) v7 = 0; else if (v7 > 255) v7 = 255;
 #endif
-            out[i*8 + j] = (int16_t)v;
-        }
+
+        out[row * 8 + 0] = (int16_t)v0;
+        out[row * 8 + 1] = (int16_t)v1;
+        out[row * 8 + 2] = (int16_t)v2;
+        out[row * 8 + 3] = (int16_t)v3;
+        out[row * 8 + 4] = (int16_t)v4;
+        out[row * 8 + 5] = (int16_t)v5;
+        out[row * 8 + 6] = (int16_t)v6;
+        out[row * 8 + 7] = (int16_t)v7;
     }
 }
 
@@ -934,6 +1044,18 @@ static void upsample_and_store_RGB565(const jpg_t *jpg,
 #if JPEG_DEBUG_SWAP_CBCR
                 int tmpCb = Cbi; Cbi = Cri; Cri = tmpCb;
 #endif
+                /* Simple bilinear smoothing for chroma to reduce blockiness on subsampled images */
+                if (!treat_rgb && P1 && P2)
+                {
+                    int x1 = (x + 1 < mW) ? x + 1 : x;
+                    int y1 = (y + 1 < mH) ? y + 1 : y;
+                    int idx = y * mW + x;
+                    int idxr = y * mW + x1;
+                    int idxd = y1 * mW + x;
+                    int idxdr= y1 * mW + x1;
+                    Cbi = (P1[idx] + P1[idxr] + P1[idxd] + P1[idxdr] + 2) >> 2;
+                    Cri = (P2[idx] + P2[idxr] + P2[idxd] + P2[idxdr] + 2) >> 2;
+                }
                 int r = Yi + g_Cr_r_tab[Cri];
                 int g = Yi + (g_Cb_g_tab[Cbi] + g_Cr_g_tab[Cri]);
                 int b = Yi + g_Cb_b_tab[Cbi];

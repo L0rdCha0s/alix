@@ -74,6 +74,12 @@ extern uintptr_t kernel_heap_end;
 
 #define STATIC_ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
+static inline bool canonical_u64(uint64_t v)
+{
+    uint64_t sign = v >> 47;
+    return sign == 0 || sign == 0x1FFFFu;
+}
+
 static const char *const g_context_guard_reg_names[] = {
     "r15",
     "r14",
@@ -409,9 +415,10 @@ static void scheduler_log_if_stalled(const char *label, uint64_t start_ticks)
     uint64_t ms = scheduler_ticks_to_ms(elapsed);
     if (ms >= SCHEDULER_STALL_LOG_MS)
     {
-        serial_printf("[sched] stall label=%s duration=%llu ms\r\n",
+        serial_printf("[sched] stall label=%s duration=%llu ms uptime=%llu s\r\n",
                       label,
-                      (unsigned long long)ms);
+                      (unsigned long long)ms,
+                      (unsigned long long)(ms / 1000ULL));
     }
 }
 
@@ -4986,8 +4993,34 @@ static bool switch_to_thread(thread_t *next)
         }
 
         arch_cpu_set_kernel_stack(current_cpu_index(), next->kernel_stack_top);
-        wrmsr(MSR_FS_BASE, next->fs_base);
-        wrmsr(MSR_GS_BASE, next->gs_base);
+        uint64_t fsb = next->fs_base;
+        uint64_t gsb = next->gs_base;
+        if (!canonical_u64(fsb))
+        {
+            serial_printf("%s", "[sched] warning: non-canonical fs_base thread=");
+            if (next->name[0]) serial_printf("%s", next->name); else serial_printf("%s", "<unnamed>");
+            serial_printf("%s", " pid=0x");
+            serial_printf("%016llX", (unsigned long long)(next->process ? next->process->pid : 0));
+            serial_printf("%s", " fs_base=0x");
+            serial_printf("%016llX", (unsigned long long)fsb);
+            serial_printf("%s", "\r\n");
+            fsb = 0;
+            next->fs_base = 0;
+        }
+        if (!canonical_u64(gsb))
+        {
+            serial_printf("%s", "[sched] warning: non-canonical gs_base thread=");
+            if (next->name[0]) serial_printf("%s", next->name); else serial_printf("%s", "<unnamed>");
+            serial_printf("%s", " pid=0x");
+            serial_printf("%016llX", (unsigned long long)(next->process ? next->process->pid : 0));
+            serial_printf("%s", " gs_base=0x");
+            serial_printf("%016llX", (unsigned long long)gsb);
+            serial_printf("%s", "\r\n");
+            gsb = 0;
+            next->gs_base = 0;
+        }
+        wrmsr(MSR_FS_BASE, fsb);
+        wrmsr(MSR_GS_BASE, gsb);
         fpu_restore_state(&next->fpu_state);
 
     scheduler_debug_check_resume(next, "switch_to");
@@ -5007,6 +5040,18 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
     }
 
     context_switch(prev_ctx, next_ctx, prev_transition_flag);
+    /*
+     * Do not trust the resumed RFLAGS: if VM/VIF/VIP/ID are set, even PUSHF/CLI
+     * can fault. Load a known-good flags value (reserved bit set, IF clear) and
+     * keep interrupts masked while the scheduler finishes bookkeeping.
+     */
+    __asm__ volatile (
+        "pushq $0x2\n\t"  /* RFLAGS with only the reserved bit set */
+        "popfq\n\t"
+        "cli\n\t"
+        :
+        :
+        : "memory", "cc");
 
     thread_t *resumed = current_thread_local();
     if (resumed)

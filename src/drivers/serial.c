@@ -165,22 +165,42 @@ static uint64_t serial_now_millis(void)
     return (ticks * 1000ULL) / (uint64_t)freq;
 }
 
+static uint64_t serial_uptime_millis(void)
+{
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        return 0;
+    }
+    uint64_t ticks = timer_ticks();
+    return (ticks * 1000ULL) / (uint64_t)freq;
+}
+
 static void serial_log_prefix(void)
 {
 #if !SERIAL_LOG_PREFIX_ENABLE
     return;
 #endif
-    uint64_t ms = serial_now_millis();
-    uint64_t seconds = ms / 1000ULL;
-    uint64_t millis_part = ms % 1000ULL;
+    uint64_t wall_ms = serial_now_millis();
+    uint64_t wall_seconds = wall_ms / 1000ULL;
+    uint64_t millis_part = wall_ms % 1000ULL;
+    uint64_t up_ms = serial_uptime_millis();
+    uint64_t up_seconds = up_ms / 1000ULL;
     uint32_t cpu = smp_current_cpu_index();
 
     serial_output_char('[');
-    serial_output_decimal(seconds);
+    serial_output_decimal(wall_seconds);
     serial_output_char('.');
     serial_output_char((char)('0' + (millis_part / 100ULL) % 10ULL));
     serial_output_char((char)('0' + (millis_part / 10ULL) % 10ULL));
     serial_output_char((char)('0' + (millis_part % 10ULL)));
+    serial_output_char(']');
+    serial_output_char('[');
+    serial_output_char('u');
+    serial_output_char('p');
+    serial_output_char('=');
+    serial_output_decimal(up_seconds);
+    serial_output_char('s');
     serial_output_char(']');
     serial_output_char('[');
     serial_output_char('c');
