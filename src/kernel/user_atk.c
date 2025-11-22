@@ -52,6 +52,7 @@ static uint32_t g_next_handle = 1;
 
 #define USER_ATK_PRESENT_SAMPLE_WORDS 8u
 
+#if USER_ATK_DEBUG
 static void user_atk_present_log_summary(uint32_t handle,
                                          size_t expected_bytes,
                                          size_t actual_bytes,
@@ -73,6 +74,7 @@ static void user_atk_present_log_mismatch(uint32_t handle, size_t expected_bytes
                   (unsigned long long)((uint64_t)expected_bytes),
                   (unsigned long long)((uint64_t)actual_bytes));
 }
+#endif
 
 #if USER_ATK_DEBUG
 static void user_atk_log(const char *msg, uint64_t value)
@@ -206,22 +208,41 @@ void user_atk_window_resized(const atk_widget_t *window)
     }
 
     atk_widget_t *image = win->image;
+
+    int new_off_x = image->x;
+    int new_off_y = image->y;
     int new_width = image->width;
     int new_height = image->height;
-    if (new_width <= 0 || new_height <= 0)
-    {
-        return;
-    }
+    if (new_width < 1) new_width = 1;
+    if (new_height < 1) new_height = 1;
 
     bool size_changed = (new_width != win->content_width) || (new_height != win->content_height);
-    bool offset_changed = (win->content_offset_x != image->x) || (win->content_offset_y != image->y);
+    bool offset_changed = (win->content_offset_x != new_off_x) || (win->content_offset_y != new_off_y);
 
     if (!size_changed && !offset_changed)
     {
         return;
     }
 
+    serial_printf("[user_atk][resize] handle=0x%016llX old=%dx%d off=(%d,%d) new=%dx%d off=(%d,%d)\r\n",
+                  (unsigned long long)win->handle,
+                  win->content_width,
+                  win->content_height,
+                  win->content_offset_x,
+                  win->content_offset_y,
+                  new_width,
+                  new_height,
+                  new_off_x,
+                  new_off_y);
+
     spinlock_lock(&win->pixel_lock);
+    serial_printf("[user_atk][resize] handle=0x%016llX pixels=0x%016llX bytes=0x%016llX stride=%d content=%dx%d\r\n",
+                  (unsigned long long)win->handle,
+                  (unsigned long long)(uintptr_t)win->pixels,
+                  (unsigned long long)win->pixel_bytes,
+                  win->stride_bytes,
+                  win->content_width,
+                  win->content_height);
     if (size_changed)
     {
         size_t new_bytes = (size_t)new_width * (size_t)new_height * sizeof(video_color_t);
@@ -270,8 +291,16 @@ void user_atk_window_resized(const atk_widget_t *window)
         win->content_height = new_height;
     }
 
-    win->content_offset_x = image->x;
-    win->content_offset_y = image->y;
+    /* Refresh layout margins so anchor-based layout keeps using correct geometry. */
+    image->layout_margin_left = new_off_x;
+    image->layout_margin_top = new_off_y;
+    image->layout_margin_right = win->window->width - (new_off_x + new_width);
+    image->layout_margin_bottom = win->window->height - (new_off_y + new_height);
+    if (image->layout_margin_right < 0) image->layout_margin_right = 0;
+    if (image->layout_margin_bottom < 0) image->layout_margin_bottom = 0;
+
+    win->content_offset_x = new_off_x;
+    win->content_offset_y = new_off_y;
     spinlock_unlock(&win->pixel_lock);
 
     user_atk_queue_resize_event(win, (uint32_t)win->content_width, (uint32_t)win->content_height);
@@ -707,12 +736,23 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
 
     spinlock_lock(&win->pixel_lock);
 
-    user_atk_present_log_summary(handle, win->pixel_bytes, byte_len, pixels, win->pixels);
+    serial_printf("[user_atk][present] handle=0x%016llX bytes=0x%016llX expected=0x%016llX content=%dx%d stride=%d dst=0x%016llX\r\n",
+                  (unsigned long long)((uint64_t)handle),
+                  (unsigned long long)((uint64_t)byte_len),
+                  (unsigned long long)((uint64_t)win->pixel_bytes),
+                  win->content_width,
+                  win->content_height,
+                  win->stride_bytes,
+                  (unsigned long long)((uint64_t)(uintptr_t)win->pixels));
 
-    size_t copy_bytes = win->pixel_bytes;
-    if (byte_len != win->pixel_bytes)
+    size_t expected_bytes = win->pixel_bytes;
+    size_t copy_bytes = expected_bytes;
+    if (byte_len != expected_bytes)
     {
-        user_atk_present_log_mismatch(handle, win->pixel_bytes, byte_len);
+#if USER_ATK_DEBUG
+        user_atk_present_log_summary(handle, expected_bytes, byte_len, pixels, win->pixels);
+        user_atk_present_log_mismatch(handle, expected_bytes, byte_len);
+#endif
         if (byte_len < copy_bytes)
         {
             copy_bytes = byte_len;
@@ -725,19 +765,10 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
         user_atk_window_release(win);
         return -1;
     }
-    if (copy_bytes < win->pixel_bytes)
+    if (copy_bytes < expected_bytes)
     {
-        size_t remaining = win->pixel_bytes - copy_bytes;
+        size_t remaining = expected_bytes - copy_bytes;
         memset((uint8_t *)win->pixels + copy_bytes, 0, remaining);
-    }
-    if (byte_len != win->pixel_bytes && win->content_height > 0)
-    {
-        win->pixel_bytes = byte_len;
-        size_t stride = byte_len / (size_t)win->content_height;
-        if (stride >= sizeof(video_color_t))
-        {
-            win->stride_bytes = (int)stride;
-        }
     }
     spinlock_unlock(&win->pixel_lock);
     user_atk_log("present dst ptr=", (uintptr_t)win->pixels);
@@ -889,6 +920,18 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
 #endif
         spinlock_unlock(&win->event_lock);
         return;
+    }
+
+    if (event->type == USER_ATK_EVENT_RESIZE && win->event_count > 0)
+    {
+        size_t last = (win->event_tail + USER_ATK_EVENT_QUEUE_MAX - 1) % USER_ATK_EVENT_QUEUE_MAX;
+        if (win->events[last].type == USER_ATK_EVENT_RESIZE)
+        {
+            win->events[last] = *event;
+            spinlock_unlock(&win->event_lock);
+            wait_queue_wake_one(&win->event_waiters);
+            return;
+        }
     }
 
     win->events[win->event_tail] = *event;

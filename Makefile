@@ -341,7 +341,7 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
-		-no-reboot -monitor vc:1280x1024 -serial stdio -vga std \
+		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
@@ -354,7 +354,7 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
-		-no-reboot -monitor vc:1280x1024 -serial stdio -vga std \
+		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 run-hdd-gdb: QEMU_GDB_FLAGS = -s -S

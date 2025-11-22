@@ -8,7 +8,7 @@
 - If you need to modify memory layout, make sure you keep uefi.ld (kernel) and link.ld (user apps) up-to-date
 - If you want to boot the kernel, the shell has a variety of commands (including shutdown) - which you can use to stop the kernel and return to your thinking
 - Always run "make" to check your work before handing back to the user
-- Use x86_64-elf-addr2line and x86_64-elf-objdump in order to look for lines in stacktraces in compiled code and analyse ELF binaries.
+- Use x86_64-elf-addr2line and x86_64-elf-objdump in order to look for lines in stacktraces in compiled code and analyse ELF binaries, like build/alix.elf (which is the main kernel binary)
 - Use tcpdump to analyse qemu-net.pcap when looking at network traffic.
 - We are still building our libc - if there's a function that should be either in the kernel or the user libc, add it in, rather than putting a function that should be in libc in a seperate place
 

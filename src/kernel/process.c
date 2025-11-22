@@ -1321,10 +1321,13 @@ static void thread_enqueue_deferred_free(thread_t *thread)
     {
         owner = 0;
     }
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
     spinlock_lock(&g_deferred_free_locks[owner]);
     thread->deferred_next = g_deferred_thread_frees[owner];
     g_deferred_thread_frees[owner] = thread;
     spinlock_unlock(&g_deferred_free_locks[owner]);
+    cpu_restore_flags(flags);
 }
 
 static bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *stats)
@@ -3930,12 +3933,14 @@ static void scheduler_log_switch_latency(uint64_t ms,
     }
 }
 
-static inline void run_queue_lock_acquire(run_queue_t *queue, const char *label)
+static inline uint64_t run_queue_lock_acquire(run_queue_t *queue, const char *label)
 {
     if (!queue)
     {
-        return;
+        return 0;
     }
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
     uint64_t start = timer_ticks();
     bool wait_logged = false;
     thread_t *waiter = current_thread_local();
@@ -3966,9 +3971,10 @@ static inline void run_queue_lock_acquire(run_queue_t *queue, const char *label)
     queue->lock_owner_label = label;
     queue->lock_owner_caller = __builtin_return_address(0);
     queue->lock_acquired_ticks = timer_ticks();
+    return flags;
 }
 
-static inline void run_queue_lock_release(run_queue_t *queue)
+static inline void run_queue_lock_release(run_queue_t *queue, uint64_t flags)
 {
     if (!queue)
     {
@@ -3983,6 +3989,7 @@ static inline void run_queue_lock_release(run_queue_t *queue)
     queue->lock_owner_caller = NULL;
     queue->lock_acquired_ticks = 0;
     spinlock_unlock(&queue->lock);
+    cpu_restore_flags(flags);
     if (start)
     {
         uint64_t delta = timer_ticks() - start;
@@ -4176,9 +4183,9 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue)
 static thread_t *dequeue_thread_for_cpu(uint32_t cpu_index)
 {
     run_queue_t *local = scheduler_run_queue(cpu_index);
-    run_queue_lock_acquire(local, "dequeue");
+    uint64_t flags = run_queue_lock_acquire(local, "dequeue");
     thread_t *thread = run_queue_pop_locked(local);
-    run_queue_lock_release(local);
+    run_queue_lock_release(local, flags);
     if (thread)
     {
         thread->run_queue_cpu = cpu_index;
@@ -4197,7 +4204,7 @@ static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
     }
 
     run_queue_t *queue = scheduler_run_queue(cpu_index);
-    run_queue_lock_acquire(queue, "enqueue");
+    uint64_t flags = run_queue_lock_acquire(queue, "enqueue");
     thread_priority_t priority = thread->priority;
     if (priority < THREAD_PRIORITY_IDLE || priority >= THREAD_PRIORITY_COUNT)
     {
@@ -4220,7 +4227,7 @@ static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
     }
     queue->counts[priority]++;
     queue->total++;
-    run_queue_lock_release(queue);
+    run_queue_lock_release(queue, flags);
     scheduler_shell_log("enqueued", thread);
 }
 
@@ -4478,9 +4485,9 @@ static void remove_from_run_queue(thread_t *thread)
     {
         uint32_t target = (cpu_index + attempt) % cpu_count;
         run_queue_t *queue = scheduler_run_queue(target);
-        run_queue_lock_acquire(queue, "remove");
+        uint64_t flags = run_queue_lock_acquire(queue, "remove");
         bool removed = run_queue_detach_locked(queue, thread);
-        run_queue_lock_release(queue);
+        run_queue_lock_release(queue, flags);
         if (removed)
         {
             return;
@@ -4499,19 +4506,19 @@ static bool scheduler_thread_in_any_queue(thread_t *thread)
     for (uint32_t cpu = 0; cpu < cpu_count; ++cpu)
     {
         run_queue_t *queue = scheduler_run_queue(cpu);
-        run_queue_lock_acquire(queue, "contains");
+        uint64_t flags = run_queue_lock_acquire(queue, "contains");
         for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE; --pr)
         {
             for (thread_t *cursor = queue->heads[pr]; cursor; cursor = cursor->queue_next)
             {
                 if (cursor == thread)
                 {
-                    run_queue_lock_release(queue);
+                    run_queue_lock_release(queue, flags);
                     return true;
                 }
             }
         }
-        run_queue_lock_release(queue);
+        run_queue_lock_release(queue, flags);
     }
 
     return false;
@@ -5058,6 +5065,11 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
         :
         : "memory", "cc");
 
+    /*
+     * We have returned from context_switch, meaning we were switched back to.
+     * The 'next' variable refers to the thread we switched TO, not the one running now.
+     * We must use current_thread_local() to get the actual running thread (us).
+     */
     thread_t *resumed = current_thread_local();
     if (resumed)
     {

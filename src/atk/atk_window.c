@@ -326,6 +326,17 @@ void atk_window_request_layout(atk_widget_t *window)
     {
         return;
     }
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window))
+    {
+        serial_printf("[atk][layout] remote window=%p size=%dx%d pos=(%d,%d)\r\n",
+                      (void *)window,
+                      window->width,
+                      window->height,
+                      window->x,
+                      window->y);
+    }
+#endif
     window_after_size_change(window);
     atk_window_mark_dirty(window);
 }
@@ -818,6 +829,18 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
     {
         return;
     }
+
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window))
+    {
+        serial_printf("[atk][draw] remote window=%p pos=(%d,%d) size=%dx%d\r\n",
+                      (void *)window,
+                      window->x,
+                      window->y,
+                      window->width,
+                      window->height);
+    }
+#endif
 
     atk_state_theme_validate(state, "atk_window_draw");
     const atk_theme_t *theme = &state->theme;

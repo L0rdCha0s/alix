@@ -105,20 +105,15 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     net_format_ipv4(target_ip, ipbuf);
     net_format_mac(target_mac, macbuf);
     serial_printf("%s", "icmp: send echo id=0x");
-    serial_printf("%c", "0123456789ABCDEF"[(identifier >> 12) & 0xF]);
-    serial_printf("%c", "0123456789ABCDEF"[(identifier >> 8) & 0xF]);
-    serial_printf("%c", "0123456789ABCDEF"[(identifier >> 4) & 0xF]);
-    serial_printf("%c", "0123456789ABCDEF"[identifier & 0xF]);
+    serial_printf("%04X", identifier);
     serial_printf("%s", " seq=0x");
-    serial_printf("%c", "0123456789ABCDEF"[(sequence >> 12) & 0xF]);
-    serial_printf("%c", "0123456789ABCDEF"[(sequence >> 8) & 0xF]);
-    serial_printf("%c", "0123456789ABCDEF"[(sequence >> 4) & 0xF]);
-    serial_printf("%c", "0123456789ABCDEF"[sequence & 0xF]);
+    serial_printf("%04X", sequence);
     serial_printf("%s", " target=");
     serial_printf("%s", ipbuf);
     serial_printf("%s", " mac=");
     serial_printf("%s", macbuf);
     serial_printf("%s", " len=");
+
     char lenbuf[12];
     size_t len_idx = 0;
     size_t send_len_copy = frame_len;
