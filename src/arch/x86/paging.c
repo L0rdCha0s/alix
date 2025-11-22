@@ -6,6 +6,7 @@
 #include "types.h"
 #include "arch/x86/smp_boot.h"
 #include "smp.h"
+#include "process.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -790,6 +791,24 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
     if (!g_paging_ready || !g_kernel_space.tables_base || length == 0)
     {
         return false;
+    }
+
+    /* Never flip permissions on the stack we are currently running on; doing so
+     * would fault as soon as this function touches its own locals. */
+    if (!writable)
+    {
+        thread_t *current = thread_current();
+        uintptr_t stack_start = 0;
+        uintptr_t stack_end = 0;
+        if (current && process_thread_stack_bounds(current, &stack_start, &stack_end) && stack_end > stack_start)
+        {
+            uintptr_t range_start = align_down(virtual_addr, PAGE_SIZE_BYTES);
+            uintptr_t range_end = align_up(virtual_addr + length, PAGE_SIZE_BYTES);
+            if (!(range_end <= stack_start || range_start >= stack_end))
+            {
+                return false;
+            }
+        }
     }
 
     paging_space_t *space = &g_kernel_space;

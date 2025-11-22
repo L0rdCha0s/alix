@@ -493,9 +493,16 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
     video_draw_rect_outline(origin_x, origin_y, tab_view->width, tab_view->height, theme->window_border);
 
     atk_widget_t *content = atk_tab_view_active_content(tab_view);
-    if (content && content->used)
+    if (content)
     {
-        atk_widget_draw_any(state, content);
+        if (content->width != content_w || content->height != content_h)
+        {
+            tab_view_layout_pages((atk_widget_t *)tab_view, (atk_tab_view_priv_t *)priv);
+        }
+        if (content->used)
+        {
+            atk_widget_draw_any(state, content);
+        }
     }
 }
 

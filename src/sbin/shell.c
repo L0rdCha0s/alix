@@ -1378,7 +1378,8 @@ static char *trim_whitespace(char *text)
 
 static void serial_emit_char(char c)
 {
-    serial_printf("%c", c);
+    /* Write directly without log prefix/newline to keep shell output contiguous. */
+    serial_output_bytes(&c, 1);
 }
 
 static void shell_stream_console_write(void *context, const char *data, size_t len)

@@ -6,6 +6,7 @@
 #include "libc.h"
 #include "atk/atk_font.h"
 #include <stdint.h>
+#include "serial.h"
 
 #if ATK_LIST_VIEW_MAX_COLUMNS < 10
 #error "ATK_LIST_VIEW_MAX_COLUMNS must be at least 10 to support task manager views"
@@ -24,6 +25,7 @@ typedef struct
 {
     char title[ATK_LIST_VIEW_COLUMN_TITLE_MAX];
     int width;
+    int desired_width;
     bool flexible;
 } atk_list_view_column_t;
 
@@ -232,11 +234,13 @@ bool atk_list_view_configure_columns(atk_widget_t *list, const atk_list_view_col
         if (def->width <= 0)
         {
             col->width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
+            col->desired_width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
             col->flexible = true;
         }
         else
         {
             col->width = def->width;
+            col->desired_width = def->width;
             col->flexible = false;
         }
     }
@@ -377,18 +381,26 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
     int origin_y = 0;
     atk_widget_absolute_position(list, &origin_x, &origin_y);
 
+    if (priv->layout_dirty ||
+        list->width != priv->last_layout_width ||
+        list->height != priv->last_layout_height)
+    {
+        list_view_sync_layout((atk_widget_t *)list, priv_write);
+    }
+
     const atk_theme_t *theme = &state->theme;
     video_draw_rect(origin_x, origin_y, list->width, list->height, theme->window_body);
 
     int client_width = list->width;
     int client_height = list->height;
+    int scrollbar_size = (priv->scrollbar_size > 0) ? priv->scrollbar_size : ATK_LIST_VIEW_SCROLLBAR_SIZE;
     if (priv->vscroll && priv->vscroll->used)
     {
-        client_width -= priv->vscroll->width;
+        client_width -= scrollbar_size;
     }
     if (priv->hscroll && priv->hscroll->used)
     {
-        client_height -= priv->hscroll->height;
+        client_height -= scrollbar_size;
     }
 
     if (client_width <= 0 || client_height <= 0 || priv->row_height <= 0)
@@ -445,8 +457,22 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
                 break;
             }
 
-            int visible_width = col_end > clip_right ? (clip_right - column_x) : col_width;
-            if (visible_width <= 0)
+            int draw_x = column_x;
+            int draw_width = col_width;
+
+            if (draw_x < clip_left)
+            {
+                int diff = clip_left - draw_x;
+                draw_width -= diff;
+                draw_x = clip_left;
+            }
+
+            if (draw_x + draw_width > clip_right)
+            {
+                draw_width = clip_right - draw_x;
+            }
+
+            if (draw_width <= 0)
             {
                 column_x = col_end;
                 continue;
@@ -458,7 +484,11 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
                 text_x = column_x;
             }
             int baseline = atk_font_baseline_for_rect(origin_y, header_h);
-            atk_rect_t clip = { column_x, origin_y, visible_width, header_h };
+            atk_rect_t clip = { draw_x, origin_y, draw_width, header_h };
+            
+            serial_printf("col=%zu x=%d w=%d clip_l=%d clip_r=%d draw_x=%d draw_w=%d\r\n",
+                          c, column_x, col_width, clip_left, clip_right, draw_x, draw_width);
+            
             atk_font_draw_string_clipped(text_x,
                                          baseline,
                                          col->title,
@@ -523,8 +553,22 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
                 text = priv->cells[cell_index].text;
             }
 
-            int visible_width = cell_end > clip_right ? (clip_right - cell_x) : col_width;
-            if (visible_width <= 0)
+            int draw_x = cell_x;
+            int draw_width = col_width;
+
+            if (draw_x < clip_left)
+            {
+                int diff = clip_left - draw_x;
+                draw_width -= diff;
+                draw_x = clip_left;
+            }
+
+            if (draw_x + draw_width > clip_right)
+            {
+                draw_width = clip_right - draw_x;
+            }
+
+            if (draw_width <= 0)
             {
                 cell_x = cell_end;
                 continue;
@@ -536,7 +580,7 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
                 text_x = cell_x;
             }
             int baseline = atk_font_baseline_for_rect(row_y, row_height);
-            atk_rect_t clip = { cell_x, row_y, visible_width, row_height };
+            atk_rect_t clip = { draw_x, row_y, draw_width, row_height };
             atk_font_draw_string_clipped(text_x, baseline, text, theme->button_text, row_bg, &clip);
             cell_x = cell_end;
         }
@@ -723,6 +767,7 @@ static int list_view_layout_columns(atk_list_view_priv_t *priv, int client_width
     for (size_t i = 0; i < priv->column_count; ++i)
     {
         atk_list_view_column_t *col = &priv->columns[i];
+        col->width = col->desired_width;
         if (col->width < ATK_LIST_VIEW_MIN_COLUMN_WIDTH)
         {
             col->width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
@@ -735,11 +780,11 @@ static int list_view_layout_columns(atk_list_view_priv_t *priv, int client_width
     }
 
     int remaining = client_width - total_width;
-    if (client_width > 0 && remaining > 0)
+    if (client_width > 0 && remaining != 0)
     {
         size_t flex_remaining = flex_count;
         int share = flex_remaining > 0 ? (remaining / (int)flex_remaining) : 0;
-        for (size_t i = 0; i < priv->column_count && remaining > 0; ++i)
+        for (size_t i = 0; i < priv->column_count && (remaining != 0 || flex_remaining > 0); ++i)
         {
             atk_list_view_column_t *col = &priv->columns[i];
             if (!col->flexible)
@@ -751,8 +796,17 @@ static int list_view_layout_columns(atk_list_view_priv_t *priv, int client_width
             {
                 add = remaining;
             }
-            col->width += add;
+            
+            int new_width = col->width + add;
+            if (new_width < ATK_LIST_VIEW_MIN_COLUMN_WIDTH)
+            {
+                new_width = ATK_LIST_VIEW_MIN_COLUMN_WIDTH;
+            }
+            // Adjust remaining by what we *actually* used/removed, 
+            // but for the purpose of distribution, we just consume the 'share'.
+            // The simple logic is to just subtract 'add' from remaining to ensure the last one gets the rest.
             remaining -= add;
+            col->width = new_width;
         }
 
         if (flex_count == 0 && priv->column_count > 0 && remaining > 0)
@@ -923,6 +977,7 @@ static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv
     int visible_rows = 0;
     int max_scroll_row = 0;
     int max_scroll_x = 0;
+    atk_widget_t *window = list_view_window(list);
 
     for (int iter = 0; iter < 3; ++iter)
     {
@@ -933,7 +988,7 @@ static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv
         }
 
         total_width = list_view_layout_columns(priv, client_width);
-        bool next_need_hscroll = total_width > client_width;
+        bool next_need_hscroll = (window != NULL) && (total_width > client_width);
 
         client_height = list_height - (next_need_hscroll ? scrollbar_size : 0);
         if (client_height < 0)
@@ -953,7 +1008,7 @@ static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv
         }
 
         visible_rows = (priv->row_height > 0) ? (row_area / priv->row_height) : 0;
-        bool next_need_vscroll = (priv->row_height > 0) &&
+        bool next_need_vscroll = (window != NULL) && (priv->row_height > 0) &&
                                  ((int)(priv->row_count * priv->row_height) > row_area);
 
         if (need_vscroll == next_need_vscroll && need_hscroll == next_need_hscroll)
@@ -971,7 +1026,7 @@ static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv
     }
 
     total_width = list_view_layout_columns(priv, client_width);
-    need_hscroll = total_width > client_width;
+    need_hscroll = (window != NULL) && (total_width > client_width);
 
     client_height = list_height - (need_hscroll ? scrollbar_size : 0);
     if (client_height < 0)
@@ -1237,6 +1292,7 @@ static bool list_view_apply_column_resize(atk_widget_t *list,
     }
 
     left->width = left_width;
+    left->desired_width = left_width;
     left->flexible = false;
     priv->layout_dirty = true;
     list_view_mark_dirty(list);

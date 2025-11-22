@@ -173,6 +173,8 @@ void atk_font_draw_string_clipped(int x,
         int margin = (atk_font_line_height() + 9) / 10;
         clip_y0 -= margin;
         clip_y1 += margin;
+        if (clip_y0 < 0) clip_y0 = 0;
+        if (clip_y1 > VIDEO_HEIGHT) clip_y1 = VIDEO_HEIGHT;
         if (clip_x1 <= clip_x0 || clip_y1 <= clip_y0)
         {
             return;
