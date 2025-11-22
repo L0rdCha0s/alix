@@ -502,15 +502,11 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
 #ifdef KERNEL_BUILD
             menu_log_pair("release", state->menu_open_entry->title);
             menu_log_coords("release coords", cursor_x, cursor_y);
-            serial_printf("%s", "[menu_bar] menu bounds x=");
-            serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->x));
-            serial_printf("%s", " y=");
-            serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->y));
-            serial_printf("%s", " w=");
-            serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->width));
-            serial_printf("%s", " h=");
-            serial_printf("%016llX", (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->height));
-            serial_printf("%s", "\r\n");
+            serial_printf("[menu_bar] menu bounds x=%016llX y=%016llX w=%016llX h=%016llX\r\n",
+                          (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->x),
+                          (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->y),
+                          (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->width),
+                          (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->height));
 #endif
             if (atk_menu_contains(state->menu_open_entry->menu, cursor_x, cursor_y))
             {

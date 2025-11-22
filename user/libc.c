@@ -245,7 +245,12 @@ static void *realloc_locked(void *ptr, size_t size)
     {
         return NULL;
     }
-    memcpy(new_ptr, ptr, block->size);
+    size_t copy_size = block->size;
+    if (size < copy_size)
+    {
+        copy_size = size;
+    }
+    memcpy(new_ptr, ptr, copy_size);
     block->free = true;
     coalesce(block);
     return new_ptr;

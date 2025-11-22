@@ -145,13 +145,28 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     serial_printf("%s", "\r\n");
 
     const size_t dump_len = frame_len < 64 ? frame_len : 64;
-    serial_printf("%s", "icmp: frame data=");
-    for (size_t i = 0; i < dump_len; ++i)
     {
-        uint8_t byte = buffer[i];
-        serial_printf("%s%02X", (i == 0) ? "" : " ", byte);
+        /* Render the dump in one line to avoid serial spam. */
+        char line[256];
+        size_t pos = 0;
+        const char *prefix = "icmp: frame data=";
+        size_t prefix_len = strlen(prefix);
+        if (prefix_len < sizeof(line))
+        {
+            memcpy(line + pos, prefix, prefix_len);
+            pos += prefix_len;
+        }
+        for (size_t i = 0; i < dump_len && pos + 3 < sizeof(line); ++i)
+        {
+            uint8_t byte = buffer[i];
+            line[pos++] = ' ';
+            const char hex[] = "0123456789ABCDEF";
+            line[pos++] = hex[(byte >> 4) & 0xF];
+            line[pos++] = hex[byte & 0xF];
+        }
+        line[pos] = '\0';
+        serial_printf("%s", line);
     }
-    serial_printf("%s", "\r\n");
 
     bool ok = net_if_send_copy(iface, buffer, frame_len);
     if (!ok)

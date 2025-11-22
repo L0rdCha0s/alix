@@ -7,6 +7,7 @@
 #include "libc.h"
 #include "process.h"
 #include "serial.h"
+#include "spinlock.h"
 #include "video.h"
 #include "user_copy.h"
 
@@ -31,10 +32,12 @@ typedef struct user_atk_window
     int stride_bytes;
     bool closed;
     bool destroying;
+    spinlock_t pixel_lock;
     user_atk_event_t events[USER_ATK_EVENT_QUEUE_MAX];
     size_t event_head;
     size_t event_tail;
     size_t event_count;
+    spinlock_t event_lock;
     wait_queue_t event_waiters;
     struct user_atk_window *next;
     struct user_atk_window *prev;
@@ -49,29 +52,18 @@ static uint32_t g_next_handle = 1;
 
 #define USER_ATK_PRESENT_SAMPLE_WORDS 8u
 
-static void user_atk_present_dump(const char *label, const video_color_t *pixels, size_t byte_len)
-{
-    serial_printf("%s", "[user_atk][present] ");
-    serial_printf("%s", label ? label : "buffer");
-    serial_printf("%s", " ptr=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)pixels));
-    serial_printf("%s", " bytes=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)byte_len));
-    serial_printf("%s", "\r\n");
-}
-
 static void user_atk_present_log_summary(uint32_t handle,
                                          size_t expected_bytes,
                                          size_t actual_bytes,
                                          const video_color_t *src_pixels,
                                          const video_color_t *dst_pixels)
 {
-    serial_printf("[user_atk][present] handle=0x%016llX expected=0x%016llX actual=0x%016llX\r\n",
+    serial_printf("[user_atk][present] handle=0x%016llX expected=0x%016llX actual=0x%016llX user=0x%016llX dst=0x%016llX\r\n",
                   (unsigned long long)((uint64_t)handle),
                   (unsigned long long)((uint64_t)expected_bytes),
-                  (unsigned long long)((uint64_t)actual_bytes));
-    user_atk_present_dump("user", src_pixels, actual_bytes);
-    user_atk_present_dump("dst", dst_pixels, expected_bytes);
+                  (unsigned long long)((uint64_t)actual_bytes),
+                  (unsigned long long)((uint64_t)(uintptr_t)src_pixels),
+                  (unsigned long long)((uint64_t)(uintptr_t)dst_pixels));
 }
 
 static void user_atk_present_log_mismatch(uint32_t handle, size_t expected_bytes, size_t actual_bytes)
@@ -115,9 +107,21 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
 static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_event);
 static void user_atk_send_close_event(user_atk_window_t *win);
 static void user_atk_apply_priorities(void);
-static bool user_atk_event_queue_empty(void *context);
+static bool user_atk_event_ready(void *context);
 static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_event_t *event);
 static void user_atk_queue_resize_event(user_atk_window_t *win, uint32_t width, uint32_t height);
+
+static spinlock_t g_windows_lock;
+
+static inline void user_atk_windows_lock(void)
+{
+    spinlock_lock(&g_windows_lock);
+}
+
+static inline void user_atk_windows_unlock(void)
+{
+    spinlock_unlock(&g_windows_lock);
+}
 
 void user_atk_init(void)
 {
@@ -134,6 +138,7 @@ void user_atk_init(void)
         process_clear_priority_override(g_capture_priority_owner);
         g_capture_priority_owner = NULL;
     }
+    spinlock_init(&g_windows_lock);
     g_next_handle = 1;
 }
 
@@ -216,12 +221,14 @@ void user_atk_window_resized(const atk_widget_t *window)
         return;
     }
 
+    spinlock_lock(&win->pixel_lock);
     if (size_changed)
     {
         size_t new_bytes = (size_t)new_width * (size_t)new_height * sizeof(video_color_t);
         video_color_t *pixels = (video_color_t *)malloc(new_bytes);
         if (!pixels)
         {
+            spinlock_unlock(&win->pixel_lock);
             image->width = win->content_width;
             image->height = win->content_height;
             return;
@@ -252,6 +259,7 @@ void user_atk_window_resized(const atk_widget_t *window)
             free(pixels);
             image->width = win->content_width;
             image->height = win->content_height;
+            spinlock_unlock(&win->pixel_lock);
             return;
         }
 
@@ -264,6 +272,7 @@ void user_atk_window_resized(const atk_widget_t *window)
 
     win->content_offset_x = image->x;
     win->content_offset_y = image->y;
+    spinlock_unlock(&win->pixel_lock);
 
     user_atk_queue_resize_event(win, (uint32_t)win->content_width, (uint32_t)win->content_height);
     atk_window_mark_dirty(win->window);
@@ -277,11 +286,12 @@ void user_atk_focus_window(const atk_widget_t *window)
     {
         target = NULL;
     }
-    if (g_focus_window == target)
+    user_atk_windows_lock();
+    if (g_focus_window != target)
     {
-        return;
+        g_focus_window = target;
     }
-    g_focus_window = target;
+    user_atk_windows_unlock();
     user_atk_apply_priorities();
 }
 
@@ -292,6 +302,7 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
                                 bool released_edge,
                                 bool left_pressed)
 {
+    user_atk_windows_lock();
     user_atk_window_t *previous_capture = g_capture_window;
     if (previous_capture)
     {
@@ -311,6 +322,7 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     {
         /* target is already retained via previous_capture */
     }
+    user_atk_windows_unlock();
 #if USER_ATK_DEBUG
     user_atk_log_pair("route_mouse hover", (uintptr_t)hover_window, (uintptr_t)(target ? target->window : NULL));
 #endif
@@ -337,7 +349,7 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
                    rel_x < target->content_width &&
                    rel_y < target->content_height);
 
-    if (!inside && !g_capture_window)
+    if (!inside && !previous_capture)
     {
 #if USER_ATK_DEBUG
         uint64_t coord = ((uint64_t)(uint32_t)rel_x << 32) | (uint32_t)(rel_y & 0xFFFFFFFFu);
@@ -370,7 +382,9 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     if (pressed_edge)
     {
         event.flags |= USER_ATK_MOUSE_FLAG_PRESS;
+        user_atk_windows_lock();
         g_capture_window = target;
+        user_atk_windows_unlock();
 #if USER_ATK_DEBUG
         user_atk_log_pair("capture begin", target->handle, (uint64_t)event.flags);
 #endif
@@ -378,6 +392,7 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     if (released_edge)
     {
         event.flags |= USER_ATK_MOUSE_FLAG_RELEASE;
+        user_atk_windows_lock();
         if (g_capture_window == target && !left_pressed)
         {
             g_capture_window = NULL;
@@ -385,6 +400,7 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
             user_atk_log_pair("capture end", target->handle, (uint64_t)event.flags);
 #endif
         }
+        user_atk_windows_unlock();
     }
 
 #if USER_ATK_DEBUG
@@ -392,7 +408,10 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     user_atk_log_pair("queue mouse", coord, (uint64_t)event.flags);
 #endif
     user_atk_queue_event(target, &event);
-    if (previous_capture != g_capture_window)
+    user_atk_windows_lock();
+    bool capture_changed = (previous_capture != g_capture_window);
+    user_atk_windows_unlock();
+    if (capture_changed)
     {
         user_atk_apply_priorities();
     }
@@ -409,12 +428,24 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
 
 bool user_atk_route_key_event(char ch)
 {
-    if (!g_focus_window || g_focus_window->closed)
+    user_atk_windows_lock();
+    user_atk_window_t *focus = g_focus_window;
+    if (focus && focus->closed)
+    {
+        focus = NULL;
+        g_focus_window = NULL;
+    }
+    if (focus)
+    {
+        user_atk_window_retain(focus);
+    }
+    user_atk_windows_unlock();
+    if (!focus)
     {
         return false;
     }
 #if USER_ATK_DEBUG
-    user_atk_log_pair("route_key", (uint64_t)(uint8_t)ch, g_focus_window->handle);
+    user_atk_log_pair("route_key", (uint64_t)(uint8_t)ch, focus->handle);
 #endif
 
     user_atk_event_t event = {
@@ -425,7 +456,8 @@ bool user_atk_route_key_event(char ch)
         .data0 = (uint8_t)ch,
         .data1 = 0,
     };
-    user_atk_queue_event(g_focus_window, &event);
+    user_atk_queue_event(focus, &event);
+    user_atk_window_release(focus);
     return true;
 }
 
@@ -438,10 +470,14 @@ static void user_atk_window_on_destroy(void *context)
     }
 
     bool send_close_event = !win->destroying;
+    user_atk_windows_lock();
     win->window = NULL;
     win->image = NULL;
+    spinlock_lock(&win->pixel_lock);
     win->pixels = NULL;
+    win->pixel_bytes = 0;
     win->closed = true;
+    spinlock_unlock(&win->pixel_lock);
     if (g_focus_window == win)
     {
         g_focus_window = NULL;
@@ -450,6 +486,7 @@ static void user_atk_window_on_destroy(void *context)
     {
         g_capture_window = NULL;
     }
+    user_atk_windows_unlock();
     wait_queue_wake_all(&win->event_waiters);
     user_atk_apply_priorities();
     if (send_close_event)
@@ -460,6 +497,7 @@ static void user_atk_window_on_destroy(void *context)
 
 static void user_atk_insert(user_atk_window_t *win)
 {
+    user_atk_windows_lock();
     win->prev = NULL;
     win->next = g_windows_head;
     if (g_windows_head)
@@ -467,6 +505,7 @@ static void user_atk_insert(user_atk_window_t *win)
         g_windows_head->prev = win;
     }
     g_windows_head = win;
+    user_atk_windows_unlock();
 }
 
 static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
@@ -477,6 +516,7 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     }
     (void)closing_kernel;
 
+    user_atk_windows_lock();
     if (win->prev)
     {
         win->prev->next = win->next;
@@ -492,13 +532,6 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     win->next = NULL;
     win->prev = NULL;
 
-    if (win->window)
-    {
-        win->destroying = true;
-        atk_window_close(atk_state_get(), win->window);
-        win->destroying = false;
-    }
-
     if (g_focus_window == win)
     {
         g_focus_window = NULL;
@@ -507,6 +540,15 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     {
         g_capture_window = NULL;
     }
+    user_atk_windows_unlock();
+
+    if (win->window)
+    {
+        win->destroying = true;
+        atk_window_close(atk_state_get(), win->window);
+        win->destroying = false;
+    }
+
     wait_queue_wake_all(&win->event_waiters);
     user_atk_apply_priorities();
     user_atk_window_release(win);
@@ -514,14 +556,17 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
 
 static user_atk_window_t *user_atk_find(uint32_t handle, process_t *owner)
 {
+    user_atk_windows_lock();
     for (user_atk_window_t *win = g_windows_head; win; win = win->next)
     {
         if (win->handle == handle && win->owner == owner)
         {
             user_atk_window_retain(win);
+            user_atk_windows_unlock();
             return win;
         }
     }
+    user_atk_windows_unlock();
     return NULL;
 }
 
@@ -623,9 +668,11 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     win->stride_bytes = desc.width * (int)sizeof(video_color_t);
     win->closed = false;
     win->destroying = false;
+    spinlock_init(&win->pixel_lock);
     win->event_head = 0;
     win->event_tail = 0;
     win->event_count = 0;
+    spinlock_init(&win->event_lock);
     wait_queue_init(&win->event_waiters);
 
     atk_window_set_context(window, win, user_atk_window_on_destroy);
@@ -658,20 +705,41 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
         return -1;
     }
 
+    spinlock_lock(&win->pixel_lock);
+
     user_atk_present_log_summary(handle, win->pixel_bytes, byte_len, pixels, win->pixels);
 
+    size_t copy_bytes = win->pixel_bytes;
     if (byte_len != win->pixel_bytes)
     {
         user_atk_present_log_mismatch(handle, win->pixel_bytes, byte_len);
-        user_atk_window_release(win);
-        return -1;
+        if (byte_len < copy_bytes)
+        {
+            copy_bytes = byte_len;
+        }
     }
 
-    if (!user_copy_from_user(win->pixels, pixels, byte_len))
+    if (copy_bytes > 0 && !user_copy_from_user(win->pixels, pixels, copy_bytes))
     {
+        spinlock_unlock(&win->pixel_lock);
         user_atk_window_release(win);
         return -1;
     }
+    if (copy_bytes < win->pixel_bytes)
+    {
+        size_t remaining = win->pixel_bytes - copy_bytes;
+        memset((uint8_t *)win->pixels + copy_bytes, 0, remaining);
+    }
+    if (byte_len != win->pixel_bytes && win->content_height > 0)
+    {
+        win->pixel_bytes = byte_len;
+        size_t stride = byte_len / (size_t)win->content_height;
+        if (stride >= sizeof(video_color_t))
+        {
+            win->stride_bytes = (int)stride;
+        }
+    }
+    spinlock_unlock(&win->pixel_lock);
     user_atk_log("present dst ptr=", (uintptr_t)win->pixels);
     if (win->window)
     {
@@ -718,7 +786,7 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
             user_atk_window_release(win);
             return 0;
         }
-        wait_queue_wait(&win->event_waiters, user_atk_event_queue_empty, win);
+        wait_queue_wait(&win->event_waiters, user_atk_event_ready, win);
     }
 
     if (!user_copy_to_user(event_out, &event, sizeof(event)))
@@ -749,17 +817,33 @@ int64_t user_atk_sys_close(uint32_t handle)
 
 void user_atk_on_process_destroy(process_t *process)
 {
-    user_atk_window_t *win = g_windows_head;
-    while (win)
+    if (!process)
     {
-        user_atk_window_t *next = win->next;
-        if (win->owner == process)
+        return;
+    }
+
+    while (1)
+    {
+        user_atk_windows_lock();
+        user_atk_window_t *target = NULL;
+        for (user_atk_window_t *win = g_windows_head; win; win = win->next)
         {
-            user_atk_window_retain(win);
-            user_atk_remove(win, false);
-            user_atk_window_release(win);
+            if (win->owner == process)
+            {
+                user_atk_window_retain(win);
+                target = win;
+                break;
+            }
         }
-        win = next;
+        user_atk_windows_unlock();
+
+        if (!target)
+        {
+            break;
+        }
+
+        user_atk_remove(target, false);
+        user_atk_window_release(target);
     }
 }
 
@@ -796,11 +880,14 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
     }
 #endif
 
+    spinlock_lock(&win->event_lock);
+
     if (user_atk_try_coalesce_mouse(win, event))
     {
 #if USER_ATK_DEBUG
         user_atk_log_pair("coalesce mouse", win->handle, event->flags);
 #endif
+        spinlock_unlock(&win->event_lock);
         return;
     }
 
@@ -812,13 +899,21 @@ static void user_atk_queue_event(user_atk_window_t *win, const user_atk_event_t 
         win->event_count--;
     }
     win->event_count++;
+    spinlock_unlock(&win->event_lock);
     wait_queue_wake_one(&win->event_waiters);
 }
 
 static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_event)
 {
-    if (!win || win->event_count == 0)
+    if (!win)
     {
+        return false;
+    }
+
+    spinlock_lock(&win->event_lock);
+    if (win->event_count == 0)
+    {
+        spinlock_unlock(&win->event_lock);
         return false;
     }
     if (out_event)
@@ -833,6 +928,7 @@ static bool user_atk_pop_event(user_atk_window_t *win, user_atk_event_t *out_eve
 #endif
     win->event_head = (win->event_head + 1) % USER_ATK_EVENT_QUEUE_MAX;
     win->event_count--;
+    spinlock_unlock(&win->event_lock);
     return true;
 }
 
@@ -853,14 +949,17 @@ static void user_atk_send_close_event(user_atk_window_t *win)
     user_atk_queue_event(win, &event);
 }
 
-static bool user_atk_event_queue_empty(void *context)
+static bool user_atk_event_ready(void *context)
 {
     user_atk_window_t *win = (user_atk_window_t *)context;
     if (!win)
     {
         return false;
     }
-    return (win->event_count == 0) && !win->closed;
+    spinlock_lock(&win->event_lock);
+    bool ready = (win->event_count > 0);
+    spinlock_unlock(&win->event_lock);
+    return ready;
 }
 
 static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_event_t *event)
@@ -903,8 +1002,18 @@ static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_e
 
 static void user_atk_apply_priorities(void)
 {
-    process_t *focus_owner = (g_focus_window && !g_focus_window->closed) ? g_focus_window->owner : NULL;
-    process_t *capture_owner = (g_capture_window && !g_capture_window->closed) ? g_capture_window->owner : NULL;
+    user_atk_windows_lock();
+    if (g_focus_window && g_focus_window->closed)
+    {
+        g_focus_window = NULL;
+    }
+    if (g_capture_window && g_capture_window->closed)
+    {
+        g_capture_window = NULL;
+    }
+
+    process_t *focus_owner = g_focus_window ? g_focus_window->owner : NULL;
+    process_t *capture_owner = g_capture_window ? g_capture_window->owner : NULL;
 
     if (g_capture_priority_owner && g_capture_priority_owner != capture_owner)
     {
@@ -956,4 +1065,5 @@ static void user_atk_apply_priorities(void)
     {
         g_capture_priority_owner = NULL;
     }
+    user_atk_windows_unlock();
 }

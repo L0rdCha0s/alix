@@ -336,15 +336,18 @@ static void fault_dump_bytes(uint64_t rip)
     {
         return;
     }
-    serial_printf("%s", "  instr bytes:");
+    static const char hex[] = "0123456789ABCDEF";
+    char buf[4] = { ' ', '0', '0', '\0' };
+    serial_early_write_string("  instr bytes:");
     for (size_t i = 0; i < 16; ++i)
     {
         uintptr_t addr = (uintptr_t)(rip + i);
         uint8_t byte = *((volatile uint8_t *)addr);
-        serial_printf("%s", " ");
-        serial_printf("%02X", (unsigned int)(byte));
+        buf[1] = hex[(byte >> 4) & 0xF];
+        buf[2] = hex[byte & 0xF];
+        serial_early_write_string(buf);
     }
-    serial_printf("%s", "\r\n");
+    serial_early_write_string("\r\n");
 }
 
 static void pic_remap(void)

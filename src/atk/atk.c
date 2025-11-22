@@ -29,6 +29,16 @@
 #include "vfs.h"
 #endif
 
+#define ATK_MAX_BG_RECTS 64
+
+typedef struct
+{
+    int x;
+    int y;
+    int width;
+    int height;
+} atk_bg_rect_t;
+
 #if defined(KERNEL_BUILD) && ATK_DEBUG
 #define ATK_MOUSE_LOG(...) serial_printf(__VA_ARGS__)
 #else
@@ -205,9 +215,21 @@ static void atk_paint_background_region(const atk_state_t *state, int x, int y, 
         return;
     }
 
-    video_draw_rect(x, y, width, height, state->theme.background);
+    bool have_wall = g_atk_background.loaded && g_atk_background.pixels;
+    bool wall_covers_screen = have_wall &&
+                              g_atk_background.width  >= VIDEO_WIDTH &&
+                              g_atk_background.height >= VIDEO_HEIGHT;
 
-    if (!g_atk_background.loaded || !g_atk_background.pixels)
+    /* If the wallpaper covers the whole screen, avoid painting the solid
+     * theme background first to prevent visible flashes during resize.
+     * For partial wallpapers we still clear to the theme color so uncovered
+     * areas stay deterministic. */
+    if (!have_wall || !wall_covers_screen)
+    {
+        video_draw_rect(x, y, width, height, state->theme.background);
+    }
+
+    if (!have_wall)
     {
         return;
     }
@@ -264,6 +286,158 @@ static void atk_paint_background_region(const atk_state_t *state, int x, int y, 
     video_draw_rect(x, y, width, height, state->theme.background);
 }
 #endif
+
+static bool atk_rect_overlap(const atk_bg_rect_t *a, const atk_bg_rect_t *b)
+{
+    if (!a || !b || a->width <= 0 || a->height <= 0 || b->width <= 0 || b->height <= 0)
+    {
+        return false;
+    }
+    int ax1 = a->x + a->width;
+    int ay1 = a->y + a->height;
+    int bx1 = b->x + b->width;
+    int by1 = b->y + b->height;
+    return !(ax1 <= b->x || ay1 <= b->y || bx1 <= a->x || by1 <= a->y);
+}
+
+static int atk_rect_subtract(const atk_bg_rect_t *src,
+                             const atk_bg_rect_t *mask,
+                             atk_bg_rect_t *out,
+                             int out_cap)
+{
+    if (!src || src->width <= 0 || src->height <= 0 || out_cap <= 0)
+    {
+        return 0;
+    }
+    if (!mask || mask->width <= 0 || mask->height <= 0 || !atk_rect_overlap(src, mask))
+    {
+        out[0] = *src;
+        return 1;
+    }
+
+    int ox0 = src->x > mask->x ? src->x : mask->x;
+    int oy0 = src->y > mask->y ? src->y : mask->y;
+    int ox1 = (src->x + src->width) < (mask->x + mask->width) ? (src->x + src->width) : (mask->x + mask->width);
+    int oy1 = (src->y + src->height) < (mask->y + mask->height) ? (src->y + src->height) : (mask->y + mask->height);
+
+    int count = 0;
+
+    /* Top strip */
+    if (src->y < oy0 && count < out_cap)
+    {
+        out[count++] = (atk_bg_rect_t){ src->x, src->y, src->width, oy0 - src->y };
+    }
+
+    /* Bottom strip */
+    int src_y1 = src->y + src->height;
+    if (oy1 < src_y1 && count < out_cap)
+    {
+        out[count++] = (atk_bg_rect_t){ src->x, oy1, src->width, src_y1 - oy1 };
+    }
+
+    int mid_y = oy0;
+    int mid_h = oy1 - oy0;
+    if (mid_h > 0)
+    {
+        /* Left strip */
+        if (src->x < ox0 && count < out_cap)
+        {
+            out[count++] = (atk_bg_rect_t){ src->x, mid_y, ox0 - src->x, mid_h };
+        }
+        /* Right strip */
+        int src_x1 = src->x + src->width;
+        if (ox1 < src_x1 && count < out_cap)
+        {
+            out[count++] = (atk_bg_rect_t){ ox1, mid_y, src_x1 - ox1, mid_h };
+        }
+    }
+
+    return count;
+}
+
+static void atk_window_bounds(const atk_widget_t *window, atk_bg_rect_t *out)
+{
+    if (!window || !out)
+    {
+        return;
+    }
+    out->x = window->x - ATK_WINDOW_BORDER;
+    out->y = window->y - ATK_WINDOW_BORDER;
+    out->width = window->width + ATK_WINDOW_BORDER * 2;
+    out->height = window->height + ATK_WINDOW_BORDER * 2;
+}
+
+static int atk_mask_background_regions(const atk_state_t *state,
+                                       const atk_bg_rect_t *initial,
+                                       atk_bg_rect_t *out_list,
+                                       int out_cap)
+{
+    if (!initial || !out_list || out_cap <= 0)
+    {
+        return 0;
+    }
+
+    atk_bg_rect_t current[ATK_MAX_BG_RECTS];
+    int current_count = 1;
+    current[0] = *initial;
+
+    /* Mask menu bar */
+    int menu_h = atk_menu_bar_height(state);
+    if (menu_h > 0)
+    {
+        atk_bg_rect_t mask = { 0, 0, VIDEO_WIDTH, menu_h };
+        atk_bg_rect_t next[ATK_MAX_BG_RECTS];
+        int next_count = 0;
+        for (int i = 0; i < current_count && next_count < ATK_MAX_BG_RECTS; ++i)
+        {
+            next_count += atk_rect_subtract(&current[i],
+                                            &mask,
+                                            &next[next_count],
+                                            ATK_MAX_BG_RECTS - next_count);
+        }
+        memcpy(current, next, (size_t)next_count * sizeof(atk_bg_rect_t));
+        current_count = next_count;
+    }
+
+    /* Mask each window */
+    if (state)
+    {
+        atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
+        ATK_LIST_FOR_EACH(node, &state->windows)
+        {
+            atk_widget_t *window = (atk_widget_t *)node->value;
+            if (!window || !window->used)
+            {
+                continue;
+            }
+            atk_bg_rect_t mask;
+            atk_window_bounds(window, &mask);
+
+            atk_bg_rect_t next[ATK_MAX_BG_RECTS];
+            int next_count = 0;
+            for (int i = 0; i < current_count && next_count < ATK_MAX_BG_RECTS; ++i)
+            {
+                next_count += atk_rect_subtract(&current[i],
+                                                &mask,
+                                                &next[next_count],
+                                                ATK_MAX_BG_RECTS - next_count);
+            }
+            memcpy(current, next, (size_t)next_count * sizeof(atk_bg_rect_t));
+            current_count = next_count;
+            if (current_count == 0)
+            {
+                break;
+            }
+        }
+    }
+
+    if (current_count > out_cap)
+    {
+        current_count = out_cap;
+    }
+    memcpy(out_list, current, (size_t)current_count * sizeof(atk_bg_rect_t));
+    return current_count;
+}
 
 #define ATK_RESIZE_EDGE_LEFT   (1u << 0)
 #define ATK_RESIZE_EDGE_TOP    (1u << 1)
@@ -521,21 +695,17 @@ void atk_render(void)
         goto out;
     }
 
-    bool full = (region.x == 0 &&
-                 region.y == 0 &&
-                 region.width >= VIDEO_WIDTH &&
-                 region.height >= VIDEO_HEIGHT);
-
-    if (full)
+    atk_bg_rect_t initial = { region.x, region.y, region.width, region.height };
+    atk_bg_rect_t rects[ATK_MAX_BG_RECTS];
+    int rect_count = atk_mask_background_regions(state, &initial, rects, ATK_MAX_BG_RECTS);
+    for (int i = 0; i < rect_count; ++i)
     {
-        atk_paint_background_region(state, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
-        atk_desktop_draw_buttons(state, NULL);
-        atk_window_draw_all(state, NULL);
-        atk_menu_bar_draw(state);
-        goto out;
+        atk_bg_rect_t *r = &rects[i];
+        if (r->width > 0 && r->height > 0)
+        {
+            atk_paint_background_region(state, r->x, r->y, r->width, r->height);
+        }
     }
-
-    atk_paint_background_region(state, region.x, region.y, region.width, region.height);
     atk_desktop_draw_buttons(state, &region);
     atk_window_draw_all(state, &region);
 
@@ -1232,7 +1402,11 @@ static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_
     atk_window_ensure_inside(win);
 
     atk_dirty_mark_rect(old_left, old_top, old_width, old_height);
-    /* Redraw the full scene during resize to avoid flicker across windows. */
+    atk_dirty_mark_rect(win->x - ATK_WINDOW_BORDER,
+                        win->y - ATK_WINDOW_BORDER,
+                        win->width + ATK_WINDOW_BORDER * 2,
+                        win->height + ATK_WINDOW_BORDER * 2);
+    /* Force a full redraw during resize to keep terminal state consistent. */
     atk_dirty_mark_rect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
     atk_window_request_layout(win);
     return true;

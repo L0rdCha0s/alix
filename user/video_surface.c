@@ -13,18 +13,28 @@ static uint32_t g_surface_width = VIDEO_WIDTH;
 static uint32_t g_surface_height = VIDEO_HEIGHT;
 static bool g_surface_dirty = false;
 static bool g_surface_track_dirty = false;
+static volatile int g_surface_lock = 0;
 
 static inline bool surface_ready(void)
 {
     return (g_surface != NULL && g_surface_width > 0 && g_surface_height > 0);
 }
 
+static inline void surface_lock(void)
+{
+    while (__sync_lock_test_and_set(&g_surface_lock, 1) != 0)
+    {
+        __asm__ volatile ("pause");
+    }
+}
+
+static inline void surface_unlock(void)
+{
+    __sync_lock_release(&g_surface_lock);
+}
+
 static inline void surface_touch(void)
 {
-    if (!surface_ready())
-    {
-        return;
-    }
     g_surface_dirty = true;
 }
 
@@ -39,21 +49,25 @@ void video_surface_attach(video_color_t *buffer, uint32_t width, uint32_t height
     surface_log("attach buffer=", (uintptr_t)buffer);
     surface_log("attach width=", width);
     surface_log("attach height=", height);
+    surface_lock();
     g_surface = buffer;
     g_surface_width = width;
     g_surface_height = height;
     g_surface_track_dirty = false;
     surface_touch();
+    surface_unlock();
 }
 
 void video_surface_detach(void)
 {
+    surface_lock();
     surface_log("detach buffer=", (uintptr_t)g_surface);
     g_surface = NULL;
     g_surface_width = 0;
     g_surface_height = 0;
     g_surface_dirty = false;
     g_surface_track_dirty = false;
+    surface_unlock();
 }
 
 video_color_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
@@ -80,8 +94,10 @@ void video_cursor_set_shape(video_cursor_shape_t shape)
 void video_fill(video_color_t color)
 {
     surface_log("fill color=", color);
+    surface_lock();
     if (!surface_ready())
     {
+        surface_unlock();
         return;
     }
     size_t pixels = (size_t)g_surface_width * (size_t)g_surface_height;
@@ -90,12 +106,15 @@ void video_fill(video_color_t color)
         g_surface[i] = color;
     }
     surface_touch();
+    surface_unlock();
 }
 
 static void video_draw_char(int x, int y, char c, video_color_t fg, video_color_t bg)
 {
+    surface_lock();
     if (!surface_ready())
     {
+        surface_unlock();
         return;
     }
 
@@ -128,6 +147,7 @@ static void video_draw_char(int x, int y, char c, video_color_t fg, video_color_
     {
         surface_touch();
     }
+    surface_unlock();
 }
 
 void video_draw_rect(int x, int y, int width, int height, video_color_t color)
@@ -136,8 +156,15 @@ void video_draw_rect(int x, int y, int width, int height, video_color_t color)
     surface_log("rect y=", y);
     surface_log("rect w=", width);
     surface_log("rect h=", height);
-    if (!surface_ready() || width <= 0 || height <= 0)
+    if (width <= 0 || height <= 0)
     {
+        return;
+    }
+
+    surface_lock();
+    if (!surface_ready())
+    {
+        surface_unlock();
         return;
     }
 
@@ -165,6 +192,7 @@ void video_draw_rect(int x, int y, int width, int height, video_color_t color)
         }
     }
     surface_touch();
+    surface_unlock();
 }
 
 void video_draw_rect_outline(int x, int y, int width, int height, video_color_t color)
@@ -276,8 +304,15 @@ void video_blit_rgba32(int x,
                        int stride_bytes,
                        bool use_alpha)
 {
-    if (!surface_ready() || !pixels || width <= 0 || height <= 0)
+    if (!pixels || width <= 0 || height <= 0)
     {
+        return;
+    }
+
+    surface_lock();
+    if (!surface_ready())
+    {
+        surface_unlock();
         return;
     }
 
@@ -302,6 +337,7 @@ void video_blit_rgba32(int x,
     int copy_h = y1 - y0;
     if (copy_w <= 0 || copy_h <= 0)
     {
+        surface_unlock();
         return;
     }
 
@@ -352,63 +388,91 @@ void video_blit_rgba32(int x,
         row += stride_bytes;
     }
     surface_touch();
+    surface_unlock();
 }
 
 bool video_is_active(void)
 {
-    return surface_ready();
+    surface_lock();
+    bool ready = surface_ready();
+    surface_unlock();
+    return ready;
 }
 
 void video_request_refresh(void)
 {
-    surface_touch();
+    surface_lock();
+    if (surface_ready())
+    {
+        surface_touch();
+    }
+    surface_unlock();
 }
 
 void video_request_refresh_window(struct atk_widget *window)
 {
     (void)window;
-    surface_touch();
+    surface_lock();
+    if (surface_ready())
+    {
+        surface_touch();
+    }
+    surface_unlock();
 }
 
 void video_pump_events(void) {}
 
 bool video_surface_has_dirty(void)
 {
-    return !g_surface_track_dirty || g_surface_dirty;
+    surface_lock();
+    bool dirty = (!g_surface_track_dirty || g_surface_dirty);
+    surface_unlock();
+    return dirty;
 }
 
 bool video_surface_consume_dirty(void)
 {
+    surface_lock();
     if (!g_surface_track_dirty)
     {
+        surface_unlock();
         return true;
     }
     if (!g_surface_dirty)
     {
+        surface_unlock();
         return false;
     }
     g_surface_dirty = false;
+    surface_unlock();
     return true;
 }
 
 void video_surface_force_dirty(void)
 {
+    surface_lock();
     if (surface_ready())
     {
         g_surface_dirty = true;
     }
+    surface_unlock();
 }
 
 void video_surface_set_tracking(bool enable)
 {
+    surface_lock();
     g_surface_track_dirty = enable;
     if (!enable)
     {
         g_surface_dirty = true;
     }
+    surface_unlock();
 }
 
 bool video_surface_tracking_enabled(void)
 {
-    return g_surface_track_dirty;
+    surface_lock();
+    bool enabled = g_surface_track_dirty;
+    surface_unlock();
+    return enabled;
 }
