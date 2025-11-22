@@ -7,6 +7,7 @@
 #include "arch/x86/smp_boot.h"
 #include "smp.h"
 #include "process.h"
+#include "spinlock.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -94,6 +95,22 @@ static bool g_paging_ready = false;
 static bool g_nx_supported = false;
 static bool g_smep_supported = false;
 static bool g_smap_supported = false;
+static spinlock_t g_paging_lock;
+
+static inline uint64_t paging_lock(void)
+{
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("cli" ::: "memory");
+    spinlock_lock(&g_paging_lock);
+    return flags;
+}
+
+static inline void paging_unlock(uint64_t flags)
+{
+    spinlock_unlock(&g_paging_lock);
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
+}
 
 static inline uintptr_t align_up(uintptr_t value, uintptr_t alignment)
 {
@@ -186,6 +203,14 @@ static inline void flush_local_tlb(void)
     write_cr3(read_cr3());
 }
 
+static bool paging_map_user_page_internal(paging_space_t *space,
+                                          uintptr_t virtual_addr,
+                                          uintptr_t physical_addr,
+                                          bool writable,
+                                          bool executable);
+
+static bool paging_unmap_user_page_internal(paging_space_t *space,
+                                            uintptr_t virtual_addr);
 static void paging_panic(const char *msg) __attribute__((noreturn));
 static void paging_panic(const char *msg)
 {
@@ -603,6 +628,7 @@ void paging_init(void)
         return;
     }
 
+    spinlock_init(&g_paging_lock);
     detect_features();
 
     paging_space_t kernel_space;
@@ -694,6 +720,18 @@ bool paging_map_user_page(paging_space_t *space,
                           bool writable,
                           bool executable)
 {
+    uint64_t flags = paging_lock();
+    bool ok = paging_map_user_page_internal(space, virtual_addr, physical_addr, writable, executable);
+    paging_unlock(flags);
+    return ok;
+}
+
+static bool paging_map_user_page_internal(paging_space_t *space,
+                                          uintptr_t virtual_addr,
+                                          uintptr_t physical_addr,
+                                          bool writable,
+                                          bool executable)
+{
     if (!space)
     {
         return false;
@@ -729,25 +767,37 @@ bool paging_map_user_range(paging_space_t *space,
         return false;
     }
 
+    uint64_t flags = paging_lock();
     uintptr_t virt = align_down(virtual_addr, PAGE_SIZE_BYTES);
     uintptr_t phys = align_down(physical_addr, PAGE_SIZE_BYTES);
     size_t remaining = align_up(length, PAGE_SIZE_BYTES);
 
     while (remaining > 0)
     {
-        if (!paging_map_user_page(space, virt, phys, writable, executable))
+        if (!paging_map_user_page_internal(space, virt, phys, writable, executable))
         {
+            paging_unlock(flags);
             return false;
         }
         virt += PAGE_SIZE_BYTES;
         phys += PAGE_SIZE_BYTES;
         remaining -= PAGE_SIZE_BYTES;
     }
+    paging_unlock(flags);
     return true;
 }
 
 bool paging_unmap_user_page(paging_space_t *space,
                             uintptr_t virtual_addr)
+{
+    uint64_t flags = paging_lock();
+    bool ok = paging_unmap_user_page_internal(space, virtual_addr);
+    paging_unlock(flags);
+    return ok;
+}
+
+static bool paging_unmap_user_page_internal(paging_space_t *space,
+                                            uintptr_t virtual_addr)
 {
     if (!space || !space->tables_base)
     {
@@ -763,6 +813,10 @@ bool paging_unmap_user_page(paging_space_t *space,
     uint64_t *pdpt = entry_to_table(pml4[pml4_idx]);
     size_t pdpt_idx = index_pdpt(virtual_addr);
     if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0)
+    {
+        return false;
+    }
+    if ((pdpt[pdpt_idx] & PAGE_PAGE_SIZE) != 0)
     {
         return false;
     }
@@ -793,6 +847,8 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
         return false;
     }
 
+    uint64_t lock_flags = paging_lock();
+
     /* Never flip permissions on the stack we are currently running on; doing so
      * would fault as soon as this function touches its own locals. */
     if (!writable)
@@ -806,6 +862,7 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
             uintptr_t range_end = align_up(virtual_addr + length, PAGE_SIZE_BYTES);
             if (!(range_end <= stack_start || range_start >= stack_end))
             {
+                paging_unlock(lock_flags);
                 return false;
             }
         }
@@ -821,11 +878,13 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
         uint64_t *pt = NULL;
         if (!ensure_page_table(space, start, false, &pt))
         {
+            paging_unlock(lock_flags);
             return false;
         }
         size_t pt_idx = index_pt(start);
         if ((pt[pt_idx] & PAGE_PRESENT) == 0)
         {
+            paging_unlock(lock_flags);
             return false;
         }
         if (writable)
@@ -856,6 +915,7 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
         paging_flush_space_tlb(&g_kernel_space);
     }
 
+    paging_unlock(lock_flags);
     return true;
 }
 
