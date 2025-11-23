@@ -25,6 +25,7 @@
 #include "build_features.h"
 #include <stddef.h>
 
+extern uintptr_t kernel_heap_base;
 extern uintptr_t kernel_heap_end;
 extern uint8_t __kernel_text_start[];
 extern uint8_t __kernel_data_end[];
@@ -576,9 +577,6 @@ static inline void write_cr3(uint64_t value)
     __asm__ volatile ("mov %0, %%cr3" :: "r"(value) : "memory");
 }
 
-extern uintptr_t kernel_heap_base;
-extern uintptr_t kernel_heap_end;
-
 static bool pointer_in_heap(uint64_t addr, size_t size)
 {
     uint64_t heap_start = (uint64_t)kernel_heap_base;
@@ -834,6 +832,7 @@ static uintptr_t thread_stack_watch_default_suspect(thread_t *thread)
     return 0;
 }
 
+static void thread_quarantine_corrupt(thread_t *thread, const char *reason);
 static void thread_stack_watch_clear_snapshot(thread_t *thread)
 {
 #if ENABLE_STACK_WRITE_DEBUG
@@ -847,6 +846,70 @@ static void thread_stack_watch_clear_snapshot(thread_t *thread)
     thread->stack_watch_timeout_count = 0;
 #else
     (void)thread;
+#endif
+}
+
+static bool thread_saved_frame_valid(thread_t *thread, const char *label)
+{
+#if ENABLE_STACK_WRITE_DEBUG
+    if (!thread || !thread->context || !thread->stack_base)
+    {
+        return true;
+    }
+
+    /* Avoid spinning on the lock if the thread is currently running. */
+    if (thread->state == THREAD_STATE_RUNNING)
+    {
+        return true;
+    }
+
+    spinlock_lock(&thread->context_lock);
+
+    uintptr_t ctx = (uintptr_t)thread->context;
+    uintptr_t lower = (uintptr_t)thread->stack_base;
+    uintptr_t upper = thread->kernel_stack_top;
+    size_t needed = (size_t)((CONTEXT_SWITCH_SAVED_WORDS + 1ULL) * sizeof(uint64_t));
+    if (ctx < lower || upper < ctx || (upper - ctx) < needed)
+    {
+        serial_printf("[sched] stack watch: context out of range thread=%s pid=0x%016llX ctx=0x%016llX bounds=[0x%016llX,0x%016llX) label=%s\r\n",
+                      thread->name[0] ? thread->name : "<unnamed>",
+                      (unsigned long long)(thread->process ? thread->process->pid : 0),
+                      (unsigned long long)ctx,
+                      (unsigned long long)lower,
+                      (unsigned long long)upper,
+                      label ? label : "<none>");
+        spinlock_unlock(&thread->context_lock);
+        thread_quarantine_corrupt(thread, "stack_watch_ctx_oob");
+        return false;
+    }
+
+    const uint64_t *ctx_words = (const uint64_t *)ctx;
+    uint64_t saved_rflags = ctx_words[CONTEXT_SWITCH_SAVED_WORDS - 1];
+    uint64_t resume_rip = ctx_words[CONTEXT_SWITCH_SAVED_WORDS];
+    bool rip_canonical = pointer_is_canonical((uintptr_t)resume_rip);
+    bool rip_in_kernel = rip_canonical &&
+                         resume_rip >= (uint64_t)(uintptr_t)__kernel_text_start &&
+                         resume_rip <  (uint64_t)(uintptr_t)__kernel_data_end;
+    bool rflags_reserved_ok = (saved_rflags & RFLAGS_RESERVED_BIT) != 0;
+    spinlock_unlock(&thread->context_lock);
+
+    if (rip_in_kernel && rflags_reserved_ok)
+    {
+        return true;
+    }
+
+    serial_printf("[sched] stack watch: invalid saved frame thread=%s pid=0x%016llX rip=0x%016llX rflags=0x%016llX label=%s\r\n",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  (unsigned long long)resume_rip,
+                  (unsigned long long)saved_rflags,
+                  label ? label : "<none>");
+    thread_quarantine_corrupt(thread, rip_in_kernel ? "stack_watch_rflags" : "stack_watch_rip");
+    return false;
+#else
+    (void)thread;
+    (void)label;
+    return true;
 #endif
 }
 
@@ -1050,7 +1113,7 @@ static void thread_stack_watch_deactivate(thread_t *thread);
 static void thread_free_resources(thread_t *thread);
 static void thread_enqueue_deferred_free(thread_t *thread);
 static bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *stats);
-static void thread_quarantine_corrupt(thread_t *thread, const char *reason);
+static bool thread_saved_frame_valid(thread_t *thread, const char *label);
 
 static void thread_registry_add(thread_t *thread)
 {
@@ -1134,6 +1197,12 @@ static bool thread_stack_watch_arm_now(thread_t *thread)
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
         serial_printf("%s", "[sched] stack watch abort: bad stack metadata\r\n");
 #endif
+        return false;
+    }
+
+    const char *label = thread->stack_watch_context ? thread->stack_watch_context : "stack_watch";
+    if (!thread_saved_frame_valid(thread, label))
+    {
         return false;
     }
 
@@ -5092,6 +5161,59 @@ static bool switch_to_thread(thread_t *next)
         sanitize_gs_base(next);
         thread_stack_watch_deactivate(next);
 
+        /* Validate the saved resume RIP before changing address space/MSRs. */
+        uint64_t resume_rip = 0;
+        uint64_t saved_rflags = 0;
+        bool rip_in_kernel = false;
+        bool rflags_reserved_ok = false;
+        spinlock_lock(&next->context_lock);
+        const uint64_t *ctx_words = (const uint64_t *)next->context;
+        if (ctx_words)
+        {
+            resume_rip = ctx_words[CONTEXT_SWITCH_SAVED_WORDS];
+            saved_rflags = ctx_words[CONTEXT_SWITCH_SAVED_WORDS - 1];
+            bool rip_canonical = pointer_is_canonical((uintptr_t)resume_rip);
+            rip_in_kernel = rip_canonical &&
+                            resume_rip >= (uint64_t)(uintptr_t)__kernel_text_start &&
+                            resume_rip <  (uint64_t)(uintptr_t)__kernel_data_end;
+            rflags_reserved_ok = (saved_rflags & RFLAGS_RESERVED_BIT) != 0;
+        }
+        spinlock_unlock(&next->context_lock);
+        if (!rip_in_kernel || !rflags_reserved_ok)
+        {
+            serial_printf("[sched] switch_to cancelled: invalid resume rip thread=%s pid=0x%016llX rip=0x%016llX ctx=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+                          next->name[0] ? next->name : "<unnamed>",
+                          (unsigned long long)(next->process ? next->process->pid : 0),
+                          (unsigned long long)resume_rip,
+                          (unsigned long long)(uintptr_t)next->context,
+                          (unsigned long long)((uintptr_t)next->stack_base),
+                          (unsigned long long)(next->kernel_stack_top));
+            if (!rflags_reserved_ok)
+            {
+                serial_printf("[sched] switch_to detail: bad saved rflags=0x%016llX (missing reserved bit)\r\n",
+                              (unsigned long long)saved_rflags);
+            }
+
+            thread_quarantine_corrupt(next, "invalid_resume_rip");
+
+            if (next_process)
+            {
+                paging_space_clear_active_cpu(&next_process->address_space, cpu_idx);
+            }
+            if (prev)
+            {
+                prev->state = THREAD_STATE_RUNNING;
+            }
+            if (prev_process)
+            {
+                prev_process->state = PROCESS_STATE_RUNNING;
+                paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
+            }
+            set_current_thread_local(prev);
+            set_current_process_local(prev_process);
+            return false;
+        }
+
         uint64_t desired_cr3 = next_process ? next_process->cr3 : read_cr3();
         if (desired_cr3 && desired_cr3 != read_cr3())
         {
@@ -5128,45 +5250,6 @@ static bool switch_to_thread(thread_t *next)
         wrmsr(MSR_FS_BASE, fsb);
         wrmsr(MSR_GS_BASE, gsb);
         fpu_restore_state(&next->fpu_state);
-
-        /*
-         * Validate the saved resume RIP before we try to switch. A corrupted
-         * context (e.g., freed/overwritten stack) can leave a garbage return
-         * address that will fault as soon as we return. Treat obviously bad
-         * RIPs as a failed switch target and pick another thread.
-         */
-        const uint64_t *ctx_words = (const uint64_t *)next->context;
-        uint64_t resume_rip = ctx_words[CONTEXT_SWITCH_SAVED_WORDS];
-        bool rip_canonical = pointer_is_canonical((uintptr_t)resume_rip);
-        bool rip_in_kernel = rip_canonical &&
-                             resume_rip >= (uint64_t)(uintptr_t)__kernel_text_start &&
-                             resume_rip <  (uint64_t)(uintptr_t)__kernel_data_end;
-        if (!rip_in_kernel)
-        {
-            serial_printf("[sched] switch_to cancelled: invalid resume rip thread=%s pid=0x%016llX rip=0x%016llX ctx=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
-                          next->name[0] ? next->name : "<unnamed>",
-                          (unsigned long long)(next->process ? next->process->pid : 0),
-                          (unsigned long long)resume_rip,
-                          (unsigned long long)(uintptr_t)next->context,
-                          (unsigned long long)((uintptr_t)next->stack_base),
-                          (unsigned long long)(next->kernel_stack_top));
-            /* Restore state for the current thread and abort this switch attempt. */
-            if (prev)
-            {
-                prev->state = THREAD_STATE_RUNNING;
-            }
-            if (prev_process)
-            {
-                prev_process->state = PROCESS_STATE_RUNNING;
-            }
-            set_current_thread_local(prev);
-            set_current_process_local(prev_process);
-            if (prev_process && prev_process != next_process)
-            {
-                paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
-            }
-            return false;
-        }
 
         scheduler_debug_check_resume(next, "switch_to");
     }
