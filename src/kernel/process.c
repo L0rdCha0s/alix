@@ -204,6 +204,7 @@ struct thread
     thread_tls_t tls;
     process_t *process;
     cpu_context_t *context;
+    spinlock_t context_lock;
     bool context_valid;
     uint8_t *stack_base;
     uint8_t *stack_guard_base;
@@ -367,7 +368,6 @@ static thread_t *g_sleep_queue_head = NULL;
 static uint64_t g_next_pid = 1;
 static spinlock_t g_sleep_queue_lock;
 static spinlock_t g_process_lock;
-
 static volatile bool g_scheduler_boot_ready = false;
 
 static fpu_state_t g_fpu_initial_state;
@@ -2184,13 +2184,22 @@ void thread_disable_context_guard(thread_t *thread)
 static void thread_context_guard_update(thread_t *thread, const char *label)
 {
 #if ENABLE_CONTEXT_GUARD
-    if (thread && !thread->context_guard_enabled)
+    if (!thread)
     {
+        return;
+    }
+
+    spinlock_lock(&thread->context_lock);
+
+    if (!thread->context_guard_enabled)
+    {
+        spinlock_unlock(&thread->context_lock);
         return;
     }
     thread_check_context_bounds(thread, label);
     if (!thread || !thread->context)
     {
+        spinlock_unlock(&thread->context_lock);
         return;
     }
     const uint64_t *words = NULL;
@@ -2201,6 +2210,7 @@ static void thread_context_guard_update(thread_t *thread, const char *label)
         thread->context_guard_ptr = 0;
         thread->context_guard_count = 0;
         memset(thread->context_guard_words, 0, sizeof(thread->context_guard_words));
+        spinlock_unlock(&thread->context_lock);
         return;
     }
     size_t copy_words = (available < CONTEXT_GUARD_WORDS) ? available : (size_t)CONTEXT_GUARD_WORDS;
@@ -2214,6 +2224,7 @@ static void thread_context_guard_update(thread_t *thread, const char *label)
     thread->context_guard_hash = thread_compute_context_guard(thread);
     thread->context_guard_ptr = (uintptr_t)thread->context;
     thread->context_guard_generation++;
+    spinlock_unlock(&thread->context_lock);
 #else
     (void)thread;
     (void)label;
@@ -2223,17 +2234,25 @@ static void thread_context_guard_update(thread_t *thread, const char *label)
 static void thread_context_guard_verify(thread_t *thread, const char *label)
 {
 #if ENABLE_CONTEXT_GUARD
-    if (thread && !thread->context_guard_enabled)
+    if (!thread || !thread->context_valid)
     {
+        return;
+    }
+    spinlock_lock(&thread->context_lock);
+    if (!thread->context_valid || !thread->context_guard_enabled)
+    {
+        spinlock_unlock(&thread->context_lock);
         return;
     }
     thread_check_context_bounds(thread, label);
     if (!thread || !thread->context_guard_hash || !thread->context)
     {
+        spinlock_unlock(&thread->context_lock);
         return;
     }
     if (thread->context_guard_ptr != (uintptr_t)thread->context)
     {
+        spinlock_unlock(&thread->context_lock);
         thread_context_guard_update(thread, "context_guard_resync");
         return;
     }
@@ -2241,6 +2260,7 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
     size_t available = thread_context_guard_collect(thread, &current_words);
     if (available == 0 || !current_words)
     {
+        spinlock_unlock(&thread->context_lock);
         return;
     }
     size_t compare_words = thread->context_guard_count;
@@ -2262,6 +2282,7 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
     }
     if (!mismatch)
     {
+        spinlock_unlock(&thread->context_lock);
         return;
     }
     /* If the saved context pointer is unchanged and the thread is not running,
@@ -2278,6 +2299,7 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
                       (unsigned long long)(thread->process ? thread->process->pid : 0),
                       (unsigned long long)(thread->context_guard_hash),
                       (unsigned long long)(current_hash));
+        spinlock_unlock(&thread->context_lock);
         thread_context_guard_update(thread, "context_guard_resync_soft");
         return;
     }
@@ -2290,6 +2312,7 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
                   (unsigned long long)((uintptr_t)thread->context),
                   (unsigned long long)(thread->context_guard_hash),
                   (unsigned long long)(current_hash));
+    spinlock_unlock(&thread->context_lock);
     thread_context_guard_update(thread, "context_guard_resync_soft");
     return;
 #endif
@@ -3676,6 +3699,7 @@ static thread_t *thread_create(process_t *process,
     thread->fs_base = 0;
     thread->gs_base = (uint64_t)&thread->tls;
     thread->fpu_initialized = true;
+    spinlock_init(&thread->context_lock);
     thread->waiting_queue = NULL;
     thread->wait_queue_next = NULL;
     thread->magic = THREAD_MAGIC;
@@ -4177,7 +4201,9 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue)
                 bool ctx_ok = thread_context_in_bounds(thread, "dequeue_revalidate");
                 if (ctx_ok)
                 {
+                    spinlock_lock(&thread->context_lock);
                     thread->context_valid = true;
+                    spinlock_unlock(&thread->context_lock);
 #if ENABLE_CONTEXT_GUARD
                     if (thread->context_guard_enabled)
                     {
@@ -5011,14 +5037,15 @@ static bool switch_to_thread(thread_t *next)
         next->preempt_pending = false;
 
         thread_context_guard_release_pages(next);
-        thread_context_guard_verify(next, "switch_to");
         if (next->stack_watch_blocked)
         {
             serial_printf("[sched] switch_to cancelled: stack watch active thread=%s pid=0x%016llX context=%s\r\n",
                           next->name[0] ? next->name : "<unnamed>",
                           (unsigned long long)(next->process ? next->process->pid : 0),
                           next->context_guard_freeze_label ? next->context_guard_freeze_label : "<none>");
+            spinlock_lock(&next->context_lock);
             next->context_valid = true;
+            spinlock_unlock(&next->context_lock);
             next->state = THREAD_STATE_BLOCKED;
             if (prev)
             {
@@ -5160,7 +5187,9 @@ static bool switch_to_thread(thread_t *next)
     /* Only mark context invalid when we're truly about to switch. */
     if (next)
     {
+        spinlock_lock(&next->context_lock);
         next->context_valid = false;
+        spinlock_unlock(&next->context_lock);
         scheduler_shell_log("context_valid=false (switch_to)", next);
     }
 
@@ -5207,7 +5236,9 @@ static bool switch_to_thread(thread_t *next)
         wrmsr(MSR_GS_BASE, sanitize_gs_base(resumed));
 
         thread_context_guard_release_pages(resumed);
+        spinlock_lock(&resumed->context_lock);
         resumed->context_valid = true;
+        spinlock_unlock(&resumed->context_lock);
 #if ENABLE_CONTEXT_GUARD
         if (resumed->context_guard_enabled)
         {
@@ -5279,7 +5310,9 @@ static void scheduler_schedule(bool requeue_current)
             current->state = THREAD_STATE_READY;
             current->time_slice_remaining = scheduler_time_slice_ticks();
             current->preempt_pending = false;
+            spinlock_lock(&current->context_lock);
             current->context_valid = true;
+            spinlock_unlock(&current->context_lock);
             current->in_transition = true;
             // scheduler_shell_log("context_valid=true (requeue)", current);
             // scheduler_trace("[sched] requeue current;", current);
@@ -5309,7 +5342,9 @@ static void scheduler_schedule(bool requeue_current)
     {
         current->state = THREAD_STATE_RUNNING;
         current->preempt_pending = false;
+        spinlock_lock(&current->context_lock);
         current->context_valid = true;
+        spinlock_unlock(&current->context_lock);
         current->in_transition = false;
         cpu_restore_flags(flags);
         scheduler_log_if_stalled("scheduler_schedule(run_current)", sched_watch);
@@ -5337,9 +5372,11 @@ static void scheduler_schedule(bool requeue_current)
         }
             if (next == current)
             {
-                current->state = THREAD_STATE_RUNNING;
-                current->preempt_pending = false;
+            current->state = THREAD_STATE_RUNNING;
+            current->preempt_pending = false;
+                spinlock_lock(&current->context_lock);
                 current->context_valid = true;
+                spinlock_unlock(&current->context_lock);
                 current->in_transition = false;
                 cpu_restore_flags(flags);
                 scheduler_log_if_stalled("scheduler_schedule(requeue)", sched_watch);
