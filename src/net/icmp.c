@@ -104,40 +104,12 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
     char macbuf[13];
     net_format_ipv4(target_ip, ipbuf);
     net_format_mac(target_mac, macbuf);
-    serial_printf("%s", "icmp: send echo id=0x");
-    serial_printf("%04X", identifier);
-    serial_printf("%s", " seq=0x");
-    serial_printf("%04X", sequence);
-    serial_printf("%s", " target=");
-    serial_printf("%s", ipbuf);
-    serial_printf("%s", " mac=");
-    serial_printf("%s", macbuf);
-    serial_printf("%s", " len=");
-
-    char lenbuf[12];
-    size_t len_idx = 0;
-    size_t send_len_copy = frame_len;
-    if (send_len_copy == 0)
-    {
-        lenbuf[len_idx++] = '0';
-    }
-    else
-    {
-        char tmp[12];
-        size_t tmp_idx = 0;
-        while (send_len_copy > 0 && tmp_idx < sizeof(tmp))
-        {
-            tmp[tmp_idx++] = (char)('0' + (send_len_copy % 10));
-            send_len_copy /= 10;
-        }
-        while (tmp_idx > 0)
-        {
-            lenbuf[len_idx++] = tmp[--tmp_idx];
-        }
-    }
-    lenbuf[len_idx] = '\0';
-    serial_printf("%s", lenbuf);
-    serial_printf("%s", "\r\n");
+    serial_printf("icmp: send echo id=0x%04X seq=0x%04X target=%s mac=%s len=%zu\r\n",
+                  identifier,
+                  sequence,
+                  ipbuf,
+                  macbuf,
+                  frame_len);
 
     const size_t dump_len = frame_len < 64 ? frame_len : 64;
     {
@@ -154,13 +126,13 @@ bool net_icmp_send_echo(net_interface_t *iface, const uint8_t target_mac[6],
         for (size_t i = 0; i < dump_len && pos + 3 < sizeof(line); ++i)
         {
             uint8_t byte = buffer[i];
-            line[pos++] = ' ';
             const char hex[] = "0123456789ABCDEF";
+            line[pos++] = (i == 0) ? ' ' : ' ';
             line[pos++] = hex[(byte >> 4) & 0xF];
             line[pos++] = hex[byte & 0xF];
         }
         line[pos] = '\0';
-        serial_printf("%s", line);
+        serial_printf("%s\r\n", line);
     }
 
     bool ok = net_if_send_copy(iface, buffer, frame_len);

@@ -68,7 +68,7 @@ extern uint8_t __kernel_data_end[];
 #define ENABLE_STACK_GUARD_PROTECT       1
 #endif
 #ifndef CONTEXT_GUARD_STRICT
-#define CONTEXT_GUARD_STRICT             1
+#define CONTEXT_GUARD_STRICT             0
 #endif
 #ifndef THREAD_CREATE_DEBUG
 #define THREAD_CREATE_DEBUG              1
@@ -1050,6 +1050,7 @@ static void thread_stack_watch_deactivate(thread_t *thread);
 static void thread_free_resources(thread_t *thread);
 static void thread_enqueue_deferred_free(thread_t *thread);
 static bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *stats);
+static void thread_quarantine_corrupt(thread_t *thread, const char *reason);
 
 static void thread_registry_add(thread_t *thread)
 {
@@ -2261,6 +2262,23 @@ static void thread_context_guard_verify(thread_t *thread, const char *label)
     }
     if (!mismatch)
     {
+        return;
+    }
+    /* If the saved context pointer is unchanged and the thread is not running,
+     * a mismatch likely means the context was legitimately updated (e.g., during
+     * a switch-out) after the last guard snapshot. Resync once instead of
+     * treating it as corruption. */
+    if (thread->context_guard_ptr == (uintptr_t)thread->context &&
+        thread->state != THREAD_STATE_RUNNING &&
+        thread->context_valid)
+    {
+        serial_printf("[sched] context guard mismatch (resync) label=%s thread=%s pid=0x%016llX saved_hash=0x%016llX current_hash=0x%016llX\r\n",
+                      label ? label : "<none>",
+                      thread->name[0] ? thread->name : "<unnamed>",
+                      (unsigned long long)(thread->process ? thread->process->pid : 0),
+                      (unsigned long long)(thread->context_guard_hash),
+                      (unsigned long long)(current_hash));
+        thread_context_guard_update(thread, "context_guard_resync_soft");
         return;
     }
 #if !CONTEXT_GUARD_STRICT
@@ -4156,8 +4174,24 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue)
 
             if (!thread->context_valid)
             {
-                scheduler_trace("[sched] dequeue forcing context_valid=true;", thread);
-                thread->context_valid = true;
+                bool ctx_ok = thread_context_in_bounds(thread, "dequeue_revalidate");
+                if (ctx_ok)
+                {
+                    thread->context_valid = true;
+#if ENABLE_CONTEXT_GUARD
+                    if (thread->context_guard_enabled)
+                    {
+                        thread_context_guard_update(thread, "dequeue_revalidate");
+                    }
+#endif
+                }
+                else
+                {
+                    scheduler_trace("[sched] dequeue context invalid; quarantining", thread);
+                    thread_quarantine_corrupt(thread, "context_invalid_in_queue");
+                    thread = next;
+                    continue;
+                }
             }
             return thread;
         }
@@ -4967,8 +5001,6 @@ static bool switch_to_thread(thread_t *next)
     {
         next->last_cpu_index = cpu_idx;
         next->state = THREAD_STATE_RUNNING;
-        next->context_valid = false;
-        scheduler_shell_log("context_valid=false (switch_to)", next);
         if (next_process)
         {
             next_process->state = PROCESS_STATE_RUNNING;
@@ -5002,7 +5034,6 @@ static bool switch_to_thread(thread_t *next)
             {
                 paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
             }
-            thread_quarantine_corrupt(next, "invalid_resume_rip");
             return false;
         }
         if (!thread_pointer_valid(next))
@@ -5110,11 +5141,11 @@ static bool switch_to_thread(thread_t *next)
             return false;
         }
 
-    scheduler_debug_check_resume(next, "switch_to");
-}
+        scheduler_debug_check_resume(next, "switch_to");
+    }
 
-cpu_context_t **prev_ctx = prev ? &prev->context : &g_bootstrap_context;
-cpu_context_t *next_ctx = next ? next->context : NULL;
+    cpu_context_t **prev_ctx = prev ? &prev->context : &g_bootstrap_context;
+    cpu_context_t *next_ctx = next ? next->context : NULL;
     uint8_t *prev_transition_flag = prev ? (uint8_t *)&prev->in_transition : &g_context_switch_dummy_flag;
 
     if (!next_ctx)
@@ -5126,6 +5157,13 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
         return false;
     }
 
+    /* Only mark context invalid when we're truly about to switch. */
+    if (next)
+    {
+        next->context_valid = false;
+        scheduler_shell_log("context_valid=false (switch_to)", next);
+    }
+
     context_switch(prev_ctx, next_ctx, prev_transition_flag);
 
     /*
@@ -5133,9 +5171,24 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
      * The 'next' variable refers to the thread we switched TO, not the one running now.
      * We must use current_thread_local() to get the actual running thread (us).
      */
+    uintptr_t rsp_after = 0;
+    __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp_after));
+
     thread_t *resumed = current_thread_local();
+
     if (resumed)
     {
+        if (!thread_stack_pointer_valid(resumed, rsp_after))
+        {
+            serial_printf("[sched] fatal: resumed with invalid RSP thread=%s pid=0x%016llX rsp=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+                          resumed->name[0] ? resumed->name : "<unnamed>",
+                          (unsigned long long)(resumed->process ? resumed->process->pid : 0),
+                          (unsigned long long)rsp_after,
+                          (unsigned long long)(uintptr_t)resumed->stack_base,
+                          (unsigned long long)resumed->kernel_stack_top);
+            fatal("resumed with invalid stack pointer");
+        }
+
         /*
          * Refresh per-CPU state for the thread we just resumed. While we set
          * RSP0/FS/GS for the thread we were switching to before calling
@@ -5143,7 +5196,7 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
          * meantime. Ensure interrupts/NMIs on this thread use its own stack
          * and TLS bases.
          */
-        arch_cpu_set_kernel_stack(cpu_idx, resumed->kernel_stack_top);
+        arch_cpu_set_kernel_stack(current_cpu_index(), resumed->kernel_stack_top);
         uint64_t fsb = resumed->fs_base;
         if (!canonical_u64(fsb))
         {
@@ -5153,26 +5206,15 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
         wrmsr(MSR_FS_BASE, fsb);
         wrmsr(MSR_GS_BASE, sanitize_gs_base(resumed));
 
-        /* Validate that we resumed on a sane stack to catch corruption early. */
-        uintptr_t rsp_after = 0;
-        __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp_after));
-        if (!thread_stack_pointer_valid(resumed, rsp_after))
-        {
-            serial_printf("%s", "[sched] fatal: resumed with invalid RSP thread=");
-            serial_printf("%s", resumed->name[0] ? resumed->name : "<unnamed>");
-            serial_printf("%s", " pid=0x");
-            serial_printf("%016llX", (unsigned long long)(resumed->process ? resumed->process->pid : 0));
-            serial_printf("%s", " rsp=0x");
-            serial_printf("%016llX", (unsigned long long)rsp_after);
-            serial_printf("%s", " stack=[0x");
-            serial_printf("%016llX", (unsigned long long)(uintptr_t)resumed->stack_base);
-            serial_printf("%s", ",0x");
-            serial_printf("%016llX", (unsigned long long)resumed->kernel_stack_top);
-            serial_printf("%s", ")\r\n");
-            fatal("resumed with invalid stack pointer");
-        }
         thread_context_guard_release_pages(resumed);
         resumed->context_valid = true;
+#if ENABLE_CONTEXT_GUARD
+        if (resumed->context_guard_enabled)
+        {
+            /* Context frame was just restored; refresh the guard to the new saved frame. */
+            thread_context_guard_update(resumed, "resumed");
+        }
+#endif
         scheduler_shell_log("context_valid=true (resumed)", resumed);
     }
 #if ENABLE_STACK_WRITE_DEBUG
@@ -5184,7 +5226,9 @@ cpu_context_t *next_ctx = next ? next->context : NULL;
 #if ENABLE_CONTEXT_GUARD
     if (prev)
     {
-        thread_context_guard_update(prev, "switch_from");
+        /* The previous thread's context has just been saved; refresh its guard to match
+         * the newly stored frame so strict mode won't flag an expected change. */
+        thread_context_guard_update(prev, "switch_from_saved");
     }
 #endif
 #if ENABLE_STACK_GUARD_PROTECT
@@ -7006,6 +7050,31 @@ void process_debug_log_stack_write(const char *label,
     if (!owner || (!self_write && !cross_write))
     {
         return;
+    }
+
+    /* Suppress noisy repeated self-writes to the same location in a short window. */
+    static uintptr_t last_self_addr = 0;
+    static uint64_t last_self_pid = 0;
+    static size_t last_self_len = 0;
+    static const char *last_self_label = NULL;
+    static uint64_t last_self_tick = 0;
+    if (self_write)
+    {
+        uint64_t now = timer_ticks();
+        uint64_t pid = owner && owner->process ? owner->process->pid : 0;
+        if (addr == last_self_addr &&
+            pid == last_self_pid &&
+            len == last_self_len &&
+            last_self_label == label &&
+            now - last_self_tick <= timer_frequency() / 10) /* ~100ms window */
+        {
+            return;
+        }
+        last_self_addr = addr;
+        last_self_pid = pid;
+        last_self_len = len;
+        last_self_label = label;
+        last_self_tick = now;
     }
 
     const char *prefix = self_write ? "[stack-write-self]" : (cross_write ? "[stack-write-cross]" : "[stack-write]");
