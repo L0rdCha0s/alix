@@ -45,6 +45,99 @@ typedef struct
 #define ATK_MOUSE_LOG(...) ((void)0)
 #endif
 
+#ifndef ATK_DRAG_DEBUG
+#define ATK_DRAG_DEBUG 0
+#endif
+
+static inline void atk_drag_log(const char *label,
+                                const atk_state_t *state,
+                                const atk_widget_t *window,
+                                const video_color_t *scene,
+                                int scene_w,
+                                int scene_h,
+                                int scene_stride,
+                                const video_color_t *win_surface,
+                                int win_w,
+                                int win_h,
+                                int win_stride,
+                                int region_x0,
+                                int region_y0,
+                                int region_x1,
+                                int region_y1)
+{
+    if (!ATK_DRAG_DEBUG)
+    {
+        return;
+    }
+#ifdef KERNEL_BUILD
+    serial_printf("[atk][drag] %s state=0x%016llX win=0x%016llX scene=0x%016llX sw=%u sh=%u sstride=%u win_surf=0x%016llX ww=%u wh=%u wstride=%u region=(%d,%d)-(%d,%d)\r\n",
+                  label ? label : "?",
+                  (unsigned long long)((uint64_t)(uintptr_t)state),
+                  (unsigned long long)((uint64_t)(uintptr_t)window),
+                  (unsigned long long)((uint64_t)(uintptr_t)scene),
+                  (unsigned)scene_w,
+                  (unsigned)scene_h,
+                  (unsigned)scene_stride,
+                  (unsigned long long)((uint64_t)(uintptr_t)win_surface),
+                  (unsigned)win_w,
+                  (unsigned)win_h,
+                  (unsigned)win_stride,
+                  region_x0,
+                  region_y0,
+                  region_x1,
+                  region_y1);
+#else
+    serial_printf("[atk][drag user] %s state=0x%016llX win=0x%016llX scene=0x%016llX sw=%u sh=%u sstride=%u win_surf=0x%016llX ww=%u wh=%u wstride=%u region=(%d,%d)-(%d,%d)\n",
+                  label ? label : "?",
+                  (unsigned long long)((uint64_t)(uintptr_t)state),
+                  (unsigned long long)((uint64_t)(uintptr_t)window),
+                  (unsigned long long)((uint64_t)(uintptr_t)scene),
+                  (unsigned)scene_w,
+                  (unsigned)scene_h,
+                  (unsigned)scene_stride,
+                  (unsigned long long)((uint64_t)(uintptr_t)win_surface),
+                  (unsigned)win_w,
+                  (unsigned)win_h,
+                  (unsigned)win_stride,
+                  region_x0,
+                  region_y0,
+                  region_x1,
+                  region_y1);
+#endif
+}
+
+static inline void atk_drag_log_blit(const char *label,
+                                     const video_color_t *src,
+                                     int stride_bytes,
+                                     int w,
+                                     int h,
+                                     int dst_x,
+                                     int dst_y)
+{
+#ifdef KERNEL_BUILD
+    if (!ATK_DRAG_DEBUG)
+    {
+        return;
+    }
+    serial_printf("[atk][drag blit] %s src=0x%016llX stride=%u w=%u h=%u dst=(%d,%d)\r\n",
+                  label ? label : "?",
+                  (unsigned long long)((uint64_t)(uintptr_t)src),
+                  (unsigned)stride_bytes,
+                  (unsigned)w,
+                  (unsigned)h,
+                  dst_x,
+                  dst_y);
+#else
+    (void)label;
+    (void)src;
+    (void)stride_bytes;
+    (void)w;
+    (void)h;
+    (void)dst_x;
+    (void)dst_y;
+#endif
+}
+
 static void atk_apply_default_theme(atk_state_t *state);
 static __attribute__((unused)) void action_exit_to_text(atk_widget_t *button, void *context);
 static void atk_build_mouse_event(const atk_widget_t *widget,
@@ -66,6 +159,14 @@ static bool atk_dispatch_widget_mouse(atk_state_t *state,
                                       uint64_t event_id,
                                       atk_mouse_event_result_t *result);
 static void atk_clear_focus_widget(atk_state_t *state);
+static void atk_window_bounds_full(const atk_widget_t *window, int *x, int *y, int *w, int *h);
+static bool atk_ensure_surface(video_color_t **buf, int *cur_w, int *cur_h, int *stride_bytes, int target_w, int target_h);
+static bool atk_drag_prepare(atk_state_t *state, atk_widget_t *window);
+static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y);
+static void atk_drag_finish(atk_state_t *state);
+static void atk_render_scene_without(atk_state_t *state, const atk_widget_t *skip);
+static void atk_resize_band_draw(atk_state_t *state, int x, int y, int w, int h);
+static void atk_resize_band_clear(atk_state_t *state);
 #ifndef ATK_NO_DESKTOP_APPS
 static void action_open_task_manager(atk_widget_t *button, void *context);
 static void action_open_atk_terminal(atk_widget_t *button, void *context);
@@ -439,6 +540,160 @@ static int atk_mask_background_regions(const atk_state_t *state,
     }
     memcpy(out_list, current, (size_t)current_count * sizeof(atk_bg_rect_t));
     return current_count;
+}
+
+static __attribute__((unused)) void atk_render_scene_without(atk_state_t *state, const atk_widget_t *skip)
+{
+#ifndef KERNEL_BUILD
+    (void)state;
+    (void)skip;
+    return;
+#else
+    if (!state)
+    {
+        return;
+    }
+
+    if (!atk_state_theme_validate(state, "render_scene_without"))
+    {
+        atk_apply_default_theme(state);
+    }
+
+#ifdef KERNEL_BUILD
+    atk_background_reload_if_needed();
+#endif
+
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    atk_rect_t full = { 0, 0, screen_w, screen_h };
+
+    atk_paint_background_region(state, 0, 0, screen_w, screen_h);
+    atk_desktop_draw_buttons(state, &full);
+    atk_window_draw_all_except(state, &full, skip);
+
+    int menu_bottom = atk_menu_bar_height(state);
+    if (menu_bottom > 0)
+    {
+        atk_menu_bar_draw(state);
+    }
+#endif
+}
+
+#ifdef KERNEL_BUILD
+static void atk_resize_band_clear(atk_state_t *state)
+{
+    if (!state || !state->resize_band.active)
+    {
+        return;
+    }
+    video_overlay_restore(state->resize_band.x,
+                          state->resize_band.y,
+                          state->resize_band.width,
+                          state->resize_band.height);
+    state->resize_band.active = false;
+}
+
+static void atk_resize_band_draw(atk_state_t *state, int x, int y, int w, int h)
+{
+    if (!state || w <= 0 || h <= 0)
+    {
+        return;
+    }
+    atk_resize_band_clear(state);
+    state->resize_band.active = true;
+    state->resize_band.x = x;
+    state->resize_band.y = y;
+    state->resize_band.width = w;
+    state->resize_band.height = h;
+    video_color_t color = video_make_color(0xFF, 0xFF, 0xFF);
+    video_overlay_rect_outline(x, y, w, h, color);
+}
+#else
+static void atk_resize_band_clear(atk_state_t *state)
+{
+    if (state)
+    {
+        state->resize_band.active = false;
+    }
+}
+
+static void atk_resize_band_draw(atk_state_t *state, int x, int y, int w, int h)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    if (state)
+    {
+        state->resize_band.active = false;
+    }
+}
+#endif
+
+static void atk_window_bounds_full(const atk_widget_t *window, int *x, int *y, int *w, int *h)
+{
+    int bx = 0, by = 0, bw = 0, bh = 0;
+    if (window && window->used)
+    {
+        const atk_window_priv_t *priv = (const atk_window_priv_t *)atk_widget_priv(window, &ATK_WINDOW_CLASS);
+        bool chrome_visible = priv ? priv->chrome_visible : true;
+        bx = window->x;
+        by = window->y;
+        bw = window->width;
+        bh = window->height;
+        if (chrome_visible)
+        {
+            bx -= ATK_WINDOW_BORDER;
+            by -= ATK_WINDOW_BORDER;
+            bw += ATK_WINDOW_BORDER * 2;
+            bh += ATK_WINDOW_BORDER * 2;
+        }
+    }
+    if (x) *x = bx;
+    if (y) *y = by;
+    if (w) *w = bw;
+    if (h) *h = bh;
+}
+
+static __attribute__((unused)) bool atk_ensure_surface(video_color_t **buf, int *cur_w, int *cur_h, int *stride_bytes, int target_w, int target_h)
+{
+#ifndef KERNEL_BUILD
+    (void)buf;
+    (void)cur_w;
+    (void)cur_h;
+    (void)stride_bytes;
+    (void)target_w;
+    (void)target_h;
+    return false;
+#else
+    if (!buf || target_w <= 0 || target_h <= 0)
+    {
+        return false;
+    }
+
+    int desired_stride = target_w * (int)sizeof(video_color_t);
+    if (*buf && cur_w && cur_h && stride_bytes &&
+        *cur_w == target_w && *cur_h == target_h && *stride_bytes == desired_stride)
+    {
+        return true;
+    }
+
+    size_t bytes = (size_t)target_w * (size_t)target_h * sizeof(video_color_t);
+    video_color_t *new_buf = (video_color_t *)malloc(bytes);
+    if (!new_buf)
+    {
+        return false;
+    }
+    if (*buf)
+    {
+        free(*buf);
+    }
+    *buf = new_buf;
+    if (cur_w) *cur_w = target_w;
+    if (cur_h) *cur_h = target_h;
+    if (stride_bytes) *stride_bytes = desired_stride;
+    return true;
+#endif
 }
 
 #define ATK_RESIZE_EDGE_LEFT   (1u << 0)
@@ -896,6 +1151,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                     state->dragging_window = win;
                     state->drag_offset_x = cursor_x - win->x;
                     state->drag_offset_y = cursor_y - win->y;
+                    state->drag_active = atk_drag_prepare(state, win);
                     handled = true;
                 }
             }
@@ -975,10 +1231,34 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         {
             if (state->resizing_window)
             {
+                atk_widget_t *win = state->resizing_window;
+                atk_resize_band_clear(state);
+                int old_bx = 0, old_by = 0, old_bw = 0, old_bh = 0;
+                atk_window_bounds_full(win, &old_bx, &old_by, &old_bw, &old_bh);
+
+                win->x = state->resize_proposed_x;
+                win->y = state->resize_proposed_y;
+                win->width = state->resize_proposed_w;
+                win->height = state->resize_proposed_h;
+                atk_window_ensure_inside(win);
+
+                int new_bx = 0, new_by = 0, new_bw = 0, new_bh = 0;
+                atk_window_bounds_full(win, &new_bx, &new_by, &new_bw, &new_bh);
+
+                atk_dirty_mark_rect(old_bx, old_by, old_bw, old_bh);
+                atk_dirty_mark_rect(new_bx, new_by, new_bw, new_bh);
+                atk_window_request_layout(win);
+                result.redraw = true;
                 state->resizing_window = NULL;
                 state->resize_edges = 0;
             }
-            state->dragging_window = NULL;
+            if (state->dragging_window)
+            {
+                atk_drag_finish(state);
+                state->dragging_window = NULL;
+                state->drag_active = false;
+                result.redraw = true;
+            }
             if (state->dragging_desktop_button)
             {
                 state->dragging_desktop_button = NULL;
@@ -1013,32 +1293,34 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
     if (left_pressed && state->resizing_window && state->resizing_window->used)
     {
-        if (atk_window_resize_drag(state, cursor_x, cursor_y))
-        {
-            result.redraw = true;
-        }
+        atk_window_resize_drag(state, cursor_x, cursor_y);
     }
     else if (left_pressed && state->dragging_window && state->dragging_window->used)
     {
-        atk_widget_t *win = state->dragging_window;
-        int old_x = win->x;
-        int old_y = win->y;
-        int old_width = win->width;
-        int old_height = win->height;
-
-        int new_x = cursor_x - state->drag_offset_x;
-        int new_y = cursor_y - state->drag_offset_y;
-        win->x = new_x;
-        win->y = new_y;
-        atk_window_ensure_inside(win);
-        if (win->x != old_x || win->y != old_y)
+        if (state->drag_active)
         {
-            atk_dirty_mark_rect(old_x - ATK_WINDOW_BORDER,
-                                old_y - ATK_WINDOW_BORDER,
-                                old_width + ATK_WINDOW_BORDER * 2,
-                                old_height + ATK_WINDOW_BORDER * 2);
-            atk_window_mark_dirty(win);
-            result.redraw = true;
+            atk_drag_step(state, cursor_x, cursor_y);
+        }
+        else
+        {
+            atk_widget_t *win = state->dragging_window;
+            int old_bx = 0, old_by = 0, old_bw = 0, old_bh = 0;
+            atk_window_bounds_full(win, &old_bx, &old_by, &old_bw, &old_bh);
+
+            int new_x = cursor_x - state->drag_offset_x;
+            int new_y = cursor_y - state->drag_offset_y;
+            win->x = new_x;
+            win->y = new_y;
+            atk_window_ensure_inside(win);
+            int new_bx = 0, new_by = 0, new_bw = 0, new_bh = 0;
+            atk_window_bounds_full(win, &new_bx, &new_by, &new_bw, &new_bh);
+
+            if (new_bx != old_bx || new_by != old_by)
+            {
+                atk_dirty_mark_rect(old_bx, old_by, old_bw, old_bh);
+                atk_window_mark_dirty(win);
+                result.redraw = true;
+            }
         }
     }
 
@@ -1324,6 +1606,11 @@ static bool atk_window_begin_resize(atk_state_t *state,
     state->resize_start_y = window->y;
     state->resize_start_width = window->width;
     state->resize_start_height = window->height;
+    state->resize_proposed_x = window->x;
+    state->resize_proposed_y = window->y;
+    state->resize_proposed_w = window->width;
+    state->resize_proposed_h = window->height;
+    atk_resize_band_clear(state);
     state->dragging_window = NULL;
     return true;
 }
@@ -1340,11 +1627,6 @@ static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_
     {
         return false;
     }
-
-    int old_left = win->x - ATK_WINDOW_BORDER;
-    int old_top = win->y - ATK_WINDOW_BORDER;
-    int old_width = win->width + ATK_WINDOW_BORDER * 2;
-    int old_height = win->height + ATK_WINDOW_BORDER * 2;
 
     int new_x = state->resize_start_x;
     int new_y = state->resize_start_y;
@@ -1391,27 +1673,352 @@ static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_
         }
     }
 
-    if (new_width == win->width && new_height == win->height &&
-        new_x == win->x && new_y == win->y)
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    if (new_width > screen_w)
+    {
+        new_width = screen_w;
+    }
+    if (new_height > screen_h)
+    {
+        new_height = screen_h;
+    }
+    if (new_x < 0) new_x = 0;
+    if (new_y < 0) new_y = 0;
+    if (new_x + new_width > screen_w) new_x = screen_w - new_width;
+    if (new_y + new_height > screen_h) new_y = screen_h - new_height;
+
+    if (new_width == state->resize_proposed_w &&
+        new_height == state->resize_proposed_h &&
+        new_x == state->resize_proposed_x &&
+        new_y == state->resize_proposed_y)
     {
         return false;
     }
 
+    state->resize_proposed_x = new_x;
+    state->resize_proposed_y = new_y;
+    state->resize_proposed_w = new_width;
+    state->resize_proposed_h = new_height;
+
+    const atk_window_priv_t *priv = (const atk_window_priv_t *)atk_widget_priv(win, &ATK_WINDOW_CLASS);
+    int border = (priv && priv->chrome_visible) ? ATK_WINDOW_BORDER : 0;
+    int band_x = new_x - border;
+    int band_y = new_y - border;
+    int band_w = new_width + border * 2;
+    int band_h = new_height + border * 2;
+    atk_resize_band_draw(state, band_x, band_y, band_w, band_h);
+    return true;
+}
+
+static bool atk_drag_prepare(atk_state_t *state, atk_widget_t *window)
+{
+#ifndef KERNEL_BUILD
+    (void)state;
+    (void)window;
+    return false;
+#else
+    if (!state || !window || !window->used)
+    {
+        return false;
+    }
+    state->drag_scene_valid = false;
+    state->drag_active = false;
+    state->drag_window_surface = NULL;
+
+    int bx = 0, by = 0, bw = 0, bh = 0;
+    atk_window_bounds_full(window, &bx, &by, &bw, &bh);
+
+    atk_window_priv_t *priv = (atk_window_priv_t *)atk_widget_priv(window, &ATK_WINDOW_CLASS);
+    if (!priv)
+    {
+        return false;
+    }
+
+    if (!atk_ensure_surface(&priv->surface,
+                            &priv->surface_width,
+                            &priv->surface_height,
+                            &priv->surface_stride_bytes,
+                            bw,
+                            bh))
+    {
+        return false;
+    }
+    priv->surface_stride_bytes = bw * (int)sizeof(video_color_t);
+
+    video_copy_backbuffer(bx, by, bw, bh, priv->surface, priv->surface_stride_bytes);
+    priv->surface_valid = true;
+
+    state->drag_window_surface = priv->surface;
+    state->drag_window_w = bw;
+    state->drag_window_h = bh;
+    state->drag_window_stride_bytes = priv->surface_stride_bytes;
+    state->drag_prev_x = bx;
+    state->drag_prev_y = by;
+    atk_drag_log("prepare",
+                 state,
+                 window,
+                 state->drag_scene,
+                 state->drag_scene_w,
+                 state->drag_scene_h,
+                 state->drag_scene_stride_bytes,
+                 state->drag_window_surface,
+                 state->drag_window_w,
+                 state->drag_window_h,
+                 state->drag_window_stride_bytes,
+                 bx,
+                 by,
+                 bx + bw,
+                 by + bh);
+
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    if (!atk_ensure_surface(&state->drag_scene,
+                            &state->drag_scene_w,
+                            &state->drag_scene_h,
+                            &state->drag_scene_stride_bytes,
+                            screen_w,
+                            screen_h))
+    {
+        return false;
+    }
+    state->drag_scene_stride_bytes = screen_w * (int)sizeof(video_color_t);
+
+    atk_render_scene_without(state, window);
+    video_copy_backbuffer(0, 0, screen_w, screen_h, state->drag_scene, state->drag_scene_stride_bytes);
+    state->drag_scene_valid = true;
+
+    /* Put the window back where it was so the screen remains stable. */
+    video_blit_rgba32(bx, by, bw, bh, state->drag_window_surface, state->drag_window_stride_bytes, false);
+    state->drag_active = true;
+    atk_drag_log("prepare_done",
+                 state,
+                 window,
+                 state->drag_scene,
+                 state->drag_scene_w,
+                 state->drag_scene_h,
+                 state->drag_scene_stride_bytes,
+                 state->drag_window_surface,
+                 state->drag_window_w,
+                 state->drag_window_h,
+                 state->drag_window_stride_bytes,
+                 bx,
+                 by,
+                 bx + bw,
+                 by + bh);
+    return true;
+#endif
+}
+
+static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
+{
+#ifndef KERNEL_BUILD
+    (void)state;
+    (void)cursor_x;
+    (void)cursor_y;
+    return;
+#else
+    if (!state || !state->drag_active || !state->drag_scene_valid || !state->drag_window_surface)
+    {
+        return;
+    }
+
+    atk_widget_t *win = state->dragging_window;
+    if (!win || !win->used)
+    {
+        return;
+    }
+
+    /* Validate surfaces before using them; keep copies within allocation bounds. */
+    if (!state->drag_scene ||
+        state->drag_scene_w <= 0 ||
+        state->drag_scene_h <= 0 ||
+        state->drag_scene_stride_bytes <= 0 ||
+        !state->drag_window_surface ||
+        state->drag_window_w <= 0 ||
+        state->drag_window_h <= 0 ||
+        state->drag_window_stride_bytes <= 0)
+    {
+        state->drag_active = false;
+        atk_window_mark_dirty(win);
+        return;
+    }
+
+    int new_x = cursor_x - state->drag_offset_x;
+    int new_y = cursor_y - state->drag_offset_y;
     win->x = new_x;
     win->y = new_y;
-    win->width = new_width;
-    win->height = new_height;
     atk_window_ensure_inside(win);
 
-    atk_dirty_mark_rect(old_left, old_top, old_width, old_height);
-    atk_dirty_mark_rect(win->x - ATK_WINDOW_BORDER,
-                        win->y - ATK_WINDOW_BORDER,
-                        win->width + ATK_WINDOW_BORDER * 2,
-                        win->height + ATK_WINDOW_BORDER * 2);
-    /* Force a full redraw during resize to keep terminal state consistent. */
-    atk_dirty_mark_rect(0, 0, video_screen_width(), video_screen_height());
-    atk_window_request_layout(win);
-    return true;
+    int new_bx = 0, new_by = 0;
+    atk_window_bounds_full(win, &new_bx, &new_by, NULL, NULL);
+
+    int old_x = state->drag_prev_x;
+    int old_y = state->drag_prev_y;
+    int w = state->drag_window_w;
+    int h = state->drag_window_h;
+
+    int x0 = (new_bx < old_x) ? new_bx : old_x;
+    int y0 = (new_by < old_y) ? new_by : old_y;
+    int x1 = (new_bx + w > old_x + w) ? (new_bx + w) : (old_x + w);
+    int y1 = (new_by + h > old_y + h) ? (new_by + h) : (old_y + h);
+
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > screen_w) x1 = screen_w;
+    if (y1 > screen_h) y1 = screen_h;
+    if (x1 > state->drag_scene_w) x1 = state->drag_scene_w;
+    if (y1 > state->drag_scene_h) y1 = state->drag_scene_h;
+    if (x0 >= x1 || y0 >= y1)
+    {
+        return;
+    }
+
+    /* Clamp region to buffer bounds to avoid overruns. */
+    size_t scene_pixels = (size_t)state->drag_scene_w * (size_t)state->drag_scene_h;
+    size_t scene_min_stride = (size_t)state->drag_scene_w * sizeof(video_color_t);
+    if ((size_t)state->drag_scene_stride_bytes < scene_min_stride)
+    {
+        return;
+    }
+    int region_w = x1 - x0;
+    int region_h = y1 - y0;
+    size_t scene_offset = (size_t)y0 * (size_t)state->drag_scene_w + (size_t)x0;
+    size_t scene_max_needed = scene_offset + (size_t)(region_h - 1) * (size_t)state->drag_scene_w + (size_t)(region_w - 1);
+    if (scene_offset >= scene_pixels || scene_max_needed >= scene_pixels)
+    {
+        atk_drag_log("scene_bounds_reject",
+                     state,
+                     win,
+                     state->drag_scene,
+                     state->drag_scene_w,
+                     state->drag_scene_h,
+                     state->drag_scene_stride_bytes,
+                     state->drag_window_surface,
+                     state->drag_window_w,
+                     state->drag_window_h,
+                     state->drag_window_stride_bytes,
+                     x0,
+                     y0,
+                     x1,
+                     y1);
+        return;
+    }
+
+    size_t win_pixels = (size_t)state->drag_window_w * (size_t)state->drag_window_h;
+    size_t win_min_stride = (size_t)state->drag_window_w * sizeof(video_color_t);
+    if ((size_t)state->drag_window_stride_bytes < win_min_stride)
+    {
+        atk_drag_log("win_stride_reject",
+                     state,
+                     win,
+                     state->drag_scene,
+                     state->drag_scene_w,
+                     state->drag_scene_h,
+                     state->drag_scene_stride_bytes,
+                     state->drag_window_surface,
+                     state->drag_window_w,
+                     state->drag_window_h,
+                     state->drag_window_stride_bytes,
+                     x0,
+                     y0,
+                     x1,
+                     y1);
+        return;
+    }
+    size_t win_max_needed_bytes = (size_t)(h - 1) * (size_t)state->drag_window_stride_bytes + (size_t)(w - 1) * sizeof(video_color_t);
+    if (win_max_needed_bytes / sizeof(video_color_t) >= win_pixels)
+    {
+        atk_drag_log("win_bounds_reject",
+                     state,
+                     win,
+                     state->drag_scene,
+                     state->drag_scene_w,
+                     state->drag_scene_h,
+                     state->drag_scene_stride_bytes,
+                     state->drag_window_surface,
+                     state->drag_window_w,
+                     state->drag_window_h,
+                     state->drag_window_stride_bytes,
+                     x0,
+                     y0,
+                     x1,
+                     y1);
+        return;
+    }
+
+    atk_drag_log("step",
+                 state,
+                 win,
+                 state->drag_scene,
+                 state->drag_scene_w,
+                 state->drag_scene_h,
+                 state->drag_scene_stride_bytes,
+                 state->drag_window_surface,
+                 state->drag_window_w,
+                 state->drag_window_h,
+                 state->drag_window_stride_bytes,
+                 x0,
+                 y0,
+                 x1,
+                 y1);
+
+    const video_color_t *scene_base = state->drag_scene +
+                                      (size_t)y0 * (size_t)state->drag_scene_w +
+                                      (size_t)x0;
+    atk_drag_log_blit("scene_copy",
+                      scene_base,
+                      state->drag_scene_stride_bytes,
+                      region_w,
+                      region_h,
+                      x0,
+                      y0);
+    video_blit_rgba32(x0,
+                      y0,
+                      x1 - x0,
+                      y1 - y0,
+                      scene_base,
+                      state->drag_scene_stride_bytes,
+                      false);
+
+    atk_drag_log_blit("win_overlay",
+                      state->drag_window_surface,
+                      state->drag_window_stride_bytes,
+                      w,
+                      h,
+                      new_bx,
+                      new_by);
+    video_blit_rgba32(new_bx,
+                      new_by,
+                      w,
+                      h,
+                      state->drag_window_surface,
+                      state->drag_window_stride_bytes,
+                      false);
+
+    state->drag_prev_x = new_bx;
+    state->drag_prev_y = new_by;
+#endif
+}
+
+static void atk_drag_finish(atk_state_t *state)
+{
+    if (!state)
+    {
+        return;
+    }
+    state->drag_active = false;
+    state->drag_scene_valid = false;
+    state->drag_window_surface = NULL;
+    if (state->drag_window_w > 0 && state->drag_window_h > 0)
+    {
+        atk_dirty_mark_rect(state->drag_prev_x,
+                            state->drag_prev_y,
+                            state->drag_window_w,
+                            state->drag_window_h);
+    }
 }
 
 static video_cursor_shape_t atk_cursor_shape_for_edges(uint32_t edges)

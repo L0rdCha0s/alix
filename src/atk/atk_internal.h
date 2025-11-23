@@ -74,6 +74,12 @@ typedef struct
     void *user_context;
     void (*on_destroy)(void *context);
     bool chrome_visible;
+    /* Cached surface of the window (including chrome). */
+    video_color_t *surface;
+    int surface_width;
+    int surface_height;
+    int surface_stride_bytes;
+    bool surface_valid;
 } atk_window_priv_t;
 
 typedef struct
@@ -150,6 +156,34 @@ typedef struct atk_state
     int dirty_y0;
     int dirty_x1;
     int dirty_y1;
+
+    /* Fast-move/resize compositing state */
+    video_color_t *drag_scene; /* full-screen scene without the actively dragged window */
+    int drag_scene_w;
+    int drag_scene_h;
+    int drag_scene_stride_bytes;
+    bool drag_scene_valid;
+    video_color_t *drag_window_surface;
+    int drag_window_w;
+    int drag_window_h;
+    int drag_window_stride_bytes;
+    int drag_prev_x;
+    int drag_prev_y;
+    bool drag_active;
+
+    struct
+    {
+        bool active;
+        int x;
+        int y;
+        int width;
+        int height;
+    } resize_band;
+
+    int resize_proposed_x;
+    int resize_proposed_y;
+    int resize_proposed_w;
+    int resize_proposed_h;
 } atk_state_t;
 
 extern const atk_class_t ATK_WIDGET_CLASS;

@@ -47,6 +47,14 @@ void video_blit_rgba32(int x,
                        const video_color_t *pixels,
                        int stride_bytes,
                        bool use_alpha);
+void video_copy_backbuffer(int x,
+                           int y,
+                           int width,
+                           int height,
+                           video_color_t *dst,
+                           int dst_stride_bytes);
+void video_overlay_restore(int x, int y, int width, int height);
+void video_overlay_rect_outline(int x, int y, int width, int height, video_color_t color);
 bool video_is_active(void);
 void video_request_refresh(void);
 void video_request_refresh_window(struct atk_widget *window);

@@ -83,6 +83,31 @@ void atk_window_reset_all(atk_state_t *state)
     state->resize_start_y = 0;
     state->resize_start_width = 0;
     state->resize_start_height = 0;
+    if (state->drag_scene)
+    {
+        free(state->drag_scene);
+        state->drag_scene = NULL;
+    }
+    state->drag_scene_w = 0;
+    state->drag_scene_h = 0;
+    state->drag_scene_stride_bytes = 0;
+    state->drag_scene_valid = false;
+    state->drag_window_surface = NULL;
+    state->drag_window_w = 0;
+    state->drag_window_h = 0;
+    state->drag_window_stride_bytes = 0;
+    state->drag_prev_x = 0;
+    state->drag_prev_y = 0;
+    state->drag_active = false;
+    state->resize_band.active = false;
+    state->resize_band.x = 0;
+    state->resize_band.y = 0;
+    state->resize_band.width = 0;
+    state->resize_band.height = 0;
+    state->resize_proposed_x = 0;
+    state->resize_proposed_y = 0;
+    state->resize_proposed_w = 0;
+    state->resize_proposed_h = 0;
     state->pressed_window_button_window = 0;
     state->pressed_window_button = 0;
     state->focus_widget = NULL;
@@ -121,6 +146,32 @@ void atk_window_draw_all(const atk_state_t *state, const atk_rect_t *clip)
         atk_widget_t *window = (atk_widget_t *)node->value;
         if (window && window->used)
         {
+            if (!window_intersects_clip(window, clip))
+            {
+                continue;
+            }
+            window_draw_internal(state, window);
+        }
+    }
+}
+
+void atk_window_draw_all_except(const atk_state_t *state, const atk_rect_t *clip, const atk_widget_t *skip)
+{
+    if (!state)
+    {
+        return;
+    }
+
+    atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
+    ATK_LIST_FOR_EACH(node, &state->windows)
+    {
+        atk_widget_t *window = (atk_widget_t *)node->value;
+        if (window && window->used)
+        {
+            if (skip && window == skip)
+            {
+                continue;
+            }
             if (!window_intersects_clip(window, clip))
             {
                 continue;
@@ -323,6 +374,11 @@ void atk_window_mark_dirty(const atk_widget_t *window)
     {
         return;
     }
+    atk_window_priv_t *priv = window_priv_mut((atk_widget_t *)window);
+    if (priv)
+    {
+        priv->surface_valid = false;
+    }
     atk_dirty_mark_rect(x, y, w, h);
 }
 
@@ -420,6 +476,11 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     priv->user_context = NULL;
     priv->on_destroy = NULL;
     priv->chrome_visible = true;
+    priv->surface = NULL;
+    priv->surface_width = 0;
+    priv->surface_height = 0;
+    priv->surface_stride_bytes = 0;
+    priv->surface_valid = false;
 
     window->used = true;
     window->width = 600;
@@ -479,6 +540,8 @@ void atk_window_close(atk_state_t *state, atk_widget_t *window)
     if (state->dragging_window == window)
     {
         state->dragging_window = 0;
+        state->drag_window_surface = NULL;
+        state->drag_active = false;
     }
 
     if (state->pressed_window_button_window == window)
@@ -543,6 +606,7 @@ void atk_window_set_title_text(atk_widget_t *window, const char *title)
         }
     }
     priv->title[i] = '\0';
+    priv->surface_valid = false;
     atk_window_mark_dirty(window);
 }
 
@@ -593,6 +657,7 @@ void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
 
     priv->chrome_visible = visible;
     window_after_size_change(window);
+    priv->surface_valid = false;
     atk_window_mark_dirty(window);
 }
 
@@ -831,6 +896,7 @@ static void window_after_size_change(atk_widget_t *window)
         user_atk_window_resized(window);
     }
 #endif
+    priv->surface_valid = false;
 }
 
 static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window)
@@ -1185,6 +1251,15 @@ static void window_destroy(atk_widget_t *window)
         priv->user_context = NULL;
         priv->on_destroy = NULL;
         priv->close_button = NULL;
+        if (priv->surface)
+        {
+            free(priv->surface);
+            priv->surface = NULL;
+        }
+        priv->surface_width = 0;
+        priv->surface_height = 0;
+        priv->surface_stride_bytes = 0;
+        priv->surface_valid = false;
     }
 
     atk_widget_destroy(window);
