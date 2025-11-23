@@ -10,6 +10,8 @@
 #define CELL_PADDING 12
 #define LABEL_HEIGHT 18
 #define WINDOW_MARGIN 16
+#define TTF_DEMO_WIDTH  800
+#define TTF_DEMO_HEIGHT 600
 
 typedef struct
 {
@@ -652,7 +654,7 @@ int main(int argc, char **argv)
     free(entries);
 
     atk_user_window_t session = {0};
-    if (!atk_user_window_open(&session, "TTF Demo", VIDEO_WIDTH, VIDEO_HEIGHT))
+    if (!atk_user_window_open(&session, "TTF Demo", TTF_DEMO_WIDTH, TTF_DEMO_HEIGHT))
     {
         printf("ttf_demo: unable to open window\n");
         free(atlas_pixels);

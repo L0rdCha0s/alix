@@ -58,7 +58,7 @@ bool shell_cmd_imgview(shell_state_t *shell, shell_output_t *out, const char *ar
         return shell_output_error(out, "atk state unavailable");
     }
 
-    atk_widget_t *window = atk_window_create_at(state, VIDEO_WIDTH / 2, VIDEO_HEIGHT / 2);
+    atk_widget_t *window = atk_window_create_at(state, video_screen_width() / 2, video_screen_height() / 2);
     if (!window)
     {
         return shell_output_error(out, "failed to create window");

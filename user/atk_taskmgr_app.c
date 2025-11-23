@@ -17,6 +17,8 @@
 #define TASKMGR_PROCESS_CAP 64
 #define TASKMGR_NET_CAP     8
 #define TASKMGR_REFRESH_MS 5000
+#define TASKMGR_WINDOW_WIDTH  800
+#define TASKMGR_WINDOW_HEIGHT 600
 
 typedef struct
 {
@@ -404,7 +406,7 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
     atk_menu_bar_set_enabled(state, false);
     taskmgr_apply_theme(state);
 
-    atk_widget_t *window = atk_window_create_at(state, 780, 520);
+    atk_widget_t *window = atk_window_create_at(state, TASKMGR_WINDOW_WIDTH, TASKMGR_WINDOW_HEIGHT);
     if (!window)
     {
         return false;
@@ -413,8 +415,8 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
     atk_window_set_chrome_visible(window, false);
     window->x = 0;
     window->y = 0;
-    window->width = 780;
-    window->height = 520;
+    window->width = TASKMGR_WINDOW_WIDTH;
+    window->height = TASKMGR_WINDOW_HEIGHT;
 
     atk_layout_t layout;
     int chrome_top = atk_window_is_chrome_visible(window) ? ATK_WINDOW_TITLE_HEIGHT : 0;
@@ -550,8 +552,8 @@ int main(void)
 
     if (!atk_user_window_open_with_flags(&app.remote,
                                          "Task Manager",
-                                         780,
-                                         520,
+                                         TASKMGR_WINDOW_WIDTH,
+                                         TASKMGR_WINDOW_HEIGHT,
                                          USER_ATK_WINDOW_FLAG_RESIZABLE))
     {
         printf("atk_taskmgr: failed to open remote window\n");

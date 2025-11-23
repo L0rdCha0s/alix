@@ -217,8 +217,8 @@ static void atk_paint_background_region(const atk_state_t *state, int x, int y, 
 
     bool have_wall = g_atk_background.loaded && g_atk_background.pixels;
     bool wall_covers_screen = have_wall &&
-                              g_atk_background.width  >= VIDEO_WIDTH &&
-                              g_atk_background.height >= VIDEO_HEIGHT;
+                              g_atk_background.width  >= video_screen_width() &&
+                              g_atk_background.height >= video_screen_height();
 
     /* If the wallpaper covers the whole screen, avoid painting the solid
      * theme background first to prevent visible flashes during resize.
@@ -239,8 +239,10 @@ static void atk_paint_background_region(const atk_state_t *state, int x, int y, 
     int dst_x1 = x + width;
     int dst_y1 = y + height;
 
-    if (dst_x1 > VIDEO_WIDTH) dst_x1 = VIDEO_WIDTH;
-    if (dst_y1 > VIDEO_HEIGHT) dst_y1 = VIDEO_HEIGHT;
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    if (dst_x1 > screen_w) dst_x1 = screen_w;
+    if (dst_y1 > screen_h) dst_y1 = screen_h;
 
     int src_x0 = dst_x0;
     int src_y0 = dst_y0;
@@ -385,7 +387,7 @@ static int atk_mask_background_regions(const atk_state_t *state,
     int menu_h = atk_menu_bar_height(state);
     if (menu_h > 0)
     {
-        atk_bg_rect_t mask = { 0, 0, VIDEO_WIDTH, menu_h };
+        atk_bg_rect_t mask = { 0, 0, video_screen_width(), menu_h };
         atk_bg_rect_t next[ATK_MAX_BG_RECTS];
         int next_count = 0;
         for (int i = 0; i < current_count && next_count < ATK_MAX_BG_RECTS; ++i)
@@ -1053,8 +1055,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
         if (new_x < 0) new_x = 0;
         if (new_y < 0) new_y = 0;
-        int max_x = VIDEO_WIDTH - btn->width;
-        int max_y = VIDEO_HEIGHT - atk_button_effective_height(btn);
+        int max_x = video_screen_width() - btn->width;
+        int max_y = video_screen_height() - atk_button_effective_height(btn);
         if (max_x < 0) max_x = 0;
         if (max_y < 0) max_y = 0;
         if (new_x > max_x) new_x = max_x;
@@ -1407,7 +1409,7 @@ static bool atk_window_resize_drag(atk_state_t *state, int cursor_x, int cursor_
                         win->width + ATK_WINDOW_BORDER * 2,
                         win->height + ATK_WINDOW_BORDER * 2);
     /* Force a full redraw during resize to keep terminal state consistent. */
-    atk_dirty_mark_rect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
+    atk_dirty_mark_rect(0, 0, video_screen_width(), video_screen_height());
     atk_window_request_layout(win);
     return true;
 }
@@ -1488,7 +1490,11 @@ static void atk_schedule_user_launch(const char *launcher_name, const void *info
     if (!launcher)
     {
         serial_printf("%s", "atk: failed to schedule user launcher\r\n");
+        return;
     }
+
+    /* Detach so idle reaper can clean up the launcher when it exits. */
+    process_detach_parent(launcher);
 }
 
 static void atk_launch_user_binary(void *arg)

@@ -9,6 +9,9 @@
 #include "libc.h"
 #include "video.h"
 
+#define ATK_DEMO_WIDTH  800
+#define ATK_DEMO_HEIGHT 600
+
 static atk_user_window_t g_session;
 static atk_widget_t *g_window = NULL;
 static atk_widget_t *g_label = NULL;
@@ -48,7 +51,7 @@ static bool init_ui(void)
     atk_menu_bar_set_enabled(state, false);
     apply_theme(state);
 
-    g_window = atk_window_create_at(state, VIDEO_WIDTH / 2, VIDEO_HEIGHT / 2);
+    g_window = atk_window_create_at(state, ATK_DEMO_WIDTH / 2, ATK_DEMO_HEIGHT / 2);
     if (!g_window)
     {
         return false;
@@ -58,8 +61,8 @@ static bool init_ui(void)
     atk_window_set_chrome_visible(g_window, false);
     g_window->x = 0;
     g_window->y = 0;
-    g_window->width = VIDEO_WIDTH;
-    g_window->height = VIDEO_HEIGHT;
+    g_window->width = ATK_DEMO_WIDTH;
+    g_window->height = ATK_DEMO_HEIGHT;
 
     int content_margin = 16;
     int chrome_top = atk_window_is_chrome_visible(g_window) ? ATK_WINDOW_TITLE_HEIGHT : 0;
@@ -67,7 +70,7 @@ static bool init_ui(void)
     g_label = atk_window_add_label(g_window,
                                    content_margin,
                                    label_y,
-                                   VIDEO_WIDTH - content_margin * 2,
+                                   ATK_DEMO_WIDTH - content_margin * 2,
                                    96);
     if (!g_label)
     {
@@ -79,7 +82,7 @@ static bool init_ui(void)
     g_input = atk_window_add_text_input(g_window,
                                         content_margin,
                                         input_y,
-                                        VIDEO_WIDTH - content_margin * 2);
+                                        ATK_DEMO_WIDTH - content_margin * 2);
     if (!g_input)
     {
         return false;
@@ -118,7 +121,7 @@ static void process_key_event(const user_atk_event_t *event)
 
 int main(void)
 {
-    if (!atk_user_window_open(&g_session, "ATK Demo", VIDEO_WIDTH, VIDEO_HEIGHT))
+    if (!atk_user_window_open(&g_session, "ATK Demo", ATK_DEMO_WIDTH, ATK_DEMO_HEIGHT))
     {
         printf("atk_demo: failed to open window\n");
         return 1;

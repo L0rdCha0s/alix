@@ -354,17 +354,19 @@ void atk_window_ensure_inside(atk_widget_t *window)
         return;
     }
 
-    if (window->width > VIDEO_WIDTH)
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    if (window->width > screen_w)
     {
-        window->width = VIDEO_WIDTH;
+        window->width = screen_w;
     }
-    if (window->height > VIDEO_HEIGHT)
+    if (window->height > screen_h)
     {
-        window->height = VIDEO_HEIGHT;
+        window->height = screen_h;
     }
 
-    int max_x = VIDEO_WIDTH - window->width;
-    int max_y = VIDEO_HEIGHT - window->height;
+    int max_x = screen_w - window->width;
+    int max_y = screen_h - window->height;
 
     if (window->x < 0) window->x = 0;
     if (window->y < 0) window->y = 0;

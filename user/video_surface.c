@@ -7,10 +7,12 @@
 
 #define FONT_WIDTH 8
 #define FONT_HEIGHT 16
+#define VIDEO_SURFACE_DEFAULT_WIDTH  640
+#define VIDEO_SURFACE_DEFAULT_HEIGHT 480
 
 static video_color_t *g_surface = NULL;
-static uint32_t g_surface_width = VIDEO_WIDTH;
-static uint32_t g_surface_height = VIDEO_HEIGHT;
+static uint32_t g_surface_width = VIDEO_SURFACE_DEFAULT_WIDTH;
+static uint32_t g_surface_height = VIDEO_SURFACE_DEFAULT_HEIGHT;
 static bool g_surface_dirty = false;
 static bool g_surface_track_dirty = false;
 static volatile int g_surface_lock = 0;
@@ -294,6 +296,16 @@ void video_invalidate_rect(int x, int y, int width, int height)
 void video_invalidate_all(void)
 {
     surface_touch();
+}
+
+int video_screen_width(void)
+{
+    return (int)g_surface_width;
+}
+
+int video_screen_height(void)
+{
+    return (int)g_surface_height;
 }
 
 void video_blit_rgba32(int x,

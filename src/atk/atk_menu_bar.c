@@ -123,7 +123,7 @@ void atk_menu_bar_set_enabled(atk_state_t *state, bool enabled)
     }
     state->menu_open_entry = NULL;
     state->menu_hover_entry = NULL;
-    atk_dirty_mark_rect(0, 0, VIDEO_WIDTH, previous_height);
+    atk_dirty_mark_rect(0, 0, video_screen_width(), previous_height);
 }
 
 int atk_menu_bar_height(const atk_state_t *state)
@@ -292,8 +292,8 @@ void atk_menu_bar_draw(const atk_state_t *state)
     }
     const atk_theme_t *theme = &state->theme;
 
-    video_draw_rect(0, 0, VIDEO_WIDTH, height, theme->menu_bar_face);
-    video_draw_rect(0, height - 1, VIDEO_WIDTH, 1, theme->menu_dropdown_border);
+    video_draw_rect(0, 0, video_screen_width(), height, theme->menu_bar_face);
+    video_draw_rect(0, height - 1, video_screen_width(), 1, theme->menu_dropdown_border);
 
     if (state->menu_logo && state->menu_logo->used)
     {
@@ -365,7 +365,7 @@ void atk_menu_bar_draw(const atk_state_t *state)
     {
         clock_box_width = ATK_MENU_BAR_CLOCK_RESERVE - ATK_MENU_BAR_ENTRY_SPACING;
     }
-    int clock_x = VIDEO_WIDTH - clock_box_width - ATK_MENU_BAR_ENTRY_SPACING;
+    int clock_x = video_screen_width() - clock_box_width - ATK_MENU_BAR_ENTRY_SPACING;
     if (clock_x < 0)
     {
         clock_x = 0;
@@ -460,9 +460,10 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
             if (hover_entry->menu)
             {
                 int menu_width = hover_entry->menu->width;
-                if (menu_x + menu_width > VIDEO_WIDTH - 2)
+                int screen_w = video_screen_width();
+                if (menu_x + menu_width > screen_w - 2)
                 {
-                    menu_x = VIDEO_WIDTH - menu_width - 2;
+                    menu_x = screen_w - menu_width - 2;
                 }
                 if (menu_x < 0)
                 {
@@ -573,7 +574,7 @@ static void atk_menu_bar_update_layout(atk_state_t *state)
         return;
     }
     int cursor = ATK_MENU_BAR_LOGO_MARGIN_X;
-    int max_right = VIDEO_WIDTH - ATK_MENU_BAR_CLOCK_RESERVE;
+    int max_right = video_screen_width() - ATK_MENU_BAR_CLOCK_RESERVE;
     if (max_right < cursor)
     {
         max_right = cursor;
@@ -775,7 +776,7 @@ static void menu_action_welcome(void *context)
     }
 
     menu_log("welcome: invoked");
-    atk_widget_t *window = atk_window_create_at(state, VIDEO_WIDTH / 2, state->menu_bar_height + 120);
+    atk_widget_t *window = atk_window_create_at(state, video_screen_width() / 2, state->menu_bar_height + 120);
     if (!window)
     {
         menu_log("welcome: window creation failed");
@@ -849,7 +850,7 @@ static void atk_menu_bar_mark_dirty(const atk_state_t *state)
     {
         return;
     }
-    atk_dirty_mark_rect(0, 0, VIDEO_WIDTH, height);
+    atk_dirty_mark_rect(0, 0, video_screen_width(), height);
 }
 
 static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu)
@@ -873,7 +874,7 @@ static void atk_menu_bar_clock_tick(void *context)
     {
         goto out;
     }
-    atk_dirty_mark_rect(VIDEO_WIDTH - ATK_MENU_BAR_CLOCK_RESERVE, 0, ATK_MENU_BAR_CLOCK_RESERVE, height);
+    atk_dirty_mark_rect(video_screen_width() - ATK_MENU_BAR_CLOCK_RESERVE, 0, ATK_MENU_BAR_CLOCK_RESERVE, height);
 out:
     atk_state_lock_release(irq_state);
 }

@@ -27,7 +27,7 @@ BASE_CFLAGS := -O4 -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fn
 KERNEL_CFLAGS := $(BASE_CFLAGS) -mgeneral-regs-only -mfpmath=387 -mno-sse \
                   -DKERNEL_BUILD
 USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
-               -DVIDEO_WIDTH=640 -DVIDEO_HEIGHT=360 -msse2 -mfpmath=sse -mstackrealign
+               -msse2 -mfpmath=sse -mstackrealign
 
 KERNEL_LD   := $(ARCH_DIR)/uefi.ld
 LOADER_DIR  := src/loader

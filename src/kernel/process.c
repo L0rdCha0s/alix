@@ -6450,6 +6450,11 @@ process_t *process_thread_owner(const thread_t *thread)
     return thread ? thread->process : NULL;
 }
 
+void process_detach_parent(process_t *process)
+{
+    process_detach_child(process);
+}
+
 bool process_is_zombie(const process_t *process)
 {
     return process && process->state == PROCESS_STATE_ZOMBIE;

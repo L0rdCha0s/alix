@@ -63,6 +63,8 @@ static uint32_t *backbuffer = (uint32_t *)(uintptr_t)BACKBUFFER_ADDR;
 static volatile uint32_t *framebuffer = 0;
 static uint64_t framebuffer_phys = 0;
 static bool framebuffer_detected = false;
+static int g_video_width = VIDEO_WIDTH;
+static int g_video_height = VIDEO_HEIGHT;
 
 static bool vga_state_saved = false;
 static uint8_t saved_regs[1 + 5 + 25 + 9 + 21];
@@ -161,6 +163,16 @@ static void video_prepare_font(void);
 static void video_draw_char(int x, int y, char c, video_color_t fg, video_color_t bg);
 static void video_blit_clipped(int dst_x0, int dst_y0, int copy_w, int copy_h,
                                const video_color_t *src, int stride_bytes, int src_x0, int src_y0);
+
+int video_screen_width(void)
+{
+    return g_video_width;
+}
+
+int video_screen_height(void)
+{
+    return g_video_height;
+}
 
 /* --------- Cursor shape --------- */
 static const char *const cursor_shape_arrow[CURSOR_H] = {
@@ -335,6 +347,10 @@ static bool video_hw_enable(void)
     bga_write(BGA_REG_Y_OFFSET, 0);
     bga_write(BGA_REG_BANK, 0);
     bga_write(BGA_REG_ENABLE, 0x41); /* enable + LFB */
+
+    /* Capture the active resolution for higher layers. */
+    g_video_width = VIDEO_WIDTH;
+    g_video_height = VIDEO_HEIGHT;
 
     video_log_hex("BGA XRES readback: 0x", bga_read(BGA_REG_XRES));
     video_log_hex("BGA YRES readback: 0x", bga_read(BGA_REG_YRES));

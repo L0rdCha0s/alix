@@ -9,8 +9,8 @@
 #define DOOM_PI 3.14159265358979323846f
 #define DOOM_TWO_PI (DOOM_PI * 2.0f)
 #define DOOM_ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
-#define DOOM_VIDEO_WIDTH ((int)VIDEO_WIDTH)
-#define DOOM_VIDEO_HEIGHT ((int)VIDEO_HEIGHT)
+#define DOOM_VIDEO_WIDTH 640
+#define DOOM_VIDEO_HEIGHT 480
 
 #define DOOM_MOVE_SPEED 0.18f
 #define DOOM_STRAFE_SPEED 0.16f
@@ -1467,7 +1467,7 @@ static bool doom_handle_key(char ch, bool *running)
 
 int main(void)
 {
-    if (!atk_user_window_open(&g_window, "Doom", VIDEO_WIDTH, VIDEO_HEIGHT))
+    if (!atk_user_window_open(&g_window, "Doom", DOOM_VIDEO_WIDTH, DOOM_VIDEO_HEIGHT))
     {
         printf("doom: failed to open window\n");
         return 1;

@@ -15,6 +15,8 @@
 #define PROC_REPEAT_INITIAL "/proc/keyboard/repeat/initial"
 #define PROC_REPEAT_INTERVAL "/proc/keyboard/repeat/repeat"
 #define PROC_REPEAT_MULTI "/proc/keyboard/repeat/multi_mode"
+#define WOLF3D_WINDOW_WIDTH  640
+#define WOLF3D_WINDOW_HEIGHT 480
 
 #define WOLF_ABS(value) ((value) < 0.0 ? -(value) : (value))
 
@@ -615,7 +617,7 @@ int main(void)
     keyboard_repeat_backup_t repeat_backup = { 0 };
     bool repeat_override_active = wolf3d_override_keyboard_repeat(&repeat_backup);
 
-    if (!atk_user_window_open(&g_window, "Wolf3D (user)", VIDEO_WIDTH, VIDEO_HEIGHT))
+    if (!atk_user_window_open(&g_window, "Wolf3D (user)", WOLF3D_WINDOW_WIDTH, WOLF3D_WINDOW_HEIGHT))
     {
         printf("wolf3d: failed to open window\n");
         if (repeat_override_active)

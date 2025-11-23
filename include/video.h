@@ -38,6 +38,8 @@ void video_draw_text_clipped(int x, int y, int width, int height,
                              const char *text, video_color_t fg, video_color_t bg);
 void video_invalidate_rect(int x, int y, int width, int height);
 void video_invalidate_all(void);
+int video_screen_width(void);
+int video_screen_height(void);
 void video_blit_rgba32(int x,
                        int y,
                        int width,

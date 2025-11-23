@@ -615,18 +615,17 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     {
         return -1;
     }
-    if (desc.width > VIDEO_WIDTH)
+    /* Validate extremely large requests to avoid overflow, but do not tie to screen size. */
+    if (desc.width > 16384 || desc.height > 16384)
     {
-        desc.width = VIDEO_WIDTH;
-    }
-    if (desc.height > VIDEO_HEIGHT)
-    {
-        desc.height = VIDEO_HEIGHT;
+        return -1;
     }
     desc.title[USER_ATK_TITLE_MAX - 1] = '\0';
 
     atk_state_t *state = atk_state_get();
-    atk_widget_t *window = atk_window_create_at(state, VIDEO_WIDTH / 2, VIDEO_HEIGHT / 2);
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    atk_widget_t *window = atk_window_create_at(state, screen_w / 2, screen_h / 2);
     if (!window)
     {
         return -1;

@@ -127,6 +127,7 @@ vfs_node_t *process_current_cwd(void);
 void process_set_cwd(process_t *process, vfs_node_t *dir);
 int process_current_stdout_fd(void);
 ssize_t process_stdout_write(const char *data, size_t len);
+void process_detach_parent(process_t *process);
 
 void process_on_timer_tick(interrupt_frame_t *frame);
 void process_preempt_hook(void);

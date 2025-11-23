@@ -10,8 +10,8 @@
 #include "usyscall.h"
 #include "user_atk_defs.h"
 
-#define SHELL_WINDOW_WIDTH   VIDEO_WIDTH
-#define SHELL_WINDOW_HEIGHT  VIDEO_HEIGHT
+#define SHELL_WINDOW_WIDTH   640
+#define SHELL_WINDOW_HEIGHT  480
 #define SHELL_PROMPT         "alex@alix$ "
 #define SHELL_OUTPUT_BUFFER  4096
 
