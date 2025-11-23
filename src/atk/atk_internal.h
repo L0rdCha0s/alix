@@ -170,6 +170,10 @@ typedef struct atk_state
     int drag_prev_x;
     int drag_prev_y;
     bool drag_active;
+    video_color_t *drag_overlay;
+    int drag_overlay_w;
+    int drag_overlay_h;
+    int drag_overlay_stride_bytes;
 
     struct
     {

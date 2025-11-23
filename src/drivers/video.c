@@ -734,6 +734,62 @@ void video_overlay_rect_outline(int x, int y, int width, int height, video_color
     }
 }
 
+void video_overlay_blit_rgba32(int x,
+                               int y,
+                               int width,
+                               int height,
+                               const video_color_t *pixels,
+                               int stride_bytes)
+{
+    if (!framebuffer || !pixels || width <= 0 || height <= 0)
+    {
+        return;
+    }
+    if (stride_bytes <= 0)
+    {
+        stride_bytes = width * (int)sizeof(video_color_t);
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+    int src_x = 0;
+    int src_y = 0;
+
+    if (x0 < 0) { src_x = -x0; x0 = 0; }
+    if (y0 < 0) { src_y = -y0; y0 = 0; }
+    if (x1 > VIDEO_WIDTH) x1 = VIDEO_WIDTH;
+    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+
+    int copy_w = x1 - x0;
+    int copy_h = y1 - y0;
+    if (copy_w <= 0 || copy_h <= 0)
+    {
+        return;
+    }
+
+    int max_copy_w = width - src_x;
+    int max_copy_h = height - src_y;
+    if (copy_w > max_copy_w) copy_w = max_copy_w;
+    if (copy_h > max_copy_h) copy_h = max_copy_h;
+    if (copy_w <= 0 || copy_h <= 0)
+    {
+        return;
+    }
+
+    const uint8_t *row_ptr = (const uint8_t *)pixels +
+                             (size_t)src_y * (size_t)stride_bytes +
+                             (size_t)src_x * sizeof(video_color_t);
+    for (int row = 0; row < copy_h; ++row)
+    {
+        volatile uint32_t *dst = &framebuffer[(y0 + row) * VIDEO_WIDTH + x0];
+        const video_color_t *src_row = (const video_color_t *)row_ptr;
+        fb_memcpy_wc((void *)dst, src_row, (size_t)copy_w * sizeof(video_color_t));
+        row_ptr += stride_bytes;
+    }
+}
+
 /* --------- Dirty tracking & flush --------- */
 #define VIDEO_MAX_DIRTY_RECTS 16
 typedef struct
@@ -857,6 +913,11 @@ static void video_flush_dirty(void)
 static void video_perform_refresh(void)
 {
     uint64_t irq_state = video_irq_save();
+
+    if (atk_drag_active())
+    {
+        goto out;
+    }
 
     if (!video_active)
     {
@@ -1113,11 +1174,15 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     if (result.redraw)
     {
-        /* let renderer choose dirties; do not pre-clear here */
-        atk_render();
+        /* Skip backbuffer redraws while dragging overlays are active. */
+        if (!atk_drag_active())
+        {
+            /* let renderer choose dirties; do not pre-clear here */
+            atk_render();
+        }
     }
 
-    if (dirty_count > 0 && !refresh_requested)
+    if (dirty_count > 0 && !refresh_requested && !atk_drag_active())
     {
         video_flush_dirty();
     }

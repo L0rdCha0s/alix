@@ -20,5 +20,6 @@ void atk_enter_mode(void);
 void atk_render(void);
 atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x, int cursor_y, bool pressed_edge, bool released_edge, bool left_pressed);
 atk_key_event_result_t atk_handle_key_char(char ch);
+bool atk_drag_active(void);
 
 #endif

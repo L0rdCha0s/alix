@@ -99,6 +99,14 @@ void atk_window_reset_all(atk_state_t *state)
     state->drag_prev_x = 0;
     state->drag_prev_y = 0;
     state->drag_active = false;
+    if (state->drag_overlay)
+    {
+        free(state->drag_overlay);
+        state->drag_overlay = NULL;
+    }
+    state->drag_overlay_w = 0;
+    state->drag_overlay_h = 0;
+    state->drag_overlay_stride_bytes = 0;
     state->resize_band.active = false;
     state->resize_band.x = 0;
     state->resize_band.y = 0;

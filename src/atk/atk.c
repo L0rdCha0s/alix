@@ -161,6 +161,7 @@ static bool atk_dispatch_widget_mouse(atk_state_t *state,
 static void atk_clear_focus_widget(atk_state_t *state);
 static void atk_window_bounds_full(const atk_widget_t *window, int *x, int *y, int *w, int *h);
 static bool atk_ensure_surface(video_color_t **buf, int *cur_w, int *cur_h, int *stride_bytes, int target_w, int target_h);
+static bool atk_ensure_overlay(atk_state_t *state, int width, int height);
 static bool atk_drag_prepare(atk_state_t *state, atk_widget_t *window);
 static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y);
 static void atk_drag_finish(atk_state_t *state);
@@ -696,6 +697,45 @@ static __attribute__((unused)) bool atk_ensure_surface(video_color_t **buf, int 
 #endif
 }
 
+static bool atk_ensure_overlay(atk_state_t *state, int width, int height)
+{
+#ifndef KERNEL_BUILD
+    (void)state;
+    (void)width;
+    (void)height;
+    return false;
+#else
+    if (!state || width <= 0 || height <= 0)
+    {
+        return false;
+    }
+    int stride = width * (int)sizeof(video_color_t);
+    if (state->drag_overlay &&
+        state->drag_overlay_w == width &&
+        state->drag_overlay_h == height &&
+        state->drag_overlay_stride_bytes == stride)
+    {
+        return true;
+    }
+
+    size_t bytes = (size_t)width * (size_t)height * sizeof(video_color_t);
+    video_color_t *buf = (video_color_t *)malloc(bytes);
+    if (!buf)
+    {
+        return false;
+    }
+    if (state->drag_overlay)
+    {
+        free(state->drag_overlay);
+    }
+    state->drag_overlay = buf;
+    state->drag_overlay_w = width;
+    state->drag_overlay_h = height;
+    state->drag_overlay_stride_bytes = stride;
+    return true;
+#endif
+}
+
 #define ATK_RESIZE_EDGE_LEFT   (1u << 0)
 #define ATK_RESIZE_EDGE_TOP    (1u << 1)
 #define ATK_RESIZE_EDGE_RIGHT  (1u << 2)
@@ -921,6 +961,12 @@ void atk_enter_mode(void)
 #endif
 
     atk_state_lock_release(irq_state);
+}
+
+bool atk_drag_active(void)
+{
+    atk_state_t *state = atk_state_get();
+    return state && state->drag_active;
 }
 
 void atk_render(void)
@@ -1258,6 +1304,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                 state->dragging_window = NULL;
                 state->drag_active = false;
                 result.redraw = true;
+                video_request_refresh();
             }
             if (state->dragging_desktop_button)
             {
@@ -1877,7 +1924,8 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
     }
 
     /* Clamp region to buffer bounds to avoid overruns. */
-    size_t scene_pixels = (size_t)state->drag_scene_w * (size_t)state->drag_scene_h;
+    size_t scene_stride_px = (size_t)state->drag_scene_stride_bytes / sizeof(video_color_t);
+    size_t scene_pixels = scene_stride_px * (size_t)state->drag_scene_h;
     size_t scene_min_stride = (size_t)state->drag_scene_w * sizeof(video_color_t);
     if ((size_t)state->drag_scene_stride_bytes < scene_min_stride)
     {
@@ -1885,8 +1933,8 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
     }
     int region_w = x1 - x0;
     int region_h = y1 - y0;
-    size_t scene_offset = (size_t)y0 * (size_t)state->drag_scene_w + (size_t)x0;
-    size_t scene_max_needed = scene_offset + (size_t)(region_h - 1) * (size_t)state->drag_scene_w + (size_t)(region_w - 1);
+    size_t scene_offset = (size_t)y0 * scene_stride_px + (size_t)x0;
+    size_t scene_max_needed = scene_offset + (size_t)(region_h - 1) * scene_stride_px + (size_t)(region_w - 1);
     if (scene_offset >= scene_pixels || scene_max_needed >= scene_pixels)
     {
         atk_drag_log("scene_bounds_reject",
@@ -1965,38 +2013,72 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
                  x1,
                  y1);
 
-    const video_color_t *scene_base = state->drag_scene +
-                                      (size_t)y0 * (size_t)state->drag_scene_w +
+    const video_color_t *scene_base = (const video_color_t *)((const uint8_t *)state->drag_scene +
+                                      (size_t)y0 * (size_t)state->drag_scene_stride_bytes) +
                                       (size_t)x0;
-    atk_drag_log_blit("scene_copy",
-                      scene_base,
-                      state->drag_scene_stride_bytes,
+
+    /* Compose into an off-screen overlay buffer to avoid flicker between passes. */
+    if (!atk_ensure_overlay(state, region_w, region_h))
+    {
+        return;
+    }
+
+    for (int row = 0; row < region_h; ++row)
+    {
+        const video_color_t *src_row = scene_base + (size_t)row * scene_stride_px;
+        video_color_t *dst_row = (video_color_t *)((uint8_t *)state->drag_overlay +
+                                    (size_t)row * (size_t)state->drag_overlay_stride_bytes);
+        memcpy(dst_row, src_row, (size_t)region_w * sizeof(video_color_t));
+    }
+
+    /* Clip the window copy to the overlay region to avoid overruns at screen edges. */
+    int dest_x0 = new_bx;
+    int dest_y0 = new_by;
+    int dest_x1 = new_bx + w;
+    int dest_y1 = new_by + h;
+
+    int copy_x0 = (dest_x0 > x0) ? dest_x0 : x0;
+    int copy_y0 = (dest_y0 > y0) ? dest_y0 : y0;
+    int copy_x1 = (dest_x1 < x1) ? dest_x1 : x1;
+    int copy_y1 = (dest_y1 < y1) ? dest_y1 : y1;
+
+    int copy_w = copy_x1 - copy_x0;
+    int copy_h = copy_y1 - copy_y0;
+
+    if (copy_w > 0 && copy_h > 0)
+    {
+        int src_x = copy_x0 - dest_x0;
+        int src_y = copy_y0 - dest_y0;
+        int dst_x = copy_x0 - x0;
+        int dst_y = copy_y0 - y0;
+
+        size_t win_stride_px = (size_t)state->drag_window_stride_bytes / sizeof(video_color_t);
+        size_t overlay_stride_px = (size_t)state->drag_overlay_stride_bytes / sizeof(video_color_t);
+
+        for (int row = 0; row < copy_h; ++row)
+        {
+            const video_color_t *src_row = state->drag_window_surface +
+                                           (size_t)(src_y + row) * win_stride_px + (size_t)src_x;
+            video_color_t *dst_row = (video_color_t *)state->drag_overlay +
+                                     (size_t)(dst_y + row) * overlay_stride_px + (size_t)dst_x;
+            memcpy(dst_row, src_row, (size_t)copy_w * sizeof(video_color_t));
+        }
+    }
+
+    atk_drag_log_blit("overlay_flush",
+                      state->drag_overlay,
+                      state->drag_overlay_stride_bytes,
                       region_w,
                       region_h,
                       x0,
                       y0);
-    video_blit_rgba32(x0,
-                      y0,
-                      x1 - x0,
-                      y1 - y0,
-                      scene_base,
-                      state->drag_scene_stride_bytes,
-                      false);
 
-    atk_drag_log_blit("win_overlay",
-                      state->drag_window_surface,
-                      state->drag_window_stride_bytes,
-                      w,
-                      h,
-                      new_bx,
-                      new_by);
-    video_blit_rgba32(new_bx,
-                      new_by,
-                      w,
-                      h,
-                      state->drag_window_surface,
-                      state->drag_window_stride_bytes,
-                      false);
+    video_overlay_blit_rgba32(x0,
+                              y0,
+                              region_w,
+                              region_h,
+                              state->drag_overlay,
+                              state->drag_overlay_stride_bytes);
 
     state->drag_prev_x = new_bx;
     state->drag_prev_y = new_by;
