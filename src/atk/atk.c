@@ -1802,6 +1802,10 @@ static bool atk_drag_prepare(atk_state_t *state, atk_widget_t *window)
     state->drag_window_stride_bytes = priv->surface_stride_bytes;
     state->drag_prev_x = bx;
     state->drag_prev_y = by;
+    state->drag_start_x = bx;
+    state->drag_start_y = by;
+    state->drag_start_w = bw;
+    state->drag_start_h = bh;
     atk_drag_log("prepare",
                  state,
                  window,
@@ -2094,12 +2098,22 @@ static void atk_drag_finish(atk_state_t *state)
     state->drag_active = false;
     state->drag_scene_valid = false;
     state->drag_window_surface = NULL;
+
+    /* Redraw both the last overlay location and the final window position to avoid ghosts. */
     if (state->drag_window_w > 0 && state->drag_window_h > 0)
     {
         atk_dirty_mark_rect(state->drag_prev_x,
                             state->drag_prev_y,
                             state->drag_window_w,
                             state->drag_window_h);
+    }
+
+    if (state->drag_start_w > 0 && state->drag_start_h > 0)
+    {
+        atk_dirty_mark_rect(state->drag_start_x,
+                            state->drag_start_y,
+                            state->drag_start_w,
+                            state->drag_start_h);
     }
 }
 

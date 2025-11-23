@@ -169,6 +169,10 @@ typedef struct atk_state
     int drag_window_stride_bytes;
     int drag_prev_x;
     int drag_prev_y;
+    int drag_start_x;
+    int drag_start_y;
+    int drag_start_w;
+    int drag_start_h;
     bool drag_active;
     video_color_t *drag_overlay;
     int drag_overlay_w;
