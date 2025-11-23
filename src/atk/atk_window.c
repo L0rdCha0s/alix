@@ -18,6 +18,12 @@
 #include "user_atk_host.h"
 #endif
 
+#if ATK_DEBUG && defined(KERNEL_BUILD)
+#define ATK_WINDOW_LOG(...) serial_printf(__VA_ARGS__)
+#else
+#define ATK_WINDOW_LOG(...) ((void)0)
+#endif
+
 /* Forward decl for compilers if video.h doesn't expose it (no harm if duplicated). */
 static void atk_log(const char *msg);
 static bool window_list_pointer_valid(const void *ptr);
@@ -329,12 +335,12 @@ void atk_window_request_layout(atk_widget_t *window)
 #ifdef KERNEL_BUILD
     if (user_atk_window_is_remote(window))
     {
-        serial_printf("[atk][layout] remote window=%p size=%dx%d pos=(%d,%d)\r\n",
-                      (void *)window,
-                      window->width,
-                      window->height,
-                      window->x,
-                      window->y);
+        ATK_WINDOW_LOG("[atk][layout] remote window=%p size=%dx%d pos=(%d,%d)\r\n",
+                       (void *)window,
+                       window->width,
+                       window->height,
+                       window->x,
+                       window->y);
     }
 #endif
     window_after_size_change(window);
@@ -590,8 +596,8 @@ void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
 
 static void atk_log(const char *msg)
 {
-    serial_printf("%s", msg);
-    serial_printf("%s", "\r\n");
+    (void)msg;
+    ATK_WINDOW_LOG("%s\r\n", msg);
 }
 
 static bool window_list_pointer_valid(const void *ptr)
@@ -645,7 +651,7 @@ static bool window_sanitize_list(atk_state_t *state)
 
     if (corrupted)
     {
-        serial_printf("%s", "atk: window list corrupted; resetting\r\n");
+        ATK_WINDOW_LOG("%s", "atk: window list corrupted; resetting\r\n");
         list->head = NULL;
         list->tail = NULL;
         list->size = 0;
@@ -654,7 +660,7 @@ static bool window_sanitize_list(atk_state_t *state)
 
     if (list->tail && !window_list_pointer_valid(list->tail))
     {
-        serial_printf("%s", "atk: window list tail corrupted; resetting\r\n");
+        ATK_WINDOW_LOG("%s", "atk: window list tail corrupted; resetting\r\n");
         list->head = NULL;
         list->tail = NULL;
         list->size = 0;
@@ -671,51 +677,53 @@ bool atk_window_list_validate(atk_state_t *state)
 
 static void window_debug_dump_node(const atk_list_node_t *node, size_t index)
 {
+    (void)index;
     const atk_widget_t *win = node ? (const atk_widget_t *)node->value : NULL;
-    serial_printf("%s", "[atk][winlist] idx=");
-    serial_printf("%016llX", (unsigned long long)index);
-    serial_printf("%s", " node=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)node));
-    serial_printf("%s", " next=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)(node ? node->next : NULL)));
-    serial_printf("%s", " win=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)win));
+    ATK_WINDOW_LOG("%s", "[atk][winlist] idx=");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)index);
+    ATK_WINDOW_LOG("%s", " node=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)node));
+    ATK_WINDOW_LOG("%s", " next=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)(node ? node->next : NULL)));
+    ATK_WINDOW_LOG("%s", " win=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)win));
     if (win)
     {
-        serial_printf("%s", " used=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)win->used));
-        serial_printf("%s", " x=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)win->x));
-        serial_printf("%s", " y=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)win->y));
-        serial_printf("%s", " w=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)win->width));
-        serial_printf("%s", " h=");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)win->height));
+        ATK_WINDOW_LOG("%s", " used=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->used));
+        ATK_WINDOW_LOG("%s", " x=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->x));
+        ATK_WINDOW_LOG("%s", " y=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->y));
+        ATK_WINDOW_LOG("%s", " w=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->width));
+        ATK_WINDOW_LOG("%s", " h=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->height));
     }
-    serial_printf("%s", "\r\n");
+    ATK_WINDOW_LOG("%s", "\r\n");
 }
 
 void atk_window_list_dump(atk_state_t *state, const char *label)
 {
-    serial_printf("%s", "[atk][winlist] dump label=");
-    serial_printf("%s", label ? label : "?");
-    serial_printf("%s", "\r\n");
+    (void)label;
+    ATK_WINDOW_LOG("%s", "[atk][winlist] dump label=");
+    ATK_WINDOW_LOG("%s", label ? label : "?");
+    ATK_WINDOW_LOG("%s", "\r\n");
 
     if (!state)
     {
-        serial_printf("%s", "[atk][winlist] state null\r\n");
+        ATK_WINDOW_LOG("%s", "[atk][winlist] state null\r\n");
         return;
     }
 
     atk_list_t *list = &state->windows;
-    serial_printf("%s", "[atk][winlist] head=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)list->head));
-    serial_printf("%s", " tail=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)(uintptr_t)list->tail));
-    serial_printf("%s", " size=");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)list->size));
-    serial_printf("%s", "\r\n");
+    ATK_WINDOW_LOG("%s", "[atk][winlist] head=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)list->head));
+    ATK_WINDOW_LOG("%s", " tail=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)list->tail));
+    ATK_WINDOW_LOG("%s", " size=");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)list->size));
+    ATK_WINDOW_LOG("%s", "\r\n");
 
     const size_t max_nodes = 32;
     size_t idx = 0;
@@ -725,7 +733,7 @@ void atk_window_list_dump(atk_state_t *state, const char *label)
     }
     if (idx >= max_nodes)
     {
-        serial_printf("%s", "[atk][winlist] truncated\r\n");
+        ATK_WINDOW_LOG("%s", "[atk][winlist] truncated\r\n");
     }
 }
 
@@ -762,7 +770,7 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
     {
         if (!window_list_pointer_valid(node))
         {
-            serial_printf("%s", "[atk][layout] invalid child node; skipping\r\n");
+            ATK_WINDOW_LOG("%s", "[atk][layout] invalid child node; skipping\r\n");
             continue;
         }
         atk_widget_t *child = (atk_widget_t *)node->value;
@@ -772,7 +780,7 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
         }
         if (!atk_widget_validate(child, "window_layout_children child"))
         {
-            serial_printf("%s", "[atk][layout] invalid child widget; skipping\r\n");
+            ATK_WINDOW_LOG("%s", "[atk][layout] invalid child widget; skipping\r\n");
             continue;
         }
 
@@ -833,12 +841,12 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
 #ifdef KERNEL_BUILD
     if (user_atk_window_is_remote(window))
     {
-        serial_printf("[atk][draw] remote window=%p pos=(%d,%d) size=%dx%d\r\n",
-                      (void *)window,
-                      window->x,
-                      window->y,
-                      window->width,
-                      window->height);
+        ATK_WINDOW_LOG("[atk][draw] remote window=%p pos=(%d,%d) size=%dx%d\r\n",
+                       (void *)window,
+                       window->x,
+                       window->y,
+                       window->width,
+                       window->height);
     }
 #endif
 
