@@ -51,7 +51,7 @@ extern uint8_t __kernel_data_end[];
 #endif
 #define CONTEXT_GUARD_WORDS              8ULL
 #ifndef ENABLE_STACK_WRITE_DEBUG
-#define ENABLE_STACK_WRITE_DEBUG         1
+#define ENABLE_STACK_WRITE_DEBUG         0
 #endif
 #ifndef STACK_WATCH_SNAPSHOT_BYTES
 #define STACK_WATCH_SNAPSHOT_BYTES       128ULL
@@ -60,13 +60,13 @@ extern uint8_t __kernel_data_end[];
 #define STACK_WATCH_TIMEOUT_LIMIT        20U
 #endif
 #ifndef ENABLE_STACK_WRITE_DEBUG_LOGS
-#define ENABLE_STACK_WRITE_DEBUG_LOGS    1
+#define ENABLE_STACK_WRITE_DEBUG_LOGS    0
 #endif
 #ifndef ENABLE_STACK_SCAN_LOGS
 #define ENABLE_STACK_SCAN_LOGS           0
 #endif
 #ifndef ENABLE_STACK_GUARD_PROTECT
-#define ENABLE_STACK_GUARD_PROTECT       1
+#define ENABLE_STACK_GUARD_PROTECT       0
 #endif
 #ifndef CONTEXT_GUARD_STRICT
 #define CONTEXT_GUARD_STRICT             0
@@ -397,6 +397,7 @@ static void thread_freeze_for_stack_watch(thread_t *thread, const char *context)
 static void thread_unfreeze_after_stack_watch(thread_t *thread);
 static void stack_watch_check_timeouts(void);
 static void stack_watch_remove_frozen(thread_t *thread);
+static void thread_quarantine_corrupt(thread_t *thread, const char *reason);
 
 static inline uint64_t scheduler_ticks_to_ms(uint64_t ticks)
 {

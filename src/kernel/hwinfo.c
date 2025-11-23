@@ -6,6 +6,8 @@
 #include "types.h"
 #include "bootinfo.h"
 #include <stddef.h>
+#include "io.h"
+#include "arch/x86/cpu.h"
 
 #define HWINFO_E820_MAX    BOOTINFO_MAX_E820_ENTRIES
 
@@ -19,8 +21,16 @@ typedef struct
 
 static e820_entry_t g_e820[HWINFO_E820_MAX];
 static uint32_t g_e820_count = 0;
+static bool g_mem_info_valid = false;
 static hwinfo_cpu_info_t g_cpu_info;
-static bool g_hwinfo_ready = false;
+static bool g_cpu_info_valid = false;
+
+static inline uint64_t rdtsc(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
 
 static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
@@ -148,6 +158,81 @@ static void load_e820(void)
         g_e820[i].attr = boot_info.e820[i].attr;
     }
     g_e820_count = count;
+    g_mem_info_valid = true;
+}
+
+/*
+ * Calibrate CPU frequency using PIT Channel 2 (Speaker).
+ * This is used as a fallback when CPUID leaf 0x16 is not supported.
+ */
+static uint32_t cpu_calibrate_frequency(void)
+{
+    /*
+     * PIT Channel 2 is at port 0x42.
+     * Control port is 0x61 (Speaker).
+     * Command port is 0x43.
+     * PIT frequency is 1.193182 MHz.
+     */
+    const uint32_t pit_freq = 1193182;
+    
+    /* Save current state of port 0x61 */
+    uint8_t port61 = inb(0x61);
+    
+    /* Enable PIT Channel 2 gate (bit 0), disable speaker data (bit 1) to avoid noise */
+    outb(0x61, (port61 & 0xFD) | 1);
+    
+    /* Configure PIT Channel 2: Mode 0 (Interrupt on Terminal Count), Binary */
+    /* 10110000b = 0xB0: Ch2, Access Lo/Hi, Mode 0, Binary */
+    outb(0x43, 0xB0);
+    
+    /* Set reload value to 0xFFFF */
+    outb(0x42, 0xFF);
+    outb(0x42, 0xFF);
+    
+    /* Wait for a tick to settle */
+    uint64_t start_tsc = rdtsc();
+    
+    uint16_t start_count = 0;
+    uint16_t current_count = 0;
+    
+    /* Read initial count */
+    outb(0x43, 0x80); /* Latch command for Ch 2 */
+    start_count = inb(0x42);
+    start_count |= (inb(0x42) << 8);
+    
+    /* Spin loop */
+    /* We want to wait for roughly 1/20th of a second (50ms) or so for decent precision */
+    /* 50ms @ 1.19MHz ~= 59659 ticks. That fits in 16-bit (65535). */
+    /* Let's wait for 50000 ticks. */
+    const uint16_t ticks_to_wait = 50000;
+    
+    while (1)
+    {
+        outb(0x43, 0x80);
+        current_count = inb(0x42);
+        current_count |= (inb(0x42) << 8);
+        
+        uint16_t delta = start_count - current_count; /* Down counter */
+        if (delta >= ticks_to_wait)
+        {
+            break;
+        }
+    }
+    
+    uint64_t end_tsc = rdtsc();
+    
+    /* Restore port 0x61 */
+    outb(0x61, port61);
+    
+    uint64_t tsc_delta = end_tsc - start_tsc;
+    
+    /*
+     * Frequency = (TSC_Delta / PIT_Ticks) * PIT_Frequency
+     * MHz = Frequency / 1000000
+     */
+    
+    uint64_t freq_hz = (tsc_delta * pit_freq) / ticks_to_wait;
+    return (uint32_t)(freq_hz / 1000000ULL);
 }
 
 static void query_cpu(void)
@@ -194,17 +279,29 @@ static void query_cpu(void)
         g_cpu_info.max_mhz = 0;
         g_cpu_info.bus_mhz = 0;
     }
+
+    /* Fallback if CPUID 0x16 is missing or returns 0 */
+    if (g_cpu_info.base_mhz == 0)
+    {
+        uint32_t calibrated = cpu_calibrate_frequency();
+        if (calibrated > 0)
+        {
+            g_cpu_info.base_mhz = calibrated;
+            g_cpu_info.max_mhz = calibrated; /* Assume running at max/base for now */
+            /* Leave bus_mhz as 0 as we can't easily measure it directly without more info */
+        }
+    }
+    g_cpu_info_valid = true;
 }
 
 static void hwinfo_ensure_initialized(void)
 {
-    if (g_hwinfo_ready)
+    if (g_cpu_info_valid && g_mem_info_valid)
     {
         return;
     }
     load_e820();
     query_cpu();
-    g_hwinfo_ready = true;
 }
 
 static uint64_t total_usable_bytes(void)
@@ -410,7 +507,7 @@ void hwinfo_init(void)
 bool hwinfo_get_cpu_info(hwinfo_cpu_info_t *out)
 {
     hwinfo_ensure_initialized();
-    if (!out || !g_hwinfo_ready)
+    if (!out || !g_cpu_info_valid)
     {
         return false;
     }
@@ -421,7 +518,7 @@ bool hwinfo_get_cpu_info(hwinfo_cpu_info_t *out)
 bool hwinfo_get_memory_info(hwinfo_memory_info_t *out)
 {
     hwinfo_ensure_initialized();
-    if (!out || !g_hwinfo_ready)
+    if (!out || !g_mem_info_valid)
     {
         return false;
     }
