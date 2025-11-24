@@ -27,6 +27,7 @@ void atk_list_view_set_cell_text(atk_widget_t *list, size_t row, size_t column, 
 void atk_list_view_clear(atk_widget_t *list);
 size_t atk_list_view_row_count(const atk_widget_t *list);
 size_t atk_list_view_column_count(const atk_widget_t *list);
+void atk_list_view_force_vertical_scrollbar(atk_widget_t *list, bool force);
 void atk_list_view_draw(const struct atk_state *state, const atk_widget_t *list);
 void atk_list_view_destroy(atk_widget_t *list);
 void atk_list_view_relayout(atk_widget_t *list);

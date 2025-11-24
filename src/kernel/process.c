@@ -734,11 +734,9 @@ static bool process_heap_commit_range(process_t *process, uintptr_t start, uintp
 
 static void process_log(const char *msg, uint64_t value)
 {
-    serial_printf("%s", "[proc] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", "0x");
-    serial_printf("%016llX", (unsigned long long)(value));
-    serial_printf("%s", "\r\n");
+    serial_printf("[proc] %s0x%016llX\r\n",
+                  msg ? msg : "",
+                  (unsigned long long)(value));
 }
 
 static void process_handle_stack_guard_fault(void) __attribute__((noreturn));
@@ -1517,13 +1515,13 @@ static bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stat
     if (did_work)
     {
         uint64_t ms = scheduler_ticks_to_ms(local_stats.duration_ticks);
-        serial_printf("[sched] deferred_free cpu=%u grabbed=0x%016llX freed=0x%016llX requeued=0x%016llX duration=%llu ms%s\r\n",
-                      local_stats.cpu_index,
-                      (unsigned long long)local_stats.grabbed,
-                      (unsigned long long)local_stats.freed,
-                      (unsigned long long)local_stats.requeued,
-                      (unsigned long long)ms,
-                      (ms >= DEFERRED_FREE_WARN_MS) ? " (slow)" : "");
+        // serial_printf("[sched] deferred_free cpu=%u grabbed=0x%016llX freed=0x%016llX requeued=0x%016llX duration=%llu ms%s\r\n",
+        //               local_stats.cpu_index,
+        //               (unsigned long long)local_stats.grabbed,
+        //               (unsigned long long)local_stats.freed,
+        //               (unsigned long long)local_stats.requeued,
+        //               (unsigned long long)ms,
+        //               (ms >= DEFERRED_FREE_WARN_MS) ? " (slow)" : "");
     }
 
     return did_work;

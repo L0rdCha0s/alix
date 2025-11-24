@@ -59,6 +59,7 @@ typedef struct
     int last_layout_width;
     int last_layout_height;
     bool layout_dirty;
+    bool force_vscroll;
 } atk_list_view_priv_t;
 
 static void list_view_mark_dirty(const atk_widget_t *list);
@@ -162,6 +163,7 @@ atk_widget_t *atk_list_view_create(void)
     priv->last_layout_width = -1;
     priv->last_layout_height = -1;
     priv->layout_dirty = true;
+    priv->force_vscroll = false;
 
     return widget;
 }
@@ -332,6 +334,17 @@ size_t atk_list_view_column_count(const atk_widget_t *list)
 {
     const atk_list_view_priv_t *priv = list_priv(list);
     return priv ? priv->column_count : 0;
+}
+
+void atk_list_view_force_vertical_scrollbar(atk_widget_t *list, bool force)
+{
+    atk_list_view_priv_t *priv = list_priv_mut(list);
+    if (!priv)
+    {
+        return;
+    }
+    priv->force_vscroll = force;
+    priv->layout_dirty = true;
 }
 
 bool atk_list_view_is_over_separator(const atk_widget_t *list, int local_x, int local_y)
@@ -1009,7 +1022,8 @@ static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv
 
         visible_rows = (priv->row_height > 0) ? (row_area / priv->row_height) : 0;
         bool next_need_vscroll = (window != NULL) && (priv->row_height > 0) &&
-                                 ((int)(priv->row_count * priv->row_height) > row_area);
+                                 (priv->force_vscroll ||
+                                  ((int)(priv->row_count * priv->row_height) > row_area));
 
         if (need_vscroll == next_need_vscroll && need_hscroll == next_need_hscroll)
         {
@@ -1027,6 +1041,10 @@ static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv
 
     total_width = list_view_layout_columns(priv, client_width);
     need_hscroll = (window != NULL) && (total_width > client_width);
+    if (priv->force_vscroll && window != NULL)
+    {
+        need_vscroll = true;
+    }
 
     client_height = list_height - (need_hscroll ? scrollbar_size : 0);
     if (client_height < 0)
@@ -1058,7 +1076,7 @@ static void list_view_sync_layout(atk_widget_t *list, atk_list_view_priv_t *priv
 
     max_scroll_x = (total_width > client_width) ? (total_width - client_width) : 0;
 
-    if (!need_vscroll)
+    if (!need_vscroll && !priv->force_vscroll)
     {
         priv->scroll_row = 0;
     }

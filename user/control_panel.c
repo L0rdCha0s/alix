@@ -5,6 +5,7 @@
 #include "atk_window.h"
 #include "atk/layout.h"
 #include "atk/atk_list_view.h"
+#include "atk/atk_scrollbar.h"
 #include "atk_menu_bar.h"
 #include "serial.h"
 #include "libc.h"
@@ -41,6 +42,7 @@ typedef struct
 {
     atk_user_window_t remote;
     atk_widget_t *window;
+    atk_widget_t *content_scrollbar;
     atk_widget_t *home_tile;
     atk_widget_t *back_button;
     atk_widget_t *summary_list;
@@ -52,20 +54,44 @@ typedef struct
     uint32_t refresh_counter;
     bool showing_info;
     bool layout_dirty;
+    int content_scroll_offset;
+    int content_bg_x;
+    int content_bg_y;
+    int content_bg_w;
+    int content_bg_h;
 } control_panel_app_t;
+
+#define CP_SECTION_SPACING 12
+#define CP_SCROLLBAR_SIZE 14
+#define CP_SUMMARY_HEIGHT 160
+#define CP_BLOCK_HEIGHT   130
+#define CP_NET_HEIGHT     140
+#define CP_PCI_HEIGHT     220
 
 static void cp_apply_theme(atk_state_t *state)
 {
-    state->theme.background = video_make_color(0x15, 0x1C, 0x27);
-    state->theme.window_border = video_make_color(0x32, 0x32, 0x32);
-    state->theme.window_title = video_make_color(0x45, 0x70, 0xB2);
+    state->theme.background = video_make_color(0x55, 0x57, 0x5A);
+    state->theme.window_border = video_make_color(0x2E, 0x2E, 0x2E);
+    state->theme.window_title = video_make_color(0x5A, 0x7C, 0xB8);
     state->theme.window_title_text = video_make_color(0xFF, 0xFF, 0xFF);
-    state->theme.window_body = video_make_color(0xF2, 0xF2, 0xF2);
+    state->theme.window_body = video_make_color(0xC4, 0xC6, 0xCA);
     state->theme.button_face = video_make_color(0x58, 0x7A, 0xB8);
     state->theme.button_border = video_make_color(0x1F, 0x2A, 0x3B);
     state->theme.button_text = video_make_color(0xFF, 0xFF, 0xFF);
     state->theme.desktop_icon_face = video_make_color(0x58, 0x7A, 0xB8);
     state->theme.desktop_icon_text = state->theme.window_title_text;
+}
+
+static void cp_on_scroll_change(atk_widget_t *scrollbar, void *context, int value)
+{
+    (void)scrollbar;
+    control_panel_app_t *app = (control_panel_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+    app->content_scroll_offset = value;
+    app->layout_dirty = true;
 }
 
 static void cp_copy_string(char *dst, size_t dst_len, const char *src)
@@ -729,6 +755,15 @@ static void cp_refresh_data(control_panel_app_t *app)
 
 static void cp_render(control_panel_app_t *app)
 {
+    if (app && app->showing_info)
+    {
+        /* Fill the content viewport to avoid empty white space if the widgets are offscreen. */
+        video_draw_rect(app->content_bg_x,
+                        app->content_bg_y,
+                        app->content_bg_w,
+                        app->content_bg_h,
+                        video_make_color(0x22, 0x22, 0x22));
+    }
     atk_render();
     atk_user_present(&app->remote);
 }
@@ -742,6 +777,7 @@ static void cp_on_hardware_click(atk_widget_t *button, void *context)
         app->refresh_pending = true;
         cp_refresh_data(app);
         app->showing_info = true;
+        app->content_scroll_offset = 0;
         app->layout_dirty = true;
     }
 }
@@ -787,6 +823,12 @@ static void cp_layout_views(control_panel_app_t *app)
             app->back_button->width = 0;
             app->back_button->height = 0;
         }
+        if (app->content_scrollbar)
+        {
+            app->content_scrollbar->used = false;
+            app->content_scrollbar->width = 0;
+            app->content_scrollbar->height = 0;
+        }
         /* Hide lists. */
         atk_widget_t *lists[] = { app->summary_list, app->block_list, app->net_list, app->pci_list };
         for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); ++i)
@@ -819,47 +861,79 @@ static void cp_layout_views(control_panel_app_t *app)
 
     int content_x = 160;
     int content_y = chrome_top + 12;
-    int content_w = win_w - 176;
+    int base_content_w = win_w - 176;
     int content_h = win_h - chrome_top - 24;
-    if (content_w < 0) content_w = 0;
+    if (base_content_w < 0) base_content_w = 0;
     if (content_h < 0) content_h = 0;
+    app->content_bg_x = content_x;
+    app->content_bg_y = content_y;
+    app->content_bg_w = base_content_w;
+    app->content_bg_h = content_h;
 
-    atk_layout_t layout;
-    atk_layout_init(&layout, content_x, content_y, content_w, content_h);
-    atk_layout_set_padding(&layout, 0, 0, 0, 0);
+    int desired_total_h = CP_SUMMARY_HEIGHT + CP_BLOCK_HEIGHT + CP_NET_HEIGHT + CP_PCI_HEIGHT + (CP_SECTION_SPACING * 3);
+    bool need_scroll = desired_total_h > content_h;
+    int content_w = base_content_w - (need_scroll ? CP_SCROLLBAR_SIZE : 0);
+    if (content_w < 0) content_w = 0;
+    int scroll_max = need_scroll ? (desired_total_h - content_h) : 0;
+    if (scroll_max < 0) scroll_max = 0;
+    if (app->content_scroll_offset < 0) app->content_scroll_offset = 0;
+    if (app->content_scroll_offset > scroll_max) app->content_scroll_offset = scroll_max;
 
-    atk_layout_region_t summary_region = atk_layout_take_top(&layout, 140, 12);
-    atk_layout_region_t block_region = atk_layout_take_top(&layout, 110, 12);
-    atk_layout_region_t net_region = atk_layout_take_top(&layout, 120, 12);
-    atk_layout_region_t pci_region = atk_layout_content(&layout);
+    int y = content_y - app->content_scroll_offset;
+    int summary_y = y;
+    int block_y = summary_y + CP_SUMMARY_HEIGHT + CP_SECTION_SPACING;
+    int net_y = block_y + CP_BLOCK_HEIGHT + CP_SECTION_SPACING;
+    int pci_y = net_y + CP_NET_HEIGHT + CP_SECTION_SPACING;
+    int pci_h = CP_PCI_HEIGHT;
 
     if (app->summary_list)
     {
-        app->summary_list->x = summary_region.x;
-        app->summary_list->y = summary_region.y;
-        app->summary_list->width = summary_region.width;
-        app->summary_list->height = summary_region.height;
+        app->summary_list->x = content_x;
+        app->summary_list->y = summary_y;
+        app->summary_list->width = content_w;
+        app->summary_list->height = CP_SUMMARY_HEIGHT;
     }
     if (app->block_list)
     {
-        app->block_list->x = block_region.x;
-        app->block_list->y = block_region.y;
-        app->block_list->width = block_region.width;
-        app->block_list->height = block_region.height;
+        app->block_list->x = content_x;
+        app->block_list->y = block_y;
+        app->block_list->width = content_w;
+        app->block_list->height = CP_BLOCK_HEIGHT;
     }
     if (app->net_list)
     {
-        app->net_list->x = net_region.x;
-        app->net_list->y = net_region.y;
-        app->net_list->width = net_region.width;
-        app->net_list->height = net_region.height;
+        app->net_list->x = content_x;
+        app->net_list->y = net_y;
+        app->net_list->width = content_w;
+        app->net_list->height = CP_NET_HEIGHT;
     }
     if (app->pci_list)
     {
-        app->pci_list->x = pci_region.x;
-        app->pci_list->y = pci_region.y;
-        app->pci_list->width = pci_region.width;
-        app->pci_list->height = pci_region.height;
+        app->pci_list->x = content_x;
+        app->pci_list->y = pci_y;
+        app->pci_list->width = content_w;
+        app->pci_list->height = pci_h;
+    }
+
+    if (app->content_scrollbar)
+    {
+        if (need_scroll)
+        {
+            app->content_scrollbar->used = true;
+            app->content_scrollbar->x = content_x + content_w;
+            app->content_scrollbar->y = content_y;
+            app->content_scrollbar->width = CP_SCROLLBAR_SIZE;
+            app->content_scrollbar->height = content_h;
+            atk_scrollbar_set_range(app->content_scrollbar, 0, scroll_max, content_h);
+            atk_scrollbar_set_value(app->content_scrollbar, app->content_scroll_offset);
+        }
+        else
+        {
+            app->content_scrollbar->used = false;
+            app->content_scrollbar->width = 0;
+            app->content_scrollbar->height = 0;
+            app->content_scroll_offset = 0;
+        }
     }
     app->layout_dirty = false;
 }
@@ -990,7 +1064,16 @@ static bool cp_init_ui(control_panel_app_t *app)
                           ATK_WIDGET_ANCHOR_RIGHT |
                           ATK_WIDGET_ANCHOR_BOTTOM);
 
+    atk_widget_t *content_scroll = atk_window_add_scrollbar(window, 0, 0, 1, 1, ATK_SCROLLBAR_VERTICAL);
+    if (!content_scroll)
+    {
+        cp_log("scrollbar creation failed");
+        return false;
+    }
+    atk_scrollbar_set_change_handler(content_scroll, cp_on_scroll_change, app);
+
     app->window = window;
+    app->content_scrollbar = content_scroll;
     app->home_tile = tile;
     app->back_button = back;
     app->summary_list = summary;
@@ -1000,6 +1083,7 @@ static bool cp_init_ui(control_panel_app_t *app)
     app->showing_info = true;
     app->refresh_pending = true;
     app->layout_dirty = true;
+    app->content_scroll_offset = 0;
     cp_layout_views(app);
     cp_log("init_ui ok");
     return true;

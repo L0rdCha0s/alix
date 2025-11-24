@@ -69,11 +69,9 @@ static void vfs_log_sync_result(const char *dev_name,
 
 static void vfs_log(const char *msg, uint64_t value)
 {
-    serial_printf("%s", "[vfs] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", "0x");
-    serial_printf("%016llX", (unsigned long long)(value));
-    serial_printf("%s", "\r\n");
+    serial_printf("[vfs] %s0x%016llX\r\n",
+                  msg ? msg : "",
+                  (unsigned long long)(value));
 }
 
 static bool vfs_mount_sync_node(vfs_node_t *node);
@@ -692,6 +690,9 @@ static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all)
     if (ok)
     {
         vfs_clear_dirty_subtree(mount->mount_point, mount);
+        spinlock_lock(&mount->dirty_lock);
+        mount->dirty_bytes = 0;
+        spinlock_unlock(&mount->dirty_lock);
     }
     spinlock_unlock(&g_vfs_tree_lock);
     return ok;
@@ -1734,6 +1735,11 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
         vfs_log_sync_result(dev_name, "fail", start, pending_bytes);
         return false;
     }
+
+    spinlock_lock(&mount->dirty_lock);
+    mount->dirty_bytes = 0;
+    mount->dirty = false;
+    spinlock_unlock(&mount->dirty_lock);
 
     vfs_log_sync_result(dev_name, "ok", start, pending_bytes);
     return true;
