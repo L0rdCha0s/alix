@@ -1,11 +1,14 @@
 #include "heap.h"
 #include "libc.h"
 #include "serial.h"
+#include "paging.h"
 #include "spinlock.h"
 #include "smp.h"
 
 #include <stddef.h>
 #include <stdint.h>
+
+#define HEAP_MAG_ENABLED 0
 
 #ifndef ENABLE_HEAP_TRACE
 #define ENABLE_HEAP_TRACE 1
@@ -77,10 +80,47 @@ static inline uint64_t read_tsc(void)
     return ((uint64_t)hi << 32) | lo;
 }
 
+static inline void heap_log_hex32(uint32_t value)
+{
+    char buf[9];
+    for (int i = 0; i < 8; ++i)
+    {
+        uint8_t nibble = (uint8_t)((value >> (28 - (i * 4))) & 0xF);
+        buf[i] = (char)(nibble < 10 ? ('0' + nibble) : ('A' + (nibble - 10)));
+    }
+    buf[8] = '\0';
+    serial_early_write_string(buf);
+}
+
+static inline void heap_log_hex64(uint64_t value)
+{
+    char buf[17];
+    for (int i = 0; i < 16; ++i)
+    {
+        uint8_t nibble = (uint8_t)((value >> (60 - (i * 4))) & 0xF);
+        buf[i] = (char)(nibble < 10 ? ('0' + nibble) : ('A' + (nibble - 10)));
+    }
+    buf[16] = '\0';
+    serial_early_write_string(buf);
+}
+
+static inline void heap_log_lock_event(const char *label, uint32_t cpu, uint64_t depth)
+{
+    serial_early_write_string("[heap][lock] ");
+    serial_early_write_string(label ? label : "?");
+    serial_early_write_string(" cpu=0x");
+    heap_log_hex32(cpu);
+    serial_early_write_string(" depth=0x");
+    heap_log_hex64(depth);
+    serial_early_write_string("\r\n");
+}
+
 static inline size_t heap_bin_index(size_t size);
 static void free_list_init(void);
 static void free_list_insert(heap_block_t *block);
+static void free_list_insert_locked(heap_block_t *block, size_t bin);
 static void free_list_remove(heap_block_t *block);
+static void free_list_remove_locked(heap_block_t *block, size_t bin);
 static bool heap_free_list_contains(const heap_block_t *block);
 static bool heap_verify_free_bins_locked(size_t *count_out);
 static size_t heap_capture_snapshot(heap_block_snapshot_t *out, size_t max, bool *truncated);
@@ -120,6 +160,25 @@ static volatile uint32_t g_heap_lock_depth = 0;
 static volatile uint64_t g_heap_lock_saved_flags[SMP_MAX_CPUS];
 static volatile void *g_heap_lock_owner_ra[SMP_MAX_CPUS];
 static volatile uint64_t g_heap_lock_owner_tsc[SMP_MAX_CPUS];
+static spinlock_t g_heap_bin_locks[HEAP_BIN_COUNT];
+
+#define HEAP_MAG_CLASS_COUNT 4
+static const size_t g_heap_mag_sizes[HEAP_MAG_CLASS_COUNT] = { 16, 32, 64, 128 };
+#define HEAP_MAG_CAPACITY 32
+
+typedef struct heap_magazine
+{
+    spinlock_t lock;
+    bool init;
+    uint32_t count[HEAP_MAG_CLASS_COUNT];
+    void *slots[HEAP_MAG_CLASS_COUNT][HEAP_MAG_CAPACITY];
+} heap_magazine_t;
+
+static heap_magazine_t g_heap_magazines[SMP_MAX_CPUS];
+static int heap_mag_class_for_size(size_t size);
+static heap_magazine_t *heap_mag_for_cpu(uint32_t cpu);
+static void *heap_mag_pop(size_t size);
+static bool heap_mag_push(heap_block_t *block);
 
 static inline uint64_t heap_lock_acquire(void)
 {
@@ -131,9 +190,14 @@ static inline uint64_t heap_lock_acquire(void)
      * - Do not sleep, block, or call into code that can reschedule.
      * - Heap must not be entered from NMI/MCE contexts. */
     __asm__ volatile ("" ::: "memory");
+    if (paging_global_lock_held_by_current_cpu())
+    {
+        serial_early_write_string("[heap] lock_order_violation: paging->heap\r\n");
+    }
     if (g_heap_lock_owner == cpu)
     {
         g_heap_lock_depth++;
+        heap_log_lock_event("acquire-recursing", cpu, g_heap_lock_depth);
         return flags;
     }
 
@@ -153,6 +217,7 @@ static inline uint64_t heap_lock_acquire(void)
         g_heap_lock_owner_ra[cpu] = __builtin_return_address(0);
         g_heap_lock_owner_tsc[cpu] = read_tsc();
     }
+    heap_log_lock_event("acquire", cpu, g_heap_lock_depth);
     heap_log("lock acquire flags=", flags);
     return flags;
 }
@@ -163,9 +228,11 @@ static inline void heap_lock_release(uint64_t flags)
     if (g_heap_lock_owner == cpu && g_heap_lock_depth > 1)
     {
         g_heap_lock_depth--;
+        heap_log_lock_event("release-defer", cpu, g_heap_lock_depth);
         return;
     }
 
+    heap_log_lock_event("release", cpu, g_heap_lock_depth);
     heap_log("lock release flags=", flags);
     g_heap_lock_owner = UINT32_MAX;
     g_heap_lock_depth = 0;
@@ -179,6 +246,106 @@ static inline void heap_lock_release(uint64_t flags)
         g_heap_lock_owner_tsc[cpu] = 0;
     }
     __asm__ volatile ("push %0; popfq" :: "r"(restore_flags) : "cc");
+}
+
+static int heap_mag_class_for_size(size_t size)
+{
+#if !HEAP_MAG_ENABLED
+    (void)size;
+    return -1;
+#else
+    for (int i = 0; i < (int)HEAP_MAG_CLASS_COUNT; ++i)
+    {
+        if (size <= g_heap_mag_sizes[i])
+        {
+            return i;
+        }
+    }
+    return -1;
+#endif
+}
+
+static heap_magazine_t *heap_mag_for_cpu(uint32_t cpu)
+{
+#if !HEAP_MAG_ENABLED
+    (void)cpu;
+    return NULL;
+#else
+    if (cpu >= SMP_MAX_CPUS)
+    {
+        return NULL;
+    }
+    heap_magazine_t *mag = &g_heap_magazines[cpu];
+    if (!mag->init)
+    {
+        spinlock_init(&mag->lock);
+        mag->init = true;
+    }
+    return mag;
+#endif
+}
+
+static void *heap_mag_pop(size_t size)
+{
+#if !HEAP_MAG_ENABLED
+    (void)size;
+    return NULL;
+#else
+    int cls = heap_mag_class_for_size(size);
+    if (cls < 0)
+    {
+        return NULL;
+    }
+    uint32_t cpu = smp_current_cpu_index();
+    heap_magazine_t *mag = heap_mag_for_cpu(cpu);
+    if (!mag)
+    {
+        return NULL;
+    }
+    spinlock_lock(&mag->lock);
+    void *ptr = NULL;
+    if (mag->count[cls] > 0)
+    {
+        uint32_t idx = --mag->count[cls];
+        ptr = mag->slots[cls][idx];
+        mag->slots[cls][idx] = NULL;
+    }
+    spinlock_unlock(&mag->lock);
+    return ptr;
+#endif
+}
+
+static bool heap_mag_push(heap_block_t *block)
+{
+#if !HEAP_MAG_ENABLED
+    (void)block;
+    return false;
+#else
+    if (!block)
+    {
+        return false;
+    }
+    int cls = heap_mag_class_for_size(block->size);
+    if (cls < 0)
+    {
+        return false;
+    }
+    uint32_t cpu = smp_current_cpu_index();
+    heap_magazine_t *mag = heap_mag_for_cpu(cpu);
+    if (!mag)
+    {
+        return false;
+    }
+    spinlock_lock(&mag->lock);
+    bool stored = false;
+    if (mag->count[cls] < HEAP_MAG_CAPACITY)
+    {
+        mag->slots[cls][mag->count[cls]++] = (void *)((uintptr_t)block + sizeof(heap_block_t));
+        stored = true;
+    }
+    spinlock_unlock(&mag->lock);
+    return stored;
+#endif
 }
 
 static size_t align_size(size_t size)
@@ -231,16 +398,16 @@ static void free_list_init(void)
     for (size_t i = 0; i < HEAP_BIN_COUNT; ++i)
     {
         g_free_bins[i] = NULL;
+        spinlock_init(&g_heap_bin_locks[i]);
     }
 }
 
-static void free_list_remove(heap_block_t *block)
+static void free_list_remove_locked(heap_block_t *block, size_t bin)
 {
     if (!block)
     {
         return;
     }
-    size_t bin = heap_bin_index(block->size);
     if (block->free_prev)
     {
         block->free_prev->free_next = block->free_next;
@@ -257,13 +424,29 @@ static void free_list_remove(heap_block_t *block)
     block->free_prev = NULL;
 }
 
-static void free_list_insert(heap_block_t *block)
+static void free_list_remove(heap_block_t *block)
 {
     if (!block)
     {
         return;
     }
     size_t bin = heap_bin_index(block->size);
+    spinlock_lock(&g_heap_bin_locks[bin]);
+    free_list_remove_locked(block, bin);
+    spinlock_unlock(&g_heap_bin_locks[bin]);
+}
+
+static void free_list_insert_locked(heap_block_t *block, size_t bin)
+{
+    if (!block)
+    {
+        return;
+    }
+    size_t actual_bin = heap_bin_index(block->size);
+    if (actual_bin != bin)
+    {
+        bin = actual_bin;
+    }
     block->free = true;
     block->free_prev = NULL;
     block->free_next = g_free_bins[bin];
@@ -274,6 +457,18 @@ static void free_list_insert(heap_block_t *block)
     g_free_bins[bin] = block;
 }
 
+static void free_list_insert(heap_block_t *block)
+{
+    if (!block)
+    {
+        return;
+    }
+    size_t bin = heap_bin_index(block->size);
+    spinlock_lock(&g_heap_bin_locks[bin]);
+    free_list_insert_locked(block, bin);
+    spinlock_unlock(&g_heap_bin_locks[bin]);
+}
+
 static bool heap_free_list_contains(const heap_block_t *block)
 {
     if (!block)
@@ -281,12 +476,14 @@ static bool heap_free_list_contains(const heap_block_t *block)
         return false;
     }
     size_t bin = heap_bin_index(block->size);
+    spinlock_lock(&g_heap_bin_locks[bin]);
     heap_block_t *cursor = g_free_bins[bin];
     size_t guard = 0;
     while (cursor)
     {
         if (cursor == block)
         {
+            spinlock_unlock(&g_heap_bin_locks[bin]);
             return true;
         }
         cursor = cursor->free_next;
@@ -296,6 +493,7 @@ static bool heap_free_list_contains(const heap_block_t *block)
             break;
         }
     }
+    spinlock_unlock(&g_heap_bin_locks[bin]);
     return false;
 }
 
@@ -865,6 +1063,24 @@ void *malloc(size_t size)
     size_t trace_free_bytes = 0;
     bool trace_free_ok = false;
 #endif
+
+    size_t aligned = align_size(size);
+    if (aligned > 0)
+    {
+        void *mag_ptr = heap_mag_pop(aligned);
+        if (mag_ptr)
+        {
+            heap_block_t *blk = payload_to_block(mag_ptr);
+            if (blk)
+            {
+                blk->free = false;
+                blk->free_next = NULL;
+                blk->free_prev = NULL;
+            }
+            return mag_ptr;
+        }
+    }
+
     uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized || size == 0)
     {
@@ -872,7 +1088,7 @@ void *malloc(size_t size)
         return NULL;
     }
 
-    size = align_size(size);
+    size = aligned;
     if (size == 0)
     {
         heap_lock_release(flags);
@@ -935,10 +1151,8 @@ void free(void *ptr)
     size_t trace_free_bytes = 0;
     bool trace_free_ok = false;
 #endif
-    uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized || !ptr)
     {
-        heap_lock_release(flags);
         return;
     }
 
@@ -946,9 +1160,23 @@ void free(void *ptr)
     if (!block || !pointer_in_heap(block) || (((uintptr_t)block & (ALIGNMENT - 1)) != 0) || block->free)
     {
         heap_log("free invalid ptr=", (uintptr_t)ptr);
-        heap_lock_release(flags);
         return;
     }
+
+    bool mag_stored = false;
+    if (heap_mag_class_for_size(block->size) >= 0)
+    {
+        block->free_next = NULL;
+        block->free_prev = NULL;
+        /* Keep block->free=false so neighbors are not coalesced over a cached block. */
+        mag_stored = heap_mag_push(block);
+    }
+    if (mag_stored)
+    {
+        return;
+    }
+
+    uint64_t flags = heap_lock_acquire();
 #if ENABLE_HEAP_TRACE
     if (g_heap_trace_enabled)
     {

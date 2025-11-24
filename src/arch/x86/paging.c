@@ -9,6 +9,7 @@
 #include "process.h"
 #include "spinlock.h"
 #include "heap.h"
+#include "build_features.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -109,6 +110,39 @@ static inline uint64_t read_tsc(void)
     return ((uint64_t)hi << 32) | lo;
 }
 
+static inline void paging_log_hex32(uint32_t value)
+{
+    char buf[9];
+    for (int i = 0; i < 8; ++i)
+    {
+        uint8_t nibble = (uint8_t)((value >> (28 - (i * 4))) & 0xF);
+        buf[i] = (char)(nibble < 10 ? ('0' + nibble) : ('A' + (nibble - 10)));
+    }
+    buf[8] = '\0';
+    serial_early_write_string(buf);
+}
+
+static inline void paging_log_hex64(uint64_t value)
+{
+    char buf[17];
+    for (int i = 0; i < 16; ++i)
+    {
+        uint8_t nibble = (uint8_t)((value >> (60 - (i * 4))) & 0xF);
+        buf[i] = (char)(nibble < 10 ? ('0' + nibble) : ('A' + (nibble - 10)));
+    }
+    buf[16] = '\0';
+    serial_early_write_string(buf);
+}
+
+static inline void paging_log_lock_event(const char *label, uint32_t cpu)
+{
+    serial_early_write_string("[paging][lock] ");
+    serial_early_write_string(label ? label : "?");
+    serial_early_write_string(" cpu=0x");
+    paging_log_hex32(cpu);
+    serial_early_write_string("\r\n");
+}
+
 static inline uint64_t paging_lock(void)
 {
     uint64_t flags;
@@ -116,6 +150,7 @@ static inline uint64_t paging_lock(void)
     uint32_t cpu = smp_current_cpu_index();
     __asm__ volatile ("cli" ::: "memory");
     spinlock_lock(&g_paging_lock);
+    paging_log_lock_event("acquire", cpu);
     g_paging_lock_owner = cpu;
     if (cpu < SMP_MAX_CPUS)
     {
@@ -128,6 +163,7 @@ static inline uint64_t paging_lock(void)
 static inline void paging_unlock(uint64_t flags)
 {
     uint32_t cpu = smp_current_cpu_index();
+    paging_log_lock_event("release", cpu);
     g_paging_lock_owner = UINT32_MAX;
     if (cpu < SMP_MAX_CPUS)
     {
@@ -135,6 +171,51 @@ static inline void paging_unlock(uint64_t flags)
         g_paging_lock_owner_tsc[cpu] = 0;
     }
     spinlock_unlock(&g_paging_lock);
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
+}
+
+bool paging_global_lock_held_by_current_cpu(void)
+{
+    uint32_t cpu = smp_current_cpu_index();
+    return __atomic_load_n(&g_paging_lock_owner, __ATOMIC_ACQUIRE) == cpu;
+}
+
+static inline uint64_t paging_space_lock(paging_space_t *space, bool *used_global)
+{
+    if (!space || !space->lock_inited)
+    {
+        if (used_global)
+        {
+            *used_global = true;
+        }
+        return paging_lock();
+    }
+    if (used_global)
+    {
+        *used_global = false;
+    }
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("cli" ::: "memory");
+    /* Lock ordering: never take paging locks while holding heap lock. */
+    if (heap_lock_held_by_current_cpu())
+    {
+        serial_early_write_string("[paging] lock_order_violation: heap->paging\r\n");
+    }
+    spinlock_lock(&space->lock);
+    paging_log_lock_event("acquire-space", smp_current_cpu_index());
+    return flags;
+}
+
+static inline void paging_space_unlock(paging_space_t *space, bool used_global, uint64_t flags)
+{
+    if (used_global || !space || !space->lock_inited)
+    {
+        paging_unlock(flags);
+        return;
+    }
+    paging_log_lock_event("release-space", smp_current_cpu_index());
+    spinlock_unlock(&space->lock);
     __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
 }
 
@@ -704,6 +785,8 @@ void paging_init(void)
     write_cr3(kernel_space.cr3);
 
     g_kernel_space = kernel_space;
+    spinlock_init(&g_kernel_space.lock);
+    g_kernel_space.lock_inited = true;
     g_paging_ready = true;
 }
 
@@ -720,6 +803,8 @@ bool paging_clone_kernel_space(paging_space_t *space)
         paging_debug_log("clone_kernel_space build_failed");
         return false;
     }
+    spinlock_init(&space->lock);
+    space->lock_inited = true;
     paging_debug_log("clone_kernel_space success");
     return true;
 }
@@ -736,6 +821,7 @@ bool paging_share_kernel_space(paging_space_t *space)
     space->allocation_size = g_kernel_space.allocation_size;
     space->tables_base = g_kernel_space.tables_base;
     space->active_cpu_mask = 0;
+    space->lock_inited = false; /* shared kernel space uses global lock */
     return true;
 }
 
@@ -745,8 +831,19 @@ void paging_destroy_space(paging_space_t *space)
     {
         return;
     }
+    bool used_global = false;
+    uint64_t flags = 0;
+    if (space->lock_inited)
+    {
+        flags = paging_space_lock(space, &used_global);
+    }
+    space->lock_inited = false;
     if (space->allocation_base == g_kernel_space.allocation_base)
     {
+        if (space->lock_inited)
+        {
+            paging_space_unlock(space, used_global, flags);
+        }
         return;
     }
     for (size_t i = 0; i < space->extra_page_count; ++i)
@@ -765,6 +862,10 @@ void paging_destroy_space(paging_space_t *space)
     space->tables_base = NULL;
     space->cr3 = 0;
     space->active_cpu_mask = 0;
+    if (space->lock_inited)
+    {
+        paging_space_unlock(space, used_global, flags);
+    }
 }
 
 uintptr_t paging_kernel_cr3(void)
@@ -786,9 +887,10 @@ bool paging_map_user_page(paging_space_t *space,
     {
         return false;
     }
-    uint64_t flags = paging_lock();
+    bool used_global = false;
+    uint64_t flags = paging_space_lock(space, &used_global);
     bool ok = paging_map_user_page_internal(space, virtual_addr, physical_addr, writable, executable);
-    paging_unlock(flags);
+    paging_space_unlock(space, used_global, flags);
     return ok;
 }
 
@@ -838,7 +940,8 @@ bool paging_map_user_range(paging_space_t *space,
         return false;
     }
 
-    uint64_t flags = paging_lock();
+    bool used_global = false;
+    uint64_t flags = paging_space_lock(space, &used_global);
     uintptr_t virt = align_down(virtual_addr, PAGE_SIZE_BYTES);
     uintptr_t phys = align_down(physical_addr, PAGE_SIZE_BYTES);
     size_t remaining = align_up(length, PAGE_SIZE_BYTES);
@@ -847,14 +950,14 @@ bool paging_map_user_range(paging_space_t *space,
     {
         if (!paging_map_user_page_internal(space, virt, phys, writable, executable))
         {
-            paging_unlock(flags);
+            paging_space_unlock(space, used_global, flags);
             return false;
         }
         virt += PAGE_SIZE_BYTES;
         phys += PAGE_SIZE_BYTES;
         remaining -= PAGE_SIZE_BYTES;
     }
-    paging_unlock(flags);
+    paging_space_unlock(space, used_global, flags);
     return true;
 }
 
@@ -865,9 +968,10 @@ bool paging_unmap_user_page(paging_space_t *space,
     {
         return false;
     }
-    uint64_t flags = paging_lock();
+    bool used_global = false;
+    uint64_t flags = paging_space_lock(space, &used_global);
     bool ok = paging_unmap_user_page_internal(space, virtual_addr);
-    paging_unlock(flags);
+    paging_space_unlock(space, used_global, flags);
     return ok;
 }
 
