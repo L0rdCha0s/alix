@@ -10,6 +10,7 @@ extern "C" {
 struct atk_state;
 
 atk_widget_t *atk_window_add_iconbox(atk_widget_t *window, int x, int y, int width, int height);
+void atk_iconbox_set_active(atk_widget_t *iconbox, bool active);
 bool atk_iconbox_add_icon(atk_widget_t *iconbox, const char *title, atk_button_action_t action, void *context);
 void atk_iconbox_clear(atk_widget_t *iconbox);
 void atk_iconbox_relayout(atk_widget_t *iconbox);

@@ -7,6 +7,7 @@
 #include "atk/atk_image.h"
 #include "atk/atk_label.h"
 #include "atk/atk_iconbox.h"
+#include "atk/atk_nav_stack.h"
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_list_view.h"
 #include "atk/atk_tabs.h"
@@ -331,6 +332,10 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
 #endif
         atk_widget_t *child = (atk_widget_t *)node->value;
         if (!child)
+        {
+            continue;
+        }
+        if (child->parent != window)
         {
             continue;
         }
@@ -858,6 +863,10 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
         {
             continue;
         }
+        if (child->parent != window)
+        {
+            continue;
+        }
         if (!atk_widget_validate(child, "window_layout_children child"))
         {
             ATK_WINDOW_LOG("%s", "[atk][layout] invalid child widget; skipping\r\n");
@@ -869,6 +878,10 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
         if (atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
         {
             atk_tab_view_relayout(child);
+        }
+        else if (atk_widget_is_a(child, &ATK_NAV_STACK_CLASS))
+        {
+            atk_nav_stack_relayout(child);
         }
         else if (atk_widget_is_a(child, &ATK_ICONBOX_CLASS))
         {
@@ -997,6 +1010,10 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
     {
         atk_widget_t *child = (atk_widget_t *)node->value;
         if (!child || !child->used)
+        {
+            continue;
+        }
+        if (child->parent != window)
         {
             continue;
         }

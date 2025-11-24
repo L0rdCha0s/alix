@@ -436,6 +436,21 @@ bool atk_iconbox_add_icon(atk_widget_t *iconbox, const char *title, atk_button_a
     return true;
 }
 
+void atk_iconbox_set_active(atk_widget_t *iconbox, bool active)
+{
+    atk_iconbox_priv_t *priv = iconbox_priv_mut(iconbox);
+    if (!priv)
+    {
+        return;
+    }
+    iconbox->used = active;
+    if (priv->scrollbar)
+    {
+        priv->scrollbar->used = active;
+    }
+    iconbox_mark_dirty(iconbox);
+}
+
 void atk_iconbox_clear(atk_widget_t *iconbox)
 {
     atk_iconbox_priv_t *priv = iconbox_priv_mut(iconbox);

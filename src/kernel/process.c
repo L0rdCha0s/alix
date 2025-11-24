@@ -3997,9 +3997,17 @@ static void scheduler_log_switch_latency(uint64_t ms,
                                          const deferred_free_stats_t *stats)
 {
     const char *pname = (prev && prev->name[0] != '\0') ? prev->name : (prev ? "<unnamed>" : "<none>");
-    uint64_t ppid = (prev && prev->process) ? prev->process->pid : 0;
+    uint64_t ppid = 0;
+    if (prev && thread_pointer_valid(prev) && process_pointer_valid(prev->process))
+    {
+        ppid = prev->process->pid;
+    }
     const char *nname = (next && next->name[0] != '\0') ? next->name : (next ? "<unnamed>" : "<none>");
-    uint64_t npid = (next && next->process) ? next->process->pid : 0;
+    uint64_t npid = 0;
+    if (next && thread_pointer_valid(next) && process_pointer_valid(next->process))
+    {
+        npid = next->process->pid;
+    }
 
     if (stats && stats->grabbed > 0)
     {

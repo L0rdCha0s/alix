@@ -5,6 +5,8 @@
 #include "atk_window.h"
 #include "atk/layout.h"
 #include "atk/atk_iconbox.h"
+#include "atk/atk_nav_stack.h"
+#include "atk/atk_font.h"
 #include "atk_menu_bar.h"
 #include "libc.h"
 #include "serial.h"
@@ -15,13 +17,117 @@
 #define CP_WINDOW_WIDTH  820
 #define CP_WINDOW_HEIGHT 520
 
+typedef struct control_panel_app control_panel_app_t;
+
 typedef struct
+{
+    control_panel_app_t *app;
+    const char *title;
+} cp_icon_ctx_t;
+
+struct control_panel_app
 {
     atk_user_window_t remote;
     atk_widget_t *window;
+    atk_widget_t *nav;
     atk_widget_t *iconbox;
+    cp_icon_ctx_t hw_ctx;
+    cp_icon_ctx_t net_ctx;
     bool running;
-} control_panel_app_t;
+};
+
+typedef struct
+{
+    char title[64];
+} cp_pane_priv_t;
+
+static void cp_pane_draw(const atk_state_t *state, const atk_widget_t *widget, int origin_x, int origin_y, void *context);
+static bool cp_pane_hit(const atk_widget_t *widget,
+                        int origin_x,
+                        int origin_y,
+                        int px,
+                        int py,
+                        void *context);
+
+static const atk_class_t CP_PANE_CLASS = { "CPPane", &ATK_WIDGET_CLASS, NULL, sizeof(cp_pane_priv_t) };
+
+static const atk_widget_ops_t g_cp_pane_ops = {
+    .destroy = NULL,
+    .draw = cp_pane_draw,
+    .hit_test = cp_pane_hit,
+    .on_mouse = NULL,
+    .on_key = NULL
+};
+
+static atk_widget_t *cp_create_pane(const char *title)
+{
+    atk_widget_t *pane = atk_widget_create(&CP_PANE_CLASS);
+    if (!pane)
+    {
+        return NULL;
+    }
+    pane->used = true;
+    pane->x = 0;
+    pane->y = 0;
+    pane->width = 0;
+    pane->height = 0;
+    atk_widget_set_ops(pane, &g_cp_pane_ops, NULL);
+
+    cp_pane_priv_t *priv = (cp_pane_priv_t *)atk_widget_priv(pane, &CP_PANE_CLASS);
+    if (priv && title)
+    {
+        size_t len = strlen(title);
+        if (len >= sizeof(priv->title))
+        {
+            len = sizeof(priv->title) - 1;
+        }
+        memcpy(priv->title, title, len);
+        priv->title[len] = '\0';
+    }
+    else if (priv)
+    {
+        priv->title[0] = '\0';
+    }
+    return pane;
+}
+
+static void cp_pane_draw(const atk_state_t *state, const atk_widget_t *widget, int origin_x, int origin_y, void *context)
+{
+    (void)context;
+    if (!state || !widget || !widget->used)
+    {
+        return;
+    }
+    const atk_theme_t *theme = &state->theme;
+    int x = origin_x + widget->x;
+    int y = origin_y + widget->y;
+    video_draw_rect(x, y, widget->width, widget->height, theme->window_body);
+    cp_pane_priv_t *priv = (cp_pane_priv_t *)atk_widget_priv(widget, &CP_PANE_CLASS);
+    const char *title = (priv && priv->title[0]) ? priv->title : "Details";
+    int text_w = atk_font_text_width(title);
+    int text_x = x + (widget->width - text_w) / 2;
+    int baseline = atk_font_baseline_for_rect(y, widget->height);
+    atk_font_draw_string(text_x, baseline, title, theme->window_title, theme->window_body);
+}
+
+static bool cp_pane_hit(const atk_widget_t *widget,
+                        int origin_x,
+                        int origin_y,
+                        int px,
+                        int py,
+                        void *context)
+{
+    (void)context;
+    if (!widget || !widget->used)
+    {
+        return false;
+    }
+    int x0 = origin_x + widget->x;
+    int y0 = origin_y + widget->y;
+    int x1 = x0 + widget->width;
+    int y1 = y0 + widget->height;
+    return (px >= x0 && px < x1 && py >= y0 && py < y1);
+}
 
 static void cp_log(const char *msg)
 {
@@ -70,7 +176,7 @@ static void cp_render(control_panel_app_t *app)
 
 static void cp_layout(control_panel_app_t *app)
 {
-    if (!app || !app->window || !app->iconbox)
+    if (!app || !app->window || !app->nav)
     {
         return;
     }
@@ -85,18 +191,29 @@ static void cp_layout(control_panel_app_t *app)
     atk_layout_set_padding(&layout, 18, 18, 18, 18);
     atk_layout_region_t content = atk_layout_content(&layout);
 
-    app->iconbox->x = content.x;
-    app->iconbox->y = content.y;
-    app->iconbox->width = content.width;
-    app->iconbox->height = content.height;
-    atk_iconbox_relayout(app->iconbox);
+    app->nav->x = content.x;
+    app->nav->y = content.y;
+    app->nav->width = content.width;
+    app->nav->height = content.height;
+    atk_nav_stack_relayout(app->nav);
 }
 
 static void cp_icon_action(atk_widget_t *button, void *context)
 {
     (void)button;
-    const char *label = (const char *)context;
-    cp_log(label ? label : "icon");
+    cp_icon_ctx_t *ctx = (cp_icon_ctx_t *)context;
+    if (!ctx || !ctx->app || !ctx->app->nav)
+    {
+        return;
+    }
+    const char *label = ctx->title ? ctx->title : "Details";
+    atk_widget_t *pane = cp_create_pane(label);
+    if (!pane)
+    {
+        return;
+    }
+    atk_nav_stack_push(ctx->app->nav, pane, label);
+    atk_window_mark_dirty(ctx->app->window);
 }
 
 static bool cp_init_ui(control_panel_app_t *app)
@@ -130,6 +247,17 @@ static bool cp_init_ui(control_panel_app_t *app)
     atk_window_set_title_text(window, "Control Panel");
     atk_window_ensure_inside(window);
 
+    atk_widget_t *nav = atk_window_add_nav_stack(window,
+                                                 0,
+                                                 ATK_WINDOW_TITLE_HEIGHT,
+                                                 window->width,
+                                                 window->height - ATK_WINDOW_TITLE_HEIGHT);
+    if (!nav)
+    {
+        atk_window_close(state, window);
+        return false;
+    }
+
     atk_widget_t *iconbox = atk_window_add_iconbox(window,
                                                    0,
                                                    ATK_WINDOW_TITLE_HEIGHT,
@@ -140,19 +268,21 @@ static bool cp_init_ui(control_panel_app_t *app)
         atk_window_close(state, window);
         return false;
     }
-    atk_widget_set_layout(iconbox,
-                          ATK_WIDGET_ANCHOR_LEFT |
-                          ATK_WIDGET_ANCHOR_TOP |
-                          ATK_WIDGET_ANCHOR_RIGHT |
-                          ATK_WIDGET_ANCHOR_BOTTOM);
+    atk_nav_stack_push_owned(nav, iconbox, "Home", false);
 
-    if (!atk_iconbox_add_icon(iconbox, "Hardware Info", cp_icon_action, "Hardware Info") ||
-        !atk_iconbox_add_icon(iconbox, "Network Info", cp_icon_action, "Network Info"))
+    app->hw_ctx.app = app;
+    app->hw_ctx.title = "Hardware Info";
+    app->net_ctx.app = app;
+    app->net_ctx.title = "Network Info";
+
+    if (!atk_iconbox_add_icon(iconbox, "Hardware Info", cp_icon_action, &app->hw_ctx) ||
+        !atk_iconbox_add_icon(iconbox, "Network Info", cp_icon_action, &app->net_ctx))
     {
         atk_window_close(state, window);
         return false;
     }
 
+    app->nav = nav;
     app->window = window;
     app->iconbox = iconbox;
     cp_layout(app);
@@ -258,6 +388,11 @@ int main(void)
         if (!app.running)
         {
             break;
+        }
+
+        if (app.nav && atk_nav_stack_sliding(app.nav))
+        {
+            needs_render = true;
         }
 
         if (needs_render)

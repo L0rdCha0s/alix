@@ -228,6 +228,9 @@ static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
         return;
     }
     bool logged_wait = false;
+#if ENABLE_FLUSHD
+    uint64_t start_ticks = timer_ticks();
+#endif
 #if !ENABLE_FLUSHD
     bool flushed = false;
 #endif
@@ -263,6 +266,18 @@ static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
             logged_wait = true;
         }
 #if ENABLE_FLUSHD
+        /* If flushd is not keeping up, fall back to a synchronous writeback after ~100ms. */
+        uint64_t freq = timer_frequency();
+        if (freq == 0)
+        {
+            freq = 1000;
+        }
+        uint64_t elapsed_ms = ((timer_ticks() - start_ticks) * 1000ULL) / freq;
+        if (elapsed_ms >= 100)
+        {
+            vfs_mount_writeback(mount, false);
+            start_ticks = timer_ticks();
+        }
         storage_request_flush();
         process_yield();
 #else
