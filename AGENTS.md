@@ -7,6 +7,7 @@
 - Regarding SMP, pay particular attention to any scenario where we share something from a process stack with another thread - this will never work, and corrupt the stacks and crash the kernel
 - If you need to modify memory layout, make sure you keep uefi.ld (kernel) and link.ld (user apps) up-to-date
 - If you want to boot the kernel, the shell has a variety of commands (including shutdown) - which you can use to stop the kernel and return to your thinking
+- Ensure logs created using serial_printf are on one line, rather than split across several printfs - remember that serial_printf always prints a linefeed
 - Always run "make" to check your work before handing back to the user
 - Use x86_64-elf-addr2line and x86_64-elf-objdump in order to look for lines in stacktraces in compiled code and analyse ELF binaries, like build/alix.elf (which is the main kernel binary). Here is an example: /bin/bash -lc 'cd /Users/alex/Documents/Projects/alix && x86_64-elf-objdump -d build/alix.elf | rg -n "113a4"'
 - Use tcpdump to analyse qemu-net.pcap when looking at network traffic.

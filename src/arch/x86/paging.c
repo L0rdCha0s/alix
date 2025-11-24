@@ -8,6 +8,7 @@
 #include "smp.h"
 #include "process.h"
 #include "spinlock.h"
+#include "heap.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -96,20 +97,81 @@ static bool g_nx_supported = false;
 static bool g_smep_supported = false;
 static bool g_smap_supported = false;
 static spinlock_t g_paging_lock;
+static volatile uint32_t g_paging_lock_owner = UINT32_MAX;
+static volatile void *g_paging_lock_owner_ra[SMP_MAX_CPUS];
+static volatile uint64_t g_paging_lock_owner_tsc[SMP_MAX_CPUS];
+
+static inline uint64_t read_tsc(void)
+{
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
 
 static inline uint64_t paging_lock(void)
 {
     uint64_t flags;
     __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    uint32_t cpu = smp_current_cpu_index();
     __asm__ volatile ("cli" ::: "memory");
     spinlock_lock(&g_paging_lock);
+    g_paging_lock_owner = cpu;
+    if (cpu < SMP_MAX_CPUS)
+    {
+        g_paging_lock_owner_ra[cpu] = __builtin_return_address(0);
+        g_paging_lock_owner_tsc[cpu] = read_tsc();
+    }
     return flags;
 }
 
 static inline void paging_unlock(uint64_t flags)
 {
+    uint32_t cpu = smp_current_cpu_index();
+    g_paging_lock_owner = UINT32_MAX;
+    if (cpu < SMP_MAX_CPUS)
+    {
+        g_paging_lock_owner_ra[cpu] = NULL;
+        g_paging_lock_owner_tsc[cpu] = 0;
+    }
     spinlock_unlock(&g_paging_lock);
     __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
+}
+
+static void paging_log_lock_state(const char *context)
+{
+    uint32_t owner = __atomic_load_n(&g_paging_lock_owner, __ATOMIC_ACQUIRE);
+    if (owner >= SMP_MAX_CPUS)
+    {
+        serial_printf("[paging] lock state context=%s owner=<none>\r\n", context ? context : "<none>");
+        return;
+    }
+    uint64_t ra = (uint64_t)(uintptr_t)__atomic_load_n(&g_paging_lock_owner_ra[owner], __ATOMIC_ACQUIRE);
+    uint64_t tsc = __atomic_load_n(&g_paging_lock_owner_tsc[owner], __ATOMIC_ACQUIRE);
+    serial_printf("[paging] lock state context=%s owner_cpu=0x%08llX ra=0x%016llX tsc=0x%016llX\r\n",
+                  context ? context : "<none>",
+                  (unsigned long long)owner,
+                  (unsigned long long)ra,
+                  (unsigned long long)tsc);
+}
+
+static bool paging_check_lock_order(const char *context)
+{
+    if (heap_lock_held_by_current_cpu())
+    {
+        heap_lock_info_t info = { 0 };
+        heap_lock_owner_snapshot(&info);
+        serial_printf("[paging] lock-order violation context=%s while holding heap lock\r\n",
+                      context ? context : "<none>");
+        serial_printf("[paging] heap owner cpu=0x%08llX depth=0x%08llX ra=0x%016llX tsc=0x%016llX\r\n",
+                      (unsigned long long)(info.owner_cpu),
+                      (unsigned long long)(info.depth),
+                      (unsigned long long)(info.owner_ra),
+                      (unsigned long long)(info.acquired_tsc));
+        paging_log_lock_state("lock_order_violation");
+        return false;
+    }
+    return true;
 }
 
 static inline uintptr_t align_up(uintptr_t value, uintptr_t alignment)
@@ -720,6 +782,10 @@ bool paging_map_user_page(paging_space_t *space,
                           bool writable,
                           bool executable)
 {
+    if (!paging_check_lock_order("paging_map_user_page"))
+    {
+        return false;
+    }
     uint64_t flags = paging_lock();
     bool ok = paging_map_user_page_internal(space, virtual_addr, physical_addr, writable, executable);
     paging_unlock(flags);
@@ -767,6 +833,11 @@ bool paging_map_user_range(paging_space_t *space,
         return false;
     }
 
+    if (!paging_check_lock_order("paging_map_user_range"))
+    {
+        return false;
+    }
+
     uint64_t flags = paging_lock();
     uintptr_t virt = align_down(virtual_addr, PAGE_SIZE_BYTES);
     uintptr_t phys = align_down(physical_addr, PAGE_SIZE_BYTES);
@@ -790,6 +861,10 @@ bool paging_map_user_range(paging_space_t *space,
 bool paging_unmap_user_page(paging_space_t *space,
                             uintptr_t virtual_addr)
 {
+    if (!paging_check_lock_order("paging_unmap_user_page"))
+    {
+        return false;
+    }
     uint64_t flags = paging_lock();
     bool ok = paging_unmap_user_page_internal(space, virtual_addr);
     paging_unlock(flags);
@@ -843,6 +918,11 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
                                       bool writable)
 {
     if (!g_paging_ready || !g_kernel_space.tables_base || length == 0)
+    {
+        return false;
+    }
+
+    if (!paging_check_lock_order("paging_set_kernel_range_writable"))
     {
         return false;
     }

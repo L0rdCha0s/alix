@@ -19,6 +19,7 @@
 #define HEAP_FIND_WATCHDOG_THRESHOLD (4096ULL)
 #endif
 
+#define HEAP_FREE_TRAVERSAL_GUARD 131072ULL
 #define ALIGNMENT 16UL
 #define HEAP_BIN_COUNT 32U
 #define HEAP_MIN_SPLIT_REMAINDER ALIGNMENT
@@ -68,6 +69,14 @@ typedef struct
 
 #define HEAP_DUMP_SNAPSHOT_MAX 32U
 
+static inline uint64_t read_tsc(void)
+{
+    uint32_t hi = 0;
+    uint32_t lo = 0;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
 static inline size_t heap_bin_index(size_t size);
 static void free_list_init(void);
 static void free_list_insert(heap_block_t *block);
@@ -77,10 +86,21 @@ static bool heap_verify_free_bins_locked(size_t *count_out);
 static size_t heap_capture_snapshot(heap_block_snapshot_t *out, size_t max, bool *truncated);
 static bool heap_verify_locked(const char *context);
 #if ENABLE_HEAP_TRACE
-static void heap_trace_log_alloc(size_t requested, const heap_block_t *block, void *caller);
-static void heap_trace_log_free(size_t size, uintptr_t block_addr, void *caller);
-static void heap_trace_log_stall(size_t requested, const heap_block_t *cursor, uint64_t iterations, void *caller);
+static void heap_trace_log_alloc(size_t requested, const heap_block_t *block, void *caller,
+                                 size_t free_bytes, bool free_bytes_valid);
+static void heap_trace_log_free(size_t size, uintptr_t block_addr, void *caller,
+                                size_t free_bytes, bool free_bytes_valid);
+static void heap_trace_log_stall(size_t requested, const heap_block_t *cursor, uint64_t iterations,
+                                 void *caller, size_t free_bytes, bool free_bytes_valid,
+                                 heap_lock_info_t *lock_info);
 #endif
+static bool heap_calculate_free_bytes_locked(size_t *out_free_bytes, size_t *out_nodes);
+static void heap_log_lock_info(const char *context, const heap_lock_info_t *info);
+static void heap_format_readable_bytes(size_t bytes,
+                                       uint64_t *out_value,
+                                       uint64_t *out_fraction,
+                                       const char **out_suffix,
+                                       bool *out_fraction_used);
 
 #ifdef ENABLE_MEM_DEBUG_LOGS
 static inline void heap_log(const char *msg, uintptr_t value)
@@ -98,6 +118,8 @@ static inline void heap_log(const char *msg, uintptr_t value)
 static volatile uint32_t g_heap_lock_owner = UINT32_MAX;
 static volatile uint32_t g_heap_lock_depth = 0;
 static volatile uint64_t g_heap_lock_saved_flags[SMP_MAX_CPUS];
+static volatile void *g_heap_lock_owner_ra[SMP_MAX_CPUS];
+static volatile uint64_t g_heap_lock_owner_tsc[SMP_MAX_CPUS];
 
 static inline uint64_t heap_lock_acquire(void)
 {
@@ -128,6 +150,8 @@ static inline uint64_t heap_lock_acquire(void)
     if (cpu < SMP_MAX_CPUS)
     {
         g_heap_lock_saved_flags[cpu] = flags;
+        g_heap_lock_owner_ra[cpu] = __builtin_return_address(0);
+        g_heap_lock_owner_tsc[cpu] = read_tsc();
     }
     heap_log("lock acquire flags=", flags);
     return flags;
@@ -151,6 +175,8 @@ static inline void heap_lock_release(uint64_t flags)
     if (cpu < SMP_MAX_CPUS)
     {
         restore_flags = g_heap_lock_saved_flags[cpu];
+        g_heap_lock_owner_ra[cpu] = NULL;
+        g_heap_lock_owner_tsc[cpu] = 0;
     }
     __asm__ volatile ("push %0; popfq" :: "r"(restore_flags) : "cc");
 }
@@ -410,10 +436,88 @@ static heap_block_t *split_block(heap_block_t *block, size_t size)
     return new_block;
 }
 
+static bool heap_calculate_free_bytes_locked(size_t *out_free_bytes, size_t *out_nodes)
+{
+    if (!out_free_bytes)
+    {
+        return false;
+    }
+    size_t total = 0;
+    size_t visited = 0;
+    for (size_t bin = 0; bin < HEAP_BIN_COUNT; ++bin)
+    {
+        heap_block_t *cursor = g_free_bins[bin];
+        while (cursor)
+        {
+            total += cursor->size;
+            cursor = cursor->free_next;
+            visited++;
+            if (visited > HEAP_FREE_TRAVERSAL_GUARD)
+            {
+                return false;
+            }
+        }
+    }
+    *out_free_bytes = total;
+    if (out_nodes)
+    {
+        *out_nodes = visited;
+    }
+    return true;
+}
+
+static void heap_log_lock_info(const char *context, const heap_lock_info_t *info)
+{
+    if (!info)
+    {
+        return;
+    }
+    serial_printf("[heap] lock owner context=%s owner_cpu=0x%08llX depth=0x%08llX ra=0x%016llX tsc=0x%016llX\r\n",
+                  context ? context : "<none>",
+                  (unsigned long long)(info->owner_cpu),
+                  (unsigned long long)(info->depth),
+                  (unsigned long long)(info->owner_ra),
+                  (unsigned long long)(info->acquired_tsc));
+}
+
+static void heap_format_readable_bytes(size_t bytes,
+                                       uint64_t *out_value,
+                                       uint64_t *out_fraction,
+                                       const char **out_suffix,
+                                       bool *out_fraction_used)
+{
+    static const char *suffixes[] = { "B", "KB", "MB", "GB", "TB", "PB" };
+    size_t suffix = 0;
+    uint64_t value = bytes;
+    uint64_t remainder = 0;
+    while (value >= 1000 && (suffix + 1) < (sizeof(suffixes) / sizeof(suffixes[0])))
+    {
+        remainder = value % 1000;
+        value /= 1000;
+        suffix++;
+    }
+    bool use_fraction = (remainder != 0) && (value < 10) && (suffix > 0);
+    if (out_value)
+    {
+        *out_value = value;
+    }
+    if (out_fraction)
+    {
+        *out_fraction = use_fraction ? (remainder / 100) : 0;
+    }
+    if (out_suffix)
+    {
+        *out_suffix = suffixes[suffix];
+    }
+    if (out_fraction_used)
+    {
+        *out_fraction_used = use_fraction;
+    }
+}
+
 static heap_block_t *find_suitable_block(size_t size, void *caller)
 {
     uint64_t iterations = 0;
-    bool watchdog_triggered = false;
     size_t start_bin = heap_bin_index(size);
 
     for (size_t bin = start_bin; bin < HEAP_BIN_COUNT; ++bin)
@@ -428,21 +532,59 @@ static heap_block_t *find_suitable_block(size_t size, void *caller)
 
             block = block->free_next;
             iterations++;
-            if (!watchdog_triggered && iterations >= HEAP_FIND_WATCHDOG_THRESHOLD)
+            if (iterations >= HEAP_FIND_WATCHDOG_THRESHOLD)
             {
+                size_t free_bytes = 0;
+                bool free_ok = heap_calculate_free_bytes_locked(&free_bytes, NULL);
+                heap_lock_info_t info = { 0 };
+                heap_lock_owner_snapshot(&info);
 #if ENABLE_HEAP_TRACE
                 if (g_heap_trace_enabled)
                 {
-                    heap_trace_log_stall(size, block, iterations, caller);
+                    heap_trace_log_stall(size, block, iterations, caller, free_bytes, free_ok, &info);
                 }
 #else
-                serial_printf("%s", "[heap] find_suitable_block stall size=0x");
-                serial_printf("%016llX", (unsigned long long)(size));
-                serial_printf("%s", " block=0x");
-                serial_printf("%016llX", (unsigned long long)((uintptr_t)(block ? block : 0)));
-                serial_printf("%s", "\r\n");
+                uint64_t r_value = 0;
+                uint64_t r_fraction = 0;
+                const char *r_suffix = "B";
+                bool r_frac_used = false;
+                if (free_ok)
+                {
+                    heap_format_readable_bytes(free_bytes, &r_value, &r_fraction, &r_suffix, &r_frac_used);
+                }
+                if (free_ok && r_frac_used)
+                {
+                    serial_printf("[heap] find_suitable_block stall size=0x%016llX block=0x%016llX iterations=0x%016llX free=%llu.%01llu%s (%llu bytes)\r\n",
+                                  (unsigned long long)(size),
+                                  (unsigned long long)((uintptr_t)(block ? block : 0)),
+                                  (unsigned long long)(iterations),
+                                  (unsigned long long)r_value,
+                                  (unsigned long long)r_fraction,
+                                  r_suffix,
+                                  (unsigned long long)free_bytes);
+                }
+                else if (free_ok)
+                {
+                    serial_printf("[heap] find_suitable_block stall size=0x%016llX block=0x%016llX iterations=0x%016llX free=%llu%s (%llu bytes)\r\n",
+                                  (unsigned long long)(size),
+                                  (unsigned long long)((uintptr_t)(block ? block : 0)),
+                                  (unsigned long long)(iterations),
+                                  (unsigned long long)r_value,
+                                  r_suffix,
+                                  (unsigned long long)free_bytes);
+                }
+                else
+                {
+                    serial_printf("[heap] find_suitable_block stall size=0x%016llX block=0x%016llX iterations=0x%016llX free=unknown\r\n",
+                                  (unsigned long long)(size),
+                                  (unsigned long long)((uintptr_t)(block ? block : 0)),
+                                  (unsigned long long)(iterations));
+                }
+                heap_log_lock_info("find_suitable_block_watchdog", &info);
 #endif
-                watchdog_triggered = true;
+                heap_debug_dump("find_suitable_block_watchdog");
+                heap_debug_verify("find_suitable_block_watchdog");
+                return NULL;
             }
         }
     }
@@ -683,6 +825,36 @@ bool heap_debug_verify(const char *context)
     return ok;
 }
 
+bool heap_lock_owner_snapshot(heap_lock_info_t *info)
+{
+    if (!info)
+    {
+        return false;
+    }
+    heap_lock_info_t snapshot = { 0 };
+    snapshot.owner_cpu = __atomic_load_n(&g_heap_lock_owner, __ATOMIC_ACQUIRE);
+    snapshot.depth = __atomic_load_n(&g_heap_lock_depth, __ATOMIC_ACQUIRE);
+    if (snapshot.owner_cpu < SMP_MAX_CPUS)
+    {
+        snapshot.owner_ra = (uint64_t)(uintptr_t)__atomic_load_n(&g_heap_lock_owner_ra[snapshot.owner_cpu], __ATOMIC_ACQUIRE);
+        snapshot.acquired_tsc = __atomic_load_n(&g_heap_lock_owner_tsc[snapshot.owner_cpu], __ATOMIC_ACQUIRE);
+    }
+    else
+    {
+        snapshot.owner_ra = 0;
+        snapshot.acquired_tsc = 0;
+    }
+    *info = snapshot;
+    return snapshot.owner_cpu != UINT32_MAX;
+}
+
+bool heap_lock_held_by_current_cpu(void)
+{
+    uint32_t cpu = smp_current_cpu_index();
+    return (__atomic_load_n(&g_heap_lock_owner, __ATOMIC_ACQUIRE) == cpu) &&
+           (__atomic_load_n(&g_heap_lock_depth, __ATOMIC_ACQUIRE) > 0);
+}
+
 void *malloc(size_t size)
 {
     size_t requested = size;
@@ -690,6 +862,8 @@ void *malloc(size_t size)
 #if ENABLE_HEAP_TRACE
     heap_block_t *trace_block = NULL;
     size_t trace_bytes = 0;
+    size_t trace_free_bytes = 0;
+    bool trace_free_ok = false;
 #endif
     uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized || size == 0)
@@ -734,6 +908,7 @@ void *malloc(size_t size)
         {
             g_heap_trace_peak_bytes = g_heap_trace_bytes_in_use;
         }
+        trace_free_ok = heap_calculate_free_bytes_locked(&trace_free_bytes, NULL);
     }
 #endif
     void *result = (void *)((uintptr_t)block + sizeof(heap_block_t));
@@ -743,7 +918,7 @@ void *malloc(size_t size)
 #if ENABLE_HEAP_TRACE
     if (trace_block && g_heap_trace_enabled && trace_bytes >= g_heap_trace_threshold)
     {
-        heap_trace_log_alloc(requested, trace_block, trace_caller);
+        heap_trace_log_alloc(requested, trace_block, trace_caller, trace_free_bytes, trace_free_ok);
     }
 #endif
     return result;
@@ -757,6 +932,8 @@ void free(void *ptr)
     size_t trace_size = 0;
     uintptr_t trace_addr = 0;
     bool trace_log = false;
+    size_t trace_free_bytes = 0;
+    bool trace_free_ok = false;
 #endif
     uint64_t flags = heap_lock_acquire();
     if (!g_heap_initialized || !ptr)
@@ -795,51 +972,173 @@ void free(void *ptr)
     block->free_prev = NULL;
     heap_block_t *merged = coalesce(block);
     free_list_insert(merged);
+#if ENABLE_HEAP_TRACE
+    if (trace_log && g_heap_trace_enabled)
+    {
+        trace_free_ok = heap_calculate_free_bytes_locked(&trace_free_bytes, NULL);
+    }
+#endif
     heap_lock_release(flags);
 #if ENABLE_HEAP_TRACE
     if (trace_log && trace_size >= g_heap_trace_threshold)
     {
-        heap_trace_log_free(trace_size, trace_addr, trace_caller);
+        heap_trace_log_free(trace_size, trace_addr, trace_caller, trace_free_bytes, trace_free_ok);
     }
 #endif
 }
 
 #if ENABLE_HEAP_TRACE
-static void heap_trace_log_alloc(size_t requested, const heap_block_t *block, void *caller)
+static void heap_trace_log_alloc(size_t requested, const heap_block_t *block, void *caller,
+                                 size_t free_bytes, bool free_bytes_valid)
 {
     if (!block)
     {
         return;
     }
-    serial_printf(
-        "[heap] alloc requested=0x%016llX actual=0x%016llX block=0x%016llX caller=0x%016llX "
-        "in_use=0x%016llX peak=0x%016llX\r\n",
-        (unsigned long long)(requested),
-        (unsigned long long)(block->size),
-        (unsigned long long)((uintptr_t)block),
-        (unsigned long long)((uintptr_t)caller),
-        (unsigned long long)(g_heap_trace_bytes_in_use),
-        (unsigned long long)(g_heap_trace_peak_bytes));
+    if (free_bytes_valid)
+    {
+        uint64_t r_value = 0;
+        uint64_t r_fraction = 0;
+        const char *r_suffix = "B";
+        bool r_frac_used = false;
+        heap_format_readable_bytes(free_bytes, &r_value, &r_fraction, &r_suffix, &r_frac_used);
+        if (r_frac_used)
+        {
+            serial_printf("[heap] alloc requested=0x%016llX actual=0x%016llX block=0x%016llX caller=0x%016llX "
+                          "in_use=0x%016llX peak=0x%016llX free=%llu.%01llu%s (%llu bytes)\r\n",
+                          (unsigned long long)(requested),
+                          (unsigned long long)(block->size),
+                          (unsigned long long)((uintptr_t)block),
+                          (unsigned long long)((uintptr_t)caller),
+                          (unsigned long long)(g_heap_trace_bytes_in_use),
+                          (unsigned long long)(g_heap_trace_peak_bytes),
+                          (unsigned long long)r_value,
+                          (unsigned long long)r_fraction,
+                          r_suffix,
+                          (unsigned long long)free_bytes);
+        }
+        else
+        {
+            serial_printf("[heap] alloc requested=0x%016llX actual=0x%016llX block=0x%016llX caller=0x%016llX "
+                          "in_use=0x%016llX peak=0x%016llX free=%llu%s (%llu bytes)\r\n",
+                          (unsigned long long)(requested),
+                          (unsigned long long)(block->size),
+                          (unsigned long long)((uintptr_t)block),
+                          (unsigned long long)((uintptr_t)caller),
+                          (unsigned long long)(g_heap_trace_bytes_in_use),
+                          (unsigned long long)(g_heap_trace_peak_bytes),
+                          (unsigned long long)r_value,
+                          r_suffix,
+                          (unsigned long long)free_bytes);
+        }
+    }
+    else
+    {
+        serial_printf("[heap] alloc requested=0x%016llX actual=0x%016llX block=0x%016llX caller=0x%016llX "
+                      "in_use=0x%016llX peak=0x%016llX free=unknown\r\n",
+                      (unsigned long long)(requested),
+                      (unsigned long long)(block->size),
+                      (unsigned long long)((uintptr_t)block),
+                      (unsigned long long)((uintptr_t)caller),
+                      (unsigned long long)(g_heap_trace_bytes_in_use),
+                      (unsigned long long)(g_heap_trace_peak_bytes));
+    }
 }
 
-static void heap_trace_log_free(size_t size, uintptr_t block_addr, void *caller)
+static void heap_trace_log_free(size_t size, uintptr_t block_addr, void *caller,
+                                size_t free_bytes, bool free_bytes_valid)
 {
-    serial_printf("[heap] free size=0x%016llX block=0x%016llX caller=0x%016llX in_use=0x%016llX\r\n",
-                  (unsigned long long)(size),
-                  (unsigned long long)(block_addr),
-                  (unsigned long long)((uintptr_t)caller),
-                  (unsigned long long)(g_heap_trace_bytes_in_use));
+    if (free_bytes_valid)
+    {
+        uint64_t r_value = 0;
+        uint64_t r_fraction = 0;
+        const char *r_suffix = "B";
+        bool r_frac_used = false;
+        heap_format_readable_bytes(free_bytes, &r_value, &r_fraction, &r_suffix, &r_frac_used);
+        if (r_frac_used)
+        {
+            serial_printf("[heap] free size=0x%016llX block=0x%016llX caller=0x%016llX in_use=0x%016llX free=%llu.%01llu%s (%llu bytes)\r\n",
+                          (unsigned long long)(size),
+                          (unsigned long long)(block_addr),
+                          (unsigned long long)((uintptr_t)caller),
+                          (unsigned long long)(g_heap_trace_bytes_in_use),
+                          (unsigned long long)r_value,
+                          (unsigned long long)r_fraction,
+                          r_suffix,
+                          (unsigned long long)free_bytes);
+        }
+        else
+        {
+            serial_printf("[heap] free size=0x%016llX block=0x%016llX caller=0x%016llX in_use=0x%016llX free=%llu%s (%llu bytes)\r\n",
+                          (unsigned long long)(size),
+                          (unsigned long long)(block_addr),
+                          (unsigned long long)((uintptr_t)caller),
+                          (unsigned long long)(g_heap_trace_bytes_in_use),
+                          (unsigned long long)r_value,
+                          r_suffix,
+                          (unsigned long long)free_bytes);
+        }
+    }
+    else
+    {
+        serial_printf("[heap] free size=0x%016llX block=0x%016llX caller=0x%016llX in_use=0x%016llX free=unknown\r\n",
+                      (unsigned long long)(size),
+                      (unsigned long long)(block_addr),
+                      (unsigned long long)((uintptr_t)caller),
+                      (unsigned long long)(g_heap_trace_bytes_in_use));
+    }
 }
 
-static void heap_trace_log_stall(size_t requested, const heap_block_t *cursor, uint64_t iterations, void *caller)
+static void heap_trace_log_stall(size_t requested, const heap_block_t *cursor, uint64_t iterations,
+                                 void *caller, size_t free_bytes, bool free_bytes_valid,
+                                 heap_lock_info_t *lock_info)
 {
-    serial_printf(
-        "[heap] find_suitable_block stall size=0x%016llX iterations=0x%016llX cursor=0x%016llX "
-        "caller=0x%016llX\r\n",
-        (unsigned long long)(requested),
-        (unsigned long long)(iterations),
-        (unsigned long long)((uintptr_t)(cursor ? cursor : 0)),
-        (unsigned long long)((uintptr_t)caller));
+    if (free_bytes_valid)
+    {
+        uint64_t r_value = 0;
+        uint64_t r_fraction = 0;
+        const char *r_suffix = "B";
+        bool r_frac_used = false;
+        heap_format_readable_bytes(free_bytes, &r_value, &r_fraction, &r_suffix, &r_frac_used);
+        if (r_frac_used)
+        {
+            serial_printf("[heap] find_suitable_block stall size=0x%016llX iterations=0x%016llX cursor=0x%016llX "
+                          "caller=0x%016llX free=%llu.%01llu%s (%llu bytes)\r\n",
+                          (unsigned long long)(requested),
+                          (unsigned long long)(iterations),
+                          (unsigned long long)((uintptr_t)(cursor ? cursor : 0)),
+                          (unsigned long long)((uintptr_t)caller),
+                          (unsigned long long)r_value,
+                          (unsigned long long)r_fraction,
+                          r_suffix,
+                          (unsigned long long)free_bytes);
+        }
+        else
+        {
+            serial_printf("[heap] find_suitable_block stall size=0x%016llX iterations=0x%016llX cursor=0x%016llX "
+                          "caller=0x%016llX free=%llu%s (%llu bytes)\r\n",
+                          (unsigned long long)(requested),
+                          (unsigned long long)(iterations),
+                          (unsigned long long)((uintptr_t)(cursor ? cursor : 0)),
+                          (unsigned long long)((uintptr_t)caller),
+                          (unsigned long long)r_value,
+                          r_suffix,
+                          (unsigned long long)free_bytes);
+        }
+    }
+    else
+    {
+        serial_printf("[heap] find_suitable_block stall size=0x%016llX iterations=0x%016llX cursor=0x%016llX "
+                      "caller=0x%016llX free=unknown\r\n",
+                      (unsigned long long)(requested),
+                      (unsigned long long)(iterations),
+                      (unsigned long long)((uintptr_t)(cursor ? cursor : 0)),
+                      (unsigned long long)((uintptr_t)caller));
+    }
+    if (lock_info)
+    {
+        heap_log_lock_info("find_suitable_block_watchdog", lock_info);
+    }
 }
 
 void heap_trace_set_enabled(bool enable)
