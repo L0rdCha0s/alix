@@ -692,6 +692,11 @@ static void pending_push_sequence(const char *seq, size_t len)
     }
 }
 
+void keyboard_unread_char(char ch)
+{
+    pending_push_char(ch);
+}
+
 void keyboard_init(void)
 {
     keyboard_reset_state();

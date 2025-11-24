@@ -4,6 +4,7 @@
 #include "interrupts.h"
 #include "keyboard.h"
 #include "spinlock.h"
+#include "process.h"
 
 #define KBD_STATUS 0x64
 #define KBD_COMMAND 0x64
@@ -31,6 +32,7 @@ static uint32_t g_mouse_queue_head = 0;
 static uint32_t g_mouse_queue_tail = 0;
 static spinlock_t g_mouse_queue_lock = { 0 };
 static bool g_mouse_queue_overflow_logged = false;
+static bool g_mouse_daemon_started = false;
 
 static inline uint64_t mouse_irq_save(void)
 {
@@ -342,5 +344,32 @@ void mouse_poll(void)
         uint8_t data = inb(KBD_DATA);
         mouse_process_byte(data);
         mouse_irq_restore(irq_state);
+    }
+}
+
+static void mouse_daemon_entry(void *arg)
+{
+    (void)arg;
+    while (1)
+    {
+        mouse_poll();
+        process_sleep_ms(2);
+    }
+}
+
+void mouse_start_daemon(void)
+{
+    if (g_mouse_daemon_started)
+    {
+        return;
+    }
+    process_t *proc = process_create_kernel("mouse_daemon",
+                                            mouse_daemon_entry,
+                                            NULL,
+                                            0,
+                                            -1);
+    if (proc)
+    {
+        g_mouse_daemon_started = true;
     }
 }

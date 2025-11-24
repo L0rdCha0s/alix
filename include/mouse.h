@@ -12,5 +12,6 @@ void mouse_reset_debug_counter(void);
 void mouse_poll(void);
 /* Drain queued mouse events (FIFO) and dispatch to the registered listener. */
 void mouse_dispatch_events(void);
+void mouse_start_daemon(void);
 
 #endif

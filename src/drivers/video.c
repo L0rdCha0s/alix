@@ -1032,6 +1032,7 @@ bool video_enter_mode(void)
 
     cursor_draw_overlay();
     video_log("cursor drawn, entering loop");
+    mouse_start_daemon();
     return true;
 }
 
@@ -1040,7 +1041,6 @@ void video_run_loop(void)
     video_log("video_run_loop start");
     while (video_active && !exit_requested)
     {
-        mouse_poll();
         mouse_dispatch_events();
         video_poll_keyboard();
         if (refresh_requested)
@@ -1060,7 +1060,6 @@ void video_pump_events(void)
         return;
     }
 
-    mouse_poll();
     mouse_dispatch_events();
     video_poll_keyboard();
     if (refresh_requested)

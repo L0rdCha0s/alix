@@ -8,6 +8,7 @@
 #include "libc.h"
 #include "process.h"
 #include "vfs.h"
+#include "keyboard.h"
 
 #define INPUT_CAPACITY 256
 #define SHELL_HISTORY_LIMIT 20
@@ -63,6 +64,9 @@ static void cli_history_load_current(char *buffer, size_t *len, size_t capacity)
 static void cli_history_load_text(const char *text, char *buffer, size_t *len, size_t capacity);
 static void cli_history_save_current(const char *buffer, size_t len);
 static bool cli_line_is_blank(const char *line);
+
+static shell_state_t *g_active_shell = NULL;
+static void shell_wait_for_interrupt(void *context);
 
 void shell_output_init_console(shell_output_t *out)
 {
@@ -753,11 +757,12 @@ void shell_main(void)
     shell->stream_context = NULL;
     shell->stdout_fd = process_current_stdout_fd();
     shell->foreground_process = NULL;
-    shell->wait_hook = NULL;
-    shell->wait_context = NULL;
+    shell->wait_hook = shell_wait_for_interrupt;
+    shell->wait_context = shell;
     shell->owner_process = process_current();
     shell->cwd_changed_fn = NULL;
     shell->cwd_changed_context = NULL;
+    g_active_shell = shell;
     char input[INPUT_CAPACITY];
 
     console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\n");
@@ -1263,6 +1268,31 @@ static bool cli_wait_for_char(char *out, int attempts)
     return false;
 }
 
+static void shell_wait_for_interrupt(void *context)
+{
+    shell_state_t *shell = (shell_state_t *)context;
+    if (!shell)
+    {
+        return;
+    }
+
+    char c;
+    if (!cli_try_read_char(&c))
+    {
+        mouse_poll();
+        return;
+    }
+    if (c == 0x03) /* Ctrl-C */
+    {
+        console_write("^C\n");
+        serial_printf("%s", "^C\r\n");
+        shell_request_interrupt(shell);
+        return;
+    }
+    /* Not Ctrl-C: push it back so interactive sessions don't lose input. */
+    keyboard_unread_char(c);
+}
+
 static size_t cli_read_line(char *buffer, size_t capacity)
 {
     //serial_write_string("shell.c: cli_read_line in\n");
@@ -1271,6 +1301,18 @@ static size_t cli_read_line(char *buffer, size_t capacity)
     while (1)
     {
         char c = cli_get_char();
+
+        if (c == 0x03) /* Ctrl-C */
+        {
+            console_write("^C\n");
+            serial_printf("%s", "^C\r\n");
+            if (g_active_shell)
+            {
+                shell_request_interrupt(g_active_shell);
+            }
+            buffer[0] = '\0';
+            return 0;
+        }
 
         if (c == 0x1B)
         {
