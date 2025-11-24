@@ -6,9 +6,13 @@
 #include "video.h"
 
 #ifndef ATK_NO_DESKTOP_APPS
+#define ATK_FONT_ENABLE_TTF 1
+#define ATK_FONT_LOAD_FROM_VFS 1
 #include "vfs.h"
 #else
-#include "syscall_defs.h"
+#define ATK_FONT_ENABLE_TTF 1
+#define ATK_FONT_LOAD_FROM_VFS 0
+#include "usyscall.h"
 #endif
 
 #define ATK_FONT_PATH "/usr/share/fonts/PublicSans.ttf"
@@ -36,6 +40,9 @@ typedef struct
     ttf_font_t font;
     ttf_font_metrics_t metrics;
     atk_font_glyph_t glyphs[ATK_FONT_CACHE_COUNT];
+    uint8_t *font_blob;
+    size_t font_blob_size;
+    bool font_blob_owned;
 } atk_font_state_t;
 
 static atk_font_state_t g_font_state = { 0 };
@@ -43,7 +50,7 @@ static atk_font_state_t g_font_state = { 0 };
 static bool atk_font_load(void);
 static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint);
 
-#ifdef ATK_NO_DESKTOP_APPS
+#if ATK_FONT_ENABLE_TTF && !ATK_FONT_LOAD_FROM_VFS
 static bool atk_font_read_user(uint8_t **data_out, size_t *size_out);
 #endif
 
@@ -260,12 +267,16 @@ void atk_font_draw_string_clipped(int x,
 
 static bool atk_font_load(void)
 {
+#if !ATK_FONT_ENABLE_TTF
+    return false;
+#endif
+
     if (g_font_state.ready)
     {
         return true;
     }
 
-#ifndef ATK_NO_DESKTOP_APPS
+#if ATK_FONT_LOAD_FROM_VFS
     vfs_node_t *node = vfs_open_file(vfs_root(), ATK_FONT_PATH, false, false);
     if (!node)
     {
@@ -277,8 +288,13 @@ static bool atk_font_load(void)
     {
         return false;
     }
-    if (!ttf_font_load(&g_font_state.font, (const uint8_t *)data, size))
+    g_font_state.font_blob = (uint8_t *)data;
+    g_font_state.font_blob_size = size;
+    g_font_state.font_blob_owned = false;
+    if (!ttf_font_load(&g_font_state.font, g_font_state.font_blob, g_font_state.font_blob_size))
     {
+        g_font_state.font_blob = NULL;
+        g_font_state.font_blob_size = 0;
         return false;
     }
 #else
@@ -288,10 +304,15 @@ static bool atk_font_load(void)
     {
         return false;
     }
-    bool ok = ttf_font_load(&g_font_state.font, buffer, size);
-    free(buffer);
-    if (!ok)
+    g_font_state.font_blob = buffer;
+    g_font_state.font_blob_size = size;
+    g_font_state.font_blob_owned = true;
+    if (!ttf_font_load(&g_font_state.font, buffer, size))
     {
+        free(buffer);
+        g_font_state.font_blob = NULL;
+        g_font_state.font_blob_size = 0;
+        g_font_state.font_blob_owned = false;
         return false;
     }
 #endif
@@ -300,6 +321,15 @@ static bool atk_font_load(void)
     {
         ttf_font_unload(&g_font_state.font);
         g_font_state.font.impl = NULL;
+#if !ATK_FONT_LOAD_FROM_VFS
+        if (g_font_state.font_blob_owned && g_font_state.font_blob)
+        {
+            free(g_font_state.font_blob);
+        }
+#endif
+        g_font_state.font_blob = NULL;
+        g_font_state.font_blob_size = 0;
+        g_font_state.font_blob_owned = false;
         return false;
     }
 
@@ -378,7 +408,7 @@ static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint)
     return glyph;
 }
 
-#ifdef ATK_NO_DESKTOP_APPS
+#if ATK_FONT_ENABLE_TTF && !ATK_FONT_LOAD_FROM_VFS
 static bool atk_font_read_user(uint8_t **data_out, size_t *size_out)
 {
     if (!data_out || !size_out)
@@ -386,56 +416,30 @@ static bool atk_font_read_user(uint8_t **data_out, size_t *size_out)
         return false;
     }
 
-    int fd = open(ATK_FONT_PATH, SYSCALL_OPEN_READ);
-    if (fd < 0)
+    *data_out = NULL;
+    *size_out = 0;
+
+    ssize_t size = sys_font_cache(NULL, 0);
+    if (size <= 0)
     {
         return false;
     }
 
-    size_t capacity = 0;
-    size_t size = 0;
-    uint8_t *buffer = NULL;
-
-    while (1)
+    uint8_t *buffer = (uint8_t *)malloc((size_t)size);
+    if (!buffer)
     {
-        if (size == capacity)
-        {
-            size_t new_capacity = capacity ? capacity * 2 : 4096;
-            uint8_t *new_buffer = (uint8_t *)realloc(buffer, new_capacity);
-            if (!new_buffer)
-            {
-                free(buffer);
-                close(fd);
-                return false;
-            }
-            buffer = new_buffer;
-            capacity = new_capacity;
-        }
-
-        ssize_t bytes = read(fd, buffer + size, capacity - size);
-        if (bytes < 0)
-        {
-            free(buffer);
-            close(fd);
-            return false;
-        }
-        if (bytes == 0)
-        {
-            break;
-        }
-        size += (size_t)bytes;
+        return false;
     }
 
-    close(fd);
-
-    if (size == 0)
+    ssize_t got = sys_font_cache(buffer, (size_t)size);
+    if (got <= 0)
     {
         free(buffer);
         return false;
     }
 
     *data_out = buffer;
-    *size_out = size;
+    *size_out = (size_t)got;
     return true;
 }
 #endif

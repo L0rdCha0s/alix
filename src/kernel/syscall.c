@@ -12,6 +12,7 @@
 #include "net/interface.h"
 #include "user_copy.h"
 #include "timekeeping.h"
+#include "font_cache.h"
 
 static process_info_t *g_proc_snapshot_buf = NULL;
 static size_t g_proc_snapshot_cap = 0;
@@ -503,6 +504,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_UI_CLOSE:
             result = user_atk_sys_close((uint32_t)frame->rdi);
+            break;
+        case SYSCALL_FONT_CACHE:
+            result = font_cache_copy_to_user((void *)frame->rdi, (size_t)frame->rsi);
             break;
         case SYSCALL_SERIAL_WRITE:
         {

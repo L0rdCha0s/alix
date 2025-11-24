@@ -6,6 +6,7 @@
 #include "video.h"
 #include "atk/atk_image.h"
 #include "atk/atk_label.h"
+#include "atk/atk_iconbox.h"
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_list_view.h"
 #include "atk/atk_tabs.h"
@@ -868,6 +869,10 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
         if (atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
         {
             atk_tab_view_relayout(child);
+        }
+        else if (atk_widget_is_a(child, &ATK_ICONBOX_CLASS))
+        {
+            atk_iconbox_relayout(child);
         }
         else if (atk_widget_is_a(child, &ATK_LIST_VIEW_CLASS))
         {

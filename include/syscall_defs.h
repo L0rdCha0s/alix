@@ -25,6 +25,7 @@ typedef enum
     SYSCALL_PROC_SNAPSHOT = 17,
     SYSCALL_NET_SNAPSHOT = 18,
     SYSCALL_TIME_MILLIS = 19,
+    SYSCALL_FONT_CACHE = 20,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)

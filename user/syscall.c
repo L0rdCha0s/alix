@@ -205,3 +205,8 @@ uint64_t sys_time_millis(void)
 {
     return (uint64_t)syscall0(SYSCALL_TIME_MILLIS);
 }
+
+ssize_t sys_font_cache(void *buffer, size_t capacity)
+{
+    return (ssize_t)syscall2(SYSCALL_FONT_CACHE, (long)buffer, (long)capacity);
+}

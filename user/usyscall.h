@@ -31,5 +31,6 @@ int sys_shell_close(int handle);
 ssize_t sys_proc_snapshot(syscall_process_info_t *buffer, size_t capacity);
 ssize_t sys_net_snapshot(syscall_net_stats_t *buffer, size_t capacity);
 uint64_t sys_time_millis(void);
+ssize_t sys_font_cache(void *buffer, size_t capacity);
 
 #endif
