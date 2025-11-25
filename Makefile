@@ -337,6 +337,11 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device ich9-usb-uhci1 \
+		-device ich9-usb-uhci2 \
+		-device ich9-usb-uhci3 \
+		-device usb-kbd \
+		-device usb-mouse \
 		-device ahci,id=ahci0 \
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
@@ -350,6 +355,11 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device ich9-usb-uhci1 \
+		-device ich9-usb-uhci2 \
+		-device ich9-usb-uhci3 \
+		-device usb-kbd \
+		-device usb-mouse \
 		-device ahci,id=ahci0 \
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \

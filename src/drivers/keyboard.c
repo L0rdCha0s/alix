@@ -21,6 +21,7 @@ static volatile uint8_t scancode_buffer[KBD_BUFFER_SIZE];
 static volatile size_t buffer_head = 0;
 static volatile size_t buffer_tail = 0;
 static uint8_t key_down[128];
+static bool ps2_enabled = true;
 
 /* Place key maps in .data, not .rodata, to avoid early-rodata issues */
 static char normal_map[128] = {
@@ -617,6 +618,10 @@ static bool read_scancode(uint8_t *code)
     {
         return true;
     }
+    if (!ps2_enabled)
+    {
+        return false;
+    }
     uint8_t status = inb(KBD_STATUS);
     if ((status & 0x01) == 0)
     {
@@ -844,4 +849,14 @@ void keyboard_buffer_push(uint8_t scancode)
     //serial_write_string("\r\n");
 
     buffer_push(scancode);
+}
+
+void keyboard_disable_ps2(void)
+{
+    ps2_enabled = false;
+}
+
+bool keyboard_ps2_enabled(void)
+{
+    return ps2_enabled;
 }

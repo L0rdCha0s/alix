@@ -1700,6 +1700,10 @@ static void thread_assert_stack_current(thread_t *thread, const char *context)
     {
         return;
     }
+    if (thread->is_idle)
+    {
+        return;
+    }
     uint64_t rsp = 0;
     __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp));
     if (!thread_stack_pointer_valid(thread, rsp))
@@ -2547,12 +2551,17 @@ static process_t *allocate_process(const char *name, bool is_user)
 {
     bool needs_clone = is_user;
     bool trace_clone = needs_clone && string_name_equals(name, "shell");
+    bool trace_usb = string_name_equals(name, "usb_initd");
     if (trace_clone)
     {
         heap_debug_verify("shell_pre_alloc_verify");
         heap_debug_dump("shell_pre_alloc_dump");
         serial_printf("%s", "[process] paging trace enabled\r\n");
         paging_set_clone_trace(true);
+    }
+    if (trace_usb)
+    {
+        serial_printf("[proc usb_initd] alloc begin clone=%s\r\n", needs_clone ? "true" : "false");
     }
     process_t *proc = (process_t *)malloc(sizeof(process_t));
     if (!proc)
@@ -2561,6 +2570,10 @@ static process_t *allocate_process(const char *name, bool is_user)
         {
             serial_printf("%s", "[process] shell malloc failed\r\n");
             paging_set_clone_trace(false);
+        }
+        if (trace_usb)
+        {
+            serial_printf("%s", "[proc usb_initd] malloc failed\r\n");
         }
         return NULL;
     }
@@ -2580,6 +2593,10 @@ static process_t *allocate_process(const char *name, bool is_user)
         process_create_log(name, "share_kernel");
         space_ready = paging_share_kernel_space(&proc->address_space);
     }
+    if (trace_usb)
+    {
+        serial_printf("[proc usb_initd] share_kernel_space=%s\r\n", space_ready ? "ok" : "fail");
+    }
     if (trace_clone)
     {
         heap_debug_verify("shell_post_clone_verify");
@@ -2590,6 +2607,10 @@ static process_t *allocate_process(const char *name, bool is_user)
     {
         free(proc);
         process_create_log(name, "space_fail");
+        if (trace_usb)
+        {
+            serial_printf("%s", "[proc usb_initd] space setup failed\r\n");
+        }
         return NULL;
     }
     process_create_log(name, needs_clone ? "clone_done" : "share_done");
@@ -3619,11 +3640,15 @@ static thread_t *thread_create(process_t *process,
         return NULL;
     }
 
+    serial_printf("[thread_create] entry name=%s pre-malloc\r\n", name ? name : "<null>");
     thread_t *thread = (thread_t *)malloc(sizeof(thread_t));
     if (!thread)
     {
+        serial_printf("%s", "[thread_create] malloc thread struct failed\r\n");
         return NULL;
     }
+    serial_printf("[thread_create] thread struct=0x%016llX\r\n",
+                  (unsigned long long)((uintptr_t)thread));
     memset(thread, 0, sizeof(*thread));
     thread->last_cpu_index = 0;
     thread->deferred_next = NULL;
@@ -3708,6 +3733,10 @@ static thread_t *thread_create(process_t *process,
     thread->stack_guard_base = guard_base;
     thread->stack_base = guard_base + guard_bytes;
     thread->stack_size = aligned_stack;
+    serial_printf("[thread_create] stack prepared base=0x%016llX top=0x%016llX size=0x%016llX\r\n",
+                  (unsigned long long)((uintptr_t)thread->stack_base),
+                  (unsigned long long)((uintptr_t)(thread->stack_base + aligned_stack)),
+                  (unsigned long long)aligned_stack);
 #if THREAD_CREATE_DEBUG
     serial_printf("[thread_create] guard_filled base=%016llX size=0x%016llX\r\n",
                   (unsigned long long)((uintptr_t)thread->stack_base),
@@ -4307,6 +4336,17 @@ static thread_t *dequeue_thread_for_cpu(uint32_t cpu_index)
     uint64_t flags = run_queue_lock_acquire(local, "dequeue");
     thread_t *thread = run_queue_pop_locked(local);
     run_queue_lock_release(local, flags);
+    // if (thread && thread->name[0])
+    // {
+    //     serial_printf("[sched] cpu=%u dequeue next=%s pid=0x%016llX state=%s ctx=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+    //                   cpu_index,
+    //                   thread->name,
+    //                   (unsigned long long)(thread->process ? thread->process->pid : 0),
+    //                   thread_state_name(thread->state),
+    //                   (unsigned long long)(uintptr_t)thread->context,
+    //                   (unsigned long long)((uintptr_t)thread->stack_base),
+    //                   (unsigned long long)(thread->kernel_stack_top));
+    // }
     if (thread)
     {
         thread->run_queue_cpu = cpu_index;
@@ -4348,6 +4388,18 @@ static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
     }
     queue->counts[priority]++;
     queue->total++;
+    // if (thread->name[0])
+    // {
+    //     serial_printf("[sched] cpu=%u enqueue thread=%s pid=0x%016llX prio=%u state=%s ctx=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+    //                   cpu_index,
+    //                   thread->name,
+    //                   (unsigned long long)(thread->process ? thread->process->pid : 0),
+    //                   (unsigned)priority,
+    //                   thread_state_name(thread->state),
+    //                   (unsigned long long)(uintptr_t)thread->context,
+    //                   (unsigned long long)((uintptr_t)thread->stack_base),
+    //                   (unsigned long long)(thread->kernel_stack_top));
+    // }
     run_queue_lock_release(queue, flags);
     scheduler_shell_log("enqueued", thread);
 }
@@ -5017,16 +5069,27 @@ static bool switch_to_thread(thread_t *next)
     deferred_free_stats_t deferred_stats = { 0 };
     bool deferred_work = false;
     thread_t *prev = current_thread_local();
+    if (prev && prev->is_idle)
+    {
+        prev->state = THREAD_STATE_RUNNING;
+        prev->context_valid = true;
+    }
     process_t *prev_process = prev ? prev->process : NULL;
     process_t *next_process = next ? next->process : NULL;
     uint32_t cpu_idx = current_cpu_index();
 
+    if (next && next->is_idle)
+    {
+        next->state = THREAD_STATE_READY;
+        next->pending_destroy = false;
+        next->context_valid = true;
+    }
     if (next && !thread_pointer_valid(next))
     {
         scheduler_trace("[sched] switch_to: invalid next pointer;", next);
         return false;
     }
-    if (next && (next->state == THREAD_STATE_ZOMBIE || next->pending_destroy))
+    if (next && !next->is_idle && (next->state == THREAD_STATE_ZOMBIE || next->pending_destroy))
     {
         scheduler_trace("[sched] switch_to: next is zombie/pending_destroy;", next);
         return false;
@@ -5037,7 +5100,7 @@ static bool switch_to_thread(thread_t *next)
         thread_quarantine_corrupt(next, "fpu_region_invalid");
         return false;
     }
-    if (next && (!next->context || !next->stack_base || next->kernel_stack_top == 0))
+    if (next && !next->is_idle && (!next->context || !next->stack_base || next->kernel_stack_top == 0))
     {
         serial_printf("[sched] switch_to cancelled: missing context thread=%s pid=0x%016llX context=0x%016llX stack_base=0x%016llX stack_top=0x%016llX\r\n",
                       next->name[0] ? next->name : "<unnamed>",
@@ -5045,6 +5108,11 @@ static bool switch_to_thread(thread_t *next)
                       (unsigned long long)(uintptr_t)next->context,
                       (unsigned long long)(uintptr_t)next->stack_base,
                       (unsigned long long)next->kernel_stack_top);
+        serial_printf("[sched] detail state=%s in_run_queue=%s ctx_valid=%s cpu=%u\r\n",
+                      thread_state_name(next->state),
+                      next->in_run_queue ? "true" : "false",
+                      next->context_valid ? "true" : "false",
+                      cpu_idx);
         thread_quarantine_corrupt(next, "missing_context");
         return false;
     }
@@ -5297,7 +5365,7 @@ static bool switch_to_thread(thread_t *next)
 
     if (resumed)
     {
-        if (!thread_stack_pointer_valid(resumed, rsp_after))
+        if (!resumed->is_idle && !thread_stack_pointer_valid(resumed, rsp_after))
         {
             serial_printf("[sched] fatal: resumed with invalid RSP thread=%s pid=0x%016llX rsp=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
                           resumed->name[0] ? resumed->name : "<unnamed>",
@@ -5574,6 +5642,13 @@ static void user_thread_entry(void *arg)
 static void thread_trampoline(void)
 {
     thread_t *self = current_thread_local();
+    if (self)
+    {
+        serial_printf("[thread_trampoline] start name=%s arg=0x%016llX entry=0x%016llX\r\n",
+                      self->name[0] ? self->name : "<unnamed>",
+                      (unsigned long long)((uintptr_t)self->arg),
+                      (unsigned long long)((uintptr_t)self->entry));
+    }
     if (self && self->entry)
     {
         self->entry(self->arg);
@@ -5876,7 +5951,61 @@ static void scheduler_main_loop(void)
 
 void process_start_scheduler(void)
 {
-    scheduler_main_loop();
+    uint32_t cpu = current_cpu_index();
+    thread_t *idle = g_idle_threads[cpu];
+    if (!idle)
+    {
+        fatal("no idle thread for BSP scheduler start");
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+
+    /* Make sure the BSP actually runs on the idle thread's stack before scheduling. */
+    arch_cpu_set_kernel_stack(cpu, idle->kernel_stack_top);
+    wrmsr(MSR_GS_BASE, idle->gs_base);
+    wrmsr(MSR_FS_BASE, idle->fs_base);
+
+    uint64_t new_rsp = idle->kernel_stack_top;
+    void (*target)(void) = scheduler_main_loop;
+    if (flags & RFLAGS_IF_BIT)
+    {
+        __asm__ volatile (
+            "mov %0, %%rsp\n\t"
+            "sti\n\t"
+            "jmp *%1\n\t"
+            :
+            : "r"(new_rsp), "r"(target)
+            : "rsp", "memory");
+    }
+    else
+    {
+        __asm__ volatile (
+            "mov %0, %%rsp\n\t"
+            "jmp *%1\n\t"
+            :
+            : "r"(new_rsp), "r"(target)
+            : "rsp", "memory");
+    }
+    fatal("process_start_scheduler unreachable");
+}
+
+void process_bind_idle_to_bsp(void)
+{
+    thread_t *idle = g_idle_threads[0];
+    if (!idle)
+    {
+        fatal("no idle thread for BSP");
+    }
+    set_current_thread_local(idle);
+    set_current_process_local(idle->process);
+    idle->state = THREAD_STATE_RUNNING;
+    idle->context_valid = true;
+    idle->preempt_pending = false;
+    idle->time_slice_remaining = scheduler_time_slice_ticks();
+    arch_cpu_set_kernel_stack(0, idle->kernel_stack_top);
+    wrmsr(MSR_GS_BASE, idle->gs_base);
+    wrmsr(MSR_FS_BASE, idle->fs_base);
 }
 
 void process_run_secondary_cpu(uint32_t cpu_index)
@@ -5943,19 +6072,35 @@ static process_t *process_create_kernel_internal(const char *name,
     }
 
     process_create_log(name, "thread_create_start");
+    if (string_name_equals(name, "usb_initd"))
+    {
+        serial_printf("%s", "[proc usb_initd] thread_create start\r\n");
+    }
     thread_t *thread = thread_create(proc, name, entry, arg, stack_size, false, proc->is_user);
     if (!thread)
     {
         paging_destroy_space(&proc->address_space);
         free(proc);
         process_create_log(name, "thread_create_fail");
+        if (string_name_equals(name, "usb_initd"))
+        {
+            serial_printf("%s", "[proc usb_initd] thread_create failed\r\n");
+        }
         return NULL;
     }
 
     process_create_log(name, "thread_create_done");
     process_create_log(name, "finalize_start");
+    if (string_name_equals(name, "usb_initd"))
+    {
+        serial_printf("%s", "[proc usb_initd] finalize start\r\n");
+    }
     process_t *result = process_finalize_new_process(proc, thread, stdout_fd, parent);
     process_create_log(name, result ? "success" : "finalize_fail");
+    if (string_name_equals(name, "usb_initd"))
+    {
+        serial_printf("[proc usb_initd] finalize %s\r\n", result ? "success" : "fail");
+    }
     return result;
 }
 

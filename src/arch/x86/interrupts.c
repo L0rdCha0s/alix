@@ -46,6 +46,7 @@ static void serial_format_hex64(char *out, size_t cap, uint64_t value)
 static uint8_t pic1_mask = 0xFF;
 static uint8_t pic2_mask = 0xFF;
 static int irq12_log_count = 0;
+static int irq10_log_count = 0;
 
 static void halt_forever(void) __attribute__((noreturn));
 static void fault_report(const char *reason,
@@ -387,8 +388,11 @@ __attribute__((interrupt)) static void irq1_handler(interrupt_frame_t *frame)
     if ((status & 0x01) != 0)
     {
         uint8_t scancode = inb(0x60);
-        keyboard_buffer_push(scancode);
-    
+        if (keyboard_ps2_enabled())
+        {
+            keyboard_buffer_push(scancode);
+        }
+
     }
     pic_send_eoi(1);
 }
@@ -399,6 +403,17 @@ __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
     timer_on_tick();
     smp_broadcast_schedule_ipi();
     pic_send_eoi(0);
+}
+
+__attribute__((interrupt)) static void irq10_handler(interrupt_frame_t *frame)
+{
+    (void)frame;
+    if (irq10_log_count < 4)
+    {
+        serial_printf("%s", "[irq10] spurious/unhandled\r\n");
+        irq10_log_count++;
+    }
+    pic_send_eoi(10);
 }
 
 __attribute__((interrupt)) static void irq11_handler(interrupt_frame_t *frame)
@@ -550,6 +565,7 @@ void interrupts_init(void)
     idt_set_gate(14, (void *)page_fault_handler);
     idt_set_gate(32, (void *)irq0_handler);
     idt_set_gate(33, (void *)irq1_handler);
+    idt_set_gate(42, (void *)irq10_handler);
     idt_set_gate(43, (void *)irq11_handler);
     idt_set_gate(44, (void *)irq12_handler);
     idt_set_gate(SMP_SCHEDULE_IPI_VECTOR, (void *)smp_schedule_ipi_handler);

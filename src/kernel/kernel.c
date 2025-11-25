@@ -31,6 +31,7 @@
 #include "smp.h"
 #include "proc_devices.h"
 #include "build_features.h"
+#include "usb_hid.h"
 
 static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
@@ -376,6 +377,18 @@ static void fstab_mount_run(void)
 static void warmup_run_sequence(void)
 {
     serial_printf("%s", "[warmup] sequence start\r\n");
+    serial_printf("%s", "[warmup] calling usb_hid_init\r\n");
+    process_t *usb_init = process_create_kernel("usb_initd", (thread_entry_t)usb_hid_init, NULL, 0, -1);
+    if (!usb_init)
+    {
+        serial_printf("%s", "[usb] failed to spawn usb_initd\r\n");
+    }
+    else
+    {
+        serial_printf("%s", "[warmup] usb_initd spawned\r\n");
+        /* Let the USB init thread run immediately so it doesn't starve behind warmup work. */
+        process_yield();
+    }
 #if ENABLE_FSTAB_MOUNT
     vfs_spin_up();
     fstab_mount_run();
@@ -673,7 +686,6 @@ void kernel_main(void)
     {
         serial_printf("%s", "[alix] warn: smp_start_secondary_cpus failed\r\n");
     }
-    interrupts_enable();
     proc_devices_init();
     serial_printf("%s", "[alix] after rtl8139_init\n");
 
@@ -689,10 +701,12 @@ void kernel_main(void)
     }
 
     serial_start_async_worker();
+    process_bind_idle_to_bsp();
     serial_printf("%s", "[alix] enabling scheduler\n");
     process_scheduler_set_ready();
 
     serial_printf("%s", "[alix] starting scheduler\n");
+    interrupts_enable();
     process_start_scheduler();
 
     for (;;)

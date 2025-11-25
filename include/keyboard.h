@@ -7,5 +7,7 @@ void keyboard_init(void);
 bool keyboard_try_read(char *out_char);
 void keyboard_buffer_push(uint8_t scancode);
 void keyboard_unread_char(char ch);
+void keyboard_disable_ps2(void);
+bool keyboard_ps2_enabled(void);
 
 #endif

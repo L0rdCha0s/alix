@@ -33,6 +33,7 @@ static uint32_t g_mouse_queue_tail = 0;
 static spinlock_t g_mouse_queue_lock = { 0 };
 static bool g_mouse_queue_overflow_logged = false;
 static bool g_mouse_daemon_started = false;
+static bool g_mouse_ps2_enabled = true;
 
 static inline uint64_t mouse_irq_save(void)
 {
@@ -130,6 +131,11 @@ static void mouse_queue_push(int dx, int dy, bool left)
     mouse_irq_restore(flags);
 }
 
+void mouse_inject_event(int dx, int dy, bool left)
+{
+    mouse_queue_push(dx, dy, left);
+}
+
 static bool mouse_queue_pop(mouse_event_t *out)
 {
     if (!out)
@@ -217,6 +223,12 @@ void mouse_register_listener(mouse_listener_t listener)
 
 void mouse_init(void)
 {
+    mouse_queue_reset();
+    if (!g_mouse_ps2_enabled)
+    {
+        return;
+    }
+
     mouse_log("mouse_init: enabling aux port");
     mouse_wait(1);
     outb(KBD_COMMAND, 0xA8); /* enable aux */
@@ -239,7 +251,6 @@ void mouse_init(void)
     packet_index = 0;
     mouse_irq_log_count = 0;
     mouse_log("mouse_init: streaming enabled");
-    mouse_queue_reset();
     interrupts_enable_irq(12);
 }
 
@@ -305,11 +316,15 @@ unlock:
         mouse_packet_log++;
     }
 
-    mouse_queue_push(out_dx, -out_dy, out_left);
+    mouse_inject_event(out_dx, -out_dy, out_left);
 }
 
 void mouse_on_irq(uint8_t byte)
 {
+    if (!g_mouse_ps2_enabled)
+    {
+        return;
+    }
     if (mouse_irq_log_count < 64)
     {
         //mouse_log("mouse IRQ data incoming");
@@ -325,6 +340,10 @@ void mouse_on_irq(uint8_t byte)
 
 void mouse_poll(void)
 {
+    if (!g_mouse_ps2_enabled)
+    {
+        return;
+    }
     /* Drain ONLY PS/2 aux (mouse) bytes so they don't clog the buffer.
        Leave keyboard bytes untouched for keyboard_try_read(). */
     while (1)
@@ -359,6 +378,10 @@ static void mouse_daemon_entry(void *arg)
 
 void mouse_start_daemon(void)
 {
+    if (!g_mouse_ps2_enabled)
+    {
+        return;
+    }
     if (g_mouse_daemon_started)
     {
         return;
@@ -372,4 +395,15 @@ void mouse_start_daemon(void)
     {
         g_mouse_daemon_started = true;
     }
+}
+
+void mouse_disable_ps2(void)
+{
+    g_mouse_ps2_enabled = false;
+    mouse_queue_reset();
+}
+
+bool mouse_ps2_active(void)
+{
+    return g_mouse_ps2_enabled;
 }

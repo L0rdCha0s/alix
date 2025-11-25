@@ -22,6 +22,10 @@
 #define HEAP_FIND_WATCHDOG_THRESHOLD (4096ULL)
 #endif
 
+#ifndef HEAP_LOCK_TRACE
+#define HEAP_LOCK_TRACE 0
+#endif
+
 #define HEAP_FREE_TRAVERSAL_GUARD 131072ULL
 #define ALIGNMENT 16UL
 #define HEAP_BIN_COUNT 32U
@@ -217,8 +221,19 @@ static inline uint64_t heap_lock_acquire(void)
         g_heap_lock_owner_ra[cpu] = __builtin_return_address(0);
         g_heap_lock_owner_tsc[cpu] = read_tsc();
     }
-    heap_log_lock_event("acquire", cpu, g_heap_lock_depth);
-    heap_log("lock acquire flags=", flags);
+    if (HEAP_LOCK_TRACE)
+    {
+        heap_log_lock_event("acquire", cpu, g_heap_lock_depth);
+        heap_log("lock acquire flags=", flags);
+        static uint64_t lock_log_budget = 32;
+        if (lock_log_budget > 0)
+        {
+            lock_log_budget--;
+            serial_early_write_string("[heap][lock] ra=0x");
+            heap_log_hex64((uint64_t)(uintptr_t)__builtin_return_address(0));
+            serial_early_write_string("\r\n");
+        }
+    }
     return flags;
 }
 
@@ -228,12 +243,18 @@ static inline void heap_lock_release(uint64_t flags)
     if (g_heap_lock_owner == cpu && g_heap_lock_depth > 1)
     {
         g_heap_lock_depth--;
-        heap_log_lock_event("release-defer", cpu, g_heap_lock_depth);
+        if (HEAP_LOCK_TRACE)
+        {
+            heap_log_lock_event("release-defer", cpu, g_heap_lock_depth);
+        }
         return;
     }
 
-    heap_log_lock_event("release", cpu, g_heap_lock_depth);
-    heap_log("lock release flags=", flags);
+    if (HEAP_LOCK_TRACE)
+    {
+        heap_log_lock_event("release", cpu, g_heap_lock_depth);
+        heap_log("lock release flags=", flags);
+    }
     g_heap_lock_owner = UINT32_MAX;
     g_heap_lock_depth = 0;
     spinlock_unlock(&g_heap_lock);
