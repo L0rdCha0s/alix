@@ -217,13 +217,30 @@ static void process_keyboard_report(const uint8_t *report, size_t len)
 static void keyboard_thread(void *arg)
 {
     (void)arg;
-    uint8_t buf[8];
+    uint16_t buf_len = (g_kbd_ep.max_packet > 0) ? g_kbd_ep.max_packet : 8;
+    uint8_t *buf = (uint8_t *)malloc(buf_len);
+    size_t td_bytes = 64 + 15; /* UHCI TD is 16-byte aligned, 32 bytes in size. */
+    uint8_t *td_raw = (uint8_t *)malloc(td_bytes);
+    void *td = td_raw ? (void *)((uintptr_t)(td_raw + 15) & ~(uintptr_t)0xFULL) : NULL;
+    if (!buf || !td)
+    {
+        serial_printf("%s", "[usb] keyboard thread no buffer/td\r\n");
+        if (buf)
+        {
+            free(buf);
+        }
+        if (td_raw)
+        {
+            free(td_raw);
+        }
+        process_exit(-1);
+    }
 
     while (1)
     {
         uint16_t got = 0;
         if (g_kbd && g_kbd_ep.max_packet > 0 &&
-            usb_interrupt_in(g_kbd, &g_kbd_ep, buf, sizeof(buf), &got) &&
+            usb_interrupt_in_prealloc(g_kbd, &g_kbd_ep, buf, buf_len, &got, td) &&
             got > 0)
         {
             process_keyboard_report(buf, got);
@@ -241,24 +258,48 @@ static void process_mouse_report(const uint8_t *buf, size_t len)
     int dx = (int8_t)buf[1];
     int dy = (int8_t)buf[2];
     bool left = (buf[0] & 0x01u) != 0;
-    mouse_inject_event(dx, -dy, left);
+    mouse_inject_event(dx, dy, left);
 }
 
 static void mouse_thread(void *arg)
 {
     (void)arg;
-    uint8_t buf[8];
+    uint16_t buf_len = (g_mouse_ep.max_packet > 0) ? g_mouse_ep.max_packet : 8;
+    uint8_t *buf = (uint8_t *)malloc(buf_len);
+    size_t td_bytes = 64 + 15;
+    uint8_t *td_raw = (uint8_t *)malloc(td_bytes);
+    void *td = td_raw ? (void *)((uintptr_t)(td_raw + 15) & ~(uintptr_t)0xFULL) : NULL;
+    if (!buf || !td)
+    {
+        serial_printf("%s", "[usb] mouse thread no buffer/td\r\n");
+        if (buf)
+        {
+            free(buf);
+        }
+        if (td_raw)
+        {
+            free(td_raw);
+        }
+        process_exit(-1);
+    }
 
     while (1)
     {
         uint16_t got = 0;
         if (g_mouse && g_mouse_ep.max_packet > 0 &&
-            usb_interrupt_in(g_mouse, &g_mouse_ep, buf, g_mouse_ep.max_packet, &got) &&
+            usb_interrupt_in_prealloc(g_mouse, &g_mouse_ep, buf, buf_len, &got, td) &&
             got > 0)
         {
             process_mouse_report(buf, got);
         }
-        process_sleep_ms(8);
+        /* Drain events immediately so UI stays responsive even during heavy CPU load. */
+        mouse_dispatch_events();
+        uint16_t sleep_ms = g_mouse_ep.interval_ms;
+        if (sleep_ms == 0 || sleep_ms > 8)
+        {
+            sleep_ms = 1;
+        }
+        process_sleep_ms(sleep_ms);
     }
 }
 

@@ -33,7 +33,13 @@ static uint32_t g_mouse_queue_tail = 0;
 static spinlock_t g_mouse_queue_lock = { 0 };
 static bool g_mouse_queue_overflow_logged = false;
 static bool g_mouse_daemon_started = false;
+#if ENABLE_USB
 static bool g_mouse_ps2_enabled = true;
+#else
+/* When USB is disabled we are running in a debug PS/2-only mode; keep the mouse
+ * controller off to prevent AUX bytes from polluting the shared data port. */
+static bool g_mouse_ps2_enabled = false;
+#endif
 
 static inline uint64_t mouse_irq_save(void)
 {

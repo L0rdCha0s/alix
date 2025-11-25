@@ -1469,6 +1469,17 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         goto out;
     }
 
+    /* Challenge ACKs from peers in TIME_WAIT: ACK without SYN while we are
+     * still in SYN_SENT.  Proactively send an RST using the peer's ACK
+     * number so the old TCB is torn down and a subsequent SYN can complete. */
+    if (socket->state == TCP_STATE_SYN_SENT &&
+        (flags & TCP_FLAG_SYN) == 0 &&
+        (flags & TCP_FLAG_ACK) != 0)
+    {
+        tcp_send_segment(socket, ack_num, TCP_FLAG_RST, NULL, 0, false, false);
+        goto out;
+    }
+
     if ((flags & TCP_FLAG_ACK) != 0)
     {
         tcp_handle_ack(socket, ack_num);

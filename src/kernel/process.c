@@ -5268,6 +5268,18 @@ static bool switch_to_thread(thread_t *next)
                 serial_printf("[sched] switch_to detail: bad saved rflags=0x%016llX (missing reserved bit)\r\n",
                               (unsigned long long)saved_rflags);
             }
+            if (ctx_words)
+            {
+                serial_printf("[sched] context dump thread=%s pid=0x%016llX ctx=0x%016llX words=",
+                              next->name[0] ? next->name : "<unnamed>",
+                              (unsigned long long)(next->process ? next->process->pid : 0),
+                              (unsigned long long)(uintptr_t)next->context);
+                for (size_t i = 0; i < 10; ++i)
+                {
+                    serial_printf(" %016llX", (unsigned long long)ctx_words[i]);
+                }
+                serial_printf("%s", "\r\n");
+            }
 
             thread_quarantine_corrupt(next, "invalid_resume_rip");
 

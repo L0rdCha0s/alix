@@ -24,8 +24,13 @@ BASE_CFLAGS := -O4 -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fn
                -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
                -fshort-wchar
 
+USB ?= 1
+
 KERNEL_CFLAGS := $(BASE_CFLAGS) -mgeneral-regs-only -mfpmath=387 -mno-sse \
                   -DKERNEL_BUILD
+ifeq ($(USB),0)
+KERNEL_CFLAGS += -DENABLE_USB=0
+endif
 USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
                -msse2 -mfpmath=sse -mstackrealign
 
@@ -360,6 +365,20 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ich9-usb-uhci3 \
 		-device usb-kbd \
 		-device usb-mouse \
+		-device ahci,id=ahci0 \
+		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
+		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
+		-device ide-hd,drive=data,bus=ahci0.1 \
+		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
+
+run-ps2-hdd: USB=0
+run-ps2-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+	$(QEMU_NET_PREFIX) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
+		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
 		-device ahci,id=ahci0 \
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \

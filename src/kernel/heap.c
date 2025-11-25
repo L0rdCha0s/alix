@@ -429,6 +429,28 @@ static void free_list_remove_locked(heap_block_t *block, size_t bin)
     {
         return;
     }
+    /* Guard against corrupted linkage to prevent GPFs from poisoned pointers. */
+    if (block->free_prev && !pointer_in_heap(block->free_prev))
+    {
+        heap_log("free_list_remove prev oob block=", (uintptr_t)block);
+        block->free_prev = NULL;
+    }
+    if (block->free_next && !pointer_in_heap(block->free_next))
+    {
+        heap_log("free_list_remove next oob block=", (uintptr_t)block);
+        block->free_next = NULL;
+    }
+    if (block->free_prev && block->free_prev->free_next != block)
+    {
+        heap_log("free_list_remove prev mismatch block=", (uintptr_t)block);
+        block->free_prev = NULL;
+    }
+    if (block->free_next && block->free_next->free_prev != block)
+    {
+        heap_log("free_list_remove next mismatch block=", (uintptr_t)block);
+        block->free_next = NULL;
+    }
+
     if (block->free_prev)
     {
         block->free_prev->free_next = block->free_next;

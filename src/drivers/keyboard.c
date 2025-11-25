@@ -8,6 +8,14 @@
 
 #define KBD_STATUS 0x64
 #define KBD_DATA   0x60
+#define KBD_CMD    0x64
+
+#define KBD_CMD_DISABLE_PORT1 0xAD
+#define KBD_CMD_DISABLE_PORT2 0xA7
+#define KBD_CMD_ENABLE_PORT1  0xAE
+#define KBD_CMD_ENABLE_PORT2  0xA8
+#define KBD_CMD_READ_CBYTE    0x20
+#define KBD_CMD_WRITE_CBYTE   0x60
 
 static uint8_t left_shift_pressed = 0;
 static uint8_t right_shift_pressed = 0;
@@ -98,6 +106,31 @@ static ssize_t keyboard_proc_value_read(vfs_node_t *node, size_t offset, void *b
 static ssize_t keyboard_proc_value_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
 static bool pending_pop_char(char *ch);
 static void pending_push_sequence(const char *seq, size_t len);
+static void ps2_controller_init(void);
+
+static bool ps2_wait_input_empty(void)
+{
+    for (int i = 0; i < 0x10000; ++i)
+    {
+        if ((inb(KBD_STATUS) & 0x02u) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ps2_wait_output_full(void)
+{
+    for (int i = 0; i < 0x10000; ++i)
+    {
+        if (inb(KBD_STATUS) & 0x01u)
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 static bool keyboard_is_space(char ch)
 {
@@ -704,6 +737,8 @@ void keyboard_unread_char(char ch)
 
 void keyboard_init(void)
 {
+    ps2_enabled = true;
+    ps2_controller_init();
     keyboard_reset_state();
     keyboard_update_repeat_ticks();
 
@@ -859,4 +894,11 @@ void keyboard_disable_ps2(void)
 bool keyboard_ps2_enabled(void)
 {
     return ps2_enabled;
+}
+
+static void ps2_controller_init(void)
+{
+    (void)ps2_wait_input_empty;
+    (void)ps2_wait_output_full;
+    /* Old PS/2 init worked without touching the controller; leave it as-is for compatibility. */
 }

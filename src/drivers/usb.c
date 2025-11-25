@@ -5,8 +5,11 @@
 #include "libc.h"
 #include "timer.h"
 #include "process.h"
+#include "interrupts.h"
 
 #define UHCI_MAX_PORTS 2
+#define UHCI_MAX_DEVICES 16
+#define UHCI_TD_POOL_SIZE 2048
 
 #define UHCI_USBCMD      0x00
 #define UHCI_USBSTS      0x02
@@ -60,6 +63,23 @@
 #define UHCI_TD_CTRL_BITSTUFF  (1u << 17)
 #define UHCI_TD_CTRL_ACTLEN_MASK 0x000007FFu
 
+#define USB_PORT_STAT_CONNECTION   0x0001u
+#define USB_PORT_STAT_ENABLE       0x0002u
+#define USB_PORT_STAT_RESET        0x0010u
+#define USB_PORT_STAT_POWER        0x0100u
+#define USB_PORT_STAT_LOW_SPEED    0x0200u
+#define USB_PORT_STAT_HIGH_SPEED   0x0400u
+
+#define USB_PORT_FEAT_CONNECTION     0
+#define USB_PORT_FEAT_ENABLE         1
+#define USB_PORT_FEAT_RESET          4
+#define USB_PORT_FEAT_POWER          8
+#define USB_PORT_FEAT_C_CONNECTION   16
+#define USB_PORT_FEAT_C_ENABLE       17
+#define USB_PORT_FEAT_C_SUSPEND      18
+#define USB_PORT_FEAT_C_OVER_CURRENT 19
+#define USB_PORT_FEAT_C_RESET        20
+
 typedef struct
 {
     uint32_t link;
@@ -83,13 +103,89 @@ typedef struct
     uint32_t *frame_list;
     uhci_qh_t *async_qh;
     spinlock_t lock;
-    usb_device_t devices[UHCI_MAX_PORTS];
+    bool transfer_active;
+    uint8_t irq_line;
+    bool irq_enabled;
+    usb_device_t devices[UHCI_MAX_DEVICES];
     size_t device_count;
 } uhci_controller_t;
+
+static __attribute__((aligned(16))) uhci_td_t g_td_pool[UHCI_TD_POOL_SIZE];
+static uint16_t g_td_pool_next = 0;
+static uint16_t g_td_pool_free[UHCI_TD_POOL_SIZE];
+static uint16_t g_td_pool_free_count = 0;
+static spinlock_t g_td_pool_lock;
 
 static uhci_controller_t g_uhci[UHCI_MAX_CONTROLLERS] = { 0 };
 static size_t g_uhci_count = 0;
 static bool ehci_route_ports_to_uhci(void);
+
+static inline bool td_in_pool(uhci_td_t *td)
+{
+    return td && td >= g_td_pool && td < (g_td_pool + UHCI_TD_POOL_SIZE);
+}
+
+static uhci_td_t *td_pool_alloc(size_t count)
+{
+    uhci_td_t *tds = NULL;
+    spinlock_lock(&g_td_pool_lock);
+    if (count == 1 && g_td_pool_free_count > 0)
+    {
+        uint16_t idx = g_td_pool_free[--g_td_pool_free_count];
+        tds = &g_td_pool[idx];
+    }
+    else if (g_td_pool_next + count <= UHCI_TD_POOL_SIZE)
+    {
+        tds = &g_td_pool[g_td_pool_next];
+        g_td_pool_next = (uint16_t)(g_td_pool_next + count);
+    }
+    spinlock_unlock(&g_td_pool_lock);
+    if (tds)
+    {
+        memset(tds, 0, sizeof(uhci_td_t) * count);
+    }
+    return tds;
+}
+
+static void td_pool_free(uhci_td_t *td)
+{
+    if (!td_in_pool(td))
+    {
+        return;
+    }
+    uint16_t idx = (uint16_t)(td - g_td_pool);
+    spinlock_lock(&g_td_pool_lock);
+    if (g_td_pool_free_count < UHCI_TD_POOL_SIZE)
+    {
+        g_td_pool_free[g_td_pool_free_count++] = idx;
+    }
+    spinlock_unlock(&g_td_pool_lock);
+}
+
+static void td_pool_free_chain(uhci_td_t *tds, size_t count)
+{
+    if (!tds || count == 0)
+    {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        td_pool_free(&tds[i]);
+    }
+}
+
+static void uhci_unlink_chain(uhci_td_t *tds, size_t td_count)
+{
+    if (!tds || td_count == 0)
+    {
+        return;
+    }
+    for (size_t i = 0; i < td_count; ++i)
+    {
+        tds[i].link = UHCI_LINK_TERMINATE;
+        tds[i].control &= ~UHCI_TD_CTRL_ACTIVE;
+    }
+}
 
 static inline uint64_t usb_now_ms(void)
 {
@@ -269,14 +365,7 @@ static bool uhci_start(uhci_controller_t *hc)
 
 static uhci_td_t *uhci_alloc_td_chain(size_t count)
 {
-    size_t bytes = sizeof(uhci_td_t) * count;
-    uhci_td_t *tds = (uhci_td_t *)malloc(bytes);
-    if (!tds)
-    {
-        return NULL;
-    }
-    memset(tds, 0, bytes);
-    return tds;
+    return td_pool_alloc(count);
 }
 
 static inline uint32_t uhci_build_token(uint8_t pid,
@@ -300,7 +389,9 @@ static bool uhci_wait_for_td(uhci_td_t *last, uint32_t timeout_ms)
         return false;
     }
     uint64_t deadline = usb_now_ms() + timeout_ms;
-    uint32_t spin_guard = timeout_ms ? (timeout_ms * 5000u) : 100000u;
+    uint32_t spin_guard = timeout_ms ? (timeout_ms * 2000u) : 50000u;
+    uint32_t snooze = 0;
+    static int deadline_log_budget = 8;
     while (spin_guard-- > 0)
     {
         uint32_t ctrl = last->control;
@@ -319,12 +410,46 @@ static bool uhci_wait_for_td(uhci_td_t *last, uint32_t timeout_ms)
         }
         if (usb_now_ms() >= deadline)
         {
-            usb_log("[usb] td wait deadline");
+            if (deadline_log_budget > 0)
+            {
+                deadline_log_budget--;
+                usb_log("[usb] td wait deadline");
+            }
             break;
+        }
+        if (++snooze >= 2000)
+        {
+            snooze = 0;
+            process_sleep_ms(1);
         }
         __asm__ volatile ("pause");
     }
     return false;
+}
+
+static void uhci_acquire_transfer(uhci_controller_t *hc)
+{
+    while (1)
+    {
+        spinlock_lock(&hc->lock);
+        if (!hc->transfer_active)
+        {
+            hc->transfer_active = true;
+            spinlock_unlock(&hc->lock);
+            return;
+        }
+        spinlock_unlock(&hc->lock);
+        process_yield();
+    }
+}
+
+static void uhci_release_transfer(uhci_controller_t *hc)
+{
+    spinlock_lock(&hc->lock);
+    hc->async_qh->element_link = UHCI_LINK_TERMINATE;
+    hc->async_qh->head_link = UHCI_LINK_TERMINATE;
+    hc->transfer_active = false;
+    spinlock_unlock(&hc->lock);
 }
 
 static bool uhci_submit_chain(uhci_controller_t *hc,
@@ -338,12 +463,14 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
         return false;
     }
 
+    uhci_acquire_transfer(hc);
     spinlock_lock(&hc->lock);
     hc->async_qh->element_link = virt_to_phys(tds);
     hc->async_qh->head_link = UHCI_LINK_TERMINATE;
+    spinlock_unlock(&hc->lock);
 
     uhci_td_t *last = &tds[td_count - 1];
-    uint32_t wait_ms = is_interrupt ? 20 : 200;
+    uint32_t wait_ms = is_interrupt ? 2 : 200;
     bool ok = uhci_wait_for_td(last, wait_ms);
     bool soft_no_data = false;
     if (!ok && is_interrupt)
@@ -356,9 +483,7 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
     }
     /* Unlink the chain before releasing the lock so the controller does not
        keep walking freed TDs on subsequent frames. */
-    hc->async_qh->element_link = UHCI_LINK_TERMINATE;
-    hc->async_qh->head_link = UHCI_LINK_TERMINATE;
-    spinlock_unlock(&hc->lock);
+    uhci_release_transfer(hc);
     if (!ok)
     {
         uint32_t token = tds[0].token;
@@ -371,6 +496,15 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
                       (unsigned)ep,
                       (unsigned)tds[0].control,
                       (unsigned)last->control);
+        /* Stop the controller from continually re-walking this chain. */
+        uhci_unlink_chain(tds, td_count);
+        outw(hc->iobase + UHCI_USBSTS, 0xFFFF);
+        /* If the controller halted, try to restart it so later transfers keep working. */
+        uint16_t sts = inw(hc->iobase + UHCI_USBSTS);
+        if (sts & UHCI_STS_HCHALTED)
+        {
+            uhci_start(hc);
+        }
         return false;
     }
 
@@ -456,29 +590,27 @@ static bool uhci_control_xfer(uhci_controller_t *hc,
 
     usb_log("[usb] control xfer submit");
     bool ok = uhci_submit_chain(hc, tds, total_tds, true, false);
-    free(tds);
     usb_log(ok ? "[usb] control xfer ok" : "[usb] control xfer fail");
+    td_pool_free_chain(tds, total_tds);
     return ok;
 }
 
-static bool uhci_interrupt_in_xfer(uhci_controller_t *hc,
-                                   usb_device_t *dev,
-                                   usb_endpoint_t *ep,
-                                   void *buffer,
-                                   uint16_t length,
-                                   uint16_t *transferred)
+static bool uhci_interrupt_in_xfer_td(uhci_controller_t *hc,
+                                      usb_device_t *dev,
+                                      usb_endpoint_t *ep,
+                                      void *buffer,
+                                      uint16_t length,
+                                      uint16_t *transferred,
+                                      uhci_td_t *td,
+                                      bool free_td)
 {
-    if (!hc || !dev || !ep || !buffer || length == 0)
+    (void)free_td; /* caller owns td lifetime now */
+    if (!hc || !dev || !ep || !buffer || length == 0 || !td)
     {
         return false;
     }
 
-    uhci_td_t *td = uhci_alloc_td_chain(1);
-    if (!td)
-    {
-        return false;
-    }
-
+    memset(td, 0, sizeof(*td));
     uint32_t ctrl = UHCI_TD_CTRL_ERRCNT(3) | UHCI_TD_CTRL_ACTIVE | UHCI_TD_CTRL_SPD;
     if (dev->speed == USB_SPEED_LOW)
     {
@@ -490,21 +622,140 @@ static bool uhci_interrupt_in_xfer(uhci_controller_t *hc,
     td->link = UHCI_LINK_TERMINATE;
 
     bool ok = uhci_submit_chain(hc, td, 1, true, true);
+    uint16_t actual = 0;
     if (ok && transferred)
     {
         uint32_t act_len = td->control & UHCI_TD_CTRL_ACTLEN_MASK;
         if (act_len == UHCI_TD_CTRL_ACTLEN_MASK)
         {
-            *transferred = 0;
+            actual = 0;
         }
         else
         {
-            *transferred = (uint16_t)(act_len + 1u);
+            actual = (uint16_t)(act_len + 1u);
         }
+        *transferred = actual;
     }
-    ep->data_toggle ^= 1u;
-    free(td);
+    if (ok && actual > 0)
+    {
+        ep->data_toggle ^= 1u;
+    }
     return ok;
+}
+
+static bool uhci_interrupt_in_xfer(uhci_controller_t *hc,
+                                   usb_device_t *dev,
+                                   usb_endpoint_t *ep,
+                                   void *buffer,
+                                   uint16_t length,
+                                   uint16_t *transferred)
+{
+    uhci_td_t *td = uhci_alloc_td_chain(1);
+    if (!td)
+    {
+        return false;
+    }
+    bool ok = uhci_interrupt_in_xfer_td(hc, dev, ep, buffer, length, transferred, td, true);
+    td_pool_free(td);
+    return ok;
+}
+
+static usb_device_t *usb_alloc_device_slot(uhci_controller_t *hc)
+{
+    if (!hc)
+    {
+        return NULL;
+    }
+    if (hc->device_count >= UHCI_MAX_DEVICES)
+    {
+        serial_printf("[usb] device limit reached (%u)\r\n", (unsigned)UHCI_MAX_DEVICES);
+        return NULL;
+    }
+    usb_device_t *dev = &hc->devices[hc->device_count];
+    memset(dev, 0, sizeof(*dev));
+    dev->host = hc;
+    dev->max_packet0 = 8;
+    return dev;
+}
+
+static bool usb_hub_get_descriptor(usb_device_t *hub, uint8_t *buf, uint16_t len)
+{
+    if (!hub || !buf || len == 0)
+    {
+        return false;
+    }
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0xA0,
+        .bRequest = USB_REQ_GET_DESCRIPTOR,
+        .wValue = (USB_DESC_HUB << 8),
+        .wIndex = 0,
+        .wLength = len
+    };
+    return usb_control_transfer(hub, &setup, buf, len);
+}
+
+static bool usb_hub_set_port_feature(usb_device_t *hub, uint8_t port, uint16_t feature)
+{
+    if (!hub || port == 0)
+    {
+        return false;
+    }
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0x23,
+        .bRequest = USB_REQ_SET_FEATURE,
+        .wValue = feature,
+        .wIndex = port,
+        .wLength = 0
+    };
+    return usb_control_transfer(hub, &setup, NULL, 0);
+}
+
+static bool usb_hub_clear_port_feature(usb_device_t *hub, uint8_t port, uint16_t feature)
+{
+    if (!hub || port == 0)
+    {
+        return false;
+    }
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0x23,
+        .bRequest = USB_REQ_CLEAR_FEATURE,
+        .wValue = feature,
+        .wIndex = port,
+        .wLength = 0
+    };
+    return usb_control_transfer(hub, &setup, NULL, 0);
+}
+
+static bool usb_hub_get_port_status(usb_device_t *hub,
+                                    uint8_t port,
+                                    uint16_t *status,
+                                    uint16_t *change)
+{
+    if (!hub || port == 0)
+    {
+        return false;
+    }
+    uint16_t buf[2] = { 0, 0 };
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0xA3,
+        .bRequest = USB_REQ_GET_STATUS,
+        .wValue = 0,
+        .wIndex = port,
+        .wLength = sizeof(buf)
+    };
+    if (!usb_control_transfer(hub, &setup, buf, sizeof(buf)))
+    {
+        return false;
+    }
+    if (status)
+    {
+        *status = buf[0];
+    }
+    if (change)
+    {
+        *change = buf[1];
+    }
+    return true;
 }
 
 static bool usb_parse_config(usb_device_t *dev, uint8_t *config, uint16_t total_len)
@@ -566,77 +817,16 @@ static bool usb_parse_config(usb_device_t *dev, uint8_t *config, uint16_t total_
     return true;
 }
 
-static bool usb_enumerate_port(uhci_controller_t *hc, uint16_t port_reg, uint8_t port_index)
+static void usb_enumerate_hub_ports(uhci_controller_t *hc, usb_device_t *hub);
+
+static bool usb_enumerate_device(uhci_controller_t *hc,
+                                 usb_device_t *dev,
+                                 uint8_t port_index)
 {
-    serial_printf("[usb] port%u check\r\n", (unsigned)port_index);
-    uint16_t status = inw(hc->iobase + port_reg);
-    serial_printf("[usb] port%u status initial=0x%04X\r\n",
-                  (unsigned)port_index,
-                  (unsigned)status);
-
-    /* Ports can be left suspended by firmware; bring them back before checking. */
-    if (status & UHCI_PORT_SUSP)
+    if (!hc || !dev)
     {
-        serial_printf("[usb] port%u resume start status=0x%04X\r\n",
-                      (unsigned)port_index,
-                      (unsigned)status);
-        outw(hc->iobase + port_reg, status | UHCI_PORT_RD | UHCI_PORT_CSC | UHCI_PORT_PEC);
-        usb_delay_ms(20);
-        status = inw(hc->iobase + port_reg);
-        outw(hc->iobase + port_reg,
-             (uint16_t)((status & ~(UHCI_PORT_RD | UHCI_PORT_SUSP)) | UHCI_PORT_CSC | UHCI_PORT_PEC));
-        usb_delay_ms(2);
-        status = inw(hc->iobase + port_reg);
-        serial_printf("[usb] port%u resume done status=0x%04X\r\n",
-                      (unsigned)port_index,
-                      (unsigned)status);
-    }
-
-    if ((status & UHCI_PORT_CCS) == 0)
-    {
-        serial_printf("[usb] port%u no device status=0x%04X\r\n",
-                      (unsigned)port_index,
-                      (unsigned)status);
         return false;
     }
-
-    outw(hc->iobase + port_reg, status | UHCI_PORT_PR);
-    serial_printf("[usb] port%u reset asserted\r\n", (unsigned)port_index);
-    usb_delay_ms(50);
-    outw(hc->iobase + port_reg, status & ~UHCI_PORT_PR);
-    serial_printf("[usb] port%u reset released\r\n", (unsigned)port_index);
-    usb_delay_ms(10);
-
-    status = inw(hc->iobase + port_reg);
-    if ((status & UHCI_PORT_CCS) == 0)
-    {
-        serial_printf("[usb] port%u lost connect after reset status=0x%04X\r\n",
-                      (unsigned)port_index,
-                      (unsigned)status);
-        return false;
-    }
-    serial_printf("[usb] port%u status after reset=0x%04X\r\n",
-                  (unsigned)port_index,
-                  (unsigned)status);
-
-    outw(hc->iobase + port_reg, status | UHCI_PORT_PE | UHCI_PORT_CSC | UHCI_PORT_PEC);
-    usb_delay_ms(2);
-
-    if (hc->device_count >= UHCI_MAX_PORTS)
-    {
-        serial_printf("[usb] port%u device limit reached\r\n", (unsigned)port_index);
-        return false;
-    }
-
-    usb_device_t *dev = &hc->devices[hc->device_count];
-    memset(dev, 0, sizeof(*dev));
-    dev->host = hc;
-    dev->port = port_index;
-    dev->speed = (status & UHCI_PORT_LSDA) ? USB_SPEED_LOW : USB_SPEED_FULL;
-    serial_printf("[usb] port%u connected speed=%s\r\n",
-                  (unsigned)port_index,
-                  dev->speed == USB_SPEED_LOW ? "low" : "full");
-    dev->max_packet0 = 8;
 
     uint8_t device_desc_buf[18];
     usb_setup_packet_t get_dev = {
@@ -647,7 +837,7 @@ static bool usb_enumerate_port(uhci_controller_t *hc, uint16_t port_reg, uint8_t
         .wLength = 8
     };
 
-    if (!uhci_control_xfer(hc, NULL, &get_dev, device_desc_buf, 8))
+    if (!uhci_control_xfer(hc, dev, &get_dev, device_desc_buf, 8))
     {
         usb_log("[usb] failed to get dev desc (first stage)");
         return false;
@@ -656,44 +846,47 @@ static bool usb_enumerate_port(uhci_controller_t *hc, uint16_t port_reg, uint8_t
                   (unsigned)port_index,
                   (unsigned)device_desc_buf[7]);
 
-    dev->max_packet0 = device_desc_buf[7];
-    if (dev->max_packet0 == 0)
-    {
-        dev->max_packet0 = 8;
-    }
+    dev->max_packet0 = device_desc_buf[7] ? device_desc_buf[7] : 8;
 
-    get_dev.wLength = sizeof(device_desc_buf);
-
-    dev->address = (uint8_t)(hc->device_count + 1);
+    uint8_t new_addr = (uint8_t)(hc->device_count + 1);
     usb_setup_packet_t set_addr = {
         .bmRequestType = 0x00,
         .bRequest = USB_REQ_SET_ADDRESS,
-        .wValue = dev->address,
+        .wValue = new_addr,
         .wIndex = 0,
         .wLength = 0
     };
-    if (!uhci_control_xfer(hc, NULL, &set_addr, NULL, 0))
+    if (!uhci_control_xfer(hc, dev, &set_addr, NULL, 0))
     {
         usb_log("[usb] failed to set address");
         return false;
     }
-    serial_printf("[usb] port%u address=%u\r\n", (unsigned)port_index, (unsigned)dev->address);
+    serial_printf("[usb] port%u address=%u\r\n", (unsigned)port_index, (unsigned)new_addr);
     usb_delay_ms(4);
+    dev->address = new_addr;
 
+    get_dev.wLength = sizeof(device_desc_buf);
     if (!uhci_control_xfer(hc, dev, &get_dev, device_desc_buf, sizeof(device_desc_buf)))
     {
         usb_log("[usb] failed to read device descriptor");
         return false;
     }
-    serial_printf("[usb] port%u dev vid=0x%04X pid=0x%04X pkt0=%u\r\n",
+    dev->vendor_id = (uint16_t)device_desc_buf[8] | ((uint16_t)device_desc_buf[9] << 8);
+    dev->product_id = (uint16_t)device_desc_buf[10] | ((uint16_t)device_desc_buf[11] << 8);
+    dev->max_packet0 = device_desc_buf[7] ? device_desc_buf[7] : dev->max_packet0;
+    dev->device_class = device_desc_buf[4];
+    dev->device_subclass = device_desc_buf[5];
+    dev->device_protocol = device_desc_buf[6];
+    dev->is_hub = (dev->device_class == USB_CLASS_HUB);
+    dev->hub_port_count = 0;
+    serial_printf("[usb] port%u dev vid=0x%04X pid=0x%04X cls=0x%02X sub=0x%02X proto=0x%02X pkt0=%u\r\n",
                   (unsigned)port_index,
                   (unsigned)dev->vendor_id,
                   (unsigned)dev->product_id,
+                  (unsigned)dev->device_class,
+                  (unsigned)dev->device_subclass,
+                  (unsigned)dev->device_protocol,
                   (unsigned)dev->max_packet0);
-
-    dev->vendor_id = (uint16_t)device_desc_buf[8] | ((uint16_t)device_desc_buf[9] << 8);
-    dev->product_id = (uint16_t)device_desc_buf[10] | ((uint16_t)device_desc_buf[11] << 8);
-    dev->max_packet0 = device_desc_buf[7];
 
     uint8_t config_head[9];
     usb_setup_packet_t get_cfg_head = {
@@ -767,7 +960,176 @@ static bool usb_enumerate_port(uhci_controller_t *hc, uint16_t port_reg, uint8_t
     serial_printf("[usb] port%u enumerate complete count=%u\r\n",
                   (unsigned)port_index,
                   (unsigned)hc->device_count);
+
+    if (dev->is_hub)
+    {
+        usb_enumerate_hub_ports(hc, dev);
+    }
     return true;
+}
+
+static void usb_enumerate_hub_ports(uhci_controller_t *hc, usb_device_t *hub)
+{
+    if (!hc || !hub)
+    {
+        return;
+    }
+    uint8_t hub_desc[8];
+    if (!usb_hub_get_descriptor(hub, hub_desc, sizeof(hub_desc)))
+    {
+        serial_printf("[usb] hub addr=%u descriptor read failed\r\n",
+                      (unsigned)hub->address);
+        return;
+    }
+
+    uint8_t ports = hub_desc[2];
+    hub->hub_port_count = ports;
+    serial_printf("[usb] hub addr=%u ports=%u\r\n",
+                  (unsigned)hub->address,
+                  (unsigned)ports);
+    if (ports == 0)
+    {
+        return;
+    }
+
+    for (uint8_t p = 1; p <= ports; ++p)
+    {
+        usb_hub_set_port_feature(hub, p, USB_PORT_FEAT_POWER);
+    }
+    usb_delay_ms(20);
+
+    for (uint8_t p = 1; p <= ports; ++p)
+    {
+        uint16_t ps = 0, pc = 0;
+        if (!usb_hub_get_port_status(hub, p, &ps, &pc))
+        {
+            continue;
+        }
+        if (!(ps & USB_PORT_STAT_CONNECTION))
+        {
+            continue;
+        }
+
+        usb_hub_clear_port_feature(hub, p, USB_PORT_FEAT_C_CONNECTION);
+        usb_hub_clear_port_feature(hub, p, USB_PORT_FEAT_C_ENABLE);
+        usb_hub_clear_port_feature(hub, p, USB_PORT_FEAT_C_RESET);
+
+        if (!usb_hub_set_port_feature(hub, p, USB_PORT_FEAT_RESET))
+        {
+            serial_printf("[usb] hub addr=%u port%u reset failed\r\n",
+                          (unsigned)hub->address,
+                          (unsigned)p);
+            continue;
+        }
+        usb_delay_ms(50);
+        usb_hub_clear_port_feature(hub, p, USB_PORT_FEAT_C_RESET);
+
+        int wait_enable = 10;
+        while (wait_enable-- > 0)
+        {
+            if (!usb_hub_get_port_status(hub, p, &ps, &pc))
+            {
+                break;
+            }
+            if (ps & USB_PORT_STAT_ENABLE)
+            {
+                break;
+            }
+            usb_delay_ms(10);
+        }
+        if (!(ps & USB_PORT_STAT_ENABLE))
+        {
+            serial_printf("[usb] hub addr=%u port%u not enabled status=0x%04X\r\n",
+                          (unsigned)hub->address,
+                          (unsigned)p,
+                          (unsigned)ps);
+            continue;
+        }
+
+        bool low_speed = (ps & USB_PORT_STAT_LOW_SPEED) != 0;
+        usb_device_t *child = usb_alloc_device_slot(hc);
+        if (!child)
+        {
+            return;
+        }
+        child->port = p;
+        child->speed = low_speed ? USB_SPEED_LOW : USB_SPEED_FULL;
+        child->address = 0;
+        if (!usb_enumerate_device(hc, child, p))
+        {
+            memset(child, 0, sizeof(*child));
+        }
+    }
+}
+
+static bool usb_enumerate_port(uhci_controller_t *hc, uint16_t port_reg, uint8_t port_index)
+{
+    serial_printf("[usb] port%u check\r\n", (unsigned)port_index);
+    uint16_t status = inw(hc->iobase + port_reg);
+    serial_printf("[usb] port%u status initial=0x%04X\r\n",
+                  (unsigned)port_index,
+                  (unsigned)status);
+
+    /* Ports can be left suspended by firmware; bring them back before checking. */
+    if (status & UHCI_PORT_SUSP)
+    {
+        serial_printf("[usb] port%u resume start status=0x%04X\r\n",
+                      (unsigned)port_index,
+                      (unsigned)status);
+        outw(hc->iobase + port_reg, status | UHCI_PORT_RD | UHCI_PORT_CSC | UHCI_PORT_PEC);
+        usb_delay_ms(20);
+        status = inw(hc->iobase + port_reg);
+        outw(hc->iobase + port_reg,
+             (uint16_t)((status & ~(UHCI_PORT_RD | UHCI_PORT_SUSP)) | UHCI_PORT_CSC | UHCI_PORT_PEC));
+        usb_delay_ms(2);
+        status = inw(hc->iobase + port_reg);
+        serial_printf("[usb] port%u resume done status=0x%04X\r\n",
+                      (unsigned)port_index,
+                      (unsigned)status);
+    }
+
+    if ((status & UHCI_PORT_CCS) == 0)
+    {
+        serial_printf("[usb] port%u no device status=0x%04X\r\n",
+                      (unsigned)port_index,
+                      (unsigned)status);
+        return false;
+    }
+
+    outw(hc->iobase + port_reg, status | UHCI_PORT_PR);
+    serial_printf("[usb] port%u reset asserted\r\n", (unsigned)port_index);
+    usb_delay_ms(50);
+    outw(hc->iobase + port_reg, status & ~UHCI_PORT_PR);
+    serial_printf("[usb] port%u reset released\r\n", (unsigned)port_index);
+    usb_delay_ms(10);
+
+    status = inw(hc->iobase + port_reg);
+    if ((status & UHCI_PORT_CCS) == 0)
+    {
+        serial_printf("[usb] port%u lost connect after reset status=0x%04X\r\n",
+                      (unsigned)port_index,
+                      (unsigned)status);
+        return false;
+    }
+    serial_printf("[usb] port%u status after reset=0x%04X\r\n",
+                  (unsigned)port_index,
+                  (unsigned)status);
+
+    outw(hc->iobase + port_reg, status | UHCI_PORT_PE | UHCI_PORT_CSC | UHCI_PORT_PEC);
+    usb_delay_ms(2);
+
+    usb_device_t *dev = usb_alloc_device_slot(hc);
+    if (!dev)
+    {
+        return false;
+    }
+    dev->port = port_index;
+    dev->speed = (status & UHCI_PORT_LSDA) ? USB_SPEED_LOW : USB_SPEED_FULL;
+    serial_printf("[usb] port%u connected speed=%s\r\n",
+                  (unsigned)port_index,
+                  dev->speed == USB_SPEED_LOW ? "low" : "full");
+    dev->address = 0;
+    return usb_enumerate_device(hc, dev, port_index);
 }
 
 static bool usb_probe_uhci(uhci_controller_t *hc, pci_device_t dev)
@@ -791,6 +1153,7 @@ static bool usb_probe_uhci(uhci_controller_t *hc, pci_device_t dev)
                   (unsigned)bar4);
     pci_set_command_bits(hc->pci, 0x0005u, 0);
     pci_config_write16(hc->pci, UHCI_LEGSUP, 0x8F00u);
+    hc->irq_line = pci_config_read8(hc->pci, 0x3Cu);
 
     hc->frame_list = (uint32_t *)malloc(4096 + 4096);
     if (!hc->frame_list)
@@ -831,6 +1194,9 @@ static bool usb_probe_uhci(uhci_controller_t *hc, pci_device_t dev)
 
 bool usb_bus_init(void)
 {
+    g_td_pool_next = 0;
+    g_td_pool_free_count = 0;
+    spinlock_init(&g_td_pool_lock);
     usb_log("[usb] bus_init begin");
     usb_log("[usb] attempting ehci port routing");
     ehci_route_ports_to_uhci();
@@ -905,6 +1271,14 @@ bool usb_bus_init(void)
             continue;
         }
         usb_log("[usb] start ok");
+        if (hc->irq_line < 16 && !hc->irq_enabled)
+        {
+            interrupts_enable_irq(hc->irq_line);
+            hc->irq_enabled = true;
+            serial_printf("[usb] enabled irq line %u for uhci %u\r\n",
+                          (unsigned)hc->irq_line,
+                          (unsigned)i);
+        }
         usb_enumerate_port(hc, UHCI_PORTSC1, 0);
         usb_enumerate_port(hc, UHCI_PORTSC2, 1);
     }
@@ -1067,4 +1441,47 @@ bool usb_interrupt_in(usb_device_t *dev,
     }
     uhci_controller_t *hc = (uhci_controller_t *)dev->host;
     return uhci_interrupt_in_xfer(hc, dev, ep, buffer, length, transferred);
+}
+
+bool usb_interrupt_in_prealloc(usb_device_t *dev,
+                               usb_endpoint_t *ep,
+                               void *buffer,
+                               uint16_t length,
+                               uint16_t *transferred,
+                               void *td_mem)
+{
+    if (!dev || !dev->host || !td_mem)
+    {
+        return false;
+    }
+    uhci_controller_t *hc = (uhci_controller_t *)dev->host;
+    return uhci_interrupt_in_xfer_td(hc,
+                                     dev,
+                                     ep,
+                                     buffer,
+                                     length,
+                                     transferred,
+                                     (uhci_td_t *)td_mem,
+                                     false);
+}
+
+void usb_on_irq(void)
+{
+    static int log_budget = 8;
+    for (size_t i = 0; i < g_uhci_count; ++i)
+    {
+        uhci_controller_t *hc = &g_uhci[i];
+        uint16_t status = inw(hc->iobase + UHCI_USBSTS);
+        if (status != 0)
+        {
+            outw(hc->iobase + UHCI_USBSTS, status);
+            if (log_budget > 0)
+            {
+                log_budget--;
+                serial_printf("[usb] irq status=0x%04X hc=%u\r\n",
+                              (unsigned)status,
+                              (unsigned)i);
+            }
+        }
+    }
 }

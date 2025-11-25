@@ -31,10 +31,13 @@
 #include "smp.h"
 #include "proc_devices.h"
 #include "build_features.h"
+#if ENABLE_USB
 #include "usb_hid.h"
+#endif
 
 static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
+static void tcp_timer_process_entry(void *arg);
 #if ENABLE_FLUSHD
 static void storage_flush_wait(uint32_t interval_ms);
 static volatile bool g_flushd_wake_requested = false;
@@ -377,6 +380,7 @@ static void fstab_mount_run(void)
 static void warmup_run_sequence(void)
 {
     serial_printf("%s", "[warmup] sequence start\r\n");
+#if ENABLE_USB
     serial_printf("%s", "[warmup] calling usb_hid_init\r\n");
     process_t *usb_init = process_create_kernel("usb_initd", (thread_entry_t)usb_hid_init, NULL, 0, -1);
     if (!usb_init)
@@ -389,6 +393,9 @@ static void warmup_run_sequence(void)
         /* Let the USB init thread run immediately so it doesn't starve behind warmup work. */
         process_yield();
     }
+#else
+    serial_printf("%s", "[warmup] usb disabled; skipping usb_hid_init\r\n");
+#endif
 #if ENABLE_FSTAB_MOUNT
     vfs_spin_up();
     fstab_mount_run();
@@ -448,6 +455,17 @@ static void shell_process_entry(void *arg)
     (void)arg;
     shell_main();
     process_exit(0);
+}
+
+static void tcp_timer_process_entry(void *arg)
+{
+    (void)arg;
+    const uint32_t interval_ms = 10;
+    while (1)
+    {
+        net_tcp_poll();
+        process_sleep_ms(interval_ms);
+    }
 }
 
 #if ENABLE_FLUSHD
@@ -688,6 +706,16 @@ void kernel_main(void)
     }
     proc_devices_init();
     serial_printf("%s", "[alix] after rtl8139_init\n");
+
+    process_t *tcp_timer_process = process_create_kernel("tcp_timerd",
+                                                         tcp_timer_process_entry,
+                                                         NULL,
+                                                         0,
+                                                         -1);
+    if (!tcp_timer_process)
+    {
+        serial_printf("%s", "[alix] warn: failed to create tcp_timerd\r\n");
+    }
 
     process_t *warmup_process = process_create_kernel("warmup", warmup_process_entry, NULL, 0, -1);
     if (!warmup_process)

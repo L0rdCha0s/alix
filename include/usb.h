@@ -24,8 +24,10 @@
 #define USB_DESC_DEVICE_QUAL   0x06
 #define USB_DESC_HID           0x21
 #define USB_DESC_HID_REPORT    0x22
+#define USB_DESC_HUB           0x29
 
 #define USB_CLASS_HID          0x03
+#define USB_CLASS_HUB          0x09
 
 #define UHCI_MAX_CONTROLLERS   4
 
@@ -63,6 +65,11 @@ typedef struct usb_device
     uint8_t max_packet0;
     usb_device_type_t type;
     usb_endpoint_t intr_ep;
+    uint8_t device_class;
+    uint8_t device_subclass;
+    uint8_t device_protocol;
+    bool is_hub;
+    uint8_t hub_port_count;
 } usb_device_t;
 
 typedef struct
@@ -88,5 +95,18 @@ bool usb_interrupt_in(usb_device_t *dev,
                       void *buffer,
                       uint16_t length,
                       uint16_t *transferred);
+
+/* Submit an interrupt IN transfer using caller-provided TD storage.
+ * The TD memory must be at least sizeof(internal TD) and 16-byte aligned,
+ * and must remain valid for the duration of the call. */
+bool usb_interrupt_in_prealloc(usb_device_t *dev,
+                               usb_endpoint_t *ep,
+                               void *buffer,
+                               uint16_t length,
+                               uint16_t *transferred,
+                               void *td_mem);
+
+/* Handle host controller IRQs (UHCI for now). */
+void usb_on_irq(void);
 
 #endif /* USB_H */

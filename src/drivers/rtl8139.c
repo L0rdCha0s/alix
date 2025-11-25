@@ -353,8 +353,6 @@ void rtl8139_on_irq(void)
         rtl8139_tx_flush_queue();
         rtl8139_release_tx(irq_flags);
     }
-
-    net_tcp_poll();
 }
 
 void rtl8139_poll(void)
@@ -368,13 +366,16 @@ void rtl8139_poll(void)
     rtl8139_reclaim_tx();
     rtl8139_tx_flush_queue();
     rtl8139_release_tx(irq_flags);
-    net_tcp_poll();
 }
 
 static void rtl8139_timer_task(void *context)
 {
     (void)context;
     rtl8139_poll();
+    /* Periodic watchdog to recover stuck TX descriptors even when the ring is
+       not saturated (e.g. SYN queued while nothing else is pending). */
+    rtl8139_tx_check_stuck("timer");
+    rtl8139_tx_force_release("timer");
 }
 
 bool rtl8139_is_present(void)
