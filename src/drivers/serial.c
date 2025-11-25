@@ -382,6 +382,7 @@ void serial_early_write_string(const char *s)
 static void serial_worker_entry(void *arg)
 {
     (void)arg;
+    g_serial_async_enabled = true;
     while (1)
     {
         char ch;
@@ -408,7 +409,6 @@ void serial_start_async_worker(void)
     if (proc)
     {
         g_serial_worker_started = true;
-        g_serial_async_enabled = true;
     }
 }
 

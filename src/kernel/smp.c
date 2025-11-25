@@ -558,9 +558,15 @@ void smp_handle_schedule_ipi(interrupt_frame_t *frame)
     process_on_timer_tick(frame);
 }
 
-void smp_broadcast_schedule_ipi(void)
+void smp_broadcast_schedule_ipi(bool include_self)
 {
     lapic_broadcast_ipi(SMP_SCHEDULE_IPI_VECTOR, true);
+    // uint32_t online = __atomic_load_n(&g_online_cpus, __ATOMIC_ACQUIRE);
+    // if (online <= 1)
+    // {
+    //     return;
+    // }
+    // lapic_broadcast_ipi(SMP_SCHEDULE_IPI_VECTOR, include_self);
 }
 
 void smp_broadcast_tlb_flush(void)
@@ -601,4 +607,9 @@ void smp_tlb_flush_mask(uint32_t cpu_mask)
         }
         lapic_send_ipi(g_cpus[i].apic_id, SMP_TLB_FLUSH_IPI_VECTOR);
     }
+}
+
+uint32_t smp_online_cpu_count(void)
+{
+    return __atomic_load_n(&g_online_cpus, __ATOMIC_ACQUIRE);
 }

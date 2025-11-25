@@ -6061,6 +6061,11 @@ void process_scheduler_set_ready(void)
     __atomic_store_n(&g_scheduler_boot_ready, true, __ATOMIC_RELEASE);
 }
 
+bool process_scheduler_ready(void)
+{
+    return __atomic_load_n(&g_scheduler_boot_ready, __ATOMIC_ACQUIRE);
+}
+
 static process_t *process_create_kernel_internal(const char *name,
                                                  thread_entry_t entry,
                                                  void *arg,

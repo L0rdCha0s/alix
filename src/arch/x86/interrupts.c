@@ -403,7 +403,16 @@ __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
 {
     (void)frame;
     timer_on_tick();
-    smp_broadcast_schedule_ipi();
+    smp_broadcast_schedule_ipi(false);
+
+    // if (process_scheduler_ready())
+    // {
+    //     process_on_timer_tick(frame);
+    //     if (smp_online_cpu_count() > 1)
+    //     {
+    //         smp_broadcast_schedule_ipi(false);
+    //     }
+    // }
     pic_send_eoi(0);
 }
 

@@ -239,13 +239,41 @@ bool shell_service_close_session(uint32_t handle)
             shell_session_lock(session);
             if (session->running && (!session->runner || !process_is_zombie(session->runner)))
             {
-                if (session->runner)
+                process_t *runner = session->runner;
+                process_t *fg = session->state.foreground_process;
+                if (fg)
                 {
-                    process_kill(session->runner, -1);
+                    process_kill(fg, -1);
+                    session->state.foreground_process = NULL;
                 }
+                if (runner)
+                {
+                    process_kill(runner, -1);
+                    session->runner = NULL;
+                }
+                session->running = false;
+                session->completed = true;
+                session->last_status = -1;
                 shell_session_unlock(session);
                 shell_list_unlock();
-                return false;
+                if (fg)
+                {
+                    process_join(fg, NULL);
+                    if (process_is_zombie(fg))
+                    {
+                        process_destroy(fg);
+                    }
+                }
+                if (runner)
+                {
+                    process_join(runner, NULL);
+                    if (process_is_zombie(runner))
+                    {
+                        process_destroy(runner);
+                    }
+                }
+                /* Retry close now that the session has been torn down. */
+                return shell_service_close_session(handle);
             }
 
             process_t *zombie = shell_session_cleanup_runner_locked(session);
@@ -366,6 +394,13 @@ void shell_service_cleanup_process(process_t *process)
         if (session->owner == process)
         {
             shell_session_lock(session);
+            process_t *fg = session->state.foreground_process;
+            process_t *fg_to_wait = NULL;
+            if (fg && !process_is_zombie(fg))
+            {
+                process_kill(fg, -1);
+                fg_to_wait = fg;
+            }
             if (session->runner && !process_is_zombie(session->runner))
             {
                 process_t *runner = session->runner;
@@ -382,6 +417,12 @@ void shell_service_cleanup_process(process_t *process)
             {
                 session->running = false;
             }
+            process_t *fg_zombie = NULL;
+            if (fg && process_is_zombie(fg))
+            {
+                fg_zombie = fg;
+                session->state.foreground_process = NULL;
+            }
             *cursor = session->next;
             shell_session_unlock(session);
 
@@ -393,9 +434,21 @@ void shell_service_cleanup_process(process_t *process)
             free(session);
 
             shell_list_unlock();
+            if (fg_to_wait)
+            {
+                process_join(fg_to_wait, NULL);
+                if (process_is_zombie(fg_to_wait))
+                {
+                    process_destroy(fg_to_wait);
+                }
+            }
             if (zombie)
             {
                 process_destroy(zombie);
+            }
+            if (fg_zombie)
+            {
+                process_destroy(fg_zombie);
             }
             shell_list_lock();
             cursor = &g_shell_sessions;
@@ -575,6 +628,18 @@ int shell_service_interrupt(uint32_t handle)
     if (session->running)
     {
         ok = shell_request_interrupt(&session->state);
+        if (!ok)
+        {
+            process_t *fg = session->state.foreground_process;
+            if (fg && !process_is_zombie(fg))
+            {
+                ok = process_kill(fg, -1);
+            }
+        }
+        if (!ok && session->runner && !process_is_zombie(session->runner))
+        {
+            ok = process_kill(session->runner, -1);
+        }
     }
     shell_session_unlock(session);
     return ok ? 0 : -1;

@@ -9,6 +9,7 @@
 #include "libc.h"
 #include "font.h"
 #include "console.h"
+#include "spinlock.h"
 
 typedef struct atk_state atk_state_t;
 typedef struct atk_widget atk_widget_t;
@@ -88,6 +89,7 @@ static int video_mouse_log_count = 0;
 static volatile bool refresh_requested = false;
 static bool refresh_requested_full = false;
 static atk_widget_t *refresh_window = NULL;
+static spinlock_t g_video_lock;
 
 typedef struct
 {
@@ -308,6 +310,7 @@ static bool bga_available(void)
 /* --------- Public API --------- */
 void video_init(void)
 {
+    spinlock_init(&g_video_lock);
     vga_capture_state();
     vga_capture_font();
     video_prepare_font();
@@ -805,7 +808,9 @@ static int dirty_count = 0;
 
 static void video_dirty_reset(void)
 {
+    spinlock_lock(&g_video_lock);
     dirty_count = 0;
+    spinlock_unlock(&g_video_lock);
 }
 
 void video_invalidate_rect(int x, int y, int width, int height)
@@ -823,6 +828,8 @@ void video_invalidate_rect(int x, int y, int width, int height)
 
     if (x0 >= x1 || y0 >= y1) return;
 
+    bool handled = false;
+    spinlock_lock(&g_video_lock);
     for (int i = 0; i < dirty_count; ++i)
     {
         video_dirty_rect_t *r = &dirty_rects[i];
@@ -832,30 +839,60 @@ void video_invalidate_rect(int x, int y, int width, int height)
             if (y0 < r->y0) r->y0 = y0;
             if (x1 > r->x1) r->x1 = x1;
             if (y1 > r->y1) r->y1 = y1;
-            return;
+            handled = true;
+            break;
         }
     }
 
-    if (dirty_count < VIDEO_MAX_DIRTY_RECTS)
+    if (!handled && dirty_count < VIDEO_MAX_DIRTY_RECTS)
     {
         dirty_rects[dirty_count++] = (video_dirty_rect_t){ x0, y0, x1, y1 };
-        return;
+        handled = true;
     }
 
-    video_dirty_rect_t *r = &dirty_rects[0];
-    if (x0 < r->x0) r->x0 = x0;
-    if (y0 < r->y0) r->y0 = y0;
-    if (x1 > r->x1) r->x1 = x1;
-    if (y1 > r->y1) r->y1 = y1;
+    if (!handled)
+    {
+        video_dirty_rect_t *r = &dirty_rects[0];
+        if (x0 < r->x0) r->x0 = x0;
+        if (y0 < r->y0) r->y0 = y0;
+        if (x1 > r->x1) r->x1 = x1;
+        if (y1 > r->y1) r->y1 = y1;
+    }
+    spinlock_unlock(&g_video_lock);
 }
 
 void video_invalidate_all(void)
 {
+    spinlock_lock(&g_video_lock);
     dirty_count = 1;
     dirty_rects[0].x0 = 0;
     dirty_rects[0].y0 = 0;
     dirty_rects[0].x1 = VIDEO_WIDTH;
     dirty_rects[0].y1 = VIDEO_HEIGHT;
+    spinlock_unlock(&g_video_lock);
+}
+
+static int video_dirty_snapshot(video_dirty_rect_t *out, int max_rects)
+{
+    if (!out || max_rects <= 0)
+    {
+        return 0;
+    }
+
+    int count = 0;
+    spinlock_lock(&g_video_lock);
+    if (dirty_count > 0)
+    {
+        count = dirty_count;
+        if (count > max_rects)
+        {
+            count = max_rects;
+        }
+        memcpy(out, dirty_rects, (size_t)count * sizeof(video_dirty_rect_t));
+        dirty_count = 0;
+    }
+    spinlock_unlock(&g_video_lock);
+    return count;
 }
 
 /* Copy with wide stores; helps WC coalesce */
@@ -876,15 +913,25 @@ static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t
 
 static void video_flush_dirty(void)
 {
-    if (dirty_count <= 0 || !framebuffer) return;
+    if (!framebuffer)
+    {
+        return;
+    }
+
+    video_dirty_rect_t rects[VIDEO_MAX_DIRTY_RECTS];
+    int count = video_dirty_snapshot(rects, VIDEO_MAX_DIRTY_RECTS);
+    if (count <= 0)
+    {
+        return;
+    }
 
 #ifdef ENABLE_MEM_DEBUG_LOGS
-    video_log_hex("flush count=", dirty_count);
+    video_log_hex("flush count=", count);
 #endif
 
-    for (int i = 0; i < dirty_count; ++i)
+    for (int i = 0; i < count; ++i)
     {
-        video_dirty_rect_t *r = &dirty_rects[i];
+        video_dirty_rect_t *r = &rects[i];
         int w = r->x1 - r->x0;
         size_t row_bytes = (size_t)w * sizeof(video_color_t);
 #ifdef ENABLE_MEM_DEBUG_LOGS
@@ -906,68 +953,72 @@ static void video_flush_dirty(void)
             fb_memcpy_wc((void *)dst, src, row_bytes);
         }
     }
-
-    video_dirty_reset();
 }
 
 static void video_perform_refresh(void)
 {
-    uint64_t irq_state = video_irq_save();
+    video_dirty_rect_t rects[VIDEO_MAX_DIRTY_RECTS];
+    int rect_count = video_dirty_snapshot(rects, VIDEO_MAX_DIRTY_RECTS);
 
-    if (atk_drag_active())
+    atk_widget_t *target = NULL;
+    bool do_full = false;
+    bool active = false;
+
+    spinlock_lock(&g_video_lock);
+    active = video_active;
+    target = refresh_window;
+    refresh_window = NULL;
+    do_full = refresh_requested_full;
+    refresh_requested_full = false;
+    refresh_requested = (refresh_window != NULL) || refresh_requested_full;
+    spinlock_unlock(&g_video_lock);
+
+    if (!active || atk_drag_active())
     {
-        goto out;
+        return;
     }
 
-    if (!video_active)
+    if (rect_count > 0)
     {
-        goto out;
-    }
-
-    if (dirty_count > 0)
-    {
-        video_flush_dirty();
+        for (int i = 0; i < rect_count; ++i)
+        {
+            video_dirty_rect_t *r = &rects[i];
+            int w = r->x1 - r->x0;
+            size_t row_bytes = (size_t)w * sizeof(video_color_t);
+#ifdef ENABLE_MEM_DEBUG_LOGS
+            video_log_hex("flush x0=", r->x0);
+            video_log_hex("flush y0=", r->y0);
+            video_log_hex("flush x1=", r->x1);
+            video_log_hex("flush y1=", r->y1);
+            video_log_hex("flush bytes=", row_bytes);
+#endif
+            for (int y = r->y0; y < r->y1; ++y)
+            {
+                volatile uint32_t *dst = &framebuffer[y * VIDEO_WIDTH + r->x0];
+                uint32_t *src = &backbuffer[y * VIDEO_WIDTH + r->x0];
+                fb_memcpy_wc((void *)dst, src, row_bytes);
+            }
+        }
     }
 
     atk_state_t *state = atk_state_get();
 
-    if (refresh_window)
+    if (target)
     {
-        atk_widget_t *target = refresh_window;
-        refresh_window = NULL;
-
-        if (target)
-        {
-            video_dirty_reset();
-            atk_window_draw_from(state, target);
-            if (dirty_count > 0)
-            {
-                video_flush_dirty();
-            }
-            cursor_draw_overlay();
-            refresh_requested = refresh_requested_full || (refresh_window != NULL);
-            goto out;
-        }
-
-        refresh_requested_full = true;
+        video_dirty_reset();
+        atk_window_draw_from(state, target);
+        video_flush_dirty();
+        cursor_draw_overlay();
+        return;
     }
 
-    if (refresh_requested_full)
+    if (do_full)
     {
-        refresh_requested_full = false;
         video_dirty_reset();
         atk_render();
-        if (dirty_count > 0)
-        {
-            video_flush_dirty();
-        }
+        video_flush_dirty();
         cursor_draw_overlay();
     }
-
-    refresh_requested = refresh_requested_full || (refresh_window != NULL);
-
-out:
-    video_irq_restore(irq_state);
 }
 
 void video_cursor_set_shape(video_cursor_shape_t shape)
@@ -1043,9 +1094,12 @@ void video_run_loop(void)
     {
         mouse_dispatch_events();
         video_poll_keyboard();
-        if (refresh_requested)
+        bool pending_refresh = false;
+        spinlock_lock(&g_video_lock);
+        pending_refresh = refresh_requested || refresh_requested_full;
+        spinlock_unlock(&g_video_lock);
+        if (pending_refresh)
         {
-            refresh_requested = false;
             video_perform_refresh();
         }
         __asm__ volatile ("hlt");
@@ -1062,9 +1116,12 @@ void video_pump_events(void)
 
     mouse_dispatch_events();
     video_poll_keyboard();
-    if (refresh_requested)
+    bool pending_refresh = false;
+    spinlock_lock(&g_video_lock);
+    pending_refresh = refresh_requested || refresh_requested_full;
+    spinlock_unlock(&g_video_lock);
+    if (pending_refresh)
     {
-        refresh_requested = false;
         video_perform_refresh();
     }
 }
@@ -1075,8 +1132,10 @@ void video_request_refresh(void)
     {
         return;
     }
+    spinlock_lock(&g_video_lock);
     refresh_requested_full = true;
     refresh_requested = true;
+    spinlock_unlock(&g_video_lock);
 }
 
 void video_request_refresh_window(atk_widget_t *window)
@@ -1088,20 +1147,26 @@ void video_request_refresh_window(atk_widget_t *window)
     atk_state_t *state = atk_state_get();
     if (!state || !atk_window_contains(state, window))
     {
+        spinlock_lock(&g_video_lock);
         refresh_requested_full = true;
         refresh_requested = true;
+        spinlock_unlock(&g_video_lock);
         return;
     }
 
     if (!atk_window_is_topmost(state, window))
     {
+        spinlock_lock(&g_video_lock);
         refresh_requested_full = true;
         refresh_requested = true;
+        spinlock_unlock(&g_video_lock);
         return;
     }
 
+    spinlock_lock(&g_video_lock);
     refresh_window = window;
     refresh_requested = true;
+    spinlock_unlock(&g_video_lock);
 }
 
 void video_exit_mode(void)
@@ -1140,20 +1205,19 @@ static void video_poll_keyboard(void)
 
 void video_on_mouse_event(int dx, int dy, bool left_pressed)
 {
-    uint64_t irq_state = video_irq_save();
-
     if (!video_active)
     {
-        /* Do not log inside IRQ handlers; serial output here has triggered faults. */
-        goto out;
+        return;
     }
 
+    spinlock_lock(&g_video_lock);
     if (refresh_window)
     {
         refresh_requested_full = true;
         refresh_window = NULL;
         refresh_requested = true;
     }
+    spinlock_unlock(&g_video_lock);
 
     /* restore previous cursor region before drawing new one */
     cursor_restore_background();
@@ -1181,7 +1245,14 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
         }
     }
 
-    if (dirty_count > 0 && !refresh_requested && !atk_drag_active())
+    bool has_dirty = false;
+    bool pending_refresh = false;
+    spinlock_lock(&g_video_lock);
+    has_dirty = dirty_count > 0;
+    pending_refresh = refresh_requested || refresh_requested_full;
+    spinlock_unlock(&g_video_lock);
+
+    if (has_dirty && !pending_refresh && !atk_drag_active())
     {
         video_flush_dirty();
     }
@@ -1189,10 +1260,10 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     /* Track button state even if we bail out for a refresh to keep edge detection consistent. */
     last_left_down = left_pressed;
 
-    if (refresh_requested)
+    if (pending_refresh)
     {
         video_perform_refresh();
-        goto out;
+        return;
     }
 
     cursor_draw_overlay();
@@ -1201,11 +1272,10 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     if (result.exit_video)
     {
+        spinlock_lock(&g_video_lock);
         exit_requested = true;
+        spinlock_unlock(&g_video_lock);
     }
-
-out:
-    video_irq_restore(irq_state);
 }
 
 /* --------- Logging & detection --------- */
