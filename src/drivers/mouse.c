@@ -34,11 +34,11 @@ static spinlock_t g_mouse_queue_lock = { 0 };
 static bool g_mouse_queue_overflow_logged = false;
 static bool g_mouse_daemon_started = false;
 #if ENABLE_USB
-static bool g_mouse_ps2_enabled = true;
-#else
-/* When USB is disabled we are running in a debug PS/2-only mode; keep the mouse
- * controller off to prevent AUX bytes from polluting the shared data port. */
+/* When USB is enabled, keep PS/2 mouse disabled to avoid double-handling input. */
 static bool g_mouse_ps2_enabled = false;
+#else
+/* USB disabled: allow legacy PS/2 mouse for debug/testing. */
+static bool g_mouse_ps2_enabled = true;
 #endif
 
 static inline uint64_t mouse_irq_save(void)

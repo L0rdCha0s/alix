@@ -29,7 +29,11 @@ static volatile uint8_t scancode_buffer[KBD_BUFFER_SIZE];
 static volatile size_t buffer_head = 0;
 static volatile size_t buffer_tail = 0;
 static uint8_t key_down[128];
+#if ENABLE_USB
+static bool ps2_enabled = false; /* USB enabled: keep PS/2 keyboard path disabled by default. */
+#else
 static bool ps2_enabled = true;
+#endif
 
 /* Place key maps in .data, not .rodata, to avoid early-rodata issues */
 static char normal_map[128] = {
@@ -737,6 +741,11 @@ void keyboard_unread_char(char ch)
 
 void keyboard_init(void)
 {
+#if ENABLE_USB
+    /* Skip PS/2 init when USB is present to avoid contention on the controller. */
+    ps2_enabled = false;
+    return;
+#else
     ps2_enabled = true;
     ps2_controller_init();
     keyboard_reset_state();
@@ -774,6 +783,7 @@ void keyboard_init(void)
     {
         serial_printf("%s", "[keyboard] failed to create /proc/keyboard/repeat/multi_mode\r\n");
     }
+#endif /* ENABLE_USB */
 }
 
 bool keyboard_try_read(char *out_char)

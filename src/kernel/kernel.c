@@ -38,6 +38,10 @@
 static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
 static void tcp_timer_process_entry(void *arg);
+#if 1
+static void printer_a_process_entry(void *arg);
+static void printer_b_process_entry(void *arg);
+#endif
 #if ENABLE_FLUSHD
 static void storage_flush_wait(uint32_t interval_ms);
 static volatile bool g_flushd_wake_requested = false;
@@ -659,19 +663,27 @@ void kernel_main(void)
     user_memory_init();
     paging_init();
     serial_printf("%s", "[alix] after paging_init\n");
-    hwinfo_print_boot_summary();
-    serial_printf("%s", "[alix] after hwinfo\n");
     acpi_init();
     serial_printf("%s", "[alix] after acpi_init\n");
     smp_init();
-    serial_printf("%s", "[alix] after smp_init\n");
     process_system_init();
-    serial_printf("%s", "[alix] after process_system_init\n");
+
+#if ENABLE_INIT_HWINFO
+    hwinfo_print_boot_summary();
+    serial_printf("%s", "[alix] after hwinfo\n");
+#endif
+
+#if ENABLE_INIT_USER_ATK
     user_atk_init();
+#endif
+
+#if ENABLE_INIT_BLOCK
     block_init();
     ahci_init();
     serial_printf("%s", "[alix] after block_init\n");
+#endif
 
+#if ENABLE_INIT_VFS
     vfs_init();
     serial_printf("%s", "[alix] after vfs_init\n");
 #if ENABLE_STARTUP_SCRIPT
@@ -682,31 +694,61 @@ void kernel_main(void)
     logger_init();
     devfs_init();
     serial_printf("%s", "[alix] after devfs_init\n");
+#endif
+
     interrupts_init();
     interrupts_enable_irq(1);
-    serial_printf("%s", "[alix] after interrupts_init\n");
     timer_init(100);
+#if ENABLE_INIT_KEYBOARD
     timekeeping_init();
     keyboard_init();
     serial_printf("%s", "[alix] after keyboard_init\n");
+#else
+    timekeeping_init();
+#endif
+
+#if ENABLE_INIT_BLOCK
     ata_init();
     devfs_register_block_devices();
     serial_printf("%s", "[alix] after storage init\n");
+#endif
 
+#if ENABLE_INIT_NET
     net_if_init();
     net_dns_init();
     net_ntp_init();
     net_tcp_init();
     serial_printf("%s", "[alix] after net init\n");
-
     rtl8139_init();
-    if (!smp_start_secondary_cpus())
-    {
-        serial_printf("%s", "[alix] warn: smp_start_secondary_cpus failed\r\n");
-    }
+#endif
+
+#if ENABLE_INIT_PROC_DEVICES
     proc_devices_init();
     serial_printf("%s", "[alix] after rtl8139_init\n");
+#endif
 
+    /* Spawn only the two demo printers; everything else stays disabled. */
+    process_t *printer_a = process_create_kernel("printerA",
+                                                 printer_a_process_entry,
+                                                 NULL,
+                                                 0,
+                                                 -1);
+    if (!printer_a)
+    {
+        serial_printf("%s", "[alix] failed to create printerA\r\n");
+    }
+
+    process_t *printer_b = process_create_kernel("printerB",
+                                                 printer_b_process_entry,
+                                                 NULL,
+                                                 0,
+                                                 -1);
+    if (!printer_b)
+    {
+        serial_printf("%s", "[alix] failed to create printerB\r\n");
+    }
+
+#if ENABLE_INIT_TCP_TIMER
     process_t *tcp_timer_process = process_create_kernel("tcp_timerd",
                                                          tcp_timer_process_entry,
                                                          NULL,
@@ -716,7 +758,9 @@ void kernel_main(void)
     {
         serial_printf("%s", "[alix] warn: failed to create tcp_timerd\r\n");
     }
+#endif
 
+#if ENABLE_INIT_WARMUP
     process_t *warmup_process = process_create_kernel("warmup", warmup_process_entry, NULL, 0, -1);
     if (!warmup_process)
     {
@@ -727,18 +771,53 @@ void kernel_main(void)
     {
         process_stack_watch_process(warmup_process, "warmup_boot");
     }
+#endif
 
+    if (!smp_start_secondary_cpus())
+    {
+        serial_printf("%s", "[alix] warn: smp_start_secondary_cpus failed\r\n");
+    }
+
+#if ENABLE_INIT_SERIAL_ASYNC
     serial_start_async_worker();
+#endif
     process_bind_idle_to_bsp();
-    serial_printf("%s", "[alix] enabling scheduler\n");
     process_scheduler_set_ready();
-
-    serial_printf("%s", "[alix] starting scheduler\n");
     interrupts_enable();
     process_start_scheduler();
 
     for (;;)
     {
         __asm__ volatile ("hlt");
+    }
+}
+
+static void printer_emit(const char *msg)
+{
+    if (!msg)
+    {
+        return;
+    }
+    serial_printf("%s", msg);
+   // console_write(msg);
+}
+
+static void printer_a_process_entry(void *arg)
+{
+    (void)arg;
+    while (1)
+    {
+        printer_emit("A\r\n");
+        process_sleep_ms(1);
+    }
+}
+
+static void printer_b_process_entry(void *arg)
+{
+    (void)arg;
+    while (1)
+    {
+        printer_emit("B\r\n");
+        process_sleep_ms(1);
     }
 }

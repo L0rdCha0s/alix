@@ -90,7 +90,8 @@ static const char *const g_context_guard_reg_names[] = {
     "r12",
     "rbx",
     "rbp",
-    "rflags"
+    "rflags",
+    "ret"
 };
 
 enum context_frame_index
@@ -102,11 +103,11 @@ enum context_frame_index
     CTX_RBX,
     CTX_RBP,
     CTX_RFLAGS,
-    CTX_RIP,
+    CTX_RET,
     CTX_WORD_COUNT
 };
 #undef CONTEXT_SWITCH_SAVED_WORDS
-#define CONTEXT_SWITCH_SAVED_WORDS CTX_RIP
+#define CONTEXT_SWITCH_SAVED_WORDS CTX_RET
 
 static void thread_trampoline(void) __attribute__((noreturn));
 
@@ -277,6 +278,7 @@ struct thread
     bool sleeping;
     uint64_t sleep_until_tick;
     struct thread *sleep_queue_next;
+    uint32_t running_cpu;
     uint64_t context_guard_hash;
     uintptr_t context_guard_ptr;
     uint64_t context_guard_generation;
@@ -309,6 +311,7 @@ struct thread
 #endif
 
 #define RUN_QUEUE_CPU_INVALID 0xFFFFFFFFu
+#define RUN_QUEUE_CPU_CLAIMED 0xFFFFFFFEu
 
 static inline bool thread_in_run_queue_load(const thread_t *thread)
 {
@@ -530,6 +533,22 @@ static inline thread_t *current_thread_local(void)
     return g_current_threads[idx];
 }
 
+static inline int32_t thread_find_running_cpu(const thread_t *thread)
+{
+    if (!thread)
+    {
+        return -1;
+    }
+    for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
+    {
+        if (g_current_threads[i] == thread)
+        {
+            return (int32_t)i;
+        }
+    }
+    return -1;
+}
+
 static inline process_t *current_process_local(void)
 {
     uint32_t idx = smp_current_cpu_index();
@@ -566,6 +585,11 @@ static bool thread_running_on_any_cpu(const thread_t *thread)
     {
         return false;
     }
+    uint32_t running = __atomic_load_n(&((thread_t *)thread)->running_cpu, __ATOMIC_ACQUIRE);
+    if (running != RUN_QUEUE_CPU_INVALID)
+    {
+        return true;
+    }
     for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
     {
         if (g_current_threads[i] == thread)
@@ -582,16 +606,12 @@ static bool thread_running_elsewhere(const thread_t *thread)
     {
         return false;
     }
+    uint32_t running = __atomic_load_n(&((thread_t *)thread)->running_cpu, __ATOMIC_ACQUIRE);
     thread_t *self = current_thread_local();
-    for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
-    {
-        thread_t *cursor = g_current_threads[i];
-        if (cursor == thread && cursor != self)
-        {
-            return true;
-        }
-    }
-    return false;
+    return (running != RUN_QUEUE_CPU_INVALID &&
+            running < SMP_MAX_CPUS &&
+            g_current_threads[running] == thread &&
+            g_current_threads[running] != self);
 }
 
 static bool thread_lifetime_active(const thread_t *thread)
@@ -993,7 +1013,7 @@ static bool thread_saved_frame_valid(thread_t *thread, const char *label)
 
     const uint64_t *ctx_words = (const uint64_t *)ctx;
     uint64_t saved_rflags = ctx_words[CTX_RFLAGS];
-    uint64_t resume_rip = ctx_words[CTX_RIP];
+    uint64_t resume_rip = ctx_words[CTX_RET];
     bool rip_canonical = pointer_is_canonical((uintptr_t)resume_rip);
     bool rip_in_kernel = rip_canonical &&
                          resume_rip >= (uint64_t)(uintptr_t)__kernel_text_start &&
@@ -2175,7 +2195,7 @@ static void scheduler_debug_check_resume(thread_t *thread, const char *label)
         return;
     }
 
-    uint64_t resume_rip = ctx_copy[CTX_RIP];
+    uint64_t resume_rip = ctx_copy[CTX_RET];
     bool resume_zero = (resume_rip == 0);
     bool resume_boot = (resume_rip >= SMP_BOOT_DATA_PHYS &&
                         resume_rip < SMP_BOOT_DATA_PHYS + 0x1000);
@@ -4038,11 +4058,11 @@ static thread_t *thread_create(process_t *process,
     uint64_t *stack64 = (uint64_t *)stack_ptr;
 
     /*
-     * Build the initial context frame to exactly mirror context_switch:
+     * Build the initial context frame to mirror context_switch save order:
      * low addresses -> r15, r14, r13, r12, rbx, rbp, rflags, return RIP <- high.
      * After the first return, RSP will be restored to usable_limit.
      */
-    *(--stack64) = (uint64_t)thread_trampoline; /* return address (below saved frame) */
+    *(--stack64) = (uint64_t)thread_trampoline; /* return address (above saved frame) */
     *(--stack64) = RFLAGS_DEFAULT;              /* rflags */
     *(--stack64) = 0;                           /* rbp */
     *(--stack64) = 0;                           /* rbx */
@@ -4075,6 +4095,7 @@ static thread_t *thread_create(process_t *process,
     thread->preempt_pending = false;
     thread->fs_base = 0;
     thread->gs_base = (uint64_t)&thread->tls;
+    thread->running_cpu = RUN_QUEUE_CPU_INVALID;
     thread->fpu_initialized = true;
     spinlock_init(&thread->context_lock);
     thread->waiting_queue = NULL;
@@ -4480,6 +4501,21 @@ static inline void run_queue_lock_release(run_queue_t *queue, uint64_t flags)
     }
 }
 
+static inline void thread_release_running_claim(thread_t *thread)
+{
+    if (!thread)
+    {
+        return;
+    }
+    uint32_t expected = RUN_QUEUE_CPU_CLAIMED;
+    (void)__atomic_compare_exchange_n(&thread->running_cpu,
+                                      &expected,
+                                      RUN_QUEUE_CPU_INVALID,
+                                      false,
+                                      __ATOMIC_ACQ_REL,
+                                      __ATOMIC_ACQUIRE);
+}
+
 static uint32_t scheduler_select_target_cpu(thread_t *thread)
 {
     uint32_t cpu_count = scheduler_cpu_limit();
@@ -4638,16 +4674,101 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue)
         while (thread)
         {
             thread_t *next = thread->queue_next;
+            uint32_t running = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
+            if (running != RUN_QUEUE_CPU_INVALID)
+            {
+                bool running_active = (running < SMP_MAX_CPUS &&
+                                       g_current_threads[running] == thread &&
+                                       thread->state == THREAD_STATE_RUNNING);
+                if (running_active)
+                {
+                    scheduler_trace("[sched] dequeue drop: already running", thread);
+                    run_queue_detach_locked(queue, thread);
+                    thread_in_run_queue_store(thread, false);
+                    thread->run_queue_cpu = RUN_QUEUE_CPU_INVALID;
+                    thread = next;
+                    continue;
+                }
+                int32_t real_cpu = thread_find_running_cpu(thread);
+                if (real_cpu >= 0)
+                {
+                    __atomic_store_n(&thread->running_cpu, (uint32_t)real_cpu, __ATOMIC_RELEASE);
+                    scheduler_trace("[sched] dequeue drop: running on other cpu", thread);
+                    run_queue_detach_locked(queue, thread);
+                    thread_in_run_queue_store(thread, false);
+                    thread->run_queue_cpu = RUN_QUEUE_CPU_INVALID;
+                    thread->state = THREAD_STATE_RUNNING;
+                    thread = next;
+                    continue;
+                }
+                if (running == RUN_QUEUE_CPU_CLAIMED && thread->state == THREAD_STATE_READY)
+                {
+                    uint32_t expected_owner = RUN_QUEUE_CPU_CLAIMED;
+                    if (__atomic_compare_exchange_n(&thread->running_cpu,
+                                                    &expected_owner,
+                                                    RUN_QUEUE_CPU_INVALID,
+                                                    false,
+                                                    __ATOMIC_ACQ_REL,
+                                                    __ATOMIC_ACQUIRE))
+                    {
+                        running = RUN_QUEUE_CPU_INVALID;
+                    }
+                    else
+                    {
+                        thread = next;
+                        continue;
+                    }
+                }
+                else if (running != RUN_QUEUE_CPU_CLAIMED)
+                {
+                    uint32_t expected_owner = running;
+                    if (__atomic_compare_exchange_n(&thread->running_cpu,
+                                                    &expected_owner,
+                                                    RUN_QUEUE_CPU_INVALID,
+                                                    false,
+                                                    __ATOMIC_ACQ_REL,
+                                                    __ATOMIC_ACQUIRE))
+                    {
+                        running = RUN_QUEUE_CPU_INVALID;
+                    }
+                    else
+                    {
+                        thread = next;
+                        continue;
+                    }
+                }
+                if (running != RUN_QUEUE_CPU_INVALID)
+                {
+                    thread = next;
+                    continue;
+                }
+            }
+
+            /* Claim the thread for this CPU before detaching to prevent double dequeue. */
+            uint32_t expected = RUN_QUEUE_CPU_INVALID;
+            if (!__atomic_compare_exchange_n(&thread->running_cpu,
+                                             &expected,
+                                             RUN_QUEUE_CPU_CLAIMED,
+                                             false,
+                                             __ATOMIC_ACQ_REL,
+                                             __ATOMIC_ACQUIRE))
+            {
+                thread = next;
+                continue;
+            }
             if (!thread_can_run(thread))
             {
+                __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
                 thread = next;
                 continue;
             }
 
             if (!run_queue_detach_locked(queue, thread))
             {
+                __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
                 return NULL;
             }
+            thread->run_queue_cpu = queue->cpu_index;
 
             if (!thread->context_valid)
             {
@@ -4716,19 +4837,89 @@ static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
     {
         return;
     }
+    uint32_t running = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
+    if (running != RUN_QUEUE_CPU_INVALID)
+    {
+        bool running_active = (running < SMP_MAX_CPUS &&
+                               g_current_threads[running] == thread &&
+                               thread->state == THREAD_STATE_RUNNING);
+        if (running_active)
+        {
+            scheduler_trace("[sched] enqueue skip: already running", thread);
+            return;
+        }
+        int32_t real_cpu = thread_find_running_cpu(thread);
+        if (real_cpu >= 0)
+        {
+            __atomic_store_n(&thread->running_cpu, (uint32_t)real_cpu, __ATOMIC_RELEASE);
+            scheduler_trace("[sched] enqueue skip: running on other cpu", thread);
+            thread->state = THREAD_STATE_RUNNING;
+            thread_in_run_queue_store(thread, false);
+            thread->run_queue_cpu = RUN_QUEUE_CPU_INVALID;
+            return;
+        }
+        if (running == RUN_QUEUE_CPU_CLAIMED && thread->state == THREAD_STATE_READY)
+        {
+            uint32_t expected = RUN_QUEUE_CPU_CLAIMED;
+            if (__atomic_compare_exchange_n(&thread->running_cpu,
+                                            &expected,
+                                            RUN_QUEUE_CPU_INVALID,
+                                            false,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE))
+            {
+                running = RUN_QUEUE_CPU_INVALID;
+            }
+            else
+            {
+                running = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
+            }
+        }
+        else if (running != RUN_QUEUE_CPU_CLAIMED)
+        {
+            uint32_t expected = running;
+            if (__atomic_compare_exchange_n(&thread->running_cpu,
+                                            &expected,
+                                            RUN_QUEUE_CPU_INVALID,
+                                            false,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE))
+            {
+                serial_printf("[sched] enqueue cleared stale running_cpu thread=%s pid=0x%016llX old_cpu=%u\r\n",
+                              thread->name[0] ? thread->name : "<unnamed>",
+                              (unsigned long long)(thread->process ? thread->process->pid : 0),
+                              (unsigned)running);
+                running = RUN_QUEUE_CPU_INVALID;
+            }
+            else
+            {
+                running = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
+                running_active = (running < SMP_MAX_CPUS &&
+                                  g_current_threads[running] == thread &&
+                                  thread->state == THREAD_STATE_RUNNING);
+            }
+        }
+        if (running_active || running != RUN_QUEUE_CPU_INVALID)
+        {
+            scheduler_trace("[sched] enqueue skip: already running", thread);
+            return;
+        }
+    }
 
     run_queue_t *queue = scheduler_run_queue(cpu_index);
     if (!queue)
     {
         return;
     }
+    /* Thread is READY and will be enqueued; mark not running so future enqueue checks don't clear stale CPU. */
+    __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
     uint64_t flags = run_queue_lock_acquire(queue, "enqueue");
-    bool already_queued = thread_in_run_queue_test_and_set(thread);
-    if (already_queued)
+    if (thread_in_run_queue_load(thread))
     {
         run_queue_lock_release(queue, flags);
         return;
     }
+    thread_in_run_queue_store(thread, true);
     thread_priority_t priority = thread->priority;
     if (priority < THREAD_PRIORITY_IDLE || priority >= THREAD_PRIORITY_COUNT)
     {
@@ -4877,12 +5068,12 @@ static void thread_unfreeze_after_stack_watch(thread_t *thread)
     stack_watch_remove_frozen(thread);
     thread->stack_watch_next = NULL;
     thread->stack_watch_freeze_deadline = 0;
-    thread->state = THREAD_STATE_READY;
-    thread->preempt_pending = false;
+        thread->state = THREAD_STATE_READY;
+        thread->preempt_pending = false;
 #if ENABLE_CONTEXT_GUARD
-    thread_context_guard_update(thread, "stack_watch_resume");
+        thread_context_guard_update(thread, "stack_watch_resume");
 #endif
-    enqueue_thread(thread);
+        enqueue_thread(thread);
 #else
     (void)thread;
 #endif
@@ -5455,6 +5646,7 @@ static void thread_quarantine_corrupt(thread_t *thread, const char *reason)
     thread->time_slice_remaining = 0;
     thread->in_transition = false;
     thread->context_valid = false;
+    thread->running_cpu = RUN_QUEUE_CPU_INVALID;
 
     process_t *proc = thread->process;
     if (proc && proc->state != PROCESS_STATE_ZOMBIE)
@@ -5472,6 +5664,8 @@ static bool switch_to_thread(thread_t *next)
     uint64_t switch_start_ticks = timer_ticks();
     deferred_free_stats_t deferred_stats = { 0 };
     bool deferred_work = false;
+    bool next_locked = false;
+    cpu_context_t *next_ctx = NULL;
     thread_assert_current_stack_owner("switch_to_entry");
     thread_t *prev = current_thread_local();
     if (prev && prev->is_idle)
@@ -5492,17 +5686,20 @@ static bool switch_to_thread(thread_t *next)
     if (next && !thread_pointer_valid(next))
     {
         scheduler_trace("[sched] switch_to: invalid next pointer;", next);
+        thread_release_running_claim(next);
         return false;
     }
     if (next && !next->is_idle && (next->state == THREAD_STATE_ZOMBIE || next->pending_destroy))
     {
         scheduler_trace("[sched] switch_to: next is zombie/pending_destroy;", next);
+        thread_release_running_claim(next);
         return false;
     }
     if (next && !thread_fpu_region_valid(next))
     {
         scheduler_trace("[sched] switch_to: invalid fpu region;", next);
         thread_quarantine_corrupt(next, "fpu_region_invalid");
+        thread_release_running_claim(next);
         return false;
     }
     if (next && !next->is_idle && (!next->context || !next->stack_base || next->kernel_stack_top == 0))
@@ -5519,11 +5716,13 @@ static bool switch_to_thread(thread_t *next)
                       next->context_valid ? "true" : "false",
                       cpu_idx);
         thread_quarantine_corrupt(next, "missing_context");
+        thread_release_running_claim(next);
         return false;
     }
     if (next && !thread_stack_guard_intact(next))
     {
         thread_quarantine_corrupt(next, "stack_guard_corrupt");
+        thread_release_running_claim(next);
         return false;
     }
 
@@ -5539,6 +5738,7 @@ static bool switch_to_thread(thread_t *next)
         if (!thread_context_in_bounds(next, "switch_to"))
         {
             thread_quarantine_corrupt(next, "context_out_of_bounds");
+            thread_release_running_claim(next);
             return false;
         }
     }
@@ -5550,6 +5750,7 @@ static bool switch_to_thread(thread_t *next)
         fpu_save_state(&prev->fpu_state);
         prev->fs_base = rdmsr(MSR_FS_BASE);
         prev->gs_base = rdmsr(MSR_GS_BASE);
+        __atomic_store_n(&prev->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
         if (prev_process)
         {
             prev_process->current_thread = prev;
@@ -5599,6 +5800,7 @@ static bool switch_to_thread(thread_t *next)
             {
                 paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
             }
+            thread_release_running_claim(next);
             return false;
         }
         if (!thread_pointer_valid(next))
@@ -5619,6 +5821,7 @@ static bool switch_to_thread(thread_t *next)
                 paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
             }
             thread_quarantine_corrupt(next, "post_verify_pointer");
+            thread_release_running_claim(next);
             return false;
         }
         thread_assert_stack_guard_only(next, "switch_to");
@@ -5639,6 +5842,7 @@ static bool switch_to_thread(thread_t *next)
         uint64_t ctx_copy[10] = { 0 };
         size_t ctx_copy_count = 0;
         spinlock_lock(&next->context_lock);
+        next_locked = true;
         if (!next->context_valid || !next->context || !next->stack_base)
         {
             context_ok = false;
@@ -5662,7 +5866,7 @@ static bool switch_to_thread(thread_t *next)
                     ctx_copy_count = STATIC_ARRAY_SIZE(ctx_copy);
                 }
                 memcpy(ctx_copy, ctx_words, ctx_copy_count * sizeof(uint64_t));
-                resume_rip = ctx_copy[CTX_RIP];
+                resume_rip = ctx_copy[CTX_RET];
                 saved_rflags = ctx_copy[CTX_RFLAGS];
                 bool rip_canonical = pointer_is_canonical((uintptr_t)resume_rip);
                 rip_in_kernel = rip_canonical &&
@@ -5671,7 +5875,6 @@ static bool switch_to_thread(thread_t *next)
                 rflags_reserved_ok = (saved_rflags & RFLAGS_RESERVED_BIT) != 0;
             }
         }
-        spinlock_unlock(&next->context_lock);
         if (!context_ok || !rip_in_kernel || !rflags_reserved_ok)
         {
             serial_printf("[sched] switch_to cancelled: invalid resume rip thread=%s pid=0x%016llX rip=0x%016llX ctx=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
@@ -5704,6 +5907,8 @@ static bool switch_to_thread(thread_t *next)
                 serial_printf("%s", "\r\n");
             }
 
+            spinlock_unlock(&next->context_lock);
+            next_locked = false;
             thread_quarantine_corrupt(next, "invalid_resume_rip");
 
             if (next_process)
@@ -5721,8 +5926,13 @@ static bool switch_to_thread(thread_t *next)
             }
             set_current_thread_local(prev);
             set_current_process_local(prev_process);
+            thread_release_running_claim(next);
             return false;
         }
+        /* Commit to switch: freeze saved frame and hand its pointer to context_switch. */
+        next->context_valid = false;
+        next_ctx = next->context;
+        scheduler_shell_log("context_valid=false (switch_to)", next);
 
         /* Update CPU->thread/process mapping now that we are committed to switch. */
         set_current_thread_local(next);
@@ -5740,6 +5950,57 @@ static bool switch_to_thread(thread_t *next)
         if (desired_cr3 && desired_cr3 != read_cr3())
         {
             write_cr3(desired_cr3);
+        }
+
+        uint32_t expected = next->is_idle ? RUN_QUEUE_CPU_INVALID : RUN_QUEUE_CPU_CLAIMED;
+        uint32_t running_now = __atomic_load_n(&next->running_cpu, __ATOMIC_ACQUIRE);
+        bool cas_ok = false;
+        if (next->is_idle && running_now == cpu_idx)
+        {
+            cas_ok = true; /* Already owned by this CPU, allow reuse. */
+        }
+        else if (__atomic_compare_exchange_n(&next->running_cpu,
+                                             &expected,
+                                             cpu_idx,
+                                             false,
+                                             __ATOMIC_ACQ_REL,
+                                             __ATOMIC_ACQUIRE))
+        {
+            cas_ok = true;
+        }
+
+        if (!cas_ok)
+        {
+            serial_printf("[sched] switch_to cancelled: thread already running thread=%s pid=0x%016llX prev_cpu=%u new_cpu=%u\r\n",
+                          next->name[0] ? next->name : "<unnamed>",
+                          (unsigned long long)(next->process ? next->process->pid : 0),
+                          (unsigned)running_now,
+                          cpu_idx);
+            if (next_locked)
+            {
+                spinlock_unlock(&next->context_lock);
+                next_locked = false;
+            }
+            next->state = THREAD_STATE_READY;
+            enqueue_thread(next);
+            if (next_process)
+            {
+                paging_space_clear_active_cpu(&next_process->address_space, cpu_idx);
+            }
+            if (prev)
+            {
+                prev->state = THREAD_STATE_RUNNING;
+                __atomic_store_n(&prev->running_cpu, cpu_idx, __ATOMIC_RELEASE);
+            }
+            if (prev_process)
+            {
+                prev_process->state = PROCESS_STATE_RUNNING;
+                paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
+            }
+            set_current_thread_local(prev);
+            set_current_process_local(prev_process);
+            thread_release_running_claim(next);
+            return false;
         }
 
         arch_cpu_set_kernel_stack(cpu_idx, next->kernel_stack_top);
@@ -5773,11 +6034,15 @@ static bool switch_to_thread(thread_t *next)
         wrmsr(MSR_GS_BASE, gsb);
         fpu_restore_state(&next->fpu_state);
 
+        if (next_locked)
+        {
+            spinlock_unlock(&next->context_lock);
+            next_locked = false;
+        }
         scheduler_debug_check_resume(next, "switch_to");
     }
 
     cpu_context_t **prev_ctx = prev ? &prev->context : &g_bootstrap_context;
-    cpu_context_t *next_ctx = next ? next->context : NULL;
     uint8_t *prev_transition_flag = prev ? (uint8_t *)&prev->in_transition : &g_context_switch_dummy_flag;
 
     if (!next_ctx)
@@ -5786,16 +6051,8 @@ static bool switch_to_thread(thread_t *next)
         {
             paging_space_mark_active_cpu(&prev_process->address_space, cpu_idx);
         }
+        thread_release_running_claim(next);
         return false;
-    }
-
-    /* Only mark context invalid when we're truly about to switch. */
-    if (next)
-    {
-        spinlock_lock(&next->context_lock);
-        next->context_valid = false;
-        spinlock_unlock(&next->context_lock);
-        scheduler_shell_log("context_valid=false (switch_to)", next);
     }
 
     context_switch(prev_ctx, next_ctx, prev_transition_flag);
@@ -5805,14 +6062,20 @@ static bool switch_to_thread(thread_t *next)
      * The 'next' variable refers to the thread we switched TO, not the one running now.
      * We must use current_thread_local() to get the actual running thread (us).
      */
-    cpu_context_t *prev_ctx_ptr = (prev && prev->context) ? prev->context : NULL;
+    cpu_context_t *prev_ctx_ptr = NULL;
     uint64_t prev_saved_flags = 0;
     uint64_t prev_saved_rip = 0;
-    if (prev_ctx_ptr)
+    if (prev)
     {
-        const uint64_t *prev_ctx_words = (const uint64_t *)prev_ctx_ptr;
-        prev_saved_flags = prev_ctx_words[CTX_RFLAGS];
-        prev_saved_rip = prev_ctx_words[CTX_RIP];
+        spinlock_lock(&prev->context_lock);
+        prev_ctx_ptr = prev->context;
+        if (prev_ctx_ptr)
+        {
+            const uint64_t *prev_ctx_words = (const uint64_t *)prev_ctx_ptr;
+            prev_saved_flags = prev_ctx_words[CTX_RFLAGS];
+            prev_saved_rip = prev_ctx_words[CTX_RET];
+        }
+        spinlock_unlock(&prev->context_lock);
     }
 
     uintptr_t rsp_after = 0;
@@ -5851,6 +6114,7 @@ static bool switch_to_thread(thread_t *next)
     {
         set_current_thread_local(resumed);
         set_current_process_local(resumed->process);
+        __atomic_store_n(&resumed->running_cpu, cpu_idx, __ATOMIC_RELEASE);
         if (!resumed->is_idle && !thread_stack_pointer_valid(resumed, rsp_after))
         {
             serial_printf("[sched] fatal: resumed with invalid RSP thread=%s pid=0x%016llX rsp=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
@@ -5954,6 +6218,7 @@ static void scheduler_schedule(bool requeue_current)
             current->state = THREAD_STATE_READY;
             current->time_slice_remaining = scheduler_time_slice_ticks();
             current->preempt_pending = false;
+            __atomic_store_n(&current->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
             spinlock_lock(&current->context_lock);
             current->context_valid = true;
             spinlock_unlock(&current->context_lock);
@@ -6490,6 +6755,7 @@ void process_bind_idle_to_bsp(void)
     idle->context_valid = true;
     idle->preempt_pending = false;
     idle->time_slice_remaining = scheduler_time_slice_ticks();
+    __atomic_store_n(&idle->running_cpu, 0, __ATOMIC_RELEASE);
     arch_cpu_set_kernel_stack(0, idle->kernel_stack_top);
     wrmsr(MSR_GS_BASE, idle->gs_base);
     wrmsr(MSR_FS_BASE, idle->fs_base);
@@ -6516,6 +6782,7 @@ void process_run_secondary_cpu(uint32_t cpu_index)
     idle->context_valid = true;
     idle->preempt_pending = false;
     idle->time_slice_remaining = scheduler_time_slice_ticks();
+    __atomic_store_n(&idle->running_cpu, cpu, __ATOMIC_RELEASE);
 
     arch_cpu_set_kernel_stack(cpu, idle->kernel_stack_top);
     wrmsr(MSR_GS_BASE, idle->gs_base);
@@ -6832,8 +7099,8 @@ void process_sleep_ticks(uint64_t ticks)
     thread->state = THREAD_STATE_BLOCKED;
     thread->sleep_until_tick = wake_tick;
     sleep_queue_insert(thread);
-    cpu_restore_flags(flags);
     scheduler_schedule(false);
+    cpu_restore_flags(flags);
 }
 
 void process_sleep_ms(uint32_t ms)
@@ -7240,35 +7507,36 @@ void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void
     uint64_t flags = cpu_save_flags();
     cpu_cli();
 
-    spinlock_lock(&queue->lock);
-
-    if (thread_in_run_queue_load(thread))
-    {
-        remove_from_run_queue(thread);
-    }
-    thread->state = THREAD_STATE_BLOCKED;
-    thread->waiting_queue = queue;
-    wait_queue_enqueue_locked(queue, thread);
-
-    spinlock_unlock(&queue->lock);
-
-    if (predicate && predicate(context))
+    for (;;)
     {
         spinlock_lock(&queue->lock);
-        if (thread->waiting_queue == queue)
+
+        if (!predicate || predicate(context))
         {
-            wait_queue_remove_thread_locked(queue, thread);
-            thread->waiting_queue = NULL;
+            if (thread->waiting_queue == queue)
+            {
+                wait_queue_remove_thread_locked(queue, thread);
+                thread->waiting_queue = NULL;
+            }
+            thread->state = THREAD_STATE_RUNNING;
+            spinlock_unlock(&queue->lock);
+            cpu_restore_flags(flags);
+            return;
         }
-        thread->state = THREAD_STATE_RUNNING;
+
+        if (thread_in_run_queue_load(thread))
+        {
+            remove_from_run_queue(thread);
+        }
+        thread->state = THREAD_STATE_BLOCKED;
+        thread->waiting_queue = queue;
+        wait_queue_enqueue_locked(queue, thread);
+
         spinlock_unlock(&queue->lock);
 
-        cpu_restore_flags(flags);
-        return;
+        scheduler_schedule(false);
+        /* Loop and re-check predicate under lock after waking. */
     }
-
-    scheduler_schedule(false);
-    cpu_restore_flags(flags);
 }
 
 void wait_queue_wake_one(wait_queue_t *queue)
