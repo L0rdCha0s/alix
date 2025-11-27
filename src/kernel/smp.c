@@ -1,3 +1,4 @@
+
 #include "smp.h"
 
 #include <stddef.h>
@@ -376,57 +377,22 @@ static uint32_t resolve_apic_to_index(uint32_t apic_id, bool strict)
 
 uint32_t smp_current_cpu_index(void)
 {
-    static bool warned_unmapped = false;
-    static bool dumped_map = false;
-
     if (!g_smp_initialized)
     {
         return g_boot_cpu_index;
     }
 
     uint32_t apic = lapic_get_id();
-    uint32_t idx = resolve_apic_to_index(apic, false);
-    if (idx < SMP_MAX_CPUS && __atomic_load_n(&g_cpus[idx].online, __ATOMIC_ACQUIRE))
+    uint32_t idx = resolve_apic_to_index(apic, true);
+    if (idx >= SMP_MAX_CPUS)
     {
-        return idx;
+        smp_panic("current CPU index out of range", apic);
     }
-
-    if (!warned_unmapped)
+    if (!__atomic_load_n(&g_cpus[idx].online, __ATOMIC_ACQUIRE))
     {
-        serial_printf("%s", "[smp] warning: unmapped current CPU apic=0x");
-        serial_printf("%016llX", (unsigned long long)apic);
-        serial_printf("%s", " -> using BSP index\r\n");
-        if (!dumped_map)
-        {
-            dumped_map = true;
-            serial_printf("%s", "[smp] map dump g_cpu_count=0x");
-            serial_printf("%016llX", (unsigned long long)g_cpu_count);
-            serial_printf("%s", "\r\n");
-            uint32_t max_dump = (g_cpu_count < SMP_MAX_CPUS) ? g_cpu_count : SMP_MAX_CPUS;
-            if (max_dump > 8)
-            {
-                max_dump = 8;
-            }
-            for (uint32_t i = 0; i < max_dump; ++i)
-            {
-                serial_printf("%s", "  idx=0x");
-                serial_printf("%016llX", (unsigned long long)i);
-                serial_printf("%s", " apic=0x");
-                serial_printf("%016llX", (unsigned long long)g_cpus[i].apic_id);
-                serial_printf("%s", " present=");
-                serial_printf("%s", g_cpus[i].present ? "1" : "0");
-                serial_printf("%s", " online=");
-                serial_printf("%s", __atomic_load_n(&g_cpus[i].online, __ATOMIC_ACQUIRE) ? "1" : "0");
-                serial_printf("%s", "\r\n");
-            }
-            serial_printf("%s", "  apic_to_index[apic]=0x");
-            uint8_t map = (apic < (uint32_t)sizeof(g_apic_to_index)) ? g_apic_to_index[apic] : 0xFF;
-            serial_printf("%02X", (unsigned int)map);
-            serial_printf("%s", "\r\n");
-        }
-        warned_unmapped = true;
+        smp_panic("current CPU not marked online", apic);
     }
-    return g_boot_cpu_index;
+    return idx;
 }
 
 static void prepare_bootstrap_data(uint32_t cpu_index, uint64_t stack_top)
