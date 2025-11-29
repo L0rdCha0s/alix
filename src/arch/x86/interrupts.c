@@ -8,6 +8,8 @@
 #include "rtl8139.h"
 #include "serial.h"
 #include "process.h"
+void scheduler_schedule(bool requeue_current);
+#include "process.h"
 #include "console.h"
 #include "syscall.h"
 #include "smp.h"
@@ -401,18 +403,12 @@ __attribute__((interrupt)) static void irq1_handler(interrupt_frame_t *frame)
 
 __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
 {
-    (void)frame;
     timer_on_tick();
-    smp_broadcast_schedule_ipi(false);
-
-    // if (process_scheduler_ready())
-    // {
-    //     process_on_timer_tick(frame);
-    //     if (smp_online_cpu_count() > 1)
-    //     {
-    //         smp_broadcast_schedule_ipi(false);
-    //     }
-    // }
+    process_on_timer_tick(frame);
+    if (process_scheduler_ready())
+    {
+        smp_broadcast_schedule_ipi(false);
+    }
     pic_send_eoi(0);
 }
 

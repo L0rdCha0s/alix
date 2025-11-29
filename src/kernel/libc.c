@@ -2,21 +2,49 @@
 
 #include "fd.h"
 #include "process.h"
+#include "serial.h"
 
-static inline void libc_mem_debug(const char *label, void *dst, size_t count)
+static inline void libc_mem_debug(const char *label, void *dst, const void *src, size_t count)
 {
     if (!dst || count == 0)
     {
         return;
     }
-    process_debug_log_stack_write(label, __builtin_return_address(0), dst, count);
+    void *caller = __builtin_return_address(0);
+    thread_t *dst_owner = process_find_stack_owner(dst, count);
+    thread_t *src_owner = src ? process_find_stack_owner(src, count) : NULL;
+    bool overlap = false;
+    if (src && dst)
+    {
+        uintptr_t d = (uintptr_t)dst;
+        uintptr_t s = (uintptr_t)src;
+        if ((d < s + count) && (s < d + count))
+        {
+            overlap = true;
+        }
+    }
+
+    if (dst_owner || src_owner || overlap)
+    {
+        serial_printf("[memcpy dbg] label=%s dst=0x%016llX src=0x%016llX len=0x%016llX dst_owner=0x%016llX src_owner=0x%016llX overlap=%s caller=0x%016llX\r\n",
+                      label ? label : "<none>",
+                      (unsigned long long)(uintptr_t)dst,
+                      (unsigned long long)(uintptr_t)src,
+                      (unsigned long long)count,
+                      (unsigned long long)(uintptr_t)dst_owner,
+                      (unsigned long long)(uintptr_t)src_owner,
+                      overlap ? "true" : "false",
+                      (unsigned long long)(uintptr_t)caller);
+    }
+
+    process_debug_log_stack_write(label, caller, dst, count);
 }
 
 void *memset(void *dst, int value, size_t count)
 {
     uint8_t *ptr = (uint8_t *)dst;
     uint8_t byte = (uint8_t)value;
-    libc_mem_debug("memset", dst, count);
+    libc_mem_debug("memset", dst, NULL, count);
     for (size_t i = 0; i < count; ++i)
     {
         ptr[i] = byte;
@@ -29,7 +57,7 @@ void *memmove(void *dst, const void *src, size_t count)
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
 
-    libc_mem_debug("memmove", dst, count);
+    libc_mem_debug("memmove", dst, src, count);
 
     if (d == s || count == 0)
     {
@@ -58,7 +86,7 @@ void *memcpy(void *dst, const void *src, size_t count)
 {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
-    libc_mem_debug("memcpy", dst, count);
+    libc_mem_debug("memcpy", dst, src, count);
     for (size_t i = 0; i < count; ++i)
     {
         d[i] = s[i];
