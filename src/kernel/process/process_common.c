@@ -439,6 +439,7 @@ static const uint64_t RUN_QUEUE_LOCK_WARN_MS __attribute__((unused)) = 1000ULL;
 static const uint64_t SCHED_SWITCH_WARN_MS = 500ULL;
 static const uint64_t DEFERRED_FREE_WARN_MS = 250ULL;
 static bool g_bad_saved_rflags_tripped __attribute__((unused)) = false;
+uint64_t g_scheduler_switch_count = 0;
 static uint32_t g_scheduler_rr_cursor = 0;
 
 typedef struct deferred_free_stats

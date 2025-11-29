@@ -798,8 +798,8 @@ static void printer_emit(const char *msg)
     {
         return;
     }
-    serial_printf("%s", msg);
-   // console_write(msg);
+    uint64_t switches = scheduler_switch_count();
+    serial_printf("%s switch=%llu\r\n", msg, (unsigned long long)switches);
 }
 
 static void printer_a_process_entry(void *arg)
@@ -807,7 +807,7 @@ static void printer_a_process_entry(void *arg)
     (void)arg;
     while (1)
     {
-        printer_emit("A\r\n");
+        printer_emit("A");
         process_sleep_ms(1);
     }
 }
@@ -817,7 +817,7 @@ static void printer_b_process_entry(void *arg)
     (void)arg;
     while (1)
     {
-        printer_emit("B\r\n");
+        printer_emit("B");
         process_sleep_ms(1);
     }
 }

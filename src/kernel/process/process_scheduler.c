@@ -118,6 +118,13 @@ static inline uint64_t scheduler_thread_pid(const thread_t *thread)
     return thread->process->pid;
 }
 
+extern uint64_t g_scheduler_switch_count;
+
+uint64_t scheduler_switch_count(void)
+{
+    return __atomic_load_n(&g_scheduler_switch_count, __ATOMIC_RELAXED);
+}
+
 static uint32_t scheduler_rand32(void)
 {
     /* Simple xorshift with timer noise mixed in to vary CPU selection. */
@@ -1647,6 +1654,10 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
     }
 
         scheduler_log_pick(current, next, cpu_index, requeue_current ? "requeue" : "switch");
+        if (next != current)
+        {
+            __atomic_fetch_add(&g_scheduler_switch_count, 1ULL, __ATOMIC_RELAXED);
+        }
         scheduler_lock_release(sched_flags);
 
         while (next && !switch_to_thread(next))
