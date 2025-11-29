@@ -12,6 +12,7 @@ struct shell_output
 {
     bool to_file;
     vfs_node_t *file;
+    size_t file_offset;
     bool to_buffer;
     char *buffer;
     size_t length;

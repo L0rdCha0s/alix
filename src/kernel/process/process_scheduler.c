@@ -1,3 +1,7 @@
+extern uint64_t g_scheduler_switch_count;
+#include "sched_log.h"
+#include "procfs.h"
+
 static thread_priority_t thread_effective_priority(const thread_t *thread);
 
 static inline uint32_t scheduler_cpu_limit(void)
@@ -14,7 +18,7 @@ static inline uint32_t scheduler_cpu_limit(void)
     static uint32_t limit_log_budget = 4;
     if (limit_log_budget > 0)
     {
-        serial_printf("[sched dbg] cpu_limit online=%u\r\n", (unsigned)online);
+        SCHED_DBG("[sched dbg] cpu_limit online=%u\r\n", (unsigned)online);
         limit_log_budget--;
     }
     return online;
@@ -42,6 +46,10 @@ static inline run_queue_t *scheduler_run_queue(uint32_t cpu_index)
 #if ENABLE_RUN_QUEUE_DEBUG
 static void scheduler_verify_run_queue_locked(run_queue_t *queue, const char *where)
 {
+    if (!sched_dbg_enabled())
+    {
+        return;
+    }
     if (!queue)
     {
         return;
@@ -59,28 +67,28 @@ static void scheduler_verify_run_queue_locked(run_queue_t *queue, const char *wh
             counted_total++;
             if (!thread_in_run_queue_load(thread))
             {
-                serial_printf("[sched] runq invariant (%s): thread=%s pid=0x%016llX in cpu=%u list but flag=false\r\n",
-                              where ? where : "<unset>",
-                              thread->name[0] ? thread->name : "<unnamed>",
-                              (unsigned long long)(thread->process ? thread->process->pid : 0),
-                              cpu_index);
+                SCHED_DBG("[sched] runq invariant (%s): thread=%s pid=0x%016llX in cpu=%u list but flag=false\r\n",
+                          where ? where : "<unset>",
+                          thread->name[0] ? thread->name : "<unnamed>",
+                          (unsigned long long)(thread->process ? thread->process->pid : 0),
+                          cpu_index);
             }
             if (thread->run_queue_cpu != cpu_index)
             {
-                serial_printf("[sched] runq invariant (%s): thread=%s pid=0x%016llX in cpu=%u list but run_queue_cpu=%u\r\n",
-                              where ? where : "<unset>",
-                              thread->name[0] ? thread->name : "<unnamed>",
-                              (unsigned long long)(thread->process ? thread->process->pid : 0),
-                              cpu_index,
-                              thread->run_queue_cpu);
+                SCHED_DBG("[sched] runq invariant (%s): thread=%s pid=0x%016llX in cpu=%u list but run_queue_cpu=%u\r\n",
+                          where ? where : "<unset>",
+                          thread->name[0] ? thread->name : "<unnamed>",
+                          (unsigned long long)(thread->process ? thread->process->pid : 0),
+                          cpu_index,
+                          thread->run_queue_cpu);
             }
             thread = thread->queue_next;
             if (++safety > 100000)
             {
-                serial_printf("[sched] runq invariant (%s): possible queue loop cpu=%u prio=%d\r\n",
-                              where ? where : "<unset>",
-                              cpu_index,
-                              pr);
+                SCHED_DBG("[sched] runq invariant (%s): possible queue loop cpu=%u prio=%d\r\n",
+                          where ? where : "<unset>",
+                          cpu_index,
+                          pr);
                 break;
             }
         }
@@ -89,11 +97,11 @@ static void scheduler_verify_run_queue_locked(run_queue_t *queue, const char *wh
     uint32_t reported_total = __atomic_load_n(&queue->total, __ATOMIC_RELAXED);
     if (reported_total != counted_total)
     {
-        serial_printf("[sched] runq invariant (%s): cpu=%u total=%u counted=%u\r\n",
-                      where ? where : "<unset>",
-                      cpu_index,
-                      (unsigned)reported_total,
-                      (unsigned)counted_total);
+        SCHED_DBG("[sched] runq invariant (%s): cpu=%u total=%u counted=%u\r\n",
+                  where ? where : "<unset>",
+                  cpu_index,
+                  (unsigned)reported_total,
+                  (unsigned)counted_total);
     }
 }
 #else
@@ -118,11 +126,92 @@ static inline uint64_t scheduler_thread_pid(const thread_t *thread)
     return thread->process->pid;
 }
 
-extern uint64_t g_scheduler_switch_count;
-
 uint64_t scheduler_switch_count(void)
 {
     return __atomic_load_n(&g_scheduler_switch_count, __ATOMIC_RELAXED);
+}
+
+static ssize_t sched_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    uint32_t *flag = (uint32_t *)context;
+    if (!flag || !buffer)
+    {
+        return -1;
+    }
+    char tmp[3];
+    tmp[0] = __atomic_load_n(flag, __ATOMIC_ACQUIRE) ? '1' : '0';
+    tmp[1] = '\n';
+    tmp[2] = '\0';
+    size_t len = 2;
+    if (offset >= len)
+    {
+        return 0;
+    }
+    size_t to_copy = len - offset;
+    if (to_copy > count)
+    {
+        to_copy = count;
+    }
+    memcpy(buffer, tmp + offset, to_copy);
+    return (ssize_t)to_copy;
+}
+
+static ssize_t sched_log_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)offset;
+    uint32_t *flag = (uint32_t *)context;
+    if (!flag || !buffer || count == 0)
+    {
+        return -1;
+    }
+    const char *cbuf = (const char *)buffer;
+
+    size_t idx = 0;
+    while (idx < count)
+    {
+        char c = cbuf[idx];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        {
+            ++idx;
+            continue;
+        }
+        uint32_t value = 0;
+        if (c == '1' || c == 'y' || c == 'Y')
+        {
+            value = 1;
+        }
+        else if (c == '0' || c == 'n' || c == 'N')
+        {
+            value = 0;
+        }
+        else
+        {
+            return -1;
+        }
+        for (size_t tail = idx + 1; tail < count; ++tail)
+        {
+            char t = cbuf[tail];
+            if (t == ' ' || t == '\t' || t == '\r' || t == '\n')
+            {
+                continue;
+            }
+            return -1;
+        }
+        __atomic_store_n(flag, value, __ATOMIC_RELEASE);
+        return (ssize_t)count;
+    }
+
+    return (ssize_t)count;
+}
+
+void scheduler_log_controls_init(void)
+{
+    /* Expose /proc/sys/sched/log_enable and dbg_enable */
+    (void)procfs_create_file_at("sys/sched/log_enable", sched_log_read, sched_log_write, &g_sched_log_enable);
+    (void)procfs_create_file_at("sys/sched/dbg_enable", sched_log_read, sched_log_write, &g_sched_dbg_enable);
+    (void)procfs_create_file_at("sys/sched/sleep_log", sched_log_read, sched_log_write, &g_sched_sleep_log_enable);
 }
 
 static uint32_t scheduler_rand32(void)
@@ -139,22 +228,22 @@ static uint32_t scheduler_rand32(void)
 
 static void scheduler_log_enqueue(thread_t *thread, uint32_t cpu_index, const char *reason)
 {
-    serial_printf("[sched] enqueue cpu=%u thread=%s pid=0x%016llX reason=%s\r\n",
-                  cpu_index,
-                  scheduler_thread_name(thread),
-                  (unsigned long long)scheduler_thread_pid(thread),
-                  reason ? reason : "<none>");
+    SCHED_LOG("[sched] enqueue cpu=%u thread=%s pid=0x%016llX reason=%s\r\n",
+              cpu_index,
+              scheduler_thread_name(thread),
+              (unsigned long long)scheduler_thread_pid(thread),
+              reason ? reason : "<none>");
 }
 
 static void scheduler_log_pick(thread_t *prev, thread_t *next, uint32_t cpu_index, const char *reason)
 {
-    serial_printf("[sched] pick cpu=%u prev=%s pid=0x%016llX next=%s pid=0x%016llX reason=%s\r\n",
-                  cpu_index,
-                  scheduler_thread_name(prev),
-                  (unsigned long long)scheduler_thread_pid(prev),
-                  scheduler_thread_name(next),
-                  (unsigned long long)scheduler_thread_pid(next),
-                  reason ? reason : "<none>");
+    SCHED_LOG("[sched] pick cpu=%u prev=%s pid=0x%016llX next=%s pid=0x%016llX reason=%s\r\n",
+              cpu_index,
+              scheduler_thread_name(prev),
+              (unsigned long long)scheduler_thread_pid(prev),
+              scheduler_thread_name(next),
+              (unsigned long long)scheduler_thread_pid(next),
+              reason ? reason : "<none>");
 }
 
 static void __attribute__((unused)) scheduler_log_thread_brief(const thread_t *thread)
@@ -175,6 +264,10 @@ static void scheduler_log_switch_latency(uint64_t ms,
                                          bool deferred_work,
                                          const deferred_free_stats_t *stats)
 {
+    if (!sched_log_enabled())
+    {
+        return;
+    }
     const char *pname = scheduler_thread_name(prev);
     uint64_t ppid = (prev && thread_pointer_valid(prev) && process_pointer_valid(prev->process))
                     ? prev->process->pid
@@ -187,27 +280,27 @@ static void scheduler_log_switch_latency(uint64_t ms,
     if (stats && stats->grabbed > 0)
     {
         uint64_t df_ms = scheduler_ticks_to_ms(stats->duration_ticks);
-        serial_printf("[sched] switch latency %llu ms prev=%s pid=0x%016llX next=%s pid=0x%016llX deferred=%s grabbed=0x%016llX freed=0x%016llX requeued=0x%016llX df_ms=%llu\r\n",
-                      (unsigned long long)ms,
-                      pname,
-                      (unsigned long long)ppid,
-                      nname,
-                      (unsigned long long)npid,
-                      deferred_work ? "true" : "false",
-                      (unsigned long long)stats->grabbed,
-                      (unsigned long long)stats->freed,
-                      (unsigned long long)stats->requeued,
-                      (unsigned long long)df_ms);
+        SCHED_LOG("[sched] switch latency %llu ms prev=%s pid=0x%016llX next=%s pid=0x%016llX deferred=%s grabbed=0x%016llX freed=0x%016llX requeued=0x%016llX df_ms=%llu\r\n",
+                  (unsigned long long)ms,
+                  pname,
+                  (unsigned long long)ppid,
+                  nname,
+                  (unsigned long long)npid,
+                  deferred_work ? "true" : "false",
+                  (unsigned long long)stats->grabbed,
+                  (unsigned long long)stats->freed,
+                  (unsigned long long)stats->requeued,
+                  (unsigned long long)df_ms);
     }
     else
     {
-        serial_printf("[sched] switch latency %llu ms prev=%s pid=0x%016llX next=%s pid=0x%016llX deferred=%s\r\n",
-                      (unsigned long long)ms,
-                      pname,
-                      (unsigned long long)ppid,
-                      nname,
-                      (unsigned long long)npid,
-                      deferred_work ? "true" : "false");
+        SCHED_LOG("[sched] switch latency %llu ms prev=%s pid=0x%016llX next=%s pid=0x%016llX deferred=%s\r\n",
+                  (unsigned long long)ms,
+                  pname,
+                  (unsigned long long)ppid,
+                  nname,
+                  (unsigned long long)npid,
+                  deferred_work ? "true" : "false");
     }
 }
 
@@ -266,21 +359,21 @@ static void scheduler_log_running_cpu_change(const thread_t *thread,
                                              uint32_t value,
                                              const char *reason)
 {
-    serial_printf("[sched dbg] running_cpu_change thread=%s pid=0x%016llX value=%u reason=%s\r\n",
-                  scheduler_thread_name(thread),
-                  (unsigned long long)scheduler_thread_pid(thread),
-                  (unsigned)value,
-                  reason ? reason : "<none>");
+    SCHED_DBG("[sched dbg] running_cpu_change thread=%s pid=0x%016llX value=%u reason=%s\r\n",
+              scheduler_thread_name(thread),
+              (unsigned long long)scheduler_thread_pid(thread),
+              (unsigned)value,
+              reason ? reason : "<none>");
 }
 
 static void scheduler_log_current_slot(uint32_t cpu_index, const char *tag)
 {
     thread_t *slot = g_current_threads[cpu_index];
-    serial_printf("[sched dbg] current_slot cpu=%u thread=%s pid=0x%016llX tag=%s\r\n",
-                  (unsigned)cpu_index,
-                  scheduler_thread_name(slot),
-                  (unsigned long long)scheduler_thread_pid(slot),
-                  tag ? tag : "<none>");
+    SCHED_DBG("[sched dbg] current_slot cpu=%u thread=%s pid=0x%016llX tag=%s\r\n",
+              (unsigned)cpu_index,
+              scheduler_thread_name(slot),
+              (unsigned long long)scheduler_thread_pid(slot),
+              tag ? tag : "<none>");
 }
 
 static uint32_t scheduler_select_target_cpu(thread_t *thread)
@@ -555,10 +648,10 @@ static void enqueue_thread_on_cpu_locked(thread_t *thread, uint32_t cpu_index)
     {
         thread_debug_check_ownership(thread, "enqueue_running");
         thread_t *slot = (rc < SMP_MAX_CPUS) ? g_current_threads[rc] : NULL;
-        serial_printf("[sched dbg] enqueue_blocked rc=%u slot_thread=%s slot_pid=0x%016llX\r\n",
-                      rc,
-                      scheduler_thread_name(slot),
-                      (unsigned long long)scheduler_thread_pid(slot));
+        SCHED_DBG("[sched dbg] enqueue_blocked rc=%u slot_thread=%s slot_pid=0x%016llX\r\n",
+                  rc,
+                  scheduler_thread_name(slot),
+                  (unsigned long long)scheduler_thread_pid(slot));
         run_queue_lock_release(queue, flags);
         return;
     }
@@ -629,7 +722,7 @@ static void __attribute__((unused)) thread_freeze_for_stack_watch(thread_t *thre
         thread_in_run_queue_store(thread, false);
         thread->stack_watch_next = g_stack_watch_frozen_head;
         g_stack_watch_frozen_head = thread;
-        serial_printf("%s", "[sched] stack watch freeze thread=");
+        SCHED_LOG("%s", "[sched] stack watch freeze thread=");
         if (thread->name[0])
         {
             serial_printf("%s", thread->name);
@@ -739,7 +832,7 @@ static void stack_watch_check_timeouts(void)
             uint8_t new_byte = 0;
             if (thread_stack_watch_snapshot_changed(thread, &delta_addr, &old_byte, &new_byte))
             {
-                serial_printf("%s", "[sched] stack watch delta thread=");
+                SCHED_LOG("%s", "[sched] stack watch delta thread=");
                 if (thread->name[0])
                 {
                     serial_printf("%s", thread->name);
@@ -768,19 +861,19 @@ static void stack_watch_check_timeouts(void)
 
             if (!thread->stack_watch_timeout_logged)
             {
-                serial_printf("[sched] stack watch timeout thread=%s pid=0x%016llX suspect=0x%016llX\r\n",
-                              thread->name[0] ? thread->name : "<unnamed>",
-                              (unsigned long long)(thread->process ? thread->process->pid : 0),
-                              (unsigned long long)(thread->stack_watch_suspect));
+                SCHED_LOG("[sched] stack watch timeout thread=%s pid=0x%016llX suspect=0x%016llX\r\n",
+                          thread->name[0] ? thread->name : "<unnamed>",
+                          (unsigned long long)(thread->process ? thread->process->pid : 0),
+                          (unsigned long long)(thread->stack_watch_suspect));
                 thread->stack_watch_timeout_logged = true;
             }
 
             thread->stack_watch_timeout_count++;
             if (thread->stack_watch_timeout_count >= STACK_WATCH_TIMEOUT_LIMIT)
             {
-                serial_printf("[sched] stack watch release thread=%s pid=0x%016llX reason=timeout_limit\r\n",
-                              thread->name[0] ? thread->name : "<unnamed>",
-                              (unsigned long long)(thread->process ? thread->process->pid : 0));
+                SCHED_LOG("[sched] stack watch release thread=%s pid=0x%016llX reason=timeout_limit\r\n",
+                          thread->name[0] ? thread->name : "<unnamed>",
+                          (unsigned long long)(thread->process ? thread->process->pid : 0));
                 thread_stack_watch_deactivate(thread);
                 thread_unfreeze_after_stack_watch(thread);
                 continue;
@@ -866,9 +959,9 @@ static void remove_from_run_queue(thread_t *thread)
         scheduler_lock_release(sched_flags);
     }
 #if ENABLE_RUN_QUEUE_DEBUG
-    serial_printf("[sched] remove_from_run_queue: thread=%s pid=0x%016llX flagged but not in any queue\r\n",
-                  thread->name[0] ? thread->name : "<unnamed>",
-                  (unsigned long long)(thread->process ? thread->process->pid : 0));
+    SCHED_LOG("[sched] remove_from_run_queue: thread=%s pid=0x%016llX flagged but not in any queue\r\n",
+              thread->name[0] ? thread->name : "<unnamed>",
+              (unsigned long long)(thread->process ? thread->process->pid : 0));
 #endif
 }
 
@@ -1100,11 +1193,11 @@ static void sleep_queue_wake_due(uint64_t now)
         thread->sleep_queue_next = NULL;
         thread->sleeping = false;
         spinlock_unlock(&g_sleep_queue_lock);
-        serial_printf("[sleep] wake thread=%s pid=0x%016llX now=%llu wake_tick=%llu\r\n",
-                      thread->name[0] ? thread->name : "<unnamed>",
-                      (unsigned long long)(thread->process ? thread->process->pid : 0),
-                      (unsigned long long)now,
-                      (unsigned long long)thread->sleep_until_tick);
+        SCHED_SLEEP_LOG("[sleep] wake thread=%s pid=0x%016llX now=%llu wake_tick=%llu\r\n",
+                        thread->name[0] ? thread->name : "<unnamed>",
+                        (unsigned long long)(thread->process ? thread->process->pid : 0),
+                        (unsigned long long)now,
+                        (unsigned long long)thread->sleep_until_tick);
         if (thread_lifetime_active(thread) &&
             !thread->pending_destroy &&
             thread->state == THREAD_STATE_BLOCKED)
@@ -1113,18 +1206,18 @@ static void sleep_queue_wake_due(uint64_t now)
             if (rc != RUN_QUEUE_CPU_INVALID)
             {
                 thread->wake_pending = true;
-                serial_printf("[sleep] wake_pending thread=%s pid=0x%016llX running_cpu=%u state=%s\r\n",
-                              thread->name[0] ? thread->name : "<unnamed>",
-                              (unsigned long long)(thread->process ? thread->process->pid : 0),
-                              rc,
-                              thread_state_name(thread->state));
+                SCHED_SLEEP_LOG("[sleep] wake_pending thread=%s pid=0x%016llX running_cpu=%u state=%s\r\n",
+                                thread->name[0] ? thread->name : "<unnamed>",
+                                (unsigned long long)(thread->process ? thread->process->pid : 0),
+                                rc,
+                                thread_state_name(thread->state));
             }
             else
             {
                 thread->state = THREAD_STATE_READY;
-                serial_printf("[sleep] wake_enqueue thread=%s pid=0x%016llX\r\n",
-                              thread->name[0] ? thread->name : "<unnamed>",
-                              (unsigned long long)(thread->process ? thread->process->pid : 0));
+                SCHED_SLEEP_LOG("[sleep] wake_enqueue thread=%s pid=0x%016llX\r\n",
+                                thread->name[0] ? thread->name : "<unnamed>",
+                                (unsigned long long)(thread->process ? thread->process->pid : 0));
                 uint32_t target = scheduler_select_target_cpu(thread);
                 /* scheduler_lock is already held; use the locked enqueue path to avoid deadlock. */
                 enqueue_thread_on_cpu_locked(thread, target);
@@ -1272,10 +1365,10 @@ static void thread_quarantine_corrupt(thread_t *thread, const char *reason)
 
     const char *name = thread->name[0] ? thread->name : "<unnamed>";
     uint64_t pid = thread->process ? thread->process->pid : 0;
-    serial_printf("[sched] quarantine thread=%s pid=0x%016llX reason=%s\r\n",
-                  name,
-                  (unsigned long long)pid,
-                  reason ? reason : "<unknown>");
+    SCHED_LOG("[sched] quarantine thread=%s pid=0x%016llX reason=%s\r\n",
+              name,
+              (unsigned long long)pid,
+              reason ? reason : "<unknown>");
 
     thread_stack_watch_deactivate(thread);
 #if ENABLE_STACK_WRITE_DEBUG
@@ -1445,14 +1538,14 @@ static bool switch_to_thread(thread_t *next)
     /* Log upcoming context pointer and stack info. */
     uint64_t rsp_now = 0;
     __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp_now));
-    serial_printf("[sched dbg] switch_ctx cpu=%u next=%s pid=0x%016llX next_ctx=0x%016llX next_stack_base=0x%016llX next_stack_top=0x%016llX current_rsp=0x%016llX\r\n",
-                  (unsigned)cpu_idx,
-                  scheduler_thread_name(next),
-                  (unsigned long long)scheduler_thread_pid(next),
-                  (unsigned long long)(uintptr_t)next_ctx,
-                  (unsigned long long)((uintptr_t)next->stack_base),
-                  (unsigned long long)next->kernel_stack_top,
-                  (unsigned long long)rsp_now);
+    SCHED_DBG("[sched dbg] switch_ctx cpu=%u next=%s pid=0x%016llX next_ctx=0x%016llX next_stack_base=0x%016llX next_stack_top=0x%016llX current_rsp=0x%016llX\r\n",
+              (unsigned)cpu_idx,
+              scheduler_thread_name(next),
+              (unsigned long long)scheduler_thread_pid(next),
+              (unsigned long long)(uintptr_t)next_ctx,
+              (unsigned long long)((uintptr_t)next->stack_base),
+              (unsigned long long)next->kernel_stack_top,
+              (unsigned long long)rsp_now);
 
     uint8_t *prev_transition_flag = NULL;
     if (prev && prev != next)
@@ -1647,7 +1740,7 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
     if (next && next->is_idle && !current)
     {
         /* Nothing runnable; stay idle and return. */
-        serial_printf("[sched] idle return cpu=%u\r\n", (unsigned)cpu_index);
+        SCHED_LOG("[sched] idle return cpu=%u\r\n", (unsigned)cpu_index);
         scheduler_lock_release(sched_flags);
         scheduler_log_if_stalled("scheduler_schedule(idle_return)", sched_watch);
         return;

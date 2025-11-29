@@ -23,6 +23,8 @@
 #include "lapic.h"
 #include "spinlock.h"
 #include "build_features.h"
+#include "procfs.h"
+#include "sched_log.h"
 #include <stddef.h>
 
 extern uintptr_t kernel_heap_base;
@@ -440,6 +442,9 @@ static const uint64_t SCHED_SWITCH_WARN_MS = 500ULL;
 static const uint64_t DEFERRED_FREE_WARN_MS = 250ULL;
 static bool g_bad_saved_rflags_tripped __attribute__((unused)) = false;
 uint64_t g_scheduler_switch_count = 0;
+uint32_t g_sched_log_enable = 1;
+uint32_t g_sched_dbg_enable = 1;
+uint32_t g_sched_sleep_log_enable = 1;
 static uint32_t g_scheduler_rr_cursor = 0;
 
 typedef struct deferred_free_stats
@@ -477,10 +482,10 @@ static void scheduler_log_if_stalled(const char *label, uint64_t start_ticks)
     uint64_t ms = scheduler_ticks_to_ms(elapsed);
     if (ms >= SCHEDULER_STALL_LOG_MS)
     {
-        serial_printf("[sched] stall label=%s duration=%llu ms uptime=%llu s\r\n",
-                      label,
-                      (unsigned long long)ms,
-                      (unsigned long long)(ms / 1000ULL));
+        SCHED_LOG("[sched] stall label=%s duration=%llu ms uptime=%llu s\r\n",
+                  label,
+                  (unsigned long long)ms,
+                  (unsigned long long)(ms / 1000ULL));
     }
 }
 
@@ -506,18 +511,18 @@ static inline uint32_t current_cpu_index(void)
     }
 
     /* Capture corruption as early as possible. */
-    serial_printf("[sched] bad cpu index=0x%08X caller=0x%016llX\r\n",
-                  idx,
-                  (unsigned long long)(uintptr_t)__builtin_return_address(0));
+    SCHED_LOG("[sched] bad cpu index=0x%08X caller=0x%016llX\r\n",
+              idx,
+              (unsigned long long)(uintptr_t)__builtin_return_address(0));
     for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
     {
         thread_t *t = g_current_threads[i];
         process_t *p = g_current_processes[i];
-        serial_printf("[sched] slot=%u thread=0x%016llX pid=0x%016llX lock=0x%08X\r\n",
-                      (unsigned)i,
-                      (unsigned long long)(uintptr_t)t,
-                      (unsigned long long)(p ? p->pid : 0),
-                      g_deferred_free_locks[i].value);
+        SCHED_LOG("[sched] slot=%u thread=0x%016llX pid=0x%016llX lock=0x%08X\r\n",
+                  (unsigned)i,
+                  (unsigned long long)(uintptr_t)t,
+                  (unsigned long long)(p ? p->pid : 0),
+                  g_deferred_free_locks[i].value);
     }
     return 0;
 }
@@ -641,7 +646,7 @@ static inline void thread_clear_running_cpu(thread_t *thread)
 
 static void thread_debug_check_ownership(const thread_t *thread, const char *where)
 {
-    if (!thread)
+    if (!sched_dbg_enabled() || !thread)
     {
         return;
     }
@@ -649,14 +654,14 @@ static void thread_debug_check_ownership(const thread_t *thread, const char *whe
     int32_t actual = thread_find_running_cpu(thread);
     if (actual >= 0 && rc != (uint32_t)actual)
     {
-        serial_printf("[sched dbg] ownership mismatch %s thread=%s pid=0x%016llX running_cpu=%u actual_cpu=%d state=%s in_run_queue=%s\r\n",
-                      where ? where : "<unknown>",
-                      thread->name[0] ? thread->name : "<unnamed>",
-                      (unsigned long long)(thread->process ? thread->process->pid : 0),
-                      rc,
-                      actual,
-                      thread_state_name(thread->state),
-                      thread_in_run_queue_load(thread) ? "true" : "false");
+        SCHED_DBG("[sched dbg] ownership mismatch %s thread=%s pid=0x%016llX running_cpu=%u actual_cpu=%d state=%s in_run_queue=%s\r\n",
+                  where ? where : "<unknown>",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  rc,
+                  actual,
+                  thread_state_name(thread->state),
+                  thread_in_run_queue_load(thread) ? "true" : "false");
     }
 }
 
@@ -1055,13 +1060,13 @@ static bool thread_saved_frame_valid(thread_t *thread, const char *label)
     size_t needed = (size_t)((CONTEXT_SWITCH_SAVED_WORDS + 1ULL) * sizeof(uint64_t));
     if (ctx < lower || upper < ctx || (upper - ctx) < needed)
     {
-        serial_printf("[sched] stack watch: context out of range thread=%s pid=0x%016llX ctx=0x%016llX bounds=[0x%016llX,0x%016llX) label=%s\r\n",
-                      thread->name[0] ? thread->name : "<unnamed>",
-                      (unsigned long long)(thread->process ? thread->process->pid : 0),
-                      (unsigned long long)ctx,
-                      (unsigned long long)lower,
-                      (unsigned long long)upper,
-                      label ? label : "<none>");
+        SCHED_LOG("[sched] stack watch: context out of range thread=%s pid=0x%016llX ctx=0x%016llX bounds=[0x%016llX,0x%016llX) label=%s\r\n",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  (unsigned long long)ctx,
+                  (unsigned long long)lower,
+                  (unsigned long long)upper,
+                  label ? label : "<none>");
         spinlock_unlock(&thread->context_lock);
         thread_quarantine_corrupt(thread, "stack_watch_ctx_oob");
         return false;
@@ -1081,12 +1086,12 @@ static bool thread_saved_frame_valid(thread_t *thread, const char *label)
         uint64_t *ctx_mut = (uint64_t *)ctx;
         ctx_mut[CTX_RFLAGS] = patched;
         rflags_reserved_ok = true;
-        serial_printf("[sched] patched reserved rflags bit thread=%s pid=0x%016llX where=%s old=0x%016llX new=0x%016llX\r\n",
-                      thread->name[0] ? thread->name : "<unnamed>",
-                      (unsigned long long)(thread->process ? thread->process->pid : 0),
-                      label ? label : "<none>",
-                      (unsigned long long)saved_rflags,
-                      (unsigned long long)patched);
+        SCHED_LOG("[sched] patched reserved rflags bit thread=%s pid=0x%016llX where=%s old=0x%016llX new=0x%016llX\r\n",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  label ? label : "<none>",
+                  (unsigned long long)saved_rflags,
+                  (unsigned long long)patched);
     }
     spinlock_unlock(&thread->context_lock);
 
@@ -1095,12 +1100,12 @@ static bool thread_saved_frame_valid(thread_t *thread, const char *label)
         return true;
     }
 
-    serial_printf("[sched] stack watch: invalid saved frame thread=%s pid=0x%016llX rip=0x%016llX rflags=0x%016llX label=%s\r\n",
-                  thread->name[0] ? thread->name : "<unnamed>",
-                  (unsigned long long)(thread->process ? thread->process->pid : 0),
-                  (unsigned long long)resume_rip,
-                  (unsigned long long)saved_rflags,
-                  label ? label : "<none>");
+    SCHED_LOG("[sched] stack watch: invalid saved frame thread=%s pid=0x%016llX rip=0x%016llX rflags=0x%016llX label=%s\r\n",
+              thread->name[0] ? thread->name : "<unnamed>",
+              (unsigned long long)(thread->process ? thread->process->pid : 0),
+              (unsigned long long)resume_rip,
+              (unsigned long long)saved_rflags,
+              label ? label : "<none>");
     thread_quarantine_corrupt(thread, rip_in_kernel ? "stack_watch_rflags" : "stack_watch_rip");
     return false;
 #else
@@ -1410,7 +1415,7 @@ static bool thread_stack_watch_arm_now(thread_t *thread)
         thread->stack_size == 0)
     {
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
-        serial_printf("%s", "[sched] stack watch abort: bad stack metadata\r\n");
+        SCHED_LOG("%s", "[sched] stack watch abort: bad stack metadata\r\n");
 #endif
         return false;
     }
@@ -1433,7 +1438,7 @@ static bool thread_stack_watch_arm_now(thread_t *thread)
     size_t length = (size_t)(top - base);
     if (!paging_set_kernel_range_writable(base, length, false))
     {
-        serial_printf("%s", "[sched] warning: unable to arm stack watch\r\n");
+        SCHED_LOG("%s", "[sched] warning: unable to arm stack watch\r\n");
         return false;
     }
     thread->stack_watch_active = true;
@@ -1442,13 +1447,13 @@ static bool thread_stack_watch_arm_now(thread_t *thread)
 
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
     const char *name = thread->name[0] ? thread->name : "<unnamed>";
-    serial_printf("[sched] stack watch armed thread=%s pid=0x%016llX context=%s suspect=0x%016llX base=0x%016llX top=0x%016llX\r\n",
-                  name,
-                  (unsigned long long)(thread->process ? thread->process->pid : 0),
-                  thread->stack_watch_context ? thread->stack_watch_context : "<none>",
-                  (unsigned long long)(thread->stack_watch_suspect),
-                  (unsigned long long)(base),
-                  (unsigned long long)(top));
+    SCHED_LOG("[sched] stack watch armed thread=%s pid=0x%016llX context=%s suspect=0x%016llX base=0x%016llX top=0x%016llX\r\n",
+              name,
+              (unsigned long long)(thread->process ? thread->process->pid : 0),
+              thread->stack_watch_context ? thread->stack_watch_context : "<none>",
+              (unsigned long long)(thread->stack_watch_suspect),
+              (unsigned long long)(base),
+              (unsigned long long)(top));
 #endif
     thread->stack_watch_timeout_logged = false;
     thread_stack_watch_capture_snapshot(thread);
@@ -1505,20 +1510,10 @@ static bool thread_stack_watch_activate(thread_t *thread,
     if (!was_enabled)
     {
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
-        serial_printf("%s", "[sched] stack watch pending thread=");
-        if (thread->name[0])
-        {
-            serial_printf("%s", thread->name);
-        }
-        else
-        {
-            serial_printf("%s", "<unnamed>");
-        }
-        serial_printf("%s", " pid=0x");
-        serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
-        serial_printf("%s", " context=");
-        serial_printf("%s", thread->stack_watch_context ? thread->stack_watch_context : "<none>");
-        serial_printf("%s", "\r\n");
+        SCHED_LOG("[sched] stack watch pending thread=%s pid=0x%016llX context=%s\r\n",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  thread->stack_watch_context ? thread->stack_watch_context : "<none>");
 #endif
     }
     return true;
@@ -1551,12 +1546,12 @@ static void thread_stack_watch_deactivate(thread_t *thread)
                                           thread->stack_watch_len,
                                           true))
     {
-        serial_printf("%s", "[sched] warning: unable to disarm stack watch\r\n");
+        SCHED_LOG("%s", "[sched] warning: unable to disarm stack watch\r\n");
     }
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
-    serial_printf("[sched] stack watch cleared thread=%s pid=0x%016llX\r\n",
-                  thread->name[0] ? thread->name : "<unnamed>",
-                  (unsigned long long)(thread->process ? thread->process->pid : 0));
+    SCHED_LOG("[sched] stack watch cleared thread=%s pid=0x%016llX\r\n",
+              thread->name[0] ? thread->name : "<unnamed>",
+              (unsigned long long)(thread->process ? thread->process->pid : 0));
 #endif
     thread->stack_watch_active = false;
     thread->stack_watch_base = 0;
@@ -1582,22 +1577,22 @@ static void thread_free_resources(thread_t *thread)
 #if ENABLE_STACK_WRITE_DEBUG
     if (thread->stack_watch_active || thread->stack_watch_blocked)
     {
-        serial_printf("[sched] warning: freeing thread with stack_watch state active=%s blocked=%s name=%s pid=0x%016llX\r\n",
-                      thread->stack_watch_active ? "true" : "false",
-                      thread->stack_watch_blocked ? "true" : "false",
-                      thread->name[0] ? thread->name : "<unnamed>",
-                      (unsigned long long)(thread->process ? thread->process->pid : 0));
+        SCHED_LOG("[sched] warning: freeing thread with stack_watch state active=%s blocked=%s name=%s pid=0x%016llX\r\n",
+                  thread->stack_watch_active ? "true" : "false",
+                  thread->stack_watch_blocked ? "true" : "false",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0));
         thread_stack_watch_deactivate(thread);
         thread_unfreeze_after_stack_watch(thread);
     }
 #endif
     if (thread->waiting_queue || thread->sleeping)
     {
-        serial_printf("[sched] warning: freeing thread still linked waiting_queue=%s sleeping=%s name=%s pid=0x%016llX\r\n",
-                      thread->waiting_queue ? "true" : "false",
-                      thread->sleeping ? "true" : "false",
-                      thread->name[0] ? thread->name : "<unnamed>",
-                      (unsigned long long)(thread->process ? thread->process->pid : 0));
+        SCHED_LOG("[sched] warning: freeing thread still linked waiting_queue=%s sleeping=%s name=%s pid=0x%016llX\r\n",
+                  thread->waiting_queue ? "true" : "false",
+                  thread->sleeping ? "true" : "false",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0));
         thread_remove_from_wait_queue(thread);
         if (thread->sleeping)
         {
@@ -1610,12 +1605,12 @@ static void thread_free_resources(thread_t *thread)
     uintptr_t ctx_ptr = (uintptr_t)thread->context;
     uintptr_t stack_base = (uintptr_t)thread->stack_base;
     uintptr_t stack_top = thread->kernel_stack_top;
-    serial_printf("[sched] thread_free_resources name=%s pid=0x%016llX context=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
-                  name,
-                  (unsigned long long)pid,
-                  (unsigned long long)ctx_ptr,
-                  (unsigned long long)stack_base,
-                  (unsigned long long)stack_top);
+    SCHED_LOG("[sched] thread_free_resources name=%s pid=0x%016llX context=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+              name,
+              (unsigned long long)pid,
+              (unsigned long long)ctx_ptr,
+              (unsigned long long)stack_base,
+              (unsigned long long)stack_top);
     uint8_t *stack_allocation_raw = thread->stack_allocation_raw;
     uint8_t *stack_guard_base = thread->stack_guard_base;
     uint8_t *stack_base_ptr = thread->stack_base;
@@ -1829,19 +1824,13 @@ static bool thread_context_in_bounds(thread_t *thread,
             if (!(ctx >= lower && ctx < upper))
             {
                 ok = false;
-                serial_printf("%s", "[sched] context pointer out of bounds ");
-                serial_printf("%s", reason ? reason : "<none>");
-                serial_printf("%s", " thread=");
-                serial_printf("%s", thread->name[0] ? thread->name : "<unnamed>");
-                serial_printf("%s", " pid=0x");
-                serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
-                serial_printf("%s", " ctx=0x");
-                serial_printf("%016llX", (unsigned long long)ctx);
-                serial_printf("%s", " stack=[0x");
-                serial_printf("%016llX", (unsigned long long)lower);
-                serial_printf("%s", ",0x");
-                serial_printf("%016llX", (unsigned long long)upper);
-                serial_printf("%s", ")\r\n");
+                SCHED_LOG("[sched] context pointer out of bounds %s thread=%s pid=0x%016llX ctx=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+                          reason ? reason : "<none>",
+                          thread->name[0] ? thread->name : "<unnamed>",
+                          (unsigned long long)(thread->process ? thread->process->pid : 0),
+                          (unsigned long long)ctx,
+                          (unsigned long long)lower,
+                          (unsigned long long)upper);
             }
         }
     }
@@ -1877,43 +1866,21 @@ static void thread_check_context_bounds(const thread_t *thread,
         return;
     }
 
-    serial_printf("%s", "[sched] context ptr out of range label=");
-    serial_printf("%s", label ? label : "<none>");
-    serial_printf("%s", " thread=");
-    if (thread->name[0])
-    {
-        serial_printf("%s", thread->name);
-    }
-    else
-    {
-        serial_printf("%s", "<unnamed>");
-    }
-    serial_printf("%s", " pid=0x");
-    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
-    serial_printf("%s", " ptr=0x");
-    serial_printf("%016llX", (unsigned long long)(ctx));
-    serial_printf("%s", " stack_base=0x");
-    serial_printf("%016llX", (unsigned long long)(lower));
-    serial_printf("%s", " stack_top=0x");
-    serial_printf("%016llX", (unsigned long long)(upper));
-    serial_printf("%s", "\r\n");
+    SCHED_LOG("[sched] context ptr out of range label=%s thread=%s pid=0x%016llX ptr=0x%016llX stack_base=0x%016llX stack_top=0x%016llX\r\n",
+              label ? label : "<none>",
+              thread->name[0] ? thread->name : "<unnamed>",
+              (unsigned long long)(thread->process ? thread->process->pid : 0),
+              (unsigned long long)(ctx),
+              (unsigned long long)(lower),
+              (unsigned long long)(upper));
 
 #if ENABLE_STACK_WRITE_DEBUG
     thread_t *owner = thread_find_stack_owner(ctx, 0);
     if (owner)
     {
-        serial_printf("%s", "  ctx points into stack owned by thread=");
-        if (owner->name[0])
-        {
-            serial_printf("%s", owner->name);
-        }
-        else
-        {
-            serial_printf("%s", "<unnamed>");
-        }
-        serial_printf("%s", " pid=0x");
-        serial_printf("%016llX", (unsigned long long)(owner->process ? owner->process->pid : 0));
-        serial_printf("%s", "\r\n");
+        SCHED_LOG("  ctx points into stack owned by thread=%s pid=0x%016llX\r\n",
+                  owner->name[0] ? owner->name : "<unnamed>",
+                  (unsigned long long)(owner->process ? owner->process->pid : 0));
     }
 #endif
     fatal("thread context pointer corrupt");
@@ -2030,15 +1997,15 @@ static void thread_assert_current_stack_owner(const char *context)
     }
 
     thread_t *owner = thread_find_stack_owner(rsp, 1);
-    serial_printf("[sched] fatal: stack owner mismatch ctx=%s current=%s pid=0x%016llX rsp=0x%016llX stack=[0x%016llX,0x%016llX) owner=%s owner_pid=0x%016llX\r\n",
-                  context ? context : "<none>",
-                  current->name[0] ? current->name : "<unnamed>",
-                  (unsigned long long)(current->process ? current->process->pid : 0),
-                  (unsigned long long)rsp,
-                  (unsigned long long)((uintptr_t)current->stack_base),
-                  (unsigned long long)current->kernel_stack_top,
-                  (owner && owner->name[0]) ? owner->name : (owner ? "<unnamed>" : "<none>"),
-                  (unsigned long long)(owner && owner->process ? owner->process->pid : 0));
+    SCHED_LOG("[sched] fatal: stack owner mismatch ctx=%s current=%s pid=0x%016llX rsp=0x%016llX stack=[0x%016llX,0x%016llX) owner=%s owner_pid=0x%016llX\r\n",
+              context ? context : "<none>",
+              current->name[0] ? current->name : "<unnamed>",
+              (unsigned long long)(current->process ? current->process->pid : 0),
+              (unsigned long long)rsp,
+              (unsigned long long)((uintptr_t)current->stack_base),
+              (unsigned long long)current->kernel_stack_top,
+              (owner && owner->name[0]) ? owner->name : (owner ? "<unnamed>" : "<none>"),
+              (unsigned long long)(owner && owner->process ? owner->process->pid : 0));
     fatal("current stack owner mismatch");
 }
 
@@ -2126,24 +2093,12 @@ static void scheduler_debug_dump_thread_stack(thread_t *thread, const char *labe
     }
 
     const uint64_t *start = (const uint64_t *)start_addr;
-    serial_printf("%s", "[sched] stack snapshot label=");
-    serial_printf("%s", label ? label : "<none>");
-    serial_printf("%s", " thread=");
-    if (thread->name[0])
-    {
-        serial_printf("%s", thread->name);
-    }
-    else
-    {
-        serial_printf("%s", "<unnamed>");
-    }
-    serial_printf("%s", " pid=0x");
-    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
-    serial_printf("%s", " entries=");
-    serial_printf("%016llX", (unsigned long long)(dump_qwords));
-    serial_printf("%s", " ctx=0x");
-    serial_printf("%016llX", (unsigned long long)(ctx_ptr));
-    serial_printf("%s", "\r\n");
+    SCHED_LOG("[sched] stack snapshot label=%s thread=%s pid=0x%016llX entries=0x%016llX ctx=0x%016llX\r\n",
+              label ? label : "<none>",
+              thread->name[0] ? thread->name : "<unnamed>",
+              (unsigned long long)(thread->process ? thread->process->pid : 0),
+              (unsigned long long)(dump_qwords),
+              (unsigned long long)(ctx_ptr));
     scheduler_debug_dump_stack(start, dump_qwords);
 #else
     (void)thread;
@@ -2294,32 +2249,16 @@ static void scheduler_debug_check_resume(thread_t *thread, const char *label)
     }
 
     process_t *proc = thread->process;
-    serial_printf("%s", "[sched] resume rip anomaly label=");
-    serial_printf("%s", label ? label : "<none>");
-    serial_printf("%s", " reason=");
-    serial_printf("%s", resume_zero ? "zero" : "smp_boot");
-    serial_printf("%s", " cpu=");
-    serial_printf("%016llX", (unsigned long long)(current_cpu_index()));
-    serial_printf("%s", " thread=");
-    if (thread->name[0])
-    {
-        serial_printf("%s", thread->name);
-    }
-    else
-    {
-        serial_printf("%s", "<unnamed>");
-    }
-    serial_printf("%s", " pid=0x");
-    serial_printf("%016llX", (unsigned long long)(proc ? proc->pid : 0));
-    serial_printf("%s", " resume_rip=0x");
-    serial_printf("%016llX", (unsigned long long)(resume_rip));
-    serial_printf("%s", " ctx=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->context));
-    serial_printf("%s", " stack_base=0x");
-    serial_printf("%016llX", (unsigned long long)((uintptr_t)thread->stack_base));
-    serial_printf("%s", " stack_top=0x");
-    serial_printf("%016llX", (unsigned long long)(thread->kernel_stack_top));
-    serial_printf("%s", "\r\n");
+    SCHED_LOG("[sched] resume rip anomaly label=%s reason=%s cpu=%016llX thread=%s pid=0x%016llX resume_rip=0x%016llX ctx=0x%016llX stack_base=0x%016llX stack_top=0x%016llX\r\n",
+              label ? label : "<none>",
+              resume_zero ? "zero" : "smp_boot",
+              (unsigned long long)(current_cpu_index()),
+              thread->name[0] ? thread->name : "<unnamed>",
+              (unsigned long long)(proc ? proc->pid : 0),
+              (unsigned long long)(resume_rip),
+              (unsigned long long)((uintptr_t)thread->context),
+              (unsigned long long)((uintptr_t)thread->stack_base),
+              (unsigned long long)(thread->kernel_stack_top));
 
     const uint64_t *stack_dump = ctx_copy + (CTX_WORD_COUNT - 1);
     size_t dump_qwords = 16;
@@ -2459,6 +2398,10 @@ static void context_guard_dump_window(thread_t *thread,
     {
         return;
     }
+    if (!sched_log_enabled())
+    {
+        return;
+    }
 
     size_t total_words = words_before + words_after + 1;
     size_t bytes_before = words_before * sizeof(uint64_t);
@@ -2483,12 +2426,12 @@ static void context_guard_dump_window(thread_t *thread,
     {
         end = upper;
     }
-    serial_printf("[sched] context_guard window thread=%s pid=0x%016llX focus=0x%016llX range=[0x%016llX,0x%016llX)\r\n",
-                  thread->name[0] ? thread->name : "<unnamed>",
-                  (unsigned long long)(thread->process ? thread->process->pid : 0),
-                  (unsigned long long)(focus_addr),
-                  (unsigned long long)(start),
-                  (unsigned long long)(end));
+    SCHED_LOG("[sched] context_guard window thread=%s pid=0x%016llX focus=0x%016llX range=[0x%016llX,0x%016llX)\r\n",
+              thread->name[0] ? thread->name : "<unnamed>",
+              (unsigned long long)(thread->process ? thread->process->pid : 0),
+              (unsigned long long)(focus_addr),
+              (unsigned long long)(start),
+              (unsigned long long)(end));
     for (uintptr_t addr = start; addr + sizeof(uint64_t) <= end; addr += sizeof(uint64_t))
     {
         serial_printf("%s", "  [");
@@ -2551,7 +2494,7 @@ static void thread_context_guard_release_pages(thread_t *thread)
                                           thread->context_guard_protect_len,
                                           true))
     {
-        serial_printf("%s", "[sched] warning: failed to unprotect stack guard region\r\n");
+        SCHED_LOG("%s", "[sched] warning: failed to unprotect stack guard region\r\n");
     }
     thread->context_guard_protected = false;
     thread->context_guard_protect_base = 0;
@@ -2590,7 +2533,7 @@ static void __attribute__((unused)) thread_context_guard_protect_pages(thread_t 
     }
     if (!paging_set_kernel_range_writable(start, length, false))
     {
-        serial_printf("%s", "[sched] warning: failed to protect stack guard region\r\n");
+        SCHED_LOG("%s", "[sched] warning: failed to protect stack guard region\r\n");
         return;
     }
     thread->context_guard_protect_base = start;
@@ -2629,12 +2572,12 @@ static void thread_context_guard_update(thread_t *thread, const char *label)
     thread_t *current = current_thread_local();
     if (current && current != thread)
     {
-        serial_printf("[sched] context_guard_update skipped wrong_thread target=%s pid=0x%016llX current=%s current_pid=0x%016llX label=%s\r\n",
-                      thread->name[0] ? thread->name : "<unnamed>",
-                      (unsigned long long)(thread->process ? thread->process->pid : 0),
-                      current->name[0] ? current->name : "<unnamed>",
-                      (unsigned long long)(current->process ? current->process->pid : 0),
-                      label ? label : "<none>");
+        SCHED_LOG("[sched] context_guard_update skipped wrong_thread target=%s pid=0x%016llX current=%s current_pid=0x%016llX label=%s\r\n",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  current->name[0] ? current->name : "<unnamed>",
+                  (unsigned long long)(current->process ? current->process->pid : 0),
+                  label ? label : "<none>");
         return;
     }
     uint64_t rsp_now = 0;
@@ -2642,13 +2585,13 @@ static void thread_context_guard_update(thread_t *thread, const char *label)
     thread_t *rsp_owner = thread_find_stack_owner(rsp_now, 1);
     if (rsp_owner && rsp_owner != thread)
     {
-        serial_printf("[sched] context_guard_update skipped wrong_stack thread=%s pid=0x%016llX rsp=0x%016llX owner=%s owner_pid=0x%016llX label=%s\r\n",
-                      thread->name[0] ? thread->name : "<unnamed>",
-                      (unsigned long long)(thread->process ? thread->process->pid : 0),
-                      (unsigned long long)rsp_now,
-                      rsp_owner->name[0] ? rsp_owner->name : "<unnamed>",
-                      (unsigned long long)(rsp_owner->process ? rsp_owner->process->pid : 0),
-                      label ? label : "<none>");
+        SCHED_LOG("[sched] context_guard_update skipped wrong_stack thread=%s pid=0x%016llX rsp=0x%016llX owner=%s owner_pid=0x%016llX label=%s\r\n",
+                  thread->name[0] ? thread->name : "<unnamed>",
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  (unsigned long long)rsp_now,
+                  rsp_owner->name[0] ? rsp_owner->name : "<unnamed>",
+                  (unsigned long long)(rsp_owner->process ? rsp_owner->process->pid : 0),
+                  label ? label : "<none>");
         return;
     }
     if (thread_running_on_any_cpu(thread))
@@ -2787,6 +2730,7 @@ static void __attribute__((unused)) thread_context_guard_verify(thread_t *thread
         spinlock_unlock(&thread->context_lock);
         return;
     }
+    bool log_guard = sched_log_enabled();
     /* If the saved context pointer is unchanged and the thread is not running,
      * a mismatch likely means the context was legitimately updated (e.g., during
      * a switch-out) after the last guard snapshot. Resync once instead of
@@ -2795,18 +2739,23 @@ static void __attribute__((unused)) thread_context_guard_verify(thread_t *thread
         thread->state != THREAD_STATE_RUNNING &&
         thread->context_valid)
     {
-        serial_printf("[sched] context guard mismatch (resync) label=%s thread=%s pid=0x%016llX saved_hash=0x%016llX current_hash=0x%016llX\r\n",
+        if (log_guard)
+        {
+            SCHED_LOG("[sched] context guard mismatch (resync) label=%s thread=%s pid=0x%016llX saved_hash=0x%016llX current_hash=0x%016llX\r\n",
                       label ? label : "<none>",
                       thread->name[0] ? thread->name : "<unnamed>",
                       (unsigned long long)(thread->process ? thread->process->pid : 0),
                       (unsigned long long)(thread->context_guard_hash),
                       (unsigned long long)(current_hash));
+        }
         spinlock_unlock(&thread->context_lock);
         thread_context_guard_update(thread, "context_guard_resync_soft");
         return;
     }
 #if !CONTEXT_GUARD_STRICT
-    serial_printf("[sched] context guard mismatch (resync) label=%s thread=%s pid=0x%016llX saved_ptr=0x%016llX current_ptr=0x%016llX saved_hash=0x%016llX current_hash=0x%016llX\r\n",
+    if (log_guard)
+    {
+        SCHED_LOG("[sched] context guard mismatch (resync) label=%s thread=%s pid=0x%016llX saved_ptr=0x%016llX current_ptr=0x%016llX saved_hash=0x%016llX current_hash=0x%016llX\r\n",
                   label ? label : "<none>",
                   thread->name[0] ? thread->name : "<unnamed>",
                   (unsigned long long)(thread->process ? thread->process->pid : 0),
@@ -2814,6 +2763,7 @@ static void __attribute__((unused)) thread_context_guard_verify(thread_t *thread
                   (unsigned long long)((uintptr_t)thread->context),
                   (unsigned long long)(thread->context_guard_hash),
                   (unsigned long long)(current_hash));
+    }
     spinlock_unlock(&thread->context_lock);
     thread_context_guard_update(thread, "context_guard_resync_soft");
     return;
@@ -2832,7 +2782,9 @@ static void __attribute__((unused)) thread_context_guard_verify(thread_t *thread
         thread_context_guard_update(thread, "context_guard_r14");
         return;
     }
-    serial_printf("[sched] context guard mismatch label=%s thread=%s pid=0x%016llX saved_ptr=0x%016llX current_ptr=0x%016llX saved_hash=0x%016llX current_hash=0x%016llX\r\n",
+    if (log_guard)
+    {
+        SCHED_LOG("[sched] context guard mismatch label=%s thread=%s pid=0x%016llX saved_ptr=0x%016llX current_ptr=0x%016llX saved_hash=0x%016llX current_hash=0x%016llX\r\n",
                   label ? label : "<none>",
                   thread->name[0] ? thread->name : "<unnamed>",
                   (unsigned long long)(thread->process ? thread->process->pid : 0),
@@ -2840,15 +2792,19 @@ static void __attribute__((unused)) thread_context_guard_verify(thread_t *thread
                   (unsigned long long)((uintptr_t)thread->context),
                   (unsigned long long)(thread->context_guard_hash),
                   (unsigned long long)(current_hash));
+    }
     uintptr_t diff_addr = 0;
     if (diff_index != (size_t)-1)
     {
         diff_addr = thread->context_guard_ptr + diff_index * sizeof(uint64_t);
-        serial_printf("[sched] context guard diff diff_index=0x%016llX addr=0x%016llX saved=0x%016llX current=0x%016llX\r\n",
+        if (log_guard)
+        {
+            SCHED_LOG("[sched] context guard diff diff_index=0x%016llX addr=0x%016llX saved=0x%016llX current=0x%016llX\r\n",
                       (unsigned long long)(diff_index),
                       (unsigned long long)(diff_addr),
                       (unsigned long long)(thread->context_guard_words[diff_index]),
                       (unsigned long long)(current_words[diff_index]));
+        }
     }
     const char *reg_name = "<unknown>";
     if (diff_index != (size_t)-1 &&
@@ -2856,9 +2812,12 @@ static void __attribute__((unused)) thread_context_guard_verify(thread_t *thread
     {
         reg_name = g_context_guard_reg_names[diff_index];
     }
-    serial_printf("%s", "  register=");
-    serial_printf("%s", reg_name);
-    serial_printf("%s", "\r\n");
+    if (log_guard)
+    {
+        serial_printf("%s", "  register=");
+        serial_printf("%s", reg_name);
+        serial_printf("%s", "\r\n");
+    }
     if (diff_addr)
     {
         context_guard_dump_window(thread, diff_addr, 4, 4);

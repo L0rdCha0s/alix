@@ -292,11 +292,11 @@ void process_sleep_ticks(uint64_t ticks)
     thread_clear_running_cpu(thread);
     thread->in_transition = false;
     thread->wake_pending = false;
-    serial_printf("[sleep] enqueue thread=%s pid=0x%016llX wake_tick=%llu now=%llu\r\n",
-                  thread->name[0] ? thread->name : "<unnamed>",
-                  (unsigned long long)(thread->process ? thread->process->pid : 0),
-                  (unsigned long long)wake_tick,
-                  (unsigned long long)now);
+    SCHED_SLEEP_LOG("[sleep] enqueue thread=%s pid=0x%016llX wake_tick=%llu now=%llu\r\n",
+                    thread->name[0] ? thread->name : "<unnamed>",
+                    (unsigned long long)(thread->process ? thread->process->pid : 0),
+                    (unsigned long long)wake_tick,
+                    (unsigned long long)now);
     sleep_queue_insert(thread);
     scheduler_schedule(false);
     cpu_restore_flags(flags);
@@ -1117,7 +1117,7 @@ bool process_handle_stack_watch_fault(uintptr_t fault_addr,
     }
 
     thread_t *writer = current_thread_local();
-    serial_printf("%s", "[sched] stack watch fault hit\r\n");
+    SCHED_LOG("%s", "[sched] stack watch fault hit\r\n");
     serial_printf("%s", "  target=");
     if (target->name[0])
     {

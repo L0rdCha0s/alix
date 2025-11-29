@@ -1,5 +1,9 @@
 static void scheduler_trace(const char *prefix, thread_t *thread)
 {
+    if (!sched_dbg_enabled())
+    {
+        return;
+    }
     if (!prefix || !thread)
     {
         return;
@@ -7,20 +11,20 @@ static void scheduler_trace(const char *prefix, thread_t *thread)
 
     const char *name = thread->name[0] ? thread->name : "<unnamed>";
     uint64_t pid = thread->process ? thread->process->pid : 0;
-    serial_printf("%s thread=%s pid=0x%016llX state=%s ctx_valid=%s stack=0x%016llX\r\n",
-                  prefix,
-                  name,
-                  (unsigned long long)pid,
-                  thread_state_name(thread->state),
-                  thread->context_valid ? "true" : "false",
-                  (unsigned long long)((uintptr_t)thread->stack_base));
+    SCHED_DBG("%s thread=%s pid=0x%016llX state=%s ctx_valid=%s stack=0x%016llX\r\n",
+              prefix,
+              name,
+              (unsigned long long)pid,
+              thread_state_name(thread->state),
+              thread->context_valid ? "true" : "false",
+              (unsigned long long)((uintptr_t)thread->stack_base));
 }
 
 static void scheduler_log_state_event(const char *tag,
                                       const thread_t *thread,
                                       const char *where)
 {
-    if (!thread)
+    if (!sched_dbg_enabled() || !thread)
     {
         return;
     }
@@ -29,27 +33,27 @@ static void scheduler_log_state_event(const char *tag,
     const char *name = thread->name[0] ? thread->name : "<unnamed>";
     uint64_t rsp_now = 0;
     __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp_now));
-    serial_printf("[sched dbg] %s where=%s cpu=%u thread=%s pid=0x%016llX state=%s running_cpu=%u in_run_queue=%s rq_cpu=%u in_transition=%s wake_pending=%s ctx_valid=%s\r\n",
-                  tag ? tag : "<none>",
-                  where ? where : "<unknown>",
-                  (unsigned)cpu_idx,
-                  name,
-                  (unsigned long long)(thread->process ? thread->process->pid : 0),
-                  thread_state_name(thread->state),
-                  running,
-                  thread_in_run_queue_load(thread) ? "true" : "false",
-                  thread->run_queue_cpu,
-                  thread->in_transition ? "true" : "false",
-                  thread->wake_pending ? "true" : "false",
-                  thread->context_valid ? "true" : "false");
-    serial_printf("[sched dbg] stack_ctx cpu=%u thread=%s pid=0x%016llX stack_base=0x%016llX stack_top=0x%016llX rsp=0x%016llX tag=%s\r\n",
-                  (unsigned)cpu_idx,
-                  name,
-                  (unsigned long long)(thread->process ? thread->process->pid : 0),
-                  (unsigned long long)((uintptr_t)thread->stack_base),
-                  (unsigned long long)thread->kernel_stack_top,
-                  (unsigned long long)rsp_now,
-                  where ? where : "<unknown>");
+    SCHED_DBG("[sched dbg] %s where=%s cpu=%u thread=%s pid=0x%016llX state=%s running_cpu=%u in_run_queue=%s rq_cpu=%u in_transition=%s wake_pending=%s ctx_valid=%s\r\n",
+              tag ? tag : "<none>",
+              where ? where : "<unknown>",
+              (unsigned)cpu_idx,
+              name,
+              (unsigned long long)(thread->process ? thread->process->pid : 0),
+              thread_state_name(thread->state),
+              running,
+              thread_in_run_queue_load(thread) ? "true" : "false",
+              thread->run_queue_cpu,
+              thread->in_transition ? "true" : "false",
+              thread->wake_pending ? "true" : "false",
+              thread->context_valid ? "true" : "false");
+    SCHED_DBG("[sched dbg] stack_ctx cpu=%u thread=%s pid=0x%016llX stack_base=0x%016llX stack_top=0x%016llX rsp=0x%016llX tag=%s\r\n",
+              (unsigned)cpu_idx,
+              name,
+              (unsigned long long)(thread->process ? thread->process->pid : 0),
+              (unsigned long long)((uintptr_t)thread->stack_base),
+              (unsigned long long)thread->kernel_stack_top,
+              (unsigned long long)rsp_now,
+              where ? where : "<unknown>");
 }
 
 static bool __attribute__((unused)) thread_name_equals(const thread_t *thread, const char *name)
@@ -74,38 +78,30 @@ static bool string_name_equals(const char *lhs, const char *rhs)
 
 static void process_create_log(const char *name, const char *event)
 {
-    if (!ENABLE_SHELL_TRACE)
+    if (!ENABLE_SHELL_TRACE || !sched_log_enabled())
     {
         return;
     }
 
-    serial_printf("%s", "[proc-trace] process_create ");
-    serial_printf("%s", event ? event : "<none>");
-    serial_printf("%s", " name=");
-    serial_printf("%s", name ? name : "<none>");
-    serial_printf("%s", "\r\n");
+    SCHED_LOG("[proc-trace] process_create %s name=%s\r\n",
+              event ? event : "<none>",
+              name ? name : "<none>");
 }
 
 static void scheduler_shell_log(const char *event, thread_t *thread)
 {
-    if (!ENABLE_SHELL_TRACE || !thread)
+    if (!ENABLE_SHELL_TRACE || !thread || !sched_log_enabled())
     {
         return;
     }
 
-    serial_printf("%s", "[sched-trace] ");
-    serial_printf("%s", event);
-    serial_printf("%s", " state=");
-    serial_printf("%s", thread_state_name(thread->state));
-    serial_printf("%s", " ctx_valid=");
-    serial_printf("%s", thread->context_valid ? "true" : "false");
-    serial_printf("%s", " name=");
-    serial_printf("%s", thread->name[0] ? thread->name : "<unnamed>");
-    serial_printf("%s", " pid=0x");
-    serial_printf("%016llX", (unsigned long long)(thread->process ? thread->process->pid : 0));
-    serial_printf("%s", " rsp0=0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)thread->kernel_stack_top));
-    serial_printf("%s", "\r\n");
+    SCHED_LOG("[sched-trace] %s state=%s ctx_valid=%s name=%s pid=0x%016llX rsp0=0x%016llX\r\n",
+              event ? event : "<none>",
+              thread_state_name(thread->state),
+              thread->context_valid ? "true" : "false",
+              thread->name[0] ? thread->name : "<unnamed>",
+              (unsigned long long)(thread->process ? thread->process->pid : 0),
+              (unsigned long long)((uint64_t)thread->kernel_stack_top));
 }
 
 static void scheduler_wait_for_boot_ready(void)
@@ -173,15 +169,26 @@ static thread_t *thread_create(process_t *process,
         return NULL;
     }
 
-    serial_printf("[thread_create] entry name=%s pre-malloc\r\n", name ? name : "<null>");
+    bool sched_trace = sched_dbg_enabled();
+
+    if (sched_trace)
+    {
+        SCHED_DBG("[thread_create] entry name=%s pre-malloc\r\n", name ? name : "<null>");
+    }
     thread_t *thread = (thread_t *)malloc(sizeof(thread_t));
     if (!thread)
     {
-        serial_printf("%s", "[thread_create] malloc thread struct failed\r\n");
+        if (sched_trace)
+        {
+            SCHED_DBG("%s", "[thread_create] malloc thread struct failed\r\n");
+        }
         return NULL;
     }
-    serial_printf("[thread_create] thread struct=0x%016llX\r\n",
+    if (sched_trace)
+    {
+        SCHED_DBG("[thread_create] thread struct=0x%016llX\r\n",
                   (unsigned long long)((uintptr_t)thread));
+    }
     memset(thread, 0, sizeof(*thread));
     thread->last_cpu_index = RUN_QUEUE_CPU_INVALID;
     thread->deferred_next = NULL;
@@ -199,7 +206,9 @@ static thread_t *thread_create(process_t *process,
     size_t allocation_size = guard_bytes + aligned_stack + PAGE_SIZE_BYTES_LOCAL;
     const uintptr_t heap_limit = (uintptr_t)kernel_heap_end;
 #if THREAD_CREATE_DEBUG
-    serial_printf("[thread_create] begin name=%s stack=0x%016llX aligned=0x%016llX alloc=0x%016llX "
+    if (sched_trace)
+    {
+        SCHED_DBG("[thread_create] begin name=%s stack=0x%016llX aligned=0x%016llX alloc=0x%016llX "
                   "is_user=%s is_idle=%s\r\n",
                   name ? name : "<null>",
                   (unsigned long long)requested_stack,
@@ -207,6 +216,7 @@ static thread_t *thread_create(process_t *process,
                   (unsigned long long)allocation_size,
                   is_user_thread ? "true" : "false",
                   is_idle ? "true" : "false");
+    }
 #endif
     uint8_t *raw_allocation = NULL;
     uint8_t *guard_base = NULL;
@@ -215,9 +225,12 @@ static thread_t *thread_create(process_t *process,
     {
         raw_allocation = (uint8_t *)malloc(allocation_size);
 #if THREAD_CREATE_DEBUG
-        serial_printf("[thread_create] attempt=%016llX raw=%016llX\r\n",
+        if (sched_trace)
+        {
+            SCHED_DBG("[thread_create] attempt=%016llX raw=%016llX\r\n",
                       (unsigned long long)attempt,
                       (unsigned long long)((uintptr_t)raw_allocation));
+        }
 #endif
         if (!raw_allocation)
         {
@@ -226,12 +239,15 @@ static thread_t *thread_create(process_t *process,
         guard_base = (uint8_t *)align_up_uintptr((uintptr_t)raw_allocation, PAGE_SIZE_BYTES_LOCAL);
         uintptr_t stack_end = (uintptr_t)(guard_base + guard_bytes + aligned_stack);
 #if THREAD_CREATE_DEBUG
-        serial_printf("[thread_create] layout raw=%016llX guard_base=%016llX stack_end=0x%016llX "
+        if (sched_trace)
+        {
+            SCHED_DBG("[thread_create] layout raw=%016llX guard_base=%016llX stack_end=0x%016llX "
                       "heap_limit=0x%016llX\r\n",
                       (unsigned long long)((uintptr_t)raw_allocation),
                       (unsigned long long)((uintptr_t)guard_base),
                       (unsigned long long)stack_end,
                       (unsigned long long)heap_limit);
+        }
 #endif
         if (stack_end <= heap_limit)
         {
@@ -244,21 +260,27 @@ static thread_t *thread_create(process_t *process,
     if (!raw_allocation)
     {
 #if THREAD_CREATE_DEBUG
-        serial_printf("[thread_create] alloc_failed name=%s alloc_size=0x%016llX\r\n",
+        if (sched_trace)
+        {
+            SCHED_DBG("[thread_create] alloc_failed name=%s alloc_size=0x%016llX\r\n",
                       name ? name : "<null>",
                       (unsigned long long)allocation_size);
+        }
 #endif
         free(thread);
         return NULL;
     }
 
 #if THREAD_CREATE_DEBUG
-    serial_printf("[thread_create] using_allocation raw=%016llX guard_base=%016llX guard_bytes=0x%016llX "
+    if (sched_trace)
+    {
+        SCHED_DBG("[thread_create] using_allocation raw=%016llX guard_base=%016llX guard_bytes=0x%016llX "
                   "aligned_stack=0x%016llX\r\n",
                   (unsigned long long)((uintptr_t)raw_allocation),
                   (unsigned long long)((uintptr_t)guard_base),
                   (unsigned long long)guard_bytes,
                   (unsigned long long)aligned_stack);
+    }
 #endif
 
     memset(guard_base, STACK_GUARD_PATTERN, guard_bytes);
@@ -267,14 +289,20 @@ static thread_t *thread_create(process_t *process,
     thread->stack_guard_base = guard_base;
     thread->stack_base = guard_base + guard_bytes;
     thread->stack_size = aligned_stack;
-    serial_printf("[thread_create] stack prepared base=0x%016llX top=0x%016llX size=0x%016llX\r\n",
+    if (sched_trace)
+    {
+        SCHED_DBG("[thread_create] stack prepared base=0x%016llX top=0x%016llX size=0x%016llX\r\n",
                   (unsigned long long)((uintptr_t)thread->stack_base),
                   (unsigned long long)((uintptr_t)(thread->stack_base + aligned_stack)),
                   (unsigned long long)aligned_stack);
+    }
 #if THREAD_CREATE_DEBUG
-    serial_printf("[thread_create] guard_filled base=%016llX size=0x%016llX\r\n",
+    if (sched_trace)
+    {
+        SCHED_DBG("[thread_create] guard_filled base=%016llX size=0x%016llX\r\n",
                   (unsigned long long)((uintptr_t)thread->stack_base),
                   (unsigned long long)thread->stack_size);
+    }
 #endif
 
     uintptr_t stack_limit = ((uintptr_t)thread->stack_base + aligned_stack) & ~(uintptr_t)0xF;
@@ -348,19 +376,25 @@ static thread_t *thread_create(process_t *process,
     thread->wake_pending = false;
     memcpy(&thread->fpu_state, &g_fpu_initial_state, sizeof(fpu_state_t));
 #if THREAD_CREATE_DEBUG
-    serial_printf("[thread_create] stack_frame built sp=0x%016llX limit=0x%016llX usable_limit=0x%016llX\r\n",
+    if (sched_trace)
+    {
+        SCHED_DBG("[thread_create] stack_frame built sp=0x%016llX limit=0x%016llX usable_limit=0x%016llX\r\n",
                   (unsigned long long)((uintptr_t)stack64),
                   (unsigned long long)stack_limit,
                   (unsigned long long)usable_limit);
-    serial_printf("[thread_create] context set name=%s stack_base=0x%016llX stack_top=0x%016llX context=0x%016llX\r\n",
+        SCHED_DBG("[thread_create] context set name=%s stack_base=0x%016llX stack_top=0x%016llX context=0x%016llX\r\n",
                   name ? name : "<null>",
                   (unsigned long long)((uintptr_t)thread->stack_base),
                   (unsigned long long)((uintptr_t)thread->kernel_stack_top),
                   (unsigned long long)((uintptr_t)thread->context));
+    }
 #endif
 
 #if THREAD_CREATE_DEBUG
-    serial_printf("[thread_create] pre_watch name=%s\r\n", name ? name : "<null>");
+    if (sched_trace)
+    {
+        SCHED_DBG("[thread_create] pre_watch name=%s\r\n", name ? name : "<null>");
+    }
 #endif
 
     if (name)

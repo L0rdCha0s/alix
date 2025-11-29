@@ -691,6 +691,7 @@ void kernel_main(void)
 #endif
     procfs_init();
     serial_printf("%s", "[alix] after procfs_init\n");
+    scheduler_log_controls_init();
     logger_init();
     devfs_init();
     serial_printf("%s", "[alix] after devfs_init\n");
@@ -727,26 +728,26 @@ void kernel_main(void)
     serial_printf("%s", "[alix] after rtl8139_init\n");
 #endif
 
-    /* Spawn only the two demo printers; everything else stays disabled. */
-    process_t *printer_a = process_create_kernel("printerA",
-                                                 printer_a_process_entry,
-                                                 NULL,
-                                                 0,
-                                                 -1);
-    if (!printer_a)
-    {
-        serial_printf("%s", "[alix] failed to create printerA\r\n");
-    }
+    // /* Spawn only the two demo printers; everything else stays disabled. */
+    // process_t *printer_a = process_create_kernel("printerA",
+    //                                              printer_a_process_entry,
+    //                                              NULL,
+    //                                              0,
+    //                                              -1);
+    // if (!printer_a)
+    // {
+    //     serial_printf("%s", "[alix] failed to create printerA\r\n");
+    // }
 
-    process_t *printer_b = process_create_kernel("printerB",
-                                                 printer_b_process_entry,
-                                                 NULL,
-                                                 0,
-                                                 -1);
-    if (!printer_b)
-    {
-        serial_printf("%s", "[alix] failed to create printerB\r\n");
-    }
+    // process_t *printer_b = process_create_kernel("printerB",
+    //                                              printer_b_process_entry,
+    //                                              NULL,
+    //                                              0,
+    //                                              -1);
+    // if (!printer_b)
+    // {
+    //     serial_printf("%s", "[alix] failed to create printerB\r\n");
+    // }
 
 #if ENABLE_INIT_TCP_TIMER
     process_t *tcp_timer_process = process_create_kernel("tcp_timerd",

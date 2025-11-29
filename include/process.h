@@ -81,6 +81,7 @@ void process_scheduler_set_ready(void);
 bool process_scheduler_ready(void);
 void process_bind_idle_to_bsp(void);
 uint64_t scheduler_switch_count(void);
+void scheduler_log_controls_init(void);
 
 process_t *process_create_kernel(const char *name,
                                  thread_entry_t entry,

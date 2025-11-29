@@ -72,6 +72,7 @@ void shell_output_init_console(shell_output_t *out)
 {
     out->to_file = false;
     out->file = NULL;
+    out->file_offset = 0;
     out->to_buffer = false;
     out->buffer = NULL;
     out->length = 0;
@@ -82,6 +83,7 @@ void shell_output_init_buffer(shell_output_t *out)
 {
     out->to_file = false;
     out->file = NULL;
+    out->file_offset = 0;
     out->to_buffer = true;
     out->buffer = NULL;
     out->length = 0;
@@ -102,6 +104,7 @@ bool shell_output_prepare_file(shell_output_t *out, vfs_node_t *file)
         free(out->buffer);
         out->buffer = NULL;
     }
+    out->file_offset = 0;
     out->length = 0;
     out->capacity = 0;
     return true;
@@ -155,7 +158,17 @@ bool shell_output_write_len(shell_output_t *out, const char *text, size_t len)
 
     if (out->to_file)
     {
-        return vfs_append(out->file, text, len);
+        if (!out->file)
+        {
+            return false;
+        }
+        ssize_t written = vfs_write_at(out->file, out->file_offset, text, len);
+        if (written < 0)
+        {
+            return false;
+        }
+        out->file_offset += (size_t)written;
+        return written == (ssize_t)len;
     }
     if (out->to_buffer)
     {
@@ -251,6 +264,7 @@ void shell_output_reset(shell_output_t *out)
     }
     out->to_file = false;
     out->file = NULL;
+    out->file_offset = 0;
     out->to_buffer = false;
     out->length = 0;
     out->capacity = 0;
