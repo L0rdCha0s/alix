@@ -4,7 +4,7 @@
 #include "types.h"
 #include "spinlock.h"
 
-#define PAGING_MAX_EXTRA_PAGES 64
+#define PAGING_MAX_EXTRA_PAGES 512
 
 typedef struct paging_extra_page
 {

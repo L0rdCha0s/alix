@@ -1036,7 +1036,10 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
         return false;
     }
 
-    uint64_t lock_flags = paging_lock();
+    paging_space_t *space = &g_kernel_space;
+    bool used_global = false;
+    uint64_t lock_flags = paging_space_lock(space, &used_global);
+    bool ok = false;
 
     /* Never flip permissions on the stack we are currently running on; doing so
      * would fault as soon as this function touches its own locals. */
@@ -1051,13 +1054,11 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
             uintptr_t range_end = align_up(virtual_addr + length, PAGE_SIZE_BYTES);
             if (!(range_end <= stack_start || range_start >= stack_end))
             {
-                paging_unlock(lock_flags);
-                return false;
+                goto out;
             }
         }
     }
 
-    paging_space_t *space = &g_kernel_space;
     uintptr_t start = align_down(virtual_addr, PAGE_SIZE_BYTES);
     uintptr_t end = align_up(virtual_addr + length, PAGE_SIZE_BYTES);
     bool changed = false;
@@ -1067,14 +1068,12 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
         uint64_t *pt = NULL;
         if (!ensure_page_table(space, start, false, &pt))
         {
-            paging_unlock(lock_flags);
-            return false;
+            goto out;
         }
         size_t pt_idx = index_pt(start);
         if ((pt[pt_idx] & PAGE_PRESENT) == 0)
         {
-            paging_unlock(lock_flags);
-            return false;
+            goto out;
         }
         if (writable)
         {
@@ -1104,8 +1103,11 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
         paging_flush_space_tlb(&g_kernel_space);
     }
 
-    paging_unlock(lock_flags);
-    return true;
+    ok = true;
+
+out:
+    paging_space_unlock(space, used_global, lock_flags);
+    return ok;
 }
 
 void paging_handle_remote_tlb_flush(void)
