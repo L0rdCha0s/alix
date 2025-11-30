@@ -348,7 +348,7 @@ ssize_t shell_service_poll(uint32_t handle,
     {
         session->running = false;
     }
-    shell_session_log(session, "poll_after_cleanup");
+    //shell_session_log(session, "poll_after_cleanup");
 
     size_t available = 0;
     if (session->capture_len > session->read_offset)

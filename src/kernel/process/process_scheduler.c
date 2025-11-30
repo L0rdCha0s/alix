@@ -420,18 +420,15 @@ static uint32_t scheduler_select_target_cpu(thread_t *thread)
         return 0;
     }
 
-    /* Prefer the current CPU so short tasks start immediately; fall back to hash. */
-    uint32_t start = current_cpu_index();
-    if (start >= limit || !scheduler_cpu_online(start))
+    /* Spread work; hash by pid for stability, otherwise random. */
+    uint32_t start = 0;
+    if (thread && thread->process)
     {
-        if (thread && thread->process)
-        {
-            start = (uint32_t)(thread->process->pid % (uint64_t)limit);
-        }
-        else
-        {
-            start = scheduler_rand32() % limit;
-        }
+        start = (uint32_t)(thread->process->pid % (uint64_t)limit);
+    }
+    else
+    {
+        start = scheduler_rand32() % limit;
     }
 
     for (uint32_t attempt = 0; attempt < limit; ++attempt)
