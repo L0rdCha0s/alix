@@ -1,6 +1,8 @@
 extern uint64_t g_scheduler_switch_count;
 #include "sched_log.h"
 #include "procfs.h"
+#include "smp.h"
+#include "lapic.h"
 
 static bool scheduler_stack_make_writable(thread_t *thread, const char *context)
 {
@@ -418,15 +420,18 @@ static uint32_t scheduler_select_target_cpu(thread_t *thread)
         return 0;
     }
 
-    /* Spread work; hash by pid for stability, otherwise random. */
-    uint32_t start = 0;
-    if (thread && thread->process)
+    /* Prefer the current CPU so short tasks start immediately; fall back to hash. */
+    uint32_t start = current_cpu_index();
+    if (start >= limit || !scheduler_cpu_online(start))
     {
-        start = (uint32_t)(thread->process->pid % (uint64_t)limit);
-    }
-    else
-    {
-        start = scheduler_rand32() % limit;
+        if (thread && thread->process)
+        {
+            start = (uint32_t)(thread->process->pid % (uint64_t)limit);
+        }
+        else
+        {
+            start = scheduler_rand32() % limit;
+        }
     }
 
     for (uint32_t attempt = 0; attempt < limit; ++attempt)
@@ -443,6 +448,21 @@ static uint32_t scheduler_select_target_cpu(thread_t *thread)
 static inline thread_priority_t scheduler_queue_priority(void)
 {
     return THREAD_PRIORITY_NORMAL;
+}
+
+static void scheduler_nudge_cpu(uint32_t cpu_index)
+{
+    uint32_t self = current_cpu_index();
+    if (cpu_index == self)
+    {
+        return;
+    }
+    const smp_cpu_t *cpu = smp_cpu_by_index(cpu_index);
+    if (!cpu || !cpu->present || !__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE))
+    {
+        return;
+    }
+    lapic_send_ipi(cpu->apic_id, SMP_SCHEDULE_IPI_VECTOR);
 }
 
 static void run_queue_push_locked(run_queue_t *queue, thread_t *thread)
@@ -703,6 +723,7 @@ static void enqueue_thread_on_cpu_locked(thread_t *thread, uint32_t cpu_index)
     run_queue_lock_release(queue, flags);
     scheduler_log_enqueue(thread, target_cpu, "enqueue");
     scheduler_shell_log("enqueued", thread);
+    scheduler_nudge_cpu(target_cpu);
 }
 
 static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
@@ -1482,6 +1503,26 @@ static bool switch_to_thread(thread_t *next)
         return false;
     }
 
+    if (next_process && !process_pointer_valid(next_process))
+    {
+        scheduler_lock_release(sched_lock_enter);
+        serial_printf("[sched] fatal: invalid process ptr thread=%s pid=0x%016llX proc=0x%016llX\r\n",
+                      scheduler_thread_name(next),
+                      (unsigned long long)scheduler_thread_pid(next),
+                      (unsigned long long)((uint64_t)(uintptr_t)next_process));
+        fatal("switch_to_invalid_process");
+    }
+
+    if (next_process && (next_process == (process_t *)next))
+    {
+        scheduler_lock_release(sched_lock_enter);
+        serial_printf("[sched] fatal: thread->process self thread=%s pid=0x%016llX thread_ptr=0x%016llX\r\n",
+                      scheduler_thread_name(next),
+                      (unsigned long long)scheduler_thread_pid(next),
+                      (unsigned long long)(uintptr_t)next);
+        fatal("switch_to_self_process_ptr");
+    }
+
     if (!thread_context_in_bounds(next, "switch_to"))
     {
         thread_quarantine_corrupt(next, "switch_to_ctx_bounds");
@@ -1554,6 +1595,22 @@ static bool switch_to_thread(thread_t *next)
     spinlock_unlock(&next->context_lock);
 
     uint64_t desired_cr3 = next_process ? next_process->cr3 : read_cr3();
+    if (next_process &&
+        ((desired_cr3 & (PAGE_SIZE_BYTES_LOCAL - 1)) != 0 || desired_cr3 == 0))
+    {
+        scheduler_lock_release(sched_lock_enter);
+        serial_printf("[sched] fatal: bad cr3 thread=%s pid=0x%016llX proc=0x%016llX cr3=0x%016llX proc_state=%d magic=0x%08X as_cr3=0x%016llX as_base=0x%016llX as_size=0x%016llX\r\n",
+                      scheduler_thread_name(next),
+                      (unsigned long long)scheduler_thread_pid(next),
+                      (unsigned long long)(uintptr_t)next_process,
+                      (unsigned long long)desired_cr3,
+                      (int)next_process->state,
+                      (unsigned)next_process->magic,
+                      (unsigned long long)next_process->address_space.cr3,
+                      (unsigned long long)(uintptr_t)next_process->address_space.allocation_base,
+                      (unsigned long long)next_process->address_space.allocation_size);
+        fatal("switch_to_bad_cr3");
+    }
     if (desired_cr3 && desired_cr3 != read_cr3())
     {
         write_cr3(desired_cr3);

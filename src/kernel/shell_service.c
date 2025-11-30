@@ -7,6 +7,7 @@
 #include "shell.h"
 #include "spinlock.h"
 #include "vfs.h"
+#include "serial.h"
 
 typedef struct shell_session
 {
@@ -56,6 +57,24 @@ static int shell_session_fd_close(void *ctx);
 static void shell_session_stream(void *context, const char *data, size_t len);
 static void shell_session_exec_task(void *arg);
 static process_t *shell_session_cleanup_runner_locked(shell_session_t *session);
+
+static void shell_session_log(shell_session_t *session, const char *tag)
+{
+    if (!session || !tag)
+    {
+        return;
+    }
+    process_t *runner = session->runner;
+    uint64_t runner_pid = runner ? process_get_pid(runner) : 0;
+    uint64_t owner_pid = session->owner ? process_get_pid(session->owner) : 0;
+    serial_printf("[shellsvc] %s handle=%u running=%s completed=%s runner=0x%016llX owner=0x%016llX\r\n",
+                  tag,
+                  (unsigned)session->handle,
+                  session->running ? "true" : "false",
+                  session->completed ? "true" : "false",
+                  (unsigned long long)runner_pid,
+                  (unsigned long long)owner_pid);
+}
 
 static const fd_ops_t g_shell_session_fd_ops = {
     .read = NULL,
@@ -168,12 +187,16 @@ int shell_service_exec(uint32_t handle,
     shell_session_t *session = shell_session_find_locked(handle, owner);
     if (!session)
     {
+        serial_printf("[shellsvc] exec lookup failed handle=%u owner=0x%016llX\r\n",
+                      (unsigned)handle,
+                      (unsigned long long)(owner ? process_get_pid(owner) : 0));
         free(line);
         return -1;
     }
 
     if (session->running)
     {
+        shell_session_log(session, "exec_rejected_running");
         shell_session_unlock(session);
         free(line);
         return -1;
@@ -184,6 +207,7 @@ int shell_service_exec(uint32_t handle,
     session->running = true;
     session->completed = false;
     session->last_status = 0;
+    shell_session_log(session, "exec_start");
     shell_session_unlock(session);
 
     if (zombie)
@@ -214,6 +238,7 @@ int shell_service_exec(uint32_t handle,
         shell_session_lock(session);
         session->running = false;
         shell_session_unlock(session);
+        shell_session_log(session, "exec_create_failed");
         free(task->line);
         free(task);
         return -1;
@@ -221,6 +246,7 @@ int shell_service_exec(uint32_t handle,
 
     shell_session_lock(session);
     session->runner = proc;
+    shell_session_log(session, "exec_runner_set");
     shell_session_unlock(session);
     return 0;
 }
@@ -322,6 +348,7 @@ ssize_t shell_service_poll(uint32_t handle,
     {
         session->running = false;
     }
+    shell_session_log(session, "poll_after_cleanup");
 
     size_t available = 0;
     if (session->capture_len > session->read_offset)
@@ -577,12 +604,23 @@ static void shell_session_exec_task(void *arg)
     shell_exec_task_t *task = (shell_exec_task_t *)arg;
     if (!task || !task->session || !task->line)
     {
+        serial_printf("[shellsvc] worker_bad_task task=%p session=%p line=%p\r\n",
+                      (void *)task,
+                      task ? (void *)task->session : NULL,
+                      task ? (void *)task->line : NULL);
         process_exit(-1);
     }
 
     shell_session_t *session = task->session;
+    shell_session_log(session, "worker_begin");
+    serial_printf("[shellsvc] worker_exec handle=%u entering execute_line\r\n",
+                  (unsigned)session->handle);
     bool success = false;
     char *result = shell_execute_line(&session->state, task->line, &success);
+    serial_printf("[shellsvc] worker_exec handle=%u execute_line_done success=%s result=%p\r\n",
+                  (unsigned)session->handle,
+                  success ? "true" : "false",
+                  (void *)result);
     if (result)
     {
         shell_session_append(session, result, strlen(result));
@@ -595,6 +633,7 @@ static void shell_session_exec_task(void *arg)
     session->running = false;
     session->completed = true;
     session->last_status = success ? 0 : -1;
+    shell_session_log(session, "worker_end");
     shell_session_unlock(session);
     process_exit(0);
 }
@@ -611,6 +650,7 @@ static process_t *shell_session_cleanup_runner_locked(shell_session_t *session)
         runner = session->runner;
         session->runner = NULL;
         session->running = false;
+        shell_session_log(session, "cleanup_runner");
     }
     return runner;
 }

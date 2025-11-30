@@ -406,7 +406,13 @@ void usb_hid_init(void)
         }
         else
         {
-            serial_printf("%s", "[usb] keyboard thread started\r\n");
+            process_user_layout_t layout = { 0 };
+            process_query_user_layout(kbd_thread, &layout);
+            serial_printf("[usb] keyboard thread started proc=0x%016llX pid=0x%016llX cr3=0x%016llX as_cr3=0x%016llX\r\n",
+                          (unsigned long long)(uintptr_t)kbd_thread,
+                          (unsigned long long)process_get_pid(kbd_thread),
+                          (unsigned long long)layout.cr3,
+                          (unsigned long long)layout.cr3);
         }
     }
     if (g_mouse)
@@ -418,7 +424,13 @@ void usb_hid_init(void)
         }
         else
         {
-            serial_printf("%s", "[usb] mouse thread started\r\n");
+            process_user_layout_t layout = { 0 };
+            process_query_user_layout(m_thread, &layout);
+            serial_printf("[usb] mouse thread started proc=0x%016llX pid=0x%016llX cr3=0x%016llX as_cr3=0x%016llX\r\n",
+                          (unsigned long long)(uintptr_t)m_thread,
+                          (unsigned long long)process_get_pid(m_thread),
+                          (unsigned long long)layout.cr3,
+                          (unsigned long long)layout.cr3);
         }
     }
 }

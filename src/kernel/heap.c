@@ -766,6 +766,19 @@ static heap_block_t *find_suitable_block(size_t size, void *caller)
         heap_block_t *block = g_free_bins[bin];
         while (block)
         {
+            if (!block->free)
+            {
+                /* Encountered an allocated block still linked in a free bin: clean it up. */
+                heap_block_t *next = block->free_next;
+                free_list_remove_locked(block, bin);
+                serial_printf("[heap] free bin corruption block=0x%016llX size=0x%016llX bin=%llu caller=0x%016llX\r\n",
+                              (unsigned long long)((uintptr_t)block),
+                              (unsigned long long)block->size,
+                              (unsigned long long)bin,
+                              (unsigned long long)((uintptr_t)caller));
+                block = next;
+                continue;
+            }
             if (block->size >= size)
             {
                 return block;

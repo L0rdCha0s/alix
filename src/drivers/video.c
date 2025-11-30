@@ -6,6 +6,7 @@
 #include "atk/atk_list.h"
 #include "pci.h"
 #include "keyboard.h"
+#include "process.h"
 #include "libc.h"
 #include "font.h"
 #include "console.h"
@@ -1102,7 +1103,8 @@ void video_run_loop(void)
         {
             video_perform_refresh();
         }
-        __asm__ volatile ("hlt");
+        /* Yield briefly so USB/other input threads can run even if no IRQ fires. */
+        process_sleep_ms(1);
     }
     video_log("video_run_loop end");
 }

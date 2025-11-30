@@ -66,6 +66,12 @@ static process_t *allocate_process(const char *name, bool is_user)
     }
     process_create_log(name, needs_clone ? "clone_done" : "share_done");
     proc->cr3 = proc->address_space.cr3;
+    serial_printf("[process] alloc detail ptr=0x%016llX name=%s pid=0x%016llX cr3=0x%016llX as_cr3=0x%016llX\r\n",
+                  (unsigned long long)(uintptr_t)proc,
+                  (name && name[0]) ? name : "<unnamed>",
+                  (unsigned long long)proc->pid,
+                  (unsigned long long)proc->cr3,
+                  (unsigned long long)proc->address_space.cr3);
     if (name)
     {
         size_t len = strlen(name);

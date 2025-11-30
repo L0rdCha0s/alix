@@ -133,6 +133,13 @@ static process_t *process_finalize_new_process(process_t *proc,
 
     proc->main_thread = thread;
     proc->current_thread = thread;
+    serial_printf("[process] finalize proc=0x%016llX name=%s pid=0x%016llX cr3=0x%016llX as_cr3=0x%016llX main_thread=0x%016llX\r\n",
+                  (unsigned long long)(uintptr_t)proc,
+                  proc->name[0] ? proc->name : "<unnamed>",
+                  (unsigned long long)proc->pid,
+                  (unsigned long long)proc->cr3,
+                  (unsigned long long)proc->address_space.cr3,
+                  (unsigned long long)(uintptr_t)thread);
     spinlock_lock(&g_process_lock);
     proc->next = g_process_list;
     g_process_list = proc;
@@ -183,6 +190,15 @@ static thread_t *thread_create(process_t *process,
             SCHED_DBG("%s", "[thread_create] malloc thread struct failed\r\n");
         }
         return NULL;
+    }
+    if (thread == (thread_t *)process)
+    {
+        serial_printf("[thread_create] fatal: thread struct overlap process name=%s proc=0x%016llX thread=0x%016llX pid=0x%016llX\r\n",
+                      name ? name : "<null>",
+                      (unsigned long long)(uintptr_t)process,
+                      (unsigned long long)(uintptr_t)thread,
+                      (unsigned long long)(process ? process->pid : 0));
+        fatal("thread_create overlap");
     }
     if (sched_trace)
     {
