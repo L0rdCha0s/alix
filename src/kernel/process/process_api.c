@@ -755,6 +755,7 @@ void wait_queue_wake_one(wait_queue_t *queue)
     spinlock_lock(&queue->lock);
 
     thread_t *thread = wait_queue_dequeue_locked(queue);
+    thread_t *to_enqueue = NULL;
     if (thread)
     {
         thread->waiting_queue = NULL;
@@ -764,22 +765,21 @@ void wait_queue_wake_one(wait_queue_t *queue)
             !thread->exited &&
             !thread_in_run_queue_load(thread))
         {
-            uint32_t rc = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
-            if (rc != RUN_QUEUE_CPU_INVALID)
-            {
-                thread->wake_pending = true;
-            }
-            else
-            {
-                thread->state = THREAD_STATE_READY;
-                enqueue_thread(thread);
-            }
+            thread->wake_pending = false;
+            thread->state = THREAD_STATE_READY;
+            __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
+            to_enqueue = thread;
         }
     }
 
     spinlock_unlock(&queue->lock);
     scheduler_lock_release(sched_flags);
     cpu_restore_flags(flags);
+
+    if (to_enqueue)
+    {
+        enqueue_thread(to_enqueue);
+    }
 }
 
 void wait_queue_wake_all(wait_queue_t *queue)
@@ -793,6 +793,9 @@ void wait_queue_wake_all(wait_queue_t *queue)
     uint64_t sched_flags = scheduler_lock_acquire("wait_queue_wake_all");
     spinlock_lock(&queue->lock);
 
+    thread_t *pending[32];
+    size_t pending_count = 0;
+
     thread_t *thread = wait_queue_dequeue_locked(queue);
     while (thread)
     {
@@ -803,15 +806,12 @@ void wait_queue_wake_all(wait_queue_t *queue)
             !thread->exited &&
             !thread_in_run_queue_load(thread))
         {
-            uint32_t rc = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
-            if (rc != RUN_QUEUE_CPU_INVALID)
+            thread->wake_pending = false;
+            thread->state = THREAD_STATE_READY;
+            __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
+            if (pending_count < (sizeof(pending) / sizeof(pending[0])))
             {
-                thread->wake_pending = true;
-            }
-            else
-            {
-                thread->state = THREAD_STATE_READY;
-                enqueue_thread(thread);
+                pending[pending_count++] = thread;
             }
         }
         thread = wait_queue_dequeue_locked(queue);
@@ -820,6 +820,11 @@ void wait_queue_wake_all(wait_queue_t *queue)
     spinlock_unlock(&queue->lock);
     scheduler_lock_release(sched_flags);
     cpu_restore_flags(flags);
+
+    for (size_t i = 0; i < pending_count; ++i)
+    {
+        enqueue_thread(pending[i]);
+    }
 }
 
 void process_set_priority(process_t *process, thread_priority_t priority)
@@ -1320,13 +1325,23 @@ void process_debug_log_stack_write(const char *label,
         thread_t *rsp_owner = thread_find_stack_owner((uintptr_t)rsp_now, 1);
         if (rsp_owner && rsp_owner != writer)
         {
-            serial_printf("[stack-owner-mismatch] ctx=%s writer=%s pid=0x%016llX rsp=0x%016llX owner=%s owner_pid=0x%016llX\r\n",
-                          label ? label : "<none>",
-                          writer->name[0] ? writer->name : "<unnamed>",
-                          (unsigned long long)(writer->process ? writer->process->pid : 0),
-                          (unsigned long long)rsp_now,
-                          (rsp_owner->name[0]) ? rsp_owner->name : "<unnamed>",
-                          (unsigned long long)(rsp_owner->process ? rsp_owner->process->pid : 0));
+            /* During a context switch we may have already published the incoming thread
+             * while still running on the outgoing stack; treat that case as if the
+             * outgoing owner is still current to avoid false cross-stack noise. */
+            if (writer->in_transition)
+            {
+                writer = rsp_owner;
+            }
+            else
+            {
+                serial_printf("[stack-owner-mismatch] ctx=%s writer=%s pid=0x%016llX rsp=0x%016llX owner=%s owner_pid=0x%016llX\r\n",
+                              label ? label : "<none>",
+                              writer->name[0] ? writer->name : "<unnamed>",
+                              (unsigned long long)(writer->process ? writer->process->pid : 0),
+                              (unsigned long long)rsp_now,
+                              (rsp_owner->name[0]) ? rsp_owner->name : "<unnamed>",
+                              (unsigned long long)(rsp_owner->process ? rsp_owner->process->pid : 0));
+            }
         }
     }
 

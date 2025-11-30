@@ -516,6 +516,17 @@ static void storage_flush_timer_callback(void *context)
     }
     if (storage_flush_should_wake(NULL))
     {
+        static volatile uint32_t g_flushd_timer_wake_log = 0;
+        uint32_t count = __atomic_add_fetch(&g_flushd_timer_wake_log, 1, __ATOMIC_RELAXED);
+        if (count <= 16)
+        {
+            uint64_t ticks = timer_ticks();
+            uint64_t deadline = __atomic_load_n(&g_flushd_wait_deadline, __ATOMIC_ACQUIRE);
+            serial_printf("[flushd] timer wake at tick=%llu deadline=%llu req=%u\r\n",
+                          (unsigned long long)ticks,
+                          (unsigned long long)deadline,
+                          (unsigned int)__atomic_load_n(&g_flushd_wake_requested, __ATOMIC_ACQUIRE));
+        }
         wait_queue_wake_all(&g_flushd_wait_queue);
     }
 }
@@ -562,6 +573,7 @@ static void storage_flush_wait(uint32_t interval_ms)
     /* If we failed to register a periodic wake timer, fall back to polling sleeps. */
     if (!queue_ready || !timer_ready || timer_failed)
     {
+        serial_printf("%s", "[flushd] warn: timer not ready; using sleep fallback\r\n");
         const uint32_t step_ms = (interval_ms < 100) ? interval_ms : 100;
         uint32_t remaining = interval_ms;
         while (remaining > 0)
@@ -588,6 +600,14 @@ static void storage_flush_wait(uint32_t interval_ms)
         return;
     }
     uint64_t deadline = timer_ticks() + ticks;
+    static uint32_t g_flushd_wait_log = 0;
+    uint32_t log_idx = g_flushd_wait_log++;
+    if (log_idx < 8)
+    {
+        serial_printf("[flushd] wait start tick=%llu deadline=%llu\r\n",
+                      (unsigned long long)timer_ticks(),
+                      (unsigned long long)deadline);
+    }
     __atomic_store_n(&g_flushd_wait_deadline, deadline, __ATOMIC_RELEASE);
 
     while (!storage_flush_should_wake(NULL))
@@ -622,11 +642,18 @@ static void storage_flush_process_entry(void *arg)
     {
         process_sleep_ms(100);
     }
+    serial_printf("%s", "[flushd] entering loop\r\n");
     while (1)
     {
 #if ENABLE_FLUSHD
         storage_flush_wait(interval_ms);
         __atomic_store_n(&g_flushd_wake_requested, false, __ATOMIC_RELEASE);
+        static uint32_t g_flushd_awake_log = 0;
+        uint32_t awake_idx = g_flushd_awake_log++;
+        if (awake_idx < 8)
+        {
+            serial_printf("[flushd] awake tick=%llu\r\n", (unsigned long long)timer_ticks());
+        }
 #else
         process_sleep_ms(interval_ms);
 #endif
