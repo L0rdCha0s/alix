@@ -9,6 +9,7 @@
 #include "process.h"
 #include "spinlock.h"
 #include "heap.h"
+#include "sched_log.h"
 #include "build_features.h"
 
 #include <stddef.h>
@@ -136,6 +137,10 @@ static inline void paging_log_hex64(uint64_t value)
 
 static inline void paging_log_lock_event(const char *label, uint32_t cpu)
 {
+    if (!sched_paging_lock_log_enabled())
+    {
+        return;
+    }
     serial_early_write_string("[paging][lock] ");
     serial_early_write_string(label ? label : "?");
     serial_early_write_string(" cpu=0x");

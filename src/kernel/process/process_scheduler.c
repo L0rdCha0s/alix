@@ -2,6 +2,38 @@ extern uint64_t g_scheduler_switch_count;
 #include "sched_log.h"
 #include "procfs.h"
 
+static bool scheduler_stack_make_writable(thread_t *thread, const char *context)
+{
+#if ENABLE_STACK_WRITE_DEBUG || ENABLE_CONTEXT_GUARD
+    if (!thread || !thread->stack_base || thread->kernel_stack_top == 0)
+    {
+        return true;
+    }
+    uintptr_t base = align_down_uintptr((uintptr_t)thread->stack_base, PAGE_SIZE_BYTES_LOCAL);
+    uintptr_t top = align_up_uintptr(thread->kernel_stack_top, PAGE_SIZE_BYTES_LOCAL);
+    if (top <= base)
+    {
+        return true;
+    }
+    size_t length = (size_t)(top - base);
+    if (!paging_set_kernel_range_writable(base, length, true))
+    {
+        const char *name = thread->name[0] ? thread->name : "<unnamed>";
+        SCHED_LOG("[sched] stack unprotect failed thread=%s pid=0x%016llX base=0x%016llX len=0x%016llX ctx=%s\r\n",
+                  name,
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  (unsigned long long)base,
+                  (unsigned long long)length,
+                  context ? context : "<none>");
+        return false;
+    }
+#else
+    (void)thread;
+    (void)context;
+#endif
+    return true;
+}
+
 static thread_priority_t thread_effective_priority(const thread_t *thread);
 
 static inline uint32_t scheduler_cpu_limit(void)
@@ -212,6 +244,8 @@ void scheduler_log_controls_init(void)
     (void)procfs_create_file_at("sys/sched/log_enable", sched_log_read, sched_log_write, &g_sched_log_enable);
     (void)procfs_create_file_at("sys/sched/dbg_enable", sched_log_read, sched_log_write, &g_sched_dbg_enable);
     (void)procfs_create_file_at("sys/sched/sleep_log", sched_log_read, sched_log_write, &g_sched_sleep_log_enable);
+    (void)procfs_create_file_at("sys/sched/paging_lock_log", sched_log_read, sched_log_write, &g_sched_paging_lock_log_enable);
+    (void)procfs_create_file_at("sys/sched/memcpy_log", sched_log_read, sched_log_write, &g_sched_memcpy_log_enable);
 }
 
 static uint32_t scheduler_rand32(void)
@@ -1510,6 +1544,11 @@ static bool switch_to_thread(thread_t *next)
 
     thread_context_guard_release_pages(next);
     thread_stack_watch_deactivate(next);
+    if (!scheduler_stack_make_writable(next, "switch_to"))
+    {
+        scheduler_lock_release(sched_lock_enter);
+        fatal("next stack not writable");
+    }
     spinlock_lock(&next->context_lock);
     next->context_valid = true;
     spinlock_unlock(&next->context_lock);

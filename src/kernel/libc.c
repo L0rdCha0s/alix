@@ -3,9 +3,14 @@
 #include "fd.h"
 #include "process.h"
 #include "serial.h"
+#include "sched_log.h"
 
 static inline void libc_mem_debug(const char *label, void *dst, const void *src, size_t count)
 {
+    if (!sched_memcpy_log_enabled())
+    {
+        return;
+    }
     if (!dst || count == 0)
     {
         return;
@@ -26,15 +31,15 @@ static inline void libc_mem_debug(const char *label, void *dst, const void *src,
 
     if (dst_owner || src_owner || overlap)
     {
-        serial_printf("[memcpy dbg] label=%s dst=0x%016llX src=0x%016llX len=0x%016llX dst_owner=0x%016llX src_owner=0x%016llX overlap=%s caller=0x%016llX\r\n",
-                      label ? label : "<none>",
-                      (unsigned long long)(uintptr_t)dst,
-                      (unsigned long long)(uintptr_t)src,
-                      (unsigned long long)count,
-                      (unsigned long long)(uintptr_t)dst_owner,
-                      (unsigned long long)(uintptr_t)src_owner,
-                      overlap ? "true" : "false",
-                      (unsigned long long)(uintptr_t)caller);
+        SCHED_MEMCPY_LOG("[memcpy dbg] label=%s dst=0x%016llX src=0x%016llX len=0x%016llX dst_owner=0x%016llX src_owner=0x%016llX overlap=%s caller=0x%016llX\r\n",
+                         label ? label : "<none>",
+                         (unsigned long long)(uintptr_t)dst,
+                         (unsigned long long)(uintptr_t)src,
+                         (unsigned long long)count,
+                         (unsigned long long)(uintptr_t)dst_owner,
+                         (unsigned long long)(uintptr_t)src_owner,
+                         overlap ? "true" : "false",
+                         (unsigned long long)(uintptr_t)caller);
     }
 
     process_debug_log_stack_write(label, caller, dst, count);

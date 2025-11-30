@@ -442,9 +442,11 @@ static const uint64_t SCHED_SWITCH_WARN_MS = 500ULL;
 static const uint64_t DEFERRED_FREE_WARN_MS = 250ULL;
 static bool g_bad_saved_rflags_tripped __attribute__((unused)) = false;
 uint64_t g_scheduler_switch_count = 0;
-uint32_t g_sched_log_enable = 1;
-uint32_t g_sched_dbg_enable = 1;
-uint32_t g_sched_sleep_log_enable = 1;
+uint32_t g_sched_log_enable = 0;
+uint32_t g_sched_dbg_enable = 0;
+uint32_t g_sched_sleep_log_enable = 0;
+uint32_t g_sched_paging_lock_log_enable = 0;
+uint32_t g_sched_memcpy_log_enable = 0;
 static uint32_t g_scheduler_rr_cursor = 0;
 
 typedef struct deferred_free_stats
@@ -1546,7 +1548,13 @@ static void thread_stack_watch_deactivate(thread_t *thread)
                                           thread->stack_watch_len,
                                           true))
     {
-        SCHED_LOG("%s", "[sched] warning: unable to disarm stack watch\r\n");
+        const char *name = thread->name[0] ? thread->name : "<unnamed>";
+        SCHED_LOG("[sched] stack watch disarm failed thread=%s pid=0x%016llX base=0x%016llX len=0x%016llX\r\n",
+                  name,
+                  (unsigned long long)(thread->process ? thread->process->pid : 0),
+                  (unsigned long long)thread->stack_watch_base,
+                  (unsigned long long)thread->stack_watch_len);
+        fatal("stack watch deactivate failed");
     }
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
     SCHED_LOG("[sched] stack watch cleared thread=%s pid=0x%016llX\r\n",

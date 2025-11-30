@@ -93,7 +93,7 @@ bool shell_cmd_letters(shell_state_t *shell, shell_output_t *out, const char *ar
                       "letters",
                       letters_sequence,
                       sizeof(letters_sequence) - 1,
-                      200,
+                      3,
                       letters_handle_char);
 }
 
