@@ -23,5 +23,6 @@ void net_tcp_socket_close(net_tcp_socket_t *socket);
 void net_tcp_socket_release(net_tcp_socket_t *socket);
 uint64_t net_tcp_socket_last_activity(const net_tcp_socket_t *socket);
 int net_tcp_socket_fd(const net_tcp_socket_t *socket);
+void net_tcp_log_state(const net_tcp_socket_t *socket, const char *tag);
 
 #endif

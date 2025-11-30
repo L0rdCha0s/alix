@@ -792,22 +792,14 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     }
 #endif
 
-    net_tcp_socket_t *socket = net_tcp_socket_open(iface);
-    if (!socket)
-    {
-        return shell_output_error(out, "no TCP sockets available");
-    }
-    int socket_fd = net_tcp_socket_fd(socket);
-    if (socket_fd < 0)
-    {
-        shell_output_error(out, "failed to allocate socket descriptor");
-        goto cleanup;
-    }
-
+    net_tcp_socket_t *socket = NULL;
+    int socket_fd = -1;
     bool success = false;
     bool tls_active = false;
     tls_session_t *tls_session = NULL;
     vfs_node_t *file = NULL;
+    char *header_buf = NULL;
+    uint8_t *chunk = NULL;
     size_t written = 0;
 #if WGET_PROGRESS_LOG
     uint64_t log_start_ticks = timer_ticks();
@@ -817,6 +809,18 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 #if WGET_TLS_TRACE_ENABLE
     bool tls_trace_logged_first_payload = false;
 #endif
+
+    socket = net_tcp_socket_open(iface);
+    if (!socket)
+    {
+        return shell_output_error(out, "no TCP sockets available");
+    }
+    socket_fd = net_tcp_socket_fd(socket);
+    if (socket_fd < 0)
+    {
+        shell_output_error(out, "failed to allocate socket descriptor");
+        goto cleanup;
+    }
 
     if (!net_tcp_socket_connect(socket, remote_ip, remote_port))
     {
@@ -968,8 +972,16 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     serial_printf("[wget] sent request bytes=%zu\r\n", req_len);
 #endif
     shell_output_write(out, "Request sent, awaiting response...\n");
+    serial_printf("%s", "[wget] enter recv loop\r\n");
 
-    char header_buf[WGET_HEADER_CAP];
+    header_buf = (char *)malloc(WGET_HEADER_CAP);
+    chunk = (uint8_t *)malloc(WGET_CHUNK_SIZE);
+    if (!header_buf || !chunk)
+    {
+        shell_output_error(out, "buffer allocation failed");
+        goto cleanup;
+    }
+
     size_t header_len = 0;
     bool header_done = false;
     bool header_parsed = false;
@@ -980,21 +992,50 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     chunked_state_t cstate;
     bool chunked_done = false;
     uint64_t last_progress = timer_ticks();
+    uint64_t last_status_log = last_progress;
 
-    uint8_t chunk[WGET_CHUNK_SIZE];
+    uint64_t loop_iter = 0;
 
     while (1)
     {
+        serial_printf("[wget] loop iter=%llu header_done=%u written=%zu\r\n",
+                      (unsigned long long)loop_iter++,
+                      header_done ? 1U : 0U,
+                      written);
         if (net_tcp_socket_has_error(socket))
         {
             shell_output_error(out, "TCP connection error");
             goto cleanup;
         }
 
+        uint64_t now_status = timer_ticks();
+        if (now_status - last_status_log >= timer_frequency())
+        {
+            size_t avail = net_tcp_socket_available(socket);
+            net_tcp_log_state(socket, "wget_loop");
+            serial_printf("[wget] status header_done=%u header_len=%zu parsed=%u chunked=%u chunked_done=%u have_len=%u content_len=%zu written=%zu avail=%zu remote_closed=%u tls=%u\r\n",
+                          header_done ? 1U : 0U,
+                          header_len,
+                          header_parsed ? 1U : 0U,
+                          is_chunked ? 1U : 0U,
+                          chunked_done ? 1U : 0U,
+                          have_length ? 1U : 0U,
+                          content_length,
+                          written,
+                          avail,
+                          net_tcp_socket_remote_closed(socket) ? 1U : 0U,
+                          tls_active ? 1U : 0U);
+            last_status_log = now_status;
+        }
+
         size_t bytes_read = 0;
         if (tls_active)
         {
-            bytes_read = tls_session_recv(tls_session, chunk, sizeof(chunk));
+            bytes_read = tls_session_recv(tls_session, chunk, WGET_CHUNK_SIZE);
+            serial_printf("[wget] recv tls bytes=%zu err=%u remote_closed=%u\r\n",
+                          bytes_read,
+                          net_tcp_socket_has_error(socket) ? 1U : 0U,
+                          net_tcp_socket_remote_closed(socket) ? 1U : 0U);
 #if WGET_TLS_TRACE_ENABLE
             if (bytes_read > 0 && !tls_trace_logged_first_payload)
             {
@@ -1026,6 +1067,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     serial_printf("[wget] waiting for data... elapsed=%llums written=%zu\r\n",
                                   (unsigned long long)wget_ticks_to_ms(now - log_start_ticks),
                                   written);
+                    net_tcp_log_state(socket, "wget_wait");
                     last_wait_log = now;
                 }
 #endif
@@ -1040,7 +1082,11 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         }
         else
         {
-            ssize_t got = read(socket_fd, chunk, sizeof(chunk));
+            ssize_t got = read(socket_fd, chunk, WGET_CHUNK_SIZE);
+            serial_printf("[wget] recv plain bytes=%zd err=%u remote_closed=%u\r\n",
+                          (long long)got,
+                          net_tcp_socket_has_error(socket) ? 1U : 0U,
+                          net_tcp_socket_remote_closed(socket) ? 1U : 0U);
             if (got < 0)
             {
                 shell_output_error(out, "socket read failed");
@@ -1070,6 +1116,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     serial_printf("[wget] waiting for data... elapsed=%llums written=%zu\r\n",
                                   (unsigned long long)wget_ticks_to_ms(now - log_start_ticks),
                                   written);
+                    net_tcp_log_state(socket, "wget_wait");
                     last_wait_log = now;
                 }
 #endif
@@ -1090,7 +1137,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         {
             while (!header_done && offset < bytes_read)
             {
-                if (header_len >= sizeof(header_buf) - 1)
+                if (header_len >= WGET_HEADER_CAP - 1)
                 {
                     shell_output_error(out, "HTTP headers too large");
                     goto cleanup;
@@ -1150,34 +1197,35 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     }
                 }
 
-                if (!is_chunked && find_header_value(header_buf, "content-length", value, sizeof(value)))
+                if (!is_chunked &&
+                    find_header_value(header_buf, "content-length", value, sizeof(value)))
                 {
-                if (!parse_decimal_size(value, &content_length))
-                {
-                    shell_output_error(out, "invalid Content-Length");
-                    goto cleanup;
-                }
-#if WGET_TRACE_ENABLE
-                shell_output_write(out, "debug: content-length=");
-                char len_buf[24];
-                if (!format_decimal(len_buf, sizeof(len_buf), (unsigned)content_length, NULL))
-                {
-                    len_buf[0] = '\0';
-                }
-                shell_output_write(out, len_buf);
-                shell_output_write(out, "\n");
-#endif
-                have_length = true;
-                if (file && !file_preallocated)
-                {
-                    if (!vfs_reserve(file, content_length))
+                    if (!parse_decimal_size(value, &content_length))
                     {
-                        shell_output_error(out, "failed to reserve file storage");
+                        shell_output_error(out, "invalid Content-Length");
                         goto cleanup;
                     }
-                    file_preallocated = true;
+#if WGET_TRACE_ENABLE
+                    shell_output_write(out, "debug: content-length=");
+                    char len_buf[24];
+                    if (!format_decimal(len_buf, sizeof(len_buf), (unsigned)content_length, NULL))
+                    {
+                        len_buf[0] = '\0';
+                    }
+                    shell_output_write(out, len_buf);
+                    shell_output_write(out, "\n");
+#endif
+                    have_length = true;
+                    if (file && !file_preallocated)
+                    {
+                        if (!vfs_reserve(file, content_length))
+                        {
+                            shell_output_error(out, "failed to reserve file storage");
+                            goto cleanup;
+                        }
+                        file_preallocated = true;
+                    }
                 }
-            }
 
                 header_parsed = true;
             }
@@ -1284,6 +1332,16 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     shell_output_write(out, "\n");
 
 cleanup:
+    if (chunk)
+    {
+        free(chunk);
+        chunk = NULL;
+    }
+    if (header_buf)
+    {
+        free(header_buf);
+        header_buf = NULL;
+    }
     if (tls_session)
     {
         tls_session_close(tls_session);
