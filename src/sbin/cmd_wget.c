@@ -9,6 +9,7 @@
 #include "net/dns.h"
 #include "net/tcp.h"
 #include "net/tls.h"
+#include "process.h"
 #include "serial.h"
 #include "timer.h"
 #include "timekeeping.h"
@@ -838,12 +839,13 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             shell_output_error(out, "TCP handshake failed");
             goto cleanup;
         }
-        if (timer_ticks() - start >= connect_timeout)
+        uint64_t now = timer_ticks();
+        if (now - start >= connect_timeout)
         {
             shell_output_error(out, "TCP connect timeout");
             goto cleanup;
         }
-        __asm__ volatile ("pause");
+        process_sleep_ms(1);
     }
 #if WGET_PROGRESS_LOG
     {

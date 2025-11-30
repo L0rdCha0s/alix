@@ -48,6 +48,7 @@ static inline void tcp_irq_restore(uint64_t flags)
 
 #define NET_TCP_MAX_SOCKETS           4
 #define NET_TCP_MAX_PAYLOAD           1460
+#define NET_TCP_DEFAULT_MSS           NET_TCP_MAX_PAYLOAD
 #define NET_TCP_RX_MAX_CAPACITY       (5U * 1024U * 1024U)
 #define NET_TCP_RX_WAKE_THRESHOLD     (NET_TCP_MAX_PAYLOAD * 4U)
 #define NET_TCP_RX_RESUME_THRESHOLD   (NET_TCP_MAX_PAYLOAD * 16U)
@@ -112,6 +113,7 @@ struct net_tcp_socket
     uint64_t reass_last_ack_tick;
     bool remote_closed;
     bool error;
+    uint16_t mss;
 
     uint64_t last_send_tick;
     uint64_t last_activity_tick;
@@ -122,6 +124,7 @@ struct net_tcp_socket
     wait_queue_t wait_queue;
     uint64_t debug_last_log_tick;
     thread_t *owner;
+    uint8_t syn_challenge_acks;
 };
 
 static void tcp_log_send_block(const net_tcp_socket_t *socket, const char *reason, size_t len)
@@ -246,7 +249,7 @@ void net_tcp_init(void)
 
     g_retransmit_ticks = (freq / 2U) ? (freq / 2U) : 1U;
     g_arp_retry_ticks = (freq / 2U) ? (freq / 2U) : 1U;
-    g_connect_timeout_ticks = freq * 4U;
+    g_connect_timeout_ticks = freq * 12U;
     if (g_connect_timeout_ticks < freq)
     {
         g_connect_timeout_ticks = freq;
@@ -276,9 +279,11 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
     socket->state = TCP_STATE_UNUSED;
     wait_queue_init(&socket->wait_queue);
     socket->remote_window = 4096;
-    socket->max_retries = 6;
+    socket->max_retries = 10;
     socket->advertised_window = 0;
     socket->owner = NULL;
+    socket->mss = NET_TCP_DEFAULT_MSS;
+    socket->syn_challenge_acks = 0;
     if (fd_registered && fd >= 0)
     {
         fd_release(fd);
@@ -801,7 +806,9 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
     socket->pending_flags = 0;
     socket->pending_payload_len = 0;
     socket->retry_count = 0;
-    socket->max_retries = 6;
+    socket->max_retries = 10;
+    socket->syn_challenge_acks = 0;
+    socket->mss = NET_TCP_DEFAULT_MSS;
 
     uint64_t now = timer_ticks();
     socket->last_activity_tick = now;
@@ -835,13 +842,14 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
 bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t len)
 {
     uint64_t lock_flags = tcp_lock();
+    size_t max_payload = socket ? (size_t)socket->mss : (size_t)NET_TCP_DEFAULT_MSS;
     if (!socket || !data || len == 0)
     {
         tcp_log_send_block(socket, "invalid", len);
         tcp_unlock(lock_flags);
         return false;
     }
-    if (len > NET_TCP_MAX_PAYLOAD)
+    if (len > max_payload)
     {
         tcp_log_send_block(socket, "oversize", len);
         tcp_unlock(lock_flags);
@@ -859,7 +867,15 @@ bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t l
         tcp_unlock(lock_flags);
         return false;
     }
-    if (socket->remote_window != 0 && socket->remote_window < len)
+    if (socket->remote_window == 0)
+    {
+        tcp_log_send_block(socket, "remote_window0", len);
+        tcp_unlock(lock_flags);
+        return false;
+    }
+
+    size_t outstanding = socket->awaiting_ack ? socket->unacked_len : 0;
+    if (socket->remote_window != 0 && socket->remote_window < outstanding + len)
     {
         tcp_log_send_block(socket, "remote_window", len);
         tcp_unlock(lock_flags);
@@ -868,8 +884,14 @@ bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t l
 
     if (socket->awaiting_ack)
     {
-        size_t outstanding = socket->pending_payload_len;
-        if (outstanding + len > sizeof(socket->pending_payload))
+        size_t pending = socket->pending_payload_len;
+        if (socket->mss && pending + len > socket->mss)
+        {
+            tcp_log_send_block(socket, "pending_mss", len);
+            tcp_unlock(lock_flags);
+            return false;
+        }
+        if (pending + len > sizeof(socket->pending_payload))
         {
             tcp_log_send_block(socket, "pending_capacity", len);
             tcp_unlock(lock_flags);
@@ -886,6 +908,8 @@ bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t l
         socket->pending_payload_len += len;
         socket->unacked_len += len;
         socket->pending_flags |= (TCP_FLAG_ACK | TCP_FLAG_PSH);
+        socket->last_send_tick = timer_ticks();
+        socket->retry_count = 0;
         tcp_unlock(lock_flags);
         return true;
     }
@@ -1062,7 +1086,8 @@ static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size
                           closed ? 1U : 0U);
             last_wait_log = now;
         }
-        process_yield();
+        /* If a wakeup is missed, avoid spinning forever: sleep briefly. */
+        process_sleep_ms(1);
     }
 }
 
@@ -1212,7 +1237,7 @@ void net_tcp_log_state(const net_tcp_socket_t *socket, const char *tag)
     uint8_t ip_c = (uint8_t)((remote_ip >> 8) & 0xFF);
     uint8_t ip_d = (uint8_t)(remote_ip & 0xFF);
 
-    serial_printf("[tcp] state tag=%s state=%s lp=%u rp=%u ip=%u.%u.%u.%u rx=%zu/%zu remote_win=0x%04X adv=0x%04X await=%u pend=%zu unacked_seq=0x%08X unacked_len=0x%08X seq_next=0x%08X recv_next=0x%08X remote_closed=%u error=%u owner=%s owner_pid=0x%016llX\r\n",
+    serial_printf("[tcp] state tag=%s state=%s lp=%u rp=%u ip=%u.%u.%u.%u rx=%zu/%zu remote_win=0x%04X adv=0x%04X mss=%u await=%u pend=%zu unacked_seq=0x%08X unacked_len=0x%08X seq_next=0x%08X recv_next=0x%08X remote_closed=%u error=%u owner=%s owner_pid=0x%016llX\r\n",
                   tag ? tag : "(none)",
                   state ? state : "<unknown>",
                   (unsigned)local_port,
@@ -1225,6 +1250,7 @@ void net_tcp_log_state(const net_tcp_socket_t *socket, const char *tag)
                   rx_cap,
                   (unsigned)remote_win,
                   (unsigned)advertised,
+                  (unsigned)(socket ? socket->mss : 0),
                   awaiting_ack ? 1U : 0U,
                   pending_len,
                   (unsigned)unacked_seq,
@@ -1274,9 +1300,10 @@ static ssize_t tcp_fd_write(void *ctx, const void *buffer, size_t count)
     }
 
     size_t to_send = count;
-    if (to_send > NET_TCP_MAX_PAYLOAD)
+    size_t max_payload = socket->mss ? (size_t)socket->mss : (size_t)NET_TCP_DEFAULT_MSS;
+    if (to_send > max_payload)
     {
-        to_send = NET_TCP_MAX_PAYLOAD;
+        to_send = max_payload;
     }
 
     if (!net_tcp_socket_send(socket, (const uint8_t *)buffer, to_send))
@@ -1355,7 +1382,17 @@ void net_tcp_poll(void)
 
         if (socket->awaiting_ack)
         {
-            if (now - socket->last_send_tick >= g_retransmit_ticks)
+            uint64_t rto = g_retransmit_ticks << socket->retry_count;
+            uint64_t max_rto = g_retransmit_ticks * 16U;
+            if (rto > max_rto)
+            {
+                rto = max_rto;
+            }
+            if (rto == 0)
+            {
+                rto = g_retransmit_ticks;
+            }
+            if (now - socket->last_send_tick >= rto)
             {
                 tcp_retransmit(socket);
             }
@@ -1371,6 +1408,20 @@ void net_tcp_poll(void)
         if (socket->state == TCP_STATE_FIN_WAIT_2 && socket->remote_closed)
         {
             socket->state = TCP_STATE_CLOSED;
+        }
+        if (socket->state == TCP_STATE_CLOSE_WAIT && socket->remote_closed)
+        {
+            if (socket->rx_size == 0)
+            {
+                socket->state = TCP_STATE_CLOSED;
+            }
+            else
+            {
+                /* Ensure any blocked readers wake to drain remaining data. */
+                tcp_unlock(lock_flags);
+                wait_queue_wake_all(&socket->wait_queue);
+                lock_flags = tcp_lock();
+            }
         }
     }
     tcp_unlock(lock_flags);
@@ -1553,9 +1604,45 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         goto out;
     }
 
+    if ((flags & TCP_FLAG_SYN) != 0 && tcp_header_len > 20)
+    {
+        size_t opt_len = tcp_header_len - 20;
+        const uint8_t *opt = tcp + 20;
+        while (opt_len > 0)
+        {
+            uint8_t kind = opt[0];
+            if (kind == 0)
+            {
+                break;
+            }
+            if (kind == 1)
+            {
+                opt += 1;
+                opt_len -= 1;
+                continue;
+            }
+            if (opt_len < 2 || opt[1] < 2 || opt[1] > opt_len)
+            {
+                break;
+            }
+            uint8_t klen = opt[1];
+            if (kind == 2 && klen == 4)
+            {
+                uint16_t mss_opt = read_be16(opt + 2);
+                if (mss_opt > 0)
+                {
+                    uint16_t mss_clamped = (mss_opt > NET_TCP_MAX_PAYLOAD) ? NET_TCP_MAX_PAYLOAD : mss_opt;
+                    socket->mss = mss_clamped;
+                }
+            }
+            opt += klen;
+            opt_len -= klen;
+        }
+    }
+
     /* Validate checksum */
     size_t tcp_len = tcp_header_len + payload_len;
-    uint8_t tcp_copy[20 + NET_TCP_MAX_PAYLOAD];
+    uint8_t tcp_copy[60 + NET_TCP_MAX_PAYLOAD];
     if (tcp_len > sizeof(tcp_copy))
     {
         goto out;
@@ -1569,7 +1656,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         goto out;
     }
 
-    socket->remote_window = window ? window : 1;
+    socket->remote_window = window;
     socket->last_activity_tick = timer_ticks();
 
     if (flags & TCP_FLAG_RST)
@@ -1580,13 +1667,41 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     }
 
     /* Challenge ACKs from peers in TIME_WAIT: ACK without SYN while we are
-     * still in SYN_SENT.  Proactively send an RST using the peer's ACK
-     * number so the old TCB is torn down and a subsequent SYN can complete. */
+     * still in SYN_SENT.  Treat this as a stale TCB on the peer and restart
+     * our handshake with a fresh ISS (and occasionally a new port). */
     if (socket->state == TCP_STATE_SYN_SENT &&
         (flags & TCP_FLAG_SYN) == 0 &&
         (flags & TCP_FLAG_ACK) != 0)
     {
-        tcp_send_segment(socket, ack_num, TCP_FLAG_RST, NULL, 0, false, false);
+        socket->syn_challenge_acks++;
+        if (socket->syn_challenge_acks >= 2)
+        {
+            uint16_t new_port = tcp_allocate_port();
+            if (new_port != 0)
+            {
+                socket->local_port = new_port;
+            }
+            socket->syn_challenge_acks = 0;
+        }
+
+        uint32_t iss = tcp_initial_seq();
+        socket->seq_next = iss;
+        socket->unacked_seq = iss;
+        socket->unacked_len = 0;
+        socket->pending_payload_len = 0;
+        socket->pending_flags = 0;
+        socket->retry_count = 0;
+        socket->awaiting_ack = false;
+        socket->connect_deadline = timer_ticks() + g_connect_timeout_ticks;
+
+        if (!tcp_send_syn(socket))
+        {
+            tcp_mark_error(socket, "syn retry failed");
+        }
+        else
+        {
+            socket->state = TCP_STATE_SYN_SENT;
+        }
         goto out;
     }
 
@@ -1606,6 +1721,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         socket->pending_payload_len = 0;
         socket->pending_flags = 0;
         tcp_send_ack(socket);
+        wake_waiters = true;
         seq_num += 1;
     }
 
@@ -1902,6 +2018,10 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     {
         return false;
     }
+    if (socket->mss && payload_len > socket->mss)
+    {
+        return false;
+    }
     if (payload_len > 0 && !payload)
     {
         return false;
@@ -1912,7 +2032,11 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
         return false;
     }
 
-    size_t frame_len = 14 + 20 + 20 + payload_len;
+    bool syn = (flags & TCP_FLAG_SYN) != 0;
+    size_t opt_len = syn ? 4U : 0U; /* MSS option */
+    size_t tcp_header_len = 20U + opt_len;
+    size_t ip_header_len = 20U;
+    size_t frame_len = 14 + ip_header_len + tcp_header_len + payload_len;
     if (frame_len < 60)
     {
         frame_len = 60;
@@ -1933,7 +2057,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
 
     uint8_t *eth = frame;
     uint8_t *ip = frame + 14;
-    uint8_t *tcp = ip + 20;
+    uint8_t *tcp = ip + ip_header_len;
 
     memcpy(eth, socket->remote_mac, 6);
     memcpy(eth + 6, socket->iface->mac, 6);
@@ -1942,7 +2066,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
 
     ip[0] = 0x45;
     ip[1] = 0x00;
-    uint16_t ip_len = (uint16_t)(20 + 20 + payload_len);
+    uint16_t ip_len = (uint16_t)(ip_header_len + tcp_header_len + payload_len);
     write_be16(ip + 2, ip_len);
     write_be16(ip + 4, 0);
     write_be16(ip + 6, 0x4000);
@@ -1957,7 +2081,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     write_be16(tcp + 2, socket->remote_port);
     write_be32(tcp + 4, seq);
     write_be32(tcp + 8, socket->recv_next);
-    tcp[12] = (uint8_t)((5 << 4) & 0xF0);
+    tcp[12] = (uint8_t)(((tcp_header_len / 4U) << 4) & 0xF0);
     tcp[13] = flags;
     size_t window_avail = 0;
     if (socket->rx_capacity > socket->rx_size)
@@ -1990,12 +2114,21 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     write_be16(tcp + 16, 0);
     write_be16(tcp + 18, 0);
 
-    if (payload_len > 0 && payload)
+    if (syn)
     {
-        memcpy(tcp + 20, payload, payload_len);
+        uint16_t advertised_mss = socket->mss ? socket->mss : NET_TCP_DEFAULT_MSS;
+        uint8_t *opt = tcp + 20;
+        opt[0] = 2; /* MSS */
+        opt[1] = 4;
+        write_be16(opt + 2, advertised_mss);
     }
 
-    write_be16(tcp + 16, tcp_checksum(socket, tcp, 20 + payload_len));
+    if (payload_len > 0 && payload)
+    {
+        memcpy(tcp + tcp_header_len, payload, payload_len);
+    }
+
+    write_be16(tcp + 16, tcp_checksum(socket, tcp, tcp_header_len + payload_len));
 
     if (!net_if_send_direct(socket->iface, frame, frame_len))
     {

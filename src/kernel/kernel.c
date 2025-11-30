@@ -555,6 +555,28 @@ static void storage_flush_signal_init(void)
 static void storage_flush_wait(uint32_t interval_ms)
 {
     storage_flush_signal_init();
+    bool queue_ready = __atomic_load_n(&g_flushd_wait_queue_ready, __ATOMIC_ACQUIRE);
+    bool timer_ready = __atomic_load_n(&g_flushd_timer_registered, __ATOMIC_ACQUIRE);
+    bool timer_failed = __atomic_load_n(&g_flushd_timer_failed, __ATOMIC_ACQUIRE);
+
+    /* If we failed to register a periodic wake timer, fall back to polling sleeps. */
+    if (!queue_ready || !timer_ready || timer_failed)
+    {
+        const uint32_t step_ms = (interval_ms < 100) ? interval_ms : 100;
+        uint32_t remaining = interval_ms;
+        while (remaining > 0)
+        {
+            if (__atomic_load_n(&g_flushd_wake_requested, __ATOMIC_ACQUIRE))
+            {
+                return;
+            }
+            uint32_t slice = remaining < step_ms ? remaining : step_ms;
+            process_sleep_ms(slice);
+            remaining -= slice;
+        }
+        return;
+    }
+
     __atomic_store_n(&g_flushd_wait_deadline, 0, __ATOMIC_RELEASE);
     if (storage_flush_should_wake(NULL))
     {
