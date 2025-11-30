@@ -993,14 +993,16 @@ static bool tcp_can_read(void *context)
     net_tcp_socket_t *socket = (net_tcp_socket_t *)context;
     if (!socket) return true;
 
-    uint64_t flags = tcp_lock();
-    bool result = false;
-    if (socket->state == TCP_STATE_UNUSED) result = true;
-    else if (socket->error || socket->state == TCP_STATE_ERROR) result = true;
-    else if (socket->rx_size > 0) result = true;
-    else if (socket->remote_closed && socket->rx_size == 0) result = true;
-    tcp_unlock(flags);
-    return result;
+    tcp_state_t state = __atomic_load_n(&socket->state, __ATOMIC_ACQUIRE);
+    size_t rx_size = __atomic_load_n(&socket->rx_size, __ATOMIC_ACQUIRE);
+    bool remote_closed = __atomic_load_n(&socket->remote_closed, __ATOMIC_ACQUIRE);
+    bool error = __atomic_load_n(&socket->error, __ATOMIC_ACQUIRE);
+
+    if (state == TCP_STATE_UNUSED) return true;
+    if (error || state == TCP_STATE_ERROR) return true;
+    if (rx_size > 0) return true;
+    if (remote_closed && rx_size == 0) return true;
+    return false;
 }
 
 static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
@@ -1369,6 +1371,7 @@ static void tcp_retransmit(net_tcp_socket_t *socket)
 void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t length)
 {
     uint64_t lock_flags = tcp_lock();
+    bool wake_waiters = false;
     if (!iface || !frame || length < 54)
     {
         goto out;
@@ -1465,6 +1468,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
     if (flags & TCP_FLAG_RST)
     {
+        wake_waiters = true;
         tcp_mark_error(socket, "peer reset");
         goto out;
     }
@@ -1503,6 +1507,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     if (payload_len > 0)
     {
         tcp_process_payload(socket, seq_num, payload, payload_len);
+        wake_waiters = true;
     }
 
     if (flags & TCP_FLAG_FIN)
@@ -1512,7 +1517,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         {
             socket->recv_next = fin_seq + 1;
             socket->remote_closed = true;
-            wait_queue_wake_all(&socket->wait_queue);
+            wake_waiters = true;
             if (socket->state == TCP_STATE_ESTABLISHED)
             {
                 socket->state = TCP_STATE_CLOSE_WAIT;
@@ -1535,6 +1540,10 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
 out:
     tcp_unlock(lock_flags);
+    if (wake_waiters)
+    {
+        wait_queue_wake_all(&socket->wait_queue);
+    }
 }
 
 static void tcp_handle_ack(net_tcp_socket_t *socket, uint32_t ack_num)

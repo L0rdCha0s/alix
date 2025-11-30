@@ -154,6 +154,10 @@ vfs_node_t *procfs_create_file_at(const char *path,
     {
         return NULL;
     }
+    /* Procfs nodes must always be writable so control files (e.g. /proc/sys)
+     * accept writes even when their parents were created before mutability
+     * was propagated. Force mutability on the created node. */
+    vfs_set_subtree_mutable(file, true);
 
     if (!vfs_set_file_callbacks(file, read_cb, write_cb, context))
     {

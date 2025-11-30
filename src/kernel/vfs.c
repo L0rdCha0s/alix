@@ -428,6 +428,12 @@ static bool vfs_node_allows_mutation(const vfs_node_t *node)
     {
         return false;
     }
+    /* Callback-backed nodes (e.g., procfs control files) should be writable
+     * even if they were not explicitly marked mutable. */
+    if (node->write_cb)
+    {
+        return true;
+    }
     if (node->mount)
     {
         return true;
