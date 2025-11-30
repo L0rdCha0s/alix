@@ -437,7 +437,7 @@ int process_join_with_hook(process_t *process,
             process_yield();
             continue;
         }
-        wait_queue_wait(&process->wait_queue, process_has_exited, process);
+        process_yield();
     }
 
     if (status_out)
