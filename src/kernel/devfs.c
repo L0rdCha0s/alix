@@ -79,3 +79,29 @@ void devfs_register_block_devices(void)
     }
     devfs_set_mutable(false);
 }
+
+bool devfs_register_file(const char *name,
+                         vfs_read_cb_t read_cb,
+                         vfs_write_cb_t write_cb,
+                         void *context)
+{
+    if (!name || name[0] == '\0')
+    {
+        return false;
+    }
+    vfs_node_t *dev_dir = devfs_root_node();
+    if (!dev_dir)
+    {
+        return false;
+    }
+
+    devfs_set_mutable(true);
+    vfs_node_t *node = vfs_open_file(dev_dir, name, true, true);
+    bool ok = false;
+    if (node)
+    {
+        ok = vfs_set_file_callbacks(node, read_cb, write_cb, context);
+    }
+    devfs_set_mutable(false);
+    return ok;
+}

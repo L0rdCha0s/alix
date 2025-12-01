@@ -85,7 +85,8 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/atk_shell.elf \
              $(USER_OBJDIR)/atk_taskmgr.elf \
              $(USER_OBJDIR)/control_panel.elf \
-             $(USER_OBJDIR)/loop.elf
+             $(USER_OBJDIR)/loop.elf \
+             $(USER_OBJDIR)/playsound.elf
 USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
@@ -94,7 +95,8 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/atk_shell \
              $(USER_BIN_DIR)/atk_taskmgr \
              $(USER_BIN_DIR)/control_panel \
-             $(USER_BIN_DIR)/loop
+             $(USER_BIN_DIR)/loop \
+             $(USER_BIN_DIR)/playsound
 HOST_TEST_DIR := $(OBJDIR)/host-tests
 HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
@@ -199,6 +201,10 @@ $(USER_OBJDIR)/loop.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/loop.o $(USER_LD_
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/loop.o
 
+$(USER_OBJDIR)/playsound.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/playsound.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/playsound.o
+
 $(DL_SCRIPT_SRC): $(USER_ELFS)
 	@mkdir -p $(GENERATED_DIR)
 	@{ \
@@ -253,6 +259,10 @@ $(USER_BIN_DIR)/control_panel: $(USER_OBJDIR)/control_panel.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/loop: $(USER_OBJDIR)/loop.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/playsound: $(USER_OBJDIR)/playsound.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 
@@ -337,11 +347,18 @@ ifeq ($(NET_BACKEND),vmnet-bridged)
   VMNET_BRIDGE ?= en0
   VMNET_SOCKET ?= $(HOMEBREW_PREFIX)/var/run/socket_vmnet.bridged.$(VMNET_BRIDGE)
   QEMU_NET_PREFIX := $(HOMEBREW_PREFIX)/opt/socket_vmnet/bin/socket_vmnet_client $(VMNET_SOCKET)
-  NETDEV := -netdev socket,id=n0,fd=3
+NETDEV := -netdev socket,id=n0,fd=3
 endif
 
 # Device (keep RTL8139 + MAC)
 NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
+
+# Audio backend (default coreaudio on macOS; override with AUDIO_DEV=pa/alsa/none)
+AUDIO_DEV ?= coreaudio
+HDA_MODEL ?= hda-output
+HDA_CONTROLLER ?= intel-hda
+HDA_AUDIO_ID ?= snd0
+QEMU_AUDIO := -audiodev $(AUDIO_DEV),id=$(HDA_AUDIO_ID)
 
 run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
@@ -352,6 +369,8 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ich9-usb-uhci1 \
 		-device ich9-usb-uhci2 \
 		-device ich9-usb-uhci3 \
+		-device $(HDA_CONTROLLER) \
+		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
 		-device usb-kbd \
 		-device usb-mouse \
 		-device ahci,id=ahci0 \
@@ -359,6 +378,7 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
 		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
@@ -370,6 +390,8 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ich9-usb-uhci1 \
 		-device ich9-usb-uhci2 \
 		-device ich9-usb-uhci3 \
+		-device $(HDA_CONTROLLER) \
+		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
 		-device usb-kbd \
 		-device usb-mouse \
 		-device ahci,id=ahci0 \
@@ -377,6 +399,7 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
 		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 run-ps2-hdd: USB=0
@@ -386,11 +409,14 @@ run-ps2-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device $(HDA_CONTROLLER) \
+		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
 		-device ahci,id=ahci0 \
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
 		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
 run-hdd-gdb: QEMU_GDB_FLAGS = -s -S

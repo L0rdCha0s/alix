@@ -402,37 +402,25 @@ static void build_page_tables(void)
     uint64_t addr = 0;
     for (int i = 0; i < 512; ++i)
     {
-        if (e820_chunk_usable(addr, chunk_size))
-        {
-            pd0[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
-        }
+        pd0[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
         addr += chunk_size;
     }
     addr = 0x40000000ULL;
     for (int i = 0; i < 512; ++i)
     {
-        if (e820_chunk_usable(addr, chunk_size))
-        {
-            pd1[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
-        }
+        pd1[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
         addr += chunk_size;
     }
     addr = 0x80000000ULL;
     for (int i = 0; i < 512; ++i)
     {
-        if (e820_chunk_usable(addr, chunk_size))
-        {
-            pd2[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
-        }
+        pd2[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
         addr += chunk_size;
     }
     addr = 0xC0000000ULL;
     for (int i = 0; i < 512; ++i)
     {
-        if (e820_chunk_usable(addr, chunk_size))
-        {
-            pd3[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
-        }
+        pd3[i] = (addr & 0x000FFFFFFFFFF000ULL) | present_rw | large_page;
         addr += chunk_size;
     }
 

@@ -31,6 +31,7 @@
 #include "smp.h"
 #include "proc_devices.h"
 #include "build_features.h"
+#include "hda.h"
 #if ENABLE_USB
 #include "usb_hid.h"
 #endif
@@ -38,6 +39,7 @@
 static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
 static void tcp_timer_process_entry(void *arg);
+static void hda_init_process_entry(void *arg);
 #if 1
 static void printer_a_process_entry(void *arg);
 static void printer_b_process_entry(void *arg);
@@ -472,6 +474,13 @@ static void tcp_timer_process_entry(void *arg)
     }
 }
 
+static void hda_init_process_entry(void *arg)
+{
+    (void)arg;
+    hda_init();
+    process_exit(0);
+}
+
 #if ENABLE_FLUSHD
 static uint64_t storage_flush_ms_to_ticks(uint32_t ms)
 {
@@ -775,6 +784,19 @@ void kernel_main(void)
 #if ENABLE_INIT_PROC_DEVICES
     proc_devices_init();
     serial_printf("%s", "[alix] after rtl8139_init\n");
+#endif
+
+    /* Defer HDA bring-up to its own kernel thread so codecs have time to appear. */
+#if ENABLE_INIT_HDA
+    process_t *hda_process = process_create_kernel("hda_init",
+                                                   hda_init_process_entry,
+                                                   NULL,
+                                                   0,
+                                                   -1);
+    if (!hda_process)
+    {
+        serial_printf("%s", "[alix] warn: failed to create hda_init\r\n");
+    }
 #endif
 
     // /* Spawn only the two demo printers; everything else stays disabled. */

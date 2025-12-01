@@ -14,6 +14,7 @@
 #define ENABLE_INIT_VFS           1
 #define ENABLE_INIT_KEYBOARD      1
 #define ENABLE_INIT_NET           1
+#define ENABLE_INIT_HDA           1
 #define ENABLE_INIT_PROC_DEVICES  1
 #define ENABLE_INIT_SERIAL_ASYNC  1
 #define ENABLE_INIT_TCP_TIMER     1
