@@ -978,22 +978,6 @@ static ssize_t hda_dev_write(vfs_node_t *node,
         spinlock_unlock(&hda->lock);
     }
 
-    /* Drain the data we just queued so the buffer ends in silence. */
-    for (;;)
-    {
-        spinlock_lock(&hda->lock);
-        uint32_t hw_pos = hda_hw_position(hda);
-        hda_update_used_bytes(hda, hw_pos);
-        size_t used = hda->used_bytes;
-        spinlock_unlock(&hda->lock);
-
-        if (used == 0)
-        {
-            break;
-        }
-        process_sleep_ms(1);
-    }
-
     return (ssize_t)written;
 }
 
