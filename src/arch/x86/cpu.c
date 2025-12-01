@@ -8,6 +8,7 @@
 #define ARCH_MAX_CPUS SMP_MAX_CPUS
 #define GDT_ENTRY_COUNT 9
 #define TSS_SELECTOR 0x38
+#define IST_STACK_SIZE_BYTES (16 * 1024)
 
 typedef struct __attribute__((packed))
 {
@@ -45,6 +46,7 @@ static arch_gdtr_t gdt_descriptors[ARCH_MAX_CPUS];
 static uint8_t tss_tables[ARCH_MAX_CPUS][sizeof(tss64_layout_t)] __attribute__((aligned(16)));
 static uint64_t cpu_rsp0[ARCH_MAX_CPUS] = { 0 };
 static bool gdt_prepared[ARCH_MAX_CPUS] = { false };
+static uint8_t ist_stacks[ARCH_MAX_CPUS][IST_STACK_SIZE_BYTES] __attribute__((aligned(16)));
 
 static void install_tss_descriptor(uint32_t cpu_index)
 {
@@ -72,6 +74,9 @@ static void prepare_gdt(uint32_t cpu_index)
     memset(tss_tables[cpu_index], 0, sizeof(tss64_layout_t));
     tss64_layout_t *tss = (tss64_layout_t *)tss_tables[cpu_index];
     tss->iomap_base = sizeof(tss64_layout_t);
+    /* IST1: dedicated fault stack to avoid corrupt thread stacks. */
+    uint8_t *ist1 = ist_stacks[cpu_index];
+    tss->ist1 = (uint64_t)(uintptr_t)(ist1 + IST_STACK_SIZE_BYTES);
     install_tss_descriptor(cpu_index);
     gdt_descriptors[cpu_index].limit = (uint16_t)(sizeof(gdt_tables[cpu_index]) - 1U);
     gdt_descriptors[cpu_index].base = (uint64_t)(uintptr_t)gdt_tables[cpu_index];

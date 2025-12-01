@@ -21,7 +21,7 @@
 #endif
 
 #ifndef WGET_PROGRESS_LOG
-#define WGET_PROGRESS_LOG 1
+#define WGET_PROGRESS_LOG 0
 #endif
 
 #ifndef WGET_TLS_TRACE_ENABLE
@@ -996,14 +996,14 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     uint64_t last_progress = timer_ticks();
     uint64_t last_status_log = last_progress;
 
-    uint64_t loop_iter = 0;
+    // uint64_t loop_iter = 0;
 
     while (1)
     {
-        serial_printf("[wget] loop iter=%llu header_done=%u written=%zu\r\n",
-                      (unsigned long long)loop_iter++,
-                      header_done ? 1U : 0U,
-                      written);
+        // serial_printf("[wget] loop iter=%llu header_done=%u written=%zu\r\n",
+        //               (unsigned long long)loop_iter++,
+        //               header_done ? 1U : 0U,
+        //               written);
         if (net_tcp_socket_has_error(socket))
         {
             shell_output_error(out, "TCP connection error");
@@ -1013,20 +1013,20 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         uint64_t now_status = timer_ticks();
         if (now_status - last_status_log >= timer_frequency())
         {
-            size_t avail = net_tcp_socket_available(socket);
+            // size_t avail = net_tcp_socket_available(socket);
             net_tcp_log_state(socket, "wget_loop");
-            serial_printf("[wget] status header_done=%u header_len=%zu parsed=%u chunked=%u chunked_done=%u have_len=%u content_len=%zu written=%zu avail=%zu remote_closed=%u tls=%u\r\n",
-                          header_done ? 1U : 0U,
-                          header_len,
-                          header_parsed ? 1U : 0U,
-                          is_chunked ? 1U : 0U,
-                          chunked_done ? 1U : 0U,
-                          have_length ? 1U : 0U,
-                          content_length,
-                          written,
-                          avail,
-                          net_tcp_socket_remote_closed(socket) ? 1U : 0U,
-                          tls_active ? 1U : 0U);
+            // serial_printf("[wget] status header_done=%u header_len=%zu parsed=%u chunked=%u chunked_done=%u have_len=%u content_len=%zu written=%zu avail=%zu remote_closed=%u tls=%u\r\n",
+            //               header_done ? 1U : 0U,
+            //               header_len,
+            //               header_parsed ? 1U : 0U,
+            //               is_chunked ? 1U : 0U,
+            //               chunked_done ? 1U : 0U,
+            //               have_length ? 1U : 0U,
+            //               content_length,
+            //               written,
+            //               avail,
+            //               net_tcp_socket_remote_closed(socket) ? 1U : 0U,
+            //               tls_active ? 1U : 0U);
             last_status_log = now_status;
         }
 
@@ -1085,10 +1085,10 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         else
         {
             ssize_t got = read(socket_fd, chunk, WGET_CHUNK_SIZE);
-            serial_printf("[wget] recv plain bytes=%zd err=%u remote_closed=%u\r\n",
-                          (long long)got,
-                          net_tcp_socket_has_error(socket) ? 1U : 0U,
-                          net_tcp_socket_remote_closed(socket) ? 1U : 0U);
+            // serial_printf("[wget] recv plain bytes=%zd err=%u remote_closed=%u\r\n",
+            //               (long long)got,
+            //               net_tcp_socket_has_error(socket) ? 1U : 0U,
+            //               net_tcp_socket_remote_closed(socket) ? 1U : 0U);
             if (got < 0)
             {
                 shell_output_error(out, "socket read failed");

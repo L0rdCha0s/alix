@@ -50,11 +50,16 @@ void idt_init(void)
 
 void idt_set_gate_dpl(uint8_t vector, void (*handler)(void), uint8_t dpl)
 {
+    idt_set_gate_ist(vector, handler, dpl, 0);
+}
+
+void idt_set_gate_ist(uint8_t vector, void (*handler)(void), uint8_t dpl, uint8_t ist)
+{
     uint64_t addr = (uint64_t)handler;
     struct idt_entry *entry = &idt[vector];
     entry->offset_low = (uint16_t)(addr & 0xFFFF);
     entry->selector = 0x18;  /* 64-bit code segment */
-    entry->ist = 0;
+    entry->ist = ist & 0x7u;
     uint8_t attr = 0x8E;
     attr &= (uint8_t)~0x60;
     attr |= (uint8_t)((dpl & 0x3u) << 5);

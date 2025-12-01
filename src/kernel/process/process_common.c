@@ -1979,11 +1979,21 @@ static void thread_assert_stack_current(thread_t *thread, const char *context)
     if (!thread_stack_pointer_valid(thread, rsp))
     {
         thread_log_stack_issue(thread, context, "rsp_out_of_bounds");
+        if (thread->process && thread->process->is_user)
+        {
+            thread_quarantine_corrupt(thread, "rsp_out_of_bounds");
+            return;
+        }
         fatal("kernel stack pointer left bounds");
     }
     if (!thread_stack_guard_intact(thread))
     {
         thread_log_stack_issue(thread, context, "guard_corrupted");
+        if (thread->process && thread->process->is_user)
+        {
+            thread_quarantine_corrupt(thread, "stack_guard_corrupted");
+            return;
+        }
         fatal("kernel stack guard corrupted");
     }
     thread_scan_stack_for_suspicious_values(thread, rsp, false, context);

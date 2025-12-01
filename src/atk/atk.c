@@ -1782,6 +1782,9 @@ static bool atk_drag_prepare(atk_state_t *state, atk_widget_t *window)
         return false;
     }
 
+    /* Make sure the window is painted on top before we snapshot it for dragging. */
+    atk_window_draw(state, window);
+
     if (!atk_ensure_surface(&priv->surface,
                             &priv->surface_width,
                             &priv->surface_height,

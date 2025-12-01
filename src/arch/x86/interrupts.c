@@ -567,11 +567,13 @@ __attribute__((interrupt)) static void smp_tlb_flush_ipi_handler(interrupt_frame
 void interrupts_init(void)
 {
     idt_init();
-    idt_set_gate(0, (void *)divide_error_handler);
-    idt_set_gate(6, (void *)invalid_opcode_handler);
-    idt_set_gate(12, (void *)stack_fault_handler);
-    idt_set_gate(13, (void *)general_protection_handler);
-    idt_set_gate(14, (void *)page_fault_handler);
+    /* Route fault-like exceptions to an IST stack to avoid running on a corrupted thread stack. */
+    const uint8_t fault_ist = 1;
+    idt_set_gate_ist(0, (void *)divide_error_handler, 0, fault_ist);
+    idt_set_gate_ist(6, (void *)invalid_opcode_handler, 0, fault_ist);
+    idt_set_gate_ist(12, (void *)stack_fault_handler, 0, fault_ist);
+    idt_set_gate_ist(13, (void *)general_protection_handler, 0, fault_ist);
+    idt_set_gate_ist(14, (void *)page_fault_handler, 0, fault_ist);
     idt_set_gate(32, (void *)irq0_handler);
     idt_set_gate(33, (void *)irq1_handler);
     idt_set_gate(42, (void *)irq10_handler);
