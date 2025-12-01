@@ -749,6 +749,7 @@ void kernel_main(void)
 #endif
     procfs_init();
     serial_printf("%s", "[alix] after procfs_init\n");
+    vfs_sys_controls_init();
     scheduler_log_controls_init();
     logger_init();
     devfs_init();

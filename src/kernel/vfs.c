@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include "timer.h"
 #include "build_features.h"
+#include "procfs.h"
 
 extern void storage_request_flush(void);
 
@@ -29,6 +30,12 @@ static vfs_node_t *root = NULL;
 static vfs_mount_t *mounts = NULL;
 static spinlock_t g_vfs_tree_lock;
 static const uint64_t VFS_SYNC_LOG_MS_THRESHOLD = 100ULL;
+static uint32_t g_vfs_log_enable = 0;
+
+static inline bool vfs_logs_enabled(void)
+{
+    return __atomic_load_n(&g_vfs_log_enable, __ATOMIC_RELAXED) != 0;
+}
 
 #define VFS_MAX_SYMLINK_DEPTH 8
 
@@ -69,6 +76,10 @@ static void vfs_log_sync_result(const char *dev_name,
 
 static void vfs_log(const char *msg, uint64_t value)
 {
+    if (!vfs_logs_enabled())
+    {
+        return;
+    }
     serial_printf("[vfs] %s0x%016llX\r\n",
                   msg ? msg : "",
                   (unsigned long long)(value));
@@ -95,6 +106,75 @@ size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max);
 bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
 static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes);
 static void vfs_account_dirty_bytes(vfs_mount_t *mount, size_t bytes);
+
+static ssize_t vfs_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)context;
+    (void)offset;
+    if (!buffer || count == 0)
+    {
+        return 0;
+    }
+    char out[2];
+    out[0] = (__atomic_load_n(&g_vfs_log_enable, __ATOMIC_RELAXED) != 0) ? '1' : '0';
+    size_t len = (count > 1) ? 2 : 1;
+    if (len == 2)
+    {
+        out[1] = '\n';
+    }
+    memcpy(buffer, out, len);
+    return (ssize_t)len;
+}
+
+static ssize_t vfs_log_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)context;
+    (void)offset;
+    if (!buffer || count == 0)
+    {
+        return -1;
+    }
+    const char *cbuf = (const char *)buffer;
+    int value = -1;
+    size_t idx = 0;
+    while (idx < count && (cbuf[idx] == ' ' || cbuf[idx] == '\t'))
+    {
+        ++idx;
+    }
+    if (idx < count)
+    {
+        if (cbuf[idx] == '0')
+        {
+            value = 0;
+        }
+        else if (cbuf[idx] == '1')
+        {
+            value = 1;
+        }
+    }
+    if (value < 0)
+    {
+        return -1;
+    }
+    for (size_t tail = idx + 1; tail < count; ++tail)
+    {
+        char t = cbuf[tail];
+        if (t == ' ' || t == '\t' || t == '\r' || t == '\n')
+        {
+            continue;
+        }
+        return -1;
+    }
+    __atomic_store_n(&g_vfs_log_enable, (uint32_t)value, __ATOMIC_RELEASE);
+    return (ssize_t)count;
+}
+
+void vfs_sys_controls_init(void)
+{
+    (void)procfs_create_file_at("sys/vfs/log_enable", vfs_log_read, vfs_log_write, NULL);
+}
 
 /* ---------- helpers ---------- */
 

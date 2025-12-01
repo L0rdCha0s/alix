@@ -28,6 +28,7 @@ typedef ssize_t (*vfs_read_cb_t)(vfs_node_t *node, size_t offset, void *buffer, 
 typedef ssize_t (*vfs_write_cb_t)(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
 
 void vfs_init(void);
+void vfs_sys_controls_init(void);
 vfs_node_t *vfs_root(void);
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path);
