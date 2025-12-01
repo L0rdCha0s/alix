@@ -9,7 +9,16 @@
 #define TARGET_RATE 48000
 #define TARGET_CHANNELS 2
 #define MAX_INPUT_SAMPLES_PER_CHANNEL 1152
-#define MAX_RESAMPLED_SAMPLES (MAX_INPUT_SAMPLES_PER_CHANNEL * 6 * TARGET_CHANNELS)
+#define MAX_RESAMPLED_SAMPLES 65536u
+
+typedef struct
+{
+    uint64_t phase;
+    int16_t prev[2];
+    bool have_prev;
+    uint32_t src_rate;
+    uint64_t step;
+} resample_state_t;
 
 static int16_t clamp16(int32_t v)
 {
@@ -59,45 +68,70 @@ static size_t resample_to_target(const mp3d_sample_t *in,
                                  int src_channels,
                                  int src_rate,
                                  int16_t *out,
-                                 size_t out_capacity)
+                                 size_t out_capacity,
+                                 resample_state_t *state)
 {
-    if (!in || !out || src_rate <= 0 || src_channels <= 0)
+    if (!in || !out || !state || src_rate <= 0 || src_channels <= 0)
     {
         return 0;
     }
 
-    uint64_t dst_per_channel = ((uint64_t)samples_per_channel * TARGET_RATE + (uint64_t)src_rate / 2u) / (uint64_t)src_rate;
-    if (dst_per_channel == 0)
+    if (state->src_rate != (uint32_t)src_rate)
     {
-        return 0;
+        state->src_rate = (uint32_t)src_rate;
+        state->step = ((uint64_t)src_rate << 32) / TARGET_RATE;
+        state->phase = 0;
+        state->have_prev = false;
     }
 
-    size_t required = (size_t)dst_per_channel * TARGET_CHANNELS;
-    if (required > out_capacity)
+    size_t produced = 0;
+    while (produced + TARGET_CHANNELS <= out_capacity)
     {
-        dst_per_channel = out_capacity / TARGET_CHANNELS;
-        required = dst_per_channel * TARGET_CHANNELS;
-    }
+        uint64_t idx = state->phase >> 32;
+        if (idx + 1 >= samples_per_channel)
+        {
+            break;
+        }
 
-    for (uint64_t i = 0; i < dst_per_channel; ++i)
-    {
-        uint64_t scaled = i * (uint64_t)src_rate;
-        uint64_t src_idx = scaled / TARGET_RATE;
-        uint64_t frac = scaled % TARGET_RATE;
-        uint64_t next = (src_idx + 1 < samples_per_channel) ? (src_idx + 1) : src_idx;
-
+        uint64_t frac = state->phase & 0xFFFFFFFFu;
         for (int ch = 0; ch < TARGET_CHANNELS; ++ch)
         {
             int ch_src = (src_channels == 1) ? 0 : ch;
-            int32_t s0 = in[src_idx * (uint64_t)src_channels + ch_src];
-            int32_t s1 = in[next * (uint64_t)src_channels + ch_src];
-            int64_t blended = s0 * (int64_t)(TARGET_RATE - frac) + s1 * (int64_t)frac;
-            int32_t sample = (int32_t)(blended / TARGET_RATE);
-            out[i * TARGET_CHANNELS + (uint64_t)ch] = clamp16(sample);
+            int32_t s0;
+            if (idx == 0 && state->have_prev)
+            {
+                s0 = state->prev[ch_src];
+            }
+            else
+            {
+                s0 = in[idx * (uint64_t)src_channels + ch_src];
+            }
+
+            int32_t s1 = in[(idx + 1) * (uint64_t)src_channels + ch_src];
+            int64_t blended = (int64_t)s0 * (int64_t)(0x100000000ull - frac) + (int64_t)s1 * (int64_t)frac;
+            int32_t sample = (int32_t)(blended >> 32);
+            out[produced + (size_t)ch] = clamp16(sample);
         }
+
+        produced += TARGET_CHANNELS;
+        state->phase += state->step;
     }
 
-    return required;
+    if (samples_per_channel > 0)
+    {
+        state->prev[0] = in[(samples_per_channel - 1) * (uint64_t)src_channels + 0];
+        state->prev[1] = in[(samples_per_channel - 1) * (uint64_t)src_channels + (src_channels > 1 ? 1 : 0)];
+        state->have_prev = true;
+    }
+
+    uint64_t consumed_whole = (state->phase >> 32);
+    if (consumed_whole > samples_per_channel)
+    {
+        consumed_whole = samples_per_channel;
+    }
+    state->phase -= consumed_whole << 32;
+
+    return produced;
 }
 
 int main(int argc, char **argv)
@@ -164,6 +198,8 @@ int main(int argc, char **argv)
     }
     buf_filled = (size_t)initial;
 
+    resample_state_t rs = {0};
+
     for (;;)
     {
         mp3dec_frame_info_t frame_info;
@@ -219,7 +255,8 @@ int main(int argc, char **argv)
                                                 frame_info.channels,
                                                 frame_info.hz,
                                                 out_buffer,
-                                                MAX_RESAMPLED_SAMPLES);
+                                                MAX_RESAMPLED_SAMPLES,
+                                                &rs);
         if (out_samples == 0)
         {
             continue;
