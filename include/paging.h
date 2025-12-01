@@ -46,6 +46,9 @@ bool paging_unmap_user_page(paging_space_t *space,
 bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
                                       size_t length,
                                       bool writable);
+bool paging_set_kernel_range_writable_force(uintptr_t virtual_addr,
+                                            size_t length,
+                                            bool writable);
 void paging_flush_space_tlb(paging_space_t *space);
 void paging_flush_global_tlb(void);
 void paging_handle_remote_tlb_flush(void);

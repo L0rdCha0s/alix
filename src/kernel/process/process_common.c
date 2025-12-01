@@ -1549,12 +1549,25 @@ static void thread_stack_watch_deactivate(thread_t *thread)
                                           true))
     {
         const char *name = thread->name[0] ? thread->name : "<unnamed>";
-        SCHED_LOG("[sched] stack watch disarm failed thread=%s pid=0x%016llX base=0x%016llX len=0x%016llX\r\n",
-                  name,
-                  (unsigned long long)(thread->process ? thread->process->pid : 0),
-                  (unsigned long long)thread->stack_watch_base,
-                  (unsigned long long)thread->stack_watch_len);
-        fatal("stack watch deactivate failed");
+        uint64_t pid = thread->process ? thread->process->pid : 0;
+        serial_printf("[sched] stack watch disarm failed thread=%s pid=0x%016llX base=0x%016llX len=0x%016llX ctx=%s retrying\r\n",
+                      name,
+                      (unsigned long long)pid,
+                      (unsigned long long)thread->stack_watch_base,
+                      (unsigned long long)thread->stack_watch_len,
+                      thread->stack_watch_context ? thread->stack_watch_context : "<none>");
+
+        if (!paging_set_kernel_range_writable_force(thread->stack_watch_base,
+                                                    thread->stack_watch_len,
+                                                    true))
+        {
+            serial_printf("[sched] stack watch force-clear failed thread=%s pid=0x%016llX base=0x%016llX len=0x%016llX\r\n",
+                          name,
+                          (unsigned long long)pid,
+                          (unsigned long long)thread->stack_watch_base,
+                          (unsigned long long)thread->stack_watch_len);
+            fatal("stack watch deactivate failed");
+        }
     }
 #if ENABLE_STACK_WRITE_DEBUG_LOGS
     SCHED_LOG("[sched] stack watch cleared thread=%s pid=0x%016llX\r\n",

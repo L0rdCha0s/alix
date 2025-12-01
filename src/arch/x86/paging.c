@@ -1022,16 +1022,17 @@ static bool paging_unmap_user_page_internal(paging_space_t *space,
     return true;
 }
 
-bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
-                                      size_t length,
-                                      bool writable)
+static bool paging_set_kernel_range_writable_internal(uintptr_t virtual_addr,
+                                                      size_t length,
+                                                      bool writable,
+                                                      bool enforce_lock_order)
 {
     if (!g_paging_ready || !g_kernel_space.tables_base || length == 0)
     {
         return false;
     }
 
-    if (!paging_check_lock_order("paging_set_kernel_range_writable"))
+    if (enforce_lock_order && !paging_check_lock_order("paging_set_kernel_range_writable"))
     {
         return false;
     }
@@ -1108,6 +1109,20 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
 out:
     paging_space_unlock(space, used_global, lock_flags);
     return ok;
+}
+
+bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
+                                      size_t length,
+                                      bool writable)
+{
+    return paging_set_kernel_range_writable_internal(virtual_addr, length, writable, true);
+}
+
+bool paging_set_kernel_range_writable_force(uintptr_t virtual_addr,
+                                            size_t length,
+                                            bool writable)
+{
+    return paging_set_kernel_range_writable_internal(virtual_addr, length, writable, false);
 }
 
 void paging_handle_remote_tlb_flush(void)
