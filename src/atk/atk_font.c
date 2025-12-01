@@ -244,6 +244,44 @@ void atk_font_draw_string_clipped(int x,
             continue;
         }
 
+        /* Defensive: guard against a corrupted glyph cache entry. */
+        if (!glyph->alpha || glyph->stride <= 0)
+        {
+            glyph->ready = false;
+            glyph->alpha = NULL;
+            glyph->width = 0;
+            glyph->height = 0;
+            glyph->stride = 0;
+            pen_x += (glyph->advance > 0) ? glyph->advance : ATK_FONT_WIDTH;
+            continue;
+        }
+
+        if (start_col >= glyph->stride)
+        {
+            pen_x += glyph->advance;
+            continue;
+        }
+
+        if (width > glyph->stride - start_col)
+        {
+            width = glyph->stride - start_col;
+            if (width <= 0)
+            {
+                pen_x += glyph->advance;
+                continue;
+            }
+        }
+
+        if (start_row >= glyph->height)
+        {
+            pen_x += glyph->advance;
+            continue;
+        }
+        if (rows > glyph->height - start_row)
+        {
+            rows = glyph->height - start_row;
+        }
+
         for (int row = 0; row < rows; ++row)
         {
             const uint8_t *src = glyph->alpha + (start_row + row) * glyph->stride + start_col;
