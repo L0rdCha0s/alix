@@ -1707,7 +1707,11 @@ static int mp3d_find_frame(const uint8_t *mp3, int mp3_bytes, int *free_format_b
 
 void mp3dec_init(mp3dec_t *dec)
 {
-    dec->header[0] = 0;
+    if (!dec)
+    {
+        return;
+    }
+    memset(dec, 0, sizeof(mp3dec_t));
 }
 
 int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_sample_t *pcm, mp3dec_frame_info_t *info)
@@ -1716,6 +1720,8 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
     const uint8_t *hdr;
     bs_t bs_frame[1];
     mp3dec_scratch_t scratch;
+
+    memset(&scratch, 0, sizeof(scratch));
 
     if (mp3_bytes > 4 && dec->header[0] == 0xff && hdr_compare(dec->header, mp3))
     {
@@ -1748,6 +1754,15 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
     if (!pcm)
     {
         return hdr_frame_samples(hdr);
+    }
+
+    int payload_bytes = frame_size - HDR_SIZE;
+    if (payload_bytes < 0 || payload_bytes > MAX_L3_FRAME_PAYLOAD_BYTES)
+    {
+        int bytes_to_skip = frame_size > 0 ? frame_size : 0;
+        info->frame_bytes = MINIMP3_MIN(i + bytes_to_skip, mp3_bytes);
+        mp3dec_init(dec);
+        return 0;
     }
 
     bs_init(bs_frame, hdr + HDR_SIZE, frame_size - HDR_SIZE);

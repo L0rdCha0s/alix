@@ -78,6 +78,8 @@ USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOUR
 USER_ATK_EXTRA_SOURCES := $(USER_DIR)/atk/atk_terminal.c
 USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
 USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
+USER_DOOM_SOURCES := $(wildcard $(USER_DIR)/doom/*.c)
+USER_DOOM_OBJECTS := $(patsubst $(USER_DIR)/doom/%.c,$(USER_OBJDIR)/doom/%.o,$(USER_DOOM_SOURCES))
 USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
@@ -183,9 +185,9 @@ $(USER_OBJDIR)/wolf3d.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/wolf3d.o $(USER
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/wolf3d.o
 
-$(USER_OBJDIR)/doom.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/doom.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/doom.elf: $(USER_COMMON_OBJECTS) $(USER_DOOM_OBJECTS) $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/doom.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_DOOM_OBJECTS)
 
 $(USER_OBJDIR)/atk_shell.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_shell_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)

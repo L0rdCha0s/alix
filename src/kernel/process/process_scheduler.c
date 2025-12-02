@@ -1616,6 +1616,11 @@ static bool switch_to_thread(thread_t *next)
     arch_cpu_set_kernel_stack(cpu_idx, next->kernel_stack_top);
     wrmsr(MSR_FS_BASE, next->fs_base);
     wrmsr(MSR_GS_BASE, sanitize_gs_base(next));
+    if (!thread_fpu_region_valid(next))
+    {
+        scheduler_lock_release(sched_lock_enter);
+        fatal("switch_to_bad_fpu_region");
+    }
     fpu_restore_state(&next->fpu_state);
 
     cpu_context_t **prev_ctx = prev ? &prev->context : &g_bootstrap_context;
@@ -2101,6 +2106,18 @@ bool process_handle_exception(interrupt_frame_t *frame,
         proc->exit_status = -1;
         proc->state = PROCESS_STATE_ZOMBIE;
         wait_queue_wake_all(&proc->wait_queue);
+    }
+
+    /* For user-mode faults, stop here and reschedule instead of bouncing through a kernel fault path. */
+    if (user_mode)
+    {
+        serial_printf("process: user fault in thread %s reason=%s error=0x%016llX addr=0x%016llX\r\n",
+                      thread->name[0] ? thread->name : "(anon)",
+                      reason ? reason : "unknown",
+                      (unsigned long long)error_code,
+                      has_address ? (unsigned long long)address : 0ULL);
+        scheduler_schedule(false);
+        fatal("user fault handler returned");
     }
 
     process_trigger_fatal_fault(thread, frame, reason, error_code, has_address, address);

@@ -7,6 +7,7 @@
 #include "devfs.h"
 #include "process.h"
 #include "spinlock.h"
+#include "timer.h"
 
 #define HDA_REG_GCTL       0x08
 #define HDA_REG_WAKEEN     0x0C
@@ -132,9 +133,21 @@ typedef struct
     size_t used_bytes;
     int16_t last_sample[2];
     bool have_last_sample;
+    uint64_t last_write_ms;
 } hda_state_t;
 
 static hda_state_t g_hda;
+
+static inline uint64_t hda_now_ms(void)
+{
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        return 0;
+    }
+    uint64_t ticks = timer_ticks();
+    return (ticks * 1000ULL) / (uint64_t)freq;
+}
 
 static inline uint32_t virt_to_phys32(const void *ptr)
 {
@@ -222,6 +235,12 @@ static void hda_stop_stream(hda_state_t *hda)
     ctl &= ~HDA_SDCTL_RUN;
     hda_write32(hda, ctl_off, ctl);
     hda->running = false;
+    hda->used_bytes = 0;
+    hda->write_pos = 0;
+    hda->last_write_ms = 0;
+    hda->have_last_sample = false;
+    hda->last_sample[0] = 0;
+    hda->last_sample[1] = 0;
 }
 
 static void hda_fill_pattern(hda_state_t *hda, uint32_t offset, size_t len)
@@ -345,6 +364,21 @@ static void hda_housekeeping(void *arg)
             {
                 serial_printf("[hda] ring empty lpib=0x%08X\r\n", (unsigned)hw);
                 g_hda_empty_log_budget--;
+            }
+            uint64_t now_ms = hda_now_ms();
+            if (now_ms != 0 &&
+                g_hda.last_write_ms != 0 &&
+                g_hda.used_bytes == 0 &&
+                now_ms >= g_hda.last_write_ms &&
+                (now_ms - g_hda.last_write_ms) > 200ULL)
+            {
+                hda_stop_stream(&g_hda);
+                if (g_hda_empty_log_budget > 0)
+                {
+                    serial_printf("[hda] idle stop after %llu ms\r\n",
+                                  (unsigned long long)(now_ms - g_hda.last_write_ms));
+                    g_hda_empty_log_budget--;
+                }
             }
         }
         spinlock_unlock(&g_hda.lock);
@@ -850,6 +884,7 @@ static bool hda_prepare_buffers(hda_state_t *hda)
     hda->have_last_sample = false;
     hda->last_sample[0] = 0;
     hda->last_sample[1] = 0;
+    hda->last_write_ms = 0;
 
     size_t entry_bytes = hda->buffer_size / HDA_BDL_ENTRIES;
     for (uint32_t i = 0; i < HDA_BDL_ENTRIES; ++i)
@@ -982,6 +1017,7 @@ static bool hda_start_stream(hda_state_t *hda)
     hda->running = true;
     hda->hw_pos_prev = hda_read32(hda, HDA_REG_SD_LPIB(HDA_STREAM_INDEX));
     hda->used_bytes = 0;
+    hda->last_write_ms = hda_now_ms();
     hda_log_hwpos(hda, "after-start");
     return true;
 }
@@ -1065,6 +1101,7 @@ static ssize_t hda_dev_write(vfs_node_t *node,
             hda->last_sample[1] = (int16_t)((uint16_t)tail[2] | ((uint16_t)tail[3] << 8));
             hda->have_last_sample = true;
         }
+        hda->last_write_ms = hda_now_ms();
         spinlock_unlock(&hda->lock);
     }
 

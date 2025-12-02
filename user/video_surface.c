@@ -486,21 +486,29 @@ void video_surface_convert8_to_rgba32(const uint8_t *src,
                                       video_color_t *dst,
                                       size_t pixel_count)
 {
+    /*
+     * Guard aggressively against bad pointers or overflow so we never fault in
+     * user mode while blitting into the window buffer. A NULL or below-base
+     * pointer should simply result in a dropped frame rather than a crash.
+     */
+    const uintptr_t MIN_USER = 0x400000ULL;
     if (!src || !palette || !dst || pixel_count == 0)
     {
         return;
     }
-
-    size_t i = 0;
-    /* Unrolled to reduce branch overhead on tight blits. */
-    for (; i + 4 <= pixel_count; i += 4)
+    if ((uintptr_t)src < MIN_USER || (uintptr_t)palette < MIN_USER || (uintptr_t)dst < MIN_USER)
     {
-        dst[i + 0] = palette[src[i + 0]];
-        dst[i + 1] = palette[src[i + 1]];
-        dst[i + 2] = palette[src[i + 2]];
-        dst[i + 3] = palette[src[i + 3]];
+        return;
     }
-    for (; i < pixel_count; ++i)
+
+    size_t byte_span = 0;
+    if (__builtin_mul_overflow(pixel_count, sizeof(video_color_t), &byte_span))
+    {
+        return;
+    }
+
+    /* Straightforward loop to avoid relying on any aggressive unrolling. */
+    for (size_t i = 0; i < pixel_count; ++i)
     {
         dst[i] = palette[src[i]];
     }

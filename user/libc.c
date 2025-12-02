@@ -2,6 +2,11 @@
 
 #include "userlib.h"
 #include "serial.h"
+#include "stdio.h"
+#include "errno.h"
+#include "unistd.h"
+
+int errno = 0;
 
 #define ALIGNMENT 16UL
 #define SIZE_MAX_VALUE ((size_t)-1)
@@ -355,17 +360,260 @@ int strncmp(const char *a, const char *b, size_t n)
     return 0;
 }
 
+char *strcpy(char *dst, const char *src)
+{
+    if (!dst || !src)
+    {
+        return dst;
+    }
+    char *out = dst;
+    while (*src)
+    {
+        *dst++ = *src++;
+    }
+    *dst = '\0';
+    return out;
+}
+
+char *strncpy(char *dst, const char *src, size_t n)
+{
+    if (!dst || !src || n == 0)
+    {
+        return dst;
+    }
+    size_t i = 0;
+    for (; i < n && src[i] != '\0'; ++i)
+    {
+        dst[i] = src[i];
+    }
+    for (; i < n; ++i)
+    {
+        dst[i] = '\0';
+    }
+    return dst;
+}
+
+char *strcat(char *dst, const char *src)
+{
+    if (!dst || !src)
+    {
+        return dst;
+    }
+    char *out = dst;
+    while (*dst)
+    {
+        ++dst;
+    }
+    while (*src)
+    {
+        *dst++ = *src++;
+    }
+    *dst = '\0';
+    return out;
+}
+
+char *strchr(const char *str, int ch)
+{
+    if (!str)
+    {
+        return NULL;
+    }
+    char target = (char)ch;
+    while (*str)
+    {
+        if (*str == target)
+        {
+            return (char *)str;
+        }
+        ++str;
+    }
+    return (target == '\0') ? (char *)str : NULL;
+}
+
+char *strrchr(const char *str, int ch)
+{
+    if (!str)
+    {
+        return NULL;
+    }
+    char target = (char)ch;
+    const char *last = NULL;
+    while (*str)
+    {
+        if (*str == target)
+        {
+            last = str;
+        }
+        ++str;
+    }
+    if (target == '\0')
+    {
+        return (char *)str;
+    }
+    return (char *)last;
+}
+
+static int libc_tolower_char(int ch)
+{
+    if (ch >= 'A' && ch <= 'Z')
+    {
+        return ch - 'A' + 'a';
+    }
+    return ch;
+}
+
+int strcasecmp(const char *a, const char *b)
+{
+    if (a == b)
+    {
+        return 0;
+    }
+    while (a && b && *a && *b)
+    {
+        int ca = libc_tolower_char((unsigned char)*a);
+        int cb = libc_tolower_char((unsigned char)*b);
+        if (ca != cb)
+        {
+            return ca - cb;
+        }
+        ++a;
+        ++b;
+    }
+    int ca = a ? libc_tolower_char((unsigned char)*a) : 0;
+    int cb = b ? libc_tolower_char((unsigned char)*b) : 0;
+    return ca - cb;
+}
+
+int strncasecmp(const char *a, const char *b, size_t n)
+{
+    if (n == 0)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i < n; ++i)
+    {
+        int ca = a ? libc_tolower_char((unsigned char)a[i]) : 0;
+        int cb = b ? libc_tolower_char((unsigned char)b[i]) : 0;
+        if (ca != cb || ca == 0 || cb == 0)
+        {
+            return ca - cb;
+        }
+    }
+    return 0;
+}
+
+int toupper(int ch)
+{
+    if (ch >= 'a' && ch <= 'z')
+    {
+        return ch - ('a' - 'A');
+    }
+    return ch;
+}
+
+int tolower(int ch)
+{
+    return libc_tolower_char(ch);
+}
+
+int isdigit(int ch)
+{
+    return (ch >= '0' && ch <= '9') ? 1 : 0;
+}
+
+int isprint(int ch)
+{
+    return (ch >= 0x20 && ch <= 0x7E) ? 1 : 0;
+}
+
+int isspace(int ch)
+{
+    return (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f') ? 1 : 0;
+}
+
+int isalpha(int ch)
+{
+    return ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) ? 1 : 0;
+}
+
+int isalnum(int ch)
+{
+    return (isalpha(ch) || isdigit(ch)) ? 1 : 0;
+}
+
+int abs(int value)
+{
+    return (value < 0) ? -value : value;
+}
+
+int atoi(const char *str)
+{
+    if (!str)
+    {
+        return 0;
+    }
+    while (isspace((unsigned char)*str))
+    {
+        ++str;
+    }
+    int sign = 1;
+    if (*str == '+' || *str == '-')
+    {
+        if (*str == '-')
+        {
+            sign = -1;
+        }
+        ++str;
+    }
+    int result = 0;
+    while (isdigit((unsigned char)*str))
+    {
+        result = result * 10 + (*str - '0');
+        ++str;
+    }
+    return result * sign;
+}
+
 typedef struct
 {
     int fd;
-    int count;
+    char *buffer;
+    size_t capacity;
+    size_t length;
     bool error;
+    bool buffer_mode;
 } printf_sink_t;
 
 static void printf_sink_write(printf_sink_t *sink, const char *data, size_t len)
 {
     if (!sink || sink->error || !data || len == 0)
     {
+        return;
+    }
+
+    if (sink->buffer_mode)
+    {
+        if (sink->buffer && sink->capacity > 0 && sink->length < sink->capacity)
+        {
+            size_t space = sink->capacity - sink->length;
+            if (space > 0)
+            {
+                /* Keep one byte for the null terminator. */
+                if (space > 0)
+                {
+                    size_t copy = len;
+                    if (copy > space - 1)
+                    {
+                        copy = space - 1;
+                    }
+                    if (copy > 0)
+                    {
+                        memcpy(sink->buffer + sink->length, data, copy);
+                    }
+                }
+            }
+        }
+        sink->length += len;
         return;
     }
 
@@ -379,7 +627,7 @@ static void printf_sink_write(printf_sink_t *sink, const char *data, size_t len)
             return;
         }
         offset += (size_t)result;
-        sink->count += (int)result;
+        sink->length += (size_t)result;
     }
 }
 
@@ -665,7 +913,21 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
     }
 }
 
-static int vprintf_internal(const char *format, va_list args)
+static void printf_sink_finalize_buffer(printf_sink_t *sink)
+{
+    if (!sink || !sink->buffer_mode || !sink->buffer || sink->capacity == 0)
+    {
+        return;
+    }
+    size_t pos = sink->length;
+    if (pos >= sink->capacity)
+    {
+        pos = sink->capacity - 1;
+    }
+    sink->buffer[pos] = '\0';
+}
+
+static int vprintf_fd(int fd, const char *format, va_list args)
 {
     if (!format)
     {
@@ -673,9 +935,12 @@ static int vprintf_internal(const char *format, va_list args)
     }
 
     printf_sink_t sink = {
-        .fd = 1,
-        .count = 0,
-        .error = false
+        .fd = fd,
+        .buffer = NULL,
+        .capacity = 0,
+        .length = 0,
+        .error = false,
+        .buffer_mode = false,
     };
 
     printf_format(&sink, format, args);
@@ -683,14 +948,79 @@ static int vprintf_internal(const char *format, va_list args)
     {
         return -1;
     }
-    return sink.count;
+    return (int)sink.length;
+}
+
+static int vsnprintf_internal(char *buf, size_t size, const char *format, va_list args)
+{
+    if (!format)
+    {
+        return -1;
+    }
+    printf_sink_t sink = {
+        .fd = -1,
+        .buffer = buf,
+        .capacity = size,
+        .length = 0,
+        .error = false,
+        .buffer_mode = true,
+    };
+    printf_format(&sink, format, args);
+    printf_sink_finalize_buffer(&sink);
+    return (int)sink.length;
 }
 
 int printf(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    int result = vprintf_internal(format, args);
+    int result = vprintf_fd(1, format, args);
+    va_end(args);
+    return result;
+}
+
+int vfprintf(FILE *stream, const char *format, va_list args)
+{
+    if (!stream)
+    {
+        return -1;
+    }
+    return vprintf_fd(stream->fd, format, args);
+}
+
+int fprintf(FILE *stream, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int result = vfprintf(stream, format, args);
+    va_end(args);
+    return result;
+}
+
+int vsprintf(char *buf, const char *format, va_list args)
+{
+    return vsnprintf_internal(buf, (size_t)-1, format, args);
+}
+
+int sprintf(char *buf, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int result = vsnprintf_internal(buf, (size_t)-1, format, args);
+    va_end(args);
+    return result;
+}
+
+int vsnprintf(char *buf, size_t size, const char *format, va_list args)
+{
+    return vsnprintf_internal(buf, size, format, args);
+}
+
+int snprintf(char *buf, size_t size, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int result = vsnprintf_internal(buf, size, format, args);
     va_end(args);
     return result;
 }
@@ -743,6 +1073,225 @@ void *calloc(size_t count, size_t size)
     return ptr;
 }
 
+static FILE g_stdout_obj = { .fd = 1, .error = 0, .eof = 0 };
+static FILE g_stderr_obj = { .fd = 2, .error = 0, .eof = 0 };
+static FILE g_stdin_obj = { .fd = 0, .error = 0, .eof = 0 };
+FILE *stdout = &g_stdout_obj;
+FILE *stderr = &g_stderr_obj;
+FILE *stdin = &g_stdin_obj;
+
+static FILE *file_alloc(int fd)
+{
+    FILE *stream = (FILE *)malloc(sizeof(FILE));
+    if (!stream)
+    {
+        return NULL;
+    }
+    stream->fd = fd;
+    stream->error = 0;
+    stream->eof = 0;
+    return stream;
+}
+
+static uint64_t fopen_mode_to_flags(const char *mode, bool *append_out)
+{
+    if (append_out)
+    {
+        *append_out = false;
+    }
+    if (!mode || mode[0] == '\0')
+    {
+        return SYSCALL_OPEN_READ;
+    }
+
+    bool plus = false;
+    bool append = false;
+    uint64_t flags = 0;
+
+    switch (mode[0])
+    {
+        case 'r':
+            flags = SYSCALL_OPEN_READ;
+            break;
+        case 'w':
+            flags = SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE;
+            break;
+        case 'a':
+            flags = SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE;
+            append = true;
+            break;
+        default:
+            flags = SYSCALL_OPEN_READ;
+            break;
+    }
+
+    for (const char *c = mode; *c; ++c)
+    {
+        if (*c == '+')
+        {
+            plus = true;
+        }
+    }
+    if (plus)
+    {
+        flags |= SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE;
+    }
+
+    if (append_out)
+    {
+        *append_out = append;
+    }
+    return flags;
+}
+
+FILE *fopen(const char *path, const char *mode)
+{
+    bool append = false;
+    uint64_t flags = fopen_mode_to_flags(mode, &append);
+    int fd = open(path, flags);
+    if (fd < 0)
+    {
+        return NULL;
+    }
+    if (append)
+    {
+        (void)lseek(fd, 0, SYSCALL_SEEK_END);
+    }
+
+    FILE *stream = file_alloc(fd);
+    if (!stream)
+    {
+        close(fd);
+        return NULL;
+    }
+    return stream;
+}
+
+int fclose(FILE *stream)
+{
+    if (!stream)
+    {
+        return -1;
+    }
+    int fd = stream->fd;
+    int res = (fd >= 0) ? close(fd) : -1;
+    if (stream != stdout && stream != stderr && stream != stdin)
+    {
+        free(stream);
+    }
+    return res;
+}
+
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+    if (!stream || !ptr || size == 0 || nmemb == 0)
+    {
+        return 0;
+    }
+    size_t total = size * nmemb;
+    size_t read_bytes = 0;
+    uint8_t *dst = (uint8_t *)ptr;
+    while (read_bytes < total)
+    {
+        ssize_t got = read(stream->fd, dst + read_bytes, total - read_bytes);
+        if (got <= 0)
+        {
+            if (got == 0)
+            {
+                stream->eof = 1;
+            }
+            else
+            {
+                stream->error = 1;
+            }
+            break;
+        }
+        read_bytes += (size_t)got;
+    }
+    return read_bytes / size;
+}
+
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+    if (!stream || !ptr || size == 0 || nmemb == 0)
+    {
+        return 0;
+    }
+    size_t total = size * nmemb;
+    size_t written = 0;
+    const uint8_t *src = (const uint8_t *)ptr;
+    while (written < total)
+    {
+        ssize_t out = write(stream->fd, src + written, total - written);
+        if (out <= 0)
+        {
+            stream->error = 1;
+            break;
+        }
+        written += (size_t)out;
+    }
+    return written / size;
+}
+
+int fflush(FILE *stream)
+{
+    (void)stream;
+    return 0;
+}
+
+int fseek(FILE *stream, long offset, int whence)
+{
+    if (!stream)
+    {
+        return -1;
+    }
+    stream->eof = 0;
+    int64_t pos = lseek(stream->fd, offset, whence);
+    return (pos < 0) ? -1 : 0;
+}
+
+long ftell(FILE *stream)
+{
+    if (!stream)
+    {
+        return -1;
+    }
+    return (long)lseek(stream->fd, 0, SYSCALL_SEEK_CUR);
+}
+
+int fputc(int ch, FILE *stream)
+{
+    unsigned char c = (unsigned char)ch;
+    return (fwrite(&c, 1, 1, stream) == 1) ? (int)c : -1;
+}
+
+int fputs(const char *s, FILE *stream)
+{
+    if (!s)
+    {
+        return -1;
+    }
+    size_t len = strlen(s);
+    return (fwrite(s, 1, len, stream) == len) ? 0 : -1;
+}
+
+void setbuf(FILE *stream, char *buf)
+{
+    (void)stream;
+    (void)buf;
+}
+
+int getchar(void)
+{
+    unsigned char ch = 0;
+    ssize_t got = read(0, &ch, 1);
+    if (got == 1)
+    {
+        return (int)ch;
+    }
+    return -1;
+}
+
 ssize_t read(int fd, void *buffer, size_t count)
 {
     return sys_read(fd, buffer, count);
@@ -763,9 +1312,22 @@ int64_t lseek(int fd, int64_t offset, int whence)
     return sys_lseek(fd, offset, whence);
 }
 
-int fstat(int fd, syscall_stat_t *st)
+int fstat(int fd, struct stat *st)
 {
-    return sys_fstat(fd, st);
+    if (!st)
+    {
+        return -1;
+    }
+    syscall_stat_t tmp;
+    int res = sys_fstat(fd, &tmp);
+    if (res != 0)
+    {
+        return res;
+    }
+    st->st_size = tmp.size_bytes;
+    st->st_mode = 0;
+    st->st_type = tmp.type;
+    return 0;
 }
 
 ssize_t pread(int fd, void *buffer, size_t count, size_t offset)
@@ -773,7 +1335,7 @@ ssize_t pread(int fd, void *buffer, size_t count, size_t offset)
     return sys_pread(fd, buffer, count, offset);
 }
 
-int open(const char *path, uint64_t flags)
+int open(const char *path, uint64_t flags, ...)
 {
     uint64_t mode_flags = flags;
     if ((mode_flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) == 0)
@@ -786,6 +1348,177 @@ int open(const char *path, uint64_t flags)
 void *sbrk(int64_t increment)
 {
     return sys_sbrk(increment);
+}
+
+int access(const char *path, int mode)
+{
+    uint64_t flags = 0;
+    if (mode & W_OK)
+    {
+        flags |= SYSCALL_OPEN_WRITE;
+    }
+    if ((mode & W_OK) == 0 || (mode & R_OK))
+    {
+        flags |= SYSCALL_OPEN_READ;
+    }
+    int fd = open(path, flags);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
+static bool parse_int(const char **cursor, int base, int *out)
+{
+    const char *s = *cursor;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
+    {
+        ++s;
+    }
+    int sign = 1;
+    if (*s == '+' || *s == '-')
+    {
+        if (*s == '-')
+        {
+            sign = -1;
+        }
+        ++s;
+    }
+    if (base == 10 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+    {
+        base = 16;
+        s += 2;
+    }
+    int value = 0;
+    bool any = false;
+    while (*s)
+    {
+        int digit;
+        if (*s >= '0' && *s <= '9')
+        {
+            digit = *s - '0';
+        }
+        else if (base == 16 && *s >= 'a' && *s <= 'f')
+        {
+            digit = 10 + (*s - 'a');
+        }
+        else if (base == 16 && *s >= 'A' && *s <= 'F')
+        {
+            digit = 10 + (*s - 'A');
+        }
+        else
+        {
+            break;
+        }
+        if (digit >= base)
+        {
+            break;
+        }
+        value = value * base + digit;
+        any = true;
+        ++s;
+    }
+    if (!any)
+    {
+        return false;
+    }
+    *cursor = s;
+    if (out)
+    {
+        *out = value * sign;
+    }
+    return true;
+}
+
+int sscanf(const char *str, const char *fmt, ...)
+{
+    if (!str || !fmt)
+    {
+        return 0;
+    }
+    va_list args;
+    va_start(args, fmt);
+    int assigned = 0;
+    const char *s = str;
+    const char *f = fmt;
+
+    while (*f)
+    {
+        if (*f == '%')
+        {
+            ++f;
+            if (*f == '\0')
+            {
+                break;
+            }
+            switch (*f)
+            {
+                case 'c':
+                {
+                    int *out = va_arg(args, int *);
+                    if (!out || *s == '\0')
+                    {
+                        goto done;
+                    }
+                    *out = (unsigned char)*s++;
+                    assigned++;
+                    ++f;
+                    break;
+                }
+                case 'd':
+                case 'i':
+                {
+                    int *out = va_arg(args, int *);
+                    if (!parse_int(&s, 10, out))
+                    {
+                        goto done;
+                    }
+                    assigned++;
+                    ++f;
+                    break;
+                }
+                case 'x':
+                {
+                    int *out = va_arg(args, int *);
+                    if (!parse_int(&s, 16, out))
+                    {
+                        goto done;
+                    }
+                    assigned++;
+                    ++f;
+                    break;
+                }
+                default:
+                    goto done;
+            }
+        }
+        else if (isspace((unsigned char)*f))
+        {
+            while (isspace((unsigned char)*f))
+            {
+                ++f;
+            }
+            while (isspace((unsigned char)*s))
+            {
+                ++s;
+            }
+        }
+        else
+        {
+            if (*f != *s)
+            {
+                goto done;
+            }
+            ++f;
+            ++s;
+        }
+    }
+
+done:
+    va_end(args);
+    return assigned;
 }
 
 void exit(int status)

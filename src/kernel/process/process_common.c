@@ -811,7 +811,18 @@ static bool thread_fpu_region_valid(const thread_t *thread)
         return false;
     }
     uintptr_t addr = (uintptr_t)&thread->fpu_state;
-    return pointer_in_heap(addr, sizeof(fpu_state_t));
+    if (!pointer_in_heap(addr, sizeof(fpu_state_t)) || !pointer_is_canonical(addr))
+    {
+        return false;
+    }
+    if ((addr & 0xF) != 0)
+    {
+        serial_printf("[proc] fpu_state misaligned thread=%s addr=0x%016llX\r\n",
+                      thread->name,
+                      (unsigned long long)addr);
+        return false;
+    }
+    return true;
 }
 
 static bool process_pointer_valid(const process_t *process)
