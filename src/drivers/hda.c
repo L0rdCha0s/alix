@@ -79,7 +79,7 @@
 #define HDA_PCM_FORMAT     0x0011u /* 48 kHz, 16-bit, 2 channels */
 #define HDA_CONN_LIST_LEN  0x0EL
 
-#define HDA_BDL_ENTRIES    32u
+#define HDA_BDL_ENTRIES    64u
 #define HDA_BUFFER_BYTES   (HDA_BDL_ENTRIES * 4096u)
 
 #define HDA_STREAM_INDEX   0u
@@ -130,6 +130,8 @@ typedef struct
     uint16_t rirb_rp;
     uint32_t hw_pos_prev;
     size_t used_bytes;
+    int16_t last_sample[2];
+    bool have_last_sample;
 } hda_state_t;
 
 static hda_state_t g_hda;
@@ -205,9 +207,9 @@ static inline void hda_write16(hda_state_t *hda, uint32_t offset, uint16_t value
 
 static uint32_t hda_hw_position(hda_state_t *hda);
 
-static int g_hda_lpib_log_budget = 8;
-static int g_hda_error_log_budget = 8;
-static int g_hda_empty_log_budget = 16;
+static int g_hda_lpib_log_budget = 1000;
+static int g_hda_error_log_budget = 1000;
+static int g_hda_empty_log_budget = 1000;
 
 static void hda_stop_stream(hda_state_t *hda)
 {
@@ -222,6 +224,47 @@ static void hda_stop_stream(hda_state_t *hda)
     hda->running = false;
 }
 
+static void hda_fill_pattern(hda_state_t *hda, uint32_t offset, size_t len)
+{
+    if (!hda || !hda->buffer || len == 0)
+    {
+        return;
+    }
+    /* Fade the last stereo sample to silence over a small window to avoid clicks. */
+    const int16_t last_l = hda->have_last_sample ? hda->last_sample[0] : 0;
+    const int16_t last_r = hda->have_last_sample ? hda->last_sample[1] : 0;
+    const size_t frames = len / 4;
+    const size_t fade_frames = (frames < 32) ? frames : 32;
+    uint32_t pos = offset % (uint32_t)hda->buffer_size;
+    uint32_t buf_size = (uint32_t)hda->buffer_size;
+
+    for (size_t i = 0; i < frames; ++i)
+    {
+        int32_t l = 0;
+        int32_t r = 0;
+        if (fade_frames > 0 && i < fade_frames)
+        {
+            uint32_t scale = (uint32_t)(fade_frames - i);
+            l = (int32_t)((last_l * (int32_t)scale) / (int32_t)fade_frames);
+            r = (int32_t)((last_r * (int32_t)scale) / (int32_t)fade_frames);
+        }
+        /* write one stereo frame */
+        hda->buffer[pos + 0] = (uint8_t)(l & 0xFF);
+        hda->buffer[pos + 1] = (uint8_t)((l >> 8) & 0xFF);
+        hda->buffer[pos + 2] = (uint8_t)(r & 0xFF);
+        hda->buffer[pos + 3] = (uint8_t)((r >> 8) & 0xFF);
+        pos = (pos + 4u) % buf_size;
+    }
+
+    /* Handle any tail bytes (should be rare): fill zeros. */
+    size_t tail = len - frames * 4u;
+    for (size_t i = 0; i < tail; ++i)
+    {
+        hda->buffer[pos] = 0;
+        pos = (pos + 1u) % buf_size;
+    }
+}
+
 static void hda_silence_advance(hda_state_t *hda, uint32_t prev, uint32_t hw_pos)
 {
     if (!hda || !hda->buffer || hda->buffer_size == 0 || hw_pos == prev)
@@ -232,15 +275,15 @@ static void hda_silence_advance(hda_state_t *hda, uint32_t prev, uint32_t hw_pos
     uint32_t buf = (uint32_t)hda->buffer_size;
     if (hw_pos > prev)
     {
-        memset(hda->buffer + prev, 0, (size_t)(hw_pos - prev));
+        hda_fill_pattern(hda, prev, (size_t)(hw_pos - prev));
     }
     else
     {
         size_t first = (size_t)(buf - prev);
-        memset(hda->buffer + prev, 0, first);
+        hda_fill_pattern(hda, prev, first);
         if (hw_pos != 0)
         {
-            memset(hda->buffer, 0, hw_pos);
+            hda_fill_pattern(hda, 0, hw_pos);
         }
     }
 }
@@ -291,7 +334,7 @@ static void hda_housekeeping(void *arg)
     (void)arg;
     for (;;)
     {
-        process_sleep_ms(5);
+        process_sleep_ms(1);
         spinlock_lock(&g_hda.lock);
         if (g_hda.running)
         {
@@ -803,6 +846,9 @@ static bool hda_prepare_buffers(hda_state_t *hda)
     hda->write_pos = 0;
     hda->used_bytes = 0;
     hda->hw_pos_prev = 0;
+    hda->have_last_sample = false;
+    hda->last_sample[0] = 0;
+    hda->last_sample[1] = 0;
 
     size_t entry_bytes = hda->buffer_size / HDA_BDL_ENTRIES;
     for (uint32_t i = 0; i < HDA_BDL_ENTRIES; ++i)
@@ -1008,6 +1054,15 @@ static ssize_t hda_dev_write(vfs_node_t *node,
             hda->write_pos = (hda->write_pos + second) % hda->buffer_size;
             written += second;
             hda->used_bytes += second;
+        }
+        /* Remember the last stereo sample to smooth underrun padding. */
+        size_t total_written = written;
+        if (total_written >= 4)
+        {
+            const uint8_t *tail = src + total_written - 4;
+            hda->last_sample[0] = (int16_t)((uint16_t)tail[0] | ((uint16_t)tail[1] << 8));
+            hda->last_sample[1] = (int16_t)((uint16_t)tail[2] | ((uint16_t)tail[3] << 8));
+            hda->have_last_sample = true;
         }
         spinlock_unlock(&hda->lock);
     }
