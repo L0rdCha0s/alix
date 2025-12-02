@@ -1520,7 +1520,15 @@ atk_key_event_result_t atk_handle_key_char(char ch)
         goto out;
     }
 
-    if (user_atk_route_key_event(ch))
+    keyboard_event_t kev = {
+        .scancode = 0,
+        .extended = false,
+        .released = false,
+        .repeat = false,
+        .ch = ch,
+    };
+
+    if (user_atk_route_key_event(&kev))
     {
         goto out;
     }

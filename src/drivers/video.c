@@ -2,7 +2,9 @@
 #include "io.h"
 #include "serial.h"
 #include "mouse.h"
+#include "keyboard.h"
 #include "atk.h"
+#include "user_atk_host.h"
 #include "atk/atk_list.h"
 #include "pci.h"
 #include "keyboard.h"
@@ -1187,16 +1189,24 @@ static void video_poll_keyboard(void)
 {
     if (!video_active) return;
 
-    char ch = 0;
     bool have_input = false;
     bool redraw_needed = false;
 
-    while (keyboard_try_read(&ch))
+    keyboard_event_t kev;
+    while (keyboard_try_read_event(&kev))
     {
         have_input = true;
-        atk_key_event_result_t result = atk_handle_key_char(ch);
-        if (result.redraw) redraw_needed = true;
-        if (result.exit_video) exit_requested = true;
+        if (user_atk_route_key_event(&kev))
+        {
+            continue;
+        }
+
+        if (!kev.released && kev.ch != 0)
+        {
+            atk_key_event_result_t result = atk_handle_key_char(kev.ch);
+            if (result.redraw) redraw_needed = true;
+            if (result.exit_video) exit_requested = true;
+        }
     }
 
     if (!have_input || !redraw_needed) return;

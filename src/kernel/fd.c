@@ -119,3 +119,33 @@ int fd_close(int fd)
     }
     return 0;
 }
+
+ssize_t fd_pread(int fd, void *buffer, size_t count, size_t offset)
+{
+    fd_entry_t *entry = fd_lookup(fd);
+    if (!entry || !entry->ops || !entry->ops->pread)
+    {
+        return -1;
+    }
+    return entry->ops->pread(entry->context, buffer, count, offset);
+}
+
+int64_t fd_lseek(int fd, int64_t offset, int whence)
+{
+    fd_entry_t *entry = fd_lookup(fd);
+    if (!entry || !entry->ops || !entry->ops->lseek)
+    {
+        return -1;
+    }
+    return entry->ops->lseek(entry->context, offset, whence);
+}
+
+int fd_fstat(int fd, syscall_stat_t *out)
+{
+    fd_entry_t *entry = fd_lookup(fd);
+    if (!entry || !entry->ops || !entry->ops->fstat)
+    {
+        return -1;
+    }
+    return entry->ops->fstat(entry->context, out);
+}

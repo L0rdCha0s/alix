@@ -3,6 +3,7 @@
 
 #include "user_atk_defs.h"
 #include "video.h"
+#include "keyboard.h"
 
 struct atk_widget;
 struct process;
@@ -19,7 +20,7 @@ bool user_atk_route_mouse_event(const struct atk_widget *hover_window,
                                 bool pressed_edge,
                                 bool released_edge,
                                 bool left_pressed);
-bool user_atk_route_key_event(char ch);
+bool user_atk_route_key_event(const keyboard_event_t *event);
 void user_atk_window_resized(const struct atk_widget *window);
 
 int64_t user_atk_sys_create(const user_atk_window_desc_t *desc);

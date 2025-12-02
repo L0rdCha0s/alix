@@ -481,6 +481,31 @@ void video_surface_set_tracking(bool enable)
     surface_unlock();
 }
 
+void video_surface_convert8_to_rgba32(const uint8_t *src,
+                                      const video_color_t *palette,
+                                      video_color_t *dst,
+                                      size_t pixel_count)
+{
+    if (!src || !palette || !dst || pixel_count == 0)
+    {
+        return;
+    }
+
+    size_t i = 0;
+    /* Unrolled to reduce branch overhead on tight blits. */
+    for (; i + 4 <= pixel_count; i += 4)
+    {
+        dst[i + 0] = palette[src[i + 0]];
+        dst[i + 1] = palette[src[i + 1]];
+        dst[i + 2] = palette[src[i + 2]];
+        dst[i + 3] = palette[src[i + 3]];
+    }
+    for (; i < pixel_count; ++i)
+    {
+        dst[i] = palette[src[i]];
+    }
+}
+
 bool video_surface_tracking_enabled(void)
 {
     surface_lock();

@@ -210,3 +210,18 @@ ssize_t sys_font_cache(void *buffer, size_t capacity)
 {
     return (ssize_t)syscall2(SYSCALL_FONT_CACHE, (long)buffer, (long)capacity);
 }
+
+int64_t sys_lseek(int fd, int64_t offset, int whence)
+{
+    return (int64_t)syscall3(SYSCALL_LSEEK, fd, (long)offset, (long)whence);
+}
+
+int sys_fstat(int fd, syscall_stat_t *st)
+{
+    return (int)syscall2(SYSCALL_FSTAT, fd, (long)st);
+}
+
+ssize_t sys_pread(int fd, void *buffer, size_t count, size_t offset)
+{
+    return (ssize_t)syscall4(SYSCALL_PREAD, fd, (long)buffer, (long)count, (long)offset);
+}

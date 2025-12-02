@@ -99,10 +99,11 @@ static keyboard_proc_value_t g_initial_repeat_entry = { &repeat_initial_delay_ms
 static keyboard_proc_value_t g_repeat_interval_entry = { &repeat_interval_ms, "repeat" };
 static keyboard_proc_bool_entry_t g_multi_repeat_entry = { &g_repeat_multi_mode, NULL };
 
+static void keyboard_clear_event(keyboard_event_t *event);
 static void keyboard_repeat_reset(void);
 static void keyboard_start_repeat(uint8_t scancode, bool extended, bool keypad_enter);
 static void keyboard_stop_repeat(uint8_t scancode, bool extended);
-static bool keyboard_repeat_due(char *out_char);
+static bool keyboard_repeat_due(keyboard_event_t *event);
 static void keyboard_update_repeat_ticks(void);
 static void keyboard_set_multi_mode(bool enabled);
 static bool keyboard_emit_char(uint8_t scancode, bool extended, bool keypad_enter, bool synthetic, char *out_char);
@@ -139,6 +140,19 @@ static bool ps2_wait_output_full(void)
 static bool keyboard_is_space(char ch)
 {
     return (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r');
+}
+
+static void keyboard_clear_event(keyboard_event_t *event)
+{
+    if (!event)
+    {
+        return;
+    }
+    event->scancode = 0;
+    event->extended = false;
+    event->released = false;
+    event->repeat = false;
+    event->ch = 0;
 }
 
 static void keyboard_repeat_reset(void)
@@ -253,9 +267,9 @@ static void keyboard_stop_repeat(uint8_t scancode, bool extended)
     }
 }
 
-static bool keyboard_repeat_due(char *out_char)
+static bool keyboard_repeat_due(keyboard_event_t *event)
 {
-    if (!out_char)
+    if (!event)
     {
         return false;
     }
@@ -273,15 +287,22 @@ static bool keyboard_repeat_due(char *out_char)
         {
             continue;
         }
+        char ch = 0;
         if (!keyboard_emit_char(entry->scancode,
                                 entry->extended,
                                 entry->keypad_enter,
                                 true,
-                                out_char))
+                                &ch))
         {
             entry->active = false;
             continue;
         }
+        keyboard_clear_event(event);
+        event->scancode = entry->scancode;
+        event->extended = entry->extended;
+        event->released = false;
+        event->repeat = true;
+        event->ch = ch;
         entry->waiting_initial = false;
         entry->next_tick = now + repeat_interval_ticks;
         g_repeat_next_index = (idx + 1) % KEYBOARD_MAX_REPEAT_KEYS;
@@ -744,7 +765,6 @@ void keyboard_init(void)
 #if ENABLE_USB
     /* Skip PS/2 init when USB is present to avoid contention on the controller. */
     ps2_enabled = false;
-    return;
 #else
     ps2_enabled = true;
     ps2_controller_init();
@@ -786,19 +806,24 @@ void keyboard_init(void)
 #endif /* ENABLE_USB */
 }
 
-bool keyboard_try_read(char *out_char)
+bool keyboard_try_read_event(keyboard_event_t *event)
 {
-    if (pending_pop_char(out_char))
+    if (!event)
+    {
+        return false;
+    }
+    keyboard_clear_event(event);
+
+    char pending = 0;
+    if (pending_pop_char(&pending))
+    {
+        event->ch = pending;
+        return true;
+    }
+    if (keyboard_repeat_due(event))
     {
         return true;
     }
-    if (keyboard_repeat_due(out_char))
-    {
-        return true;
-    }
-
-    //serial_write_string("keybaord.c: keyboard_try_read\n");
-
 
     uint8_t scancode;
     if (!read_scancode(&scancode))
@@ -835,7 +860,11 @@ bool keyboard_try_read(char *out_char)
         {
             key_down[scancode] = released ? 0 : 1;
         }
-        return false;
+        keyboard_clear_event(event);
+        event->scancode = scancode;
+        event->extended = extended;
+        event->released = released;
+        return true;
     }
     if (scancode == 0x36)
     {
@@ -844,13 +873,20 @@ bool keyboard_try_read(char *out_char)
         {
             key_down[scancode] = released ? 0 : 1;
         }
-        return false;
+        keyboard_clear_event(event);
+        event->scancode = scancode;
+        event->extended = extended;
+        event->released = released;
+        return true;
     }
 
     if (scancode == 0x3A && !released)
     {
         caps_lock_enabled ^= 1;
-        return false;
+        keyboard_clear_event(event);
+        event->scancode = scancode;
+        event->extended = extended;
+        return true;
     }
 
     if (!extended && scancode == 0x1D)
@@ -860,12 +896,20 @@ bool keyboard_try_read(char *out_char)
         {
             key_down[scancode] = released ? 0 : 1;
         }
-        return false;
+        keyboard_clear_event(event);
+        event->scancode = scancode;
+        event->extended = extended;
+        event->released = released;
+        return true;
     }
     if (extended && scancode == 0x1D)
     {
         right_ctrl_pressed = released ? 0 : 1;
-        return false;
+        keyboard_clear_event(event);
+        event->scancode = scancode;
+        event->extended = extended;
+        event->released = released;
+        return true;
     }
 
     if (released)
@@ -875,13 +919,44 @@ bool keyboard_try_read(char *out_char)
             key_down[scancode] = 0;
         }
         keyboard_stop_repeat(scancode, extended);
+        keyboard_clear_event(event);
+        event->scancode = scancode;
+        event->extended = extended;
+        event->released = true;
+        return true;
+    }
+
+    char out_char = 0;
+    bool have_char = keyboard_emit_char(scancode, extended, keypad_enter, false, &out_char);
+    if (have_char)
+    {
+        keyboard_start_repeat(scancode, extended, keypad_enter);
+    }
+
+    keyboard_clear_event(event);
+    event->scancode = scancode;
+    event->extended = extended;
+    event->released = false;
+    event->repeat = false;
+    event->ch = have_char ? out_char : 0;
+    return true;
+}
+
+bool keyboard_try_read(char *out_char)
+{
+    if (!out_char)
+    {
         return false;
     }
 
-    if (keyboard_emit_char(scancode, extended, keypad_enter, false, out_char))
+    keyboard_event_t event;
+    while (keyboard_try_read_event(&event))
     {
-        keyboard_start_repeat(scancode, extended, keypad_enter);
-        return true;
+        if (!event.released && event.ch != 0)
+        {
+            *out_char = event.ch;
+            return true;
+        }
     }
     return false;
 }

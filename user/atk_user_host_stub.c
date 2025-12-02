@@ -41,9 +41,9 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     return false;
 }
 
-bool user_atk_route_key_event(char ch)
+bool user_atk_route_key_event(const keyboard_event_t *event)
 {
-    (void)ch;
+    (void)event;
     return false;
 }
 

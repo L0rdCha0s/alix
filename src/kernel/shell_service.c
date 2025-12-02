@@ -80,6 +80,9 @@ static const fd_ops_t g_shell_session_fd_ops = {
     .read = NULL,
     .write = shell_session_fd_write,
     .close = shell_session_fd_close,
+    .pread = NULL,
+    .lseek = NULL,
+    .fstat = NULL,
 };
 
 static inline void shell_session_lock(shell_session_t *session)

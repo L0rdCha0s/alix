@@ -7,5 +7,8 @@
 int open(const char *path, uint64_t flags);
 void *sbrk(int64_t increment);
 void exit(int status) __attribute__((noreturn));
+int64_t lseek(int fd, int64_t offset, int whence);
+int fstat(int fd, syscall_stat_t *st);
+ssize_t pread(int fd, void *buffer, size_t count, size_t offset);
 
 #endif

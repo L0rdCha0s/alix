@@ -455,8 +455,12 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     return true;
 }
 
-bool user_atk_route_key_event(char ch)
+bool user_atk_route_key_event(const keyboard_event_t *key_event)
 {
+    if (!key_event)
+    {
+        return false;
+    }
     user_atk_windows_lock();
     user_atk_window_t *focus = g_focus_window;
     if (focus && focus->closed)
@@ -474,7 +478,7 @@ bool user_atk_route_key_event(char ch)
         return false;
     }
 #if USER_ATK_DEBUG
-    user_atk_log_pair("route_key", (uint64_t)(uint8_t)ch, focus->handle);
+    user_atk_log_pair("route_key", (uint64_t)(uint8_t)key_event->ch, focus->handle);
 #endif
 
     user_atk_event_t event = {
@@ -482,9 +486,21 @@ bool user_atk_route_key_event(char ch)
         .flags = 0,
         .x = 0,
         .y = 0,
-        .data0 = (uint8_t)ch,
-        .data1 = 0,
+        .data0 = (uint8_t)key_event->ch,
+        .data1 = (uint32_t)key_event->scancode,
     };
+    if (key_event->released)
+    {
+        event.flags |= USER_ATK_KEY_FLAG_RELEASE;
+    }
+    if (key_event->extended)
+    {
+        event.flags |= USER_ATK_KEY_FLAG_EXTENDED;
+    }
+    if (key_event->repeat)
+    {
+        event.flags |= USER_ATK_KEY_FLAG_REPEAT;
+    }
     user_atk_queue_event(focus, &event);
     user_atk_window_release(focus);
     return true;

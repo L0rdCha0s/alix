@@ -9,6 +9,7 @@
 #else
 #include "types.h"
 #endif
+#include "syscall_defs.h"
 
 void *memset(void *dst, int value, size_t count);
 void *memmove(void *dst, const void *src, size_t count);
@@ -28,5 +29,8 @@ ssize_t write(int fd, const void *buffer, size_t count);
 int close(int fd);
 int open(const char *path, uint64_t flags);
 int printf(const char *format, ...);
+int64_t lseek(int fd, int64_t offset, int whence);
+int fstat(int fd, syscall_stat_t *st);
+ssize_t pread(int fd, void *buffer, size_t count, size_t offset);
 
 #endif

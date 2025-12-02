@@ -758,6 +758,21 @@ int close(int fd)
     return sys_close(fd);
 }
 
+int64_t lseek(int fd, int64_t offset, int whence)
+{
+    return sys_lseek(fd, offset, whence);
+}
+
+int fstat(int fd, syscall_stat_t *st)
+{
+    return sys_fstat(fd, st);
+}
+
+ssize_t pread(int fd, void *buffer, size_t count, size_t offset)
+{
+    return sys_pread(fd, buffer, count, offset);
+}
+
 int open(const char *path, uint64_t flags)
 {
     uint64_t mode_flags = flags;

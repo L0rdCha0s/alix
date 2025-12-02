@@ -272,10 +272,74 @@ static int syscall_file_close(void *ctx)
     return 0;
 }
 
+static ssize_t syscall_file_pread(void *ctx, void *buffer, size_t count, size_t offset)
+{
+    file_handle_t *handle = (file_handle_t *)ctx;
+    if (!handle || !handle->readable || (!buffer && count > 0))
+    {
+        return -1;
+    }
+    return vfs_read_at(handle->node, offset, buffer, count);
+}
+
+static int64_t syscall_file_lseek(void *ctx, int64_t offset, int whence)
+{
+    file_handle_t *handle = (file_handle_t *)ctx;
+    if (!handle || !handle->node)
+    {
+        return -1;
+    }
+
+    size_t size = 0;
+    vfs_node_type_t type = VFS_NODE_FILE;
+    vfs_stat(handle->node, &size, &type);
+
+    int64_t base = 0;
+    switch (whence)
+    {
+        case SYSCALL_SEEK_SET: base = 0; break;
+        case SYSCALL_SEEK_CUR: base = (int64_t)handle->offset; break;
+        case SYSCALL_SEEK_END: base = (int64_t)size; break;
+        default: return -1;
+    }
+
+    int64_t target = 0;
+    if (__builtin_add_overflow(base, offset, &target) || target < 0)
+    {
+        return -1;
+    }
+
+    handle->offset = (size_t)target;
+    return target;
+}
+
+static int syscall_file_fstat(void *ctx, syscall_stat_t *out)
+{
+    file_handle_t *handle = (file_handle_t *)ctx;
+    if (!handle || !handle->node || !out)
+    {
+        return -1;
+    }
+
+    size_t size = 0;
+    vfs_node_type_t type = VFS_NODE_FILE;
+    if (!vfs_stat(handle->node, &size, &type))
+    {
+        return -1;
+    }
+    out->size_bytes = size;
+    out->type = (uint32_t)type;
+    out->reserved = 0;
+    return 0;
+}
+
 static const fd_ops_t g_syscall_file_ops = {
     .read = syscall_file_read,
     .write = syscall_file_write,
     .close = syscall_file_close,
+    .pread = syscall_file_pread,
+    .lseek = syscall_file_lseek,
+    .fstat = syscall_file_fstat,
 };
 
 static int64_t syscall_do_write(uint64_t fd, const void *buffer, size_t count)
@@ -338,6 +402,65 @@ static int64_t syscall_do_read(uint64_t fd, void *buffer, size_t count)
     }
     free(tmp);
     return (int64_t)bytes;
+}
+
+static int64_t syscall_do_pread(uint64_t fd, void *buffer, size_t count, size_t offset)
+{
+    if (count == 0)
+    {
+        return 0;
+    }
+    if (!buffer)
+    {
+        return -1;
+    }
+    if (!user_ptr_range_valid(buffer, count))
+    {
+        return -1;
+    }
+
+    uint8_t *tmp = (uint8_t *)malloc(count);
+    if (!tmp)
+    {
+        return -1;
+    }
+    ssize_t bytes = fd_pread((int)fd, tmp, count, offset);
+    if (bytes > 0)
+    {
+        if (!user_copy_to_user(buffer, tmp, (size_t)bytes))
+        {
+            bytes = -1;
+        }
+    }
+    free(tmp);
+    return (int64_t)bytes;
+}
+
+static int64_t syscall_do_lseek(uint64_t fd, int64_t offset, int whence)
+{
+    return fd_lseek((int)fd, offset, whence);
+}
+
+static int64_t syscall_do_fstat(uint64_t fd, syscall_stat_t *out)
+{
+    if (!out)
+    {
+        return -1;
+    }
+    if (!user_ptr_range_valid(out, sizeof(*out)))
+    {
+        return -1;
+    }
+    syscall_stat_t tmp;
+    if (fd_fstat((int)fd, &tmp) != 0)
+    {
+        return -1;
+    }
+    if (!user_copy_to_user(out, &tmp, sizeof(tmp)))
+    {
+        return -1;
+    }
+    return 0;
 }
 
 static int64_t syscall_do_close(uint64_t fd)
@@ -469,11 +592,23 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                                      (void *)frame->rsi,
                                      (size_t)frame->rdx);
             break;
+        case SYSCALL_PREAD:
+            result = syscall_do_pread(frame->rdi,
+                                      (void *)frame->rsi,
+                                      (size_t)frame->rdx,
+                                      (size_t)frame->r10);
+            break;
         case SYSCALL_OPEN:
             result = syscall_do_open((const char *)frame->rdi, frame->rsi);
             break;
         case SYSCALL_CLOSE:
             result = syscall_do_close(frame->rdi);
+            break;
+        case SYSCALL_LSEEK:
+            result = syscall_do_lseek(frame->rdi, (int64_t)frame->rsi, (int)frame->rdx);
+            break;
+        case SYSCALL_FSTAT:
+            result = syscall_do_fstat(frame->rdi, (syscall_stat_t *)frame->rsi);
             break;
         case SYSCALL_YIELD:
             process_preempt_hook();

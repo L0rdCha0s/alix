@@ -1529,6 +1529,23 @@ char *vfs_data(vfs_node_t *file, size_t *size)
     return data;
 }
 
+bool vfs_stat(const vfs_node_t *node, size_t *size_out, vfs_node_type_t *type_out)
+{
+    if (!node)
+    {
+        return false;
+    }
+    if (size_out)
+    {
+        *size_out = node->size;
+    }
+    if (type_out)
+    {
+        *type_out = node->type;
+    }
+    return true;
+}
+
 const char *vfs_name(const vfs_node_t *node)
 {
     return node ? node->name : NULL;

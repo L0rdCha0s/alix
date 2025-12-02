@@ -725,6 +725,9 @@ static const fd_ops_t console_stdout_ops = {
     .read = NULL,
     .write = console_stdout_write,
     .close = NULL,
+    .pread = NULL,
+    .lseek = NULL,
+    .fstat = NULL,
 };
 
 static inline uint64_t cpu_save_flags(void)

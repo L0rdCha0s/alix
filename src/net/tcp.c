@@ -201,6 +201,9 @@ static const fd_ops_t g_tcp_fd_ops = {
     .read = tcp_fd_read,
     .write = tcp_fd_write,
     .close = tcp_fd_close,
+    .pread = NULL,
+    .lseek = NULL,
+    .fstat = NULL,
 };
 
 static spinlock_t g_tcp_lock;
