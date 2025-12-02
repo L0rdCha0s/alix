@@ -4,6 +4,8 @@
 #include "paging.h"
 #include "spinlock.h"
 #include "smp.h"
+#include "procfs.h"
+#include "vfs.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -62,6 +64,8 @@ static size_t g_heap_trace_peak_bytes = 0;
 static size_t g_heap_trace_allocations = 0;
 static size_t g_heap_trace_frees = 0;
 #endif
+
+static uint32_t g_heap_trace_log_enable = 0;
 
 typedef struct
 {
@@ -145,6 +149,94 @@ static void heap_format_readable_bytes(size_t bytes,
                                        uint64_t *out_fraction,
                                        const char **out_suffix,
                                        bool *out_fraction_used);
+
+static inline __attribute__((unused)) bool heap_trace_logs_enabled(void)
+{
+    return __atomic_load_n(&g_heap_trace_log_enable, __ATOMIC_RELAXED) != 0;
+}
+
+static ssize_t heap_log_enable_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    uint32_t *flag = (uint32_t *)context;
+    if (!flag || !buffer)
+    {
+        return -1;
+    }
+    char tmp[3];
+    tmp[0] = __atomic_load_n(flag, __ATOMIC_ACQUIRE) ? '1' : '0';
+    tmp[1] = '\n';
+    tmp[2] = '\0';
+    size_t len = 2;
+    if (offset >= len)
+    {
+        return 0;
+    }
+    size_t to_copy = len - offset;
+    if (to_copy > count)
+    {
+        to_copy = count;
+    }
+    memcpy(buffer, tmp + offset, to_copy);
+    return (ssize_t)to_copy;
+}
+
+static ssize_t heap_log_enable_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)offset;
+    uint32_t *flag = (uint32_t *)context;
+    if (!flag || !buffer || count == 0)
+    {
+        return -1;
+    }
+    char cbuf[4];
+    size_t to_copy = count;
+    if (to_copy >= sizeof(cbuf))
+    {
+        to_copy = sizeof(cbuf) - 1;
+    }
+    memcpy(cbuf, buffer, to_copy);
+    cbuf[to_copy] = '\0';
+
+    int value = -1;
+    size_t idx = 0;
+    while (idx < to_copy && (cbuf[idx] == ' ' || cbuf[idx] == '\t' || cbuf[idx] == '\r' || cbuf[idx] == '\n'))
+    {
+        ++idx;
+    }
+    if (idx < to_copy)
+    {
+        if (cbuf[idx] == '0')
+        {
+            value = 0;
+        }
+        else if (cbuf[idx] == '1')
+        {
+            value = 1;
+        }
+    }
+    if (value < 0)
+    {
+        return -1;
+    }
+    for (size_t tail = idx + 1; tail < to_copy; ++tail)
+    {
+        char t = cbuf[tail];
+        if (t == ' ' || t == '\t' || t == '\r' || t == '\n')
+        {
+            continue;
+        }
+        return -1;
+    }
+    __atomic_store_n(flag, (uint32_t)value, __ATOMIC_RELEASE);
+    return (ssize_t)count;
+}
+
+void heap_sys_controls_init(void)
+{
+    (void)procfs_create_file_at("sys/mem/log_enable", heap_log_enable_read, heap_log_enable_write, &g_heap_trace_log_enable);
+}
 
 #ifdef ENABLE_MEM_DEBUG_LOGS
 static inline void heap_log(const char *msg, uintptr_t value)
@@ -788,16 +880,20 @@ static heap_block_t *find_suitable_block(size_t size, void *caller)
             iterations++;
             if (iterations >= HEAP_FIND_WATCHDOG_THRESHOLD)
             {
-                size_t free_bytes = 0;
-                bool free_ok = heap_calculate_free_bytes_locked(&free_bytes, NULL);
-                heap_lock_info_t info = { 0 };
-                heap_lock_owner_snapshot(&info);
 #if ENABLE_HEAP_TRACE
-                if (g_heap_trace_enabled)
+                if (g_heap_trace_enabled && heap_trace_logs_enabled())
                 {
+                    size_t free_bytes = 0;
+                    bool free_ok = heap_calculate_free_bytes_locked(&free_bytes, NULL);
+                    heap_lock_info_t info = (heap_lock_info_t){ 0 };
+                    heap_lock_owner_snapshot(&info);
                     heap_trace_log_stall(size, block, iterations, caller, free_bytes, free_ok, &info);
                 }
 #else
+                size_t free_bytes = 0;
+                bool free_ok = heap_calculate_free_bytes_locked(&free_bytes, NULL);
+                heap_lock_info_t info = (heap_lock_info_t){ 0 };
+                heap_lock_owner_snapshot(&info);
                 uint64_t r_value = 0;
                 uint64_t r_fraction = 0;
                 const char *r_suffix = "B";
@@ -1180,7 +1276,10 @@ void *malloc(size_t size)
         {
             g_heap_trace_peak_bytes = g_heap_trace_bytes_in_use;
         }
-        trace_free_ok = heap_calculate_free_bytes_locked(&trace_free_bytes, NULL);
+        if (heap_trace_logs_enabled())
+        {
+            trace_free_ok = heap_calculate_free_bytes_locked(&trace_free_bytes, NULL);
+        }
     }
 #endif
     void *result = (void *)((uintptr_t)block + sizeof(heap_block_t));
@@ -1188,7 +1287,7 @@ void *malloc(size_t size)
     heap_log("malloc size=", requested);
     heap_lock_release(flags);
 #if ENABLE_HEAP_TRACE
-    if (trace_block && g_heap_trace_enabled && trace_bytes >= g_heap_trace_threshold)
+    if (trace_block && g_heap_trace_enabled && heap_trace_logs_enabled() && trace_bytes >= g_heap_trace_threshold)
     {
         heap_trace_log_alloc(requested, trace_block, trace_caller, trace_free_bytes, trace_free_ok);
     }
@@ -1257,14 +1356,14 @@ void free(void *ptr)
     heap_block_t *merged = coalesce(block);
     free_list_insert(merged);
 #if ENABLE_HEAP_TRACE
-    if (trace_log && g_heap_trace_enabled)
+    if (trace_log && g_heap_trace_enabled && heap_trace_logs_enabled())
     {
         trace_free_ok = heap_calculate_free_bytes_locked(&trace_free_bytes, NULL);
     }
 #endif
     heap_lock_release(flags);
 #if ENABLE_HEAP_TRACE
-    if (trace_log && trace_size >= g_heap_trace_threshold)
+    if (trace_log && g_heap_trace_enabled && heap_trace_logs_enabled() && trace_size >= g_heap_trace_threshold)
     {
         heap_trace_log_free(trace_size, trace_addr, trace_caller, trace_free_bytes, trace_free_ok);
     }
@@ -1275,7 +1374,7 @@ void free(void *ptr)
 static void heap_trace_log_alloc(size_t requested, const heap_block_t *block, void *caller,
                                  size_t free_bytes, bool free_bytes_valid)
 {
-    if (!block)
+    if (!block || !heap_trace_logs_enabled())
     {
         return;
     }
@@ -1332,6 +1431,10 @@ static void heap_trace_log_alloc(size_t requested, const heap_block_t *block, vo
 static void heap_trace_log_free(size_t size, uintptr_t block_addr, void *caller,
                                 size_t free_bytes, bool free_bytes_valid)
 {
+    if (!heap_trace_logs_enabled())
+    {
+        return;
+    }
     if (free_bytes_valid)
     {
         uint64_t r_value = 0;
@@ -1377,6 +1480,10 @@ static void heap_trace_log_stall(size_t requested, const heap_block_t *cursor, u
                                  void *caller, size_t free_bytes, bool free_bytes_valid,
                                  heap_lock_info_t *lock_info)
 {
+    if (!heap_trace_logs_enabled())
+    {
+        return;
+    }
     if (free_bytes_valid)
     {
         uint64_t r_value = 0;

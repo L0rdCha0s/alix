@@ -1543,6 +1543,19 @@ static void thread_stack_watch_deactivate(thread_t *thread)
     {
         return;
     }
+    if (thread->stack_watch_base == 0 || thread->stack_watch_len == 0)
+    {
+        thread->stack_watch_active = false;
+        thread->stack_watch_base = 0;
+        thread->stack_watch_len = 0;
+        thread_stack_watch_clear_snapshot(thread);
+        if (!thread->stack_watch_enabled)
+        {
+            thread->stack_watch_suspect = 0;
+            thread->stack_watch_context = NULL;
+        }
+        return;
+    }
     bool keep_metadata = thread->stack_watch_enabled;
     if (!paging_set_kernel_range_writable(thread->stack_watch_base,
                                           thread->stack_watch_len,

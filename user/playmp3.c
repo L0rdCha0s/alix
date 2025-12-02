@@ -1,4 +1,5 @@
 #include "userlib.h"
+#include "serial.h"
 
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_NO_STDIO
@@ -18,6 +19,7 @@ typedef struct
     bool have_prev;
     uint32_t src_rate;
     uint64_t step;
+    uint64_t src_pos;
 } resample_state_t;
 
 static int16_t clamp16(int32_t v)
@@ -25,6 +27,22 @@ static int16_t clamp16(int32_t v)
     if (v > 32767) return 32767;
     if (v < -32768) return -32768;
     return (int16_t)v;
+}
+
+static bool write_all(int fd, const void *data, size_t bytes)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    size_t written = 0;
+    while (written < bytes)
+    {
+        ssize_t w = write(fd, p + written, bytes - written);
+        if (w <= 0)
+        {
+            return false;
+        }
+        written += (size_t)w;
+    }
+    return true;
 }
 
 static int open_input(const char *path)
@@ -81,33 +99,41 @@ static size_t resample_to_target(const mp3d_sample_t *in,
         state->src_rate = (uint32_t)src_rate;
         state->step = ((uint64_t)src_rate << 32) / TARGET_RATE;
         state->phase = 0;
+        state->src_pos = 0;
         state->have_prev = false;
     }
 
     size_t produced = 0;
+    uint64_t block_start = state->src_pos;
+    uint64_t block_end = state->src_pos + (uint64_t)samples_per_channel;
+
     while (produced + TARGET_CHANNELS <= out_capacity)
     {
         uint64_t idx = state->phase >> 32;
-        if (idx + 1 >= samples_per_channel)
+        if (idx + 1u >= block_end)
         {
             break;
         }
 
-        uint64_t frac = state->phase & 0xFFFFFFFFu;
+        uint32_t frac = (uint32_t)(state->phase & 0xFFFFFFFFu);
         for (int ch = 0; ch < TARGET_CHANNELS; ++ch)
         {
             int ch_src = (src_channels == 1) ? 0 : ch;
             int32_t s0;
-            if (idx == 0 && state->have_prev)
+            int32_t s1;
+
+            if (idx < block_start)
             {
-                s0 = state->prev[ch_src];
+                s0 = state->have_prev ? state->prev[ch_src] : 0;
+                s1 = in[ch_src];
             }
             else
             {
-                s0 = in[idx * (uint64_t)src_channels + ch_src];
+                uint64_t idx_local = idx - block_start;
+                s0 = in[(idx_local * (uint64_t)src_channels) + ch_src];
+                s1 = in[((idx_local + 1u) * (uint64_t)src_channels) + ch_src];
             }
 
-            int32_t s1 = in[(idx + 1) * (uint64_t)src_channels + ch_src];
             int64_t blended = (int64_t)s0 * (int64_t)(0x100000000ull - frac) + (int64_t)s1 * (int64_t)frac;
             int32_t sample = (int32_t)(blended >> 32);
             out[produced + (size_t)ch] = clamp16(sample);
@@ -119,17 +145,12 @@ static size_t resample_to_target(const mp3d_sample_t *in,
 
     if (samples_per_channel > 0)
     {
-        state->prev[0] = in[(samples_per_channel - 1) * (uint64_t)src_channels + 0];
-        state->prev[1] = in[(samples_per_channel - 1) * (uint64_t)src_channels + (src_channels > 1 ? 1 : 0)];
+        uint64_t last = (uint64_t)samples_per_channel - 1u;
+        state->prev[0] = in[last * (uint64_t)src_channels + 0];
+        state->prev[1] = in[last * (uint64_t)src_channels + (src_channels > 1 ? 1 : 0)];
         state->have_prev = true;
+        state->src_pos += (uint64_t)samples_per_channel;
     }
-
-    uint64_t consumed_whole = (state->phase >> 32);
-    if (consumed_whole > samples_per_channel)
-    {
-        consumed_whole = samples_per_channel;
-    }
-    state->phase -= consumed_whole << 32;
 
     return produced;
 }
@@ -199,6 +220,8 @@ int main(int argc, char **argv)
     buf_filled = (size_t)initial;
 
     resample_state_t rs = {0};
+    bool logged_frame = false;
+    int rc = 0;
 
     for (;;)
     {
@@ -250,6 +273,37 @@ int main(int argc, char **argv)
 
         /* minimp3 returns samples per channel; do not divide by channel count. */
         size_t samples_per_channel = (size_t)samples;
+        if (!logged_frame)
+        {
+            serial_printf("playmp3 frame ch=%d hz=%d layer=%d br=%dk samples=%u frame_bytes=%d\r\n",
+                          frame_info.channels,
+                          frame_info.hz,
+                          frame_info.layer,
+                          frame_info.bitrate_kbps,
+                          (unsigned)samples_per_channel,
+                          frame_info.frame_bytes);
+            logged_frame = true;
+        }
+
+        if (frame_info.hz == TARGET_RATE && frame_info.channels == TARGET_CHANNELS)
+        {
+            size_t total_samples = samples_per_channel * TARGET_CHANNELS;
+            size_t bytes_to_write = total_samples * sizeof(int16_t);
+            if (!write_all(audio_fd, decode_buffer, bytes_to_write))
+            {
+                printf("playmp3: audio write failed\n");
+                rc = 1;
+                break;
+            }
+            /* Reset resampler history so a later rate change starts cleanly. */
+            rs.phase = 0;
+            rs.src_pos = 0;
+            rs.have_prev = false;
+            rs.src_rate = 0;
+            rs.step = 0;
+            continue;
+        }
+
         size_t out_samples = resample_to_target(decode_buffer,
                                                 samples_per_channel,
                                                 frame_info.channels,
@@ -263,21 +317,11 @@ int main(int argc, char **argv)
         }
 
         size_t bytes_to_write = out_samples * sizeof(int16_t);
-        size_t written = 0;
-        while (written < bytes_to_write)
+        if (!write_all(audio_fd, out_buffer, bytes_to_write))
         {
-            ssize_t w = write(audio_fd, (uint8_t *)out_buffer + written, bytes_to_write - written);
-            if (w <= 0)
-            {
-                printf("playmp3: audio write failed\n");
-                free(in_buffer);
-                free(out_buffer);
-                free(decode_buffer);
-                close(audio_fd);
-                close(input_fd);
-                return 1;
-            }
-            written += (size_t)w;
+            printf("playmp3: audio write failed\n");
+            rc = 1;
+            break;
         }
 
         if (buf_pos >= buf_filled)
@@ -292,5 +336,5 @@ int main(int argc, char **argv)
     free(decode_buffer);
     close(audio_fd);
     close(input_fd);
-    return 0;
+    return rc;
 }

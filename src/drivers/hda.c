@@ -77,16 +77,23 @@
 #define HDA_SDSTS_CLEAR    (HDA_SDSTS_BCIS | HDA_SDSTS_FIFOE | HDA_SDSTS_DESE)
 
 #define HDA_PCM_FORMAT     0x0011u /* 48 kHz, 16-bit, 2 channels */
+#define HDA_CONN_LIST_LEN  0x0EL
 
-#define HDA_BDL_ENTRIES    8u
+#define HDA_BDL_ENTRIES    32u
 #define HDA_BUFFER_BYTES   (HDA_BDL_ENTRIES * 4096u)
 
 #define HDA_STREAM_INDEX   0u
 #define HDA_STREAM_TAG     (HDA_STREAM_INDEX + 1u)
 
 #define HDA_PIN_WIDGET_CTRL_OUT 0x40u
-#define HDA_EAPD_BTL_ENABLE     0x02u
+#define HDA_EAPD_ENABLE         0x01u
 #define HDA_VERB_SET_AMP_GAIN_MUTE 0x300u
+#define HDA_AMP_SET_OUTPUT 0x8000u
+#define HDA_AMP_SET_INPUT  0x4000u
+#define HDA_AMP_SET_LEFT   0x2000u
+#define HDA_AMP_SET_RIGHT  0x1000u
+#define HDA_AMP_MUTE       0x0080u
+#define HDA_AMP_GAIN_MASK  0x007Fu
 
 typedef struct
 {
@@ -200,6 +207,7 @@ static uint32_t hda_hw_position(hda_state_t *hda);
 
 static int g_hda_lpib_log_budget = 8;
 static int g_hda_error_log_budget = 8;
+static int g_hda_empty_log_budget = 16;
 
 static void hda_stop_stream(hda_state_t *hda)
 {
@@ -289,9 +297,10 @@ static void hda_housekeeping(void *arg)
         {
             uint32_t hw = hda_hw_position(&g_hda);
             hda_update_used_bytes(&g_hda, hw);
-            if (g_hda.used_bytes == 0)
+            if (g_hda.used_bytes == 0 && g_hda_empty_log_budget > 0)
             {
-                hda_stop_stream(&g_hda);
+                serial_printf("[hda] ring empty lpib=0x%08X\r\n", (unsigned)hw);
+                g_hda_empty_log_budget--;
             }
         }
         spinlock_unlock(&g_hda.lock);
@@ -605,11 +614,28 @@ static bool hda_reset_controller(hda_state_t *hda)
 
 static void hda_unmute_output_amp(hda_state_t *hda, uint8_t node_id, uint8_t gain)
 {
-    /* Unmute left/right output channels at the requested gain level. */
-    uint16_t left_payload = (uint16_t)(((uint16_t)gain & 0x0Fu) << 8);
-    uint16_t right_payload = (uint16_t)((1u << 12) | (((uint16_t)gain & 0x0Fu) << 8));
-    (void)hda_send_verb(hda, hda->codec_id, node_id, HDA_VERB_SET_AMP_GAIN_MUTE, left_payload, NULL);
-    (void)hda_send_verb(hda, hda->codec_id, node_id, HDA_VERB_SET_AMP_GAIN_MUTE, right_payload, NULL);
+    if (!hda)
+    {
+        return;
+    }
+
+    uint16_t steps = (uint16_t)gain & HDA_AMP_GAIN_MASK;
+
+    uint16_t left_payload = (uint16_t)(HDA_AMP_SET_OUTPUT | HDA_AMP_SET_LEFT | steps);
+    (void)hda_send_verb(hda,
+                        hda->codec_id,
+                        node_id,
+                        HDA_VERB_SET_AMP_GAIN_MUTE,
+                        left_payload,
+                        NULL);
+
+    uint16_t right_payload = (uint16_t)(HDA_AMP_SET_OUTPUT | HDA_AMP_SET_RIGHT | steps);
+    (void)hda_send_verb(hda,
+                        hda->codec_id,
+                        node_id,
+                        HDA_VERB_SET_AMP_GAIN_MUTE,
+                        right_payload,
+                        NULL);
 }
 
 static bool hda_wait_codecs(hda_state_t *hda, uint16_t *out_mask)
@@ -753,10 +779,10 @@ static bool hda_pick_nodes(hda_state_t *hda)
     hda_unmute_output_amp(hda, converter, 0x08);
     hda_unmute_output_amp(hda, pin, 0x08);
 
-    /* Enable EAPD/BTL if the pin advertises the capability. */
+    /* Enable EAPD if the pin advertises the capability. */
     if (pin_caps != 0)
     {
-        (void)hda_send_verb(hda, hda->codec_id, pin, 0x70C, HDA_EAPD_BTL_ENABLE, NULL);
+        (void)hda_send_verb(hda, hda->codec_id, pin, 0x70C, HDA_EAPD_ENABLE, NULL);
     }
     return true;
 }
@@ -864,12 +890,20 @@ static bool hda_program_stream(hda_state_t *hda)
     uint32_t ctl = (HDA_STREAM_TAG << HDA_SDCTL_STREAM_SHIFT);
     hda_write32(hda, ctl_off, ctl);
 
-    /* Program the converter with stream tag and format. */
+    /* Bind converter to this stream: stereo consumes channel 0 and 1. */
+    uint16_t stream_chan = (uint16_t)((HDA_STREAM_TAG << 4) | 0u);
     (void)hda_send_verb(hda,
                         hda->codec_id,
                         hda->converter_node,
                         0x706,
-                        (uint16_t)((HDA_STREAM_TAG << 4) | 0),
+                        stream_chan,
+                        NULL);
+    /* Explicitly state two channels (0-indexed count). */
+    (void)hda_send_verb(hda,
+                        hda->codec_id,
+                        hda->converter_node,
+                        0x72D,
+                        1,
                         NULL);
     (void)hda_send_verb(hda,
                         hda->codec_id,
