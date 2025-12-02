@@ -207,9 +207,9 @@ static inline void hda_write16(hda_state_t *hda, uint32_t offset, uint16_t value
 
 static uint32_t hda_hw_position(hda_state_t *hda);
 
-static int g_hda_lpib_log_budget = 1000;
-static int g_hda_error_log_budget = 1000;
-static int g_hda_empty_log_budget = 1000;
+static int g_hda_lpib_log_budget = 8;
+static int g_hda_error_log_budget = 8;
+static int g_hda_empty_log_budget = 32;
 
 static void hda_stop_stream(hda_state_t *hda)
 {
@@ -339,8 +339,9 @@ static void hda_housekeeping(void *arg)
         if (g_hda.running)
         {
             uint32_t hw = hda_hw_position(&g_hda);
+            size_t used_before = g_hda.used_bytes;
             hda_update_used_bytes(&g_hda, hw);
-            if (g_hda.used_bytes == 0 && g_hda_empty_log_budget > 0)
+            if (used_before > 0 && g_hda.used_bytes == 0 && g_hda_empty_log_budget > 0)
             {
                 serial_printf("[hda] ring empty lpib=0x%08X\r\n", (unsigned)hw);
                 g_hda_empty_log_budget--;

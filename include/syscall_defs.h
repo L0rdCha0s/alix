@@ -26,12 +26,19 @@ typedef enum
     SYSCALL_NET_SNAPSHOT = 18,
     SYSCALL_TIME_MILLIS = 19,
     SYSCALL_FONT_CACHE = 20,
+    SYSCALL_LSEEK = 21,
+    SYSCALL_FSTAT = 22,
+    SYSCALL_PREAD = 23,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)
 #define SYSCALL_OPEN_WRITE    (1u << 1)
 #define SYSCALL_OPEN_CREATE   (1u << 2)
 #define SYSCALL_OPEN_TRUNCATE (1u << 3)
+
+#define SYSCALL_SEEK_SET 0
+#define SYSCALL_SEEK_CUR 1
+#define SYSCALL_SEEK_END 2
 
 #define SYSCALL_PROCESS_NAME_MAX 32
 #define SYSCALL_NET_IF_NAME_MAX 8
@@ -81,5 +88,12 @@ typedef struct
     uint64_t rx_errors;
     uint64_t tx_errors;
 } syscall_net_stats_t;
+
+typedef struct
+{
+    uint64_t size_bytes;
+    uint32_t type; /* vfs_node_type_t */
+    uint32_t reserved;
+} syscall_stat_t;
 
 #endif
