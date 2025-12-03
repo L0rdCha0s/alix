@@ -9,6 +9,7 @@
 #include "process.h"
 #include "vfs.h"
 #include "keyboard.h"
+#include "video.h"
 
 #define INPUT_CAPACITY 256
 #define SHELL_HISTORY_LIMIT 20
@@ -228,7 +229,8 @@ bool shell_request_interrupt(shell_state_t *shell)
         return false;
     }
 
-    return process_kill(proc, -1);
+    process_kill_tree(proc);
+    return true;
 }
 
 char *shell_output_take_buffer(shell_output_t *out)
@@ -1242,6 +1244,16 @@ static bool cli_try_read_char(char *out)
 {
     if (!out)
     {
+        return false;
+    }
+    /* When video mode is active, leave keyboard input for ATK/GUI paths. */
+    if (video_is_active())
+    {
+        if (serial_has_char())
+        {
+            *out = serial_read_char();
+            return true;
+        }
         return false;
     }
     if (keyboard_try_read(out))

@@ -272,12 +272,12 @@ bool shell_service_close_session(uint32_t handle)
                 process_t *fg = session->state.foreground_process;
                 if (fg)
                 {
-                    process_kill(fg, -1);
+                    process_kill_tree(fg);
                     session->state.foreground_process = NULL;
                 }
                 if (runner)
                 {
-                    process_kill(runner, -1);
+                    process_kill_tree(runner);
                     session->runner = NULL;
                 }
                 session->running = false;
@@ -428,7 +428,7 @@ void shell_service_cleanup_process(process_t *process)
             process_t *fg_to_wait = NULL;
             if (fg && !process_is_zombie(fg))
             {
-                process_kill(fg, -1);
+                process_kill_tree(fg);
                 fg_to_wait = fg;
             }
             if (session->runner && !process_is_zombie(session->runner))
@@ -436,7 +436,7 @@ void shell_service_cleanup_process(process_t *process)
                 process_t *runner = session->runner;
                 shell_session_unlock(session);
                 shell_list_unlock();
-                process_kill(runner, -1);
+                process_kill_tree(runner);
                 process_join(runner, NULL);
                 shell_list_lock();
                 continue;
@@ -664,25 +664,40 @@ int shell_service_interrupt(uint32_t handle)
     shell_session_t *session = shell_session_find_locked(handle, owner);
     if (!session)
     {
+        serial_printf("[shellsvc] interrupt lookup_failed handle=%u owner=0x%016llX\r\n",
+                      (unsigned)handle,
+                      (unsigned long long)(owner ? process_get_pid(owner) : 0));
         return -1;
     }
+
+    serial_printf("[shellsvc] interrupt request handle=%u running=%s fg_pid=0x%016llX runner_pid=0x%016llX\r\n",
+                  (unsigned)handle,
+                  session->running ? "true" : "false",
+                  (unsigned long long)(session->state.foreground_process ? process_get_pid(session->state.foreground_process) : 0),
+                  (unsigned long long)(session->runner ? process_get_pid(session->runner) : 0));
 
     bool ok = false;
     if (session->running)
     {
-        ok = shell_request_interrupt(&session->state);
-        if (!ok)
+        process_t *fg = session->state.foreground_process;
+        process_t *runner = session->runner;
+
+        if (fg && !process_is_zombie(fg))
         {
-            process_t *fg = session->state.foreground_process;
-            if (fg && !process_is_zombie(fg))
-            {
-                ok = process_kill(fg, -1);
-            }
+            process_kill_tree(fg);
+            ok = true;
         }
-        if (!ok && session->runner && !process_is_zombie(session->runner))
+
+        if (runner && !process_is_zombie(runner))
         {
-            ok = process_kill(session->runner, -1);
+            process_kill_tree(runner);
+            ok = true;
         }
+
+        session->state.foreground_process = NULL;
+        session->running = false;
+        session->completed = true;
+        session->last_status = -1;
     }
     shell_session_unlock(session);
     return ok ? 0 : -1;

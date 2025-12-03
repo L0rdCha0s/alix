@@ -6,6 +6,7 @@
 #include "atk_window.h"
 #include "atk/atk_terminal.h"
 #include "libc.h"
+#include "stdio.h"
 #include "video.h"
 #include "usyscall.h"
 #include "user_atk_defs.h"
@@ -168,6 +169,15 @@ static bool shell_on_control(atk_widget_t *terminal, void *context, char control
 
     if (control == 0x03)
     {
+        char msg[64];
+        int len = snprintf(msg,
+                           sizeof(msg),
+                           "[atk_shell] ctrl-c handle=%d\r\n",
+                           app->shell_handle);
+        if (len > 0)
+        {
+            sys_serial_write(msg, (size_t)len);
+        }
         if (sys_shell_interrupt(app->shell_handle) == 0)
         {
             shell_poll_output(app);
@@ -213,6 +223,8 @@ static bool shell_handle_key(atk_shell_app_t *app, const user_atk_event_t *event
     }
 
     char ch = (char)event->data0;
+
+    shell_log_key(ch);
 
     atk_key_event_result_t result = atk_handle_key_char(ch);
     return result.redraw;
