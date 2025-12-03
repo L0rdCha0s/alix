@@ -7,6 +7,7 @@
 #include "serial.h"
 #include "shell.h"
 #include "vfs.h"
+#include "spinlock.h"
 #include "net/dhcp.h"
 #include "net/interface.h"
 
@@ -34,10 +35,16 @@ static void startup_log_with_iface(const char *prefix, const char *iface);
 static const char *startup_skip_spaces(const char *text);
 #define STARTUP_WAIT_INTERVAL_MS 100U
 #define STARTUP_WAIT_MAX_MS      10000U
+
+/* Serialize startup command execution so outputs stay ordered. */
+static spinlock_t g_startup_command_lock;
 #endif
 
 void startup_init(void)
 {
+#if ENABLE_STARTUP_SCRIPT
+    spinlock_init(&g_startup_command_lock);
+#endif
     /* Defer creation until the filesystem is ready. */
 }
 
@@ -81,7 +88,15 @@ static void startup_process_entry(void *arg)
         process_exit(0);
     }
 
-    shell_state_t shell = {
+    shell_state_t *shell = (shell_state_t *)malloc(sizeof(shell_state_t));
+    if (!shell)
+    {
+        startup_log("failed to allocate startup shell");
+        startup_command_list_reset(&list);
+        process_exit(1);
+    }
+
+    *shell = (shell_state_t){
         .cwd = vfs_root(),
         .stream_fn = NULL,
         .stream_context = NULL,
@@ -96,14 +111,16 @@ static void startup_process_entry(void *arg)
 
     for (size_t i = 0; i < list.count; ++i)
     {
+        spinlock_lock(&g_startup_command_lock);
         const char *command = list.commands[i];
         if (!command)
         {
+            spinlock_unlock(&g_startup_command_lock);
             continue;
         }
         startup_log_command(command);
         bool success = false;
-        char *output = shell_execute_line(&shell, command, &success);
+        char *output = shell_execute_line(shell, command, &success);
         if (output && *output)
         {
             console_write(output);
@@ -121,8 +138,10 @@ static void startup_process_entry(void *arg)
         {
             startup_wait_for_command_completion(command);
         }
+        spinlock_unlock(&g_startup_command_lock);
     }
 
+    free(shell);
     startup_command_list_reset(&list);
     process_exit(0);
 }

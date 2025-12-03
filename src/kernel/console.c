@@ -3,6 +3,7 @@
 #include "io.h"
 #include "libc.h"
 #include "font.h"
+#include "spinlock.h"
 
 #define VGA_REG_COUNT_MISC 1
 #define VGA_COLUMNS 80
@@ -23,10 +24,15 @@ static uint32_t fb_pitch = 0;
 static uint32_t fb_cell_w = GLYPH_WIDTH;
 static uint32_t fb_cell_h = GLYPH_HEIGHT;
 static volatile uint32_t *fb_ptr = NULL;
+static spinlock_t g_console_lock;
 static void console_redraw_vga(void);
 static void fb_draw_cell(size_t row, size_t col);
 static void fb_redraw_all(void);
 static void fb_init_from_bootinfo(void);
+static inline void console_lock(void) { spinlock_lock(&g_console_lock); }
+static inline void console_unlock(void) { spinlock_unlock(&g_console_lock); }
+static void console_putc_unlocked(char c);
+static void console_backspace_unlocked(void);
 
 static const uint8_t text_mode_80x25[] = {
     /* MISC */
@@ -132,6 +138,7 @@ static void console_scroll(void)
 
 void console_init(void)
 {
+    spinlock_init(&g_console_lock);
     memset(console_chars, ' ', sizeof(console_chars));
     console_force_text_mode(text_mode_80x25);
     cursor_row = cursor_col = 0;
@@ -142,6 +149,7 @@ void console_init(void)
 
 void console_clear(void)
 {
+    console_lock();
     if (console_vga_enabled)
     {
         uint16_t blank = ((uint16_t)VGA_COLOR << 8) | ' ';
@@ -156,6 +164,7 @@ void console_clear(void)
     console_update_cursor();
     memset(console_chars, ' ', sizeof(console_chars));
     fb_redraw_all();
+    console_unlock();
 }
 
 static void console_newline(void)
@@ -169,6 +178,13 @@ static void console_newline(void)
 }
 
 void console_putc(char c)
+{
+    console_lock();
+    console_putc_unlocked(c);
+    console_unlock();
+}
+
+static void console_putc_unlocked(char c)
 {
     if (c == '\n')
     {
@@ -219,14 +235,23 @@ void console_putc(char c)
 
 void console_write(const char *s)
 {
+    console_lock();
     size_t len = strlen(s);
     for (size_t i = 0; i < len; ++i)
     {
-        console_putc(s[i]);
+        console_putc_unlocked(s[i]);
     }
+    console_unlock();
 }
 
 void console_backspace(void)
+{
+    console_lock();
+    console_backspace_unlocked();
+    console_unlock();
+}
+
+static void console_backspace_unlocked(void)
 {
     if (cursor_col == 0)
     {
