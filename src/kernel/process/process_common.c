@@ -448,6 +448,7 @@ uint32_t g_sched_sleep_log_enable = 0;
 uint32_t g_sched_paging_lock_log_enable = 0;
 uint32_t g_sched_memcpy_log_enable = 0;
 uint32_t g_sched_priority_enable = 0;
+uint32_t g_sched_default_priority = THREAD_PRIORITY_NORMAL;
 static uint32_t g_scheduler_rr_cursor = 0;
 
 typedef struct deferred_free_stats
@@ -528,6 +529,21 @@ static inline uint32_t current_cpu_index(void)
                   g_deferred_free_locks[i].value);
     }
     return 0;
+}
+
+static inline bool scheduler_priority_enabled(void)
+{
+    return __atomic_load_n(&g_sched_priority_enable, __ATOMIC_RELAXED) != 0;
+}
+
+static inline thread_priority_t scheduler_default_priority(void)
+{
+    uint32_t value = __atomic_load_n(&g_sched_default_priority, __ATOMIC_RELAXED);
+    if (value >= THREAD_PRIORITY_COUNT)
+    {
+        value = THREAD_PRIORITY_NORMAL;
+    }
+    return (thread_priority_t)value;
 }
 
 static inline thread_t *current_thread_local(void)

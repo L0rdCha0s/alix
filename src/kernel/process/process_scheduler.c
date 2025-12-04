@@ -249,6 +249,7 @@ void scheduler_log_controls_init(void)
     (void)procfs_create_file_at("sys/sched/paging_lock_log", sched_log_read, sched_log_write, &g_sched_paging_lock_log_enable);
     (void)procfs_create_file_at("sys/sched/memcpy_log", sched_log_read, sched_log_write, &g_sched_memcpy_log_enable);
     (void)procfs_create_file_at("sys/sched/priority_enable", sched_log_read, sched_log_write, &g_sched_priority_enable);
+    (void)procfs_create_file_at("sys/sched/default_priority", sched_log_read, sched_log_write, &g_sched_default_priority);
 }
 
 static uint32_t scheduler_rand32(void)
@@ -390,11 +391,6 @@ static inline void scheduler_lock_release(uint64_t flags)
 {
     spinlock_unlock(&g_scheduler_lock);
     cpu_restore_flags(flags);
-}
-
-static inline bool scheduler_priority_enabled(void)
-{
-    return __atomic_load_n(&g_sched_priority_enable, __ATOMIC_RELAXED) != 0;
 }
 
 static void scheduler_log_running_cpu_change(const thread_t *thread,
