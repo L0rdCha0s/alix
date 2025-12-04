@@ -248,6 +248,7 @@ void scheduler_log_controls_init(void)
     (void)procfs_create_file_at("sys/sched/sleep_log", sched_log_read, sched_log_write, &g_sched_sleep_log_enable);
     (void)procfs_create_file_at("sys/sched/paging_lock_log", sched_log_read, sched_log_write, &g_sched_paging_lock_log_enable);
     (void)procfs_create_file_at("sys/sched/memcpy_log", sched_log_read, sched_log_write, &g_sched_memcpy_log_enable);
+    (void)procfs_create_file_at("sys/sched/priority_enable", sched_log_read, sched_log_write, &g_sched_priority_enable);
 }
 
 static uint32_t scheduler_rand32(void)
@@ -389,6 +390,11 @@ static inline void scheduler_lock_release(uint64_t flags)
 {
     spinlock_unlock(&g_scheduler_lock);
     cpu_restore_flags(flags);
+}
+
+static inline bool scheduler_priority_enabled(void)
+{
+    return __atomic_load_n(&g_sched_priority_enable, __ATOMIC_RELAXED) != 0;
 }
 
 static void scheduler_log_running_cpu_change(const thread_t *thread,
@@ -550,39 +556,56 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue)
         return NULL;
     }
 
-    thread_priority_t priority = scheduler_queue_priority();
-    for (thread_t *thread = queue->heads[priority]; thread; )
+    thread_priority_t priorities[THREAD_PRIORITY_COUNT];
+    size_t pr_count = 0;
+    if (scheduler_priority_enabled())
     {
-        thread_t *next = thread->queue_next;
-        uint32_t expected = RUN_QUEUE_CPU_INVALID;
-        if (!__atomic_compare_exchange_n(&thread->running_cpu,
-                                         &expected,
-                                         queue->cpu_index,
-                                         false,
-                                         __ATOMIC_ACQ_REL,
-                                         __ATOMIC_ACQUIRE))
+        for (int pr = THREAD_PRIORITY_COUNT - 1; pr >= THREAD_PRIORITY_IDLE; --pr)
         {
-            thread = next;
-            continue;
+            priorities[pr_count++] = (thread_priority_t)pr;
         }
-        if (!thread_can_run(thread))
+    }
+    else
+    {
+        priorities[pr_count++] = THREAD_PRIORITY_NORMAL;
+    }
+
+    for (size_t i = 0; i < pr_count; ++i)
+    {
+        thread_priority_t priority = priorities[i];
+        for (thread_t *thread = queue->heads[priority]; thread; )
         {
-            (void)run_queue_detach_locked(queue, thread);
-            thread = next;
-            continue;
+            thread_t *next = thread->queue_next;
+            uint32_t expected = RUN_QUEUE_CPU_INVALID;
+            if (!__atomic_compare_exchange_n(&thread->running_cpu,
+                                             &expected,
+                                             queue->cpu_index,
+                                             false,
+                                             __ATOMIC_ACQ_REL,
+                                             __ATOMIC_ACQUIRE))
+            {
+                thread = next;
+                continue;
+            }
+            if (!thread_can_run(thread))
+            {
+                (void)run_queue_detach_locked(queue, thread);
+                thread = next;
+                continue;
+            }
+            if (!run_queue_detach_locked(queue, thread))
+            {
+                /* Failed to detach; undo the running_cpu claim and continue. */
+                __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
+                thread = next;
+                continue;
+            }
+            thread->in_transition = true;
+            thread->run_queue_cpu = queue->cpu_index;
+            thread->wake_pending = false;
+            scheduler_log_running_cpu_change(thread, queue->cpu_index, "claim_dequeue");
+            return thread;
         }
-        if (!run_queue_detach_locked(queue, thread))
-        {
-            /* Failed to detach; undo the running_cpu claim and continue. */
-            __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
-            thread = next;
-            continue;
-        }
-        thread->in_transition = true;
-        thread->run_queue_cpu = queue->cpu_index;
-        thread->wake_pending = false;
-        scheduler_log_running_cpu_change(thread, queue->cpu_index, "claim_dequeue");
-        return thread;
     }
     return NULL;
 }

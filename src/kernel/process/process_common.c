@@ -447,6 +447,7 @@ uint32_t g_sched_dbg_enable = 0;
 uint32_t g_sched_sleep_log_enable = 0;
 uint32_t g_sched_paging_lock_log_enable = 0;
 uint32_t g_sched_memcpy_log_enable = 0;
+uint32_t g_sched_priority_enable = 0;
 static uint32_t g_scheduler_rr_cursor = 0;
 
 typedef struct deferred_free_stats
