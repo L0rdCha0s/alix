@@ -131,6 +131,8 @@ static process_t *process_finalize_new_process(process_t *proc,
         proc->stdout_fd = g_console_stdout_fd;
     }
 
+    procfs_register_process_priority(proc);
+
     proc->main_thread = thread;
     proc->current_thread = thread;
     serial_printf("[process] finalize proc=0x%016llX name=%s pid=0x%016llX cr3=0x%016llX as_cr3=0x%016llX main_thread=0x%016llX\r\n",

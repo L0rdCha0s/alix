@@ -1,3 +1,4 @@
+#include "stdio.h"
 extern uint64_t g_scheduler_switch_count;
 #include "sched_log.h"
 #include "procfs.h"
@@ -240,6 +241,92 @@ static ssize_t sched_log_write(vfs_node_t *node, size_t offset, const void *buff
     return (ssize_t)count;
 }
 
+static size_t sched_append_str_local(char *dst, size_t cap, size_t pos, const char *src)
+{
+    while (src && *src && pos < cap)
+    {
+        dst[pos++] = *src++;
+    }
+    return pos;
+}
+
+static size_t sched_append_uint_local(char *dst, size_t cap, size_t pos, uint64_t value)
+{
+    char tmp[32];
+    size_t t = 0;
+    if (value == 0)
+    {
+        tmp[t++] = '0';
+    }
+    else
+    {
+        while (value > 0 && t < sizeof(tmp))
+        {
+            tmp[t++] = (char)('0' + (value % 10));
+            value /= 10;
+        }
+    }
+    while (t > 0 && pos < cap)
+    {
+        dst[pos++] = tmp[--t];
+    }
+    return pos;
+}
+
+static ssize_t sched_current_priority_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)context;
+    if (!buffer)
+    {
+        return -1;
+    }
+
+    thread_t *thread = current_thread_local();
+    if (!thread)
+    {
+        return 0;
+    }
+
+    thread_priority_t base = thread->base_priority;
+    thread_priority_t override = thread->priority_override;
+    bool override_active = thread->priority_override_active;
+    thread_priority_t effective = thread_effective_priority(thread);
+    uint32_t priority_enabled = __atomic_load_n(&g_sched_priority_enable, __ATOMIC_RELAXED);
+    thread_priority_t default_pri = scheduler_default_priority();
+
+    char tmp[128];
+    size_t pos = 0;
+    pos = sched_append_str_local(tmp, sizeof(tmp), pos, "base=");
+    pos = sched_append_uint_local(tmp, sizeof(tmp), pos, (uint64_t)base);
+    pos = sched_append_str_local(tmp, sizeof(tmp), pos, " override=");
+    pos = sched_append_uint_local(tmp, sizeof(tmp), pos, (uint64_t)override);
+    pos = sched_append_str_local(tmp, sizeof(tmp), pos, " override_active=");
+    pos = sched_append_uint_local(tmp, sizeof(tmp), pos, override_active ? 1 : 0);
+    pos = sched_append_str_local(tmp, sizeof(tmp), pos, " effective=");
+    pos = sched_append_uint_local(tmp, sizeof(tmp), pos, (uint64_t)effective);
+    pos = sched_append_str_local(tmp, sizeof(tmp), pos, " priority_enabled=");
+    pos = sched_append_uint_local(tmp, sizeof(tmp), pos, (uint64_t)priority_enabled);
+    pos = sched_append_str_local(tmp, sizeof(tmp), pos, " default=");
+    pos = sched_append_uint_local(tmp, sizeof(tmp), pos, (uint64_t)default_pri);
+    if (pos < sizeof(tmp))
+    {
+        tmp[pos++] = '\n';
+    }
+    size_t len = pos;
+    if (offset >= len)
+    {
+        return 0;
+    }
+    size_t to_copy = len - offset;
+    if (to_copy > count)
+    {
+        to_copy = count;
+    }
+    memcpy(buffer, tmp + offset, to_copy);
+    return (ssize_t)to_copy;
+}
+
 void scheduler_log_controls_init(void)
 {
     /* Expose /proc/sys/sched/log_enable and dbg_enable */
@@ -250,6 +337,7 @@ void scheduler_log_controls_init(void)
     (void)procfs_create_file_at("sys/sched/memcpy_log", sched_log_read, sched_log_write, &g_sched_memcpy_log_enable);
     (void)procfs_create_file_at("sys/sched/priority_enable", sched_log_read, sched_log_write, &g_sched_priority_enable);
     (void)procfs_create_file_at("sys/sched/default_priority", sched_log_read, sched_log_write, &g_sched_default_priority);
+    (void)procfs_create_file_at("sys/sched/current_priority", sched_current_priority_read, NULL, NULL);
 }
 
 static uint32_t scheduler_rand32(void)

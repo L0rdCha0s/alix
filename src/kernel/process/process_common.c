@@ -447,9 +447,12 @@ uint32_t g_sched_dbg_enable = 0;
 uint32_t g_sched_sleep_log_enable = 0;
 uint32_t g_sched_paging_lock_log_enable = 0;
 uint32_t g_sched_memcpy_log_enable = 0;
-uint32_t g_sched_priority_enable = 0;
+uint32_t g_sched_priority_enable = 1;
 uint32_t g_sched_default_priority = THREAD_PRIORITY_NORMAL;
 static uint32_t g_scheduler_rr_cursor = 0;
+static bool process_pointer_valid(const process_t *process);
+static vfs_node_t *proc_pid_dir(process_t *process);
+static void procfs_register_process_priority(process_t *process);
 
 typedef struct deferred_free_stats
 {
@@ -506,6 +509,9 @@ static inline uint32_t scheduler_time_slice_ticks(void)
     return g_time_slice_ticks;
 }
 
+static bool process_pointer_valid(const process_t *process);
+static bool thread_pointer_valid(const thread_t *thread);
+
 static inline uint32_t current_cpu_index(void)
 {
     uint32_t idx = smp_current_cpu_index();
@@ -544,6 +550,155 @@ static inline thread_priority_t scheduler_default_priority(void)
         value = THREAD_PRIORITY_NORMAL;
     }
     return (thread_priority_t)value;
+}
+
+static size_t sched_append_uint(char *dst, size_t cap, size_t pos, uint64_t value)
+{
+    char tmp[32];
+    size_t t = 0;
+    if (value == 0)
+    {
+        tmp[t++] = '0';
+    }
+    else
+    {
+        while (value > 0 && t < sizeof(tmp))
+        {
+            tmp[t++] = (char)('0' + (value % 10));
+            value /= 10;
+        }
+    }
+    while (t > 0 && pos < cap)
+    {
+        dst[pos++] = tmp[--t];
+    }
+    return pos;
+}
+
+static ssize_t process_priority_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    if (!buffer)
+    {
+        return -1;
+    }
+    process_t *process = (process_t *)context;
+    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    {
+        return 0;
+    }
+    thread_t *thread = process->main_thread;
+    thread_priority_t base = thread->base_priority;
+    thread_priority_t override = thread->priority_override;
+    bool override_active = thread->priority_override_active;
+    thread_priority_t effective = override_active ? override : base;
+
+    char tmp[96];
+    size_t pos = 0;
+    pos = sched_append_uint(tmp, sizeof(tmp), pos, (uint64_t)base); /* base */
+    /* insert labels with minimal helpers */
+    /* base=<base> override=<override> override_active=<0/1> effective=<effective>\n */
+    /* rewrite with manual appends */
+    pos = 0;
+    const char *labels[] = { "base=", " override=", " override_active=", " effective=" };
+    uint64_t values[] = { (uint64_t)base, (uint64_t)override, override_active ? 1ULL : 0ULL, (uint64_t)effective };
+    for (size_t i = 0; i < 4 && pos < sizeof(tmp); ++i)
+    {
+        const char *s = labels[i];
+        while (*s && pos < sizeof(tmp))
+        {
+            tmp[pos++] = *s++;
+        }
+        pos = sched_append_uint(tmp, sizeof(tmp), pos, values[i]);
+    }
+    if (pos < sizeof(tmp))
+    {
+        tmp[pos++] = '\n';
+    }
+
+    size_t len = pos;
+    if (offset >= len)
+    {
+        return 0;
+    }
+    size_t to_copy = len - offset;
+    if (to_copy > count)
+    {
+        to_copy = count;
+    }
+    memcpy(buffer, tmp + offset, to_copy);
+    return (ssize_t)to_copy;
+}
+
+static vfs_node_t *proc_pid_dir(process_t *process)
+{
+    if (!process_pointer_valid(process))
+    {
+        return NULL;
+    }
+    char path[32];
+    char *cursor = path;
+    uint64_t pid = process->pid;
+    char digits[21];
+    size_t dlen = 0;
+    if (pid == 0)
+    {
+        digits[dlen++] = '0';
+    }
+    else
+    {
+        while (pid > 0 && dlen < sizeof(digits))
+        {
+            digits[dlen++] = (char)('0' + (pid % 10));
+            pid /= 10;
+        }
+    }
+    while (dlen > 0)
+    {
+        *cursor++ = digits[--dlen];
+    }
+    *cursor = '\0';
+    return procfs_mkdir(path);
+}
+
+static void procfs_register_process_priority(process_t *process)
+{
+    vfs_node_t *dir = proc_pid_dir(process);
+    if (!dir)
+    {
+        return;
+    }
+
+    /* Build "<pid>/priority" and create read-only file. */
+    char path[48];
+    char *cursor = path;
+    uint64_t pid = process ? process->pid : 0;
+    char digits[21];
+    size_t dlen = 0;
+    if (pid == 0)
+    {
+        digits[dlen++] = '0';
+    }
+    else
+    {
+        while (pid > 0 && dlen < sizeof(digits))
+        {
+            digits[dlen++] = (char)('0' + (pid % 10));
+            pid /= 10;
+        }
+    }
+    while (dlen > 0)
+    {
+        *cursor++ = digits[--dlen];
+    }
+    const char suffix[] = "/priority";
+    for (size_t i = 0; i < sizeof(suffix) - 1 && cursor < path + sizeof(path) - 1; ++i)
+    {
+        *cursor++ = suffix[i];
+    }
+    *cursor = '\0';
+
+    (void)procfs_create_file_at(path, process_priority_read, NULL, process);
 }
 
 static inline thread_t *current_thread_local(void)

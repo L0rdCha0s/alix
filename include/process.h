@@ -65,6 +65,14 @@ typedef struct process_info
     uint64_t heap_committed_bytes;
 } process_info_t;
 
+typedef struct process_priority_info
+{
+    thread_priority_t base_priority;
+    thread_priority_t priority_override;
+    bool override_active;
+    thread_priority_t effective_priority;
+} process_priority_info_t;
+
 typedef struct process_user_layout
 {
     bool is_user;

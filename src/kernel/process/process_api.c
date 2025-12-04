@@ -56,6 +56,13 @@ static process_t *process_create_kernel_internal(const char *name,
 static process_t *process_create_user_dummy_internal(const char *name,
                                                      size_t stack_size,
                                                      int stdout_fd,
+                                                     process_t *parent);
+static process_priority_info_t process_priority_info(const process_t *process);
+static ssize_t process_priority_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
+
+static process_t *process_create_user_dummy_internal(const char *name,
+                                                     size_t stack_size,
+                                                     int stdout_fd,
                                                      process_t *parent)
 {
     process_t *proc = allocate_process(name, true);
@@ -1388,3 +1395,23 @@ void process_debug_log_stack_write(const char *label,
     (void)len;
 }
 #endif
+static process_priority_info_t process_priority_info(const process_t *process)
+{
+    process_priority_info_t info;
+    info.base_priority = THREAD_PRIORITY_NORMAL;
+    info.priority_override = THREAD_PRIORITY_NORMAL;
+    info.override_active = false;
+    info.effective_priority = THREAD_PRIORITY_NORMAL;
+
+    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    {
+        return info;
+    }
+
+    thread_t *thread = process->main_thread;
+    info.base_priority = thread->base_priority;
+    info.priority_override = thread->priority_override;
+    info.override_active = thread->priority_override_active;
+    info.effective_priority = thread_effective_priority(thread);
+    return info;
+}
