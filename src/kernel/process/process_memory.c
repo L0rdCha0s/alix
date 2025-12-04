@@ -33,6 +33,7 @@ static process_t *allocate_process(const char *name, bool is_user)
                   (name && name[0]) ? name : "<unnamed>");
     proc->pid = g_next_pid++;
     proc->state = PROCESS_STATE_READY;
+    proc->lifetime_state = PROCESS_LIFETIME_ALIVE;
     bool space_ready = false;
     if (needs_clone)
     {

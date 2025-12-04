@@ -1099,27 +1099,43 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                       (unsigned long long)event_id);
     }
 
+    atk_widget_t *hover_window_initial = atk_window_hit_test(state, cursor_x, cursor_y);
+
     atk_widget_t *hover_resize_window = NULL;
     uint32_t hover_resize_edges = 0;
-    ATK_LIST_FOR_EACH_REVERSE(resize_node, &state->windows)
+    if (hover_window_initial)
     {
-        atk_widget_t *win = (atk_widget_t *)resize_node->value;
-        if (!win || !win->used)
+        if (atk_window_supports_resize(hover_window_initial))
         {
-            continue;
+            hover_resize_edges = atk_window_resize_edges_at(hover_window_initial, cursor_x, cursor_y);
+            if (hover_resize_edges != 0)
+            {
+                hover_resize_window = hover_window_initial;
+            }
         }
-        if (!atk_window_supports_resize(win))
+    }
+    else
+    {
+        ATK_LIST_FOR_EACH_REVERSE(resize_node, &state->windows)
         {
-            continue;
+            atk_widget_t *win = (atk_widget_t *)resize_node->value;
+            if (!win || !win->used)
+            {
+                continue;
+            }
+            if (!atk_window_supports_resize(win))
+            {
+                continue;
+            }
+            uint32_t edges = atk_window_resize_edges_at(win, cursor_x, cursor_y);
+            if (edges == 0)
+            {
+                continue;
+            }
+            hover_resize_window = win;
+            hover_resize_edges = edges;
+            break;
         }
-        uint32_t edges = atk_window_resize_edges_at(win, cursor_x, cursor_y);
-        if (edges == 0)
-        {
-            continue;
-        }
-        hover_resize_window = win;
-        hover_resize_edges = edges;
-        break;
     }
 
     if (!capture_consumed)
@@ -1145,19 +1161,9 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                   &result);
             }
 
-            ATK_LIST_FOR_EACH_REVERSE(win_node, &state->windows)
+            if (!handled && hover_window_initial && hover_window_initial->used)
             {
-                if (handled)
-                {
-                    break;
-                }
-
-                atk_widget_t *win = (atk_widget_t *)win_node->value;
-                if (!win || !win->used)
-                {
-                    continue;
-                }
-
+                atk_widget_t *win = hover_window_initial;
                 atk_widget_t *btn = atk_window_get_button_at(win, cursor_x, cursor_y);
                 if (btn)
                 {
@@ -1180,8 +1186,17 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
             if (!handled)
             {
-                atk_widget_t *win = atk_window_title_hit_test(state, cursor_x, cursor_y);
-                if (win && win->used)
+                atk_widget_t *win = hover_window_initial;
+                const atk_window_priv_t *priv = win ? (const atk_window_priv_t *)atk_widget_priv(win, &ATK_WINDOW_CLASS) : NULL;
+                bool chrome_visible = priv ? priv->chrome_visible : true;
+                bool over_title = win &&
+                                  win->used &&
+                                  chrome_visible &&
+                                  cursor_x >= win->x &&
+                                  cursor_x < win->x + win->width &&
+                                  cursor_y >= win->y &&
+                                  cursor_y < win->y + ATK_WINDOW_TITLE_HEIGHT;
+                if (over_title)
                 {
                     atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
                     bool moved = atk_window_bring_to_front(state, win);

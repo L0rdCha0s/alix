@@ -1496,7 +1496,8 @@ static void process_reap_orphans(void)
         {
             if (proc->state == PROCESS_STATE_ZOMBIE &&
                 proc->parent == NULL &&
-                proc != g_idle_process)
+                proc != g_idle_process &&
+                process_try_mark_destroying(proc))
             {
                 target = proc;
                 break;
@@ -1511,7 +1512,7 @@ static void process_reap_orphans(void)
             break;
         }
 
-        process_destroy(target);
+        process_destroy_marked(target);
     }
 }
 

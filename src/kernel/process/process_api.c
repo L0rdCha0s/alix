@@ -325,13 +325,8 @@ void process_sleep_ms(uint32_t ms)
     process_sleep_ticks(ticks);
 }
 
-void process_destroy(process_t *process)
+static void process_destroy_marked(process_t *process)
 {
-    if (!process || process->state != PROCESS_STATE_ZOMBIE || process == g_idle_process)
-    {
-        return;
-    }
-
     serial_printf("[proc] destroy pid=0x%016llX name=%s main_thread=0x%016llX\r\n",
                   (unsigned long long)process->pid,
                   process->name,
@@ -390,7 +385,23 @@ void process_destroy(process_t *process)
     process->magic = 0;
     process_free_user_regions(process);
     paging_destroy_space(&process->address_space);
+    __atomic_store_n(&process->lifetime_state, PROCESS_LIFETIME_FREED, __ATOMIC_RELEASE);
     free(process);
+}
+
+void process_destroy(process_t *process)
+{
+    if (!process || process->state != PROCESS_STATE_ZOMBIE || process == g_idle_process)
+    {
+        return;
+    }
+
+    if (!process_try_mark_destroying(process))
+    {
+        return;
+    }
+
+    process_destroy_marked(process);
 }
 
 void process_exit(int status)

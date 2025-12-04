@@ -225,6 +225,13 @@ typedef enum
     THREAD_LIFETIME_FREED
 } thread_lifetime_state_t;
 
+typedef enum
+{
+    PROCESS_LIFETIME_ALIVE = 0,
+    PROCESS_LIFETIME_DESTROYING,
+    PROCESS_LIFETIME_FREED
+} process_lifetime_state_t;
+
 struct thread
 {
     thread_tls_t tls;
@@ -354,6 +361,7 @@ struct process
 {
     uint64_t pid;
     process_state_t state;
+    process_lifetime_state_t lifetime_state;
     char name[PROCESS_NAME_MAX];
     uint64_t cr3;
     paging_space_t address_space;
@@ -848,6 +856,21 @@ static bool thread_lifetime_active(const thread_t *thread)
     thread_lifetime_state_t state = __atomic_load_n(&((thread_t *)thread)->lifetime_state,
                                                     __ATOMIC_ACQUIRE);
     return state == THREAD_LIFETIME_ALIVE;
+}
+
+static bool process_try_mark_destroying(process_t *process)
+{
+    if (!process)
+    {
+        return false;
+    }
+    process_lifetime_state_t expected = PROCESS_LIFETIME_ALIVE;
+    return __atomic_compare_exchange_n(&process->lifetime_state,
+                                       &expected,
+                                       PROCESS_LIFETIME_DESTROYING,
+                                       false,
+                                       __ATOMIC_ACQ_REL,
+                                       __ATOMIC_RELAXED);
 }
 
 static inline void paging_space_mark_active_cpu(paging_space_t *space, uint32_t cpu_index)
@@ -1514,6 +1537,7 @@ static bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stat
 static bool thread_saved_frame_valid(thread_t *thread, const char *label);
 static void thread_remove_from_wait_queue(thread_t *thread);
 static void sleep_queue_remove(thread_t *thread);
+static void process_destroy_marked(process_t *process);
 
 static void thread_registry_add(thread_t *thread)
 {
