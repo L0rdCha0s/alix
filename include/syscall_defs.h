@@ -2,6 +2,7 @@
 #define SYSCALL_DEFS_H
 
 #include "types.h"
+#include "timekeeping.h"
 
 typedef enum
 {
@@ -30,6 +31,7 @@ typedef enum
     SYSCALL_FSTAT = 22,
     SYSCALL_PREAD = 23,
     SYSCALL_CPU_SNAPSHOT = 24,
+    SYSCALL_TIME_INFO = 25,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)
@@ -113,5 +115,11 @@ typedef struct
     uint32_t type; /* vfs_node_type_t */
     uint32_t reserved;
 } syscall_stat_t;
+
+typedef struct
+{
+    int32_t offset_minutes;
+    char timezone_name[TIMEKEEPING_TZ_NAME_MAX];
+} syscall_time_info_t;
 
 #endif

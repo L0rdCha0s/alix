@@ -283,15 +283,15 @@ atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py)
     {
         return 0;
     }
-    if (!priv->chrome_visible)
-    {
-        return 0;
-    }
 
     ATK_LIST_FOR_EACH_REVERSE(node, &priv->buttons)
     {
         atk_widget_t *btn = (atk_widget_t *)node->value;
         if (!btn || !btn->used)
+        {
+            continue;
+        }
+        if (!priv->chrome_visible && btn == priv->close_button)
         {
             continue;
         }
@@ -918,6 +918,7 @@ static void window_after_size_change(atk_widget_t *window)
         window_layout_close_button(window, priv);
     }
 
+    /* Layout remains responsible for user buttons regardless of chrome visibility. */
     window_layout_children(window, priv);
 
 #ifdef KERNEL_BUILD
@@ -1017,7 +1018,7 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
         {
             continue;
         }
-        if (!chrome_visible && atk_widget_is_a(child, &ATK_BUTTON_CLASS))
+        if (!chrome_visible && priv && child == priv->close_button)
         {
             continue;
         }

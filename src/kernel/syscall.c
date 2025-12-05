@@ -909,6 +909,21 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = syscall_do_cpu_snapshot((syscall_cpu_stats_t *)frame->rdi,
                                              (size_t)frame->rsi);
             break;
+        case SYSCALL_TIME_INFO:
+        {
+            syscall_time_info_t *user_info = (syscall_time_info_t *)frame->rdi;
+            if (!user_info || !user_ptr_range_valid(user_info, sizeof(*user_info)))
+            {
+                result = -1;
+                break;
+            }
+            syscall_time_info_t info = { 0 };
+            info.offset_minutes = timekeeping_timezone_offset_minutes();
+            const char *tz_name = timekeeping_timezone_name();
+            syscall_copy_string(info.timezone_name, sizeof(info.timezone_name), tz_name);
+            result = user_copy_to_user(user_info, &info, sizeof(info)) ? 0 : -1;
+            break;
+        }
         case SYSCALL_TIME_MILLIS:
             result = (int64_t)timekeeping_now_millis();
             break;

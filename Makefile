@@ -82,6 +82,8 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
              $(USER_OBJDIR)/atk_shell.elf \
+             $(USER_OBJDIR)/atk_clock.elf \
+             $(USER_OBJDIR)/atk_richtext.elf \
              $(USER_OBJDIR)/atk_taskmgr.elf \
              $(USER_OBJDIR)/control_panel.elf \
              $(USER_OBJDIR)/loop.elf \
@@ -92,6 +94,8 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
              $(USER_BIN_DIR)/wolf3d \
              $(USER_BIN_DIR)/atk_shell \
+             $(USER_BIN_DIR)/atk_clock \
+             $(USER_BIN_DIR)/atk_richtext \
              $(USER_BIN_DIR)/atk_taskmgr \
              $(USER_BIN_DIR)/control_panel \
              $(USER_BIN_DIR)/loop \
@@ -186,6 +190,14 @@ $(USER_OBJDIR)/atk_shell.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_shell_app.o
 
+$(USER_OBJDIR)/atk_clock.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_clock_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_clock_app.o
+
+$(USER_OBJDIR)/atk_richtext.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_richtext_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_richtext_app.o
+
 $(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_taskmgr_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_taskmgr_app.o
@@ -248,6 +260,14 @@ $(USER_BIN_DIR)/doom: $(USER_OBJDIR)/doom.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/atk_shell: $(USER_OBJDIR)/atk_shell.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_clock: $(USER_OBJDIR)/atk_clock.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_richtext: $(USER_OBJDIR)/atk_richtext.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 

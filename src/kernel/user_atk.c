@@ -751,6 +751,7 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
 
     spinlock_lock(&win->pixel_lock);
 
+#if USER_ATK_DEBUG
     serial_printf("[user_atk][present] handle=0x%016llX bytes=0x%016llX expected=0x%016llX content=%dx%d stride=%d dst=0x%016llX\r\n",
                   (unsigned long long)((uint64_t)handle),
                   (unsigned long long)((uint64_t)byte_len),
@@ -759,6 +760,8 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
                   win->content_height,
                   win->stride_bytes,
                   (unsigned long long)((uint64_t)(uintptr_t)win->pixels));
+#endif
+
 
     size_t expected_bytes = win->pixel_bytes;
     size_t copy_bytes = expected_bytes;

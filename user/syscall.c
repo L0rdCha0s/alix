@@ -211,6 +211,11 @@ uint64_t sys_time_millis(void)
     return (uint64_t)syscall0(SYSCALL_TIME_MILLIS);
 }
 
+int sys_time_info(syscall_time_info_t *info)
+{
+    return (int)syscall1(SYSCALL_TIME_INFO, (long)info);
+}
+
 ssize_t sys_font_cache(void *buffer, size_t capacity)
 {
     return (ssize_t)syscall2(SYSCALL_FONT_CACHE, (long)buffer, (long)capacity);
