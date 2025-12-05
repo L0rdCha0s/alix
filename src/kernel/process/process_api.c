@@ -427,7 +427,7 @@ void process_exit(int status)
     fatal("process_exit returned");
 }
 
-static bool process_has_exited(void *context)
+static bool __attribute__((unused)) process_has_exited(void *context)
 {
     process_t *proc = (process_t *)context;
     return !proc || !process_pointer_valid(proc) || proc->state == PROCESS_STATE_ZOMBIE;
@@ -1452,7 +1452,7 @@ void process_debug_log_stack_write(const char *label,
     (void)len;
 }
 #endif
-static process_priority_info_t process_priority_info(const process_t *process)
+static process_priority_info_t __attribute__((unused)) process_priority_info(const process_t *process)
 {
     process_priority_info_t info;
     info.base_priority = THREAD_PRIORITY_NORMAL;

@@ -131,7 +131,7 @@ static bool chunk_overlaps_framebuffer(uint64_t base, uint64_t end)
     return end > fb_base && base < fb_end;
 }
 
-static bool e820_chunk_usable(uint64_t base, uint64_t size)
+static bool __attribute__((unused)) e820_chunk_usable(uint64_t base, uint64_t size)
 {
     if (size == 0)
     {
@@ -468,7 +468,7 @@ static void kernel_entry_main(bootinfo_t *loader_info)
     kernel_main();
 }
 
-void __attribute__((naked)) kernel_entry(bootinfo_t *loader_info)
+void __attribute__((naked)) kernel_entry(bootinfo_t *loader_info __attribute__((unused)))
 {
     __asm__ volatile (
         "cli\n\t"

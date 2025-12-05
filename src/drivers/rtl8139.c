@@ -125,7 +125,7 @@ static uint32_t g_tx_phys[RTL_TX_SLOT_COUNT];
 static __attribute__((aligned(256))) uint8_t g_rx_buffer[RTL_RX_BUFFER_SIZE];
 static int g_log_rx_count = 0;
 #define RTL_RX_FRAME_MAX  12288
-static int g_state_dump_budget = 12;
+static int __attribute__((unused)) g_state_dump_budget = 12;
 static int g_tx_dump_budget = 32;
 static int g_hw_tx_cursor = 0; // which TSD/TSAD pair the NIC expects next
 static int g_tx_tail_cursor = 0; // oldest descriptor that might still be owned by NIC
@@ -137,7 +137,7 @@ static volatile bool g_rx_bounce_in_use[RTL_RX_BOUNCE_COUNT];
 
 #define RTL_TX_QUEUE_MAX 16
 #define RTL_TX_FRAME_MAX 1600
-static int g_arp_dump_budget = 16;
+static int __attribute__((unused)) g_arp_dump_budget = 16;
 static uint8_t g_tx_queue_data[RTL_TX_QUEUE_MAX][RTL_TX_FRAME_MAX];
 static size_t g_tx_queue_len[RTL_TX_QUEUE_MAX];
 static int g_tx_queue_head = 0;
@@ -570,7 +570,7 @@ static uint16_t rtl8139_buffer_read16(uint32_t offset)
     return (uint16_t)(g_rx_buffer[index0] | ((uint16_t)g_rx_buffer[index1] << 8));
 }
 
-static uint8_t rtl8139_buffer_read8(uint32_t offset)
+static uint8_t __attribute__((unused)) rtl8139_buffer_read8(uint32_t offset)
 {
     return g_rx_buffer[offset % RTL_RX_RING_SIZE];
 }
@@ -759,10 +759,10 @@ static void rtl8139_log_stack_source(const thread_t *owner, const void *ptr, siz
     serial_printf("%s", "\r\n");
 }
 
-static void rtl8139_log_dma_target(const char *context,
-                                   int slot,
-                                   const uint8_t *buffer,
-                                   size_t len)
+static void __attribute__((unused)) rtl8139_log_dma_target(const char *context,
+                                                           int slot,
+                                                           const uint8_t *buffer,
+                                                           size_t len)
 {
     serial_printf("%s", "rtl8139: dma context=");
     serial_printf("%s", context ? context : "<none>");
@@ -1097,7 +1097,7 @@ static void rtl8139_tx_force_release(const char *context)
     }
 }
 
-static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len)
+static void __attribute__((unused)) rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len)
 {
 #if !RTL8139_TRACE_ENABLE
     (void)prefix;

@@ -191,6 +191,7 @@ static bool shell_on_control(atk_widget_t *terminal, void *context, char control
 
 static bool shell_handle_mouse(atk_shell_app_t *app, const user_atk_event_t *event)
 {
+    (void)app;
     if (!event)
     {
         return false;

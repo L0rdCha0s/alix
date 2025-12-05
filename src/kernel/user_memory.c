@@ -89,7 +89,7 @@ static void user_memory_insert_node(user_memory_range_t *node)
     }
 }
 
-static void user_memory_detach_range(user_memory_range_t *node, user_memory_range_t *prev)
+static void __attribute__((unused)) user_memory_detach_range(user_memory_range_t *node, user_memory_range_t *prev)
 {
     if (!node)
     {

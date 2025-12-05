@@ -1333,7 +1333,7 @@ static void detect_framebuffer(void)
     video_log("BGA device not found on PCI bus; using default framebuffer address");
 }
 
-static void video_log_mouse_event(int dx, int dy, bool left_pressed)
+static void __attribute__((unused)) video_log_mouse_event(int dx, int dy, bool left_pressed)
 {
 #if VIDEO_MOUSE_LOG
     if (video_mouse_log_count >= 16) return;

@@ -259,7 +259,6 @@ static volatile uint64_t g_heap_lock_owner_tsc[SMP_MAX_CPUS];
 static spinlock_t g_heap_bin_locks[HEAP_BIN_COUNT];
 
 #define HEAP_MAG_CLASS_COUNT 4
-static const size_t g_heap_mag_sizes[HEAP_MAG_CLASS_COUNT] = { 16, 32, 64, 128 };
 #define HEAP_MAG_CAPACITY 32
 
 typedef struct heap_magazine
@@ -270,9 +269,14 @@ typedef struct heap_magazine
     void *slots[HEAP_MAG_CLASS_COUNT][HEAP_MAG_CAPACITY];
 } heap_magazine_t;
 
+#if HEAP_MAG_ENABLED
+static const size_t g_heap_mag_sizes[HEAP_MAG_CLASS_COUNT] = { 16, 32, 64, 128 };
 static heap_magazine_t g_heap_magazines[SMP_MAX_CPUS];
+#endif
 static int heap_mag_class_for_size(size_t size);
+#if HEAP_MAG_ENABLED
 static heap_magazine_t *heap_mag_for_cpu(uint32_t cpu);
+#endif
 static void *heap_mag_pop(size_t size);
 static bool heap_mag_push(heap_block_t *block);
 
@@ -378,12 +382,9 @@ static int heap_mag_class_for_size(size_t size)
 #endif
 }
 
-static heap_magazine_t *heap_mag_for_cpu(uint32_t cpu)
+#if HEAP_MAG_ENABLED
+static heap_magazine_t * __attribute__((unused)) heap_mag_for_cpu(uint32_t cpu)
 {
-#if !HEAP_MAG_ENABLED
-    (void)cpu;
-    return NULL;
-#else
     if (cpu >= SMP_MAX_CPUS)
     {
         return NULL;
@@ -395,8 +396,8 @@ static heap_magazine_t *heap_mag_for_cpu(uint32_t cpu)
         mag->init = true;
     }
     return mag;
-#endif
 }
+#endif
 
 static void *heap_mag_pop(size_t size)
 {

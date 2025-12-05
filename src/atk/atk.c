@@ -697,7 +697,7 @@ static __attribute__((unused)) bool atk_ensure_surface(video_color_t **buf, int 
 #endif
 }
 
-static bool atk_ensure_overlay(atk_state_t *state, int width, int height)
+static bool __attribute__((unused)) atk_ensure_overlay(atk_state_t *state, int width, int height)
 {
 #ifndef KERNEL_BUILD
     (void)state;

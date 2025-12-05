@@ -876,7 +876,7 @@ static void printer_emit(const char *msg)
     serial_printf("%s switch=%llu\r\n", msg, (unsigned long long)switches);
 }
 
-static void printer_a_process_entry(void *arg)
+static void __attribute__((unused)) printer_a_process_entry(void *arg)
 {
     (void)arg;
     while (1)
@@ -886,7 +886,7 @@ static void printer_a_process_entry(void *arg)
     }
 }
 
-static void printer_b_process_entry(void *arg)
+static void __attribute__((unused)) printer_b_process_entry(void *arg)
 {
     (void)arg;
     while (1)

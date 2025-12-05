@@ -178,8 +178,8 @@ static bool acpi_checksum(const void *table, size_t length)
 
 static uintptr_t acpi_ebda_address(void)
 {
-    const uint16_t *ebda_segment_ptr = (const uint16_t *)(uintptr_t)0x40E;
-    uint16_t segment = ebda_segment_ptr ? *ebda_segment_ptr : 0;
+    uint16_t segment = 0;
+    memcpy(&segment, (const void *)(uintptr_t)0x40E, sizeof(segment));
     return (uintptr_t)segment << 4;
 }
 
@@ -240,7 +240,6 @@ static acpi_rsdp_v2_t *acpi_find_rsdp(void)
     if (boot_info.magic == BOOTINFO_MAGIC && boot_info.acpi_rsdp != 0)
     {
         acpi_log_hex("Bootinfo RSDP pointer ", boot_info.acpi_rsdp);
-        volatile acpi_rsdp_v2_t *rsdp_phys = (acpi_rsdp_v2_t *)(uintptr_t)boot_info.acpi_rsdp;
         acpi_rsdp_v2_t rsdp_copy_v2;
         memcpy(&rsdp_copy_v2, (const void *)(uintptr_t)boot_info.acpi_rsdp, sizeof(rsdp_copy_v2));
         acpi_rsdp_v2_t *rsdp = &rsdp_copy_v2;

@@ -324,7 +324,7 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
 
     ATK_LIST_FOR_EACH_REVERSE(node, &priv->children)
     {
-#ifndef KERNEL_BUILD
+#if ATK_USER_POINTER_MIN > 0
         if ((uintptr_t)node < ATK_USER_POINTER_MIN)
         {
             continue;
@@ -339,16 +339,16 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
         {
             continue;
         }
-#ifndef KERNEL_BUILD
+        if (!child->used)
+        {
+            continue;
+        }
+#if ATK_USER_POINTER_MIN > 0
         if ((uintptr_t)child < ATK_USER_POINTER_MIN)
         {
             continue;
         }
 #endif
-        if (!child->used)
-        {
-            continue;
-        }
         if (atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
         {
             if (!atk_tab_view_contains_point(child, px, py))

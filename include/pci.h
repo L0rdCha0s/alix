@@ -2263,7 +2263,7 @@ static const PciVendor PCI_VENDORS[] = {
     {0x270F, "Chaintech Computer Co. Ltd"},
     {0x2711, "AVID Technology Inc."},
     {0x2955, "Connectix Virtual PC"},
-    {0x2A15, "3D Vision(???)"},
+    {0x2A15, "3D Vision (?)"},
     {0x2A18, "Video Transcode Controller"},
     {0x2BD8, "ROPEX Industrie-Elektronik GmbH"},
     {0x2EC1, "Zenic Inc"},

@@ -1735,6 +1735,10 @@ static bool terminal_resize_storage(atk_terminal_priv_t *priv, int new_cols, int
     int old_cols = priv->cols;
     int old_rows = priv->rows;
 
+    char *scroll_cells = NULL;
+    video_color_t *scroll_fg = NULL;
+    video_color_t *scroll_bg = NULL;
+
     size_t new_count = (size_t)new_cols * (size_t)new_rows;
     char *cells = (char *)malloc(new_count);
     video_color_t *fg = (video_color_t *)malloc(sizeof(video_color_t) * new_count);
@@ -1764,9 +1768,6 @@ static bool terminal_resize_storage(atk_terminal_priv_t *priv, int new_cols, int
         }
     }
 
-    char *scroll_cells = NULL;
-    video_color_t *scroll_fg = NULL;
-    video_color_t *scroll_bg = NULL;
     if (priv->scrollback_capacity > 0)
     {
         size_t total = (size_t)priv->scrollback_capacity * (size_t)new_cols;

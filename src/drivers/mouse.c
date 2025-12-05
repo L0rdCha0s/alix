@@ -73,7 +73,7 @@ static bool mouse_listener_valid(mouse_listener_t listener)
            addr < (uintptr_t)__kernel_text_end;
 }
 
-static void mouse_log_packet(int dx, int dy, bool left, uint8_t status)
+static void __attribute__((unused)) mouse_log_packet(int dx, int dy, bool left, uint8_t status)
 {
     char buf[64];
     int idx = 0;

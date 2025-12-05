@@ -10,7 +10,7 @@ extern const size_t g_dl_script_content_len;
 
 bool dl_script_install_default(void)
 {
-    if (!g_dl_script_content || g_dl_script_content_len == 0)
+    if (g_dl_script_content_len == 0)
     {
         return false;
     }

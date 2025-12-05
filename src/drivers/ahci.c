@@ -166,16 +166,18 @@ static bool g_ahci_use_interrupts = false;
 
 static void ahci_log(const char *msg)
 {
-    #if AHCI_DEBUG
+#if AHCI_DEBUG
     serial_printf("%s", "[ahci] ");
     serial_printf("%s", msg ? msg : "(null)");
     serial_printf("%s", "\r\n");
-    #endif
+#else
+    (void)msg;
+#endif
 }
 
 static void ahci_log_hex(const char *msg, uint64_t value)
 {
-    #if AHCI_DEBUG
+#if AHCI_DEBUG
     serial_printf("%s", "[ahci] ");
     if (msg)
     {
@@ -184,23 +186,29 @@ static void ahci_log_hex(const char *msg, uint64_t value)
     serial_printf("%s", "0x");
     serial_printf("%016llX", (unsigned long long)(value));
     serial_printf("%s", "\r\n");
-    #endif
+#else
+    (void)msg;
+    (void)value;
+#endif
 }
 
 static void ahci_log_port(uint32_t port_no, const char *msg)
 {
-    #if AHCI_DEBUG
+#if AHCI_DEBUG
     serial_printf("%s", "[ahci] port ");
     serial_printf("%016llX", (unsigned long long)(port_no));
     serial_printf("%s", ": ");
     serial_printf("%s", msg ? msg : "(null)");
     serial_printf("%s", "\r\n");
-    #endif
+#else
+    (void)port_no;
+    (void)msg;
+#endif
 }
 
 static void ahci_log_port_hex(uint32_t port_no, const char *msg, uint64_t value)
 {
-    #if AHCI_DEBUG
+#if AHCI_DEBUG
     serial_printf("%s", "[ahci] port ");
     serial_printf("%016llX", (unsigned long long)(port_no));
     serial_printf("%s", ": ");
@@ -211,10 +219,14 @@ static void ahci_log_port_hex(uint32_t port_no, const char *msg, uint64_t value)
     serial_printf("%s", "0x");
     serial_printf("%016llX", (unsigned long long)(value));
     serial_printf("%s", "\r\n");
-    #endif
+#else
+    (void)port_no;
+    (void)msg;
+    (void)value;
+#endif
 }
 
-static void ahci_log_owner_details(const thread_t *owner)
+static void __attribute__((unused)) ahci_log_owner_details(const thread_t *owner)
 {
     if (!owner)
     {
@@ -235,7 +247,7 @@ static void ahci_log_stack_bounce(uint32_t port_no,
                                   size_t len,
                                   bool write)
 {
-    #if AHCI_DEBUG
+#if AHCI_DEBUG
     serial_printf("%s", "[ahci] port ");
     serial_printf("%016llX", (unsigned long long)(port_no));
     serial_printf("%s", ": stack buffer redirected action=");
@@ -249,7 +261,14 @@ static void ahci_log_stack_bounce(uint32_t port_no,
     serial_printf("%s", " len=0x");
     serial_printf("%016llX", (unsigned long long)(len));
     serial_printf("%s", "\r\n");
-    #endif
+#else
+    (void)port_no;
+    (void)owner;
+    (void)original;
+    (void)bounce;
+    (void)len;
+    (void)write;
+#endif
 }
 
 static void ahci_log_prdt_entry(uint32_t port_no,
@@ -259,7 +278,7 @@ static void ahci_log_prdt_entry(uint32_t port_no,
                                 uint64_t phys_addr,
                                 uint32_t len)
 {
-    #if AHCI_DEBUG
+#if AHCI_DEBUG
     serial_printf("%s", "[ahci] port ");
     serial_printf("%016llX", (unsigned long long)(port_no));
     serial_printf("%s", " slot=0x");
@@ -276,7 +295,14 @@ static void ahci_log_prdt_entry(uint32_t port_no,
     thread_t *owner = process_find_stack_owner((const void *)virt_addr, len);
     ahci_log_owner_details(owner);
     serial_printf("%s", "\r\n");
-    #endif
+#else
+    (void)port_no;
+    (void)slot;
+    (void)index;
+    (void)virt_addr;
+    (void)phys_addr;
+    (void)len;
+#endif
 }
 
 static void ahci_request_os_ownership(void)
@@ -589,6 +615,10 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
                            bool write)
 {
     bool result = false;
+    uint8_t *bounce_alloc = NULL;
+    uint64_t total_bytes = 0;
+    bool has_payload = false;
+    void *original_buffer = NULL;
     hba_port_t *port = ctx->port;
     ahci_log_hex("cmd buffer=", (uint64_t)(uintptr_t)buffer);
     ahci_log_hex("cmd bytes=", (uint64_t)count * AHCI_SECTOR_SIZE);
@@ -597,15 +627,14 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
         goto cleanup;
     }
 
-    uint64_t total_bytes = count ? ((uint64_t)count * AHCI_SECTOR_SIZE) : 0;
-    bool has_payload = (total_bytes > 0);
+    total_bytes = count ? ((uint64_t)count * AHCI_SECTOR_SIZE) : 0;
+    has_payload = (total_bytes > 0);
     if (has_payload && !buffer)
     {
         goto cleanup;
     }
 
-    void *original_buffer = has_payload ? buffer : NULL;
-    uint8_t *bounce_alloc = NULL;
+    original_buffer = has_payload ? buffer : NULL;
     if (has_payload)
     {
         thread_t *stack_owner = process_find_stack_owner(buffer, (size_t)total_bytes);

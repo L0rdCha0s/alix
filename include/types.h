@@ -21,7 +21,9 @@ typedef unsigned long      uintptr_t;
 
 typedef enum { false = 0, true = 1 } bool;
 
+#ifndef NULL
 #define NULL ((void*)0)
+#endif
 #endif
 
 

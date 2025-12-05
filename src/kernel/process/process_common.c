@@ -468,7 +468,7 @@ uint32_t g_sched_paging_lock_log_enable = 0;
 uint32_t g_sched_memcpy_log_enable = 0;
 uint32_t g_sched_priority_enable = 1;
 uint32_t g_sched_default_priority = THREAD_PRIORITY_NORMAL;
-static uint32_t g_scheduler_rr_cursor = 0;
+static uint32_t g_scheduler_rr_cursor __attribute__((unused)) = 0;
 static bool process_pointer_valid(const process_t *process);
 static vfs_node_t *proc_pid_dir(process_t *process);
 static void procfs_register_process_priority(process_t *process);
@@ -2281,7 +2281,7 @@ static void thread_assert_stack_current(thread_t *thread, const char *context)
     thread_scan_stack_for_suspicious_values(thread, rsp, false, context);
 }
 
-static void thread_assert_current_stack_owner(const char *context)
+static void __attribute__((unused)) thread_assert_current_stack_owner(const char *context)
 {
     thread_t *current = current_thread_local();
     if (!current)
@@ -2309,7 +2309,7 @@ static void thread_assert_current_stack_owner(const char *context)
     fatal("current stack owner mismatch");
 }
 
-static void thread_assert_stack_guard_only(thread_t *thread, const char *context)
+static void __attribute__((unused)) thread_assert_stack_guard_only(thread_t *thread, const char *context)
 {
     if (!thread)
     {
@@ -2482,7 +2482,7 @@ static void thread_log_stack_scan_hit(thread_t *thread,
 #endif
 }
 
-static void scheduler_debug_check_resume(thread_t *thread, const char *label)
+static void __attribute__((unused)) scheduler_debug_check_resume(thread_t *thread, const char *label)
 {
     if (!thread || !thread->context)
     {

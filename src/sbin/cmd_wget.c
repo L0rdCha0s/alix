@@ -103,7 +103,7 @@ typedef struct
     int    trailer_stage;     // 0,1,2,3 progressing toward CRLFCRLF
 } chunked_state_t;
 
-static uint64_t wget_ticks_to_ms(uint64_t ticks)
+static uint64_t __attribute__((unused)) wget_ticks_to_ms(uint64_t ticks)
 {
     uint32_t freq = timer_frequency();
     if (freq == 0)
@@ -883,6 +883,9 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             shell_output_error(out, "TLS handshake failed");
             goto cleanup;
         }
+#if !WGET_PROGRESS_LOG
+        (void)tls_start;
+#endif
 #if WGET_PROGRESS_LOG
         {
             uint64_t tls_ms = wget_ticks_to_ms(timer_ticks() - tls_start);

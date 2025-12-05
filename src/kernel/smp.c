@@ -209,10 +209,7 @@ static void map_cpu(uint32_t index, uint8_t apic_id, uint8_t processor_id, bool 
     g_cpus[index].bsp = false;
     __atomic_store_n(&g_cpus[index].online, false, __ATOMIC_RELAXED);
 
-    if (apic_id < sizeof(g_apic_to_index))
-    {
-        g_apic_to_index[apic_id] = (uint8_t)index;
-    }
+    g_apic_to_index[apic_id] = (uint8_t)index;
 }
 
 static void ensure_boot_cpu_present(void)
@@ -526,6 +523,7 @@ void smp_handle_schedule_ipi(interrupt_frame_t *frame)
 
 void smp_broadcast_schedule_ipi(bool include_self)
 {
+    (void)include_self;
     lapic_broadcast_ipi(SMP_SCHEDULE_IPI_VECTOR, true);
     // uint32_t online = __atomic_load_n(&g_online_cpus, __ATOMIC_ACQUIRE);
     // if (online <= 1)
