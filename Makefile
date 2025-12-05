@@ -49,13 +49,13 @@ C_SOURCES := \
 	$(ARCH_KERNEL_SOURCES) \
 	$(wildcard $(SBIN_DIR)/*.c)
 C_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(C_SOURCES))
+# Pull in process/* units directly rather than including from process.c.
+PROCESS_SOURCES := $(wildcard $(KERNEL_DIR)/process/*.c)
+C_SOURCES := $(filter-out $(KERNEL_DIR)/process.c,$(C_SOURCES))
+C_SOURCES += $(PROCESS_SOURCES)
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
-
-# process.c includes other C units directly; make sure changes in those parts
-# trigger a rebuild of process.o.
-PROCESS_PARTS := $(wildcard $(KERNEL_DIR)/process/*.c)
 
 ASM_SOURCES := $(filter-out $(ARCH_DIR)/ap_trampoline.S,$(wildcard $(ARCH_DIR)/*.S))
 ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
@@ -129,9 +129,6 @@ $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 $(OBJDIR)/%.o: $(SRC_DIR)/%.S
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
-
-# Ensure process.o rebuilds when any included process/*.c changes.
-$(OBJDIR)/kernel/process.o: $(KERNEL_DIR)/process.c $(PROCESS_PARTS)
 
 NASM ?= nasm
 AP_TRAMP_BIN := $(OBJDIR)/arch/x86/ap_trampoline.bin

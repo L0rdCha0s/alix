@@ -1,4 +1,6 @@
-static void scheduler_trace(const char *prefix, thread_t *thread)
+#include "process_internal.h"
+
+void scheduler_trace(const char *prefix, thread_t *thread)
 {
     if (!sched_dbg_enabled())
     {
@@ -20,9 +22,9 @@ static void scheduler_trace(const char *prefix, thread_t *thread)
               (unsigned long long)((uintptr_t)thread->stack_base));
 }
 
-static void scheduler_log_state_event(const char *tag,
-                                      const thread_t *thread,
-                                      const char *where)
+void scheduler_log_state_event(const char *tag,
+                               const thread_t *thread,
+                               const char *where)
 {
     if (!sched_dbg_enabled() || !thread)
     {
@@ -65,30 +67,7 @@ static bool __attribute__((unused)) thread_name_equals(const thread_t *thread, c
     return strncmp(thread->name, name, PROCESS_NAME_MAX) == 0;
 }
 
-static bool string_name_equals(const char *lhs, const char *rhs)
-{
-    if (!lhs || !rhs)
-    {
-        return false;
-    }
-    return strncmp(lhs, rhs, PROCESS_NAME_MAX) == 0;
-}
-
-#define ENABLE_SHELL_TRACE 0
-
-static void process_create_log(const char *name, const char *event)
-{
-    if (!ENABLE_SHELL_TRACE || !sched_log_enabled())
-    {
-        return;
-    }
-
-    SCHED_LOG("[proc-trace] process_create %s name=%s\r\n",
-              event ? event : "<none>",
-              name ? name : "<none>");
-}
-
-static void scheduler_shell_log(const char *event, thread_t *thread)
+void scheduler_shell_log(const char *event, thread_t *thread)
 {
     if (!ENABLE_SHELL_TRACE || !thread || !sched_log_enabled())
     {
@@ -104,7 +83,7 @@ static void scheduler_shell_log(const char *event, thread_t *thread)
               (unsigned long long)((uint64_t)thread->kernel_stack_top));
 }
 
-static void scheduler_wait_for_boot_ready(void)
+void scheduler_wait_for_boot_ready(void)
 {
     while (!__atomic_load_n(&g_scheduler_boot_ready, __ATOMIC_ACQUIRE))
     {
@@ -112,10 +91,10 @@ static void scheduler_wait_for_boot_ready(void)
     }
 }
 
-static process_t *process_finalize_new_process(process_t *proc,
-                                               thread_t *thread,
-                                               int stdout_fd,
-                                               process_t *parent)
+process_t *process_finalize_new_process(process_t *proc,
+                                        thread_t *thread,
+                                        int stdout_fd,
+                                        process_t *parent)
 {
     if (!proc || !thread)
     {
@@ -165,13 +144,13 @@ static process_t *process_finalize_new_process(process_t *proc,
     return proc;
 }
 
-static thread_t *thread_create(process_t *process,
-                               const char *name,
-                               thread_entry_t entry,
-                               void *arg,
-                               size_t stack_size,
-                               bool is_idle,
-                               bool user_mode)
+thread_t *thread_create(process_t *process,
+                        const char *name,
+                        thread_entry_t entry,
+                        void *arg,
+                        size_t stack_size,
+                        bool is_idle,
+                        bool user_mode)
 {
     if (!process || !entry)
     {

@@ -1,4 +1,6 @@
-static process_t *allocate_process(const char *name, bool is_user)
+#include "process_internal.h"
+
+process_t *allocate_process(const char *name, bool is_user)
 {
     bool needs_clone = is_user;
     bool trace_clone = needs_clone && string_name_equals(name, "shell");
@@ -113,7 +115,7 @@ static process_t *allocate_process(const char *name, bool is_user)
     return proc;
 }
 
-static void process_free_user_regions(process_t *process)
+void process_free_user_regions(process_t *process)
 {
     if (!process)
     {
@@ -293,7 +295,7 @@ static void process_heap_free_map(process_t *process)
     process->heap_dir_count = 0;
 }
 
-static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes)
+bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes)
 {
     if (!process || bytes == 0)
     {
@@ -322,7 +324,7 @@ static bool process_heap_zero_range(process_t *process, uintptr_t start, size_t 
     return true;
 }
 
-static void process_heap_release_from(process_t *process, uintptr_t virt_start)
+void process_heap_release_from(process_t *process, uintptr_t virt_start)
 {
     if (!process || !process->heap_page_dirs)
     {
@@ -367,7 +369,7 @@ static void process_heap_release_from(process_t *process, uintptr_t virt_start)
     }
 }
 
-static void process_free_heap_pages(process_t *process)
+void process_free_heap_pages(process_t *process)
 {
     if (!process)
     {
@@ -378,7 +380,7 @@ static void process_free_heap_pages(process_t *process)
     process_heap_free_map(process);
 }
 
-static bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t end)
+bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t end)
 {
     if (!process || start >= end)
     {
@@ -593,7 +595,7 @@ static bool process_setup_user_heap(process_t *process)
     return true;
 }
 
-static void process_clear_args(process_t *process)
+void process_clear_args(process_t *process)
 {
     if (!process)
     {
@@ -613,9 +615,9 @@ static void process_clear_args(process_t *process)
     process->arg_count = 0;
 }
 
-static bool process_store_args(process_t *process,
-                               const char *const *argv,
-                               size_t argc)
+bool process_store_args(process_t *process,
+                        const char *const *argv,
+                        size_t argc)
 {
     if (!process)
     {
@@ -797,7 +799,7 @@ void process_dump_user_stack(process_t *process,
     }
 }
 
-static bool process_prepare_stack_with_args(process_t *process)
+bool process_prepare_stack_with_args(process_t *process)
 {
     if (!process || !process->user_stack_host || process->user_stack_size == 0)
     {
@@ -901,7 +903,7 @@ static bool process_prepare_stack_with_args(process_t *process)
     return true;
 }
 
-static bool process_setup_basic_user_memory(process_t *process)
+bool process_setup_basic_user_memory(process_t *process)
 {
     if (!process_setup_user_stack(process))
     {
@@ -914,7 +916,7 @@ static bool process_setup_basic_user_memory(process_t *process)
     return process_setup_preempt_stub(process);
 }
 
-static bool process_setup_dummy_user_space(process_t *process)
+bool process_setup_dummy_user_space(process_t *process)
 {
     if (!process)
     {
@@ -941,20 +943,3 @@ static bool process_setup_dummy_user_space(process_t *process)
     process->user_entry_point = USER_STUB_CODE_BASE;
     return true;
 }
-
-void scheduler_schedule(bool requeue_current);
-static void idle_thread_entry(void *arg) __attribute__((noreturn));
-static void thread_trampoline(void) __attribute__((noreturn));
-static void user_thread_entry(void *arg) __attribute__((noreturn));
-static void enqueue_thread(thread_t *thread);
-static void remove_from_run_queue(thread_t *thread);
-static void thread_refresh_priority(thread_t *thread);
-static void thread_set_base_priority(thread_t *thread, thread_priority_t priority);
-static void thread_set_priority_override(thread_t *thread, bool enabled, thread_priority_t priority);
-static void thread_remove_from_wait_queue(thread_t *thread);
-static void wait_queue_enqueue_locked(wait_queue_t *queue, thread_t *thread);
-static thread_t *wait_queue_dequeue_locked(wait_queue_t *queue);
-static void process_attach_child(process_t *parent, process_t *child);
-static void process_detach_child(process_t *child);
-static process_t *process_detach_first_child(process_t *parent);
-static void process_reap_orphans(void);

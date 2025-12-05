@@ -1,9 +1,11 @@
+#include "process_internal.h"
 #include "stdio.h"
-extern uint64_t g_scheduler_switch_count;
-#include "sched_log.h"
+
 #include "procfs.h"
 #include "smp.h"
 #include "lapic.h"
+
+static bool thread_can_run(const thread_t *thread);
 
 static bool scheduler_stack_make_writable(thread_t *thread, const char *context)
 {
@@ -36,8 +38,6 @@ static bool scheduler_stack_make_writable(thread_t *thread, const char *context)
 #endif
     return true;
 }
-
-static thread_priority_t thread_effective_priority(const thread_t *thread);
 
 static inline uint32_t scheduler_cpu_limit(void)
 {
@@ -466,21 +466,6 @@ static inline __attribute__((unused)) void thread_release_running_claim(thread_t
     (void)thread;
 }
 
-static inline uint64_t scheduler_lock_acquire(const char *where)
-{
-    (void)where;
-    uint64_t flags = cpu_save_flags();
-    cpu_cli();
-    spinlock_lock(&g_scheduler_lock);
-    return flags;
-}
-
-static inline void scheduler_lock_release(uint64_t flags)
-{
-    spinlock_unlock(&g_scheduler_lock);
-    cpu_restore_flags(flags);
-}
-
 static void scheduler_log_running_cpu_change(const thread_t *thread,
                                              uint32_t value,
                                              const char *reason)
@@ -838,7 +823,7 @@ static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index)
 }
 
 
-static void enqueue_thread(thread_t *thread)
+void enqueue_thread(thread_t *thread)
 {
     if (!thread || thread->is_idle)
     {
@@ -926,7 +911,7 @@ static void stack_watch_remove_frozen(thread_t *thread)
 #endif
 }
 
-static void thread_unfreeze_after_stack_watch(thread_t *thread)
+void thread_unfreeze_after_stack_watch(thread_t *thread)
 {
 #if ENABLE_STACK_WRITE_DEBUG
     if (!thread)
@@ -964,7 +949,7 @@ static void thread_unfreeze_after_stack_watch(thread_t *thread)
 #endif
 }
 
-static void stack_watch_check_timeouts(void)
+void stack_watch_check_timeouts(void)
 {
 #if ENABLE_STACK_WRITE_DEBUG
     uint64_t now = timer_ticks();
@@ -1076,7 +1061,7 @@ static bool thread_can_run(const thread_t *thread)
     return true;
 }
 
-static void remove_from_run_queue(thread_t *thread)
+void remove_from_run_queue(thread_t *thread)
 {
     if (!thread)
     {
@@ -1124,7 +1109,7 @@ static void remove_from_run_queue(thread_t *thread)
 #endif
 }
 
-static bool scheduler_thread_in_any_queue(thread_t *thread)
+bool scheduler_thread_in_any_queue(thread_t *thread)
 {
     if (!thread)
     {
@@ -1173,7 +1158,7 @@ static thread_priority_t thread_clamp_priority(thread_priority_t priority)
     return priority;
 }
 
-static thread_priority_t thread_effective_priority(const thread_t *thread)
+thread_priority_t thread_effective_priority(const thread_t *thread)
 {
     if (!thread)
     {
@@ -1207,7 +1192,7 @@ static void thread_refresh_priority(thread_t *thread)
     }
 }
 
-static void thread_set_base_priority(thread_t *thread, thread_priority_t priority)
+void thread_set_base_priority(thread_t *thread, thread_priority_t priority)
 {
     if (!thread_pointer_valid(thread))
     {
@@ -1220,7 +1205,7 @@ static void thread_set_base_priority(thread_t *thread, thread_priority_t priorit
     }
 }
 
-static void thread_set_priority_override(thread_t *thread, bool enabled, thread_priority_t priority)
+void thread_set_priority_override(thread_t *thread, bool enabled, thread_priority_t priority)
 {
     if (!thread_pointer_valid(thread))
     {
@@ -1238,7 +1223,7 @@ static void thread_set_priority_override(thread_t *thread, bool enabled, thread_
     thread_refresh_priority(thread);
 }
 
-static void thread_remove_from_wait_queue(thread_t *thread)
+void thread_remove_from_wait_queue(thread_t *thread)
 {
     wait_queue_t *queue = (thread && thread->waiting_queue) ? thread->waiting_queue : NULL;
     if (!queue)
@@ -1274,7 +1259,7 @@ static void thread_remove_from_wait_queue(thread_t *thread)
     thread->wait_queue_next = NULL;
 }
 
-static void sleep_queue_insert(thread_t *thread)
+void sleep_queue_insert(thread_t *thread)
 {
     if (!thread)
     {
@@ -1304,7 +1289,7 @@ static void sleep_queue_insert(thread_t *thread)
     spinlock_unlock(&g_sleep_queue_lock);
 }
 
-static void sleep_queue_remove(thread_t *thread)
+void sleep_queue_remove(thread_t *thread)
 {
     if (!thread || !thread->sleeping)
     {
@@ -1341,7 +1326,7 @@ static void sleep_queue_remove(thread_t *thread)
     spinlock_unlock(&g_sleep_queue_lock);
 }
 
-static void sleep_queue_wake_due(uint64_t now)
+void sleep_queue_wake_due(uint64_t now)
 {
     uint64_t sched_flags = scheduler_lock_acquire("sleep_queue_wake_due");
     spinlock_lock(&g_sleep_queue_lock);
@@ -1388,7 +1373,7 @@ static void sleep_queue_wake_due(uint64_t now)
     scheduler_lock_release(sched_flags);
 }
 
-static void process_attach_child(process_t *parent, process_t *child)
+void process_attach_child(process_t *parent, process_t *child)
 {
     if (!child)
     {
@@ -1417,7 +1402,7 @@ static void process_attach_child(process_t *parent, process_t *child)
     cpu_restore_flags(flags);
 }
 
-static void process_detach_child(process_t *child)
+void process_detach_child(process_t *child)
 {
     if (!child)
     {
@@ -1448,7 +1433,7 @@ static void process_detach_child(process_t *child)
     cpu_restore_flags(flags);
 }
 
-static process_t *process_detach_first_child(process_t *parent)
+process_t *process_detach_first_child(process_t *parent)
 {
     if (!parent)
     {
@@ -1516,7 +1501,7 @@ static void process_reap_orphans(void)
     }
 }
 
-static void thread_quarantine_corrupt(thread_t *thread, const char *reason)
+void thread_quarantine_corrupt(thread_t *thread, const char *reason)
 {
     if (!thread || thread->pending_destroy)
     {
@@ -1978,7 +1963,7 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
     }
 }
 
-static void idle_thread_entry(void *arg)
+void idle_thread_entry(void *arg)
 {
     (void)arg;
     while (1)
@@ -2056,7 +2041,7 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
     __builtin_unreachable();
 }
 
-static void user_thread_entry(void *arg)
+void user_thread_entry(void *arg)
 {
     user_thread_bootstrap_t params = { 0 };
     if (arg)
@@ -2071,7 +2056,7 @@ static void user_thread_entry(void *arg)
     process_jump_to_user(params.entry, params.stack_top, params.argc, params.argv_ptr);
 }
 
-static void thread_trampoline(void)
+void thread_trampoline(void)
 {
     thread_t *self = current_thread_local();
     if (self)
@@ -2088,7 +2073,7 @@ static void thread_trampoline(void)
     process_exit(0);
 }
 
-static void process_handle_stack_guard_fault(void)
+void process_handle_stack_guard_fault(void)
 {
     thread_t *current = current_thread_local();
     if (!current)
@@ -2130,7 +2115,7 @@ static void process_handle_stack_guard_fault(void)
     fatal("stack guard handler returned");
 }
 
-static void process_handle_fatal_fault(void)
+void process_handle_fatal_fault(void)
 {
     thread_t *current = current_thread_local();
     if (!current)

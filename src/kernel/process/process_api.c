@@ -1,3 +1,5 @@
+#include "process_internal.h"
+
 static process_t *process_create_kernel_internal(const char *name,
                                                  thread_entry_t entry,
                                                  void *arg,
@@ -58,8 +60,6 @@ static process_t *process_create_user_dummy_internal(const char *name,
                                                      int stdout_fd,
                                                      process_t *parent);
 static process_priority_info_t process_priority_info(const process_t *process);
-static ssize_t process_priority_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
-
 static process_t *process_create_user_dummy_internal(const char *name,
                                                      size_t stack_size,
                                                      int stdout_fd,
@@ -325,7 +325,7 @@ void process_sleep_ms(uint32_t ms)
     process_sleep_ticks(ticks);
 }
 
-static void process_destroy_marked(process_t *process)
+void process_destroy_marked(process_t *process)
 {
     serial_printf("[proc] destroy pid=0x%016llX name=%s main_thread=0x%016llX\r\n",
                   (unsigned long long)process->pid,

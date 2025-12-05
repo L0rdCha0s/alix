@@ -1,3 +1,5 @@
+#include "process_internal.h"
+
 void process_system_init(void)
 {
     fpu_prepare_initial_state();
