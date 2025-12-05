@@ -13,13 +13,18 @@
 static video_color_t *g_surface = NULL;
 static uint32_t g_surface_width = VIDEO_SURFACE_DEFAULT_WIDTH;
 static uint32_t g_surface_height = VIDEO_SURFACE_DEFAULT_HEIGHT;
+static size_t g_surface_capacity_pixels = 0;
 static bool g_surface_dirty = false;
 static bool g_surface_track_dirty = false;
 static volatile int g_surface_lock = 0;
 
 static inline bool surface_ready(void)
 {
-    return (g_surface != NULL && g_surface_width > 0 && g_surface_height > 0);
+    size_t needed = (size_t)g_surface_width * (size_t)g_surface_height;
+    return (g_surface != NULL &&
+            g_surface_width > 0 &&
+            g_surface_height > 0 &&
+            g_surface_capacity_pixels >= needed);
 }
 
 static inline void surface_lock(void)
@@ -46,15 +51,48 @@ static inline void surface_log(const char *msg, uint64_t value)
     (void)value;
 }
 
-void video_surface_attach(video_color_t *buffer, uint32_t width, uint32_t height)
+void video_surface_attach(video_color_t *buffer, uint32_t width, uint32_t height, size_t buffer_bytes)
 {
     surface_log("attach buffer=", (uintptr_t)buffer);
     surface_log("attach width=", width);
     surface_log("attach height=", height);
     surface_lock();
+    g_surface = NULL;
+    g_surface_width = 0;
+    g_surface_height = 0;
+    g_surface_capacity_pixels = 0;
+    g_surface_track_dirty = false;
+
+    if (!buffer || width == 0 || height == 0)
+    {
+        surface_unlock();
+        return;
+    }
+
+    size_t capacity_pixels = buffer_bytes / sizeof(video_color_t);
+    if (capacity_pixels == 0)
+    {
+        surface_unlock();
+        return;
+    }
+
+    size_t requested_pixels = (size_t)width * (size_t)height;
+    if (requested_pixels > capacity_pixels)
+    {
+        /* Clamp height to what the buffer can actually hold. */
+        height = (uint32_t)(capacity_pixels / width);
+        requested_pixels = (size_t)width * (size_t)height;
+        if (height == 0 || requested_pixels == 0)
+        {
+            surface_unlock();
+            return;
+        }
+    }
+
     g_surface = buffer;
     g_surface_width = width;
     g_surface_height = height;
+    g_surface_capacity_pixels = capacity_pixels;
     g_surface_track_dirty = false;
     surface_touch();
     surface_unlock();
@@ -67,6 +105,7 @@ void video_surface_detach(void)
     g_surface = NULL;
     g_surface_width = 0;
     g_surface_height = 0;
+    g_surface_capacity_pixels = 0;
     g_surface_dirty = false;
     g_surface_track_dirty = false;
     surface_unlock();

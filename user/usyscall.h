@@ -30,6 +30,7 @@ int sys_shell_interrupt(int handle);
 int sys_shell_close(int handle);
 ssize_t sys_proc_snapshot(syscall_process_info_t *buffer, size_t capacity);
 ssize_t sys_net_snapshot(syscall_net_stats_t *buffer, size_t capacity);
+ssize_t sys_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capacity);
 uint64_t sys_time_millis(void);
 ssize_t sys_font_cache(void *buffer, size_t capacity);
 int64_t sys_lseek(int fd, int64_t offset, int whence);

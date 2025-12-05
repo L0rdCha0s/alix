@@ -15,6 +15,7 @@
 #define ATK_COL(chars) ((chars) * ATK_FONT_WIDTH)
 
 #define TASKMGR_PROCESS_CAP 64
+#define TASKMGR_CPU_CAP     SYSCALL_CPU_MAX
 #define TASKMGR_NET_CAP     8
 #define TASKMGR_REFRESH_MS 5000
 #define TASKMGR_WINDOW_WIDTH  800
@@ -25,6 +26,7 @@ typedef struct
     atk_user_window_t remote;
     atk_widget_t *window;
     atk_widget_t *tab_view;
+    atk_widget_t *cpu_list;
     atk_widget_t *process_list;
     atk_widget_t *memory_list;
     atk_widget_t *network_list;
@@ -39,7 +41,24 @@ typedef struct
     uint64_t last_tx_bytes;
 } taskmgr_net_history_t;
 
+typedef struct
+{
+    uint32_t cpu_index;
+    uint64_t last_total_ticks;
+    uint64_t last_idle_ticks;
+    bool valid;
+} taskmgr_cpu_history_t;
+
+typedef struct
+{
+    uint64_t pid;
+    uint64_t last_runtime_ticks;
+    bool valid;
+} taskmgr_proc_history_t;
+
 static taskmgr_net_history_t g_net_history[TASKMGR_NET_CAP];
+static taskmgr_cpu_history_t g_cpu_history[TASKMGR_CPU_CAP];
+static taskmgr_proc_history_t g_proc_history[TASKMGR_PROCESS_CAP];
 
 static const char *process_state_name(uint32_t state)
 {
@@ -162,6 +181,47 @@ static void taskmgr_format_bytes(uint64_t value, char *buffer, size_t len)
     }
 }
 
+static void taskmgr_format_percent(uint32_t value, char *buffer, size_t len)
+{
+    if (!buffer || len == 0)
+    {
+        return;
+    }
+    taskmgr_format_u64((uint64_t)value, buffer, len);
+    size_t used = strlen(buffer);
+    if (used + 1 < len)
+    {
+        buffer[used++] = '%';
+        buffer[used] = '\0';
+    }
+}
+
+static uint32_t taskmgr_percent_of_total(uint64_t numerator, uint64_t denominator, uint32_t cap)
+{
+    if (denominator == 0)
+    {
+        return 0;
+    }
+
+    uint64_t limit = (uint64_t)(~(uint64_t)0);
+    uint64_t scaled = numerator;
+    if (scaled > limit / 100ULL)
+    {
+        scaled = limit;
+    }
+    else
+    {
+        scaled *= 100ULL;
+    }
+
+    uint64_t value = scaled / denominator;
+    if (value > cap)
+    {
+        value = cap;
+    }
+    return (uint32_t)value;
+}
+
 static taskmgr_net_history_t *taskmgr_history_slot(const char *name)
 {
     taskmgr_net_history_t *empty = NULL;
@@ -189,6 +249,60 @@ static taskmgr_net_history_t *taskmgr_history_slot(const char *name)
         return empty;
     }
     return &g_net_history[0];
+}
+
+static taskmgr_cpu_history_t *taskmgr_cpu_history_slot(uint32_t cpu_index)
+{
+    taskmgr_cpu_history_t *empty = NULL;
+    for (size_t i = 0; i < TASKMGR_CPU_CAP; ++i)
+    {
+        taskmgr_cpu_history_t *hist = &g_cpu_history[i];
+        if (hist->valid && hist->cpu_index == cpu_index)
+        {
+            return hist;
+        }
+        if (!hist->valid && !empty)
+        {
+            empty = hist;
+        }
+    }
+
+    if (empty)
+    {
+        memset(empty, 0, sizeof(*empty));
+        empty->cpu_index = cpu_index;
+        empty->valid = true;
+        return empty;
+    }
+
+    return &g_cpu_history[0];
+}
+
+static taskmgr_proc_history_t *taskmgr_proc_history_slot(uint64_t pid)
+{
+    taskmgr_proc_history_t *empty = NULL;
+    for (size_t i = 0; i < TASKMGR_PROCESS_CAP; ++i)
+    {
+        taskmgr_proc_history_t *hist = &g_proc_history[i];
+        if (hist->valid && hist->pid == pid)
+        {
+            return hist;
+        }
+        if (!hist->valid && !empty)
+        {
+            empty = hist;
+        }
+    }
+
+    if (empty)
+    {
+        memset(empty, 0, sizeof(*empty));
+        empty->pid = pid;
+        empty->valid = true;
+        return empty;
+    }
+
+    return &g_proc_history[0];
 }
 
 static void taskmgr_format_mac(const uint8_t mac[6], char *out, size_t len)
@@ -253,7 +367,8 @@ static void taskmgr_format_ipv4(uint32_t addr, char *out, size_t len)
 
 static void taskmgr_populate_process_table(atk_taskmgr_app_t *app,
                                            const syscall_process_info_t *procs,
-                                           size_t count)
+                                           size_t count,
+                                           uint64_t total_tick_delta)
 {
     if (!app || !app->process_list)
     {
@@ -264,19 +379,41 @@ static void taskmgr_populate_process_table(atk_taskmgr_app_t *app,
     for (size_t i = 0; i < count; ++i)
     {
         const syscall_process_info_t *info = &procs[i];
-        char cells[9][32];
+        char cells[10][32];
+
+        taskmgr_proc_history_t *hist = taskmgr_proc_history_slot(info->pid);
+        uint32_t cpu_percent = 0;
+        if (hist && hist->valid && info->runtime_ticks >= hist->last_runtime_ticks && total_tick_delta > 0)
+        {
+            uint64_t runtime_delta = info->runtime_ticks - hist->last_runtime_ticks;
+            cpu_percent = taskmgr_percent_of_total(runtime_delta, total_tick_delta, 999);
+        }
+        if (hist)
+        {
+            hist->pid = info->pid;
+            hist->last_runtime_ticks = info->runtime_ticks;
+            hist->valid = true;
+        }
 
         taskmgr_copy_string(cells[0], sizeof(cells[0]), info->is_idle ? "*" : "");
         taskmgr_format_u64(info->pid, cells[1], sizeof(cells[1]));
         taskmgr_copy_string(cells[2], sizeof(cells[2]), process_state_name(info->process_state));
         taskmgr_copy_string(cells[3], sizeof(cells[3]), thread_state_name(info->thread_state));
-        taskmgr_copy_string(cells[4], sizeof(cells[4]), info->is_idle ? "yes" : "no");
-        taskmgr_format_u64((uint64_t)info->stdout_fd, cells[5], sizeof(cells[5]));
-        taskmgr_copy_string(cells[6], sizeof(cells[6]), info->process_name);
-        taskmgr_copy_string(cells[7], sizeof(cells[7]), info->thread_name);
-        taskmgr_format_u64(info->time_slice_remaining, cells[8], sizeof(cells[8]));
+        taskmgr_format_percent(cpu_percent, cells[4], sizeof(cells[4]));
+        taskmgr_copy_string(cells[5], sizeof(cells[5]), info->is_idle ? "yes" : "no");
+        if (info->stdout_fd < 0)
+        {
+            taskmgr_copy_string(cells[6], sizeof(cells[6]), "-");
+        }
+        else
+        {
+            taskmgr_format_u64((uint64_t)info->stdout_fd, cells[6], sizeof(cells[6]));
+        }
+        taskmgr_copy_string(cells[7], sizeof(cells[7]), info->process_name);
+        taskmgr_copy_string(cells[8], sizeof(cells[8]), info->thread_name);
+        taskmgr_format_u64(info->time_slice_remaining, cells[9], sizeof(cells[9]));
 
-        for (int col = 0; col < 9; ++col)
+        for (int col = 0; col < 10; ++col)
         {
             atk_list_view_set_cell_text(app->process_list, i, (size_t)col, cells[col]);
         }
@@ -311,7 +448,100 @@ static void taskmgr_populate_memory_table(atk_taskmgr_app_t *app,
     }
 }
 
-static void taskmgr_refresh_processes(atk_taskmgr_app_t *app)
+static uint64_t taskmgr_refresh_cpu(atk_taskmgr_app_t *app)
+{
+    if (!app || !app->cpu_list)
+    {
+        return 0;
+    }
+
+    syscall_cpu_stats_t stats[TASKMGR_CPU_CAP];
+    ssize_t count = sys_cpu_snapshot(stats, TASKMGR_CPU_CAP);
+    if (count < 0)
+    {
+        atk_list_view_clear(app->cpu_list);
+        if (app->window)
+        {
+            atk_window_mark_dirty(app->window);
+        }
+        return 0;
+    }
+    if ((size_t)count > TASKMGR_CPU_CAP)
+    {
+        count = TASKMGR_CPU_CAP;
+    }
+
+    uint64_t total_delta_sum = 0;
+    atk_list_view_set_row_count(app->cpu_list, (size_t)count);
+    for (ssize_t i = 0; i < count; ++i)
+    {
+        const syscall_cpu_stats_t *info = &stats[i];
+        taskmgr_cpu_history_t *hist = taskmgr_cpu_history_slot((uint32_t)info->cpu_index);
+        uint64_t total_delta = 0;
+        uint64_t idle_delta = 0;
+        uint32_t load_percent = 0;
+
+        if (hist)
+        {
+            if (hist->valid)
+            {
+                if (info->total_ticks >= hist->last_total_ticks)
+                {
+                    total_delta = info->total_ticks - hist->last_total_ticks;
+                }
+                if (info->idle_ticks >= hist->last_idle_ticks)
+                {
+                    idle_delta = info->idle_ticks - hist->last_idle_ticks;
+                }
+                if (total_delta > 0 && idle_delta <= total_delta)
+                {
+                    uint64_t busy = total_delta - idle_delta;
+                    load_percent = taskmgr_percent_of_total(busy, total_delta, 100);
+                }
+            }
+            hist->cpu_index = (uint32_t)info->cpu_index;
+            hist->last_total_ticks = info->total_ticks;
+            hist->last_idle_ticks = info->idle_ticks;
+            hist->valid = true;
+        }
+
+        total_delta_sum += total_delta;
+
+        char cells[9][32];
+        taskmgr_format_u64(info->cpu_index, cells[0], sizeof(cells[0]));
+        taskmgr_copy_string(cells[1], sizeof(cells[1]), info->online ? "yes" : "no");
+        taskmgr_format_percent(load_percent, cells[2], sizeof(cells[2]));
+        taskmgr_format_u64(info->run_queue_depth, cells[3], sizeof(cells[3]));
+        taskmgr_format_u64(info->switch_count, cells[4], sizeof(cells[4]));
+        taskmgr_format_u64(info->current_pid, cells[5], sizeof(cells[5]));
+        if (info->online)
+        {
+            taskmgr_copy_string(cells[6], sizeof(cells[6]), thread_state_name(info->current_thread_state));
+            taskmgr_copy_string(cells[7], sizeof(cells[7]), info->current_process_name);
+            taskmgr_copy_string(cells[8], sizeof(cells[8]), info->current_thread_name);
+        }
+        else
+        {
+            taskmgr_copy_string(cells[6], sizeof(cells[6]), "-");
+            taskmgr_copy_string(cells[7], sizeof(cells[7]), "-");
+            taskmgr_copy_string(cells[8], sizeof(cells[8]), "-");
+        }
+
+        for (int col = 0; col < 9; ++col)
+        {
+            atk_list_view_set_cell_text(app->cpu_list, (size_t)i, (size_t)col, cells[col]);
+        }
+    }
+
+    if (app->window)
+    {
+        atk_window_mark_dirty(app->window);
+    }
+
+    return total_delta_sum;
+}
+
+static void taskmgr_refresh_processes(atk_taskmgr_app_t *app, uint64_t total_tick_delta)
 {
     syscall_process_info_t procs[TASKMGR_PROCESS_CAP];
     ssize_t count = sys_proc_snapshot(procs, TASKMGR_PROCESS_CAP);
@@ -330,7 +560,7 @@ static void taskmgr_refresh_processes(atk_taskmgr_app_t *app)
     }
 
     size_t rows = (size_t)count;
-    taskmgr_populate_process_table(app, procs, rows);
+    taskmgr_populate_process_table(app, procs, rows, total_tick_delta);
     taskmgr_populate_memory_table(app, procs, rows);
     if (app->window)
     {
@@ -448,17 +678,38 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
     static const atk_list_view_column_def_t PROCESS_COLUMNS[] = {
         { "*", ATK_COL(3) },
         { "PID", ATK_COL(6) },
-        { "PSTATE", ATK_COL(9) },
-        { "TSTATE", ATK_COL(9) },
+        { "PSTATE", ATK_COL(8) },
+        { "TSTATE", ATK_COL(8) },
+        { "CPU%", ATK_COL(6) },
         { "IDLE", ATK_COL(5) },
         { "FD", ATK_COL(6) },
-        { "PROC", ATK_COL(22) },
-        { "THREAD", ATK_COL(22) },
-        { "REM", ATK_COL(10) },
+        { "PROC", ATK_COL(20) },
+        { "THREAD", ATK_COL(20) },
+        { "REM", ATK_COL(8) },
     };
     atk_list_view_configure_columns(process_list, PROCESS_COLUMNS, sizeof(PROCESS_COLUMNS) / sizeof(PROCESS_COLUMNS[0]));
     atk_tab_view_add_page(tab_view, "Processes", process_list);
     app->process_list = process_list;
+
+    atk_widget_t *cpu_list = atk_list_view_create();
+    if (!cpu_list)
+    {
+        return false;
+    }
+    static const atk_list_view_column_def_t CPU_COLUMNS[] = {
+        { "CPU", ATK_COL(4) },
+        { "ONLINE", ATK_COL(8) },
+        { "LOAD", ATK_COL(7) },
+        { "RUNQ", ATK_COL(6) },
+        { "SWITCH", ATK_COL(10) },
+        { "PID", ATK_COL(6) },
+        { "STATE", ATK_COL(8) },
+        { "PROC", ATK_COL(18) },
+        { "THREAD", ATK_COL(18) },
+    };
+    atk_list_view_configure_columns(cpu_list, CPU_COLUMNS, sizeof(CPU_COLUMNS) / sizeof(CPU_COLUMNS[0]));
+    atk_tab_view_add_page(tab_view, "CPU", cpu_list);
+    app->cpu_list = cpu_list;
 
     atk_widget_t *memory_list = atk_list_view_create();
     if (!memory_list)
@@ -569,7 +820,10 @@ int main(void)
     }
 
     memset(g_net_history, 0, sizeof(g_net_history));
-    taskmgr_refresh_processes(&app);
+    memset(g_cpu_history, 0, sizeof(g_cpu_history));
+    memset(g_proc_history, 0, sizeof(g_proc_history));
+    uint64_t cpu_delta = taskmgr_refresh_cpu(&app);
+    taskmgr_refresh_processes(&app, cpu_delta);
     taskmgr_refresh_network(&app);
     taskmgr_render(&app);
     app.next_refresh_ms = sys_time_millis() + TASKMGR_REFRESH_MS;
@@ -608,7 +862,8 @@ int main(void)
         uint64_t now_ms = sys_time_millis();
         if (app.next_refresh_ms == 0 || now_ms >= app.next_refresh_ms)
         {
-            taskmgr_refresh_processes(&app);
+            uint64_t refresh_cpu_delta = taskmgr_refresh_cpu(&app);
+            taskmgr_refresh_processes(&app, refresh_cpu_delta);
             taskmgr_refresh_network(&app);
             needs_render = true;
             app.next_refresh_ms = now_ms + TASKMGR_REFRESH_MS;

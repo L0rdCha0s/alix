@@ -18,6 +18,10 @@ static process_info_t *g_proc_snapshot_buf = NULL;
 static size_t g_proc_snapshot_cap = 0;
 static syscall_process_info_t *g_proc_snapshot_user_buf = NULL;
 static size_t g_proc_snapshot_user_cap = 0;
+static process_cpu_info_t *g_cpu_snapshot_buf = NULL;
+static size_t g_cpu_snapshot_cap = 0;
+static syscall_cpu_stats_t *g_cpu_snapshot_user_buf = NULL;
+static size_t g_cpu_snapshot_user_cap = 0;
 static net_interface_stats_t *g_net_snapshot_buf = NULL;
 static size_t g_net_snapshot_cap = 0;
 static syscall_net_stats_t *g_net_snapshot_user_buf = NULL;
@@ -136,6 +140,8 @@ static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t c
         out->is_idle = info->is_idle ? 1u : 0u;
         out->heap_used_bytes = info->heap_used_bytes;
         out->heap_committed_bytes = info->heap_committed_bytes;
+        out->runtime_ticks = info->runtime_ticks;
+        out->last_cpu_index = info->last_cpu_index;
 
         const char *proc_name = info->name ? info->name : "";
         const char *thread_name = info->thread_name ? info->thread_name : "";
@@ -229,6 +235,100 @@ static int64_t syscall_do_net_snapshot(syscall_net_stats_t *buffer, size_t capac
     if (count > 0)
     {
         size_t copy_bytes = sizeof(syscall_net_stats_t) * count;
+        if (!user_copy_to_user(buffer, out_buf, copy_bytes))
+        {
+            return -1;
+        }
+    }
+
+    return (int64_t)count;
+}
+
+static int64_t syscall_do_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return -1;
+    }
+
+    size_t bytes = 0;
+    if (__builtin_mul_overflow(capacity, sizeof(*buffer), &bytes))
+    {
+        return -1;
+    }
+
+    if (!user_ptr_range_valid(buffer, bytes))
+    {
+        return -1;
+    }
+
+    size_t capped_capacity = capacity;
+    if (capped_capacity > SYSCALL_CPU_MAX)
+    {
+        capped_capacity = SYSCALL_CPU_MAX;
+    }
+
+    if (capped_capacity > g_cpu_snapshot_cap)
+    {
+        size_t snap_bytes = sizeof(process_cpu_info_t) * capped_capacity;
+        process_cpu_info_t *new_buf = (process_cpu_info_t *)realloc(g_cpu_snapshot_buf,
+                                                                    snap_bytes);
+        if (!new_buf)
+        {
+            return -1;
+        }
+        g_cpu_snapshot_buf = new_buf;
+        g_cpu_snapshot_cap = capped_capacity;
+    }
+
+    if (capacity > g_cpu_snapshot_user_cap)
+    {
+        syscall_cpu_stats_t *new_out = (syscall_cpu_stats_t *)realloc(g_cpu_snapshot_user_buf,
+                                                                      bytes);
+        if (!new_out)
+        {
+            return -1;
+        }
+        g_cpu_snapshot_user_buf = new_out;
+        g_cpu_snapshot_user_cap = capacity;
+    }
+
+    process_cpu_info_t *tmp = g_cpu_snapshot_buf;
+    syscall_cpu_stats_t *out_buf = g_cpu_snapshot_user_buf;
+    if (!tmp || !out_buf)
+    {
+        return -1;
+    }
+
+    size_t count = process_cpu_snapshot(tmp, capped_capacity);
+    if (count > capacity)
+    {
+        count = capacity;
+    }
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        const process_cpu_info_t *info = &tmp[i];
+        syscall_cpu_stats_t *out = &out_buf[i];
+        out->cpu_index = info->cpu_index;
+        out->online = info->online;
+        out->run_queue_depth = info->run_queue_depth;
+        out->current_thread_state = info->current_thread_state;
+        out->total_ticks = info->total_ticks;
+        out->idle_ticks = info->idle_ticks;
+        out->switch_count = info->switch_count;
+        out->current_pid = info->current_pid;
+        syscall_copy_string(out->current_process_name,
+                            SYSCALL_PROCESS_NAME_MAX,
+                            info->current_process_name);
+        syscall_copy_string(out->current_thread_name,
+                            SYSCALL_PROCESS_NAME_MAX,
+                            info->current_thread_name);
+    }
+
+    if (count > 0)
+    {
+        size_t copy_bytes = sizeof(syscall_cpu_stats_t) * count;
         if (!user_copy_to_user(buffer, out_buf, copy_bytes))
         {
             return -1;
@@ -803,6 +903,10 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_NET_SNAPSHOT:
             result = syscall_do_net_snapshot((syscall_net_stats_t *)frame->rdi,
+                                             (size_t)frame->rsi);
+            break;
+        case SYSCALL_CPU_SNAPSHOT:
+            result = syscall_do_cpu_snapshot((syscall_cpu_stats_t *)frame->rdi,
                                              (size_t)frame->rsi);
             break;
         case SYSCALL_TIME_MILLIS:

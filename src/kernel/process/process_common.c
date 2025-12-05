@@ -256,6 +256,7 @@ struct thread
     uint64_t fs_base;
     uint64_t gs_base;
     uint32_t time_slice_remaining;
+    uint64_t runtime_ticks;
     thread_priority_t base_priority;
     thread_priority_t priority;
     thread_priority_t priority_override;
@@ -370,6 +371,7 @@ struct process
     int exit_status;
     struct process *next;
     int stdout_fd;
+    uint64_t runtime_ticks;
     bool is_user;
     process_t *parent;
     process_t *first_child;
@@ -412,6 +414,13 @@ typedef struct run_queue
     uint32_t cpu_index;
 } run_queue_t;
 
+typedef struct cpu_usage_counters
+{
+    uint64_t total_ticks;
+    uint64_t idle_ticks;
+    uint64_t last_tick;
+} __attribute__((aligned(64))) cpu_usage_counters_t;
+
 static process_t *g_process_list = NULL;
 static process_t *g_current_processes[SMP_MAX_CPUS] = { NULL };
 static thread_t *g_current_threads[SMP_MAX_CPUS] = { NULL };
@@ -426,6 +435,8 @@ static spinlock_t g_stack_owner_locks[STACK_OWNER_BUCKET_COUNT];
 static process_t *g_idle_process = NULL;
 static cpu_context_t *g_bootstrap_context = NULL;
 static run_queue_t g_run_queues[SMP_MAX_CPUS];
+static cpu_usage_counters_t g_cpu_usage[SMP_MAX_CPUS];
+static uint64_t g_cpu_switch_counts[SMP_MAX_CPUS];
 static spinlock_t g_scheduler_lock;
 static thread_t *g_sleep_queue_head = NULL;
 static uint64_t g_next_pid = 1;
@@ -558,6 +569,41 @@ static inline thread_priority_t scheduler_default_priority(void)
         value = THREAD_PRIORITY_NORMAL;
     }
     return (thread_priority_t)value;
+}
+
+static void cpu_account_tick(thread_t *thread)
+{
+    uint32_t cpu_index = current_cpu_index();
+    if (cpu_index >= SMP_MAX_CPUS)
+    {
+        cpu_index = 0;
+    }
+
+    cpu_usage_counters_t *usage = &g_cpu_usage[cpu_index];
+    uint64_t tick = timer_ticks();
+    uint64_t last_tick = __atomic_load_n(&usage->last_tick, __ATOMIC_RELAXED);
+    if (last_tick == tick)
+    {
+        return;
+    }
+
+    __atomic_store_n(&usage->last_tick, tick, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&usage->total_ticks, 1ULL, __ATOMIC_RELAXED);
+
+    if (!thread || thread->is_idle)
+    {
+        __atomic_fetch_add(&usage->idle_ticks, 1ULL, __ATOMIC_RELAXED);
+        return;
+    }
+
+    __atomic_store_n(&thread->last_cpu_index, cpu_index, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&thread->runtime_ticks, 1ULL, __ATOMIC_RELAXED);
+
+    process_t *proc = thread->process;
+    if (proc)
+    {
+        __atomic_fetch_add(&proc->runtime_ticks, 1ULL, __ATOMIC_RELAXED);
+    }
 }
 
 static size_t sched_append_uint(char *dst, size_t cap, size_t pos, uint64_t value)

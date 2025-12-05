@@ -1956,6 +1956,7 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
         if (next != current)
         {
             __atomic_fetch_add(&g_scheduler_switch_count, 1ULL, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_cpu_switch_counts[cpu_index], 1ULL, __ATOMIC_RELAXED);
         }
         scheduler_lock_release(sched_flags);
 

@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "video.h"
-void video_surface_attach(video_color_t *buffer, uint32_t width, uint32_t height);
+void video_surface_attach(video_color_t *buffer, uint32_t width, uint32_t height, size_t buffer_bytes);
 void video_surface_detach(void);
 bool video_surface_has_dirty(void);
 bool video_surface_consume_dirty(void);

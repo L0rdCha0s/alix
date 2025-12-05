@@ -1032,6 +1032,7 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity)
             info->thread_name = thread->name[0] ? thread->name : "";
             info->is_idle = thread->is_idle;
             info->time_slice_remaining = thread->time_slice_remaining;
+            info->last_cpu_index = __atomic_load_n(&thread->last_cpu_index, __ATOMIC_RELAXED);
         }
         else
         {
@@ -1039,8 +1040,10 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity)
             info->thread_name = "";
             info->is_idle = false;
             info->time_slice_remaining = 0;
+            info->last_cpu_index = RUN_QUEUE_CPU_INVALID;
         }
         info->is_current = (proc == current_process_local());
+        info->runtime_ticks = __atomic_load_n(&proc->runtime_ticks, __ATOMIC_RELAXED);
 
         if (proc->is_user && proc->user_heap_base != 0 && proc->user_heap_brk >= proc->user_heap_base)
         {
@@ -1061,6 +1064,48 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity)
     spinlock_unlock(&g_process_lock);
 
     cpu_restore_flags(flags);
+    return count;
+}
+
+size_t process_cpu_snapshot(process_cpu_info_t *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return 0;
+    }
+
+    uint32_t cpu_count = smp_cpu_count();
+    if (cpu_count > SMP_MAX_CPUS)
+    {
+        cpu_count = SMP_MAX_CPUS;
+    }
+
+    size_t count = 0;
+    for (uint32_t i = 0; i < cpu_count && count < capacity; ++i)
+    {
+        process_cpu_info_t *info = &buffer[count++];
+        const smp_cpu_t *cpu = smp_cpu_by_index(i);
+        info->cpu_index = i;
+        info->online = (cpu && __atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE)) ? 1u : 0u;
+        info->run_queue_depth = __atomic_load_n(&g_run_queues[i].total, __ATOMIC_RELAXED);
+        info->total_ticks = __atomic_load_n(&g_cpu_usage[i].total_ticks, __ATOMIC_RELAXED);
+        info->idle_ticks = __atomic_load_n(&g_cpu_usage[i].idle_ticks, __ATOMIC_RELAXED);
+        info->switch_count = __atomic_load_n(&g_cpu_switch_counts[i], __ATOMIC_RELAXED);
+        info->current_pid = 0;
+        info->current_thread_state = THREAD_STATE_ZOMBIE;
+        info->current_process_name = "";
+        info->current_thread_name = "";
+
+        thread_t *current = g_current_threads[i];
+        if (current)
+        {
+            info->current_thread_state = current->state;
+            info->current_pid = current->process ? current->process->pid : 0;
+            info->current_process_name = (current->process && current->process->name[0]) ? current->process->name : "";
+            info->current_thread_name = current->name[0] ? current->name : "";
+        }
+    }
+
     return count;
 }
 
@@ -1244,6 +1289,7 @@ void process_on_timer_tick(interrupt_frame_t *frame)
     stack_watch_check_timeouts();
 
     thread_t *thread = current_thread_local();
+    cpu_account_tick(thread);
     if (!thread || thread->is_idle)
     {
         return;

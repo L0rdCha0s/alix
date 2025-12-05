@@ -63,7 +63,23 @@ typedef struct process_info
     int stdout_fd;
     uint64_t heap_used_bytes;
     uint64_t heap_committed_bytes;
+    uint64_t runtime_ticks;
+    uint32_t last_cpu_index;
 } process_info_t;
+
+typedef struct process_cpu_info
+{
+    uint32_t cpu_index;
+    uint32_t online;
+    uint32_t run_queue_depth;
+    uint32_t current_thread_state;
+    uint64_t total_ticks;
+    uint64_t idle_ticks;
+    uint64_t switch_count;
+    uint64_t current_pid;
+    const char *current_process_name;
+    const char *current_thread_name;
+} process_cpu_info_t;
 
 typedef struct process_priority_info
 {
@@ -146,6 +162,7 @@ void process_on_timer_tick(interrupt_frame_t *frame);
 void process_preempt_hook(void);
 void process_destroy(process_t *process);
 size_t process_snapshot(process_info_t *buffer, size_t capacity);
+size_t process_cpu_snapshot(process_cpu_info_t *buffer, size_t capacity);
 const char *process_state_name(process_state_t state);
 const char *thread_state_name(thread_state_t state);
 uint64_t process_get_pid(const process_t *process);

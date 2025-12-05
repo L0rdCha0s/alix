@@ -192,7 +192,13 @@ static bool atk_user_window_open_internal(atk_user_window_t *win,
         return false;
     }
 
-    size_t bytes = (size_t)width * (size_t)height * sizeof(video_color_t);
+    size_t bytes = 0;
+    if (__builtin_mul_overflow((size_t)width, (size_t)height, &bytes) ||
+        __builtin_mul_overflow(bytes, sizeof(video_color_t), &bytes))
+    {
+        sys_ui_close((uint32_t)handle);
+        return false;
+    }
     video_color_t *buffer = (video_color_t *)malloc(bytes);
     if (!buffer)
     {
@@ -208,7 +214,7 @@ static bool atk_user_window_open_internal(atk_user_window_t *win,
     win->height = height;
     win->track_dirty = false;
 
-    video_surface_attach(buffer, width, height);
+    video_surface_attach(buffer, width, height, bytes);
     video_surface_set_tracking(false);
     atk_user_trace("window_open handle", win->handle, (uintptr_t)buffer);
     return true;
@@ -227,7 +233,12 @@ static void atk_user_handle_resize_event(atk_user_window_t *win, const user_atk_
         return;
     }
 
-    size_t bytes = (size_t)width * (size_t)height * sizeof(video_color_t);
+    size_t bytes = 0;
+    if (__builtin_mul_overflow((size_t)width, (size_t)height, &bytes) ||
+        __builtin_mul_overflow(bytes, sizeof(video_color_t), &bytes))
+    {
+        return;
+    }
     video_color_t *buffer = (video_color_t *)realloc(win->buffer, bytes);
     if (!buffer)
     {
@@ -250,7 +261,7 @@ static void atk_user_handle_resize_event(atk_user_window_t *win, const user_atk_
     win->buffer_bytes = bytes;
     win->width = width;
     win->height = height;
-    video_surface_attach(buffer, width, height);
+    video_surface_attach(buffer, width, height, bytes);
     video_surface_set_tracking(win->track_dirty);
     video_surface_force_dirty();
     atk_user_trace("window_resize handle", win->handle, ((uint64_t)width << 32) | height);
