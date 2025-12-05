@@ -268,23 +268,27 @@ bool shell_service_close_session(uint32_t handle)
             shell_session_lock(session);
             if (session->running && (!session->runner || !process_is_zombie(session->runner)))
             {
+                /* Do not hold any shell locks while killing/joining processes;
+                 * process_destroy() will re-enter shell_service_cleanup_process().
+                 */
                 process_t *runner = session->runner;
                 process_t *fg = session->state.foreground_process;
-                if (fg)
-                {
-                    process_kill_tree(fg);
-                    session->state.foreground_process = NULL;
-                }
-                if (runner)
-                {
-                    process_kill_tree(runner);
-                    session->runner = NULL;
-                }
+                session->state.foreground_process = NULL;
+                session->runner = NULL;
                 session->running = false;
                 session->completed = true;
                 session->last_status = -1;
                 shell_session_unlock(session);
                 shell_list_unlock();
+
+                if (fg && !process_is_zombie(fg))
+                {
+                    process_kill_tree(fg);
+                }
+                if (runner && !process_is_zombie(runner))
+                {
+                    process_kill_tree(runner);
+                }
                 if (fg)
                 {
                     process_join(fg, NULL);

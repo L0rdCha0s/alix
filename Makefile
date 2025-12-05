@@ -85,6 +85,7 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/atk_clock.elf \
              $(USER_OBJDIR)/atk_richtext.elf \
              $(USER_OBJDIR)/atk_taskmgr.elf \
+             $(USER_OBJDIR)/atk_mp3.elf \
              $(USER_OBJDIR)/control_panel.elf \
              $(USER_OBJDIR)/loop.elf \
              $(USER_OBJDIR)/playsound.elf \
@@ -97,6 +98,7 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/atk_clock \
              $(USER_BIN_DIR)/atk_richtext \
              $(USER_BIN_DIR)/atk_taskmgr \
+             $(USER_BIN_DIR)/atk_mp3 \
              $(USER_BIN_DIR)/control_panel \
              $(USER_BIN_DIR)/loop \
              $(USER_BIN_DIR)/playsound \
@@ -202,6 +204,10 @@ $(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USE
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_taskmgr_app.o
 
+$(USER_OBJDIR)/atk_mp3.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_mp3_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_mp3_app.o
+
 $(USER_OBJDIR)/control_panel.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/control_panel.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/control_panel.o
@@ -272,6 +278,10 @@ $(USER_BIN_DIR)/atk_richtext: $(USER_OBJDIR)/atk_richtext.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/atk_taskmgr: $(USER_OBJDIR)/atk_taskmgr.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_mp3: $(USER_OBJDIR)/atk_mp3.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 

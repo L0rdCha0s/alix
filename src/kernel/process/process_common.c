@@ -1642,6 +1642,12 @@ void thread_assert_stack_current(thread_t *thread, const char *context)
     {
         return;
     }
+    /* If the thread is already dead (e.g. faulted on an IST stack), do not
+     * enforce kernel stack bounds/guards while we switch away. */
+    if (thread->state == THREAD_STATE_ZOMBIE || thread->exited)
+    {
+        return;
+    }
     if (thread->is_idle)
     {
         return;

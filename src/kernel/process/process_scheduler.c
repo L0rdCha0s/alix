@@ -1860,6 +1860,17 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
         uint32_t cpu_index = current_cpu_index();
         thread_t *current = current_thread_local();
 
+        /* If the current slot holds a thread that is already dead (e.g. faulted on
+         * an IST stack), drop it instead of trying to validate or requeue it. */
+        if (current && current->state == THREAD_STATE_ZOMBIE)
+        {
+            thread_clear_running_cpu(current);
+            set_current_thread_local(NULL);
+            set_current_process_local(NULL);
+            current = NULL;
+            requeue_current = false;
+        }
+
         if (!current || current->is_idle)
         {
             requeue_current = false;
@@ -1925,15 +1936,6 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
         spinlock_unlock(&current->context_lock);
         scheduler_lock_release(sched_flags);
         scheduler_log_if_stalled("scheduler_schedule(run_current)", sched_watch);
-        return;
-    }
-
-    if (next && next->is_idle && !current)
-    {
-        /* Nothing runnable; stay idle and return. */
-        SCHED_LOG("[sched] idle return cpu=%u\r\n", (unsigned)cpu_index);
-        scheduler_lock_release(sched_flags);
-        scheduler_log_if_stalled("scheduler_schedule(idle_return)", sched_watch);
         return;
     }
 
