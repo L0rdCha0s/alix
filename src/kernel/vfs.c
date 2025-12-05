@@ -12,6 +12,7 @@
 #include "timer.h"
 #include "build_features.h"
 #include "procfs.h"
+#include "smp.h"
 
 extern void storage_request_flush(void);
 
@@ -35,6 +36,72 @@ static uint32_t g_vfs_log_enable = 0;
 static inline bool vfs_logs_enabled(void)
 {
     return __atomic_load_n(&g_vfs_log_enable, __ATOMIC_RELAXED) != 0;
+}
+
+static inline uint64_t ticks_to_ms(uint64_t ticks)
+{
+    uint64_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 1000;
+    }
+    return (ticks * 1000ULL) / freq;
+}
+
+static bool vfs_sync_lock_acquire(vfs_mount_t *mount, const char *dev_name, bool allow_steal)
+{
+    if (!mount)
+    {
+        return false;
+    }
+
+    uint64_t wait_start = timer_ticks();
+    while (1)
+    {
+        if (__sync_lock_test_and_set(&mount->sync_lock.value, 1) == 0)
+        {
+            mount->sync_owner_pid = process_current_pid();
+            mount->sync_owner_cpu = smp_current_cpu_index();
+            mount->sync_owner_ticks = timer_ticks();
+            return true;
+        }
+
+        while (mount->sync_lock.value)
+        {
+            __asm__ volatile ("pause");
+            uint64_t elapsed_ms = ticks_to_ms(timer_ticks() - wait_start);
+            if (elapsed_ms >= 2000ULL)
+            {
+                uint64_t owner_age_ms = ticks_to_ms(timer_ticks() - mount->sync_owner_ticks);
+                serial_printf("[vfs] sync_lock wait timeout dev=%s owner_pid=0x%016llX owner_cpu=%u age_ms=%llu steal=%d\r\n",
+                              dev_name ? dev_name : "(anon)",
+                              (unsigned long long)mount->sync_owner_pid,
+                              (unsigned)mount->sync_owner_cpu,
+                              (unsigned long long)owner_age_ms,
+                              allow_steal ? 1 : 0);
+                if (!allow_steal)
+                {
+                    return false;
+                }
+                /* Forcefully clear and retry. */
+                __sync_lock_release(&mount->sync_lock.value);
+                wait_start = timer_ticks();
+                break;
+            }
+        }
+    }
+}
+
+static void vfs_sync_lock_release(vfs_mount_t *mount)
+{
+    if (!mount)
+    {
+        return;
+    }
+    mount->sync_owner_pid = 0;
+    mount->sync_owner_cpu = UINT32_MAX;
+    mount->sync_owner_ticks = 0;
+    spinlock_unlock(&mount->sync_lock);
 }
 
 #define VFS_MAX_SYMLINK_DEPTH 8
@@ -807,7 +874,11 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     }
     vfs_mount_t *mount = node->mount;
     bool ok = true;
-    spinlock_lock(&mount->sync_lock);
+    const char *dev_name = (mount->device && mount->device->name[0]) ? mount->device->name : "(anon)";
+    if (!vfs_sync_lock_acquire(mount, dev_name, true))
+    {
+        return false;
+    }
     spinlock_lock(&g_vfs_tree_lock);
     ok = alixfs_mount_flush_single(mount->backend, node, mount);
     spinlock_unlock(&g_vfs_tree_lock);
@@ -815,7 +886,7 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     {
         ok = alixfs_mount_commit(mount->backend);
     }
-    spinlock_unlock(&mount->sync_lock);
+    vfs_sync_lock_release(mount);
 
     if (!ok)
     {
@@ -1815,34 +1886,16 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     }
 
     uint64_t start = timer_ticks();
-    uint64_t lock_wait_start = timer_ticks();
-    while (__sync_lock_test_and_set(&mount->sync_lock.value, 1) != 0)
+    if (!vfs_sync_lock_acquire(mount, dev_name, true))
     {
-        while (mount->sync_lock.value)
-        {
-            __asm__ volatile ("pause");
-            uint64_t elapsed_ticks = timer_ticks() - lock_wait_start;
-            uint64_t freq = timer_frequency();
-            if (freq == 0)
-            {
-                freq = 1000;
-            }
-            uint64_t elapsed_ms = (elapsed_ticks * 1000ULL) / freq;
-            if (elapsed_ms >= 2000ULL)
-            {
-                serial_printf("[vfs] sync_lock wait timeout dev=%s force=%d\r\n",
-                              dev_name,
-                              force ? 1 : 0);
-                return false;
-            }
-        }
+        return false;
     }
     bool ok = vfs_mount_flush_tree(mount, force_all);
     if (ok && mount->backend)
     {
         ok = alixfs_mount_commit(mount->backend);
     }
-    spinlock_unlock(&mount->sync_lock);
+    vfs_sync_lock_release(mount);
 
     if (!ok)
     {
@@ -1917,6 +1970,9 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     mount->dirty_bytes_limit = VFS_DIRTY_BACKPRESSURE_LIMIT;
     spinlock_init(&mount->dirty_lock);
     spinlock_init(&mount->sync_lock);
+    mount->sync_owner_pid = 0;
+    mount->sync_owner_cpu = UINT32_MAX;
+    mount->sync_owner_ticks = 0;
     mount->backend = alixfs_mount_create(device);
     if (!mount->backend)
     {

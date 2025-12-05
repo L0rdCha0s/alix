@@ -929,9 +929,9 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
     uintptr_t base = process->user_heap_base;
     uintptr_t limit = process->user_heap_limit;
     uintptr_t current = process->user_heap_brk;
-    process_log("sbrk pid=", process->pid);
-    process_log("sbrk inc=", (uint64_t)increment);
-    process_log("sbrk current=", current);
+    //process_log("sbrk pid=", process->pid);
+    //process_log("sbrk inc=", (uint64_t)increment);
+    //process_log("sbrk current=", current);
     if (base == 0 || limit <= base || current < base || current > limit)
     {
         process_log("sbrk invalid bounds pid=", process->pid);
@@ -988,8 +988,8 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
     }
 
     process->user_heap_brk = new_brk;
-    process_log("sbrk new=", new_brk);
-    process_log("sbrk return=", current);
+    //process_log("sbrk new=", new_brk);
+    //process_log("sbrk return=", current);
     return (int64_t)current;
 }
 

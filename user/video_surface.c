@@ -216,6 +216,7 @@ void video_draw_rect(int x, int y, int width, int height, video_color_t color)
 
     if (x1 <= 0 || y1 <= 0 || x0 >= (int)g_surface_width || y0 >= (int)g_surface_height)
     {
+        surface_unlock();
         return;
     }
 

@@ -48,6 +48,9 @@ struct vfs_mount
     size_t dirty_bytes_limit;
     spinlock_t dirty_lock;
     spinlock_t sync_lock;
+    uint64_t sync_owner_pid;
+    uint32_t sync_owner_cpu;
+    uint64_t sync_owner_ticks;
     struct alixfs_mount *backend;
 };
 
