@@ -352,7 +352,11 @@ int main(void)
     rich_app_t app;
     memset(&app, 0, sizeof(app));
 
-    if (!atk_user_window_open(&app.remote, "ATK Rich Text", RICH_APP_WIDTH, RICH_APP_HEIGHT))
+    if (!atk_user_window_open_with_flags(&app.remote,
+                                         "ATK Rich Text",
+                                         RICH_APP_WIDTH,
+                                         RICH_APP_HEIGHT,
+                                         USER_ATK_WINDOW_FLAG_RESIZABLE))
     {
         printf("richtext: failed to open window\n");
         return 1;

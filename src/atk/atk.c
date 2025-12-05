@@ -1434,6 +1434,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         user_atk_focus_window(NULL);
     }
 
+    if (result.redraw && !state->dirty_full && !state->dirty_active)
+    {
+        atk_dirty_mark_all();
+    }
+
     uint32_t cursor_edges = 0;
     if (state->resizing_window && state->resize_edges)
     {

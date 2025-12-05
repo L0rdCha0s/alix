@@ -20,6 +20,17 @@
 #include "user_atk_host.h"
 #endif
 
+static inline bool pointer_is_canonical(const void *ptr)
+{
+    if (!ptr)
+    {
+        return true;
+    }
+    uint64_t v = (uint64_t)(uintptr_t)ptr;
+    uint64_t top = v >> 47;
+    return (top == 0u) || (top == 0x1FFFFu);
+}
+
 #if ATK_DEBUG && defined(KERNEL_BUILD)
 #define ATK_WINDOW_LOG(...) serial_printf(__VA_ARGS__)
 #else
@@ -1011,14 +1022,22 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
                         theme->window_body);
     }
 
-    ATK_LIST_FOR_EACH(node, &priv->children)
+    for (atk_list_node_t *node = priv->children.head; node; node = node->next)
     {
+        if (!pointer_is_canonical(node))
+        {
+            break;
+        }
 #if ATK_USER_POINTER_MIN > 0
         if ((uintptr_t)node < ATK_USER_POINTER_MIN)
         {
             continue;
         }
 #endif
+        if (!pointer_is_canonical(node->value))
+        {
+            continue;
+        }
         atk_widget_t *child = (atk_widget_t *)node->value;
         if (!child || !child->used)
         {
@@ -1030,6 +1049,10 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
             continue;
         }
 #endif
+        if (!pointer_is_canonical(child))
+        {
+            continue;
+        }
         if (!atk_widget_validate(child, "atk_window_draw child"))
         {
             continue;
