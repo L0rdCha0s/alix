@@ -28,6 +28,9 @@ static void button_draw_cb(const atk_state_t *state,
                            int origin_x,
                            int origin_y,
                            void *context);
+static atk_mouse_response_t button_mouse_cb(atk_widget_t *widget,
+                                            const atk_mouse_event_t *event,
+                                            void *context);
 static bool button_hit_test_cb(const atk_widget_t *widget,
                                int origin_x,
                                int origin_y,
@@ -40,7 +43,7 @@ static const atk_widget_ops_t g_button_ops = {
     .destroy = button_destroy_cb,
     .draw = button_draw_cb,
     .hit_test = button_hit_test_cb,
-    .on_mouse = NULL,
+    .on_mouse = button_mouse_cb,
     .on_key = NULL
 };
 
@@ -66,6 +69,7 @@ void atk_button_configure(atk_widget_t *widget,
     priv->style = style;
     priv->draggable = draggable;
     priv->absolute = absolute;
+    priv->pressed = false;
     priv->action = action;
     priv->action_context = context;
     priv->list_node = NULL;
@@ -427,6 +431,55 @@ static bool button_hit_test_cb(const atk_widget_t *widget,
 {
     (void)context;
     return atk_button_hit_test(widget, origin_x, origin_y, px, py);
+}
+
+static atk_mouse_response_t button_mouse_cb(atk_widget_t *widget,
+                                            const atk_mouse_event_t *event,
+                                            void *context)
+{
+    (void)context;
+    if (!widget || !event)
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
+
+    atk_button_priv_t *priv = button_priv_mut(widget);
+    if (!priv)
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
+
+    bool inside = atk_button_hit_test(widget,
+                                      event->origin_x,
+                                      event->origin_y,
+                                      event->cursor_x,
+                                      event->cursor_y);
+
+    if (event->pressed_edge && event->left_pressed && inside)
+    {
+        priv->pressed = true;
+        return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_CAPTURE | ATK_MOUSE_RESPONSE_REDRAW;
+    }
+
+    if (event->released_edge)
+    {
+        bool should_invoke = priv->pressed && inside;
+        priv->pressed = false;
+        if (should_invoke)
+        {
+            atk_button_invoke(widget);
+            return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW | ATK_MOUSE_RESPONSE_RELEASE;
+        }
+        return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_RELEASE | ATK_MOUSE_RESPONSE_REDRAW;
+    }
+
+    if (event->left_pressed && priv->pressed)
+    {
+        /* Continue to consume while held if we claimed capture. */
+        return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_CAPTURE;
+    }
+
+    return ATK_MOUSE_RESPONSE_NONE;
 }
 
 static void button_destroy_cb(atk_widget_t *widget, void *context)

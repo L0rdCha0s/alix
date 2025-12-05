@@ -287,7 +287,8 @@ static void on_font_button(atk_widget_t *button, void *context)
         if (app->font_buttons[i] == button)
         {
             app->current_font = app->font_sizes[i];
-            atk_rich_text_set_font_size(app->editor, app->current_font);
+            atk_rich_text_apply_font_size(app->editor, app->current_font);
+            atk_rich_text_focus(atk_state_get(), app->editor);
             update_font_buttons(app);
             atk_window_mark_dirty(app->window);
             return;

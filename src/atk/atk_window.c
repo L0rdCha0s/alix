@@ -953,7 +953,11 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
     const atk_theme_t *theme = &state->theme;
     atk_window_priv_t *priv_mut = window_priv_mut((atk_widget_t *)window);
     const atk_window_priv_t *priv = (const atk_window_priv_t *)priv_mut;
-    bool chrome_visible = priv ? priv->chrome_visible : true;
+    if (!priv)
+    {
+        return;
+    }
+    bool chrome_visible = priv->chrome_visible;
 
     if (chrome_visible)
     {
@@ -1009,8 +1013,24 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
 
     ATK_LIST_FOR_EACH(node, &priv->children)
     {
+#if ATK_USER_POINTER_MIN > 0
+        if ((uintptr_t)node < ATK_USER_POINTER_MIN)
+        {
+            continue;
+        }
+#endif
         atk_widget_t *child = (atk_widget_t *)node->value;
         if (!child || !child->used)
+        {
+            continue;
+        }
+#if ATK_USER_POINTER_MIN > 0
+        if ((uintptr_t)child < ATK_USER_POINTER_MIN)
+        {
+            continue;
+        }
+#endif
+        if (!atk_widget_validate(child, "atk_window_draw child"))
         {
             continue;
         }

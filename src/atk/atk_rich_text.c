@@ -303,6 +303,46 @@ void atk_rich_text_set_font_size(atk_widget_t *editor, int size_px)
     rich_text_invalidate(editor);
 }
 
+void atk_rich_text_apply_font_size(atk_widget_t *editor, int size_px)
+{
+    atk_rich_text_priv_t *priv = rich_text_priv_mut(editor);
+    if (!priv)
+    {
+        return;
+    }
+    int clamped = rich_text_clamp_font_size(size_px);
+
+    /* Update default font for new text regardless of selection. */
+    priv->current_font_size = clamped;
+
+    /* If no selection or no buffer, just mark dirty and exit. */
+    if (!priv->chars || priv->sel_start == priv->sel_end || priv->length == 0)
+    {
+        priv->layout_dirty = true;
+        rich_text_invalidate(editor);
+        return;
+    }
+
+    size_t start = priv->sel_start;
+    size_t end = priv->sel_end;
+    if (start > priv->length) start = priv->length;
+    if (end > priv->length) end = priv->length;
+    if (start > end)
+    {
+        size_t tmp = start;
+        start = end;
+        end = tmp;
+    }
+
+    for (size_t i = start; i < end; ++i)
+    {
+        priv->chars[i].size = clamped;
+    }
+
+    priv->layout_dirty = true;
+    rich_text_invalidate(editor);
+}
+
 int atk_rich_text_current_font_size(const atk_widget_t *editor)
 {
     const atk_rich_text_priv_t *priv = rich_text_priv(editor);
@@ -735,6 +775,15 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
         return false;
     }
 
+    /* If we lost the char buffer, forget the text to avoid OOB. */
+    if (priv->length > 0 && !priv->chars)
+    {
+        priv->length = 0;
+        priv->capacity = 0;
+        priv->cursor = 0;
+        rich_text_clear_selection(priv);
+    }
+
     if (editor->width != priv->last_width || editor->height != priv->last_height)
     {
         priv->last_width = editor->width;
@@ -777,8 +826,13 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
     while (true)
     {
         bool at_end = (idx >= priv->length);
-        char ch = at_end ? '\n' : priv->chars[idx].ch;
-        int ch_size = at_end ? priv->current_font_size : priv->chars[idx].size;
+        char ch = '\n';
+        int ch_size = priv->current_font_size;
+        if (!at_end && priv->chars)
+        {
+            ch = priv->chars[idx].ch;
+            ch_size = priv->chars[idx].size;
+        }
         ch_size = rich_text_clamp_font_size(ch_size);
 
         atk_rich_font_size_cache_t *cache = rich_font_cache_for_size(ch_size);
@@ -1034,11 +1088,16 @@ static size_t rich_text_index_for_point(atk_widget_t *editor, atk_rich_text_priv
         return line->start;
     }
 
+    if (!priv->chars || priv->length == 0)
+    {
+        return line->start;
+    }
+
     int pen_x = 0;
     size_t idx = line->start;
     while (idx < line->end && idx < priv->length)
     {
-        int size_px = rich_text_clamp_font_size(priv->chars[idx].size);
+        int size_px = rich_text_clamp_font_size(priv->chars ? priv->chars[idx].size : priv->current_font_size);
         atk_rich_font_size_cache_t *cache = rich_font_cache_for_size(size_px);
         atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, (uint32_t)(unsigned char)priv->chars[idx].ch);
         int advance = 0;
@@ -1078,6 +1137,14 @@ static atk_mouse_response_t rich_text_mouse_cb(atk_widget_t *widget,
     atk_state_t *state = atk_state_get();
     atk_rich_text_focus(state, widget);
 
+    if (priv->length > 0 && !priv->chars)
+    {
+        priv->length = 0;
+        priv->capacity = 0;
+        priv->cursor = 0;
+        rich_text_clear_selection(priv);
+    }
+
     rich_text_update_layout(widget, priv);
     size_t idx = rich_text_index_for_point(widget, priv, event->local_x, event->local_y);
     if (idx > priv->length)
@@ -1108,7 +1175,7 @@ static atk_mouse_response_t rich_text_mouse_cb(atk_widget_t *widget,
     if (event->released_edge && priv->selecting)
     {
         priv->selecting = false;
-        return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
+        return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW | ATK_MOUSE_RESPONSE_RELEASE;
     }
 
     return ATK_MOUSE_RESPONSE_NONE;
@@ -1182,6 +1249,10 @@ static void rich_text_draw_cb(const atk_state_t *state,
         int pen_x = content_left;
         for (size_t idx = line->start; idx < line->end && idx < priv->length; ++idx)
         {
+            if (!priv->chars)
+            {
+                break;
+            }
             char ch = priv->chars[idx].ch;
             int size_px = rich_text_clamp_font_size(priv->chars[idx].size);
             atk_rich_font_size_cache_t *cache = rich_font_cache_for_size(size_px);

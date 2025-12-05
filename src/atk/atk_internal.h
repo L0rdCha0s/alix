@@ -55,6 +55,7 @@ typedef struct
     atk_button_style_t style;
     bool draggable;
     bool absolute;
+    bool pressed;
     char title[ATK_BUTTON_TITLE_MAX];
     atk_button_action_t action;
     void *action_context;
