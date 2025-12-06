@@ -22,6 +22,17 @@ typedef struct atk_widget_guard_header
 
 static atk_widget_guard_header_t *g_widget_guard_head = NULL;
 
+static inline bool atk_guard_pointer_canonical(const void *ptr)
+{
+    if (!ptr)
+    {
+        return true;
+    }
+    uint64_t v = (uint64_t)(uintptr_t)ptr;
+    uint64_t top = v >> 47;
+    return (top == 0u) || (top == 0x1FFFFu);
+}
+
 static size_t atk_widget_guard_aligned_payload(size_t size)
 {
     const size_t align = sizeof(uint64_t) - 1;
@@ -72,13 +83,26 @@ static atk_widget_guard_header_t *atk_widget_guard_lookup(const atk_widget_t *wi
         return NULL;
     }
     atk_widget_guard_header_t *current = g_widget_guard_head;
+    size_t guard = 0;
+    const size_t guard_limit = 4096;
     while (current)
     {
+        if (!atk_guard_pointer_canonical(current) || !atk_guard_pointer_canonical(current->next))
+        {
+            g_widget_guard_head = NULL;
+            return NULL;
+        }
         if (current->widget == widget)
         {
             return current;
         }
         current = current->next;
+        guard++;
+        if (guard > guard_limit)
+        {
+            g_widget_guard_head = NULL;
+            return NULL;
+        }
     }
     return NULL;
 }

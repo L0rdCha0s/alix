@@ -214,11 +214,11 @@ static void build_ui(mp3_ui_t *ui)
     log_mp3("[atk_mp3] window created\r\n");
     /* For remote windows, keep the surface origin at (0,0) so the whole buffer is filled. */
     ui->window->x = 0;
-    ui->window->y = 0;
+    ui->window->y = MP3_MARGIN;
     ui->window->width = MP3_UI_WIDTH;
-    ui->window->height = MP3_UI_HEIGHT;
+    ui->window->height = MP3_UI_HEIGHT - MP3_MARGIN;
     atk_window_set_chrome_visible(ui->window, false);
-    atk_window_set_title_text(ui->window, "ATK MP3 (UI Prototype)");
+    atk_window_set_title_text(ui->window, "Alixamp");
 
     int chrome_top = atk_window_is_chrome_visible(ui->window) ? ATK_WINDOW_TITLE_HEIGHT : 0;
     int x = MP3_MARGIN;
@@ -401,7 +401,7 @@ static bool mp3_update_progress(mp3_ui_t *ui, bool force_update)
     int value = (int)((consumed * MP3_SCRUB_MAX) / size_est);
     if (value < 0) value = 0;
     if (value > MP3_SCRUB_MAX) value = MP3_SCRUB_MAX;
-    if (force_max || value != p->last_progress)
+    if (force_update || value != p->last_progress)
     {
         atk_scrollbar_set_value(ui->scrubber, value);
         p->last_progress = value;

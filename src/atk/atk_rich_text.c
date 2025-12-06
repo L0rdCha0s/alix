@@ -1282,49 +1282,73 @@ static void rich_text_draw_cb(const atk_state_t *state,
                     video_draw_rect(bg_x0, bg_y0, bg_x1 - bg_x0, line->height, theme->menu_bar_highlight);
                 }
             }
-            if (glyph && glyph->ready && glyph->width > 0 && glyph->height > 0 && glyph->alpha)
+            if (glyph && glyph->ready)
             {
-                int dst_x = pen_x + glyph->bearing_x;
-                int dst_y = abs_y + line->baseline - priv->scroll_y - glyph->bearing_y;
-                int glyph_x0 = dst_x;
-                int glyph_y0 = dst_y;
-                int glyph_x1 = glyph_x0 + glyph->width;
-                int glyph_y1 = glyph_y0 + glyph->height;
+                const uint8_t *glyph_alpha = glyph->alpha;
+                int glyph_w = glyph->width;
+                int glyph_h = glyph->height;
+                int glyph_stride = glyph->stride;
 
-                if (!(glyph_x1 <= clip_x0 || glyph_x0 >= clip_x1 || glyph_y1 <= clip_y0 || glyph_y0 >= clip_y1))
+                if (glyph_alpha && glyph_w > 0 && glyph_h > 0 && glyph_stride > 0)
                 {
-                    int visible_x0 = (glyph_x0 < clip_x0) ? clip_x0 : glyph_x0;
-                    int visible_x1 = (glyph_x1 > clip_x1) ? clip_x1 : glyph_x1;
-                    int visible_y0 = (glyph_y0 < clip_y0) ? clip_y0 : glyph_y0;
-                    int visible_y1 = (glyph_y1 > clip_y1) ? clip_y1 : glyph_y1;
+                    int dst_x = pen_x + glyph->bearing_x;
+                    int dst_y = abs_y + line->baseline - priv->scroll_y - glyph->bearing_y;
+                    int glyph_x0 = dst_x;
+                    int glyph_y0 = dst_y;
+                    int glyph_x1 = glyph_x0 + glyph_w;
+                    int glyph_y1 = glyph_y0 + glyph_h;
 
-                    int start_col = visible_x0 - glyph_x0;
-                    int start_row = visible_y0 - glyph_y0;
-                    int draw_width = visible_x1 - visible_x0;
-                    int draw_rows = visible_y1 - visible_y0;
-                    if (start_col < 0) start_col = 0;
-                    if (start_row < 0) start_row = 0;
-                    if (draw_width > 0 && draw_rows > 0 && rich_row_buffer_ensure(priv, draw_width))
+                    if (!(glyph_x1 <= clip_x0 || glyph_x0 >= clip_x1 || glyph_y1 <= clip_y0 || glyph_y0 >= clip_y1))
                     {
-                        for (int row = 0; row < draw_rows; ++row)
+                        int visible_x0 = (glyph_x0 < clip_x0) ? clip_x0 : glyph_x0;
+                        int visible_x1 = (glyph_x1 > clip_x1) ? clip_x1 : glyph_x1;
+                        int visible_y0 = (glyph_y0 < clip_y0) ? clip_y0 : glyph_y0;
+                        int visible_y1 = (glyph_y1 > clip_y1) ? clip_y1 : glyph_y1;
+
+                        int start_col = visible_x0 - glyph_x0;
+                        int start_row = visible_y0 - glyph_y0;
+                        int draw_width = visible_x1 - visible_x0;
+                        int draw_rows = visible_y1 - visible_y0;
+                        if (start_col < 0) start_col = 0;
+                        if (start_row < 0) start_row = 0;
+
+                        if (start_col < glyph_stride && start_row < glyph_h &&
+                            draw_width > 0 && draw_rows > 0 &&
+                            rich_row_buffer_ensure(priv, draw_width))
                         {
-                            const uint8_t *src = glyph->alpha + (start_row + row) * glyph->stride + start_col;
-                            for (int col = 0; col < draw_width; ++col)
+                            if (draw_width > glyph_stride - start_col)
                             {
-                                uint8_t alpha = src[col];
-                                priv->row_buffer[col] = ((video_color_t)alpha << 24) | (theme->button_text & 0x00FFFFFFu);
+                                draw_width = glyph_stride - start_col;
                             }
-                            video_blit_rgba32(visible_x0,
-                                              visible_y0 + row,
-                                              draw_width,
-                                              1,
-                                              priv->row_buffer,
-                                              draw_width * (int)sizeof(video_color_t),
-                                              true);
+                            if (draw_rows > glyph_h - start_row)
+                            {
+                                draw_rows = glyph_h - start_row;
+                            }
+
+                            for (int row = 0; row < draw_rows; ++row)
+                            {
+                                const uint8_t *src = glyph_alpha + (start_row + row) * glyph_stride + start_col;
+                                for (int col = 0; col < draw_width; ++col)
+                                {
+                                    uint8_t alpha = src[col];
+                                    priv->row_buffer[col] = ((video_color_t)alpha << 24) | (theme->button_text & 0x00FFFFFFu);
+                                }
+                                video_blit_rgba32(visible_x0,
+                                                  visible_y0 + row,
+                                                  draw_width,
+                                                  1,
+                                                  priv->row_buffer,
+                                                  draw_width * (int)sizeof(video_color_t),
+                                                  true);
+                            }
                         }
                     }
+                    advance = glyph->advance;
                 }
-                advance = glyph->advance;
+                else
+                {
+                    advance = rich_text_fallback_advance(size_px, ch);
+                }
             }
             else
             {

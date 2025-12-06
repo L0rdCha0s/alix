@@ -31,7 +31,7 @@ typedef struct
     atk_widget_t *memory_list;
     atk_widget_t *network_list;
     bool running;
-    uint64_t next_refresh_ms;
+    uint64_t last_refresh_ms;
 } atk_taskmgr_app_t;
 
 typedef struct
@@ -826,7 +826,7 @@ int main(void)
     taskmgr_refresh_processes(&app, cpu_delta);
     taskmgr_refresh_network(&app);
     taskmgr_render(&app);
-    app.next_refresh_ms = sys_time_millis() + TASKMGR_REFRESH_MS;
+    app.last_refresh_ms = sys_time_millis();
 
     while (app.running)
     {
@@ -860,13 +860,19 @@ int main(void)
         }
 
         uint64_t now_ms = sys_time_millis();
-        if (app.next_refresh_ms == 0 || now_ms >= app.next_refresh_ms)
+        /* Handle clock adjustments or wrap: if time goes backwards, reset the baseline. */
+        if (now_ms < app.last_refresh_ms)
+        {
+            app.last_refresh_ms = now_ms;
+        }
+        uint64_t elapsed_ms = now_ms - app.last_refresh_ms;
+        if (elapsed_ms >= TASKMGR_REFRESH_MS)
         {
             uint64_t refresh_cpu_delta = taskmgr_refresh_cpu(&app);
             taskmgr_refresh_processes(&app, refresh_cpu_delta);
             taskmgr_refresh_network(&app);
             needs_render = true;
-            app.next_refresh_ms = now_ms + TASKMGR_REFRESH_MS;
+            app.last_refresh_ms = now_ms;
         }
 
         if (needs_render)

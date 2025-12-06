@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "video.h"
+#include "atk/atk_font.h"
 #include "libc.h"
 
 #define ATK_TEXT_INPUT_PADDING_X 4
@@ -105,7 +106,12 @@ atk_widget_t *atk_window_add_text_input(atk_widget_t *window, int x, int y, int 
     input->x = x;
     input->y = y;
     input->width = width;
-    input->height = ATK_FONT_HEIGHT + ATK_TEXT_INPUT_PADDING_Y * 2;
+    int line_height = atk_font_line_height();
+    if (line_height < ATK_FONT_HEIGHT)
+    {
+        line_height = ATK_FONT_HEIGHT;
+    }
+    input->height = line_height + ATK_TEXT_INPUT_PADDING_Y * 2;
     input->parent = window;
     input->used = true;
     atk_widget_set_ops(input, &g_text_input_ops, NULL);
@@ -311,16 +317,34 @@ void atk_text_input_draw(const atk_state_t *state, const atk_widget_t *input)
     video_draw_rect_outline(x, y, width, height, border);
 
     const char *text = priv->text ? priv->text : "";
-    video_draw_text(x + ATK_TEXT_INPUT_PADDING_X, y + ATK_TEXT_INPUT_PADDING_Y, text, state->theme.button_text, face);
+    int line_height = atk_font_line_height();
+    int content_y = y + ATK_TEXT_INPUT_PADDING_Y;
+    int baseline = atk_font_baseline_for_rect(content_y, height - ATK_TEXT_INPUT_PADDING_Y * 2);
+    atk_rect_t clip = { x + ATK_TEXT_INPUT_PADDING_X,
+                        y + ATK_TEXT_INPUT_PADDING_Y,
+                        width - ATK_TEXT_INPUT_PADDING_X * 2,
+                        height - ATK_TEXT_INPUT_PADDING_Y * 2 };
+    atk_font_draw_string_clipped(x + ATK_TEXT_INPUT_PADDING_X,
+                                 baseline,
+                                 text,
+                                 state->theme.button_text,
+                                 face,
+                                 &clip);
 
     if (priv->focused)
     {
-        int caret_x = x + ATK_TEXT_INPUT_PADDING_X + (int)priv->length * ATK_FONT_WIDTH;
+        int caret_x = x + ATK_TEXT_INPUT_PADDING_X + atk_font_text_width(text);
         if (caret_x > x + width - 2)
         {
             caret_x = x + width - 2;
         }
-        video_draw_rect(caret_x, y + ATK_TEXT_INPUT_PADDING_Y, 2, height - ATK_TEXT_INPUT_PADDING_Y * 2, state->theme.button_text);
+        int caret_height = line_height;
+        int caret_y = baseline - caret_height + 1;
+        if (caret_y < y + ATK_TEXT_INPUT_PADDING_Y)
+        {
+            caret_y = y + ATK_TEXT_INPUT_PADDING_Y;
+        }
+        video_draw_rect(caret_x, caret_y, 2, caret_height, state->theme.button_text);
     }
 }
 

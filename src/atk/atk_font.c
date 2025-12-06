@@ -201,30 +201,38 @@ void atk_font_draw_string_clipped(int x,
             continue;
         }
 
-        if (glyph->width <= 0 || glyph->height <= 0 || !glyph->alpha)
+        const uint8_t *glyph_alpha = glyph->alpha;
+        int glyph_width = glyph->width;
+        int glyph_height = glyph->height;
+        int glyph_stride = glyph->stride;
+        int glyph_advance = glyph->advance;
+        int glyph_bearing_x = glyph->bearing_x;
+        int glyph_bearing_y = glyph->bearing_y;
+
+        if (glyph_width <= 0 || glyph_height <= 0 || !glyph_alpha)
         {
-            pen_x += glyph->advance;
+            pen_x += glyph_advance;
             continue;
         }
 
-        if (glyph->width > ATK_FONT_MAX_ROW_PIXELS)
+        if (glyph_width > ATK_FONT_MAX_ROW_PIXELS)
         {
-            pen_x += glyph->advance;
+            pen_x += glyph_advance;
             continue;
         }
 
-        int dst_x = pen_x + glyph->bearing_x;
-        int dst_y = baseline_y - glyph->bearing_y;
+        int dst_x = pen_x + glyph_bearing_x;
+        int dst_y = baseline_y - glyph_bearing_y;
 
         int glyph_x0 = dst_x;
         int glyph_y0 = dst_y;
-        int glyph_x1 = glyph_x0 + glyph->width;
-        int glyph_y1 = glyph_y0 + glyph->height;
+        int glyph_x1 = glyph_x0 + glyph_width;
+        int glyph_y1 = glyph_y0 + glyph_height;
 
         if (glyph_x1 <= clip_x0 || glyph_x0 >= clip_x1 ||
             glyph_y1 <= clip_y0 || glyph_y0 >= clip_y1)
         {
-            pen_x += glyph->advance;
+            pen_x += glyph_advance;
             continue;
         }
 
@@ -240,51 +248,68 @@ void atk_font_draw_string_clipped(int x,
 
         if (width <= 0 || rows <= 0)
         {
-            pen_x += glyph->advance;
+            pen_x += glyph_advance;
             continue;
         }
 
         /* Defensive: guard against a corrupted glyph cache entry. */
-        if (!glyph->alpha || glyph->stride <= 0)
+        if (!glyph_alpha || glyph_stride <= 0)
         {
-            glyph->ready = false;
-            glyph->alpha = NULL;
-            glyph->width = 0;
-            glyph->height = 0;
-            glyph->stride = 0;
-            pen_x += (glyph->advance > 0) ? glyph->advance : ATK_FONT_WIDTH;
+            if (glyph)
+            {
+                glyph->ready = false;
+                glyph->alpha = NULL;
+                glyph->width = 0;
+                glyph->height = 0;
+                glyph->stride = 0;
+            }
+            pen_x += (glyph_advance > 0) ? glyph_advance : ATK_FONT_WIDTH;
             continue;
         }
 
-        if (start_col >= glyph->stride)
+        if (start_col >= glyph_stride)
         {
-            pen_x += glyph->advance;
+            pen_x += glyph_advance;
             continue;
         }
 
-        if (width > glyph->stride - start_col)
+        if (width > glyph_stride - start_col)
         {
-            width = glyph->stride - start_col;
+            width = glyph_stride - start_col;
             if (width <= 0)
             {
-                pen_x += glyph->advance;
+                pen_x += glyph_advance;
                 continue;
             }
         }
 
-        if (start_row >= glyph->height)
+        if (start_row >= glyph_height)
         {
-            pen_x += glyph->advance;
+            pen_x += glyph_advance;
             continue;
         }
-        if (rows > glyph->height - start_row)
+        if (rows > glyph_height - start_row)
         {
-            rows = glyph->height - start_row;
+            rows = glyph_height - start_row;
+        }
+
+        /* Defensive: if the cache entry lost its bitmap, drop this glyph. */
+        if (!glyph_alpha)
+        {
+            if (glyph)
+            {
+                glyph->ready = false;
+                glyph->width = 0;
+                glyph->height = 0;
+                glyph->stride = 0;
+            }
+            pen_x += (glyph_advance > 0) ? glyph_advance : ATK_FONT_WIDTH;
+            continue;
         }
 
         for (int row = 0; row < rows; ++row)
         {
-            const uint8_t *src = glyph->alpha + (start_row + row) * glyph->stride + start_col;
+            const uint8_t *src = glyph_alpha + (start_row + row) * glyph_stride + start_col;
             for (int col = 0; col < width; ++col)
             {
                 uint8_t alpha = src[col];
@@ -299,7 +324,7 @@ void atk_font_draw_string_clipped(int x,
                               true);
         }
 
-        pen_x += glyph->advance;
+        pen_x += glyph_advance;
     }
 }
 

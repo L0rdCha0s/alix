@@ -31,7 +31,7 @@ static inline bool pointer_is_canonical(const void *ptr)
     return (top == 0u) || (top == 0x1FFFFu);
 }
 
-#if ATK_DEBUG && defined(KERNEL_BUILD)
+ #if ATK_DEBUG && defined(KERNEL_BUILD)
 #define ATK_WINDOW_LOG(...) serial_printf(__VA_ARGS__)
 #else
 #define ATK_WINDOW_LOG(...) ((void)0)
@@ -67,6 +67,33 @@ static void window_debug_dump_node(const atk_list_node_t *node, size_t index);
 extern const atk_class_t ATK_BUTTON_CLASS;
 static const atk_widget_vtable_t window_vtable = { 0 };
 const atk_class_t ATK_WINDOW_CLASS = { "Window", &ATK_WIDGET_CLASS, &window_vtable, sizeof(atk_window_priv_t) };
+
+static inline bool window_list_node_ok(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (window_list_pointer_valid(node))
+    {
+        return true;
+    }
+    ATK_WINDOW_LOG("[atk_window] window list corrupt node=%p (%s)", node, where ? where : "?");
+    return false;
+}
+
+static inline atk_list_node_t *window_list_next_safe(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (!window_list_node_ok(node, where))
+    {
+        return NULL;
+    }
+    atk_list_node_t *next = node->next;
+    if (next && !window_list_pointer_valid(next))
+    {
+        ATK_WINDOW_LOG("[atk_window] window list corrupt next=%p (%s)", next, where ? where : "?");
+        return NULL;
+    }
+    return next;
+}
 
 void atk_window_reset_all(atk_state_t *state)
 {
@@ -166,17 +193,22 @@ void atk_window_draw_all(const atk_state_t *state, const atk_rect_t *clip)
     }
 
     atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
-    ATK_LIST_FOR_EACH(node, &state->windows)
+    for (atk_list_node_t *node = state->windows.head; node; )
     {
-        atk_widget_t *window = (atk_widget_t *)node->value;
-        if (window && window->used)
+        atk_list_node_t *next = window_list_next_safe(node, "draw_all");
+        atk_widget_t *window = window_list_pointer_valid(node ? node->value : NULL)
+                                   ? (atk_widget_t *)node->value
+                                   : NULL;
+        if (!window && node)
         {
-            if (!window_intersects_clip(window, clip))
-            {
-                continue;
-            }
+            ATK_WINDOW_LOG("[atk_window] window pointer corrupt node=%p (draw_all)", node);
+        }
+
+        if (window && window->used && window_intersects_clip(window, clip))
+        {
             window_draw_internal(state, window);
         }
+        node = next;
     }
 }
 
@@ -188,21 +220,22 @@ void atk_window_draw_all_except(const atk_state_t *state, const atk_rect_t *clip
     }
 
     atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
-    ATK_LIST_FOR_EACH(node, &state->windows)
+    for (atk_list_node_t *node = state->windows.head; node; )
     {
-        atk_widget_t *window = (atk_widget_t *)node->value;
-        if (window && window->used)
+        atk_list_node_t *next = window_list_next_safe(node, "draw_all_except");
+        atk_widget_t *window = window_list_pointer_valid(node ? node->value : NULL)
+                                   ? (atk_widget_t *)node->value
+                                   : NULL;
+        if (!window && node)
         {
-            if (skip && window == skip)
-            {
-                continue;
-            }
-            if (!window_intersects_clip(window, clip))
-            {
-                continue;
-            }
+            ATK_WINDOW_LOG("[atk_window] window pointer corrupt node=%p (draw_all_except)", node);
+        }
+
+        if (window && window->used && (!skip || window != skip) && window_intersects_clip(window, clip))
+        {
             window_draw_internal(state, window);
         }
+        node = next;
     }
 }
 
