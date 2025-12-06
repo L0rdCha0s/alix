@@ -117,6 +117,12 @@ static void letters_handle_char(char c)
                                                      NULL,
                                                      PROCESS_DEFAULT_STACK_SIZE,
                                                      process_current_stdout_fd());
+            if (child)
+            {
+                /* Detach so exited children are reaped promptly instead of waiting
+                   until the parent process exits. */
+                process_detach_parent(child);
+            }
             (void)child;
             break;
         }

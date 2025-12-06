@@ -1,6 +1,7 @@
 #include "atk/atk_label.h"
 
 #include "atk_internal.h"
+#include "atk/atk_font.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include "video.h"
@@ -18,8 +19,19 @@ typedef struct
 
 static void label_invalidate(const atk_widget_t *label);
 static bool label_ensure_capacity(atk_label_priv_t *priv, size_t extra);
-static size_t label_count_wrapped_lines(const char *text, int max_chars_per_line);
-static const char *label_skip_wrapped_lines(const char *text, size_t skip, int max_chars_per_line);
+static size_t label_line_length(const char *text,
+                                int max_width,
+                                char *scratch,
+                                size_t scratch_cap);
+static size_t label_count_wrapped_lines(const char *text,
+                                        int max_width,
+                                        char *scratch,
+                                        size_t scratch_cap);
+static const char *label_skip_wrapped_lines(const char *text,
+                                            size_t skip,
+                                            int max_width,
+                                            char *scratch,
+                                            size_t scratch_cap);
 static void label_draw_cb(const atk_state_t *state,
                           const atk_widget_t *widget,
                           int origin_x,
@@ -197,15 +209,15 @@ void atk_label_draw(const atk_state_t *state, const atk_widget_t *label)
         return;
     }
 
-    int max_chars_per_line = content_width / ATK_FONT_WIDTH;
-    int line_height = ATK_FONT_HEIGHT + 2;
-    int max_lines = content_height / line_height;
-    if (max_chars_per_line <= 0 || max_lines <= 0)
+    int line_height = atk_font_line_height();
+    int max_lines = (line_height > 0) ? (content_height / line_height) : 0;
+    if (line_height <= 0 || max_lines <= 0)
     {
         return;
     }
 
-    size_t total_lines = label_count_wrapped_lines(text, max_chars_per_line);
+    char scratch[512];
+    size_t total_lines = label_count_wrapped_lines(text, content_width, scratch, sizeof(scratch));
     size_t start_line = 0;
     if (priv->stick_to_bottom)
     {
@@ -228,14 +240,40 @@ void atk_label_draw(const atk_state_t *state, const atk_widget_t *label)
         start_line = priv->scroll_line;
     }
 
-    const char *draw_text = label_skip_wrapped_lines(text, start_line, max_chars_per_line);
-    video_draw_text_clipped(x + 2,
-                            y + 2,
-                            content_width,
-                            content_height,
-                            draw_text,
-                            state->theme.button_text,
-                            state->theme.window_body);
+    const char *draw_text = label_skip_wrapped_lines(text, start_line, content_width, scratch, sizeof(scratch));
+    int draw_y = y + 2;
+    for (int line = 0; line < max_lines && draw_text && *draw_text != '\0'; ++line)
+    {
+        size_t len = label_line_length(draw_text, content_width, scratch, sizeof(scratch));
+        if (len == 0)
+        {
+            break;
+        }
+
+        size_t copy_len = len;
+        if (copy_len >= sizeof(scratch))
+        {
+            copy_len = sizeof(scratch) - 1;
+        }
+        memcpy(scratch, draw_text, copy_len);
+        scratch[copy_len] = '\0';
+
+        atk_rect_t clip = { x + 2, draw_y, content_width, line_height };
+        int baseline = atk_font_baseline_for_rect(draw_y, line_height);
+        atk_font_draw_string_clipped(x + 2,
+                                     baseline,
+                                     scratch,
+                                     state->theme.button_text,
+                                     state->theme.window_body,
+                                     &clip);
+
+        draw_text += len;
+        if (*draw_text == '\n')
+        {
+            ++draw_text;
+        }
+        draw_y += line_height;
+    }
 }
 
 void atk_label_scroll_to_line(atk_widget_t *label, size_t line)
@@ -306,9 +344,61 @@ static void label_destroy_cb(atk_widget_t *widget, void *context)
     atk_widget_destroy(widget);
 }
 
-static size_t label_count_wrapped_lines(const char *text, int max_chars_per_line)
+static size_t label_line_length(const char *text,
+                                int max_width,
+                                char *scratch,
+                                size_t scratch_cap)
 {
-    if (!text || max_chars_per_line <= 0)
+    if (!text || !scratch || scratch_cap < 2 || max_width <= 0)
+    {
+        return 0;
+    }
+
+    size_t len = 0;
+    size_t last_break = (size_t)-1;
+
+    while (text[len] != '\0' && text[len] != '\n')
+    {
+        if (len + 1 < scratch_cap)
+        {
+            scratch[len] = text[len];
+            scratch[len + 1] = '\0';
+            int width = atk_font_text_width(scratch);
+            if (width > max_width)
+            {
+                if (len == 0)
+                {
+                    return 1;
+                }
+                if (last_break != (size_t)-1 && last_break > 0)
+                {
+                    return last_break;
+                }
+                return len;
+            }
+        }
+
+        if (text[len] == ' ' || text[len] == '\t')
+        {
+            last_break = len + 1;
+        }
+
+        ++len;
+        if (len + 1 >= scratch_cap)
+        {
+            return (last_break != (size_t)-1 && last_break > 0) ? last_break : len;
+        }
+    }
+
+    return len;
+}
+
+static size_t label_count_wrapped_lines(const char *text,
+                                        int max_width,
+                                        char *scratch,
+                                        size_t scratch_cap)
+{
+    if (!text || max_width <= 0)
     {
         return 0;
     }
@@ -317,17 +407,18 @@ static size_t label_count_wrapped_lines(const char *text, int max_chars_per_line
     const char *cursor = text;
     while (*cursor != '\0')
     {
-        int chars = 0;
-        while (*cursor != '\0' && *cursor != '\n' && chars < max_chars_per_line)
+        size_t len = label_line_length(cursor, max_width, scratch, scratch_cap);
+        if (len == 0)
         {
-            ++cursor;
-            ++chars;
+            ++lines;
+            break;
         }
-        ++lines;
+        cursor += len;
         if (*cursor == '\n')
         {
             ++cursor;
         }
+        ++lines;
     }
 
     if (lines == 0)
@@ -337,9 +428,13 @@ static size_t label_count_wrapped_lines(const char *text, int max_chars_per_line
     return lines;
 }
 
-static const char *label_skip_wrapped_lines(const char *text, size_t skip, int max_chars_per_line)
+static const char *label_skip_wrapped_lines(const char *text,
+                                            size_t skip,
+                                            int max_width,
+                                            char *scratch,
+                                            size_t scratch_cap)
 {
-    if (!text || max_chars_per_line <= 0)
+    if (!text || max_width <= 0)
     {
         return text;
     }
@@ -347,12 +442,12 @@ static const char *label_skip_wrapped_lines(const char *text, size_t skip, int m
     const char *cursor = text;
     while (*cursor != '\0' && skip > 0)
     {
-        int chars = 0;
-        while (*cursor != '\0' && *cursor != '\n' && chars < max_chars_per_line)
+        size_t len = label_line_length(cursor, max_width, scratch, scratch_cap);
+        if (len == 0)
         {
-            ++cursor;
-            ++chars;
+            return cursor;
         }
+        cursor += len;
         if (*cursor == '\n')
         {
             ++cursor;

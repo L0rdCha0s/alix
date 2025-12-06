@@ -76,6 +76,30 @@ void atk_button_configure(atk_widget_t *widget,
     button_set_title(priv, title ? title : "");
 }
 
+void atk_button_set_title(atk_widget_t *widget, const char *title)
+{
+    if (!widget || !title)
+    {
+        return;
+    }
+
+    atk_button_priv_t *priv = button_priv_mut(widget);
+    if (!priv)
+    {
+        return;
+    }
+
+    button_set_title(priv, title);
+    int origin_x = widget->parent ? widget->parent->x : 0;
+    int origin_y = widget->parent ? widget->parent->y : 0;
+    int height = atk_button_effective_height(widget);
+    atk_dirty_mark_rect(origin_x + widget->x, origin_y + widget->y, widget->width, height);
+    if (widget->parent)
+    {
+        video_request_refresh_window(widget->parent);
+    }
+}
+
 int atk_button_effective_height(const atk_widget_t *widget)
 {
     if (!widget || !widget->used)

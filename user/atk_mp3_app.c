@@ -16,6 +16,7 @@
 #include "user_atk_defs.h"
 #include "video.h"
 #include "serial.h"
+#include "sys/stat.h"
 
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_NO_STDIO
@@ -32,6 +33,9 @@
 #define MP3_READ_CHUNK 8192u
 #define MP3_INPUT_BUFFER_SIZE (MP3_READ_CHUNK * 4u)
 #define MP3_MAX_RESAMPLED_SAMPLES 65536u
+#define MP3_SCRUB_MAX 1000
+#define MP3_SCRUB_PAGE 40
+#define MP3_MIN_FILE_KNOWN 1024
 
 typedef struct
 {
@@ -56,6 +60,11 @@ typedef struct
     mp3d_sample_t *decode_buffer;
     int16_t *out_buffer;
     bool active;
+    bool seekable;
+    uint64_t file_size;
+    uint64_t file_pos;
+    uint64_t consumed_bytes;
+    int last_progress;
 } mp3_player_t;
 
 typedef struct
@@ -73,10 +82,19 @@ typedef struct
     atk_widget_t *scrubber;
     bool running;
     bool playing;
+    bool user_scrub_active;
     mp3_player_t player;
 } mp3_ui_t;
 
-static bool mp3_play_selected(mp3_ui_t *ui);
+static void mp3_set_status(mp3_ui_t *ui, const char *text);
+static bool mp3_start_selected(mp3_ui_t *ui);
+static void mp3_toggle_play(mp3_ui_t *ui);
+static void mp3_pause(mp3_ui_t *ui);
+static void mp3_resume(mp3_ui_t *ui);
+static void mp3_update_play_button(mp3_ui_t *ui);
+static bool mp3_update_progress(mp3_ui_t *ui, bool force_update);
+static bool mp3_player_seek_percent(mp3_ui_t *ui, int value);
+static uint64_t mp3_current_offset(const mp3_player_t *p);
 
 static void log_mp3(const char *msg)
 {
@@ -117,14 +135,36 @@ static void on_scrollbar_change(atk_widget_t *scrollbar, void *context, int valu
 {
     (void)scrollbar;
     mp3_ui_t *ui = (mp3_ui_t *)context;
-    if (!ui || !ui->status_label)
+    if (!ui)
     {
         return;
     }
+
+    ui->user_scrub_active = true;
+
+    if (!ui->player.active || !ui->player.seekable || ui->player.file_size == 0)
+    {
+        mp3_set_status(ui, "Seek unavailable");
+        return;
+    }
+
+    int percent = (value * 100) / MP3_SCRUB_MAX;
     char buf[64];
-    snprintf(buf, sizeof(buf), "Scrub: %d", value);
-    atk_label_set_text(ui->status_label, buf);
-    atk_window_mark_dirty(ui->window);
+    snprintf(buf, sizeof(buf), "%s to %d%%", ui->playing ? "Playing" : "Paused", percent);
+
+    if (mp3_player_seek_percent(ui, value))
+    {
+        mp3_set_status(ui, buf);
+        mp3_update_progress(ui, true);
+        if (ui->window)
+        {
+            atk_window_mark_dirty(ui->window);
+        }
+    }
+    else
+    {
+        mp3_set_status(ui, "Seek failed");
+    }
 }
 
 static void on_placeholder_button(atk_widget_t *button, void *context)
@@ -143,13 +183,13 @@ static void on_open_click(atk_widget_t *button, void *context)
 {
     (void)button;
     mp3_ui_t *ui = (mp3_ui_t *)context;
-    mp3_play_selected(ui);
+    mp3_start_selected(ui);
 }
 
 static void on_play_click(atk_widget_t *button, void *context)
 {
     (void)button;
-    mp3_play_selected((mp3_ui_t *)context);
+    mp3_toggle_play((mp3_ui_t *)context);
 }
 
 static void build_ui(mp3_ui_t *ui)
@@ -240,7 +280,7 @@ static void build_ui(mp3_ui_t *ui)
     log_mp3(ui->rew_button ? "[atk_mp3] rew button ok\r\n" : "[atk_mp3] rew button FAIL\r\n");
 
     ui->play_button = atk_window_add_button(ui->window,
-                                            "Play/Pause",
+                                            "Play",
                                             x + 60 + btn_spacing,
                                             y,
                                             110,
@@ -273,7 +313,7 @@ static void build_ui(mp3_ui_t *ui)
                                             ATK_SCROLLBAR_HORIZONTAL);
     if (ui->scrubber)
     {
-        atk_scrollbar_set_range(ui->scrubber, 0, 100, 10);
+        atk_scrollbar_set_range(ui->scrubber, 0, MP3_SCRUB_MAX, MP3_SCRUB_PAGE);
         atk_scrollbar_set_value(ui->scrubber, 0);
         atk_scrollbar_set_change_handler(ui->scrubber, on_scrollbar_change, ui);
     }
@@ -281,6 +321,20 @@ static void build_ui(mp3_ui_t *ui)
 
     atk_window_mark_dirty(ui->window);
     log_mp3("[atk_mp3] build_ui end\r\n");
+}
+
+static uint64_t mp3_current_offset(const mp3_player_t *p)
+{
+    if (!p)
+    {
+        return 0;
+    }
+    /* file_pos tracks total bytes read into buffers; buf_filled/buf_pos track what remains. */
+    if (p->file_pos >= (uint64_t)p->buf_filled)
+    {
+        return p->file_pos - ((uint64_t)p->buf_filled - (uint64_t)p->buf_pos);
+    }
+    return p->consumed_bytes;
 }
 
 static void mp3_set_status(mp3_ui_t *ui, const char *text)
@@ -294,6 +348,70 @@ static void mp3_set_status(mp3_ui_t *ui, const char *text)
     {
         atk_window_mark_dirty(ui->window);
     }
+}
+
+static void mp3_update_play_button(mp3_ui_t *ui)
+{
+    if (!ui || !ui->play_button)
+    {
+        return;
+    }
+    const char *title = (ui->playing && ui->player.active) ? "Pause" : "Play";
+    atk_button_set_title(ui->play_button, title);
+    if (ui->window)
+    {
+        atk_window_mark_dirty(ui->window);
+    }
+}
+
+static bool mp3_update_progress(mp3_ui_t *ui, bool force_update)
+{
+    if (!ui || !ui->scrubber)
+    {
+        return false;
+    }
+    if (ui->user_scrub_active && !force_update)
+    {
+        return false;
+    }
+
+    mp3_player_t *p = &ui->player;
+    if (!p->active)
+    {
+        return false;
+    }
+
+    uint64_t consumed = mp3_current_offset(p);
+    uint64_t size_est = p->file_size;
+    if (size_est == 0)
+    {
+        /* Fall back to what we currently have in flight if stat failed. */
+        size_est = consumed + (uint64_t)(p->buf_filled - p->buf_pos);
+    }
+    if (size_est == 0)
+    {
+        return false;
+    }
+
+    if (consumed > size_est)
+    {
+        consumed = size_est;
+    }
+
+    int value = (int)((consumed * MP3_SCRUB_MAX) / size_est);
+    if (value < 0) value = 0;
+    if (value > MP3_SCRUB_MAX) value = MP3_SCRUB_MAX;
+    if (force_max || value != p->last_progress)
+    {
+        atk_scrollbar_set_value(ui->scrubber, value);
+        p->last_progress = value;
+        if (ui->window)
+        {
+            atk_window_mark_dirty(ui->window);
+        }
+        return true;
+    }
+    return false;
 }
 
 static int16_t mp3_clamp16(int32_t v)
@@ -458,7 +576,10 @@ static void mp3_player_cleanup(mp3_ui_t *ui, const char *status)
     memset(p, 0, sizeof(*p));
     p->input_fd = -1;
     p->audio_fd = -1;
+    p->last_progress = -1;
+    ui->user_scrub_active = false;
     ui->playing = false;
+    mp3_update_play_button(ui);
     if (status)
     {
         mp3_set_status(ui, status);
@@ -512,10 +633,39 @@ static bool mp3_player_start(mp3_ui_t *ui)
     p->decode_buffer = (mp3d_sample_t *)malloc(sizeof(mp3d_sample_t) * MINIMP3_MAX_SAMPLES_PER_FRAME);
     p->in_buffer = (uint8_t *)malloc(MP3_INPUT_BUFFER_SIZE);
     p->in_capacity = MP3_INPUT_BUFFER_SIZE;
+    p->file_size = 0;
+    p->file_pos = 0;
+    p->consumed_bytes = 0;
+    p->last_progress = -1;
+    p->seekable = false;
     if (!p->out_buffer || !p->decode_buffer || !p->in_buffer)
     {
         mp3_player_cleanup(ui, "Out of memory");
         return false;
+    }
+
+    struct stat st;
+    memset(&st, 0, sizeof(st));
+    if (fstat(p->input_fd, &st) == 0 && st.st_size > 0)
+    {
+        p->file_size = (uint64_t)st.st_size;
+    }
+
+    int64_t end = lseek(p->input_fd, 0, SYSCALL_SEEK_END);
+    if (end >= 0)
+    {
+        if ((uint64_t)end > p->file_size)
+        {
+            p->file_size = (uint64_t)end;
+        }
+        if (lseek(p->input_fd, 0, SYSCALL_SEEK_SET) >= 0)
+        {
+            p->seekable = true;
+        }
+    }
+    else
+    {
+        (void)lseek(p->input_fd, 0, SYSCALL_SEEK_SET);
     }
 
     ssize_t initial = read(p->input_fd, p->in_buffer, p->in_capacity);
@@ -526,12 +676,21 @@ static bool mp3_player_start(mp3_ui_t *ui)
     }
     p->buf_filled = (size_t)initial;
     p->buf_pos = 0;
+    p->file_pos = (uint64_t)p->buf_filled;
 
     mp3dec_init(&p->dec);
     memset(&p->rs, 0, sizeof(p->rs));
     p->active = true;
     ui->playing = true;
+    ui->user_scrub_active = false;
+    if (ui->scrubber)
+    {
+        atk_scrollbar_set_range(ui->scrubber, 0, MP3_SCRUB_MAX, MP3_SCRUB_PAGE);
+        atk_scrollbar_set_value(ui->scrubber, 0);
+    }
     mp3_set_status(ui, "Playing...");
+    mp3_update_play_button(ui);
+    mp3_update_progress(ui, true);
     return true;
 }
 
@@ -565,7 +724,72 @@ static bool mp3_player_refill(mp3_player_t *p)
         return false;
     }
     p->buf_filled += (size_t)got;
+    p->file_pos += (uint64_t)got;
     return true;
+}
+
+static bool mp3_player_seek_bytes(mp3_ui_t *ui, uint64_t offset)
+{
+    if (!ui)
+    {
+        return false;
+    }
+
+    mp3_player_t *p = &ui->player;
+    if (!p->active || !p->seekable || !p->in_buffer)
+    {
+        return false;
+    }
+
+    if (p->file_size > 0 && offset >= p->file_size)
+    {
+        offset = (p->file_size > 0) ? (p->file_size - 1u) : 0u;
+    }
+
+    if (lseek(p->input_fd, (int64_t)offset, SYSCALL_SEEK_SET) < 0)
+    {
+        return false;
+    }
+
+    p->buf_filled = 0;
+    p->buf_pos = 0;
+    p->file_pos = offset;
+    p->consumed_bytes = offset;
+    p->last_progress = -1;
+    mp3dec_init(&p->dec);
+    memset(&p->rs, 0, sizeof(p->rs));
+
+    ssize_t got = read(p->input_fd, p->in_buffer, p->in_capacity);
+    if (got <= 0)
+    {
+        mp3_player_cleanup(ui, "Seek failed");
+        return false;
+    }
+
+    p->buf_filled = (size_t)got;
+    p->file_pos += (uint64_t)got;
+    mp3_update_progress(ui, true);
+    return true;
+}
+
+static bool mp3_player_seek_percent(mp3_ui_t *ui, int value)
+{
+    if (!ui)
+    {
+        return false;
+    }
+
+    mp3_player_t *p = &ui->player;
+    if (!p->active || !p->seekable || p->file_size == 0)
+    {
+        return false;
+    }
+
+    if (value < 0) value = 0;
+    if (value > MP3_SCRUB_MAX) value = MP3_SCRUB_MAX;
+
+    uint64_t target = (uint64_t)value * p->file_size / MP3_SCRUB_MAX;
+    return mp3_player_seek_bytes(ui, target);
 }
 
 static bool mp3_player_tick(mp3_ui_t *ui)
@@ -579,6 +803,7 @@ static bool mp3_player_tick(mp3_ui_t *ui)
     {
         return false;
     }
+    bool ui_changed = false;
 
     const int MAX_FRAMES_PER_TICK = 4;
     int frames = 0;
@@ -596,6 +821,11 @@ static bool mp3_player_tick(mp3_ui_t *ui)
         {
             if (!mp3_player_refill(p))
             {
+                if (p->file_size > 0)
+                {
+                    p->consumed_bytes = p->file_size;
+                    mp3_update_progress(ui, true);
+                }
                 mp3_player_cleanup(ui, "Playback finished");
                 return false;
             }
@@ -661,10 +891,59 @@ static bool mp3_player_tick(mp3_ui_t *ui)
         ++frames;
     }
 
-    return p->active;
+    if (p->active)
+    {
+        ui_changed |= mp3_update_progress(ui, false);
+    }
+
+    return ui_changed;
 }
 
-static bool mp3_play_selected(mp3_ui_t *ui)
+static void mp3_pause(mp3_ui_t *ui)
+{
+    if (!ui || !ui->player.active || !ui->playing)
+    {
+        return;
+    }
+    ui->playing = false;
+    mp3_update_play_button(ui);
+    mp3_set_status(ui, "Paused");
+}
+
+static void mp3_resume(mp3_ui_t *ui)
+{
+    if (!ui || !ui->player.active || ui->playing)
+    {
+        return;
+    }
+    ui->playing = true;
+    mp3_update_play_button(ui);
+    mp3_set_status(ui, "Playing...");
+}
+
+static void mp3_toggle_play(mp3_ui_t *ui)
+{
+    if (!ui)
+    {
+        return;
+    }
+    if (!ui->player.active)
+    {
+        mp3_player_start(ui);
+        return;
+    }
+
+    if (ui->playing)
+    {
+        mp3_pause(ui);
+    }
+    else
+    {
+        mp3_resume(ui);
+    }
+}
+
+static bool mp3_start_selected(mp3_ui_t *ui)
 {
     return mp3_player_start(ui);
 }
@@ -672,7 +951,7 @@ static bool mp3_play_selected(mp3_ui_t *ui)
 static void on_file_submit(atk_widget_t *input, void *context)
 {
     (void)input;
-    mp3_play_selected((mp3_ui_t *)context);
+    mp3_start_selected((mp3_ui_t *)context);
 }
 
 static bool dispatch_event(mp3_ui_t *ui, const user_atk_event_t *event)
@@ -722,6 +1001,9 @@ int main(void)
     mp3_ui_t ui;
     memset(&ui, 0, sizeof(ui));
     ui.running = true;
+    ui.player.input_fd = -1;
+    ui.player.audio_fd = -1;
+    ui.player.last_progress = -1;
 
     if (!atk_user_window_open_with_flags(&ui.remote,
                                          "ATK MP3",
@@ -756,6 +1038,7 @@ int main(void)
 
     while (ui.running)
     {
+        ui.user_scrub_active = false;
         bool redraw = false;
         bool had_event = false;
         bool progressed = false;
@@ -769,7 +1052,7 @@ int main(void)
         {
             progressed = mp3_player_tick(&ui);
         }
-        if (redraw)
+        if (redraw || progressed)
         {
             atk_render();
             atk_user_present(&ui.remote);

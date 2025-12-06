@@ -10,6 +10,7 @@ void atk_button_configure(atk_widget_t *widget,
                           bool absolute,
                           atk_button_action_t action,
                           void *context);
+void atk_button_set_title(atk_widget_t *widget, const char *title);
 int atk_button_effective_height(const atk_widget_t *widget);
 bool atk_button_hit_test(const atk_widget_t *widget, int origin_x, int origin_y, int px, int py);
 void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int origin_x, int origin_y);
