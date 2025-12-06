@@ -32,6 +32,8 @@ typedef enum
     SYSCALL_PREAD = 23,
     SYSCALL_CPU_SNAPSHOT = 24,
     SYSCALL_TIME_INFO = 25,
+    SYSCALL_SOCKET_OPEN = 26,
+    SYSCALL_SOCKET_CONNECT = 27,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)

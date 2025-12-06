@@ -1335,6 +1335,26 @@ int net_tcp_socket_fd(const net_tcp_socket_t *socket)
     return socket->fd;
 }
 
+net_tcp_socket_t *net_tcp_socket_from_fd(int fd)
+{
+    uint64_t flags = tcp_lock();
+    for (size_t i = 0; i < NET_TCP_MAX_SOCKETS; ++i)
+    {
+        net_tcp_socket_t *socket = &g_sockets[i];
+        if (socket->state == TCP_STATE_UNUSED)
+        {
+            continue;
+        }
+        if (socket->fd_registered && socket->fd == fd)
+        {
+            tcp_unlock(flags);
+            return socket;
+        }
+    }
+    tcp_unlock(flags);
+    return NULL;
+}
+
 void net_tcp_log_state(const net_tcp_socket_t *socket, const char *tag)
 {
     if (!tcp_debug_enabled())

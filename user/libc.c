@@ -1345,6 +1345,16 @@ int open(const char *path, uint64_t flags, ...)
     return sys_open(path, mode_flags);
 }
 
+int socket_open(const char *iface_name)
+{
+    return sys_socket_open(iface_name);
+}
+
+int socket_connect(int fd, const char *ipv4_text, uint16_t port)
+{
+    return sys_socket_connect(fd, ipv4_text, port);
+}
+
 void *sbrk(int64_t increment)
 {
     return sys_sbrk(increment);

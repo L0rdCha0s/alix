@@ -235,3 +235,13 @@ ssize_t sys_pread(int fd, void *buffer, size_t count, size_t offset)
 {
     return (ssize_t)syscall4(SYSCALL_PREAD, fd, (long)buffer, (long)count, (long)offset);
 }
+
+int sys_socket_open(const char *iface_name)
+{
+    return (int)syscall2(SYSCALL_SOCKET_OPEN, (long)iface_name, 0);
+}
+
+int sys_socket_connect(int fd, const char *ipv4_text, uint16_t port)
+{
+    return (int)syscall3(SYSCALL_SOCKET_CONNECT, fd, (long)ipv4_text, (long)port);
+}

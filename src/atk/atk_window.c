@@ -63,6 +63,10 @@ static const atk_window_priv_t *window_priv(const atk_widget_t *window);
 static void window_destroy(atk_widget_t *window);
 static void window_destroy_value(void *value);
 static void window_debug_dump_node(const atk_list_node_t *node, size_t index);
+static void window_reset_children(atk_window_priv_t *priv, const char *where);
+static inline atk_list_node_t *window_child_next_safe(atk_list_node_t *node, const char *where);
+
+#define WINDOW_CHILD_GUARD_LIMIT 4096u
 
 extern const atk_class_t ATK_BUTTON_CLASS;
 static const atk_widget_vtable_t window_vtable = { 0 };
@@ -93,6 +97,56 @@ static inline atk_list_node_t *window_list_next_safe(atk_list_node_t *node, cons
         return NULL;
     }
     return next;
+}
+
+static inline atk_list_node_t *window_list_prev_safe(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (!window_list_node_ok(node, where))
+    {
+        return NULL;
+    }
+    atk_list_node_t *prev = node->prev;
+    if (prev && !window_list_pointer_valid(prev))
+    {
+        ATK_WINDOW_LOG("[atk_window] window list corrupt prev=%p (%s)", prev, where ? where : "?");
+        return NULL;
+    }
+    return prev;
+}
+
+static inline atk_list_node_t *window_child_next_safe(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (!window_list_node_ok(node, where))
+    {
+        return NULL;
+    }
+    atk_list_node_t *next = node->next;
+    if (next == node)
+    {
+        ATK_WINDOW_LOG("[atk][window] child list self-loop (%s)\r\n", where ? where : "?");
+        return NULL;
+    }
+    if (next && !window_list_pointer_valid(next))
+    {
+        ATK_WINDOW_LOG("[atk][window] child list corrupt next=%p (%s)\r\n", next, where ? where : "?");
+        return NULL;
+    }
+    return next;
+}
+
+static void window_reset_children(atk_window_priv_t *priv, const char *where)
+{
+    (void)where;
+    if (!priv)
+    {
+        return;
+    }
+    ATK_WINDOW_LOG("[atk][window] resetting children list (%s)\r\n", where ? where : "?");
+    priv->children.head = NULL;
+    priv->children.tail = NULL;
+    priv->children.size = 0;
 }
 
 void atk_window_reset_all(atk_state_t *state)
@@ -366,30 +420,38 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
         return NULL;
     }
 
-    ATK_LIST_FOR_EACH_REVERSE(node, &priv->children)
+    for (atk_list_node_t *node = priv->children.tail; node; )
     {
+        atk_list_node_t *prev = window_list_prev_safe(node, "widget_at");
 #if ATK_USER_POINTER_MIN > 0
         if ((uintptr_t)node < ATK_USER_POINTER_MIN)
         {
+            node = prev;
             continue;
         }
 #endif
-        atk_widget_t *child = (atk_widget_t *)node->value;
+        atk_widget_t *child = window_list_pointer_valid(node ? node->value : NULL)
+                                   ? (atk_widget_t *)node->value
+                                   : NULL;
         if (!child)
         {
+            node = prev;
             continue;
         }
         if (child->parent != window)
         {
+            node = prev;
             continue;
         }
         if (!child->used)
         {
+            node = prev;
             continue;
         }
 #if ATK_USER_POINTER_MIN > 0
         if ((uintptr_t)child < ATK_USER_POINTER_MIN)
         {
+            node = prev;
             continue;
         }
 #endif
@@ -397,13 +459,14 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
         {
             if (!atk_tab_view_contains_point(child, px, py))
             {
+                node = prev;
                 continue;
             }
 
             if (!atk_tab_view_point_in_tab_bar(child, px, py))
             {
                 atk_widget_t *content = atk_tab_view_active_content(child);
-                if (content && content->used)
+                if (content && atk_widget_validate(content, "tab_view content") && content->used)
                 {
                     int cx = 0;
                     int cy = 0;
@@ -424,6 +487,7 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
         {
             return child;
         }
+        node = prev;
     }
     return NULL;
 }
@@ -895,7 +959,8 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
         return;
     }
 
-    ATK_LIST_FOR_EACH(node, &priv->children)
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->children.head; node && guard < WINDOW_CHILD_GUARD_LIMIT; node = window_child_next_safe(node, "layout_children"), guard++)
     {
         if (!window_list_pointer_valid(node))
         {
@@ -941,6 +1006,10 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
             atk_terminal_handle_resize(child);
         }
 #endif
+    }
+    if (guard >= WINDOW_CHILD_GUARD_LIMIT)
+    {
+        window_reset_children(priv, "layout_children_guard");
     }
 }
 
@@ -1055,10 +1124,12 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
                         theme->window_body);
     }
 
-    for (atk_list_node_t *node = priv->children.head; node; node = node->next)
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->children.head; node && guard < WINDOW_CHILD_GUARD_LIMIT; node = window_child_next_safe(node, "draw_children"), guard++)
     {
         if (!pointer_is_canonical(node))
         {
+            window_reset_children(priv_mut, "draw_children_badptr");
             break;
         }
 #if ATK_USER_POINTER_MIN > 0
@@ -1100,6 +1171,10 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
         }
 
         atk_widget_draw_any(state, child);
+    }
+    if (guard >= WINDOW_CHILD_GUARD_LIMIT)
+    {
+        window_reset_children(priv_mut, "draw_children_guard");
     }
 }
 

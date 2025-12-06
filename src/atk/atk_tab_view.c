@@ -14,6 +14,7 @@
 #endif
 
 #define ATK_TAB_VIEW_MIN_WIDTH   (ATK_FONT_WIDTH * 6)
+#define TAB_PAGE_GUARD_LIMIT 4096
 
 typedef struct
 {
@@ -34,6 +35,111 @@ typedef struct
     void *change_context;
     atk_list_node_t *list_node;
 } atk_tab_view_priv_t;
+
+static inline bool tab_list_pointer_valid(const void *ptr)
+{
+    if (!ptr)
+    {
+        return true;
+    }
+    uint64_t addr = (uint64_t)(uintptr_t)ptr;
+    uint64_t top = addr >> 47;
+    return (top == 0u) || (top == 0x1FFFFu);
+}
+
+static void tab_view_reset_pages(atk_tab_view_priv_t *priv, const char *where)
+{
+    if (!priv)
+    {
+        return;
+    }
+    serial_printf("atk_tab_view: resetting pages after corruption (%s)\r\n", where ? where : "?");
+    priv->pages.head = NULL;
+    priv->pages.tail = NULL;
+    priv->pages.size = 0;
+    priv->page_count = 0;
+    priv->active_index = 0;
+}
+
+static inline atk_list_node_t *tab_view_next_node(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (!node || !tab_list_pointer_valid(node))
+    {
+        return NULL;
+    }
+    atk_list_node_t *next = node->next;
+    if (next == node)
+    {
+        serial_printf("atk_tab_view: page list self-loop (%s)\r\n", where ? where : "?");
+        return NULL;
+    }
+    if (next && !tab_list_pointer_valid(next))
+    {
+        serial_printf("atk_tab_view: page list corrupt next (%s)\r\n", where ? where : "?");
+        return NULL;
+    }
+    return next;
+}
+
+static bool tab_view_validate_pages(atk_tab_view_priv_t *priv, const char *where)
+{
+    if (!priv)
+    {
+        return false;
+    }
+
+    size_t count = 0;
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->pages.head; node; node = node->next)
+    {
+        if (!tab_list_pointer_valid(node) ||
+            (node->prev && !tab_list_pointer_valid(node->prev)) ||
+            (node->next && !tab_list_pointer_valid(node->next)) ||
+            !tab_list_pointer_valid(node->value))
+        {
+            tab_view_reset_pages(priv, where);
+            return false;
+        }
+
+        if (++guard > TAB_PAGE_GUARD_LIMIT)
+        {
+            tab_view_reset_pages(priv, "tab_pages_guard");
+            return false;
+        }
+        count++;
+    }
+
+    if (priv->pages.tail && !tab_list_pointer_valid(priv->pages.tail))
+    {
+        tab_view_reset_pages(priv, where);
+        return false;
+    }
+
+    if (priv->page_count != count)
+    {
+        priv->page_count = count;
+    }
+    if (priv->page_count == 0)
+    {
+        priv->active_index = 0;
+    }
+    else if (priv->active_index >= priv->page_count)
+    {
+        priv->active_index = priv->page_count - 1;
+    }
+    return true;
+}
+
+static inline atk_tab_view_page_t *tab_page_from_node(atk_list_node_t *node, const char *where)
+{
+    if (!node || !tab_list_pointer_valid(node->value))
+    {
+        serial_printf("atk_tab_view: bad page pointer (%s)\r\n", where ? where : "?");
+        return NULL;
+    }
+    return (atk_tab_view_page_t *)node->value;
+}
 
 static atk_tab_view_priv_t *tab_view_priv_mut(atk_widget_t *tab_view);
 static const atk_tab_view_priv_t *tab_view_priv(const atk_widget_t *tab_view);
@@ -165,7 +271,7 @@ bool atk_tab_view_add_page(atk_widget_t *tab_view, const char *title, atk_widget
 void atk_tab_view_set_active(atk_widget_t *tab_view, size_t index)
 {
     atk_tab_view_priv_t *priv = tab_view_priv_mut(tab_view);
-    if (!priv || priv->page_count == 0)
+    if (!priv || !tab_view_validate_pages(priv, "set_active") || priv->page_count == 0)
     {
         return;
     }
@@ -209,16 +315,29 @@ atk_widget_t *atk_tab_view_active_content(const atk_widget_t *tab_view)
         return NULL;
     }
 
+    if (!tab_view_validate_pages((atk_tab_view_priv_t *)priv, "active_content"))
+    {
+        return NULL;
+    }
     size_t index = atk_tab_view_active(tab_view);
     size_t current = 0;
-    ATK_LIST_FOR_EACH(node, &priv->pages)
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->pages.head; node && guard < TAB_PAGE_GUARD_LIMIT; node = tab_view_next_node(node, "active_content"), guard++)
     {
-        atk_tab_view_page_t *page = (atk_tab_view_page_t *)node->value;
+        atk_tab_view_page_t *page = tab_page_from_node(node, "active_content");
+        if (!page)
+        {
+            continue;
+        }
         if (current == index)
         {
             return page->content;
         }
         current++;
+    }
+    if (guard >= TAB_PAGE_GUARD_LIMIT)
+    {
+        tab_view_reset_pages((atk_tab_view_priv_t *)priv, "active_content_guard");
     }
     return NULL;
 }
@@ -298,9 +417,18 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, const atk_mouse_event_t *
     int tab_x = priv->content_padding;
     int max_x = tab_view->width;
     size_t index = 0;
-    ATK_LIST_FOR_EACH(node, &priv->pages)
+    if (!tab_view_validate_pages(priv, "handle_mouse"))
     {
-        atk_tab_view_page_t *page = (atk_tab_view_page_t *)node->value;
+        return false;
+    }
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->pages.head; node && guard < TAB_PAGE_GUARD_LIMIT; node = tab_view_next_node(node, "handle_mouse"), guard++)
+    {
+        atk_tab_view_page_t *page = tab_page_from_node(node, "handle_mouse");
+        if (!page)
+        {
+            continue;
+        }
         int width = tab_view_tab_width(priv, page);
         if (tab_x >= max_x)
         {
@@ -331,6 +459,10 @@ bool atk_tab_view_handle_mouse(atk_widget_t *tab_view, const atk_mouse_event_t *
         }
         tab_x = x1 + priv->tab_spacing;
         index++;
+    }
+    if (guard >= TAB_PAGE_GUARD_LIMIT)
+    {
+        tab_view_reset_pages(priv, "handle_mouse_guard");
     }
 
     atk_event_debug_tab_miss(event->id, tab_view, local_x, local_y, "no_tab_match");
@@ -423,9 +555,18 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
     int tab_x = origin_x + priv->content_padding;
     int tab_y = origin_y;
     size_t index = 0;
-    ATK_LIST_FOR_EACH(node, &priv->pages)
+    if (!tab_view_validate_pages((atk_tab_view_priv_t *)priv, "draw"))
     {
-        const atk_tab_view_page_t *page = (const atk_tab_view_page_t *)node->value;
+        return;
+    }
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->pages.head; node && guard < TAB_PAGE_GUARD_LIMIT; node = tab_view_next_node(node, "draw"), guard++)
+    {
+        const atk_tab_view_page_t *page = (const atk_tab_view_page_t *)tab_page_from_node(node, "draw");
+        if (!page)
+        {
+            continue;
+        }
         int width = tab_view_tab_width(priv, page);
         if (width <= 0)
         {
@@ -491,6 +632,11 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
     content_y += origin_y;
     video_draw_rect(content_x, content_y, content_w, content_h, theme->window_body);
     video_draw_rect_outline(origin_x, origin_y, tab_view->width, tab_view->height, theme->window_border);
+    if (guard >= TAB_PAGE_GUARD_LIMIT)
+    {
+        tab_view_reset_pages((atk_tab_view_priv_t *)priv, "draw_guard");
+        return;
+    }
 
     atk_widget_t *content = atk_tab_view_active_content(tab_view);
     if (content)
@@ -611,15 +757,20 @@ static void tab_view_layout_pages(atk_widget_t *tab_view, atk_tab_view_priv_t *p
     {
         return;
     }
+    if (!tab_view_validate_pages(priv, "layout_pages"))
+    {
+        return;
+    }
     int content_x = 0;
     int content_y = 0;
     int content_w = 0;
     int content_h = 0;
     tab_view_content_bounds(tab_view, priv, &content_x, &content_y, &content_w, &content_h);
 
-    ATK_LIST_FOR_EACH(node, &priv->pages)
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->pages.head; node && guard < TAB_PAGE_GUARD_LIMIT; node = tab_view_next_node(node, "layout_pages"), guard++)
     {
-        atk_tab_view_page_t *page = (atk_tab_view_page_t *)node->value;
+        atk_tab_view_page_t *page = tab_page_from_node(node, "layout_pages");
         if (page && page->content)
         {
             page->content->x = content_x;
@@ -628,6 +779,10 @@ static void tab_view_layout_pages(atk_widget_t *tab_view, atk_tab_view_priv_t *p
             page->content->height = content_h;
             page->content->parent = tab_view;
         }
+    }
+    if (guard >= TAB_PAGE_GUARD_LIMIT)
+    {
+        tab_view_reset_pages(priv, "layout_pages_guard");
     }
 }
 

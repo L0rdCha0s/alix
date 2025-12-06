@@ -32,6 +32,7 @@ typedef struct
     atk_widget_t *network_list;
     bool running;
     uint64_t last_refresh_ms;
+    uint64_t last_render_ms;
 } atk_taskmgr_app_t;
 
 typedef struct
@@ -780,8 +781,17 @@ static void taskmgr_handle_key(const user_atk_event_t *event, bool *needs_render
 
 static void taskmgr_render(atk_taskmgr_app_t *app)
 {
+    if (!app)
+    {
+        return;
+    }
     atk_render();
-    atk_user_present(&app->remote);
+    bool ok = atk_user_present(&app->remote);
+    app->last_render_ms = sys_time_millis();
+    if (!ok)
+    {
+        printf("atk_taskmgr: present failed at ms=%llu\n", (unsigned long long)app->last_render_ms);
+    }
 }
 
 static void taskmgr_handle_resize(atk_taskmgr_app_t *app, uint32_t width, uint32_t height)
@@ -827,6 +837,7 @@ int main(void)
     taskmgr_refresh_network(&app);
     taskmgr_render(&app);
     app.last_refresh_ms = sys_time_millis();
+    app.last_render_ms = app.last_refresh_ms;
 
     while (app.running)
     {
@@ -877,6 +888,19 @@ int main(void)
 
         if (needs_render)
         {
+            taskmgr_render(&app);
+        }
+
+        /* Watchdog: if nothing has rendered for a while, force a present. */
+        uint64_t since_render = now_ms - app.last_render_ms;
+        if (!needs_render && since_render >= 5000)
+        {
+            if (app.window)
+            {
+                atk_window_mark_dirty(app.window);
+            }
+            printf("atk_taskmgr: watchdog forcing render after %llu ms idle\n",
+                   (unsigned long long)since_render);
             taskmgr_render(&app);
         }
 

@@ -38,6 +38,8 @@ ssize_t read(int fd, void *buffer, size_t count);
 ssize_t write(int fd, const void *buffer, size_t count);
 int close(int fd);
 int open(const char *path, uint64_t flags, ...);
+int socket_open(const char *iface_name);
+int socket_connect(int fd, const char *ipv4_text, uint16_t port);
 int printf(const char *format, ...);
 int64_t lseek(int fd, int64_t offset, int whence);
 int fstat(int fd, struct stat *st);

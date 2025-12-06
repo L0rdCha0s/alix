@@ -37,5 +37,7 @@ ssize_t sys_font_cache(void *buffer, size_t capacity);
 int64_t sys_lseek(int fd, int64_t offset, int whence);
 int sys_fstat(int fd, syscall_stat_t *st);
 ssize_t sys_pread(int fd, void *buffer, size_t count, size_t offset);
+int sys_socket_open(const char *iface_name);
+int sys_socket_connect(int fd, const char *ipv4_text, uint16_t port);
 
 #endif

@@ -10,6 +10,7 @@
 #include "user_atk_host.h"
 #include "shell_service.h"
 #include "net/interface.h"
+#include "net/tcp.h"
 #include "user_copy.h"
 #include "timekeeping.h"
 #include "font_cache.h"
@@ -38,6 +39,7 @@ typedef struct
 #define SYSCALL_MAX_PATH_LEN     4096u
 #define SYSCALL_MAX_COMMAND_LEN  4096u
 #define SYSCALL_MAX_SERIAL_BYTES 4096u
+#define SYSCALL_MAX_IP_TEXT_LEN  64u
 
 static ssize_t syscall_file_read(void *ctx, void *buffer, size_t count)
 {
@@ -336,6 +338,130 @@ static int64_t syscall_do_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capac
     }
 
     return (int64_t)count;
+}
+
+static net_interface_t *syscall_pick_interface(const char *iface_name_user)
+{
+    net_interface_t *iface = NULL;
+    char *name_buf = NULL;
+
+    if (iface_name_user)
+    {
+        name_buf = (char *)malloc(NET_IF_NAME_MAX);
+        if (!name_buf)
+        {
+            return NULL;
+        }
+        size_t copied = 0;
+        if (!user_copy_string_from_user(name_buf, NET_IF_NAME_MAX, iface_name_user, &copied))
+        {
+            free(name_buf);
+            return NULL;
+        }
+        iface = net_if_by_name(name_buf);
+    }
+
+    if (!iface)
+    {
+        size_t count = net_if_count();
+        for (size_t i = 0; i < count; ++i)
+        {
+            net_interface_t *candidate = net_if_at(i);
+            if (!candidate || !candidate->present)
+            {
+                continue;
+            }
+            iface = candidate;
+            if (candidate->link_up)
+            {
+                break;
+            }
+        }
+    }
+
+    free(name_buf);
+    return iface;
+}
+
+static int64_t syscall_do_socket_open(const char *iface_name_user)
+{
+    net_interface_t *iface = syscall_pick_interface(iface_name_user);
+    if (!iface)
+    {
+        return -1;
+    }
+
+    net_tcp_socket_t *socket = net_tcp_socket_open(iface);
+    if (!socket)
+    {
+        return -1;
+    }
+
+    int fd = net_tcp_socket_fd(socket);
+    if (fd < 0)
+    {
+        net_tcp_socket_release(socket);
+        return -1;
+    }
+    return (int64_t)fd;
+}
+
+static int64_t syscall_do_socket_connect(int fd,
+                                         const char *ipv4_text_user,
+                                         uint16_t port)
+{
+    if (!ipv4_text_user || port == 0)
+    {
+        return -1;
+    }
+
+    char *ip_text = (char *)malloc(SYSCALL_MAX_IP_TEXT_LEN);
+    if (!ip_text)
+    {
+        return -1;
+    }
+    size_t copied = 0;
+    if (!user_copy_string_from_user(ip_text, SYSCALL_MAX_IP_TEXT_LEN, ipv4_text_user, &copied))
+    {
+        free(ip_text);
+        return -1;
+    }
+
+    uint32_t ipv4 = 0;
+    bool parsed = net_parse_ipv4(ip_text, &ipv4);
+    free(ip_text);
+    if (!parsed || ipv4 == 0)
+    {
+        return -1;
+    }
+
+    net_tcp_socket_t *socket = net_tcp_socket_from_fd(fd);
+    if (!socket)
+    {
+        return -1;
+    }
+    if (!net_tcp_socket_connect(socket, ipv4, port))
+    {
+        return -1;
+    }
+
+    const uint32_t step_ms = 10;
+    const uint32_t timeout_ms = 15000;
+    uint32_t waited = 0;
+    while (!net_tcp_socket_is_established(socket))
+    {
+        if (net_tcp_socket_has_error(socket) || net_tcp_socket_remote_closed(socket))
+        {
+            return -1;
+        }
+        if (waited >= timeout_ms)
+        {
+            return -1;
+        }
+        process_sleep_ms(step_ms);
+        waited += step_ms;
+    }
+    return 0;
 }
 
 static ssize_t syscall_file_write(void *ctx, const void *buffer, size_t count)
@@ -926,6 +1052,14 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         }
         case SYSCALL_TIME_MILLIS:
             result = (int64_t)timekeeping_now_millis();
+            break;
+        case SYSCALL_SOCKET_OPEN:
+            result = syscall_do_socket_open((const char *)frame->rdi);
+            break;
+        case SYSCALL_SOCKET_CONNECT:
+            result = syscall_do_socket_connect((int)frame->rdi,
+                                               (const char *)frame->rsi,
+                                               (uint16_t)frame->rdx);
             break;
         default:
             serial_printf("%s", "syscall: unhandled id=");
