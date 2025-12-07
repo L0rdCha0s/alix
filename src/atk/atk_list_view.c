@@ -51,6 +51,10 @@ typedef struct
     int content_height;
     int hover_separator;
     atk_list_node_t *list_node;
+    atk_list_view_select_t on_select;
+    void *select_context;
+    size_t selected_row;
+    bool has_selection;
     bool resizing;
     size_t resizing_column;
     int resize_start_x;
@@ -155,6 +159,10 @@ atk_widget_t *atk_list_view_create(void)
     priv->content_height = 0;
     priv->hover_separator = -1;
     priv->list_node = NULL;
+    priv->on_select = NULL;
+    priv->select_context = NULL;
+    priv->selected_row = 0;
+    priv->has_selection = false;
     priv->resizing = false;
     priv->resizing_column = 0;
     priv->resize_start_x = 0;
@@ -277,6 +285,11 @@ void atk_list_view_set_row_count(atk_widget_t *list, size_t rows)
     {
         priv->scroll_row = (int)rows - 1;
     }
+    if (priv->has_selection && priv->selected_row >= rows)
+    {
+        priv->has_selection = false;
+        priv->selected_row = 0;
+    }
     priv->layout_dirty = true;
 }
 
@@ -321,6 +334,8 @@ void atk_list_view_clear(atk_widget_t *list)
     priv->scroll_row = 0;
     priv->scroll_x = 0;
     priv->hover_separator = -1;
+    priv->has_selection = false;
+    priv->selected_row = 0;
     priv->layout_dirty = true;
 }
 
@@ -334,6 +349,53 @@ size_t atk_list_view_column_count(const atk_widget_t *list)
 {
     const atk_list_view_priv_t *priv = list_priv(list);
     return priv ? priv->column_count : 0;
+}
+
+void atk_list_view_set_selected(atk_widget_t *list, size_t row)
+{
+    atk_list_view_priv_t *priv = list_priv_mut(list);
+    if (!priv)
+    {
+        return;
+    }
+    if (row >= priv->row_count)
+    {
+        if (priv->has_selection)
+        {
+            priv->has_selection = false;
+            priv->selected_row = 0;
+            list_view_mark_dirty(list);
+        }
+        return;
+    }
+
+    if (!priv->has_selection || priv->selected_row != row)
+    {
+        priv->selected_row = row;
+        priv->has_selection = true;
+        list_view_mark_dirty(list);
+    }
+}
+
+size_t atk_list_view_selected(const atk_widget_t *list)
+{
+    const atk_list_view_priv_t *priv = list_priv(list);
+    if (!priv || !priv->has_selection)
+    {
+        return ATK_LIST_VIEW_NO_SELECTION;
+    }
+    return priv->selected_row;
+}
+
+void atk_list_view_set_select_handler(atk_widget_t *list, atk_list_view_select_t handler, void *context)
+{
+    atk_list_view_priv_t *priv = list_priv_mut(list);
+    if (!priv)
+    {
+        return;
+    }
+    priv->on_select = handler;
+    priv->select_context = context;
 }
 
 void atk_list_view_force_vertical_scrollbar(atk_widget_t *list, bool force)
@@ -532,6 +594,12 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
         }
 
         video_color_t row_bg = stripe_colors[row_index % 2];
+        video_color_t text_color = theme->button_text;
+        if (priv->has_selection && priv->selected_row == row_index)
+        {
+            row_bg = theme->menu_bar_highlight;
+            text_color = theme->window_title_text;
+        }
         if (row_height > 0 && client_width > 0)
         {
             video_draw_rect(origin_x, row_y, client_width, row_height, row_bg);
@@ -594,7 +662,7 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
             }
             int baseline = atk_font_baseline_for_rect(row_y, row_height);
             atk_rect_t clip = { draw_x, row_y, draw_width, row_height };
-            atk_font_draw_string_clipped(text_x, baseline, text, theme->button_text, row_bg, &clip);
+            atk_font_draw_string_clipped(text_x, baseline, text, text_color, row_bg, &clip);
             cell_x = cell_end;
         }
 
@@ -675,6 +743,10 @@ void atk_list_view_destroy(atk_widget_t *list)
     priv->list_node = NULL;
     priv->layout_dirty = true;
     priv->hover_separator = -1;
+    priv->on_select = NULL;
+    priv->select_context = NULL;
+    priv->has_selection = false;
+    priv->selected_row = 0;
 }
 
 void atk_list_view_relayout(atk_widget_t *list)
@@ -1377,6 +1449,39 @@ static atk_mouse_response_t list_view_mouse_cb(atk_widget_t *widget,
         else
         {
             list_view_update_hover(widget, priv, event->local_x, event->local_y);
+        }
+    }
+
+    bool click_select = event->pressed_edge || event->released_edge || (event->left_pressed && !priv->resizing);
+
+    if (click_select && !priv->resizing)
+    {
+        int header_h = priv->header_visible_height;
+        int local_y = event->local_y;
+        if (local_y >= header_h && priv->row_height > 0)
+        {
+            size_t relative_row = (size_t)((local_y - header_h) / priv->row_height);
+            size_t absolute_row = relative_row;
+            if (priv->scroll_row > 0)
+            {
+                absolute_row += (size_t)priv->scroll_row;
+            }
+            if (absolute_row < priv->row_count)
+            {
+                atk_list_view_set_selected(widget, absolute_row);
+                if (priv->on_select)
+                {
+                    priv->on_select(widget, priv->select_context, absolute_row);
+                }
+                return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
+            }
+            else if (priv->has_selection)
+            {
+                priv->has_selection = false;
+                priv->selected_row = 0;
+                list_view_mark_dirty(widget);
+                return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
+            }
         }
     }
 

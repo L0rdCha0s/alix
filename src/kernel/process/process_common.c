@@ -1,4 +1,5 @@
 #include "process_internal.h"
+#include "shell.h"
 
 extern uintptr_t kernel_heap_base;
 extern uintptr_t kernel_heap_end;
@@ -399,6 +400,7 @@ static ssize_t console_stdout_write(void *ctx, const void *buffer, size_t count)
         return 0;
     }
     const char *data = (const char *)buffer;
+    shell_emit_console_tap(data, count);
     for (size_t i = 0; i < count; ++i)
     {
         char c = data[i];

@@ -21,6 +21,7 @@
 #define ATK_FONT_CACHE_LAST  126
 #define ATK_FONT_CACHE_COUNT (ATK_FONT_CACHE_LAST - ATK_FONT_CACHE_FIRST + 1)
 #define ATK_FONT_MAX_ROW_PIXELS 96
+#define ATK_FONT_TEXT_GUARD 2048
 
 typedef struct
 {
@@ -50,6 +51,28 @@ static atk_font_state_t g_font_state = { 0 };
 static bool atk_font_load(void);
 static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint);
 
+static inline bool atk_font_pointer_is_canonical(const void *ptr)
+{
+    if (!ptr)
+    {
+        return true;
+    }
+    uint64_t v = (uint64_t)(uintptr_t)ptr;
+    uint64_t top = v >> 47;
+    return (top == 0u) || (top == 0x1FFFFu);
+}
+
+static inline bool atk_font_glyph_ptr_valid(atk_font_glyph_t *glyph)
+{
+    if (!glyph || !atk_font_pointer_is_canonical(glyph))
+    {
+        return false;
+    }
+    atk_font_glyph_t *base = g_font_state.glyphs;
+    atk_font_glyph_t *end = base + ATK_FONT_CACHE_COUNT;
+    return (glyph >= base && glyph < end);
+}
+
 #if ATK_FONT_ENABLE_TTF && !ATK_FONT_LOAD_FROM_VFS
 static bool atk_font_read_user(uint8_t **data_out, size_t *size_out);
 #endif
@@ -72,10 +95,11 @@ int atk_font_text_width(const char *text)
     }
 
     int width = 0;
-    for (const unsigned char *cursor = (const unsigned char *)text; *cursor; ++cursor)
+    size_t guard = 0;
+    for (const unsigned char *cursor = (const unsigned char *)text; *cursor && guard < ATK_FONT_TEXT_GUARD; ++cursor, ++guard)
     {
         atk_font_glyph_t *glyph = atk_font_get_glyph(*cursor);
-        if (glyph && glyph->ready)
+        if (atk_font_glyph_ptr_valid(glyph) && glyph->ready)
         {
             width += glyph->advance;
         }
@@ -192,10 +216,11 @@ void atk_font_draw_string_clipped(int x,
     video_color_t row_pixels[ATK_FONT_MAX_ROW_PIXELS];
     int pen_x = x;
 
-    for (const unsigned char *cursor = (const unsigned char *)text; *cursor; ++cursor)
+    size_t guard = 0;
+    for (const unsigned char *cursor = (const unsigned char *)text; *cursor && guard < ATK_FONT_TEXT_GUARD; ++cursor, ++guard)
     {
         atk_font_glyph_t *glyph = atk_font_get_glyph(*cursor);
-        if (!glyph || !glyph->ready)
+        if (!atk_font_glyph_ptr_valid(glyph) || !glyph->ready)
         {
             pen_x += ATK_FONT_WIDTH;
             continue;

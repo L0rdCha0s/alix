@@ -245,3 +245,8 @@ int sys_socket_connect(int fd, const char *ipv4_text, uint16_t port)
 {
     return (int)syscall3(SYSCALL_SOCKET_CONNECT, fd, (long)ipv4_text, (long)port);
 }
+
+ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacity)
+{
+    return (ssize_t)syscall3(SYSCALL_LIST_DIR, (long)path, (long)entries, (long)capacity);
+}

@@ -67,7 +67,48 @@ static void cli_history_save_current(const char *buffer, size_t len);
 static bool cli_line_is_blank(const char *line);
 
 static shell_state_t *g_active_shell = NULL;
+static shell_console_tap_fn g_console_tap_fn = NULL;
+static void *g_console_tap_ctx = NULL;
+static shell_state_t *shell_push_active(shell_state_t *shell)
+{
+    shell_state_t *prev = g_active_shell;
+    g_active_shell = shell;
+    return prev;
+}
+
+static void shell_pop_active(shell_state_t *prev)
+{
+    g_active_shell = prev;
+}
 static void shell_wait_for_interrupt(void *context);
+
+void shell_set_console_tap(shell_console_tap_fn fn, void *context)
+{
+    g_console_tap_fn = fn;
+    g_console_tap_ctx = context;
+}
+
+void shell_get_console_tap(shell_console_tap_fn *fn_out, void **ctx_out)
+{
+    if (fn_out)
+    {
+        *fn_out = g_console_tap_fn;
+    }
+    if (ctx_out)
+    {
+        *ctx_out = g_console_tap_ctx;
+    }
+}
+
+void shell_emit_console_tap(const char *data, size_t len)
+{
+    shell_console_tap_fn fn = g_console_tap_fn;
+    void *ctx = g_console_tap_ctx;
+    if (fn && data && len > 0)
+    {
+        fn(ctx, data, len);
+    }
+}
 
 void shell_output_init_console(shell_output_t *out)
 {
@@ -155,6 +196,20 @@ bool shell_output_write_len(shell_output_t *out, const char *text, size_t len)
     if (!text || len == 0)
     {
         return true;
+    }
+
+    shell_state_t *active = g_active_shell;
+    if (active && active->stream_fn)
+    {
+        /*
+         * Stream immediately so remote shells (and the interactive console)
+         * see output as it is produced. Avoid double-printing when the stream
+         * target is already the console sink.
+         */
+        if (active->stream_fn != shell_stream_console_write || out->to_buffer || out->to_file)
+        {
+            active->stream_fn(active->stream_context, text, len);
+        }
     }
 
     if (out->to_file)
@@ -858,10 +913,21 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         return shell_duplicate_empty();
     }
 
+    shell_state_t *prev_shell = shell_push_active(shell);
+    shell_console_tap_fn prev_tap_fn = NULL;
+    void *prev_tap_ctx = NULL;
+    shell_get_console_tap(&prev_tap_fn, &prev_tap_ctx);
+    if (shell && shell->stream_fn)
+    {
+        shell_set_console_tap(shell->stream_fn, shell->stream_context);
+    }
+
     size_t input_len = strlen(input);
     char *working = (char *)malloc(input_len + 1);
     if (!working)
     {
+        shell_pop_active(prev_shell);
+        shell_set_console_tap(prev_tap_fn, prev_tap_ctx);
         return shell_duplicate_empty();
     }
     memcpy(working, input, input_len + 1);
@@ -874,6 +940,8 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         {
             *success = true;
         }
+        shell_pop_active(prev_shell);
+        shell_set_console_tap(prev_tap_fn, prev_tap_ctx);
         return shell_duplicate_empty();
     }
 
@@ -894,7 +962,9 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
         redirect_path = trim_whitespace(redirect + 1);
         if (*redirect_path == '\0')
         {
-            free(working);
+        free(working);
+        shell_pop_active(prev_shell);
+        shell_set_console_tap(prev_tap_fn, prev_tap_ctx);
         return shell_duplicate_string("Error: redirect target missing\n");
         }
     }
@@ -920,6 +990,8 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
     if (!args_owned)
     {
         free(working);
+        shell_pop_active(prev_shell);
+        shell_set_console_tap(prev_tap_fn, prev_tap_ctx);
         return shell_duplicate_string("Error: failed to expand arguments\n");
     }
     args = args_owned;
@@ -953,6 +1025,8 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             free(args_owned);
         }
         free(working);
+        shell_pop_active(prev_shell);
+        shell_set_console_tap(prev_tap_fn, prev_tap_ctx);
         return shell_duplicate_string("Error: out of memory\n");
     }
     if (redirect_path)
@@ -967,6 +1041,8 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                 free(args_owned);
             }
             free(working);
+            shell_pop_active(prev_shell);
+            shell_set_console_tap(prev_tap_fn, prev_tap_ctx);
             return shell_duplicate_string("Error: redirect failed\n");
         }
     }
@@ -1175,6 +1251,8 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
     {
         *success = handler_found && handler_result;
     }
+    shell_pop_active(prev_shell);
+    shell_set_console_tap(prev_tap_fn, prev_tap_ctx);
     return result;
 }
 
@@ -1196,7 +1274,8 @@ static void shell_run_and_display(shell_state_t *shell, const char *input)
 {
     bool success = false;
     char *result = shell_execute_line(shell, input, &success);
-    if (result && *result)
+    bool streamed = shell && shell->stream_fn;
+    if (result && *result && !streamed)
     {
         console_write(result);
         serial_printf("%s", result);

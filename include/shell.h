@@ -7,6 +7,7 @@
 
 typedef struct shell_output shell_output_t;
 typedef struct shell_state shell_state_t;
+typedef void (*shell_console_tap_fn)(void *context, const char *data, size_t len);
 
 struct shell_output
 {
@@ -52,5 +53,8 @@ bool shell_execute_binary(shell_state_t *shell,
                           const char *path,
                           const char *args,
                           const char *label);
+void shell_set_console_tap(shell_console_tap_fn fn, void *context);
+void shell_get_console_tap(shell_console_tap_fn *fn_out, void **ctx_out);
+void shell_emit_console_tap(const char *data, size_t len);
 
 #endif

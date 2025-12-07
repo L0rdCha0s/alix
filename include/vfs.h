@@ -58,6 +58,8 @@ size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity);
 bool vfs_remove_file(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_first_child(vfs_node_t *dir);
 vfs_node_t *vfs_next_sibling(vfs_node_t *node);
+typedef bool (*vfs_enum_cb_t)(const vfs_node_t *child, void *context);
+size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context);
 vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device_t *device);
 void vfs_clear_directory(vfs_node_t *dir);
 bool vfs_format(block_device_t *device);

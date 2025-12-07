@@ -12,6 +12,7 @@ atk_widget_t *atk_window_add_text_input(atk_widget_t *window, int x, int y, int 
 void atk_text_input_set_submit_handler(atk_widget_t *input, atk_text_input_submit_t handler, void *context);
 const char *atk_text_input_text(const atk_widget_t *input);
 void atk_text_input_clear(atk_widget_t *input);
+void atk_text_input_set_text(atk_widget_t *input, const char *text);
 bool atk_text_input_hit_test(const atk_widget_t *input, int origin_x, int origin_y, int px, int py);
 bool atk_text_input_is_focused(const atk_widget_t *input);
 void atk_text_input_focus(struct atk_state *state, atk_widget_t *input);

@@ -628,7 +628,7 @@ static void shell_session_exec_task(void *arg)
                   (unsigned)session->handle,
                   success ? "true" : "false",
                   (void *)result);
-    if (result)
+    if (result && !session->state.stream_fn)
     {
         shell_session_append(session, result, strlen(result));
         free(result);

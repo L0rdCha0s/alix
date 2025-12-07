@@ -39,5 +39,6 @@ int sys_fstat(int fd, syscall_stat_t *st);
 ssize_t sys_pread(int fd, void *buffer, size_t count, size_t offset);
 int sys_socket_open(const char *iface_name);
 int sys_socket_connect(int fd, const char *ipv4_text, uint16_t port);
+ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacity);
 
 #endif

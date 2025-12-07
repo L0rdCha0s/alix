@@ -177,7 +177,7 @@ bool shell_execute_binary(shell_state_t *shell,
     process_t *proc = process_create_user_elf_with_parent(exec_path,
                                                           (const uint8_t *)data,
                                                           size,
-                                                          -1,
+                                                          shell ? shell->stdout_fd : -1,
                                                           process_current(),
                                                           (const char *const *)tokens,
                                                           token_count);

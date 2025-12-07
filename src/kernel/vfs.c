@@ -1747,6 +1747,27 @@ vfs_node_t *vfs_next_sibling(vfs_node_t *node)
     return node ? node->next_sibling : NULL;
 }
 
+size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context)
+{
+    if (!dir || dir->type != VFS_NODE_DIR || !callback)
+    {
+        return 0;
+    }
+
+    size_t count = 0;
+    spinlock_lock(&g_vfs_tree_lock);
+    for (vfs_node_t *child = dir->first_child; child; child = child->next_sibling)
+    {
+        ++count;
+        if (!callback(child, context))
+        {
+            break;
+        }
+    }
+    spinlock_unlock(&g_vfs_tree_lock);
+    return count;
+}
+
 vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device_t *device)
 {
     if (!dir || dir->type != VFS_NODE_DIR || !name || !device)

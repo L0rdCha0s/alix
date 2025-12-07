@@ -34,6 +34,7 @@ typedef enum
     SYSCALL_TIME_INFO = 25,
     SYSCALL_SOCKET_OPEN = 26,
     SYSCALL_SOCKET_CONNECT = 27,
+    SYSCALL_LIST_DIR = 28,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)
@@ -48,6 +49,7 @@ typedef enum
 #define SYSCALL_PROCESS_NAME_MAX 32
 #define SYSCALL_NET_IF_NAME_MAX 8
 #define SYSCALL_CPU_MAX 32
+#define SYSCALL_DIR_NAME_MAX 64
 
 typedef enum
 {
@@ -117,6 +119,22 @@ typedef struct
     uint32_t type; /* vfs_node_type_t */
     uint32_t reserved;
 } syscall_stat_t;
+
+typedef enum
+{
+    SYSCALL_NODE_TYPE_DIR = 0,
+    SYSCALL_NODE_TYPE_FILE = 1,
+    SYSCALL_NODE_TYPE_BLOCK = 2,
+    SYSCALL_NODE_TYPE_SYMLINK = 3
+} syscall_node_type_t;
+
+typedef struct
+{
+    uint32_t type; /* syscall_node_type_t */
+    uint32_t reserved;
+    uint64_t size_bytes;
+    char name[SYSCALL_DIR_NAME_MAX];
+} syscall_dirent_t;
 
 typedef struct
 {

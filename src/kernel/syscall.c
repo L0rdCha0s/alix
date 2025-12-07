@@ -41,6 +41,13 @@ typedef struct
 #define SYSCALL_MAX_SERIAL_BYTES 4096u
 #define SYSCALL_MAX_IP_TEXT_LEN  64u
 
+typedef struct
+{
+    syscall_dirent_t *entries;
+    size_t capacity;
+    size_t count;
+} syscall_dir_enum_t;
+
 static ssize_t syscall_file_read(void *ctx, void *buffer, size_t count)
 {
     file_handle_t *handle = (file_handle_t *)ctx;
@@ -78,6 +85,48 @@ static void syscall_copy_string(char *dst, size_t capacity, const char *src)
     }
     memcpy(dst, src, len);
     dst[len] = '\0';
+}
+
+static bool syscall_dir_collect(const vfs_node_t *child, void *context)
+{
+    if (!child || !context)
+    {
+        return false;
+    }
+    syscall_dir_enum_t *ctx = (syscall_dir_enum_t *)context;
+    if (!ctx->entries || ctx->capacity == 0)
+    {
+        return false;
+    }
+    if (ctx->count >= ctx->capacity)
+    {
+        return false;
+    }
+
+    syscall_dirent_t *dst = &ctx->entries[ctx->count];
+    size_t size_bytes = 0;
+    vfs_node_type_t node_type = VFS_NODE_FILE;
+    if (!vfs_stat(child, &size_bytes, &node_type))
+    {
+        return false;
+    }
+
+    dst->type = (uint32_t)node_type;
+    dst->size_bytes = size_bytes;
+    dst->reserved = 0;
+    const char *name = vfs_name(child);
+    size_t len = name ? strlen(name) : 0;
+    if (len >= SYSCALL_DIR_NAME_MAX)
+    {
+        len = SYSCALL_DIR_NAME_MAX - 1;
+    }
+    if (len > 0 && name)
+    {
+        memcpy(dst->name, name, len);
+    }
+    dst->name[len] = '\0';
+    ctx->count++;
+    return ctx->count < ctx->capacity;
 }
 
 static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t capacity)
@@ -694,6 +743,75 @@ static int64_t syscall_do_close(uint64_t fd)
     return (int64_t)fd_close((int)fd);
 }
 
+static int64_t syscall_do_list_dir(const char *path, syscall_dirent_t *out_entries, size_t capacity)
+{
+    if (!out_entries || capacity == 0)
+    {
+        return -1;
+    }
+
+    size_t bytes = 0;
+    if (__builtin_mul_overflow(capacity, sizeof(*out_entries), &bytes))
+    {
+        return -1;
+    }
+
+    if (!user_ptr_range_valid(out_entries, bytes))
+    {
+        return -1;
+    }
+
+    char *path_buf = (char *)malloc(SYSCALL_MAX_PATH_LEN);
+    if (!path_buf)
+    {
+        return -1;
+    }
+    size_t copied_len = 0;
+    if (!user_copy_string_from_user(path_buf, SYSCALL_MAX_PATH_LEN, path ? path : "", &copied_len))
+    {
+        free(path_buf);
+        return -1;
+    }
+    (void)copied_len;
+
+    vfs_node_t *cwd = process_current_cwd();
+    if (!cwd)
+    {
+        cwd = vfs_root();
+    }
+    vfs_node_t *dir = vfs_resolve(cwd, path_buf);
+    free(path_buf);
+    if (!dir || !vfs_is_dir(dir))
+    {
+        return -1;
+    }
+
+    syscall_dirent_t *entries = (syscall_dirent_t *)malloc(bytes);
+    if (!entries)
+    {
+        return -1;
+    }
+    syscall_dir_enum_t ctx = {
+        .entries = entries,
+        .capacity = capacity,
+        .count = 0
+    };
+    vfs_enum_children(dir, syscall_dir_collect, &ctx);
+
+    if (ctx.count > 0)
+    {
+        size_t copy_bytes = ctx.count * sizeof(syscall_dirent_t);
+        if (!user_copy_to_user(out_entries, entries, copy_bytes))
+        {
+            free(entries);
+            return -1;
+        }
+    }
+
+    free(entries);
+    return (int64_t)ctx.count;
+}
+
 static int64_t syscall_do_open(const char *path, uint64_t flags)
 {
     if (!path)
@@ -835,6 +953,11 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_FSTAT:
             result = syscall_do_fstat(frame->rdi, (syscall_stat_t *)frame->rsi);
+            break;
+        case SYSCALL_LIST_DIR:
+            result = syscall_do_list_dir((const char *)frame->rdi,
+                                         (syscall_dirent_t *)frame->rsi,
+                                         (size_t)frame->rdx);
             break;
         case SYSCALL_YIELD:
             process_preempt_hook();

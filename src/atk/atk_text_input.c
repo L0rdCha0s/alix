@@ -172,6 +172,37 @@ void atk_text_input_clear(atk_widget_t *input)
     text_input_invalidate(input);
 }
 
+void atk_text_input_set_text(atk_widget_t *input, const char *text)
+{
+    atk_text_input_priv_t *priv = (atk_text_input_priv_t *)atk_widget_priv(input, &ATK_TEXT_INPUT_CLASS);
+    if (!priv)
+    {
+        return;
+    }
+    const char *src = text ? text : "";
+    size_t len = strlen(src);
+    size_t needed = len + 1;
+    if (needed > priv->capacity)
+    {
+        if (!text_input_ensure_capacity(priv, len))
+        {
+            return;
+        }
+    }
+
+    if (priv->text && len > 0)
+    {
+        memcpy(priv->text, src, len);
+        priv->text[len] = '\0';
+    }
+    else if (priv->text)
+    {
+        priv->text[0] = '\0';
+    }
+    priv->length = len;
+    text_input_invalidate(input);
+}
+
 bool atk_text_input_hit_test(const atk_widget_t *input, int origin_x, int origin_y, int px, int py)
 {
     if (!input || !input->used)
