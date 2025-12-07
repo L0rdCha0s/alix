@@ -392,7 +392,7 @@ static atk_mouse_response_t scrollbar_mouse_cb(atk_widget_t *widget,
 
     atk_mouse_response_t response = ATK_MOUSE_RESPONSE_NONE;
 
-    if (event->pressed_edge)
+    if (event->pressed_edge || (event->left_pressed && !priv->dragging))
     {
         bool value_changed = false;
         if (atk_scrollbar_begin_drag(widget, event->cursor_x, event->cursor_y, &value_changed))

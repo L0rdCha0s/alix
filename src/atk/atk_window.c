@@ -420,6 +420,20 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
         return NULL;
     }
 
+    /* Prioritize explicit scrollbar hit before general child iteration to ensure drags capture. */
+    ATK_LIST_FOR_EACH_REVERSE(sb_node, &priv->scrollbars)
+    {
+        atk_widget_t *sb = (atk_widget_t *)sb_node->value;
+        if (!sb || !sb->used || sb->parent != window)
+        {
+            continue;
+        }
+        if (atk_widget_hit_test(sb, window->x, window->y, px, py))
+        {
+            return sb;
+        }
+    }
+
     for (atk_list_node_t *node = priv->children.tail; node; )
     {
         atk_list_node_t *prev = window_list_prev_safe(node, "widget_at");

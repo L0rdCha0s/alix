@@ -1,6 +1,7 @@
 #include "atk_user.h"
 
 #include "atk.h"
+#include "atk_app.h"
 #include "atk_internal.h"
 #include "atk_menu_bar.h"
 #include "atk_window.h"
@@ -28,9 +29,6 @@ typedef struct
 } atk_shell_app_t;
 
 static void shell_apply_theme(atk_state_t *state);
-static void shell_log_key(char ch);
-static bool shell_state_has_dirty(void);
-static bool shell_dispatch_event(atk_shell_app_t *app, const user_atk_event_t *event);
 static bool shell_handle_resize(atk_shell_app_t *app, uint32_t width, uint32_t height);
 static bool shell_poll_output(atk_shell_app_t *app);
 
@@ -55,7 +53,7 @@ static void shell_render(atk_shell_app_t *app)
         return;
     }
     atk_render();
-    atk_user_present(&app->remote);
+    atk_user_present_force(&app->remote);
 }
 
 static bool shell_handle_resize(atk_shell_app_t *app, uint32_t width, uint32_t height)
@@ -72,6 +70,21 @@ static bool shell_handle_resize(atk_shell_app_t *app, uint32_t width, uint32_t h
     return true;
 }
 
+static bool shell_on_resize_event(uint32_t width, uint32_t height, void *context)
+{
+    return shell_handle_resize((atk_shell_app_t *)context, width, height);
+}
+
+static void shell_on_close_event(void *context)
+{
+    atk_shell_app_t *app = (atk_shell_app_t *)context;
+    if (app)
+    {
+        app->running = false;
+    }
+    atk_main_request_exit();
+}
+
 static void shell_append(atk_shell_app_t *app, const char *text)
 {
     if (!app || !app->terminal || !text)
@@ -86,6 +99,10 @@ static void shell_append(atk_shell_app_t *app, const char *text)
         {
             app->last_output_newline = text[len - 1] == '\n';
         }
+    }
+    if (app && app->window)
+    {
+        atk_window_mark_dirty(app->window);
     }
 }
 
@@ -113,28 +130,6 @@ static void shell_handle_output(atk_shell_app_t *app, const char *buffer, size_t
     }
 }
 
-static void shell_log_key(char ch)
-{
-    char msg[32];
-    size_t pos = 0;
-    const char prefix[] = "[atk_shell] key=";
-    const size_t prefix_len = sizeof(prefix) - 1;
-    memcpy(msg + pos, prefix, prefix_len);
-    pos += prefix_len;
-    static const char hex[] = "0123456789ABCDEF";
-    unsigned char u = (unsigned char)ch;
-    msg[pos++] = '0';
-    msg[pos++] = 'x';
-    msg[pos++] = hex[(u >> 4) & 0xF];
-    msg[pos++] = hex[u & 0xF];
-    msg[pos++] = ' ';
-    msg[pos++] = '(';
-    msg[pos++] = (u >= 32 && u <= 126) ? (char)u : '.';
-    msg[pos++] = ')';
-    msg[pos++] = '\n';
-    sys_serial_write(msg, pos);
-}
-
 static void shell_on_submit(atk_widget_t *terminal, void *context, const char *line)
 {
     (void)terminal;
@@ -155,7 +150,6 @@ static void shell_on_submit(atk_widget_t *terminal, void *context, const char *l
     {
         app->command_active = true;
     }
-    shell_render(app);
 }
 
 static bool shell_on_control(atk_widget_t *terminal, void *context, char control)
@@ -181,54 +175,11 @@ static bool shell_on_control(atk_widget_t *terminal, void *context, char control
         if (sys_shell_interrupt(app->shell_handle) == 0)
         {
             shell_poll_output(app);
-            shell_render(app);
             return true;
         }
         return false;
     }
     return false;
-}
-
-static bool shell_handle_mouse(atk_shell_app_t *app, const user_atk_event_t *event)
-{
-    (void)app;
-    if (!event)
-    {
-        return false;
-    }
-    bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
-    bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
-    bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
-    atk_mouse_event_result_t result = atk_handle_mouse_event(event->x,
-                                                             event->y,
-                                                             press,
-                                                             release,
-                                                             left);
-    return result.redraw;
-}
-
-static bool shell_handle_key(atk_shell_app_t *app, const user_atk_event_t *event)
-{
-    if (!app || !event)
-    {
-        return false;
-    }
-
-    if (app && app->terminal)
-    {
-        atk_state_t *state = atk_state_get();
-        if (state && atk_state_focus_widget(state) != app->terminal)
-        {
-            atk_terminal_focus(state, app->terminal);
-        }
-    }
-
-    char ch = (char)event->data0;
-
-    shell_log_key(ch);
-
-    atk_key_event_result_t result = atk_handle_key_char(ch);
-    return result.redraw;
 }
 
 static bool shell_init_ui(atk_shell_app_t *app)
@@ -314,40 +265,14 @@ static bool shell_poll_output(atk_shell_app_t *app)
     return changed;
 }
 
-static bool shell_dispatch_event(atk_shell_app_t *app, const user_atk_event_t *event)
+static bool shell_on_tick(void *context)
 {
-    if (!app || !event)
+    atk_shell_app_t *app = (atk_shell_app_t *)context;
+    if (!app || !app->running)
     {
         return false;
     }
-
-    switch (event->type)
-    {
-        case USER_ATK_EVENT_MOUSE:
-            return shell_handle_mouse(app, event);
-        case USER_ATK_EVENT_KEY:
-            return shell_handle_key(app, event);
-        case USER_ATK_EVENT_RESIZE:
-            return shell_handle_resize(app,
-                                       (uint32_t)event->data0,
-                                       (uint32_t)event->data1);
-        case USER_ATK_EVENT_CLOSE:
-            app->running = false;
-            return false;
-        default:
-            break;
-    }
-    return false;
-}
-
-static bool shell_state_has_dirty(void)
-{
-    atk_state_t *state = atk_state_get();
-    if (!state)
-    {
-        return false;
-    }
-    return state->dirty_full || state->dirty_active;
+    return shell_poll_output(app);
 }
 
 int main(void)
@@ -387,30 +312,18 @@ int main(void)
 
     shell_render(&app);
 
-    while (app.running)
-    {
-        bool redraw = false;
-        bool had_event = false;
-        user_atk_event_t event;
+    atk_main_config_t main_cfg = {
+        .window = &app.remote,
+        .tick = shell_on_tick,
+        .tick_context = &app,
+        .present_on_idle = false,
+        .legacy_input = false
+    };
 
-        while (atk_user_poll_event(&app.remote, &event))
-        {
-            had_event = true;
-            redraw |= shell_dispatch_event(&app, &event);
-        }
+    atk_main_register_resize_handler(shell_on_resize_event, &app);
+    atk_main_register_close_handler(shell_on_close_event, &app);
 
-        redraw |= shell_poll_output(&app);
-
-        if (redraw || shell_state_has_dirty())
-        {
-            shell_render(&app);
-        }
-        else if (!had_event)
-        {
-            /* Avoid busy-spin when idle, but still allow output polling. */
-            sys_yield();
-        }
-    }
+    atk_main(&main_cfg);
 
     if (app.shell_handle >= 0)
     {

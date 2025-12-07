@@ -1,6 +1,7 @@
 #include "atk_user.h"
 
 #include "atk.h"
+#include "atk_app.h"
 #include "atk_internal.h"
 #include "atk_menu_bar.h"
 #include "atk_window.h"
@@ -92,33 +93,6 @@ static bool init_ui(void)
     return true;
 }
 
-static void process_mouse_event(const user_atk_event_t *event)
-{
-    bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
-    bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
-    bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
-    atk_mouse_event_result_t result = atk_handle_mouse_event(event->x,
-                                                             event->y,
-                                                             press,
-                                                             release,
-                                                             left);
-    if (result.redraw)
-    {
-        atk_render();
-        atk_user_present(&g_session);
-    }
-}
-
-static void process_key_event(const user_atk_event_t *event)
-{
-    atk_key_event_result_t result = atk_handle_key_char((char)event->data0);
-    if (result.redraw)
-    {
-        atk_render();
-        atk_user_present(&g_session);
-    }
-}
-
 int main(void)
 {
     if (!atk_user_window_open(&g_session, "ATK Demo", ATK_DEMO_WIDTH, ATK_DEMO_HEIGHT))
@@ -136,32 +110,17 @@ int main(void)
     }
 
     atk_render();
-    atk_user_present(&g_session);
+    atk_user_present_force(&g_session);
 
-    bool running = true;
-    while (running)
-    {
-        user_atk_event_t event;
-        if (!atk_user_wait_event(&g_session, &event))
-        {
-            continue;
-        }
+    atk_main_config_t main_cfg = {
+        .window = &g_session,
+        .tick = NULL,
+        .tick_context = NULL,
+        .present_on_idle = false,
+        .legacy_input = false
+    };
 
-        switch (event.type)
-        {
-            case USER_ATK_EVENT_MOUSE:
-                process_mouse_event(&event);
-                break;
-            case USER_ATK_EVENT_KEY:
-                process_key_event(&event);
-                break;
-            case USER_ATK_EVENT_CLOSE:
-                running = false;
-                break;
-            default:
-                break;
-        }
-    }
+    atk_main(&main_cfg);
 
     atk_user_close(&g_session);
     return 0;

@@ -1100,39 +1100,6 @@ static void on_file_submit(atk_widget_t *input, void *context)
     mp3_start_selected((mp3_ui_t *)context);
 }
 
-static bool mp3_on_mouse_event(const user_atk_event_t *event, void *context)
-{
-    mp3_ui_t *ui = (mp3_ui_t *)context;
-    if (!ui || !event)
-    {
-        return false;
-    }
-    bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
-    bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
-    bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
-    atk_mouse_event_result_t res = atk_handle_mouse_event(event->x, event->y, press, release, left);
-    if (res.exit_video)
-    {
-        atk_main_request_exit();
-    }
-    return res.redraw;
-}
-
-static bool mp3_on_key_event(const user_atk_event_t *event, void *context)
-{
-    mp3_ui_t *ui = (mp3_ui_t *)context;
-    if (!ui || !event)
-    {
-        return false;
-    }
-    atk_key_event_result_t res = atk_handle_key_char((char)event->data0);
-    if (res.exit_video)
-    {
-        atk_main_request_exit();
-    }
-    return res.redraw;
-}
-
 static bool mp3_on_resize_event(uint32_t width, uint32_t height, void *context)
 {
     mp3_ui_t *ui = (mp3_ui_t *)context;
@@ -1216,24 +1183,20 @@ int main(void)
     }
     log_mp3("[atk_mp3] build_ui ok\r\n");
 
-    const atk_app_event_handlers_t handlers = {
-        .on_mouse = NULL,
-        .on_key = NULL,
-        .on_resize = mp3_on_resize_event,
-        .on_close = mp3_on_close_event
-    };
     atk_main_config_t main_cfg = {
         .window = &ui.remote,
-        .handlers = &handlers,
-        .handler_context = &ui,
         .tick = mp3_on_tick,
         .tick_context = &ui,
-        .present_on_idle = false
+        .present_on_idle = false,
+        .legacy_input = false
     };
 
     atk_render();
     atk_user_present_force(&ui.remote);
     log_mp3("[atk_mp3] first present\r\n");
+
+    atk_main_register_resize_handler(mp3_on_resize_event, &ui);
+    atk_main_register_close_handler(mp3_on_close_event, &ui);
 
     atk_main(&main_cfg);
     mp3_close_file_dialog(&ui);

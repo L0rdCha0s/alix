@@ -1,6 +1,7 @@
 #include "atk_user.h"
 
 #include "atk.h"
+#include "atk_app.h"
 #include "atk_internal.h"
 #include "atk_window.h"
 #include "atk_menu_bar.h"
@@ -576,16 +577,6 @@ static void clock_apply_theme(atk_state_t *state)
     atk_state_theme_commit(state);
 }
 
-static bool clock_state_has_dirty(void)
-{
-    atk_state_t *state = atk_state_get();
-    if (!state)
-    {
-        return false;
-    }
-    return state->dirty_full || state->dirty_active;
-}
-
 static bool clock_tick(atk_clock_app_t *app)
 {
     if (!app || !app->window)
@@ -685,39 +676,7 @@ static void clock_present(atk_clock_app_t *app)
         return;
     }
     atk_render();
-    atk_user_present(&app->remote);
-}
-
-static bool clock_handle_mouse(const user_atk_event_t *event, bool *needs_render)
-{
-    if (!event || !needs_render)
-    {
-        return false;
-    }
-    atk_mouse_event_result_t result = atk_handle_mouse_event(event->x,
-                                                             event->y,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0);
-    if (result.redraw)
-    {
-        *needs_render = true;
-    }
-    return result.redraw;
-}
-
-static bool clock_handle_key(const user_atk_event_t *event, bool *needs_render)
-{
-    if (!event || !needs_render)
-    {
-        return false;
-    }
-    atk_key_event_result_t result = atk_handle_key_char((char)event->data0);
-    if (result.redraw)
-    {
-        *needs_render = true;
-    }
-    return result.redraw;
+    atk_user_present_force(&app->remote);
 }
 
 static void clock_handle_resize(atk_clock_app_t *app, uint32_t width, uint32_t height)
@@ -731,6 +690,32 @@ static void clock_handle_resize(atk_clock_app_t *app, uint32_t width, uint32_t h
     atk_window_request_layout(app->window);
     clock_layout(app);
     atk_window_mark_dirty(app->window);
+}
+
+static bool clock_on_resize_event(uint32_t width, uint32_t height, void *context)
+{
+    clock_handle_resize((atk_clock_app_t *)context, width, height);
+    return true;
+}
+
+static void clock_on_close_event(void *context)
+{
+    atk_clock_app_t *app = (atk_clock_app_t *)context;
+    if (app)
+    {
+        app->running = false;
+    }
+    atk_main_request_exit();
+}
+
+static bool clock_on_tick(void *context)
+{
+    atk_clock_app_t *app = (atk_clock_app_t *)context;
+    if (!app || !app->running)
+    {
+        return false;
+    }
+    return clock_tick(app);
 }
 
 static bool clock_init_ui(atk_clock_app_t *app)
@@ -875,49 +860,18 @@ int main(int argc, char **argv)
 
     clock_present(&app);
 
-    while (app.running)
-    {
-        bool needs_render = false;
-        bool had_event = false;
-        user_atk_event_t event;
+    atk_main_config_t main_cfg = {
+        .window = &app.remote,
+        .tick = clock_on_tick,
+        .tick_context = &app,
+        .present_on_idle = false,
+        .legacy_input = false
+    };
 
-        while (atk_user_poll_event(&app.remote, &event))
-        {
-            had_event = true;
-            switch (event.type)
-            {
-                case USER_ATK_EVENT_MOUSE:
-                    clock_handle_mouse(&event, &needs_render);
-                    break;
-                case USER_ATK_EVENT_KEY:
-                    clock_handle_key(&event, &needs_render);
-                    break;
-                case USER_ATK_EVENT_RESIZE:
-                    clock_handle_resize(&app, (uint32_t)event.data0, (uint32_t)event.data1);
-                    needs_render = true;
-                    break;
-                case USER_ATK_EVENT_CLOSE:
-                    app.running = false;
-                    break;
-                default:
-                    break;
-            }
-        }
+    atk_main_register_resize_handler(clock_on_resize_event, &app);
+    atk_main_register_close_handler(clock_on_close_event, &app);
 
-        if (clock_tick(&app))
-        {
-            needs_render = true;
-        }
-
-        if (needs_render || clock_state_has_dirty())
-        {
-            clock_present(&app);
-        }
-        else if (!had_event)
-        {
-            sys_yield();
-        }
-    }
+    atk_main(&main_cfg);
 
     atk_user_close(&app.remote);
     clock_destroy(&app);

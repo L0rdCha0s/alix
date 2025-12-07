@@ -1,6 +1,7 @@
 #include "atk_user.h"
 
 #include "atk.h"
+#include "atk_app.h"
 #include "atk_internal.h"
 #include "atk_window.h"
 #include "atk_menu_bar.h"
@@ -37,8 +38,6 @@ static void relayout(rich_app_t *app);
 static void update_font_buttons(rich_app_t *app);
 static void populate_sample(rich_app_t *app);
 static void on_font_button(atk_widget_t *button, void *context);
-static void process_mouse(rich_app_t *app, const user_atk_event_t *event);
-static void process_key(rich_app_t *app, const user_atk_event_t *event);
 static bool handle_resize(rich_app_t *app, uint32_t width, uint32_t height);
 
 static void apply_theme(atk_state_t *state)
@@ -296,41 +295,6 @@ static void on_font_button(atk_widget_t *button, void *context)
     }
 }
 
-static void process_mouse(rich_app_t *app, const user_atk_event_t *event)
-{
-    if (!app || !event)
-    {
-        return;
-    }
-    bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
-    bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
-    bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
-    atk_mouse_event_result_t result = atk_handle_mouse_event(event->x,
-                                                             event->y,
-                                                             press,
-                                                             release,
-                                                             left);
-    if (result.redraw)
-    {
-        atk_render();
-        atk_user_present(&app->remote);
-    }
-}
-
-static void process_key(rich_app_t *app, const user_atk_event_t *event)
-{
-    if (!app || !event)
-    {
-        return;
-    }
-    atk_key_event_result_t result = atk_handle_key_char((char)event->data0);
-    if (result.redraw)
-    {
-        atk_render();
-        atk_user_present(&app->remote);
-    }
-}
-
 static bool handle_resize(rich_app_t *app, uint32_t width, uint32_t height)
 {
     if (!app || !app->window || width == 0 || height == 0)
@@ -341,10 +305,26 @@ static bool handle_resize(rich_app_t *app, uint32_t width, uint32_t height)
     app->window->height = (int)height;
     relayout(app);
     atk_window_request_layout(app->window);
-    atk_window_mark_dirty(app->window);
-    atk_render();
-    atk_user_present(&app->remote);
+    if (app->window)
+    {
+        atk_window_mark_dirty(app->window);
+    }
     return true;
+}
+
+static bool rich_on_resize_event(uint32_t width, uint32_t height, void *context)
+{
+    return handle_resize((rich_app_t *)context, width, height);
+}
+
+static void rich_on_close_event(void *context)
+{
+    rich_app_t *app = (rich_app_t *)context;
+    if (app)
+    {
+        app->running = false;
+    }
+    atk_main_request_exit();
 }
 
 int main(void)
@@ -371,34 +351,22 @@ int main(void)
     }
 
     atk_render();
-    atk_user_present(&app.remote);
+    atk_user_present_force(&app.remote);
 
     app.running = true;
-    while (app.running)
-    {
-        user_atk_event_t event;
-        if (!atk_user_wait_event(&app.remote, &event))
-        {
-            continue;
-        }
-        switch (event.type)
-        {
-            case USER_ATK_EVENT_MOUSE:
-                process_mouse(&app, &event);
-                break;
-            case USER_ATK_EVENT_KEY:
-                process_key(&app, &event);
-                break;
-            case USER_ATK_EVENT_RESIZE:
-                handle_resize(&app, (uint32_t)event.data0, (uint32_t)event.data1);
-                break;
-            case USER_ATK_EVENT_CLOSE:
-                app.running = false;
-                break;
-            default:
-                break;
-        }
-    }
+
+    atk_main_config_t main_cfg = {
+        .window = &app.remote,
+        .tick = NULL,
+        .tick_context = NULL,
+        .present_on_idle = false,
+        .legacy_input = false
+    };
+
+    atk_main_register_resize_handler(rich_on_resize_event, &app);
+    atk_main_register_close_handler(rich_on_close_event, &app);
+
+    atk_main(&main_cfg);
 
     atk_user_close(&app.remote);
     return 0;

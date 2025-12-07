@@ -1,6 +1,7 @@
 #include "atk_user.h"
 
 #include "atk.h"
+#include "atk_app.h"
 #include "atk_internal.h"
 #include "atk_menu_bar.h"
 #include "atk_window.h"
@@ -753,32 +754,6 @@ static bool taskmgr_init_ui(atk_taskmgr_app_t *app)
     return true;
 }
 
-static void taskmgr_handle_mouse(const user_atk_event_t *event, bool *needs_render)
-{
-    if (!event)
-    {
-        return;
-    }
-    atk_mouse_event_result_t result = atk_handle_mouse_event(event->x,
-                                                             event->y,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0);
-    if (result.redraw)
-    {
-        *needs_render = true;
-    }
-}
-
-static void taskmgr_handle_key(const user_atk_event_t *event, bool *needs_render)
-{
-    atk_key_event_result_t result = atk_handle_key_char((char)event->data0);
-    if (result.redraw)
-    {
-        *needs_render = true;
-    }
-}
-
 static void taskmgr_render(atk_taskmgr_app_t *app)
 {
     if (!app)
@@ -786,7 +761,7 @@ static void taskmgr_render(atk_taskmgr_app_t *app)
         return;
     }
     atk_render();
-    bool ok = atk_user_present(&app->remote);
+    bool ok = atk_user_present_force(&app->remote);
     app->last_render_ms = sys_time_millis();
     if (!ok)
     {
@@ -803,6 +778,65 @@ static void taskmgr_handle_resize(atk_taskmgr_app_t *app, uint32_t width, uint32
     app->window->width = (int)width;
     app->window->height = (int)height;
     atk_window_request_layout(app->window);
+}
+
+static bool taskmgr_on_resize_event(uint32_t width, uint32_t height, void *context)
+{
+    taskmgr_handle_resize((atk_taskmgr_app_t *)context, width, height);
+    return true;
+}
+
+static void taskmgr_on_close_event(void *context)
+{
+    atk_taskmgr_app_t *app = (atk_taskmgr_app_t *)context;
+    if (app)
+    {
+        app->running = false;
+    }
+    atk_main_request_exit();
+}
+
+static bool taskmgr_on_tick(void *context)
+{
+    atk_taskmgr_app_t *app = (atk_taskmgr_app_t *)context;
+    if (!app || !app->running)
+    {
+        return false;
+    }
+
+    uint64_t now_ms = sys_time_millis();
+    if (now_ms < app->last_refresh_ms)
+    {
+        app->last_refresh_ms = now_ms;
+    }
+
+    bool needs_render = false;
+    uint64_t elapsed_ms = now_ms - app->last_refresh_ms;
+    if (elapsed_ms >= TASKMGR_REFRESH_MS)
+    {
+        uint64_t refresh_cpu_delta = taskmgr_refresh_cpu(app);
+        taskmgr_refresh_processes(app, refresh_cpu_delta);
+        taskmgr_refresh_network(app);
+        needs_render = true;
+        app->last_refresh_ms = now_ms;
+    }
+
+    uint64_t since_render = now_ms - app->last_render_ms;
+    if (!needs_render && since_render >= 5000)
+    {
+        if (app->window)
+        {
+            atk_window_mark_dirty(app->window);
+        }
+        needs_render = true;
+    }
+
+    if (needs_render)
+    {
+        app->last_render_ms = now_ms;
+    }
+
+    return needs_render;
 }
 
 int main(void)
@@ -839,73 +873,18 @@ int main(void)
     app.last_refresh_ms = sys_time_millis();
     app.last_render_ms = app.last_refresh_ms;
 
-    while (app.running)
-    {
-        bool needs_render = false;
-        user_atk_event_t event;
-        while (atk_user_poll_event(&app.remote, &event))
-        {
-            switch (event.type)
-            {
-                case USER_ATK_EVENT_MOUSE:
-                    taskmgr_handle_mouse(&event, &needs_render);
-                    break;
-                case USER_ATK_EVENT_KEY:
-                    taskmgr_handle_key(&event, &needs_render);
-                    break;
-                case USER_ATK_EVENT_CLOSE:
-                    app.running = false;
-                    break;
-                case USER_ATK_EVENT_RESIZE:
-                    taskmgr_handle_resize(&app, (uint32_t)event.data0, (uint32_t)event.data1);
-                    needs_render = true;
-                    break;
-                default:
-                    break;
-            }
-        }
+    atk_main_config_t main_cfg = {
+        .window = &app.remote,
+        .tick = taskmgr_on_tick,
+        .tick_context = &app,
+        .present_on_idle = false,
+        .legacy_input = false
+    };
 
-        if (!app.running)
-        {
-            break;
-        }
+    atk_main_register_resize_handler(taskmgr_on_resize_event, &app);
+    atk_main_register_close_handler(taskmgr_on_close_event, &app);
 
-        uint64_t now_ms = sys_time_millis();
-        /* Handle clock adjustments or wrap: if time goes backwards, reset the baseline. */
-        if (now_ms < app.last_refresh_ms)
-        {
-            app.last_refresh_ms = now_ms;
-        }
-        uint64_t elapsed_ms = now_ms - app.last_refresh_ms;
-        if (elapsed_ms >= TASKMGR_REFRESH_MS)
-        {
-            uint64_t refresh_cpu_delta = taskmgr_refresh_cpu(&app);
-            taskmgr_refresh_processes(&app, refresh_cpu_delta);
-            taskmgr_refresh_network(&app);
-            needs_render = true;
-            app.last_refresh_ms = now_ms;
-        }
-
-        if (needs_render)
-        {
-            taskmgr_render(&app);
-        }
-
-        /* Watchdog: if nothing has rendered for a while, force a present. */
-        uint64_t since_render = now_ms - app.last_render_ms;
-        if (!needs_render && since_render >= 5000)
-        {
-            if (app.window)
-            {
-                atk_window_mark_dirty(app.window);
-            }
-            printf("atk_taskmgr: watchdog forcing render after %llu ms idle\n",
-                   (unsigned long long)since_render);
-            taskmgr_render(&app);
-        }
-
-        sys_yield();
-    }
+    atk_main(&main_cfg);
 
     atk_user_close(&app.remote);
     return 0;

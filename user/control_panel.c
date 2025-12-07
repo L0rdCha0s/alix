@@ -1,6 +1,7 @@
 #include "atk_user.h"
 
 #include "atk.h"
+#include "atk_app.h"
 #include "atk_internal.h"
 #include "atk_window.h"
 #include "atk/layout.h"
@@ -171,7 +172,7 @@ static void cp_render(control_panel_app_t *app)
         return;
     }
     atk_render();
-    atk_user_present(&app->remote);
+    atk_user_present_force(&app->remote);
 }
 
 static void cp_layout(control_panel_app_t *app)
@@ -290,36 +291,6 @@ static bool cp_init_ui(control_panel_app_t *app)
     return true;
 }
 
-static void cp_handle_mouse(const user_atk_event_t *event, bool *needs_render)
-{
-    if (!event || !needs_render)
-    {
-        return;
-    }
-    atk_mouse_event_result_t result = atk_handle_mouse_event(event->x,
-                                                             event->y,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0,
-                                                             (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0);
-    if (result.redraw)
-    {
-        *needs_render = true;
-    }
-}
-
-static void cp_handle_key(const user_atk_event_t *event, bool *needs_render)
-{
-    if (!event || !needs_render)
-    {
-        return;
-    }
-    atk_key_event_result_t result = atk_handle_key_char((char)event->data0);
-    if (result.redraw)
-    {
-        *needs_render = true;
-    }
-}
-
 static void cp_handle_resize(control_panel_app_t *app, uint32_t width, uint32_t height)
 {
     if (!app || !app->window)
@@ -331,6 +302,37 @@ static void cp_handle_resize(control_panel_app_t *app, uint32_t width, uint32_t 
     app->window->height = (int)height;
     atk_window_request_layout(app->window);
     cp_layout(app);
+}
+
+static bool cp_on_resize_event(uint32_t width, uint32_t height, void *context)
+{
+    cp_handle_resize((control_panel_app_t *)context, width, height);
+    return true;
+}
+
+static void cp_on_close_event(void *context)
+{
+    control_panel_app_t *app = (control_panel_app_t *)context;
+    if (app)
+    {
+        app->running = false;
+    }
+    atk_main_request_exit();
+}
+
+static bool cp_on_tick(void *context)
+{
+    control_panel_app_t *app = (control_panel_app_t *)context;
+    if (!app)
+    {
+        return false;
+    }
+    bool sliding = app->nav && atk_nav_stack_sliding(app->nav);
+    if (sliding && app->window)
+    {
+        atk_window_mark_dirty(app->window);
+    }
+    return sliding;
 }
 
 int main(void)
@@ -359,49 +361,18 @@ int main(void)
 
     cp_render(&app);
 
-    while (app.running)
-    {
-        bool needs_render = false;
-        user_atk_event_t event;
-        while (atk_user_poll_event(&app.remote, &event))
-        {
-            switch (event.type)
-            {
-                case USER_ATK_EVENT_MOUSE:
-                    cp_handle_mouse(&event, &needs_render);
-                    break;
-                case USER_ATK_EVENT_KEY:
-                    cp_handle_key(&event, &needs_render);
-                    break;
-                case USER_ATK_EVENT_CLOSE:
-                    app.running = false;
-                    break;
-                case USER_ATK_EVENT_RESIZE:
-                    cp_handle_resize(&app, (uint32_t)event.data0, (uint32_t)event.data1);
-                    needs_render = true;
-                    break;
-                default:
-                    break;
-            }
-        }
+    atk_main_config_t main_cfg = {
+        .window = &app.remote,
+        .tick = cp_on_tick,
+        .tick_context = &app,
+        .present_on_idle = false,
+        .legacy_input = false
+    };
 
-        if (!app.running)
-        {
-            break;
-        }
+    atk_main_register_resize_handler(cp_on_resize_event, &app);
+    atk_main_register_close_handler(cp_on_close_event, &app);
 
-        if (app.nav && atk_nav_stack_sliding(app.nav))
-        {
-            needs_render = true;
-        }
-
-        if (needs_render)
-        {
-            cp_render(&app);
-        }
-
-        sys_yield();
-    }
+    atk_main(&main_cfg);
 
     atk_user_close(&app.remote);
     return 0;
