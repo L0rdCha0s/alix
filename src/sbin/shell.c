@@ -39,9 +39,23 @@ typedef struct
 
 static bool cli_try_read_char(char *out);
 static char cli_get_char(void);
-static size_t cli_read_line(char *buffer, size_t capacity);
-static bool cli_handle_escape_sequence(char *buffer, size_t *len, size_t capacity);
+static size_t cli_read_line(shell_state_t *shell, char *buffer, size_t capacity);
+static bool cli_handle_escape_sequence(char *buffer,
+                                       size_t *len,
+                                       size_t *cursor,
+                                       size_t capacity,
+                                       size_t *rendered_len);
 static bool cli_wait_for_char(char *out, int attempts);
+static void cli_render_line(const char *buffer,
+                            size_t len,
+                            size_t cursor,
+                            size_t *rendered_len);
+static bool cli_handle_tab(shell_state_t *shell,
+                           char *buffer,
+                           size_t *len,
+                           size_t *cursor,
+                           size_t capacity,
+                           size_t *rendered_len);
 static bool is_space(char c);
 static char *trim_whitespace(char *text);
 static char *shell_expand_arguments(shell_state_t *shell, const char *args);
@@ -65,6 +79,26 @@ static void cli_history_load_current(char *buffer, size_t *len, size_t capacity)
 static void cli_history_load_text(const char *text, char *buffer, size_t *len, size_t capacity);
 static void cli_history_save_current(const char *buffer, size_t len);
 static bool cli_line_is_blank(const char *line);
+static const char SHELL_PROMPT[] = "alex@alix$ ";
+
+typedef struct
+{
+    char **items;
+    size_t count;
+    size_t capacity;
+} shell_completion_list_t;
+
+static void shell_completion_reset(shell_completion_list_t *list);
+static bool shell_completion_add(shell_completion_list_t *list, const char *text);
+static bool shell_collect_command_completions(const char *token,
+                                              size_t token_len,
+                                              shell_completion_list_t *list);
+static bool shell_collect_path_completions(shell_state_t *shell,
+                                           const char *token,
+                                           size_t token_len,
+                                           shell_completion_list_t *list);
+static size_t shell_completion_common_prefix(shell_completion_list_t *list);
+static void shell_completion_render_options(shell_completion_list_t *list);
 
 static shell_state_t *g_active_shell = NULL;
 static shell_console_tap_fn g_console_tap_fn = NULL;
@@ -836,13 +870,13 @@ void shell_main(void)
     g_active_shell = shell;
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\n");
-    serial_printf("%s", "In-memory FS shell ready. Commands: echo, cat, mkdir, cd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, pwd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\n");
+    serial_printf("%s", "In-memory FS shell ready. Commands: echo, cat, mkdir, cd, pwd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\r\n");
 
     while (1)
     {
         shell_print_prompt();
-        size_t len = cli_read_line(input, INPUT_CAPACITY);
+        size_t len = cli_read_line(shell, input, INPUT_CAPACITY);
         (void)len;
         cli_history_record(input);
         shell_run_and_display(shell, input);
@@ -854,6 +888,7 @@ static const shell_command_t g_commands[] = {
     { "cat",         shell_cmd_cat },
     { "mkdir",       shell_cmd_mkdir },
     { "cd",          shell_cmd_cd },
+    { "pwd",         shell_cmd_pwd },
     { "rm",          shell_cmd_rm },
     { "mkfs",        shell_cmd_mkfs },
     { "mount",       shell_cmd_mount },
@@ -1315,8 +1350,8 @@ static char *shell_duplicate_string(const char *text)
 
 static void shell_print_prompt(void)
 {
-    console_write("alex@alix$ ");
-    serial_printf("%s", "alex@alix$ ");
+    console_write(SHELL_PROMPT);
+    serial_output_bytes(SHELL_PROMPT, sizeof(SHELL_PROMPT) - 1);
 }
 
 static bool cli_try_read_char(char *out)
@@ -1390,7 +1425,7 @@ static void shell_wait_for_interrupt(void *context)
     if (c == 0x03) /* Ctrl-C */
     {
         console_write("^C\n");
-        serial_printf("%s", "^C\r\n");
+        serial_output_bytes("^C\r\n", 4);
         shell_request_interrupt(shell);
         return;
     }
@@ -1398,74 +1433,13 @@ static void shell_wait_for_interrupt(void *context)
     keyboard_unread_char(c);
 }
 
-static size_t cli_read_line(char *buffer, size_t capacity)
+static bool cli_handle_escape_sequence(char *buffer,
+                                       size_t *len,
+                                       size_t *cursor,
+                                       size_t capacity,
+                                       size_t *rendered_len)
 {
-    //serial_write_string("shell.c: cli_read_line in\n");
-    
-    size_t len = 0;
-    while (1)
-    {
-        char c = cli_get_char();
-
-        if (c == 0x03) /* Ctrl-C */
-        {
-            console_write("^C\n");
-            serial_printf("%s", "^C\r\n");
-            if (g_active_shell)
-            {
-                shell_request_interrupt(g_active_shell);
-            }
-            buffer[0] = '\0';
-            return 0;
-        }
-
-        if (c == 0x1B)
-        {
-            if (cli_handle_escape_sequence(buffer, &len, capacity))
-            {
-                continue;
-            }
-        }
-
-        if (c == '\r')
-        {
-            c = '\n';
-        }
-
-        if ((c == '\b' || c == 0x7F))
-        {
-            if (len > 0)
-            {
-                --len;
-                console_backspace();
-                serial_printf("%s", "\b \b");
-            }
-            continue;
-        }
-
-        if (c == '\n')
-        {
-            console_putc('\n');
-            serial_emit_char('\n');
-            buffer[len] = '\0';
-            return len;
-        }
-
-        if (c >= ' ' && len < capacity - 1)
-        {
-            buffer[len++] = c;
-            console_putc(c);
-            serial_printf("%c", c);
-        }
-    }
-
-    //serial_write_string("shell.c: cli_read_line out\n");
-}
-
-static bool cli_handle_escape_sequence(char *buffer, size_t *len, size_t capacity)
-{
-    (void)capacity;
-    if (!buffer || !len)
+    if (!buffer || !len || !cursor)
     {
         return true;
     }
@@ -1489,15 +1463,114 @@ static bool cli_handle_escape_sequence(char *buffer, size_t *len, size_t capacit
     switch (final)
     {
         case 'A':
-            cli_history_show_previous(buffer, len, capacity);
+            if (cli_history_show_previous(buffer, len, capacity))
+            {
+                *cursor = *len;
+                cli_render_line(buffer, *len, *cursor, rendered_len);
+            }
             break;
         case 'B':
-            cli_history_show_next(buffer, len, capacity);
+            if (cli_history_show_next(buffer, len, capacity))
+            {
+                *cursor = *len;
+                cli_render_line(buffer, *len, *cursor, rendered_len);
+            }
+            break;
+        case 'C':
+            if (*cursor < *len)
+            {
+                (*cursor)++;
+                cli_render_line(buffer, *len, *cursor, rendered_len);
+            }
+            break;
+        case 'D':
+            if (*cursor > 0)
+            {
+                (*cursor)--;
+                cli_render_line(buffer, *len, *cursor, rendered_len);
+            }
             break;
         default:
             break;
     }
     return true;
+}
+
+static size_t cli_read_line(shell_state_t *shell, char *buffer, size_t capacity)
+{
+    size_t len = 0;
+    size_t cursor = 0;
+    size_t rendered_len = 0;
+    if (buffer && capacity > 0)
+    {
+        buffer[0] = '\0';
+    }
+
+    while (1)
+    {
+        char c = cli_get_char();
+
+        if (c == 0x1B)
+        {
+            if (cli_handle_escape_sequence(buffer, &len, &cursor, capacity, &rendered_len))
+            {
+                continue;
+            }
+        }
+        else if (c == 0x03) /* Ctrl-C */
+        {
+            console_write("^C\n");
+            serial_output_bytes("^C\r\n", 4);
+            if (shell)
+            {
+                shell_request_interrupt(shell);
+            }
+            buffer[0] = '\0';
+            return 0;
+        }
+        else if (c == '\t')
+        {
+            if (cli_handle_tab(shell, buffer, &len, &cursor, capacity, &rendered_len))
+            {
+                continue;
+            }
+        }
+        else if (c == '\r')
+        {
+            c = '\n';
+        }
+
+        if (c == '\n')
+        {
+            console_putc('\n');
+            serial_emit_char('\n');
+            buffer[len] = '\0';
+            return len;
+        }
+
+        if ((c == '\b' || c == 0x7F))
+        {
+            if (cursor > 0)
+            {
+                memmove(buffer + cursor - 1, buffer + cursor, len - cursor);
+                len--;
+                cursor--;
+                buffer[len] = '\0';
+                cli_render_line(buffer, len, cursor, &rendered_len);
+            }
+            continue;
+        }
+
+        if (c >= ' ' && len < capacity - 1)
+        {
+            memmove(buffer + cursor + 1, buffer + cursor, len - cursor);
+            buffer[cursor] = c;
+            len++;
+            cursor++;
+            buffer[len] = '\0';
+            cli_render_line(buffer, len, cursor, &rendered_len);
+        }
+    }
 }
 
 static bool is_space(char c)
@@ -1538,6 +1611,425 @@ static void shell_stream_console_write(void *context, const char *data, size_t l
         console_putc(c);
         serial_emit_char(c);
     }
+}
+
+static void cli_render_line(const char *buffer,
+                            size_t len,
+                            size_t cursor,
+                            size_t *rendered_len)
+{
+    size_t previous_len = rendered_len ? *rendered_len : len;
+    size_t prompt_len = sizeof(SHELL_PROMPT) - 1;
+
+    console_write("\r");
+    serial_emit_char('\r');
+    shell_print_prompt();
+    for (size_t i = 0; i < len; ++i)
+    {
+        char ch = buffer[i];
+        console_putc(ch);
+        serial_emit_char(ch);
+    }
+
+    size_t total_display = prompt_len + len;
+    size_t prev_display = prompt_len + previous_len;
+    if (prev_display > total_display)
+    {
+        size_t clear = prev_display - total_display;
+        for (size_t i = 0; i < clear; ++i)
+        {
+            console_putc(' ');
+            serial_emit_char(' ');
+        }
+    }
+
+    console_write("\r");
+    serial_emit_char('\r');
+    shell_print_prompt();
+    size_t target = (cursor < len) ? cursor : len;
+    for (size_t i = 0; i < target; ++i)
+    {
+        char ch = buffer[i];
+        console_putc(ch);
+        serial_emit_char(ch);
+    }
+
+    if (rendered_len)
+    {
+        *rendered_len = len;
+    }
+}
+
+static bool cli_replace_token(char *buffer,
+                              size_t *len,
+                              size_t capacity,
+                              size_t token_start,
+                              size_t token_len,
+                              const char *replacement,
+                              size_t replacement_len)
+{
+    if (!buffer || !len || !replacement)
+    {
+        return false;
+    }
+    if (token_start > *len || token_len > (*len - token_start))
+    {
+        return false;
+    }
+    size_t tail_len = *len - (token_start + token_len);
+    size_t new_len = token_start + replacement_len + tail_len;
+    if (new_len >= capacity)
+    {
+        return false;
+    }
+    if (tail_len > 0)
+    {
+        memmove(buffer + token_start + replacement_len,
+                buffer + token_start + token_len,
+                tail_len);
+    }
+    memcpy(buffer + token_start, replacement, replacement_len);
+    *len = new_len;
+    buffer[new_len] = '\0';
+    return true;
+}
+
+static void shell_completion_reset(shell_completion_list_t *list)
+{
+    if (!list)
+    {
+        return;
+    }
+    if (list->items)
+    {
+        for (size_t i = 0; i < list->count; ++i)
+        {
+            if (list->items[i])
+            {
+                free(list->items[i]);
+            }
+        }
+        free(list->items);
+    }
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static bool shell_completion_add(shell_completion_list_t *list, const char *text)
+{
+    if (!list || !text)
+    {
+        return false;
+    }
+    size_t len = strlen(text);
+    char *copy = (char *)malloc(len + 1);
+    if (!copy)
+    {
+        return false;
+    }
+    memcpy(copy, text, len + 1);
+
+    if (list->count >= list->capacity)
+    {
+        size_t new_capacity = list->capacity ? list->capacity * 2 : 8;
+        char **new_items = (char **)realloc(list->items, new_capacity * sizeof(char *));
+        if (!new_items)
+        {
+            free(copy);
+            return false;
+        }
+        list->items = new_items;
+        list->capacity = new_capacity;
+    }
+    list->items[list->count++] = copy;
+    return true;
+}
+
+static bool shell_command_matches(const char *name, const char *token, size_t token_len)
+{
+    if (!name)
+    {
+        return false;
+    }
+    size_t name_len = strlen(name);
+    if (token_len > name_len)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < token_len; ++i)
+    {
+        char c = token[i];
+        if (c >= 'A' && c <= 'Z')
+        {
+            c = (char)(c + ('a' - 'A'));
+        }
+        if (name[i] != c)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool shell_collect_command_completions(const char *token,
+                                              size_t token_len,
+                                              shell_completion_list_t *list)
+{
+    if (!list)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(g_commands) / sizeof(g_commands[0]); ++i)
+    {
+        const char *name = g_commands[i].name;
+        if (shell_command_matches(name, token, token_len))
+        {
+            shell_completion_add(list, name);
+        }
+    }
+    return true;
+}
+
+static bool shell_collect_path_completions(shell_state_t *shell,
+                                           const char *token,
+                                           size_t token_len,
+                                           shell_completion_list_t *list)
+{
+    if (!shell || !list)
+    {
+        return false;
+    }
+
+    char dir_part[256];
+    size_t dir_len = 0;
+    size_t base_len = token_len;
+    const char *base = token;
+    for (size_t i = 0; i < token_len; ++i)
+    {
+        if (token[i] == '/')
+        {
+            dir_len = i + 1;
+        }
+    }
+
+    if (dir_len >= sizeof(dir_part))
+    {
+        return false;
+    }
+
+    if (dir_len > 0)
+    {
+        memcpy(dir_part, token, dir_len);
+    }
+    dir_part[dir_len] = '\0';
+    base = token + dir_len;
+    base_len = token_len >= dir_len ? token_len - dir_len : 0;
+
+    vfs_node_t *root_dir = vfs_root();
+    vfs_node_t *cwd = shell->cwd ? shell->cwd : root_dir;
+    vfs_node_t *target_dir = cwd;
+    if (dir_len > 0)
+    {
+        if (dir_part[0] == '/')
+        {
+            target_dir = vfs_resolve(root_dir, dir_part);
+        }
+        else
+        {
+            target_dir = vfs_resolve(cwd, dir_part);
+        }
+    }
+
+    if (!target_dir || !vfs_is_dir(target_dir))
+    {
+        return false;
+    }
+
+    for (vfs_node_t *child = vfs_first_child(target_dir); child; child = vfs_next_sibling(child))
+    {
+        const char *name = vfs_name(child);
+        if (!name)
+        {
+            continue;
+        }
+        size_t name_len = strlen(name);
+        if (base_len > name_len)
+        {
+            continue;
+        }
+        if (base_len > 0 && memcmp(name, base, base_len) != 0)
+        {
+            continue;
+        }
+
+        size_t total_len = dir_len + name_len + 1;
+        char *candidate = (char *)malloc(total_len + 1);
+        if (!candidate)
+        {
+            continue;
+        }
+
+        size_t pos = 0;
+        if (dir_len > 0)
+        {
+            memcpy(candidate, dir_part, dir_len);
+            pos += dir_len;
+        }
+        memcpy(candidate + pos, name, name_len);
+        pos += name_len;
+        if (vfs_is_dir(child))
+        {
+            candidate[pos++] = '/';
+        }
+        candidate[pos] = '\0';
+        shell_completion_add(list, candidate);
+        free(candidate);
+    }
+    return true;
+}
+
+static size_t shell_completion_common_prefix(shell_completion_list_t *list)
+{
+    if (!list || list->count == 0)
+    {
+        return 0;
+    }
+    size_t prefix = strlen(list->items[0]);
+    for (size_t i = 1; i < list->count; ++i)
+    {
+        const char *item = list->items[i];
+        size_t item_len = strlen(item);
+        size_t max = prefix < item_len ? prefix : item_len;
+        size_t j = 0;
+        for (; j < max; ++j)
+        {
+            if (list->items[0][j] != item[j])
+            {
+                break;
+            }
+        }
+        prefix = j;
+        if (prefix == 0)
+        {
+            break;
+        }
+    }
+    return prefix;
+}
+
+static void shell_completion_render_options(shell_completion_list_t *list)
+{
+    if (!list || list->count == 0)
+    {
+        return;
+    }
+    console_putc('\n');
+    serial_emit_char('\n');
+    for (size_t i = 0; i < list->count; ++i)
+    {
+        const char *item = list->items[i] ? list->items[i] : "";
+        console_write(item);
+        serial_output_bytes(item, strlen(item));
+        if (i + 1 < list->count)
+        {
+            console_putc(' ');
+            serial_emit_char(' ');
+        }
+    }
+    console_putc('\n');
+    serial_emit_char('\n');
+}
+
+static bool cli_handle_tab(shell_state_t *shell,
+                           char *buffer,
+                           size_t *len,
+                           size_t *cursor,
+                           size_t capacity,
+                           size_t *rendered_len)
+{
+    if (!shell || !buffer || !len || !cursor)
+    {
+        return false;
+    }
+
+    size_t cursor_pos = *cursor;
+    size_t word_start = cursor_pos;
+    while (word_start > 0 && !is_space(buffer[word_start - 1]))
+    {
+        --word_start;
+    }
+    size_t token_len = cursor_pos - word_start;
+    const char *token = buffer + word_start;
+
+    size_t scan = 0;
+    while (scan < word_start && is_space(buffer[scan]))
+    {
+        ++scan;
+    }
+    bool first_token = (scan == word_start);
+
+    bool has_slash = false;
+    for (size_t i = 0; i < token_len; ++i)
+    {
+        if (token[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+
+    shell_completion_list_t list = { 0 };
+    if (first_token && !has_slash)
+    {
+        shell_collect_command_completions(token, token_len, &list);
+    }
+    shell_collect_path_completions(shell, token, token_len, &list);
+
+    if (list.count == 0)
+    {
+        shell_completion_reset(&list);
+        return false;
+    }
+
+    bool updated = false;
+    size_t common = shell_completion_common_prefix(&list);
+    if (common > token_len)
+    {
+        size_t add_len = common - token_len;
+        if (*len + add_len < capacity)
+        {
+            memmove(buffer + cursor_pos + add_len,
+                    buffer + cursor_pos,
+                    *len - cursor_pos);
+            memcpy(buffer + word_start + token_len, list.items[0] + token_len, add_len);
+            *len += add_len;
+            cursor_pos += add_len;
+            buffer[*len] = '\0';
+            updated = true;
+        }
+    }
+
+    if (list.count == 1)
+    {
+        const char *full = list.items[0];
+        size_t full_len = strlen(full);
+        if (cli_replace_token(buffer, len, capacity, word_start, token_len, full, full_len))
+        {
+            cursor_pos = word_start + full_len;
+            updated = true;
+        }
+    }
+
+    if (!updated)
+    {
+        shell_completion_render_options(&list);
+    }
+
+    *cursor = cursor_pos;
+    cli_render_line(buffer, *len, *cursor, rendered_len);
+    shell_completion_reset(&list);
+    return true;
 }
 
 static bool cli_line_is_blank(const char *line)
@@ -1616,18 +2108,7 @@ static void cli_history_load_text(const char *text,
         return;
     }
 
-    while (*len > 0)
-    {
-        --(*len);
-        console_backspace();
-        serial_printf("%s", "\b \b");
-    }
-
-    size_t copy_len = 0;
-    if (text)
-    {
-        copy_len = strlen(text);
-    }
+    size_t copy_len = text ? strlen(text) : 0;
     if (copy_len >= capacity)
     {
         copy_len = capacity - 1;
@@ -1638,13 +2119,6 @@ static void cli_history_load_text(const char *text,
     }
     buffer[copy_len] = '\0';
     *len = copy_len;
-
-    for (size_t i = 0; i < copy_len; ++i)
-    {
-        char ch = buffer[i];
-        console_putc(ch);
-        serial_printf("%c", ch);
-    }
 }
 
 static void cli_history_load_current(char *buffer, size_t *len, size_t capacity)

@@ -412,6 +412,30 @@ ssize_t shell_service_poll(uint32_t handle,
     return (ssize_t)copied;
 }
 
+ssize_t shell_service_get_cwd(uint32_t handle, char *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return -1;
+    }
+    process_t *owner = process_current();
+    shell_session_t *session = shell_session_find_locked(handle, owner);
+    if (!session)
+    {
+        return -1;
+    }
+
+    vfs_node_t *cwd = session->state.cwd ? session->state.cwd : vfs_root();
+    size_t written = vfs_build_path(cwd, buffer, capacity);
+    shell_session_unlock(session);
+    if (written == 0 || written >= capacity)
+    {
+        return -1;
+    }
+    buffer[written] = '\0';
+    return (ssize_t)written;
+}
+
 void shell_service_cleanup_process(process_t *process)
 {
     if (!process)

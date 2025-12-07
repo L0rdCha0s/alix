@@ -24,9 +24,14 @@ static uint32_t fb_pitch = 0;
 static uint32_t fb_cell_w = GLYPH_WIDTH;
 static uint32_t fb_cell_h = GLYPH_HEIGHT;
 static volatile uint32_t *fb_ptr = NULL;
+static bool fb_cursor_valid = false;
+static size_t fb_cursor_row = 0;
+static size_t fb_cursor_col = 0;
 static spinlock_t g_console_lock;
 static void console_redraw_vga(void);
 static void fb_draw_cell(size_t row, size_t col);
+static void fb_cursor_hide(void);
+static void fb_cursor_show(void);
 static void fb_redraw_all(void);
 static void fb_init_from_bootinfo(void);
 static inline void console_lock(void) { spinlock_lock(&g_console_lock); }
@@ -134,6 +139,7 @@ static void console_scroll(void)
             sizeof(console_chars[0]) * (VGA_ROWS - 1));
     memset(console_chars[VGA_ROWS - 1], ' ', VGA_COLUMNS);
     fb_redraw_all();
+    fb_cursor_show();
 }
 
 void console_init(void)
@@ -145,6 +151,7 @@ void console_init(void)
     console_update_cursor();
     fb_init_from_bootinfo();
     fb_redraw_all();
+    fb_cursor_show();
 }
 
 void console_clear(void)
@@ -164,17 +171,20 @@ void console_clear(void)
     console_update_cursor();
     memset(console_chars, ' ', sizeof(console_chars));
     fb_redraw_all();
+    fb_cursor_show();
     console_unlock();
 }
 
 static void console_newline(void)
 {
+    fb_cursor_hide();
     cursor_col = 0;
     if (++cursor_row >= VGA_ROWS)
     {
         console_scroll();
     }
     console_update_cursor();
+    fb_cursor_show();
 }
 
 void console_putc(char c)
@@ -186,6 +196,8 @@ void console_putc(char c)
 
 static void console_putc_unlocked(char c)
 {
+    fb_cursor_hide();
+
     if (c == '\n')
     {
         console_newline();
@@ -230,6 +242,7 @@ static void console_putc_unlocked(char c)
     else
     {
         console_update_cursor();
+        fb_cursor_show();
     }
 }
 
@@ -253,6 +266,8 @@ void console_backspace(void)
 
 static void console_backspace_unlocked(void)
 {
+    fb_cursor_hide();
+
     if (cursor_col == 0)
     {
         if (cursor_row == 0)
@@ -275,6 +290,7 @@ static void console_backspace_unlocked(void)
     console_update_cursor();
     console_chars[cursor_row][cursor_col] = ' ';
     fb_draw_cell(cursor_row, cursor_col);
+    fb_cursor_show();
 }
 
 static void console_redraw_vga(void)
@@ -363,6 +379,65 @@ static void fb_draw_cell(size_t row, size_t col)
     }
 }
 
+static void fb_cursor_hide(void)
+{
+    if (!fb_console_enabled || !fb_ptr || !fb_cursor_valid)
+    {
+        return;
+    }
+    fb_draw_cell(fb_cursor_row, fb_cursor_col);
+    fb_cursor_valid = false;
+}
+
+static void fb_cursor_show(void)
+{
+    if (!fb_console_enabled || !fb_ptr)
+    {
+        return;
+    }
+
+    fb_cursor_hide();
+    fb_cursor_row = cursor_row;
+    fb_cursor_col = cursor_col;
+    fb_cursor_valid = true;
+
+    if (fb_cursor_row >= VGA_ROWS || fb_cursor_col >= VGA_COLUMNS)
+    {
+        return;
+    }
+
+    uint32_t cell_w = fb_cell_w;
+    uint32_t cell_h = fb_cell_h;
+    uint32_t x0 = (uint32_t)fb_cursor_col * cell_w;
+    uint32_t y0 = (uint32_t)fb_cursor_row * cell_h;
+    if (x0 + cell_w > fb_width || y0 + cell_h > fb_height)
+    {
+        return;
+    }
+
+    /* Redraw the underlying cell, then overlay a simple left-edge bar cursor. */
+    fb_draw_cell(fb_cursor_row, fb_cursor_col);
+
+    uint32_t bar_w = cell_w / 8;
+    if (bar_w == 0)
+    {
+        bar_w = 1;
+    }
+    if (bar_w > cell_w)
+    {
+        bar_w = cell_w;
+    }
+
+    for (uint32_t y = 0; y < cell_h; ++y)
+    {
+        volatile uint32_t *dst = (volatile uint32_t *)((uintptr_t)fb_ptr + (y0 + y) * fb_pitch) + x0;
+        for (uint32_t x = 0; x < bar_w; ++x)
+        {
+            dst[x] = 0xFFFFFFFFU;
+        }
+    }
+}
+
 static void fb_redraw_all(void)
 {
     if (!fb_console_enabled || !fb_ptr)
@@ -376,6 +451,7 @@ static void fb_redraw_all(void)
             fb_draw_cell(row, col);
         }
     }
+    fb_cursor_show();
 }
 
 void console_set_vga_enabled(bool enabled)

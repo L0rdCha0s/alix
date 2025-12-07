@@ -26,6 +26,7 @@ ssize_t sys_shell_poll(int handle,
                        size_t output_len,
                        int *status_out,
                        int *running_out);
+ssize_t sys_shell_get_cwd(int handle, char *buffer, size_t capacity);
 int sys_shell_interrupt(int handle);
 int sys_shell_close(int handle);
 ssize_t sys_proc_snapshot(syscall_process_info_t *buffer, size_t capacity);

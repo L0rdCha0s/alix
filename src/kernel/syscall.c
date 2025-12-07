@@ -1143,6 +1143,33 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = (poll_res >= 0) ? (int64_t)poll_res : -1;
             break;
         }
+        case SYSCALL_SHELL_CWD:
+        {
+            char *output_user = (char *)frame->rsi;
+            size_t output_capacity = (size_t)frame->rdx;
+            if (!output_user || output_capacity == 0 ||
+                !user_ptr_range_valid(output_user, output_capacity))
+            {
+                result = -1;
+                break;
+            }
+            char path_buf[256];
+            ssize_t written = shell_service_get_cwd((uint32_t)frame->rdi,
+                                                    path_buf,
+                                                    sizeof(path_buf));
+            if (written < 0 || (size_t)written + 1 > output_capacity)
+            {
+                result = -1;
+                break;
+            }
+            if (!user_copy_to_user(output_user, path_buf, (size_t)written + 1))
+            {
+                result = -1;
+                break;
+            }
+            result = written;
+            break;
+        }
         case SYSCALL_SHELL_INTERRUPT:
             result = shell_service_interrupt((uint32_t)frame->rdi);
             break;

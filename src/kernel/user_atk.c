@@ -112,6 +112,10 @@ static void user_atk_apply_priorities(void);
 static bool user_atk_event_ready(void *context);
 static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_event_t *event);
 static void user_atk_queue_resize_event(user_atk_window_t *win, uint32_t width, uint32_t height);
+static void user_atk_queue_key_sequence(user_atk_window_t *win,
+                                        const keyboard_event_t *src,
+                                        const char *seq,
+                                        size_t len);
 
 static spinlock_t g_windows_lock;
 
@@ -481,6 +485,28 @@ bool user_atk_route_key_event(const keyboard_event_t *key_event)
     user_atk_log_pair("route_key", (uint64_t)(uint8_t)key_event->ch, focus->handle);
 #endif
 
+    /* Translate extended arrow keys into ANSI escape sequences so text UI can consume them. */
+    if (key_event->extended && !key_event->released && key_event->ch == 0)
+    {
+        const char *seq = NULL;
+        size_t seq_len = 0;
+        switch (key_event->scancode)
+        {
+            case 0x48: seq = "\x1B[A"; seq_len = 3; break; /* Up */
+            case 0x50: seq = "\x1B[B"; seq_len = 3; break; /* Down */
+            case 0x4B: seq = "\x1B[D"; seq_len = 3; break; /* Left */
+            case 0x4D: seq = "\x1B[C"; seq_len = 3; break; /* Right */
+            default:
+                break;
+        }
+        if (seq && seq_len > 0)
+        {
+            user_atk_queue_key_sequence(focus, key_event, seq, seq_len);
+            user_atk_window_release(focus);
+            return true;
+        }
+    }
+
     user_atk_event_t event = {
         .type = USER_ATK_EVENT_KEY,
         .flags = 0,
@@ -504,6 +530,40 @@ bool user_atk_route_key_event(const keyboard_event_t *key_event)
     user_atk_queue_event(focus, &event);
     user_atk_window_release(focus);
     return true;
+}
+
+static void user_atk_queue_key_sequence(user_atk_window_t *win,
+                                        const keyboard_event_t *src,
+                                        const char *seq,
+                                        size_t len)
+{
+    if (!win || !seq || len == 0)
+    {
+        return;
+    }
+    for (size_t i = 0; i < len; ++i)
+    {
+        user_atk_event_t ev = {
+            .type = USER_ATK_EVENT_KEY,
+            .flags = 0,
+            .x = 0,
+            .y = 0,
+            .data0 = (uint8_t)seq[i],
+            .data1 = src ? (uint32_t)src->scancode : 0,
+        };
+        if (src)
+        {
+            if (src->extended)
+            {
+                ev.flags |= USER_ATK_KEY_FLAG_EXTENDED;
+            }
+            if (src->repeat)
+            {
+                ev.flags |= USER_ATK_KEY_FLAG_REPEAT;
+            }
+        }
+        user_atk_queue_event(win, &ev);
+    }
 }
 
 static void user_atk_window_on_destroy(void *context)

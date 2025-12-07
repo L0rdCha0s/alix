@@ -69,7 +69,11 @@ typedef struct
 
     char *input_buffer;
     size_t input_length;
+    size_t input_cursor;
     size_t input_capacity;
+    size_t input_rendered_length;
+    int input_start_row;
+    int input_start_col;
     char *history_entries[ATK_TERMINAL_HISTORY_LIMIT];
     size_t history_start;
     size_t history_count;
@@ -138,6 +142,8 @@ static void terminal_history_reset_navigation(atk_terminal_priv_t *priv);
 static bool terminal_history_is_blank(const char *line);
 static void terminal_history_add(atk_terminal_priv_t *priv, const char *line);
 static void terminal_history_save_current(atk_terminal_priv_t *priv);
+static void terminal_capture_input_anchor(atk_terminal_priv_t *priv);
+static void terminal_render_input(atk_terminal_priv_t *priv);
 static void terminal_history_load_current(atk_terminal_priv_t *priv);
 static void terminal_history_load_text(atk_terminal_priv_t *priv, const char *text);
 static bool terminal_history_show_previous(atk_terminal_priv_t *priv);
@@ -421,6 +427,8 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch)
         return false;
     }
 
+    terminal_capture_input_anchor(priv);
+
     if (priv->input_state == TERM_INPUT_ESC)
     {
         if (ch == '[')
@@ -439,14 +447,33 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch)
         if (ch == 'A')
         {
             handled = terminal_history_show_previous(priv);
+            priv->input_cursor = priv->input_length;
         }
         else if (ch == 'B')
         {
             handled = terminal_history_show_next(priv);
+            priv->input_cursor = priv->input_length;
+        }
+        else if (ch == 'C')
+        {
+            if (priv->input_cursor < priv->input_length)
+            {
+                priv->input_cursor++;
+                handled = true;
+            }
+        }
+        else if (ch == 'D')
+        {
+            if (priv->input_cursor > 0)
+            {
+                priv->input_cursor--;
+                handled = true;
+            }
         }
         priv->input_state = TERM_INPUT_NORMAL;
         if (handled)
         {
+            terminal_render_input(priv);
             terminal_invalidate(terminal);
         }
         return true;
@@ -467,7 +494,20 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch)
         if (priv->control_handler &&
             priv->control_handler(terminal, priv->control_context, ch))
         {
+            priv->input_cursor = 0;
+            priv->input_length = 0;
+            terminal_render_input(priv);
             terminal_invalidate(terminal);
+            return true;
+        }
+        return false;
+    }
+
+    if (ch == '\t')
+    {
+        if (priv->control_handler &&
+            priv->control_handler(terminal, priv->control_context, ch))
+        {
             return true;
         }
         return false;
@@ -493,19 +533,32 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch)
             priv->submit(terminal, priv->submit_context, priv->input_buffer ? priv->input_buffer : "");
         }
         priv->input_length = 0;
+        priv->input_cursor = 0;
+        priv->input_rendered_length = 0;
+        priv->input_start_row = priv->cursor_row;
+        priv->input_start_col = priv->cursor_col;
+        if (priv->input_buffer && priv->input_capacity > 0)
+        {
+            priv->input_buffer[0] = '\0';
+        }
         terminal_invalidate(terminal);
         return true;
     }
     else if (ch == '\b' || ch == 0x7F)
     {
-        if (priv->input_length > 0)
+        if (priv->input_cursor == 0)
         {
-            priv->input_length--;
-            terminal_backspace(priv);
-            terminal_invalidate(terminal);
-            return true;
+            return false;
         }
-        return false;
+        memmove(priv->input_buffer + priv->input_cursor - 1,
+                priv->input_buffer + priv->input_cursor,
+                priv->input_length - priv->input_cursor);
+        priv->input_length--;
+        priv->input_cursor--;
+        priv->input_buffer[priv->input_length] = '\0';
+        terminal_render_input(priv);
+        terminal_invalidate(terminal);
+        return true;
     }
     else if ((unsigned char)ch >= 32)
     {
@@ -513,8 +566,14 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch)
         {
             return false;
         }
-        priv->input_buffer[priv->input_length++] = ch;
-        terminal_handle_printable(priv, ch);
+        memmove(priv->input_buffer + priv->input_cursor + 1,
+                priv->input_buffer + priv->input_cursor,
+                priv->input_length - priv->input_cursor);
+        priv->input_buffer[priv->input_cursor] = ch;
+        priv->input_length++;
+        priv->input_cursor++;
+        priv->input_buffer[priv->input_length] = '\0';
+        terminal_render_input(priv);
         terminal_invalidate(terminal);
         return true;
     }
@@ -552,12 +611,65 @@ void atk_terminal_clear_input(atk_widget_t *terminal)
     {
         return;
     }
-    priv->input_length = 0;
-    if (priv->input_buffer && priv->input_capacity > 0)
-    {
-        priv->input_buffer[0] = '\0';
-    }
+    terminal_clear_input(priv);
+    priv->input_rendered_length = 0;
+    terminal_invalidate(terminal);
     terminal_history_reset_navigation(priv);
+}
+
+size_t atk_terminal_get_input(const atk_widget_t *terminal, char *buffer, size_t capacity, size_t *cursor_out)
+{
+    const atk_terminal_priv_t *priv = terminal_priv(terminal);
+    if (!priv || !buffer || capacity == 0)
+    {
+        return 0;
+    }
+    size_t copy_len = priv->input_length;
+    if (copy_len >= capacity)
+    {
+        copy_len = capacity - 1;
+    }
+    if (copy_len > 0 && priv->input_buffer)
+    {
+        memcpy(buffer, priv->input_buffer, copy_len);
+    }
+    buffer[copy_len] = '\0';
+    if (cursor_out)
+    {
+        size_t cursor = priv->input_cursor;
+        if (cursor > copy_len)
+        {
+            cursor = copy_len;
+        }
+        *cursor_out = cursor;
+    }
+    return copy_len;
+}
+
+void atk_terminal_set_input(atk_widget_t *terminal, const char *text, size_t cursor)
+{
+    atk_terminal_priv_t *priv = terminal_priv_mut(terminal);
+    if (!priv)
+    {
+        return;
+    }
+    size_t len = text ? strlen(text) : 0;
+    if (!terminal_ensure_input_capacity(priv, len))
+    {
+        return;
+    }
+    if (len > 0 && text)
+    {
+        memcpy(priv->input_buffer, text, len);
+    }
+    if (priv->input_buffer)
+    {
+        priv->input_buffer[len] = '\0';
+    }
+    priv->input_length = len;
+    priv->input_cursor = (cursor > len) ? len : cursor;
+    terminal_render_input(priv);
+    terminal_invalidate(terminal);
 }
 
 void atk_terminal_focus(atk_state_t *state, atk_widget_t *terminal)
@@ -884,6 +996,55 @@ static void terminal_history_reset_navigation(atk_terminal_priv_t *priv)
     priv->history_saved_valid = false;
 }
 
+static void terminal_capture_input_anchor(atk_terminal_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->input_length == 0)
+    {
+        priv->input_start_row = priv->cursor_row;
+        priv->input_start_col = priv->cursor_col;
+    }
+}
+
+static void terminal_render_input(atk_terminal_priv_t *priv)
+{
+    if (!priv || !priv->input_buffer)
+    {
+        return;
+    }
+
+    terminal_capture_input_anchor(priv);
+
+    size_t previous = priv->input_rendered_length;
+    priv->cursor_row = priv->input_start_row;
+    priv->cursor_col = priv->input_start_col;
+    for (size_t i = 0; i < previous; ++i)
+    {
+        terminal_handle_printable(priv, ' ');
+    }
+
+    priv->cursor_row = priv->input_start_row;
+    priv->cursor_col = priv->input_start_col;
+    for (size_t i = 0; i < priv->input_length; ++i)
+    {
+        terminal_handle_printable(priv, priv->input_buffer[i]);
+    }
+    priv->input_rendered_length = priv->input_length;
+
+    int cols = (priv->cols > 0) ? priv->cols : 1;
+    size_t cursor_offset = priv->input_cursor;
+    if (cursor_offset > priv->input_length)
+    {
+        cursor_offset = priv->input_length;
+    }
+    size_t absolute = (size_t)priv->input_start_col + cursor_offset;
+    priv->cursor_row = priv->input_start_row + (int)(absolute / (size_t)cols);
+    priv->cursor_col = (int)(absolute % (size_t)cols);
+}
+
 static bool terminal_history_is_blank(const char *line)
 {
     if (!line)
@@ -978,15 +1139,14 @@ static void terminal_clear_input(atk_terminal_priv_t *priv)
     {
         return;
     }
-    while (priv->input_length > 0)
-    {
-        priv->input_length--;
-        terminal_backspace(priv);
-    }
+    terminal_capture_input_anchor(priv);
     if (priv->input_buffer && priv->input_capacity > 0)
     {
         priv->input_buffer[0] = '\0';
     }
+    priv->input_cursor = 0;
+    priv->input_length = 0;
+    terminal_render_input(priv);
 }
 
 static void terminal_history_load_text(atk_terminal_priv_t *priv, const char *text)
@@ -1009,15 +1169,12 @@ static void terminal_history_load_text(atk_terminal_priv_t *priv, const char *te
         memcpy(priv->input_buffer, text, text_len);
     }
     priv->input_length = text_len;
+    priv->input_cursor = text_len;
     if (priv->input_buffer)
     {
         priv->input_buffer[text_len] = '\0';
     }
-
-    for (size_t i = 0; i < text_len; ++i)
-    {
-        terminal_handle_printable(priv, text[i]);
-    }
+    terminal_render_input(priv);
 }
 
 static void terminal_history_load_current(atk_terminal_priv_t *priv)
@@ -1178,6 +1335,10 @@ static void terminal_reset_state(atk_terminal_priv_t *priv)
     priv->param_question = false;
     priv->attr_bold = false;
     priv->input_length = 0;
+    priv->input_cursor = 0;
+    priv->input_rendered_length = 0;
+    priv->input_start_row = 0;
+    priv->input_start_col = 0;
     priv->scrollback_count = 0;
     priv->scrollback_start = 0;
     priv->view_offset = 0;

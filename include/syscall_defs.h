@@ -35,6 +35,7 @@ typedef enum
     SYSCALL_SOCKET_OPEN = 26,
     SYSCALL_SOCKET_CONNECT = 27,
     SYSCALL_LIST_DIR = 28,
+    SYSCALL_SHELL_CWD = 29,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)

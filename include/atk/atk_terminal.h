@@ -21,6 +21,8 @@ bool atk_terminal_handle_char(atk_widget_t *terminal, char ch);
 void atk_terminal_set_submit_handler(atk_widget_t *terminal, atk_terminal_submit_t handler, void *context);
 void atk_terminal_set_control_handler(atk_widget_t *terminal, atk_terminal_control_t handler, void *context);
 void atk_terminal_clear_input(atk_widget_t *terminal);
+size_t atk_terminal_get_input(const atk_widget_t *terminal, char *buffer, size_t capacity, size_t *cursor_out);
+void atk_terminal_set_input(atk_widget_t *terminal, const char *text, size_t cursor);
 void atk_terminal_focus(struct atk_state *state, atk_widget_t *terminal);
 bool atk_terminal_is_focused(const struct atk_state *state, const atk_widget_t *terminal);
 void atk_terminal_mark_dirty(atk_widget_t *terminal);
