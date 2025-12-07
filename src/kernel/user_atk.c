@@ -592,6 +592,9 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
         win->destroying = true;
         atk_window_close(atk_state_get(), win->window);
         win->destroying = false;
+        atk_dirty_mark_all();
+        video_request_refresh();
+        video_pump_events();
     }
 
     wait_queue_wake_all(&win->event_waiters);

@@ -1236,8 +1236,25 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
                     bool consumed = false;
                     atk_widget_t *child = atk_window_widget_at(win, cursor_x, cursor_y);
+                    serial_printf("[atk][mouse] win=%p pos=(%d,%d) size=%dx%d child=%p cursor=(%d,%d)\r\n",
+                                  (void *)win,
+                                  win->x,
+                                  win->y,
+                                  win->width,
+                                  win->height,
+                                  (void *)child,
+                                  cursor_x,
+                                  cursor_y);
                     if (child)
                     {
+                        int abs_x = 0, abs_y = 0;
+                        atk_widget_absolute_position(child, &abs_x, &abs_y);
+                        serial_printf("[atk][mouse] child cls=%s abs=(%d,%d) local=(%d,%d)\r\n",
+                                      child->cls ? child->cls->name : "?",
+                                      abs_x,
+                                      abs_y,
+                                      cursor_x - abs_x,
+                                      cursor_y - abs_y);
                         consumed = atk_dispatch_widget_mouse(state,
                                                              child,
                                                              cursor_x,
@@ -1432,6 +1449,31 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
     if (pressed_edge && !remote_handled)
     {
         user_atk_focus_window(NULL);
+    }
+    else if (!remote_handled && !capture_consumed && left_pressed && !pressed_edge && !released_edge)
+    {
+        atk_widget_t *win = atk_window_hit_test(state, cursor_x, cursor_y);
+        if (win && win->used)
+        {
+            atk_widget_t *child = atk_window_widget_at(win, cursor_x, cursor_y);
+            if (child)
+            {
+                bool consumed = atk_dispatch_widget_mouse(state,
+                                                         child,
+                                                         cursor_x,
+                                                         cursor_y,
+                                                         pressed_edge,
+                                                         released_edge,
+                                                         left_pressed,
+                                                         "drag",
+                                                         event_id,
+                                                         &result);
+                if (consumed)
+                {
+                    user_atk_focus_window(win);
+                }
+            }
+        }
     }
 
     if (result.redraw && !state->dirty_full && !state->dirty_active)

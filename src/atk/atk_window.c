@@ -483,7 +483,9 @@ atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
             return child;
         }
 
-        if (atk_widget_hit_test(child, window->x, window->y, px, py))
+        int child_origin_x = window->x + child->x;
+        int child_origin_y = window->y + child->y;
+        if (atk_widget_hit_test(child, child_origin_x, child_origin_y, px, py))
         {
             return child;
         }

@@ -560,10 +560,6 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
             }
             int baseline = atk_font_baseline_for_rect(origin_y, header_h);
             atk_rect_t clip = { draw_x, origin_y, draw_width, header_h };
-            
-            serial_printf("col=%zu x=%d w=%d clip_l=%d clip_r=%d draw_x=%d draw_w=%d\r\n",
-                          c, column_x, col_width, clip_left, clip_right, draw_x, draw_width);
-            
             atk_font_draw_string_clipped(text_x,
                                          baseline,
                                          col->title,

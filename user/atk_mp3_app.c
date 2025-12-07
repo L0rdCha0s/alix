@@ -1,6 +1,7 @@
 #include "atk_user.h"
 
 #include "atk.h"
+#include "atk_app.h"
 #include "atk_internal.h"
 #include "atk_menu_bar.h"
 #include "atk_window.h"
@@ -9,7 +10,6 @@
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_text_input.h"
 #include "atk/atk_file_dialog.h"
-#include "video_surface.h"
 #include <stdio.h>
 #include <string.h>
 #include "userlib.h"
@@ -83,6 +83,7 @@ typedef struct
     atk_widget_t *fwd_button;
     atk_widget_t *scrubber;
     atk_widget_t *file_dialog;
+    atk_modal_session_t dialog_modal;
     bool running;
     bool playing;
     bool user_scrub_active;
@@ -100,7 +101,11 @@ static bool mp3_player_seek_percent(mp3_ui_t *ui, int value);
 static uint64_t mp3_current_offset(const mp3_player_t *p);
 static void mp3_open_file_dialog(mp3_ui_t *ui);
 static void mp3_on_file_dialog_result(atk_widget_t *requester, const char *path, bool confirmed, void *context);
-static void mp3_modal_file_dialog(mp3_ui_t *ui, const char *initial_path);
+static const char *mp3_dialog_initial_path(const mp3_ui_t *ui, char *buf, size_t cap);
+static void mp3_close_file_dialog(mp3_ui_t *ui);
+static bool mp3_on_resize_event(uint32_t width, uint32_t height, void *context);
+static void mp3_on_close_event(void *context);
+static bool mp3_on_tick(void *context);
 
 static void log_mp3(const char *msg)
 {
@@ -185,6 +190,34 @@ static void on_placeholder_button(atk_widget_t *button, void *context)
     atk_window_mark_dirty(ui->window);
 }
 
+static void mp3_close_file_dialog(mp3_ui_t *ui)
+{
+    if (!ui)
+    {
+        return;
+    }
+    if (ui->file_dialog && ui->file_dialog->used)
+    {
+        atk_state_t *state = atk_state_get();
+        if (state)
+        {
+            atk_window_close(state, ui->file_dialog);
+        }
+    }
+    if (ui->dialog_modal.active)
+    {
+        atk_modal_end(&ui->dialog_modal);
+    }
+    ui->file_dialog = NULL;
+    if (ui->window)
+    {
+        atk_window_mark_dirty(ui->window);
+    }
+    atk_dirty_mark_all();
+    atk_render();
+    atk_user_present_force(&ui->remote);
+}
+
 static void mp3_on_file_dialog_result(atk_widget_t *requester, const char *path, bool confirmed, void *context)
 {
     (void)requester;
@@ -194,136 +227,74 @@ static void mp3_on_file_dialog_result(atk_widget_t *requester, const char *path,
         return;
     }
     ui->file_dialog = NULL;
-    if (!confirmed || !path || !ui->file_input)
+    if (confirmed && path && ui->file_input)
     {
-        return;
+        atk_text_input_set_text(ui->file_input, path);
+        mp3_start_selected(ui);
     }
-    atk_text_input_set_text(ui->file_input, path);
-    mp3_start_selected(ui);
+    mp3_close_file_dialog(ui);
 }
 
-static void mp3_modal_file_dialog(mp3_ui_t *ui, const char *initial_path)
+static const char *mp3_dialog_initial_path(const mp3_ui_t *ui, char *buf, size_t cap)
 {
-    if (!ui)
+    if (!buf || cap == 0)
     {
-        return;
+        return "/root";
+    }
+    buf[0] = '\0';
+
+    const char *src = (ui && ui->file_input) ? atk_text_input_text(ui->file_input) : NULL;
+    if (!src || src[0] == '\0')
+    {
+        memcpy(buf, "/root", 6);
+        return buf;
     }
 
-    atk_state_t *state = atk_state_get();
-    bool main_used = ui->window ? ui->window->used : false;
-    if (ui->window)
+    size_t len = strlen(src);
+    if (len >= cap)
     {
-        ui->window->used = false;
+        len = cap - 1;
+    }
+    memcpy(buf, src, len);
+    buf[len] = '\0';
+
+    /* Strip trailing slashes (leave root alone). */
+    while (len > 1 && buf[len - 1] == '/')
+    {
+        buf[--len] = '\0';
     }
 
-    atk_user_window_t dialog_remote;
-    memset(&dialog_remote, 0, sizeof(dialog_remote));
-    if (!atk_user_window_open_with_flags(&dialog_remote,
-                                         "Open MP3",
-                                         MP3_UI_WIDTH,
-                                         MP3_UI_HEIGHT,
-                                         USER_ATK_WINDOW_FLAG_RESIZABLE))
+    /* If there's no slash, treat it as a bare filename and fall back to /root. */
+    char *last_slash = NULL;
+    for (size_t i = 0; i < len; ++i)
     {
-        mp3_set_status(ui, "Open dialog unavailable");
-        if (ui->window) ui->window->used = main_used;
-        return;
-    }
-    atk_user_enable_dirty_tracking(&dialog_remote, true);
-    video_surface_attach(dialog_remote.buffer,
-                         dialog_remote.width,
-                         dialog_remote.height,
-                         dialog_remote.buffer_bytes);
-
-    ui->file_dialog = atk_file_dialog_open(NULL,
-                                           "Open MP3",
-                                           initial_path,
-                                           mp3_on_file_dialog_result,
-                                           ui);
-    if (!ui->file_dialog)
-    {
-        atk_user_close(&dialog_remote);
-        video_surface_attach(ui->remote.buffer,
-                             ui->remote.width,
-                             ui->remote.height,
-                             ui->remote.buffer_bytes);
-        if (ui->window) ui->window->used = main_used;
-        mp3_set_status(ui, "Open dialog unavailable");
-        return;
-    }
-
-    atk_render();
-    atk_user_present_force(&dialog_remote);
-
-    bool running = true;
-    while (running && ui->file_dialog)
-    {
-        bool had_event = false;
-        bool redraw = false;
-        user_atk_event_t ev;
-        while (atk_user_poll_event(&dialog_remote, &ev))
+        if (buf[i] == '/')
         {
-            had_event = true;
-            switch (ev.type)
-            {
-                case USER_ATK_EVENT_MOUSE:
-                {
-                    atk_mouse_event_result_t r = atk_handle_mouse_event(ev.x,
-                                                                        ev.y,
-                                                                        (ev.flags & USER_ATK_MOUSE_FLAG_PRESS) != 0,
-                                                                        (ev.flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0,
-                                                                        (ev.flags & USER_ATK_MOUSE_FLAG_LEFT) != 0);
-                    redraw |= r.redraw;
-                    break;
-                }
-                case USER_ATK_EVENT_KEY:
-                {
-                    atk_key_event_result_t kr = atk_handle_key_char((char)ev.data0);
-                    redraw |= kr.redraw;
-                    break;
-                }
-                case USER_ATK_EVENT_RESIZE:
-                {
-                    /* dialog windows adjust layouts on next draw; surface already matches. */
-                    break;
-                }
-                case USER_ATK_EVENT_CLOSE:
-                {
-                    if (ui->file_dialog && ui->file_dialog->used)
-                    {
-                        atk_window_close(state, ui->file_dialog);
-                        ui->file_dialog = NULL;
-                    }
-                    running = false;
-                    break;
-                }
-                default:
-                    break;
-            }
+            last_slash = &buf[i];
         }
-
-        if (ui->file_dialog && redraw)
+    }
+    if (!last_slash)
+    {
+        memcpy(buf, "/root", 6);
+    }
+    else if (buf[len - 1] != '/')
+    {
+        /* Trim off the filename, keeping root if that's all that's left. */
+        if (last_slash == buf)
         {
-            atk_render();
-            atk_user_present(&dialog_remote);
+            buf[1] = '\0';
         }
-        else if (!had_event)
+        else
         {
-            sys_yield();
+            *last_slash = '\0';
         }
     }
 
-    atk_user_close(&dialog_remote);
-    video_surface_attach(ui->remote.buffer,
-                         ui->remote.width,
-                         ui->remote.height,
-                         ui->remote.buffer_bytes);
-    if (ui->window)
+    if (buf[0] == '\0')
     {
-        ui->window->used = main_used;
-        atk_window_mark_dirty(ui->window);
+        memcpy(buf, "/root", 6);
     }
-    atk_render();
-    atk_user_present_force(&ui->remote);
+    return buf;
 }
 
 static void mp3_open_file_dialog(mp3_ui_t *ui)
@@ -332,10 +303,26 @@ static void mp3_open_file_dialog(mp3_ui_t *ui)
     {
         return;
     }
-    const char *initial = (ui->file_input && atk_text_input_text(ui->file_input)[0])
-                              ? atk_text_input_text(ui->file_input)
-                              : "/root";
-    mp3_modal_file_dialog(ui, initial);
+    char initial_path[256];
+    const char *initial = mp3_dialog_initial_path(ui, initial_path, sizeof(initial_path));
+    const uint32_t dialog_w = 720;
+    const uint32_t dialog_h = 420;
+
+    ui->file_dialog = atk_app_open_file_dialog_modal(&ui->dialog_modal,
+                                                     ui->window,
+                                                     "Open MP3",
+                                                     initial,
+                                                     mp3_on_file_dialog_result,
+                                                     ui,
+                                                     dialog_w,
+                                                     dialog_h,
+                                                     USER_ATK_WINDOW_FLAG_RESIZABLE);
+    if (!ui->file_dialog)
+    {
+        mp3_set_status(ui, "Open dialog unavailable");
+        return;
+    }
+    mp3_set_status(ui, "Select a file");
 }
 
 static void on_open_click(atk_widget_t *button, void *context)
@@ -1113,45 +1100,83 @@ static void on_file_submit(atk_widget_t *input, void *context)
     mp3_start_selected((mp3_ui_t *)context);
 }
 
-static bool dispatch_event(mp3_ui_t *ui, const user_atk_event_t *event)
+static bool mp3_on_mouse_event(const user_atk_event_t *event, void *context)
 {
+    mp3_ui_t *ui = (mp3_ui_t *)context;
     if (!ui || !event)
     {
         return false;
     }
-    switch (event->type)
+    bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
+    bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
+    bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
+    atk_mouse_event_result_t res = atk_handle_mouse_event(event->x, event->y, press, release, left);
+    if (res.exit_video)
     {
-        case USER_ATK_EVENT_MOUSE:
-        {
-            bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
-            bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
-            bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
-            atk_mouse_event_result_t res = atk_handle_mouse_event(event->x, event->y, press, release, left);
-            return res.redraw;
-        }
-        case USER_ATK_EVENT_KEY:
-        {
-            atk_key_event_result_t res = atk_handle_key_char((char)event->data0);
-            return res.redraw;
-        }
-        case USER_ATK_EVENT_RESIZE:
-        {
-            if (ui->window)
-            {
-                ui->window->width = (int)event->data0;
-                ui->window->height = (int)event->data1;
-                atk_window_request_layout(ui->window);
-                atk_window_mark_dirty(ui->window);
-            }
-            return true;
-        }
-        case USER_ATK_EVENT_CLOSE:
-            ui->running = false;
-            return false;
-        default:
-            break;
+        atk_main_request_exit();
     }
-    return false;
+    return res.redraw;
+}
+
+static bool mp3_on_key_event(const user_atk_event_t *event, void *context)
+{
+    mp3_ui_t *ui = (mp3_ui_t *)context;
+    if (!ui || !event)
+    {
+        return false;
+    }
+    atk_key_event_result_t res = atk_handle_key_char((char)event->data0);
+    if (res.exit_video)
+    {
+        atk_main_request_exit();
+    }
+    return res.redraw;
+}
+
+static bool mp3_on_resize_event(uint32_t width, uint32_t height, void *context)
+{
+    mp3_ui_t *ui = (mp3_ui_t *)context;
+    if (!ui || !ui->window || width == 0 || height == 0)
+    {
+        return false;
+    }
+    ui->window->width = (int)width;
+    ui->window->height = (int)height;
+    atk_window_request_layout(ui->window);
+    atk_window_mark_dirty(ui->window);
+    return true;
+}
+
+static void mp3_on_close_event(void *context)
+{
+    mp3_ui_t *ui = (mp3_ui_t *)context;
+    if (!ui)
+    {
+        return;
+    }
+    if (ui->dialog_modal.active)
+    {
+        mp3_close_file_dialog(ui);
+        return;
+    }
+    ui->running = false;
+    mp3_close_file_dialog(ui);
+    atk_main_request_exit();
+}
+
+static bool mp3_on_tick(void *context)
+{
+    mp3_ui_t *ui = (mp3_ui_t *)context;
+    if (!ui)
+    {
+        return false;
+    }
+    ui->user_scrub_active = false;
+    if (!ui->playing)
+    {
+        return false;
+    }
+    return mp3_player_tick(ui);
 }
 
 int main(void)
@@ -1191,37 +1216,27 @@ int main(void)
     }
     log_mp3("[atk_mp3] build_ui ok\r\n");
 
+    const atk_app_event_handlers_t handlers = {
+        .on_mouse = NULL,
+        .on_key = NULL,
+        .on_resize = mp3_on_resize_event,
+        .on_close = mp3_on_close_event
+    };
+    atk_main_config_t main_cfg = {
+        .window = &ui.remote,
+        .handlers = &handlers,
+        .handler_context = &ui,
+        .tick = mp3_on_tick,
+        .tick_context = &ui,
+        .present_on_idle = false
+    };
+
     atk_render();
     atk_user_present_force(&ui.remote);
     log_mp3("[atk_mp3] first present\r\n");
 
-    while (ui.running)
-    {
-        ui.user_scrub_active = false;
-        bool redraw = false;
-        bool had_event = false;
-        bool progressed = false;
-        user_atk_event_t ev;
-        while (atk_user_poll_event(&ui.remote, &ev))
-        {
-            had_event = true;
-            redraw |= dispatch_event(&ui, &ev);
-        }
-        if (ui.playing)
-        {
-            progressed = mp3_player_tick(&ui);
-        }
-        if (redraw || progressed)
-        {
-            atk_render();
-            atk_user_present(&ui.remote);
-        }
-        else if (!had_event && !progressed)
-        {
-            sys_yield();
-        }
-    }
-
+    atk_main(&main_cfg);
+    mp3_close_file_dialog(&ui);
     mp3_player_cleanup(&ui, NULL);
     atk_user_close(&ui.remote);
     log_mp3("[atk_mp3] main exit\r\n");
