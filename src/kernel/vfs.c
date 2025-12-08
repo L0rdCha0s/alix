@@ -23,7 +23,7 @@ extern void storage_request_flush(void);
  *  - No fixed limits on node count, name length, or file size (bounded by RAM).
  */
 
-#define VFS_DIRTY_BACKPRESSURE_LIMIT   (2ULL * 1024ULL * 1024ULL)
+#define VFS_DIRTY_BACKPRESSURE_LIMIT   (10ULL * 1024ULL * 1024ULL)
 
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 

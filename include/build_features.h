@@ -16,7 +16,7 @@
 #define ENABLE_INIT_NET           1
 #define ENABLE_INIT_HDA           1
 #define ENABLE_INIT_PROC_DEVICES  1
-#define ENABLE_INIT_SERIAL_ASYNC  0
+#define ENABLE_INIT_SERIAL_ASYNC  1
 #define ENABLE_INIT_TCP_TIMER     1
 #define ENABLE_INIT_WARMUP        1
 #ifndef ENABLE_USB

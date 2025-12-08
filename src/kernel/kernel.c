@@ -32,6 +32,9 @@
 #include "proc_devices.h"
 #include "build_features.h"
 #include "hda.h"
+#include "stdio.h"
+#include "serial_format.h"
+#include <stdarg.h>
 #if ENABLE_USB
 #include "usb_hid.h"
 #endif
@@ -56,6 +59,140 @@ static void storage_flush_signal_init(void);
 static bool storage_flush_should_wake(void *context);
 static void storage_flush_timer_callback(void *context);
 static uint64_t storage_flush_ms_to_ticks(uint32_t ms);
+static uint32_t g_flushd_log_enable = 0;
+static ssize_t flushd_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
+static ssize_t flushd_log_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
+static inline bool flushd_log_enabled(void)
+{
+    return __atomic_load_n(&g_flushd_log_enable, __ATOMIC_ACQUIRE) != 0;
+}
+
+typedef struct flushd_buf_ctx
+{
+    char *buf;
+    size_t len;
+    size_t cap;
+} flushd_buf_ctx_t;
+
+static void flushd_buf_putc(void *ctx, char c)
+{
+    flushd_buf_ctx_t *b = (flushd_buf_ctx_t *)ctx;
+    if (!b || !b->buf || b->cap == 0)
+    {
+        return;
+    }
+    if (b->len + 1 >= b->cap)
+    {
+        return;
+    }
+    b->buf[b->len++] = c;
+}
+
+static void flushd_logf(const char *fmt, ...)
+{
+    if (!flushd_log_enabled())
+    {
+        return;
+    }
+    char buffer[256];
+    flushd_buf_ctx_t buf_ctx = {
+        .buf = buffer,
+        .len = 0,
+        .cap = sizeof(buffer),
+    };
+    serial_format_ctx_t fmt_ctx = {
+        .putc = flushd_buf_putc,
+        .validate = NULL,
+        .ctx = &buf_ctx,
+        .count = 0,
+        .error = false,
+    };
+    va_list ap;
+    va_start(ap, fmt);
+    serial_format_vprintf(&fmt_ctx, fmt, ap);
+    va_end(ap);
+    if (buf_ctx.len == 0)
+    {
+        return;
+    }
+    if (buf_ctx.len >= buf_ctx.cap)
+    {
+        buf_ctx.len = buf_ctx.cap - 1;
+    }
+    buffer[buf_ctx.len] = '\0';
+    serial_printf("%s", buffer);
+}
+
+static ssize_t flushd_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)context;
+    if (!buffer)
+    {
+        return -1;
+    }
+    char tmp[3];
+    tmp[0] = flushd_log_enabled() ? '1' : '0';
+    tmp[1] = '\n';
+    tmp[2] = '\0';
+    size_t len = 2;
+    if (offset >= len)
+    {
+        return 0;
+    }
+    size_t to_copy = len - offset;
+    if (to_copy > count)
+    {
+        to_copy = count;
+    }
+    memcpy(buffer, tmp + offset, to_copy);
+    return (ssize_t)to_copy;
+}
+
+static ssize_t flushd_log_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)context;
+    (void)offset;
+    if (!buffer || count == 0)
+    {
+        return -1;
+    }
+    const char *cbuf = (const char *)buffer;
+    size_t idx = 0;
+    while (idx < count && (cbuf[idx] == ' ' || cbuf[idx] == '\t'))
+    {
+        ++idx;
+    }
+    if (idx >= count)
+    {
+        return -1;
+    }
+    int value = -1;
+    if (cbuf[idx] == '0')
+    {
+        value = 0;
+    }
+    else if (cbuf[idx] == '1')
+    {
+        value = 1;
+    }
+    if (value < 0)
+    {
+        return -1;
+    }
+    for (size_t tail = idx + 1; tail < count; ++tail)
+    {
+        char t = cbuf[tail];
+        if (t == ' ' || t == '\t' || t == '\r' || t == '\n')
+        {
+            continue;
+        }
+        return -1;
+    }
+    __atomic_store_n(&g_flushd_log_enable, (uint32_t)value, __ATOMIC_RELEASE);
+    return (ssize_t)count;
+}
 #endif
 
 static volatile bool g_fstab_ready =
@@ -440,10 +577,16 @@ static void warmup_run_sequence(void)
     else
     {
         process_stack_watch_process(flush_process, "flushd_boot");
-        serial_printf("%s", "[warmup] flush daemon started\r\n");
+        if (flushd_log_enabled())
+        {
+            flushd_logf("%s", "[warmup] flush daemon started\r\n");
+        }
     }
 #else
-    serial_printf("%s", "[alix] flushd disabled; skipping\r\n");
+    if (flushd_log_enabled())
+    {
+        flushd_logf("%s", "[alix] flushd disabled; skipping\r\n");
+    }
 #endif
     serial_printf("%s", "[warmup] sequence complete\r\n");
 }
@@ -531,10 +674,10 @@ static void storage_flush_timer_callback(void *context)
         {
             uint64_t ticks = timer_ticks();
             uint64_t deadline = __atomic_load_n(&g_flushd_wait_deadline, __ATOMIC_ACQUIRE);
-            serial_printf("[flushd] timer wake at tick=%llu deadline=%llu req=%u\r\n",
-                          (unsigned long long)ticks,
-                          (unsigned long long)deadline,
-                          (unsigned int)__atomic_load_n(&g_flushd_wake_requested, __ATOMIC_ACQUIRE));
+            flushd_logf("[flushd] timer wake at tick=%llu deadline=%llu req=%u\r\n",
+                        (unsigned long long)ticks,
+                        (unsigned long long)deadline,
+                        (unsigned int)__atomic_load_n(&g_flushd_wake_requested, __ATOMIC_ACQUIRE));
         }
         wait_queue_wake_all(&g_flushd_wait_queue);
     }
@@ -566,7 +709,7 @@ static void storage_flush_signal_init(void)
         }
         else
         {
-            serial_printf("%s", "[flushd] warn: unable to register wake timer\r\n");
+            flushd_logf("%s", "[flushd] warn: unable to register wake timer\r\n");
             __atomic_store_n(&g_flushd_timer_failed, true, __ATOMIC_RELEASE);
         }
     }
@@ -582,7 +725,7 @@ static void storage_flush_wait(uint32_t interval_ms)
     /* If we failed to register a periodic wake timer, fall back to polling sleeps. */
     if (!queue_ready || !timer_ready || timer_failed)
     {
-        serial_printf("%s", "[flushd] warn: timer not ready; using sleep fallback\r\n");
+        flushd_logf("%s", "[flushd] warn: timer not ready; using sleep fallback\r\n");
         const uint32_t step_ms = (interval_ms < 100) ? interval_ms : 100;
         uint32_t remaining = interval_ms;
         while (remaining > 0)
@@ -613,9 +756,9 @@ static void storage_flush_wait(uint32_t interval_ms)
     uint32_t log_idx = g_flushd_wait_log++;
     if (log_idx < 8)
     {
-        serial_printf("[flushd] wait start tick=%llu deadline=%llu\r\n",
-                      (unsigned long long)timer_ticks(),
-                      (unsigned long long)deadline);
+        flushd_logf("[flushd] wait start tick=%llu deadline=%llu\r\n",
+                    (unsigned long long)timer_ticks(),
+                    (unsigned long long)deadline);
     }
     __atomic_store_n(&g_flushd_wait_deadline, deadline, __ATOMIC_RELEASE);
 
@@ -646,12 +789,12 @@ void storage_request_flush(void)
 static void storage_flush_process_entry(void *arg)
 {
     (void)arg;
-    const uint32_t interval_ms = 2000;
+    const uint32_t interval_ms = 200;
     while (!g_fstab_ready)
     {
         process_sleep_ms(100);
     }
-    serial_printf("%s", "[flushd] entering loop\r\n");
+    //serial_printf("%s", "[flushd] entering loop\r\n");
     while (1)
     {
 #if ENABLE_FLUSHD
@@ -661,7 +804,7 @@ static void storage_flush_process_entry(void *arg)
         uint32_t awake_idx = g_flushd_awake_log++;
         if (awake_idx < 8)
         {
-            serial_printf("[flushd] awake tick=%llu\r\n", (unsigned long long)timer_ticks());
+            //serial_printf("[flushd] awake tick=%llu\r\n", (unsigned long long)timer_ticks());
         }
 #else
         process_sleep_ms(interval_ms);
@@ -670,7 +813,6 @@ static void storage_flush_process_entry(void *arg)
         vfs_mount_info_t mounts[max_mounts];
         size_t total_mounts = vfs_snapshot_mounts(mounts, max_mounts);
         size_t dirty_mounts = 0;
-        bool any = false;
         for (size_t i = 0; i < total_mounts && i < max_mounts; ++i)
         {
             if (mounts[i].dirty)
@@ -678,34 +820,40 @@ static void storage_flush_process_entry(void *arg)
                 dirty_mounts++;
                 char path[128];
                 vfs_build_path(mounts[i].mount_point, path, sizeof(path));
-                const char *dev = mounts[i].device ? mounts[i].device->name : "(none)";
-                serial_printf("%s", "[flushd] dirty: ");
-                serial_printf("%s", dev);
-                serial_printf("%s", " -> ");
-                serial_printf("%s", path);
-                if (mounts[i].needs_full_sync)
-                {
-                    serial_printf("%s", " (full)");
-                }
-                serial_printf("%s", "\r\n");
-                any = true;
+                // serial_printf("%s", "[flushd] dirty: ");
+                // serial_printf("%s", dev);
+                // serial_printf("%s", " -> ");
+                // serial_printf("%s", path);
+                // if (mounts[i].needs_full_sync)
+                // {
+                //     serial_printf("%s", " (full)");
+                // }
+                // serial_printf("%s", "\r\n");
             }
         }
-        if (!any)
+        if (flushd_log_enabled())
         {
-            serial_printf("%s", "[flushd] no dirty mounts\r\n");
-        }
-        if (!vfs_sync_dirty())
-        {
-            serial_printf("%s", "[flushd] warning: partial sync failure\r\n");
-        }
-        else if (dirty_mounts)
-        {
-            serial_printf("%s", "[flushd] sync complete\r\n");
+            bool sync_ok = vfs_sync_dirty();
+            if (dirty_mounts == 0)
+            {
+                flushd_logf("%s", "[flushd] no dirty mounts\r\n");
+            }
+            if (!sync_ok)
+            {
+                flushd_logf("%s", "[flushd] warning: partial sync failure\r\n");
+            }
+            else if (dirty_mounts)
+            {
+                flushd_logf("%s", "[flushd] sync complete\r\n");
+            }
+            else
+            {
+                flushd_logf("%s", "[flushd] nothing to sync\r\n");
+            }
         }
         else
         {
-            serial_printf("%s", "[flushd] nothing to sync\r\n");
+            (void)vfs_sync_dirty();
         }
     }
 }
@@ -752,6 +900,9 @@ void kernel_main(void)
     vfs_sys_controls_init();
     heap_sys_controls_init();
     scheduler_log_controls_init();
+#if ENABLE_FLUSHD
+    (void)procfs_create_file_at("sys/vfs/flushd_log_enable", flushd_log_read, flushd_log_write, &g_flushd_log_enable);
+#endif
     logger_init();
     devfs_init();
     serial_printf("%s", "[alix] after devfs_init\n");
