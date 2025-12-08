@@ -25,7 +25,22 @@ static inline bool scheduler_saved_rip_valid(const thread_t *thread, uint64_t ri
     {
         uintptr_t user_base = g_mem_layout.user_pointer_base;
         uintptr_t user_limit = g_mem_layout.user_pointer_limit;
-        return rip_u >= user_base && rip_u < user_limit;
+        if (rip_u >= user_base && rip_u < user_limit)
+        {
+            return true;
+        }
+        /* User threads execute kernel code during bootstrap/syscalls/preemption. */
+        if (rip_u >= (uintptr_t)__kernel_text_start)
+        {
+            return true;
+        }
+        /* Also allow the explicit kernel trampolines used at startup. */
+        if (rip_u == (uintptr_t)thread_trampoline ||
+            rip_u == (uintptr_t)user_thread_entry)
+        {
+            return true;
+        }
+        return false;
     }
     uintptr_t text_base = (uintptr_t)__kernel_text_start;
     if (rip_u < text_base)
@@ -745,6 +760,13 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 thread = next;
                 continue;
             }
+            uint32_t rc = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
+            if (rc != RUN_QUEUE_CPU_INVALID)
+            {
+                /* Never claim a thread that still thinks it is running somewhere. */
+                thread = next;
+                continue;
+            }
             if (!thread_can_run(thread))
             {
                 (void)run_queue_detach_locked(queue, thread);
@@ -772,6 +794,12 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
         {
             thread_t *next = thread->queue_next;
             if (skip && thread == skip)
+            {
+                thread = next;
+                continue;
+            }
+            uint32_t rc = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
+            if (rc != RUN_QUEUE_CPU_INVALID)
             {
                 thread = next;
                 continue;
@@ -882,31 +910,6 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
         }
     }
 
-    if (fallback_candidate)
-    {
-        /* Force-claim one thread whose running_cpu was non-invalid to avoid stranding. */
-        thread_t *thread = fallback_candidate;
-        thread->running_cpu = queue->cpu_index;
-        if (!thread_can_run(thread))
-        {
-            (void)run_queue_detach_locked(queue, thread);
-            thread_in_run_queue_store(thread, false);
-            thread->run_queue_cpu = RUN_QUEUE_CPU_INVALID;
-            scheduler_log_running_cpu_change(thread, RUN_QUEUE_CPU_INVALID, "force_claim_not_runnable");
-            return NULL;
-        }
-        if (!run_queue_detach_locked(queue, thread))
-        {
-            __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
-            return NULL;
-        }
-        thread->in_transition = true;
-        thread->run_queue_cpu = queue->cpu_index;
-        thread->wake_pending = false;
-        scheduler_log_running_cpu_change(thread, queue->cpu_index, "claim_dequeue_force");
-        return thread;
-    }
-
     if (stuck_claims > 0)
     {
         SCHED_LOG("[sched] dequeue_stuck cpu=%u stuck_claims=%u total=%llu draw=%u\r\n",
@@ -929,8 +932,13 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
     return NULL;
 }
 
-static __attribute__((unused)) thread_t *run_queue_steal_for_cpu(uint32_t cpu_index)
+static thread_t *run_queue_steal_for_cpu(uint32_t cpu_index, thread_t *skip)
 {
+    if (!g_sched_steal_enable)
+    {
+        return NULL;
+    }
+
     uint32_t limit = scheduler_cpu_limit();
     if (limit <= 1 || cpu_index >= limit)
     {
@@ -950,8 +958,15 @@ static __attribute__((unused)) thread_t *run_queue_steal_for_cpu(uint32_t cpu_in
         {
             continue;
         }
+
         uint64_t flags = run_queue_lock_acquire(queue, "steal");
-        thread_t *thread = run_queue_pop_locked(queue, NULL);
+        if (queue->total <= 1)
+        {
+            run_queue_lock_release(queue, flags);
+            continue;
+        }
+
+        thread_t *thread = run_queue_pop_locked(queue, skip);
         scheduler_verify_run_queue_locked(queue, "steal_dequeue");
         run_queue_lock_release(queue, flags);
         if (thread)
@@ -959,6 +974,11 @@ static __attribute__((unused)) thread_t *run_queue_steal_for_cpu(uint32_t cpu_in
             thread->run_queue_cpu = cpu_index;
             scheduler_log_running_cpu_change(thread, cpu_index, "claim_steal");
             __atomic_store_n(&thread->running_cpu, cpu_index, __ATOMIC_RELEASE);
+            SCHED_LOG("[sched] steal_success target_cpu=%u from_cpu=%u thread=%s pid=0x%016llX\r\n",
+                      cpu_index,
+                      idx,
+                      scheduler_thread_name(thread),
+                      (unsigned long long)scheduler_thread_pid(thread));
             return thread;
         }
     }
@@ -990,6 +1010,12 @@ static thread_t *dequeue_thread_for_cpu(uint32_t cpu_index, thread_t *skip)
             __atomic_store_n(&thread->running_cpu, cpu_index, __ATOMIC_RELEASE);
             return thread;
         }
+    }
+
+    thread_t *stolen = run_queue_steal_for_cpu(cpu_index, skip);
+    if (stolen)
+    {
+        return stolen;
     }
 
     return NULL;
@@ -1348,6 +1374,15 @@ void stack_watch_check_timeouts(void)
 static bool thread_can_run(const thread_t *thread)
 {
     if (!thread)
+    {
+        return false;
+    }
+    if (!thread_lifetime_active(thread) || thread->pending_destroy)
+    {
+        return false;
+    }
+    if (!thread->context_valid || !thread->context || !thread->stack_base ||
+        thread->kernel_stack_top == 0)
     {
         return false;
     }

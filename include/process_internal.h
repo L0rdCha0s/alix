@@ -401,6 +401,7 @@ extern fpu_state_t g_fpu_initial_state;
 extern uint64_t g_scheduler_switch_count;
 extern const fd_ops_t console_stdout_ops;
 extern uint32_t g_sched_priority_enable;
+extern uint32_t g_sched_steal_enable;
 extern uint32_t g_sched_default_priority;
 extern uintptr_t kernel_heap_base;
 extern uintptr_t kernel_heap_end;

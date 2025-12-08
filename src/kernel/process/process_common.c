@@ -86,6 +86,7 @@ uint32_t g_sched_sleep_log_enable = 0;
 uint32_t g_sched_paging_lock_log_enable = 0;
 uint32_t g_sched_memcpy_log_enable = 0;
 uint32_t g_sched_priority_enable = 1;
+uint32_t g_sched_steal_enable = 0;
 uint32_t g_sched_default_priority = THREAD_PRIORITY_NORMAL;
 static uint32_t g_scheduler_rr_cursor __attribute__((unused)) = 0;
 static vfs_node_t *proc_pid_dir(process_t *process);
