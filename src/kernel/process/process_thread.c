@@ -345,6 +345,8 @@ thread_t *thread_create(process_t *process,
     thread->is_idle = is_idle;
     thread->exited = false;
     thread->exit_status = 0;
+    thread->runtime_ticks = 0;
+    thread->last_scheduled_tick = timer_ticks();
     thread->time_slice_remaining = scheduler_time_slice_ticks();
     thread_priority_t default_priority = THREAD_PRIORITY_NORMAL;
     if (is_idle)

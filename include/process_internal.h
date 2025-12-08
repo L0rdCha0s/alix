@@ -281,6 +281,7 @@ struct thread
     uint64_t context_guard_generation;
     uint64_t context_guard_words[CONTEXT_GUARD_WORDS];
     size_t context_guard_count;
+    uint64_t last_scheduled_tick;
     uintptr_t context_guard_protect_base;
     size_t context_guard_protect_len;
     bool context_guard_protected;

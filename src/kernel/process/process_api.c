@@ -1278,11 +1278,63 @@ bool process_stack_watch_process(process_t *process, const char *context)
 #endif
 }
 
+static void scheduler_log_process_age_snapshot(uint64_t now_ticks)
+{
+    if (smp_current_cpu_index() != 0)
+    {
+        return;
+    }
+
+    uint64_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 1000;
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    spinlock_lock(&g_process_lock);
+    for (process_t *proc = g_process_list; proc; proc = proc->next)
+    {
+        thread_t *thread = proc->main_thread;
+        uint64_t last_tick = thread ? __atomic_load_n(&thread->last_scheduled_tick, __ATOMIC_RELAXED) : 0;
+        uint64_t elapsed_ticks = (last_tick && now_ticks > last_tick) ? (now_ticks - last_tick) : 0;
+        uint64_t elapsed_sec = freq ? (elapsed_ticks / freq) : 0;
+        const char *pname = proc->name[0] ? proc->name : "<unnamed>";
+        const char *pstate = process_state_name(proc->state);
+        const char *tstate = thread ? thread_state_name(thread->state) : "none";
+        uint64_t pid = proc->pid;
+        SCHED_LOG("[sched] proc_age pid=0x%016llX name=%s state=%s thread_state=%s last_s=%llus\r\n",
+                  (unsigned long long)pid,
+                  pname,
+                  pstate,
+                  tstate,
+                  (unsigned long long)elapsed_sec);
+    }
+    spinlock_unlock(&g_process_lock);
+    cpu_restore_flags(flags);
+}
+
 void process_on_timer_tick(interrupt_frame_t *frame)
 {
     if (!frame)
     {
         return;
+    }
+
+    static uint64_t last_proc_log = 0;
+    uint64_t now_ticks = timer_ticks();
+    uint64_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 1000;
+    }
+    uint64_t interval = freq * 5ULL;
+    if (smp_current_cpu_index() == 0 &&
+        (last_proc_log == 0 || (now_ticks - last_proc_log) >= interval))
+    {
+        last_proc_log = now_ticks;
+        scheduler_log_process_age_snapshot(now_ticks);
     }
 
     sleep_queue_wake_due(timer_ticks());
