@@ -83,6 +83,8 @@ static uint32_t g_rx_offset = 0;
 static net_interface_t *g_iface = NULL;
 static spinlock_t g_tx_lock;
 static spinlock_t g_rx_lock;
+static volatile uint16_t g_imr_mask = 0;
+static volatile bool g_rx_work_pending = false;
 
 static inline uint64_t rtl8139_save_flags(void)
 {
@@ -185,6 +187,7 @@ static void rtl8139_log_dma_target(const char *context,
                                    size_t len);
 static void rtl8139_dump_bytes(const char *prefix, const uint8_t *data, size_t len);
 static void rtl8139_timer_task(void *context);
+static void rtl8139_process_rx_work(void);
 static void rtl8139_log_tx_state(const char *context);
 static void rtl8139_log_tsd_status(uint32_t tsd);
 static void rtl8139_tx_meta_capture(int slot, const uint8_t *frame, size_t len);
@@ -248,7 +251,8 @@ void rtl8139_init(void)
     /* Recommended TCR value: IFG=3 (96ns), max DMA burst, default thresholds. */
     outl(g_io_base + RTL_REG_TCR, 0x03000700);
 
-    outw(g_io_base + RTL_REG_IMR, RTL_ISR_ROK | RTL_ISR_RER | RTL_ISR_TOK | RTL_ISR_TER);
+    g_imr_mask = (uint16_t)(RTL_ISR_ROK | RTL_ISR_RER | RTL_ISR_TOK | RTL_ISR_TER);
+    outw(g_io_base + RTL_REG_IMR, g_imr_mask);
     outb(g_io_base + RTL_REG_CR, (uint8_t)(RTL_CR_RE | RTL_CR_TE));
 
     for (int i = 0; i < 6; ++i)
@@ -324,32 +328,18 @@ void rtl8139_on_irq(void)
 
     outw(g_io_base + RTL_REG_ISR, status);
 
-    if (status & RTL_ISR_RER)
+    if (status & (RTL_ISR_RER | RTL_ISR_ROK))
     {
-        rtl8139_log("rx error");
-    }
-    if (status & RTL_ISR_TER)
-    {
-        rtl8139_log("tx error");
-    }
+        g_rx_work_pending = true;
+        g_imr_mask &= (uint16_t)~(RTL_ISR_RER | RTL_ISR_ROK);
+        outw(g_io_base + RTL_REG_IMR, g_imr_mask);
 #if RTL8139_TRACE_ENABLE
-    if (status & RTL_ISR_TOK)
-    {
-        rtl8139_log("tx ok");
-    }
+        if (status & RTL_ISR_RER)
+        {
+            rtl8139_log("rx error");
+        }
 #endif
-    if (status & RTL_ISR_ROK)
-    {
-        rtl8139_handle_receive();
     }
-
-#if RTL8139_TRACE_ENABLE
-    if (status & (RTL_ISR_RER | RTL_ISR_TER | RTL_ISR_TOK | RTL_ISR_ROK))
-    {
-        rtl8139_dump_state("irq");
-    }
-#endif
-
     if (status & (RTL_ISR_TOK | RTL_ISR_TER))
     {
         uint64_t irq_flags = rtl8139_acquire_tx();
@@ -365,17 +355,23 @@ void rtl8139_poll(void)
     {
         return;
     }
-    rtl8139_handle_receive();
+    rtl8139_process_rx_work();
     uint64_t irq_flags = rtl8139_acquire_tx();
     rtl8139_reclaim_tx();
     rtl8139_tx_flush_queue();
     rtl8139_release_tx(irq_flags);
+    net_tcp_poll();
 }
 
 static void rtl8139_timer_task(void *context)
 {
     (void)context;
-    rtl8139_poll();
+    rtl8139_process_rx_work();
+    uint64_t irq_flags = rtl8139_acquire_tx();
+    rtl8139_reclaim_tx();
+    rtl8139_tx_flush_queue();
+    rtl8139_release_tx(irq_flags);
+    net_tcp_poll();
     /* Periodic watchdog to recover stuck TX descriptors even when the ring is
        not saturated (e.g. SYN queued while nothing else is pending). */
     rtl8139_tx_check_stuck("timer");
@@ -657,6 +653,38 @@ static void rtl8139_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16
     }
 }
 
+static void rtl8139_process_rx_work(void)
+{
+    if (!g_rtl_present)
+    {
+        return;
+    }
+
+    bool need_work = g_rx_work_pending;
+    if (!need_work)
+    {
+        need_work = (inb(g_io_base + RTL_REG_CR) & RTL_CR_RX_EMPTY) == 0;
+    }
+    if (!need_work)
+    {
+        return;
+    }
+
+    rtl8139_handle_receive();
+
+    bool empty = (inb(g_io_base + RTL_REG_CR) & RTL_CR_RX_EMPTY) != 0;
+    if (empty)
+    {
+        g_rx_work_pending = false;
+        outw(g_io_base + RTL_REG_ISR, (uint16_t)(RTL_ISR_ROK | RTL_ISR_RER));
+        g_imr_mask |= (uint16_t)(RTL_ISR_ROK | RTL_ISR_RER);
+        outw(g_io_base + RTL_REG_IMR, g_imr_mask);
+    }
+    else
+    {
+        g_rx_work_pending = true;
+    }
+}
 
 
 static bool rtl8139_tx_send(net_interface_t *iface, const uint8_t *data, size_t len)
