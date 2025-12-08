@@ -1051,7 +1051,7 @@ void ahci_on_irq(void)
     {
         return;
     }
-    uint32_t pending = g_hba->is;
+    uint32_t pending = g_hba->is & g_hba->pi;
     if (!pending)
     {
         return;
@@ -1060,12 +1060,12 @@ void ahci_on_irq(void)
     ahci_log_hex("irq PxIS mask=", pending);
 #endif
     g_hba->is = pending;
-    for (uint32_t port_no = 0; port_no < AHCI_MAX_PORTS; ++port_no)
+    while (pending)
     {
-        if (pending & (1U << port_no))
-        {
-            ahci_handle_port_irq(port_no);
-        }
+        uint32_t port_bit = pending & (~pending + 1);
+        uint32_t port_no = (uint32_t)__builtin_ctz(port_bit);
+        pending &= (pending - 1);
+        ahci_handle_port_irq(port_no);
     }
 }
 

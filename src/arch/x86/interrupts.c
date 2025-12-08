@@ -415,20 +415,20 @@ __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
 __attribute__((interrupt)) static void irq10_handler(interrupt_frame_t *frame)
 {
     (void)frame;
-    ahci_on_irq();
 #if ENABLE_USB
     usb_on_irq();
 #endif
+    ahci_on_irq();
     pic_send_eoi(10);
 }
 
 __attribute__((interrupt)) static void irq11_handler(interrupt_frame_t *frame)
 {
     (void)frame;
-    ahci_on_irq();
 #if ENABLE_USB
     usb_on_irq();
 #endif
+    ahci_on_irq();
     rtl8139_on_irq();
     pic_send_eoi(11);
 }

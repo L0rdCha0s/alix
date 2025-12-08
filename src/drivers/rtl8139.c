@@ -71,6 +71,10 @@
 #define RTL_RX_RING_SIZE   (64 * 1024)
 #define RTL_RX_BUFFER_SIZE (RTL_RX_RING_SIZE + 16 + 1500)
 
+/* Cap receive work per IRQ to keep interrupts masked for a bounded time.
+   Remaining packets will trigger another IRQ (or be picked up by the poll timer). */
+#define RTL_RX_IRQ_BUDGET 64
+
 static bool g_rtl_present = false;
 static pci_device_t g_device;
 static uint16_t g_io_base = 0;
@@ -399,7 +403,7 @@ static void rtl8139_handle_receive(void)
     rtl8139_dump_state("rx poll");
 #endif
 
-    int safety = 4096;
+    int safety = RTL_RX_IRQ_BUDGET;
 
     spinlock_lock(&g_rx_lock);
     while ((inb(g_io_base + RTL_REG_CR) & RTL_CR_RX_EMPTY) == 0 && safety-- > 0)
