@@ -519,13 +519,22 @@ static int atk_mask_background_regions(const atk_state_t *state,
 
             atk_bg_rect_t next[ATK_MAX_BG_RECTS];
             int next_count = 0;
-            for (int i = 0; i < current_count && next_count < ATK_MAX_BG_RECTS; ++i)
+            int i = 0;
+            for (; i < current_count && next_count < ATK_MAX_BG_RECTS; ++i)
             {
                 next_count += atk_rect_subtract(&current[i],
                                                 &mask,
                                                 &next[next_count],
                                                 ATK_MAX_BG_RECTS - next_count);
             }
+            if (i < current_count || next_count >= ATK_MAX_BG_RECTS)
+            {
+                /* Too many fragments; fall back to repainting the whole dirty region. */
+                current[0] = *initial;
+                current_count = 1;
+                break;
+            }
+
             memcpy(current, next, (size_t)next_count * sizeof(atk_bg_rect_t));
             current_count = next_count;
             if (current_count == 0)
@@ -1198,6 +1207,9 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                   cursor_y < win->y + ATK_WINDOW_TITLE_HEIGHT;
                 if (over_title)
                 {
+                    /* Keep focus on this window even when dragging its chrome. */
+                    user_atk_focus_window(win);
+
                     atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
                     bool moved = atk_window_bring_to_front(state, win);
                     if (moved)
@@ -1275,7 +1287,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
                     if (!consumed)
                     {
-                        atk_clear_focus_widget(state);
+                        user_atk_focus_window(win);
+                        handled = true;
                     }
 
                     handled = true;
@@ -1332,9 +1345,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
             }
             if (state->dragging_window)
             {
+                atk_widget_t *win = state->dragging_window;
                 atk_drag_finish(state);
                 state->dragging_window = NULL;
                 state->drag_active = false;
+                user_atk_focus_window(win);
                 result.redraw = true;
                 video_request_refresh();
             }
@@ -1379,6 +1394,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         if (state->drag_active)
         {
             atk_drag_step(state, cursor_x, cursor_y);
+            result.redraw = true;
         }
         else
         {
@@ -2003,10 +2019,6 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
     /* Now that we have compositing, redraw the affected regions instead of freezing. */
     atk_dirty_mark_rect(old_x, old_y, w, h);
     atk_dirty_mark_rect(new_bx, new_by, w, h);
-    video_request_refresh();
-    state->drag_prev_x = new_bx;
-    state->drag_prev_y = new_by;
-    return;
 
     /* Clamp region to buffer bounds to avoid overruns. */
     size_t scene_stride_px = (size_t)state->drag_scene_stride_bytes / sizeof(video_color_t);
