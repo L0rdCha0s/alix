@@ -2000,6 +2000,14 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
         return;
     }
 
+    /* Now that we have compositing, redraw the affected regions instead of freezing. */
+    atk_dirty_mark_rect(old_x, old_y, w, h);
+    atk_dirty_mark_rect(new_bx, new_by, w, h);
+    video_request_refresh();
+    state->drag_prev_x = new_bx;
+    state->drag_prev_y = new_by;
+    return;
+
     /* Clamp region to buffer bounds to avoid overruns. */
     size_t scene_stride_px = (size_t)state->drag_scene_stride_bytes / sizeof(video_color_t);
     size_t scene_pixels = scene_stride_px * (size_t)state->drag_scene_h;

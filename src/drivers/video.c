@@ -976,7 +976,7 @@ static void video_perform_refresh(void)
     refresh_requested = (refresh_window != NULL) || refresh_requested_full;
     spinlock_unlock(&g_video_lock);
 
-    if (!active || atk_drag_active())
+    if (!active)
     {
         return;
     }
@@ -1249,12 +1249,8 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     if (result.redraw)
     {
-        /* Skip backbuffer redraws while dragging overlays are active. */
-        if (!atk_drag_active())
-        {
-            /* let renderer choose dirties; do not pre-clear here */
-            atk_render();
-        }
+        /* let renderer choose dirties; do not pre-clear here */
+        atk_render();
     }
 
     bool has_dirty = false;
@@ -1264,7 +1260,7 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     pending_refresh = refresh_requested || refresh_requested_full;
     spinlock_unlock(&g_video_lock);
 
-    if (has_dirty && !pending_refresh && !atk_drag_active())
+    if (has_dirty && !pending_refresh)
     {
         video_flush_dirty();
     }
