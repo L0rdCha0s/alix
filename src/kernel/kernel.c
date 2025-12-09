@@ -43,6 +43,7 @@ static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
 static void tcp_timer_process_entry(void *arg);
 static void hda_init_process_entry(void *arg);
+static uint32_t choose_non_ui_cpu(void);
 #if 1
 static void printer_a_process_entry(void *arg);
 static void printer_b_process_entry(void *arg);
@@ -121,6 +122,26 @@ static void flushd_logf(const char *fmt, ...)
     }
     buffer[buf_ctx.len] = '\0';
     serial_printf("%s", buffer);
+}
+
+static uint32_t choose_non_ui_cpu(void)
+{
+    uint32_t ui = process_get_ui_cpu();
+    uint32_t count = smp_cpu_count();
+    if (count == 0)
+    {
+        return PROCESS_CPU_ANY;
+    }
+    if (count == 1)
+    {
+        return ui;
+    }
+    uint32_t candidate = (ui == 0) ? 1u : 0u;
+    if (candidate >= count)
+    {
+        candidate = 0;
+    }
+    return candidate;
 }
 
 static ssize_t flushd_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
@@ -567,6 +588,12 @@ static void warmup_run_sequence(void)
     }
     serial_printf("%s", "[warmup] shell process created\r\n");
     process_stack_watch_process(shell_process, "shell_boot");
+    uint32_t non_ui_cpu = choose_non_ui_cpu();
+    process_set_priority(shell_process, THREAD_PRIORITY_BACKGROUND);
+    if (non_ui_cpu != PROCESS_CPU_ANY)
+    {
+        process_set_affinity(shell_process, non_ui_cpu);
+    }
 
 #if ENABLE_FLUSHD
     process_t *flush_process = process_create_kernel("flushd", storage_flush_process_entry, NULL, 0, -1);
@@ -580,6 +607,11 @@ static void warmup_run_sequence(void)
         if (flushd_log_enabled())
         {
             flushd_logf("%s", "[warmup] flush daemon started\r\n");
+        }
+        process_set_priority(flush_process, THREAD_PRIORITY_BACKGROUND);
+        if (non_ui_cpu != PROCESS_CPU_ANY)
+        {
+            process_set_affinity(flush_process, non_ui_cpu);
         }
     }
 #else
@@ -983,6 +1015,15 @@ void kernel_main(void)
     {
         serial_printf("%s", "[alix] warn: failed to create tcp_timerd\r\n");
     }
+    else
+    {
+        uint32_t non_ui_cpu = choose_non_ui_cpu();
+        process_set_priority(tcp_timer_process, THREAD_PRIORITY_BACKGROUND);
+        if (non_ui_cpu != PROCESS_CPU_ANY)
+        {
+            process_set_affinity(tcp_timer_process, non_ui_cpu);
+        }
+    }
 #endif
 
 #if ENABLE_INIT_WARMUP
@@ -1001,6 +1042,17 @@ void kernel_main(void)
     if (!smp_start_secondary_cpus())
     {
         serial_printf("%s", "[alix] warn: smp_start_secondary_cpus failed\r\n");
+    }
+    else
+    {
+        uint32_t ui_cpu = 0;
+        uint32_t count = smp_cpu_count();
+        if (count > 1)
+        {
+            ui_cpu = 1;
+        }
+        process_set_ui_cpu(ui_cpu);
+        serial_printf("[alix] ui cpu reserved=%u\r\n", (unsigned)ui_cpu);
     }
 
 #if ENABLE_INIT_SERIAL_ASYNC

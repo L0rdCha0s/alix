@@ -411,6 +411,12 @@ void usb_hid_init(void)
         }
         else
         {
+            uint32_t ui_cpu = process_get_ui_cpu();
+            process_set_priority(kbd_thread, THREAD_PRIORITY_UI);
+            if (ui_cpu != PROCESS_CPU_ANY)
+            {
+                process_set_affinity(kbd_thread, ui_cpu);
+            }
             process_user_layout_t layout = { 0 };
             process_query_user_layout(kbd_thread, &layout);
             serial_printf("[usb] keyboard thread started proc=0x%016llX pid=0x%016llX cr3=0x%016llX as_cr3=0x%016llX\r\n",
@@ -429,6 +435,12 @@ void usb_hid_init(void)
         }
         else
         {
+            uint32_t ui_cpu = process_get_ui_cpu();
+            process_set_priority(m_thread, THREAD_PRIORITY_UI);
+            if (ui_cpu != PROCESS_CPU_ANY)
+            {
+                process_set_affinity(m_thread, ui_cpu);
+            }
             process_user_layout_t layout = { 0 };
             process_query_user_layout(m_thread, &layout);
             serial_printf("[usb] mouse thread started proc=0x%016llX pid=0x%016llX cr3=0x%016llX as_cr3=0x%016llX\r\n",

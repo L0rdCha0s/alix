@@ -361,6 +361,8 @@ thread_t *thread_create(process_t *process,
     thread->priority = default_priority;
     thread->priority_override = default_priority;
     thread->priority_override_active = false;
+    thread->affinity_enabled = false;
+    thread->affinity_cpu = RUN_QUEUE_CPU_INVALID;
     thread->in_transition = false;
     thread->preempt_pending = false;
     thread->fs_base = 0;

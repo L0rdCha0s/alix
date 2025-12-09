@@ -7,6 +7,8 @@
 #include "types.h"
 #include "interrupts.h"
 #include "process.h"
+#include "lapic.h"
+#include "smp.h"
 
 #ifndef AHCI_TRACE_IRQ
 #define AHCI_TRACE_IRQ 0
@@ -163,6 +165,7 @@ static ahci_port_ctx_t *g_ahci_ports[AHCI_MAX_PORTS] = { 0 };
 static uint8_t g_ahci_irq_line = 10;
 static bool g_ahci_irq_ready = false;
 static bool g_ahci_use_interrupts = false;
+static bool g_ahci_msi_enabled = false;
 
 static void ahci_log(const char *msg)
 {
@@ -514,6 +517,27 @@ static void ahci_port_release(ahci_port_ctx_t *ctx)
     }
     g_ahci_ports[ctx->port_no] = NULL;
     free(ctx);
+}
+
+static uint8_t ahci_select_msi_apic(void)
+{
+    uint32_t ui = process_get_ui_cpu();
+    uint32_t count = smp_cpu_count();
+    uint32_t target_cpu = 0;
+    if (count > 1 && ui != PROCESS_CPU_ANY)
+    {
+        target_cpu = (ui == 0) ? 1u : 0u;
+        if (target_cpu >= count)
+        {
+            target_cpu = 0;
+        }
+    }
+    const smp_cpu_t *cpu = smp_cpu_by_index(target_cpu);
+    if (cpu)
+    {
+        return (uint8_t)cpu->apic_id;
+    }
+    return (uint8_t)lapic_get_id();
 }
 
 static void ahci_handle_port_irq(uint32_t port_no)
@@ -1022,12 +1046,19 @@ void ahci_init(void)
     }
 
     uint8_t irq_line = pci_config_read8(dev, 0x3C);
-    if (irq_line == 0 || irq_line == 0xFF)
-    {
-        irq_line = 11;
-        pci_config_write8(dev, 0x3C, irq_line);
-    }
+    irq_line = 10; /* Prefer IRQ10 to avoid sharing vector with NIC. */
+    pci_config_write8(dev, 0x3C, irq_line);
     g_ahci_irq_line = irq_line;
+
+    uint8_t vector = (uint8_t)(32 + g_ahci_irq_line);
+    uint8_t apic = ahci_select_msi_apic();
+    if (pci_enable_msi(dev, vector, apic))
+    {
+        g_ahci_msi_enabled = true;
+        serial_printf("[ahci] MSI enabled vec=0x%02X apic=%u\r\n",
+                      (unsigned)vector,
+                      (unsigned)apic);
+    }
 
     uint32_t pi = g_hba->pi;
     ahci_log_hex("port implemented mask=", pi);

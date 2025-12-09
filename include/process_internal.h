@@ -247,6 +247,8 @@ struct thread
     thread_priority_t priority;
     thread_priority_t priority_override;
     bool priority_override_active;
+    bool affinity_enabled;
+    uint32_t affinity_cpu;
     int exit_status;
     bool in_run_queue;
     bool is_idle;
@@ -695,6 +697,7 @@ void thread_trigger_stack_guard(thread_t *thread, interrupt_frame_t *frame, cons
 extern void process_preempt_trampoline(void);
 void thread_set_base_priority(thread_t *thread, thread_priority_t priority);
 void thread_set_priority_override(thread_t *thread, bool enabled, thread_priority_t priority);
+void thread_set_affinity(thread_t *thread, bool enabled, uint32_t cpu_index);
 void enqueue_thread(thread_t *thread);
 void thread_quarantine_corrupt(thread_t *thread, const char *reason);
 void process_log(const char *msg, uint64_t value);

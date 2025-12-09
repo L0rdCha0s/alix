@@ -99,3 +99,58 @@ void pci_set_command_bits(pci_device_t dev, uint16_t set_bits, uint16_t clear_bi
     value &= (uint16_t)~clear_bits;
     pci_config_write16(dev, 0x04, value);
 }
+
+static uint8_t pci_find_capability(pci_device_t dev, uint8_t cap_id)
+{
+    /* Capabilities list pointer at 0x34 for header type 0. */
+    uint8_t status = (uint8_t)((pci_config_read16(dev, 0x06) >> 8) & 0xFF);
+    const uint8_t CAP_LIST_BIT = 0x10;
+    if ((status & CAP_LIST_BIT) == 0)
+    {
+        return 0;
+    }
+
+    uint8_t ptr = pci_config_read8(dev, 0x34);
+    int safety = 48;
+    while (ptr >= 0x40 && safety-- > 0)
+    {
+        uint8_t id = pci_config_read8(dev, ptr);
+        if (id == cap_id)
+        {
+            return ptr;
+        }
+        ptr = pci_config_read8(dev, (uint8_t)(ptr + 1));
+    }
+    return 0;
+}
+
+bool pci_enable_msi(pci_device_t dev, uint8_t vector, uint8_t apic_id)
+{
+    const uint8_t MSI_CAP_ID = 0x05;
+    uint8_t cap = pci_find_capability(dev, MSI_CAP_ID);
+    if (cap == 0)
+    {
+        return false;
+    }
+
+    uint16_t control = pci_config_read16(dev, (uint8_t)(cap + 0x2));
+    bool addr64 = (control & (1u << 7)) != 0;
+
+    uint32_t msg_addr = 0xFEE00000U | ((uint32_t)apic_id << 12);
+    pci_config_write32(dev, (uint8_t)(cap + 0x4), msg_addr);
+    uint8_t data_off = (uint8_t)(cap + (addr64 ? 0xC : 0x8));
+    if (addr64)
+    {
+        pci_config_write32(dev, (uint8_t)(cap + 0x8), 0);
+    }
+    uint16_t msg_data = vector;
+    pci_config_write16(dev, data_off, msg_data);
+
+    control |= 0x0001u; /* MSI Enable */
+    control &= (uint16_t)~(1u << 8); /* per-vector mask disable */
+    pci_config_write16(dev, (uint8_t)(cap + 0x2), control);
+
+    /* Disable legacy INTx to avoid double-delivery. */
+    pci_set_command_bits(dev, 0x0400, 0);
+    return true;
+}

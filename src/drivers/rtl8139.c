@@ -14,6 +14,8 @@
 #include "timer.h"
 #include "spinlock.h"
 #include "process.h"
+#include "smp.h"
+#include "lapic.h"
 
 #ifndef RTL8139_TRACE_ENABLE
 #define RTL8139_TRACE_ENABLE 0
@@ -85,6 +87,7 @@ static spinlock_t g_tx_lock;
 static spinlock_t g_rx_lock;
 static volatile uint16_t g_imr_mask = 0;
 static volatile bool g_rx_work_pending = false;
+static bool g_rtl_msi_enabled = false;
 
 static inline uint64_t rtl8139_save_flags(void)
 {
@@ -196,6 +199,7 @@ static void rtl8139_tx_check_stuck(const char *context);
 static void rtl8139_tx_force_release(const char *context);
 static uint8_t *rtl8139_rx_bounce_acquire(void);
 static void rtl8139_rx_bounce_release(uint8_t *buffer);
+static uint8_t rtl8139_select_msi_apic(void);
 
 void rtl8139_init(void)
 {
@@ -281,6 +285,16 @@ void rtl8139_init(void)
     {
         net_if_set_link_up(g_iface, true);
         net_if_set_tx_handler(g_iface, rtl8139_tx_send);
+    }
+
+    uint8_t vector = 32 + 11;
+    uint8_t apic = rtl8139_select_msi_apic();
+    if (pci_enable_msi(g_device, vector, apic))
+    {
+        g_rtl_msi_enabled = true;
+        serial_printf("[rtl8139] MSI enabled vec=0x%02X apic=%u\r\n",
+                      (unsigned)vector,
+                      (unsigned)apic);
     }
 
     uint32_t timer_freq = timer_frequency();
@@ -1217,6 +1231,27 @@ static uint8_t *rtl8139_rx_bounce_acquire(void)
         }
     }
     return NULL;
+}
+
+static uint8_t rtl8139_select_msi_apic(void)
+{
+    uint32_t ui = process_get_ui_cpu();
+    uint32_t count = smp_cpu_count();
+    uint32_t target_cpu = 0;
+    if (count > 1 && ui != PROCESS_CPU_ANY)
+    {
+        target_cpu = (ui == 0) ? 1u : 0u;
+        if (target_cpu >= count)
+        {
+            target_cpu = 0;
+        }
+    }
+    const smp_cpu_t *cpu = smp_cpu_by_index(target_cpu);
+    if (cpu)
+    {
+        return (uint8_t)cpu->apic_id;
+    }
+    return (uint8_t)lapic_get_id();
 }
 
 static void rtl8139_rx_bounce_release(uint8_t *buffer)

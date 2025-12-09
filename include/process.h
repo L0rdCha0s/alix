@@ -16,6 +16,8 @@ typedef struct trap_frame trap_frame_t;
 typedef void (*thread_entry_t)(void *arg);
 typedef void (*process_wait_hook_t)(void *context);
 
+#define PROCESS_CPU_ANY 0xFFFFFFFFu
+
 typedef enum
 {
     THREAD_PRIORITY_IDLE = 0,
@@ -207,6 +209,14 @@ process_t *process_create_user_elf_with_parent(const char *name,
 void process_set_priority(process_t *process, thread_priority_t priority);
 void process_set_priority_override(process_t *process, thread_priority_t priority);
 void process_clear_priority_override(process_t *process);
+void process_set_thread_priority(thread_t *thread, thread_priority_t priority);
+void process_set_affinity(process_t *process, uint32_t cpu_index);
+void process_clear_affinity(process_t *process);
+void process_set_ui_cpu(uint32_t cpu_index);
+uint32_t process_get_ui_cpu(void);
+void process_set_ui_cpu(uint32_t cpu_index);
+uint32_t process_get_ui_cpu(void);
+void process_set_thread_priority(thread_t *thread, thread_priority_t priority);
 
 void wait_queue_init(wait_queue_t *queue);
 void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void *context);

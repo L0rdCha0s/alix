@@ -21,6 +21,7 @@ void pci_config_write8(pci_device_t dev, uint8_t offset, uint8_t value);
 
 bool pci_find_device(uint16_t vendor, uint16_t device_id, pci_device_t *out_dev);
 void pci_set_command_bits(pci_device_t dev, uint16_t set_bits, uint16_t clear_bits);
+bool pci_enable_msi(pci_device_t dev, uint8_t vector, uint8_t apic_id);
 
 
 // pci_vendors.c

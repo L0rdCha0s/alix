@@ -854,6 +854,33 @@ void process_set_priority(process_t *process, thread_priority_t priority)
     thread_set_base_priority(process->main_thread, priority);
 }
 
+void process_set_thread_priority(thread_t *thread, thread_priority_t priority)
+{
+    if (!thread_pointer_valid(thread))
+    {
+        return;
+    }
+    thread_set_base_priority(thread, priority);
+}
+
+void process_set_affinity(process_t *process, uint32_t cpu_index)
+{
+    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    {
+        return;
+    }
+    thread_set_affinity(process->main_thread, true, cpu_index);
+}
+
+void process_clear_affinity(process_t *process)
+{
+    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    {
+        return;
+    }
+    thread_set_affinity(process->main_thread, false, RUN_QUEUE_CPU_INVALID);
+}
+
 void process_set_priority_override(process_t *process, thread_priority_t priority)
 {
     if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
@@ -871,6 +898,7 @@ void process_clear_priority_override(process_t *process)
     }
     thread_set_priority_override(process->main_thread, false, THREAD_PRIORITY_NORMAL);
 }
+
 
 uint64_t process_take_preempt_resume_rip(void)
 {

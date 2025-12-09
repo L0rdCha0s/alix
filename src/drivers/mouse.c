@@ -399,6 +399,12 @@ void mouse_start_daemon(void)
                                             -1);
     if (proc)
     {
+        uint32_t ui_cpu = process_get_ui_cpu();
+        process_set_priority(proc, THREAD_PRIORITY_UI);
+        if (ui_cpu != PROCESS_CPU_ANY)
+        {
+            process_set_affinity(proc, ui_cpu);
+        }
         g_mouse_daemon_started = true;
     }
 }

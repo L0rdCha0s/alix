@@ -121,6 +121,28 @@ static inline run_queue_t *scheduler_run_queue(uint32_t cpu_index)
     return &g_run_queues[cpu_index];
 }
 
+static uint32_t g_ui_cpu_index = RUN_QUEUE_CPU_INVALID;
+
+void process_set_ui_cpu(uint32_t cpu_index)
+{
+    g_ui_cpu_index = cpu_index;
+}
+
+uint32_t process_get_ui_cpu(void)
+{
+    return g_ui_cpu_index;
+}
+
+void thread_set_affinity(thread_t *thread, bool enabled, uint32_t cpu_index)
+{
+    if (!thread)
+    {
+        return;
+    }
+    thread->affinity_enabled = enabled;
+    thread->affinity_cpu = enabled ? cpu_index : RUN_QUEUE_CPU_INVALID;
+}
+
 #if ENABLE_RUN_QUEUE_DEBUG
 static void scheduler_verify_run_queue_locked(run_queue_t *queue, const char *where)
 {
@@ -584,7 +606,17 @@ static uint32_t scheduler_select_target_cpu(thread_t *thread)
         return 0;
     }
 
-    /* Spread work; hash by pid for stability, otherwise random. */
+    uint32_t ui_cpu = g_ui_cpu_index;
+    bool ui_cpu_online = (ui_cpu != RUN_QUEUE_CPU_INVALID) && scheduler_cpu_online(ui_cpu);
+
+    /* UI threads stick to the reserved CPU if available. */
+    if (thread && thread->priority == THREAD_PRIORITY_UI && ui_cpu_online)
+    {
+        return ui_cpu;
+    }
+
+    /* Spread work; hash by pid for stability, otherwise random. Avoid the UI CPU for
+       non-UI work when we have more than one CPU online. */
     uint32_t start = 0;
     if (thread && thread->process)
     {
@@ -593,6 +625,26 @@ static uint32_t scheduler_select_target_cpu(thread_t *thread)
     else
     {
         start = scheduler_rand32() % limit;
+    }
+
+    for (uint32_t attempt = 0; attempt < limit; ++attempt)
+    {
+        uint32_t idx = (start + attempt) % limit;
+        if (!scheduler_cpu_online(idx))
+        {
+            continue;
+        }
+        if (ui_cpu_online && limit > 1 && idx == ui_cpu)
+        {
+            continue;
+        }
+        return idx;
+    }
+
+    /* Fall back to UI CPU if nothing else is online. */
+    if (ui_cpu_online)
+    {
+        return ui_cpu;
     }
 
     for (uint32_t attempt = 0; attempt < limit; ++attempt)
@@ -767,6 +819,13 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 thread = next;
                 continue;
             }
+            if (thread->affinity_enabled &&
+                thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
+                thread->affinity_cpu != queue->cpu_index)
+            {
+                thread = next;
+                continue;
+            }
             if (!thread_can_run(thread))
             {
                 (void)run_queue_detach_locked(queue, thread);
@@ -804,6 +863,13 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 thread = next;
                 continue;
             }
+            if (thread->affinity_enabled &&
+                thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
+                thread->affinity_cpu != queue->cpu_index)
+            {
+                thread = next;
+                continue;
+            }
             uint32_t tickets = scheduler_tickets_for_thread(thread, now_ticks);
             if (tickets == 0)
             {
@@ -828,6 +894,14 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                     fallback_candidate = thread;
                     stuck_claims++;
                 }
+                thread = next;
+                continue;
+            }
+            if (thread->affinity_enabled &&
+                thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
+                thread->affinity_cpu != queue->cpu_index)
+            {
+                __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
                 thread = next;
                 continue;
             }
@@ -885,6 +959,14 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
                 thread = next;
                 continue;
             }
+            if (thread->affinity_enabled &&
+                thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
+                thread->affinity_cpu != queue->cpu_index)
+            {
+                __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
+                thread = next;
+                continue;
+            }
             if (!thread_can_run(thread))
             {
                 (void)run_queue_detach_locked(queue, thread);
@@ -935,6 +1017,11 @@ static thread_t *run_queue_pop_locked(run_queue_t *queue, thread_t *skip)
 static thread_t *run_queue_steal_for_cpu(uint32_t cpu_index, thread_t *skip)
 {
     if (!g_sched_steal_enable)
+    {
+        return NULL;
+    }
+
+    if (cpu_index == g_ui_cpu_index)
     {
         return NULL;
     }
@@ -1090,6 +1177,10 @@ static void enqueue_thread_on_cpu_locked(thread_t *thread, uint32_t cpu_index)
     }
 
     uint32_t target_cpu = cpu_index;
+    if (thread->priority == THREAD_PRIORITY_UI && g_ui_cpu_index != RUN_QUEUE_CPU_INVALID)
+    {
+        target_cpu = g_ui_cpu_index;
+    }
     uint32_t limit = scheduler_cpu_limit();
     if (target_cpu >= limit || !scheduler_cpu_online(target_cpu))
     {
@@ -1102,6 +1193,15 @@ static void enqueue_thread_on_cpu_locked(thread_t *thread, uint32_t cpu_index)
     }
 
     uint64_t flags = run_queue_lock_acquire(queue, "enqueue");
+
+    if (thread->affinity_enabled &&
+        thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
+        queue->cpu_index != thread->affinity_cpu)
+    {
+        run_queue_lock_release(queue, flags);
+        enqueue_thread_on_cpu_locked(thread, thread->affinity_cpu);
+        return;
+    }
 
     if (!thread_lifetime_active(thread) ||
         thread->pending_destroy ||
