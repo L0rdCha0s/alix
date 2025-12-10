@@ -796,7 +796,7 @@ static void menu_action_welcome(void *context)
         atk_label_set_text(label,
                            "Thank you for trying AlixOS!\n\n"
                            "Networking now comes up automatically thanks to\n"
-                           "the new startup scripts (dhclient rtl0).\n"
+                           "the new startup scripts (dhclient igb0).\n"
                            "Use the top menu bar to find Help items like this.");
         menu_log("welcome: label set");
     }

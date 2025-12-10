@@ -6,7 +6,7 @@ static void usage(void)
 {
     const char msg[] =
         "usage: socket_demo <ipv4> <port> [iface] [path]\n"
-        "       example: socket_demo 10.0.2.2 80 rtl0 /\n";
+"       example: socket_demo 10.0.2.2 80 igb0 /\n";
     write(1, msg, sizeof(msg) - 1);
 }
 

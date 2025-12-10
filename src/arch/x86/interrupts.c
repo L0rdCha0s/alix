@@ -6,6 +6,7 @@
 #include "types.h"
 #include "interrupts.h"
 #include "rtl8139.h"
+#include "igb.h"
 #include "serial.h"
 #include "process.h"
 void scheduler_schedule(bool requeue_current);
@@ -430,6 +431,7 @@ __attribute__((interrupt)) static void irq11_handler(interrupt_frame_t *frame)
     usb_on_irq();
 #endif
     ahci_on_irq();
+    igb_on_irq();
     rtl8139_on_irq();
     lapic_eoi();
     pic_send_eoi(11);

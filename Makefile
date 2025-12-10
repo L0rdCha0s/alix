@@ -395,8 +395,9 @@ ifeq ($(NET_BACKEND),vmnet-bridged)
 NETDEV := -netdev socket,id=n0,fd=3
 endif
 
-# Device (keep RTL8139 + MAC)
-NIC := -device rtl8139,netdev=n0,mac=52:54:00:12:34:56
+# Device (default: Intel igb)
+NIC := -device igb,netdev=n0,mac=52:54:00:12:34:56
+NIC_RTL := -device rtl8139,netdev=n0,mac=52:54:00:12:34:57
 
 # Audio backend (default coreaudio on macOS; override with AUDIO_DEV=pa/alsa/none)
 AUDIO_DEV ?= coreaudio
@@ -446,6 +447,27 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
+
+run-hdd-rtl: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+	$(QEMU_NET_PREFIX) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
+		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device ich9-usb-uhci1 \
+		-device ich9-usb-uhci2 \
+		-device ich9-usb-uhci3 \
+		-device $(HDA_CONTROLLER) \
+		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
+		-device usb-kbd \
+		-device usb-mouse \
+		-device ahci,id=ahci0 \
+		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
+		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
+		-device ide-hd,drive=data,bus=ahci0.1 \
+		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		$(QEMU_AUDIO) \
+		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC_RTL)
 
 run-ps2-hdd: USB=0
 run-ps2-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)

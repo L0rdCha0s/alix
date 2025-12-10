@@ -9,6 +9,7 @@
 #include "heap.h"
 #include "paging.h"
 #include "rtl8139.h"
+#include "igb.h"
 #include "shell.h"
 #include "net/interface.h"
 #include "net/tcp.h"
@@ -963,12 +964,13 @@ void kernel_main(void)
     net_ntp_init();
     net_tcp_init();
     serial_printf("%s", "[alix] after net init\n");
+    igb_init();
     rtl8139_init();
 #endif
 
 #if ENABLE_INIT_PROC_DEVICES
     proc_devices_init();
-    serial_printf("%s", "[alix] after rtl8139_init\n");
+    serial_printf("%s", "[alix] after net devices init\n");
 #endif
 
     /* Defer HDA bring-up to its own kernel thread so codecs have time to appear. */

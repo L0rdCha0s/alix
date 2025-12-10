@@ -194,7 +194,7 @@ static bool startup_ensure_default_script(void)
         "# AlixOS startup script\n"
         "# Lines that begin with # are treated as comments.\n"
         "\n"
-        "dhclient rtl0\n"
+        "dhclient igb0\n"
         "ntpdate pool.ntp.org\n";
 
     if (!vfs_append(file, default_script, sizeof(default_script) - 1))

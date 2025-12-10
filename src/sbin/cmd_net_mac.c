@@ -7,13 +7,20 @@ bool shell_cmd_net_mac(shell_state_t *shell, shell_output_t *out, const char *ar
     (void)shell;
     (void)args;
 
-    net_interface_t *iface = net_if_by_name("rtl0");
+    const char *label = "igb0";
+    net_interface_t *iface = net_if_by_name("igb0");
+    if (!iface)
+    {
+        iface = net_if_by_name("rtl0");
+        label = "rtl0";
+    }
     if (!iface)
     {
         return shell_output_error(out, "network device not present");
     }
 
-    shell_output_write(out, "rtl8139 mac: ");
+    shell_output_write(out, label);
+    shell_output_write(out, " mac: ");
     for (int i = 0; i < 6; ++i)
     {
         static const char hex[] = "0123456789ABCDEF";
