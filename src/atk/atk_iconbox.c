@@ -198,8 +198,19 @@ static void iconbox_update_scrollbar(atk_widget_t *iconbox, atk_iconbox_priv_t *
         priv->scroll_y = max_scroll;
         atk_scrollbar_set_value(priv->scrollbar, priv->scroll_y);
     }
-    priv->scrollbar->x = iconbox->x + iconbox->width - priv->scrollbar_size;
-    priv->scrollbar->y = iconbox->y;
+
+    int abs_x = 0;
+    int abs_y = 0;
+    atk_widget_absolute_position(iconbox, &abs_x, &abs_y);
+    int parent_abs_x = 0;
+    int parent_abs_y = 0;
+    if (priv->scrollbar->parent)
+    {
+        atk_widget_absolute_position(priv->scrollbar->parent, &parent_abs_x, &parent_abs_y);
+    }
+
+    priv->scrollbar->x = abs_x - parent_abs_x + iconbox->width - priv->scrollbar_size;
+    priv->scrollbar->y = abs_y - parent_abs_y;
     priv->scrollbar->width = priv->scrollbar_size;
     priv->scrollbar->height = iconbox->height;
 }

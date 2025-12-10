@@ -129,8 +129,8 @@ static void nav_content_bounds(const atk_widget_t *nav, const atk_nav_priv_t *pr
     {
         return;
     }
-    int x = nav->x + priv->padding;
-    int y = nav->y + priv->header_h + priv->padding;
+    int x = priv->padding;
+    int y = priv->header_h + priv->padding;
     int w = nav->width - priv->padding * 2;
     int h = nav->height - priv->header_h - priv->padding * 2;
     if (w < 0) w = 0;
@@ -432,7 +432,9 @@ static void nav_draw_header(const atk_state_t *state,
         atk_font_draw_string(text_x, baseline, label, theme->button_text, theme->button_face);
     }
 
-    const char *title = (priv->count > 0) ? priv->entries[priv->count - 1].title : "";
+    const char *title = (priv->count > 0 && priv->entries)
+                            ? priv->entries[priv->count - 1].title
+                            : "";
     if (title && *title)
     {
         int text_w = atk_font_text_width(title);
@@ -485,9 +487,13 @@ static void nav_draw_cb(const atk_state_t *state,
 
     nav_draw_header(state, widget, priv, origin_x, origin_y);
 
-    if (priv->count == 0)
+    if (priv->count == 0 || !priv->entries)
     {
         priv_mut->post_pop_refresh = false;
+        if (priv->count > 0 && !priv->entries)
+        {
+            priv_mut->count = 0;
+        }
         return;
     }
 
