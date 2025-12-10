@@ -205,8 +205,8 @@ static __attribute__((aligned(16))) uint8_t g_tx_buffers[IGB_TX_DESC_COUNT][IGB_
 static uint32_t g_rx_index = 0;
 static uint32_t g_tx_head = 0;
 static uint32_t g_tx_clean = 0;
-static int g_rx_log_budget = 240;
-static int g_rx_idle_log_budget = 500;
+static int g_rx_log_budget = 24;
+static int g_rx_idle_log_budget = 8;
 static int g_irq_log_budget = 16;
 
 static void igb_log(const char *msg);

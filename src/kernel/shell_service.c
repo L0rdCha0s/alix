@@ -272,8 +272,8 @@ bool shell_service_close_session(uint32_t handle)
                  * process_destroy() will re-enter shell_service_cleanup_process().
                  */
                 process_t *runner = session->runner;
-                process_t *fg = session->state.foreground_process;
-                session->state.foreground_process = NULL;
+                process_t *fg = shell_foreground_load(&session->state);
+                shell_foreground_store(&session->state, NULL);
                 session->runner = NULL;
                 session->running = false;
                 session->completed = true;
@@ -452,12 +452,13 @@ void shell_service_cleanup_process(process_t *process)
         if (session->owner == process)
         {
             shell_session_lock(session);
-            process_t *fg = session->state.foreground_process;
+            process_t *fg = shell_foreground_load(&session->state);
             process_t *fg_to_wait = NULL;
             if (fg && !process_is_zombie(fg))
             {
                 process_kill_tree(fg);
                 fg_to_wait = fg;
+                shell_foreground_store(&session->state, NULL);
             }
             if (session->runner && !process_is_zombie(session->runner))
             {
@@ -479,7 +480,7 @@ void shell_service_cleanup_process(process_t *process)
             if (fg && process_is_zombie(fg))
             {
                 fg_zombie = fg;
-                session->state.foreground_process = NULL;
+                shell_foreground_store(&session->state, NULL);
             }
             *cursor = session->next;
             shell_session_unlock(session);
@@ -698,35 +699,38 @@ int shell_service_interrupt(uint32_t handle)
         return -1;
     }
 
+    process_t *fg = shell_foreground_load(&session->state);
+    process_t *runner = session->runner;
+
     serial_printf("[shellsvc] interrupt request handle=%u running=%s fg_pid=0x%016llX runner_pid=0x%016llX\r\n",
                   (unsigned)handle,
                   session->running ? "true" : "false",
-                  (unsigned long long)(session->state.foreground_process ? process_get_pid(session->state.foreground_process) : 0),
-                  (unsigned long long)(session->runner ? process_get_pid(session->runner) : 0));
+                  (unsigned long long)(fg ? process_get_pid(fg) : 0),
+                  (unsigned long long)(runner ? process_get_pid(runner) : 0));
 
-    bool ok = false;
+    bool killed = false;
     if (session->running)
     {
-        process_t *fg = session->state.foreground_process;
-        process_t *runner = session->runner;
-
         if (fg && !process_is_zombie(fg))
         {
             process_kill_tree(fg);
-            ok = true;
+            killed = true;
         }
 
         if (runner && !process_is_zombie(runner))
         {
             process_kill_tree(runner);
-            ok = true;
+            killed = true;
         }
 
-        session->state.foreground_process = NULL;
-        session->running = false;
-        session->completed = true;
-        session->last_status = -1;
+        if (killed)
+        {
+            shell_foreground_store(&session->state, NULL);
+            session->running = false;
+            session->completed = true;
+            session->last_status = -1;
+        }
     }
     shell_session_unlock(session);
-    return ok ? 0 : -1;
+    return killed ? 0 : -1;
 }

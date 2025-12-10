@@ -34,6 +34,24 @@ struct shell_state
     void *cwd_changed_context;
 };
 
+/* Foreground tracking is shared across threads (shell workers + interruptors). */
+static inline process_t *shell_foreground_load(shell_state_t *shell)
+{
+    if (!shell)
+    {
+        return NULL;
+    }
+    return __atomic_load_n(&shell->foreground_process, __ATOMIC_ACQUIRE);
+}
+
+static inline void shell_foreground_store(shell_state_t *shell, process_t *proc)
+{
+    if (shell)
+    {
+        __atomic_store_n(&shell->foreground_process, proc, __ATOMIC_RELEASE);
+    }
+}
+
 void shell_main(void);
 
 void shell_output_init_console(shell_output_t *out);

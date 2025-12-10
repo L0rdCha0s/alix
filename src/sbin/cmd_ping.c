@@ -12,8 +12,8 @@
 
 static const char *skip_ws(const char *cursor);
 static bool read_token(const char **cursor, char *out, size_t capacity);
-static void ping_stdout_write(const char *text);
-static void ping_stdout_write_uint(unsigned value);
+static void ping_output_write(shell_output_t *out, const char *text);
+static void ping_output_write_uint(shell_output_t *out, unsigned value);
 
 typedef struct
 {
@@ -107,9 +107,9 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
     bool resolved_host = false;
     if (!net_parse_ipv4(state->ip_token, &target_ip))
     {
-        ping_stdout_write("Resolving ");
-        ping_stdout_write(state->ip_token);
-        ping_stdout_write("...\n");
+        ping_output_write(out, "Resolving ");
+        ping_output_write(out, state->ip_token);
+        ping_output_write(out, "...\n");
         if (!net_dns_resolve_ipv4(state->ip_token, requested_iface, &target_ip))
         {
             free(state);
@@ -134,21 +134,21 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
     net_format_ipv4(iface->ipv4_addr, state->source_str);
 
-    ping_stdout_write("PING ");
+    ping_output_write(out, "PING ");
     if (resolved_host)
     {
-        ping_stdout_write(state->ip_token);
-        ping_stdout_write(" (");
-        ping_stdout_write(state->target_str);
-        ping_stdout_write(")");
+        ping_output_write(out, state->ip_token);
+        ping_output_write(out, " (");
+        ping_output_write(out, state->target_str);
+        ping_output_write(out, ")");
     }
     else
     {
-        ping_stdout_write(state->target_str);
+        ping_output_write(out, state->target_str);
     }
-    ping_stdout_write(" from ");
-    ping_stdout_write(state->source_str);
-    ping_stdout_write(":\n");
+    ping_output_write(out, " from ");
+    ping_output_write(out, state->source_str);
+    ping_output_write(out, ":\n");
 
     bool have_mac = net_arp_lookup(next_hop_ip, state->target_mac);
     uint32_t frequency = timer_frequency();
@@ -160,7 +160,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
     if (!have_mac)
     {
-        ping_stdout_write("  Resolving ARP...\n");
+        ping_output_write(out, "  Resolving ARP...\n");
         if (!net_arp_send_request(iface, next_hop_ip))
         {
             free(state);
@@ -180,7 +180,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
         if (!have_mac)
         {
-            ping_stdout_write("  Request timed out (ARP)\n");
+            ping_output_write(out, "  Request timed out (ARP)\n");
             free(state);
             return false;
         }
@@ -214,14 +214,14 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
             {
                 char reply_ip[32];
                 net_format_ipv4(reply.from_ip, reply_ip);
-                ping_stdout_write("  Reply from ");
-                ping_stdout_write(reply_ip);
-                ping_stdout_write(": bytes=");
-                ping_stdout_write_uint((unsigned)reply.bytes);
-                ping_stdout_write(" time=");
+                ping_output_write(out, "  Reply from ");
+                ping_output_write(out, reply_ip);
+                ping_output_write(out, ": bytes=");
+                ping_output_write_uint(out, (unsigned)reply.bytes);
+                ping_output_write(out, " time=");
                 uint64_t ms = reply.rtt_ticks * 1000ULL / frequency;
-                ping_stdout_write_uint((unsigned)ms);
-                ping_stdout_write("ms\n");
+                ping_output_write_uint(out, (unsigned)ms);
+                ping_output_write(out, "ms\n");
                 got_reply = true;
                 break;
             }
@@ -230,7 +230,7 @@ bool shell_cmd_ping(shell_state_t *shell, shell_output_t *out, const char *args)
 
         if (!got_reply)
         {
-            ping_stdout_write("  Request timed out\n");
+            ping_output_write(out, "  Request timed out\n");
         }
 
         sequence++;
@@ -288,33 +288,41 @@ static bool read_token(const char **cursor, char *out, size_t capacity)
     return true;
 }
 
-static void ping_stdout_write(const char *text)
+static void ping_output_write(shell_output_t *out, const char *text)
 {
-    if (!text)
+    if (!out || !text)
     {
         return;
     }
-    process_stdout_write(text, strlen(text));
+    shell_output_write(out, text);
 }
 
-static void ping_stdout_write_uint(unsigned value)
+static void ping_output_write_uint(shell_output_t *out, unsigned value)
 {
+    if (!out)
+    {
+        return;
+    }
     char buf[16];
-    int pos = 0;
+    size_t pos = 0;
     if (value == 0)
     {
         buf[pos++] = '0';
     }
     else
     {
-        while (value > 0 && pos < (int)(sizeof(buf) - 1))
+        while (value > 0 && pos < sizeof(buf))
         {
             buf[pos++] = (char)('0' + (value % 10U));
             value /= 10U;
         }
     }
-    while (pos-- > 0)
+    /* reverse in-place */
+    for (size_t i = 0; i < pos / 2; ++i)
     {
-        process_stdout_write(&buf[pos], 1);
+        char tmp = buf[i];
+        buf[i] = buf[pos - 1 - i];
+        buf[pos - 1 - i] = tmp;
     }
+    shell_output_write_len(out, buf, pos);
 }

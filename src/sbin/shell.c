@@ -312,7 +312,7 @@ bool shell_request_interrupt(shell_state_t *shell)
         return false;
     }
 
-    process_t *proc = shell->foreground_process;
+    process_t *proc = shell_foreground_load(shell);
     if (!proc)
     {
         return false;
@@ -861,7 +861,7 @@ void shell_main(void)
     shell->stream_fn = shell_stream_console_write;
     shell->stream_context = NULL;
     shell->stdout_fd = process_current_stdout_fd();
-    shell->foreground_process = NULL;
+    shell_foreground_store(shell, NULL);
     shell->wait_hook = shell_wait_for_interrupt;
     shell->wait_context = shell;
     shell->owner_process = process_current();
@@ -1122,7 +1122,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
 
             if (shell)
             {
-                shell->foreground_process = proc;
+                shell_foreground_store(shell, proc);
             }
 
             process_join_with_hook(proc,
@@ -1137,9 +1137,9 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
             }
             free(task);
 
-            if (shell && shell->foreground_process == proc)
+            if (shell && shell_foreground_load(shell) == proc)
             {
-                shell->foreground_process = NULL;
+                shell_foreground_store(shell, NULL);
             }
             break;
         }
@@ -1227,7 +1227,7 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                         {
                             if (shell)
                             {
-                                shell->foreground_process = proc;
+                                shell_foreground_store(shell, proc);
                             }
                             process_join_with_hook(proc,
                                                     NULL,
@@ -1239,9 +1239,9 @@ char *shell_execute_line(shell_state_t *shell, const char *input, bool *success)
                             {
                                 free(task->args_owned);
                             }
-                            if (shell && shell->foreground_process == proc)
+                            if (shell && shell_foreground_load(shell) == proc)
                             {
-                                shell->foreground_process = NULL;
+                                shell_foreground_store(shell, NULL);
                             }
                             free(task);
                         }
