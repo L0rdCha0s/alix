@@ -1325,6 +1325,14 @@ static void scheduler_log_process_age_snapshot(uint64_t now_ticks)
     for (process_t *proc = g_process_list; proc; proc = proc->next)
     {
         thread_t *thread = proc->main_thread;
+        if (thread && !thread_pointer_valid(thread))
+        {
+            serial_printf("[sched] proc_age skip invalid main_thread pid=0x%016llX name=%s ptr=0x%016llX\r\n",
+                          (unsigned long long)proc->pid,
+                          proc->name[0] ? proc->name : "<unnamed>",
+                          (unsigned long long)(uintptr_t)thread);
+            thread = NULL;
+        }
         uint64_t last_tick = thread ? __atomic_load_n(&thread->last_scheduled_tick, __ATOMIC_RELAXED) : 0;
         uint64_t elapsed_ticks = (last_tick && now_ticks > last_tick) ? (now_ticks - last_tick) : 0;
         uint64_t elapsed_sec = freq ? (elapsed_ticks / freq) : 0;

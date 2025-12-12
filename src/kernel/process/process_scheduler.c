@@ -7,6 +7,8 @@
 
 static bool thread_can_run(const thread_t *thread);
 extern uint8_t __kernel_text_start[];
+void remove_from_run_queue(thread_t *thread);
+static void enqueue_thread_on_cpu(thread_t *thread, uint32_t cpu_index);
 
 static inline bool scheduler_addr_canonical(uint64_t value)
 {
@@ -141,6 +143,26 @@ void thread_set_affinity(thread_t *thread, bool enabled, uint32_t cpu_index)
     }
     thread->affinity_enabled = enabled;
     thread->affinity_cpu = enabled ? cpu_index : RUN_QUEUE_CPU_INVALID;
+
+    if (!enabled || cpu_index == RUN_QUEUE_CPU_INVALID)
+    {
+        return;
+    }
+
+    /*
+     * If a thread is already enqueued on a different CPU, migrate it now.
+     * The scheduler filters by affinity at dequeue time, so leaving it in the
+     * wrong run queue can strand the thread forever.
+     */
+    if (thread->state == THREAD_STATE_READY &&
+        !thread->in_transition &&
+        thread_in_run_queue_load(thread) &&
+        thread->run_queue_cpu != cpu_index &&
+        __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE) == RUN_QUEUE_CPU_INVALID)
+    {
+        remove_from_run_queue(thread);
+        enqueue_thread_on_cpu(thread, cpu_index);
+    }
 }
 
 #if ENABLE_RUN_QUEUE_DEBUG
@@ -608,6 +630,16 @@ static uint32_t scheduler_select_target_cpu(thread_t *thread)
 
     uint32_t ui_cpu = g_ui_cpu_index;
     bool ui_cpu_online = (ui_cpu != RUN_QUEUE_CPU_INVALID) && scheduler_cpu_online(ui_cpu);
+
+    /* Honor explicit affinity first. */
+    if (thread &&
+        thread->affinity_enabled &&
+        thread->affinity_cpu != RUN_QUEUE_CPU_INVALID &&
+        thread->affinity_cpu < limit &&
+        scheduler_cpu_online(thread->affinity_cpu))
+    {
+        return thread->affinity_cpu;
+    }
 
     /* UI threads stick to the reserved CPU if available. */
     if (thread && thread->priority == THREAD_PRIORITY_UI && ui_cpu_online)
@@ -1997,7 +2029,22 @@ static bool switch_to_thread(thread_t *next)
     bool deferred_work = false;
 
     thread_t *prev = current_thread_local();
+    if (prev && !thread_pointer_valid(prev))
+    {
+        serial_printf("[sched] warning: invalid current thread ptr=0x%016llX cpu=%u\r\n",
+                      (unsigned long long)(uintptr_t)prev,
+                      (unsigned)current_cpu_index());
+        prev = NULL;
+    }
     process_t *prev_process = prev ? prev->process : NULL;
+    if (prev_process && !process_pointer_valid(prev_process))
+    {
+        serial_printf("[sched] warning: invalid current process ptr=0x%016llX thread=%s pid=0x%016llX\r\n",
+                      (unsigned long long)(uintptr_t)prev_process,
+                      prev ? scheduler_thread_name(prev) : "<none>",
+                      (unsigned long long)(prev ? scheduler_thread_pid(prev) : 0));
+        prev_process = NULL;
+    }
     process_t *next_process = next ? next->process : NULL;
     uint32_t cpu_idx = current_cpu_index();
     uint64_t sched_lock_enter = scheduler_lock_acquire("switch_to_thread");
@@ -2163,6 +2210,21 @@ static bool switch_to_thread(thread_t *next)
         scheduler_lock_release(sched_lock_enter);
         return false;
     }
+    uintptr_t next_ctx_addr = (uintptr_t)next_ctx;
+    uintptr_t stack_base = (uintptr_t)next->stack_base;
+    uintptr_t stack_top = (uintptr_t)next->kernel_stack_top;
+    if (next_ctx_addr < stack_base || next_ctx_addr >= stack_top)
+    {
+        SCHED_LOG("[sched] invalid ctx ptr thread=%s pid=0x%016llX ctx=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+                  scheduler_thread_name(next),
+                  (unsigned long long)scheduler_thread_pid(next),
+                  (unsigned long long)next_ctx_addr,
+                  (unsigned long long)stack_base,
+                  (unsigned long long)stack_top);
+        thread_quarantine_corrupt(next, "invalid_context_ptr");
+        scheduler_lock_release(sched_lock_enter);
+        return false;
+    }
     /* Log upcoming context pointer and stack info. */
     uint64_t rsp_now = 0;
     __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp_now));
@@ -2187,6 +2249,36 @@ static bool switch_to_thread(thread_t *next)
         thread_quarantine_corrupt(next, "invalid_saved_rip");
         scheduler_lock_release(sched_lock_enter);
         return false;
+    }
+
+    /* Debug: selectively log doom thread contexts to diagnose corruption. */
+    const char *next_name_dbg = scheduler_thread_name(next);
+    bool is_doom_dbg = false;
+    if (next_name_dbg)
+    {
+        for (const char *p = next_name_dbg; *p; ++p)
+        {
+            if (p[0] == 'd' && p[1] == 'o' && p[2] == 'o' && p[3] == 'm')
+            {
+                is_doom_dbg = true;
+                break;
+            }
+        }
+    }
+    if (is_doom_dbg)
+    {
+        serial_printf("[sched][doom] pre-switch ctx=0x%016llX rflags=0x%016llX ret=0x%016llX r15=0x%016llX r14=0x%016llX r13=0x%016llX r12=0x%016llX rbx=0x%016llX rbp=0x%016llX kstack=[0x%016llX,0x%016llX)\r\n",
+                      (unsigned long long)(uintptr_t)next_ctx,
+                      (unsigned long long)next_ctx[CTX_RFLAGS],
+                      (unsigned long long)next_ctx[CTX_RET],
+                      (unsigned long long)next_ctx[CTX_R15],
+                      (unsigned long long)next_ctx[CTX_R14],
+                      (unsigned long long)next_ctx[CTX_R13],
+                      (unsigned long long)next_ctx[CTX_R12],
+                      (unsigned long long)next_ctx[CTX_RBX],
+                      (unsigned long long)next_ctx[CTX_RBP],
+                      (unsigned long long)(uintptr_t)next->stack_base,
+                      (unsigned long long)next->kernel_stack_top);
     }
 
     uint8_t *prev_transition_flag = NULL;

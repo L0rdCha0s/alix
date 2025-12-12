@@ -23,6 +23,59 @@ static heap_block_t *g_heap_head = NULL;
 static heap_block_t *g_heap_tail = NULL;
 static volatile int g_heap_lock = 0;
 
+typedef struct
+{
+    char *name;
+    char *value;
+} libc_env_entry_t;
+
+static libc_env_entry_t *g_env_entries = NULL;
+static size_t g_env_count = 0;
+static size_t g_env_capacity = 0;
+
+static int libc_env_find(const char *name)
+{
+    if (!name)
+    {
+        return -1;
+    }
+    for (size_t i = 0; i < g_env_count; ++i)
+    {
+        if (strcmp(g_env_entries[i].name, name) == 0)
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static bool libc_env_reserve(size_t needed)
+{
+    if (g_env_capacity >= needed)
+    {
+        return true;
+    }
+    size_t new_cap = g_env_capacity == 0 ? 4 : g_env_capacity * 2;
+    if (new_cap < needed)
+    {
+        new_cap = needed;
+    }
+
+    size_t bytes = 0;
+    if (__builtin_mul_overflow(new_cap, sizeof(libc_env_entry_t), &bytes))
+    {
+        return false;
+    }
+    libc_env_entry_t *entries = (libc_env_entry_t *)realloc(g_env_entries, bytes);
+    if (!entries)
+    {
+        return false;
+    }
+    g_env_entries = entries;
+    g_env_capacity = new_cap;
+    return true;
+}
+
 #ifdef ENABLE_USER_MEM_DEBUG_LOGS
 static void user_heap_log(const char *msg, uintptr_t value)
 {
@@ -572,6 +625,117 @@ int atoi(const char *str)
         ++str;
     }
     return result * sign;
+}
+
+char *getenv(const char *name)
+{
+    if (!name || name[0] == '\0' || name[0] == '=')
+    {
+        return NULL;
+    }
+    int index = libc_env_find(name);
+    if (index < 0)
+    {
+        return NULL;
+    }
+    return g_env_entries[index].value;
+}
+
+int setenv(const char *name, const char *value, int overwrite)
+{
+    if (!name || name[0] == '\0' || strchr(name, '='))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!value)
+    {
+        value = "";
+    }
+
+    int index = libc_env_find(name);
+    if (index >= 0 && !overwrite)
+    {
+        return 0;
+    }
+
+    size_t name_len = strlen(name) + 1;
+    size_t value_len = strlen(value) + 1;
+
+    char *name_copy = NULL;
+    char *value_copy = (char *)malloc(value_len);
+    if (!value_copy)
+    {
+        errno = ENOMEM;
+        return -1;
+    }
+    memcpy(value_copy, value, value_len);
+
+    if (index < 0)
+    {
+        if (!libc_env_reserve(g_env_count + 1))
+        {
+            free(value_copy);
+            errno = ENOMEM;
+            return -1;
+        }
+        name_copy = (char *)malloc(name_len);
+        if (!name_copy)
+        {
+            free(value_copy);
+            errno = ENOMEM;
+            return -1;
+        }
+        memcpy(name_copy, name, name_len);
+        g_env_entries[g_env_count].name = name_copy;
+        g_env_entries[g_env_count].value = value_copy;
+        g_env_count++;
+        return 0;
+    }
+
+    free(g_env_entries[index].value);
+    g_env_entries[index].value = value_copy;
+    return 0;
+}
+
+int unsetenv(const char *name)
+{
+    if (!name || name[0] == '\0' || strchr(name, '='))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    int index = libc_env_find(name);
+    if (index < 0)
+    {
+        return 0;
+    }
+    free(g_env_entries[index].name);
+    free(g_env_entries[index].value);
+    for (size_t i = (size_t)index + 1; i < g_env_count; ++i)
+    {
+        g_env_entries[i - 1] = g_env_entries[i];
+    }
+    if (g_env_count > 0)
+    {
+        g_env_count--;
+    }
+    return 0;
+}
+
+char *strerror(int errnum)
+{
+    switch (errnum)
+    {
+        case EINVAL: return "Invalid argument";
+        case ENOMEM: return "Out of memory";
+        case ENOENT: return "No such file or directory";
+        case EAGAIN: return "Resource temporarily unavailable";
+        case EINTR:  return "Interrupted system call";
+        case EEXIST: return "File exists";
+        case EIO:    return "I/O error";
+        default:     return "Unknown error";
+    }
 }
 
 typedef struct

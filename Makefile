@@ -22,7 +22,7 @@ DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
 BASE_CFLAGS := -O4 -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
                -m64 -mno-red-zone -Wall -Wextra -g -I$(INCLUDE_DIR) -I$(ATK_DIR) \
                -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
-               -fshort-wchar
+               -fshort-wchar -MMD -MP
 
 USB ?= 1
 
@@ -32,7 +32,8 @@ ifeq ($(USB),0)
 KERNEL_CFLAGS += -DENABLE_USB=0
 endif
 USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
-               -msse2 -mfpmath=sse -mstackrealign
+               -msse2 -mfpmath=sse -mstackrealign -mcmodel=large -I$(USER_DIR)/doom \
+               -DNORMALUNIX
 
 KERNEL_LD   := $(ARCH_DIR)/uefi.ld
 LOADER_DIR  := src/loader
@@ -78,9 +79,12 @@ USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOUR
 USER_ATK_EXTRA_SOURCES := $(USER_DIR)/atk/atk_terminal.c $(USER_DIR)/atk_app.c
 USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
 USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
+USER_DOOM_SOURCES := $(wildcard $(USER_DIR)/doom/*.c)
+USER_DOOM_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_DOOM_SOURCES))
 USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
+             $(USER_OBJDIR)/doom.elf \
              $(USER_OBJDIR)/atk_shell.elf \
              $(USER_OBJDIR)/atk_clock.elf \
              $(USER_OBJDIR)/atk_richtext.elf \
@@ -95,6 +99,7 @@ USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
              $(USER_BIN_DIR)/wolf3d \
+             $(USER_BIN_DIR)/doom \
              $(USER_BIN_DIR)/atk_shell \
              $(USER_BIN_DIR)/atk_clock \
              $(USER_BIN_DIR)/atk_richtext \
@@ -513,3 +518,7 @@ png-test: $(PNG_TEST_BIN)
 	$(PNG_TEST_BIN) lenna.png
 
 .PHONY: all run run-hdd run-hdd-gdb clean test-dhcp ttf-test sha256-test png-test
+
+-include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) \
+         $(USER_OBJDIR)/*.d $(USER_OBJDIR)/atk/*.d $(USER_OBJDIR)/atk/util/*.d \
+         $(USER_OBJDIR)/kernel/*.d $(USER_OBJDIR)/doom/*.d

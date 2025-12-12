@@ -666,8 +666,19 @@ static void vfs_detach_child(vfs_node_t *child)
 static vfs_node_t *vfs_find_child(vfs_node_t *parent, const char *name)
 {
     if (!parent || !name) return NULL;
+    size_t guard = 0;
+    const size_t guard_limit = 16384;
     for (vfs_node_t *n = parent->first_child; n; n = n->next_sibling)
     {
+        if (++guard > guard_limit)
+        {
+            serial_printf("[vfs] sibling loop detected parent=%s name=%s head=0x%016llX last=0x%016llX\r\n",
+                          parent->name ? parent->name : "<noname>",
+                          name,
+                          (unsigned long long)(uintptr_t)parent->first_child,
+                          (unsigned long long)(uintptr_t)n);
+            break;
+        }
         if (n->name && strcmp(n->name, name) == 0)
             return n;
     }

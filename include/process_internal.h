@@ -634,7 +634,10 @@ void fpu_prepare_initial_state(void);
 void fpu_save_state(fpu_state_t *state);
 void fpu_restore_state(const fpu_state_t *state);
 void fatal(const char *msg) __attribute__((noreturn));
-void context_switch(cpu_context_t **prev_ctx, cpu_context_t *next_ctx, uint8_t *transition_flag, uint32_t *stack_guard_label);
+void context_switch(cpu_context_t **prev_ctx,
+                    cpu_context_t *next_ctx,
+                    uint8_t *transition_flag,
+                    uint32_t *stack_guard_label);
 void process_handle_stack_guard_fault(void);
 void process_handle_fatal_fault(void);
 

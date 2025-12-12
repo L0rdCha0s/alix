@@ -5,6 +5,7 @@
 #include "libc.h"
 #include "memory_layout.h"
 #include "serial.h"
+#include "spinlock.h"
 
 #define USER_MEMORY_PAGE_SIZE 4096ULL
 
@@ -17,6 +18,7 @@ typedef struct user_memory_range
 
 static user_memory_range_t *g_free_ranges = NULL;
 static size_t g_free_bytes = 0;
+static spinlock_t g_user_memory_lock;
 
 #ifdef ENABLE_MEM_DEBUG_LOGS
 static inline void usermem_log(const char *msg, uintptr_t value)
@@ -137,6 +139,8 @@ static void user_memory_add_range(uintptr_t base, uintptr_t end)
 
 void user_memory_init(void)
 {
+    spinlock_init(&g_user_memory_lock);
+    spinlock_lock(&g_user_memory_lock);
     g_free_ranges = NULL;
     g_free_bytes = 0;
 
@@ -189,6 +193,7 @@ void user_memory_init(void)
     serial_printf("%s", "user_memory: available 0x");
     serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
     serial_printf("%s", " bytes\r\n");
+    spinlock_unlock(&g_user_memory_lock);
 }
 
 void *user_memory_alloc(size_t bytes)
@@ -200,6 +205,7 @@ void *user_memory_alloc(size_t bytes)
     size_t aligned = (size_t)align_up_uintptr(bytes, USER_MEMORY_PAGE_SIZE);
     usermem_log("alloc req=", aligned);
 
+    spinlock_lock(&g_user_memory_lock);
     user_memory_range_t **cursor = &g_free_ranges;
     while (*cursor)
     {
@@ -216,10 +222,12 @@ void *user_memory_alloc(size_t bytes)
             }
             g_free_bytes -= aligned;
             usermem_log("alloc ptr=", addr);
+            spinlock_unlock(&g_user_memory_lock);
             return (void *)addr;
         }
         cursor = &range->next;
     }
+    spinlock_unlock(&g_user_memory_lock);
     serial_printf("%s", "user_memory: allocation failed\r\n");
     serial_printf("%s", "user_memory: free bytes 0x");
     serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
@@ -261,13 +269,18 @@ void user_memory_free(void *addr, size_t bytes)
     node->base = base;
     node->length = length;
     node->next = NULL;
+    spinlock_lock(&g_user_memory_lock);
     g_free_bytes += length;
     user_memory_insert_node(node);
+    spinlock_unlock(&g_user_memory_lock);
 }
 
 size_t user_memory_available(void)
 {
-    return g_free_bytes;
+    spinlock_lock(&g_user_memory_lock);
+    size_t available = g_free_bytes;
+    spinlock_unlock(&g_user_memory_lock);
+    return available;
 }
 
 bool user_memory_alloc_page(uintptr_t *phys_out)
@@ -276,6 +289,7 @@ bool user_memory_alloc_page(uintptr_t *phys_out)
     {
         return false;
     }
+    spinlock_lock(&g_user_memory_lock);
     user_memory_range_t *prev = NULL;
     user_memory_range_t *range = g_free_ranges;
     while (range && range->length < USER_MEMORY_PAGE_SIZE)
@@ -285,6 +299,7 @@ bool user_memory_alloc_page(uintptr_t *phys_out)
     }
     if (!range)
     {
+        spinlock_unlock(&g_user_memory_lock);
         serial_printf("%s", "user_memory: no free pages\r\n");
         serial_printf("%s", "user_memory: free bytes 0x");
         serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
@@ -308,10 +323,13 @@ bool user_memory_alloc_page(uintptr_t *phys_out)
     }
     g_free_bytes -= USER_MEMORY_PAGE_SIZE;
     *phys_out = addr;
+    spinlock_unlock(&g_user_memory_lock);
     return true;
 }
 
 void user_memory_free_page(uintptr_t phys)
 {
+    spinlock_lock(&g_user_memory_lock);
     user_memory_add_range(phys, phys + USER_MEMORY_PAGE_SIZE);
+    spinlock_unlock(&g_user_memory_lock);
 }

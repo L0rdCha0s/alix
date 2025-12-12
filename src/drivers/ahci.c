@@ -4,6 +4,8 @@
 #include "libc.h"
 #include "pci.h"
 #include "serial.h"
+#include "spinlock.h"
+#include "user_copy.h"
 #include "types.h"
 #include "interrupts.h"
 #include "process.h"
@@ -155,6 +157,8 @@ typedef struct
     uint8_t *fis;
     uint8_t port_no;
     block_device_t *block;
+    spinlock_t lock;
+    volatile bool busy;
     volatile bool waiting;
     volatile bool wait_success;
     uint32_t wait_slot_mask;
@@ -639,9 +643,11 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
                            bool write)
 {
     bool result = false;
+    bool acquired_busy = false;
     uint8_t *bounce_alloc = NULL;
     uint64_t total_bytes = 0;
     bool has_payload = false;
+    bool user_buffer = false;
     void *original_buffer = NULL;
     hba_port_t *port = ctx->port;
     ahci_log_hex("cmd buffer=", (uint64_t)(uintptr_t)buffer);
@@ -650,6 +656,18 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     {
         goto cleanup;
     }
+
+    /* Serialize commands per port without holding a spinlock across yields. */
+    spinlock_lock(&ctx->lock);
+    while (ctx->busy)
+    {
+        spinlock_unlock(&ctx->lock);
+        process_yield();
+        spinlock_lock(&ctx->lock);
+    }
+    ctx->busy = true;
+    acquired_busy = true;
+    spinlock_unlock(&ctx->lock);
 
     total_bytes = count ? ((uint64_t)count * AHCI_SECTOR_SIZE) : 0;
     has_payload = (total_bytes > 0);
@@ -661,8 +679,9 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     original_buffer = has_payload ? buffer : NULL;
     if (has_payload)
     {
+        user_buffer = user_ptr_range_valid(buffer, (size_t)total_bytes);
         thread_t *stack_owner = process_find_stack_owner(buffer, (size_t)total_bytes);
-        if (stack_owner)
+        if (user_buffer || stack_owner)
         {
             bounce_alloc = (uint8_t *)malloc((size_t)total_bytes);
             if (!bounce_alloc)
@@ -672,14 +691,28 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
             }
             if (write)
             {
-                memcpy(bounce_alloc, buffer, (size_t)total_bytes);
+                if (user_buffer)
+                {
+                    if (!user_copy_from_user(bounce_alloc, buffer, (size_t)total_bytes))
+                    {
+                        ahci_log_port(ctx->port_no, "user bounce copy failed");
+                        goto cleanup;
+                    }
+                }
+                else
+                {
+                    memcpy(bounce_alloc, buffer, (size_t)total_bytes);
+                }
             }
-            ahci_log_stack_bounce(ctx->port_no,
-                                  stack_owner,
-                                  buffer,
-                                  bounce_alloc,
-                                  (size_t)total_bytes,
-                                  write);
+            if (stack_owner)
+            {
+                ahci_log_stack_bounce(ctx->port_no,
+                                      stack_owner,
+                                      buffer,
+                                      bounce_alloc,
+                                      (size_t)total_bytes,
+                                      write);
+            }
             buffer = bounce_alloc;
         }
     }
@@ -804,9 +837,25 @@ cleanup:
     {
         if (result && !write && original_buffer)
         {
-            memcpy(original_buffer, bounce_alloc, (size_t)total_bytes);
+            if (user_buffer)
+            {
+                if (!user_copy_to_user(original_buffer, bounce_alloc, (size_t)total_bytes))
+                {
+                    result = false;
+                }
+            }
+            else
+            {
+                memcpy(original_buffer, bounce_alloc, (size_t)total_bytes);
+            }
         }
         free(bounce_alloc);
+    }
+    if (acquired_busy)
+    {
+        spinlock_lock(&ctx->lock);
+        ctx->busy = false;
+        spinlock_unlock(&ctx->lock);
     }
     return result;
 }
@@ -880,8 +929,10 @@ static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
         serial_printf("%s", "[ahci] failed to allocate port context\r\n");
         return;
     }
+    spinlock_init(&ctx->lock);
     ctx->port = (hba_port_t *)port;
     ctx->port_no = (uint8_t)port_no;
+    ctx->busy = false;
     ctx->waiting = false;
     ctx->wait_success = false;
     ctx->wait_slot_mask = 0;

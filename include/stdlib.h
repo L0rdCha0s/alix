@@ -12,6 +12,10 @@ void *realloc(void *ptr, size_t size);
 void free(void *ptr);
 int abs(int value);
 int atoi(const char *str);
+int setenv(const char *name, const char *value, int overwrite);
+int unsetenv(const char *name);
+char *getenv(const char *name);
+void exit(int status);
 #endif
 
 #endif

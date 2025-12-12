@@ -5,7 +5,8 @@
 #include "types.h"
 #include "vfs.h"
 
-static const char *const DOOM_PATH = "/bin/doom";
+static const char *const DOOM_PATH = "/usr/bin/doom";
+static const char *const DOOM_PATH_FALLBACK = "/bin/doom";
 
 bool shell_cmd_doom(shell_state_t *shell, shell_output_t *out, const char *args)
 {
@@ -19,6 +20,11 @@ bool shell_cmd_doom(shell_state_t *shell, shell_output_t *out, const char *args)
     }
 
     vfs_node_t *node = vfs_resolve(root, DOOM_PATH);
+    if (!node)
+    {
+        /* Allow older path if the binary was installed under /bin. */
+        node = vfs_resolve(root, DOOM_PATH_FALLBACK);
+    }
     if (!node || !vfs_is_file(node))
     {
         return shell_output_error(out, "doom: binary not found");

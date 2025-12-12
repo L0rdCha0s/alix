@@ -8,7 +8,7 @@ PHDRS
 
 SECTIONS
 {
-    . = 0x0000000000400000;
+    . = 0x0000000100000000;
 
     .text : ALIGN(16)
     {
@@ -29,7 +29,9 @@ SECTIONS
 
     .bss : ALIGN(16)
     {
+        __bss_start = .;
         *(.bss*)
         *(COMMON)
+        __bss_end = .;
     } :data
 }

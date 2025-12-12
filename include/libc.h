@@ -26,6 +26,7 @@ char *strchr(const char *str, int ch);
 char *strrchr(const char *str, int ch);
 int strcasecmp(const char *a, const char *b);
 int strncasecmp(const char *a, const char *b, size_t n);
+char *strerror(int errnum);
 
 void *malloc(size_t size);
 void free(void *ptr);
@@ -33,6 +34,9 @@ void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
 int abs(int value);
 int atoi(const char *str);
+int setenv(const char *name, const char *value, int overwrite);
+int unsetenv(const char *name);
+char *getenv(const char *name);
 
 ssize_t read(int fd, void *buffer, size_t count);
 ssize_t write(int fd, const void *buffer, size_t count);

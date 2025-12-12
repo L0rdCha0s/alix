@@ -539,7 +539,10 @@ static int syscall_file_close(void *ctx)
         file_handle_t *handle = (file_handle_t *)ctx;
         if (handle->node)
         {
-            vfs_flush_node(handle->node);
+            if (handle->writable)
+            {
+                vfs_flush_node(handle->node);
+            }
             vfs_node_release(handle->node);
         }
         free(handle);
@@ -862,6 +865,7 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     }
 
     bool proc_devices_path = (path_buf && strncmp(path_buf, "/proc/devices", 13) == 0);
+    bool trace_doom_wad = (path_buf && strcmp(path_buf, "/usr/share/games/doom/doom1.wad") == 0);
     if (proc_devices_path)
     {
         serial_printf("%s", "[sys_open] attempt ");
@@ -871,7 +875,20 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
         serial_printf("%s", "\r\n");
     }
 
+    if (trace_doom_wad)
+    {
+        serial_printf("[sys_open] doom pre vfs_open_file cwd=0x%016llX create=%d truncate=%d",
+                      (unsigned long long)(uintptr_t)cwd,
+                      create ? 1 : 0,
+                      (truncate && writable) ? 1 : 0);
+    }
+
     vfs_node_t *node = vfs_open_file(cwd, path_buf, create, truncate && writable);
+    if (trace_doom_wad)
+    {
+        serial_printf("[sys_open] doom vfs_open_file node=0x%016llX",
+                      (unsigned long long)(uintptr_t)node);
+    }
     if (!node && proc_devices_path)
     {
         serial_printf("%s", "[sys_open] fail ");
@@ -905,6 +922,10 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
         vfs_node_release(node);
         free(handle);
         return -1;
+    }
+    if (trace_doom_wad)
+    {
+        serial_printf("[sys_open] doom fd=%d", fd);
     }
     return (int64_t)fd;
 }

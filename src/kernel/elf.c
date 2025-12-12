@@ -2,6 +2,7 @@
 
 #include "libc.h"
 #include "serial.h"
+#include "process_internal.h"
 
 #define ELF_MAGIC 0x464C457FU
 #define ELF_CLASS_64 2U
@@ -96,6 +97,15 @@ bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uin
         {
             continue;
         }
+
+        serial_printf("[elf] segment process=%s type=0x%X flags=0x%X off=0x%016llX vaddr=0x%016llX filesz=0x%016llX memsz=0x%016llX\r\n",
+                      process->name,
+                      (unsigned)ph->type,
+                      (unsigned)ph->flags,
+                      (unsigned long long)ph->offset,
+                      (unsigned long long)ph->vaddr,
+                      (unsigned long long)ph->filesz,
+                      (unsigned long long)ph->memsz);
 
         if (ph->offset + ph->filesz > size)
         {

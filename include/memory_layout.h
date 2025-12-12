@@ -3,8 +3,13 @@
 
 #include "types.h"
 
-#define USER_DEFAULT_POINTER_BASE  0x0000000000400000ULL
-#define USER_DEFAULT_POINTER_LIMIT 0x00000000FFFFFFFFULL
+/*
+ * NOTE: Kernel maps an identity region for low memory (currently 0-4GiB).
+ * User-space must live above that or it will alias/overwrite kernel mappings
+ * inside per-process page tables when CR3 switches.
+ */
+#define USER_DEFAULT_POINTER_BASE  0x0000000100000000ULL
+#define USER_DEFAULT_POINTER_LIMIT 0x00000001FFFFFFFFULL
 #define USER_DEFAULT_STACK_TOP_OFFSET 0x01000000ULL
 #define USER_DEFAULT_STACK_SIZE   (64ULL * 1024ULL)
 #define USER_DEFAULT_HEAP_BASE_OFFSET 0x02000000ULL
