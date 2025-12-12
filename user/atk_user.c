@@ -189,6 +189,12 @@ static bool atk_user_window_open_internal(atk_user_window_t *win,
     int handle = sys_ui_create(&desc);
     if (handle < 0)
     {
+        serial_printf("[atk_user] ui_create failed rc=%d title=%s w=%u h=%u flags=0x%llX\n",
+                      handle,
+                      desc.title,
+                      (unsigned)width,
+                      (unsigned)height,
+                      (unsigned long long)flags);
         return false;
     }
 
@@ -196,12 +202,19 @@ static bool atk_user_window_open_internal(atk_user_window_t *win,
     if (__builtin_mul_overflow((size_t)width, (size_t)height, &bytes) ||
         __builtin_mul_overflow(bytes, sizeof(video_color_t), &bytes))
     {
+        serial_printf("[atk_user] ui_create overflow title=%s w=%u h=%u\n",
+                      desc.title,
+                      (unsigned)width,
+                      (unsigned)height);
         sys_ui_close((uint32_t)handle);
         return false;
     }
     video_color_t *buffer = (video_color_t *)malloc(bytes);
     if (!buffer)
     {
+        serial_printf("[atk_user] ui_create malloc failed title=%s bytes=%llu\n",
+                      desc.title,
+                      (unsigned long long)bytes);
         sys_ui_close((uint32_t)handle);
         return false;
     }

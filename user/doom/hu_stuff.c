@@ -36,6 +36,7 @@ rcsid[] = "$Id: hu_stuff.c,v 1.4 1997/02/03 16:47:52 b1 Exp $";
 #include "w_wad.h"
 
 #include "s_sound.h"
+#include "serial.h"
 
 #include "doomstat.h"
 
@@ -396,19 +397,25 @@ void HU_Init(void)
     int		j;
     char	buffer[9];
 
+    serial_printf("[doom][HU_Init] begin\n");
     if (french)
-	shiftxform = french_shiftxform;
+		shiftxform = french_shiftxform;
     else
-	shiftxform = english_shiftxform;
+		shiftxform = english_shiftxform;
 
     // load the heads-up font
     j = HU_FONTSTART;
     for (i=0;i<HU_FONTSIZE;i++)
     {
-	sprintf(buffer, "STCFN%.3d", j++);
-	hu_font[i] = (patch_t *) W_CacheLumpName(buffer, PU_STATIC);
+		sprintf(buffer, "STCFN%03d", j++);
+		if ((i % 8) == 0)
+		{
+		    serial_printf("[doom][HU_Init] loading %s\n", buffer);
+		}
+		hu_font[i] = (patch_t *) W_CacheLumpName(buffer, PU_STATIC);
     }
 
+    serial_printf("[doom][HU_Init] done\n");
 }
 
 void HU_Stop(void)

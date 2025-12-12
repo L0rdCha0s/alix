@@ -13,6 +13,7 @@
 #include "i_video.h"
 #include "i_sound.h"
 #include "m_misc.h"
+#include "serial.h"
 #include "types.h"
 #include "usyscall.h"
 
@@ -71,6 +72,7 @@ void I_Init(void)
 
 void I_Quit(void)
 {
+    serial_printf("[doom][I_Quit] exiting cleanly\n");
     D_QuitNetGame();
     I_ShutdownSound();
     I_ShutdownMusic();
@@ -107,6 +109,14 @@ void I_Error(char *error, ...)
     va_list args;
 
     va_start(args, error);
+
+    char buf[256];
+    va_list args_copy;
+    va_copy(args_copy, args);
+    vsnprintf(buf, sizeof(buf), error ? error : "<null>", args_copy);
+    va_end(args_copy);
+    serial_printf("[doom][I_Error] %s\n", buf);
+
     fprintf(stderr, "Error: ");
     vfprintf(stderr, error, args);
     fprintf(stderr, "\n");

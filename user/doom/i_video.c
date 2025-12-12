@@ -11,6 +11,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "string.h"
+#include "serial.h"
 #include "types.h"
 #include "usyscall.h"
 #include "v_video.h"
@@ -264,7 +265,9 @@ void I_InitGraphics(void)
         return;
     }
 
+    serial_printf("[doom][video] I_InitGraphics begin\n");
     doom_video_pick_scale();
+    serial_printf("[doom][video] scale=%d win=%dx%d\n", g_scale, DOOM_WINDOW_WIDTH, DOOM_WINDOW_HEIGHT);
 
     /* Keep the window at a predictable size so the present byte_len matches the
      * window buffer size the kernel expects. */
@@ -274,6 +277,10 @@ void I_InitGraphics(void)
     {
         I_Error("I_InitGraphics: failed to open window");
     }
+    serial_printf("[doom][video] window_open ok handle=%u buffer=0x%016llX bytes=%llu\n",
+                  (unsigned)g_window.handle,
+                  (unsigned long long)(uintptr_t)g_window.buffer,
+                  (unsigned long long)g_window.buffer_bytes);
     atk_user_enable_dirty_tracking(&g_window, false);
 
     size_t pixels = (size_t)SCREENWIDTH * (size_t)SCREENHEIGHT;
@@ -282,11 +289,16 @@ void I_InitGraphics(void)
     {
         I_Error("I_InitGraphics: failed to allocate frame buffer");
     }
+    serial_printf("[doom][video] framebuf=0x%016llX pixels=%llu\n",
+                  (unsigned long long)(uintptr_t)g_frame_rgba,
+                  (unsigned long long)pixels);
 
     g_window_ready = true;
     g_last_mouse_x = -1;
     g_last_mouse_y = -1;
     g_mouse_buttons = 0;
+
+    serial_printf("[doom][video] I_InitGraphics done\n");
 }
 
 void I_ShutdownGraphics(void)
