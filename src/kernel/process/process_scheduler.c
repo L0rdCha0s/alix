@@ -2251,36 +2251,6 @@ static bool switch_to_thread(thread_t *next)
         return false;
     }
 
-    /* Debug: selectively log doom thread contexts to diagnose corruption. */
-    const char *next_name_dbg = scheduler_thread_name(next);
-    bool is_doom_dbg = false;
-    if (next_name_dbg)
-    {
-        for (const char *p = next_name_dbg; *p; ++p)
-        {
-            if (p[0] == 'd' && p[1] == 'o' && p[2] == 'o' && p[3] == 'm')
-            {
-                is_doom_dbg = true;
-                break;
-            }
-        }
-    }
-    if (is_doom_dbg)
-    {
-        serial_printf("[sched][doom] pre-switch ctx=0x%016llX rflags=0x%016llX ret=0x%016llX r15=0x%016llX r14=0x%016llX r13=0x%016llX r12=0x%016llX rbx=0x%016llX rbp=0x%016llX kstack=[0x%016llX,0x%016llX)\r\n",
-                      (unsigned long long)(uintptr_t)next_ctx,
-                      (unsigned long long)next_ctx[CTX_RFLAGS],
-                      (unsigned long long)next_ctx[CTX_RET],
-                      (unsigned long long)next_ctx[CTX_R15],
-                      (unsigned long long)next_ctx[CTX_R14],
-                      (unsigned long long)next_ctx[CTX_R13],
-                      (unsigned long long)next_ctx[CTX_R12],
-                      (unsigned long long)next_ctx[CTX_RBX],
-                      (unsigned long long)next_ctx[CTX_RBP],
-                      (unsigned long long)(uintptr_t)next->stack_base,
-                      (unsigned long long)next->kernel_stack_top);
-    }
-
     uint8_t *prev_transition_flag = NULL;
     if (prev && prev != next)
     {
