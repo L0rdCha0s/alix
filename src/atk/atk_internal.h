@@ -205,6 +205,7 @@ extern const atk_class_t ATK_SCROLLBAR_CLASS;
 extern const atk_class_t ATK_LIST_VIEW_CLASS;
 extern const atk_class_t ATK_TAB_VIEW_CLASS;
 extern const atk_class_t ATK_MENU_CLASS;
+extern const atk_class_t ATK_DROPDOWN_CLASS;
 extern const atk_class_t ATK_RICH_TEXT_CLASS;
 
 atk_state_t *atk_state_get(void);

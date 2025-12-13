@@ -35,6 +35,7 @@ block_device_t *block_register(const char *name,
                                uint64_t sector_count,
                                block_device_read_fn read,
                                block_device_write_fn write,
+                               block_device_flush_fn flush,
                                void *driver_data)
 {
     if (sector_size == 0 || sector_count == 0 || !read)
@@ -55,6 +56,7 @@ block_device_t *block_register(const char *name,
     device->driver_data = driver_data;
     device->read = read;
     device->write = write;
+    device->flush = flush;
     device->next = NULL;
 
     if (!g_block_devices_head)
@@ -121,4 +123,17 @@ bool block_write(block_device_t *device, uint64_t lba, uint32_t count, const voi
         return false;
     }
     return device->write(device, lba, count, buffer);
+}
+
+bool block_flush(block_device_t *device)
+{
+    if (!device)
+    {
+        return false;
+    }
+    if (!device->flush)
+    {
+        return true;
+    }
+    return device->flush(device);
 }

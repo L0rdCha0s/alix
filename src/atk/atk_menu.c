@@ -57,14 +57,12 @@ const atk_class_t ATK_MENU_CLASS = { "Menu", &ATK_WIDGET_CLASS, &menu_vtable, si
 #ifdef KERNEL_BUILD
 static void atk_menu_debug_log(const char *msg, const char *detail)
 {
-    serial_printf("%s", "[menu] ");
-    serial_printf("%s", msg ? msg : "(null)");
     if (detail)
     {
-        serial_printf("%s", ": ");
-        serial_printf("%s", detail);
+        serial_printf("[menu] %s: %s", msg ? msg : "(null)", detail);
+        return;
     }
-    serial_printf("%s", "\r\n");
+    serial_printf("[menu] %s", msg ? msg : "(null)");
 }
 #else
 static inline void atk_menu_debug_log(const char *msg, const char *detail)
@@ -79,6 +77,7 @@ static const atk_menu_priv_t *menu_priv_const(const atk_widget_t *menu);
 static bool menu_ensure_capacity(atk_menu_priv_t *priv, size_t desired);
 static int menu_measure_text_width(const char *title);
 static void atk_menu_mark_dirty(const atk_widget_t *menu);
+static void atk_menu_absolute_origin(const atk_widget_t *menu, int *x_out, int *y_out);
 
 atk_widget_t *atk_menu_create(void)
 {
@@ -229,8 +228,13 @@ bool atk_menu_contains(const atk_widget_t *menu, int px, int py)
     {
         return false;
     }
-    return px >= menu->x && px < menu->x + menu->width &&
-           py >= menu->y && py < menu->y + menu->height;
+    int ox = 0;
+    int oy = 0;
+    atk_menu_absolute_origin(menu, &ox, &oy);
+    int x0 = ox + menu->x;
+    int y0 = oy + menu->y;
+    return px >= x0 && px < x0 + menu->width &&
+           py >= y0 && py < y0 + menu->height;
 }
 
 bool atk_menu_handle_click(atk_widget_t *menu, int px, int py)
@@ -245,7 +249,10 @@ bool atk_menu_handle_click(atk_widget_t *menu, int px, int py)
         return false;
     }
 
-    int relative_y = py - menu->y;
+    int ox = 0;
+    int oy = 0;
+    atk_menu_absolute_origin(menu, &ox, &oy);
+    int relative_y = py - (oy + menu->y);
     int index = relative_y / priv->item_height;
     if (index < 0 || (size_t)index >= priv->count)
     {
@@ -276,7 +283,10 @@ bool atk_menu_update_hover(atk_widget_t *menu, int px, int py)
     int new_index = -1;
     if (atk_menu_contains(menu, px, py))
     {
-        int relative_y = py - menu->y;
+        int ox = 0;
+        int oy = 0;
+        atk_menu_absolute_origin(menu, &ox, &oy);
+        int relative_y = py - (oy + menu->y);
         new_index = relative_y / priv->item_height;
         if (new_index < 0 || (size_t)new_index >= priv->count)
         {
@@ -304,35 +314,41 @@ void atk_menu_draw(const atk_state_t *state, const atk_widget_t *menu)
     atk_state_theme_validate(state, "atk_menu_draw");
 
     const atk_theme_t *theme = &state->theme;
-    video_draw_rect(menu->x,
-                    menu->y,
+    int ox = 0;
+    int oy = 0;
+    atk_menu_absolute_origin(menu, &ox, &oy);
+    int abs_x = ox + menu->x;
+    int abs_y = oy + menu->y;
+
+    video_draw_rect(abs_x,
+                    abs_y,
                     menu->width,
                     menu->height,
                     theme->menu_dropdown_face);
-    video_draw_rect_outline(menu->x,
-                            menu->y,
+    video_draw_rect_outline(abs_x,
+                            abs_y,
                             menu->width,
                             menu->height,
                             theme->menu_dropdown_border);
 
     for (size_t i = 0; i < priv->count; ++i)
     {
-        int item_y = menu->y + (int)i * priv->item_height;
+        int item_y = abs_y + (int)i * priv->item_height;
         video_color_t bg = theme->menu_dropdown_face;
         video_color_t fg = theme->menu_dropdown_text;
         if ((int)i == priv->highlighted_index)
         {
             bg = theme->menu_dropdown_highlight;
             fg = theme->menu_dropdown_face;
-            video_draw_rect(menu->x + 1,
+            video_draw_rect(abs_x + 1,
                             item_y + 1,
                             menu->width - 2,
                             priv->item_height - 2,
                             bg);
         }
-        int text_x = menu->x + ATK_MENU_ITEM_PADDING_X;
+        int text_x = abs_x + ATK_MENU_ITEM_PADDING_X;
         int baseline = atk_font_baseline_for_rect(item_y, priv->item_height);
-        atk_rect_t clip = { menu->x, item_y, menu->width, priv->item_height };
+        atk_rect_t clip = { abs_x, item_y, menu->width, priv->item_height };
         atk_font_draw_string_clipped(text_x, baseline, priv->items[i].title, fg, bg, &clip);
     }
 }
@@ -451,5 +467,26 @@ static void atk_menu_mark_dirty(const atk_widget_t *menu)
     {
         return;
     }
-    atk_dirty_mark_rect(menu->x, menu->y, menu->width, menu->height);
+    int ox = 0;
+    int oy = 0;
+    atk_menu_absolute_origin(menu, &ox, &oy);
+    atk_dirty_mark_rect(ox + menu->x, oy + menu->y, menu->width, menu->height);
+}
+
+static void atk_menu_absolute_origin(const atk_widget_t *menu, int *x_out, int *y_out)
+{
+    int x = 0;
+    int y = 0;
+    if (menu && menu->parent)
+    {
+        atk_widget_absolute_position(menu->parent, &x, &y);
+    }
+    if (x_out)
+    {
+        *x_out = x;
+    }
+    if (y_out)
+    {
+        *y_out = y;
+    }
 }

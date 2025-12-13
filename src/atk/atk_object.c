@@ -504,8 +504,8 @@ bool atk_widget_hit_test(const atk_widget_t *widget, int origin_x, int origin_y,
         return ops->hit_test(widget, origin_x, origin_y, px, py, widget->ops_context);
     }
 
-    int x0 = origin_x;
-    int y0 = origin_y;
+    int x0 = origin_x + widget->x;
+    int y0 = origin_y + widget->y;
     int x1 = x0 + widget->width;
     int y1 = y0 + widget->height;
     return (px >= x0 && px < x1 && py >= y0 && py < y1);

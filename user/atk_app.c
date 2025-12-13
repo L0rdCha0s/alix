@@ -761,3 +761,40 @@ atk_widget_t *atk_app_open_file_dialog_modal(atk_modal_session_t *session,
     }
     return dlg;
 }
+
+atk_widget_t *atk_app_save_file_dialog_modal(atk_modal_session_t *session,
+                                             atk_widget_t *requester,
+                                             const char *title,
+                                             const char *initial_path,
+                                             atk_file_dialog_result_t on_result,
+                                             void *context,
+                                             uint32_t width,
+                                             uint32_t height,
+                                             uint32_t flags)
+{
+    if (!session)
+    {
+        return NULL;
+    }
+
+    if (!atk_modal_begin(session, title, width, height, flags, requester))
+    {
+        return NULL;
+    }
+
+    atk_widget_t *dlg = atk_file_dialog_save(requester, title, initial_path, on_result, context);
+    if (!dlg)
+    {
+        atk_modal_end(session);
+        return NULL;
+    }
+
+    atk_window_mark_dirty(dlg);
+    atk_render();
+    atk_user_window_t *active = atk_main_active_window();
+    if (active)
+    {
+        atk_user_present_force(active);
+    }
+    return dlg;
+}

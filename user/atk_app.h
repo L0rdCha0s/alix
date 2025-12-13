@@ -64,6 +64,16 @@ atk_widget_t *atk_app_open_file_dialog_modal(atk_modal_session_t *session,
                                              uint32_t height,
                                              uint32_t flags);
 
+atk_widget_t *atk_app_save_file_dialog_modal(atk_modal_session_t *session,
+                                             atk_widget_t *requester,
+                                             const char *title,
+                                             const char *initial_path,
+                                             atk_file_dialog_result_t on_result,
+                                             void *context,
+                                             uint32_t width,
+                                             uint32_t height,
+                                             uint32_t flags);
+
 /* Register additional input callbacks that run after ATK's default dispatch. Returns -1 on failure. */
 int atk_main_register_mouse_handler(atk_app_mouse_handler_t handler, void *context);
 int atk_main_register_key_handler(atk_app_key_handler_t handler, void *context);

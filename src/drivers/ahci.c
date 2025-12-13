@@ -905,7 +905,16 @@ static bool ahci_block_write(block_device_t *device, uint64_t lba, uint32_t coun
         src += chunk * device->sector_size;
         count -= chunk;
     }
-    /* Ensure device write cache is persisted. */
+    return true;
+}
+
+static bool ahci_block_flush(block_device_t *device)
+{
+    ahci_port_ctx_t *ctx = (ahci_port_ctx_t *)device->driver_data;
+    if (!ctx)
+    {
+        return false;
+    }
     return ahci_issue_cmd(ctx, ATA_CMD_FLUSH_CACHE_EXT, 0, 0, NULL, false);
 }
 
@@ -1015,7 +1024,7 @@ static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)
         name[pos++] = digits[--dpos];
     }
     name[pos] = '\0';
-    block_device_t *blk = block_register(name, AHCI_SECTOR_SIZE, sectors, ahci_block_read, ahci_block_write, ctx);
+    block_device_t *blk = block_register(name, AHCI_SECTOR_SIZE, sectors, ahci_block_read, ahci_block_write, ahci_block_flush, ctx);
     if (blk)
     {
         ctx->block = blk;

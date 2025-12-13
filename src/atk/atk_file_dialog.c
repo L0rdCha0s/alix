@@ -36,6 +36,7 @@ typedef struct
     atk_widget_t *requester;
     atk_file_dialog_result_t callback;
     void *callback_ctx;
+    atk_file_dialog_mode_t mode;
     syscall_dirent_t *scratch;
     syscall_dirent_t *dir_entries;
     syscall_dirent_t *file_entries;
@@ -55,6 +56,8 @@ typedef struct
 static void file_dialog_on_destroy(void *context);
 static void file_dialog_refresh(atk_file_dialog_t *dlg);
 static void file_dialog_finish(atk_file_dialog_t *dlg, bool confirmed);
+static void file_dialog_apply_initial_path(atk_file_dialog_t *dlg, const char *initial_path);
+static void file_dialog_set_selected_path(atk_file_dialog_t *dlg, const char *name);
 
 typedef struct
 {
@@ -285,6 +288,20 @@ static const char *file_dialog_capture_input(atk_file_dialog_t *dlg)
         dlg->selected_path[0] = '\0';
         return NULL;
     }
+
+    if (dlg->mode == ATK_FILE_DIALOG_MODE_SAVE)
+    {
+        if (text[0] == '/')
+        {
+            file_dialog_copy_path(dlg, text);
+        }
+        else
+        {
+            file_dialog_set_selected_path(dlg, text);
+        }
+        return dlg->selected_path[0] ? dlg->selected_path : NULL;
+    }
+
     file_dialog_copy_path(dlg, text);
     return dlg->selected_path;
 }
@@ -322,7 +339,14 @@ static void file_dialog_set_selected_path(atk_file_dialog_t *dlg, const char *na
 
     if (dlg->path_input)
     {
-        atk_text_input_set_text(dlg->path_input, dlg->selected_path);
+        if (dlg->mode == ATK_FILE_DIALOG_MODE_SAVE)
+        {
+            atk_text_input_set_text(dlg->path_input, name);
+        }
+        else
+        {
+            atk_text_input_set_text(dlg->path_input, dlg->selected_path);
+        }
     }
     if (dlg->window)
     {
@@ -353,7 +377,10 @@ static void file_dialog_update_lists(atk_file_dialog_t *dlg)
     atk_list_view_set_selected(dlg->file_list, ATK_LIST_VIEW_NO_SELECTION);
     if (dlg->path_input)
     {
-        atk_text_input_set_text(dlg->path_input, "");
+        if (dlg->mode == ATK_FILE_DIALOG_MODE_OPEN)
+        {
+            atk_text_input_set_text(dlg->path_input, "");
+        }
     }
     atk_list_view_relayout(dlg->folder_list);
     atk_list_view_relayout(dlg->file_list);
@@ -546,11 +573,12 @@ static void file_dialog_on_destroy(void *context)
     free(dlg);
 }
 
-atk_widget_t *atk_file_dialog_open(atk_widget_t *requester,
-                                   const char *title,
-                                   const char *initial_path,
-                                   atk_file_dialog_result_t on_result,
-                                   void *context)
+static atk_widget_t *file_dialog_open_impl(atk_widget_t *requester,
+                                           const char *title,
+                                           const char *initial_path,
+                                           atk_file_dialog_result_t on_result,
+                                           void *context,
+                                           atk_file_dialog_mode_t mode)
 {
     atk_state_t *state = atk_state_get();
     if (!state)
@@ -585,6 +613,7 @@ atk_widget_t *atk_file_dialog_open(atk_widget_t *requester,
     dlg->requester = requester;
     dlg->callback = on_result;
     dlg->callback_ctx = context;
+    dlg->mode = mode;
     if (title && title[0])
     {
         size_t len = strlen(title);
@@ -597,8 +626,16 @@ atk_widget_t *atk_file_dialog_open(atk_widget_t *requester,
     }
     else
     {
-        const char def_title[] = "Open File";
-        memcpy(dlg->title_prefix, def_title, sizeof(def_title));
+        if (mode == ATK_FILE_DIALOG_MODE_SAVE)
+        {
+            const char def_title[] = "Save File";
+            memcpy(dlg->title_prefix, def_title, sizeof(def_title));
+        }
+        else
+        {
+            const char def_title[] = "Open File";
+            memcpy(dlg->title_prefix, def_title, sizeof(def_title));
+        }
     }
 
     int screen_w = video_screen_width();
@@ -697,7 +734,7 @@ atk_widget_t *atk_file_dialog_open(atk_widget_t *requester,
         atk_text_input_set_submit_handler(dlg->path_input, file_dialog_on_submit, dlg);
     }
     dlg->open_button = atk_window_add_button(dlg->window,
-                                             "Open",
+                                             (mode == ATK_FILE_DIALOG_MODE_SAVE) ? "Save" : "Open",
                                              content_x + input_w + ATK_FILE_DIALOG_SPACING,
                                              input_y,
                                              open_w,
@@ -707,7 +744,118 @@ atk_widget_t *atk_file_dialog_open(atk_widget_t *requester,
                                              file_dialog_on_open,
                                              dlg);
 
-    file_dialog_set_directory(dlg, initial_path);
+    file_dialog_apply_initial_path(dlg, initial_path);
     atk_window_mark_dirty(dlg->window);
     return dlg->window;
+}
+
+atk_widget_t *atk_file_dialog_open(atk_widget_t *requester,
+                                   const char *title,
+                                   const char *initial_path,
+                                   atk_file_dialog_result_t on_result,
+                                   void *context)
+{
+    return file_dialog_open_impl(requester,
+                                 title,
+                                 initial_path,
+                                 on_result,
+                                 context,
+                                 ATK_FILE_DIALOG_MODE_OPEN);
+}
+
+atk_widget_t *atk_file_dialog_save(atk_widget_t *requester,
+                                   const char *title,
+                                   const char *initial_path,
+                                   atk_file_dialog_result_t on_result,
+                                   void *context)
+{
+    return file_dialog_open_impl(requester,
+                                 title,
+                                 initial_path,
+                                 on_result,
+                                 context,
+                                 ATK_FILE_DIALOG_MODE_SAVE);
+}
+
+static void file_dialog_apply_initial_path(atk_file_dialog_t *dlg, const char *initial_path)
+{
+    if (!dlg)
+    {
+        return;
+    }
+
+    const char *src = (initial_path && initial_path[0]) ? initial_path : "/root";
+    if (dlg->mode == ATK_FILE_DIALOG_MODE_OPEN)
+    {
+        file_dialog_set_directory(dlg, src);
+        return;
+    }
+
+    size_t len = strlen(src);
+    while (len > 1 && src[len - 1] == '/')
+    {
+        --len;
+    }
+
+    char *trimmed = (char *)malloc(len + 1);
+    if (!trimmed)
+    {
+        file_dialog_set_directory(dlg, "/root");
+        return;
+    }
+    memcpy(trimmed, src, len);
+    trimmed[len] = '\0';
+
+    if (file_dialog_list_dir(trimmed, dlg->scratch, 1) >= 0)
+    {
+        file_dialog_set_directory(dlg, trimmed);
+        free(trimmed);
+    }
+    else
+    {
+        char *last_slash = NULL;
+        for (char *p = trimmed; *p; ++p)
+        {
+            if (*p == '/')
+            {
+                last_slash = p;
+            }
+        }
+
+        if (last_slash == trimmed)
+        {
+            const char *name = trimmed + 1;
+            file_dialog_set_directory(dlg, "/");
+            if (name && name[0])
+            {
+                file_dialog_set_selected_path(dlg, name);
+            }
+        }
+        else if (last_slash)
+        {
+            char *name = last_slash + 1;
+            *last_slash = '\0';
+            file_dialog_set_directory(dlg, trimmed);
+            if (name && name[0])
+            {
+                file_dialog_set_selected_path(dlg, name);
+            }
+        }
+        else
+        {
+            file_dialog_set_directory(dlg, "/root");
+            if (trimmed[0])
+            {
+                file_dialog_set_selected_path(dlg, trimmed);
+            }
+        }
+
+        free(trimmed);
+    }
+
+    atk_state_t *state = atk_state_get();
+    if (state && dlg->path_input)
+    {
+        atk_text_input_focus(state, dlg->path_input);
+    }
 }

@@ -293,6 +293,16 @@ static bool ata_block_write(block_device_t *device, uint64_t lba, uint32_t count
         }
     }
 
+    return true;
+}
+
+static bool ata_block_flush(block_device_t *device)
+{
+    ata_device_ctx_t *ctx = (ata_device_ctx_t *)device->driver_data;
+    if (!ctx)
+    {
+        return false;
+    }
     return ata_flush_cache(ctx);
 }
 
@@ -359,7 +369,7 @@ static void ata_register_from_identify(ata_channel_t *channel, uint8_t drive, ui
     ctx->channel = channel;
     ctx->drive = drive;
 
-    block_device_t *device = block_register(name, 512, sectors, ata_block_read, ata_block_write, ctx);
+    block_device_t *device = block_register(name, 512, sectors, ata_block_read, ata_block_write, ata_block_flush, ctx);
     if (!device)
     {
         free(ctx);

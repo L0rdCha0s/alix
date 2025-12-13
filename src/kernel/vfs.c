@@ -130,15 +130,11 @@ static void vfs_log_sync_result(const char *dev_name,
     {
         return;
     }
-    serial_printf("%s", "[vfs] sync ");
-    serial_printf("%s", status);
-    serial_printf("%s", " dev=");
-    serial_printf("%s", dev_name);
-    serial_printf("%s", " bytes=0x");
-    serial_printf("%016llX", (unsigned long long)total_bytes);
-    serial_printf("%s", " duration=");
-    serial_printf("%llu", (unsigned long long)elapsed_ms);
-    serial_printf("%s", "ms\r\n");
+    serial_printf("[vfs] sync %s dev=%s bytes=0x%016llX duration=%llums",
+                  status,
+                  dev_name,
+                  (unsigned long long)total_bytes,
+                  (unsigned long long)elapsed_ms);
 }
 
 static void vfs_log(const char *msg, uint64_t value)
@@ -351,21 +347,14 @@ static void vfs_log_backpressure_event(const vfs_mount_t *mount,
     process_t *proc = thread ? process_thread_owner(thread) : NULL;
     uint64_t pid = proc ? process_get_pid(proc) : 0;
 
-    serial_printf("%s", "[vfs] backpressure ");
-    serial_printf("%s", phase ? phase : "?");
-    serial_printf("%s", " mount=");
-    serial_printf("%s", path);
-    serial_printf("%s", " dirty=");
-    serial_printf("%016llX", (unsigned long long)dirty_bytes);
-    serial_printf("%s", " limit=");
-    serial_printf("%016llX", (unsigned long long)limit);
-    serial_printf("%s", " pending=");
-    serial_printf("%016llX", (unsigned long long)pending_bytes);
-    serial_printf("%s", " thread=");
-    serial_printf("%s", thread_name);
-    serial_printf("%s", " pid=0x");
-    serial_printf("%016llX", (unsigned long long)pid);
-    serial_printf("%s", "\r\n");
+    serial_printf("[vfs] backpressure %s mount=%s dirty=0x%016llX limit=0x%016llX pending=0x%016llX thread=%s pid=0x%016llX",
+                  phase ? phase : "?",
+                  path,
+                  (unsigned long long)dirty_bytes,
+                  (unsigned long long)limit,
+                  (unsigned long long)pending_bytes,
+                  thread_name,
+                  (unsigned long long)pid);
 }
 
 static void vfs_backpressure_wait(vfs_mount_t *mount, size_t pending_bytes)
@@ -1926,6 +1915,10 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     if (ok && mount->backend)
     {
         ok = alixfs_mount_commit(mount->backend);
+    }
+    if (ok && force && mount->device)
+    {
+        ok = block_flush(mount->device);
     }
     vfs_sync_lock_release(mount);
 
