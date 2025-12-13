@@ -34,10 +34,66 @@ const uint8_t g_user_exit_stub[7] = {
     0xF4              /* hlt (should not reach) */
 };
 
-const uint8_t g_user_preempt_stub[9] = {
+/*
+ * User-mode preemption stub:
+ * - Timer IRQ rewrites user RIP to USER_PREEMPT_STUB_BASE.
+ * - Stub saves full user register state on the user stack, performs a yield
+ *   syscall, then restores state and returns to the interrupted RIP.
+ *
+ * IMPORTANT:
+ * - SYSCALL_YIELD returns the resume RIP in RAX when invoked from a preempt
+ *   stub, so we can restore the interrupted RAX before resuming.
+ * - This stub must not rely on kernel-mapped memory; it runs in user mode.
+ */
+const uint8_t g_user_preempt_stub[66] = {
+    /* reserve 8 bytes on the user stack for the resume RIP */
+    0x6A, 0x00,                         /* push 0 */
+
+    /* save GPRs + RFLAGS (push order must match the pops below) */
+    0x50,                               /* push rax */
+    0x51,                               /* push rcx */
+    0x52,                               /* push rdx */
+    0x53,                               /* push rbx */
+    0x55,                               /* push rbp */
+    0x56,                               /* push rsi */
+    0x57,                               /* push rdi */
+    0x41, 0x50,                         /* push r8 */
+    0x41, 0x51,                         /* push r9 */
+    0x41, 0x52,                         /* push r10 */
+    0x41, 0x53,                         /* push r11 */
+    0x41, 0x54,                         /* push r12 */
+    0x41, 0x55,                         /* push r13 */
+    0x41, 0x56,                         /* push r14 */
+    0x41, 0x57,                         /* push r15 */
+    0x9C,                               /* pushfq */
+
+    /* syscall: yield */
     0xB8, (uint8_t)SYSCALL_YIELD, 0x00, 0x00, 0x00, /* mov eax, SYSCALL_YIELD */
     0xCD, 0x80,                                      /* int 0x80 */
-    0xEB, 0xF9                                       /* jmp back to self */
+
+    /* store resume RIP into the reserved slot: *(rsp + 0x80) = rax */
+    0x48, 0x89, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, /* mov [rsp+0x80], rax */
+
+    /* restore state */
+    0x9D,                               /* popfq */
+    0x41, 0x5F,                         /* pop r15 */
+    0x41, 0x5E,                         /* pop r14 */
+    0x41, 0x5D,                         /* pop r13 */
+    0x41, 0x5C,                         /* pop r12 */
+    0x41, 0x5B,                         /* pop r11 */
+    0x41, 0x5A,                         /* pop r10 */
+    0x41, 0x59,                         /* pop r9 */
+    0x41, 0x58,                         /* pop r8 */
+    0x5F,                               /* pop rdi */
+    0x5E,                               /* pop rsi */
+    0x5D,                               /* pop rbp */
+    0x5B,                               /* pop rbx */
+    0x5A,                               /* pop rdx */
+    0x59,                               /* pop rcx */
+    0x58,                               /* pop rax */
+
+    /* jump to resume RIP (popped from the reserved slot) */
+    0xC3                                /* ret */
 };
 
 

@@ -986,7 +986,13 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                 uint64_t resume = process_take_preempt_resume_rip();
                 if (resume)
                 {
-                    frame->rip = resume;
+                    /* Return the resume RIP to the user preempt stub so it can
+                     * restore the interrupted register state before resuming.
+                     *
+                     * NOTE: We intentionally do NOT overwrite frame->rip here.
+                     * The preempt stub will `ret` to this address. */
+                    result = (int64_t)resume;
+                    break;
                 }
             }
             result = 0;

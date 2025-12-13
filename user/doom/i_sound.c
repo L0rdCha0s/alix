@@ -83,11 +83,29 @@ static int clamp_int(int v, int lo, int hi)
 static void update_channel_vol(mix_channel_t *ch, int vol, int sep)
 {
     if (!ch) return;
-    vol = clamp_int(vol, 0, 127);
+    // DOOM uses a 0..15 slider for snd_SfxVolume (see m_menu.c) but the
+    // original mixer operates on a 0..127 volume range. Map 0..15 -> 0..127
+    // so effects are audible on AlixOS's /dev/audio output.
+    int volume127;
+    if (vol <= 15)
+    {
+        vol = clamp_int(vol, 0, 15);
+        volume127 = (vol * 127 + 7) / 15;
+    }
+    else
+    {
+        volume127 = clamp_int(vol, 0, 127);
+    }
     sep = clamp_int(sep, 0, 255);
 
-    ch->left_vol = (vol * (255 - sep)) / 255;
-    ch->right_vol = (vol * sep) / 255;
+    // Match the original Linux DOOM left/right volume curve, including the
+    // "squared" stereo separation.
+    int seperation = sep + 1; // 1..256
+    int left = volume127 - ((volume127 * seperation * seperation) >> 16);
+    seperation = seperation - 257; // -256..-1
+    int right = volume127 - ((volume127 * seperation * seperation) >> 16);
+    ch->left_vol = clamp_int(left, 0, 127);
+    ch->right_vol = clamp_int(right, 0, 127);
 }
 
 static uint32_t compute_step_fp(uint32_t src_rate_hz, int pitch)

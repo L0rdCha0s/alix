@@ -373,9 +373,9 @@ typedef struct cpu_usage_counters
 } __attribute__((aligned(64))) cpu_usage_counters_t;
 
 extern const uint8_t g_user_exit_stub[7];
-extern const uint8_t g_user_preempt_stub[9];
+extern const uint8_t g_user_preempt_stub[66];
 #define USER_EXIT_STUB_SIZE    7u
-#define USER_PREEMPT_STUB_SIZE 9u
+#define USER_PREEMPT_STUB_SIZE 66u
 
 extern process_t *g_process_list;
 extern process_t *g_current_processes[SMP_MAX_CPUS];
