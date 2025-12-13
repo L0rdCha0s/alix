@@ -61,7 +61,6 @@ bool shell_cmd_bgset(shell_state_t *shell, shell_output_t *out, const char *args
     {
         atk_dirty_mark_all();
         video_request_refresh();
-        video_pump_events();
     }
     return true;
 }

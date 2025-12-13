@@ -465,10 +465,16 @@ static void atk_window_bounds(const atk_widget_t *window, atk_bg_rect_t *out)
     {
         return;
     }
-    out->x = window->x - ATK_WINDOW_BORDER;
-    out->y = window->y - ATK_WINDOW_BORDER;
-    out->width = window->width + ATK_WINDOW_BORDER * 2;
-    out->height = window->height + ATK_WINDOW_BORDER * 2;
+    int border = ATK_WINDOW_BORDER;
+    const atk_window_priv_t *priv = (const atk_window_priv_t *)atk_widget_priv(window, &ATK_WINDOW_CLASS);
+    if (priv && !priv->chrome_visible)
+    {
+        border = 0;
+    }
+    out->x = window->x - border;
+    out->y = window->y - border;
+    out->width = window->width + border * 2;
+    out->height = window->height + border * 2;
 }
 
 static int atk_mask_background_regions(const atk_state_t *state,
@@ -1394,7 +1400,7 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
         if (state->drag_active)
         {
             atk_drag_step(state, cursor_x, cursor_y);
-            result.redraw = true;
+            result.redraw = false;
         }
         else
         {
@@ -1998,57 +2004,11 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
     int w = state->drag_window_w;
     int h = state->drag_window_h;
 
-    int x0 = (new_bx < old_x) ? new_bx : old_x;
-    int y0 = (new_by < old_y) ? new_by : old_y;
-    int x1 = (new_bx + w > old_x + w) ? (new_bx + w) : (old_x + w);
-    int y1 = (new_by + h > old_y + h) ? (new_by + h) : (old_y + h);
-
-    int screen_w = video_screen_width();
-    int screen_h = video_screen_height();
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > screen_w) x1 = screen_w;
-    if (y1 > screen_h) y1 = screen_h;
-    if (x1 > state->drag_scene_w) x1 = state->drag_scene_w;
-    if (y1 > state->drag_scene_h) y1 = state->drag_scene_h;
-    if (x0 >= x1 || y0 >= y1)
-    {
-        return;
-    }
-
-    /* Now that we have compositing, redraw the affected regions instead of freezing. */
-    atk_dirty_mark_rect(old_x, old_y, w, h);
-    atk_dirty_mark_rect(new_bx, new_by, w, h);
-
     /* Clamp region to buffer bounds to avoid overruns. */
     size_t scene_stride_px = (size_t)state->drag_scene_stride_bytes / sizeof(video_color_t);
-    size_t scene_pixels = scene_stride_px * (size_t)state->drag_scene_h;
     size_t scene_min_stride = (size_t)state->drag_scene_w * sizeof(video_color_t);
     if ((size_t)state->drag_scene_stride_bytes < scene_min_stride)
     {
-        return;
-    }
-    int region_w = x1 - x0;
-    int region_h = y1 - y0;
-    size_t scene_offset = (size_t)y0 * scene_stride_px + (size_t)x0;
-    size_t scene_max_needed = scene_offset + (size_t)(region_h - 1) * scene_stride_px + (size_t)(region_w - 1);
-    if (scene_offset >= scene_pixels || scene_max_needed >= scene_pixels)
-    {
-        atk_drag_log("scene_bounds_reject",
-                     state,
-                     win,
-                     state->drag_scene,
-                     state->drag_scene_w,
-                     state->drag_scene_h,
-                     state->drag_scene_stride_bytes,
-                     state->drag_window_surface,
-                     state->drag_window_w,
-                     state->drag_window_h,
-                     state->drag_window_stride_bytes,
-                     x0,
-                     y0,
-                     x1,
-                     y1);
         return;
     }
 
@@ -2056,41 +2016,11 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
     size_t win_min_stride = (size_t)state->drag_window_w * sizeof(video_color_t);
     if ((size_t)state->drag_window_stride_bytes < win_min_stride)
     {
-        atk_drag_log("win_stride_reject",
-                     state,
-                     win,
-                     state->drag_scene,
-                     state->drag_scene_w,
-                     state->drag_scene_h,
-                     state->drag_scene_stride_bytes,
-                     state->drag_window_surface,
-                     state->drag_window_w,
-                     state->drag_window_h,
-                     state->drag_window_stride_bytes,
-                     x0,
-                     y0,
-                     x1,
-                     y1);
         return;
     }
     size_t win_max_needed_bytes = (size_t)(h - 1) * (size_t)state->drag_window_stride_bytes + (size_t)(w - 1) * sizeof(video_color_t);
     if (win_max_needed_bytes / sizeof(video_color_t) >= win_pixels)
     {
-        atk_drag_log("win_bounds_reject",
-                     state,
-                     win,
-                     state->drag_scene,
-                     state->drag_scene_w,
-                     state->drag_scene_h,
-                     state->drag_scene_stride_bytes,
-                     state->drag_window_surface,
-                     state->drag_window_w,
-                     state->drag_window_h,
-                     state->drag_window_stride_bytes,
-                     x0,
-                     y0,
-                     x1,
-                     y1);
         return;
     }
 
@@ -2105,77 +2035,64 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
                  state->drag_window_w,
                  state->drag_window_h,
                  state->drag_window_stride_bytes,
-                 x0,
-                 y0,
-                 x1,
-                 y1);
+                 old_x,
+                 old_y,
+                 new_bx + w,
+                 new_by + h);
 
-    const video_color_t *scene_base = (const video_color_t *)((const uint8_t *)state->drag_scene +
-                                      (size_t)y0 * (size_t)state->drag_scene_stride_bytes) +
-                                      (size_t)x0;
+    int x0 = (new_bx < old_x) ? new_bx : old_x;
+    int y0 = (new_by < old_y) ? new_by : old_y;
+    int x1 = (new_bx + w > old_x + w) ? (new_bx + w) : (old_x + w);
+    int y1 = (new_by + h > old_y + h) ? (new_by + h) : (old_y + h);
 
-    /* Compose into an off-screen overlay buffer to avoid flicker between passes. */
-    if (!atk_ensure_overlay(state, region_w, region_h))
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > screen_w) x1 = screen_w;
+    if (y1 > screen_h) y1 = screen_h;
+    if (x1 > state->drag_scene_w) x1 = state->drag_scene_w;
+    if (y1 > state->drag_scene_h) y1 = state->drag_scene_h;
+
+    int region_w = x1 - x0;
+    int region_h = y1 - y0;
+    if (region_w <= 0 || region_h <= 0)
     {
         return;
     }
 
-    for (int row = 0; row < region_h; ++row)
-    {
-        const video_color_t *src_row = scene_base + (size_t)row * scene_stride_px;
-        video_color_t *dst_row = (video_color_t *)((uint8_t *)state->drag_overlay +
-                                    (size_t)row * (size_t)state->drag_overlay_stride_bytes);
-        memcpy(dst_row, src_row, (size_t)region_w * sizeof(video_color_t));
-    }
-
-    /* Clip the window copy to the overlay region to avoid overruns at screen edges. */
-    int dest_x0 = new_bx;
-    int dest_y0 = new_by;
-    int dest_x1 = new_bx + w;
-    int dest_y1 = new_by + h;
-
-    int copy_x0 = (dest_x0 > x0) ? dest_x0 : x0;
-    int copy_y0 = (dest_y0 > y0) ? dest_y0 : y0;
-    int copy_x1 = (dest_x1 < x1) ? dest_x1 : x1;
-    int copy_y1 = (dest_y1 < y1) ? dest_y1 : y1;
-
-    int copy_w = copy_x1 - copy_x0;
-    int copy_h = copy_y1 - copy_y0;
-
-    if (copy_w > 0 && copy_h > 0)
-    {
-        int src_x = copy_x0 - dest_x0;
-        int src_y = copy_y0 - dest_y0;
-        int dst_x = copy_x0 - x0;
-        int dst_y = copy_y0 - y0;
-
-        size_t win_stride_px = (size_t)state->drag_window_stride_bytes / sizeof(video_color_t);
-        size_t overlay_stride_px = (size_t)state->drag_overlay_stride_bytes / sizeof(video_color_t);
-
-        for (int row = 0; row < copy_h; ++row)
-        {
-            const video_color_t *src_row = state->drag_window_surface +
-                                           (size_t)(src_y + row) * win_stride_px + (size_t)src_x;
-            video_color_t *dst_row = (video_color_t *)state->drag_overlay +
-                                     (size_t)(dst_y + row) * overlay_stride_px + (size_t)dst_x;
-            memcpy(dst_row, src_row, (size_t)copy_w * sizeof(video_color_t));
-        }
-    }
-
-    atk_drag_log_blit("overlay_flush",
-                      state->drag_overlay,
-                      state->drag_overlay_stride_bytes,
+    const video_color_t *scene_src = state->drag_scene +
+                                     (size_t)y0 * scene_stride_px +
+                                     (size_t)x0;
+    atk_drag_log_blit("restore_region",
+                      scene_src,
+                      state->drag_scene_stride_bytes,
                       region_w,
                       region_h,
                       x0,
                       y0);
+    video_blit_rgba32(x0,
+                      y0,
+                      region_w,
+                      region_h,
+                      scene_src,
+                      state->drag_scene_stride_bytes,
+                      false);
 
-    video_overlay_blit_rgba32(x0,
-                              y0,
-                              region_w,
-                              region_h,
-                              state->drag_overlay,
-                              state->drag_overlay_stride_bytes);
+    atk_drag_log_blit("blit_window",
+                      state->drag_window_surface,
+                      state->drag_window_stride_bytes,
+                      w,
+                      h,
+                      new_bx,
+                      new_by);
+    video_blit_rgba32(new_bx,
+                      new_by,
+                      w,
+                      h,
+                      state->drag_window_surface,
+                      state->drag_window_stride_bytes,
+                      false);
 
     state->drag_prev_x = new_bx;
     state->drag_prev_y = new_by;
@@ -2191,23 +2108,7 @@ static void atk_drag_finish(atk_state_t *state)
     state->drag_active = false;
     state->drag_scene_valid = false;
     state->drag_window_surface = NULL;
-
-    /* Redraw both the last overlay location and the final window position to avoid ghosts. */
-    if (state->drag_window_w > 0 && state->drag_window_h > 0)
-    {
-        atk_dirty_mark_rect(state->drag_prev_x,
-                            state->drag_prev_y,
-                            state->drag_window_w,
-                            state->drag_window_h);
-    }
-
-    if (state->drag_start_w > 0 && state->drag_start_h > 0)
-    {
-        atk_dirty_mark_rect(state->drag_start_x,
-                            state->drag_start_y,
-                            state->drag_start_w,
-                            state->drag_start_h);
-    }
+    atk_dirty_mark_all();
 }
 
 static video_cursor_shape_t atk_cursor_shape_for_edges(uint32_t edges)

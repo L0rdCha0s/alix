@@ -24,6 +24,7 @@ typedef struct user_atk_window
     atk_widget_t *window;
     atk_widget_t *image;
     video_color_t *pixels;
+    video_color_t *back_pixels;
     size_t pixel_bytes;
     int content_width;
     int content_height;
@@ -250,15 +251,25 @@ void user_atk_window_resized(const atk_widget_t *window)
     if (size_changed)
     {
         size_t new_bytes = (size_t)new_width * (size_t)new_height * sizeof(video_color_t);
-        video_color_t *pixels = (video_color_t *)malloc(new_bytes);
-        if (!pixels)
+        video_color_t *front = (video_color_t *)malloc(new_bytes);
+        if (!front)
         {
             spinlock_unlock(&win->pixel_lock);
             image->width = win->content_width;
             image->height = win->content_height;
             return;
         }
-        memset(pixels, 0, new_bytes);
+        video_color_t *back = (video_color_t *)malloc(new_bytes);
+        if (!back)
+        {
+            free(front);
+            spinlock_unlock(&win->pixel_lock);
+            image->width = win->content_width;
+            image->height = win->content_height;
+            return;
+        }
+        memset(front, 0, new_bytes);
+        memset(back, 0, new_bytes);
 
         if (win->pixels && win->content_width > 0 && win->content_height > 0)
         {
@@ -268,31 +279,45 @@ void user_atk_window_resized(const atk_widget_t *window)
             {
                 size_t dst_offset = (size_t)row * (size_t)new_width * sizeof(video_color_t);
                 size_t src_offset = (size_t)row * (size_t)win->stride_bytes;
-                memcpy((uint8_t *)pixels + dst_offset,
+                memcpy((uint8_t *)front + dst_offset,
                        (const uint8_t *)win->pixels + src_offset,
                        (size_t)copy_w * sizeof(video_color_t));
             }
         }
 
         if (!atk_image_set_pixels(image,
-                                  pixels,
+                                  front,
                                   new_width,
                                   new_height,
                                   new_width * (int)sizeof(video_color_t),
-                                  true))
+                                  false))
         {
-            free(pixels);
+            free(back);
+            free(front);
             image->width = win->content_width;
             image->height = win->content_height;
             spinlock_unlock(&win->pixel_lock);
             return;
         }
 
+        video_color_t *old_front = win->pixels;
+        video_color_t *old_back = win->back_pixels;
         win->pixels = atk_image_pixels(image);
+        win->back_pixels = back;
         win->pixel_bytes = new_bytes;
         win->stride_bytes = new_width * (int)sizeof(video_color_t);
         win->content_width = new_width;
         win->content_height = new_height;
+        spinlock_unlock(&win->pixel_lock);
+        if (old_front)
+        {
+            free(old_front);
+        }
+        if (old_back)
+        {
+            free(old_back);
+        }
+        spinlock_lock(&win->pixel_lock);
     }
 
     /* Refresh layout margins so anchor-based layout keeps using correct geometry. */
@@ -575,11 +600,16 @@ static void user_atk_window_on_destroy(void *context)
     }
 
     bool send_close_event = !win->destroying;
+    video_color_t *front_pixels = NULL;
+    video_color_t *back_pixels = NULL;
     user_atk_windows_lock();
     win->window = NULL;
     win->image = NULL;
     spinlock_lock(&win->pixel_lock);
+    front_pixels = win->pixels;
+    back_pixels = win->back_pixels;
     win->pixels = NULL;
+    win->back_pixels = NULL;
     win->pixel_bytes = 0;
     win->closed = true;
     spinlock_unlock(&win->pixel_lock);
@@ -592,6 +622,14 @@ static void user_atk_window_on_destroy(void *context)
         g_capture_window = NULL;
     }
     user_atk_windows_unlock();
+    if (front_pixels)
+    {
+        free(front_pixels);
+    }
+    if (back_pixels)
+    {
+        free(back_pixels);
+    }
     wait_queue_wake_all(&win->event_waiters);
     user_atk_apply_priorities();
     if (send_close_event)
@@ -621,6 +659,8 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     }
     (void)closing_kernel;
 
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
     user_atk_windows_lock();
     if (win->prev)
     {
@@ -654,8 +694,8 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
         win->destroying = false;
         atk_dirty_mark_all();
         video_request_refresh();
-        video_pump_events();
     }
+    atk_state_lock_release(irq_state);
 
     wait_queue_wake_all(&win->event_waiters);
     user_atk_apply_priorities();
@@ -701,12 +741,41 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     }
     desc.title[USER_ATK_TITLE_MAX - 1] = '\0';
 
+    size_t pixel_bytes = (size_t)desc.width * (size_t)desc.height * sizeof(video_color_t);
+    video_color_t *front = (video_color_t *)malloc(pixel_bytes);
+    if (!front)
+    {
+        return -1;
+    }
+    video_color_t *back = (video_color_t *)malloc(pixel_bytes);
+    if (!back)
+    {
+        free(front);
+        return -1;
+    }
+    memset(front, 0, pixel_bytes);
+    memset(back, 0, pixel_bytes);
+
+    user_atk_window_t *win = (user_atk_window_t *)calloc(1, sizeof(user_atk_window_t));
+    if (!win)
+    {
+        free(back);
+        free(front);
+        return -1;
+    }
+
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     int screen_w = video_screen_width();
     int screen_h = video_screen_height();
     atk_widget_t *window = atk_window_create_at(state, screen_w / 2, screen_h / 2);
     if (!window)
     {
+        atk_state_lock_release(irq_state);
+        free(win);
+        free(back);
+        free(front);
         return -1;
     }
 
@@ -726,24 +795,28 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     if (!image)
     {
         atk_window_close(state, window);
+        atk_state_lock_release(irq_state);
+        free(win);
+        free(back);
+        free(front);
         return -1;
     }
 
-    size_t pixel_bytes = (size_t)desc.width * (size_t)desc.height * sizeof(video_color_t);
-    video_color_t *pixels = (video_color_t *)malloc(pixel_bytes);
-    if (!pixels)
-    {
-        atk_window_close(state, window);
-        return -1;
-    }
-    memset(pixels, 0, pixel_bytes);
-    user_atk_log("alloc pixels=", (uintptr_t)pixels);
+    user_atk_log("alloc pixels=", (uintptr_t)front);
     user_atk_log("alloc bytes=", pixel_bytes);
 
-    if (!atk_image_set_pixels(image, pixels, desc.width, desc.height, desc.width * (int)sizeof(video_color_t), true))
+    if (!atk_image_set_pixels(image,
+                              front,
+                              desc.width,
+                              desc.height,
+                              desc.width * (int)sizeof(video_color_t),
+                              false))
     {
-        free(pixels);
         atk_window_close(state, window);
+        atk_state_lock_release(irq_state);
+        free(win);
+        free(back);
+        free(front);
         return -1;
     }
 
@@ -753,13 +826,6 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
                           ATK_WIDGET_ANCHOR_RIGHT |
                           ATK_WIDGET_ANCHOR_BOTTOM);
 
-    user_atk_window_t *win = (user_atk_window_t *)calloc(1, sizeof(user_atk_window_t));
-    if (!win)
-    {
-        atk_window_close(state, window);
-        return -1;
-    }
-
     win->handle = g_next_handle++;
     win->flags = desc.flags & USER_ATK_WINDOW_FLAG_RESIZABLE;
     win->refcount = 1;
@@ -767,6 +833,7 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
     win->window = window;
     win->image = image;
     win->pixels = atk_image_pixels(image);
+    win->back_pixels = back;
     win->pixel_bytes = pixel_bytes;
     win->content_width = desc.width;
     win->content_height = desc.height;
@@ -787,9 +854,9 @@ int64_t user_atk_sys_create(const user_atk_window_desc_t *desc_user)
 
     atk_window_mark_dirty(window);
     video_request_refresh_window(window);
-    video_pump_events();
     user_atk_log("create handle=", win->handle);
     user_atk_focus_window(window);
+    atk_state_lock_release(irq_state);
     return (int64_t)win->handle;
 }
 
@@ -813,6 +880,12 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
     }
 
     spinlock_lock(&win->pixel_lock);
+    if (win->closed || !win->pixels)
+    {
+        spinlock_unlock(&win->pixel_lock);
+        user_atk_window_release(win);
+        return -1;
+    }
 
 #if USER_ATK_DEBUG
     serial_printf("[user_atk][present] handle=0x%016llX bytes=0x%016llX expected=0x%016llX content=%dx%d stride=%d dst=0x%016llX\r\n",
@@ -840,7 +913,8 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
         }
     }
 
-    if (copy_bytes > 0 && !user_copy_from_user(win->pixels, pixels, copy_bytes))
+    video_color_t *dst = win->back_pixels ? win->back_pixels : win->pixels;
+    if (copy_bytes > 0 && !user_copy_from_user(dst, pixels, copy_bytes))
     {
         spinlock_unlock(&win->pixel_lock);
         user_atk_window_release(win);
@@ -849,20 +923,38 @@ int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_
     if (copy_bytes < expected_bytes)
     {
         size_t remaining = expected_bytes - copy_bytes;
-        memset((uint8_t *)win->pixels + copy_bytes, 0, remaining);
+        memset((uint8_t *)dst + copy_bytes, 0, remaining);
+    }
+
+    if (win->back_pixels)
+    {
+        video_color_t *new_front = win->back_pixels;
+        win->back_pixels = win->pixels;
+        win->pixels = new_front;
     }
     spinlock_unlock(&win->pixel_lock);
     user_atk_log("present dst ptr=", (uintptr_t)win->pixels);
     if (win->window)
     {
+        atk_state_lock_init();
+        uint64_t irq_state = atk_state_lock_acquire();
+        if (win->image && win->pixels)
+        {
+            atk_image_set_pixels(win->image,
+                                 win->pixels,
+                                 win->content_width,
+                                 win->content_height,
+                                 win->stride_bytes,
+                                 false);
+        }
         atk_window_mark_dirty(win->window);
         video_request_refresh_window(win->window);
+        atk_state_lock_release(irq_state);
     }
     else
     {
         video_request_refresh();
     }
-    video_pump_events();
     user_atk_window_release(win);
     return 0;
 }

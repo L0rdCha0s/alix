@@ -65,6 +65,9 @@ static inline void video_irq_restore(uint64_t flags)
 static uint32_t *backbuffer = (uint32_t *)(uintptr_t)BACKBUFFER_ADDR;
 
 static volatile uint32_t *framebuffer = 0;
+static volatile uint32_t *framebuffer_base = 0;
+static uint32_t framebuffer_page = 0;
+static bool framebuffer_pageflip = false;
 static uint64_t framebuffer_phys = 0;
 static bool framebuffer_detected = false;
 static int g_video_width = VIDEO_WIDTH;
@@ -310,6 +313,32 @@ static bool bga_available(void)
     return id >= 0xB0C0 && id <= 0xB0C6;
 }
 
+static inline size_t framebuffer_page_pixels(void)
+{
+    return (size_t)VIDEO_WIDTH * (size_t)VIDEO_HEIGHT;
+}
+
+static inline volatile uint32_t *framebuffer_page_ptr(uint32_t page)
+{
+    if (!framebuffer_base)
+    {
+        return NULL;
+    }
+    return framebuffer_base + (size_t)(page & 1u) * framebuffer_page_pixels();
+}
+
+static inline void framebuffer_wc_fence(void)
+{
+    __asm__ volatile ("sfence" ::: "memory");
+}
+
+static void framebuffer_set_page(uint32_t page)
+{
+    framebuffer_page = page & 1u;
+    framebuffer = framebuffer_page_ptr(framebuffer_page);
+    bga_write(BGA_REG_Y_OFFSET, (uint16_t)(framebuffer_page ? VIDEO_HEIGHT : 0));
+}
+
 /* --------- Public API --------- */
 void video_init(void)
 {
@@ -332,7 +361,10 @@ static bool video_hw_enable(void)
     /* Enable write-combining over the LFB aperture (16 MiB typical) */
     video_enable_wc(framebuffer_phys, 16ULL * 1024 * 1024ULL);
 
-    framebuffer = (volatile uint32_t *)(uintptr_t)framebuffer_phys;
+    framebuffer_base = (volatile uint32_t *)(uintptr_t)framebuffer_phys;
+    framebuffer = framebuffer_base;
+    framebuffer_page = 0;
+    framebuffer_pageflip = false;
     video_log_hex("Framebuffer phys base: 0x", framebuffer_phys);
 
     if (!bga_available())
@@ -348,11 +380,18 @@ static bool video_hw_enable(void)
     bga_write(BGA_REG_YRES, VIDEO_HEIGHT);
     bga_write(BGA_REG_BPP, VIDEO_BPP);
     bga_write(BGA_REG_VIRT_WIDTH, VIDEO_WIDTH);
-    bga_write(BGA_REG_VIRT_HEIGHT, VIDEO_HEIGHT);
+    uint16_t desired_vh = (uint16_t)(VIDEO_HEIGHT * 2);
+    bga_write(BGA_REG_VIRT_HEIGHT, desired_vh);
     bga_write(BGA_REG_X_OFFSET, 0);
     bga_write(BGA_REG_Y_OFFSET, 0);
     bga_write(BGA_REG_BANK, 0);
     bga_write(BGA_REG_ENABLE, 0x41); /* enable + LFB */
+
+    framebuffer_pageflip = bga_read(BGA_REG_VIRT_HEIGHT) >= desired_vh;
+    if (!framebuffer_pageflip)
+    {
+        bga_write(BGA_REG_VIRT_HEIGHT, VIDEO_HEIGHT);
+    }
 
     /* Capture the active resolution for higher layers. */
     g_video_width = VIDEO_WIDTH;
@@ -383,14 +422,12 @@ void video_fill(video_color_t color)
     }
 }
 
-/* Draw cursor only to the LFB (overlay), no readbacks */
-static void cursor_draw_overlay(void)
+static void cursor_draw_overlay_to(volatile uint32_t *dst_fb)
 {
-    /* clamp */
-    if (cursor_x < 0) cursor_x = 0;
-    if (cursor_y < 0) cursor_y = 0;
-    if (cursor_x > VIDEO_WIDTH  - CURSOR_W)  cursor_x = VIDEO_WIDTH  - CURSOR_W;
-    if (cursor_y > VIDEO_HEIGHT - CURSOR_H)  cursor_y = VIDEO_HEIGHT - CURSOR_H;
+    if (!dst_fb)
+    {
+        return;
+    }
 
     for (int row = 0; row < CURSOR_H; ++row)
     {
@@ -406,18 +443,15 @@ static void cursor_draw_overlay(void)
             char pixel = shape_row[col];
             if (pixel == '.') continue; /* leave background as last flushed */
 
-            volatile uint32_t *p = &framebuffer[dst_y * VIDEO_WIDTH + dst_x];
+            volatile uint32_t *p = &dst_fb[dst_y * VIDEO_WIDTH + dst_x];
             *p = (pixel == 'X') ? cursor_color_primary() : cursor_color_shadow();
         }
     }
-
-    prev_cursor_x = cursor_x;
-    prev_cursor_y = cursor_y;
 }
 
-static void cursor_restore_background(void)
+static void cursor_restore_background_to(volatile uint32_t *dst_fb)
 {
-    if (!framebuffer)
+    if (!dst_fb)
     {
         return;
     }
@@ -441,8 +475,41 @@ static void cursor_restore_background(void)
             }
 
             size_t index = (size_t)dst_y * VIDEO_WIDTH + dst_x;
-            framebuffer[index] = backbuffer[index];
+            dst_fb[index] = backbuffer[index];
         }
+    }
+}
+
+/* Draw cursor only to the LFB (overlay), no readbacks */
+static void cursor_draw_overlay(void)
+{
+    if (!framebuffer)
+    {
+        return;
+    }
+
+    /* clamp */
+    if (cursor_x < 0) cursor_x = 0;
+    if (cursor_y < 0) cursor_y = 0;
+    if (cursor_x > VIDEO_WIDTH  - CURSOR_W)  cursor_x = VIDEO_WIDTH  - CURSOR_W;
+    if (cursor_y > VIDEO_HEIGHT - CURSOR_H)  cursor_y = VIDEO_HEIGHT - CURSOR_H;
+
+    cursor_draw_overlay_to(framebuffer);
+    if (framebuffer_pageflip)
+    {
+        cursor_draw_overlay_to(framebuffer_page_ptr(framebuffer_page ^ 1u));
+    }
+
+    prev_cursor_x = cursor_x;
+    prev_cursor_y = cursor_y;
+}
+
+static void cursor_restore_background(void)
+{
+    cursor_restore_background_to(framebuffer);
+    if (framebuffer_pageflip)
+    {
+        cursor_restore_background_to(framebuffer_page_ptr(framebuffer_page ^ 1u));
     }
 }
 
@@ -671,6 +738,22 @@ void video_copy_backbuffer(int x,
     }
 }
 
+static void video_overlay_restore_to(volatile uint32_t *dst_fb, int x0, int y0, int x1, int y1)
+{
+    if (!dst_fb)
+    {
+        return;
+    }
+
+    size_t row_bytes = (size_t)(x1 - x0) * sizeof(video_color_t);
+    for (int row = y0; row < y1; ++row)
+    {
+        volatile uint32_t *dst = &dst_fb[row * VIDEO_WIDTH + x0];
+        uint32_t *src = &backbuffer[row * VIDEO_WIDTH + x0];
+        fb_memcpy_wc((void *)dst, src, row_bytes);
+    }
+}
+
 void video_overlay_restore(int x, int y, int width, int height)
 {
     if (!framebuffer || width <= 0 || height <= 0)
@@ -689,12 +772,41 @@ void video_overlay_restore(int x, int y, int width, int height)
     if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
     if (x0 >= x1 || y0 >= y1) return;
 
-    size_t row_bytes = (size_t)(x1 - x0) * sizeof(video_color_t);
-    for (int row = y0; row < y1; ++row)
+    video_overlay_restore_to(framebuffer, x0, y0, x1, y1);
+    if (framebuffer_pageflip)
     {
-        volatile uint32_t *dst = &framebuffer[row * VIDEO_WIDTH + x0];
-        uint32_t *src = &backbuffer[row * VIDEO_WIDTH + x0];
-        fb_memcpy_wc((void *)dst, src, row_bytes);
+        video_overlay_restore_to(framebuffer_page_ptr(framebuffer_page ^ 1u), x0, y0, x1, y1);
+    }
+}
+
+static void video_overlay_rect_outline_to(volatile uint32_t *dst_fb, int x0, int y0, int x1, int y1, video_color_t color)
+{
+    if (!dst_fb)
+    {
+        return;
+    }
+
+    /* top */
+    for (int cx = x0; cx < x1; ++cx)
+    {
+        dst_fb[y0 * VIDEO_WIDTH + cx] = color;
+    }
+    /* bottom */
+    if (y1 - 1 != y0)
+    {
+        for (int cx = x0; cx < x1; ++cx)
+        {
+            dst_fb[(y1 - 1) * VIDEO_WIDTH + cx] = color;
+        }
+    }
+    /* left/right */
+    for (int cy = y0; cy < y1; ++cy)
+    {
+        dst_fb[cy * VIDEO_WIDTH + x0] = color;
+        if (x1 - 1 != x0)
+        {
+            dst_fb[cy * VIDEO_WIDTH + (x1 - 1)] = color;
+        }
     }
 }
 
@@ -716,27 +828,33 @@ void video_overlay_rect_outline(int x, int y, int width, int height, video_color
     if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
     if (x0 >= x1 || y0 >= y1) return;
 
-    /* top */
-    for (int cx = x0; cx < x1; ++cx)
+    video_overlay_rect_outline_to(framebuffer, x0, y0, x1, y1, color);
+    if (framebuffer_pageflip)
     {
-        framebuffer[y0 * VIDEO_WIDTH + cx] = color;
+        video_overlay_rect_outline_to(framebuffer_page_ptr(framebuffer_page ^ 1u), x0, y0, x1, y1, color);
     }
-    /* bottom */
-    if (y1 - 1 != y0)
+}
+
+static void video_overlay_blit_rgba32_to(volatile uint32_t *dst_fb,
+                                        int dst_x0,
+                                        int dst_y0,
+                                        int copy_w,
+                                        int copy_h,
+                                        const uint8_t *row_ptr,
+                                        int stride_bytes)
+{
+    if (!dst_fb)
     {
-        for (int cx = x0; cx < x1; ++cx)
-        {
-            framebuffer[(y1 - 1) * VIDEO_WIDTH + cx] = color;
-        }
+        return;
     }
-    /* left/right */
-    for (int cy = y0; cy < y1; ++cy)
+
+    const uint8_t *src_row_ptr = row_ptr;
+    for (int row = 0; row < copy_h; ++row)
     {
-        framebuffer[cy * VIDEO_WIDTH + x0] = color;
-        if (x1 - 1 != x0)
-        {
-            framebuffer[cy * VIDEO_WIDTH + (x1 - 1)] = color;
-        }
+        volatile uint32_t *dst = &dst_fb[(dst_y0 + row) * VIDEO_WIDTH + dst_x0];
+        const video_color_t *src_row = (const video_color_t *)src_row_ptr;
+        fb_memcpy_wc((void *)dst, src_row, (size_t)copy_w * sizeof(video_color_t));
+        src_row_ptr += stride_bytes;
     }
 }
 
@@ -787,12 +905,10 @@ void video_overlay_blit_rgba32(int x,
     const uint8_t *row_ptr = (const uint8_t *)pixels +
                              (size_t)src_y * (size_t)stride_bytes +
                              (size_t)src_x * sizeof(video_color_t);
-    for (int row = 0; row < copy_h; ++row)
+    video_overlay_blit_rgba32_to(framebuffer, x0, y0, copy_w, copy_h, row_ptr, stride_bytes);
+    if (framebuffer_pageflip)
     {
-        volatile uint32_t *dst = &framebuffer[(y0 + row) * VIDEO_WIDTH + x0];
-        const video_color_t *src_row = (const video_color_t *)row_ptr;
-        fb_memcpy_wc((void *)dst, src_row, (size_t)copy_w * sizeof(video_color_t));
-        row_ptr += stride_bytes;
+        video_overlay_blit_rgba32_to(framebuffer_page_ptr(framebuffer_page ^ 1u), x0, y0, copy_w, copy_h, row_ptr, stride_bytes);
     }
 }
 
@@ -914,6 +1030,29 @@ static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t
     for (; i < bytes; ++i) d[i] = s[i];
 }
 
+static void video_flush_rects_to_fb(const video_dirty_rect_t *rects, int count, volatile uint32_t *dst_fb)
+{
+    if (!dst_fb || !rects || count <= 0)
+    {
+        return;
+    }
+
+    for (int i = 0; i < count; ++i)
+    {
+        const video_dirty_rect_t *r = &rects[i];
+        int w = r->x1 - r->x0;
+        if (w <= 0) continue;
+        size_t row_bytes = (size_t)w * sizeof(video_color_t);
+
+        for (int y = r->y0; y < r->y1; ++y)
+        {
+            volatile uint32_t *dst = &dst_fb[y * VIDEO_WIDTH + r->x0];
+            uint32_t *src = &backbuffer[y * VIDEO_WIDTH + r->x0];
+            fb_memcpy_wc((void *)dst, src, row_bytes);
+        }
+    }
+}
+
 static void video_flush_dirty(void)
 {
     if (!framebuffer)
@@ -928,40 +1067,41 @@ static void video_flush_dirty(void)
         return;
     }
 
-#ifdef ENABLE_MEM_DEBUG_LOGS
-    video_log_hex("flush count=", count);
-#endif
-
-    for (int i = 0; i < count; ++i)
+    if (!framebuffer_pageflip)
     {
-        video_dirty_rect_t *r = &rects[i];
-        int w = r->x1 - r->x0;
-        size_t row_bytes = (size_t)w * sizeof(video_color_t);
-#ifdef ENABLE_MEM_DEBUG_LOGS
-        video_log_hex("flush x0=", r->x0);
-        video_log_hex("flush y0=", r->y0);
-        video_log_hex("flush x1=", r->x1);
-        video_log_hex("flush y1=", r->y1);
-        video_log_hex("flush bytes=", row_bytes);
-#endif
-
-        for (int y = r->y0; y < r->y1; ++y)
-        {
-            volatile uint32_t *dst = &framebuffer[y * VIDEO_WIDTH + r->x0];
-            uint32_t *src = &backbuffer[y * VIDEO_WIDTH + r->x0];
-#ifdef ENABLE_MEM_DEBUG_LOGS
-            video_log_hex("flush dst=", (uint64_t)(uintptr_t)dst);
-            video_log_hex("flush src=", (uint64_t)(uintptr_t)src);
-#endif
-            fb_memcpy_wc((void *)dst, src, row_bytes);
-        }
+        video_flush_rects_to_fb(rects, count, framebuffer);
+        framebuffer_wc_fence();
+        return;
     }
+
+    volatile uint32_t *old_fb = framebuffer_page_ptr(framebuffer_page);
+    uint32_t next_page = framebuffer_page ^ 1u;
+    volatile uint32_t *next_fb = framebuffer_page_ptr(next_page);
+    if (!old_fb || !next_fb)
+    {
+        video_flush_rects_to_fb(rects, count, framebuffer);
+        framebuffer_wc_fence();
+        return;
+    }
+
+    video_flush_rects_to_fb(rects, count, next_fb);
+    framebuffer_wc_fence();
+    framebuffer_set_page(next_page);
+    video_flush_rects_to_fb(rects, count, old_fb);
+    framebuffer_wc_fence();
 }
 
 static void video_perform_refresh(void)
 {
-    video_dirty_rect_t rects[VIDEO_MAX_DIRTY_RECTS];
-    int rect_count = video_dirty_snapshot(rects, VIDEO_MAX_DIRTY_RECTS);
+    if (atk_drag_active())
+    {
+        spinlock_lock(&g_video_lock);
+        refresh_window = NULL;
+        refresh_requested_full = false;
+        refresh_requested = false;
+        spinlock_unlock(&g_video_lock);
+        return;
+    }
 
     atk_widget_t *target = NULL;
     bool do_full = false;
@@ -981,34 +1121,10 @@ static void video_perform_refresh(void)
         return;
     }
 
-    if (rect_count > 0)
-    {
-        for (int i = 0; i < rect_count; ++i)
-        {
-            video_dirty_rect_t *r = &rects[i];
-            int w = r->x1 - r->x0;
-            size_t row_bytes = (size_t)w * sizeof(video_color_t);
-#ifdef ENABLE_MEM_DEBUG_LOGS
-            video_log_hex("flush x0=", r->x0);
-            video_log_hex("flush y0=", r->y0);
-            video_log_hex("flush x1=", r->x1);
-            video_log_hex("flush y1=", r->y1);
-            video_log_hex("flush bytes=", row_bytes);
-#endif
-            for (int y = r->y0; y < r->y1; ++y)
-            {
-                volatile uint32_t *dst = &framebuffer[y * VIDEO_WIDTH + r->x0];
-                uint32_t *src = &backbuffer[y * VIDEO_WIDTH + r->x0];
-                fb_memcpy_wc((void *)dst, src, row_bytes);
-            }
-        }
-    }
-
     atk_state_t *state = atk_state_get();
 
     if (target)
     {
-        video_dirty_reset();
         atk_window_draw_from(state, target);
         video_flush_dirty();
         cursor_draw_overlay();
@@ -1017,7 +1133,6 @@ static void video_perform_refresh(void)
 
     if (do_full)
     {
-        video_dirty_reset();
         atk_render();
         video_flush_dirty();
         cursor_draw_overlay();
@@ -1222,8 +1337,15 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
         return;
     }
 
+    bool dragging = atk_drag_active();
     spinlock_lock(&g_video_lock);
-    if (refresh_window)
+    if (dragging)
+    {
+        refresh_window = NULL;
+        refresh_requested_full = false;
+        refresh_requested = false;
+    }
+    else if (refresh_window)
     {
         refresh_requested_full = true;
         refresh_window = NULL;
@@ -1247,7 +1369,8 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     atk_mouse_event_result_t result = atk_handle_mouse_event(cursor_x, cursor_y, pressed_edge, released_edge, left_pressed);
 
-    if (result.redraw)
+    bool dragging_now = atk_drag_active();
+    if (result.redraw && !dragging_now)
     {
         /* let renderer choose dirties; do not pre-clear here */
         atk_render();
@@ -1258,6 +1381,13 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     spinlock_lock(&g_video_lock);
     has_dirty = dirty_count > 0;
     pending_refresh = refresh_requested || refresh_requested_full;
+    if (dragging_now && pending_refresh)
+    {
+        refresh_window = NULL;
+        refresh_requested_full = false;
+        refresh_requested = false;
+        pending_refresh = false;
+    }
     spinlock_unlock(&g_video_lock);
 
     if (has_dirty && !pending_refresh)
