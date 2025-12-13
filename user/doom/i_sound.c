@@ -27,6 +27,9 @@ enum
     DMX_HEADER_BYTES = 8,
 };
 
+// Temporarily disable MUS music playback. (Sound effects remain enabled.)
+#define DOOM_DISABLE_MUS_MUSIC 1
+
 typedef struct
 {
     bool active;
@@ -66,12 +69,24 @@ enum
     MUS_TICKS_PER_SEC = 140,
     MUSIC_MAX_VOICES = 16,
     MUSIC_BASE_AMPLITUDE = 3500,
+    // Mix music at a lower rate and hold samples to reduce CPU time spent in
+    // the synth/mixer. (Square/noise waves tolerate this well.)
+    MUSIC_MIX_DOWNSAMPLE = 4,
+};
+
+enum
+{
+    // Envelope shift tuning (applied at the music mix rate, i.e. after
+    // MUSIC_MIX_DOWNSAMPLE). Larger values = slower transitions.
+    MUSIC_ENV_ATTACK_SHIFT = 4,
+    MUSIC_ENV_RELEASE_SHIFT = 9,
 };
 
 typedef enum
 {
-    MUSIC_WAVE_SQUARE = 0,
+    MUSIC_WAVE_TRIANGLE = 0,
     MUSIC_WAVE_NOISE = 1,
+    MUSIC_WAVE_NOISE_HP = 2,
 } music_wave_t;
 
 typedef struct
@@ -84,6 +99,8 @@ typedef struct
     uint32_t step;
     int32_t amp;
     int32_t amp_target;
+    uint8_t env_shift;
+    int32_t noise_prev;
     uint8_t pan_l;
     uint8_t pan_r;
     uint32_t age;
@@ -116,6 +133,14 @@ static music_state_t g_music;
 static music_voice_t g_music_voices[MUSIC_MAX_VOICES];
 static uint32_t g_music_voice_seq = 0;
 static uint32_t g_music_noise = 0x12345678u;
+static bool g_music_interp_valid = false;
+static int32_t g_music_interp_l = 0;
+static int32_t g_music_interp_r = 0;
+static int32_t g_music_interp_target_l = 0;
+static int32_t g_music_interp_target_r = 0;
+static int32_t g_music_interp_step_l = 0;
+static int32_t g_music_interp_step_r = 0;
+static uint32_t g_music_interp_rem = 0;
 
 static const uint32_t g_music_note_step_48k[128] =
 {
@@ -225,17 +250,21 @@ static void music_voices_reset(void)
         g_music_voices[i].active = false;
         g_music_voices[i].channel = 0;
         g_music_voices[i].note = 0;
-        g_music_voices[i].wave = MUSIC_WAVE_SQUARE;
+        g_music_voices[i].wave = MUSIC_WAVE_TRIANGLE;
         g_music_voices[i].phase = 0;
         g_music_voices[i].step = 0;
         g_music_voices[i].amp = 0;
         g_music_voices[i].amp_target = 0;
+        g_music_voices[i].env_shift = MUSIC_ENV_ATTACK_SHIFT;
+        g_music_voices[i].noise_prev = 0;
         g_music_voices[i].pan_l = 64;
         g_music_voices[i].pan_r = 64;
         g_music_voices[i].age = 0;
     }
     g_music_voice_seq = 0;
 }
+
+static bool music_channel_is_percussion(uint8_t channel);
 
 static void music_all_notes_off(void)
 {
@@ -244,18 +273,155 @@ static void music_all_notes_off(void)
         if (g_music_voices[i].active)
         {
             g_music_voices[i].amp_target = 0;
+            if (!music_channel_is_percussion(g_music_voices[i].channel)
+                && g_music_voices[i].env_shift < MUSIC_ENV_RELEASE_SHIFT)
+            {
+                g_music_voices[i].env_shift = MUSIC_ENV_RELEASE_SHIFT;
+            }
         }
     }
 }
 
-static music_wave_t music_wave_for_channel(uint8_t channel)
+static bool music_channel_is_percussion(uint8_t channel)
 {
-    // Treat channel 9 as percussion (MIDI convention).
-    if ((channel & 0x0Fu) == 9)
+    // MUS uses channel 15 for percussion. (MIDI uses channel 9, but MUS->MIDI
+    // remaps channels; DOOM scores still emit percussion on MUS channel 15.)
+    return (channel & 0x0Fu) == 15;
+}
+
+static music_wave_t music_wave_for_event(uint8_t channel, uint8_t note)
+{
+    channel &= 0x0Fu;
+    note &= 0x7Fu;
+
+    if (!music_channel_is_percussion(channel))
     {
-        return MUSIC_WAVE_NOISE;
+        // A triangle wave has far fewer high harmonics than a square wave,
+        // reducing aliasing/"crackle" on high notes.
+        return MUSIC_WAVE_TRIANGLE;
     }
-    return MUSIC_WAVE_SQUARE;
+
+    // Basic percussion mapping (MIDI drum note numbers). This is not a full
+    // General MIDI synth, but it avoids "everything is white noise".
+    switch (note)
+    {
+        // Kick + toms (tonal).
+        case 35: // Acoustic Bass Drum
+        case 36: // Bass Drum 1
+        case 41: // Low Floor Tom
+        case 43: // High Floor Tom
+        case 45: // Low Tom
+        case 47: // Low-Mid Tom
+        case 48: // Hi-Mid Tom
+        case 50: // High Tom
+            return MUSIC_WAVE_TRIANGLE;
+
+        // Snare (noise burst).
+        case 38: // Acoustic Snare
+        case 40: // Electric Snare
+            return MUSIC_WAVE_NOISE;
+
+        // Hats/cymbals (high-passed noise).
+        case 42: // Closed Hi-Hat
+        case 44: // Pedal Hi-Hat
+        case 46: // Open Hi-Hat
+        case 49: // Crash Cymbal 1
+        case 51: // Ride Cymbal 1
+        case 52: // Chinese Cymbal
+        case 55: // Splash Cymbal
+        case 57: // Crash Cymbal 2
+            return MUSIC_WAVE_NOISE_HP;
+
+        default:
+            return MUSIC_WAVE_NOISE;
+    }
+}
+
+static uint8_t music_env_shift_for_event(uint8_t channel, uint8_t note, music_wave_t wave)
+{
+    (void)wave;
+    channel &= 0x0Fu;
+    note &= 0x7Fu;
+
+    if (!music_channel_is_percussion(channel))
+    {
+        return MUSIC_ENV_ATTACK_SHIFT;
+    }
+
+    // Per-track percussion note-offs are inconsistent; we use a decay envelope
+    // to prevent sustained noise. Tune decay by instrument family.
+    switch (note)
+    {
+        // Hats: fast decay.
+        case 42:
+        case 44:
+        case 46:
+            return 9;
+
+        // Cymbals: slower decay.
+        case 49:
+        case 51:
+        case 52:
+        case 55:
+        case 57:
+            return 11;
+
+        default:
+            return 10;
+    }
+}
+
+static int32_t music_scale_amp_for_event(int32_t amp_target, uint8_t channel, uint8_t note, music_wave_t wave)
+{
+    channel &= 0x0Fu;
+    note &= 0x7Fu;
+
+    if (!music_channel_is_percussion(channel))
+    {
+        return amp_target;
+    }
+
+    // Keep percussion from dominating the mix: noise reads louder than tonal
+    // waves and easily turns into "fuzz" when multiple hits overlap.
+    if (wave == MUSIC_WAVE_NOISE_HP)
+    {
+        amp_target = (amp_target * 2) / 3; // ~0.66
+    }
+    else if (wave == MUSIC_WAVE_NOISE)
+    {
+        amp_target = (amp_target * 3) / 4; // 0.75
+    }
+
+    // Emphasize kicks/toms a bit; de-emphasize hats/cymbals a bit.
+    switch (note)
+    {
+        case 35:
+        case 36:
+        case 41:
+        case 43:
+        case 45:
+        case 47:
+        case 48:
+        case 50:
+            amp_target = (amp_target * 5) / 4;
+            break;
+
+        case 42:
+        case 44:
+        case 46:
+        case 49:
+        case 51:
+        case 52:
+        case 55:
+        case 57:
+            amp_target /= 2;
+            break;
+
+        default:
+            break;
+    }
+
+    return amp_target;
 }
 
 static uint32_t music_step_for_note(uint8_t channel, uint8_t note)
@@ -342,11 +508,36 @@ static void music_note_on(uint8_t channel, uint8_t note, uint8_t volume)
     v->active = true;
     v->channel = channel;
     v->note = note;
-    v->wave = (uint8_t)music_wave_for_channel(channel);
+    music_wave_t wave = music_wave_for_event(channel, note);
+    v->wave = (uint8_t)wave;
     v->phase = 0;
     v->step = music_step_for_note(channel, note);
-    v->amp = 0;
-    v->amp_target = amp_target;
+    v->env_shift = music_env_shift_for_event(channel, note, wave);
+    if (v->env_shift == 0)
+    {
+        v->env_shift = MUSIC_ENV_ATTACK_SHIFT;
+    }
+    v->noise_prev = 0;
+
+    amp_target = music_scale_amp_for_event(amp_target, channel, note, wave);
+    if (amp_target <= 0)
+    {
+        v->active = false;
+        return;
+    }
+
+    if (music_channel_is_percussion(channel))
+    {
+        // Treat percussion as one-shot bursts: if the score doesn't send an
+        // explicit note-off, we still decay over time.
+        v->amp = amp_target;
+        v->amp_target = 0;
+    }
+    else
+    {
+        v->amp = 0;
+        v->amp_target = amp_target;
+    }
     v->pan_l = pan_l;
     v->pan_r = pan_r;
     v->age = ++g_music_voice_seq;
@@ -362,6 +553,10 @@ static void music_note_off(uint8_t channel, uint8_t note)
         if (v->active && v->channel == channel && v->note == note)
         {
             v->amp_target = 0;
+            if (!music_channel_is_percussion(channel) && v->env_shift < MUSIC_ENV_RELEASE_SHIFT)
+            {
+                v->env_shift = MUSIC_ENV_RELEASE_SHIFT;
+            }
         }
     }
 }
@@ -384,6 +579,14 @@ static void music_reset_cursor(void)
     g_music.pos = g_music.score;
     g_music.wait_ticks = 0;
     g_music.tick_accum = 0;
+    g_music_interp_valid = false;
+    g_music_interp_l = 0;
+    g_music_interp_r = 0;
+    g_music_interp_target_l = 0;
+    g_music_interp_target_r = 0;
+    g_music_interp_step_l = 0;
+    g_music_interp_step_r = 0;
+    g_music_interp_rem = 0;
     for (int c = 0; c < 16; ++c)
     {
         g_music.chan_volume[c] = 127;
@@ -476,7 +679,9 @@ static void music_tick(void)
             {
                 if (g_music.pos >= g_music.end) break;
                 uint8_t sys = *g_music.pos++ & 0x7Fu;
-                if (sys == 10 || sys == 11)
+                // Different MUS decoders use either 0/1 or 10/11 for "all notes
+                // off" style events; accept both to avoid stuck notes.
+                if (sys == 0 || sys == 1 || sys == 10 || sys == 11)
                 {
                     music_all_notes_off();
                 }
@@ -550,11 +755,16 @@ static void music_advance_one_frame(void)
     }
 }
 
-static void music_mix_frame(int32_t *left, int32_t *right)
+static void music_mix_frame(int32_t *left, int32_t *right, uint32_t phase_advance)
 {
     if (!left || !right || !g_music.loaded || !g_music.playing || g_music.paused || g_music.volume <= 0)
     {
         return;
+    }
+
+    if (phase_advance == 0)
+    {
+        phase_advance = 1;
     }
 
     for (int i = 0; i < MUSIC_MAX_VOICES; ++i)
@@ -565,8 +775,14 @@ static void music_mix_frame(int32_t *left, int32_t *right)
             continue;
         }
 
+        uint8_t env_shift = v->env_shift;
+        if (env_shift == 0)
+        {
+            env_shift = 4;
+        }
+
         int32_t amp = v->amp;
-        amp += (v->amp_target - amp) >> 4;
+        amp += (v->amp_target - amp) >> env_shift;
         v->amp = amp;
         if (v->amp_target == 0 && amp > -8 && amp < 8)
         {
@@ -575,19 +791,35 @@ static void music_mix_frame(int32_t *left, int32_t *right)
         }
 
         int32_t s;
-        if (v->wave == MUSIC_WAVE_NOISE)
+        if (v->wave == MUSIC_WAVE_NOISE || v->wave == MUSIC_WAVE_NOISE_HP)
         {
             g_music_noise = g_music_noise * 1664525u + 1013904223u;
-            s = (g_music_noise & 0x80000000u) ? amp : -amp;
+            int32_t n = (int32_t)((g_music_noise >> 16) & 0xFFFFu) - 32768;
+            if (v->wave == MUSIC_WAVE_NOISE_HP)
+            {
+                int32_t hp = n - v->noise_prev;
+                v->noise_prev = n;
+                // Extra attenuation: hp noise can be 2x the base range.
+                s = (hp * amp) >> 16;
+            }
+            else
+            {
+                s = (n * amp) >> 15;
+            }
         }
         else
         {
-            s = (v->phase & 0x80000000u) ? -amp : amp;
+            uint32_t p = v->phase;
+            uint32_t t = (p & 0x80000000u) ? ~p : p;
+            // Fold 0..0xFFFFFFFF into a full-scale triangle in [-32768,32767].
+            int32_t tri = (int32_t)(t >> 15) - 32768;
+            s = (tri * amp) >> 15;
         }
-        v->phase += v->step;
+        v->phase = (uint32_t)(v->phase + (uint32_t)((uint64_t)v->step * (uint64_t)phase_advance));
 
-        *left += (s * (int32_t)v->pan_l) / 127;
-        *right += (s * (int32_t)v->pan_r) / 127;
+        // Use Q7 scaling (divide by 128) instead of an expensive /127.
+        *left += (s * (int32_t)v->pan_l) >> 7;
+        *right += (s * (int32_t)v->pan_r) >> 7;
     }
 }
 
@@ -622,13 +854,70 @@ static void mix_frames(int16_t *out_interleaved, uint32_t frames)
 
             int32_t sample = ((int32_t)ch->data[idx] - 128) << 8;
 
-            left += (sample * ch->left_vol) / 127;
-            right += (sample * ch->right_vol) / 127;
+            // Use Q7 scaling (divide by 128) instead of an expensive /127.
+            left += (sample * ch->left_vol) >> 7;
+            right += (sample * ch->right_vol) >> 7;
 
             ch->pos_fp += ch->step_fp;
         }
 
-        music_mix_frame(&left, &right);
+        if (!g_music.loaded || !g_music.playing || g_music.paused || g_music.volume <= 0)
+        {
+            g_music_interp_valid = false;
+            g_music_interp_l = 0;
+            g_music_interp_r = 0;
+            g_music_interp_target_l = 0;
+            g_music_interp_target_r = 0;
+            g_music_interp_step_l = 0;
+            g_music_interp_step_r = 0;
+            g_music_interp_rem = 0;
+        }
+        else
+        {
+            if (!g_music_interp_valid)
+            {
+                int32_t ml = 0;
+                int32_t mr = 0;
+                music_mix_frame(&ml, &mr, MUSIC_MIX_DOWNSAMPLE);
+                g_music_interp_valid = true;
+                g_music_interp_l = ml;
+                g_music_interp_r = mr;
+                g_music_interp_target_l = ml;
+                g_music_interp_target_r = mr;
+                g_music_interp_step_l = 0;
+                g_music_interp_step_r = 0;
+                g_music_interp_rem = MUSIC_MIX_DOWNSAMPLE;
+            }
+            else if (g_music_interp_rem == 0)
+            {
+                int32_t ml = 0;
+                int32_t mr = 0;
+                music_mix_frame(&ml, &mr, MUSIC_MIX_DOWNSAMPLE);
+                g_music_interp_target_l = ml;
+                g_music_interp_target_r = mr;
+                g_music_interp_step_l = (ml - g_music_interp_l) / (int32_t)MUSIC_MIX_DOWNSAMPLE;
+                g_music_interp_step_r = (mr - g_music_interp_r) / (int32_t)MUSIC_MIX_DOWNSAMPLE;
+                g_music_interp_rem = MUSIC_MIX_DOWNSAMPLE;
+            }
+
+            left += g_music_interp_l;
+            right += g_music_interp_r;
+
+            if (g_music_interp_rem > 0)
+            {
+                g_music_interp_rem--;
+                if (g_music_interp_rem == 0)
+                {
+                    g_music_interp_l = g_music_interp_target_l;
+                    g_music_interp_r = g_music_interp_target_r;
+                }
+                else
+                {
+                    g_music_interp_l += g_music_interp_step_l;
+                    g_music_interp_r += g_music_interp_step_r;
+                }
+            }
+        }
 
         if (left > 32767) left = 32767;
         if (left < -32768) left = -32768;
@@ -1104,6 +1393,33 @@ void I_ResumeSong(int handle)
 
 int I_RegisterSong(void *data)
 {
+#if DOOM_DISABLE_MUS_MUSIC
+    (void)data;
+    g_music.loaded = false;
+    g_music.playing = false;
+    g_music.paused = false;
+    g_music.looping = false;
+    g_music.data = NULL;
+    g_music.score = NULL;
+    g_music.pos = NULL;
+    g_music.end = NULL;
+    g_music.wait_ticks = 0;
+    g_music.tick_accum = 0;
+    // Return a non-zero handle so callers keep their state machine intact.
+    if (g_music.handle == 0)
+    {
+        g_music.handle = 1;
+    }
+    else
+    {
+        g_music.handle++;
+        if (g_music.handle == 0)
+        {
+            g_music.handle = 1;
+        }
+    }
+    return g_music.handle;
+#else
     const uint8_t *p = (const uint8_t *)data;
     if (!p)
     {
@@ -1169,6 +1485,7 @@ int I_RegisterSong(void *data)
 
     music_reset_cursor();
     return g_music.handle;
+#endif
 }
 
 void I_PlaySong(int handle, int looping)

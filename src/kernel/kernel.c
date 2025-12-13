@@ -32,6 +32,7 @@
 #include "smp.h"
 #include "proc_devices.h"
 #include "build_features.h"
+#include "audio.h"
 #include "hda.h"
 #include "stdio.h"
 #include "serial_format.h"
@@ -932,6 +933,7 @@ void kernel_main(void)
     serial_printf("%s", "[alix] after procfs_init\n");
     vfs_sys_controls_init();
     heap_sys_controls_init();
+    audio_sys_controls_init();
     scheduler_log_controls_init();
 #if ENABLE_FLUSHD
     (void)procfs_create_file_at("sys/vfs/flushd_log_enable", flushd_log_read, flushd_log_write, &g_flushd_log_enable);

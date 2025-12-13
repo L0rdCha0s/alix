@@ -4,6 +4,7 @@
 #include "atk/atk_label.h"
 #include "atk/atk_menu.h"
 #include "atk/atk_font.h"
+#include "atk/atk_scrollbar.h"
 #include "atk_window.h"
 #include "font.h"
 #include "libc.h"
@@ -24,6 +25,7 @@
 #define ATK_MENU_BAR_ENTRY_SPACING 8
 #define ATK_MENU_BAR_LOGO_MARGIN_X 12
 #define ATK_MENU_BAR_LOGO_MARGIN_Y 6
+#define ATK_MENU_BAR_VOLUME_BUTTON_WIDTH 28
 #ifdef ATK_NO_DESKTOP_APPS
 #define ATK_MENU_BAR_CLOCK_RESERVE 0
 #else
@@ -61,6 +63,8 @@ static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu);
 #ifndef ATK_NO_DESKTOP_APPS
 static void atk_menu_bar_clock_tick(void *context);
 static bool g_clock_timer_registered = false;
+static atk_widget_t *g_volume_window = NULL;
+static atk_widget_t *g_volume_scrollbar = NULL;
 #endif
 
 static inline void menu_log(const char *msg) { (void)msg; }
@@ -72,6 +76,15 @@ void atk_menu_bar_reset(atk_state_t *state)
     {
         return;
     }
+
+#ifndef ATK_NO_DESKTOP_APPS
+    if (g_volume_window)
+    {
+        atk_window_close(state, g_volume_window);
+        g_volume_window = NULL;
+        g_volume_scrollbar = NULL;
+    }
+#endif
 
     atk_guard_check(&state->menu_guard_front, &state->menu_guard_back, "state->menu_entries");
     atk_list_clear(&state->menu_entries, atk_menu_bar_entry_destroy);
@@ -239,9 +252,8 @@ void atk_menu_bar_build_default(atk_state_t *state)
 #ifdef KERNEL_BUILD
             if (state->menu_entries.size > 8)
             {
-                serial_printf("%s", "atk_menu_bar: entry count=");
-                serial_printf("%016llX", (unsigned long long)(state->menu_entries.size));
-                serial_printf("%s", "\r\n");
+                serial_printf("atk_menu_bar: entry count=%016llX",
+                              (unsigned long long)(state->menu_entries.size));
             }
 #endif
             const char help_title[] = "Help";
@@ -275,6 +287,382 @@ void atk_menu_bar_build_default(atk_state_t *state)
     atk_menu_bar_update_layout(state);
     atk_menu_bar_mark_dirty(state);
 }
+
+#ifndef ATK_NO_DESKTOP_APPS
+static void atk_menu_bar_clock_layout(int height,
+                                      int *clock_x_out,
+                                      int *clock_width_out,
+                                      int *volume_x_out,
+                                      int *volume_width_out)
+{
+    if (clock_x_out)
+    {
+        *clock_x_out = 0;
+    }
+    if (clock_width_out)
+    {
+        *clock_width_out = 0;
+    }
+    if (volume_x_out)
+    {
+        *volume_x_out = 0;
+    }
+    if (volume_width_out)
+    {
+        *volume_width_out = 0;
+    }
+
+    int screen_w = video_screen_width();
+    if (screen_w <= 0)
+    {
+        return;
+    }
+
+    (void)height;
+    char clock_text[16];
+    timekeeping_format_time(clock_text, sizeof(clock_text));
+    int clock_text_width = atk_font_text_width(clock_text);
+    int clock_padding = 8;
+    int clock_box_width = clock_text_width + clock_padding * 2;
+
+    int min_clock_width = ATK_MENU_BAR_CLOCK_RESERVE -
+                          ATK_MENU_BAR_VOLUME_BUTTON_WIDTH -
+                          ATK_MENU_BAR_ENTRY_SPACING * 2;
+    if (min_clock_width < 0)
+    {
+        min_clock_width = 0;
+    }
+    if (clock_box_width < min_clock_width)
+    {
+        clock_box_width = min_clock_width;
+    }
+
+    int clock_x = screen_w - clock_box_width - ATK_MENU_BAR_ENTRY_SPACING;
+    if (clock_x < 0)
+    {
+        clock_x = 0;
+    }
+
+    int volume_width = ATK_MENU_BAR_VOLUME_BUTTON_WIDTH;
+    int volume_x = clock_x - volume_width - ATK_MENU_BAR_ENTRY_SPACING;
+    if (volume_x < 0)
+    {
+        volume_x = 0;
+    }
+
+    if (clock_x_out)
+    {
+        *clock_x_out = clock_x;
+    }
+    if (clock_width_out)
+    {
+        *clock_width_out = clock_box_width;
+    }
+    if (volume_x_out)
+    {
+        *volume_x_out = volume_x;
+    }
+    if (volume_width_out)
+    {
+        *volume_width_out = volume_width;
+    }
+}
+
+static bool atk_menu_bar_point_in_window(const atk_widget_t *window, int px, int py)
+{
+    if (!window || !window->used)
+    {
+        return false;
+    }
+    int x0 = window->x;
+    int y0 = window->y;
+    int x1 = x0 + window->width;
+    int y1 = y0 + window->height;
+    return (px >= x0 && px < x1 && py >= y0 && py < y1);
+}
+
+static bool atk_menu_bar_sys_read_volume(uint32_t *value_out)
+{
+#ifdef KERNEL_BUILD
+    if (!value_out)
+    {
+        return false;
+    }
+    vfs_node_t *node = vfs_resolve(vfs_root(), "/proc/sys/audio/volume");
+    if (!node || !vfs_is_file(node))
+    {
+        return false;
+    }
+    char buf[16];
+    ssize_t n = vfs_read_at(node, 0, buf, sizeof(buf));
+    if (n <= 0)
+    {
+        return false;
+    }
+    size_t count = (size_t)n;
+    size_t idx = 0;
+    while (idx < count && (buf[idx] == ' ' || buf[idx] == '\t'))
+    {
+        ++idx;
+    }
+    uint64_t value = 0;
+    size_t digits = 0;
+    while (idx < count)
+    {
+        char ch = buf[idx];
+        if (ch < '0' || ch > '9')
+        {
+            break;
+        }
+        value = value * 10u + (uint64_t)(ch - '0');
+        ++idx;
+        ++digits;
+        if (value > 1000u)
+        {
+            return false;
+        }
+    }
+    if (digits == 0)
+    {
+        return false;
+    }
+    if (value > 100u)
+    {
+        value = 100u;
+    }
+    *value_out = (uint32_t)value;
+    return true;
+#else
+    (void)value_out;
+    return false;
+#endif
+}
+
+static void atk_menu_bar_sys_write_volume(uint32_t value)
+{
+#ifdef KERNEL_BUILD
+    if (value > 100)
+    {
+        value = 100;
+    }
+    vfs_node_t *node = vfs_resolve(vfs_root(), "/proc/sys/audio/volume");
+    if (!node || !vfs_is_file(node))
+    {
+        return;
+    }
+
+    char buf[8];
+    size_t pos = 0;
+    char tmp[3];
+    size_t digits = 0;
+    if (value == 0)
+    {
+        tmp[digits++] = '0';
+    }
+    else
+    {
+        while (value > 0 && digits < sizeof(tmp))
+        {
+            tmp[digits++] = (char)('0' + (value % 10u));
+            value /= 10u;
+        }
+    }
+    while (digits > 0 && pos < sizeof(buf))
+    {
+        buf[pos++] = tmp[--digits];
+    }
+    if (pos < sizeof(buf))
+    {
+        buf[pos++] = '\n';
+    }
+    (void)vfs_write_at(node, 0, buf, pos);
+#else
+    (void)value;
+#endif
+}
+
+static void atk_menu_bar_volume_close(atk_state_t *state)
+{
+    if (!state || !g_volume_window)
+    {
+        return;
+    }
+    atk_window_close(state, g_volume_window);
+    g_volume_window = NULL;
+    g_volume_scrollbar = NULL;
+}
+
+static void atk_menu_bar_volume_scroll_changed(atk_widget_t *scrollbar, void *context, int value)
+{
+    (void)scrollbar;
+    (void)context;
+    if (value < 0)
+    {
+        value = 0;
+    }
+    if (value > 100)
+    {
+        value = 100;
+    }
+    /* Scrollbar top is min; map to volume so top == 100%. */
+    uint32_t volume = (uint32_t)(100 - value);
+    atk_menu_bar_sys_write_volume(volume);
+}
+
+static void atk_menu_bar_volume_open(atk_state_t *state, int volume_x, int volume_width, int menu_height)
+{
+    if (!state || g_volume_window)
+    {
+        return;
+    }
+
+    const int panel_w = 52;
+    const int panel_h = 180;
+    const int padding = 8;
+
+    atk_widget_t *window = atk_window_create_at(state,
+                                                volume_x + volume_width / 2,
+                                                menu_height + panel_h / 2);
+    if (!window)
+    {
+        return;
+    }
+
+    atk_window_set_chrome_visible(window, false);
+    window->width = panel_w;
+    window->height = panel_h;
+    window->x = volume_x + (volume_width - panel_w) / 2;
+    window->y = menu_height;
+    atk_window_ensure_inside(window);
+
+    int sb_w = window->width - padding * 2;
+    int sb_h = window->height - padding * 2;
+    if (sb_w < 12)
+    {
+        sb_w = 12;
+    }
+    if (sb_h < 24)
+    {
+        sb_h = 24;
+    }
+
+    atk_widget_t *scrollbar = atk_window_add_scrollbar(window,
+                                                       padding,
+                                                       padding,
+                                                       sb_w,
+                                                       sb_h,
+                                                       ATK_SCROLLBAR_VERTICAL);
+    if (!scrollbar)
+    {
+        atk_window_close(state, window);
+        return;
+    }
+
+    atk_scrollbar_set_range(scrollbar, 0, 100, 1);
+    uint32_t current = 100;
+    if (atk_menu_bar_sys_read_volume(&current))
+    {
+        if (current > 100)
+        {
+            current = 100;
+        }
+    }
+    atk_scrollbar_set_value(scrollbar, 100 - (int)current);
+    atk_scrollbar_set_change_handler(scrollbar, atk_menu_bar_volume_scroll_changed, NULL);
+
+    g_volume_window = window;
+    g_volume_scrollbar = scrollbar;
+    atk_window_bring_to_front(state, window);
+    atk_window_mark_dirty(window);
+    video_request_refresh_window(window);
+}
+
+static void atk_menu_bar_draw_speaker_icon(int x,
+                                           int y,
+                                           int width,
+                                           int height,
+                                           video_color_t fg)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    int icon_w = width - 8;
+    int icon_h = height - 10;
+    if (icon_w > 18)
+    {
+        icon_w = 18;
+    }
+    if (icon_h > 18)
+    {
+        icon_h = 18;
+    }
+    if (icon_w < 12)
+    {
+        icon_w = 12;
+    }
+    if (icon_h < 12)
+    {
+        icon_h = 12;
+    }
+
+    int icon_x = x + (width - icon_w) / 2;
+    int icon_y = y + (height - icon_h) / 2;
+
+    int body_w = icon_w / 3;
+    if (body_w < 4)
+    {
+        body_w = 4;
+    }
+    int body_h = icon_h / 2;
+    if (body_h < 6)
+    {
+        body_h = 6;
+    }
+    int body_x = icon_x;
+    int body_y = icon_y + (icon_h - body_h) / 2;
+
+    /* Speaker body. */
+    video_draw_rect(body_x, body_y, body_w, body_h, fg);
+
+    /* Speaker cone (simple trapezoid-ish shape via a few rectangles). */
+    int cone_x = body_x + body_w;
+    int cone_w = icon_w - body_w - 6;
+    if (cone_w < 5)
+    {
+        cone_w = 5;
+    }
+    int cone_h = body_h + 4;
+    int cone_y = body_y - 2;
+    video_draw_rect(cone_x, cone_y + 1, cone_w - 2, cone_h - 2, fg);
+    video_draw_rect(cone_x + cone_w - 2, cone_y + 2, 2, cone_h - 4, fg);
+
+    /* Sound waves: open rectangles without the left edge. */
+    int tip_x = cone_x + cone_w;
+    int wave2_x = tip_x + 1;
+    int wave2_w = icon_x + icon_w - wave2_x;
+    if (wave2_w > 5)
+    {
+        int wave2_y = icon_y + 3;
+        int wave2_h = icon_h - 6;
+        video_draw_rect(wave2_x, wave2_y, wave2_w, 1, fg);
+        video_draw_rect(wave2_x, wave2_y + wave2_h - 1, wave2_w, 1, fg);
+        video_draw_rect(wave2_x + wave2_w - 1, wave2_y, 1, wave2_h, fg);
+
+        int wave1_x = wave2_x + 2;
+        int wave1_w = wave2_w - 2;
+        if (wave1_w > 3)
+        {
+            int wave1_y = wave2_y + 2;
+            int wave1_h = wave2_h - 4;
+            video_draw_rect(wave1_x, wave1_y, wave1_w, 1, fg);
+            video_draw_rect(wave1_x, wave1_y + wave1_h - 1, wave1_w, 1, fg);
+            video_draw_rect(wave1_x + wave1_w - 1, wave1_y, 1, wave1_h, fg);
+        }
+    }
+}
+#endif
 
 void atk_menu_bar_draw(const atk_state_t *state)
 {
@@ -356,20 +744,21 @@ void atk_menu_bar_draw(const atk_state_t *state)
     }
 
 #ifndef ATK_NO_DESKTOP_APPS
+    int clock_x = 0;
+    int clock_box_width = 0;
+    int volume_x = 0;
+    int volume_width = 0;
+    atk_menu_bar_clock_layout(height, &clock_x, &clock_box_width, &volume_x, &volume_width);
+
+    bool volume_open = g_volume_window != NULL;
+    video_color_t volume_bg = volume_open ? theme->menu_bar_highlight : theme->menu_bar_face;
+    video_color_t volume_fg = volume_open ? theme->menu_dropdown_border : theme->menu_bar_text;
+    video_draw_rect(volume_x, 0, volume_width, height - 1, volume_bg);
+    atk_menu_bar_draw_speaker_icon(volume_x, 0, volume_width, height, volume_fg);
+
     char clock_text[16];
     timekeeping_format_time(clock_text, sizeof(clock_text));
-    int clock_text_width = atk_font_text_width(clock_text);
     int clock_padding = 8;
-    int clock_box_width = clock_text_width + clock_padding * 2;
-    if (clock_box_width < ATK_MENU_BAR_CLOCK_RESERVE - ATK_MENU_BAR_ENTRY_SPACING)
-    {
-        clock_box_width = ATK_MENU_BAR_CLOCK_RESERVE - ATK_MENU_BAR_ENTRY_SPACING;
-    }
-    int clock_x = video_screen_width() - clock_box_width - ATK_MENU_BAR_ENTRY_SPACING;
-    if (clock_x < 0)
-    {
-        clock_x = 0;
-    }
     video_draw_rect(clock_x,
                     0,
                     clock_box_width,
@@ -410,7 +799,7 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
 #if defined(KERNEL_BUILD) && MENU_BAR_TRACE
     if (pressed_edge || released_edge)
     {
-        serial_printf("[menu_bar] event x=%016llX y=%016llX press=%016llX release=%016llX left=%016llX\r\n",
+        serial_printf("[menu_bar] event x=%016llX y=%016llX press=%016llX release=%016llX left=%016llX",
                       (unsigned long long)((uint64_t)(int64_t)cursor_x),
                       (unsigned long long)((uint64_t)(int64_t)cursor_y),
                       (unsigned long long)(pressed_edge ? 1 : 0),
@@ -427,6 +816,43 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
         return false;
     }
     bool inside_bar = (cursor_y >= 0 && cursor_y < height);
+
+#ifndef ATK_NO_DESKTOP_APPS
+    int volume_x = 0;
+    int volume_w = 0;
+    atk_menu_bar_clock_layout(height, NULL, NULL, &volume_x, &volume_w);
+    bool volume_button_hit = inside_bar && cursor_x >= volume_x && cursor_x < volume_x + volume_w;
+    bool volume_window_hit = (!inside_bar) && atk_menu_bar_point_in_window(g_volume_window, cursor_x, cursor_y);
+
+    if (pressed_edge && g_volume_window && !volume_button_hit && !volume_window_hit)
+    {
+        atk_menu_bar_volume_close(state);
+        redraw = true;
+        atk_menu_bar_mark_dirty(state);
+    }
+
+    if (pressed_edge && volume_button_hit)
+    {
+        consumed = true;
+        if (state->menu_open_entry && state->menu_open_entry->menu)
+        {
+            atk_menu_hide(state->menu_open_entry->menu);
+            atk_menu_bar_mark_menu_area(state->menu_open_entry->menu);
+            state->menu_open_entry = NULL;
+        }
+        if (g_volume_window)
+        {
+            atk_menu_bar_volume_close(state);
+        }
+        else
+        {
+            atk_menu_bar_volume_open(state, volume_x, volume_w, height);
+        }
+        redraw = true;
+        atk_menu_bar_mark_dirty(state);
+    }
+#endif
+
     atk_menu_bar_entry_t *hover_entry = inside_bar ? atk_menu_bar_entry_hit_test(state, cursor_x) : NULL;
 
     if (hover_entry != state->menu_hover_entry)
@@ -439,7 +865,7 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
     if (pressed_edge && inside_bar && hover_entry)
     {
 #if defined(KERNEL_BUILD) && MENU_BAR_TRACE
-        serial_printf("[menu_bar] press entry: %s\r\n", hover_entry->title ? hover_entry->title : "(null)");
+        serial_printf("[menu_bar] press entry: %s", hover_entry->title ? hover_entry->title : "(null)");
 #endif
         consumed = true;
         if (state->menu_open_entry == hover_entry)
@@ -503,7 +929,7 @@ bool atk_menu_bar_handle_mouse(atk_state_t *state,
 #ifdef KERNEL_BUILD
             menu_log_pair("release", state->menu_open_entry->title);
             menu_log_coords("release coords", cursor_x, cursor_y);
-            serial_printf("[menu_bar] menu bounds x=%016llX y=%016llX w=%016llX h=%016llX\r\n",
+            serial_printf("[menu_bar] menu bounds x=%016llX y=%016llX w=%016llX h=%016llX",
                           (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->x),
                           (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->y),
                           (unsigned long long)((uint64_t)(int64_t)state->menu_open_entry->menu->width),

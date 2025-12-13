@@ -8,6 +8,7 @@
 #include "process.h"
 #include "spinlock.h"
 #include "timer.h"
+#include "audio.h"
 
 #define HDA_REG_GCTL       0x08
 #define HDA_REG_WAKEEN     0x0C
@@ -1034,6 +1035,54 @@ static uint32_t hda_hw_position(hda_state_t *hda)
     return lpib % (uint32_t)hda->buffer_size;
 }
 
+static inline int16_t hda_scale_sample(int16_t sample, uint32_t volume_percent)
+{
+    if (volume_percent >= 100)
+    {
+        return sample;
+    }
+    if (volume_percent == 0)
+    {
+        return 0;
+    }
+    int32_t scaled = ((int32_t)sample * (int32_t)volume_percent) / 100;
+    if (scaled > 32767)
+    {
+        scaled = 32767;
+    }
+    if (scaled < -32768)
+    {
+        scaled = -32768;
+    }
+    return (int16_t)scaled;
+}
+
+static void hda_copy_scaled_pcm(uint8_t *dst, const uint8_t *src, size_t len, uint32_t volume_percent)
+{
+    if (!dst || !src || len == 0)
+    {
+        return;
+    }
+    if (volume_percent >= 100)
+    {
+        memcpy(dst, src, len);
+        return;
+    }
+
+    size_t i = 0;
+    for (; i + 1 < len; i += 2)
+    {
+        int16_t sample = (int16_t)((uint16_t)src[i] | ((uint16_t)src[i + 1] << 8));
+        int16_t scaled = hda_scale_sample(sample, volume_percent);
+        dst[i] = (uint8_t)((uint16_t)scaled & 0xFF);
+        dst[i + 1] = (uint8_t)(((uint16_t)scaled >> 8) & 0xFF);
+    }
+    if (i < len)
+    {
+        dst[i] = src[i];
+    }
+}
+
 static ssize_t hda_dev_write(vfs_node_t *node,
                              size_t offset,
                              const void *buffer,
@@ -1058,6 +1107,7 @@ static ssize_t hda_dev_write(vfs_node_t *node,
     }
 
     const uint8_t *src = (const uint8_t *)buffer;
+    uint32_t volume = audio_volume_get_percent();
     size_t written = 0;
 
     while (written < count)
@@ -1085,14 +1135,14 @@ static ssize_t hda_dev_write(vfs_node_t *node,
         size_t chunk = (remaining < free_bytes) ? remaining : free_bytes;
         size_t to_end = hda->buffer_size - hda->write_pos;
         size_t first = (chunk < to_end) ? chunk : to_end;
-        memcpy(hda->buffer + hda->write_pos, src + written, first);
+        hda_copy_scaled_pcm(hda->buffer + hda->write_pos, src + written, first, volume);
         hda->write_pos = (hda->write_pos + first) % hda->buffer_size;
         written += first;
         hda->used_bytes += first;
         if (first < chunk)
         {
             size_t second = chunk - first;
-            memcpy(hda->buffer + hda->write_pos, src + written, second);
+            hda_copy_scaled_pcm(hda->buffer + hda->write_pos, src + written, second, volume);
             hda->write_pos = (hda->write_pos + second) % hda->buffer_size;
             written += second;
             hda->used_bytes += second;
@@ -1102,8 +1152,10 @@ static ssize_t hda_dev_write(vfs_node_t *node,
         if (total_written >= 4)
         {
             const uint8_t *tail = src + total_written - 4;
-            hda->last_sample[0] = (int16_t)((uint16_t)tail[0] | ((uint16_t)tail[1] << 8));
-            hda->last_sample[1] = (int16_t)((uint16_t)tail[2] | ((uint16_t)tail[3] << 8));
+            int16_t last_l = (int16_t)((uint16_t)tail[0] | ((uint16_t)tail[1] << 8));
+            int16_t last_r = (int16_t)((uint16_t)tail[2] | ((uint16_t)tail[3] << 8));
+            hda->last_sample[0] = hda_scale_sample(last_l, volume);
+            hda->last_sample[1] = hda_scale_sample(last_r, volume);
             hda->have_last_sample = true;
         }
         hda->last_write_ms = hda_now_ms();
