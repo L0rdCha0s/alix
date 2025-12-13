@@ -568,10 +568,6 @@ static int syscall_file_close(void *ctx)
         file_handle_t *handle = (file_handle_t *)ctx;
         if (handle->node)
         {
-            if (handle->writable)
-            {
-                vfs_flush_node(handle->node);
-            }
             vfs_node_release(handle->node);
         }
         free(handle);

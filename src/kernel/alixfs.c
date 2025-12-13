@@ -453,23 +453,52 @@ static bool alixfs_serialize_node(vfs_node_t *node,
     return true;
 }
 
-static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node)
+static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_all)
 {
     if (!fs || !node)
     {
         return true;
     }
-    if (!alixfs_assign_node_id(fs, node))
-    {
-        return false;
-    }
+
     uint8_t *payload = NULL;
     size_t payload_len = 0;
-    if (!alixfs_serialize_node(node, &payload, &payload_len))
+    uint32_t node_id = UINT32_MAX;
+    uint64_t dirty_seq = 0;
+    size_t pending_bytes = 0;
+
+    spinlock_lock(&node->data_lock);
+    bool dirty = force_all;
+    if (!dirty)
     {
+        dirty = node->disk_meta_dirty || node->disk_data_dirty || node->disk_name_dirty;
+        if (!dirty && node->disk_id == UINT32_MAX)
+        {
+            dirty = true;
+        }
+    }
+    if (!dirty)
+    {
+        spinlock_unlock(&node->data_lock);
+        return true;
+    }
+
+    dirty_seq = node->dirty_seq;
+    pending_bytes = node->pending_dirty_bytes;
+    if (!alixfs_assign_node_id(fs, node))
+    {
+        spinlock_unlock(&node->data_lock);
         return false;
     }
-    alixfs2_chunk_entry_t *entry = &fs->chunks[node->disk_id];
+    node_id = node->disk_id;
+
+    if (!alixfs_serialize_node(node, &payload, &payload_len))
+    {
+        spinlock_unlock(&node->data_lock);
+        return false;
+    }
+    spinlock_unlock(&node->data_lock);
+
+    alixfs2_chunk_entry_t *entry = &fs->chunks[node_id];
     size_t aligned = alixfs_align_size(payload_len, fs->sector_size);
     if (entry->capacity < aligned)
     {
@@ -497,20 +526,37 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node)
         return false;
     }
     entry->length = (uint32_t)payload_len;
-    alixfs_mark_chunk_dirty(fs, node->disk_id);
-    node->dirty = false;
-    node->disk_data_dirty = false;
-    node->disk_meta_dirty = false;
-    node->disk_name_dirty = false;
-    size_t consumed = node->pending_dirty_bytes;
-    node->pending_dirty_bytes = 0;
-    if (node->mount && consumed > 0)
+    alixfs_mark_chunk_dirty(fs, node_id);
+
+    spinlock_lock(&node->data_lock);
+    if (node->dirty_seq == dirty_seq)
+    {
+        node->dirty = false;
+        node->disk_data_dirty = false;
+        node->disk_meta_dirty = false;
+        node->disk_name_dirty = false;
+        node->pending_dirty_bytes = 0;
+    }
+    else if (pending_bytes > 0)
+    {
+        if (node->pending_dirty_bytes > pending_bytes)
+        {
+            node->pending_dirty_bytes -= pending_bytes;
+        }
+        else
+        {
+            node->pending_dirty_bytes = 0;
+        }
+    }
+    spinlock_unlock(&node->data_lock);
+
+    if (node->mount && pending_bytes > 0)
     {
         vfs_mount_t *mount = node->mount;
         spinlock_lock(&mount->dirty_lock);
-        if (mount->dirty_bytes > consumed)
+        if (mount->dirty_bytes > pending_bytes)
         {
-            mount->dirty_bytes -= consumed;
+            mount->dirty_bytes -= pending_bytes;
         }
         else
         {
@@ -582,21 +628,21 @@ static bool alixfs_flush_subtree(alixfs_mount_t *fs,
     bool dirty = false;
     if (node->mount == mount)
     {
-        spinlock_lock(&node->data_lock);
         dirty = force_all;
         if (!dirty)
         {
+            spinlock_lock(&node->data_lock);
             dirty = node->disk_meta_dirty || node->disk_data_dirty || node->disk_name_dirty;
-        }
-        if (dirty)
-        {
-            if (!alixfs_write_node(fs, node))
+            if (!dirty && node->disk_id == UINT32_MAX)
             {
-                spinlock_unlock(&node->data_lock);
-                return false;
+                dirty = true;
             }
+            spinlock_unlock(&node->data_lock);
         }
-        spinlock_unlock(&node->data_lock);
+        if (dirty && !alixfs_write_node(fs, node, force_all))
+        {
+            return false;
+        }
     }
     for (vfs_node_t *child = node->first_child; child; child = child->next_sibling)
     {
@@ -872,16 +918,15 @@ bool alixfs_mount_flush_nodes(alixfs_mount_t *fs,
 
 bool alixfs_mount_flush_single(alixfs_mount_t *fs,
                                vfs_node_t *node,
-                               vfs_mount_t *mount)
+                               vfs_mount_t *mount,
+                               bool force_all)
 {
     (void)mount;
     if (!node)
     {
         return true;
     }
-    spinlock_lock(&node->data_lock);
-    bool ok = alixfs_write_node(fs, node);
-    spinlock_unlock(&node->data_lock);
+    bool ok = alixfs_write_node(fs, node, force_all);
     return ok;
 }
 

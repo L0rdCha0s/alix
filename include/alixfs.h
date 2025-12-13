@@ -18,7 +18,8 @@ bool alixfs_mount_flush_nodes(alixfs_mount_t *fs,
                               bool force_all);
 bool alixfs_mount_flush_single(alixfs_mount_t *fs,
                                struct vfs_node *node,
-                               struct vfs_mount *mount);
+                               struct vfs_mount *mount,
+                               bool force_all);
 bool alixfs_mount_commit(alixfs_mount_t *fs);
 void alixfs_mount_release_node(alixfs_mount_t *fs, struct vfs_node *node);
 bool alixfs_mount_format(block_device_t *device);

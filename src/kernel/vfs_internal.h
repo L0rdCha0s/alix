@@ -22,6 +22,7 @@ struct vfs_node
     size_t capacity;
     char *data;
     size_t pending_dirty_bytes;
+    uint64_t dirty_seq;
     spinlock_t data_lock;
 
     uint32_t disk_id;
@@ -46,6 +47,7 @@ struct vfs_mount
     bool needs_full_sync;
     size_t dirty_bytes;
     size_t dirty_bytes_limit;
+    uint64_t dirty_seq;
     spinlock_t dirty_lock;
     spinlock_t sync_lock;
     uint64_t sync_owner_pid;

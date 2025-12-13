@@ -158,7 +158,6 @@ static void vfs_free_subtree(vfs_node_t *node);
 static bool vfs_node_allows_mutation(const vfs_node_t *node);
 static void vfs_inherit_mutability(vfs_node_t *parent, vfs_node_t *child);
 static void vfs_set_subtree_mutable_locked(vfs_node_t *node, bool allow);
-static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount);
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all);
 static bool vfs_mount_flush_single(vfs_node_t *node);
@@ -768,6 +767,7 @@ static void vfs_mark_mount_dirty(vfs_mount_t *mount)
     }
     spinlock_lock(&mount->dirty_lock);
     mount->dirty = true;
+    mount->dirty_seq++;
     spinlock_unlock(&mount->dirty_lock);
 }
 
@@ -780,6 +780,7 @@ static void vfs_mark_meta_dirty(vfs_node_t *node)
     vfs_lock_node_data(node);
     node->dirty = true;
     node->disk_meta_dirty = true;
+    node->dirty_seq++;
     vfs_unlock_node_data(node);
     vfs_mark_mount_dirty(node->mount);
 }
@@ -801,6 +802,7 @@ static void vfs_mark_data_dirty(vfs_node_t *node, size_t len)
         mounted = true;
         mount = node->mount;
     }
+    node->dirty_seq++;
     vfs_unlock_node_data(node);
     if (mounted && mount)
     {
@@ -823,46 +825,133 @@ static void vfs_note_file_dirty(vfs_node_t *node, size_t start, size_t len, bool
     }
 }
 
-static void vfs_clear_dirty_subtree(vfs_node_t *node, vfs_mount_t *mount)
-{
-    if (!node)
-    {
-        return;
-    }
-    if (mount && node->mount != mount)
-    {
-        return;
-    }
-    vfs_lock_node_data(node);
-    node->dirty = false;
-    node->disk_meta_dirty = false;
-    node->disk_data_dirty = false;
-    node->disk_name_dirty = false;
-    node->pending_dirty_bytes = 0;
-    vfs_unlock_node_data(node);
-    for (vfs_node_t *child = node->first_child; child; child = child->next_sibling)
-    {
-        vfs_clear_dirty_subtree(child, mount);
-    }
-}
-
 static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all)
 {
     if (!mount || !mount->backend || !mount->mount_point)
     {
         return true;
     }
-    bool ok = false;
-    spinlock_lock(&g_vfs_tree_lock);
-    ok = alixfs_mount_flush_nodes(mount->backend, mount->mount_point, mount, force_all);
-    if (ok)
+    bool ok = true;
+
+    vfs_node_t **stack = NULL;
+    size_t stack_count = 0;
+    size_t stack_cap = 0;
+
+    vfs_node_t **flush_nodes = NULL;
+    size_t flush_count = 0;
+    size_t flush_cap = 0;
+
+    const size_t initial_cap = 64;
+    stack = (vfs_node_t **)malloc(initial_cap * sizeof(*stack));
+    flush_nodes = (vfs_node_t **)malloc(initial_cap * sizeof(*flush_nodes));
+    if (!stack || !flush_nodes)
     {
-        vfs_clear_dirty_subtree(mount->mount_point, mount);
-        spinlock_lock(&mount->dirty_lock);
-        mount->dirty_bytes = 0;
-        spinlock_unlock(&mount->dirty_lock);
+        free(stack);
+        free(flush_nodes);
+        return false;
+    }
+    stack_cap = initial_cap;
+    flush_cap = initial_cap;
+
+    spinlock_lock(&g_vfs_tree_lock);
+    stack[stack_count++] = mount->mount_point;
+    while (stack_count > 0)
+    {
+        vfs_node_t *node = stack[--stack_count];
+        if (!node)
+        {
+            continue;
+        }
+
+        for (vfs_node_t *child = node->first_child; child; child = child->next_sibling)
+        {
+            if (stack_count == stack_cap)
+            {
+                size_t next_cap = (stack_cap < (SIZE_MAX / 2)) ? (stack_cap * 2) : 0;
+                if (!next_cap)
+                {
+                    ok = false;
+                    break;
+                }
+                vfs_node_t **resized = (vfs_node_t **)realloc(stack, next_cap * sizeof(*stack));
+                if (!resized)
+                {
+                    ok = false;
+                    break;
+                }
+                stack = resized;
+                stack_cap = next_cap;
+            }
+            stack[stack_count++] = child;
+        }
+        if (!ok)
+        {
+            break;
+        }
+
+        if (node->mount != mount)
+        {
+            continue;
+        }
+
+        bool needs_flush = force_all;
+        if (!needs_flush)
+        {
+            vfs_lock_node_data(node);
+            needs_flush = node->disk_meta_dirty || node->disk_data_dirty || node->disk_name_dirty;
+            if (!needs_flush && node->disk_id == UINT32_MAX)
+            {
+                needs_flush = true;
+            }
+            vfs_unlock_node_data(node);
+        }
+
+        if (!needs_flush)
+        {
+            continue;
+        }
+
+        if (flush_count == flush_cap)
+        {
+            size_t next_cap = (flush_cap < (SIZE_MAX / 2)) ? (flush_cap * 2) : 0;
+            if (!next_cap)
+            {
+                ok = false;
+                break;
+            }
+            vfs_node_t **resized = (vfs_node_t **)realloc(flush_nodes, next_cap * sizeof(*flush_nodes));
+            if (!resized)
+            {
+                ok = false;
+                break;
+            }
+            flush_nodes = resized;
+            flush_cap = next_cap;
+        }
+        vfs_node_retain(node);
+        flush_nodes[flush_count++] = node;
     }
     spinlock_unlock(&g_vfs_tree_lock);
+
+    if (ok)
+    {
+        for (size_t i = 0; i < flush_count; ++i)
+        {
+            if (!alixfs_mount_flush_single(mount->backend, flush_nodes[i], mount, force_all))
+            {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < flush_count; ++i)
+    {
+        vfs_node_release(flush_nodes[i]);
+    }
+
+    free(stack);
+    free(flush_nodes);
     return ok;
 }
 
@@ -879,9 +968,7 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     {
         return false;
     }
-    spinlock_lock(&g_vfs_tree_lock);
-    ok = alixfs_mount_flush_single(mount->backend, node, mount);
-    spinlock_unlock(&g_vfs_tree_lock);
+    ok = alixfs_mount_flush_single(mount->backend, node, mount, false);
     if (ok)
     {
         ok = alixfs_mount_commit(mount->backend);
@@ -1884,14 +1971,16 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     bool do_flush = force;
     bool force_all = force;
     size_t pending_bytes = 0;
+    uint64_t start_seq = 0;
     const char *dev_name = (mount->device && mount->device->name[0]) ? mount->device->name : "(anon)";
 
     spinlock_lock(&mount->dirty_lock);
-    if (mount->dirty || force)
+    if (mount->dirty || mount->needs_full_sync || force)
     {
         do_flush = true;
         force_all = force || mount->needs_full_sync;
         pending_bytes = mount->dirty_bytes;
+        start_seq = mount->dirty_seq;
         mount->dirty = false;
         mount->needs_full_sync = false;
     }
@@ -1924,8 +2013,8 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
 
     if (!ok)
     {
+        vfs_mark_mount_dirty(mount);
         spinlock_lock(&mount->dirty_lock);
-        mount->dirty = true;
         mount->needs_full_sync = true;
         spinlock_unlock(&mount->dirty_lock);
         vfs_log_sync_result(dev_name, "fail", start, pending_bytes);
@@ -1933,8 +2022,12 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     }
 
     spinlock_lock(&mount->dirty_lock);
-    mount->dirty_bytes = 0;
-    mount->dirty = false;
+    mount->needs_full_sync = false;
+    if (mount->dirty_seq == start_seq)
+    {
+        mount->dirty_bytes = 0;
+        mount->dirty = false;
+    }
     spinlock_unlock(&mount->dirty_lock);
 
     vfs_log_sync_result(dev_name, "ok", start, pending_bytes);
