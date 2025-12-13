@@ -92,6 +92,9 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->exit_status = 0;
     proc->main_thread = NULL;
     proc->current_thread = NULL;
+    spinlock_init(&proc->threads_lock);
+    proc->threads = NULL;
+    proc->thread_count = 0;
     proc->next = NULL;
     proc->stdout_fd = g_console_stdout_fd;
     proc->is_user = is_user;
@@ -104,6 +107,9 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->user_entry_point = 0;
     proc->user_stack_top = 0;
     proc->user_stack_size = 0;
+    proc->user_thread_stack_next = is_user
+                                   ? align_down_uintptr(g_mem_layout.user_pointer_limit + 1, PAGE_SIZE_BYTES_LOCAL)
+                                   : 0;
     proc->user_heap_base = 0;
     proc->user_heap_brk = 0;
     proc->user_heap_limit = 0;
@@ -913,6 +919,21 @@ bool process_setup_basic_user_memory(process_t *process)
     {
         return false;
     }
+    void *stub_ptr = NULL;
+    if (!process_map_user_segment(process,
+                                  USER_STUB_CODE_BASE,
+                                  PAGE_SIZE_BYTES_LOCAL,
+                                  false,
+                                  true,
+                                  &stub_ptr))
+    {
+        return false;
+    }
+    memset(stub_ptr, 0x90, PAGE_SIZE_BYTES_LOCAL);
+    memcpy(stub_ptr, g_user_exit_stub, sizeof(g_user_exit_stub));
+    memcpy((uint8_t *)stub_ptr + USER_THREAD_EXIT_STUB_OFFSET,
+           g_user_thread_exit_stub,
+           sizeof(g_user_thread_exit_stub));
     return process_setup_preempt_stub(process);
 }
 
@@ -922,18 +943,6 @@ bool process_setup_dummy_user_space(process_t *process)
     {
         return false;
     }
-
-    void *code_ptr = NULL;
-    if (!process_map_user_segment(process,
-                                  USER_STUB_CODE_BASE,
-                                  PAGE_SIZE_BYTES_LOCAL,
-                                  false,
-                                  true,
-                                  &code_ptr))
-    {
-        return false;
-    }
-    memcpy(code_ptr, g_user_exit_stub, sizeof(g_user_exit_stub));
 
     if (!process_setup_basic_user_memory(process))
     {

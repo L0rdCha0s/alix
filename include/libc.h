@@ -44,10 +44,30 @@ int close(int fd);
 int open(const char *path, uint64_t flags, ...);
 int socket_open(const char *iface_name);
 int socket_connect(int fd, const char *ipv4_text, uint16_t port);
+ssize_t socket_available(int fd);
 int printf(const char *format, ...);
 int64_t lseek(int fd, int64_t offset, int whence);
 int fstat(int fd, struct stat *st);
 ssize_t pread(int fd, void *buffer, size_t count, size_t offset);
 void exit(int status);
+
+typedef uint64_t alix_thread_t;
+
+typedef struct
+{
+    volatile uint32_t state;
+} alix_mutex_t;
+
+void alix_mutex_init(alix_mutex_t *mutex);
+void alix_mutex_lock(alix_mutex_t *mutex);
+void alix_mutex_unlock(alix_mutex_t *mutex);
+
+alix_thread_t alix_thread_self(void);
+int alix_thread_create(alix_thread_t *thread_out,
+                       const char *name,
+                       void (*start)(void *),
+                       void *arg);
+int alix_thread_join(alix_thread_t thread, int *status_out);
+void alix_thread_exit(int status) __attribute__((noreturn));
 
 #endif

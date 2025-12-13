@@ -98,8 +98,8 @@ static process_t *process_create_user_dummy_internal(const char *name,
     }
     bootstrap->entry = proc->user_entry_point;
     bootstrap->stack_top = proc->user_initial_stack ? proc->user_initial_stack : proc->user_stack_top;
-    bootstrap->argc = proc->user_argc;
-    bootstrap->argv_ptr = proc->user_argv_ptr;
+    bootstrap->rdi = proc->user_argc;
+    bootstrap->rsi = proc->user_argv_ptr;
 
     thread_t *thread = thread_create(proc,
                                      name,
@@ -185,8 +185,8 @@ static process_t *process_create_user_elf_internal(const char *name,
     }
     bootstrap->entry = proc->user_entry_point;
     bootstrap->stack_top = proc->user_initial_stack ? proc->user_initial_stack : proc->user_stack_top;
-    bootstrap->argc = proc->user_argc;
-    bootstrap->argv_ptr = proc->user_argv_ptr;
+    bootstrap->rdi = proc->user_argc;
+    bootstrap->rsi = proc->user_argv_ptr;
 
     thread_t *thread = thread_create(proc,
                                      name,
@@ -348,11 +348,18 @@ void process_destroy_marked(process_t *process)
 
     process_detach_child(process);
 
-    thread_t *thread = process->main_thread;
-    if (thread)
+    spinlock_lock(&process->threads_lock);
+    thread_t *thread = process->threads;
+    process->threads = NULL;
+    process->thread_count = 0;
+    process->main_thread = NULL;
+    process->current_thread = NULL;
+    spinlock_unlock(&process->threads_lock);
+
+    while (thread)
     {
-        process->main_thread = NULL;
-        process->current_thread = NULL;
+        thread_t *next = thread->process_next;
+        thread->process_next = NULL;
         thread_clear_running_cpu(thread);
         thread_remove_from_wait_queue(thread);
         if (thread->sleeping)
@@ -364,9 +371,17 @@ void process_destroy_marked(process_t *process)
             remove_from_run_queue(thread);
         }
         thread_context_guard_release_pages(thread);
+        thread->exit_status = process->exit_status;
+        thread->exited = true;
+        thread->state = THREAD_STATE_ZOMBIE;
+        thread->preempt_pending = false;
+        thread->time_slice_remaining = 0;
+        thread->wake_pending = false;
+        wait_queue_wake_all(&thread->join_queue);
+        thread->process = NULL;
         thread->magic = 0;
         thread_enqueue_deferred_free(thread);
-        thread = NULL;
+        thread = next;
     }
 
     spinlock_lock(&g_process_lock);
@@ -412,16 +427,47 @@ void process_exit(int status)
         fatal("process_exit with no current thread");
     }
 
+    process_t *proc = current->process;
+    if (proc)
+    {
+        proc->exit_status = status;
+        proc->state = PROCESS_STATE_ZOMBIE;
+        wait_queue_wake_all(&proc->wait_queue);
+
+        spinlock_lock(&proc->threads_lock);
+        thread_t *thread = proc->threads;
+        while (thread)
+        {
+            if (thread != current)
+            {
+                if (thread_in_run_queue_load(thread))
+                {
+                    remove_from_run_queue(thread);
+                }
+                thread_remove_from_wait_queue(thread);
+                if (thread->sleeping)
+                {
+                    sleep_queue_remove(thread);
+                }
+                thread->exit_status = status;
+                thread->exited = true;
+                thread->state = THREAD_STATE_ZOMBIE;
+                thread->preempt_pending = false;
+                thread->time_slice_remaining = 0;
+                thread->wake_pending = false;
+            }
+            thread = thread->process_next;
+        }
+        spinlock_unlock(&proc->threads_lock);
+        smp_broadcast_schedule_ipi(true);
+    }
+
     current->exit_status = status;
     current->exited = true;
     current->state = THREAD_STATE_ZOMBIE;
-
-    if (current->process)
-    {
-        current->process->exit_status = status;
-        current->process->state = PROCESS_STATE_ZOMBIE;
-        wait_queue_wake_all(&current->process->wait_queue);
-    }
+    current->preempt_pending = false;
+    current->time_slice_remaining = 0;
+    wait_queue_wake_all(&current->join_queue);
 
     scheduler_schedule(false);
     fatal("process_exit returned");
@@ -496,28 +542,41 @@ bool process_kill(process_t *process, int status)
     }
 
     bool target_running = (thread == current_thread_local());
-
-    if (thread_in_run_queue_load(thread))
+    if (target_running)
     {
-        remove_from_run_queue(thread);
+        cpu_restore_flags(flags);
+        process_exit(status);
     }
-
-    thread->exit_status = status;
-    thread->exited = true;
-    thread->state = THREAD_STATE_ZOMBIE;
-    thread->preempt_pending = false;
-    thread->time_slice_remaining = 0;
 
     process->exit_status = status;
     process->state = PROCESS_STATE_ZOMBIE;
     wait_queue_wake_all(&process->wait_queue);
 
-    cpu_restore_flags(flags);
-
-    if (target_running)
+    spinlock_lock(&process->threads_lock);
+    thread_t *cursor = process->threads;
+    while (cursor)
     {
-        process_exit(status);
+        if (thread_in_run_queue_load(cursor))
+        {
+            remove_from_run_queue(cursor);
+        }
+        thread_remove_from_wait_queue(cursor);
+        if (cursor->sleeping)
+        {
+            sleep_queue_remove(cursor);
+        }
+        cursor->exit_status = status;
+        cursor->exited = true;
+        cursor->state = THREAD_STATE_ZOMBIE;
+        cursor->preempt_pending = false;
+        cursor->time_slice_remaining = 0;
+        cursor->wake_pending = false;
+        cursor = cursor->process_next;
     }
+    spinlock_unlock(&process->threads_lock);
+    smp_broadcast_schedule_ipi(true);
+
+    cpu_restore_flags(flags);
 
     return true;
 }
@@ -1019,6 +1078,184 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
     //process_log("sbrk new=", new_brk);
     //process_log("sbrk return=", current);
     return (int64_t)current;
+}
+
+uint64_t thread_current_tid(void)
+{
+    thread_t *thread = current_thread_local();
+    return thread ? thread->tid : 0;
+}
+
+static bool user_thread_has_exited(void *context)
+{
+    thread_t *thread = (thread_t *)context;
+    return !thread || thread->state == THREAD_STATE_ZOMBIE;
+}
+
+int64_t process_user_thread_create(const char *name,
+                                  uintptr_t entry,
+                                  uintptr_t arg,
+                                  size_t user_stack_size)
+{
+    process_t *proc = current_process_local();
+    if (!proc || !proc->is_user)
+    {
+        return -1;
+    }
+
+    if (entry < USER_ADDRESS_SPACE_BASE ||
+        entry >= g_mem_layout.user_pointer_limit)
+    {
+        return -1;
+    }
+
+    size_t stack_bytes = user_stack_size ? user_stack_size : proc->user_stack_size;
+    stack_bytes = align_up_size(stack_bytes, PAGE_SIZE_BYTES_LOCAL);
+    if (stack_bytes < PAGE_SIZE_BYTES_LOCAL)
+    {
+        stack_bytes = PAGE_SIZE_BYTES_LOCAL;
+    }
+
+    const uintptr_t guard_bytes = PAGE_SIZE_BYTES_LOCAL;
+    uintptr_t top = proc->user_thread_stack_next;
+    if (top == 0)
+    {
+        top = align_down_uintptr(g_mem_layout.user_pointer_limit + 1, PAGE_SIZE_BYTES_LOCAL);
+    }
+    if (top <= stack_bytes + guard_bytes)
+    {
+        return -1;
+    }
+
+    uintptr_t base = top - stack_bytes;
+    uintptr_t next_top = base - guard_bytes;
+    if (proc->user_heap_limit != 0 && next_top <= proc->user_heap_limit)
+    {
+        return -1;
+    }
+
+    void *host_stack = NULL;
+    if (!process_map_user_segment(proc, base, stack_bytes, true, false, &host_stack))
+    {
+        return -1;
+    }
+    proc->user_thread_stack_next = next_top;
+    paging_flush_space_tlb(&proc->address_space);
+
+    uintptr_t ret_addr = USER_STUB_CODE_BASE + USER_THREAD_EXIT_STUB_OFFSET;
+    uintptr_t initial_rsp = base + stack_bytes - sizeof(uint64_t);
+    memcpy((uint8_t *)host_stack + (stack_bytes - sizeof(uint64_t)), &ret_addr, sizeof(ret_addr));
+
+    user_thread_bootstrap_t *bootstrap = (user_thread_bootstrap_t *)malloc(sizeof(*bootstrap));
+    if (!bootstrap)
+    {
+        return -1;
+    }
+    bootstrap->entry = entry;
+    bootstrap->stack_top = initial_rsp;
+    bootstrap->rdi = (uint64_t)arg;
+    bootstrap->rsi = 0;
+
+    if (!name || !name[0])
+    {
+        name = "uthread";
+    }
+    thread_t *thread = thread_create(proc,
+                                     name,
+                                     user_thread_entry,
+                                     bootstrap,
+                                     PROCESS_DEFAULT_STACK_SIZE,
+                                     false,
+                                     true);
+    if (!thread)
+    {
+        free(bootstrap);
+        return -1;
+    }
+
+    enqueue_thread(thread);
+    return (int64_t)thread->tid;
+}
+
+int process_user_thread_join(uint64_t tid, int *status_out)
+{
+    if (tid == 0)
+    {
+        return -1;
+    }
+
+    thread_t *current = current_thread_local();
+    process_t *proc = current ? current->process : NULL;
+    if (!current || !proc || !proc->is_user)
+    {
+        return -1;
+    }
+    if (current->tid == tid)
+    {
+        return -1;
+    }
+
+    thread_t *target = NULL;
+    spinlock_lock(&proc->threads_lock);
+    thread_t *cursor = proc->threads;
+    while (cursor)
+    {
+        if (cursor->tid == tid)
+        {
+            target = cursor;
+            break;
+        }
+        cursor = cursor->process_next;
+    }
+    if (target)
+    {
+        if (target->join_claimed != 0 || target->pending_destroy)
+        {
+            target = NULL;
+        }
+        else
+        {
+            target->join_claimed = 1;
+        }
+    }
+    spinlock_unlock(&proc->threads_lock);
+
+    if (!target)
+    {
+        return -1;
+    }
+
+    wait_queue_wait(&target->join_queue, user_thread_has_exited, target);
+    int status = target->exit_status;
+    if (status_out)
+    {
+        *status_out = status;
+    }
+    thread_enqueue_deferred_free(target);
+    return status;
+}
+
+void process_user_thread_exit(int status)
+{
+    thread_t *current = current_thread_local();
+    if (!current)
+    {
+        fatal("thread_exit with no current thread");
+    }
+    process_t *proc = current->process;
+    if (proc && current == proc->main_thread)
+    {
+        process_exit(status);
+    }
+
+    current->exit_status = status;
+    current->exited = true;
+    current->state = THREAD_STATE_ZOMBIE;
+    current->preempt_pending = false;
+    current->time_slice_remaining = 0;
+    wait_queue_wake_all(&current->join_queue);
+    scheduler_schedule(false);
+    fatal("thread_exit returned");
 }
 
 ssize_t process_stdout_write(const char *data, size_t len)

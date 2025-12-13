@@ -800,71 +800,142 @@ static void printf_sink_putc(printf_sink_t *sink, char c)
     printf_sink_write(sink, &c, 1);
 }
 
-static void printf_sink_puts(printf_sink_t *sink, const char *text)
+static void printf_sink_pad(printf_sink_t *sink, char ch, int count)
 {
-    if (!text)
+    while (count-- > 0)
     {
-        text = "(null)";
+        printf_sink_putc(sink, ch);
     }
-    printf_sink_write(sink, text, strlen(text));
 }
 
-static void printf_sink_print_unsigned(printf_sink_t *sink,
-                                       uint64_t value,
-                                       unsigned base,
-                                       bool uppercase,
-                                       int width,
-                                       bool zero_pad)
+static void printf_sink_print_uint_formatted(printf_sink_t *sink,
+                                             uint64_t value,
+                                             unsigned base,
+                                             bool uppercase,
+                                             int width,
+                                             bool left_align,
+                                             bool zero_pad,
+                                             bool has_precision,
+                                             int precision,
+                                             const char *prefix,
+                                             size_t prefix_len)
 {
     if (base < 2 || base > 16)
     {
         return;
     }
 
-    char buffer[32];
-    size_t index = 0;
     const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+    char buffer[64];
+    size_t digit_count = 0;
 
-    do
+    if (has_precision && precision < 0)
     {
-        buffer[index++] = digits[value % base];
-        value /= base;
-    } while (value != 0 && index < sizeof(buffer));
-
-    if (!zero_pad)
-    {
-        width = 0;
+        has_precision = false;
     }
+
+    if (has_precision && precision == 0 && value == 0)
+    {
+        digit_count = 0;
+    }
+    else
+    {
+        do
+        {
+            buffer[digit_count++] = digits[value % base];
+            value /= base;
+        } while (value != 0 && digit_count < sizeof(buffer));
+    }
+
+    int zeroes = 0;
+    if (has_precision)
+    {
+        if (precision > (int)digit_count)
+        {
+            zeroes = precision - (int)digit_count;
+        }
+        /* When precision is specified, the 0 flag is ignored. */
+        zero_pad = false;
+    }
+
+    int total = (int)prefix_len + zeroes + (int)digit_count;
     int pad = 0;
-    if (width > 0 && (int)index < width)
+    if (width > total)
     {
-        pad = width - (int)index;
-    }
-    while (pad-- > 0)
-    {
-        printf_sink_putc(sink, '0');
+        pad = width - total;
     }
 
-    while (index > 0)
+    if (!left_align)
     {
-        printf_sink_putc(sink, buffer[--index]);
+        if (zero_pad)
+        {
+            /* For numeric conversions, zero padding follows the prefix/sign. */
+            if (prefix_len)
+            {
+                printf_sink_write(sink, prefix, prefix_len);
+            }
+            printf_sink_pad(sink, '0', pad);
+        }
+        else
+        {
+            printf_sink_pad(sink, ' ', pad);
+            if (prefix_len)
+            {
+                printf_sink_write(sink, prefix, prefix_len);
+            }
+        }
+    }
+    else
+    {
+        if (prefix_len)
+        {
+            printf_sink_write(sink, prefix, prefix_len);
+        }
+    }
+
+    printf_sink_pad(sink, '0', zeroes);
+
+    while (digit_count > 0)
+    {
+        printf_sink_putc(sink, buffer[--digit_count]);
+    }
+
+    if (left_align)
+    {
+        printf_sink_pad(sink, ' ', pad);
     }
 }
 
-static void printf_sink_print_signed(printf_sink_t *sink, int64_t value, int width, bool zero_pad)
+static void printf_sink_print_int_formatted(printf_sink_t *sink,
+                                            int64_t value,
+                                            int width,
+                                            bool left_align,
+                                            bool zero_pad,
+                                            bool has_precision,
+                                            int precision)
 {
+    const char *prefix = "";
+    size_t prefix_len = 0;
+    uint64_t magnitude = (uint64_t)value;
+
     if (value < 0)
     {
-        printf_sink_putc(sink, '-');
-        if (zero_pad && width > 0)
-        {
-            width--;
-        }
-        uint64_t magnitude = (uint64_t)(-(value + 1)) + 1;
-        printf_sink_print_unsigned(sink, magnitude, 10, false, width, zero_pad);
-        return;
+        prefix = "-";
+        prefix_len = 1;
+        magnitude = (uint64_t)(-(value + 1)) + 1;
     }
-    printf_sink_print_unsigned(sink, (uint64_t)value, 10, false, width, zero_pad);
+
+    printf_sink_print_uint_formatted(sink,
+                                     magnitude,
+                                     10,
+                                     false,
+                                     width,
+                                     left_align,
+                                     zero_pad,
+                                     has_precision,
+                                     precision,
+                                     prefix,
+                                     prefix_len);
 }
 
 static void printf_format(printf_sink_t *sink, const char *format, va_list args)
@@ -890,43 +961,87 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
             continue;
         }
 
+        bool left_align = false;
         bool zero_pad = false;
-        if (*format == '0')
+        while (*format == '-' || *format == '0')
         {
-            zero_pad = true;
-            ++format;
+            if (*format == '-')
+            {
+                left_align = true;
+                ++format;
+                continue;
+            }
+            if (*format == '0')
+            {
+                zero_pad = true;
+                ++format;
+                continue;
+            }
         }
 
         int width = 0;
+        if (*format == '*')
+        {
+            width = va_arg(args, int);
+            if (width < 0)
+            {
+                left_align = true;
+                width = -width;
+            }
+            ++format;
+        }
         while (*format >= '0' && *format <= '9')
         {
             width = width * 10 + (*format - '0');
             ++format;
         }
-        if (!zero_pad)
+
+        bool has_precision = false;
+        int precision = 0;
+        if (*format == '.')
         {
-            width = 0;
+            has_precision = true;
+            ++format;
+            if (*format == '*')
+            {
+                precision = va_arg(args, int);
+                ++format;
+            }
+            else
+            {
+                precision = 0;
+                while (*format >= '0' && *format <= '9')
+                {
+                    precision = precision * 10 + (*format - '0');
+                    ++format;
+                }
+            }
         }
 
-        bool length_z = false;
-        bool length_l = false;
-        bool length_ll = false;
-        while (*format == 'z' || *format == 'l')
+        enum
         {
-            if (*format == 'z')
-            {
-                length_z = true;
-                ++format;
-                break;
-            }
+            LENGTH_NONE,
+            LENGTH_Z,
+            LENGTH_L,
+            LENGTH_LL,
+        } length = LENGTH_NONE;
+
+        if (*format == 'z')
+        {
+            length = LENGTH_Z;
+            ++format;
+        }
+        else if (*format == 'l')
+        {
+            ++format;
             if (*format == 'l')
             {
-                if (length_l)
-                {
-                    length_ll = true;
-                }
-                length_l = true;
+                length = LENGTH_LL;
                 ++format;
+            }
+            else
+            {
+                length = LENGTH_L;
             }
         }
 
@@ -936,47 +1051,86 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
             case 'c':
             {
                 char value = (char)va_arg(args, int);
+                if (!left_align && width > 1)
+                {
+                    printf_sink_pad(sink, ' ', width - 1);
+                }
                 printf_sink_putc(sink, value);
+                if (left_align && width > 1)
+                {
+                    printf_sink_pad(sink, ' ', width - 1);
+                }
                 break;
             }
             case 's':
             {
                 const char *text = va_arg(args, const char *);
-                printf_sink_puts(sink, text);
+                if (!text)
+                {
+                    text = "(null)";
+                }
+                size_t len = strlen(text);
+                if (has_precision && precision >= 0 && (size_t)precision < len)
+                {
+                    len = (size_t)precision;
+                }
+                int pad = 0;
+                if (width > 0 && (size_t)width > len)
+                {
+                    pad = width - (int)len;
+                }
+                if (!left_align)
+                {
+                    printf_sink_pad(sink, ' ', pad);
+                }
+                printf_sink_write(sink, text, len);
+                if (left_align)
+                {
+                    printf_sink_pad(sink, ' ', pad);
+                }
                 break;
             }
             case 'd':
             case 'i':
             {
-                if (length_z || length_l)
+                int64_t value;
+                if (length == LENGTH_Z)
                 {
-                    long value = va_arg(args, long);
-                    printf_sink_print_signed(sink, (int64_t)value, width, zero_pad);
+                    value = (int64_t)va_arg(args, ssize_t);
                 }
-                else if (length_ll)
+                else if (length == LENGTH_LL)
                 {
-                    long long value = va_arg(args, long long);
-                    printf_sink_print_signed(sink, (int64_t)value, width, zero_pad);
+                    value = (int64_t)va_arg(args, long long);
+                }
+                else if (length == LENGTH_L)
+                {
+                    value = (int64_t)va_arg(args, long);
                 }
                 else
                 {
-                    int value = va_arg(args, int);
-                    printf_sink_print_signed(sink, (int64_t)value, width, zero_pad);
+                    value = (int64_t)va_arg(args, int);
                 }
+                printf_sink_print_int_formatted(sink,
+                                               value,
+                                               width,
+                                               left_align,
+                                               zero_pad,
+                                               has_precision,
+                                               precision);
                 break;
             }
             case 'u':
             {
                 uint64_t value;
-                if (length_z)
+                if (length == LENGTH_Z)
                 {
                     value = (uint64_t)va_arg(args, size_t);
                 }
-                else if (length_ll)
+                else if (length == LENGTH_LL)
                 {
                     value = (uint64_t)va_arg(args, unsigned long long);
                 }
-                else if (length_l)
+                else if (length == LENGTH_L)
                 {
                     value = (uint64_t)va_arg(args, unsigned long);
                 }
@@ -984,21 +1138,31 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
                 {
                     value = (uint64_t)va_arg(args, unsigned int);
                 }
-                printf_sink_print_unsigned(sink, value, 10, false, width, zero_pad);
+                printf_sink_print_uint_formatted(sink,
+                                                 value,
+                                                 10,
+                                                 false,
+                                                 width,
+                                                 left_align,
+                                                 zero_pad,
+                                                 has_precision,
+                                                 precision,
+                                                 "",
+                                                 0);
                 break;
             }
             case 'x':
             {
                 uint64_t value;
-                if (length_z)
+                if (length == LENGTH_Z)
                 {
                     value = (uint64_t)va_arg(args, size_t);
                 }
-                else if (length_ll)
+                else if (length == LENGTH_LL)
                 {
                     value = (uint64_t)va_arg(args, unsigned long long);
                 }
-                else if (length_l)
+                else if (length == LENGTH_L)
                 {
                     value = (uint64_t)va_arg(args, unsigned long);
                 }
@@ -1006,21 +1170,31 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
                 {
                     value = (uint64_t)va_arg(args, unsigned int);
                 }
-                printf_sink_print_unsigned(sink, value, 16, false, width, zero_pad);
+                printf_sink_print_uint_formatted(sink,
+                                                 value,
+                                                 16,
+                                                 false,
+                                                 width,
+                                                 left_align,
+                                                 zero_pad,
+                                                 has_precision,
+                                                 precision,
+                                                 "",
+                                                 0);
                 break;
             }
             case 'X':
             {
                 uint64_t value;
-                if (length_z)
+                if (length == LENGTH_Z)
                 {
                     value = (uint64_t)va_arg(args, size_t);
                 }
-                else if (length_ll)
+                else if (length == LENGTH_LL)
                 {
                     value = (uint64_t)va_arg(args, unsigned long long);
                 }
-                else if (length_l)
+                else if (length == LENGTH_L)
                 {
                     value = (uint64_t)va_arg(args, unsigned long);
                 }
@@ -1028,47 +1202,68 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
                 {
                     value = (uint64_t)va_arg(args, unsigned int);
                 }
-                printf_sink_print_unsigned(sink, value, 16, true, width, zero_pad);
+                printf_sink_print_uint_formatted(sink,
+                                                 value,
+                                                 16,
+                                                 true,
+                                                 width,
+                                                 left_align,
+                                                 zero_pad,
+                                                 has_precision,
+                                                 precision,
+                                                 "",
+                                                 0);
                 break;
             }
             case 'p':
             {
                 uintptr_t ptr = (uintptr_t)va_arg(args, void *);
-                printf_sink_write(sink, "0x", 2);
-                printf_sink_print_unsigned(sink, ptr, 16, false, 0, false);
+                printf_sink_print_uint_formatted(sink,
+                                                 (uint64_t)ptr,
+                                                 16,
+                                                 false,
+                                                 width,
+                                                 left_align,
+                                                 zero_pad,
+                                                 false,
+                                                 0,
+                                                 "0x",
+                                                 2);
                 break;
             }
             case '\0':
             {
                 printf_sink_putc(sink, '%');
-                if (length_z)
+                if (length == LENGTH_Z)
                 {
                     printf_sink_putc(sink, 'z');
                 }
-                if (length_l)
+                if (length == LENGTH_L)
                 {
                     printf_sink_putc(sink, 'l');
-                    if (length_ll)
-                    {
-                        printf_sink_putc(sink, 'l');
-                    }
+                }
+                if (length == LENGTH_LL)
+                {
+                    printf_sink_putc(sink, 'l');
+                    printf_sink_putc(sink, 'l');
                 }
                 return;
             }
             default:
             {
                 printf_sink_putc(sink, '%');
-                if (length_z)
+                if (length == LENGTH_Z)
                 {
                     printf_sink_putc(sink, 'z');
                 }
-                if (length_l)
+                if (length == LENGTH_L)
                 {
                     printf_sink_putc(sink, 'l');
-                    if (length_ll)
-                    {
-                        printf_sink_putc(sink, 'l');
-                    }
+                }
+                if (length == LENGTH_LL)
+                {
+                    printf_sink_putc(sink, 'l');
+                    printf_sink_putc(sink, 'l');
                 }
                 printf_sink_putc(sink, specifier);
                 break;
@@ -1519,6 +1714,11 @@ int socket_connect(int fd, const char *ipv4_text, uint16_t port)
     return sys_socket_connect(fd, ipv4_text, port);
 }
 
+ssize_t socket_available(int fd)
+{
+    return sys_socket_available(fd);
+}
+
 void *sbrk(int64_t increment)
 {
     return sys_sbrk(increment);
@@ -1698,6 +1898,119 @@ done:
 void exit(int status)
 {
     sys_exit(status);
+    for (;;)
+    {
+    }
+}
+
+typedef struct
+{
+    void (*start)(void *);
+    void *arg;
+} alix_thread_start_info_t;
+
+static void alix_thread_trampoline(void *arg) __attribute__((noreturn));
+static void alix_thread_trampoline(void *arg)
+{
+    alix_thread_start_info_t *info = (alix_thread_start_info_t *)arg;
+    void (*start)(void *) = info ? info->start : NULL;
+    void *start_arg = info ? info->arg : NULL;
+    if (info)
+    {
+        free(info);
+    }
+    if (start)
+    {
+        start(start_arg);
+    }
+    alix_thread_exit(0);
+}
+
+void alix_mutex_init(alix_mutex_t *mutex)
+{
+    if (!mutex)
+    {
+        return;
+    }
+    __atomic_store_n(&mutex->state, 0, __ATOMIC_RELEASE);
+}
+
+void alix_mutex_lock(alix_mutex_t *mutex)
+{
+    if (!mutex)
+    {
+        return;
+    }
+
+    uint32_t spins = 0;
+    while (__sync_lock_test_and_set(&mutex->state, 1) != 0)
+    {
+        while (__atomic_load_n(&mutex->state, __ATOMIC_RELAXED))
+        {
+            __asm__ volatile ("pause");
+            if (((++spins) & 0xFFu) == 0)
+            {
+                (void)sys_yield();
+            }
+        }
+    }
+}
+
+void alix_mutex_unlock(alix_mutex_t *mutex)
+{
+    if (!mutex)
+    {
+        return;
+    }
+    __sync_lock_release(&mutex->state);
+}
+
+alix_thread_t alix_thread_self(void)
+{
+    return (alix_thread_t)sys_thread_self();
+}
+
+int alix_thread_create(alix_thread_t *thread_out,
+                       const char *name,
+                       void (*start)(void *),
+                       void *arg)
+{
+    if (!thread_out || !start)
+    {
+        return -1;
+    }
+
+    alix_thread_start_info_t *info = (alix_thread_start_info_t *)malloc(sizeof(*info));
+    if (!info)
+    {
+        return -1;
+    }
+    info->start = start;
+    info->arg = arg;
+
+    const size_t default_stack = 256u * 1024u;
+    int64_t tid = sys_thread_create((uintptr_t)alix_thread_trampoline,
+                                   (uintptr_t)info,
+                                   default_stack,
+                                   name);
+    if (tid < 0)
+    {
+        free(info);
+        return -1;
+    }
+
+    *thread_out = (alix_thread_t)tid;
+    return 0;
+}
+
+int alix_thread_join(alix_thread_t thread, int *status_out)
+{
+    return sys_thread_join((uint64_t)thread, status_out);
+}
+
+void alix_thread_exit(int status)
+{
+    sys_thread_exit(status);
     for (;;)
     {
     }

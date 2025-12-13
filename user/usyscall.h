@@ -40,6 +40,14 @@ int sys_fstat(int fd, syscall_stat_t *st);
 ssize_t sys_pread(int fd, void *buffer, size_t count, size_t offset);
 int sys_socket_open(const char *iface_name);
 int sys_socket_connect(int fd, const char *ipv4_text, uint16_t port);
+ssize_t sys_socket_available(int fd);
+uint64_t sys_thread_self(void);
+int64_t sys_thread_create(uintptr_t entry,
+                          uintptr_t arg,
+                          size_t stack_size,
+                          const char *name);
+int sys_thread_join(uint64_t tid, int *status_out);
+void sys_thread_exit(int status) __attribute__((noreturn));
 ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacity);
 
 #endif

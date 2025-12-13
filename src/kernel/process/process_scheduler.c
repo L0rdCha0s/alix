@@ -2563,11 +2563,10 @@ void process_preempt_hook(void)
 
 static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
                                                            uintptr_t user_stack_top,
-                                                           uint64_t argc,
-                                                           uintptr_t argv_ptr)
+                                                           uint64_t rdi_value,
+                                                           uint64_t rsi_value)
 {
-    uintptr_t aligned_stack = align_down_uintptr(user_stack_top, 16ULL);
-    uintptr_t stack_value = aligned_stack;
+    uintptr_t stack_value = user_stack_top;
     uintptr_t entry_value = entry;
     uint64_t rflags = RFLAGS_DEFAULT;
     uint64_t cs = (uint64_t)(GDT_SELECTOR_USER_CODE | 0x3u);
@@ -2594,8 +2593,8 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
         "push %%rax\n\t"
         "mov %[entry], %%rax\n\t"
         "push %%rax\n\t"
-        "mov %[argc], %%rdi\n\t"
-        "mov %[argv], %%rsi\n\t"
+        "mov %[arg0], %%rdi\n\t"
+        "mov %[arg1], %%rsi\n\t"
         "iretq\n\t"
         :
         : [ds]"r"(data_sel),
@@ -2604,8 +2603,8 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
           [rflags]"r"(rflags),
           [cs]"r"(cs),
           [entry]"m"(entry_value),
-          [argc]"r"(argc),
-          [argv]"r"(argv_ptr)
+          [arg0]"r"(rdi_value),
+          [arg1]"r"(rsi_value)
         : "rax", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
     __builtin_unreachable();
 }
@@ -2622,7 +2621,7 @@ void user_thread_entry(void *arg)
     {
         fatal("user thread bootstrap missing entry/stack");
     }
-    process_jump_to_user(params.entry, params.stack_top, params.argc, params.argv_ptr);
+    process_jump_to_user(params.entry, params.stack_top, params.rdi, params.rsi);
 }
 
 void thread_trampoline(void)

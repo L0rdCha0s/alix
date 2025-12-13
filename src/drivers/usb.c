@@ -478,6 +478,8 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
         /* Interrupt endpoints can legitimately NAK with no data; treat as empty. */
         last->control &= ~UHCI_TD_CTRL_ACTIVE;
         last->control |= UHCI_TD_CTRL_SPD;
+        /* Mark actual length as "no data" so callers see transferred=0. */
+        last->control = (last->control & ~UHCI_TD_CTRL_ACTLEN_MASK) | UHCI_TD_CTRL_ACTLEN_MASK;
         ok = true;
         soft_no_data = true;
     }

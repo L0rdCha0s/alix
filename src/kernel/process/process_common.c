@@ -34,6 +34,13 @@ const uint8_t g_user_exit_stub[7] = {
     0xF4              /* hlt (should not reach) */
 };
 
+const uint8_t g_user_thread_exit_stub[10] = {
+    0x89, 0xC7,                                      /* mov edi, eax */
+    0xB8, (uint8_t)SYSCALL_THREAD_EXIT, 0x00, 0x00, 0x00, /* mov eax, SYSCALL_THREAD_EXIT */
+    0xCD, 0x80,                                      /* int 0x80 */
+    0xF4                                             /* hlt (should not reach) */
+};
+
 /*
  * User-mode preemption stub:
  * - Timer IRQ rewrites user RIP to USER_PREEMPT_STUB_BASE.
@@ -116,6 +123,7 @@ uint64_t g_cpu_switch_counts[SMP_MAX_CPUS];
 spinlock_t g_scheduler_lock;
 thread_t *g_sleep_queue_head = NULL;
 uint64_t g_next_pid = 1;
+uint64_t g_next_tid = 1;
 spinlock_t g_sleep_queue_lock;
 spinlock_t g_process_lock;
 volatile bool g_scheduler_boot_ready = false;
@@ -1313,6 +1321,35 @@ static void thread_free_resources(thread_t *thread)
         return;
     }
 
+    process_t *owner_proc = thread->process;
+    bool owner_valid = false;
+    if (owner_proc)
+    {
+        owner_valid = pointer_in_heap((uint64_t)(uintptr_t)owner_proc, sizeof(process_t)) &&
+                      owner_proc->magic == PROCESS_MAGIC;
+    }
+
+    if (owner_valid)
+    {
+        spinlock_lock(&owner_proc->threads_lock);
+        thread_t **cursor = &owner_proc->threads;
+        while (*cursor)
+        {
+            if (*cursor == thread)
+            {
+                *cursor = thread->process_next;
+                if (owner_proc->thread_count > 0)
+                {
+                    owner_proc->thread_count--;
+                }
+                break;
+            }
+            cursor = &(*cursor)->process_next;
+        }
+        spinlock_unlock(&owner_proc->threads_lock);
+    }
+    thread->process_next = NULL;
+
 #if ENABLE_STACK_WRITE_DEBUG
     if (thread->stack_watch_active || thread->stack_watch_blocked)
     {
@@ -1340,13 +1377,14 @@ static void thread_free_resources(thread_t *thread)
         }
     }
     const char *name = thread->name[0] ? thread->name : "<unnamed>";
-    uint64_t pid = thread->process ? thread->process->pid : 0;
+    uint64_t pid = thread->owner_pid;
     uintptr_t ctx_ptr = (uintptr_t)thread->context;
     uintptr_t stack_base = (uintptr_t)thread->stack_base;
     uintptr_t stack_top = thread->kernel_stack_top;
-    SCHED_LOG("[sched] thread_free_resources name=%s pid=0x%016llX context=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
+    SCHED_LOG("[sched] thread_free_resources name=%s pid=0x%016llX tid=0x%016llX context=0x%016llX stack=[0x%016llX,0x%016llX)\r\n",
               name,
               (unsigned long long)pid,
+              (unsigned long long)thread->tid,
               (unsigned long long)ctx_ptr,
               (unsigned long long)stack_base,
               (unsigned long long)stack_top);

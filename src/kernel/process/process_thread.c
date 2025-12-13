@@ -190,6 +190,11 @@ thread_t *thread_create(process_t *process,
     thread->last_cpu_index = RUN_QUEUE_CPU_INVALID;
     thread->deferred_next = NULL;
     thread->pending_destroy = false;
+    thread->process_next = NULL;
+    thread->tid = __sync_fetch_and_add(&g_next_tid, 1);
+    thread->owner_pid = process ? process->pid : 0;
+    wait_queue_init(&thread->join_queue);
+    thread->join_claimed = 0;
     __atomic_store_n(&thread->lifetime_state, THREAD_LIFETIME_ALIVE, __ATOMIC_RELEASE);
     bool is_user_thread = user_mode;
     if (!is_user_thread && process)
@@ -336,6 +341,14 @@ thread_t *thread_create(process_t *process,
     thread->context_valid = true;
     thread->kernel_stack_top = stack_limit;
     thread->process = process;
+    if (process)
+    {
+        spinlock_lock(&process->threads_lock);
+        thread->process_next = process->threads;
+        process->threads = thread;
+        process->thread_count++;
+        spinlock_unlock(&process->threads_lock);
+    }
     thread->entry = entry;
     thread->arg = arg;
     thread->state = THREAD_STATE_READY;

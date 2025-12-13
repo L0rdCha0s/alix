@@ -177,6 +177,13 @@ bool process_handle_exception(interrupt_frame_t *frame,
 bool process_query_user_layout(const process_t *process,
                                process_user_layout_t *layout);
 int64_t process_user_sbrk(process_t *process, int64_t increment);
+uint64_t thread_current_tid(void);
+int64_t process_user_thread_create(const char *name,
+                                  uintptr_t entry,
+                                  uintptr_t arg,
+                                  size_t user_stack_size);
+int process_user_thread_join(uint64_t tid, int *status_out);
+void process_user_thread_exit(int status) __attribute__((noreturn));
 uint64_t process_take_preempt_resume_rip(void);
 bool process_map_user_segment(process_t *process,
                               uintptr_t user_base,

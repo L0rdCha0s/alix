@@ -513,6 +513,35 @@ static int64_t syscall_do_socket_connect(int fd,
     return 0;
 }
 
+static int64_t syscall_do_socket_available(int fd)
+{
+    net_tcp_socket_t *socket = net_tcp_socket_from_fd(fd);
+    if (!socket)
+    {
+        return -1;
+    }
+    return (int64_t)net_tcp_socket_available(socket);
+}
+
+static int64_t syscall_do_thread_create(uintptr_t entry,
+                                        uintptr_t arg,
+                                        size_t stack_size,
+                                        const char *name_user)
+{
+    char name_buf[PROCESS_NAME_MAX];
+    const char *name = NULL;
+    if (name_user)
+    {
+        size_t copied = 0;
+        if (!user_copy_string_from_user(name_buf, sizeof(name_buf), name_user, &copied))
+        {
+            return -1;
+        }
+        name = name_buf;
+    }
+    return process_user_thread_create(name, entry, arg, stack_size);
+}
+
 static ssize_t syscall_file_write(void *ctx, const void *buffer, size_t count)
 {
     file_handle_t *handle = (file_handle_t *)ctx;
@@ -1238,6 +1267,42 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                                                (const char *)frame->rsi,
                                                (uint16_t)frame->rdx);
             break;
+        case SYSCALL_SOCKET_AVAILABLE:
+            result = syscall_do_socket_available((int)frame->rdi);
+            break;
+        case SYSCALL_THREAD_SELF:
+            result = (int64_t)thread_current_tid();
+            break;
+        case SYSCALL_THREAD_CREATE:
+            result = syscall_do_thread_create((uintptr_t)frame->rdi,
+                                              (uintptr_t)frame->rsi,
+                                              (size_t)frame->rdx,
+                                              (const char *)frame->r10);
+            break;
+        case SYSCALL_THREAD_JOIN:
+        {
+            int *status_user = (int *)frame->rsi;
+            if (status_user && !user_ptr_range_valid(status_user, sizeof(*status_user)))
+            {
+                result = -1;
+                break;
+            }
+            int status_tmp = 0;
+            int join_res = process_user_thread_join(frame->rdi, status_user ? &status_tmp : NULL);
+            if (join_res >= 0 && status_user)
+            {
+                if (!user_copy_to_user(status_user, &status_tmp, sizeof(status_tmp)))
+                {
+                    result = -1;
+                    break;
+                }
+            }
+            result = (int64_t)join_res;
+            break;
+        }
+        case SYSCALL_THREAD_EXIT:
+            process_user_thread_exit((int)frame->rdi);
+            return 0;
         default:
             serial_printf("%s", "syscall: unhandled id=");
             serial_printf("%016llX", (unsigned long long)(syscall_id));

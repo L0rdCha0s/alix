@@ -259,3 +259,39 @@ ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacit
 {
     return (ssize_t)syscall3(SYSCALL_LIST_DIR, (long)path, (long)entries, (long)capacity);
 }
+
+ssize_t sys_socket_available(int fd)
+{
+    return (ssize_t)syscall1(SYSCALL_SOCKET_AVAILABLE, fd);
+}
+
+uint64_t sys_thread_self(void)
+{
+    return (uint64_t)syscall0(SYSCALL_THREAD_SELF);
+}
+
+int64_t sys_thread_create(uintptr_t entry,
+                          uintptr_t arg,
+                          size_t stack_size,
+                          const char *name)
+{
+    return (int64_t)syscall4(SYSCALL_THREAD_CREATE,
+                             (long)entry,
+                             (long)arg,
+                             (long)stack_size,
+                             (long)name);
+}
+
+int sys_thread_join(uint64_t tid, int *status_out)
+{
+    return (int)syscall2(SYSCALL_THREAD_JOIN, (long)tid, (long)status_out);
+}
+
+void sys_thread_exit(int status)
+{
+    syscall1(SYSCALL_THREAD_EXIT, status);
+    for (;;)
+    {
+        syscall0(SYSCALL_THREAD_EXIT);
+    }
+}

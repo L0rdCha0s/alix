@@ -60,6 +60,7 @@ void process_system_init(void)
     }
     g_sleep_queue_head = NULL;
     g_next_pid = 1;
+    g_next_tid = 1;
 
     uint32_t freq = timer_frequency();
     if (freq)

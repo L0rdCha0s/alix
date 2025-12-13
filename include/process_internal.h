@@ -147,8 +147,8 @@ typedef struct user_thread_bootstrap
 {
     uintptr_t entry;
     uintptr_t stack_top;
-    uint64_t argc;
-    uintptr_t argv_ptr;
+    uint64_t rdi;
+    uint64_t rsi;
 } user_thread_bootstrap_t;
 
 typedef enum
@@ -222,6 +222,11 @@ struct thread
 {
     thread_tls_t tls;
     process_t *process;
+    thread_t *process_next;
+    uint64_t tid;
+    uint64_t owner_pid;
+    wait_queue_t join_queue;
+    uint32_t join_claimed;
     cpu_context_t *context;
     spinlock_t context_lock;
     bool context_valid;
@@ -316,6 +321,9 @@ struct process
     paging_space_t address_space;
     thread_t *main_thread;
     thread_t *current_thread;
+    spinlock_t threads_lock;
+    thread_t *threads;
+    uint32_t thread_count;
     int exit_status;
     struct process *next;
     int stdout_fd;
@@ -330,6 +338,7 @@ struct process
     uintptr_t user_entry_point;
     uintptr_t user_stack_top;
     size_t user_stack_size;
+    uintptr_t user_thread_stack_next;
     uintptr_t user_heap_base;
     uintptr_t user_heap_brk;
     uintptr_t user_heap_limit;
@@ -373,9 +382,12 @@ typedef struct cpu_usage_counters
 } __attribute__((aligned(64))) cpu_usage_counters_t;
 
 extern const uint8_t g_user_exit_stub[7];
+extern const uint8_t g_user_thread_exit_stub[10];
 extern const uint8_t g_user_preempt_stub[66];
 #define USER_EXIT_STUB_SIZE    7u
+#define USER_THREAD_EXIT_STUB_SIZE 10u
 #define USER_PREEMPT_STUB_SIZE 66u
+#define USER_THREAD_EXIT_STUB_OFFSET 0x100u
 
 extern process_t *g_process_list;
 extern process_t *g_current_processes[SMP_MAX_CPUS];
@@ -391,6 +403,7 @@ extern uint64_t g_cpu_switch_counts[SMP_MAX_CPUS];
 extern spinlock_t g_scheduler_lock;
 extern thread_t *g_sleep_queue_head;
 extern uint64_t g_next_pid;
+extern uint64_t g_next_tid;
 extern spinlock_t g_sleep_queue_lock;
 extern spinlock_t g_process_lock;
 extern volatile bool g_scheduler_boot_ready;

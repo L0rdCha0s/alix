@@ -82,6 +82,8 @@
 
 #define HDA_BDL_ENTRIES    64u
 #define HDA_BUFFER_BYTES   (HDA_BDL_ENTRIES * 4096u)
+/* Cap how far ahead writers can buffer audio to keep latency bounded. */
+#define HDA_MAX_QUEUED_BYTES (32u * 1024u)
 
 #define HDA_STREAM_INDEX   0u
 #define HDA_STREAM_TAG     (HDA_STREAM_INDEX + 1u)
@@ -1063,9 +1065,12 @@ static ssize_t hda_dev_write(vfs_node_t *node,
         spinlock_lock(&hda->lock);
         uint32_t hw_pos = hda_hw_position(hda);
         hda_update_used_bytes(hda, hw_pos);
-        size_t free_bytes = (hda->buffer_size > 0 && hda->used_bytes < hda->buffer_size)
-            ? (hda->buffer_size - 1u - hda->used_bytes)
-            : 0u;
+        size_t max_queue = (hda->buffer_size > 0) ? (hda->buffer_size - 1u) : 0u;
+        if (max_queue > HDA_MAX_QUEUED_BYTES)
+        {
+            max_queue = HDA_MAX_QUEUED_BYTES;
+        }
+        size_t free_bytes = (max_queue > hda->used_bytes) ? (max_queue - hda->used_bytes) : 0u;
         if (free_bytes == 0)
         {
             spinlock_unlock(&hda->lock);
