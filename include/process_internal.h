@@ -134,8 +134,7 @@ typedef struct
 
 typedef struct process_user_region
 {
-    void *raw_allocation;
-    void *aligned_allocation;
+    paddr_t phys_base;
     size_t mapped_size;
     uintptr_t user_base;
     bool writable;
@@ -167,7 +166,7 @@ typedef enum
 
 typedef struct process_heap_l2
 {
-    uintptr_t phys[PROCESS_HEAP_L2_ENTRIES];
+    paddr_t phys[PROCESS_HEAP_L2_ENTRIES];
     uint64_t present[PROCESS_HEAP_PRESENT_WORDS];
 } process_heap_l2_t;
 
@@ -716,7 +715,6 @@ void thread_set_priority_override(thread_t *thread, bool enabled, thread_priorit
 void thread_set_affinity(thread_t *thread, bool enabled, uint32_t cpu_index);
 void enqueue_thread(thread_t *thread);
 void thread_quarantine_corrupt(thread_t *thread, const char *reason);
-void process_log(const char *msg, uint64_t value);
 void stack_owner_register(thread_t *thread);
 void stack_owner_unregister(thread_t *thread);
 void thread_context_guard_update(thread_t *thread, const char *label);

@@ -1,4 +1,5 @@
 #include "process_internal.h"
+#include "physmem.h"
 
 /*
  * src/kernel/process/process_memory.c
@@ -147,9 +148,9 @@ void process_free_user_regions(process_t *process)
     while (region)
     {
         process_user_region_t *next = region->next;
-        if (region->aligned_allocation && region->mapped_size > 0)
+        if (region->phys_base != 0 && region->mapped_size > 0)
         {
-            user_memory_free(region->aligned_allocation, region->mapped_size);
+            user_memory_free(region->phys_base, region->mapped_size);
         }
         free(region);
         region = next;
@@ -178,9 +179,9 @@ static void process_unlink_user_region(process_t *process, process_user_region_t
         }
         cursor = &(*cursor)->next;
     }
-    if (region->aligned_allocation && region->mapped_size > 0)
+    if (region->phys_base != 0 && region->mapped_size > 0)
     {
-        user_memory_free(region->aligned_allocation, region->mapped_size);
+        user_memory_free(region->phys_base, region->mapped_size);
     }
     free(region);
 }
@@ -193,7 +194,7 @@ static bool process_map_user_region(process_t *process, const process_user_regio
     }
     return paging_map_user_range(&process->address_space,
                                  region->user_base,
-                                 (uintptr_t)region->aligned_allocation,
+                                 (uintptr_t)region->phys_base,
                                  region->mapped_size,
                                  region->writable,
                                  region->executable);
@@ -239,7 +240,7 @@ static inline void process_heap_entry_set(process_heap_l2_t *table, size_t index
     {
         return;
     }
-    table->phys[index] = phys;
+    table->phys[index] = (paddr_t)phys;
     table->present[index / 64] |= (1ULL << (index % 64));
 }
 
@@ -269,7 +270,7 @@ static bool process_heap_table_empty(const process_heap_l2_t *table)
     return true;
 }
 
-static bool process_heap_lookup(const process_t *process, uintptr_t virt_page, uintptr_t *phys_out)
+static bool process_heap_lookup(const process_t *process, uintptr_t virt_page, paddr_t *phys_out)
 {
     if (!process || virt_page < process->user_heap_base || virt_page >= process->user_heap_limit)
     {
@@ -327,7 +328,7 @@ bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes)
     while (remaining > 0)
     {
         uintptr_t page_base = align_down_uintptr(addr, PAGE_SIZE_BYTES_LOCAL);
-        uintptr_t phys = 0;
+        paddr_t phys = 0;
         if (!process_heap_lookup(process, page_base, &phys))
         {
             return false;
@@ -338,7 +339,7 @@ bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes)
         {
             chunk = remaining;
         }
-        memset((uint8_t *)(uintptr_t)phys + page_offset, 0, chunk);
+        memset((uint8_t *)phys_to_virt(phys) + page_offset, 0, chunk);
         addr += chunk;
         remaining -= chunk;
     }
@@ -377,7 +378,7 @@ void process_heap_release_from(process_t *process, uintptr_t virt_start)
             continue;
         }
 
-        uintptr_t phys = table->phys[entry_index];
+        paddr_t phys = table->phys[entry_index];
         process_heap_entry_clear(table, entry_index);
         paging_unmap_user_page(&process->address_space, virt);
         user_memory_free_page(phys);
@@ -410,7 +411,7 @@ bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t en
     uintptr_t page_addr = start;
     while (page_addr < end)
     {
-        uintptr_t phys = 0;
+        paddr_t phys = 0;
         uintptr_t offset = (page_addr - process->user_heap_base) / PAGE_SIZE_BYTES_LOCAL;
         size_t dir_index = (size_t)(offset >> PROCESS_HEAP_L2_SHIFT);
         size_t entry_index = (size_t)(offset & PROCESS_HEAP_L2_MASK);
@@ -438,17 +439,25 @@ bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t en
 
         if (!user_memory_alloc_page(&phys))
         {
+            serial_printf("[heap] alloc_page failed pid=0x%016llX virt=0x%016llX avail=0x%016llX\n",
+                          (unsigned long long)process->pid,
+                          (unsigned long long)page_addr,
+                          (unsigned long long)user_memory_available());
             process_heap_release_from(process, start);
             process->user_heap_committed = start;
             return false;
         }
-        memset((void *)(uintptr_t)phys, 0, PAGE_SIZE_BYTES_LOCAL);
+        memset(phys_to_virt(phys), 0, PAGE_SIZE_BYTES_LOCAL);
         if (!paging_map_user_page(&process->address_space,
                                   page_addr,
-                                  phys,
+                                  (uintptr_t)phys,
                                   true,
                                   false))
         {
+            serial_printf("[heap] map failed pid=0x%016llX virt=0x%016llX phys=0x%016llX\n",
+                          (unsigned long long)process->pid,
+                          (unsigned long long)page_addr,
+                          (unsigned long long)phys);
             user_memory_free_page(phys);
             process_heap_release_from(process, start);
              process->user_heap_committed = start;
@@ -474,30 +483,28 @@ static bool process_user_region_allocate(process_t *process,
     }
 
     size_t aligned_bytes = align_up_size(bytes, PAGE_SIZE_BYTES_LOCAL);
-    void *host = user_memory_alloc(aligned_bytes);
-    if (!host)
+    paddr_t phys = user_memory_alloc(aligned_bytes);
+    if (phys == 0)
     {
         return false;
     }
+    void *host = phys_to_virt(phys);
     memset(host, 0, aligned_bytes);
 
     process_user_region_t *region = (process_user_region_t *)malloc(sizeof(process_user_region_t));
     if (!region)
     {
-        user_memory_free(host, aligned_bytes);
+        user_memory_free(phys, aligned_bytes);
         return false;
     }
 
-    region->raw_allocation = host;
-    region->aligned_allocation = host;
+    region->phys_base = phys;
     region->mapped_size = aligned_bytes;
     region->user_base = user_base;
     region->writable = writable;
     region->executable = executable;
     region->next = process->user_regions;
     process->user_regions = region;
-    process_log("region host=", (uintptr_t)host);
-    process_log("region size=", aligned_bytes);
 
     if (region_out)
     {
@@ -552,8 +559,6 @@ bool process_map_user_segment(process_t *process,
     uintptr_t aligned_base = align_down_uintptr(user_base, PAGE_SIZE_BYTES_LOCAL);
     size_t offset = (size_t)(user_base - aligned_base);
     size_t total = align_up_size(bytes + offset, PAGE_SIZE_BYTES_LOCAL);
-    process_log("map base=", aligned_base);
-    process_log("map bytes=", total);
 
     process_user_region_t *region = NULL;
     if (!process_user_region_allocate(process,
@@ -569,15 +574,13 @@ bool process_map_user_segment(process_t *process,
     if (!process_map_user_region(process, region))
     {
         process_unlink_user_region(process, region);
-        process_log("map fail base=", aligned_base);
         return false;
     }
 
     if (host_ptr_out)
     {
-        uint8_t *base_ptr = (uint8_t *)region->aligned_allocation;
+        uint8_t *base_ptr = (uint8_t *)phys_to_virt(region->phys_base);
         *host_ptr_out = base_ptr + offset;
-        process_log("map host ptr=", (uintptr_t)*host_ptr_out);
     }
     return true;
 }
@@ -706,15 +709,10 @@ bool process_store_args(process_t *process,
 
 static void process_dump_stack_entry(uintptr_t addr, uintptr_t value, bool mark_rsp)
 {
-    serial_printf("%s", "    [");
-    serial_printf("%016llX", (unsigned long long)(addr));
-    serial_printf("%s", "] = 0x");
-    serial_printf("%016llX", (unsigned long long)(value));
-    if (mark_rsp)
-    {
-        serial_printf("%s", " <-- rsp");
-    }
-    serial_printf("%s", "\r\n");
+    serial_printf("    [%016llX] = 0x%016llX%s\r\n",
+                  (unsigned long long)addr,
+                  (unsigned long long)value,
+                  mark_rsp ? " <-- rsp" : "");
 }
 
 static inline bool process_write_stack_uintptr(uint8_t *host_base,
@@ -773,13 +771,10 @@ void process_dump_user_stack(process_t *process,
     uintptr_t stack_top = process->user_stack_top;
     uintptr_t stack_bottom = stack_top - process->user_stack_size;
 
-    serial_printf("%s", "  user stack: range=[");
-    serial_printf("%016llX", (unsigned long long)(stack_bottom));
-    serial_printf("%s", ", ");
-    serial_printf("%016llX", (unsigned long long)(stack_top));
-    serial_printf("%s", ") rsp=");
-    serial_printf("%016llX", (unsigned long long)(rsp));
-    serial_printf("%s", "\r\n");
+    serial_printf("  user stack: range=[%016llX, %016llX) rsp=%016llX\r\n",
+                  (unsigned long long)stack_bottom,
+                  (unsigned long long)stack_top,
+                  (unsigned long long)rsp);
 
     if (rsp < stack_bottom || rsp >= stack_top)
     {
@@ -873,16 +868,9 @@ bool process_prepare_stack_with_args(process_t *process)
     }
 
     sp = align_down_uintptr(sp, 16ULL);
-
     if (sp < stack_bottom + sizeof(uintptr_t))
     {
         free(arg_ptrs);
-        return false;
-    }
-
-    if (sp < stack_bottom + sizeof(uintptr_t))
-    {
-        if (arg_ptrs) free(arg_ptrs);
         return false;
     }
     sp -= sizeof(uintptr_t);
@@ -921,7 +909,6 @@ bool process_prepare_stack_with_args(process_t *process)
         return false;
     }
 
-    process->user_stack_top = sp;
     process->user_initial_stack = sp;
     process->user_argc = argc;
     process->user_argv_ptr = argv_ptr;

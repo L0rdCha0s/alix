@@ -1,368 +1,70 @@
 #include "user_memory.h"
 
-#include "bootinfo.h"
-#include "heap.h"
-#include "libc.h"
-#include "memory_layout.h"
+#include "pmm.h"
 #include "serial.h"
-#include "spinlock.h"
 
 #define USER_MEMORY_PAGE_SIZE 4096ULL
 
-/*
- * src/kernel/user_memory.c
- *
- * Allocator for physical memory used to back user-space virtual pages.
- *
- * This maintains a free list of page-aligned physical ranges derived from the
- * E820 memory map provided by the boot loader (`boot_info.e820`), constrained
- * to a “user-usable” window (see `g_mem_layout`).
- *
- * Process address space code (`process_map_user_segment`) uses this allocator
- * to obtain physical pages, then maps them into user virtual address spaces.
- *
- * See docs/kernel/memory.md.
- */
-
-typedef struct user_memory_range
-{
-    uintptr_t base;
-    size_t length;
-    struct user_memory_range *next;
-} user_memory_range_t;
-
-static user_memory_range_t *g_free_ranges = NULL;
-static size_t g_free_bytes = 0;
-static spinlock_t g_user_memory_lock;
-
-#ifdef ENABLE_MEM_DEBUG_LOGS
-static inline void usermem_log(const char *msg, uintptr_t value)
-{
-    serial_printf("%s", "[umem] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", "0x");
-    serial_printf("%016llX", (unsigned long long)(value));
-    serial_printf("%s", "\r\n");
-}
-#else
-static inline void usermem_log(const char *msg, uintptr_t value)
-{
-    (void)msg;
-    (void)value;
-}
-#endif
-
-static inline uintptr_t align_up_uintptr(uintptr_t value, uintptr_t alignment)
-{
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
-static inline uintptr_t align_down_uintptr(uintptr_t value, uintptr_t alignment)
-{
-    return value & ~(alignment - 1);
-}
-
-static void user_memory_merge_forward(user_memory_range_t *range)
-{
-    if (!range)
-    {
-        return;
-    }
-    while (range->next &&
-           (range->base + range->length) == range->next->base)
-    {
-        user_memory_range_t *next = range->next;
-        range->length += next->length;
-        range->next = next->next;
-        free(next);
-    }
-}
-
-static void user_memory_insert_node(user_memory_range_t *node)
-{
-    if (!node)
-    {
-        return;
-    }
-
-    user_memory_range_t **cursor = &g_free_ranges;
-    user_memory_range_t *prev = NULL;
-    while (*cursor && (*cursor)->base < node->base)
-    {
-        prev = *cursor;
-        cursor = &(*cursor)->next;
-    }
-
-    node->next = *cursor;
-    *cursor = node;
-
-    user_memory_merge_forward(node);
-    if (prev && (prev->base + prev->length) == node->base)
-    {
-        prev->length += node->length;
-        prev->next = node->next;
-        free(node);
-        user_memory_merge_forward(prev);
-    }
-}
-
-static void __attribute__((unused)) user_memory_detach_range(user_memory_range_t *node, user_memory_range_t *prev)
-{
-    if (!node)
-    {
-        return;
-    }
-    if (prev)
-    {
-        prev->next = node->next;
-    }
-    else
-    {
-        g_free_ranges = node->next;
-    }
-    g_free_bytes -= node->length;
-    free(node);
-}
-
-static void user_memory_add_range(uintptr_t base, uintptr_t end)
-{
-    if (end <= base)
-    {
-        return;
-    }
-    base = align_up_uintptr(base, USER_MEMORY_PAGE_SIZE);
-    end = align_down_uintptr(end, USER_MEMORY_PAGE_SIZE);
-    if (end <= base)
-    {
-        return;
-    }
-
-    user_memory_range_t *node = (user_memory_range_t *)malloc(sizeof(user_memory_range_t));
-    if (!node)
-    {
-        serial_printf("%s", "user_memory: failed to allocate range node\r\n");
-        return;
-    }
-    node->base = base;
-    node->length = (size_t)(end - base);
-    node->next = NULL;
-    g_free_bytes += node->length;
-    user_memory_insert_node(node);
-    usermem_log("add base=", base);
-    usermem_log("add end=", end);
-}
-
-/*
- * Initialise the user physical page pool from the boot E820 map.
- *
- * Must be called after `boot_info` and `g_mem_layout` are initialised.
- */
 void user_memory_init(void)
 {
-    spinlock_init(&g_user_memory_lock);
-    spinlock_lock(&g_user_memory_lock);
-    g_free_ranges = NULL;
-    g_free_bytes = 0;
-
-    uintptr_t min_addr = g_mem_layout.user_phys_min;
-    uintptr_t identity_limit = g_mem_layout.identity_map_limit ? g_mem_layout.identity_map_limit : (4ULL * 1024ULL * 1024ULL * 1024ULL);
-    if (identity_limit < min_addr)
+    if (!pmm_is_ready())
     {
-        identity_limit = min_addr;
+        serial_printf("%s", "[umem] init skipped (pmm not ready)\n");
+        return;
     }
-
-    uint32_t count = boot_info.e820_entry_count;
-    if (count > BOOTINFO_MAX_E820_ENTRIES)
-    {
-        count = BOOTINFO_MAX_E820_ENTRIES;
-    }
-
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        const bootinfo_e820_entry_t *entry = &boot_info.e820[i];
-        if (entry->type != 1)
-        {
-            continue;
-        }
-
-        uint64_t start = entry->base;
-        uint64_t end = entry->base + entry->length;
-        if (end <= min_addr)
-        {
-            continue;
-        }
-        if (start < min_addr)
-        {
-            start = min_addr;
-        }
-        if (start >= identity_limit)
-        {
-            continue;
-        }
-        if (end > identity_limit)
-        {
-            end = identity_limit;
-        }
-        if (end <= start)
-        {
-            continue;
-        }
-        user_memory_add_range((uintptr_t)start, (uintptr_t)end);
-    }
-
-    serial_printf("%s", "user_memory: available 0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
-    serial_printf("%s", " bytes\r\n");
-    spinlock_unlock(&g_user_memory_lock);
+    serial_printf("[umem] ready avail=0x%016llX\n",
+                  (unsigned long long)((uint64_t)pmm_available_bytes()));
 }
 
-/*
- * Allocate a page-aligned physical range of at least `bytes`.
- *
- * Returns a physical address cast as `void*` (not a kernel virtual pointer).
- */
-void *user_memory_alloc(size_t bytes)
+paddr_t user_memory_alloc(size_t bytes)
 {
-    if (bytes == 0)
+    if (bytes == 0 || !pmm_is_ready())
     {
-        return NULL;
+        return 0;
     }
-    size_t aligned = (size_t)align_up_uintptr(bytes, USER_MEMORY_PAGE_SIZE);
-    usermem_log("alloc req=", aligned);
-
-    spinlock_lock(&g_user_memory_lock);
-    user_memory_range_t **cursor = &g_free_ranges;
-    while (*cursor)
+    paddr_t base = 0;
+    if (!pmm_alloc_range(bytes, USER_MEMORY_PAGE_SIZE, PMM_ALLOC_ANY, &base))
     {
-        user_memory_range_t *range = *cursor;
-        if (range->length >= aligned)
-        {
-            uintptr_t addr = range->base;
-            range->base += aligned;
-            range->length -= aligned;
-            if (range->length == 0)
-            {
-                *cursor = range->next;
-                free(range);
-            }
-            g_free_bytes -= aligned;
-            usermem_log("alloc ptr=", addr);
-            spinlock_unlock(&g_user_memory_lock);
-            return (void *)addr;
-        }
-        cursor = &range->next;
+        serial_printf("[umem] alloc failed bytes=0x%016llX avail=0x%016llX\n",
+                      (unsigned long long)bytes,
+                      (unsigned long long)((uint64_t)pmm_available_bytes()));
+        return 0;
     }
-    spinlock_unlock(&g_user_memory_lock);
-    serial_printf("%s", "user_memory: allocation failed\r\n");
-    serial_printf("%s", "user_memory: free bytes 0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
-    serial_printf("%s", "\r\n");
-    return NULL;
+    return base;
 }
 
-/*
- * Free a previously-allocated physical range back into the pool.
- *
- * The range is page-aligned and merged with adjacent free ranges when possible.
- */
-void user_memory_free(void *addr, size_t bytes)
+void user_memory_free(paddr_t addr, size_t bytes)
 {
-    if (!addr || bytes == 0)
+    if (!pmm_is_ready() || addr == 0 || bytes == 0)
     {
         return;
     }
-
-    uintptr_t base = align_down_uintptr((uintptr_t)addr, USER_MEMORY_PAGE_SIZE);
-    size_t length = (size_t)align_up_uintptr(bytes, USER_MEMORY_PAGE_SIZE);
-    uintptr_t end = base + length;
-    uintptr_t min_addr = g_mem_layout.user_phys_min;
-    uintptr_t identity_limit = g_mem_layout.identity_map_limit ? g_mem_layout.identity_map_limit : (4ULL * 1024ULL * 1024ULL * 1024ULL);
-
-    if (end < base || base < min_addr || end > identity_limit)
-    {
-        serial_printf("%s", "user_memory: reject free outside user region base=0x");
-        serial_printf("%016llX", (unsigned long long)base);
-        serial_printf("%s", " len=0x");
-        serial_printf("%016llX", (unsigned long long)length);
-        serial_printf("%s", "\r\n");
-        return;
-    }
-    usermem_log("free base=", base);
-    usermem_log("free len=", length);
-
-    user_memory_range_t *node = (user_memory_range_t *)malloc(sizeof(user_memory_range_t));
-    if (!node)
-    {
-        serial_printf("%s", "user_memory: failed to allocate free node\r\n");
-        return;
-    }
-    node->base = base;
-    node->length = length;
-    node->next = NULL;
-    spinlock_lock(&g_user_memory_lock);
-    g_free_bytes += length;
-    user_memory_insert_node(node);
-    spinlock_unlock(&g_user_memory_lock);
+    pmm_free_range(addr, bytes);
 }
 
-/*
- * Return total currently-free bytes in the user physical pool.
- */
 size_t user_memory_available(void)
 {
-    spinlock_lock(&g_user_memory_lock);
-    size_t available = g_free_bytes;
-    spinlock_unlock(&g_user_memory_lock);
-    return available;
+    return pmm_available_bytes();
 }
 
-bool user_memory_alloc_page(uintptr_t *phys_out)
+bool user_memory_alloc_page(paddr_t *phys_out)
 {
     if (!phys_out)
     {
         return false;
     }
-    spinlock_lock(&g_user_memory_lock);
-    user_memory_range_t *prev = NULL;
-    user_memory_range_t *range = g_free_ranges;
-    while (range && range->length < USER_MEMORY_PAGE_SIZE)
+    if (!pmm_is_ready())
     {
-        prev = range;
-        range = range->next;
-    }
-    if (!range)
-    {
-        spinlock_unlock(&g_user_memory_lock);
-        serial_printf("%s", "user_memory: no free pages\r\n");
-        serial_printf("%s", "user_memory: free bytes 0x");
-        serial_printf("%016llX", (unsigned long long)((uint64_t)g_free_bytes));
-        serial_printf("%s", "\r\n");
         return false;
     }
-    uintptr_t addr = range->base;
-    range->base += USER_MEMORY_PAGE_SIZE;
-    range->length -= USER_MEMORY_PAGE_SIZE;
-    if (range->length == 0)
-    {
-        if (prev)
-        {
-            prev->next = range->next;
-        }
-        else
-        {
-            g_free_ranges = range->next;
-        }
-        free(range);
-    }
-    g_free_bytes -= USER_MEMORY_PAGE_SIZE;
-    *phys_out = addr;
-    spinlock_unlock(&g_user_memory_lock);
-    return true;
+    return pmm_alloc_page(PMM_ALLOC_ANY, phys_out);
 }
 
-void user_memory_free_page(uintptr_t phys)
+void user_memory_free_page(paddr_t phys)
 {
-    spinlock_lock(&g_user_memory_lock);
-    user_memory_add_range(phys, phys + USER_MEMORY_PAGE_SIZE);
-    spinlock_unlock(&g_user_memory_lock);
+    if (!pmm_is_ready() || phys == 0)
+    {
+        return;
+    }
+    pmm_free_page(phys);
 }

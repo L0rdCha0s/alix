@@ -2,6 +2,7 @@
 #include "pci.h"
 #include "io.h"
 #include "serial.h"
+#include "ioremap.h"
 #include "libc.h"
 #include "timer.h"
 #include "process.h"
@@ -1361,27 +1362,37 @@ static bool ehci_route_ports_to_uhci(void)
     pci_set_command_bits(ehci, 0x0007u, 0);
     uint16_t cmd_reg = pci_config_read16(ehci, 0x04);
 
-    uint32_t bar = pci_config_read32(ehci, 0x10);
-    if (bar & 0x1u)
+    uint32_t bar_low = pci_config_read32(ehci, 0x10);
+    if (bar_low & 0x1u)
     {
         usb_log("[usb] EHCI BAR0 is IO, unexpected");
         return false;
     }
-    uintptr_t base = (uintptr_t)(bar & ~0xFu);
+    uint64_t base = (uint64_t)(bar_low & ~0xFULL);
+    if ((bar_low & 0x6u) == 0x4u)
+    {
+        uint32_t bar_high = pci_config_read32(ehci, 0x14);
+        base |= ((uint64_t)bar_high << 32);
+    }
     if (base == 0)
     {
         usb_log("[usb] EHCI BAR0 is zero");
         return false;
     }
 
-    volatile uint32_t *regs = (volatile uint32_t *)base;
+    volatile uint32_t *regs = (volatile uint32_t *)ioremap((paddr_t)base, 0x1000);
+    if (!regs)
+    {
+        usb_log("[usb] EHCI ioremap failed");
+        return false;
+    }
     uint32_t hcsparams = regs[1]; /* HCSPARAMS at offset 0x04 */
     uint8_t ports = (uint8_t)(hcsparams & 0x0F);
-    serial_printf("[usb] ehci route ports count=%u base=0x%08llX cmd=0x%04X bar=0x%08X\r\n",
+    serial_printf("[usb] ehci route ports count=%u base=0x%016llX cmd=0x%04X bar=0x%08X\r\n",
                   (unsigned)ports,
                   (unsigned long long)base,
                   (unsigned)cmd_reg,
-                  (unsigned)bar);
+                  (unsigned)bar_low);
 
     /* Stop EHCI (clear RS) to avoid races while switching ownership. */
     uint32_t cmd = regs[0];

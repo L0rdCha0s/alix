@@ -79,11 +79,9 @@ static bool libc_env_reserve(size_t needed)
 #ifdef ENABLE_USER_MEM_DEBUG_LOGS
 static void user_heap_log(const char *msg, uintptr_t value)
 {
-    serial_printf("%s", "[uheap] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", "0x");
-    serial_printf("%016llX", (unsigned long long)((uint64_t)value));
-    serial_printf("%s", "\r\n");
+    serial_printf("[uheap] %s0x%016llX\n",
+                  msg ? msg : "",
+                  (unsigned long long)((uint64_t)value));
 }
 #else
 static void user_heap_log(const char *msg, uintptr_t value)
@@ -92,6 +90,75 @@ static void user_heap_log(const char *msg, uintptr_t value)
     (void)value;
 }
 #endif
+
+static inline bool user_heap_addr_is_canonical(uintptr_t addr)
+{
+    return (addr >> 48) == 0;
+}
+
+static inline bool user_heap_ptr_is_aligned(uintptr_t addr)
+{
+    return (addr & (ALIGNMENT - 1)) == 0;
+}
+
+static uintptr_t user_heap_current_brk(void)
+{
+    void *brk = sys_sbrk(0);
+    if (brk == (void *)-1 || brk == NULL)
+    {
+        return 0;
+    }
+    return (uintptr_t)brk;
+}
+
+static bool user_heap_addr_in_bounds(uintptr_t addr)
+{
+    if (addr == 0)
+    {
+        return true;
+    }
+    if (!user_heap_addr_is_canonical(addr))
+    {
+        return false;
+    }
+    if (!user_heap_ptr_is_aligned(addr))
+    {
+        return false;
+    }
+
+    uintptr_t low = (uintptr_t)g_heap_head;
+    uintptr_t high = user_heap_current_brk();
+    if (low == 0 || high == 0)
+    {
+        return true;
+    }
+    return addr >= low && addr < high;
+}
+
+static void user_heap_log_corruption(const char *where,
+                                     const heap_block_t *block,
+                                     size_t request_size,
+                                     const heap_block_t *new_block,
+                                     const heap_block_t *suspect)
+{
+    uint64_t caller = (uint64_t)__builtin_return_address(0);
+    uintptr_t brk = user_heap_current_brk();
+
+    serial_printf("[uheap] CORRUPTION where=%s caller=0x%016llX head=0x%016llX tail=0x%016llX block=0x%016llX free=%u bsz=0x%016llX req=0x%016llX prev=0x%016llX next=0x%016llX new=0x%016llX suspect=0x%016llX brk=0x%016llX\n",
+                  where ? where : "<null>",
+                  (unsigned long long)caller,
+                  (unsigned long long)(uintptr_t)g_heap_head,
+                  (unsigned long long)(uintptr_t)g_heap_tail,
+                  (unsigned long long)(uintptr_t)block,
+                  (unsigned)(block ? block->free : 0),
+                  (unsigned long long)(block ? (uint64_t)block->size : 0),
+                  (unsigned long long)(uint64_t)request_size,
+                  (unsigned long long)(block ? (uintptr_t)block->prev : 0),
+                  (unsigned long long)(block ? (uintptr_t)block->next : 0),
+                  (unsigned long long)(uintptr_t)new_block,
+                  (unsigned long long)(uintptr_t)suspect,
+                  (unsigned long long)brk);
+}
 
 static size_t align_size(size_t size)
 {
@@ -119,6 +186,10 @@ static void split_block(heap_block_t *block, size_t size)
     new_block->prev = block;
     if (new_block->next)
     {
+        if (!user_heap_addr_in_bounds((uintptr_t)new_block->next))
+        {
+            user_heap_log_corruption("split_block next", block, size, new_block, new_block->next);
+        }
         new_block->next->prev = new_block;
     }
     else

@@ -38,6 +38,7 @@ extern bootinfo_t boot_info;
 uintptr_t kernel_heap_base = KERNEL_HEAP_BASE;
 uintptr_t kernel_heap_end = KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE;
 uintptr_t kernel_heap_size = KERNEL_HEAP_SIZE;
+uintptr_t boot_info_phys_addr = 0;
 
 memory_layout_t g_mem_layout = {
     .kernel_heap_base = KERNEL_HEAP_BASE,
@@ -470,6 +471,7 @@ static void kernel_entry_main(bootinfo_t *loader_info)
     size_t bss_size = (size_t)(__bss_end - __bss_start);
 
     zero_bytes(__bss_start, bss_size);
+    boot_info_phys_addr = (uintptr_t)loader_info;
     if (loader_info)
     {
         copy_bytes((uint8_t *)&boot_info,

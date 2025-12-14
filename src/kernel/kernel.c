@@ -22,6 +22,7 @@
 #include "acpi.h"
 #include "heap.h"
 #include "paging.h"
+#include "ioremap.h"
 #include "rtl8139.h"
 #include "igb.h"
 #include "shell.h"
@@ -38,6 +39,7 @@
 #include "logger.h"
 #include "user_atk_host.h"
 #include "user_memory.h"
+#include "pmm.h"
 #include "libc.h"
 #include "procfs.h"
 #include "startup.h"
@@ -951,9 +953,11 @@ void kernel_main(void)
     console_clear();
 
     heap_init();
-    user_memory_init();
     paging_init();
-    serial_printf("%s", "[alix] after paging_init\n");
+    ioremap_init();
+    pmm_init();
+    user_memory_init();
+    serial_printf("%s", "[alix] after paging/pmm/user_memory init\n");
     acpi_init();
     serial_printf("%s", "[alix] after acpi_init\n");
     smp_init();

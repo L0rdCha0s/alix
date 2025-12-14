@@ -153,6 +153,9 @@ bool process_stack_watch_process(process_t *process, const char *context);
 bool process_handle_stack_watch_fault(uintptr_t fault_addr,
                                       interrupt_frame_t *frame,
                                       uint64_t error_code);
+bool process_handle_user_page_fault(interrupt_frame_t *frame,
+                                    uint64_t error_code,
+                                    uint64_t address);
 uint64_t process_current_pid(void);
 vfs_node_t *process_current_cwd(void);
 void process_set_cwd(process_t *process, vfs_node_t *dir);

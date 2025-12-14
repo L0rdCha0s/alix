@@ -6,6 +6,7 @@
 #include "atk.h"
 #include "user_atk_host.h"
 #include "atk/atk_list.h"
+#include "video_backbuffer.h"
 #include "pci.h"
 #include "keyboard.h"
 #include "process.h"
@@ -61,8 +62,7 @@ static inline void video_irq_restore(uint64_t flags)
 #define VIDEO_FONT_CHAR_COUNT 256
 #define VIDEO_FONT_BYTES      (VIDEO_FONT_CHAR_COUNT * FONT_HEIGHT)
 
-#define BACKBUFFER_ADDR 0x0000000001800000ULL  /* 24 MiB: above VFS pool (16 MiB), below kernel heap (32 MiB) */
-static uint32_t *backbuffer = (uint32_t *)(uintptr_t)BACKBUFFER_ADDR;
+static uint32_t *backbuffer = (uint32_t *)(uintptr_t)VIDEO_BACKBUFFER_BASE;
 
 static volatile uint32_t *framebuffer = 0;
 static volatile uint32_t *framebuffer_base = 0;

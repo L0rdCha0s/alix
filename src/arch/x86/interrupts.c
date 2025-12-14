@@ -598,14 +598,18 @@ __attribute__((interrupt)) static void stack_fault_handler(interrupt_frame_t *fr
 __attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *frame, uint64_t error_code)
 {
     uint64_t fault_address = read_cr2();
+    if (process_handle_stack_watch_fault(fault_address, frame, error_code))
+    {
+        return;
+    }
+    if (process_handle_user_page_fault(frame, error_code, fault_address))
+    {
+        return;
+    }
     fault_report("page_fault", frame, error_code, true, true, fault_address);
     if (frame && ((frame->cs & 0x3u) == 0))
     {
         log_kernel_stack_bounds("page_fault", frame);
-    }
-    if (process_handle_stack_watch_fault(fault_address, frame, error_code))
-    {
-        return;
     }
     dump_exception_stacktrace(frame);
     if (process_handle_exception(frame, "page_fault", error_code, true, fault_address))

@@ -2701,21 +2701,17 @@ void process_handle_stack_guard_fault(void)
         fatal("stack guard fault with no current thread");
     }
 
-    serial_printf("%s", "process: stack guard violation in thread ");
-    if (current->name[0] != '\0')
+    const char *thread_name = current->name[0] != '\0' ? current->name : "(anon)";
+    if (current->stack_guard_reason)
     {
-        serial_printf("%s", current->name);
+        serial_printf("process: stack guard violation in thread %s reason=%s\r\n",
+                      thread_name,
+                      current->stack_guard_reason);
     }
     else
     {
-        serial_printf("%s", "(anon)");
+        serial_printf("process: stack guard violation in thread %s\r\n", thread_name);
     }
-    if (current->stack_guard_reason)
-    {
-        serial_printf("%s", " reason=");
-        serial_printf("%s", current->stack_guard_reason);
-    }
-    serial_printf("%s", "\r\n");
 
     current->exit_status = -1;
     current->exited = true;
@@ -2755,35 +2751,89 @@ void process_handle_fatal_fault(void)
         wait_queue_wake_all(&current->process->wait_queue);
     }
 
-    serial_printf("%s", "process: fatal fault in thread ");
-    if (current->name[0] != '\0')
-    {
-        serial_printf("%s", current->name);
-    }
-    else
-    {
-        serial_printf("%s", "(anon)");
-    }
-    serial_printf("%s", " reason=");
-    if (current->fault_reason)
-    {
-        serial_printf("%s", current->fault_reason);
-    }
-    else
-    {
-        serial_printf("%s", "unknown");
-    }
-    serial_printf("%s", " error=0x");
-    serial_printf("%016llX", (unsigned long long)(current->fault_error_code));
+    const char *thread_name = current->name[0] != '\0' ? current->name : "(anon)";
+    const char *reason = current->fault_reason ? current->fault_reason : "unknown";
     if (current->fault_has_address)
     {
-        serial_printf("%s", " addr=0x");
-        serial_printf("%016llX", (unsigned long long)(current->fault_address));
+        serial_printf("process: fatal fault in thread %s reason=%s error=0x%016llX addr=0x%016llX\r\n",
+                      thread_name,
+                      reason,
+                      (unsigned long long)(current->fault_error_code),
+                      (unsigned long long)(current->fault_address));
     }
-    serial_printf("%s", "\r\n");
+    else
+    {
+        serial_printf("process: fatal fault in thread %s reason=%s error=0x%016llX\r\n",
+                      thread_name,
+                      reason,
+                      (unsigned long long)(current->fault_error_code));
+    }
 
     scheduler_schedule(false);
     fatal("fatal fault handler returned");
+}
+
+bool process_handle_user_page_fault(interrupt_frame_t *frame,
+                                    uint64_t error_code,
+                                    uint64_t address)
+{
+    if (!frame)
+    {
+        return false;
+    }
+
+    bool user_mode = (frame->cs & 0x3u) == 0x3u;
+    if (!user_mode)
+    {
+        return false;
+    }
+
+    /* Only handle not-present data faults (leave protection/reserved/execute faults as fatal). */
+    if ((error_code & 0x1u) != 0)
+    {
+        return false;
+    }
+    if ((error_code & 0x8u) != 0 || (error_code & 0x10u) != 0)
+    {
+        return false;
+    }
+
+    thread_t *thread = current_thread_local();
+    if (!thread || !thread->is_user)
+    {
+        return false;
+    }
+
+    process_t *proc = thread->process;
+    if (!proc || !proc->is_user)
+    {
+        return false;
+    }
+
+    uintptr_t fault = (uintptr_t)address;
+    if (fault < proc->user_heap_base || fault >= proc->user_heap_brk)
+    {
+        return false;
+    }
+
+    uintptr_t page_base = align_down_uintptr(fault, PAGE_SIZE_BYTES_LOCAL);
+    uintptr_t commit_end = page_base + PAGE_SIZE_BYTES_LOCAL;
+    if (commit_end <= page_base || commit_end > proc->user_heap_limit)
+    {
+        return false;
+    }
+
+    uintptr_t commit_start = proc->user_heap_committed;
+    if (commit_start < proc->user_heap_base)
+    {
+        commit_start = proc->user_heap_base;
+    }
+    if (commit_end <= commit_start)
+    {
+        return false;
+    }
+
+    return process_heap_commit_range(proc, commit_start, commit_end);
 }
 
 bool process_handle_exception(interrupt_frame_t *frame,
@@ -2831,8 +2881,8 @@ bool process_handle_exception(interrupt_frame_t *frame,
                       (unsigned long long)error_code,
                       has_address ? (unsigned long long)address : 0ULL);
         scheduler_schedule(false);
-        fatal("user fault handler returned");
-    }
+    fatal("user fault handler returned");
+}
 
     process_trigger_fatal_fault(thread, frame, reason, error_code, has_address, address);
     return true;

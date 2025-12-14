@@ -641,13 +641,6 @@ thread_t *thread_find_stack_owner(uintptr_t addr, size_t len)
 #endif
 }
 
-void process_log(const char *msg, uint64_t value)
-{
-    serial_printf("[proc] %s0x%016llX\r\n",
-                  msg ? msg : "",
-                  (unsigned long long)(value));
-}
-
 void process_handle_stack_guard_fault(void) __attribute__((noreturn));
 void process_handle_fatal_fault(void) __attribute__((noreturn));
 

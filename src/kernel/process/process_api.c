@@ -1014,9 +1014,9 @@ bool process_query_user_layout(const process_t *process,
     layout->is_user = process->is_user;
     layout->cr3 = process->cr3;
     layout->entry_point = process->user_entry_point;
-    layout->stack_top = process->user_stack_top;
+    layout->stack_top = process->user_initial_stack ? process->user_initial_stack : process->user_stack_top;
     layout->stack_size = process->user_stack_size;
-    return process->is_user && process->user_entry_point != 0 && process->user_stack_top != 0;
+    return process->is_user && process->user_entry_point != 0 && layout->stack_top != 0;
 }
 
 /*
@@ -1038,12 +1038,13 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
     uintptr_t base = process->user_heap_base;
     uintptr_t limit = process->user_heap_limit;
     uintptr_t current = process->user_heap_brk;
-    //process_log("sbrk pid=", process->pid);
-    //process_log("sbrk inc=", (uint64_t)increment);
-    //process_log("sbrk current=", current);
     if (base == 0 || limit <= base || current < base || current > limit)
     {
-        process_log("sbrk invalid bounds pid=", process->pid);
+        serial_printf("[sbrk] invalid bounds pid=0x%016llX base=0x%016llX limit=0x%016llX cur=0x%016llX\n",
+                      (unsigned long long)process->pid,
+                      (unsigned long long)base,
+                      (unsigned long long)limit,
+                      (unsigned long long)current);
         return -1;
     }
     uintptr_t new_brk = current;
@@ -1053,8 +1054,10 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
         uint64_t inc = (uint64_t)increment;
         if (inc > (limit - current))
         {
-            process_log("sbrk clamp inc=", inc);
-            process_log("sbrk avail=", limit - current);
+            serial_printf("[sbrk] clamp pid=0x%016llX inc=0x%016llX avail=0x%016llX\n",
+                          (unsigned long long)process->pid,
+                          (unsigned long long)inc,
+                          (unsigned long long)(limit - current));
             return -1;
         }
         new_brk = current + inc;
@@ -1068,14 +1071,20 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
         {
             if (!process_heap_commit_range(process, commit_start, commit_end))
             {
-                process_log("sbrk commit failed pid=", process->pid);
-                process_log("sbrk commit avail=", user_memory_available());
+                serial_printf("[sbrk] commit failed pid=0x%016llX commit=[0x%016llX,0x%016llX) avail=0x%016llX\n",
+                              (unsigned long long)process->pid,
+                              (unsigned long long)commit_start,
+                              (unsigned long long)commit_end,
+                              (unsigned long long)user_memory_available());
                 return -1;
             }
         }
         if (!process_heap_zero_range(process, current, inc))
         {
-            process_log("sbrk zero failed pid=", process->pid);
+            serial_printf("[sbrk] zero failed pid=0x%016llX range=[0x%016llX,0x%016llX)\n",
+                          (unsigned long long)process->pid,
+                          (unsigned long long)current,
+                          (unsigned long long)(current + inc));
             return -1;
         }
     }
@@ -1084,7 +1093,11 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
         uint64_t dec = (uint64_t)(-increment);
         if (dec > (current - base))
         {
-            process_log("sbrk negative clamp dec=", dec);
+            serial_printf("[sbrk] negative clamp pid=0x%016llX dec=0x%016llX cur=0x%016llX base=0x%016llX\n",
+                          (unsigned long long)process->pid,
+                          (unsigned long long)dec,
+                          (unsigned long long)current,
+                          (unsigned long long)base);
             return -1;
         }
         new_brk = current - dec;
@@ -1097,8 +1110,6 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
     }
 
     process->user_heap_brk = new_brk;
-    //process_log("sbrk new=", new_brk);
-    //process_log("sbrk return=", current);
     return (int64_t)current;
 }
 

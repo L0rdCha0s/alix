@@ -43,6 +43,10 @@ bool paging_map_user_range(paging_space_t *space,
                            bool executable);
 bool paging_unmap_user_page(paging_space_t *space,
                             uintptr_t virtual_addr);
+bool paging_map_kernel_ioremap_range(uintptr_t virtual_addr,
+                                     paddr_t physical_addr,
+                                     size_t length,
+                                     bool cache_disable);
 bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
                                       size_t length,
                                       bool writable);

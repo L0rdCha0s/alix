@@ -13,16 +13,44 @@ static void serial_sys_write(const char *buffer, size_t length)
 
 void serial_init(void) {}
 
-static void serial_stub_putc(void *ctx, char c)
+typedef struct
 {
-    (void)ctx;
-    if (c == '\n')
+    char buffer[1024];
+    size_t length;
+} serial_stub_buffer_t;
+
+static void serial_stub_flush(serial_stub_buffer_t *ctx)
+{
+    if (!ctx || ctx->length == 0)
     {
-        char seq[2] = {'\r', '\n'};
-        serial_sys_write(seq, 2);
         return;
     }
-    serial_sys_write(&c, 1);
+    serial_sys_write(ctx->buffer, ctx->length);
+    ctx->length = 0;
+}
+
+static void serial_stub_putc_buffered(void *ctx, char c)
+{
+    serial_stub_buffer_t *buffer = (serial_stub_buffer_t *)ctx;
+    if (!buffer)
+    {
+        return;
+    }
+    if (c == '\n')
+    {
+        if (buffer->length + 2 > sizeof(buffer->buffer))
+        {
+            serial_stub_flush(buffer);
+        }
+        buffer->buffer[buffer->length++] = '\r';
+        buffer->buffer[buffer->length++] = '\n';
+        return;
+    }
+    if (buffer->length + 1 > sizeof(buffer->buffer))
+    {
+        serial_stub_flush(buffer);
+    }
+    buffer->buffer[buffer->length++] = c;
 }
 
 void serial_printf(const char *format, ...)
@@ -31,10 +59,11 @@ void serial_printf(const char *format, ...)
     {
         return;
     }
+    serial_stub_buffer_t buffer = {0};
     serial_format_ctx_t ctx = {
-        .putc = serial_stub_putc,
+        .putc = serial_stub_putc_buffered,
         .validate = NULL,
-        .ctx = NULL,
+        .ctx = &buffer,
         .count = 0,
         .error = false
     };
@@ -42,6 +71,7 @@ void serial_printf(const char *format, ...)
     va_start(args, format);
     serial_format_vprintf(&ctx, format, args);
     va_end(args);
+    serial_stub_flush(&buffer);
 }
 
 void serial_output_bytes(const char *data, size_t length)

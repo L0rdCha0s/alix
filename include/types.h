@@ -26,5 +26,8 @@ typedef enum { false = 0, true = 1 } bool;
 #endif
 #endif
 
+typedef uint64_t paddr_t;
+typedef uintptr_t vaddr_t;
+
 
 #endif

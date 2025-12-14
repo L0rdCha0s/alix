@@ -3,12 +3,15 @@
 #include "pci.h"
 #include "libc.h"
 #include "serial.h"
+#include "ioremap.h"
 #include "heap.h"
 #include "devfs.h"
 #include "process.h"
 #include "spinlock.h"
 #include "timer.h"
 #include "audio.h"
+
+#define HDA_MMIO_BYTES 0x4000ULL
 
 #define HDA_REG_GCTL       0x08
 #define HDA_REG_WAKEEN     0x0C
@@ -1238,7 +1241,12 @@ void hda_init(void)
         return;
     }
 
-    g_hda.regs = (volatile uint8_t *)(uintptr_t)base;
+    g_hda.regs = (volatile uint8_t *)ioremap((paddr_t)base, (size_t)HDA_MMIO_BYTES);
+    if (!g_hda.regs)
+    {
+        serial_printf("%s", "[hda] ioremap failed\r\n");
+        return;
+    }
     g_hda.codec_id = 0;
     g_hda.running = false;
 

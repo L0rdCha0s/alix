@@ -15,7 +15,11 @@
 set timeout 600
 
 set workdir "/Users/alex/Documents/Projects/alix"
-set cmd "cd $workdir && NET_BACKEND=user make run-hdd"
+set net_backend "user"
+if {[info exists ::env(NET_BACKEND)]} {
+    set net_backend $::env(NET_BACKEND)
+}
+set cmd "cd $workdir && NET_BACKEND=$net_backend make run-hdd"
 
 log_file -a "$workdir/qemu-serial.log"
 # Don't spam stdout; the serial log above is the source of truth.

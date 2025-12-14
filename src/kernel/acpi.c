@@ -1,6 +1,7 @@
 #include "acpi.h"
 
 #include "bootinfo.h"
+#include "physmem.h"
 #include "io.h"
 #include "libc.h"
 #include "serial.h"
@@ -123,6 +124,7 @@ static struct
 
 static acpi_sdt_header_t *g_acpi_rsdt = NULL;
 static acpi_sdt_header_t *g_acpi_xsdt = NULL;
+static acpi_rsdp_v2_t g_rsdp_ptr_copy = { 0 };
 
 static bool acpi_checksum(const void *table, size_t length);
 static uintptr_t acpi_ebda_address(void);
@@ -240,9 +242,8 @@ static acpi_rsdp_v2_t *acpi_find_rsdp(void)
     if (boot_info.magic == BOOTINFO_MAGIC && boot_info.acpi_rsdp != 0)
     {
         acpi_log_hex("Bootinfo RSDP pointer ", boot_info.acpi_rsdp);
-        acpi_rsdp_v2_t rsdp_copy_v2;
-        memcpy(&rsdp_copy_v2, (const void *)(uintptr_t)boot_info.acpi_rsdp, sizeof(rsdp_copy_v2));
-        acpi_rsdp_v2_t *rsdp = &rsdp_copy_v2;
+        memcpy(&g_rsdp_ptr_copy, (const void *)(uintptr_t)boot_info.acpi_rsdp, sizeof(g_rsdp_ptr_copy));
+        acpi_rsdp_v2_t *rsdp = &g_rsdp_ptr_copy;
         if (rsdp)
         {
             size_t length = (rsdp->length != 0) ? rsdp->length : sizeof(acpi_rsdp_v1_t);
@@ -286,12 +287,16 @@ static acpi_sdt_header_t *acpi_map_sdt(uint64_t phys, const char *expected_signa
     {
         return NULL;
     }
-    acpi_sdt_header_t *table = (acpi_sdt_header_t *)(uintptr_t)phys;
+    acpi_sdt_header_t *table = (acpi_sdt_header_t *)phys_to_virt((paddr_t)phys);
     if (!table)
     {
         return NULL;
     }
     if (table->length < sizeof(acpi_sdt_header_t))
+    {
+        return NULL;
+    }
+    if (table->length > (4u * 1024u * 1024u))
     {
         return NULL;
     }
@@ -326,21 +331,11 @@ static acpi_sdt_header_t *acpi_find_table(acpi_sdt_header_t *root, bool use_64bi
         {
             continue;
         }
-
-        acpi_sdt_header_t *candidate = (acpi_sdt_header_t *)(uintptr_t)phys;
-        if (!candidate || candidate->length < sizeof(acpi_sdt_header_t))
+        acpi_sdt_header_t *candidate = acpi_map_sdt(phys, signature);
+        if (candidate)
         {
-            continue;
+            return candidate;
         }
-        if (memcmp(candidate->signature, signature, 4) != 0)
-        {
-            continue;
-        }
-        if (!acpi_checksum(candidate, candidate->length))
-        {
-            continue;
-        }
-        return candidate;
     }
 
     return NULL;

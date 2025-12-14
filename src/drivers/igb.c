@@ -1,6 +1,7 @@
 #include "igb.h"
 #include "pci.h"
 #include "serial.h"
+#include "ioremap.h"
 #include "libc.h"
 #include "net/interface.h"
 #include "net/dhcp.h"
@@ -75,6 +76,8 @@ static void igb_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context
 #define IGB_REG_TDH0        0x03810
 #define IGB_REG_TDT0        0x03818
 #define IGB_REG_TXDCTL0     0x03828
+
+#define IGB_MMIO_BYTES 0x20000ULL
 
 #define IGB_CTRL_RST   (1U << 26)
 #define IGB_CTRL_SLU   (1U << 6)
@@ -284,7 +287,12 @@ void igb_init(void)
         igb_log("MMIO base is zero");
         return;
     }
-    g_regs = (volatile uint8_t *)(uintptr_t)bar0;
+    g_regs = (volatile uint8_t *)ioremap((paddr_t)bar0, (size_t)IGB_MMIO_BYTES);
+    if (!g_regs)
+    {
+        igb_log("ioremap failed for MMIO");
+        return;
+    }
 
     pci_set_command_bits(g_device, 0x0006, 0); /* enable memory + bus master */
 

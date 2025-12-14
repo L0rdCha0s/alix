@@ -1,10 +1,11 @@
-# Memory Management (Heap, Paging, User Mappings)
+# Memory Management (Heap, Paging, Physical RAM, User Mappings)
 
-This kernel has three major memory layers:
+This kernel has four major memory layers:
 
 1. **Kernel heap** (`malloc`/`free`): dynamic allocations for kernel objects.
 2. **Paging and address spaces**: kernel mappings + per-process user mappings.
-3. **User memory backing**: physical pages used to back user virtual ranges.
+3. **Physical memory manager (PMM)**: tracks free physical RAM ranges from E820 and hands out page-aligned allocations.
+4. **User memory backing**: physical pages used to back user virtual ranges (currently a thin wrapper over PMM).
 
 ## Global Layout (`include/memory_layout.h`, `src/arch/x86/kernel_entry.c`)
 
@@ -47,19 +48,32 @@ Locking:
 - There is a global paging lock, plus optional per-space locks (`paging_space_t.lock`).
 - Remote TLB flush uses SMP IPIs (see `smp_broadcast_tlb_flush` and `paging_handle_remote_tlb_flush`).
 
-## User Physical Page Pool (`src/kernel/user_memory.c`)
+### Kernel Mappings
 
-`user_memory.c` maintains a free list of *physical* address ranges derived from `boot_info.e820` (usable RAM), bounded by:
+The kernel maintains a few always-present mappings:
 
-- `g_mem_layout.user_phys_min` (avoid stepping on kernel heap / reserved areas)
-- `g_mem_layout.identity_map_limit` (identity-mapped limit)
+- **Low identity map**: an identity mapping of the first 4 GiB of physical address space, used for early boot and legacy assumptions.
+- **Physmap (direct map)**: a high-half direct mapping of physical RAM at `KERNEL_PHYSMAP_BASE` (see `include/physmem.h`).
+  - Kernel code can access any PMM-allocated physical page `p` via `phys_to_virt(p)`.
+- **Ioremap window**: a high-half virtual window at `KERNEL_IOREMAP_BASE` used to map device MMIO ranges on demand (see `include/ioremap.h` and `src/kernel/ioremap.c`).
 
-APIs:
+These upper-half mappings are shared into all address spaces via `paging_clone_kernel_space` so the kernel can run while a user CR3 is active.
 
-- `user_memory_alloc(bytes)` → returns a physical address (as `void*`) aligned to pages.
-- `user_memory_free(addr, bytes)` → returns a region back to the free list.
+## Physical Memory Manager (PMM) (`include/pmm.h`, `src/kernel/pmm.c`)
 
-This pool is used to back user virtual memory mappings.
+The PMM builds a free-range list from the E820 map (`boot_info.e820`, type=1 usable RAM) and then **reserves** physical ranges that must not be allocated:
+
+- Low memory (BIOS/real-mode data), bootstrap stack, bootstrap page tables
+- Kernel image
+- SMP trampoline / AP boot data
+- Kernel heap region
+- Loader-provided bootinfo copy and framebuffer ranges (if present)
+
+The PMM exposes page/range allocation APIs returning `paddr_t` physical addresses.
+
+## User Physical Backing (`include/user_memory.h`, `src/kernel/user_memory.c`)
+
+`user_memory.c` is currently a thin wrapper over the PMM used by the process subsystem to allocate/free physical pages for user mappings.
 
 ## User Virtual Memory and Address Spaces (`src/kernel/process/process_memory.c`)
 
@@ -71,10 +85,10 @@ User processes have:
 Mapping path:
 
 - `process_map_user_segment(process, user_base, bytes, writable, executable, &host_ptr_out)`
-  1. Allocates physical backing from `user_memory_alloc`.
+  1. Allocates physical backing from `user_memory_alloc` (PMM).
   2. Tracks the mapping as a `process_user_region_t`.
   3. Maps the user virtual range to the physical pages via paging helpers.
-  4. Returns a kernel-mapped host pointer for initialisation/copying.
+  4. Returns a kernel host pointer for initialisation/copying via the physmap (`phys_to_virt`).
 
 User stack and heap:
 
@@ -88,4 +102,3 @@ The process subsystem contains multiple safety mechanisms:
 - Guard regions filled with a known pattern.
 - Optional guard page protection (depending on build flags).
 - Stack-owner tracking and “stack write debug” utilities to catch cross-thread/async stack misuse.
-

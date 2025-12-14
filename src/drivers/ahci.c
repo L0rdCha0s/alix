@@ -4,6 +4,7 @@
 #include "libc.h"
 #include "pci.h"
 #include "serial.h"
+#include "ioremap.h"
 #include "spinlock.h"
 #include "user_copy.h"
 #include "types.h"
@@ -372,6 +373,36 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
                            bool write);
 static bool ahci_identify_port(ahci_port_ctx_t *ctx, uint16_t *identify);
 static void ahci_handle_port_irq(uint32_t port_no);
+
+static void ahci_log_wait_timeout(uint32_t port_no,
+                                  const char *phase,
+                                  uint8_t command,
+                                  uint64_t lba,
+                                  uint32_t count,
+                                  const hba_port_t *port)
+{
+    if (!port)
+    {
+        serial_printf("[ahci] wait timeout port=%u phase=%s cmd=0x%02X lba=0x%016llX cnt=0x%08X",
+                      (unsigned)port_no,
+                      phase ? phase : "?",
+                      (unsigned)command,
+                      (unsigned long long)lba,
+                      (unsigned)count);
+        return;
+    }
+    serial_printf("[ahci] wait timeout port=%u phase=%s cmd=0x%02X lba=0x%016llX cnt=0x%08X ci=0x%08X is=0x%08X tfd=0x%08X serr=0x%08X sact=0x%08X",
+                  (unsigned)port_no,
+                  phase ? phase : "?",
+                  (unsigned)command,
+                  (unsigned long long)lba,
+                  (unsigned)count,
+                  (unsigned)port->ci,
+                  (unsigned)port->is,
+                  (unsigned)port->tfd,
+                  (unsigned)port->serr,
+                  (unsigned)port->sact);
+}
 
 static void *alloc_aligned(size_t size, size_t align)
 {
@@ -808,27 +839,60 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
         uint32_t timeout = AHCI_CMD_TIMEOUT;
         while (ctx->waiting && timeout--)
         {
+            if (!(port->ci & ctx->wait_slot_mask))
+            {
+                if (port->is & HBA_PxIS_TFES)
+                {
+                    ctx->wait_success = false;
+                }
+                else
+                {
+                    ctx->wait_success = true;
+                }
+                ctx->waiting = false;
+                break;
+            }
+            if (port->is & HBA_PxIS_TFES)
+            {
+                ctx->wait_success = false;
+                ctx->waiting = false;
+                break;
+            }
             process_yield();
         }
         if (ctx->waiting)
         {
             ctx->waiting = false;
-            ahci_log_port(ctx->port_no, "irq wait timed out");
+            ahci_log_wait_timeout(ctx->port_no, "irq", command, lba, count, port);
             use_irq = false;
         }
         if (ctx->wait_success)
         {
+            if (port->is & HBA_PxIS_TFES)
+            {
+                port->is = HBA_PxIS_TFES;
+                goto cleanup;
+            }
             result = true;
             goto cleanup;
         }
-        ahci_log_port(ctx->port_no, "irq wait failed, retrying with polling");
+        if (use_irq)
+        {
+            ahci_log_wait_timeout(ctx->port_no, "irq_fail", command, lba, count, port);
+        }
     }
 
+    uint32_t poll_timeout = AHCI_CMD_TIMEOUT;
     while (port->ci & ctx->wait_slot_mask)
     {
         if (port->is & HBA_PxIS_TFES)
         {
             port->is = HBA_PxIS_TFES;
+            goto cleanup;
+        }
+        if (poll_timeout-- == 0)
+        {
+            ahci_log_wait_timeout(ctx->port_no, "poll", command, lba, count, port);
             goto cleanup;
         }
         process_yield();
@@ -1093,17 +1157,28 @@ void ahci_init(void)
     pci_set_command_bits(dev, 0x7, 0);
     uint64_t bdf = ((uint64_t)dev.bus << 16) | ((uint64_t)dev.device << 8) | dev.function;
     ahci_log_hex("controller PCI bdf=", bdf);
-    uint32_t bar5 = pci_config_read32(dev, 0x24) & ~0xF;
+    uint32_t bar5_low = pci_config_read32(dev, 0x24);
+    if ((bar5_low & 0x1u) != 0)
+    {
+        serial_printf("%s", "[ahci] BAR5 expected MMIO, found IO\r\n");
+        return;
+    }
+    if ((bar5_low & 0x6u) == 0x4u)
+    {
+        serial_printf("%s", "[ahci] BAR5 reports 64-bit memory; unsupported at BAR5\r\n");
+        return;
+    }
+    uint64_t bar5 = (uint64_t)(bar5_low & ~0xFUL);
     ahci_log_hex("controller BAR5=", bar5);
     if (!bar5)
     {
         serial_printf("%s", "[ahci] BAR5 invalid\r\n");
         return;
     }
-    g_hba = (volatile hba_mem_t *)(uintptr_t)bar5;
+    g_hba = (volatile hba_mem_t *)ioremap((paddr_t)bar5, sizeof(hba_mem_t));
     if (!g_hba)
     {
-        serial_printf("%s", "[ahci] BAR5 invalid\r\n");
+        serial_printf("%s", "[ahci] ioremap failed\r\n");
         return;
     }
 

@@ -1,5 +1,6 @@
 #include "paging.h"
 
+#include "bootinfo.h"
 #include "libc.h"
 #include "serial.h"
 #include "msr.h"
@@ -11,6 +12,7 @@
 #include "heap.h"
 #include "sched_log.h"
 #include "build_features.h"
+#include "physmem.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -43,6 +45,8 @@ extern uint8_t __kernel_data_end[];
 #define PAGE_PRESENT                  (1ULL << 0)
 #define PAGE_WRITABLE                 (1ULL << 1)
 #define PAGE_USER                     (1ULL << 2)
+#define PAGE_PWT                      (1ULL << 3)
+#define PAGE_PCD                      (1ULL << 4)
 #define PAGE_PAGE_SIZE                (1ULL << 7)
 #define PAGE_GLOBAL                   (1ULL << 8)
 #define PAGE_NO_EXECUTE               (1ULL << 63)
@@ -52,7 +56,7 @@ extern uint8_t __kernel_data_end[];
 #define LOW_EXECUTABLE_LIMIT          PAGE_LARGE_SIZE /* keep low identity (e.g. SMP trampoline) executable */
 
 #ifndef ENABLE_PAGING_DEBUG_LOGS
-#define ENABLE_PAGING_DEBUG_LOGS 1
+#define ENABLE_PAGING_DEBUG_LOGS 0
 #endif
 
 static bool g_paging_trace_active = false;
@@ -77,9 +81,7 @@ static void paging_debug_log(const char *msg)
         }
         g_paging_debug_budget--;
     }
-    serial_printf("%s", "[paging] ");
-    serial_printf("%s", msg);
-    serial_printf("%s", "\r\n");
+    serial_printf("[paging] %s\n", msg);
 }
 #else
 void paging_set_clone_trace(bool enable)
@@ -305,6 +307,39 @@ static inline size_t index_pt(uintptr_t addr)
     return (size_t)((addr >> 12) & 0x1FF);
 }
 
+static uint64_t e820_max_usable_end(void)
+{
+    if (boot_info.magic != BOOTINFO_MAGIC)
+    {
+        return 0;
+    }
+    uint32_t count = boot_info.e820_entry_count;
+    if (count > BOOTINFO_MAX_E820_ENTRIES)
+    {
+        count = BOOTINFO_MAX_E820_ENTRIES;
+    }
+    uint64_t max_end = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const bootinfo_e820_entry_t *entry = &boot_info.e820[i];
+        if (entry->type != 1)
+        {
+            continue;
+        }
+        uint64_t base = entry->base;
+        uint64_t end = entry->base + entry->length;
+        if (end <= base)
+        {
+            continue;
+        }
+        if (end > max_end)
+        {
+            max_end = end;
+        }
+    }
+    return max_end;
+}
+
 static inline uint64_t *entry_to_table(uint64_t entry)
 {
     return (uint64_t *)(entry & PAGE_ADDRESS_MASK);
@@ -341,6 +376,19 @@ static void *allocate_aligned_page(paging_space_t *space)
         free(raw);
         return NULL;
     }
+    return (void *)aligned;
+}
+
+static void *allocate_aligned_page_untracked(void)
+{
+    size_t raw_bytes = (size_t)(PAGE_SIZE_BYTES + PAGE_TABLE_ALIGNMENT);
+    uint8_t *raw = (uint8_t *)malloc(raw_bytes);
+    if (!raw)
+    {
+        return NULL;
+    }
+    uintptr_t aligned = align_up((uintptr_t)raw, PAGE_TABLE_ALIGNMENT);
+    memset((void *)aligned, 0, PAGE_SIZE_BYTES);
     return (void *)aligned;
 }
 
@@ -465,16 +513,14 @@ static bool allocate_tables(page_tables_t *tables, paging_space_t *space)
     size_t raw_bytes = table_bytes + PAGE_TABLE_ALIGNMENT;
     if (g_paging_trace_active)
     {
-        serial_printf("%s", "[paging] allocate_tables malloc bytes=0x");
-        serial_printf("%016llX", (unsigned long long)(raw_bytes));
-        serial_printf("%s", "\r\n");
+        serial_printf("[paging] allocate_tables malloc bytes=0x%016llX\n",
+                      (unsigned long long)raw_bytes);
     }
     uint8_t *raw = (uint8_t *)malloc(raw_bytes);
     if (g_paging_trace_active)
     {
-        serial_printf("%s", "[paging] allocate_tables malloc result=0x");
-        serial_printf("%016llX", (unsigned long long)((uintptr_t)raw));
-        serial_printf("%s", "\r\n");
+        serial_printf("[paging] allocate_tables malloc result=0x%016llX\n",
+                      (unsigned long long)(uintptr_t)raw);
     }
     if (!raw)
     {
@@ -524,10 +570,11 @@ static uint64_t *ensure_pd(page_tables_t *tables, size_t index)
 
 static void apply_large_mapping(uint64_t *pd_entry,
                                 uint64_t phys_addr,
-                                bool executable)
+                                bool executable,
+                                uint64_t extra_flags)
 {
-    uint64_t flags = PAGE_PRESENT | PAGE_PAGE_SIZE | PAGE_GLOBAL;
-    flags |= PAGE_WRITABLE;
+    uint64_t flags = PAGE_PRESENT | PAGE_PAGE_SIZE | PAGE_GLOBAL | PAGE_WRITABLE;
+    flags |= (extra_flags & (PAGE_PWT | PAGE_PCD));
     if (g_nx_supported && !executable)
     {
         flags |= PAGE_NO_EXECUTE;
@@ -541,7 +588,98 @@ static void apply_small_mapping(uint64_t *pt_entry,
                                 bool executable,
                                 bool user_accessible)
 {
-    uint64_t flags = PAGE_PRESENT | PAGE_GLOBAL;
+    uint64_t flags = PAGE_PRESENT;
+    /* Global mappings are shared across CR3 reloads. Never mark user pages
+     * global; doing so causes stale/aliased TLB entries across processes. */
+    if (!user_accessible)
+    {
+        flags |= PAGE_GLOBAL;
+    }
+    if (writable)
+    {
+        flags |= PAGE_WRITABLE;
+    }
+    if (user_accessible)
+    {
+        flags |= PAGE_USER;
+    }
+    if (g_nx_supported && !executable)
+    {
+        flags |= PAGE_NO_EXECUTE;
+    }
+    *pt_entry = phys_addr | flags;
+}
+
+static bool phys_range_overlaps_framebuffer(uint64_t base, uint64_t end)
+{
+    if (end <= base)
+    {
+        return false;
+    }
+    if (!boot_info.framebuffer_enabled || boot_info.framebuffer_size == 0)
+    {
+        return false;
+    }
+    uint64_t fb_base = boot_info.framebuffer_base;
+    uint64_t fb_end = fb_base + boot_info.framebuffer_size;
+    if (fb_end < fb_base)
+    {
+        return false;
+    }
+    return end > fb_base && base < fb_end;
+}
+
+static bool e820_range_intersects_usable_ram(uint64_t base, uint64_t length)
+{
+    if (boot_info.magic != BOOTINFO_MAGIC || length == 0)
+    {
+        return false;
+    }
+    uint64_t end = base + length;
+    if (end <= base)
+    {
+        return false;
+    }
+
+    uint32_t count = boot_info.e820_entry_count;
+    if (count > BOOTINFO_MAX_E820_ENTRIES)
+    {
+        count = BOOTINFO_MAX_E820_ENTRIES;
+    }
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const bootinfo_e820_entry_t *entry = &boot_info.e820[i];
+        if (entry->type != 1)
+        {
+            continue;
+        }
+        uint64_t e_start = entry->base;
+        uint64_t e_end = entry->base + entry->length;
+        if (e_end <= e_start)
+        {
+            continue;
+        }
+        if (end > e_start && base < e_end)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void apply_small_mapping_ex(uint64_t *pt_entry,
+                                   uint64_t phys_addr,
+                                   bool writable,
+                                   bool executable,
+                                   bool user_accessible,
+                                   uint64_t extra_flags)
+{
+    uint64_t flags = PAGE_PRESENT;
+    if (!user_accessible)
+    {
+        flags |= PAGE_GLOBAL;
+    }
+    flags |= (extra_flags & (PAGE_PWT | PAGE_PCD));
     if (writable)
     {
         flags |= PAGE_WRITABLE;
@@ -702,9 +840,8 @@ static void map_identity_space(page_tables_t *tables)
     {
         if (g_paging_trace_active && ((addr & ((1ULL << 30) - 1)) == 0))
         {
-            serial_printf("%s", "[paging] map_progress addr=0x");
-            serial_printf("%016llX", (unsigned long long)(addr));
-            serial_printf("%s", "\r\n");
+            serial_printf("[paging] map_progress addr=0x%016llX\n",
+                          (unsigned long long)addr);
         }
         size_t pd_index = (size_t)(addr >> 30);
         uint64_t *pd = ensure_pd(tables, pd_index);
@@ -721,7 +858,13 @@ static void map_identity_space(page_tables_t *tables)
         bool needs_small = !(chunk_end <= fine_start || chunk_base >= fine_end);
         if (!needs_small)
         {
-            apply_large_mapping(&pd[pde_index], chunk_base, chunk_executable);
+            uint64_t extra_flags = 0;
+            if (!e820_range_intersects_usable_ram(chunk_base, PAGE_LARGE_SIZE) &&
+                !phys_range_overlaps_framebuffer(chunk_base, chunk_end))
+            {
+                extra_flags = PAGE_PCD | PAGE_PWT;
+            }
+            apply_large_mapping(&pd[pde_index], chunk_base, chunk_executable, extra_flags);
             continue;
         }
 
@@ -749,6 +892,133 @@ static void map_identity_space(page_tables_t *tables)
             apply_small_mapping(&pt[i], page_addr, writable, exec, false);
         }
     }
+}
+
+static bool install_kernel_physmap(paging_space_t *space)
+{
+    if (!space || !space->tables_base)
+    {
+        return false;
+    }
+
+    uint64_t max_end = e820_max_usable_end();
+    if (max_end == 0)
+    {
+        return false;
+    }
+    uint64_t phys_bytes = (uint64_t)align_up((uintptr_t)max_end, PAGE_LARGE_SIZE);
+    if (phys_bytes == 0)
+    {
+        return false;
+    }
+
+    uint64_t *pml4 = (uint64_t *)space->tables_base;
+    const uintptr_t virt_base = (uintptr_t)KERNEL_PHYSMAP_BASE;
+    const size_t base_pml4_idx = index_pml4(virt_base);
+    if (base_pml4_idx >= PAGE_DIRECTORY_ENTRIES)
+    {
+        return false;
+    }
+    if ((pml4[base_pml4_idx] & PAGE_PRESENT) != 0)
+    {
+        return true;
+    }
+
+    uint64_t pml4_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+    const uintptr_t pml4_span = (uintptr_t)(1ULL << 39);
+    const uint64_t pdpt_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+
+    uint64_t phys = 0;
+    uintptr_t virt = virt_base;
+
+    while (phys < phys_bytes)
+    {
+        size_t pml4_idx = index_pml4(virt);
+        if (pml4_idx >= PAGE_DIRECTORY_ENTRIES)
+        {
+            return false;
+        }
+        if ((pml4[pml4_idx] & PAGE_PRESENT) == 0)
+        {
+            uint64_t *pdpt = (uint64_t *)allocate_aligned_page_untracked();
+            if (!pdpt)
+            {
+                return false;
+            }
+            pml4[pml4_idx] = ((uintptr_t)pdpt) | pml4_flags;
+        }
+        uint64_t *pdpt = entry_to_table(pml4[pml4_idx]);
+
+        uintptr_t virt_end = (virt & ~(pml4_span - 1)) + pml4_span;
+        uint64_t chunk_bytes = phys_bytes - phys;
+        uint64_t chunk_limit = (uint64_t)(virt_end - virt);
+        if (chunk_bytes > chunk_limit)
+        {
+            chunk_bytes = chunk_limit;
+        }
+        if (chunk_bytes == 0)
+        {
+            return false;
+        }
+
+        for (uint64_t off = 0; off < chunk_bytes; off += PAGE_LARGE_SIZE)
+        {
+            uintptr_t v = virt + (uintptr_t)off;
+            uint64_t p = phys + off;
+            size_t pdpt_idx = index_pdpt(v);
+            size_t pd_idx = index_pd(v);
+            if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0)
+            {
+                uint64_t *pd = (uint64_t *)allocate_aligned_page_untracked();
+                if (!pd)
+                {
+                    return false;
+                }
+                pdpt[pdpt_idx] = ((uintptr_t)pd) | pdpt_flags;
+            }
+            uint64_t *pd = entry_to_table(pdpt[pdpt_idx]);
+            uint64_t extra_flags = 0;
+            if (!e820_range_intersects_usable_ram(p, PAGE_LARGE_SIZE) &&
+                !phys_range_overlaps_framebuffer(p, p + PAGE_LARGE_SIZE))
+            {
+                extra_flags = PAGE_PCD | PAGE_PWT;
+            }
+            apply_large_mapping(&pd[pd_idx], p, false, extra_flags);
+        }
+
+        phys += chunk_bytes;
+        virt += (uintptr_t)chunk_bytes;
+    }
+
+    return true;
+}
+
+static bool install_kernel_ioremap_window(paging_space_t *space)
+{
+    if (!space || !space->tables_base)
+    {
+        return false;
+    }
+    uint64_t *pml4 = (uint64_t *)space->tables_base;
+    const uintptr_t virt_base = (uintptr_t)KERNEL_IOREMAP_BASE;
+    const size_t pml4_idx = index_pml4(virt_base);
+    if (pml4_idx >= PAGE_DIRECTORY_ENTRIES)
+    {
+        return false;
+    }
+    if ((pml4[pml4_idx] & PAGE_PRESENT) != 0)
+    {
+        return true;
+    }
+
+    uint64_t *pdpt = (uint64_t *)allocate_aligned_page_untracked();
+    if (!pdpt)
+    {
+        return false;
+    }
+    uint64_t flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+    pml4[pml4_idx] = ((uintptr_t)pdpt) | flags;
+    return true;
 }
 
 static bool build_identity_space(paging_space_t *space)
@@ -807,6 +1077,14 @@ void paging_init(void)
     {
         paging_panic("kernel page table allocation failed");
     }
+    if (!install_kernel_physmap(&kernel_space))
+    {
+        paging_panic("kernel physmap setup failed");
+    }
+    if (!install_kernel_ioremap_window(&kernel_space))
+    {
+        paging_panic("kernel ioremap setup failed");
+    }
 
     enable_protection_bits();
     write_cr3(kernel_space.cr3);
@@ -835,6 +1113,15 @@ bool paging_clone_kernel_space(paging_space_t *space)
     {
         paging_debug_log("clone_kernel_space build_failed");
         return false;
+    }
+    uint64_t *dst_pml4 = (uint64_t *)space->tables_base;
+    uint64_t *src_pml4 = (uint64_t *)g_kernel_space.tables_base;
+    if (dst_pml4 && src_pml4)
+    {
+        for (size_t i = 256; i < PAGE_DIRECTORY_ENTRIES; ++i)
+        {
+            dst_pml4[i] = src_pml4[i];
+        }
     }
     spinlock_init(&space->lock);
     space->lock_inited = true;
@@ -1077,6 +1364,146 @@ static bool paging_unmap_user_page_internal(paging_space_t *space,
     __asm__ volatile ("invlpg (%0)" :: "r"(virtual_addr) : "memory");
     paging_flush_space_tlb(space);
     return true;
+}
+
+static bool ensure_kernel_ioremap_pt(uintptr_t virt_addr, uint64_t **out_pt)
+{
+    if (!out_pt || !g_kernel_space.tables_base)
+    {
+        return false;
+    }
+
+    uint64_t *pml4 = (uint64_t *)g_kernel_space.tables_base;
+    size_t pml4_idx = index_pml4(virt_addr);
+    if ((pml4[pml4_idx] & PAGE_PRESENT) == 0)
+    {
+        return false;
+    }
+
+    uint64_t *pdpt = entry_to_table(pml4[pml4_idx]);
+    size_t pdpt_idx = index_pdpt(virt_addr);
+    if ((pdpt[pdpt_idx] & PAGE_PRESENT) == 0)
+    {
+        uint64_t *new_pd = (uint64_t *)allocate_aligned_page_untracked();
+        if (!new_pd)
+        {
+            return false;
+        }
+        uint64_t flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+        pdpt[pdpt_idx] = ((uintptr_t)new_pd) | flags;
+    }
+    else if ((pdpt[pdpt_idx] & PAGE_PAGE_SIZE) != 0)
+    {
+        return false;
+    }
+
+    uint64_t *pd = entry_to_table(pdpt[pdpt_idx]);
+    size_t pd_idx = index_pd(virt_addr);
+    if ((pd[pd_idx] & PAGE_PRESENT) == 0)
+    {
+        uint64_t *new_pt = (uint64_t *)allocate_aligned_page_untracked();
+        if (!new_pt)
+        {
+            return false;
+        }
+        uint64_t flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_GLOBAL;
+        pd[pd_idx] = ((uintptr_t)new_pt) | flags;
+    }
+    else if ((pd[pd_idx] & PAGE_PAGE_SIZE) != 0)
+    {
+        return false;
+    }
+
+    *out_pt = entry_to_table(pd[pd_idx]);
+    return true;
+}
+
+/*
+ * Map a physical range into the shared kernel ioremap window.
+ *
+ * Callers should allocate `virtual_addr` from the ioremap window (see ioremap.c)
+ * and should not overlap existing mappings.
+ *
+ * When `cache_disable == true` the mapping uses PCD/PWT to request uncached
+ * access (appropriate for device registers).
+ */
+bool paging_map_kernel_ioremap_range(uintptr_t virtual_addr,
+                                     paddr_t physical_addr,
+                                     size_t length,
+                                     bool cache_disable)
+{
+    if (!g_paging_ready || !g_kernel_space.tables_base || length == 0)
+    {
+        return false;
+    }
+    if (!paging_check_lock_order("paging_map_kernel_ioremap_range"))
+    {
+        return false;
+    }
+
+    const uintptr_t window_base = (uintptr_t)KERNEL_IOREMAP_BASE;
+    const uintptr_t window_end = window_base + (uintptr_t)KERNEL_IOREMAP_MAX_BYTES;
+    if (window_end <= window_base)
+    {
+        return false;
+    }
+    if (virtual_addr < window_base || virtual_addr >= window_end)
+    {
+        return false;
+    }
+    if (virtual_addr + length < virtual_addr)
+    {
+        return false;
+    }
+
+    uintptr_t virt_start = align_down(virtual_addr, PAGE_SIZE_BYTES);
+    uintptr_t virt_end = align_up(virtual_addr + length, PAGE_SIZE_BYTES);
+    if (virt_end < virt_start || virt_end > window_end)
+    {
+        return false;
+    }
+
+    uintptr_t phys_start = align_down((uintptr_t)physical_addr, PAGE_SIZE_BYTES);
+    uintptr_t phys_end = phys_start + (virt_end - virt_start);
+    if (phys_end < phys_start)
+    {
+        return false;
+    }
+
+    paging_space_t *space = &g_kernel_space;
+    bool used_global = false;
+    uint64_t lock_flags = paging_space_lock(space, &used_global);
+    bool ok = true;
+
+    uintptr_t virt = virt_start;
+    uint64_t phys = (uint64_t)phys_start;
+    uint64_t extra_flags = cache_disable ? (PAGE_PCD | PAGE_PWT) : 0;
+    while (virt < virt_end)
+    {
+        uint64_t *pt = NULL;
+        if (!ensure_kernel_ioremap_pt(virt, &pt))
+        {
+            ok = false;
+            break;
+        }
+        size_t pt_idx = index_pt(virt);
+        if ((pt[pt_idx] & PAGE_PRESENT) != 0)
+        {
+            ok = false;
+            break;
+        }
+        apply_small_mapping_ex(&pt[pt_idx], phys & PAGE_ADDRESS_MASK, true, false, false, extra_flags);
+        virt += PAGE_SIZE_BYTES;
+        phys += PAGE_SIZE_BYTES;
+    }
+
+    if (ok)
+    {
+        paging_flush_space_tlb(space);
+    }
+
+    paging_space_unlock(space, used_global, lock_flags);
+    return ok;
 }
 
 static bool paging_set_kernel_range_writable_internal(uintptr_t virtual_addr,
