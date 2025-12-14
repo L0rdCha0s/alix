@@ -317,12 +317,38 @@ static uint64_t total_usable_bytes(void)
     return total;
 }
 
-static uint64_t total_physical_bytes(void)
+static uint64_t total_ram_bytes(void)
 {
+    /*
+     * The UEFI loader converts the UEFI memory map into E820-style entries.
+     *
+     * Note: E820 type=2 ("reserved") includes both reserved *RAM* (e.g. UEFI
+     * runtime services) and non-RAM apertures (e.g. PCIe MMIO windows). We
+     * don't want MMIO to inflate the "RAM total" figure, so we only count
+     * reserved entries that look like normal cacheable memory (WB).
+     */
+    const uint32_t EFI_MEMORY_WB = 0x00000008u;
+
     uint64_t total = 0;
     for (uint32_t i = 0; i < g_e820_count; ++i)
     {
-        total += g_e820[i].length;
+        switch (g_e820[i].type)
+        {
+            case 1: /* usable RAM */
+            case 3: /* ACPI reclaimable */
+            case 4: /* ACPI NVS */
+            case 5: /* bad memory */
+                total += g_e820[i].length;
+                break;
+            case 2: /* reserved: include only if it's WB cacheable (reserved RAM) */
+                if ((g_e820[i].attr & EFI_MEMORY_WB) != 0)
+                {
+                    total += g_e820[i].length;
+                }
+                break;
+            default: /* unknown */
+                break;
+        }
     }
     return total;
 }
@@ -336,7 +362,7 @@ static void log_memory_summary(void)
     }
 
     uint64_t usable = total_usable_bytes();
-    uint64_t total = total_physical_bytes();
+    uint64_t total = total_ram_bytes();
     uint64_t usable_mib = usable / (1024ULL * 1024ULL);
     uint64_t total_mib = total / (1024ULL * 1024ULL);
 
@@ -523,7 +549,7 @@ bool hwinfo_get_memory_info(hwinfo_memory_info_t *out)
         return false;
     }
     out->usable_bytes = total_usable_bytes();
-    out->total_bytes = total_physical_bytes();
+    out->total_bytes = total_ram_bytes();
     out->e820_entries = g_e820_count;
     return true;
 }
