@@ -7,6 +7,16 @@
 #include "process.h"
 #include "interrupts.h"
 
+static bool g_usb_irq_registered[INTERRUPTS_IRQ_COUNT];
+
+static void usb_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context)
+{
+    (void)irq;
+    (void)frame;
+    (void)context;
+    usb_on_irq();
+}
+
 #define UHCI_MAX_PORTS 2
 #define UHCI_MAX_DEVICES 16
 #define UHCI_TD_POOL_SIZE 2048
@@ -1198,6 +1208,7 @@ bool usb_bus_init(void)
 {
     g_td_pool_next = 0;
     g_td_pool_free_count = 0;
+    memset(g_usb_irq_registered, 0, sizeof(g_usb_irq_registered));
     spinlock_init(&g_td_pool_lock);
     usb_log("[usb] bus_init begin");
     usb_log("[usb] attempting ehci port routing");
@@ -1273,13 +1284,31 @@ bool usb_bus_init(void)
             continue;
         }
         usb_log("[usb] start ok");
-        if (hc->irq_line < 16 && !hc->irq_enabled)
+        if (hc->irq_line < INTERRUPTS_IRQ_COUNT && !hc->irq_enabled)
         {
-            interrupts_enable_irq(hc->irq_line);
-            hc->irq_enabled = true;
-            serial_printf("[usb] enabled irq line %u for uhci %u\r\n",
-                          (unsigned)hc->irq_line,
-                          (unsigned)i);
+            bool registered = g_usb_irq_registered[hc->irq_line];
+            if (!registered)
+            {
+                registered = interrupts_register_irq_handler(hc->irq_line, usb_irq_handler, NULL);
+                if (registered)
+                {
+                    g_usb_irq_registered[hc->irq_line] = true;
+                }
+            }
+            if (registered)
+            {
+                interrupts_enable_irq(hc->irq_line);
+                hc->irq_enabled = true;
+                serial_printf("[usb] enabled irq line %u for uhci %u\r\n",
+                              (unsigned)hc->irq_line,
+                              (unsigned)i);
+            }
+            else
+            {
+                serial_printf("[usb] failed to register IRQ handler line %u for uhci %u\r\n",
+                              (unsigned)hc->irq_line,
+                              (unsigned)i);
+            }
         }
         usb_enumerate_port(hc, UHCI_PORTSC1, 0);
         usb_enumerate_port(hc, UHCI_PORTSC2, 1);

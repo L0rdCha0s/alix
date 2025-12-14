@@ -171,6 +171,14 @@ static bool g_ahci_irq_ready = false;
 static bool g_ahci_use_interrupts = false;
 static bool g_ahci_msi_enabled = false;
 
+static void ahci_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context)
+{
+    (void)irq;
+    (void)frame;
+    (void)context;
+    ahci_on_irq();
+}
+
 static void ahci_log(const char *msg)
 {
 #if AHCI_DEBUG
@@ -1109,6 +1117,10 @@ void ahci_init(void)
     irq_line = 10; /* Prefer IRQ10 to avoid sharing vector with NIC. */
     pci_config_write8(dev, 0x3C, irq_line);
     g_ahci_irq_line = irq_line;
+    if (!interrupts_register_irq_handler(g_ahci_irq_line, ahci_irq_handler, NULL))
+    {
+        serial_printf("%s", "[ahci] failed to register IRQ handler\r\n");
+    }
 
     uint8_t vector = (uint8_t)(32 + g_ahci_irq_line);
     uint8_t apic = ahci_select_msi_apic();

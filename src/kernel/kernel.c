@@ -995,6 +995,9 @@ void kernel_main(void)
 #endif
 
     interrupts_init();
+#if ENABLE_INIT_BLOCK
+    ahci_interrupts_activate();
+#endif
     interrupts_enable_irq(1);
     timer_init(100);
 #if ENABLE_INIT_KEYBOARD

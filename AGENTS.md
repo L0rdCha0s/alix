@@ -12,6 +12,7 @@
 - Use x86_64-elf-addr2line and x86_64-elf-objdump in order to look for lines in stacktraces in compiled code and analyse ELF binaries, like build/alix.elf (which is the main kernel binary). Here is an example: /bin/bash -lc 'cd /Users/alex/Documents/Projects/alix && x86_64-elf-objdump -d build/alix.elf | rg -n "113a4"'
 - Use tcpdump to analyse qemu-net.pcap when looking at network traffic.
 - We are still building our libc - if there's a function that should be either in the kernel or the user libc, add it in, rather than putting a function that should be in libc in a seperate place
+- Read the contents of the docs/ folder in order to understand ATK or the kernel layout
 
 Thanks!
 

@@ -5,21 +5,14 @@
 #include "keyboard.h"
 #include "types.h"
 #include "interrupts.h"
-#include "rtl8139.h"
-#include "igb.h"
 #include "serial.h"
-#include "process.h"
-void scheduler_schedule(bool requeue_current);
+#include "libc.h"
 #include "process.h"
 #include "console.h"
 #include "syscall.h"
 #include "smp.h"
 #include "paging.h"
 #include "lapic.h"
-#include "ahci.h"
-#if ENABLE_USB
-#include "usb.h"
-#endif
 #include "arch/x86/smp_boot.h"
 #include "arch/x86/cpu.h"
 
@@ -53,6 +46,15 @@ static uint8_t pic1_mask = 0xFF;
 static uint8_t pic2_mask = 0xFF;
 static int irq12_log_count = 0;
 
+typedef struct irq_handler_node
+{
+    irq_handler_t handler;
+    void *context;
+    struct irq_handler_node *next;
+} irq_handler_node_t;
+
+static irq_handler_node_t *g_irq_handlers[INTERRUPTS_IRQ_COUNT];
+
 static void halt_forever(void) __attribute__((noreturn));
 static void fault_report(const char *reason,
                          const interrupt_frame_t *frame,
@@ -62,6 +64,52 @@ static void fault_report(const char *reason,
                          uint64_t cr2_value);
 static void fault_dump_bytes(uint64_t rip);
 static void dump_exception_stacktrace(const interrupt_frame_t *frame);
+
+bool interrupts_register_irq_handler(uint8_t irq, irq_handler_t handler, void *context)
+{
+    if (irq >= INTERRUPTS_IRQ_COUNT || !handler)
+    {
+        return false;
+    }
+
+    irq_handler_node_t *node = (irq_handler_node_t *)malloc(sizeof(*node));
+    if (!node)
+    {
+        return false;
+    }
+
+    node->handler = handler;
+    node->context = context;
+    node->next = NULL;
+
+    irq_handler_node_t *expected = NULL;
+    do
+    {
+        expected = __atomic_load_n(&g_irq_handlers[irq], __ATOMIC_ACQUIRE);
+        node->next = expected;
+    } while (!__atomic_compare_exchange_n(&g_irq_handlers[irq],
+                                          &expected,
+                                          node,
+                                          false,
+                                          __ATOMIC_RELEASE,
+                                          __ATOMIC_RELAXED));
+    return true;
+}
+
+static void interrupts_dispatch_irq(uint8_t irq, interrupt_frame_t *frame)
+{
+    if (irq >= INTERRUPTS_IRQ_COUNT)
+    {
+        return;
+    }
+
+    irq_handler_node_t *node = __atomic_load_n(&g_irq_handlers[irq], __ATOMIC_ACQUIRE);
+    while (node)
+    {
+        node->handler(irq, frame, node->context);
+        node = node->next;
+    }
+}
 
 static inline uint64_t read_cr2(void)
 {
@@ -386,6 +434,28 @@ static void pic_send_eoi(uint8_t irq)
     outb(PIC1_COMMAND, PIC_EOI);
 }
 
+#define DEFINE_GENERIC_IRQ_HANDLER(NUM) \
+    __attribute__((interrupt)) static void irq##NUM##_handler(interrupt_frame_t *frame) \
+    { \
+        interrupts_dispatch_irq((uint8_t)(NUM), frame); \
+        lapic_eoi(); \
+        pic_send_eoi((uint8_t)(NUM)); \
+    }
+
+DEFINE_GENERIC_IRQ_HANDLER(2)
+DEFINE_GENERIC_IRQ_HANDLER(3)
+DEFINE_GENERIC_IRQ_HANDLER(4)
+DEFINE_GENERIC_IRQ_HANDLER(5)
+DEFINE_GENERIC_IRQ_HANDLER(6)
+DEFINE_GENERIC_IRQ_HANDLER(7)
+DEFINE_GENERIC_IRQ_HANDLER(8)
+DEFINE_GENERIC_IRQ_HANDLER(9)
+DEFINE_GENERIC_IRQ_HANDLER(13)
+DEFINE_GENERIC_IRQ_HANDLER(14)
+DEFINE_GENERIC_IRQ_HANDLER(15)
+
+#undef DEFINE_GENERIC_IRQ_HANDLER
+
 __attribute__((interrupt)) static void irq1_handler(interrupt_frame_t *frame)
 {
     (void)frame;
@@ -415,24 +485,14 @@ __attribute__((interrupt)) static void irq0_handler(interrupt_frame_t *frame)
 
 __attribute__((interrupt)) static void irq10_handler(interrupt_frame_t *frame)
 {
-    (void)frame;
-#if ENABLE_USB
-    usb_on_irq();
-#endif
-    ahci_on_irq();
+    interrupts_dispatch_irq(10, frame);
     lapic_eoi();
     pic_send_eoi(10);
 }
 
 __attribute__((interrupt)) static void irq11_handler(interrupt_frame_t *frame)
 {
-    (void)frame;
-#if ENABLE_USB
-    usb_on_irq();
-#endif
-    ahci_on_irq();
-    igb_on_irq();
-    rtl8139_on_irq();
+    interrupts_dispatch_irq(11, frame);
     lapic_eoi();
     pic_send_eoi(11);
 }
@@ -580,16 +640,26 @@ void interrupts_init(void)
     idt_set_gate_ist(14, (void *)page_fault_handler, 0, fault_ist);
     idt_set_gate(32, (void *)irq0_handler);
     idt_set_gate(33, (void *)irq1_handler);
+    idt_set_gate(34, (void *)irq2_handler);
+    idt_set_gate(35, (void *)irq3_handler);
+    idt_set_gate(36, (void *)irq4_handler);
+    idt_set_gate(37, (void *)irq5_handler);
+    idt_set_gate(38, (void *)irq6_handler);
+    idt_set_gate(39, (void *)irq7_handler);
+    idt_set_gate(40, (void *)irq8_handler);
+    idt_set_gate(41, (void *)irq9_handler);
     idt_set_gate(42, (void *)irq10_handler);
     idt_set_gate(43, (void *)irq11_handler);
     idt_set_gate(44, (void *)irq12_handler);
+    idt_set_gate(45, (void *)irq13_handler);
+    idt_set_gate(46, (void *)irq14_handler);
+    idt_set_gate(47, (void *)irq15_handler);
     idt_set_gate(SMP_SCHEDULE_IPI_VECTOR, (void *)smp_schedule_ipi_handler);
     idt_set_gate(SMP_TLB_FLUSH_IPI_VECTOR, (void *)smp_tlb_flush_ipi_handler);
     idt_set_gate_dpl(0x80, syscall_entry, 3);
     idt_load();
     pic_remap();
     pic_set_masks();
-    ahci_interrupts_activate();
 }
 
 void interrupts_enable_irq(uint8_t irq)

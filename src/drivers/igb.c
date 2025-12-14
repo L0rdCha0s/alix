@@ -15,6 +15,14 @@
 #include "process.h"
 #include "lapic.h"
 
+static void igb_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context)
+{
+    (void)irq;
+    (void)frame;
+    (void)context;
+    igb_on_irq();
+}
+
 #define IGB_VENDOR_ID 0x8086
 #define IGB_DEVICE_ID_82576 0x10C9
 #define IGB_DEVICE_ID_I350  0x1521
@@ -361,6 +369,10 @@ void igb_init(void)
                   (unsigned)vfre);
 
     g_igb_present = true;
+    if (!interrupts_register_irq_handler(11, igb_irq_handler, NULL))
+    {
+        igb_log("failed to register IRQ handler");
+    }
     interrupts_enable_irq(11);
 
     g_iface = net_if_register("igb0", g_mac);

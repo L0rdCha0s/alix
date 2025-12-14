@@ -111,6 +111,14 @@ static inline void rtl8139_sti(void)
     __asm__ volatile ("sti" ::: "memory");
 }
 
+static void rtl8139_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context)
+{
+    (void)irq;
+    (void)frame;
+    (void)context;
+    rtl8139_on_irq();
+}
+
 static inline uint64_t rtl8139_acquire_tx(void)
 {
     uint64_t flags = rtl8139_save_flags();
@@ -265,6 +273,10 @@ void rtl8139_init(void)
     }
 
     g_rtl_present = true;
+    if (!interrupts_register_irq_handler(11, rtl8139_irq_handler, NULL))
+    {
+        serial_printf("%s", "rtl8139: failed to register IRQ handler\r\n");
+    }
     interrupts_enable_irq(11);
 
     g_hw_tx_cursor = 0;  // after reset, the NIC starts at pair 0
