@@ -24,6 +24,19 @@
 #define ALIXFS2_MAX_FREE_CHUNKS 128u
 #define ALIXFS2_DEFAULT_NODE_CAPACITY 4096u
 
+/*
+ * On-disk structures (packed).
+ *
+ * Layout:
+ * - Header at offset 0 (sector-aligned span, see `header_span`)
+ * - Chunk table at offset `header_span` (node_capacity entries)
+ * - Data region at offset `header.data_region_offset`
+ *
+ * The chunk table maps node IDs → payload chunks. Each payload chunk stores a
+ * node header + name + data (for files/symlinks).
+ *
+ * See docs/kernel/alixfs.md for the full format description.
+ */
 typedef struct __attribute__((packed))
 {
     uint64_t offset;
@@ -102,6 +115,12 @@ static bool alixfs_device_io(block_device_t *device,
                              size_t len,
                              bool write)
 {
+    /*
+     * Byte-granular IO on top of sector-based block IO.
+     *
+     * If the request is not sector-aligned, this uses a scratch buffer and
+     * read-modify-write for partial-sector updates.
+     */
     if (!device || !buffer || len == 0)
     {
         return true;
@@ -261,6 +280,13 @@ static bool alixfs_chunk_allocate(alixfs_mount_t *fs,
                                   uint64_t *offset,
                                   uint32_t *capacity)
 {
+    /*
+     * Allocate a sector-aligned payload chunk.
+     *
+     * Allocation order:
+     *  1) first-fit from `header.free_chunks[]`
+     *  2) extend the data-region high-water mark (`data_region_size`)
+     */
     if (!fs || !offset || !capacity)
     {
         return false;
@@ -301,6 +327,12 @@ static bool alixfs_chunk_allocate(alixfs_mount_t *fs,
 
 static void alixfs_chunk_release(alixfs_mount_t *fs, uint64_t offset, uint32_t length)
 {
+    /*
+     * Return a payload chunk to the on-disk free list.
+     *
+     * This attempts to coalesce with an adjacent free chunk; otherwise it
+     * appends a new entry if the free list isn't full.
+     */
     if (!fs || length == 0)
     {
         return;
@@ -391,6 +423,11 @@ static bool alixfs_ensure_capacity(vfs_node_t *node, size_t need)
 
 static bool alixfs_assign_node_id(alixfs_mount_t *fs, vfs_node_t *node)
 {
+    /*
+     * Assign a persistent node ID (chunk table index) if missing.
+     *
+     * A node ID is considered free when `chunks[id].capacity == 0`.
+     */
     if (!fs || !node)
     {
         return false;
@@ -428,6 +465,13 @@ static bool alixfs_serialize_node(vfs_node_t *node,
                                   uint8_t **out_buf,
                                   size_t *out_len)
 {
+    /*
+     * Serialize a VFS node into the on-disk payload format:
+     *   [alixfs_node_disk_t][name bytes][data bytes]
+     *
+     * - `name_len` does not include a NUL terminator.
+     * - `data_len` is `node->size` for files/symlinks, 0 otherwise.
+     */
     if (!node || !out_buf || !out_len || node->disk_id == UINT32_MAX)
     {
         return false;
@@ -469,6 +513,12 @@ static bool alixfs_serialize_node(vfs_node_t *node,
 
 static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_all)
 {
+    /*
+     * Write a single node payload to disk and update the in-memory chunk entry.
+     *
+     * The chunk table and header are not written here; VFS calls
+     * `alixfs_mount_commit` after flushing nodes to persist metadata updates.
+     */
     if (!fs || !node)
     {
         return true;
@@ -584,6 +634,12 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
 
 static bool alixfs_flush_chunk_table(alixfs_mount_t *fs)
 {
+    /*
+     * Persist modified chunk table entries.
+     *
+     * Entries are tracked by a per-ID dirty bitmap so we can write only the
+     * changed entries rather than rewriting the full table.
+     */
     if (!fs || !fs->chunk_dirty_bitmap)
     {
         return true;
@@ -610,6 +666,11 @@ static bool alixfs_flush_chunk_table(alixfs_mount_t *fs)
 
 static bool alixfs_flush_header(alixfs_mount_t *fs)
 {
+    /*
+     * Persist the on-disk header.
+     *
+     * The header includes the free list and data-region bookkeeping.
+     */
     if (!fs || !fs->header_dirty)
     {
         return true;
@@ -635,6 +696,12 @@ static bool alixfs_flush_subtree(alixfs_mount_t *fs,
                                  vfs_mount_t *mount,
                                  bool force_all)
 {
+    /*
+     * Recursive flush for a mounted subtree.
+     *
+     * Only nodes that belong to the specific mount are flushed (so mount points
+     * embedded under the tree are not traversed across device boundaries).
+     */
     if (!node)
     {
         return true;
@@ -708,6 +775,9 @@ void alixfs_mount_destroy(alixfs_mount_t *fs)
 
 static bool alixfs_load_chunk_table(alixfs_mount_t *fs)
 {
+    /*
+     * Load the on-disk chunk table into memory and initialise the chunk dirty bitmap.
+     */
     if (!fs)
     {
         return false;

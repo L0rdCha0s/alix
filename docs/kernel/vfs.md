@@ -56,6 +56,10 @@ The default block-backed filesystem backend is AlixFS2:
 - Backend implementation: `src/kernel/alixfs.c`
 - Mount operations: `vfs_mount_device`, `vfs_format`, `vfs_sync_*` in `src/kernel/vfs.c`
 
+AlixFS2 specifics (on-disk layout, chunk table, writeback ordering, limitations):
+
+- `docs/kernel/alixfs.md`
+
 Dirty tracking is per-node and per-mount; `vfs_sync_dirty()` writes back dirty nodes and may apply backpressure when dirty bytes exceed thresholds.
 
 ## devfs and procfs
@@ -67,4 +71,3 @@ Dirty tracking is per-node and per-mount; `vfs_sync_dirty()` writes back dirty n
 - `src/kernel/procfs.c`:
   - Creates `/proc` and leaves it mutable.
   - Allows creating callback-backed files anywhere under `/proc/...` via `procfs_create_file_at`.
-

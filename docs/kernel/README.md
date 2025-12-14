@@ -8,6 +8,7 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - Processes/threads + scheduler: `docs/kernel/process.md`
 - Memory (heap, paging, user mappings): `docs/kernel/memory.md`
 - VFS/filesystems/mounts: `docs/kernel/vfs.md`
+- AlixFS2 backend details: `docs/kernel/alixfs.md`
 - Syscalls, FDs, sockets: `docs/kernel/syscalls.md`
 - Networking (drivers + protocols): `docs/kernel/network.md`
 - Source tree map: `docs/kernel/source_map.md`
@@ -21,4 +22,3 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - `src/drivers/`: device drivers (PCI, disks, NICs, serial, timer, keyboard/mouse, video, audio)
 - `src/net/`: network stack (ARP/DHCP/DNS/ICMP/NTP/TCP/TLS + routing + interface registry)
 - `include/`: public kernel headers shared across subsystems
-
