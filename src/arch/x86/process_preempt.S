@@ -3,6 +3,12 @@
 .global process_preempt_trampoline
 .extern process_preempt_hook
 
+# process_preempt_trampoline
+#
+# Used when preempting kernel-mode execution:
+# - saves volatile regs,
+# - calls `process_preempt_hook()` (which yields),
+# - returns to the saved resume RIP stored in GS:[0] (thread TLS).
 process_preempt_trampoline:
     push rax
     push rcx

@@ -208,29 +208,115 @@ extern const atk_class_t ATK_MENU_CLASS;
 extern const atk_class_t ATK_DROPDOWN_CLASS;
 extern const atk_class_t ATK_RICH_TEXT_CLASS;
 
+/*
+ * Internal: return the global ATK state pointer.
+ *
+ * The state is owned by `atk.c` and is protected by the ATK state lock.
+ */
 atk_state_t *atk_state_get(void);
+
+/*
+ * Internal: draw an arbitrary widget via its ops table.
+ *
+ * This does not do any z-ordering or clipping beyond what the widget implements.
+ */
 void atk_widget_draw_any(const atk_state_t *state, const atk_widget_t *widget);
+
+/*
+ * Internal: destroy a widget via its ops table.
+ *
+ * This is used by containers that own child widgets and need to run per-widget
+ * teardown hooks.
+ */
 void atk_widget_destroy_any(atk_widget_t *widget);
+
+/*
+ * Internal: initialize dirty tracking for a newly created state.
+ *
+ * This marks the full screen dirty and primes the dirty rectangle model.
+ */
 void atk_dirty_init(atk_state_t *state);
+
+/* Internal: mark an on-screen rectangle dirty (screen-space coordinates). */
 void atk_dirty_mark_rect(int x, int y, int width, int height);
+
+/* Internal: mark the entire screen dirty. */
 void atk_dirty_mark_all(void);
+
+/*
+ * Internal: consume the current dirty region.
+ *
+ * Returns true and fills `out_rect` when there is pending work for `atk_render()`.
+ */
 bool atk_dirty_consume(atk_rect_t *out_rect);
+
+/* Internal: return the widget currently holding mouse capture, if any. */
 atk_widget_t *atk_state_mouse_capture(const atk_state_t *state);
+
+/*
+ * Internal: set mouse capture to `widget`.
+ *
+ * Captured widgets continue to receive mouse events even if the cursor leaves
+ * their bounds until capture is released.
+ */
 void atk_state_set_mouse_capture(atk_state_t *state, atk_widget_t *widget);
+
+/* Internal: release mouse capture if it is currently held by `widget`. */
 void atk_state_release_mouse_capture(atk_state_t *state, const atk_widget_t *widget);
+
+/* Internal: return the currently focused widget, if any. */
 atk_widget_t *atk_state_focus_widget(const atk_state_t *state);
+
+/*
+ * Internal: set focus to `widget`.
+ *
+ * Focused widgets are eligible to receive key events.
+ */
 void atk_state_set_focus_widget(atk_state_t *state, atk_widget_t *widget);
+
+/*
+ * Internal: initialize guard fields used to detect state corruption.
+ *
+ * Guards are defensive only and do not provide synchronization.
+ */
 void atk_state_guard_init(atk_state_t *state);
+
+/* Internal: reset a guard pair to the known good magic values. */
 void atk_guard_reset(uint64_t *front, uint64_t *back);
+
+/* Internal: validate a guard pair and optionally log diagnostics. */
 void atk_guard_check(uint64_t *front, uint64_t *back, const char *label);
+
+/*
+ * Internal: commit the current theme and update any cached validation CRCs.
+ *
+ * Called after theme initialization/mutation.
+ */
 void atk_state_theme_commit(atk_state_t *state);
+
+/* Internal: validate that `state->theme` hasn't been corrupted. */
 bool atk_state_theme_validate(const atk_state_t *state, const char *label);
+
+/*
+ * Internal: ensure the ATK state lock is initialized.
+ *
+ * `atk.c` calls this before acquiring/releasing to keep call sites simple.
+ */
 void atk_state_lock_init(void);
+
+/*
+ * Internal: acquire the ATK state lock and return the prior IRQ state.
+ *
+ * This is a spinlock used by the kernel's UI thread and input paths.
+ */
 uint64_t atk_state_lock_acquire(void);
+
+/* Internal: release the ATK state lock using the saved IRQ state. */
 void atk_state_lock_release(uint64_t flags);
 #if ATK_DEBUG
 void atk_state_theme_log(const atk_state_t *state, const char *label);
 #else
+/* Internal: theme logging stub (compiled out unless `ATK_DEBUG` is enabled). */
 static inline void atk_state_theme_log(const atk_state_t *state, const char *label)
 {
     (void)state;

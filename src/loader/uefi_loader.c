@@ -7,6 +7,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * src/loader/uefi_loader.c
+ *
+ * UEFI loader that:
+ * - reads `\\alix.elf` from the boot volume,
+ * - loads its PT_LOAD segments into memory,
+ * - captures platform info (framebuffer, ACPI RSDP, EFI memory map → E820),
+ * - exits boot services, and
+ * - jumps to the kernel's `kernel_entry(bootinfo_t*)`.
+ *
+ * See docs/kernel/boot.md.
+ */
+
 #define EFI_PAGE_SIZE 4096ULL
 #define EFI_SIZE_TO_PAGES(x) (((x) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE)
 

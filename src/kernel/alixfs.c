@@ -5,6 +5,20 @@
 #include "serial.h"
 #include <stdint.h>
 
+/*
+ * src/kernel/alixfs.c
+ *
+ * AlixFS2 on-disk filesystem backend for the VFS mount layer.
+ *
+ * This file implements reading/writing VFS nodes to a block device:
+ * - a small fixed-size header (`alixfs2_header_t`)
+ * - a chunk table mapping node IDs to data offsets/lengths
+ * - per-node on-disk records for type/name/data
+ *
+ * The VFS orchestrates mount/writeback policy; this backend focuses on on-disk
+ * persistence. See docs/kernel/vfs.md.
+ */
+
 #define ALIXFS2_MAGIC   "ALIXFS2"
 #define ALIXFS2_VERSION 2u
 #define ALIXFS2_MAX_FREE_CHUNKS 128u
@@ -654,6 +668,12 @@ static bool alixfs_flush_subtree(alixfs_mount_t *fs,
     return true;
 }
 
+/*
+ * Create an AlixFS mount backend for a block device.
+ *
+ * This allocates in-memory tracking state; it does not read the disk until
+ * `alixfs_mount_load` is called.
+ */
 alixfs_mount_t *alixfs_mount_create(block_device_t *device)
 {
     if (!device)
@@ -672,6 +692,9 @@ alixfs_mount_t *alixfs_mount_create(block_device_t *device)
     return fs;
 }
 
+/*
+ * Destroy an AlixFS mount backend and free all associated in-memory state.
+ */
 void alixfs_mount_destroy(alixfs_mount_t *fs)
 {
     if (!fs)
@@ -722,6 +745,13 @@ static bool alixfs_load_chunk_table(alixfs_mount_t *fs)
     return true;
 }
 
+/*
+ * Load filesystem metadata from disk and populate the mounted VFS subtree.
+ *
+ * - Reads the header and chunk table.
+ * - Walks the node table and creates VFS nodes under `mount->mount_point`.
+ * - Assigns persistent disk IDs for nodes to support later writeback.
+ */
 bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
 {
     if (!fs || !mount || !mount->mount_point)
@@ -904,6 +934,11 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
     return true;
 }
 
+/*
+ * Flush an entire subtree of VFS nodes to disk.
+ *
+ * This is called by VFS mount writeback when syncing a mounted filesystem.
+ */
 bool alixfs_mount_flush_nodes(alixfs_mount_t *fs,
                               vfs_node_t *root,
                               vfs_mount_t *mount,
@@ -916,6 +951,12 @@ bool alixfs_mount_flush_nodes(alixfs_mount_t *fs,
     return alixfs_flush_subtree(fs, root, mount, force_all);
 }
 
+/*
+ * Flush a single VFS node to disk.
+ *
+ * Used for targeted writeback (`vfs_flush_node`) and as a building block for
+ * subtree flush.
+ */
 bool alixfs_mount_flush_single(alixfs_mount_t *fs,
                                vfs_node_t *node,
                                vfs_mount_t *mount,
@@ -930,6 +971,9 @@ bool alixfs_mount_flush_single(alixfs_mount_t *fs,
     return ok;
 }
 
+/*
+ * Commit filesystem metadata updates to disk (header + chunk table).
+ */
 bool alixfs_mount_commit(alixfs_mount_t *fs)
 {
     if (!fs)
@@ -943,6 +987,12 @@ bool alixfs_mount_commit(alixfs_mount_t *fs)
     return alixfs_flush_header(fs);
 }
 
+/*
+ * Release persistent storage associated with a node when it is deleted.
+ *
+ * Called by VFS when a mounted node is being freed and should be removed from
+ * the on-disk chunk table/free lists.
+ */
 void alixfs_mount_release_node(alixfs_mount_t *fs, vfs_node_t *node)
 {
     if (!fs || !node || node->disk_id == UINT32_MAX)
@@ -967,6 +1017,9 @@ void alixfs_mount_release_node(alixfs_mount_t *fs, vfs_node_t *node)
     fs->header_dirty = true;
 }
 
+/*
+ * Format a block device as a new AlixFS2 filesystem.
+ */
 bool alixfs_mount_format(block_device_t *device)
 {
     if (!device)
@@ -1053,6 +1106,12 @@ bool alixfs_mount_format(block_device_t *device)
     return ok;
 }
 
+/*
+ * Snapshot lightweight mount state for callers that want to surface health.
+ *
+ * Currently exposes whether the in-memory header is dirty (useful for VFS
+ * deciding if a full sync is still needed).
+ */
 void alixfs_mount_snapshot(const alixfs_mount_t *fs, bool *header_dirty)
 {
     if (!fs || !header_dirty)

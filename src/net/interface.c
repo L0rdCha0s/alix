@@ -8,6 +8,18 @@
 #include "process.h"
 #include "serial.h"
 
+/*
+ * src/net/interface.c
+ *
+ * Network interface registry + TX helpers.
+ *
+ * Drivers register interfaces (name + MAC) and provide a `send` callback. The
+ * stack uses `net_if_send_copy` by default, which clones buffers that point at
+ * a thread stack to avoid DMA/async use-after-return bugs on SMP systems.
+ *
+ * See docs/kernel/network.md.
+ */
+
 static net_interface_t g_interfaces[NET_MAX_INTERFACES];
 static size_t g_interface_count = 0;
 

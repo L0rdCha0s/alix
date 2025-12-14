@@ -1,5 +1,18 @@
 #include "process_internal.h"
 
+/*
+ * src/kernel/process/process_api.c
+ *
+ * Public-facing process/thread APIs (see `include/process.h`):
+ * - process creation (kernel threads, user ELF processes)
+ * - join/kill/tree management
+ * - sleep/yield helpers and snapshots for /proc/syscalls
+ * - timer-tick preemption hook (`process_on_timer_tick`)
+ *
+ * See docs/kernel/process.md for scheduler details and docs/kernel/memory.md
+ * for user address space/mapping behavior.
+ */
+
 static process_t *process_create_kernel_internal(const char *name,
                                                  thread_entry_t entry,
                                                  void *arg,
@@ -1006,6 +1019,15 @@ bool process_query_user_layout(const process_t *process,
     return process->is_user && process->user_entry_point != 0 && process->user_stack_top != 0;
 }
 
+/*
+ * User-mode `sbrk(2)` implementation.
+ *
+ * Grows/shrinks the user heap break within the reserved user heap window.
+ * Growth commits additional pages (mapping physical backing via
+ * `process_heap_commit_range`) and zeroes the new bytes.
+ *
+ * Returns the previous break on success; returns -1 on failure.
+ */
 int64_t process_user_sbrk(process_t *process, int64_t increment)
 {
     if (!process || !process->is_user || process->user_heap_base == 0)
@@ -1588,6 +1610,17 @@ static void scheduler_log_process_age_snapshot(uint64_t now_ticks)
     cpu_restore_flags(flags);
 }
 
+/*
+ * Timer/IPI hook used to drive:
+ * - sleep queue wakeups
+ * - stack watch timeout checks
+ * - preemptive scheduling (time slice expiration)
+ *
+ * When a time slice expires, this function rewrites the interrupted RIP to a
+ * preemption trampoline:
+ * - user mode → `USER_PREEMPT_STUB_BASE` (mapped per-process)
+ * - kernel mode → `process_preempt_trampoline` (arch/x86/process_preempt.S)
+ */
 void process_on_timer_tick(interrupt_frame_t *frame)
 {
     if (!frame)

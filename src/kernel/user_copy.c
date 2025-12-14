@@ -2,12 +2,33 @@
 
 #include "libc.h"
 
+/*
+ * src/kernel/user_copy.c
+ *
+ * User pointer validation and copy helpers used by syscalls.
+ *
+ * IMPORTANT LIMITATION:
+ * `user_ptr_range_valid` validates canonicality and that the range lies within
+ * the configured user pointer window. It does not guarantee that pages are
+ * mapped/present; callers must still be prepared for page faults if user space
+ * passes an unmapped address.
+ */
+
 static inline bool user_pointer_canonical(uintptr_t addr)
 {
     uint64_t sign = (uint64_t)addr >> 47;
     return sign == 0 || sign == 0x1FFFFu;
 }
 
+/*
+ * Validate a user pointer range against the configured user address window.
+ *
+ * This checks:
+ * - non-NULL (unless `len == 0`)
+ * - no overflow in `start + len - 1`
+ * - canonical x86_64 address form
+ * - range within `[USER_POINTER_BASE, USER_POINTER_LIMIT]`
+ */
 bool user_ptr_range_valid(const void *ptr, size_t len)
 {
     if (len == 0)
@@ -38,6 +59,11 @@ bool user_ptr_range_valid(const void *ptr, size_t len)
     return true;
 }
 
+/*
+ * Copy bytes from user space into kernel memory.
+ *
+ * Returns false if the user pointer range is invalid.
+ */
 bool user_copy_from_user(void *dst, const void *src_user, size_t len)
 {
     if (!dst || len == 0)
@@ -52,6 +78,11 @@ bool user_copy_from_user(void *dst, const void *src_user, size_t len)
     return true;
 }
 
+/*
+ * Copy bytes from kernel memory into user space.
+ *
+ * Returns false if the user pointer range is invalid.
+ */
 bool user_copy_to_user(void *dst_user, const void *src, size_t len)
 {
     if (!src || len == 0)
@@ -66,6 +97,12 @@ bool user_copy_to_user(void *dst_user, const void *src, size_t len)
     return true;
 }
 
+/*
+ * Copy a NUL-terminated string from user space into a kernel buffer.
+ *
+ * Validates user pointers one byte at a time so callers can pass a pointer to
+ * a shorter string without requiring the full `capacity` range to be valid.
+ */
 bool user_copy_string_from_user(char *dst,
                                 size_t capacity,
                                 const char *src_user,

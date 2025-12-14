@@ -9,28 +9,43 @@
 #endif
 
 #if ATK_EVENT_DEBUG
+/*
+ * Return a monotonically increasing event id for correlating debug logs.
+ *
+ * When `ATK_EVENT_DEBUG` is disabled, this is an inline stub that returns 0.
+ */
 uint64_t atk_event_debug_next_id(void);
+
+/* Debug hook: log the beginning of an ATK mouse event. */
 void atk_event_debug_mouse_begin(uint64_t id,
                                  int cursor_x,
                                  int cursor_y,
                                  bool pressed_edge,
                                  bool released_edge,
                                  bool left_pressed);
+
+/* Debug hook: log dispatch of a mouse event to a widget. */
 void atk_event_debug_mouse_dispatch(uint64_t id,
                                     const char *stage,
                                     const atk_widget_t *widget,
                                     const atk_mouse_event_t *event,
                                     atk_mouse_response_t response);
+
+/* Debug hook: log a tab hit (tab index computed successfully). */
 void atk_event_debug_tab_hit(uint64_t id,
                              const atk_widget_t *tab_view,
                              size_t tab_index,
                              const char *title,
                              size_t prev_index);
+
+/* Debug hook: log why a tab miss occurred (no tab selected). */
 void atk_event_debug_tab_miss(uint64_t id,
                               const atk_widget_t *tab_view,
                               int local_x,
                               int local_y,
                               const char *reason);
+
+/* Debug hook: log whether a remote (user_atk) window handled an event. */
 void atk_event_debug_remote(uint64_t id, const atk_widget_t *window, bool handled);
 #else
 static inline uint64_t atk_event_debug_next_id(void)

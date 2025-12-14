@@ -16,6 +16,20 @@
 #include "serial.h"
 #include "idt.h"
 
+/*
+ * src/kernel/smp.c
+ *
+ * SMP bring-up and inter-processor coordination:
+ * - Enumerates CPUs (via ACPI MADT + LAPIC IDs).
+ * - Copies the AP trampoline blob into low physical memory.
+ * - Starts APs via INIT/SIPI and waits for them to come online.
+ * - Provides IPIs used by other subsystems:
+ *   - schedule IPIs to encourage timely preemption
+ *   - TLB flush IPIs for paging updates across CPUs
+ *
+ * See docs/kernel/boot.md and docs/kernel/process.md.
+ */
+
 static inline uint32_t smp_cpuid_apic_id(void)
 {
     uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
@@ -245,6 +259,17 @@ static void ensure_boot_cpu_present(void)
     }
 }
 
+/*
+ * Discover CPUs and initialise basic SMP state.
+ *
+ * This:
+ * - initialises the LAPIC,
+ * - parses MADT entries to enumerate CPUs,
+ * - builds APIC ID → CPU index mappings, and
+ * - marks the BSP as online.
+ *
+ * Starting secondary CPUs is done later via `smp_start_secondary_cpus()`.
+ */
 bool smp_init(void)
 {
     for (size_t i = 0; i < sizeof(g_apic_to_index); ++i)
@@ -307,6 +332,9 @@ bool smp_init(void)
     return true;
 }
 
+/*
+ * Return the discovered CPU count (at least 1).
+ */
 uint32_t smp_cpu_count(void)
 {
     return (g_cpu_count == 0) ? 1u : g_cpu_count;
@@ -412,6 +440,12 @@ static void prepare_bootstrap_data(uint32_t cpu_index, uint64_t stack_top)
     __sync_synchronize();
 }
 
+/*
+ * Start secondary CPUs (APs).
+ *
+ * Copies the AP trampoline into low memory, then sends INIT/SIPI sequences via
+ * the LAPIC to each present non-BSP CPU. APs enter `smp_secondary_entry`.
+ */
 bool smp_start_secondary_cpus(void)
 {
     copy_trampoline_blob();
@@ -489,6 +523,12 @@ bool smp_start_secondary_cpus(void)
     return all_started;
 }
 
+/*
+ * Entry point reached by APs after executing the trampoline.
+ *
+ * Performs minimal CPU init then hands off to the scheduler via
+ * `process_run_secondary_cpu(cpu_index)` (does not return).
+ */
 void smp_secondary_entry(uint32_t apic_id)
 {
     uint32_t cpu_index = resolve_apic_to_index(apic_id, true);
@@ -516,11 +556,23 @@ void smp_secondary_entry(uint32_t apic_id)
     }
 }
 
+/*
+ * IPI handler used to encourage timely preemption on other CPUs.
+ *
+ * This reuses `process_on_timer_tick` so the preemption decision logic is
+ * shared between timer interrupts and schedule IPIs.
+ */
 void smp_handle_schedule_ipi(interrupt_frame_t *frame)
 {
     process_on_timer_tick(frame);
 }
 
+/*
+ * Broadcast a schedule IPI to online CPUs.
+ *
+ * The timer IRQ on one CPU can use this to prompt other CPUs to also run their
+ * preemption checks (useful if they are running long slices).
+ */
 void smp_broadcast_schedule_ipi(bool include_self)
 {
     (void)include_self;
@@ -533,6 +585,12 @@ void smp_broadcast_schedule_ipi(bool include_self)
     // lapic_broadcast_ipi(SMP_SCHEDULE_IPI_VECTOR, include_self);
 }
 
+/*
+ * Broadcast a “flush TLB” IPI to all online CPUs.
+ *
+ * Paging uses this after modifying shared page tables so other CPUs drop stale
+ * translations.
+ */
 void smp_broadcast_tlb_flush(void)
 {
     uint32_t online = __atomic_load_n(&g_online_cpus, __ATOMIC_ACQUIRE);
@@ -543,6 +601,11 @@ void smp_broadcast_tlb_flush(void)
     lapic_broadcast_ipi(SMP_TLB_FLUSH_IPI_VECTOR, true);
 }
 
+/*
+ * Send a TLB flush IPI to a subset of CPUs given by `cpu_mask`.
+ *
+ * The mask is indexed by CPU index (not APIC ID). The current CPU is skipped.
+ */
 void smp_tlb_flush_mask(uint32_t cpu_mask)
 {
     if (cpu_mask == 0)

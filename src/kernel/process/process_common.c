@@ -1,6 +1,18 @@
 #include "process_internal.h"
 #include "shell.h"
 
+/*
+ * src/kernel/process/process_common.c
+ *
+ * Common process/thread infrastructure shared across the process subsystem:
+ * - global registries and helpers
+ * - low-level context switching (`context_switch`)
+ * - user-mode stubs (exit, thread exit, preempt stub) copied into user space
+ * - diagnostic utilities (stack owner tracking, context guard, fault handling)
+ *
+ * See docs/kernel/process.md.
+ */
+
 extern uintptr_t kernel_heap_base;
 extern uintptr_t kernel_heap_end;
 extern uint8_t __kernel_text_start[];
@@ -2648,6 +2660,16 @@ void process_trigger_fatal_fault(thread_t *thread,
     frame->rflags &= ~RFLAGS_IF_BIT;
 }
 
+/*
+ * Low-level context switch primitive.
+ *
+ * Saves callee-saved regs + RFLAGS to the current stack, stores the resulting
+ * stack pointer to `*prev_ctx_out`, then swaps to `next_ctx` and restores
+ * regs/RFLAGS before `ret` to the next context's saved RIP.
+ *
+ * NOTE: `cpu_context_t*` is effectively a saved RSP pointing at the context
+ * frame constructed in `thread_create`.
+ */
 __attribute__((naked)) void context_switch(cpu_context_t **,
                                            cpu_context_t *,
                                            uint8_t *,

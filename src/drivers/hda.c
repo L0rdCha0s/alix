@@ -348,6 +348,21 @@ static void hda_update_used_bytes(hda_state_t *hda, uint32_t hw_pos)
             hda->used_bytes = 0;
         }
     }
+    else
+    {
+        // If the hardware position jumps unexpectedly, treat the buffer as empty
+        // and resync writer state to avoid writing far behind playback (which can
+        // introduce ~1s of apparent latency with a 256 KiB ring).
+        hda->used_bytes = 0;
+    }
+
+    // If the buffer is empty, keep the write cursor pinned to the current
+    // hardware position so subsequent writes are played immediately instead of
+    // waiting for a full ring wrap (which can be >1s with a 256 KiB ring).
+    if (hda->used_bytes == 0)
+    {
+        hda->write_pos = (size_t)hw_pos;
+    }
     hda->hw_pos_prev = hw_pos;
 }
 

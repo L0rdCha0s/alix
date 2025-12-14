@@ -11,6 +11,18 @@
 #include "net/dhcp.h"
 #include "net/interface.h"
 
+/*
+ * src/kernel/startup.c
+ *
+ * Optional startup script runner.
+ *
+ * When enabled (`ENABLE_STARTUP_SCRIPT`), the kernel spawns a `startup` process
+ * that executes `/etc/startup.rc` line-by-line via the shell. This is used to
+ * automate early boot actions (e.g. DHCP, NTP sync).
+ *
+ * See docs/kernel/boot.md and docs/kernel/vfs.md (startup script is VFS-backed).
+ */
+
 #define STARTUP_SCRIPT_PATH "/etc/startup.rc"
 
 #if ENABLE_STARTUP_SCRIPT
@@ -40,6 +52,12 @@ static const char *startup_skip_spaces(const char *text);
 static spinlock_t g_startup_command_lock;
 #endif
 
+/*
+ * Initialise startup-script support.
+ *
+ * This prepares internal state; the startup process itself is created later via
+ * `startup_schedule()` once the filesystem is ready.
+ */
 void startup_init(void)
 {
 #if ENABLE_STARTUP_SCRIPT
@@ -48,6 +66,9 @@ void startup_init(void)
     /* Defer creation until the filesystem is ready. */
 }
 
+/*
+ * Schedule the startup-script runner (spawns the `startup` kernel process).
+ */
 bool startup_schedule(void)
 {
 #if ENABLE_STARTUP_SCRIPT

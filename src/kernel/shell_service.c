@@ -9,6 +9,20 @@
 #include "vfs.h"
 #include "serial.h"
 
+/*
+ * src/kernel/shell_service.c
+ *
+ * Kernel-resident shell session service exposed to user space via syscalls.
+ *
+ * User processes can:
+ * - open a session (allocates a session object + capture FD)
+ * - execute commands asynchronously in a helper kernel process
+ * - poll collected output and completion status
+ *
+ * This is used by userland tools like the graphical shell.
+ * See docs/kernel/syscalls.md.
+ */
+
 typedef struct shell_session
 {
     uint32_t handle;

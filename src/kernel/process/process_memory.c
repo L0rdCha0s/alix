@@ -1,5 +1,20 @@
 #include "process_internal.h"
 
+/*
+ * src/kernel/process/process_memory.c
+ *
+ * Process address space management:
+ * - allocates and initialises `process_t` and its paging space (`paging_space_t`)
+ * - maps user virtual regions (ELF segments, user stack, user heap growth)
+ * - tracks user mappings for cleanup on exit
+ *
+ * This layer bridges:
+ * - `user_memory_*` (physical backing allocator) and
+ * - `paging_*` (virtual→physical page table mappings).
+ *
+ * See docs/kernel/memory.md.
+ */
+
 process_t *allocate_process(const char *name, bool is_user)
 {
     bool needs_clone = is_user;
@@ -512,6 +527,16 @@ static bool __attribute__((unused)) process_heap_commit(process_t *process, uint
     return true;
 }
 
+/*
+ * Map a user virtual range into a process address space.
+ *
+ * - Allocates physical backing pages from `user_memory_alloc`.
+ * - Records the mapping in `process->user_regions` for later teardown.
+ * - Maps the pages into `process->address_space` as user-accessible pages.
+ *
+ * On success, `host_ptr_out` receives a kernel-mapped pointer to the same
+ * physical pages, which is useful for initialising contents (ELF copy, zeroing).
+ */
 bool process_map_user_segment(process_t *process,
                               uintptr_t user_base,
                               size_t bytes,

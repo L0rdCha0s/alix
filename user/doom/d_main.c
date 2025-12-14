@@ -37,6 +37,12 @@ static const char rcsid[] = "$Id: d_main.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 #include "sys/stat.h"
 #include "fcntl.h"
 
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
+#include "m_swap.h"
+
 #include "doomdef.h"
 #include "doomstat.h"
 
@@ -559,7 +565,7 @@ void D_AddFile (char *file)
 //
 void IdentifyVersion (void)
 {
-    const char *default_iwad = "/usr/share/games/doom/doom1.wad";
+    const char *default_iwad = "/usr/share/games/doom/doom.wad";
     const char *iwad_path = default_iwad;
 
     int p = M_CheckParm("-iwad");
@@ -575,8 +581,131 @@ void IdentifyVersion (void)
     serial_printf("[doom] IdentifyVersion access=%d\r\n", access_res);
     if (access_res == 0)
     {
-        gamemode = shareware;
-        gamemission = doom;
+        int handle = open(iwad_path, O_RDONLY | O_BINARY);
+        if (handle < 0)
+        {
+            I_Error("IdentifyVersion: unable to open IWAD at %s", iwad_path);
+        }
+
+        struct stat st;
+        if (fstat(handle, &st) < 0)
+        {
+            close(handle);
+            I_Error("IdentifyVersion: unable to stat IWAD at %s", iwad_path);
+        }
+
+        typedef struct
+        {
+            char identification[4];
+            int numlumps;
+            int infotableofs;
+        } wadinfo_t;
+
+        typedef struct
+        {
+            int filepos;
+            int size;
+            char name[8];
+        } filelump_t;
+
+        wadinfo_t header;
+        if (read(handle, &header, sizeof(header)) != sizeof(header))
+        {
+            close(handle);
+            I_Error("IdentifyVersion: unable to read IWAD header at %s", iwad_path);
+        }
+
+        if (memcmp(header.identification, "IWAD", 4) && memcmp(header.identification, "PWAD", 4))
+        {
+            close(handle);
+            I_Error("IdentifyVersion: %s is not a WAD file", iwad_path);
+        }
+
+        int numlumps = LONG(header.numlumps);
+        int infotableofs = LONG(header.infotableofs);
+
+        if (numlumps <= 0 || numlumps > 100000)
+        {
+            close(handle);
+            I_Error("IdentifyVersion: invalid WAD lump count %d", numlumps);
+        }
+
+        if (infotableofs < 0 || (off_t)infotableofs > st.st_size - (off_t)numlumps * (off_t)sizeof(filelump_t))
+        {
+            close(handle);
+            I_Error("IdentifyVersion: invalid WAD directory offset %d", infotableofs);
+        }
+
+        if (lseek(handle, infotableofs, SEEK_SET) == (off_t)-1)
+        {
+            close(handle);
+            I_Error("IdentifyVersion: unable to seek IWAD directory at %s", iwad_path);
+        }
+
+        boolean has_map01 = false;
+        boolean has_e1m1 = false;
+        boolean has_e2m1 = false;
+        boolean has_e3m1 = false;
+        boolean has_e4m1 = false;
+
+        for (int i = 0; i < numlumps; i++)
+        {
+            filelump_t lump;
+            if (read(handle, &lump, sizeof(lump)) != sizeof(lump))
+            {
+                close(handle);
+                I_Error("IdentifyVersion: unable to read IWAD directory at %s", iwad_path);
+            }
+
+            char name[9];
+            memcpy(name, lump.name, 8);
+            name[8] = '\0';
+
+            if (!strcasecmp(name, "MAP01"))
+                has_map01 = true;
+            else if (!strcasecmp(name, "E1M1"))
+                has_e1m1 = true;
+            else if (!strcasecmp(name, "E2M1"))
+                has_e2m1 = true;
+            else if (!strcasecmp(name, "E3M1"))
+                has_e3m1 = true;
+            else if (!strcasecmp(name, "E4M1"))
+                has_e4m1 = true;
+
+            if (has_map01 || (has_e1m1 && has_e2m1 && has_e3m1 && has_e4m1))
+                break;
+        }
+
+        close(handle);
+
+        if (has_map01)
+        {
+            gamemode = commercial;
+            gamemission = doom2;
+        }
+        else if (has_e4m1)
+        {
+            gamemode = retail;
+            gamemission = doom;
+        }
+        else if (has_e3m1 || has_e2m1)
+        {
+            gamemode = registered;
+            gamemission = doom;
+        }
+        else if (has_e1m1)
+        {
+            gamemode = shareware;
+            gamemission = doom;
+        }
+        else
+        {
+            gamemode = indetermined;
+            gamemission = none;
+            I_Error("IdentifyVersion: unable to determine IWAD type at %s", iwad_path);
+        }
+
+        serial_printf("[doom] IdentifyVersion mode=%d mission=%d\r\n", gamemode, gamemission);
         D_AddFile((char *)iwad_path);
         serial_printf("[doom] IdentifyVersion added iwad\r\n");
         return;

@@ -1,6 +1,17 @@
 #include "devfs.h"
 #include "vfs.h"
 
+/*
+ * src/kernel/devfs.c
+ *
+ * Minimal devfs implementation layered on the VFS:
+ * - Ensures `/dev` exists.
+ * - Publishes block devices as `VFS_NODE_BLOCK` children under `/dev`.
+ * - Supports callback-backed pseudo-files under `/dev` via `vfs_set_file_callbacks`.
+ *
+ * See docs/kernel/vfs.md.
+ */
+
 static vfs_node_t *g_dev_root = NULL;
 
 static void devfs_set_mutable(bool allow)
@@ -41,6 +52,9 @@ void devfs_init(void)
     (void)devfs_root_node();
 }
 
+/*
+ * Register a single block device as `/dev/<device->name>`.
+ */
 void devfs_register_block_device(block_device_t *device)
 {
     if (!device)
@@ -62,6 +76,9 @@ void devfs_register_block_device(block_device_t *device)
     devfs_set_mutable(false);
 }
 
+/*
+ * Register all currently-known block devices under `/dev`.
+ */
 void devfs_register_block_devices(void)
 {
     vfs_node_t *dev_dir = devfs_root_node();
@@ -80,6 +97,9 @@ void devfs_register_block_devices(void)
     devfs_set_mutable(false);
 }
 
+/*
+ * Create a callback-backed file under `/dev`.
+ */
 bool devfs_register_file(const char *name,
                          vfs_read_cb_t read_cb,
                          vfs_write_cb_t write_cb,

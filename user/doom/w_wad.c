@@ -412,7 +412,17 @@ int W_GetNumForName (char* name)
     i = W_CheckNumForName (name);
     
     if (i == -1)
-      I_Error ("W_GetNumForName: %s not found!", name);
+    {
+	// Some IWADs (e.g. DOOM II) don't ship HELP2; fall back silently.
+	if (!strcmpi(name, "HELP2"))
+	{
+	    int fallback = W_CheckNumForName("TITLEPIC");
+	    if (fallback != -1)
+		return fallback;
+	}
+
+	I_Error ("W_GetNumForName: %s not found!", name);
+    }
       
     return i;
 }

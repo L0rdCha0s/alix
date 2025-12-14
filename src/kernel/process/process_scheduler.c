@@ -5,6 +5,21 @@
 #include "smp.h"
 #include "lapic.h"
 
+/*
+ * src/kernel/process/process_scheduler.c
+ *
+ * Core scheduler implementation:
+ * - per-CPU run queues (multi-priority)
+ * - dequeue/enqueue, affinity and (optional) stealing logic
+ * - context switching into the next runnable thread
+ *
+ * Preemption is initiated from `process_on_timer_tick` (process_api.c) by
+ * rewriting the interrupted RIP to a preempt trampoline; the trampoline calls
+ * `process_preempt_hook()` which yields into this scheduler.
+ *
+ * See docs/kernel/process.md.
+ */
+
 static bool thread_can_run(const thread_t *thread);
 extern uint8_t __kernel_text_start[];
 void remove_from_run_queue(thread_t *thread);
@@ -2362,6 +2377,18 @@ static bool switch_to_thread(thread_t *next)
     return true;
 }
 
+/*
+ * Core scheduling decision point.
+ *
+ * Picks the next runnable thread for the current CPU, performs accounting, and
+ * context-switches to it. The current thread may be requeued depending on
+ * `requeue_current` and its state.
+ *
+ * Called from:
+ * - idle thread loop (`idle_thread_entry`)
+ * - explicit yields (`process_yield`)
+ * - preemption trampolines (`process_preempt_hook`)
+ */
 __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_current)
 {
     uint64_t sched_watch = timer_ticks();
@@ -2532,6 +2559,12 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
     }
 }
 
+/*
+ * Idle thread main loop.
+ *
+ * Each CPU has an idle thread. It halts until an interrupt arrives, then calls
+ * into the scheduler to check for runnable work.
+ */
 void idle_thread_entry(void *arg)
 {
     (void)arg;
@@ -2542,6 +2575,13 @@ void idle_thread_entry(void *arg)
     }
 }
 
+/*
+ * Kernel-mode preempt trampoline target.
+ *
+ * `process_on_timer_tick` arranges for interrupted kernel-mode execution to
+ * enter `process_preempt_trampoline` (arch/x86/process_preempt.S), which calls
+ * this hook. The hook clears the preempt flag and yields.
+ */
 void process_preempt_hook(void)
 {
     thread_t *thread = current_thread_local();
@@ -2609,6 +2649,12 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
     __builtin_unreachable();
 }
 
+/*
+ * User thread trampoline (runs in kernel mode briefly).
+ *
+ * This consumes a heap-allocated `user_thread_bootstrap_t`, then uses `iretq`
+ * to enter CPL=3 at the user thread's entry point.
+ */
 void user_thread_entry(void *arg)
 {
     user_thread_bootstrap_t params = { 0 };
@@ -2624,6 +2670,12 @@ void user_thread_entry(void *arg)
     process_jump_to_user(params.entry, params.stack_top, params.rdi, params.rsi);
 }
 
+/*
+ * Kernel thread trampoline.
+ *
+ * All newly-created kernel threads start here via their initial context frame.
+ * It invokes the thread entry function and then exits the owning process.
+ */
 void thread_trampoline(void)
 {
     thread_t *self = current_thread_local();

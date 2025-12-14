@@ -15,6 +15,24 @@
 #include "timekeeping.h"
 #include "font_cache.h"
 
+/*
+ * src/kernel/syscall.c
+ *
+ * Syscall dispatcher and implementations.
+ *
+ * Entry/ABI:
+ * - User code executes `int 0x80`.
+ * - The x86 stub (`src/arch/x86/syscall_entry.S`) saves registers and calls
+ *   `syscall_dispatch(syscall_frame_t*, vector)`.
+ *
+ * Resource model:
+ * - Files and sockets are returned as integer FDs backed by `fd.c` entries.
+ * - VFS files use a `file_handle_t` context holding { vfs_node, offset, flags }.
+ * - TCP sockets integrate with the same FD layer via `net_tcp_socket_fd`.
+ *
+ * See docs/kernel/syscalls.md.
+ */
+
 static process_info_t *g_proc_snapshot_buf = NULL;
 static size_t g_proc_snapshot_cap = 0;
 static syscall_process_info_t *g_proc_snapshot_user_buf = NULL;
@@ -389,6 +407,13 @@ static int64_t syscall_do_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capac
     return (int64_t)count;
 }
 
+/*
+ * Select a network interface for socket syscalls.
+ *
+ * If `iface_name_user` is non-NULL, this attempts to open that specific
+ * interface name; otherwise it picks the first present interface and prefers
+ * one with link-up.
+ */
 static net_interface_t *syscall_pick_interface(const char *iface_name_user)
 {
     net_interface_t *iface = NULL;
@@ -432,6 +457,9 @@ static net_interface_t *syscall_pick_interface(const char *iface_name_user)
     return iface;
 }
 
+/*
+ * Create a TCP socket bound to a chosen interface and return its FD.
+ */
 static int64_t syscall_do_socket_open(const char *iface_name_user)
 {
     net_interface_t *iface = syscall_pick_interface(iface_name_user);
@@ -455,6 +483,11 @@ static int64_t syscall_do_socket_open(const char *iface_name_user)
     return (int64_t)fd;
 }
 
+/*
+ * Connect a TCP socket FD to a remote IPv4 address/port.
+ *
+ * This currently uses a simple poll/sleep loop waiting for ESTABLISHED.
+ */
 static int64_t syscall_do_socket_connect(int fd,
                                          const char *ipv4_text_user,
                                          uint16_t port)
@@ -513,6 +546,9 @@ static int64_t syscall_do_socket_connect(int fd,
     return 0;
 }
 
+/*
+ * Return the number of readable bytes currently buffered for a TCP socket FD.
+ */
 static int64_t syscall_do_socket_available(int fd)
 {
     net_tcp_socket_t *socket = net_tcp_socket_from_fd(fd);
@@ -840,6 +876,13 @@ static int64_t syscall_do_list_dir(const char *path, syscall_dirent_t *out_entri
     return (int64_t)ctx.count;
 }
 
+/*
+ * Open a VFS file and return an FD.
+ *
+ * This allocates a `file_handle_t` (node + current offset + access flags),
+ * retains the underlying `vfs_node_t`, and installs the handle into the global
+ * FD table with `g_syscall_file_ops`.
+ */
 static int64_t syscall_do_open(const char *path, uint64_t flags)
 {
     if (!path)
@@ -955,6 +998,14 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     return (int64_t)fd;
 }
 
+/*
+ * Syscall dispatch entrypoint called from the x86 0x80 stub.
+ *
+ * - `frame` contains the saved user register state; `frame->rax` is the syscall id.
+ * - The handler writes the return value back to `frame->rax`.
+ * - Some syscalls (notably `SYSCALL_YIELD` when invoked from the user preempt
+ *   stub) return additional information via RAX (resume RIP).
+ */
 uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
 {
     (void)vector;

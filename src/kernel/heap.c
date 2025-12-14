@@ -10,6 +10,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * src/kernel/heap.c
+ *
+ * Kernel heap allocator used by `malloc/calloc/realloc/free` inside the OS.
+ *
+ * Key properties:
+ * - Single global heap region (configured by `kernel_heap_base/end` in early boot).
+ * - Bin-based free lists with a global lock (spinlock), intended for SMP use.
+ * - Optional tracing and procfs controls for debugging fragmentation/stalls.
+ *
+ * See docs/kernel/memory.md.
+ */
+
 #define HEAP_MAG_ENABLED 0
 
 #ifndef ENABLE_HEAP_TRACE
@@ -942,9 +955,14 @@ static heap_block_t *find_suitable_block(size_t size, void *caller)
     return NULL;
 }
 
+/*
+ * Initialise the kernel heap allocator.
+ *
+ * Must be called once on the BSP before APs start using `malloc/free`. This
+ * sets up the initial free block spanning `kernel_heap_base..kernel_heap_end`.
+ */
 void heap_init(void)
 {
-    /* Must be called once on the BSP before APs start using the heap. */
     if (g_heap_initialized)
     {
         return;
@@ -1206,6 +1224,11 @@ bool heap_lock_held_by_current_cpu(void)
            (__atomic_load_n(&g_heap_lock_depth, __ATOMIC_ACQUIRE) > 0);
 }
 
+/*
+ * Allocate `size` bytes from the kernel heap.
+ *
+ * Returns NULL on OOM or if `size == 0`.
+ */
 void *malloc(size_t size)
 {
     size_t requested = size;
@@ -1296,6 +1319,11 @@ void *malloc(size_t size)
     return result;
 }
 
+/*
+ * Free a pointer previously returned by `malloc/calloc/realloc`.
+ *
+ * Invalid pointers are detected and ignored (with optional debug logging).
+ */
 void free(void *ptr)
 {
     heap_log("free req=", (uintptr_t)ptr);
@@ -1574,6 +1602,11 @@ void heap_trace_dump_stats(const char *context)
 }
 #endif
 
+/*
+ * Allocate and zero `count * size` bytes.
+ *
+ * Returns NULL on overflow or OOM.
+ */
 void *calloc(size_t count, size_t size)
 {
     if (count != 0 && size > SIZE_MAX_VALUE / count)
@@ -1627,6 +1660,12 @@ static heap_block_t *expand_block(heap_block_t *block, size_t size)
     return NULL;
 }
 
+/*
+ * Resize an allocation.
+ *
+ * - `realloc(NULL, size)` behaves like `malloc(size)`.
+ * - `realloc(ptr, 0)` frees and returns NULL.
+ */
 void *realloc(void *ptr, size_t size)
 {
     heap_log("realloc ptr=", (uintptr_t)ptr);

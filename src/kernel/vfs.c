@@ -21,6 +21,13 @@ extern void storage_request_flush(void);
  *  - Nodes and names allocated dynamically.
  *  - File data grows via realloc (doubling strategy).
  *  - No fixed limits on node count, name length, or file size (bounded by RAM).
+ *
+ * Locking model:
+ *  - `g_vfs_tree_lock` protects tree structure (parents/children, mounts list,
+ *    node creation/removal, mount point checks).
+ *  - `node->data_lock` protects the per-file data buffer and dirty tracking.
+ *
+ * See docs/kernel/vfs.md for an overview of the VFS and mount/writeback flow.
  */
 
 #define VFS_DIRTY_BACKPRESSURE_LIMIT   (10ULL * 1024ULL * 1024ULL)
@@ -233,6 +240,12 @@ static ssize_t vfs_log_write(vfs_node_t *node, size_t offset, const void *buffer
     return (ssize_t)count;
 }
 
+/*
+ * Register procfs controls for VFS debug/trace toggles.
+ *
+ * Current controls live under `/proc/sys/vfs/...` and are implemented as
+ * callback-backed VFS files via procfs.
+ */
 void vfs_sys_controls_init(void)
 {
     (void)procfs_create_file_at("sys/vfs/log_enable", vfs_log_read, vfs_log_write, NULL);
@@ -282,6 +295,15 @@ static void vfs_unlock_node_data(vfs_node_t *node)
     }
 }
 
+/*
+ * Increment a VFS node reference count.
+ *
+ * Nodes are owned by:
+ *  - the VFS tree itself (parent/child links), and
+ *  - any external holders (FDs, mounts, etc).
+ *
+ * A node may be freed only once its refcount reaches zero.
+ */
 void vfs_node_retain(vfs_node_t *node)
 {
     if (!node)
@@ -293,6 +315,12 @@ void vfs_node_retain(vfs_node_t *node)
     vfs_unlock_node_data(node);
 }
 
+/*
+ * Decrement a VFS node reference count; frees the subtree when it hits zero.
+ *
+ * Callers must ensure they are releasing their own reference and not a tree
+ * ownership link (i.e. this is for “external” references).
+ */
 void vfs_node_release(vfs_node_t *node)
 {
     if (!node)
@@ -731,6 +759,12 @@ static bool ensure_capacity_locked(vfs_node_t *file, size_t need)
     return true;
 }
 
+/*
+ * Pre-grow a file's backing buffer.
+ *
+ * This is a performance hint used to avoid repeated realloc growth when a
+ * caller knows it will append/write a large amount of data.
+ */
 bool vfs_reserve(vfs_node_t *file, size_t size_hint)
 {
     if (size_hint == 0)
@@ -1186,6 +1220,12 @@ static bool split_parent_and_name(vfs_node_t *cwd, const char *path,
 
 /* ---------- public API ---------- */
 
+/*
+ * Initialise the in-memory VFS tree.
+ *
+ * Creates the root directory node and initialises the global tree lock. Must
+ * be called before other VFS operations. Safe to call multiple times.
+ */
 void vfs_init(void)
 {
     if (root) return;
@@ -1205,11 +1245,23 @@ void vfs_init(void)
     root = node;
 }
 
+/*
+ * Return the VFS root node (`/`).
+ *
+ * The root node is created by `vfs_init()`.
+ */
 vfs_node_t *vfs_root(void)
 {
     return root;
 }
 
+/*
+ * Resolve a path to an existing node.
+ *
+ * - `cwd` is used only for relative paths; absolute paths resolve from `/`.
+ * - Holds the global tree lock during traversal.
+ * - Returns NULL if the path cannot be resolved.
+ */
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
 {
     spinlock_lock(&g_vfs_tree_lock);
@@ -1218,6 +1270,13 @@ vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
     return res;
 }
 
+/*
+ * Create (or return) a directory node at `path`.
+ *
+ * - Creates intermediate nodes as required.
+ * - Respects subtree mutability (see `vfs_set_subtree_mutable`).
+ * - Returns NULL on failure or if the path exists but is not a directory.
+ */
 vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
 {
     vfs_node_t *parent = NULL;
@@ -1267,6 +1326,13 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     return dir;
 }
 
+/*
+ * Open a file node at `path`.
+ *
+ * - If `create` is true, the node is created if missing.
+ * - If `truncate` is true and the node exists, its contents are cleared.
+ * - Returns NULL on failure or if the existing node is not a file.
+ */
 vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool truncate)
 {
     vfs_node_t *parent = NULL;
@@ -1458,6 +1524,12 @@ static vfs_node_t *vfs_symlink_locked(vfs_node_t *cwd,
     return node;
 }
 
+/*
+ * Create a symlink node at `link_path` pointing to `target_path`.
+ *
+ * Returns the symlink node on success; returns NULL if the path exists as a
+ * non-symlink (unless `vfs_force_symlink` is used).
+ */
 vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path)
 {
     spinlock_lock(&g_vfs_tree_lock);
@@ -1466,6 +1538,12 @@ vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *li
     return node;
 }
 
+/*
+ * Create or replace `link_path` with a symlink to `target_path`.
+ *
+ * Unlike `vfs_symlink`, this will remove an existing node at `link_path`
+ * (except mount points) before creating the symlink.
+ */
 bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path)
 {
     spinlock_lock(&g_vfs_tree_lock);
@@ -1474,6 +1552,7 @@ bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *lin
     return node != NULL;
 }
 
+/* Simple type predicates for callers that want to avoid peeking at internals. */
 bool vfs_is_dir(const vfs_node_t *node)
 {
     return node ? (node->type == VFS_NODE_DIR) : false;
@@ -1494,6 +1573,9 @@ bool vfs_is_symlink(const vfs_node_t *node)
     return node ? (node->type == VFS_NODE_SYMLINK) : false;
 }
 
+/*
+ * Return the backing block device for a `VFS_NODE_BLOCK`.
+ */
 block_device_t *vfs_block_device(const vfs_node_t *node)
 {
     if (!node || node->type != VFS_NODE_BLOCK)
@@ -1503,16 +1585,28 @@ block_device_t *vfs_block_device(const vfs_node_t *node)
     return node->block_device;
 }
 
+/*
+ * Return the node type (dir/file/block/symlink).
+ */
 vfs_node_type_t vfs_node_type(const vfs_node_t *node)
 {
     return node ? node->type : VFS_NODE_FILE;
 }
 
+/*
+ * For symlink nodes, return their target path string.
+ */
 const char *vfs_symlink_target(const vfs_node_t *node)
 {
     return vfs_node_symlink_target(node);
 }
 
+/*
+ * Truncate a regular file node to size 0.
+ *
+ * This updates dirty tracking so mounts will write the change back if the node
+ * is backed by a block device.
+ */
 bool vfs_truncate(vfs_node_t *file)
 {
     if (!file || file->type != VFS_NODE_FILE) return false;
@@ -1530,6 +1624,13 @@ bool vfs_truncate(vfs_node_t *file)
     return true;
 }
 
+/*
+ * Append bytes to a regular file.
+ *
+ * - When `file->mount` is non-NULL, this may apply writeback backpressure to
+ *   keep dirty bytes bounded.
+ * - Always ensures the file buffer is NUL-terminated for convenience/debug.
+ */
 bool vfs_append(vfs_node_t *file, const char *data, size_t len)
 {
     if (!file || file->type != VFS_NODE_FILE) return false;
@@ -1562,6 +1663,13 @@ bool vfs_append(vfs_node_t *file, const char *data, size_t len)
     return true;
 }
 
+/*
+ * Read bytes from a regular file at an explicit offset.
+ *
+ * If the node has `read_cb`, the callback provides the implementation (used
+ * for procfs/devfs pseudo-files). Otherwise this reads from the heap-backed
+ * `file->data` buffer.
+ */
 ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
 {
     vfs_log("read file=", (uint64_t)(uintptr_t)file);
@@ -1596,6 +1704,13 @@ ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
     return (ssize_t)count;
 }
 
+/*
+ * Write bytes to a regular file at an explicit offset.
+ *
+ * If the node has `write_cb`, the callback provides the implementation (used
+ * for procfs/devfs control files). Otherwise this writes into the heap-backed
+ * `file->data` buffer and grows the file as needed.
+ */
 ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t count)
 {
     vfs_log("write file=", (uint64_t)(uintptr_t)file);
@@ -1657,6 +1772,12 @@ ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t c
     return (ssize_t)count;
 }
 
+/*
+ * Convert a regular file into a callback-backed file node.
+ *
+ * When callbacks are installed, `vfs_read_at`/`vfs_write_at` will delegate to
+ * them instead of the heap-backed data buffer.
+ */
 bool vfs_set_file_callbacks(vfs_node_t *file,
                             vfs_read_cb_t read_cb,
                             vfs_write_cb_t write_cb,
@@ -1672,6 +1793,13 @@ bool vfs_set_file_callbacks(vfs_node_t *file,
     return true;
 }
 
+/*
+ * Return a pointer to a file's backing buffer.
+ *
+ * This is a convenience API primarily used for read-mostly consumers and small
+ * configuration files. The returned pointer aliases the internal storage and
+ * may be invalidated by future writes/resizes.
+ */
 char *vfs_data(vfs_node_t *file, size_t *size)
 {
     if (!file || file->type != VFS_NODE_FILE)
@@ -1687,6 +1815,9 @@ char *vfs_data(vfs_node_t *file, size_t *size)
     return data;
 }
 
+/*
+ * Fetch basic node metadata (size and type).
+ */
 bool vfs_stat(const vfs_node_t *node, size_t *size_out, vfs_node_type_t *type_out)
 {
     if (!node)
@@ -1704,16 +1835,28 @@ bool vfs_stat(const vfs_node_t *node, size_t *size_out, vfs_node_type_t *type_ou
     return true;
 }
 
+/*
+ * Return the node's name component (not a full path).
+ */
 const char *vfs_name(const vfs_node_t *node)
 {
     return node ? node->name : NULL;
 }
 
+/*
+ * Return the parent directory of `node` (or NULL for root/invalid nodes).
+ */
 vfs_node_t *vfs_parent(const vfs_node_t *node)
 {
     return node ? node->parent : NULL;
 }
 
+/*
+ * Build the absolute path for a node into `buffer`.
+ *
+ * This walks the parent chain up to `/` and writes a slash-separated path.
+ * Returns the number of bytes written (excluding any implicit NUL).
+ */
 size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity)
 {
     if (!buffer || capacity == 0)
@@ -1778,6 +1921,13 @@ size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity)
     return idx;
 }
 
+/*
+ * Remove a file or symlink node at `path`.
+ *
+ * - Only removes `VFS_NODE_FILE` and `VFS_NODE_SYMLINK` nodes.
+ * - Respects subtree mutability on the parent directory.
+ * - Does not remove directories or mount points.
+ */
 bool vfs_remove_file(vfs_node_t *cwd, const char *path)
 {
     if (!path || *path == '\0')
@@ -1823,17 +1973,32 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
     return true;
 }
 
+/*
+ * Return the first child of a directory (or NULL).
+ *
+ * Note: this is a raw pointer into the tree; callers should avoid mutating the
+ * tree concurrently without holding the VFS tree lock.
+ */
 vfs_node_t *vfs_first_child(vfs_node_t *dir)
 {
     if (!dir || dir->type != VFS_NODE_DIR) return NULL;
     return dir->first_child;
 }
 
+/*
+ * Return the next sibling in a directory's child list.
+ */
 vfs_node_t *vfs_next_sibling(vfs_node_t *node)
 {
     return node ? node->next_sibling : NULL;
 }
 
+/*
+ * Enumerate directory children under the VFS tree lock.
+ *
+ * Stops early if `callback` returns false. Returns the number of children
+ * visited.
+ */
 size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context)
 {
     if (!dir || dir->type != VFS_NODE_DIR || !callback)
@@ -1855,6 +2020,12 @@ size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context)
     return count;
 }
 
+/*
+ * Add a block device node under `dir`.
+ *
+ * This is used by devfs to expose block devices (e.g. `/dev/ahci0`) as
+ * `VFS_NODE_BLOCK` nodes that carry a `block_device_t*`.
+ */
 vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device_t *device)
 {
     if (!dir || dir->type != VFS_NODE_DIR || !name || !device)
@@ -1908,6 +2079,13 @@ vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device
     return node;
 }
 
+/*
+ * Remove all children from a directory.
+ *
+ * - Does not remove the directory node itself.
+ * - Respects subtree mutability.
+ * - Releases references for removed children (they are freed when refcount hits zero).
+ */
 void vfs_clear_directory(vfs_node_t *dir)
 {
     if (!dir || dir->type != VFS_NODE_DIR)
@@ -1932,6 +2110,11 @@ void vfs_clear_directory(vfs_node_t *dir)
     vfs_mark_meta_dirty(dir);
 }
 
+/*
+ * Format a block device with the default on-disk filesystem (AlixFS2).
+ *
+ * This will fail if the device is currently mounted.
+ */
 bool vfs_format(block_device_t *device)
 {
     if (!device)
@@ -2058,6 +2241,12 @@ static bool vfs_load_mount(block_device_t *device, vfs_mount_t *mount)
     return alixfs_mount_load(mount->backend, mount);
 }
 
+/*
+ * Mount a block device filesystem at an existing directory node.
+ *
+ * Mount points must be empty directories with no existing mount. The mount
+ * backend is currently AlixFS2 (`src/kernel/alixfs.c`).
+ */
 bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
 {
     if (!device || !mount_point || mount_point->type != VFS_NODE_DIR)
@@ -2117,6 +2306,9 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     return true;
 }
 
+/*
+ * Test whether a node is the root of a mounted filesystem.
+ */
 bool vfs_is_mount_point(const vfs_node_t *node)
 {
     if (!node || node->type != VFS_NODE_DIR)
@@ -2127,6 +2319,12 @@ bool vfs_is_mount_point(const vfs_node_t *node)
     return mount && mount->mount_point == node;
 }
 
+/*
+ * Flush *all* mounts (force writeback).
+ *
+ * This walks the mount list and writes dirty metadata and file data to the
+ * block device backends.
+ */
 bool vfs_sync_all(void)
 {
     bool ok = true;
@@ -2144,6 +2342,11 @@ bool vfs_sync_all(void)
     return ok;
 }
 
+/*
+ * Flush only mounts that are currently dirty.
+ *
+ * Returns false if any mount writeback fails (other mounts may still succeed).
+ */
 bool vfs_sync_dirty(void)
 {
     bool ok = true;
@@ -2172,11 +2375,22 @@ bool vfs_sync_dirty(void)
     return ok;
 }
 
+/*
+ * Flush a single node if it belongs to a mount.
+ *
+ * For non-mounted nodes this is effectively a no-op that returns true.
+ */
 bool vfs_flush_node(vfs_node_t *node)
 {
     return vfs_mount_sync_node(node);
 }
 
+/*
+ * Enable/disable mutations (create/remove/write) within a subtree.
+ *
+ * This is used to lock large parts of the tree read-only while leaving dynamic
+ * areas like `/proc` and `/dev` mutable.
+ */
 void vfs_set_subtree_mutable(vfs_node_t *node, bool allow)
 {
     spinlock_lock(&g_vfs_tree_lock);
@@ -2184,6 +2398,12 @@ void vfs_set_subtree_mutable(vfs_node_t *node, bool allow)
     spinlock_unlock(&g_vfs_tree_lock);
 }
 
+/*
+ * Snapshot current mount list state.
+ *
+ * Fills up to `max` entries in `out` (if non-NULL) and returns the total number
+ * of mounts present.
+ */
 size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max)
 {
     size_t count = 0;

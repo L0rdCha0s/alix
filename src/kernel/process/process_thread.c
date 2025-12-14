@@ -1,5 +1,16 @@
 #include "process_internal.h"
 
+/*
+ * src/kernel/process/process_thread.c
+ *
+ * Thread lifecycle and stack management:
+ * - allocation and initialisation of `thread_t`
+ * - kernel stack allocation + guard regions + initial context frame
+ * - attaching threads to processes and scheduler enqueueing
+ *
+ * See docs/kernel/process.md and docs/kernel/memory.md.
+ */
+
 void scheduler_trace(const char *prefix, thread_t *thread)
 {
     if (!sched_dbg_enabled())
@@ -144,6 +155,15 @@ process_t *process_finalize_new_process(process_t *proc,
     return proc;
 }
 
+/*
+ * Allocate and initialise a new thread.
+ *
+ * The created thread starts at `thread_trampoline` (scheduler file) after its
+ * first context switch. Stack layout:
+ * - a guard region (filled with `STACK_GUARD_PATTERN`)
+ * - the usable stack area
+ * - a reserved redzone near the top to keep the saved context frame isolated
+ */
 thread_t *thread_create(process_t *process,
                         const char *name,
                         thread_entry_t entry,

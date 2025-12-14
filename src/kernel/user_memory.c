@@ -9,6 +9,21 @@
 
 #define USER_MEMORY_PAGE_SIZE 4096ULL
 
+/*
+ * src/kernel/user_memory.c
+ *
+ * Allocator for physical memory used to back user-space virtual pages.
+ *
+ * This maintains a free list of page-aligned physical ranges derived from the
+ * E820 memory map provided by the boot loader (`boot_info.e820`), constrained
+ * to a “user-usable” window (see `g_mem_layout`).
+ *
+ * Process address space code (`process_map_user_segment`) uses this allocator
+ * to obtain physical pages, then maps them into user virtual address spaces.
+ *
+ * See docs/kernel/memory.md.
+ */
+
 typedef struct user_memory_range
 {
     uintptr_t base;
@@ -137,6 +152,11 @@ static void user_memory_add_range(uintptr_t base, uintptr_t end)
     usermem_log("add end=", end);
 }
 
+/*
+ * Initialise the user physical page pool from the boot E820 map.
+ *
+ * Must be called after `boot_info` and `g_mem_layout` are initialised.
+ */
 void user_memory_init(void)
 {
     spinlock_init(&g_user_memory_lock);
@@ -196,6 +216,11 @@ void user_memory_init(void)
     spinlock_unlock(&g_user_memory_lock);
 }
 
+/*
+ * Allocate a page-aligned physical range of at least `bytes`.
+ *
+ * Returns a physical address cast as `void*` (not a kernel virtual pointer).
+ */
 void *user_memory_alloc(size_t bytes)
 {
     if (bytes == 0)
@@ -235,6 +260,11 @@ void *user_memory_alloc(size_t bytes)
     return NULL;
 }
 
+/*
+ * Free a previously-allocated physical range back into the pool.
+ *
+ * The range is page-aligned and merged with adjacent free ranges when possible.
+ */
 void user_memory_free(void *addr, size_t bytes)
 {
     if (!addr || bytes == 0)
@@ -275,6 +305,9 @@ void user_memory_free(void *addr, size_t bytes)
     spinlock_unlock(&g_user_memory_lock);
 }
 
+/*
+ * Return total currently-free bytes in the user physical pool.
+ */
 size_t user_memory_available(void)
 {
     spinlock_lock(&g_user_memory_lock);

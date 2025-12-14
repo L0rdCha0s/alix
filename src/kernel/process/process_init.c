@@ -1,5 +1,25 @@
 #include "process_internal.h"
 
+/*
+ * src/kernel/process/process_init.c
+ *
+ * Scheduler bring-up:
+ * - Initializes global scheduler/process state.
+ * - Creates the idle process and per-CPU idle threads.
+ * - Provides the entry path for starting scheduling on the BSP and APs.
+ *
+ * See docs/kernel/process.md for the full scheduling/preemption model.
+ */
+
+/*
+ * Initialise the process subsystem.
+ *
+ * Must be called on the BSP before starting APs or enabling timer-driven
+ * scheduling. Sets up:
+ * - run queues and global registries
+ * - the idle process and per-CPU idle threads
+ * - time slice configuration derived from the timer frequency
+ */
 void process_system_init(void)
 {
     fpu_prepare_initial_state();
@@ -152,6 +172,12 @@ void process_system_init(void)
 #endif
 }
 
+/*
+ * Main scheduler loop for a CPU.
+ *
+ * Each CPU runs its idle thread; the idle thread calls `scheduler_schedule()`
+ * when woken by an interrupt or when there is runnable work.
+ */
 static void scheduler_main_loop(void)
 {
     lapic_set_tpr(0);
@@ -163,6 +189,12 @@ static void scheduler_main_loop(void)
     }
 }
 
+/*
+ * Start scheduling on the BSP.
+ *
+ * This switches the CPU onto the BSP idle thread's kernel stack and jumps into
+ * `scheduler_main_loop`. It does not return.
+ */
 void process_start_scheduler(void)
 {
     uint32_t cpu = current_cpu_index();
@@ -204,6 +236,12 @@ void process_start_scheduler(void)
     fatal("process_start_scheduler unreachable");
 }
 
+/*
+ * Bind the BSP to its idle thread (thread-local pointers, MSRs, stack).
+ *
+ * This is used during the transition from single-threaded bring-up into the
+ * scheduler, before enabling interrupts and calling `process_start_scheduler`.
+ */
 void process_bind_idle_to_bsp(void)
 {
     thread_t *idle = g_idle_threads[0];
@@ -223,6 +261,13 @@ void process_bind_idle_to_bsp(void)
     wrmsr(MSR_FS_BASE, idle->fs_base);
 }
 
+/*
+ * Entry point for secondary CPUs once SMP bring-up completes.
+ *
+ * APs are started by `src/kernel/smp.c` and arrive here after minimal CPU/IDT
+ * init. This function binds the CPU to its idle thread and enters the per-CPU
+ * scheduler loop.
+ */
 void process_run_secondary_cpu(uint32_t cpu_index)
 {
     if (cpu_index >= SMP_MAX_CPUS)

@@ -4,6 +4,19 @@
 #include "serial.h"
 #include "vfs.h"
 
+/*
+ * src/kernel/procfs.c
+ *
+ * procfs implementation layered on the VFS:
+ * - Creates `/proc` and keeps it mutable.
+ * - Supports callback-backed files used for controls and stats (e.g. `/proc/sys/...`).
+ *
+ * Callers typically use `procfs_create_file_at("sys/...", read, write, ctx)` to
+ * register a control file whose contents are produced/consumed by callbacks.
+ *
+ * See docs/kernel/vfs.md.
+ */
+
 static vfs_node_t *g_proc_dir = NULL;
 
 static vfs_node_t *procfs_ensure_dir_path(const char *path)
@@ -100,6 +113,10 @@ vfs_node_t *procfs_create_file(const char *name,
     return procfs_create_file_at(name, read_cb, write_cb, context);
 }
 
+/*
+ * Create a callback-backed file under `/proc/<path>`, creating parent
+ * directories as needed.
+ */
 vfs_node_t *procfs_create_file_at(const char *path,
                                   vfs_read_cb_t read_cb,
                                   vfs_write_cb_t write_cb,

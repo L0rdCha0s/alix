@@ -15,6 +15,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * src/arch/x86/paging.c
+ *
+ * Page table management for x86_64:
+ * - Initializes kernel paging and CPU-side protection features (NX/SMEP/SMAP).
+ * - Provides per-process address spaces (`paging_space_t`) used by the process subsystem.
+ * - Supports mapping/unmapping user pages and flushing TLBs locally/remotely (SMP).
+ *
+ * Locking:
+ * - Global paging lock for shared structures.
+ * - Optional per-space locks for page table edits in a specific address space.
+ *
+ * See docs/kernel/memory.md.
+ */
+
 extern uint8_t __kernel_text_start[];
 extern uint8_t __kernel_text_end[];
 extern uint8_t __kernel_data_start[];
@@ -769,6 +784,13 @@ static bool build_identity_space(paging_space_t *space)
     return true;
 }
 
+/*
+ * Initialise paging and install the kernel page tables.
+ *
+ * Builds an identity-mapped space for low physical memory and applies
+ * execute/writable permissions for kernel text/data. Enables CPU protection
+ * features (NX/SMEP/SMAP) when supported.
+ */
 void paging_init(void)
 {
     if (g_paging_ready)
@@ -795,6 +817,12 @@ void paging_init(void)
     g_paging_ready = true;
 }
 
+/*
+ * Create a new paging space by cloning the kernel's base mappings.
+ *
+ * The resulting `space` owns its page tables and can be modified independently
+ * (used for user processes).
+ */
 bool paging_clone_kernel_space(paging_space_t *space)
 {
     if (!g_paging_ready || !space)
@@ -814,6 +842,12 @@ bool paging_clone_kernel_space(paging_space_t *space)
     return true;
 }
 
+/*
+ * Point `space` at the shared kernel paging space.
+ *
+ * This is used for kernel-only threads that do not require a private CR3.
+ * Shared spaces use the global paging lock.
+ */
 bool paging_share_kernel_space(paging_space_t *space)
 {
     if (!g_paging_ready || !space)
@@ -830,6 +864,11 @@ bool paging_share_kernel_space(paging_space_t *space)
     return true;
 }
 
+/*
+ * Destroy a paging space and free its allocated page tables.
+ *
+ * Does nothing for spaces that reference the shared kernel tables.
+ */
 void paging_destroy_space(paging_space_t *space)
 {
     if (!space || !space->allocation_base)
@@ -873,6 +912,9 @@ void paging_destroy_space(paging_space_t *space)
     }
 }
 
+/*
+ * Return the CR3 value used for the kernel paging space.
+ */
 uintptr_t paging_kernel_cr3(void)
 {
     if (!g_paging_ready)
@@ -882,6 +924,12 @@ uintptr_t paging_kernel_cr3(void)
     return g_kernel_space.cr3;
 }
 
+/*
+ * Map a single user page into `space`.
+ *
+ * `virtual_addr` and `physical_addr` are page-aligned internally. Pages are
+ * mapped as user-accessible and can be marked writable/executable.
+ */
 bool paging_map_user_page(paging_space_t *space,
                           uintptr_t virtual_addr,
                           uintptr_t physical_addr,
@@ -928,6 +976,12 @@ static bool paging_map_user_page_internal(paging_space_t *space,
     return true;
 }
 
+/*
+ * Map a contiguous user virtual range to a contiguous physical range.
+ *
+ * The range is rounded to page boundaries. This is primarily used to map user
+ * stacks, heap pages, and ELF segments.
+ */
 bool paging_map_user_range(paging_space_t *space,
                            uintptr_t virtual_addr,
                            uintptr_t physical_addr,
@@ -966,6 +1020,9 @@ bool paging_map_user_range(paging_space_t *space,
     return true;
 }
 
+/*
+ * Unmap a single user page from an address space.
+ */
 bool paging_unmap_user_page(paging_space_t *space,
                             uintptr_t virtual_addr)
 {
@@ -1111,6 +1168,15 @@ out:
     return ok;
 }
 
+/*
+ * Toggle write permission for an existing kernel mapping range.
+ *
+ * This is used by debugging/safety features (e.g. stack protection) to
+ * temporarily unprotect/protect ranges.
+ *
+ * When `safe == true` (default), the implementation avoids changing mappings
+ * that overlap the current thread stack.
+ */
 bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
                                       size_t length,
                                       bool writable)
@@ -1118,6 +1184,12 @@ bool paging_set_kernel_range_writable(uintptr_t virtual_addr,
     return paging_set_kernel_range_writable_internal(virtual_addr, length, writable, true);
 }
 
+/*
+ * Force-set write permission for a kernel mapping range.
+ *
+ * This variant skips the “avoid current stack” safety checks and should be
+ * used with caution.
+ */
 bool paging_set_kernel_range_writable_force(uintptr_t virtual_addr,
                                             size_t length,
                                             bool writable)
@@ -1125,16 +1197,28 @@ bool paging_set_kernel_range_writable_force(uintptr_t virtual_addr,
     return paging_set_kernel_range_writable_internal(virtual_addr, length, writable, false);
 }
 
+/*
+ * IPI handler: remote CPUs flush their local TLB on request.
+ */
 void paging_handle_remote_tlb_flush(void)
 {
     flush_local_tlb();
 }
 
+/*
+ * Flush the kernel TLB entries on all CPUs.
+ */
 void paging_flush_global_tlb(void)
 {
     paging_flush_space_tlb(&g_kernel_space);
 }
 
+/*
+ * Flush TLB entries for an address space.
+ *
+ * For the kernel space this broadcasts a TLB flush IPI; for user spaces it
+ * flushes on CPUs where the space is currently active.
+ */
 void paging_flush_space_tlb(paging_space_t *space)
 {
     flush_local_tlb();

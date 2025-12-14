@@ -1,3 +1,17 @@
+/*
+ * src/kernel/kernel.c
+ *
+ * Top-level kernel initialisation (entered via `kernel_main`) and a handful of
+ * long-lived kernel service threads (shell, tcp timer, storage flush daemon).
+ *
+ * This is intentionally “wiring” code: it sequences subsystem init and kicks
+ * off background processes once the scheduler is available.
+ *
+ * See:
+ * - docs/kernel/boot.md (boot → kernel_entry → kernel_main)
+ * - docs/kernel/process.md (scheduler bring-up and kernel processes)
+ */
+
 #include "console.h"
 #include "serial.h"
 #include "keyboard.h"
@@ -633,6 +647,10 @@ static void warmup_process_entry(void *arg)
 
 }
 
+/*
+ * Kernel shell entrypoint: runs the interactive shell on a kernel thread.
+ * This thread never returns; it exits the process when `shell_main()` returns.
+ */
 static void shell_process_entry(void *arg)
 {
     (void)arg;
@@ -640,6 +658,12 @@ static void shell_process_entry(void *arg)
     process_exit(0);
 }
 
+/*
+ * Periodic TCP maintenance thread.
+ *
+ * The TCP stack uses timer-driven retransmit/timeouts; this thread provides a
+ * simple polling loop that calls `net_tcp_poll()` at a fixed cadence.
+ */
 static void tcp_timer_process_entry(void *arg)
 {
     (void)arg;
@@ -651,6 +675,12 @@ static void tcp_timer_process_entry(void *arg)
     }
 }
 
+/*
+ * Deferred HDA initialisation.
+ *
+ * Some devices/codecs may appear slightly after boot; doing this work on its
+ * own thread avoids stalling the main bring-up path.
+ */
 static void hda_init_process_entry(void *arg)
 {
     (void)arg;
@@ -806,6 +836,12 @@ static void storage_flush_wait(uint32_t interval_ms)
 #endif
 
 #if ENABLE_FLUSHD
+/*
+ * Request a background flush of dirty mounts/files.
+ *
+ * This is called by storage code (and VFS writeback logic) to nudge the flush
+ * daemon; it is safe to call from any CPU.
+ */
 void storage_request_flush(void)
 {
     __atomic_store_n(&g_flushd_wake_requested, true, __ATOMIC_RELEASE);
@@ -820,6 +856,12 @@ void storage_request_flush(void)
 }
 #endif
 
+/*
+ * Background filesystem flush daemon.
+ *
+ * Periodically scans mounted devices and calls `vfs_sync_dirty()` to push
+ * outstanding dirty data/metadata to their backing block devices.
+ */
 static void storage_flush_process_entry(void *arg)
 {
     (void)arg;
@@ -894,6 +936,15 @@ static void storage_flush_process_entry(void *arg)
 
 void kernel_main(void)
 {
+    /*
+     * `kernel_main` is entered from `src/arch/x86/kernel_entry.c` after:
+     * - `.bss` has been zeroed
+     * - `boot_info` has been copied from the UEFI loader
+     * - bootstrap page tables are active
+     *
+     * This function performs subsystem init, starts APs, then transitions into
+     * the scheduler loop. It does not return.
+     */
     serial_init();
     serial_printf("%s", "[alix] kernel_main start\n");
     console_init();

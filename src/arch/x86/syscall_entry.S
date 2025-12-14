@@ -5,6 +5,10 @@
 .global syscall_entry
 .extern syscall_dispatch
 
+# syscall_entry (IDT vector 0x80)
+#
+# Saves general-purpose registers, calls `syscall_dispatch(frame, 0x80)`, then
+# restores registers and returns via IRETQ.
 syscall_entry:
     cld                     # DF = 0 for C/memcpy-safe
     push rax

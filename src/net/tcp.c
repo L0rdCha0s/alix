@@ -17,6 +17,24 @@
 
 typedef struct thread thread_t;
 
+/*
+ * src/net/tcp.c
+ *
+ * Minimal TCP client stack with FD integration.
+ *
+ * Highlights:
+ * - Fixed socket pool (`NET_TCP_MAX_SOCKETS`).
+ * - Basic connect/send/receive/close state machine.
+ * - RX buffering with backpressure and a wait queue for blocking reads.
+ * - Integrates with the kernel FD table (`fd_allocate` + `fd_ops_t`) so user
+ *   code can treat sockets like file descriptors.
+ *
+ * Periodic maintenance is driven by `net_tcp_poll()` (called by a kernel timer
+ * thread and some driver paths).
+ *
+ * See docs/kernel/network.md and docs/kernel/syscalls.md.
+ */
+
 #ifndef TCP_TRACE_VERBOSE
 #define TCP_TRACE_VERBOSE 0
 #endif

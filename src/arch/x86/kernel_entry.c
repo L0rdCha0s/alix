@@ -10,6 +10,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * src/arch/x86/kernel_entry.c
+ *
+ * Kernel entrypoint reached from the UEFI loader.
+ *
+ * Responsibilities:
+ * - Copy loader-provided `bootinfo_t` into the global `boot_info`.
+ * - Derive early memory layout (`g_mem_layout`) and heap bounds from E820.
+ * - Build and install initial page tables (identity + kernel mappings).
+ * - Bring the BSP CPU into a known-good state (stack, segments, CR0/CR4/EFER).
+ * - Transfer control to `kernel_main` in `src/kernel/kernel.c`.
+ *
+ * See docs/kernel/boot.md and docs/kernel/memory.md.
+ */
+
 extern void kernel_main(void);
 
 extern uint8_t __kernel_text_start[];
@@ -440,8 +455,13 @@ static void build_page_tables(void)
     write_cr0(cr0);
 }
 
-
 __attribute__((noinline, used))
+/*
+ * Main entry implementation after `kernel_entry` switches to the bootstrap stack.
+ *
+ * This is still early boot code: only very limited services are safe to use
+ * here until paging/heap and CPU state are fully initialised.
+ */
 static void kernel_entry_main(bootinfo_t *loader_info)
 {
     serial_init();
@@ -468,6 +488,11 @@ static void kernel_entry_main(bootinfo_t *loader_info)
     kernel_main();
 }
 
+/*
+ * Naked entry wrapper invoked directly by the loader.
+ *
+ * Sets a known-good stack and calls `kernel_entry_main(loader_info)`.
+ */
 void __attribute__((naked)) kernel_entry(bootinfo_t *loader_info __attribute__((unused)))
 {
     __asm__ volatile (

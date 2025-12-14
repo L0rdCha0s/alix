@@ -1,9 +1,23 @@
 #include "block.h"
 #include "libc.h"
 
+/*
+ * src/kernel/block.c
+ *
+ * Block device registry and common read/write/flush wrappers.
+ *
+ * Drivers register `block_device_t` instances via `block_register`, and higher
+ * layers (VFS, filesystems) enumerate or look them up by name.
+ *
+ * See docs/kernel/vfs.md and docs/kernel/source_map.md.
+ */
+
 static block_device_t *g_block_devices_head = NULL;
 static block_device_t *g_block_devices_tail = NULL;
 
+/*
+ * Initialise the global block device list.
+ */
 void block_init(void)
 {
     g_block_devices_head = NULL;
@@ -30,6 +44,12 @@ static void block_copy_name(block_device_t *device, const char *name)
     device->name[len] = '\0';
 }
 
+/*
+ * Register a new block device.
+ *
+ * The driver provides sector geometry and callbacks. The returned pointer is
+ * owned by the registry for the lifetime of the kernel.
+ */
 block_device_t *block_register(const char *name,
                                uint32_t sector_size,
                                uint64_t sector_count,
@@ -99,6 +119,9 @@ block_device_t *block_find(const char *name)
     return NULL;
 }
 
+/*
+ * Read `count` sectors starting at LBA `lba` into `buffer`.
+ */
 bool block_read(block_device_t *device, uint64_t lba, uint32_t count, void *buffer)
 {
     if (!device || !buffer || count == 0 || !device->read)
@@ -112,6 +135,9 @@ bool block_read(block_device_t *device, uint64_t lba, uint32_t count, void *buff
     return device->read(device, lba, count, buffer);
 }
 
+/*
+ * Write `count` sectors starting at LBA `lba` from `buffer`.
+ */
 bool block_write(block_device_t *device, uint64_t lba, uint32_t count, const void *buffer)
 {
     if (!device || !buffer || count == 0 || !device->write)
@@ -125,6 +151,9 @@ bool block_write(block_device_t *device, uint64_t lba, uint32_t count, const voi
     return device->write(device, lba, count, buffer);
 }
 
+/*
+ * Flush outstanding writes for a block device (if supported).
+ */
 bool block_flush(block_device_t *device)
 {
     if (!device)
