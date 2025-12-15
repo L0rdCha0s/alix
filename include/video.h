@@ -47,6 +47,13 @@ void video_blit_rgba32(int x,
                        const video_color_t *pixels,
                        int stride_bytes,
                        bool use_alpha);
+void video_blit_rgba32_untracked(int x,
+                                 int y,
+                                 int width,
+                                 int height,
+                                 const video_color_t *pixels,
+                                 int stride_bytes,
+                                 bool use_alpha);
 void video_copy_backbuffer(int x,
                            int y,
                            int width,

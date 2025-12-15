@@ -443,6 +443,102 @@ void video_blit_rgba32(int x,
     surface_unlock();
 }
 
+void video_blit_rgba32_untracked(int x,
+                                 int y,
+                                 int width,
+                                 int height,
+                                 const video_color_t *pixels,
+                                 int stride_bytes,
+                                 bool use_alpha)
+{
+    if (!pixels || width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    surface_lock();
+    if (!surface_ready())
+    {
+        surface_unlock();
+        return;
+    }
+
+    if (stride_bytes <= 0)
+    {
+        stride_bytes = width * (int)sizeof(video_color_t);
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+    int src_x = 0;
+    int src_y = 0;
+
+    if (x0 < 0) { src_x = -x0; x0 = 0; }
+    if (y0 < 0) { src_y = -y0; y0 = 0; }
+    if (x1 > (int)g_surface_width) x1 = (int)g_surface_width;
+    if (y1 > (int)g_surface_height) y1 = (int)g_surface_height;
+
+    int copy_w = x1 - x0;
+    int copy_h = y1 - y0;
+    if (copy_w <= 0 || copy_h <= 0)
+    {
+        surface_unlock();
+        return;
+    }
+
+    const uint8_t *row = (const uint8_t *)pixels +
+                         (size_t)src_y * (size_t)stride_bytes +
+                         (size_t)src_x * sizeof(video_color_t);
+    for (int row_idx = 0; row_idx < copy_h; ++row_idx)
+    {
+        const video_color_t *src_row = (const video_color_t *)row;
+        video_color_t *dst = &g_surface[(size_t)(y0 + row_idx) * g_surface_width + x0];
+        if (!use_alpha)
+        {
+            memcpy(dst, src_row, (size_t)copy_w * sizeof(video_color_t));
+        }
+        else
+        {
+            for (int col = 0; col < copy_w; ++col)
+            {
+                video_color_t src_px = src_row[col];
+                uint8_t a = (uint8_t)(src_px >> 24);
+                if (a == 0)
+                {
+                    continue;
+                }
+                if (a == 255)
+                {
+                    dst[col] = src_px;
+                    continue;
+                }
+
+                uint8_t sr = (uint8_t)(src_px >> 16);
+                uint8_t sg = (uint8_t)(src_px >> 8);
+                uint8_t sb = (uint8_t)src_px;
+
+                video_color_t dst_px = dst[col];
+                uint8_t dr = (uint8_t)(dst_px >> 16);
+                uint8_t dg = (uint8_t)(dst_px >> 8);
+                uint8_t db = (uint8_t)dst_px;
+
+                uint8_t ia = (uint8_t)(255 - a);
+                uint8_t rr = (uint8_t)((sr * a + dr * ia) / 255);
+                uint8_t rg = (uint8_t)((sg * a + dg * ia) / 255);
+                uint8_t rb = (uint8_t)((sb * a + db * ia) / 255);
+
+                dst[col] = 0xFF000000U | ((video_color_t)rr << 16) |
+                           ((video_color_t)rg << 8) | (video_color_t)rb;
+            }
+        }
+        row += stride_bytes;
+    }
+
+    surface_unlock();
+}
+
 bool video_is_active(void)
 {
     surface_lock();

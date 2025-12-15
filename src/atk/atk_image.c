@@ -271,13 +271,13 @@ void atk_image_draw(const atk_state_t *state, const atk_widget_t *image)
 
     if (priv->pixels && priv->img_width > 0 && priv->img_height > 0)
     {
-        video_blit_rgba32(draw_x,
-                          draw_y,
-                          priv->img_width,
-                          priv->img_height,
-                          priv->pixels,
-                          priv->stride_bytes,
-                          true);
+        video_blit_rgba32_untracked(draw_x,
+                                    draw_y,
+                                    priv->img_width,
+                                    priv->img_height,
+                                    priv->pixels,
+                                    priv->stride_bytes,
+                                    true);
     }
 }
 

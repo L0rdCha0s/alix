@@ -262,23 +262,401 @@ static bool browser_buf_append(char **buf, size_t *len, size_t *cap, const uint8
     return true;
 }
 
-static const char *browser_find_http_body(const char *response)
+static bool browser_http_find_header_end(const char *data,
+                                        size_t len,
+                                        size_t *header_len_out,
+                                        size_t *body_offset_out)
 {
-    if (!response)
+    if (!data || len == 0)
     {
-        return NULL;
+        return false;
     }
-    const char *p = strstr(response, "\r\n\r\n");
-    if (p)
+
+    for (size_t i = 0; i + 3 < len; ++i)
     {
-        return p + 4;
+        if (data[i] == '\r' &&
+            data[i + 1] == '\n' &&
+            data[i + 2] == '\r' &&
+            data[i + 3] == '\n')
+        {
+            if (header_len_out)
+            {
+                *header_len_out = i;
+            }
+            if (body_offset_out)
+            {
+                *body_offset_out = i + 4;
+            }
+            return true;
+        }
     }
-    p = strstr(response, "\n\n");
-    if (p)
+
+    for (size_t i = 0; i + 1 < len; ++i)
     {
-        return p + 2;
+        if (data[i] == '\n' && data[i + 1] == '\n')
+        {
+            if (header_len_out)
+            {
+                *header_len_out = i;
+            }
+            if (body_offset_out)
+            {
+                *body_offset_out = i + 2;
+            }
+            return true;
+        }
     }
-    return response;
+
+    return false;
+}
+
+static bool browser_http_find_header_value(const char *headers,
+                                          size_t headers_len,
+                                          const char *name,
+                                          const char **value_out,
+                                          size_t *value_len_out)
+{
+    if (!headers || headers_len == 0 || !name || !value_out || !value_len_out)
+    {
+        return false;
+    }
+
+    const size_t name_len = strlen(name);
+    const char *p = headers;
+    const char *end = headers + headers_len;
+
+    while (p < end)
+    {
+        const char *line = p;
+        const char *line_end = NULL;
+        for (const char *it = p; it < end; ++it)
+        {
+            if (*it == '\n')
+            {
+                line_end = it;
+                break;
+            }
+        }
+        if (!line_end)
+        {
+            line_end = end;
+            p = end;
+        }
+        else
+        {
+            p = line_end + 1;
+        }
+
+        size_t line_len = (size_t)(line_end - line);
+        if (line_len > 0 && line[line_len - 1] == '\r')
+        {
+            line_len--;
+        }
+        if (line_len == 0)
+        {
+            continue;
+        }
+
+        const char *colon = NULL;
+        for (size_t i = 0; i < line_len; ++i)
+        {
+            if (line[i] == ':')
+            {
+                colon = line + i;
+                break;
+            }
+        }
+        if (!colon)
+        {
+            continue;
+        }
+
+        size_t key_len = (size_t)(colon - line);
+        if (key_len != name_len)
+        {
+            continue;
+        }
+        if (strncasecmp(line, name, name_len) != 0)
+        {
+            continue;
+        }
+
+        const char *value = colon + 1;
+        const char *line_data_end = line + line_len;
+        while (value < line_data_end && (*value == ' ' || *value == '\t'))
+        {
+            value++;
+        }
+        const char *value_end = line_data_end;
+        while (value_end > value && (value_end[-1] == ' ' || value_end[-1] == '\t'))
+        {
+            value_end--;
+        }
+
+        *value_out = value;
+        *value_len_out = (size_t)(value_end - value);
+        return true;
+    }
+
+    return false;
+}
+
+static bool browser_parse_decimal_size(const char *value, size_t value_len, size_t *out)
+{
+    if (!value || value_len == 0 || !out)
+    {
+        return false;
+    }
+
+    size_t parsed = 0;
+    bool saw_digit = false;
+    for (size_t i = 0; i < value_len; ++i)
+    {
+        char c = value[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        {
+            continue;
+        }
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+        saw_digit = true;
+        size_t digit = (size_t)(c - '0');
+        if (parsed > (BROWSER_MAX_BYTES - digit) / 10u)
+        {
+            return false;
+        }
+        parsed = parsed * 10u + digit;
+    }
+    if (!saw_digit)
+    {
+        return false;
+    }
+    *out = parsed;
+    return true;
+}
+
+static bool browser_has_token_ci(const char *value, size_t value_len, const char *token)
+{
+    if (!value || value_len == 0 || !token || token[0] == '\0')
+    {
+        return false;
+    }
+    size_t token_len = strlen(token);
+    if (token_len == 0 || token_len > value_len)
+    {
+        return false;
+    }
+    for (size_t i = 0; i + token_len <= value_len; ++i)
+    {
+        if (strncasecmp(value + i, token, token_len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+typedef enum
+{
+    BROWSER_CHUNK_READ_SIZE = 0,
+    BROWSER_CHUNK_READ_DATA,
+    BROWSER_CHUNK_READ_DATA_CR,
+    BROWSER_CHUNK_READ_DATA_LF,
+    BROWSER_CHUNK_READ_TRAILERS,
+    BROWSER_CHUNK_DONE
+} browser_chunk_state_t;
+
+typedef struct
+{
+    browser_chunk_state_t state;
+    size_t current_size;
+    size_t remaining;
+    char linebuf[64];
+    size_t line_len;
+    int trailer_stage;
+} browser_chunked_t;
+
+static void browser_chunked_init(browser_chunked_t *st)
+{
+    if (!st)
+    {
+        return;
+    }
+    st->state = BROWSER_CHUNK_READ_SIZE;
+    st->current_size = 0;
+    st->remaining = 0;
+    st->line_len = 0;
+    st->trailer_stage = 0;
+}
+
+static bool browser_parse_chunk_size_line(const char *line, size_t len, size_t *out)
+{
+    if (!line || len == 0 || !out)
+    {
+        return false;
+    }
+
+    size_t val = 0;
+    bool saw_digit = false;
+    for (size_t i = 0; i < len; ++i)
+    {
+        char c = line[i];
+        if (c == ';' || c == ' ' || c == '\t')
+        {
+            break;
+        }
+
+        unsigned d = 0;
+        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = 10u + (unsigned)(c - 'a');
+        else if (c >= 'A' && c <= 'F') d = 10u + (unsigned)(c - 'A');
+        else return false;
+
+        saw_digit = true;
+        if (val > (BROWSER_MAX_BYTES - (size_t)d) / 16u)
+        {
+            return false;
+        }
+        val = (val << 4) | (size_t)d;
+    }
+
+    if (!saw_digit)
+    {
+        return false;
+    }
+
+    *out = val;
+    return true;
+}
+
+static bool browser_chunked_consume(browser_chunked_t *st,
+                                   char **out_body,
+                                   size_t *out_len,
+                                   size_t *out_cap,
+                                   const uint8_t *data,
+                                   size_t len,
+                                   bool *done)
+{
+    if (!st || !out_body || !out_len || !out_cap || (!data && len > 0) || !done)
+    {
+        return false;
+    }
+
+    size_t pos = 0;
+    *done = false;
+
+    while (pos < len && st->state != BROWSER_CHUNK_DONE)
+    {
+        switch (st->state)
+        {
+            case BROWSER_CHUNK_READ_SIZE:
+            {
+                char b = (char)data[pos++];
+                if (st->line_len >= sizeof(st->linebuf))
+                {
+                    return false;
+                }
+                st->linebuf[st->line_len++] = b;
+                if (st->line_len >= 2 &&
+                    st->linebuf[st->line_len - 2] == '\r' &&
+                    st->linebuf[st->line_len - 1] == '\n')
+                {
+                    size_t linelen = st->line_len - 2;
+                    if (!browser_parse_chunk_size_line(st->linebuf, linelen, &st->current_size))
+                    {
+                        return false;
+                    }
+                    st->line_len = 0;
+                    st->remaining = st->current_size;
+                    if (st->current_size == 0)
+                    {
+                        st->state = BROWSER_CHUNK_READ_TRAILERS;
+                        st->trailer_stage = 2;
+                    }
+                    else
+                    {
+                        st->state = BROWSER_CHUNK_READ_DATA;
+                    }
+                }
+                break;
+            }
+
+            case BROWSER_CHUNK_READ_DATA:
+            {
+                size_t avail = len - pos;
+                size_t take = (st->remaining < avail) ? st->remaining : avail;
+                if (take > 0)
+                {
+                    if (!browser_buf_append(out_body, out_len, out_cap, data + pos, take))
+                    {
+                        return false;
+                    }
+                    pos += take;
+                    st->remaining -= take;
+                }
+                if (st->remaining == 0)
+                {
+                    st->state = BROWSER_CHUNK_READ_DATA_CR;
+                }
+                break;
+            }
+
+            case BROWSER_CHUNK_READ_DATA_CR:
+                if (pos >= len)
+                {
+                    return true;
+                }
+                if (data[pos++] != '\r')
+                {
+                    return false;
+                }
+                st->state = BROWSER_CHUNK_READ_DATA_LF;
+                break;
+
+            case BROWSER_CHUNK_READ_DATA_LF:
+                if (pos >= len)
+                {
+                    return true;
+                }
+                if (data[pos++] != '\n')
+                {
+                    return false;
+                }
+                st->state = BROWSER_CHUNK_READ_SIZE;
+                break;
+
+            case BROWSER_CHUNK_READ_TRAILERS:
+            {
+                char c = (char)data[pos++];
+                switch (st->trailer_stage)
+                {
+                    case 0: st->trailer_stage = (c == '\r') ? 1 : 0; break;
+                    case 1: st->trailer_stage = (c == '\n') ? 2 : (c == '\r' ? 1 : 0); break;
+                    case 2: st->trailer_stage = (c == '\r') ? 3 : 0; break;
+                    case 3:
+                        if (c == '\n')
+                        {
+                            st->state = BROWSER_CHUNK_DONE;
+                            *done = true;
+                        }
+                        else
+                        {
+                            st->trailer_stage = 0;
+                        }
+                        break;
+                }
+                break;
+            }
+
+            case BROWSER_CHUNK_DONE:
+                *done = true;
+                break;
+        }
+    }
+
+    return true;
 }
 
 static char *browser_format_error(const char *message)
@@ -349,15 +727,35 @@ static char *browser_fetch_http(const browser_url_t *url)
         return browser_format_error("alloc request failed");
     }
 
-    char *response = NULL;
-    size_t response_len = 0;
-    size_t response_cap = 0;
+    char *header_buf = NULL;
+    size_t header_len = 0;
+    size_t header_cap = 0;
+    bool header_done = false;
+
+    char *body_buf = NULL;
+    size_t body_len = 0;
+    size_t body_cap = 0;
+
+    bool have_content_length = false;
+    size_t content_length = 0;
+    bool is_chunked = false;
+    browser_chunked_t chunked;
+    browser_chunked_init(&chunked);
+
+    uint8_t *chunk = (uint8_t *)malloc(2048);
+    if (!chunk)
+    {
+        free(request);
+        close(fd);
+        return browser_format_error("alloc recv buffer failed");
+    }
 
     if (url->use_tls)
     {
         tls_session_t *tls = (tls_session_t *)malloc(sizeof(*tls));
         if (!tls)
         {
+            free(chunk);
             free(request);
             close(fd);
             return browser_format_error("alloc tls session failed");
@@ -366,6 +764,7 @@ static char *browser_fetch_http(const browser_url_t *url)
         if (!tls_session_init_fd(tls, fd))
         {
             free(tls);
+            free(chunk);
             free(request);
             close(fd);
             return browser_format_error("tls_session_init_fd failed");
@@ -375,6 +774,7 @@ static char *browser_fetch_http(const browser_url_t *url)
         {
             tls_session_close(tls);
             free(tls);
+            free(chunk);
             free(request);
             close(fd);
             return browser_format_error("tls handshake failed");
@@ -384,27 +784,177 @@ static char *browser_fetch_http(const browser_url_t *url)
         {
             tls_session_close(tls);
             free(tls);
+            free(chunk);
             free(request);
             close(fd);
             return browser_format_error("tls send failed");
         }
 
-        uint8_t chunk[2048];
         while (1)
         {
-            size_t got = tls_session_recv(tls, chunk, sizeof(chunk));
+            size_t got = tls_session_recv(tls, chunk, 2048);
             if (got == 0)
             {
                 break;
             }
-            if (!browser_buf_append(&response, &response_len, &response_cap, chunk, got))
+
+            if (!header_done)
             {
-                tls_session_close(tls);
-                free(tls);
-                free(request);
-                close(fd);
-                free(response);
-                return browser_format_error("response too large");
+                if (!browser_buf_append(&header_buf, &header_len, &header_cap, chunk, got))
+                {
+                    tls_session_close(tls);
+                    free(tls);
+                    free(request);
+                    close(fd);
+                    free(header_buf);
+                    free(body_buf);
+                    free(chunk);
+                    return browser_format_error("response too large");
+                }
+
+                size_t header_block_len = 0;
+                size_t body_offset = 0;
+                if (!browser_http_find_header_end(header_buf, header_len, &header_block_len, &body_offset))
+                {
+                    continue;
+                }
+
+                header_done = true;
+
+                const char *value = NULL;
+                size_t value_len = 0;
+                if (browser_http_find_header_value(header_buf, header_block_len,
+                                                   "transfer-encoding",
+                                                   &value, &value_len) &&
+                    browser_has_token_ci(value, value_len, "chunked"))
+                {
+                    is_chunked = true;
+                    have_content_length = false;
+                }
+
+                if (!is_chunked &&
+                    browser_http_find_header_value(header_buf, header_block_len,
+                                                   "content-length",
+                                                   &value, &value_len))
+                {
+                    size_t parsed_len = 0;
+                    if (browser_parse_decimal_size(value, value_len, &parsed_len) &&
+                        parsed_len <= BROWSER_MAX_BYTES)
+                    {
+                        have_content_length = true;
+                        content_length = parsed_len;
+                    }
+                }
+
+                if (header_len > body_offset)
+                {
+                    size_t body_bytes = header_len - body_offset;
+                    if (is_chunked)
+                    {
+                        bool done = false;
+                        if (!browser_chunked_consume(&chunked, &body_buf, &body_len, &body_cap,
+                                                     (const uint8_t *)header_buf + body_offset,
+                                                     body_bytes,
+                                                     &done))
+                        {
+                            tls_session_close(tls);
+                            free(tls);
+                            free(request);
+                            close(fd);
+                            free(header_buf);
+                            free(body_buf);
+                            free(chunk);
+                            return browser_format_error("invalid chunked body");
+                        }
+                        if (done)
+                        {
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        size_t take = body_bytes;
+                        if (have_content_length && body_len < content_length)
+                        {
+                            size_t remaining = content_length - body_len;
+                            if (take > remaining)
+                            {
+                                take = remaining;
+                            }
+                        }
+                        if (take > 0 &&
+                            !browser_buf_append(&body_buf, &body_len, &body_cap,
+                                                (const uint8_t *)header_buf + body_offset,
+                                                take))
+                        {
+                            tls_session_close(tls);
+                            free(tls);
+                            free(request);
+                            close(fd);
+                            free(header_buf);
+                            free(body_buf);
+                            free(chunk);
+                            return browser_format_error("response too large");
+                        }
+                    }
+                }
+
+                free(header_buf);
+                header_buf = NULL;
+                header_len = 0;
+                header_cap = 0;
+            }
+            else
+            {
+                if (is_chunked)
+                {
+                    bool done = false;
+                    if (!browser_chunked_consume(&chunked, &body_buf, &body_len, &body_cap,
+                                                 chunk, got, &done))
+                    {
+                        tls_session_close(tls);
+                        free(tls);
+                        free(request);
+                        close(fd);
+                        free(body_buf);
+                        free(chunk);
+                        return browser_format_error("invalid chunked body");
+                    }
+                    if (done)
+                    {
+                        break;
+                    }
+                }
+                else
+                {
+                    size_t take = got;
+                    if (have_content_length && body_len < content_length)
+                    {
+                        size_t remaining = content_length - body_len;
+                        if (take > remaining)
+                        {
+                            take = remaining;
+                        }
+                    }
+                    if (take > 0 &&
+                        !browser_buf_append(&body_buf, &body_len, &body_cap, chunk, take))
+                    {
+                        tls_session_close(tls);
+                        free(tls);
+                        free(request);
+                        close(fd);
+                        free(body_buf);
+                        free(chunk);
+                        return browser_format_error("response too large");
+                    }
+                }
+            }
+
+            if (!is_chunked &&
+                have_content_length &&
+                body_len >= content_length)
+            {
+                break;
             }
         }
 
@@ -415,48 +965,198 @@ static char *browser_fetch_http(const browser_url_t *url)
     {
         if (!browser_write_all(fd, (const uint8_t *)request, strlen(request)))
         {
+            free(chunk);
             free(request);
             close(fd);
             return browser_format_error("write failed");
         }
 
-        uint8_t chunk[2048];
         while (1)
         {
-            ssize_t got = read(fd, chunk, sizeof(chunk));
-            if (got < 0)
+            ssize_t got_raw = read(fd, chunk, 2048);
+            if (got_raw < 0)
             {
-                free(request);
-                close(fd);
-                free(response);
-                return browser_format_error("read failed");
+                continue;
             }
-            if (got == 0)
+            if (got_raw == 0)
             {
                 break;
             }
-            if (!browser_buf_append(&response, &response_len, &response_cap, chunk, (size_t)got))
+
+            size_t got = (size_t)got_raw;
+            if (!header_done)
             {
-                free(request);
-                close(fd);
-                free(response);
-                return browser_format_error("response too large");
+                if (!browser_buf_append(&header_buf, &header_len, &header_cap, chunk, got))
+                {
+                    free(request);
+                    close(fd);
+                    free(header_buf);
+                    free(body_buf);
+                    free(chunk);
+                    return browser_format_error("response too large");
+                }
+
+                size_t header_block_len = 0;
+                size_t body_offset = 0;
+                if (!browser_http_find_header_end(header_buf, header_len, &header_block_len, &body_offset))
+                {
+                    continue;
+                }
+
+                header_done = true;
+
+                const char *value = NULL;
+                size_t value_len = 0;
+                if (browser_http_find_header_value(header_buf, header_block_len,
+                                                   "transfer-encoding",
+                                                   &value, &value_len) &&
+                    browser_has_token_ci(value, value_len, "chunked"))
+                {
+                    is_chunked = true;
+                    have_content_length = false;
+                }
+
+                if (!is_chunked &&
+                    browser_http_find_header_value(header_buf, header_block_len,
+                                                   "content-length",
+                                                   &value, &value_len))
+                {
+                    size_t parsed_len = 0;
+                    if (browser_parse_decimal_size(value, value_len, &parsed_len) &&
+                        parsed_len <= BROWSER_MAX_BYTES)
+                    {
+                        have_content_length = true;
+                        content_length = parsed_len;
+                    }
+                }
+
+                if (header_len > body_offset)
+                {
+                    size_t body_bytes = header_len - body_offset;
+                    if (is_chunked)
+                    {
+                        bool done = false;
+                        if (!browser_chunked_consume(&chunked, &body_buf, &body_len, &body_cap,
+                                                     (const uint8_t *)header_buf + body_offset,
+                                                     body_bytes,
+                                                     &done))
+                        {
+                            free(request);
+                            close(fd);
+                            free(header_buf);
+                            free(body_buf);
+                            free(chunk);
+                            return browser_format_error("invalid chunked body");
+                        }
+                        if (done)
+                        {
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        size_t take = body_bytes;
+                        if (have_content_length && body_len < content_length)
+                        {
+                            size_t remaining = content_length - body_len;
+                            if (take > remaining)
+                            {
+                                take = remaining;
+                            }
+                        }
+                        if (take > 0 &&
+                            !browser_buf_append(&body_buf, &body_len, &body_cap,
+                                                (const uint8_t *)header_buf + body_offset,
+                                                take))
+                        {
+                            free(request);
+                            close(fd);
+                            free(header_buf);
+                            free(body_buf);
+                            free(chunk);
+                            return browser_format_error("response too large");
+                        }
+                    }
+                }
+
+                free(header_buf);
+                header_buf = NULL;
+                header_len = 0;
+                header_cap = 0;
+            }
+            else
+            {
+                if (is_chunked)
+                {
+                    bool done = false;
+                    if (!browser_chunked_consume(&chunked, &body_buf, &body_len, &body_cap,
+                                                 chunk, got, &done))
+                    {
+                        free(request);
+                        close(fd);
+                        free(body_buf);
+                        free(chunk);
+                        return browser_format_error("invalid chunked body");
+                    }
+                    if (done)
+                    {
+                        break;
+                    }
+                }
+                else
+                {
+                    size_t take = got;
+                    if (have_content_length && body_len < content_length)
+                    {
+                        size_t remaining = content_length - body_len;
+                        if (take > remaining)
+                        {
+                            take = remaining;
+                        }
+                    }
+                    if (take > 0 &&
+                        !browser_buf_append(&body_buf, &body_len, &body_cap, chunk, take))
+                    {
+                        free(request);
+                        close(fd);
+                        free(body_buf);
+                        free(chunk);
+                        return browser_format_error("response too large");
+                    }
+                }
+            }
+
+            if (!is_chunked &&
+                have_content_length &&
+                body_len >= content_length)
+            {
+                break;
             }
         }
     }
 
     free(request);
     close(fd);
+    free(chunk);
 
-    if (!response)
+    if (header_buf)
+    {
+        free(header_buf);
+        header_buf = NULL;
+    }
+
+    if (have_content_length && body_len < content_length)
+    {
+        free(body_buf);
+        return browser_format_error("incomplete response body");
+    }
+
+    if (!body_buf)
     {
         return browser_format_error("empty response");
     }
 
-    const char *body = browser_find_http_body(response);
-    char *out = browser_strdup(body);
-    free(response);
-    return out ? out : browser_format_error("alloc body failed");
+    return body_buf;
 }
 
 static void browser_fetch_thread(void *arg)

@@ -2269,6 +2269,12 @@ static atk_mouse_response_t rich_text_mouse_cb(atk_widget_t *widget,
     if (event->released_edge && priv->selecting)
     {
         priv->selecting = false;
+        rich_text_set_selection(priv, priv->sel_anchor, idx);
+        priv->cursor = idx;
+        priv->nav_preferred_x = -1;
+        priv->input_state = RICH_TEXT_INPUT_NORMAL;
+        rich_text_ensure_cursor_visible(widget, priv);
+        rich_text_invalidate(widget);
         return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW | ATK_MOUSE_RESPONSE_RELEASE;
     }
 
@@ -2611,13 +2617,13 @@ static void rich_text_draw_cb(const atk_state_t *state,
                             priv->row_buffer[col] = ((video_color_t)alpha << 24) | (fg & 0x00FFFFFFu);
                         }
                         int stride_bytes = draw_width * (int)sizeof(video_color_t);
-                        video_blit_rgba32(visible_x0,
-                                          row_y,
-                                          draw_width,
-                                          1,
-                                          priv->row_buffer,
-                                          stride_bytes,
-                                          true);
+                        video_blit_rgba32_untracked(visible_x0,
+                                                    row_y,
+                                                    draw_width,
+                                                    1,
+                                                    priv->row_buffer,
+                                                    stride_bytes,
+                                                    true);
 
                         if (bold)
                         {
@@ -2629,13 +2635,13 @@ static void rich_text_draw_cb(const atk_state_t *state,
                             }
                             if (bold_w > 0)
                             {
-                                video_blit_rgba32(bold_x,
-                                                  row_y,
-                                                  bold_w,
-                                                  1,
-                                                  priv->row_buffer,
-                                                  stride_bytes,
-                                                  true);
+                                video_blit_rgba32_untracked(bold_x,
+                                                            row_y,
+                                                            bold_w,
+                                                            1,
+                                                            priv->row_buffer,
+                                                            stride_bytes,
+                                                            true);
                             }
                         }
                     }
@@ -2689,7 +2695,16 @@ static void rich_text_draw_cb(const atk_state_t *state,
             }
             if (caret_h > 0)
             {
-                video_draw_rect(caret_x, caret_y, 2, caret_h, theme->window_title);
+                int caret_w = 2;
+                int caret_x0 = caret_x;
+                int caret_x1 = caret_x + caret_w;
+                if (caret_x0 < clip_x0) caret_x0 = clip_x0;
+                if (caret_x1 > clip_x1) caret_x1 = clip_x1;
+                caret_w = caret_x1 - caret_x0;
+                if (caret_w > 0)
+                {
+                    video_draw_rect(caret_x0, caret_y, caret_w, caret_h, theme->window_title);
+                }
             }
         }
     }

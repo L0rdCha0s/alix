@@ -340,13 +340,13 @@ void atk_font_draw_string_clipped(int x,
                 uint8_t alpha = src[col];
                 row_pixels[col] = ((video_color_t)alpha << 24) | (fg & 0x00FFFFFFU);
             }
-            video_blit_rgba32(visible_x0,
-                              visible_y0 + row,
-                              width,
-                              1,
-                              row_pixels,
-                              width * (int)sizeof(video_color_t),
-                              true);
+            video_blit_rgba32_untracked(visible_x0,
+                                        visible_y0 + row,
+                                        width,
+                                        1,
+                                        row_pixels,
+                                        width * (int)sizeof(video_color_t),
+                                        true);
         }
 
         pen_x += glyph_advance;

@@ -25,6 +25,9 @@ void atk_window_draw_from(atk_state_t *state, atk_widget_t *start_window);
 void atk_window_mark_dirty(const atk_widget_t *window);
 bool atk_window_contains(const atk_state_t *state, const atk_widget_t *window);
 bool atk_window_is_topmost(const atk_state_t *state, const atk_widget_t *window);
+void atk_state_lock_init(void);
+uint64_t atk_state_lock_acquire(void);
+void atk_state_lock_release(uint64_t flags);
 
 static inline uint64_t video_irq_save(void)
 {
@@ -87,6 +90,8 @@ static int cursor_x = 0;
 static int cursor_y = 0;
 static int prev_cursor_x = 0;
 static int prev_cursor_y = 0;
+static bool cursor_under_valid = false;
+static uint32_t cursor_under[2][CURSOR_W * CURSOR_H];
 static bool last_left_down = false;
 static bool logged_first_mouse = false;
 
@@ -97,6 +102,7 @@ static volatile bool refresh_requested = false;
 static bool refresh_requested_full = false;
 static atk_widget_t *refresh_window = NULL;
 static spinlock_t g_video_lock;
+static spinlock_t g_video_render_lock;
 
 typedef struct
 {
@@ -165,6 +171,7 @@ static uint8_t vga_gc_read(uint8_t index);
 static void vga_gc_write(uint8_t index, uint8_t value);
 static void video_dirty_reset(void);
 static void video_flush_dirty(void);
+static void video_perform_refresh_locked(void);
 static void video_perform_refresh(void);
 static void cursor_draw_overlay(void);
 static void cursor_restore_background(void);
@@ -344,6 +351,7 @@ static void framebuffer_set_page(uint32_t page)
 void video_init(void)
 {
     spinlock_init(&g_video_lock);
+    spinlock_init(&g_video_render_lock);
     vga_capture_state();
     vga_capture_font();
     video_prepare_font();
@@ -423,11 +431,27 @@ void video_fill(video_color_t color)
     }
 }
 
-static void cursor_draw_overlay_to(volatile uint32_t *dst_fb)
+static void cursor_draw_overlay_to(volatile uint32_t *dst_fb, uint32_t page_index)
 {
     if (!dst_fb)
     {
         return;
+    }
+
+    page_index &= 1u;
+    for (int row = 0; row < CURSOR_H; ++row)
+    {
+        int dst_y = cursor_y + row;
+        if ((unsigned)dst_y >= VIDEO_HEIGHT) continue;
+
+        for (int col = 0; col < CURSOR_W; ++col)
+        {
+            int dst_x = cursor_x + col;
+            if ((unsigned)dst_x >= VIDEO_WIDTH) continue;
+
+            size_t index = (size_t)dst_y * VIDEO_WIDTH + dst_x;
+            cursor_under[page_index][row * CURSOR_W + col] = dst_fb[index];
+        }
     }
 
     for (int row = 0; row < CURSOR_H; ++row)
@@ -450,12 +474,17 @@ static void cursor_draw_overlay_to(volatile uint32_t *dst_fb)
     }
 }
 
-static void cursor_restore_background_to(volatile uint32_t *dst_fb)
+static void cursor_restore_background_to(volatile uint32_t *dst_fb, uint32_t page_index)
 {
     if (!dst_fb)
     {
         return;
     }
+    if (!cursor_under_valid)
+    {
+        return;
+    }
+    page_index &= 1u;
 
     int x0 = prev_cursor_x;
     int y0 = prev_cursor_y;
@@ -476,7 +505,7 @@ static void cursor_restore_background_to(volatile uint32_t *dst_fb)
             }
 
             size_t index = (size_t)dst_y * VIDEO_WIDTH + dst_x;
-            dst_fb[index] = backbuffer[index];
+            dst_fb[index] = cursor_under[page_index][row * CURSOR_W + col];
         }
     }
 }
@@ -495,22 +524,23 @@ static void cursor_draw_overlay(void)
     if (cursor_x > VIDEO_WIDTH  - CURSOR_W)  cursor_x = VIDEO_WIDTH  - CURSOR_W;
     if (cursor_y > VIDEO_HEIGHT - CURSOR_H)  cursor_y = VIDEO_HEIGHT - CURSOR_H;
 
-    cursor_draw_overlay_to(framebuffer);
+    cursor_draw_overlay_to(framebuffer, framebuffer_page);
     if (framebuffer_pageflip)
     {
-        cursor_draw_overlay_to(framebuffer_page_ptr(framebuffer_page ^ 1u));
+        cursor_draw_overlay_to(framebuffer_page_ptr(framebuffer_page ^ 1u), framebuffer_page ^ 1u);
     }
 
     prev_cursor_x = cursor_x;
     prev_cursor_y = cursor_y;
+    cursor_under_valid = true;
 }
 
 static void cursor_restore_background(void)
 {
-    cursor_restore_background_to(framebuffer);
+    cursor_restore_background_to(framebuffer, framebuffer_page);
     if (framebuffer_pageflip)
     {
-        cursor_restore_background_to(framebuffer_page_ptr(framebuffer_page ^ 1u));
+        cursor_restore_background_to(framebuffer_page_ptr(framebuffer_page ^ 1u), framebuffer_page ^ 1u);
     }
 }
 
@@ -699,6 +729,84 @@ void video_blit_rgba32(int x,
     }
 
     video_invalidate_rect(x0, y0, copy_w, copy_h);
+}
+
+void video_blit_rgba32_untracked(int x,
+                                 int y,
+                                 int width,
+                                 int height,
+                                 const video_color_t *pixels,
+                                 int stride_bytes,
+                                 bool use_alpha)
+{
+    if (!pixels || width <= 0 || height <= 0) return;
+    if (stride_bytes <= 0) stride_bytes = width * (int)sizeof(video_color_t);
+
+    int x0 = x, y0 = y;
+    int x1 = x + width, y1 = y + height;
+    int src_x = 0, src_y = 0;
+
+    if (x0 < 0) { src_x = -x0; x0 = 0; }
+    if (y0 < 0) { src_y = -y0; y0 = 0; }
+    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
+    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+
+    int copy_w = x1 - x0;
+    int copy_h = y1 - y0;
+    if (copy_w <= 0 || copy_h <= 0) return;
+
+    int max_copy_w = width - src_x;
+    int max_copy_h = height - src_y;
+    if (copy_w > max_copy_w) copy_w = max_copy_w;
+    if (copy_h > max_copy_h) copy_h = max_copy_h;
+    if (copy_w <= 0 || copy_h <= 0) return;
+
+    if (!use_alpha)
+    {
+        video_blit_clipped(x0, y0, copy_w, copy_h, pixels, stride_bytes, src_x, src_y);
+        return;
+    }
+
+    const uint8_t *row_ptr = (const uint8_t *)pixels +
+                             (size_t)src_y * (size_t)stride_bytes +
+                             (size_t)src_x * sizeof(video_color_t);
+    for (int row = 0; row < copy_h; ++row)
+    {
+        const video_color_t *src_row = (const video_color_t *)row_ptr;
+        video_color_t *dst_row = &backbuffer[(y0 + row) * VIDEO_WIDTH + x0];
+        for (int col = 0; col < copy_w; ++col)
+        {
+            video_color_t src_px = src_row[col];
+            uint8_t a = (uint8_t)(src_px >> 24);
+            if (a == 0)
+            {
+                continue;
+            }
+            if (a == 255)
+            {
+                dst_row[col] = src_px;
+                continue;
+            }
+
+            uint8_t sr = (uint8_t)(src_px >> 16);
+            uint8_t sg = (uint8_t)(src_px >> 8);
+            uint8_t sb = (uint8_t)(src_px);
+
+            video_color_t dst_px = dst_row[col];
+            uint8_t dr = (uint8_t)(dst_px >> 16);
+            uint8_t dg = (uint8_t)(dst_px >> 8);
+            uint8_t db = (uint8_t)(dst_px);
+
+            uint8_t ia = (uint8_t)(255 - a);
+            uint8_t rr = (uint8_t)((sr * a + dr * ia) / 255);
+            uint8_t rg = (uint8_t)((sg * a + dg * ia) / 255);
+            uint8_t rb = (uint8_t)((sb * a + db * ia) / 255);
+
+            dst_row[col] = 0xFF000000U | ((video_color_t)rr << 16) |
+                           ((video_color_t)rg << 8) | (video_color_t)rb;
+        }
+        row_ptr += stride_bytes;
+    }
 }
 
 static inline void fb_memcpy_wc(volatile void *dst_mmio, const void *src, size_t bytes);
@@ -1092,7 +1200,7 @@ static void video_flush_dirty(void)
     framebuffer_wc_fence();
 }
 
-static void video_perform_refresh(void)
+static void video_perform_refresh_locked(void)
 {
     if (atk_drag_active())
     {
@@ -1121,12 +1229,26 @@ static void video_perform_refresh(void)
     {
         return;
     }
+    if (!target && !do_full)
+    {
+        return;
+    }
+
+    /* Erase cursor overlay before modifying/flushing the framebuffer. */
+    cursor_restore_background();
 
     atk_state_t *state = atk_state_get();
 
     if (target)
     {
-        atk_window_draw_from(state, target);
+        atk_state_lock_init();
+        uint64_t irq_state = atk_state_lock_acquire();
+        state = atk_state_get();
+        if (state)
+        {
+            atk_window_draw_from(state, target);
+        }
+        atk_state_lock_release(irq_state);
         video_flush_dirty();
         cursor_draw_overlay();
         return;
@@ -1138,6 +1260,13 @@ static void video_perform_refresh(void)
         video_flush_dirty();
         cursor_draw_overlay();
     }
+}
+
+static void video_perform_refresh(void)
+{
+    spinlock_lock(&g_video_render_lock);
+    video_perform_refresh_locked();
+    spinlock_unlock(&g_video_render_lock);
 }
 
 void video_cursor_set_shape(video_cursor_shape_t shape)
@@ -1195,6 +1324,7 @@ bool video_enter_mode(void)
     cursor_y = VIDEO_HEIGHT / 2;
     prev_cursor_x = cursor_x;
     prev_cursor_y = cursor_y;
+    cursor_under_valid = false;
     last_left_down = false;
     exit_requested = false;
     video_active = true;
@@ -1340,6 +1470,8 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
         return;
     }
 
+    spinlock_lock(&g_video_render_lock);
+
     bool dragging = atk_drag_active();
     spinlock_lock(&g_video_lock);
     if (dragging)
@@ -1403,7 +1535,8 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     if (pending_refresh)
     {
-        video_perform_refresh();
+        video_perform_refresh_locked();
+        spinlock_unlock(&g_video_render_lock);
         return;
     }
 
@@ -1417,6 +1550,8 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
         exit_requested = true;
         spinlock_unlock(&g_video_lock);
     }
+
+    spinlock_unlock(&g_video_render_lock);
 }
 
 /* --------- Logging & detection --------- */
