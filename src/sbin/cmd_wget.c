@@ -191,7 +191,11 @@ static bool chunked_consume(chunked_state_t *st,
                 if (st->current_size == 0)
                 {
                     st->state = CHUNK_READ_TRAILERS; // next: trailers then end
-                    st->trailer_stage = 0;
+                    // The trailer section ends with an empty line (CRLF). When there are no
+                    // trailer headers, the stream is "0\r\n\r\n". We've already consumed the
+                    // first CRLF as part of the size line, so start at stage 2 to accept the
+                    // remaining CRLF and complete the CRLFCRLF terminator.
+                    st->trailer_stage = 2;
                 }
                 else
                 {
@@ -740,7 +744,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 #if WGET_TLS_TRACE_ENABLE
     if (use_tls)
     {
-        wget_tls_trace_line(out, "HTTPS selected; supported cipher: TLS_RSA_WITH_AES_128_CBC_SHA256");
+        wget_tls_trace_line(out, "HTTPS selected; supported ciphers: TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256, TLS_RSA_WITH_AES_128_CBC_SHA256");
     }
 #endif
 

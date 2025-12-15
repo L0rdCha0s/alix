@@ -1,13 +1,14 @@
 /*
- * Minimal TLS 1.2 client implementation supporting the
- * TLS_RSA_WITH_AES_128_CBC_SHA256 cipher suite.
+ * Minimal TLS 1.2 client implementation supporting a small
+ * subset of ECDHE and RSA-based cipher suites.
  *
  * This code handles a narrow subset of TLS sufficient for
  * performing HTTPS GET requests against servers that still
- * allow RSA key exchange. Certificate chain validation is
- * not performed; the server certificate is only parsed to
- * extract its RSA public key. This exists solely to unblock
- * simple HTTPS downloads inside the Alix environment.
+ * allow TLS 1.2 with ECDHE. Certificate chain validation is
+ * not performed; the server certificate is parsed only to
+ * extract the public key needed to verify the handshake.
+ * This exists solely to unblock simple HTTPS downloads
+ * inside the Alix environment.
  */
 
 #include "net/tls.h"
@@ -47,6 +48,7 @@
 
 #define TLS_CIPHER_RSA_WITH_AES_128_CBC_SHA256    0x003C
 #define TLS_CIPHER_ECDHE_RSA_WITH_AES_128_CBC_SHA256 0xC027
+#define TLS_CIPHER_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 0xC02B
 #define TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256 0xC02F
 
 #define TLS_EXT_SERVER_NAME           0x0000
@@ -75,7 +77,8 @@ static uint32_t g_tls_prng_state = 0xC3E4ED12U;
 
 static bool tls_cipher_is_aead(uint16_t suite)
 {
-    return suite == TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+    return suite == TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ||
+           suite == TLS_CIPHER_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
 }
 
 static void tls_prng_mix(uint32_t value)
@@ -139,38 +142,70 @@ static bool tls_random_fill(uint8_t *buffer, size_t length, void *context)
 
 static void tls_log(const char *msg)
 {
-    serial_printf("%s", msg);
-    serial_printf("%s", "\r\n");
+    serial_printf("%s", msg ? msg : "");
 }
 
 static void tls_log_hex(const char *prefix, uint64_t value)
 {
-    serial_printf("%s", prefix);
-    serial_printf("%016llX", (unsigned long long)(value));
-    serial_printf("%s", "\r\n");
+    serial_printf("%s%016llX", prefix ? prefix : "", (unsigned long long)value);
 }
 
 #if TLS_DEBUG_SIG
 static void tls_log_hexdump(const char *label, const uint8_t *data, size_t len)
 {
     static const char hex_digits[] = "0123456789abcdef";
-    serial_printf("%s", label);
-    serial_printf("%s", ": ");
+    if (!label)
+    {
+        label = "";
+    }
     if (!data || len == 0)
     {
-        serial_printf("%s", "<empty>\r\n");
+        serial_printf("%s: <empty>", label);
         return;
     }
-    for (size_t i = 0; i < len; ++i)
+
+    size_t shown = len;
+    if (shown > 64)
     {
-        char buf[3];
-        uint8_t byte = data[i];
-        buf[0] = hex_digits[(byte >> 4) & 0x0F];
-        buf[1] = hex_digits[byte & 0x0F];
-        buf[2] = '\0';
-        serial_printf("%s", buf);
+        shown = 64;
     }
-    serial_printf("%s", "\r\n");
+
+    char line[256];
+    size_t out = 0;
+
+    size_t label_len = strlen(label);
+    if (label_len > sizeof(line) - 1)
+    {
+        label_len = sizeof(line) - 1;
+    }
+    memcpy(line + out, label, label_len);
+    out += label_len;
+
+    if (out + 2 < sizeof(line))
+    {
+        line[out++] = ':';
+        line[out++] = ' ';
+    }
+
+    while (shown > 0 && out + shown * 2 + 4 >= sizeof(line))
+    {
+        shown--;
+    }
+
+    for (size_t i = 0; i < shown; ++i)
+    {
+        uint8_t byte = data[i];
+        line[out++] = hex_digits[(byte >> 4) & 0x0F];
+        line[out++] = hex_digits[byte & 0x0F];
+    }
+    if (shown != len && out + 3 < sizeof(line))
+    {
+        line[out++] = '.';
+        line[out++] = '.';
+        line[out++] = '.';
+    }
+    line[out] = '\0';
+    serial_printf("%s", line);
 }
 
 static void tls_log_sha256_digest(const char *label, const uint8_t *data, size_t len)
@@ -337,13 +372,17 @@ static bool tls_write_record_plain(tls_session_t *session, uint8_t type, const u
     header[3] = (uint8_t)((len >> 8) & 0xFF);
     header[4] = (uint8_t)(len & 0xFF);
 
-    uint8_t record[5 + TLS_MAX_FRAGMENT];
-    memcpy(record, header, 5);
-    if (len > 0)
+    if (!tls_socket_write_all(session, header, sizeof(header), tls_default_timeout_ticks()))
     {
-        memcpy(record + 5, data, len);
+        return false;
     }
-    return tls_socket_write_all(session, record, 5 + len, tls_default_timeout_ticks());
+
+    if (len == 0)
+    {
+        return true;
+    }
+
+    return tls_socket_write_all(session, data, len, tls_default_timeout_ticks());
 }
 
 static bool tls_read_record_plain(tls_session_t *session, uint8_t *type, size_t *length, uint64_t timeout)
@@ -571,12 +610,27 @@ static bool tls_calculate_mac(uint8_t *mac_out,
                               size_t length,
                               const uint8_t *fragment)
 {
-    uint8_t mac_input[13 + TLS_MAX_FRAGMENT];
-    tls_build_additional_data(mac_input, seq, type, length);
-    memcpy(mac_input + 13, fragment, length);
+    if (!mac_out || !mac_key || (!fragment && length != 0) || length > TLS_MAX_FRAGMENT)
+    {
+        return false;
+    }
 
-    hmac_sha256(mac_key, TLS_MAC_SIZE, mac_input, 13 + length, mac_out);
-    memset(mac_input, 0, sizeof(mac_input));
+    size_t input_len = 13 + length;
+    uint8_t *mac_input = (uint8_t *)malloc(input_len);
+    if (!mac_input)
+    {
+        return false;
+    }
+
+    tls_build_additional_data(mac_input, seq, type, length);
+    if (length > 0)
+    {
+        memcpy(mac_input + 13, fragment, length);
+    }
+
+    hmac_sha256(mac_key, TLS_MAC_SIZE, mac_input, input_len, mac_out);
+    memset(mac_input, 0, input_len);
+    free(mac_input);
     return true;
 }
 
@@ -796,6 +850,11 @@ static bool tls_encrypt_record_gcm(tls_session_t *session,
         return false;
     }
 
+    if (!out || !out_len)
+    {
+        return false;
+    }
+
 #if TLS_DEBUG_SIG
     tls_log_hex("TLS: GCM encrypt seq 0x", session->client_seq);
     tls_log_hexdump("TLS: GCM client_write_key", session->client_write_key, 16);
@@ -810,7 +869,6 @@ static bool tls_encrypt_record_gcm(tls_session_t *session,
     memcpy(nonce, session->client_write_iv, TLS_GCM_FIXED_IV_SIZE);
     memcpy(nonce + TLS_GCM_FIXED_IV_SIZE, explicit_iv, TLS_GCM_EXPLICIT_IV_SIZE);
 
-    uint8_t ciphertext[TLS_MAX_FRAGMENT];
     uint8_t tag[TLS_GCM_TAG_SIZE];
     uint8_t aad[13];
     tls_build_additional_data(aad, session->client_seq, type, len);
@@ -819,11 +877,12 @@ static bool tls_encrypt_record_gcm(tls_session_t *session,
     tls_log_hexdump("TLS: GCM nonce", nonce, sizeof(nonce));
     tls_log_hexdump("TLS: GCM AAD", aad, sizeof(aad));
 #endif
+
+    uint8_t *ciphertext_out = out + 5 + TLS_GCM_EXPLICIT_IV_SIZE;
     if (!gcm_seal(&session->client_enc, session->client_gcm_H,
                   nonce, aad, sizeof(aad),
-                  data, len, ciphertext, tag))
+                  data, len, ciphertext_out, tag))
     {
-        memset(ciphertext, 0, sizeof(ciphertext));
         memset(tag, 0, sizeof(tag));
         memset(nonce, 0, sizeof(nonce));
         memset(aad, 0, sizeof(aad));
@@ -832,7 +891,7 @@ static bool tls_encrypt_record_gcm(tls_session_t *session,
     }
 
 #if TLS_DEBUG_SIG
-    tls_log_hexdump("TLS: GCM ciphertext", ciphertext, len);
+    tls_log_hexdump("TLS: GCM ciphertext", ciphertext_out, len);
     tls_log_hexdump("TLS: GCM tag", tag, sizeof(tag));
 #endif
 
@@ -846,13 +905,11 @@ static bool tls_encrypt_record_gcm(tls_session_t *session,
 
     memcpy(out, header, 5);
     memcpy(out + 5, explicit_iv, TLS_GCM_EXPLICIT_IV_SIZE);
-    memcpy(out + 5 + TLS_GCM_EXPLICIT_IV_SIZE, ciphertext, len);
     memcpy(out + 5 + TLS_GCM_EXPLICIT_IV_SIZE + len, tag, TLS_GCM_TAG_SIZE);
     *out_len = 5 + record_payload;
 
     tls_increment_seq(&session->client_seq);
 
-    memset(ciphertext, 0, sizeof(ciphertext));
     memset(tag, 0, sizeof(tag));
     memset(nonce, 0, sizeof(nonce));
     memset(aad, 0, sizeof(aad));
@@ -877,12 +934,13 @@ static bool tls_encrypt_record(tls_session_t *session,
         return false;
     }
 
-    uint8_t plaintext[TLS_MAX_FRAGMENT + TLS_MAC_SIZE + TLS_BLOCK_SIZE];
-    memcpy(plaintext, data, len);
+    if (!out || !out_len)
+    {
+        return false;
+    }
 
     uint8_t mac[TLS_MAC_SIZE];
     tls_calculate_mac(mac, session->client_write_mac, session->client_seq, type, len, data);
-    memcpy(plaintext + len, mac, TLS_MAC_SIZE);
     size_t total = len + TLS_MAC_SIZE;
 
     size_t pad_len = TLS_BLOCK_SIZE - ((total + 1) % TLS_BLOCK_SIZE);
@@ -890,18 +948,19 @@ static bool tls_encrypt_record(tls_session_t *session,
     {
         pad_len = 0;
     }
-    for (size_t i = 0; i <= pad_len; ++i)
-    {
-        plaintext[total + i] = (uint8_t)pad_len;
-    }
     total += pad_len + 1;
 
     uint8_t explicit_iv[TLS_EXPLICIT_IV_SIZE];
     tls_random_bytes(explicit_iv, sizeof(explicit_iv));
 
-    uint8_t work[TLS_MAX_FRAGMENT + TLS_MAC_SIZE + TLS_BLOCK_SIZE];
-    memcpy(work, plaintext, total);
-    tls_cbc_encrypt(&session->client_enc, work, total, explicit_iv);
+    uint8_t *record_plain = out + 5 + TLS_EXPLICIT_IV_SIZE;
+    memcpy(record_plain, data, len);
+    memcpy(record_plain + len, mac, TLS_MAC_SIZE);
+    for (size_t i = 0; i <= pad_len; ++i)
+    {
+        record_plain[len + TLS_MAC_SIZE + i] = (uint8_t)pad_len;
+    }
+    tls_cbc_encrypt(&session->client_enc, record_plain, total, explicit_iv);
 
     uint8_t header[5];
     size_t record_payload = TLS_EXPLICIT_IV_SIZE + total;
@@ -913,14 +972,11 @@ static bool tls_encrypt_record(tls_session_t *session,
 
     memcpy(out, header, 5);
     memcpy(out + 5, explicit_iv, TLS_EXPLICIT_IV_SIZE);
-    memcpy(out + 5 + TLS_EXPLICIT_IV_SIZE, work, total);
     *out_len = 5 + record_payload;
 
     tls_increment_seq(&session->client_seq);
 
-    memset(plaintext, 0, sizeof(plaintext));
     memset(mac, 0, sizeof(mac));
-    memset(work, 0, sizeof(work));
     return true;
 }
 
@@ -981,22 +1037,20 @@ static bool tls_decrypt_record(tls_session_t *session,
     uint8_t *ciphertext = data + TLS_EXPLICIT_IV_SIZE;
     size_t cipher_len = *len - TLS_EXPLICIT_IV_SIZE;
 
-    uint8_t work[TLS_MAX_FRAGMENT + TLS_MAC_SIZE + TLS_BLOCK_SIZE];
-    memcpy(work, ciphertext, cipher_len);
-    tls_cbc_decrypt(&session->server_dec, work, cipher_len, explicit_iv);
+    tls_cbc_decrypt(&session->server_dec, ciphertext, cipher_len, explicit_iv);
 
     if (cipher_len == 0)
     {
         return false;
     }
-    size_t pad_len = work[cipher_len - 1];
+    size_t pad_len = ciphertext[cipher_len - 1];
     if (pad_len + 1 > cipher_len)
     {
         return false;
     }
     for (size_t i = 0; i <= pad_len; ++i)
     {
-        if (work[cipher_len - 1 - i] != pad_len)
+        if (ciphertext[cipher_len - 1 - i] != pad_len)
         {
             return false;
         }
@@ -1009,17 +1063,16 @@ static bool tls_decrypt_record(tls_session_t *session,
     size_t body_len = total - TLS_MAC_SIZE;
 
     uint8_t mac[TLS_MAC_SIZE];
-    tls_calculate_mac(mac, session->server_write_mac, session->server_seq, type, body_len, work);
-    if (memcmp(mac, work + body_len, TLS_MAC_SIZE) != 0)
+    tls_calculate_mac(mac, session->server_write_mac, session->server_seq, type, body_len, ciphertext);
+    if (memcmp(mac, ciphertext + body_len, TLS_MAC_SIZE) != 0)
     {
         memset(mac, 0, sizeof(mac));
         return false;
     }
-    memcpy(data, work, body_len);
+    memmove(data, ciphertext, body_len);
     *len = body_len;
     tls_increment_seq(&session->server_seq);
 
-    memset(work, 0, sizeof(work));
     memset(mac, 0, sizeof(mac));
     return true;
 }
@@ -1168,6 +1221,191 @@ rsa_public_key_set(&session->server_key, mod_ptr, mod_len, exp_ptr, exp_len);
     return true;
 }
 
+static bool tls_parse_certificate_ecdsa_p256(tls_session_t *session, const uint8_t *cert, size_t cert_len)
+{
+    static const uint8_t oid_ec_public_key[] = {0x2A,0x86,0x48,0xCE,0x3D,0x02,0x01};
+    static const uint8_t oid_prime256v1[] = {0x2A,0x86,0x48,0xCE,0x3D,0x03,0x01,0x07};
+
+    asn1_reader_t reader;
+    asn1_reader_t seq;
+    asn1_reader_init(&reader, cert, cert_len);
+    if (!asn1_enter(&reader, 0x30, &seq))
+    {
+        TLS_FAIL("TLS: certificate outer sequence missing");
+    }
+
+    asn1_reader_t tbs;
+    if (!asn1_enter(&seq, 0x30, &tbs))
+    {
+        TLS_FAIL("TLS: certificate TBSCertificate missing");
+    }
+
+    uint8_t tag;
+    const uint8_t *value;
+    size_t value_len;
+
+    if (!asn1_read_element(&tbs, &tag, &value, &value_len))
+    {
+        TLS_FAIL("TLS: certificate version read failed");
+    }
+    if (tag == 0xA0)
+    {
+        if (!asn1_read_element(&tbs, &tag, &value, &value_len))
+        {
+            TLS_FAIL("TLS: certificate serial missing");
+        }
+    }
+
+    if (tag != 0x02)
+    {
+        TLS_FAIL("TLS: certificate serial has wrong tag");
+    }
+    if (!asn1_read_element(&tbs, &tag, &value, &value_len)) /* signature */
+    {
+        TLS_FAIL("TLS: certificate signature info missing");
+    }
+    if (!asn1_read_element(&tbs, &tag, &value, &value_len)) /* issuer */
+    {
+        TLS_FAIL("TLS: certificate issuer missing");
+    }
+    if (!asn1_read_element(&tbs, &tag, &value, &value_len)) /* validity */
+    {
+        TLS_FAIL("TLS: certificate validity missing");
+    }
+    if (!asn1_read_element(&tbs, &tag, &value, &value_len)) /* subject */
+    {
+        TLS_FAIL("TLS: certificate subject missing");
+    }
+
+    asn1_reader_t spki;
+    if (!asn1_enter(&tbs, 0x30, &spki))
+    {
+        TLS_FAIL("TLS: subjectPublicKeyInfo missing");
+    }
+
+    if (!asn1_read_element(&spki, &tag, &value, &value_len)) /* algorithm */
+    {
+        TLS_FAIL("TLS: SPKI algorithm missing");
+    }
+    if (tag != 0x30)
+    {
+        TLS_FAIL("TLS: SPKI algorithm not a sequence");
+    }
+    asn1_reader_t alg;
+    asn1_reader_init(&alg, value, value_len);
+    const uint8_t *oid_ptr = NULL;
+    size_t oid_len = 0;
+    if (!asn1_read_element(&alg, &tag, &oid_ptr, &oid_len) || tag != 0x06)
+    {
+        TLS_FAIL("TLS: SPKI algorithm OID missing");
+    }
+    if (oid_len != sizeof(oid_ec_public_key) ||
+        memcmp(oid_ptr, oid_ec_public_key, sizeof(oid_ec_public_key)) != 0)
+    {
+        TLS_FAIL("TLS: SPKI algorithm unsupported");
+    }
+    const uint8_t *curve_ptr = NULL;
+    size_t curve_len = 0;
+    if (!asn1_read_element(&alg, &tag, &curve_ptr, &curve_len) || tag != 0x06)
+    {
+        TLS_FAIL("TLS: SPKI curve OID missing");
+    }
+    if (curve_len != sizeof(oid_prime256v1) ||
+        memcmp(curve_ptr, oid_prime256v1, sizeof(oid_prime256v1)) != 0)
+    {
+        TLS_FAIL("TLS: SPKI curve unsupported");
+    }
+
+    if (!asn1_read_element(&spki, &tag, &value, &value_len)) /* subjectPublicKey */
+    {
+        TLS_FAIL("TLS: SPKI key missing");
+    }
+    if (tag != 0x03 || value_len < 1 || value[0] != 0x00)
+    {
+        TLS_FAIL("TLS: SPKI bitstring invalid");
+    }
+
+    const uint8_t *point = value + 1;
+    size_t point_len = value_len - 1;
+    if (point_len != P256_POINT_SIZE || point[0] != 0x04)
+    {
+        TLS_FAIL("TLS: ECDSA public key unsupported");
+    }
+
+    memcpy(session->server_ecdsa_public, point, point_len);
+    session->server_ecdsa_public_len = point_len;
+    return true;
+}
+
+static bool tls_parse_ecdsa_signature_rs(const uint8_t *signature,
+                                        size_t sig_len,
+                                        uint8_t r_out[P256_SCALAR_SIZE],
+                                        uint8_t s_out[P256_SCALAR_SIZE])
+{
+    if (!signature || sig_len == 0 || !r_out || !s_out)
+    {
+        return false;
+    }
+
+    asn1_reader_t reader;
+    asn1_reader_t seq;
+    asn1_reader_init(&reader, signature, sig_len);
+    if (!asn1_enter(&reader, 0x30, &seq))
+    {
+        return false;
+    }
+
+    uint8_t tag = 0;
+    const uint8_t *value = NULL;
+    size_t value_len = 0;
+
+    bool had_leading_zero = false;
+    if (!asn1_read_element(&seq, &tag, &value, &value_len) || tag != 0x02)
+    {
+        return false;
+    }
+    while (value_len > 0 && value[0] == 0x00)
+    {
+        had_leading_zero = true;
+        value++;
+        value_len--;
+    }
+    if (value_len == 0 || value_len > P256_SCALAR_SIZE)
+    {
+        return false;
+    }
+    if (!had_leading_zero && (value[0] & 0x80U))
+    {
+        return false;
+    }
+    memset(r_out, 0, P256_SCALAR_SIZE);
+    memcpy(r_out + (P256_SCALAR_SIZE - value_len), value, value_len);
+
+    had_leading_zero = false;
+    if (!asn1_read_element(&seq, &tag, &value, &value_len) || tag != 0x02)
+    {
+        return false;
+    }
+    while (value_len > 0 && value[0] == 0x00)
+    {
+        had_leading_zero = true;
+        value++;
+        value_len--;
+    }
+    if (value_len == 0 || value_len > P256_SCALAR_SIZE)
+    {
+        return false;
+    }
+    if (!had_leading_zero && (value[0] & 0x80U))
+    {
+        return false;
+    }
+    memset(s_out, 0, P256_SCALAR_SIZE);
+    memcpy(s_out + (P256_SCALAR_SIZE - value_len), value, value_len);
+
+    return true;
+}
+
 static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
                                                   const uint8_t *body,
                                                   size_t hs_len)
@@ -1223,10 +1461,6 @@ static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
     tls_log_hex("TLS: signature hash algo 0x", hash_algo);
     tls_log_hex("TLS: signature sig algo 0x", sig_algo);
 #endif
-    if (hash_algo != 0x04 || sig_algo != 0x01)
-    {
-        TLS_FAIL("TLS: server signature scheme unsupported");
-    }
     if (cursor + 2 > hs_len)
     {
         TLS_FAIL("TLS: missing signature length");
@@ -1284,11 +1518,44 @@ static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
     tls_log_hexdump("TLS: digest client|server|hdr", dbg_digest, sizeof(dbg_digest));
 #endif
 
-    if (!rsa_verify_pkcs1_v15_sha256(&session->server_key,
-                                     signed_data, signed_len,
-                                     signature, sig_len))
+    if (hash_algo == 0x04 && sig_algo == 0x01)
     {
-        TLS_FAIL("TLS: ECDHE signature verification failed");
+        if (!rsa_verify_pkcs1_v15_sha256(&session->server_key,
+                                         signed_data, signed_len,
+                                         signature, sig_len))
+        {
+            TLS_FAIL("TLS: RSA signature verification failed");
+        }
+    }
+    else if (hash_algo == 0x04 && sig_algo == 0x03)
+    {
+        if (session->server_ecdsa_public_len != P256_POINT_SIZE)
+        {
+            TLS_FAIL("TLS: missing server ECDSA public key");
+        }
+
+        uint8_t digest[32];
+        sha256_digest(signed_data, signed_len, digest);
+
+        uint8_t r_sig[P256_SCALAR_SIZE];
+        uint8_t s_sig[P256_SCALAR_SIZE];
+        if (!tls_parse_ecdsa_signature_rs(signature, sig_len, r_sig, s_sig))
+        {
+            TLS_FAIL("TLS: ECDSA signature parse failed");
+        }
+
+        if (!p256_ecdsa_verify(session->server_ecdsa_public, session->server_ecdsa_public_len,
+                               digest, r_sig, s_sig))
+        {
+            TLS_FAIL("TLS: ECDSA signature verification failed");
+        }
+        memset(digest, 0, sizeof(digest));
+        memset(r_sig, 0, sizeof(r_sig));
+        memset(s_sig, 0, sizeof(s_sig));
+    }
+    else
+    {
+        TLS_FAIL("TLS: server signature scheme unsupported");
     }
 
     if (!p256_is_valid_public(pub, pub_len))
@@ -1357,6 +1624,15 @@ static bool tls_process_server_handshake(tls_session_t *session,
                         *got_server_key_exchange = true;
                     }
                 }
+                else if (cipher == TLS_CIPHER_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
+                {
+                    session->key_exchange = TLS_KEY_EXCHANGE_ECDHE_ECDSA;
+                    session->ecdhe_server_public_len = 0;
+                    if (got_server_key_exchange)
+                    {
+                        *got_server_key_exchange = false;
+                    }
+                }
                 else if (cipher == TLS_CIPHER_ECDHE_RSA_WITH_AES_128_CBC_SHA256 ||
                          cipher == TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
                 {
@@ -1409,7 +1685,14 @@ static bool tls_process_server_handshake(tls_session_t *session,
                     TLS_FAIL("TLS: certificate entry truncated");
                 }
                 const uint8_t *cert_ptr = body + 6;
-                if (!tls_parse_certificate_rsa(session, cert_ptr, cert_len))
+                if (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_ECDSA)
+                {
+                    if (!tls_parse_certificate_ecdsa_p256(session, cert_ptr, cert_len))
+                    {
+                        TLS_FAIL("TLS: failed to parse ECDSA certificate");
+                    }
+                }
+                else if (!tls_parse_certificate_rsa(session, cert_ptr, cert_len))
                 {
                     TLS_FAIL("TLS: failed to parse RSA certificate");
                 }
@@ -1418,7 +1701,8 @@ static bool tls_process_server_handshake(tls_session_t *session,
             }
             case TLS_HANDSHAKE_SERVER_KEY_EXCHANGE:
             {
-                if (session->key_exchange != TLS_KEY_EXCHANGE_ECDHE_RSA)
+                if (session->key_exchange != TLS_KEY_EXCHANGE_ECDHE_RSA &&
+                    session->key_exchange != TLS_KEY_EXCHANGE_ECDHE_ECDSA)
                 {
                     TLS_FAIL("TLS: unexpected ServerKeyExchange");
                 }
@@ -1465,7 +1749,9 @@ static bool tls_send_client_hello(tls_session_t *session, const char *hostname)
     body[offset++] = 0x00; /* session id length */
 
     body[offset++] = 0x00;
-    body[offset++] = 0x06;
+    body[offset++] = 0x08;
+    body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 >> 8);
+    body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 & 0xFF);
     body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256 >> 8);
     body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256 & 0xFF);
     body[offset++] = (uint8_t)(TLS_CIPHER_ECDHE_RSA_WITH_AES_128_CBC_SHA256 >> 8);
@@ -1527,19 +1813,21 @@ static bool tls_send_client_hello(tls_session_t *session, const char *hostname)
         extensions_len += 6;
     }
 
-    /* signature_algorithms: sha256+rsa, sha1+rsa */
+    /* signature_algorithms: sha256+ecdsa, sha256+rsa, sha1+rsa */
     {
         body[offset++] = 0x00;
         body[offset++] = 0x0D;
         body[offset++] = 0x00;
-        body[offset++] = 0x06;
+        body[offset++] = 0x08;
         body[offset++] = 0x00;
+        body[offset++] = 0x06;
         body[offset++] = 0x04;
+        body[offset++] = 0x03;
         body[offset++] = 0x04;
         body[offset++] = 0x01;
         body[offset++] = 0x02;
         body[offset++] = 0x01;
-        extensions_len += 10;
+        extensions_len += 12;
     }
 
     body[ext_len_offset] = (uint8_t)(extensions_len >> 8);
@@ -1678,7 +1966,7 @@ static bool tls_send_finished(tls_session_t *session, const char *label)
     memcpy(handshake + 4, verify_data, sizeof(verify_data));
 
     size_t record_len = 0;
-    uint8_t record[TLS_MAX_RECORD];
+    uint8_t *record = session->record_buffer;
     if (!tls_encrypt_record(session, TLS_CONTENT_HANDSHAKE,
                             handshake, sizeof(handshake),
                             record, &record_len))
@@ -1693,20 +1981,13 @@ static bool tls_send_finished(tls_session_t *session, const char *label)
 
     tls_handshake_hash_update(session, handshake, sizeof(handshake));
     memset(verify_data, 0, sizeof(verify_data));
-    memset(record, 0, sizeof(record));
+    memset(record, 0, record_len);
     return true;
 }
 
-static bool tls_expect_server_finished(tls_session_t *session)
+static bool tls_expect_server_finished(tls_session_t *session, size_t len)
 {
-    uint8_t type = 0;
-    size_t len = 0;
-    uint64_t timeout = tls_default_timeout_ticks();
-    if (!tls_read_record_encrypted(session, &type, &len, timeout))
-    {
-        TLS_FAIL("TLS: failed reading encrypted record for Finished");
-    }
-    if (type != TLS_CONTENT_HANDSHAKE || len < 4 || session->record_buffer[0] != TLS_HANDSHAKE_FINISHED)
+    if (!session || len < 4 || session->record_buffer[0] != TLS_HANDSHAKE_FINISHED)
     {
         TLS_FAIL("TLS: expected Finished handshake");
     }
@@ -1825,11 +2106,17 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
                 {
                     tls_log("TLS: alert message too short");
                 }
-                if (len < 2 || session->record_buffer[1] == TLS_ALERT_LEVEL_FATAL)
+                if (len < 2)
                 {
                     return false;
                 }
-                if (session->record_buffer[0] == TLS_ALERT_CLOSE_NOTIFY)
+                uint8_t level = session->record_buffer[0];
+                uint8_t description = session->record_buffer[1];
+                if (level == TLS_ALERT_LEVEL_FATAL)
+                {
+                    return false;
+                }
+                if (description == TLS_ALERT_CLOSE_NOTIFY)
                 {
                     return false;
                 }
@@ -1844,7 +2131,8 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
                     tls_log("TLS: error processing server handshake");
                     return false;
                 }
-                if (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA &&
+                if ((session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA ||
+                     session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_ECDSA) &&
                     session->ecdhe_server_params_ready)
                 {
                     got_server_key_exchange = true;
@@ -1861,7 +2149,7 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
         {
             if (type == TLS_CONTENT_HANDSHAKE)
             {
-                if (!tls_expect_server_finished(session))
+                if (!tls_expect_server_finished(session, len))
                 {
                     tls_log("TLS: server Finished verify failed");
                     return false;
@@ -1876,7 +2164,8 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
             }
         }
 
-        bool have_server_params = (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA)
+        bool have_server_params = (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA ||
+                                   session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_ECDSA)
                                     ? session->ecdhe_server_params_ready
                                     : true;
         bool server_done_ready = got_hello_done;
@@ -1914,7 +2203,8 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
                 }
                 memset(encrypted, 0, sizeof(encrypted));
             }
-            else if (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA)
+            else if (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_RSA ||
+                     session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_ECDSA)
             {
                 if (!session->ecdhe_server_params_ready)
                 {
@@ -1990,7 +2280,7 @@ bool tls_session_send(tls_session_t *session, const uint8_t *data, size_t length
     }
 
     size_t offset = 0;
-    uint8_t record[TLS_MAX_RECORD];
+    uint8_t *record = session->record_buffer;
     while (offset < length)
     {
         size_t chunk = length - offset;
@@ -2010,8 +2300,8 @@ bool tls_session_send(tls_session_t *session, const uint8_t *data, size_t length
             return false;
         }
         offset += chunk;
+        memset(record, 0, record_len);
     }
-    memset(record, 0, sizeof(record));
     return true;
 }
 

@@ -13,5 +13,9 @@ bool p256_compute_shared(const uint8_t scalar[P256_SCALAR_SIZE],
                          const uint8_t *peer_point, size_t peer_len,
                          uint8_t out_secret[P256_SCALAR_SIZE]);
 bool p256_scalar_is_valid(const uint8_t scalar[P256_SCALAR_SIZE]);
+bool p256_ecdsa_verify(const uint8_t *public_point, size_t public_len,
+                       const uint8_t hash[32],
+                       const uint8_t r[32],
+                       const uint8_t s[32]);
 
 #endif

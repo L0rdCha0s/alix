@@ -3,11 +3,6 @@
 #include "crypto/bignum.h"
 #include "libc.h"
 #include "serial.h"
-#include "crypto/p256.h"
-
-#include "crypto/bignum.h"
-#include "libc.h"
-#include "serial.h"
 
 typedef struct
 {
@@ -16,12 +11,21 @@ typedef struct
     bool infinity;
 } p256_point_t;
 
+typedef struct
+{
+    bignum_t x;
+    bignum_t y;
+    bignum_t z;
+    bool infinity;
+} p256_jpoint_t;
+
 static bool g_p256_initialized = false;
 static bignum_t g_p256_p;
 static bignum_t g_p256_a;
 static bignum_t g_p256_b;
 static bignum_t g_p256_n;
 static bignum_t g_p256_p_minus_two;
+static bignum_t g_p256_n_minus_two;
 static p256_point_t g_p256_g;
 
 static const uint8_t P256_P_BYTES[32] = {
@@ -78,6 +82,8 @@ static void p256_init(void)
     bignum_t two;
     bignum_from_uint(&two, 2);
     bignum_sub(&g_p256_p_minus_two, &two);
+    bignum_copy(&g_p256_n_minus_two, &g_p256_n);
+    bignum_sub(&g_p256_n_minus_two, &two);
     g_p256_initialized = true;
 }
 
@@ -111,29 +117,29 @@ static void bignum_add_raw(bignum_t *out, const bignum_t *a, const bignum_t *b)
 
 static void p256_log_bignum(const char *label, const bignum_t *num)
 {
-    serial_printf("%s", "[p256] ");
-    serial_printf("%s", label);
-    serial_printf("%s", " len=0x");
-    serial_printf("%016llX", (unsigned long long)(num->length));
-    serial_printf("%s", " value=0x");
-    if (num->length == 0)
+    static const char digits[] = "0123456789abcdef";
+    if (!label)
     {
-        serial_printf("%s", "0\r\n");
+        label = "";
+    }
+    if (!num)
+    {
+        serial_printf("[p256] %s <null>", label);
         return;
     }
-    for (size_t i = num->length; i-- > 0;)
+
+    uint8_t bytes[P256_SCALAR_SIZE];
+    bignum_to_bytes(num, bytes, sizeof(bytes));
+
+    char hex[2 * P256_SCALAR_SIZE + 1];
+    for (size_t i = 0; i < sizeof(bytes); ++i)
     {
-        char hex[9];
-        uint32_t word = num->words[i];
-        for (int nibble = 7; nibble >= 0; --nibble)
-        {
-            static const char digits[] = "0123456789abcdef";
-            hex[7 - nibble] = digits[(word >> (nibble * 4)) & 0xF];
-        }
-        hex[8] = '\0';
-        serial_printf("%s", hex);
+        hex[i * 2] = digits[(bytes[i] >> 4) & 0xF];
+        hex[i * 2 + 1] = digits[bytes[i] & 0xF];
     }
-    serial_printf("%s", "\r\n");
+    hex[sizeof(hex) - 1] = '\0';
+
+    serial_printf("[p256] %s len=%zu value=0x%s", label, num->length, hex);
 }
 
 static void p256_field_reduce(bignum_t *x)
@@ -182,6 +188,195 @@ static void p256_field_inv(bignum_t *r, const bignum_t *a)
     bignum_modexp(a, &g_p256_p_minus_two, &g_p256_p, r);
 }
 
+static void p256_point_set_infinity(p256_point_t *p);
+
+static void p256_jpoint_set_infinity(p256_jpoint_t *p)
+{
+    bignum_init(&p->x);
+    bignum_init(&p->y);
+    bignum_init(&p->z);
+    p->infinity = true;
+}
+
+static void p256_jpoint_from_affine(p256_jpoint_t *dst, const p256_point_t *src)
+{
+    bignum_copy(&dst->x, &src->x);
+    bignum_copy(&dst->y, &src->y);
+    if (src->infinity)
+    {
+        bignum_init(&dst->z);
+        dst->infinity = true;
+        return;
+    }
+    bignum_from_uint(&dst->z, 1);
+    dst->infinity = false;
+}
+
+static void p256_jpoint_to_affine(p256_point_t *dst, const p256_jpoint_t *src)
+{
+    if (src->infinity || bignum_is_zero(&src->z))
+    {
+        p256_point_set_infinity(dst);
+        return;
+    }
+
+    bignum_t z_inv;
+    p256_field_inv(&z_inv, &src->z);
+    bignum_t z_inv2;
+    p256_field_sqr(&z_inv2, &z_inv);
+    bignum_t z_inv3;
+    p256_field_mul(&z_inv3, &z_inv2, &z_inv);
+
+    p256_field_mul(&dst->x, &src->x, &z_inv2);
+    p256_field_mul(&dst->y, &src->y, &z_inv3);
+    dst->infinity = false;
+}
+
+static void p256_jpoint_double(p256_jpoint_t *r, const p256_jpoint_t *p)
+{
+    if (p->infinity || bignum_is_zero(&p->y))
+    {
+        p256_jpoint_set_infinity(r);
+        return;
+    }
+
+    bignum_t A;
+    p256_field_sqr(&A, &p->x);
+
+    bignum_t B;
+    p256_field_sqr(&B, &p->y);
+
+    bignum_t C;
+    p256_field_sqr(&C, &B);
+
+    bignum_t tmp;
+    p256_field_add(&tmp, &p->x, &B);
+    p256_field_sqr(&tmp, &tmp);
+    p256_field_sub(&tmp, &tmp, &A);
+    p256_field_sub(&tmp, &tmp, &C);
+
+    bignum_t D;
+    p256_field_add(&D, &tmp, &tmp); /* D = 2 * ((X + B)^2 - A - C) */
+
+    bignum_t z2;
+    p256_field_sqr(&z2, &p->z);
+    bignum_t z4;
+    p256_field_sqr(&z4, &z2);
+
+    bignum_t E;
+    p256_field_sub(&E, &A, &z4); /* A - Z^4 */
+    p256_field_add(&tmp, &E, &E);
+    p256_field_add(&E, &tmp, &E); /* E = 3 * (A - Z^4) for a=-3 */
+
+    bignum_t F;
+    p256_field_sqr(&F, &E);
+
+    bignum_t twoD;
+    p256_field_add(&twoD, &D, &D);
+
+    bignum_t X3;
+    p256_field_sub(&X3, &F, &twoD);
+
+    bignum_t eightC;
+    p256_field_add(&eightC, &C, &C);
+    p256_field_add(&eightC, &eightC, &eightC);
+    p256_field_add(&eightC, &eightC, &eightC); /* 8 * C */
+
+    bignum_t Y3;
+    p256_field_sub(&tmp, &D, &X3);
+    p256_field_mul(&tmp, &tmp, &E);
+    p256_field_sub(&Y3, &tmp, &eightC);
+
+    bignum_t Z3;
+    p256_field_mul(&tmp, &p->y, &p->z);
+    p256_field_add(&Z3, &tmp, &tmp); /* 2 * Y * Z */
+
+    bignum_copy(&r->x, &X3);
+    bignum_copy(&r->y, &Y3);
+    bignum_copy(&r->z, &Z3);
+    r->infinity = false;
+}
+
+static void p256_jpoint_add_mixed(p256_jpoint_t *r, const p256_jpoint_t *p, const p256_point_t *q)
+{
+    if (!q || q->infinity)
+    {
+        if (!p)
+        {
+            p256_jpoint_set_infinity(r);
+            return;
+        }
+        bignum_copy(&r->x, &p->x);
+        bignum_copy(&r->y, &p->y);
+        bignum_copy(&r->z, &p->z);
+        r->infinity = p->infinity;
+        return;
+    }
+    if (!p || p->infinity)
+    {
+        p256_jpoint_from_affine(r, q);
+        return;
+    }
+
+    bignum_t Z1Z1;
+    p256_field_sqr(&Z1Z1, &p->z);
+
+    bignum_t U2;
+    p256_field_mul(&U2, &q->x, &Z1Z1);
+
+    bignum_t Z1Z1Z1;
+    p256_field_mul(&Z1Z1Z1, &p->z, &Z1Z1);
+
+    bignum_t S2;
+    p256_field_mul(&S2, &q->y, &Z1Z1Z1);
+
+    bignum_t H;
+    p256_field_sub(&H, &U2, &p->x);
+
+    bignum_t R;
+    p256_field_sub(&R, &S2, &p->y);
+
+    if (bignum_is_zero(&H))
+    {
+        if (bignum_is_zero(&R))
+        {
+            p256_jpoint_double(r, p);
+            return;
+        }
+        p256_jpoint_set_infinity(r);
+        return;
+    }
+
+    bignum_t HH;
+    p256_field_sqr(&HH, &H);
+    bignum_t HHH;
+    p256_field_mul(&HHH, &HH, &H);
+    bignum_t V;
+    p256_field_mul(&V, &p->x, &HH);
+
+    bignum_t X3;
+    p256_field_sqr(&X3, &R);
+    p256_field_sub(&X3, &X3, &HHH);
+    bignum_t twoV;
+    p256_field_add(&twoV, &V, &V);
+    p256_field_sub(&X3, &X3, &twoV);
+
+    bignum_t Y3;
+    p256_field_sub(&Y3, &V, &X3);
+    p256_field_mul(&Y3, &Y3, &R);
+    bignum_t tmp;
+    p256_field_mul(&tmp, &p->y, &HHH);
+    p256_field_sub(&Y3, &Y3, &tmp);
+
+    bignum_t Z3;
+    p256_field_mul(&Z3, &p->z, &H);
+
+    bignum_copy(&r->x, &X3);
+    bignum_copy(&r->y, &Y3);
+    bignum_copy(&r->z, &Z3);
+    r->infinity = false;
+}
+
 static void p256_point_copy(p256_point_t *dst, const p256_point_t *src)
 {
     bignum_copy(&dst->x, &src->x);
@@ -205,9 +400,6 @@ static bool p256_point_is_on_curve(const p256_point_t *p)
     if (bignum_compare(&p->x, &g_p256_p) >= 0 ||
         bignum_compare(&p->y, &g_p256_p) >= 0)
     {
-        serial_printf("%s", "[p256] point coordinate >= p\r\n");
-        p256_log_bignum("x", &p->x);
-        p256_log_bignum("y", &p->y);
         return false;
     }
     bignum_t y2;
@@ -227,13 +419,6 @@ static bool p256_point_is_on_curve(const p256_point_t *p)
 
     if (bignum_compare(&y2, &rhs) != 0)
     {
-        serial_printf("%s", "[p256] point not on curve\r\n");
-        p256_log_bignum("x", &p->x);
-        p256_log_bignum("y", &p->y);
-        p256_log_bignum("y^2", &y2);
-        p256_log_bignum("x^3", &x3);
-        p256_log_bignum("ax", &ax);
-        p256_log_bignum("x^3+ax+b", &rhs);
         return false;
     }
     return true;
@@ -335,40 +520,41 @@ static void p256_point_add(p256_point_t *r, const p256_point_t *p, const p256_po
 
 static bool p256_scalar_mult(p256_point_t *r, const p256_point_t *p, const uint8_t *scalar)
 {
-    p256_point_t acc;
-    p256_point_set_infinity(&acc);
-    p256_point_t addend;
-    p256_point_copy(&addend, p);
-
+    bool scalar_is_zero = true;
     for (size_t i = 0; i < P256_SCALAR_SIZE; ++i)
     {
-        uint8_t byte = scalar[P256_SCALAR_SIZE - 1 - i];
-        for (int bit = 0; bit < 8; ++bit)
+        if (scalar[i] != 0)
         {
-            if (byte & (1u << bit))
-            {
-                if (acc.infinity)
-                {
-                    p256_point_copy(&acc, &addend);
-                }
-                else
-                {
-                    p256_point_t tmp;
-                    p256_point_add(&tmp, &acc, &addend);
-                    p256_point_copy(&acc, &tmp);
-                }
-            }
-            p256_point_t dbl;
-            p256_point_double(&dbl, &addend);
-            p256_point_copy(&addend, &dbl);
+            scalar_is_zero = false;
+            break;
         }
     }
 
-    if (acc.infinity)
+    p256_jpoint_t acc;
+    p256_jpoint_set_infinity(&acc);
+    for (size_t byte_index = 0; byte_index < P256_SCALAR_SIZE; ++byte_index)
+    {
+        uint8_t byte = scalar[byte_index];
+        for (int bit = 7; bit >= 0; --bit)
+        {
+            p256_jpoint_double(&acc, &acc);
+            if (byte & (1u << bit))
+            {
+                p256_jpoint_t tmp;
+                p256_jpoint_add_mixed(&tmp, &acc, p);
+                bignum_copy(&acc.x, &tmp.x);
+                bignum_copy(&acc.y, &tmp.y);
+                bignum_copy(&acc.z, &tmp.z);
+                acc.infinity = tmp.infinity;
+            }
+        }
+    }
+
+    p256_jpoint_to_affine(r, &acc);
+    if (r->infinity && !scalar_is_zero)
     {
         return false;
     }
-    p256_point_copy(r, &acc);
     return true;
 }
 
@@ -389,24 +575,20 @@ bool p256_is_valid_public(const uint8_t *point, size_t length)
     p256_init();
     if (!point || length != P256_POINT_SIZE || point[0] != 0x04)
     {
-        serial_printf("%s", "[p256] invalid public key: ");
-        serial_printf("%s", point ? "" : "null ");
-        serial_printf("%s", "len=0x");
-        serial_printf("%016llX", (unsigned long long)(length));
-        serial_printf("%s", " first=0x");
-        serial_printf("%016llX", (unsigned long long)(point ? point[0] : 0));
-        serial_printf("%s", "\r\n");
+        serial_printf("[p256] invalid public key len=%zu first=0x%02X",
+                      length,
+                      (unsigned)(point ? point[0] : 0));
         return false;
     }
     p256_point_t p;
     bignum_from_bytes(&p.x, point + 1, 32);
     bignum_from_bytes(&p.y, point + 33, 32);
     p.infinity = false;
-    p256_log_bignum("public x", &p.x);
-    p256_log_bignum("public y", &p.y);
     if (!p256_point_is_on_curve(&p))
     {
-        serial_printf("%s", "[p256] warning: accepting point that failed curve check\r\n");
+        serial_printf("%s", "[p256] warning: accepting point that failed curve check");
+        p256_log_bignum("public x", &p.x);
+        p256_log_bignum("public y", &p.y);
     }
     return true;
 }
@@ -450,4 +632,81 @@ bool p256_compute_shared(const uint8_t scalar[P256_SCALAR_SIZE],
     }
     bignum_to_bytes(&shared.x, out_secret, P256_SCALAR_SIZE);
     return true;
+}
+
+bool p256_ecdsa_verify(const uint8_t *public_point, size_t public_len,
+                       const uint8_t hash[32],
+                       const uint8_t r_bytes[32],
+                       const uint8_t s_bytes[32])
+{
+    p256_init();
+    if (!public_point || public_len != P256_POINT_SIZE || public_point[0] != 0x04 ||
+        !hash || !r_bytes || !s_bytes)
+    {
+        return false;
+    }
+
+    bignum_t r;
+    bignum_t s;
+    bignum_from_bytes(&r, r_bytes, P256_SCALAR_SIZE);
+    bignum_from_bytes(&s, s_bytes, P256_SCALAR_SIZE);
+    if (bignum_is_zero(&r) || bignum_is_zero(&s))
+    {
+        return false;
+    }
+    if (bignum_compare(&r, &g_p256_n) >= 0 || bignum_compare(&s, &g_p256_n) >= 0)
+    {
+        return false;
+    }
+
+    bignum_t e;
+    bignum_from_bytes(&e, hash, P256_SCALAR_SIZE);
+    if (bignum_compare(&e, &g_p256_n) >= 0)
+    {
+        bignum_sub(&e, &g_p256_n);
+    }
+
+    bignum_t w;
+    bignum_modexp(&s, &g_p256_n_minus_two, &g_p256_n, &w);
+
+    bignum_t u1;
+    bignum_mulmod(&e, &w, &g_p256_n, &u1);
+    bignum_t u2;
+    bignum_mulmod(&r, &w, &g_p256_n, &u2);
+
+    uint8_t u1_scalar[P256_SCALAR_SIZE];
+    uint8_t u2_scalar[P256_SCALAR_SIZE];
+    bignum_to_bytes(&u1, u1_scalar, sizeof(u1_scalar));
+    bignum_to_bytes(&u2, u2_scalar, sizeof(u2_scalar));
+
+    p256_point_t q;
+    bignum_from_bytes(&q.x, public_point + 1, 32);
+    bignum_from_bytes(&q.y, public_point + 33, 32);
+    q.infinity = false;
+
+    p256_point_t p1;
+    p256_point_t p2;
+    if (!p256_scalar_mult(&p1, &g_p256_g, u1_scalar) ||
+        !p256_scalar_mult(&p2, &q, u2_scalar))
+    {
+        return false;
+    }
+
+    p256_point_t sum;
+    p256_point_add(&sum, &p1, &p2);
+    if (sum.infinity)
+    {
+        return false;
+    }
+
+    bignum_t v;
+    bignum_copy(&v, &sum.x);
+    if (bignum_compare(&v, &g_p256_n) >= 0)
+    {
+        bignum_sub(&v, &g_p256_n);
+    }
+
+    memset(u1_scalar, 0, sizeof(u1_scalar));
+    memset(u2_scalar, 0, sizeof(u2_scalar));
+    return bignum_compare(&v, &r) == 0;
 }

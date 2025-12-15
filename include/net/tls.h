@@ -12,7 +12,8 @@ typedef enum
 {
     TLS_KEY_EXCHANGE_NONE = 0,
     TLS_KEY_EXCHANGE_RSA,
-    TLS_KEY_EXCHANGE_ECDHE_RSA
+    TLS_KEY_EXCHANGE_ECDHE_RSA,
+    TLS_KEY_EXCHANGE_ECDHE_ECDSA
 } tls_key_exchange_t;
 
 typedef struct
@@ -38,6 +39,8 @@ typedef struct
     uint64_t client_seq;
     uint64_t server_seq;
     rsa_public_key_t server_key;
+    uint8_t server_ecdsa_public[P256_POINT_SIZE];
+    size_t server_ecdsa_public_len;
     uint8_t ecdhe_private[P256_SCALAR_SIZE];
     uint8_t ecdhe_public[P256_POINT_SIZE];
     size_t ecdhe_public_len;
