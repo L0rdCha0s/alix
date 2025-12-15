@@ -1217,7 +1217,6 @@ void atk_window_draw_from(atk_state_t *state, atk_widget_t *start)
         {
             continue;
         }
-        atk_window_mark_dirty(window);
         window_draw_internal(state, window);
     }
 }

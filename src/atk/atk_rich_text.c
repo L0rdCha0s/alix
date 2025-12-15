@@ -168,6 +168,24 @@ static bool rich_text_hit_test_cb(const atk_widget_t *widget,
                                   int px,
                                   int py,
                                   void *context);
+static void rich_text_draw_rect_clipped(int x,
+                                        int y,
+                                        int width,
+                                        int height,
+                                        video_color_t color,
+                                        int clip_x0,
+                                        int clip_y0,
+                                        int clip_x1,
+                                        int clip_y1);
+static void rich_text_draw_rect_outline_clipped(int x,
+                                                int y,
+                                                int width,
+                                                int height,
+                                                video_color_t color,
+                                                int clip_x0,
+                                                int clip_y0,
+                                                int clip_x1,
+                                                int clip_y1);
 static void rich_text_draw_cb(const atk_state_t *state,
                               const atk_widget_t *widget,
                               int origin_x,
@@ -2276,6 +2294,110 @@ static bool rich_text_hit_test_cb(const atk_widget_t *widget,
     return (px >= x0 && px < x1 && py >= y0 && py < y1);
 }
 
+static void rich_text_draw_rect_clipped(int x,
+                                        int y,
+                                        int width,
+                                        int height,
+                                        video_color_t color,
+                                        int clip_x0,
+                                        int clip_y0,
+                                        int clip_x1,
+                                        int clip_y1)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+
+    if (x0 < clip_x0) x0 = clip_x0;
+    if (y0 < clip_y0) y0 = clip_y0;
+    if (x1 > clip_x1) x1 = clip_x1;
+    if (y1 > clip_y1) y1 = clip_y1;
+
+    if (x1 <= x0 || y1 <= y0)
+    {
+        return;
+    }
+
+    video_draw_rect(x0, y0, x1 - x0, y1 - y0, color);
+}
+
+static void rich_text_draw_rect_outline_clipped(int x,
+                                                int y,
+                                                int width,
+                                                int height,
+                                                video_color_t color,
+                                                int clip_x0,
+                                                int clip_y0,
+                                                int clip_x1,
+                                                int clip_y1)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+    int bottom_y = y1 - 1;
+    int right_x = x1 - 1;
+
+    if (y0 >= clip_y0 && y0 < clip_y1)
+    {
+        int ex0 = x0;
+        int ex1 = x1;
+        if (ex0 < clip_x0) ex0 = clip_x0;
+        if (ex1 > clip_x1) ex1 = clip_x1;
+        if (ex1 > ex0)
+        {
+            video_draw_rect(ex0, y0, ex1 - ex0, 1, color);
+        }
+    }
+
+    if (bottom_y != y0 && bottom_y >= clip_y0 && bottom_y < clip_y1)
+    {
+        int ex0 = x0;
+        int ex1 = x1;
+        if (ex0 < clip_x0) ex0 = clip_x0;
+        if (ex1 > clip_x1) ex1 = clip_x1;
+        if (ex1 > ex0)
+        {
+            video_draw_rect(ex0, bottom_y, ex1 - ex0, 1, color);
+        }
+    }
+
+    if (x0 >= clip_x0 && x0 < clip_x1)
+    {
+        int ey0 = y0;
+        int ey1 = y1;
+        if (ey0 < clip_y0) ey0 = clip_y0;
+        if (ey1 > clip_y1) ey1 = clip_y1;
+        if (ey1 > ey0)
+        {
+            video_draw_rect(x0, ey0, 1, ey1 - ey0, color);
+        }
+    }
+
+    if (right_x != x0 && right_x >= clip_x0 && right_x < clip_x1)
+    {
+        int ey0 = y0;
+        int ey1 = y1;
+        if (ey0 < clip_y0) ey0 = clip_y0;
+        if (ey1 > clip_y1) ey1 = clip_y1;
+        if (ey1 > ey0)
+        {
+            video_draw_rect(right_x, ey0, 1, ey1 - ey0, color);
+        }
+    }
+}
+
 static void rich_text_draw_cb(const atk_state_t *state,
                               const atk_widget_t *widget,
                               int origin_x,
@@ -2307,10 +2429,16 @@ static void rich_text_draw_cb(const atk_state_t *state,
 
     int content_left = abs_x + rich_text_content_origin_x(priv);
     int content_top = abs_y;
-    int clip_x0 = abs_x;
-    int clip_y0 = abs_y;
-    int clip_x1 = abs_x + widget->width;
-    int clip_y1 = abs_y + widget->height;
+    int clip_x0 = abs_x + ATK_RICH_TEXT_PADDING;
+    int clip_y0 = abs_y + ATK_RICH_TEXT_PADDING;
+    int clip_x1 = clip_x0 + priv->view_width;
+    int clip_y1 = clip_y0 + priv->view_height;
+    int widget_x1 = abs_x + widget->width;
+    int widget_y1 = abs_y + widget->height;
+    if (clip_x0 < abs_x) clip_x0 = abs_x;
+    if (clip_y0 < abs_y) clip_y0 = abs_y;
+    if (clip_x1 > widget_x1) clip_x1 = widget_x1;
+    if (clip_y1 > widget_y1) clip_y1 = widget_y1;
 
     if (priv->pagination_enabled &&
         priv->page_count > 0 &&
@@ -2325,25 +2453,34 @@ static void rich_text_draw_cb(const atk_state_t *state,
             page_left = 0;
         }
         int page_x = doc_left + page_left;
+        int page_x1 = page_x + priv->page_width;
 
         for (size_t page_idx = 0; page_idx < priv->page_count; ++page_idx)
         {
             int page_y = abs_y + priv->page_tops[page_idx] - priv->scroll_y;
-            int page_bottom = page_y + priv->page_height;
-            if (page_bottom <= clip_y0 || page_y >= clip_y1)
+            int page_y1 = page_y + priv->page_height;
+            if (page_x1 <= clip_x0 || page_x >= clip_x1 || page_y1 <= clip_y0 || page_y >= clip_y1)
             {
                 continue;
             }
-            video_draw_rect(page_x,
-                            page_y,
-                            priv->page_width,
-                            priv->page_height,
-                            theme->menu_dropdown_face);
-            video_draw_rect_outline(page_x,
-                                    page_y,
-                                    priv->page_width,
-                                    priv->page_height,
-                                    theme->menu_dropdown_border);
+            rich_text_draw_rect_clipped(page_x,
+                                        page_y,
+                                        priv->page_width,
+                                        priv->page_height,
+                                        theme->menu_dropdown_face,
+                                        clip_x0,
+                                        clip_y0,
+                                        clip_x1,
+                                        clip_y1);
+            rich_text_draw_rect_outline_clipped(page_x,
+                                                page_y,
+                                                priv->page_width,
+                                                priv->page_height,
+                                                theme->menu_dropdown_border,
+                                                clip_x0,
+                                                clip_y0,
+                                                clip_x1,
+                                                clip_y1);
         }
     }
 
@@ -2385,7 +2522,6 @@ static void rich_text_draw_cb(const atk_state_t *state,
             if (selected)
             {
                 int bg_x0 = pen_x;
-                int bg_y0 = line_top;
                 int bg_w = 0;
                 if (glyph && glyph->ready)
                 {
@@ -2398,9 +2534,13 @@ static void rich_text_draw_cb(const atk_state_t *state,
                 int bg_x1 = bg_x0 + bg_w;
                 if (bg_x0 < clip_x0) bg_x0 = clip_x0;
                 if (bg_x1 > clip_x1) bg_x1 = clip_x1;
-                if (bg_x1 > bg_x0)
+                int bg_y0 = line_top;
+                int bg_y1 = line_top + line->height;
+                if (bg_y0 < clip_y0) bg_y0 = clip_y0;
+                if (bg_y1 > clip_y1) bg_y1 = clip_y1;
+                if (bg_x1 > bg_x0 && bg_y1 > bg_y0)
                 {
-                    video_draw_rect(bg_x0, bg_y0, bg_x1 - bg_x0, line->height, theme->menu_bar_highlight);
+                    video_draw_rect(bg_x0, bg_y0, bg_x1 - bg_x0, bg_y1 - bg_y0, theme->menu_bar_highlight);
                 }
             }
             if (glyph && glyph->ready)
