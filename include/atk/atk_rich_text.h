@@ -86,6 +86,12 @@ void atk_rich_text_scroll_to_bottom(atk_widget_t *editor);
 /* Install a callback invoked when the document content changes. */
 void atk_rich_text_set_change_handler(atk_widget_t *editor, atk_rich_text_change_t handler, void *context);
 
+/* Enable/disable read-only mode (disables user edits, but still allows programmatic updates). */
+void atk_rich_text_set_read_only(atk_widget_t *editor, bool read_only);
+
+/* Return whether read-only mode is enabled. */
+bool atk_rich_text_is_read_only(const atk_widget_t *editor);
+
 /*
  * Return a heap-allocated copy of the editor text.
  *

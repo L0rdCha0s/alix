@@ -577,6 +577,28 @@ char *strrchr(const char *str, int ch)
     return (char *)last;
 }
 
+char *strstr(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle)
+    {
+        return NULL;
+    }
+    if (*needle == '\0')
+    {
+        return (char *)haystack;
+    }
+
+    size_t needle_len = strlen(needle);
+    for (const char *p = haystack; *p; ++p)
+    {
+        if (*p == *needle && strncmp(p, needle, needle_len) == 0)
+        {
+            return (char *)p;
+        }
+    }
+    return NULL;
+}
+
 static int libc_tolower_char(int ch)
 {
     if (ch >= 'A' && ch <= 'Z')

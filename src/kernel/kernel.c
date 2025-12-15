@@ -26,6 +26,7 @@
 #include "rtl8139.h"
 #include "igb.h"
 #include "shell.h"
+#include "shell_service.h"
 #include "net/interface.h"
 #include "net/tcp.h"
 #include "net/dns.h"
@@ -146,20 +147,53 @@ static uint32_t choose_non_ui_cpu(void)
 {
     uint32_t ui = process_get_ui_cpu();
     uint32_t count = smp_cpu_count();
-    if (count == 0)
+    if (count < 2)
     {
         return PROCESS_CPU_ANY;
     }
-    if (count == 1)
+
+    bool avoid_bsp = (count > 2);
+    for (uint32_t idx = 0; idx < count; ++idx)
     {
-        return ui;
+        if (idx == ui)
+        {
+            continue;
+        }
+        const smp_cpu_t *cpu = smp_cpu_by_index(idx);
+        if (!cpu || !cpu->present)
+        {
+            continue;
+        }
+        if (!__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE))
+        {
+            continue;
+        }
+        if (avoid_bsp && cpu->bsp)
+        {
+            continue;
+        }
+        return idx;
     }
-    uint32_t candidate = (ui == 0) ? 1u : 0u;
-    if (candidate >= count)
+
+    for (uint32_t idx = 0; idx < count; ++idx)
     {
-        candidate = 0;
+        if (idx == ui)
+        {
+            continue;
+        }
+        const smp_cpu_t *cpu = smp_cpu_by_index(idx);
+        if (!cpu || !cpu->present)
+        {
+            continue;
+        }
+        if (!__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE))
+        {
+            continue;
+        }
+        return idx;
     }
-    return candidate;
+
+    return PROCESS_CPU_ANY;
 }
 
 static ssize_t flushd_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
@@ -986,6 +1020,7 @@ void kernel_main(void)
 #endif
     procfs_init();
     serial_printf("%s", "[alix] after procfs_init\n");
+    shell_service_sys_controls_init();
     vfs_sys_controls_init();
     heap_sys_controls_init();
     audio_sys_controls_init();

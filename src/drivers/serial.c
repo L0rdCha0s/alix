@@ -22,6 +22,7 @@ static const uint64_t CANONICAL_MASK = 0xFFFF800000000000ULL;
 static char g_serial_queue[SERIAL_QUEUE_SIZE];
 static size_t g_serial_queue_head = 0;
 static size_t g_serial_queue_tail = 0;
+static uint64_t g_serial_queue_dropped_bytes = 0;
 static spinlock_t g_serial_queue_lock;
 static spinlock_t g_serial_hw_lock;
 static spinlock_t g_serial_output_lock;
@@ -91,22 +92,16 @@ static void serial_hw_write_char(char c)
 
 static void serial_queue_push(char c)
 {
-    while (1)
+    spinlock_lock(&g_serial_queue_lock);
+    size_t next_tail = (g_serial_queue_tail + 1) % SERIAL_QUEUE_SIZE;
+    if (next_tail == g_serial_queue_head)
     {
-        spinlock_lock(&g_serial_queue_lock);
-        size_t next_tail = (g_serial_queue_tail + 1) % SERIAL_QUEUE_SIZE;
-        if (next_tail != g_serial_queue_head)
-        {
-            g_serial_queue[g_serial_queue_tail] = c;
-            g_serial_queue_tail = next_tail;
-            spinlock_unlock(&g_serial_queue_lock);
-            return;
-        }
-        char flushed = g_serial_queue[g_serial_queue_head];
         g_serial_queue_head = (g_serial_queue_head + 1) % SERIAL_QUEUE_SIZE;
-        spinlock_unlock(&g_serial_queue_lock);
-        serial_hw_write_char(flushed);
+        __atomic_add_fetch(&g_serial_queue_dropped_bytes, 1, __ATOMIC_RELAXED);
     }
+    g_serial_queue[g_serial_queue_tail] = c;
+    g_serial_queue_tail = next_tail;
+    spinlock_unlock(&g_serial_queue_lock);
 }
 
 static bool serial_queue_pop(char *out)

@@ -6,7 +6,6 @@
 #include "serial.h"
 #include "process.h"
 
-
 bool shell_cmd_start_video(shell_state_t *shell, shell_output_t *out, const char *args)
 {
     (void)shell;

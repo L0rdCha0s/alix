@@ -6,6 +6,7 @@
 #include "atk.h"
 #include "user_atk_host.h"
 #include "atk/atk_list.h"
+#include "atk_menu_bar.h"
 #include "video_backbuffer.h"
 #include "pci.h"
 #include "keyboard.h"
@@ -1212,6 +1213,7 @@ void video_run_loop(void)
     {
         mouse_dispatch_events();
         video_poll_keyboard();
+        atk_menu_bar_poll_clock();
         bool pending_refresh = false;
         spinlock_lock(&g_video_lock);
         pending_refresh = refresh_requested || refresh_requested_full;
@@ -1235,6 +1237,7 @@ void video_pump_events(void)
 
     mouse_dispatch_events();
     video_poll_keyboard();
+    atk_menu_bar_poll_clock();
     bool pending_refresh = false;
     spinlock_lock(&g_video_lock);
     pending_refresh = refresh_requested || refresh_requested_full;

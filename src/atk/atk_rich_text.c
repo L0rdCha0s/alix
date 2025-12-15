@@ -69,6 +69,13 @@ typedef struct
     int baseline;
 } atk_rich_line_t;
 
+typedef enum
+{
+    RICH_TEXT_INPUT_NORMAL = 0,
+    RICH_TEXT_INPUT_ESC,
+    RICH_TEXT_INPUT_ESC_BRACKET,
+} rich_text_input_state_t;
+
 typedef struct
 {
     atk_list_node_t *list_node;
@@ -91,6 +98,7 @@ typedef struct
     int last_height;
     bool layout_dirty;
     bool focused;
+    bool read_only;
     bool pagination_enabled;
     int page_width;
     int page_height;
@@ -103,6 +111,8 @@ typedef struct
     size_t sel_anchor;
     size_t sel_start;
     size_t sel_end;
+    int nav_preferred_x;
+    rich_text_input_state_t input_state;
     video_color_t *row_buffer;
     int row_buffer_capacity;
     atk_rich_text_change_t change;
@@ -138,6 +148,9 @@ static int rich_text_clamp_font_size(int size);
 static int rich_text_fallback_advance(int size, char ch);
 static void rich_text_clear_selection(atk_rich_text_priv_t *priv);
 static void rich_text_set_selection(atk_rich_text_priv_t *priv, size_t a, size_t b);
+static void rich_text_update_current_format(atk_rich_text_priv_t *priv);
+static size_t rich_text_line_index_for_cursor(const atk_rich_text_priv_t *priv, size_t cursor);
+static atk_key_response_t rich_text_handle_arrow_sequence(atk_widget_t *widget, atk_rich_text_priv_t *priv, char ch);
 
 static bool rich_font_load(void);
 #if ATK_NO_DESKTOP_APPS
@@ -231,6 +244,7 @@ atk_widget_t *atk_window_add_rich_text(atk_widget_t *window, int x, int y, int w
     priv->last_height = height;
     priv->layout_dirty = true;
     priv->focused = false;
+    priv->read_only = false;
     priv->pagination_enabled = false;
     priv->page_width = 0;
     priv->page_height = 0;
@@ -247,6 +261,8 @@ atk_widget_t *atk_window_add_rich_text(atk_widget_t *window, int x, int y, int w
     priv->sel_anchor = 0;
     priv->sel_start = 0;
     priv->sel_end = 0;
+    priv->nav_preferred_x = -1;
+    priv->input_state = RICH_TEXT_INPUT_NORMAL;
 
     atk_list_node_t *child_node = atk_list_push_back(&wpriv->children, editor);
     if (!child_node)
@@ -733,6 +749,26 @@ void atk_rich_text_set_change_handler(atk_widget_t *editor, atk_rich_text_change
     priv->change_context = context;
 }
 
+void atk_rich_text_set_read_only(atk_widget_t *editor, bool read_only)
+{
+    atk_rich_text_priv_t *priv = rich_text_priv_mut(editor);
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->read_only == read_only)
+    {
+        return;
+    }
+    priv->read_only = read_only;
+}
+
+bool atk_rich_text_is_read_only(const atk_widget_t *editor)
+{
+    const atk_rich_text_priv_t *priv = rich_text_priv(editor);
+    return priv ? priv->read_only : false;
+}
+
 char *atk_rich_text_copy_text(const atk_widget_t *editor)
 {
     const atk_rich_text_priv_t *priv = rich_text_priv(editor);
@@ -1076,6 +1112,251 @@ static void rich_text_set_selection(atk_rich_text_priv_t *priv, size_t a, size_t
     if (hi > priv->length) hi = priv->length;
     priv->sel_start = lo;
     priv->sel_end = hi;
+}
+
+static void rich_text_update_current_format(atk_rich_text_priv_t *priv)
+{
+    if (!priv || !priv->chars || priv->length == 0)
+    {
+        return;
+    }
+
+    size_t idx = priv->cursor;
+    if (idx > 0)
+    {
+        idx--;
+    }
+    if (idx >= priv->length)
+    {
+        idx = priv->length - 1;
+    }
+
+    while (idx > 0)
+    {
+        char ch = priv->chars[idx].ch;
+        if (ch != '\n' && ch != ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+        {
+            break;
+        }
+        idx--;
+    }
+
+    priv->current_font_size = rich_text_clamp_font_size((int)priv->chars[idx].size);
+    priv->current_style = priv->chars[idx].style;
+}
+
+static size_t rich_text_line_index_for_cursor(const atk_rich_text_priv_t *priv, size_t cursor)
+{
+    if (!priv || priv->line_count == 0)
+    {
+        return 0;
+    }
+
+    for (size_t i = 0; i < priv->line_count; ++i)
+    {
+        const atk_rich_line_t *line = &priv->lines[i];
+        if (cursor >= line->start && cursor <= line->end)
+        {
+            return i;
+        }
+    }
+
+    return priv->line_count - 1;
+}
+
+static bool rich_text_nav_collapse_selection(atk_rich_text_priv_t *priv, bool to_end)
+{
+    if (!priv || priv->sel_start == priv->sel_end)
+    {
+        return false;
+    }
+    priv->cursor = to_end ? priv->sel_end : priv->sel_start;
+    rich_text_clear_selection(priv);
+    rich_text_update_current_format(priv);
+    return true;
+}
+
+static bool rich_text_nav_left(atk_rich_text_priv_t *priv)
+{
+    if (!priv)
+    {
+        return false;
+    }
+    if (rich_text_nav_collapse_selection(priv, false))
+    {
+        return true;
+    }
+    if (priv->cursor == 0)
+    {
+        return false;
+    }
+    priv->cursor--;
+    rich_text_clear_selection(priv);
+    rich_text_update_current_format(priv);
+    return true;
+}
+
+static bool rich_text_nav_right(atk_rich_text_priv_t *priv)
+{
+    if (!priv)
+    {
+        return false;
+    }
+    if (rich_text_nav_collapse_selection(priv, true))
+    {
+        return true;
+    }
+    if (priv->cursor >= priv->length)
+    {
+        return false;
+    }
+    priv->cursor++;
+    rich_text_clear_selection(priv);
+    rich_text_update_current_format(priv);
+    return true;
+}
+
+static bool rich_text_nav_vertical(atk_widget_t *widget, atk_rich_text_priv_t *priv, int delta)
+{
+    if (!widget || !priv || delta == 0)
+    {
+        return false;
+    }
+
+    if (rich_text_nav_collapse_selection(priv, delta > 0))
+    {
+        priv->nav_preferred_x = -1;
+        return true;
+    }
+
+    if (!rich_text_update_layout(widget, priv))
+    {
+        return false;
+    }
+    if (priv->line_count == 0)
+    {
+        return false;
+    }
+
+    size_t current_line = rich_text_line_index_for_cursor(priv, priv->cursor);
+    size_t target_line = current_line;
+    if (delta < 0)
+    {
+        if (current_line == 0)
+        {
+            return false;
+        }
+        target_line = current_line - 1;
+    }
+    else
+    {
+        if (current_line + 1 >= priv->line_count)
+        {
+            return false;
+        }
+        target_line = current_line + 1;
+    }
+
+    if (priv->nav_preferred_x < 0)
+    {
+        int caret_x = 0;
+        int caret_y = 0;
+        int caret_h = 0;
+        if (rich_text_cursor_rect(widget, priv, 0, 0, &caret_x, &caret_y, &caret_h))
+        {
+            int pen_x = caret_x - widget->x - rich_text_content_origin_x(priv);
+            if (pen_x < 0)
+            {
+                pen_x = 0;
+            }
+            priv->nav_preferred_x = pen_x;
+        }
+        else
+        {
+            priv->nav_preferred_x = 0;
+        }
+    }
+
+    const atk_rich_line_t *line = &priv->lines[target_line];
+    int local_x = rich_text_content_origin_x(priv) + priv->nav_preferred_x;
+    int local_y = (line->top + line->height / 2) - priv->scroll_y;
+    size_t new_cursor = rich_text_index_for_point(widget, priv, local_x, local_y);
+    if (new_cursor > priv->length)
+    {
+        new_cursor = priv->length;
+    }
+    if (new_cursor == priv->cursor)
+    {
+        return false;
+    }
+    priv->cursor = new_cursor;
+    rich_text_clear_selection(priv);
+    rich_text_update_current_format(priv);
+    return true;
+}
+
+static atk_key_response_t rich_text_handle_arrow_sequence(atk_widget_t *widget, atk_rich_text_priv_t *priv, char ch)
+{
+    if (!widget || !priv)
+    {
+        return ATK_KEY_RESPONSE_NONE;
+    }
+
+    if (priv->input_state == RICH_TEXT_INPUT_ESC)
+    {
+        if (ch == '[')
+        {
+            priv->input_state = RICH_TEXT_INPUT_ESC_BRACKET;
+            return ATK_KEY_RESPONSE_HANDLED;
+        }
+        priv->input_state = RICH_TEXT_INPUT_NORMAL;
+        return ATK_KEY_RESPONSE_HANDLED;
+    }
+
+    if (priv->input_state == RICH_TEXT_INPUT_ESC_BRACKET)
+    {
+        priv->input_state = RICH_TEXT_INPUT_NORMAL;
+        bool moved = false;
+        if (ch == 'A')
+        {
+            moved = rich_text_nav_vertical(widget, priv, -1);
+        }
+        else if (ch == 'B')
+        {
+            moved = rich_text_nav_vertical(widget, priv, 1);
+        }
+        else if (ch == 'C')
+        {
+            priv->nav_preferred_x = -1;
+            moved = rich_text_nav_right(priv);
+        }
+        else if (ch == 'D')
+        {
+            priv->nav_preferred_x = -1;
+            moved = rich_text_nav_left(priv);
+        }
+        else
+        {
+            priv->nav_preferred_x = -1;
+            return ATK_KEY_RESPONSE_HANDLED;
+        }
+
+        if (moved)
+        {
+            rich_text_ensure_cursor_visible(widget, priv);
+            rich_text_invalidate(widget);
+            return ATK_KEY_RESPONSE_HANDLED | ATK_KEY_RESPONSE_REDRAW;
+        }
+        return ATK_KEY_RESPONSE_HANDLED;
+    }
+
+    if (ch == 0x1B)
+    {
+        priv->input_state = RICH_TEXT_INPUT_ESC;
+        return ATK_KEY_RESPONSE_HANDLED;
+    }
+    priv->input_state = RICH_TEXT_INPUT_NORMAL;
+    return ATK_KEY_RESPONSE_NONE;
 }
 
 static void rich_text_clear(atk_widget_t *editor, atk_rich_text_priv_t *priv)
@@ -1440,6 +1721,11 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
     }
 
     size_t idx = 0;
+    size_t last_break_end = (size_t)-1;
+    int break_ascent = 0;
+    int break_descent = 0;
+    int break_height = 0;
+    bool saw_nonspace = false;
     while (true)
     {
         bool at_end = (idx >= priv->length);
@@ -1451,6 +1737,9 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
             ch_size = priv->chars[idx].size;
         }
         ch_size = rich_text_clamp_font_size(ch_size);
+
+        bool page_break = (!at_end && ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR);
+        bool newline = (!at_end && (ch == '\n' || page_break));
 
         atk_rich_font_size_cache_t *cache = rich_font_cache_for_size(ch_size);
         ttf_font_metrics_t metrics = { 0 };
@@ -1465,17 +1754,14 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
         int gap = metrics.line_gap;
         if (gap < 0) gap = 0;
 
-        if (ascent > line_ascent) line_ascent = ascent;
-        if (descent > line_descent) line_descent = descent;
         int computed_height = ascent + descent + gap;
         if (computed_height < ATK_FONT_HEIGHT)
         {
             computed_height = ATK_FONT_HEIGHT;
         }
-        if (computed_height > line_height) line_height = computed_height;
 
         int advance = 0;
-        if (!at_end && ch != '\n' && ch != ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+        if (!at_end && !newline)
         {
             atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, (uint32_t)(unsigned char)ch);
             if (glyph && glyph->ready)
@@ -1492,10 +1778,74 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
             }
         }
 
-        bool page_break = (!at_end && ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR);
-        bool newline = (!at_end && (ch == '\n' || page_break));
-        bool wrap = (!newline && !at_end && x > 0 && (x + advance) > wrap_width);
-        if (newline || wrap || at_end)
+        if (newline || at_end)
+        {
+            if (ascent > line_ascent) line_ascent = ascent;
+            if (descent > line_descent) line_descent = descent;
+            if (computed_height > line_height) line_height = computed_height;
+        }
+
+        bool current_space = (!at_end && (ch == ' ' || ch == '\t'));
+        bool overflow = (!newline && !at_end && x > 0 && (x + advance) > wrap_width);
+        bool wrap_at_break = false;
+        if (overflow && !current_space && last_break_end != (size_t)-1 && last_break_end > line_start)
+        {
+            int word_width = 0;
+            bool word_fits = true;
+            for (size_t word_idx = last_break_end; word_idx < priv->length; ++word_idx)
+            {
+                if (!priv->chars)
+                {
+                    break;
+                }
+                char word_ch = priv->chars[word_idx].ch;
+                if (word_ch == '\n' ||
+                    word_ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR ||
+                    word_ch == ' ' ||
+                    word_ch == '\t')
+                {
+                    break;
+                }
+
+                int word_size = rich_text_clamp_font_size(priv->chars[word_idx].size);
+                atk_rich_font_size_cache_t *word_cache = rich_font_cache_for_size(word_size);
+                atk_rich_glyph_t *word_glyph = rich_font_get_glyph(word_cache, (uint32_t)(unsigned char)word_ch);
+                int word_advance = 0;
+                if (word_glyph && word_glyph->ready)
+                {
+                    word_advance = word_glyph->advance;
+                }
+                else
+                {
+                    word_advance = rich_text_fallback_advance(word_size, word_ch);
+                }
+                if (word_advance < 1)
+                {
+                    word_advance = word_size / 2;
+                }
+                if (word_width > wrap_width - word_advance)
+                {
+                    word_fits = false;
+                    break;
+                }
+                word_width += word_advance;
+            }
+            wrap_at_break = word_fits;
+        }
+
+        size_t commit_end = idx;
+        int commit_ascent = line_ascent;
+        int commit_descent = line_descent;
+        int commit_height = line_height;
+        if (wrap_at_break)
+        {
+            commit_end = last_break_end;
+            commit_ascent = break_ascent;
+            commit_descent = break_descent;
+            commit_height = break_height;
+        }
+
+        if (newline || overflow || at_end)
         {
             if (priv->line_count >= priv->line_capacity)
             {
@@ -1513,7 +1863,7 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
             {
                 int content_top = page_top + priv->page_margin;
                 int content_bottom = page_top + priv->page_height - priv->page_margin;
-                int projected = y + line_height + ATK_RICH_TEXT_LINE_SPACING;
+                int projected = y + commit_height + ATK_RICH_TEXT_LINE_SPACING;
                 if (projected > content_bottom && y > content_top)
                 {
                     page_index++;
@@ -1530,13 +1880,13 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
 
             atk_rich_line_t *line = &priv->lines[priv->line_count++];
             line->start = line_start;
-            line->end = idx;
+            line->end = commit_end;
             line->top = y;
-            line->height = line_height + ATK_RICH_TEXT_LINE_SPACING;
-            int baseline_offset = line_ascent;
+            line->height = commit_height + ATK_RICH_TEXT_LINE_SPACING;
+            int baseline_offset = commit_ascent;
             if (baseline_offset <= 0)
             {
-                baseline_offset = line_height - line_descent;
+                baseline_offset = commit_height - commit_descent;
             }
             line->baseline = y + baseline_offset;
 
@@ -1545,7 +1895,35 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
             line_ascent = 0;
             line_descent = 0;
             line_height = 0;
-            line_start = newline ? idx + 1 : idx;
+            last_break_end = (size_t)-1;
+            break_ascent = 0;
+            break_descent = 0;
+            break_height = 0;
+            saw_nonspace = false;
+
+            if (newline)
+            {
+                line_start = idx + 1;
+                idx = line_start;
+            }
+            else if (overflow)
+            {
+                if (current_space)
+                {
+                    line_start = idx + 1;
+                    idx = line_start;
+                }
+                else
+                {
+                    line_start = commit_end;
+                    idx = line_start;
+                }
+            }
+            else
+            {
+                line_start = idx;
+            }
+
             if (page_break && priv->pagination_enabled)
             {
                 page_index++;
@@ -1558,20 +1936,32 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
                 priv->page_count = page_index + 1;
                 y = page_top + priv->page_margin;
             }
-            if (wrap && !newline && !at_end)
+
+            if (at_end)
             {
-                continue;
+                break;
+            }
+            continue;
+        }
+
+        if (ascent > line_ascent) line_ascent = ascent;
+        if (descent > line_descent) line_descent = descent;
+        if (computed_height > line_height) line_height = computed_height;
+        x += advance;
+
+        if (ch == ' ' || ch == '\t')
+        {
+            if (saw_nonspace)
+            {
+                last_break_end = idx + 1;
+                break_ascent = line_ascent;
+                break_descent = line_descent;
+                break_height = line_height;
             }
         }
-
-        if (at_end)
+        else
         {
-            break;
-        }
-
-        if (ch != '\n' && ch != ATK_RICH_TEXT_PAGE_BREAK_CHAR)
-        {
-            x += advance;
+            saw_nonspace = true;
         }
         idx++;
     }
@@ -1821,6 +2211,8 @@ static atk_mouse_response_t rich_text_mouse_cb(atk_widget_t *widget,
         priv->sel_anchor = idx;
         rich_text_set_selection(priv, idx, idx);
         priv->cursor = idx;
+        priv->nav_preferred_x = -1;
+        priv->input_state = RICH_TEXT_INPUT_NORMAL;
         if (priv->chars && priv->length > 0)
         {
             size_t probe = idx;
@@ -1849,6 +2241,8 @@ static atk_mouse_response_t rich_text_mouse_cb(atk_widget_t *widget,
     {
         rich_text_set_selection(priv, priv->sel_anchor, idx);
         priv->cursor = idx;
+        priv->nav_preferred_x = -1;
+        priv->input_state = RICH_TEXT_INPUT_NORMAL;
         rich_text_ensure_cursor_visible(widget, priv);
         rich_text_invalidate(widget);
         return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW | ATK_MOUSE_RESPONSE_CAPTURE;
@@ -2227,6 +2621,17 @@ static atk_key_response_t rich_text_key_cb(atk_widget_t *widget,
     }
 
     char ch = (char)key;
+    atk_key_response_t arrow = rich_text_handle_arrow_sequence(widget, priv, ch);
+    if (arrow != ATK_KEY_RESPONSE_NONE)
+    {
+        return arrow;
+    }
+
+    if (priv->read_only)
+    {
+        return ATK_KEY_RESPONSE_NONE;
+    }
+
     bool handled = false;
     if (ch == '\b' || ch == 0x7F)
     {
@@ -2243,6 +2648,7 @@ static atk_key_response_t rich_text_key_cb(atk_widget_t *widget,
 
     if (handled)
     {
+        priv->nav_preferred_x = -1;
         priv->layout_dirty = true;
         rich_text_update_layout(widget, priv);
         rich_text_ensure_cursor_visible(widget, priv);

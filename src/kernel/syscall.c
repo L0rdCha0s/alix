@@ -10,6 +10,7 @@
 #include "user_atk_host.h"
 #include "shell_service.h"
 #include "net/interface.h"
+#include "net/dns.h"
 #include "net/tcp.h"
 #include "user_copy.h"
 #include "timekeeping.h"
@@ -57,7 +58,7 @@ typedef struct
 #define SYSCALL_MAX_PATH_LEN     4096u
 #define SYSCALL_MAX_COMMAND_LEN  4096u
 #define SYSCALL_MAX_SERIAL_BYTES 4096u
-#define SYSCALL_MAX_IP_TEXT_LEN  64u
+#define SYSCALL_MAX_IP_TEXT_LEN  256u
 
 typedef struct
 {
@@ -484,7 +485,7 @@ static int64_t syscall_do_socket_open(const char *iface_name_user)
 }
 
 /*
- * Connect a TCP socket FD to a remote IPv4 address/port.
+ * Connect a TCP socket FD to a remote IPv4 address/port (or hostname via DNS).
  *
  * This currently uses a simple poll/sleep loop waiting for ESTABLISHED.
  */
@@ -511,6 +512,15 @@ static int64_t syscall_do_socket_connect(int fd,
 
     uint32_t ipv4 = 0;
     bool parsed = net_parse_ipv4(ip_text, &ipv4);
+    if ((!parsed || ipv4 == 0) && ip_text[0] != '\0')
+    {
+        uint32_t resolved = 0;
+        if (net_dns_resolve_ipv4(ip_text, NULL, &resolved))
+        {
+            ipv4 = resolved;
+            parsed = true;
+        }
+    }
     free(ip_text);
     if (!parsed || ipv4 == 0)
     {

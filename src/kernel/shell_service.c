@@ -7,6 +7,7 @@
 #include "shell.h"
 #include "spinlock.h"
 #include "vfs.h"
+#include "procfs.h"
 #include "serial.h"
 
 /*
@@ -45,6 +46,12 @@ static shell_session_t *g_shell_sessions = NULL;
 static uint32_t g_next_shell_handle = 1;
 static spinlock_t g_shell_list_lock;
 static bool g_shell_list_lock_initialized = false;
+static uint32_t g_shellsvc_log_enable = 0;
+
+static inline bool shellsvc_log_enabled(void)
+{
+    return __atomic_load_n(&g_shellsvc_log_enable, __ATOMIC_ACQUIRE) != 0;
+}
 
 static inline void shell_list_lock(void)
 {
@@ -71,17 +78,19 @@ static int shell_session_fd_close(void *ctx);
 static void shell_session_stream(void *context, const char *data, size_t len);
 static void shell_session_exec_task(void *arg);
 static process_t *shell_session_cleanup_runner_locked(shell_session_t *session);
+static ssize_t shellsvc_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
+static ssize_t shellsvc_log_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
 
 static void shell_session_log(shell_session_t *session, const char *tag)
 {
-    if (!session || !tag)
+    if (!session || !tag || !shellsvc_log_enabled())
     {
         return;
     }
     process_t *runner = session->runner;
     uint64_t runner_pid = runner ? process_get_pid(runner) : 0;
     uint64_t owner_pid = session->owner ? process_get_pid(session->owner) : 0;
-    serial_printf("[shellsvc] %s handle=%u running=%s completed=%s runner=0x%016llX owner=0x%016llX\r\n",
+    serial_printf("[shellsvc] %s handle=%u running=%s completed=%s runner=0x%016llX owner=0x%016llX",
                   tag,
                   (unsigned)session->handle,
                   session->running ? "true" : "false",
@@ -204,7 +213,7 @@ int shell_service_exec(uint32_t handle,
     shell_session_t *session = shell_session_find_locked(handle, owner);
     if (!session)
     {
-        serial_printf("[shellsvc] exec lookup failed handle=%u owner=0x%016llX\r\n",
+        serial_printf("[shellsvc] exec lookup failed handle=%u owner=0x%016llX",
                       (unsigned)handle,
                       (unsigned long long)(owner ? process_get_pid(owner) : 0));
         free(line);
@@ -650,7 +659,7 @@ static void shell_session_exec_task(void *arg)
     shell_exec_task_t *task = (shell_exec_task_t *)arg;
     if (!task || !task->session || !task->line)
     {
-        serial_printf("[shellsvc] worker_bad_task task=%p session=%p line=%p\r\n",
+        serial_printf("[shellsvc] worker_bad_task task=%p session=%p line=%p",
                       (void *)task,
                       task ? (void *)task->session : NULL,
                       task ? (void *)task->line : NULL);
@@ -659,14 +668,20 @@ static void shell_session_exec_task(void *arg)
 
     shell_session_t *session = task->session;
     shell_session_log(session, "worker_begin");
-    serial_printf("[shellsvc] worker_exec handle=%u entering execute_line\r\n",
-                  (unsigned)session->handle);
+    if (shellsvc_log_enabled())
+    {
+        serial_printf("[shellsvc] worker_exec handle=%u entering execute_line",
+                      (unsigned)session->handle);
+    }
     bool success = false;
     char *result = shell_execute_line(&session->state, task->line, &success);
-    serial_printf("[shellsvc] worker_exec handle=%u execute_line_done success=%s result=%p\r\n",
-                  (unsigned)session->handle,
-                  success ? "true" : "false",
-                  (void *)result);
+    if (shellsvc_log_enabled())
+    {
+        serial_printf("[shellsvc] worker_exec handle=%u execute_line_done success=%s result=%p",
+                      (unsigned)session->handle,
+                      success ? "true" : "false",
+                      (void *)result);
+    }
     if (result && !session->state.stream_fn)
     {
         shell_session_append(session, result, strlen(result));
@@ -707,7 +722,7 @@ int shell_service_interrupt(uint32_t handle)
     shell_session_t *session = shell_session_find_locked(handle, owner);
     if (!session)
     {
-        serial_printf("[shellsvc] interrupt lookup_failed handle=%u owner=0x%016llX\r\n",
+        serial_printf("[shellsvc] interrupt lookup_failed handle=%u owner=0x%016llX",
                       (unsigned)handle,
                       (unsigned long long)(owner ? process_get_pid(owner) : 0));
         return -1;
@@ -716,11 +731,14 @@ int shell_service_interrupt(uint32_t handle)
     process_t *fg = shell_foreground_load(&session->state);
     process_t *runner = session->runner;
 
-    serial_printf("[shellsvc] interrupt request handle=%u running=%s fg_pid=0x%016llX runner_pid=0x%016llX\r\n",
-                  (unsigned)handle,
-                  session->running ? "true" : "false",
-                  (unsigned long long)(fg ? process_get_pid(fg) : 0),
-                  (unsigned long long)(runner ? process_get_pid(runner) : 0));
+    if (shellsvc_log_enabled())
+    {
+        serial_printf("[shellsvc] interrupt request handle=%u running=%s fg_pid=0x%016llX runner_pid=0x%016llX",
+                      (unsigned)handle,
+                      session->running ? "true" : "false",
+                      (unsigned long long)(fg ? process_get_pid(fg) : 0),
+                      (unsigned long long)(runner ? process_get_pid(runner) : 0));
+    }
 
     bool killed = false;
     if (session->running)
@@ -747,4 +765,83 @@ int shell_service_interrupt(uint32_t handle)
     }
     shell_session_unlock(session);
     return killed ? 0 : -1;
+}
+
+static ssize_t shellsvc_log_read(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)context;
+    if (!buffer)
+    {
+        return -1;
+    }
+    char tmp[3];
+    tmp[0] = shellsvc_log_enabled() ? '1' : '0';
+    tmp[1] = '\n';
+    tmp[2] = '\0';
+    size_t len = 2;
+    if (offset >= len)
+    {
+        return 0;
+    }
+    size_t to_copy = len - offset;
+    if (to_copy > count)
+    {
+        to_copy = count;
+    }
+    memcpy(buffer, tmp + offset, to_copy);
+    return (ssize_t)to_copy;
+}
+
+static ssize_t shellsvc_log_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context)
+{
+    (void)node;
+    (void)context;
+    (void)offset;
+    if (!buffer || count == 0)
+    {
+        return -1;
+    }
+    const char *cbuf = (const char *)buffer;
+    size_t idx = 0;
+    while (idx < count && (cbuf[idx] == ' ' || cbuf[idx] == '\t'))
+    {
+        ++idx;
+    }
+    if (idx >= count)
+    {
+        return -1;
+    }
+    int value = -1;
+    if (cbuf[idx] == '0')
+    {
+        value = 0;
+    }
+    else if (cbuf[idx] == '1')
+    {
+        value = 1;
+    }
+    if (value < 0)
+    {
+        return -1;
+    }
+    for (size_t tail = idx + 1; tail < count; ++tail)
+    {
+        char t = cbuf[tail];
+        if (t == ' ' || t == '\t' || t == '\r' || t == '\n')
+        {
+            continue;
+        }
+        return -1;
+    }
+    __atomic_store_n(&g_shellsvc_log_enable, (uint32_t)value, __ATOMIC_RELEASE);
+    return (ssize_t)count;
+}
+
+void shell_service_sys_controls_init(void)
+{
+    (void)procfs_create_file_at("sys/shellsvc/log_enable",
+                                shellsvc_log_read,
+                                shellsvc_log_write,
+                                &g_shellsvc_log_enable);
 }

@@ -37,10 +37,18 @@ void atk_menu_bar_build_default(atk_state_t *state);
 /*
  * Enable periodic clock updates in the menu bar.
  *
- * Kernel builds use this to keep the clock label fresh without needing user
- * input events.
+ * Kernel builds poll this from the UI loop to keep the clock label fresh
+ * without relying on timer IRQ callbacks.
  */
 void atk_menu_bar_enable_clock_timer(void);
+
+/*
+ * Poll for clock updates.
+ *
+ * Call this from the video/UI loop; it schedules a redraw when the clock needs
+ * refreshing (currently every ~5 seconds).
+ */
+void atk_menu_bar_poll_clock(void);
 
 /* Draw the menu bar into the current backbuffer. */
 void atk_menu_bar_draw(const atk_state_t *state);

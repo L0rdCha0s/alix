@@ -1002,7 +1002,7 @@ static void terminal_capture_input_anchor(atk_terminal_priv_t *priv)
     {
         return;
     }
-    if (priv->input_length == 0)
+    if (priv->input_rendered_length == 0)
     {
         priv->input_start_row = priv->cursor_row;
         priv->input_start_col = priv->cursor_col;

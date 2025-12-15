@@ -55,48 +55,32 @@ static inline uint64_t ticks_to_ms(uint64_t ticks)
     return (ticks * 1000ULL) / freq;
 }
 
-static bool vfs_sync_lock_acquire(vfs_mount_t *mount, const char *dev_name, bool allow_steal)
+static bool vfs_sync_lock_predicate(void *context)
+{
+    vfs_mount_t *mount = (vfs_mount_t *)context;
+    if (!mount)
+    {
+        return false;
+    }
+    if (!mount->sync_lock.locked)
+    {
+        mount->sync_lock.locked = true;
+        mount->sync_owner_pid = process_current_pid();
+        mount->sync_owner_cpu = smp_current_cpu_index();
+        mount->sync_owner_ticks = timer_ticks();
+        return true;
+    }
+    return false;
+}
+
+static bool vfs_sync_lock_acquire(vfs_mount_t *mount)
 {
     if (!mount)
     {
         return false;
     }
-
-    uint64_t wait_start = timer_ticks();
-    while (1)
-    {
-        if (__sync_lock_test_and_set(&mount->sync_lock.value, 1) == 0)
-        {
-            mount->sync_owner_pid = process_current_pid();
-            mount->sync_owner_cpu = smp_current_cpu_index();
-            mount->sync_owner_ticks = timer_ticks();
-            return true;
-        }
-
-        while (mount->sync_lock.value)
-        {
-            __asm__ volatile ("pause");
-            uint64_t elapsed_ms = ticks_to_ms(timer_ticks() - wait_start);
-            if (elapsed_ms >= 2000ULL)
-            {
-                uint64_t owner_age_ms = ticks_to_ms(timer_ticks() - mount->sync_owner_ticks);
-                serial_printf("[vfs] sync_lock wait timeout dev=%s owner_pid=0x%016llX owner_cpu=%u age_ms=%llu steal=%d\r\n",
-                              dev_name ? dev_name : "(anon)",
-                              (unsigned long long)mount->sync_owner_pid,
-                              (unsigned)mount->sync_owner_cpu,
-                              (unsigned long long)owner_age_ms,
-                              allow_steal ? 1 : 0);
-                if (!allow_steal)
-                {
-                    return false;
-                }
-                /* Forcefully clear and retry. */
-                __sync_lock_release(&mount->sync_lock.value);
-                wait_start = timer_ticks();
-                break;
-            }
-        }
-    }
+    wait_queue_wait(&mount->sync_lock.waiters, vfs_sync_lock_predicate, mount);
+    return true;
 }
 
 static void vfs_sync_lock_release(vfs_mount_t *mount)
@@ -105,10 +89,36 @@ static void vfs_sync_lock_release(vfs_mount_t *mount)
     {
         return;
     }
+    uint64_t owner_pid = 0;
+    uint32_t owner_cpu = UINT32_MAX;
+    uint64_t owner_ticks = 0;
+    uint64_t held_ms = 0;
+
+    spinlock_lock(&mount->sync_lock.waiters.lock);
+    owner_pid = mount->sync_owner_pid;
+    owner_cpu = mount->sync_owner_cpu;
+    owner_ticks = mount->sync_owner_ticks;
+    if (owner_ticks)
+    {
+        held_ms = ticks_to_ms(timer_ticks() - owner_ticks);
+    }
     mount->sync_owner_pid = 0;
     mount->sync_owner_cpu = UINT32_MAX;
     mount->sync_owner_ticks = 0;
-    spinlock_unlock(&mount->sync_lock);
+    mount->sync_lock.locked = false;
+    spinlock_unlock(&mount->sync_lock.waiters.lock);
+
+    wait_queue_wake_all(&mount->sync_lock.waiters);
+
+    if (held_ms >= 2000ULL)
+    {
+        const char *dev_name = (mount->device && mount->device->name[0]) ? mount->device->name : "(anon)";
+        serial_printf("[vfs] sync_lock held_long dev=%s owner_pid=0x%016llX owner_cpu=%u held_ms=%llu",
+                      dev_name,
+                      (unsigned long long)owner_pid,
+                      (unsigned)owner_cpu,
+                      (unsigned long long)held_ms);
+    }
 }
 
 #define VFS_MAX_SYMLINK_DEPTH 8
@@ -997,8 +1007,7 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     }
     vfs_mount_t *mount = node->mount;
     bool ok = true;
-    const char *dev_name = (mount->device && mount->device->name[0]) ? mount->device->name : "(anon)";
-    if (!vfs_sync_lock_acquire(mount, dev_name, true))
+    if (!vfs_sync_lock_acquire(mount))
     {
         return false;
     }
@@ -2179,7 +2188,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     }
 
     uint64_t start = timer_ticks();
-    if (!vfs_sync_lock_acquire(mount, dev_name, true))
+    if (!vfs_sync_lock_acquire(mount))
     {
         return false;
     }
@@ -2276,7 +2285,8 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     mount->mount_point = mount_point;
     mount->dirty_bytes_limit = VFS_DIRTY_BACKPRESSURE_LIMIT;
     spinlock_init(&mount->dirty_lock);
-    spinlock_init(&mount->sync_lock);
+    wait_queue_init(&mount->sync_lock.waiters);
+    mount->sync_lock.locked = false;
     mount->sync_owner_pid = 0;
     mount->sync_owner_cpu = UINT32_MAX;
     mount->sync_owner_ticks = 0;

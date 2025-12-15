@@ -233,17 +233,14 @@ void atk_state_lock_init(void)
 uint64_t atk_state_lock_acquire(void)
 {
     atk_global_lock_ensure();
-    uint64_t flags;
-    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
-    __asm__ volatile ("cli" ::: "memory");
     spinlock_lock(&g_atk_lock);
-    return flags;
+    return 0;
 }
 
 void atk_state_lock_release(uint64_t flags)
 {
+    (void)flags;
     spinlock_unlock(&g_atk_lock);
-    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc");
 }
 #else
 void atk_state_lock_init(void)

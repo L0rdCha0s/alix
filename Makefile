@@ -81,12 +81,23 @@ USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_A
 USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
 USER_DOOM_SOURCES := $(wildcard $(USER_DIR)/apps/doom/*.c)
 USER_DOOM_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_DOOM_SOURCES))
+USER_TLS_SOURCES := \
+	$(NET_DIR)/tls.c \
+	$(NET_DIR)/tls_asn1.c \
+	$(CRYPTO_DIR)/aes.c \
+	$(CRYPTO_DIR)/bignum.c \
+	$(CRYPTO_DIR)/hmac.c \
+	$(CRYPTO_DIR)/p256.c \
+	$(CRYPTO_DIR)/rsa.c \
+	$(CRYPTO_DIR)/sha256.c
+USER_TLS_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_TLS_SOURCES))
 USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
              $(USER_OBJDIR)/doom.elf \
              $(USER_OBJDIR)/atk_shell.elf \
              $(USER_OBJDIR)/atk_clock.elf \
+             $(USER_OBJDIR)/atk_browser.elf \
              $(USER_OBJDIR)/atk_richtext.elf \
              $(USER_OBJDIR)/atk_taskmgr.elf \
              $(USER_OBJDIR)/atk_mp3.elf \
@@ -103,6 +114,7 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/doom \
              $(USER_BIN_DIR)/atk_shell \
              $(USER_BIN_DIR)/atk_clock \
+             $(USER_BIN_DIR)/atk_browser \
              $(USER_BIN_DIR)/atk_richtext \
              $(USER_BIN_DIR)/atk_taskmgr \
              $(USER_BIN_DIR)/atk_mp3 \
@@ -180,6 +192,16 @@ $(USER_OBJDIR)/kernel/%.o: $(KERNEL_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
+$(USER_OBJDIR)/net/%.o: $(NET_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/crypto/%.o: $(CRYPTO_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/crypto/rsa.o: USER_CFLAGS += -DRSA_DEBUG_LOG=0
+
 $(KERNEL_ELF): $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_LD)
 	$(LD) -nostdlib -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
 
@@ -206,6 +228,10 @@ $(USER_OBJDIR)/atk_shell.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_
 $(USER_OBJDIR)/atk_clock.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_clock/atk_clock_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_clock/atk_clock_app.o
+
+$(USER_OBJDIR)/atk_browser.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_TLS_OBJECTS) $(USER_OBJDIR)/apps/atk_browser/atk_browser_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_TLS_OBJECTS) $(USER_OBJDIR)/apps/atk_browser/atk_browser_app.o
 
 $(USER_OBJDIR)/atk_richtext.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_richtext/atk_richtext_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
@@ -289,6 +315,10 @@ $(USER_BIN_DIR)/atk_shell: $(USER_OBJDIR)/atk_shell.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/atk_clock: $(USER_OBJDIR)/atk_clock.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_browser: $(USER_OBJDIR)/atk_browser.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 

@@ -18,7 +18,6 @@
 #endif
 #ifndef ATK_NO_DESKTOP_APPS
 #include "timekeeping.h"
-#include "timer.h"
 #endif
 
 #define ATK_MENU_BAR_TITLE_PADDING 14
@@ -61,8 +60,9 @@ static int atk_menu_bar_height_pixels(const atk_state_t *state);
 static void atk_menu_bar_mark_dirty(const atk_state_t *state);
 static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu);
 #ifndef ATK_NO_DESKTOP_APPS
-static void atk_menu_bar_clock_tick(void *context);
-static bool g_clock_timer_registered = false;
+#define ATK_MENU_BAR_CLOCK_REFRESH_INTERVAL_MS 5000ULL
+static bool g_clock_poll_enabled = false;
+static uint64_t g_clock_next_refresh_ms = 0;
 static atk_widget_t *g_volume_window = NULL;
 static atk_widget_t *g_volume_scrollbar = NULL;
 #endif
@@ -151,18 +151,48 @@ void atk_menu_bar_enable_clock_timer(void)
 #else
 void atk_menu_bar_enable_clock_timer(void)
 {
-    if (g_clock_timer_registered)
+    g_clock_poll_enabled = true;
+    g_clock_next_refresh_ms = 0;
+}
+#endif
+
+#ifdef ATK_NO_DESKTOP_APPS
+void atk_menu_bar_poll_clock(void)
+{
+}
+#else
+void atk_menu_bar_poll_clock(void)
+{
+    if (!g_clock_poll_enabled)
     {
         return;
     }
-    uint32_t interval = timer_frequency();
-    if (interval == 0)
+
+    uint64_t now_ms = timekeeping_now_millis();
+    if (g_clock_next_refresh_ms != 0 && now_ms < g_clock_next_refresh_ms)
     {
-        interval = 100;
+        return;
     }
-    if (timer_register_periodic(atk_menu_bar_clock_tick, NULL, interval))
+    g_clock_next_refresh_ms = now_ms + ATK_MENU_BAR_CLOCK_REFRESH_INTERVAL_MS;
+
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
+    atk_state_t *state = atk_state_get();
+    int height = atk_menu_bar_height_pixels(state);
+    bool request_refresh = false;
+    if (height > 0)
     {
-        g_clock_timer_registered = true;
+        atk_dirty_mark_rect(video_screen_width() - ATK_MENU_BAR_CLOCK_RESERVE,
+                            0,
+                            ATK_MENU_BAR_CLOCK_RESERVE,
+                            height);
+        request_refresh = true;
+    }
+    atk_state_lock_release(irq_state);
+
+    if (request_refresh)
+    {
+        video_request_refresh();
     }
 }
 #endif
@@ -1287,21 +1317,3 @@ static void atk_menu_bar_mark_menu_area(const atk_widget_t *menu)
     }
     atk_dirty_mark_rect(menu->x, menu->y, menu->width, menu->height);
 }
-
-#ifndef ATK_NO_DESKTOP_APPS
-static void atk_menu_bar_clock_tick(void *context)
-{
-    (void)context;
-    atk_state_lock_init();
-    uint64_t irq_state = atk_state_lock_acquire();
-    atk_state_t *state = atk_state_get();
-    int height = atk_menu_bar_height_pixels(state);
-    if (height <= 0)
-    {
-        goto out;
-    }
-    atk_dirty_mark_rect(video_screen_width() - ATK_MENU_BAR_CLOCK_RESERVE, 0, ATK_MENU_BAR_CLOCK_RESERVE, height);
-out:
-    atk_state_lock_release(irq_state);
-}
-#endif

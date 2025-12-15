@@ -3,9 +3,16 @@
 
 #include "vfs.h"
 #include "block.h"
+#include "process.h"
 #include "spinlock.h"
 
 struct alixfs_mount;
+
+typedef struct
+{
+    wait_queue_t waiters;
+    bool locked;
+} vfs_sync_lock_t;
 
 struct vfs_node
 {
@@ -49,7 +56,7 @@ struct vfs_mount
     size_t dirty_bytes_limit;
     uint64_t dirty_seq;
     spinlock_t dirty_lock;
-    spinlock_t sync_lock;
+    vfs_sync_lock_t sync_lock;
     uint64_t sync_owner_pid;
     uint32_t sync_owner_cpu;
     uint64_t sync_owner_ticks;

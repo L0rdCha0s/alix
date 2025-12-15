@@ -16,10 +16,14 @@
 #include "crypto/hmac.h"
 #include "crypto/p256.h"
 #include "net/tls_asn1.h"
-#include "timer.h"
 #include "serial.h"
 #include "libc.h"
+#ifdef KERNEL_BUILD
+#include "timer.h"
 #include "process.h"
+#else
+#include "usyscall.h"
+#endif
 #include <stddef.h>
 
 #ifndef TLS_DEBUG_SIG
@@ -75,6 +79,34 @@
 
 static uint32_t g_tls_prng_state = 0xC3E4ED12U;
 
+static uint64_t tls_time_ticks(void)
+{
+#ifdef KERNEL_BUILD
+    return timer_ticks();
+#else
+    return sys_time_millis();
+#endif
+}
+
+static uint32_t tls_time_frequency(void)
+{
+#ifdef KERNEL_BUILD
+    uint32_t freq = timer_frequency();
+    return freq ? freq : 100;
+#else
+    return 1000;
+#endif
+}
+
+static void tls_thread_yield(void)
+{
+#ifdef KERNEL_BUILD
+    process_yield();
+#else
+    (void)sys_yield();
+#endif
+}
+
 static bool tls_cipher_is_aead(uint16_t suite)
 {
     return suite == TLS_CIPHER_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ||
@@ -95,7 +127,7 @@ static void tls_prng_mix(uint32_t value)
 
 static void tls_prng_seed(void)
 {
-    uint64_t ticks = timer_ticks();
+    uint64_t ticks = tls_time_ticks();
     tls_prng_mix((uint32_t)ticks);
     tls_prng_mix((uint32_t)(ticks >> 32));
     tls_prng_mix((uint32_t)(uintptr_t)&ticks);
@@ -142,12 +174,12 @@ static bool tls_random_fill(uint8_t *buffer, size_t length, void *context)
 
 static void tls_log(const char *msg)
 {
-    serial_printf("%s", msg ? msg : "");
+    serial_printf("%s\n", msg ? msg : "");
 }
 
 static void tls_log_hex(const char *prefix, uint64_t value)
 {
-    serial_printf("%s%016llX", prefix ? prefix : "", (unsigned long long)value);
+    serial_printf("%s%016llX\n", prefix ? prefix : "", (unsigned long long)value);
 }
 
 #if TLS_DEBUG_SIG
@@ -205,7 +237,7 @@ static void tls_log_hexdump(const char *label, const uint8_t *data, size_t len)
         line[out++] = '.';
     }
     line[out] = '\0';
-    serial_printf("%s", line);
+    serial_printf("%s\n", line);
 }
 
 static void tls_log_sha256_digest(const char *label, const uint8_t *data, size_t len)
@@ -270,12 +302,7 @@ static void tls_increment_seq(uint64_t *seq)
 
 static uint64_t tls_default_timeout_ticks(void)
 {
-    uint32_t freq = timer_frequency();
-    if (freq == 0)
-    {
-        freq = 100;
-    }
-    return (uint64_t)freq * 15;
+    return (uint64_t)tls_time_frequency() * 15;
 }
 
 static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t len, uint64_t timeout_ticks)
@@ -286,20 +313,22 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
         return false;
     }
 
-    uint64_t start = timer_ticks();
+    uint64_t start = tls_time_ticks();
     size_t remaining = len;
     while (remaining > 0)
     {
-        if (net_tcp_socket_has_error(session->socket))
+#ifdef KERNEL_BUILD
+        if (session->socket && net_tcp_socket_has_error(session->socket))
         {
             tls_log("TLS: socket read detected tcp error");
             return false;
         }
+#endif
 
         ssize_t got = read(session->socket_fd, out, remaining);
         if (got < 0)
         {
-            if (timer_ticks() - start >= timeout_ticks)
+            if (tls_time_ticks() - start >= timeout_ticks)
             {
                 tls_log("TLS: socket read timeout waiting for data");
                 return false;
@@ -308,36 +337,34 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
         }
         if (got == 0)
         {
-            if (net_tcp_socket_remote_closed(session->socket))
-            {
-                tls_log("TLS: socket read saw remote close");
-                return false;
-            }
-            if (timer_ticks() - start >= timeout_ticks)
-            {
-                tls_log("TLS: socket read timeout while idle");
-                return false;
-            }
-            continue;
+            tls_log("TLS: socket read saw remote close");
+            return false;
         }
 
         out += got;
         remaining -= (size_t)got;
-        start = timer_ticks();
-        process_yield();
+        start = tls_time_ticks();
+        tls_thread_yield();
     }
     return true;
 }
 
 static bool tls_socket_write_all(tls_session_t *session, const uint8_t *data, size_t len, uint64_t timeout_ticks)
 {
-    if (!session || !session->socket || !data || len == 0)
+    if (!session || session->socket_fd < 0 || !data || len == 0)
     {
         tls_log("TLS: socket write invalid args");
         return false;
     }
 
-    uint64_t start = timer_ticks();
+#ifdef KERNEL_BUILD
+    if (!session->socket)
+    {
+        tls_log("TLS: socket write missing tcp socket");
+        return false;
+    }
+
+    uint64_t start = tls_time_ticks();
     while (true)
     {
         if (net_tcp_socket_has_error(session->socket))
@@ -354,13 +381,35 @@ static bool tls_socket_write_all(tls_session_t *session, const uint8_t *data, si
         {
             return true;
         }
-        if (timer_ticks() - start >= timeout_ticks)
+        if (tls_time_ticks() - start >= timeout_ticks)
         {
             tls_log("TLS: socket write timeout");
             return false;
         }
-        process_yield();
+        tls_thread_yield();
     }
+#else
+    uint64_t start = tls_time_ticks();
+    size_t offset = 0;
+    while (offset < len)
+    {
+        ssize_t wrote = write(session->socket_fd, data + offset, len - offset);
+        if (wrote <= 0)
+        {
+            if (tls_time_ticks() - start >= timeout_ticks)
+            {
+                tls_log("TLS: socket write timeout");
+                return false;
+            }
+            tls_thread_yield();
+            continue;
+        }
+        offset += (size_t)wrote;
+        start = tls_time_ticks();
+        tls_thread_yield();
+    }
+    return true;
+#endif
 }
 
 static bool tls_write_record_plain(tls_session_t *session, uint8_t type, const uint8_t *data, size_t len)
@@ -2023,17 +2072,38 @@ static bool tls_expect_server_finished(tls_session_t *session, size_t len)
 
 bool tls_session_init(tls_session_t *session, net_tcp_socket_t *socket)
 {
+#ifdef KERNEL_BUILD
     if (!session || !socket)
     {
         return false;
     }
-    memset(session, 0, sizeof(*session));
-    session->socket = socket;
-    session->socket_fd = net_tcp_socket_fd(socket);
-    if (session->socket_fd < 0)
+    int fd = net_tcp_socket_fd(socket);
+    if (fd < 0)
     {
         return false;
     }
+    if (!tls_session_init_fd(session, fd))
+    {
+        return false;
+    }
+    session->socket = socket;
+    return true;
+#else
+    (void)session;
+    (void)socket;
+    return false;
+#endif
+}
+
+bool tls_session_init_fd(tls_session_t *session, int socket_fd)
+{
+    if (!session || socket_fd < 0)
+    {
+        return false;
+    }
+    memset(session, 0, sizeof(*session));
+    session->socket = NULL;
+    session->socket_fd = socket_fd;
     sha256_init(&session->handshake_hash);
     rsa_public_key_init(&session->server_key);
     session->key_exchange = TLS_KEY_EXCHANGE_NONE;
@@ -2043,7 +2113,7 @@ bool tls_session_init(tls_session_t *session, net_tcp_socket_t *socket)
 
 bool tls_session_handshake(tls_session_t *session, const char *hostname)
 {
-    if (!session || !session->socket)
+    if (!session || session->socket_fd < 0)
     {
         tls_log("TLS: invalid session in handshake");
         return false;

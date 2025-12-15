@@ -60,6 +60,7 @@ typedef struct
 } tls_session_t;
 
 bool tls_session_init(tls_session_t *session, net_tcp_socket_t *socket);
+bool tls_session_init_fd(tls_session_t *session, int socket_fd);
 bool tls_session_handshake(tls_session_t *session, const char *hostname);
 bool tls_session_send(tls_session_t *session, const uint8_t *data, size_t length);
 size_t tls_session_recv(tls_session_t *session, uint8_t *buffer, size_t capacity);
