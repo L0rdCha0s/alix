@@ -16,4 +16,4 @@ If you are specifically working on userland remote windows, start with `docs/use
 - Core entry points: `include/atk.h`
 - Public widget APIs: `include/atk/*.h`
 - Window manager / desktop / menu bar: `src/atk/*.h` (internal but commonly used)
-- Userland wrappers: `user/atk_user.h`, `user/atk_app.h`
+- Userland wrappers: `user/lib/atk_user.h`, `user/lib/atk_app.h`

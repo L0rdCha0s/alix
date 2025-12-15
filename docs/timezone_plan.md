@@ -176,7 +176,7 @@ the corrected offsets automatically:
 
 - Console clock (`src/kernel/console.c` status line).
 - Shell prompt time.
-- Any apps that call the libc wrapper (`user/libc.c` -> `sys_timekeeping`).
+- Any apps that call the libc wrapper (`user/lib/libc.c` -> `sys_timekeeping`).
 
 To validate Australia/Sydney specifically:
 
@@ -198,4 +198,3 @@ To validate Australia/Sydney specifically:
 
 Each phase is independently testable and keeps the system usable between
 checkpoints.
-

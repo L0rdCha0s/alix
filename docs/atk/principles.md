@@ -12,7 +12,7 @@ ATK is a small retained-mode UI toolkit: widgets hold state, input mutates state
 
 - ATK renders into the current video surface/backbuffer.
   - Kernel: hardware backbuffer managed by `src/drivers/video.c`.
-  - Userland: software surface (`user/video_surface.c`) attached to an `atk_user_window_t` buffer.
+  - Userland: software surface (`user/lib/video_surface.c`) attached to an `atk_user_window_t` buffer.
 - ATK maintains a “dirty rect” model:
   - UI mutations mark regions dirty (via widget helpers such as `atk_window_mark_dirty()` or internal `atk_dirty_mark_rect()`).
   - `atk_render()` repaints the current dirty region and is a no-op when nothing is dirty.

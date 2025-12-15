@@ -2,8 +2,8 @@
 
 Headers:
 
-- `user/atk_user.h` – syscall wrapper + backbuffer ownership
-- `user/atk_app.h` – standard event loop and modal helpers
+- `user/lib/atk_user.h` – syscall wrapper + backbuffer ownership
+- `user/lib/atk_app.h` – standard event loop and modal helpers
 
 ## Remote window wrapper (`atk_user_*`)
 

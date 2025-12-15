@@ -75,7 +75,6 @@ SMP has two distinct phases:
 ## 5) Linker Scripts / Layout
 
 - Kernel layout: `src/arch/x86/uefi.ld` and constants in `include/arch/x86/bootlayout.h`
-- User layout: `user/link.ld`
+- User layout: `user/lib/link.ld`
 
 If you change virtual/physical layout assumptions, update both the linker scripts and `g_mem_layout` logic.
-

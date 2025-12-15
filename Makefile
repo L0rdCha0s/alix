@@ -31,8 +31,8 @@ KERNEL_CFLAGS := $(BASE_CFLAGS) -mgeneral-regs-only -mfpmath=387 -mno-sse \
 ifeq ($(USB),0)
 KERNEL_CFLAGS += -DENABLE_USB=0
 endif
-USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
-               -msse2 -mfpmath=sse -mstackrealign -mcmodel=large -I$(USER_DIR)/doom \
+USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(USER_DIR)/lib -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
+               -msse2 -mfpmath=sse -mstackrealign -mcmodel=large -I$(USER_DIR)/apps/doom \
                -DNORMALUNIX
 
 KERNEL_LD   := $(ARCH_DIR)/uefi.ld
@@ -63,23 +63,23 @@ ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 
 USER_OBJDIR := $(OBJDIR)/user
 USER_COMMON_SOURCES := \
-	$(USER_DIR)/crt0.c \
-	$(USER_DIR)/syscall.c \
-	$(USER_DIR)/libc.c \
-	$(USER_DIR)/atk_user.c \
-	$(USER_DIR)/video_surface.c \
-	$(USER_DIR)/serial_stub.c \
-	$(USER_DIR)/atk_user_host_stub.c
+	$(USER_DIR)/lib/crt0.c \
+	$(USER_DIR)/lib/syscall.c \
+	$(USER_DIR)/lib/libc.c \
+	$(USER_DIR)/lib/atk_user.c \
+	$(USER_DIR)/lib/video_surface.c \
+	$(USER_DIR)/lib/serial_stub.c \
+	$(USER_DIR)/lib/atk_user_host_stub.c
 USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
 USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o $(USER_OBJDIR)/kernel/ttf.o
-USER_LD_SCRIPT := $(USER_DIR)/link.ld
+USER_LD_SCRIPT := $(USER_DIR)/lib/link.ld
 USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(wildcard $(ATK_DIR)/*.c))
 USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
 USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
-USER_ATK_EXTRA_SOURCES := $(USER_DIR)/atk/atk_terminal.c $(USER_DIR)/atk_app.c
+USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c $(USER_DIR)/lib/atk_app.c
 USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
 USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
-USER_DOOM_SOURCES := $(wildcard $(USER_DIR)/doom/*.c)
+USER_DOOM_SOURCES := $(wildcard $(USER_DIR)/apps/doom/*.c)
 USER_DOOM_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_DOOM_SOURCES))
 USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
@@ -166,6 +166,8 @@ $(USER_OBJDIR)/%.o: $(USER_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
+$(USER_OBJDIR)/apps/doom/%.o: USER_CFLAGS += -Wno-unused-const-variable
+
 $(USER_OBJDIR)/atk/%.o: $(ATK_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
@@ -181,65 +183,65 @@ $(USER_OBJDIR)/kernel/%.o: $(KERNEL_DIR)/%.c
 $(KERNEL_ELF): $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_LD)
 	$(LD) -nostdlib -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
 
-$(USER_OBJDIR)/atk_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_demo.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_demo/atk_demo.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_demo.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_demo/atk_demo.o
 
-$(USER_OBJDIR)/ttf_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/ttf_demo.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/ttf_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/ttf_demo/ttf_demo.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/ttf_demo.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/ttf_demo/ttf_demo.o
 
-$(USER_OBJDIR)/wolf3d.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/wolf3d.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/wolf3d.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/wolf3d/wolf3d.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/wolf3d.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/wolf3d/wolf3d.o
 
 $(USER_OBJDIR)/doom.elf: $(USER_COMMON_OBJECTS) $(USER_DOOM_OBJECTS) $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_DOOM_OBJECTS)
 
-$(USER_OBJDIR)/atk_shell.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_shell_app.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_shell.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_shell/atk_shell_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_shell_app.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_shell/atk_shell_app.o
 
-$(USER_OBJDIR)/atk_clock.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_clock_app.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_clock.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_clock/atk_clock_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_clock_app.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_clock/atk_clock_app.o
 
-$(USER_OBJDIR)/atk_richtext.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_richtext_app.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_richtext.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_richtext/atk_richtext_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_richtext_app.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_richtext/atk_richtext_app.o
 
-$(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_taskmgr_app.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_taskmgr/atk_taskmgr_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_taskmgr_app.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_taskmgr/atk_taskmgr_app.o
 
-$(USER_OBJDIR)/atk_mp3.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_mp3_app.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_mp3.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_mp3/atk_mp3_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_mp3_app.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_mp3/atk_mp3_app.o
 
-$(USER_OBJDIR)/atk_threads.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_threads_app.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_threads.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_threads/atk_threads_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/atk_threads_app.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_threads/atk_threads_app.o
 
-$(USER_OBJDIR)/control_panel.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/control_panel.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/control_panel.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/control_panel/control_panel.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/control_panel.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/control_panel/control_panel.o
 
-$(USER_OBJDIR)/loop.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/loop.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/loop.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/loop/loop.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/loop.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/loop/loop.o
 
-$(USER_OBJDIR)/playsound.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/playsound.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/playsound.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/playsound/playsound.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/playsound.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/playsound/playsound.o
 
-$(USER_OBJDIR)/playmp3.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/playmp3.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/playmp3.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/playmp3/playmp3.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/playmp3.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/playmp3/playmp3.o
 
-$(USER_OBJDIR)/socket_demo.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/socket_demo.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/socket_demo.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/socket_demo/socket_demo.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/socket_demo.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/socket_demo/socket_demo.o
 
 $(DL_SCRIPT_SRC): $(USER_ELFS)
 	@mkdir -p $(GENERATED_DIR)

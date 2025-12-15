@@ -13,7 +13,7 @@ See `docs/user_atk.md` for the architecture and syscall model.
 
 ## Example skeleton
 
-This follows the pattern used by `user/atk_demo.c`.
+This follows the pattern used by `user/apps/atk_demo/atk_demo.c`.
 
 ```c
 #include "atk_user.h"

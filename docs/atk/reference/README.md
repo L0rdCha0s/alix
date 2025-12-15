@@ -5,7 +5,7 @@ These notes describe the main ATK modules and widgets, with pointers to the auth
 ## Core
 
 - `docs/atk/reference/core.md` – core event/render entry points (`include/atk.h`)
-- `docs/atk/reference/userland.md` – userland remote window wrappers (`user/atk_user.h`, `user/atk_app.h`)
+- `docs/atk/reference/userland.md` – userland remote window wrappers (`user/lib/atk_user.h`, `user/lib/atk_app.h`)
 - `docs/atk/reference/object_model.md` – widget base/object model (`include/atk/object.h`)
 - `docs/atk/reference/layout.md` – layout helper (`include/atk/layout.h`)
 
