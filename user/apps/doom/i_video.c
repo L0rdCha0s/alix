@@ -205,20 +205,70 @@ static int doom_translate_key(const user_atk_event_t *ev)
     }
 }
 
-static void doom_handle_key_event(const user_atk_event_t *event)
+static void doom_post_key(bool release, int key)
 {
-    int key = doom_translate_key(event);
     if (key == 0)
     {
         return;
     }
 
     event_t doom_event;
-    doom_event.type = (event->flags & USER_ATK_KEY_FLAG_RELEASE) ? ev_keyup : ev_keydown;
+    doom_event.type = release ? ev_keyup : ev_keydown;
     doom_event.data1 = key;
     doom_event.data2 = 0;
     doom_event.data3 = 0;
     D_PostEvent(&doom_event);
+}
+
+static void doom_handle_key_event(const user_atk_event_t *event)
+{
+    if (!event)
+    {
+        return;
+    }
+
+    bool release = (event->flags & USER_ATK_KEY_FLAG_RELEASE) != 0;
+    int key = doom_translate_key(event);
+    doom_post_key(release, key);
+
+    // Additional movement bindings: WASD -> arrow keys.
+    int movement_key = 0;
+    switch (key)
+    {
+        case 'w': movement_key = KEY_UPARROW; break;
+        case 'a': movement_key = KEY_LEFTARROW; break;
+        case 's': movement_key = KEY_DOWNARROW; break;
+        case 'd': movement_key = KEY_RIGHTARROW; break;
+        default:
+            break;
+    }
+    if (movement_key == 0)
+    {
+        switch (event->data1)
+        {
+            case 0x11: movement_key = KEY_UPARROW; break;    // W
+            case 0x1E: movement_key = KEY_LEFTARROW; break;  // A
+            case 0x1F: movement_key = KEY_DOWNARROW; break;  // S
+            case 0x20: movement_key = KEY_RIGHTARROW; break; // D
+            default:
+                break;
+        }
+    }
+    if (movement_key && movement_key != key)
+    {
+        doom_post_key(release, movement_key);
+    }
+
+    // Additional fire binding: Right-Shift -> Ctrl (default fire key).
+    // Keep existing bindings and still deliver the Shift event.
+    if (event->data1 == 0x36)
+    {
+        int fire_key = KEY_RCTRL;
+        if (fire_key != key && fire_key != movement_key)
+        {
+            doom_post_key(release, fire_key);
+        }
+    }
 }
 
 static void doom_handle_mouse_event(const user_atk_event_t *event)
