@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include "video.h"
 #include "libc.h"
+#include "utf8.h"
 
 typedef struct
 {
@@ -354,43 +355,52 @@ static size_t label_line_length(const char *text,
         return 0;
     }
 
-    size_t len = 0;
+    size_t pos = 0;
+    size_t scratch_len = 0;
     size_t last_break = (size_t)-1;
 
-    while (text[len] != '\0' && text[len] != '\n')
+    scratch[0] = '\0';
+
+    while (text[pos] != '\0' && text[pos] != '\n')
     {
-        if (len + 1 < scratch_cap)
+        utf8_decode_result_t dec = utf8_decode_one(text + pos);
+        if (dec.consumed == 0)
         {
-            scratch[len] = text[len];
-            scratch[len + 1] = '\0';
-            int width = atk_font_text_width(scratch);
-            if (width > max_width)
+            break;
+        }
+
+        if (scratch_len + (size_t)dec.consumed + 1 > scratch_cap)
+        {
+            return (last_break != (size_t)-1 && last_break > 0) ? last_break : pos;
+        }
+
+        memcpy(scratch + scratch_len, text + pos, (size_t)dec.consumed);
+        scratch_len += (size_t)dec.consumed;
+        scratch[scratch_len] = '\0';
+
+        int width = atk_font_text_width(scratch);
+        if (width > max_width)
+        {
+            if (pos == 0)
             {
-                if (len == 0)
-                {
-                    return 1;
-                }
-                if (last_break != (size_t)-1 && last_break > 0)
-                {
-                    return last_break;
-                }
-                return len;
+                return (size_t)dec.consumed;
             }
+            if (last_break != (size_t)-1 && last_break > 0)
+            {
+                return last_break;
+            }
+            return pos;
         }
 
-        if (text[len] == ' ' || text[len] == '\t')
+        if (dec.codepoint == ' ' || dec.codepoint == '\t')
         {
-            last_break = len + 1;
+            last_break = pos + (size_t)dec.consumed;
         }
 
-        ++len;
-        if (len + 1 >= scratch_cap)
-        {
-            return (last_break != (size_t)-1 && last_break > 0) ? last_break : len;
-        }
+        pos += (size_t)dec.consumed;
     }
 
-    return len;
+    return pos;
 }
 
 static size_t label_count_wrapped_lines(const char *text,

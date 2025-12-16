@@ -74,6 +74,7 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/atk_user_host_stub.c
 USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
 USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o $(USER_OBJDIR)/kernel/ttf.o
+USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/utf8.o
 USER_LD_SCRIPT := $(USER_DIR)/lib/link.ld
 USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(wildcard $(ATK_DIR)/*.c))
 USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)

@@ -4,6 +4,7 @@
 #include "atk/atk_scrollbar.h"
 #include "libc.h"
 #include "ttf.h"
+#include "utf8.h"
 #include "video.h"
 #if ATK_NO_DESKTOP_APPS
 #include "usyscall.h"
@@ -19,9 +20,7 @@
 #define ATK_RICH_TEXT_MAX_FONT 64
 #define ATK_RICH_TEXT_DEFAULT_FONT 18
 #define ATK_RICH_TEXT_CACHE_SLOTS 8
-#define ATK_RICH_TEXT_GLYPH_FIRST 32
-#define ATK_RICH_TEXT_GLYPH_LAST 126
-#define ATK_RICH_TEXT_GLYPH_COUNT (ATK_RICH_TEXT_GLYPH_LAST - ATK_RICH_TEXT_GLYPH_FIRST + 1)
+#define ATK_RICH_TEXT_GLYPH_CACHE_SLOTS 512
 
 typedef struct
 {
@@ -37,10 +36,18 @@ typedef struct
 
 typedef struct
 {
+    uint32_t codepoint;
+    uint32_t last_used;
+    atk_rich_glyph_t glyph;
+} atk_rich_glyph_entry_t;
+
+typedef struct
+{
     bool used;
     int size_px;
     ttf_font_metrics_t metrics;
-    atk_rich_glyph_t glyphs[ATK_RICH_TEXT_GLYPH_COUNT];
+    atk_rich_glyph_entry_t glyphs[ATK_RICH_TEXT_GLYPH_CACHE_SLOTS];
+    uint32_t use_counter;
 } atk_rich_font_size_cache_t;
 
 typedef struct
@@ -55,9 +62,10 @@ typedef struct
 
 typedef struct
 {
-    char ch;
-    uint8_t style;
     uint16_t size;
+    uint8_t style;
+    uint8_t reserved;
+    uint32_t codepoint;
 } atk_rich_char_t;
 
 typedef struct
@@ -113,6 +121,9 @@ typedef struct
     size_t sel_end;
     int nav_preferred_x;
     rich_text_input_state_t input_state;
+    uint8_t utf8_bytes[4];
+    uint8_t utf8_len;
+    uint8_t utf8_expected;
     video_color_t *row_buffer;
     int row_buffer_capacity;
     atk_rich_text_change_t change;
@@ -137,7 +148,7 @@ static bool rich_text_cursor_rect(const atk_widget_t *editor,
                                   int *h_out);
 static void rich_text_ensure_cursor_visible(atk_widget_t *editor, atk_rich_text_priv_t *priv);
 static size_t rich_text_index_for_point(atk_widget_t *editor, atk_rich_text_priv_t *priv, int local_x, int local_y);
-static bool rich_text_insert_char(atk_widget_t *editor, atk_rich_text_priv_t *priv, char ch);
+static bool rich_text_insert_char(atk_widget_t *editor, atk_rich_text_priv_t *priv, uint32_t codepoint);
 static bool rich_text_backspace(atk_widget_t *editor, atk_rich_text_priv_t *priv);
 static void rich_text_notify_change(atk_widget_t *editor, atk_rich_text_priv_t *priv);
 static void rich_text_clear(atk_widget_t *editor, atk_rich_text_priv_t *priv);
@@ -145,7 +156,7 @@ static bool rich_row_buffer_ensure(atk_rich_text_priv_t *priv, int width);
 static bool rich_page_tops_ensure(atk_rich_text_priv_t *priv, size_t desired);
 static int rich_text_content_origin_x(const atk_rich_text_priv_t *priv);
 static int rich_text_clamp_font_size(int size);
-static int rich_text_fallback_advance(int size, char ch);
+static int rich_text_fallback_advance(int size, uint32_t codepoint);
 static void rich_text_clear_selection(atk_rich_text_priv_t *priv);
 static void rich_text_set_selection(atk_rich_text_priv_t *priv, size_t a, size_t b);
 static void rich_text_update_current_format(atk_rich_text_priv_t *priv);
@@ -281,6 +292,9 @@ atk_widget_t *atk_window_add_rich_text(atk_widget_t *window, int x, int y, int w
     priv->sel_end = 0;
     priv->nav_preferred_x = -1;
     priv->input_state = RICH_TEXT_INPUT_NORMAL;
+    priv->utf8_len = 0;
+    priv->utf8_expected = 0;
+    memset(priv->utf8_bytes, 0, sizeof(priv->utf8_bytes));
 
     atk_list_node_t *child_node = atk_list_push_back(&wpriv->children, editor);
     if (!child_node)
@@ -464,8 +478,8 @@ void atk_rich_text_apply_style(atk_widget_t *editor, uint32_t style_flags, bool 
 
     for (size_t i = start; i < end; ++i)
     {
-        char ch = priv->chars[i].ch;
-        if (ch == '\n' || ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+        uint32_t codepoint = priv->chars[i].codepoint;
+        if (codepoint == '\n' || codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR)
         {
             continue;
         }
@@ -514,8 +528,8 @@ void atk_rich_text_toggle_style(atk_widget_t *editor, uint32_t style_flags)
     bool all_set = true;
     for (size_t i = start; i < end; ++i)
     {
-        char ch = priv->chars[i].ch;
-        if (ch == '\n' || ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+        uint32_t codepoint = priv->chars[i].codepoint;
+        if (codepoint == '\n' || codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR)
         {
             continue;
         }
@@ -619,16 +633,16 @@ void atk_rich_text_set_text(atk_widget_t *editor, const char *text)
         return;
     }
 
-    size_t len = strlen(text);
-    if (len == 0)
+    size_t bytes = strlen(text);
+    if (bytes == 0)
     {
         rich_text_invalidate(editor);
         return;
     }
 
-    if (!priv->chars && len > 0)
+    if (!priv->chars && bytes > 0)
     {
-        size_t cap = len + 16;
+        size_t cap = bytes + 16;
         priv->chars = (atk_rich_char_t *)malloc(cap * sizeof(atk_rich_char_t));
         if (!priv->chars)
         {
@@ -637,11 +651,12 @@ void atk_rich_text_set_text(atk_widget_t *editor, const char *text)
         priv->capacity = cap;
     }
 
-    for (size_t i = 0; i < len; ++i)
+    const char *cursor = text;
+    while (*cursor)
     {
         if (priv->length >= priv->capacity)
         {
-            size_t new_cap = priv->capacity ? priv->capacity * 2 : len + 16;
+            size_t new_cap = priv->capacity ? priv->capacity * 2 : bytes + 16;
             atk_rich_char_t *buf = (atk_rich_char_t *)realloc(priv->chars, new_cap * sizeof(atk_rich_char_t));
             if (!buf)
             {
@@ -650,9 +665,19 @@ void atk_rich_text_set_text(atk_widget_t *editor, const char *text)
             priv->chars = buf;
             priv->capacity = new_cap;
         }
-        priv->chars[priv->length].ch = text[i];
+
+        utf8_decode_result_t dec = utf8_decode_one(cursor);
+        if (dec.consumed == 0)
+        {
+            break;
+        }
+        uint32_t codepoint = dec.codepoint;
+        cursor += dec.consumed;
+
+        priv->chars[priv->length].codepoint = codepoint;
         priv->chars[priv->length].size = (uint16_t)priv->current_font_size;
-        if (text[i] == '\n' || text[i] == ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+        priv->chars[priv->length].reserved = 0;
+        if (codepoint == '\n' || codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR)
         {
             priv->chars[priv->length].style = 0;
         }
@@ -680,11 +705,29 @@ void atk_rich_text_append(atk_widget_t *editor, const char *text)
         return;
     }
 
-    size_t add_len = strlen(text);
-    if (priv->length + add_len > priv->capacity)
+    size_t bytes = strlen(text);
+    if (!priv->chars && bytes > 0)
+    {
+        size_t cap = bytes + 16;
+        priv->chars = (atk_rich_char_t *)malloc(cap * sizeof(atk_rich_char_t));
+        if (!priv->chars)
+        {
+            return;
+        }
+        priv->capacity = cap;
+    }
+
+    size_t required = priv->length;
+    if (bytes > ((size_t)-1 - required))
+    {
+        return;
+    }
+    required += bytes;
+
+    if (required > priv->capacity)
     {
         size_t new_cap = priv->capacity ? priv->capacity : 64;
-        while (new_cap < priv->length + add_len)
+        while (new_cap < required)
         {
             new_cap *= 2;
         }
@@ -697,20 +740,42 @@ void atk_rich_text_append(atk_widget_t *editor, const char *text)
         priv->capacity = new_cap;
     }
 
-    for (size_t i = 0; i < add_len; ++i)
+    const char *cursor = text;
+    while (*cursor)
     {
-        priv->chars[priv->length + i].ch = text[i];
-        priv->chars[priv->length + i].size = (uint16_t)priv->current_font_size;
-        if (text[i] == '\n' || text[i] == ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+        if (priv->length >= priv->capacity)
         {
-            priv->chars[priv->length + i].style = 0;
+            size_t new_cap = priv->capacity ? priv->capacity * 2 : (bytes + 16);
+            atk_rich_char_t *buf = (atk_rich_char_t *)realloc(priv->chars, new_cap * sizeof(atk_rich_char_t));
+            if (!buf)
+            {
+                break;
+            }
+            priv->chars = buf;
+            priv->capacity = new_cap;
+        }
+
+        utf8_decode_result_t dec = utf8_decode_one(cursor);
+        if (dec.consumed == 0)
+        {
+            break;
+        }
+        uint32_t codepoint = dec.codepoint;
+        cursor += dec.consumed;
+
+        priv->chars[priv->length].codepoint = codepoint;
+        priv->chars[priv->length].size = (uint16_t)priv->current_font_size;
+        priv->chars[priv->length].reserved = 0;
+        if (codepoint == '\n' || codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+        {
+            priv->chars[priv->length].style = 0;
         }
         else
         {
-            priv->chars[priv->length + i].style = (uint8_t)(priv->current_style & 0xFFu);
+            priv->chars[priv->length].style = (uint8_t)(priv->current_style & 0xFFu);
         }
+        priv->length++;
     }
-    priv->length += add_len;
     priv->cursor = priv->length;
     priv->layout_dirty = true;
     rich_text_notify_change(editor, priv);
@@ -792,16 +857,35 @@ char *atk_rich_text_copy_text(const atk_widget_t *editor)
     const atk_rich_text_priv_t *priv = rich_text_priv(editor);
     size_t length = (priv && priv->chars) ? priv->length : 0;
 
-    char *out = (char *)malloc(length + 1);
+    size_t out_len = 0;
+    for (size_t i = 0; i < length; ++i)
+    {
+        char enc[4];
+        size_t bytes = utf8_encode_one(priv->chars[i].codepoint, enc);
+        if (bytes > ((size_t)-1 - out_len))
+        {
+            return NULL;
+        }
+        out_len += bytes;
+    }
+
+    char *out = (char *)malloc(out_len + 1);
     if (!out)
     {
         return NULL;
     }
+    size_t pos = 0;
     for (size_t i = 0; i < length; ++i)
     {
-        out[i] = priv->chars[i].ch;
+        char enc[4];
+        size_t bytes = utf8_encode_one(priv->chars[i].codepoint, enc);
+        if (bytes > 0)
+        {
+            memcpy(out + pos, enc, bytes);
+            pos += bytes;
+        }
     }
-    out[length] = '\0';
+    out[pos] = '\0';
     return out;
 }
 
@@ -821,10 +905,18 @@ typedef struct __attribute__((packed))
     uint8_t ch;
     uint8_t style;
     uint16_t size;
-} atk_rich_text_serial_char_t;
+} atk_rich_text_serial_char_v1_t;
+
+typedef struct __attribute__((packed))
+{
+    uint32_t codepoint;
+    uint16_t size;
+    uint8_t style;
+    uint8_t reserved;
+} atk_rich_text_serial_char_v2_t;
 
 #define ATK_RICH_TEXT_SERIAL_MAGIC 0x524B5441u /* "ATKR" */
-#define ATK_RICH_TEXT_SERIAL_VERSION 1u
+#define ATK_RICH_TEXT_SERIAL_VERSION 2u
 #define ATK_RICH_TEXT_SERIAL_FLAG_PAGINATION (1u << 0)
 
 bool atk_rich_text_serialize(const atk_widget_t *editor, uint8_t **data_out, size_t *size_out)
@@ -843,7 +935,7 @@ bool atk_rich_text_serialize(const atk_widget_t *editor, uint8_t **data_out, siz
         return false;
     }
 
-    size_t entry_size = sizeof(atk_rich_text_serial_char_t);
+    size_t entry_size = sizeof(atk_rich_text_serial_char_v2_t);
     if (length > 0 && entry_size > 0)
     {
         size_t max_len = ((size_t)-1 - sizeof(atk_rich_text_serial_header_t)) / entry_size;
@@ -870,14 +962,15 @@ bool atk_rich_text_serialize(const atk_widget_t *editor, uint8_t **data_out, siz
     header.length = (uint32_t)length;
     memcpy(buf, &header, sizeof(header));
 
-    atk_rich_text_serial_char_t *out = (atk_rich_text_serial_char_t *)(buf + sizeof(header));
+    atk_rich_text_serial_char_v2_t *out = (atk_rich_text_serial_char_v2_t *)(buf + sizeof(header));
     if (priv && priv->chars)
     {
         for (size_t i = 0; i < length; ++i)
         {
-            out[i].ch = (uint8_t)priv->chars[i].ch;
-            out[i].style = priv->chars[i].style;
             out[i].size = priv->chars[i].size;
+            out[i].style = priv->chars[i].style;
+            out[i].reserved = 0;
+            out[i].codepoint = priv->chars[i].codepoint;
         }
     }
     else
@@ -910,7 +1003,8 @@ bool atk_rich_text_deserialize(atk_widget_t *editor, const uint8_t *data, size_t
 
     atk_rich_text_serial_header_t header = { 0 };
     memcpy(&header, data, sizeof(header));
-    if (header.magic != ATK_RICH_TEXT_SERIAL_MAGIC || header.version != ATK_RICH_TEXT_SERIAL_VERSION)
+    if (header.magic != ATK_RICH_TEXT_SERIAL_MAGIC ||
+        (header.version != 1u && header.version != ATK_RICH_TEXT_SERIAL_VERSION))
     {
         return false;
     }
@@ -920,7 +1014,8 @@ bool atk_rich_text_deserialize(atk_widget_t *editor, const uint8_t *data, size_t
     }
 
     size_t length = header.length;
-    size_t entry_size = sizeof(atk_rich_text_serial_char_t);
+    size_t entry_size = (header.version == 1u) ? sizeof(atk_rich_text_serial_char_v1_t)
+                                               : sizeof(atk_rich_text_serial_char_v2_t);
     if (length > 0 && entry_size > 0)
     {
         size_t max_len = ((size_t)-1 - header.header_size) / entry_size;
@@ -958,12 +1053,33 @@ bool atk_rich_text_deserialize(atk_widget_t *editor, const uint8_t *data, size_t
         priv->length = length;
         priv->cursor = length;
 
-        const atk_rich_text_serial_char_t *in = (const atk_rich_text_serial_char_t *)(data + header.header_size);
-        for (size_t i = 0; i < length; ++i)
+        if (header.version == 1u)
         {
-            priv->chars[i].ch = (char)in[i].ch;
-            priv->chars[i].style = in[i].style;
-            priv->chars[i].size = in[i].size;
+            const atk_rich_text_serial_char_v1_t *in = (const atk_rich_text_serial_char_v1_t *)(data + header.header_size);
+            for (size_t i = 0; i < length; ++i)
+            {
+                uint32_t codepoint = (uint32_t)in[i].ch;
+                priv->chars[i].codepoint = codepoint;
+                priv->chars[i].style = in[i].style;
+                priv->chars[i].size = in[i].size;
+                priv->chars[i].reserved = 0;
+            }
+        }
+        else
+        {
+            const atk_rich_text_serial_char_v2_t *in = (const atk_rich_text_serial_char_v2_t *)(data + header.header_size);
+            for (size_t i = 0; i < length; ++i)
+            {
+                uint32_t codepoint = in[i].codepoint;
+                if (codepoint > 0x10FFFFu || (codepoint >= 0xD800u && codepoint <= 0xDFFFu))
+                {
+                    codepoint = '?';
+                }
+                priv->chars[i].codepoint = codepoint;
+                priv->chars[i].style = in[i].style;
+                priv->chars[i].size = in[i].size;
+                priv->chars[i].reserved = 0;
+            }
         }
     }
     rich_text_clear_selection(priv);
@@ -1087,9 +1203,9 @@ static int rich_text_clamp_font_size(int size)
     return size;
 }
 
-static int rich_text_fallback_advance(int size, char ch)
+static int rich_text_fallback_advance(int size, uint32_t codepoint)
 {
-    (void)ch;
+    (void)codepoint;
     int base = size / 2;
     if (base < ATK_FONT_WIDTH)
     {
@@ -1151,8 +1267,8 @@ static void rich_text_update_current_format(atk_rich_text_priv_t *priv)
 
     while (idx > 0)
     {
-        char ch = priv->chars[idx].ch;
-        if (ch != '\n' && ch != ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+        uint32_t codepoint = priv->chars[idx].codepoint;
+        if (codepoint != '\n' && codepoint != (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR)
         {
             break;
         }
@@ -1412,6 +1528,8 @@ static void rich_text_clear(atk_widget_t *editor, atk_rich_text_priv_t *priv)
     priv->page_gap = 0;
     priv->layout_dirty = true;
     priv->scroll_y = 0;
+    priv->utf8_len = 0;
+    priv->utf8_expected = 0;
     rich_text_clear_selection(priv);
 }
 
@@ -1456,7 +1574,7 @@ static bool rich_text_delete_range(atk_rich_text_priv_t *priv, size_t start, siz
     return true;
 }
 
-static bool rich_text_insert_char(atk_widget_t *editor, atk_rich_text_priv_t *priv, char ch)
+static bool rich_text_insert_char(atk_widget_t *editor, atk_rich_text_priv_t *priv, uint32_t codepoint)
 {
     if (!priv)
     {
@@ -1495,9 +1613,10 @@ static bool rich_text_insert_char(atk_widget_t *editor, atk_rich_text_priv_t *pr
                 priv->chars + priv->cursor,
                 (priv->length - priv->cursor) * sizeof(atk_rich_char_t));
     }
-    priv->chars[priv->cursor].ch = ch;
+    priv->chars[priv->cursor].codepoint = codepoint;
     priv->chars[priv->cursor].size = (uint16_t)priv->current_font_size;
-    if (ch == '\n' || ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+    priv->chars[priv->cursor].reserved = 0;
+    if (codepoint == '\n' || codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR)
     {
         priv->chars[priv->cursor].style = 0;
     }
@@ -1747,17 +1866,17 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
     while (true)
     {
         bool at_end = (idx >= priv->length);
-        char ch = '\n';
+        uint32_t codepoint = '\n';
         int ch_size = priv->current_font_size;
         if (!at_end && priv->chars)
         {
-            ch = priv->chars[idx].ch;
+            codepoint = priv->chars[idx].codepoint;
             ch_size = priv->chars[idx].size;
         }
         ch_size = rich_text_clamp_font_size(ch_size);
 
-        bool page_break = (!at_end && ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR);
-        bool newline = (!at_end && (ch == '\n' || page_break));
+        bool page_break = (!at_end && codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR);
+        bool newline = (!at_end && (codepoint == '\n' || page_break));
 
         atk_rich_font_size_cache_t *cache = rich_font_cache_for_size(ch_size);
         ttf_font_metrics_t metrics = { 0 };
@@ -1781,14 +1900,14 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
         int advance = 0;
         if (!at_end && !newline)
         {
-            atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, (uint32_t)(unsigned char)ch);
+            atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, codepoint);
             if (glyph && glyph->ready)
             {
                 advance = glyph->advance;
             }
             else
             {
-                advance = rich_text_fallback_advance(ch_size, ch);
+                advance = rich_text_fallback_advance(ch_size, codepoint);
             }
             if (advance < 1)
             {
@@ -1803,7 +1922,7 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
             if (computed_height > line_height) line_height = computed_height;
         }
 
-        bool current_space = (!at_end && (ch == ' ' || ch == '\t'));
+        bool current_space = (!at_end && (codepoint == ' ' || codepoint == '\t'));
         bool overflow = (!newline && !at_end && x > 0 && (x + advance) > wrap_width);
         bool wrap_at_break = false;
         if (overflow && !current_space && last_break_end != (size_t)-1 && last_break_end > line_start)
@@ -1816,18 +1935,18 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
                 {
                     break;
                 }
-                char word_ch = priv->chars[word_idx].ch;
-                if (word_ch == '\n' ||
-                    word_ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR ||
-                    word_ch == ' ' ||
-                    word_ch == '\t')
+                uint32_t word_codepoint = priv->chars[word_idx].codepoint;
+                if (word_codepoint == '\n' ||
+                    word_codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR ||
+                    word_codepoint == ' ' ||
+                    word_codepoint == '\t')
                 {
                     break;
                 }
 
                 int word_size = rich_text_clamp_font_size(priv->chars[word_idx].size);
                 atk_rich_font_size_cache_t *word_cache = rich_font_cache_for_size(word_size);
-                atk_rich_glyph_t *word_glyph = rich_font_get_glyph(word_cache, (uint32_t)(unsigned char)word_ch);
+                atk_rich_glyph_t *word_glyph = rich_font_get_glyph(word_cache, word_codepoint);
                 int word_advance = 0;
                 if (word_glyph && word_glyph->ready)
                 {
@@ -1835,7 +1954,7 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
                 }
                 else
                 {
-                    word_advance = rich_text_fallback_advance(word_size, word_ch);
+                    word_advance = rich_text_fallback_advance(word_size, word_codepoint);
                 }
                 if (word_advance < 1)
                 {
@@ -1967,7 +2086,7 @@ static bool rich_text_update_layout(atk_widget_t *editor, atk_rich_text_priv_t *
         if (computed_height > line_height) line_height = computed_height;
         x += advance;
 
-        if (ch == ' ' || ch == '\t')
+        if (codepoint == ' ' || codepoint == '\t')
         {
             if (saw_nonspace)
             {
@@ -2060,14 +2179,14 @@ static bool rich_text_cursor_rect(const atk_widget_t *editor,
     {
         int size_px = rich_text_clamp_font_size(priv->chars[idx].size);
         atk_rich_font_size_cache_t *cache = rich_font_cache_for_size(size_px);
-        atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, (uint32_t)(unsigned char)priv->chars[idx].ch);
+        atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, priv->chars[idx].codepoint);
         if (glyph && glyph->ready)
         {
             pen_x += glyph->advance;
         }
         else
         {
-            pen_x += rich_text_fallback_advance(size_px, priv->chars[idx].ch);
+            pen_x += rich_text_fallback_advance(size_px, priv->chars[idx].codepoint);
         }
     }
 
@@ -2170,7 +2289,7 @@ static size_t rich_text_index_for_point(atk_widget_t *editor, atk_rich_text_priv
     {
         int size_px = rich_text_clamp_font_size(priv->chars ? priv->chars[idx].size : priv->current_font_size);
         atk_rich_font_size_cache_t *cache = rich_font_cache_for_size(size_px);
-        atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, (uint32_t)(unsigned char)priv->chars[idx].ch);
+        atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, priv->chars[idx].codepoint);
         int advance = 0;
         if (glyph && glyph->ready)
         {
@@ -2178,7 +2297,7 @@ static size_t rich_text_index_for_point(atk_widget_t *editor, atk_rich_text_priv
         }
         else
         {
-            advance = rich_text_fallback_advance(size_px, priv->chars[idx].ch);
+            advance = rich_text_fallback_advance(size_px, priv->chars[idx].codepoint);
         }
         if (pen_x + advance / 2 >= x)
         {
@@ -2243,7 +2362,8 @@ static atk_mouse_response_t rich_text_mouse_cb(atk_widget_t *widget,
                 probe = priv->length - 1;
             }
             while (probe > 0 &&
-                   (priv->chars[probe].ch == '\n' || priv->chars[probe].ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR))
+                   (priv->chars[probe].codepoint == '\n' ||
+                    priv->chars[probe].codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR))
             {
                 probe--;
             }
@@ -2510,20 +2630,20 @@ static void rich_text_draw_cb(const atk_state_t *state,
             {
                 break;
             }
-            char ch = priv->chars[idx].ch;
-            if (ch == '\n' || ch == ATK_RICH_TEXT_PAGE_BREAK_CHAR)
+            uint32_t codepoint = priv->chars[idx].codepoint;
+            if (codepoint == '\n' || codepoint == (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR)
             {
                 continue;
             }
             uint8_t style = priv->chars[idx].style;
             int size_px = rich_text_clamp_font_size(priv->chars[idx].size);
             atk_rich_font_size_cache_t *cache = rich_font_cache_for_size(size_px);
-            atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, (uint32_t)(unsigned char)ch);
+            atk_rich_glyph_t *glyph = rich_font_get_glyph(cache, codepoint);
             int advance = 0;
             bool selected = (priv->sel_start != priv->sel_end) &&
                             (idx >= priv->sel_start && idx < priv->sel_end) &&
-                            ch != '\n' &&
-                            ch != ATK_RICH_TEXT_PAGE_BREAK_CHAR;
+                            codepoint != '\n' &&
+                            codepoint != (uint32_t)ATK_RICH_TEXT_PAGE_BREAK_CHAR;
             video_color_t fg = selected ? theme->menu_dropdown_face : normal_text;
             if (selected)
             {
@@ -2535,7 +2655,7 @@ static void rich_text_draw_cb(const atk_state_t *state,
                 }
                 else
                 {
-                    bg_w = rich_text_fallback_advance(size_px, ch);
+                    bg_w = rich_text_fallback_advance(size_px, codepoint);
                 }
                 int bg_x1 = bg_x0 + bg_w;
                 if (bg_x0 < clip_x0) bg_x0 = clip_x0;
@@ -2649,12 +2769,12 @@ static void rich_text_draw_cb(const atk_state_t *state,
                 }
                 else
                 {
-                    advance = rich_text_fallback_advance(size_px, ch);
+                    advance = rich_text_fallback_advance(size_px, codepoint);
                 }
             }
             else
             {
-                advance = rich_text_fallback_advance(size_px, ch);
+                advance = rich_text_fallback_advance(size_px, codepoint);
             }
 
             if ((style & ATK_RICH_TEXT_STYLE_UNDERLINE) != 0 && advance > 0)
@@ -2775,7 +2895,8 @@ static atk_key_response_t rich_text_key_cb(atk_widget_t *widget,
         return ATK_KEY_RESPONSE_NONE;
     }
 
-    char ch = (char)key;
+    uint8_t byte = (uint8_t)(unsigned char)key;
+    char ch = (char)byte;
     atk_key_response_t arrow = rich_text_handle_arrow_sequence(widget, priv, ch);
     if (arrow != ATK_KEY_RESPONSE_NONE)
     {
@@ -2790,15 +2911,102 @@ static atk_key_response_t rich_text_key_cb(atk_widget_t *widget,
     bool handled = false;
     if (ch == '\b' || ch == 0x7F)
     {
+        if (priv->utf8_expected != 0 || priv->utf8_len != 0)
+        {
+            priv->utf8_expected = 0;
+            priv->utf8_len = 0;
+            memset(priv->utf8_bytes, 0, sizeof(priv->utf8_bytes));
+            return ATK_KEY_RESPONSE_HANDLED;
+        }
         handled = rich_text_backspace(widget, priv);
     }
     else if (ch == '\r' || ch == '\n')
     {
-        handled = rich_text_insert_char(widget, priv, '\n');
+        if (priv->utf8_expected != 0 || priv->utf8_len != 0)
+        {
+            handled = rich_text_insert_char(widget, priv, 0xFFFDu);
+            priv->utf8_expected = 0;
+            priv->utf8_len = 0;
+            memset(priv->utf8_bytes, 0, sizeof(priv->utf8_bytes));
+        }
+        handled |= rich_text_insert_char(widget, priv, '\n');
     }
-    else if ((unsigned char)ch >= 32)
+    else if (byte >= 0x20u)
     {
-        handled = rich_text_insert_char(widget, priv, ch);
+        for (;;)
+        {
+            if (priv->utf8_expected != 0)
+            {
+                if ((byte & 0xC0u) != 0x80u)
+                {
+                    handled |= rich_text_insert_char(widget, priv, 0xFFFDu);
+                    priv->utf8_expected = 0;
+                    priv->utf8_len = 0;
+                    memset(priv->utf8_bytes, 0, sizeof(priv->utf8_bytes));
+                    continue;
+                }
+
+                if (priv->utf8_len < sizeof(priv->utf8_bytes))
+                {
+                    priv->utf8_bytes[priv->utf8_len++] = byte;
+                }
+                else
+                {
+                    priv->utf8_expected = 0;
+                    priv->utf8_len = 0;
+                    memset(priv->utf8_bytes, 0, sizeof(priv->utf8_bytes));
+                    handled |= rich_text_insert_char(widget, priv, 0xFFFDu);
+                    break;
+                }
+
+                if (priv->utf8_len >= priv->utf8_expected)
+                {
+                    char tmp[5];
+                    tmp[0] = (char)priv->utf8_bytes[0];
+                    tmp[1] = (char)priv->utf8_bytes[1];
+                    tmp[2] = (char)priv->utf8_bytes[2];
+                    tmp[3] = (char)priv->utf8_bytes[3];
+                    tmp[4] = '\0';
+                    utf8_decode_result_t dec = utf8_decode_one(tmp);
+                    uint32_t codepoint = dec.valid ? dec.codepoint : 0xFFFDu;
+                    handled |= rich_text_insert_char(widget, priv, codepoint);
+                    priv->utf8_expected = 0;
+                    priv->utf8_len = 0;
+                    memset(priv->utf8_bytes, 0, sizeof(priv->utf8_bytes));
+                }
+                break;
+            }
+
+            if (byte < 0x80u)
+            {
+                handled |= rich_text_insert_char(widget, priv, (uint32_t)byte);
+                break;
+            }
+
+            priv->utf8_bytes[0] = byte;
+            priv->utf8_len = 1;
+            if (byte >= 0xC2u && byte <= 0xDFu)
+            {
+                priv->utf8_expected = 2;
+                break;
+            }
+            if (byte >= 0xE0u && byte <= 0xEFu)
+            {
+                priv->utf8_expected = 3;
+                break;
+            }
+            if (byte >= 0xF0u && byte <= 0xF4u)
+            {
+                priv->utf8_expected = 4;
+                break;
+            }
+
+            priv->utf8_expected = 0;
+            priv->utf8_len = 0;
+            memset(priv->utf8_bytes, 0, sizeof(priv->utf8_bytes));
+            handled |= rich_text_insert_char(widget, priv, 0xFFFDu);
+            break;
+        }
     }
 
     if (handled)
@@ -2931,6 +3139,17 @@ static atk_rich_font_size_cache_t *rich_font_cache_for_size(int size)
     }
 
     atk_rich_font_size_cache_t *cache = &g_font_state.caches[slot];
+    if (cache->used)
+    {
+        for (size_t i = 0; i < ATK_RICH_TEXT_GLYPH_CACHE_SLOTS; ++i)
+        {
+            if (cache->glyphs[i].glyph.alpha)
+            {
+                free(cache->glyphs[i].glyph.alpha);
+                cache->glyphs[i].glyph.alpha = NULL;
+            }
+        }
+    }
     memset(cache, 0, sizeof(*cache));
     cache->used = true;
     cache->size_px = size;
@@ -2949,21 +3168,56 @@ static atk_rich_glyph_t *rich_font_get_glyph(atk_rich_font_size_cache_t *cache, 
     {
         return NULL;
     }
-    if (codepoint < ATK_RICH_TEXT_GLYPH_FIRST || codepoint > ATK_RICH_TEXT_GLYPH_LAST)
+
+    if (codepoint < 0x20u || codepoint == 0x7Fu)
     {
         codepoint = '?';
     }
-    size_t idx = (size_t)(codepoint - ATK_RICH_TEXT_GLYPH_FIRST);
-    if (idx >= ATK_RICH_TEXT_GLYPH_COUNT)
+
+    uint32_t tick = ++cache->use_counter;
+    atk_rich_glyph_entry_t *entry = NULL;
+    atk_rich_glyph_entry_t *oldest = NULL;
+    for (size_t i = 0; i < ATK_RICH_TEXT_GLYPH_CACHE_SLOTS; ++i)
+    {
+        atk_rich_glyph_entry_t *e = &cache->glyphs[i];
+        if (e->glyph.ready && e->codepoint == codepoint)
+        {
+            e->last_used = tick;
+            return &e->glyph;
+        }
+        if (!e->glyph.ready && !entry)
+        {
+            entry = e;
+        }
+        if (!oldest || e->last_used < oldest->last_used)
+        {
+            oldest = e;
+        }
+    }
+
+    if (!entry)
+    {
+        entry = oldest;
+        if (entry && entry->glyph.alpha)
+        {
+            free(entry->glyph.alpha);
+            entry->glyph.alpha = NULL;
+        }
+        if (entry)
+        {
+            memset(&entry->glyph, 0, sizeof(entry->glyph));
+        }
+    }
+
+    if (!entry)
     {
         return NULL;
     }
 
-    atk_rich_glyph_t *glyph = &cache->glyphs[idx];
-    if (glyph->ready)
-    {
-        return glyph;
-    }
+    entry->codepoint = codepoint;
+    entry->last_used = tick;
+
+    atk_rich_glyph_t *glyph = &entry->glyph;
 
     ttf_bitmap_t bitmap = { 0 };
     ttf_glyph_metrics_t metrics = { 0 };
@@ -2973,14 +3227,18 @@ static atk_rich_glyph_t *rich_font_get_glyph(atk_rich_font_size_cache_t *cache, 
                                       &bitmap,
                                       &metrics))
     {
+        if (codepoint != '?')
+        {
+            return rich_font_get_glyph(cache, '?');
+        }
         glyph->ready = true;
         glyph->alpha = NULL;
         glyph->width = 0;
         glyph->height = 0;
         glyph->stride = 0;
-        glyph->advance = rich_text_fallback_advance(cache->size_px, (char)codepoint);
+        glyph->advance = rich_text_fallback_advance(cache->size_px, codepoint);
         glyph->bearing_x = 0;
-        glyph->bearing_y = 0;
+        glyph->bearing_y = cache->metrics.ascent;
         return glyph;
     }
 
@@ -2990,13 +3248,18 @@ static atk_rich_glyph_t *rich_font_get_glyph(atk_rich_font_size_cache_t *cache, 
         ttf_bitmap_destroy(&bitmap);
         return NULL;
     }
-    uint8_t *alpha = (uint8_t *)malloc(bytes);
-    if (!alpha)
+
+    uint8_t *alpha = NULL;
+    if (bytes > 0)
     {
-        ttf_bitmap_destroy(&bitmap);
-        return NULL;
+        alpha = (uint8_t *)malloc(bytes);
+        if (!alpha)
+        {
+            ttf_bitmap_destroy(&bitmap);
+            return NULL;
+        }
+        memcpy(alpha, bitmap.pixels, bytes);
     }
-    memcpy(alpha, bitmap.pixels, bytes);
 
     glyph->alpha = alpha;
     glyph->width = bitmap.width;

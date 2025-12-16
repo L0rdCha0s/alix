@@ -3,6 +3,7 @@
 #include "atk_internal.h"
 #include "libc.h"
 #include "ttf.h"
+#include "utf8.h"
 #include "video.h"
 
 #ifndef ATK_NO_DESKTOP_APPS
@@ -20,6 +21,7 @@
 #define ATK_FONT_CACHE_FIRST 32
 #define ATK_FONT_CACHE_LAST  126
 #define ATK_FONT_CACHE_COUNT (ATK_FONT_CACHE_LAST - ATK_FONT_CACHE_FIRST + 1)
+#define ATK_FONT_EXTRA_CACHE_SLOTS 256
 #define ATK_FONT_MAX_ROW_PIXELS 96
 #define ATK_FONT_TEXT_GUARD 2048
 
@@ -37,10 +39,19 @@ typedef struct
 
 typedef struct
 {
+    uint32_t codepoint;
+    uint32_t last_used;
+    atk_font_glyph_t glyph;
+} atk_font_glyph_entry_t;
+
+typedef struct
+{
     bool ready;
     ttf_font_t font;
     ttf_font_metrics_t metrics;
     atk_font_glyph_t glyphs[ATK_FONT_CACHE_COUNT];
+    atk_font_glyph_entry_t extra_glyphs[ATK_FONT_EXTRA_CACHE_SLOTS];
+    uint32_t use_counter;
     uint8_t *font_blob;
     size_t font_blob_size;
     bool font_blob_owned;
@@ -70,7 +81,14 @@ static inline bool atk_font_glyph_ptr_valid(atk_font_glyph_t *glyph)
     }
     atk_font_glyph_t *base = g_font_state.glyphs;
     atk_font_glyph_t *end = base + ATK_FONT_CACHE_COUNT;
-    return (glyph >= base && glyph < end);
+    if (glyph >= base && glyph < end)
+    {
+        return true;
+    }
+    uintptr_t p = (uintptr_t)glyph;
+    uintptr_t extra_base = (uintptr_t)&g_font_state.extra_glyphs[0];
+    uintptr_t extra_end = (uintptr_t)(&g_font_state.extra_glyphs[ATK_FONT_EXTRA_CACHE_SLOTS]);
+    return p >= extra_base && p < extra_end;
 }
 
 #if ATK_FONT_ENABLE_TTF && !ATK_FONT_LOAD_FROM_VFS
@@ -96,9 +114,18 @@ int atk_font_text_width(const char *text)
 
     int width = 0;
     size_t guard = 0;
-    for (const unsigned char *cursor = (const unsigned char *)text; *cursor && guard < ATK_FONT_TEXT_GUARD; ++cursor, ++guard)
+    const char *cursor = text;
+    while (*cursor && guard < ATK_FONT_TEXT_GUARD)
     {
-        atk_font_glyph_t *glyph = atk_font_get_glyph(*cursor);
+        utf8_decode_result_t dec = utf8_decode_one(cursor);
+        if (dec.consumed == 0)
+        {
+            break;
+        }
+        guard += (size_t)dec.consumed;
+        cursor += dec.consumed;
+
+        atk_font_glyph_t *glyph = atk_font_get_glyph(dec.codepoint);
         if (atk_font_glyph_ptr_valid(glyph) && glyph->ready)
         {
             width += glyph->advance;
@@ -217,9 +244,18 @@ void atk_font_draw_string_clipped(int x,
     int pen_x = x;
 
     size_t guard = 0;
-    for (const unsigned char *cursor = (const unsigned char *)text; *cursor && guard < ATK_FONT_TEXT_GUARD; ++cursor, ++guard)
+    const char *cursor = text;
+    while (*cursor && guard < ATK_FONT_TEXT_GUARD)
     {
-        atk_font_glyph_t *glyph = atk_font_get_glyph(*cursor);
+        utf8_decode_result_t dec = utf8_decode_one(cursor);
+        if (dec.consumed == 0)
+        {
+            break;
+        }
+        guard += (size_t)dec.consumed;
+        cursor += dec.consumed;
+
+        atk_font_glyph_t *glyph = atk_font_get_glyph(dec.codepoint);
         if (!atk_font_glyph_ptr_valid(glyph) || !glyph->ready)
         {
             pen_x += ATK_FONT_WIDTH;
@@ -432,22 +468,120 @@ static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint)
         return NULL;
     }
 
-    if (codepoint < ATK_FONT_CACHE_FIRST || codepoint > ATK_FONT_CACHE_LAST)
+    if (codepoint < ATK_FONT_CACHE_FIRST || codepoint == 0x7Fu)
     {
         codepoint = '?';
     }
 
-    atk_font_glyph_t *glyph = &g_font_state.glyphs[codepoint - ATK_FONT_CACHE_FIRST];
-    if (glyph->ready)
+    if (codepoint >= ATK_FONT_CACHE_FIRST && codepoint <= ATK_FONT_CACHE_LAST)
     {
+        atk_font_glyph_t *glyph = &g_font_state.glyphs[codepoint - ATK_FONT_CACHE_FIRST];
+        if (glyph->ready)
+        {
+            return glyph;
+        }
+
+        ttf_bitmap_t bitmap;
+        ttf_glyph_metrics_t metrics;
+        memset(&bitmap, 0, sizeof(bitmap));
+        memset(&metrics, 0, sizeof(metrics));
+
+        if (!ttf_font_render_glyph_bitmap(&g_font_state.font,
+                                          codepoint,
+                                          ATK_FONT_PIXEL_SIZE,
+                                          &bitmap,
+                                          &metrics))
+        {
+            glyph->ready = true;
+            glyph->width = 0;
+            glyph->height = 0;
+            glyph->stride = 0;
+            glyph->advance = ATK_FONT_WIDTH;
+            glyph->bearing_x = 0;
+            glyph->bearing_y = ATK_FONT_HEIGHT;
+            glyph->alpha = NULL;
+            return glyph;
+        }
+
+        size_t alpha_bytes = (size_t)bitmap.stride * (size_t)bitmap.height;
+        uint8_t *alpha = NULL;
+        if (alpha_bytes > 0)
+        {
+            alpha = (uint8_t *)malloc(alpha_bytes);
+            if (!alpha)
+            {
+                ttf_bitmap_destroy(&bitmap);
+                return NULL;
+            }
+            for (int row = 0; row < bitmap.height; ++row)
+            {
+                memcpy(alpha + (size_t)row * bitmap.stride,
+                       bitmap.pixels + (size_t)row * bitmap.stride,
+                       (size_t)bitmap.stride);
+            }
+        }
+
+        glyph->alpha = alpha;
+        glyph->width = bitmap.width;
+        glyph->height = bitmap.height;
+        glyph->stride = bitmap.stride;
+        glyph->advance = metrics.advance;
+        glyph->bearing_x = metrics.bearing_x;
+        glyph->bearing_y = metrics.bearing_y;
+        glyph->ready = true;
+
+        ttf_bitmap_destroy(&bitmap);
         return glyph;
     }
+
+    uint32_t tick = ++g_font_state.use_counter;
+    atk_font_glyph_entry_t *entry = NULL;
+    atk_font_glyph_entry_t *oldest = NULL;
+    for (size_t i = 0; i < ATK_FONT_EXTRA_CACHE_SLOTS; ++i)
+    {
+        atk_font_glyph_entry_t *e = &g_font_state.extra_glyphs[i];
+        if (e->glyph.ready && e->codepoint == codepoint)
+        {
+            e->last_used = tick;
+            return &e->glyph;
+        }
+        if (!e->glyph.ready && !entry)
+        {
+            entry = e;
+        }
+        if (!oldest || e->last_used < oldest->last_used)
+        {
+            oldest = e;
+        }
+    }
+
+    if (!entry)
+    {
+        entry = oldest;
+        if (entry && entry->glyph.alpha)
+        {
+            free(entry->glyph.alpha);
+            entry->glyph.alpha = NULL;
+        }
+        if (entry)
+        {
+            memset(&entry->glyph, 0, sizeof(entry->glyph));
+        }
+    }
+    if (!entry)
+    {
+        return NULL;
+    }
+
+    entry->codepoint = codepoint;
+    entry->last_used = tick;
 
     ttf_bitmap_t bitmap;
     ttf_glyph_metrics_t metrics;
     memset(&bitmap, 0, sizeof(bitmap));
     memset(&metrics, 0, sizeof(metrics));
 
+    atk_font_glyph_t *glyph = &entry->glyph;
     if (!ttf_font_render_glyph_bitmap(&g_font_state.font,
                                       codepoint,
                                       ATK_FONT_PIXEL_SIZE,

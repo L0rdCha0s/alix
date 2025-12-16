@@ -6,6 +6,7 @@
 #include "video.h"
 #include "atk/atk_font.h"
 #include "libc.h"
+#include "utf8.h"
 
 #define ATK_TEXT_INPUT_PADDING_X 4
 #define ATK_TEXT_INPUT_PADDING_Y 4
@@ -297,10 +298,15 @@ atk_text_input_event_t atk_text_input_handle_char(atk_widget_t *input, char ch)
     {
         if (priv->length > 0)
         {
-            priv->length--;
+            size_t new_len = priv->text ? utf8_prev_char_start(priv->text, priv->length) : 0;
+            if (new_len > priv->length)
+            {
+                new_len = priv->length - 1;
+            }
+            priv->length = new_len;
             if (priv->text)
             {
-                priv->text[priv->length] = '\0';
+                priv->text[new_len] = '\0';
             }
             text_input_invalidate(input);
             return ATK_TEXT_INPUT_EVENT_CHANGED;
@@ -308,7 +314,8 @@ atk_text_input_event_t atk_text_input_handle_char(atk_widget_t *input, char ch)
         return ATK_TEXT_INPUT_EVENT_NONE;
     }
 
-    if (ch < ' ' || ch > '~')
+    uint8_t byte = (uint8_t)(unsigned char)ch;
+    if (byte < 0x20u)
     {
         return ATK_TEXT_INPUT_EVENT_NONE;
     }
@@ -318,7 +325,7 @@ atk_text_input_event_t atk_text_input_handle_char(atk_widget_t *input, char ch)
         return ATK_TEXT_INPUT_EVENT_NONE;
     }
 
-    priv->text[priv->length++] = ch;
+    priv->text[priv->length++] = (char)byte;
     priv->text[priv->length] = '\0';
     text_input_invalidate(input);
     return ATK_TEXT_INPUT_EVENT_CHANGED;
