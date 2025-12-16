@@ -182,6 +182,7 @@ static void atk_resize_band_clear(atk_state_t *state);
 #ifndef ATK_NO_DESKTOP_APPS
 static void action_open_task_manager(atk_widget_t *button, void *context);
 static void action_open_atk_terminal(atk_widget_t *button, void *context);
+static void action_open_atk_browser(atk_widget_t *button, void *context);
 static void action_open_atk_demo(atk_widget_t *button, void *context);
 static void action_open_control_panel(atk_widget_t *button, void *context);
 static void atk_schedule_user_launch(const char *launcher_name, const void *info);
@@ -982,6 +983,17 @@ void atk_enter_mode(void)
                            true,
                            action_open_control_panel,
                            state);
+
+    atk_desktop_add_button(state,
+                           640,
+                           80,
+                           88,
+                           88,
+                           "Browser",
+                           ATK_BUTTON_STYLE_TITLE_BELOW,
+                           true,
+                           action_open_atk_browser,
+                           state);
 #else
     (void)action_exit_to_text;
 #endif
@@ -1719,6 +1731,11 @@ static const atk_user_launch_info_t g_atk_taskmgr_launch = {
     .name = "atk_taskmgr"
 };
 
+static const atk_user_launch_info_t g_atk_browser_launch = {
+    .path = "/usr/bin/atk_browser.elf",
+    .name = "atk_browser"
+};
+
 static const atk_user_launch_info_t g_atk_demo_launch = {
     .path = "/usr/bin/atk_demo.elf",
     .name = "atk_demo"
@@ -2242,6 +2259,13 @@ static void action_open_atk_terminal(atk_widget_t *button, void *context)
     (void)button;
     (void)context;
     atk_schedule_user_launch("atk_terminal_launcher", &g_atk_shell_launch);
+}
+
+static void action_open_atk_browser(atk_widget_t *button, void *context)
+{
+    (void)button;
+    (void)context;
+    atk_schedule_user_launch("atk_browser_launcher", &g_atk_browser_launch);
 }
 
 static void action_open_atk_demo(atk_widget_t *button, void *context)

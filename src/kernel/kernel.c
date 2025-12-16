@@ -308,12 +308,17 @@ static void lock_slash_root_once(void)
     {
         return;
     }
+    vfs_set_subtree_mutable(vfs_root(), false);
     vfs_node_t *proc_root = procfs_root();
     if (proc_root)
     {
         vfs_set_subtree_mutable(proc_root, true);
     }
-    vfs_set_subtree_mutable(vfs_root(), false);
+    vfs_node_t *tmp = vfs_resolve(vfs_root(), "/tmp");
+    if (tmp)
+    {
+        vfs_set_subtree_mutable(tmp, true);
+    }
     g_slash_locked = true;
 }
 

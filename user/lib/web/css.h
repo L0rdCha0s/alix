@@ -34,6 +34,20 @@ typedef struct
     css_length_t left;
 } css_box_t;
 
+typedef enum
+{
+    CSS_TEXT_ALIGN_LEFT = 0,
+    CSS_TEXT_ALIGN_CENTER,
+    CSS_TEXT_ALIGN_RIGHT
+} css_text_align_t;
+
+typedef enum
+{
+    CSS_DISPLAY_INLINE = 0,
+    CSS_DISPLAY_BLOCK,
+    CSS_DISPLAY_NONE
+} css_display_t;
+
 typedef struct
 {
     bool has_background;
@@ -46,6 +60,26 @@ typedef struct
     css_length_t width;
     bool has_margin;
     css_box_t margin;
+    bool has_padding;
+    css_box_t padding;
+    bool has_border;
+    css_length_t border_width;
+    bool has_border_color;
+    video_color_t border_color;
+    bool has_text_align;
+    css_text_align_t text_align;
+    bool has_text_shadow;
+    css_length_t text_shadow_x;
+    css_length_t text_shadow_y;
+    css_length_t text_shadow_blur;
+    bool has_text_shadow_color;
+    video_color_t text_shadow_color;
+    bool has_display;
+    css_display_t display;
+    bool has_line_height;
+    int32_t line_height_milli;
+    bool has_letter_spacing;
+    css_length_t letter_spacing;
     bool has_opacity;
     int32_t opacity_milli;
 } css_style_t;
@@ -73,4 +107,3 @@ void css_style_merge(css_style_t *dst, const css_style_t *src);
 #endif
 
 #endif /* WEB_CSS_H */
-

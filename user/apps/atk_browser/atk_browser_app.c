@@ -17,6 +17,7 @@
 #include "stdarg.h"
 #include "stdio.h"
 #include "video.h"
+#include "video_surface.h"
 #include "web/html.h"
 
 #define BROWSER_WIDTH  1000
@@ -24,9 +25,12 @@
 #define BROWSER_MARGIN 14
 #define BROWSER_GAP    10
 #define BROWSER_MAX_BYTES (2u * 1024u * 1024u)
+#define BROWSER_MAX_REDIRECTS 8
 #define BROWSER_DEBUG_LOG_MAX_BYTES (256u * 1024u)
 #define BROWSER_DEBUG_WINDOW_WIDTH  860
 #define BROWSER_DEBUG_WINDOW_HEIGHT 420
+#define BROWSER_MAX_STYLESHEETS 8
+#define BROWSER_MAX_IMAGES 16
 
 typedef struct
 {
@@ -39,6 +43,7 @@ typedef struct
 typedef struct
 {
     atk_user_window_t remote;
+    atk_user_window_t debug_remote;
     atk_widget_t *window;
     atk_widget_t *menu_button;
     atk_widget_t *menu_browser;
@@ -49,10 +54,10 @@ typedef struct
     alix_mutex_t lock;
     bool fetch_running;
     alix_thread_t fetch_thread;
-    char *pending_text;
+    char *pending_url;
+    struct browser_page_payload *pending_page;
     bool pending_ready;
 
-    atk_modal_session_t debug_modal;
     atk_widget_t *debug_window;
     atk_widget_t *debug_text;
     char *debug_log;
@@ -61,6 +66,31 @@ typedef struct
     size_t debug_log_flush_offset;
     bool debug_log_resync;
 } browser_app_t;
+
+typedef struct browser_image_payload
+{
+    char *src;
+    uint8_t *data;
+    size_t len;
+    struct browser_image_payload *next;
+} browser_image_payload_t;
+
+typedef struct browser_page_payload
+{
+    html_document_t *doc;
+    char *external_css;
+    size_t external_css_len;
+    size_t external_css_cap;
+    browser_image_payload_t *images;
+    char *error_message;
+} browser_page_payload_t;
+
+static void browser_debug_logf(browser_app_t *app, const char *fmt, ...);
+
+static char *browser_fetch_http(browser_app_t *app,
+                                const browser_url_t *url,
+                                size_t *body_len_out,
+                                browser_url_t *final_url_out);
 
 static void apply_theme(atk_state_t *state)
 {
@@ -96,6 +126,52 @@ static char *browser_strdup(const char *src)
     memcpy(dst, src, len);
     dst[len] = '\0';
     return dst;
+}
+
+static void browser_page_payload_destroy(browser_page_payload_t *page)
+{
+    if (!page)
+    {
+        return;
+    }
+    if (page->doc)
+    {
+        html_document_destroy(page->doc);
+        page->doc = NULL;
+    }
+    free(page->external_css);
+    page->external_css = NULL;
+    page->external_css_len = 0;
+    page->external_css_cap = 0;
+    browser_image_payload_t *img = page->images;
+    while (img)
+    {
+        browser_image_payload_t *next = img->next;
+        free(img->src);
+        free(img->data);
+        free(img);
+        img = next;
+    }
+    page->images = NULL;
+    free(page->error_message);
+    page->error_message = NULL;
+    free(page);
+}
+
+static browser_page_payload_t *browser_page_payload_error(const char *message)
+{
+    browser_page_payload_t *page = (browser_page_payload_t *)calloc(1, sizeof(*page));
+    if (!page)
+    {
+        return NULL;
+    }
+    page->error_message = browser_strdup(message ? message : "unknown error");
+    if (!page->error_message)
+    {
+        free(page);
+        return NULL;
+    }
+    return page;
 }
 
 static bool browser_parse_url(const char *input, browser_url_t *out)
@@ -216,6 +292,246 @@ static void browser_url_destroy(browser_url_t *url)
     }
     url->port = 0;
     url->use_tls = false;
+}
+
+static bool browser_url_clone(const browser_url_t *src, browser_url_t *dst)
+{
+    if (!src || !dst)
+    {
+        return false;
+    }
+
+    if (dst->host || dst->path)
+    {
+        browser_url_destroy(dst);
+    }
+    memset(dst, 0, sizeof(*dst));
+
+    dst->use_tls = src->use_tls;
+    dst->port = src->port;
+    dst->host = browser_strdup(src->host);
+    dst->path = browser_strdup(src->path);
+    if (!dst->host || !dst->path)
+    {
+        browser_url_destroy(dst);
+        return false;
+    }
+    return true;
+}
+
+static char *browser_strdup_len(const char *src, size_t len)
+{
+    if (!src)
+    {
+        return NULL;
+    }
+    char *out = (char *)malloc(len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    memcpy(out, src, len);
+    out[len] = '\0';
+    return out;
+}
+
+static size_t browser_path_dir_len(const char *path)
+{
+    if (!path || path[0] == '\0')
+    {
+        return 1;
+    }
+    size_t len = strlen(path);
+    if (len == 0)
+    {
+        return 1;
+    }
+    if (path[len - 1] == '/')
+    {
+        return len;
+    }
+    const char *last = strrchr(path, '/');
+    if (!last)
+    {
+        return 1;
+    }
+    size_t dir_len = (size_t)(last - path) + 1;
+    if (dir_len == 0)
+    {
+        dir_len = 1;
+    }
+    return dir_len;
+}
+
+static char *browser_build_absolute_url(const browser_url_t *base, const char *location, size_t location_len)
+{
+    if (!base || !base->host || !location)
+    {
+        return NULL;
+    }
+
+    while (location_len > 0 &&
+           (location[0] == ' ' || location[0] == '\t' || location[0] == '\r' || location[0] == '\n'))
+    {
+        location++;
+        location_len--;
+    }
+    while (location_len > 0)
+    {
+        char tail = location[location_len - 1];
+        if (tail == ' ' || tail == '\t' || tail == '\r' || tail == '\n')
+        {
+            location_len--;
+            continue;
+        }
+        break;
+    }
+
+    if (location_len == 0)
+    {
+        return NULL;
+    }
+
+    if (location_len >= 7 && strncasecmp(location, "http://", 7) == 0)
+    {
+        char *out = browser_strdup_len(location, location_len);
+        if (out)
+        {
+            memcpy(out, "http://", 7);
+        }
+        return out;
+    }
+    if (location_len >= 8 && strncasecmp(location, "https://", 8) == 0)
+    {
+        char *out = browser_strdup_len(location, location_len);
+        if (out)
+        {
+            memcpy(out, "https://", 8);
+        }
+        return out;
+    }
+
+    const char *scheme = base->use_tls ? "https" : "http";
+    uint16_t default_port = base->use_tls ? 443u : 80u;
+
+    char port_buf[16];
+    port_buf[0] = '\0';
+    if (base->port != 0 && base->port != default_port)
+    {
+        snprintf(port_buf, sizeof(port_buf), ":%u", (unsigned)base->port);
+    }
+
+    if (location_len >= 2 && location[0] == '/' && location[1] == '/')
+    {
+        size_t scheme_len = strlen(scheme);
+        size_t need = scheme_len + 1 + location_len;
+        char *out = (char *)malloc(need + 1);
+        if (!out)
+        {
+            return NULL;
+        }
+        memcpy(out, scheme, scheme_len);
+        out[scheme_len] = ':';
+        memcpy(out + scheme_len + 1, location, location_len);
+        out[need] = '\0';
+        return out;
+    }
+
+    if (location[0] == '#')
+    {
+        return NULL;
+    }
+
+    size_t scheme_len = strlen(scheme);
+    size_t host_len = strlen(base->host);
+    size_t port_len = strlen(port_buf);
+    size_t authority_len = scheme_len + 3 + host_len + port_len;
+
+    const char *path_part = NULL;
+    size_t path_len = 0;
+    char *relative_path = NULL;
+
+    if (location[0] == '/')
+    {
+        path_part = location;
+        path_len = location_len;
+    }
+    else if (location[0] == '?')
+    {
+        const char *base_path = base->path ? base->path : "/";
+        size_t base_len = strlen(base_path);
+        size_t core_len = base_len;
+        for (size_t i = 0; i < base_len; ++i)
+        {
+            if (base_path[i] == '?' || base_path[i] == '#')
+            {
+                core_len = i;
+                break;
+            }
+        }
+        if (core_len == 0)
+        {
+            core_len = 1;
+        }
+        relative_path = (char *)malloc(core_len + location_len + 1);
+        if (!relative_path)
+        {
+            return NULL;
+        }
+        memcpy(relative_path, base_path, core_len);
+        memcpy(relative_path + core_len, location, location_len);
+        relative_path[core_len + location_len] = '\0';
+        path_part = relative_path;
+        path_len = core_len + location_len;
+    }
+    else
+    {
+        const char *base_path = base->path ? base->path : "/";
+        size_t dir_len = browser_path_dir_len(base_path);
+        relative_path = (char *)malloc(dir_len + location_len + 2);
+        if (!relative_path)
+        {
+            return NULL;
+        }
+        memcpy(relative_path, base_path, dir_len);
+        size_t pos = dir_len;
+        if (pos == 0 || relative_path[pos - 1] != '/')
+        {
+            relative_path[pos++] = '/';
+        }
+        memcpy(relative_path + pos, location, location_len);
+        pos += location_len;
+        relative_path[pos] = '\0';
+        path_part = relative_path;
+        path_len = pos;
+    }
+
+    size_t total_len = authority_len + path_len;
+    char *out = (char *)malloc(total_len + 1);
+    if (!out)
+    {
+        free(relative_path);
+        return NULL;
+    }
+
+    size_t pos = 0;
+    memcpy(out + pos, scheme, scheme_len);
+    pos += scheme_len;
+    memcpy(out + pos, "://", 3);
+    pos += 3;
+    memcpy(out + pos, base->host, host_len);
+    pos += host_len;
+    if (port_len > 0)
+    {
+        memcpy(out + pos, port_buf, port_len);
+        pos += port_len;
+    }
+    memcpy(out + pos, path_part, path_len);
+    pos += path_len;
+    out[pos] = '\0';
+
+    free(relative_path);
+    return out;
 }
 
 static bool browser_write_all(int fd, const uint8_t *data, size_t len)
@@ -626,6 +942,256 @@ static size_t browser_dom_count_nodes(const html_node_t *root, size_t limit)
     return count;
 }
 
+static bool browser_is_png_bytes(const uint8_t *data, size_t len)
+{
+    static const uint8_t signature[8] = { 0x89u, 0x50u, 0x4Eu, 0x47u, 0x0Du, 0x0Au, 0x1Au, 0x0Au };
+    if (!data || len < sizeof(signature))
+    {
+        return false;
+    }
+    return memcmp(data, signature, sizeof(signature)) == 0;
+}
+
+static void browser_dom_set_attr(html_node_t *node, const char *name, const char *value)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT || !name || name[0] == '\0' || !value)
+    {
+        return;
+    }
+
+    for (html_attr_t *attr = node->attrs; attr; attr = attr->next)
+    {
+        if (!attr->name)
+        {
+            continue;
+        }
+        if (strcasecmp(attr->name, name) != 0)
+        {
+            continue;
+        }
+
+        char *copy = browser_strdup(value);
+        if (!copy)
+        {
+            return;
+        }
+        free(attr->value);
+        attr->value = copy;
+        return;
+    }
+
+    html_attr_t *attr = (html_attr_t *)calloc(1, sizeof(*attr));
+    if (!attr)
+    {
+        return;
+    }
+    attr->name = browser_strdup(name);
+    attr->value = browser_strdup(value);
+    if (!attr->name || !attr->value)
+    {
+        free(attr->name);
+        free(attr->value);
+        free(attr);
+        return;
+    }
+    attr->next = node->attrs;
+    node->attrs = attr;
+}
+
+static bool browser_page_css_append(browser_page_payload_t *page, const char *data, size_t len)
+{
+    if (!page)
+    {
+        return false;
+    }
+    if (!data || len == 0)
+    {
+        return true;
+    }
+    return browser_buf_append(&page->external_css,
+                              &page->external_css_len,
+                              &page->external_css_cap,
+                              (const uint8_t *)data,
+                              len);
+}
+
+static bool browser_page_add_image(browser_page_payload_t *page, const char *src, uint8_t *data, size_t len)
+{
+    if (!page || !src || src[0] == '\0' || !data || len == 0)
+    {
+        free(data);
+        return false;
+    }
+
+    browser_image_payload_t *img = (browser_image_payload_t *)calloc(1, sizeof(*img));
+    if (!img)
+    {
+        free(data);
+        return false;
+    }
+
+    img->src = browser_strdup(src);
+    if (!img->src)
+    {
+        free(data);
+        free(img);
+        return false;
+    }
+    img->data = data;
+    img->len = len;
+    img->next = page->images;
+    page->images = img;
+    return true;
+}
+
+static void browser_collect_resources(browser_app_t *app,
+                                      browser_page_payload_t *page,
+                                      html_node_t *root,
+                                      const browser_url_t *base_url)
+{
+    if (!app || !page || !root || !base_url || !base_url->host)
+    {
+        return;
+    }
+
+    size_t sheet_count = 0;
+    size_t image_count = 0;
+
+    html_node_t *stack[256];
+    size_t sp = 0;
+    stack[sp++] = root;
+
+    while (sp > 0)
+    {
+        html_node_t *node = stack[--sp];
+        if (node->type == HTML_NODE_ELEMENT && node->name)
+        {
+            if (strcmp(node->name, "link") == 0 && sheet_count < BROWSER_MAX_STYLESHEETS)
+            {
+                const char *rel = html_attr_get(node, "rel");
+                if (rel && browser_has_token_ci(rel, strlen(rel), "stylesheet"))
+                {
+                    const char *href = html_attr_get(node, "href");
+                    if (href && href[0] != '\0')
+                    {
+                        char *abs = browser_build_absolute_url(base_url, href, strlen(href));
+                        if (abs)
+                        {
+                            browser_dom_set_attr(node, "href", abs);
+                            browser_debug_logf(app, "[css] stylesheet %s", abs);
+
+                            browser_url_t css_url = {0};
+                            browser_url_t css_final = {0};
+                            size_t css_len = 0;
+                            if (browser_parse_url(abs, &css_url))
+                            {
+                                char *css_body = browser_fetch_http(app, &css_url, &css_len, &css_final);
+                                if (css_body && strncmp(css_body, "Error:\n", 6) != 0)
+                                {
+                                    if (browser_page_css_append(page, css_body, css_len))
+                                    {
+                                        (void)browser_page_css_append(page, "\n", 1);
+                                        sheet_count++;
+                                        browser_debug_logf(app,
+                                                           "[css] fetched bytes=%u url=%s",
+                                                           (unsigned)css_len,
+                                                           abs);
+                                    }
+                                    else
+                                    {
+                                        browser_debug_logf(app, "[css] stylesheet too large");
+                                    }
+                                }
+                                else
+                                {
+                                    const char *msg = css_body ? (css_body + 6) : "allocation failed";
+                                    browser_debug_logf(app, "[css] fetch failed url=%s err=%s", abs, msg);
+                                }
+                                free(css_body);
+                                browser_url_destroy(&css_url);
+                                browser_url_destroy(&css_final);
+                            }
+                            free(abs);
+                        }
+                    }
+                }
+            }
+            else if (strcmp(node->name, "img") == 0 && image_count < BROWSER_MAX_IMAGES)
+            {
+                const char *src = html_attr_get(node, "src");
+                if (src && src[0] != '\0')
+                {
+                    char *abs = browser_build_absolute_url(base_url, src, strlen(src));
+                    if (abs)
+                    {
+                        browser_dom_set_attr(node, "src", abs);
+                        browser_debug_logf(app, "[img] fetch %s", abs);
+
+                        browser_url_t img_url = {0};
+                        browser_url_t img_final = {0};
+                        size_t img_len = 0;
+                        if (browser_parse_url(abs, &img_url))
+                        {
+                            char *img_body = browser_fetch_http(app, &img_url, &img_len, &img_final);
+                            if (img_body && strncmp(img_body, "Error:\n", 6) != 0)
+                            {
+                                if (browser_is_png_bytes((const uint8_t *)img_body, img_len))
+                                {
+                                    if (browser_page_add_image(page, abs, (uint8_t *)img_body, img_len))
+                                    {
+                                        img_body = NULL;
+                                        image_count++;
+                                        browser_debug_logf(app,
+                                                           "[img] ok bytes=%u url=%s",
+                                                           (unsigned)img_len,
+                                                           abs);
+                                    }
+                                    else
+                                    {
+                                        browser_debug_logf(app, "[img] allocation failed");
+                                    }
+                                }
+                                else
+                                {
+                                    browser_debug_logf(app, "[img] skipped (not png) url=%s", abs);
+                                }
+                            }
+                            else
+                            {
+                                const char *msg = img_body ? (img_body + 6) : "allocation failed";
+                                browser_debug_logf(app, "[img] fetch failed url=%s err=%s", abs, msg);
+                            }
+                            free(img_body);
+                            browser_url_destroy(&img_url);
+                            browser_url_destroy(&img_final);
+                        }
+                        free(abs);
+                    }
+                }
+            }
+        }
+
+        for (html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (sp < sizeof(stack) / sizeof(stack[0]))
+            {
+                stack[sp++] = child;
+            }
+        }
+    }
+
+    if (sheet_count > 0)
+    {
+        browser_debug_logf(app, "[css] total stylesheets=%u bytes=%u",
+                           (unsigned)sheet_count,
+                           (unsigned)page->external_css_len);
+    }
+    if (image_count > 0)
+    {
+        browser_debug_logf(app, "[img] total images=%u", (unsigned)image_count);
+    }
+}
+
 typedef enum
 {
     BROWSER_CHUNK_READ_SIZE = 0,
@@ -908,6 +1474,56 @@ static void browser_debug_log_line(browser_app_t *app, const char *line)
     alix_mutex_unlock(&app->lock);
 }
 
+typedef struct
+{
+    bool dirty_full;
+    bool dirty_active;
+    int dirty_x0;
+    int dirty_y0;
+    int dirty_x1;
+    int dirty_y1;
+} browser_dirty_snapshot_t;
+
+static browser_dirty_snapshot_t browser_dirty_snapshot(const atk_state_t *state)
+{
+    browser_dirty_snapshot_t snap = {0};
+    if (!state)
+    {
+        return snap;
+    }
+    snap.dirty_full = state->dirty_full;
+    snap.dirty_active = state->dirty_active;
+    snap.dirty_x0 = state->dirty_x0;
+    snap.dirty_y0 = state->dirty_y0;
+    snap.dirty_x1 = state->dirty_x1;
+    snap.dirty_y1 = state->dirty_y1;
+    return snap;
+}
+
+static void browser_dirty_restore(atk_state_t *state, const browser_dirty_snapshot_t *snap)
+{
+    if (!state || !snap)
+    {
+        return;
+    }
+    state->dirty_full = snap->dirty_full;
+    state->dirty_active = snap->dirty_active;
+    state->dirty_x0 = snap->dirty_x0;
+    state->dirty_y0 = snap->dirty_y0;
+    state->dirty_x1 = snap->dirty_x1;
+    state->dirty_y1 = snap->dirty_y1;
+}
+
+static void browser_attach_remote(atk_user_window_t *win)
+{
+    if (!win || win->handle == 0 || !win->buffer || win->width == 0 || win->height == 0)
+    {
+        return;
+    }
+    video_surface_attach(win->buffer, win->width, win->height, win->buffer_bytes);
+    video_surface_set_tracking(win->track_dirty);
+}
+
 static bool browser_debug_flush(browser_app_t *app);
 static void browser_debug_open_window(browser_app_t *app);
 static void browser_debug_clear(browser_app_t *app);
@@ -1003,18 +1619,28 @@ static void browser_debug_close_window(browser_app_t *app)
         return;
     }
 
+    bool has_remote = app->debug_remote.handle != 0;
+    if (has_remote)
+    {
+        browser_attach_remote(&app->debug_remote);
+    }
+
     atk_state_t *state = atk_state_get();
-    if (state && app->debug_window && app->debug_window->used)
+    if (state && app->debug_window)
     {
         atk_window_close(state, app->debug_window);
     }
+
+    if (has_remote)
+    {
+        atk_user_close(&app->debug_remote);
+        memset(&app->debug_remote, 0, sizeof(app->debug_remote));
+    }
+
     app->debug_window = NULL;
     app->debug_text = NULL;
 
-    if (app->debug_modal.active)
-    {
-        atk_modal_end(&app->debug_modal);
-    }
+    browser_attach_remote(&app->remote);
 }
 
 static void browser_on_close_event(void *context)
@@ -1026,12 +1652,10 @@ static void browser_on_close_event(void *context)
         return;
     }
 
-    if (app->debug_modal.active)
+    if (app->debug_remote.handle != 0)
     {
         browser_debug_close_window(app);
-        return;
     }
-
     atk_main_request_exit();
 }
 
@@ -1048,39 +1672,35 @@ static void browser_debug_open_window(browser_app_t *app)
         return;
     }
 
-    if (app->debug_modal.active)
+    if (app->debug_remote.handle != 0)
     {
-        (void)browser_debug_flush(app);
-        return;
-    }
-
-    alix_mutex_lock(&app->lock);
-    atk_widget_t *existing = app->debug_window;
-    atk_widget_t *existing_text = app->debug_text;
-    alix_mutex_unlock(&app->lock);
-
-    if (existing && existing->used)
-    {
-        if (existing_text && existing_text->used)
+        alix_mutex_lock(&app->lock);
+        atk_widget_t *existing = app->debug_window;
+        atk_widget_t *existing_text = app->debug_text;
+        alix_mutex_unlock(&app->lock);
+        if (existing && existing_text && existing_text->used)
         {
             atk_rich_text_scroll_to_bottom(existing_text);
         }
-        atk_window_mark_dirty(existing);
         return;
     }
 
-    if (!atk_modal_begin(&app->debug_modal,
-                         "Browser Debug",
-                         BROWSER_DEBUG_WINDOW_WIDTH,
-                         BROWSER_DEBUG_WINDOW_HEIGHT,
-                         0,
-                         app->window))
+    browser_dirty_snapshot_t dirty_before = browser_dirty_snapshot(state);
+
+    if (!atk_user_window_open_with_flags(&app->debug_remote,
+                                         "Browser Debug",
+                                         BROWSER_DEBUG_WINDOW_WIDTH,
+                                         BROWSER_DEBUG_WINDOW_HEIGHT,
+                                         USER_ATK_WINDOW_FLAG_RESIZABLE))
     {
+        browser_attach_remote(&app->remote);
+        browser_dirty_restore(state, &dirty_before);
         return;
     }
+    atk_user_enable_dirty_tracking(&app->debug_remote, true);
 
-    int screen_w = video_screen_width();
-    int screen_h = video_screen_height();
+    int screen_w = (int)app->debug_remote.width;
+    int screen_h = (int)app->debug_remote.height;
     if (screen_w <= 0)
     {
         screen_w = (int)BROWSER_DEBUG_WINDOW_WIDTH;
@@ -1093,7 +1713,10 @@ static void browser_debug_open_window(browser_app_t *app)
     atk_widget_t *window = atk_window_create_at(state, screen_w / 2, screen_h / 2);
     if (!window)
     {
-        atk_modal_end(&app->debug_modal);
+        atk_user_close(&app->debug_remote);
+        memset(&app->debug_remote, 0, sizeof(app->debug_remote));
+        browser_attach_remote(&app->remote);
+        browser_dirty_restore(state, &dirty_before);
         return;
     }
 
@@ -1107,12 +1730,11 @@ static void browser_debug_open_window(browser_app_t *app)
     atk_window_set_context(window, app, browser_debug_window_on_destroy);
     atk_window_bring_to_front(state, window);
 
-    int chrome_top = atk_window_is_chrome_visible(window) ? ATK_WINDOW_TITLE_HEIGHT : 0;
     int margin = 10;
     int content_x = margin;
-    int content_y = chrome_top + margin;
+    int content_y = margin;
     int content_w = window->width - margin * 2;
-    int content_h = window->height - content_y - margin;
+    int content_h = window->height - margin * 2;
     if (content_w < 16) content_w = 16;
     if (content_h < 16) content_h = 16;
 
@@ -1120,6 +1742,10 @@ static void browser_debug_open_window(browser_app_t *app)
     if (!editor)
     {
         atk_window_close(state, window);
+        atk_user_close(&app->debug_remote);
+        memset(&app->debug_remote, 0, sizeof(app->debug_remote));
+        browser_attach_remote(&app->remote);
+        browser_dirty_restore(state, &dirty_before);
         return;
     }
     atk_widget_set_layout(editor,
@@ -1133,8 +1759,147 @@ static void browser_debug_open_window(browser_app_t *app)
     app->debug_log_flush_offset = 0;
     app->debug_log_resync = true;
     alix_mutex_unlock(&app->lock);
+
+    bool saved_browser_used = app->window ? app->window->used : true;
+    if (app->window)
+    {
+        app->window->used = false;
+    }
+    window->used = true;
     (void)browser_debug_flush(app);
-    atk_window_mark_dirty(window);
+    atk_dirty_mark_all();
+    atk_render();
+    atk_user_present_force(&app->debug_remote);
+
+    window->used = false;
+    if (app->window)
+    {
+        app->window->used = saved_browser_used;
+    }
+    browser_attach_remote(&app->remote);
+    browser_dirty_restore(state, &dirty_before);
+}
+
+static void browser_debug_sync_window_to_remote(browser_app_t *app)
+{
+    if (!app || !app->debug_window || app->debug_remote.handle == 0)
+    {
+        return;
+    }
+
+    int screen_w = (int)app->debug_remote.width;
+    int screen_h = (int)app->debug_remote.height;
+    if (screen_w <= 0)
+    {
+        screen_w = (int)BROWSER_DEBUG_WINDOW_WIDTH;
+    }
+    if (screen_h <= 0)
+    {
+        screen_h = (int)BROWSER_DEBUG_WINDOW_HEIGHT;
+    }
+
+    atk_widget_t *window = app->debug_window;
+    if (window->x != 0 || window->y != 0 || window->width != screen_w || window->height != screen_h)
+    {
+        window->x = 0;
+        window->y = 0;
+        window->width = screen_w;
+        window->height = screen_h;
+        atk_window_ensure_inside(window);
+        atk_window_request_layout(window);
+    }
+}
+
+static void browser_debug_service(browser_app_t *app)
+{
+    if (!app || app->debug_remote.handle == 0 || !app->debug_window)
+    {
+        return;
+    }
+
+    atk_state_t *state = atk_state_get();
+    if (!state)
+    {
+        return;
+    }
+
+    browser_dirty_snapshot_t dirty_before = browser_dirty_snapshot(state);
+    bool saved_browser_used = app->window ? app->window->used : true;
+    bool saved_debug_used = app->debug_window->used;
+
+    browser_attach_remote(&app->debug_remote);
+    if (app->window)
+    {
+        app->window->used = false;
+    }
+    app->debug_window->used = true;
+    browser_debug_sync_window_to_remote(app);
+
+    bool had_event = false;
+    bool close_requested = false;
+    user_atk_event_t ev;
+    while (atk_user_poll_event(&app->debug_remote, &ev))
+    {
+        had_event = true;
+        switch (ev.type)
+        {
+            case USER_ATK_EVENT_MOUSE:
+            {
+                bool left = (ev.flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
+                bool press = (ev.flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
+                bool release = (ev.flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
+                (void)atk_handle_mouse_event(ev.x, ev.y, press, release, left);
+                break;
+            }
+            case USER_ATK_EVENT_KEY:
+                /* Ignore key events for now (read-only log view). */
+                break;
+            case USER_ATK_EVENT_RESIZE:
+                browser_debug_sync_window_to_remote(app);
+                break;
+            case USER_ATK_EVENT_CLOSE:
+                close_requested = true;
+                break;
+            default:
+                break;
+        }
+
+        if (close_requested)
+        {
+            break;
+        }
+    }
+
+    if (close_requested)
+    {
+        browser_debug_close_window(app);
+        browser_dirty_restore(state, &dirty_before);
+        if (app->window)
+        {
+            app->window->used = saved_browser_used;
+        }
+        browser_attach_remote(&app->remote);
+        return;
+    }
+
+    bool flushed = browser_debug_flush(app);
+    if (had_event || flushed)
+    {
+        atk_dirty_mark_all();
+        atk_render();
+        atk_user_present(&app->debug_remote);
+    }
+
+    if (app->debug_window)
+    {
+        app->debug_window->used = saved_debug_used;
+    }
+    if (app->window)
+    {
+        app->window->used = saved_browser_used;
+    }
+    browser_attach_remote(&app->remote);
+    browser_dirty_restore(state, &dirty_before);
 }
 
 static bool browser_menu_button_hit_test(const atk_widget_t *button, int px, int py)
@@ -1405,12 +2170,31 @@ static char *browser_build_request(const char *host, const char *path)
     return req;
 }
 
-static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
+static char *browser_fetch_http_internal(browser_app_t *app,
+                                         const browser_url_t *url,
+                                         int redirect_depth,
+                                         size_t *body_len_out,
+                                         browser_url_t *final_url_out)
 {
+    if (body_len_out)
+    {
+        *body_len_out = 0;
+    }
+
     if (!url || !url->host || !url->path)
     {
         browser_debug_logf(app, "[fetch] invalid url (missing host/path)");
         return browser_format_error("invalid url");
+    }
+
+    if (redirect_depth < 0)
+    {
+        redirect_depth = 0;
+    }
+    if (redirect_depth > BROWSER_MAX_REDIRECTS)
+    {
+        browser_debug_logf(app, "[http] too many redirects");
+        return browser_format_error("too many redirects");
     }
 
     browser_debug_logf(app,
@@ -1462,6 +2246,9 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
     browser_chunked_t chunked;
     browser_chunked_init(&chunked);
 
+    char *redirect_target = NULL;
+    int redirect_status = 0;
+
     uint8_t *chunk = (uint8_t *)malloc(2048);
     if (!chunk)
     {
@@ -1474,7 +2261,7 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
     if (url->use_tls)
     {
         browser_debug_logf(app, "[tls] handshake start");
-        tls_session_t *tls = (tls_session_t *)malloc(sizeof(*tls));
+        tls_session_t *tls = tls_session_create_fd(fd);
         if (!tls)
         {
             browser_debug_logf(app, "[tls] alloc tls session failed");
@@ -1484,21 +2271,10 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
             return browser_format_error("alloc tls session failed");
         }
 
-        if (!tls_session_init_fd(tls, fd))
-        {
-            browser_debug_logf(app, "[tls] tls_session_init_fd failed");
-            free(tls);
-            free(chunk);
-            free(request);
-            close(fd);
-            return browser_format_error("tls_session_init_fd failed");
-        }
-
         if (!tls_session_handshake(tls, url->host))
         {
             browser_debug_logf(app, "[tls] handshake failed (see serial log)");
-            tls_session_close(tls);
-            free(tls);
+            tls_session_destroy(tls);
             free(chunk);
             free(request);
             close(fd);
@@ -1509,8 +2285,7 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
         if (!tls_session_send(tls, (const uint8_t *)request, strlen(request)))
         {
             browser_debug_logf(app, "[tls] send failed");
-            tls_session_close(tls);
-            free(tls);
+            tls_session_destroy(tls);
             free(chunk);
             free(request);
             close(fd);
@@ -1529,8 +2304,7 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
             {
                 if (!browser_buf_append(&header_buf, &header_len, &header_cap, chunk, got))
                 {
-                    tls_session_close(tls);
-                    free(tls);
+                    tls_session_destroy(tls);
                     free(request);
                     close(fd);
                     free(header_buf);
@@ -1555,6 +2329,8 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
 
                 const char *value = NULL;
                 size_t value_len = 0;
+                const char *location_value = NULL;
+                size_t location_len = 0;
                 if (browser_http_find_header_value(header_buf, header_block_len,
                                                    "transfer-encoding",
                                                    &value, &value_len) &&
@@ -1597,6 +2373,8 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
                                                    "location",
                                                    &value, &value_len))
                 {
+                    location_value = value;
+                    location_len = value_len;
                     char loc_buf[160];
                     size_t copy = value_len;
                     if (copy >= sizeof(loc_buf))
@@ -1606,6 +2384,41 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
                     memcpy(loc_buf, value, copy);
                     loc_buf[copy] = '\0';
                     browser_debug_logf(app, "[http] location %s", loc_buf);
+                }
+
+                if (!redirect_target &&
+                    (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) &&
+                    location_value && location_len > 0 && location_value[0] != '#')
+                {
+                    if (redirect_depth >= BROWSER_MAX_REDIRECTS)
+                    {
+                        tls_session_destroy(tls);
+                        free(request);
+                        close(fd);
+                        free(header_buf);
+                        free(body_buf);
+                        free(chunk);
+                        return browser_format_error("too many redirects");
+                    }
+                    redirect_target = browser_build_absolute_url(url, location_value, location_len);
+                    if (!redirect_target)
+                    {
+                        tls_session_destroy(tls);
+                        free(request);
+                        close(fd);
+                        free(header_buf);
+                        free(body_buf);
+                        free(chunk);
+                        return browser_format_error("redirect allocation failed");
+                    }
+                    redirect_status = status;
+                    browser_debug_logf(app, "[http] redirect %d -> %s", status, redirect_target);
+
+                    free(header_buf);
+                    header_buf = NULL;
+                    header_len = 0;
+                    header_cap = 0;
+                    break;
                 }
 
                 browser_debug_logf(app,
@@ -1624,8 +2437,7 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
                                                      body_bytes,
                                                      &done))
                         {
-                            tls_session_close(tls);
-                            free(tls);
+                            tls_session_destroy(tls);
                             free(request);
                             close(fd);
                             free(header_buf);
@@ -1654,8 +2466,7 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
                                                 (const uint8_t *)header_buf + body_offset,
                                                 take))
                         {
-                            tls_session_close(tls);
-                            free(tls);
+                            tls_session_destroy(tls);
                             free(request);
                             close(fd);
                             free(header_buf);
@@ -1679,8 +2490,7 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
                     if (!browser_chunked_consume(&chunked, &body_buf, &body_len, &body_cap,
                                                  chunk, got, &done))
                     {
-                        tls_session_close(tls);
-                        free(tls);
+                        tls_session_destroy(tls);
                         free(request);
                         close(fd);
                         free(body_buf);
@@ -1706,8 +2516,7 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
                     if (take > 0 &&
                         !browser_buf_append(&body_buf, &body_len, &body_cap, chunk, take))
                     {
-                        tls_session_close(tls);
-                        free(tls);
+                        tls_session_destroy(tls);
                         free(request);
                         close(fd);
                         free(body_buf);
@@ -1725,8 +2534,7 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
             }
         }
 
-        tls_session_close(tls);
-        free(tls);
+        tls_session_destroy(tls);
     }
     else
     {
@@ -1781,6 +2589,8 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
 
                 const char *value = NULL;
                 size_t value_len = 0;
+                const char *location_value = NULL;
+                size_t location_len = 0;
                 if (browser_http_find_header_value(header_buf, header_block_len,
                                                    "transfer-encoding",
                                                    &value, &value_len) &&
@@ -1823,6 +2633,8 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
                                                    "location",
                                                    &value, &value_len))
                 {
+                    location_value = value;
+                    location_len = value_len;
                     char loc_buf[160];
                     size_t copy = value_len;
                     if (copy >= sizeof(loc_buf))
@@ -1832,6 +2644,39 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
                     memcpy(loc_buf, value, copy);
                     loc_buf[copy] = '\0';
                     browser_debug_logf(app, "[http] location %s", loc_buf);
+                }
+
+                if (!redirect_target &&
+                    (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) &&
+                    location_value && location_len > 0 && location_value[0] != '#')
+                {
+                    if (redirect_depth >= BROWSER_MAX_REDIRECTS)
+                    {
+                        free(request);
+                        close(fd);
+                        free(header_buf);
+                        free(body_buf);
+                        free(chunk);
+                        return browser_format_error("too many redirects");
+                    }
+                    redirect_target = browser_build_absolute_url(url, location_value, location_len);
+                    if (!redirect_target)
+                    {
+                        free(request);
+                        close(fd);
+                        free(header_buf);
+                        free(body_buf);
+                        free(chunk);
+                        return browser_format_error("redirect allocation failed");
+                    }
+                    redirect_status = status;
+                    browser_debug_logf(app, "[http] redirect %d -> %s", status, redirect_target);
+
+                    free(header_buf);
+                    header_buf = NULL;
+                    header_len = 0;
+                    header_cap = 0;
+                    break;
                 }
 
                 browser_debug_logf(app,
@@ -1956,6 +2801,31 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
         header_buf = NULL;
     }
 
+    if (redirect_target)
+    {
+        if (body_buf)
+        {
+            free(body_buf);
+            body_buf = NULL;
+        }
+
+        browser_url_t next = {0};
+        if (!browser_parse_url(redirect_target, &next))
+        {
+            browser_debug_logf(app, "[http] redirect parse failed");
+            free(redirect_target);
+            return browser_format_error("invalid redirect url");
+        }
+        browser_debug_logf(app, "[http] follow redirect %d depth=%d url=%s",
+                           redirect_status,
+                           redirect_depth + 1,
+                           redirect_target);
+        free(redirect_target);
+        char *res = browser_fetch_http_internal(app, &next, redirect_depth + 1, body_len_out, final_url_out);
+        browser_url_destroy(&next);
+        return res;
+    }
+
     if (have_content_length && body_len < content_length)
     {
         browser_debug_logf(app, "[http] incomplete body got=%u expected=%u",
@@ -1971,7 +2841,20 @@ static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
     }
 
     browser_debug_logf(app, "[http] body bytes=%u", (unsigned)body_len);
+    if (body_len_out)
+    {
+        *body_len_out = body_len;
+    }
+    if (final_url_out)
+    {
+        (void)browser_url_clone(url, final_url_out);
+    }
     return body_buf;
+}
+
+static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url, size_t *body_len_out, browser_url_t *final_url_out)
+{
+    return browser_fetch_http_internal(app, url, 0, body_len_out, final_url_out);
 }
 
 static void browser_fetch_thread(void *arg)
@@ -1984,73 +2867,97 @@ static void browser_fetch_thread(void *arg)
 
     char *url_text = NULL;
     alix_mutex_lock(&app->lock);
-    url_text = app->pending_text;
-    app->pending_text = NULL;
+    url_text = app->pending_url;
+    app->pending_url = NULL;
     alix_mutex_unlock(&app->lock);
 
     browser_debug_logf(app, "[fetch] thread start url=%s", url_text ? url_text : "(null)");
 
+    browser_page_payload_t *page = NULL;
+
     if (!url_text)
     {
-        alix_mutex_lock(&app->lock);
-        app->pending_text = browser_format_error("missing url");
-        app->pending_ready = true;
-        app->fetch_running = false;
-        alix_mutex_unlock(&app->lock);
         browser_debug_logf(app, "[fetch] missing url");
-        return;
-    }
-
-    browser_url_t url;
-    char *result = NULL;
-    if (!browser_parse_url(url_text, &url))
-    {
-        browser_debug_logf(app, "[fetch] invalid url");
-        result = browser_format_error("invalid url");
+        page = browser_page_payload_error("missing url");
     }
     else
     {
-        browser_debug_logf(app,
-                           "[fetch] parsed tls=%d host=%s port=%u path=%s",
-                           url.use_tls ? 1 : 0,
-                           url.host ? url.host : "(null)",
-                           (unsigned)url.port,
-                           url.path ? url.path : "(null)");
-        result = browser_fetch_http(app, &url);
-    }
-    browser_url_destroy(&url);
-    free(url_text);
+        browser_url_t url = {0};
+        browser_url_t final_url = {0};
+        char *html = NULL;
+        size_t html_len = 0;
 
-    if (!result)
-    {
-        browser_debug_logf(app, "[fetch] result null (allocation failed)");
-        result = browser_format_error("allocation failed");
-    }
-    else if (strncmp(result, "Error:\n", 6) == 0)
-    {
-        const char *msg = result + 6;
-        char preview[96];
-        size_t mlen = strlen(msg);
-        size_t copy = mlen;
-        if (copy >= sizeof(preview))
+        if (!browser_parse_url(url_text, &url))
         {
-            copy = sizeof(preview) - 1;
+            browser_debug_logf(app, "[fetch] invalid url");
+            page = browser_page_payload_error("invalid url");
         }
-        memcpy(preview, msg, copy);
-        preview[copy] = '\0';
-        browser_debug_logf(app, "[fetch] error %s", preview);
+        else
+        {
+            browser_debug_logf(app,
+                               "[fetch] parsed tls=%d host=%s port=%u path=%s",
+                               url.use_tls ? 1 : 0,
+                               url.host ? url.host : "(null)",
+                               (unsigned)url.port,
+                               url.path ? url.path : "(null)");
+
+            html = browser_fetch_http(app, &url, &html_len, &final_url);
+            if (!html)
+            {
+                browser_debug_logf(app, "[fetch] allocation failed");
+                page = browser_page_payload_error("allocation failed");
+            }
+            else if (strncmp(html, "Error:\n", 6) == 0)
+            {
+                const char *msg = html + 6;
+                browser_debug_logf(app, "[fetch] http error %s", msg ? msg : "(null)");
+                page = browser_page_payload_error(msg ? msg : "http error");
+            }
+            else
+            {
+                browser_debug_logf(app, "[fetch] html bytes=%u", (unsigned)html_len);
+                html_parse_error_t parse_err = {0};
+                html_document_t *doc = html_parse(html, &parse_err);
+                if (!doc)
+                {
+                    const char *detail = parse_err.message ? parse_err.message : "parse failed";
+                    browser_debug_logf(app, "[fetch] parse failed %s", detail);
+                    page = browser_page_payload_error(detail);
+                }
+                else
+                {
+                    page = (browser_page_payload_t *)calloc(1, sizeof(*page));
+                    if (!page)
+                    {
+                        html_document_destroy(doc);
+                        page = browser_page_payload_error("allocation failed");
+                    }
+                    else
+                    {
+                        page->doc = doc;
+                        browser_collect_resources(app, page, doc->root, &final_url);
+                    }
+                }
+            }
+        }
+
+        free(html);
+        browser_url_destroy(&url);
+        browser_url_destroy(&final_url);
+        free(url_text);
     }
-    else
+
+    if (!page)
     {
-        browser_debug_logf(app, "[fetch] success bytes=%u", (unsigned)strlen(result));
+        page = browser_page_payload_error("allocation failed");
     }
 
     alix_mutex_lock(&app->lock);
-    if (app->pending_text)
+    if (app->pending_page)
     {
-        free(app->pending_text);
+        browser_page_payload_destroy(app->pending_page);
     }
-    app->pending_text = result;
+    app->pending_page = page;
     app->pending_ready = true;
     app->fetch_running = false;
     alix_mutex_unlock(&app->lock);
@@ -2095,11 +3002,11 @@ static void on_url_submit(atk_widget_t *input, void *context)
     }
 
     alix_mutex_lock(&app->lock);
-    if (app->pending_text)
+    if (app->pending_url)
     {
-        free(app->pending_text);
+        free(app->pending_url);
     }
-    app->pending_text = url_copy;
+    app->pending_url = url_copy;
     app->pending_ready = false;
     app->fetch_running = true;
     alix_mutex_unlock(&app->lock);
@@ -2114,11 +3021,8 @@ static void on_url_submit(atk_widget_t *input, void *context)
         browser_debug_logf(app, "[ui] failed to start fetch thread");
         alix_mutex_lock(&app->lock);
         app->fetch_running = false;
-        if (app->pending_text)
-        {
-            free(app->pending_text);
-            app->pending_text = NULL;
-        }
+        free(app->pending_url);
+        app->pending_url = NULL;
         alix_mutex_unlock(&app->lock);
         (void)atk_html_view_set_html(app->viewer,
                                      "<!doctype html><html><body><p>Failed to start fetch thread.</p></body></html>",
@@ -2136,12 +3040,9 @@ static bool browser_tick(void *context)
     }
 
     bool redraw = false;
-    if (browser_debug_flush(app))
-    {
-        redraw = true;
-    }
+    browser_debug_service(app);
 
-    char *text = NULL;
+    browser_page_payload_t *page = NULL;
     bool ready = false;
     alix_thread_t join_thread = 0;
 
@@ -2149,8 +3050,8 @@ static bool browser_tick(void *context)
     if (app->pending_ready)
     {
         ready = true;
-        text = app->pending_text;
-        app->pending_text = NULL;
+        page = app->pending_page;
+        app->pending_page = NULL;
         app->pending_ready = false;
         join_thread = app->fetch_thread;
         app->fetch_thread = 0;
@@ -2167,31 +3068,28 @@ static bool browser_tick(void *context)
         (void)alix_thread_join(join_thread, NULL);
     }
 
-    if (!text)
+    if (!page)
     {
         return false;
     }
 
-    browser_debug_logf(app, "[ui] document ready bytes=%u", (unsigned)strlen(text));
-
-    if (strncmp(text, "Error:\n", 6) == 0)
+    if (page->error_message)
     {
-        const char *msg = text + 6;
-        char page[512];
-        snprintf(page,
-                 sizeof(page),
+        char page_buf[512];
+        snprintf(page_buf,
+                 sizeof(page_buf),
                  "<!doctype html><html><body><p>Fetch error:</p><p>%s</p></body></html>",
-                 msg ? msg : "unknown");
-        (void)atk_html_view_set_html(app->viewer, page, NULL);
+                 page->error_message ? page->error_message : "unknown");
+        (void)atk_html_view_set_html(app->viewer, page_buf, NULL);
         browser_debug_logf(app, "[render] showing fetch error page");
-        free(text);
+        browser_page_payload_destroy(page);
         atk_window_mark_dirty(app->window);
+        browser_debug_service(app);
         return true;
     }
 
-    html_parse_error_t parse_err = {0};
-    html_document_t *doc = html_parse(text, &parse_err);
-    if (doc)
+    html_document_t *doc = page->doc;
+    if (doc && doc->root)
     {
         size_t node_count = browser_dom_count_nodes(doc->root, 50000);
         const html_node_t *body = browser_dom_find_first_element(doc->root, "body");
@@ -2214,22 +3112,37 @@ static bool browser_tick(void *context)
                            (unsigned)node_count,
                            body ? "yes" : "no");
 
+        page->doc = NULL;
         atk_html_view_set_document(app->viewer, doc);
+        atk_html_view_set_external_stylesheet(app->viewer,
+                                             (page->external_css && page->external_css_len > 0)
+                                                 ? page->external_css
+                                                 : NULL);
+        for (browser_image_payload_t *img = page->images; img; img = img->next)
+        {
+            bool ok = atk_html_view_add_image_png(app->viewer,
+                                                  img->src ? img->src : "",
+                                                  img->data,
+                                                  img->len);
+            browser_debug_logf(app,
+                               "[img] %s src=%s bytes=%u",
+                               ok ? "loaded" : "failed",
+                               img->src ? img->src : "(null)",
+                               (unsigned)img->len);
+        }
         browser_debug_logf(app, "[render] set document ok");
     }
     else
     {
-        char msg[256];
-        const char *detail = parse_err.message ? parse_err.message : "unknown error";
-        snprintf(msg,
-                 sizeof(msg),
-                 "<!doctype html><html><body><p>Failed to parse HTML: %s</p></body></html>",
-                 detail);
-        (void)atk_html_view_set_html(app->viewer, msg, NULL);
-        browser_debug_logf(app, "[parse] failed: %s", detail);
+        (void)atk_html_view_set_html(app->viewer,
+                                     "<!doctype html><html><body><p>No document.</p></body></html>",
+                                     NULL);
+        browser_debug_logf(app, "[parse] missing document");
     }
-    free(text);
+
+    browser_page_payload_destroy(page);
     atk_window_mark_dirty(app->window);
+    browser_debug_service(app);
     return true;
 }
 
@@ -2389,6 +3302,10 @@ int main(void)
     atk_main_register_close_handler(browser_on_close_event, &app);
     atk_main(&main_cfg);
 
+    if (app.debug_remote.handle != 0 || app.debug_window)
+    {
+        browser_debug_close_window(&app);
+    }
     atk_user_close(&app.remote);
     return 0;
 }

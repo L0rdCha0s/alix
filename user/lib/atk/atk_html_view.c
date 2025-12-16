@@ -2,6 +2,7 @@
 
 #include "atk/atk_font.h"
 #include "atk/atk_scrollbar.h"
+#include "atk/util/png.h"
 #include "atk_internal.h"
 #include "ctype.h"
 #include "libc.h"
@@ -11,6 +12,16 @@
 
 #define ATK_HTML_VIEW_PADDING 8
 #define ATK_HTML_VIEW_SCROLLBAR_WIDTH 14
+
+typedef struct html_view_image
+{
+    char *src;
+    video_color_t *pixels;
+    int width;
+    int height;
+    int stride_bytes;
+    struct html_view_image *next;
+} html_view_image_t;
 
 typedef struct
 {
@@ -23,6 +34,9 @@ typedef struct
     int last_height;
     html_document_t *doc;
     css_stylesheet_t *sheet;
+    char *external_css;
+    size_t external_css_len;
+    html_view_image_t *images;
 } atk_html_view_priv_t;
 
 typedef struct
@@ -39,12 +53,15 @@ typedef struct
     int viewport_h;
     int body_x;
     int body_w;
+    int base_font_px;
+    int base_line_height;
     int line_height;
     int space_w;
     int x;
     int y;
     int max_x;
     int content_bottom;
+    int list_level;
     bool pending_space;
     bool draw;
 } html_view_ctx_t;
@@ -147,6 +164,61 @@ static bool html_view_buf_append(char **buf, size_t *len, size_t *cap, const cha
     return true;
 }
 
+static char *html_view_strdup(const char *src)
+{
+    if (!src)
+    {
+        src = "";
+    }
+    size_t len = strlen(src);
+    char *dst = (char *)malloc(len + 1);
+    if (!dst)
+    {
+        return NULL;
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+    return dst;
+}
+
+static void html_view_images_clear(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    html_view_image_t *img = priv->images;
+    while (img)
+    {
+        html_view_image_t *next = img->next;
+        free(img->src);
+        free(img->pixels);
+        free(img);
+        img = next;
+    }
+    priv->images = NULL;
+}
+
+static html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *src)
+{
+    if (!priv || !src || src[0] == '\0')
+    {
+        return NULL;
+    }
+    for (html_view_image_t *img = priv->images; img; img = img->next)
+    {
+        if (!img->src)
+        {
+            continue;
+        }
+        if (strcmp(img->src, src) == 0)
+        {
+            return img;
+        }
+    }
+    return NULL;
+}
+
 static void html_view_collect_style_text(const html_node_t *node, char **buf, size_t *len, size_t *cap)
 {
     if (!node || !buf || !len || !cap)
@@ -193,6 +265,20 @@ static void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
     size_t css_len = 0;
     size_t css_cap = 0;
     html_view_collect_style_text(priv->doc->root, &css_text, &css_len, &css_cap);
+
+    if (priv->external_css && priv->external_css_len > 0)
+    {
+        if (css_len > 0)
+        {
+            (void)html_view_buf_append(&css_text, &css_len, &css_cap, "\n", 1);
+        }
+        (void)html_view_buf_append(&css_text,
+                                   &css_len,
+                                   &css_cap,
+                                   priv->external_css,
+                                   priv->external_css_len);
+    }
+
     if (!css_text || css_len == 0)
     {
         free(css_text);
@@ -281,6 +367,138 @@ static int html_view_length_to_px(const css_length_t *len, int viewport_w, int v
         default:
             return (int)(v / 1000);
     }
+}
+
+static int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_t *style)
+{
+    if (!ctx)
+    {
+        return atk_font_line_height() + 4;
+    }
+
+    int base_font_px = ctx->base_font_px > 0 ? ctx->base_font_px : atk_font_line_height();
+    int line_height = ctx->base_line_height > 0 ? ctx->base_line_height : (base_font_px + 4);
+
+    if (style && style->has_line_height && style->line_height_milli > 0)
+    {
+        line_height = (int)(((int64_t)base_font_px * (int64_t)style->line_height_milli) / 1000LL);
+        if (line_height < base_font_px)
+        {
+            line_height = base_font_px;
+        }
+    }
+
+    if (line_height < 8)
+    {
+        line_height = 8;
+    }
+    return line_height;
+}
+
+static void html_view_draw_rect_clipped(int x, int y, int w, int h, video_color_t color, const atk_rect_t *clip)
+{
+    if (w <= 0 || h <= 0)
+    {
+        return;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + w;
+    int y1 = y + h;
+
+    if (clip)
+    {
+        int cx0 = clip->x;
+        int cy0 = clip->y;
+        int cx1 = clip->x + clip->width;
+        int cy1 = clip->y + clip->height;
+        if (x0 < cx0) x0 = cx0;
+        if (y0 < cy0) y0 = cy0;
+        if (x1 > cx1) x1 = cx1;
+        if (y1 > cy1) y1 = cy1;
+    }
+
+    if (x1 <= x0 || y1 <= y0)
+    {
+        return;
+    }
+    video_draw_rect(x0, y0, x1 - x0, y1 - y0, color);
+}
+
+static void html_view_draw_border_clipped(int x,
+                                         int y,
+                                         int w,
+                                         int h,
+                                         int thickness,
+                                         video_color_t color,
+                                         const atk_rect_t *clip)
+{
+    if (w <= 0 || h <= 0 || thickness <= 0)
+    {
+        return;
+    }
+
+    if (thickness * 2 > w)
+    {
+        thickness = w / 2;
+    }
+    if (thickness * 2 > h)
+    {
+        thickness = h / 2;
+    }
+    if (thickness <= 0)
+    {
+        return;
+    }
+
+    html_view_draw_rect_clipped(x, y, w, thickness, color, clip);                    /* top */
+    html_view_draw_rect_clipped(x, y + h - thickness, w, thickness, color, clip);   /* bottom */
+    html_view_draw_rect_clipped(x, y + thickness, thickness, h - thickness * 2, color, clip); /* left */
+    html_view_draw_rect_clipped(x + w - thickness, y + thickness, thickness, h - thickness * 2, color, clip); /* right */
+}
+
+static void html_view_blit_rgba32_clipped(int dst_x,
+                                         int dst_y,
+                                         int width,
+                                         int height,
+                                         const video_color_t *pixels,
+                                         int stride_bytes,
+                                         const atk_rect_t *clip)
+{
+    if (!pixels || width <= 0 || height <= 0 || stride_bytes <= 0)
+    {
+        return;
+    }
+
+    int x0 = dst_x;
+    int y0 = dst_y;
+    int x1 = dst_x + width;
+    int y1 = dst_y + height;
+
+    int clip_x0 = clip ? clip->x : 0;
+    int clip_y0 = clip ? clip->y : 0;
+    int clip_x1 = clip ? (clip->x + clip->width) : video_screen_width();
+    int clip_y1 = clip ? (clip->y + clip->height) : video_screen_height();
+
+    if (x0 < clip_x0) x0 = clip_x0;
+    if (y0 < clip_y0) y0 = clip_y0;
+    if (x1 > clip_x1) x1 = clip_x1;
+    if (y1 > clip_y1) y1 = clip_y1;
+
+    int draw_w = x1 - x0;
+    int draw_h = y1 - y0;
+    if (draw_w <= 0 || draw_h <= 0)
+    {
+        return;
+    }
+
+    int offset_x = x0 - dst_x;
+    int offset_y = y0 - dst_y;
+    int stride_px = stride_bytes / (int)sizeof(video_color_t);
+    const video_color_t *src = pixels + offset_y * stride_px + offset_x;
+
+    video_blit_rgba32_untracked(x0, y0, draw_w, draw_h, src, stride_bytes, true);
 }
 
 static void html_view_new_line(html_view_ctx_t *ctx)
@@ -449,7 +667,10 @@ static bool html_view_is_block_tag(const char *tag)
     return strcmp(tag, "body") == 0 ||
            strcmp(tag, "div") == 0 ||
            strcmp(tag, "p") == 0 ||
-           strcmp(tag, "h1") == 0;
+           strcmp(tag, "h1") == 0 ||
+           strcmp(tag, "ul") == 0 ||
+           strcmp(tag, "li") == 0 ||
+           strcmp(tag, "img") == 0;
 }
 
 static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *parent_style);
@@ -479,7 +700,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         {
             return;
         }
-        video_color_t color = parent_style->has_color ? parent_style->color : video_make_color(0x10, 0x10, 0x10);
+        video_color_t color = parent_style->has_color ? parent_style->color : video_make_color(0x00, 0x00, 0x00);
         html_view_draw_text(ctx, node->text, color, false, false);
         return;
     }
@@ -490,7 +711,12 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
     }
 
     const char *tag = node->name;
-    if (strcmp(tag, "head") == 0 || strcmp(tag, "style") == 0 || strcmp(tag, "meta") == 0 || strcmp(tag, "title") == 0)
+    if (strcmp(tag, "head") == 0 ||
+        strcmp(tag, "style") == 0 ||
+        strcmp(tag, "meta") == 0 ||
+        strcmp(tag, "title") == 0 ||
+        strcmp(tag, "link") == 0 ||
+        strcmp(tag, "script") == 0)
     {
         return;
     }
@@ -510,19 +736,92 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         {
             html_view_new_line(ctx);
         }
-        ctx->y += ctx->line_height / 2;
+
+        int pad_top = 0;
+        int pad_bottom = 0;
+        if (style.has_padding)
+        {
+            pad_top = html_view_length_to_px(&style.padding.top,
+                                             ctx->viewport_w,
+                                             ctx->viewport_h,
+                                             ctx->base_font_px,
+                                             false);
+            pad_bottom = html_view_length_to_px(&style.padding.bottom,
+                                                ctx->viewport_w,
+                                                ctx->viewport_h,
+                                                ctx->base_font_px,
+                                                false);
+        }
+
+        ctx->y += pad_top;
         ctx->pending_space = false;
 
-        video_color_t color = style.has_color ? style.color : video_make_color(0x10, 0x10, 0x10);
+        video_color_t color = style.has_color ? style.color : video_make_color(0x00, 0x00, 0x00);
+
+        char *text = NULL;
+        size_t text_len = 0;
+        size_t text_cap = 0;
         for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
         {
             if (child->type == HTML_NODE_TEXT && child->text)
             {
-                html_view_draw_text(ctx, child->text, color, false, true);
+                (void)html_view_buf_append(&text, &text_len, &text_cap, child->text, strlen(child->text));
             }
         }
+        if (text && text_len > 0)
+        {
+            int text_w = atk_font_text_width(text);
+            int draw_x = ctx->body_x;
+            if (style.has_text_align)
+            {
+                if (style.text_align == CSS_TEXT_ALIGN_CENTER)
+                {
+                    draw_x = ctx->body_x + (ctx->body_w - text_w) / 2;
+                }
+                else if (style.text_align == CSS_TEXT_ALIGN_RIGHT)
+                {
+                    draw_x = ctx->body_x + (ctx->body_w - text_w);
+                }
+            }
+            if (draw_x < ctx->body_x)
+            {
+                draw_x = ctx->body_x;
+            }
+
+            int draw_top = ctx->y - ctx->priv->scroll_y;
+            int baseline = atk_font_baseline_for_rect(draw_top, ctx->line_height);
+
+            if (ctx->draw && html_view_line_visible(ctx))
+            {
+                if (style.has_text_shadow)
+                {
+                    int dx = html_view_length_to_px(&style.text_shadow_x,
+                                                    ctx->viewport_w,
+                                                    ctx->viewport_h,
+                                                    ctx->base_font_px,
+                                                    true);
+                    int dy = html_view_length_to_px(&style.text_shadow_y,
+                                                    ctx->viewport_w,
+                                                    ctx->viewport_h,
+                                                    ctx->base_font_px,
+                                                    false);
+                    video_color_t shadow = style.has_text_shadow_color ? style.text_shadow_color : video_make_color(0x00, 0x00, 0x00);
+                    atk_font_draw_string_clipped(draw_x + dx, baseline + dy, text, shadow, ctx->bg, &ctx->clip);
+                    atk_font_draw_string_clipped(draw_x + dx + 1, baseline + dy, text, shadow, ctx->bg, &ctx->clip);
+                }
+
+                atk_font_draw_string_clipped(draw_x, baseline, text, color, ctx->bg, &ctx->clip);
+                atk_font_draw_string_clipped(draw_x + 1, baseline, text, color, ctx->bg, &ctx->clip);
+            }
+
+            ctx->x = ctx->body_x;
+            ctx->pending_space = false;
+            html_view_ensure_line_visible(ctx);
+        }
+        free(text);
+
         html_view_new_line(ctx);
-        ctx->y += ctx->line_height / 4;
+        ctx->y += pad_bottom;
         ctx->pending_space = false;
         return;
     }
@@ -533,6 +832,8 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         {
             html_view_new_line(ctx);
         }
+        int saved_line_height = ctx->line_height;
+        ctx->line_height = html_view_line_height_for_style(ctx, &style);
         if (ctx->y > ctx->viewport_y)
         {
             ctx->y += ctx->line_height / 3;
@@ -540,7 +841,159 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         ctx->pending_space = false;
         html_view_render_children(ctx, node, &style);
         html_view_new_line(ctx);
+        ctx->line_height = saved_line_height;
         ctx->pending_space = false;
+        return;
+    }
+
+    if (strcmp(tag, "ul") == 0)
+    {
+        if (ctx->x != ctx->body_x)
+        {
+            html_view_new_line(ctx);
+        }
+        if (ctx->y > ctx->viewport_y)
+        {
+            ctx->y += ctx->line_height / 3;
+        }
+        ctx->pending_space = false;
+        ctx->list_level += 1;
+        html_view_render_children(ctx, node, &style);
+        if (ctx->list_level > 0)
+        {
+            ctx->list_level -= 1;
+        }
+        if (ctx->x != ctx->body_x)
+        {
+            html_view_new_line(ctx);
+        }
+        ctx->pending_space = false;
+        return;
+    }
+
+    if (strcmp(tag, "li") == 0)
+    {
+        if (ctx->x != ctx->body_x)
+        {
+            html_view_new_line(ctx);
+        }
+
+        int saved_body_x = ctx->body_x;
+        int saved_max_x = ctx->max_x;
+        int saved_line_height = ctx->line_height;
+        ctx->line_height = html_view_line_height_for_style(ctx, &style);
+
+        int level = ctx->list_level > 0 ? ctx->list_level : 1;
+        int indent = level * 32;
+        int bullet_size = 4;
+        int bullet_x = saved_body_x + indent - 16;
+        int bullet_draw_y = (ctx->y - ctx->priv->scroll_y) + ctx->line_height / 2 - bullet_size / 2;
+        video_color_t bullet_color = style.has_color ? style.color : video_make_color(0x00, 0x00, 0x00);
+
+        if (ctx->draw && html_view_line_visible(ctx))
+        {
+            html_view_draw_rect_clipped(bullet_x, bullet_draw_y, bullet_size, bullet_size, bullet_color, &ctx->clip);
+        }
+
+        ctx->body_x = saved_body_x + indent;
+        ctx->x = ctx->body_x;
+        ctx->max_x = saved_max_x;
+        ctx->pending_space = false;
+
+        html_view_render_children(ctx, node, &style);
+        html_view_new_line(ctx);
+
+        ctx->body_x = saved_body_x;
+        ctx->x = ctx->body_x;
+        ctx->max_x = saved_max_x;
+        ctx->line_height = saved_line_height;
+        ctx->pending_space = false;
+        return;
+    }
+
+    if (strcmp(tag, "img") == 0)
+    {
+        if (ctx->x != ctx->body_x)
+        {
+            html_view_new_line(ctx);
+        }
+
+        int margin_top = 0;
+        int margin_bottom = 0;
+        if (style.has_margin)
+        {
+            if (style.margin.top.valid && !style.margin.top.is_auto)
+            {
+                margin_top = html_view_length_to_px(&style.margin.top,
+                                                    ctx->viewport_w,
+                                                    ctx->viewport_h,
+                                                    ctx->base_font_px,
+                                                    false);
+            }
+            if (style.margin.bottom.valid && !style.margin.bottom.is_auto)
+            {
+                margin_bottom = html_view_length_to_px(&style.margin.bottom,
+                                                      ctx->viewport_w,
+                                                      ctx->viewport_h,
+                                                      ctx->base_font_px,
+                                                      false);
+            }
+        }
+        ctx->y += margin_top;
+        ctx->pending_space = false;
+
+        const char *src = html_attr_get(node, "src");
+        html_view_image_t *img = src ? html_view_image_find(ctx->priv, src) : NULL;
+        int img_w = img ? img->width : 0;
+        int img_h = img ? img->height : 0;
+
+        if (img && img_w > 0 && img_h > 0)
+        {
+            int draw_x = ctx->body_x;
+            if (style.has_margin)
+            {
+                bool auto_left = style.margin.left.valid && style.margin.left.is_auto;
+                bool auto_right = style.margin.right.valid && style.margin.right.is_auto;
+                if (auto_left && auto_right)
+                {
+                    draw_x = ctx->body_x + (ctx->body_w - img_w) / 2;
+                }
+                else if (style.margin.left.valid && !style.margin.left.is_auto)
+                {
+                    draw_x = ctx->body_x + html_view_length_to_px(&style.margin.left,
+                                                                  ctx->viewport_w,
+                                                                  ctx->viewport_h,
+                                                                  ctx->base_font_px,
+                                                                  true);
+                }
+            }
+            if (draw_x < ctx->body_x)
+            {
+                draw_x = ctx->body_x;
+            }
+            int draw_y = ctx->y - ctx->priv->scroll_y;
+            if (ctx->draw)
+            {
+                html_view_blit_rgba32_clipped(draw_x, draw_y, img_w, img_h, img->pixels, img->stride_bytes, &ctx->clip);
+            }
+            ctx->y += img_h;
+        }
+        else
+        {
+            const char *alt = html_attr_get(node, "alt");
+            if (!alt || alt[0] == '\0')
+            {
+                alt = "[image]";
+            }
+            video_color_t color = style.has_color ? style.color : video_make_color(0x00, 0x00, 0x00);
+            html_view_draw_text(ctx, alt, color, false, false);
+            html_view_new_line(ctx);
+        }
+
+        ctx->y += margin_bottom;
+        ctx->x = ctx->body_x;
+        ctx->pending_space = false;
+        html_view_ensure_line_visible(ctx);
         return;
     }
 
@@ -660,52 +1113,98 @@ static void html_view_draw_cb(const atk_state_t *state,
     if (viewport_w < 0) viewport_w = 0;
     if (viewport_h < 0) viewport_h = 0;
 
-    video_color_t default_bg = state->theme.window_body;
-    video_color_t default_text = video_make_color(0x10, 0x10, 0x10);
+    video_color_t default_page_bg = video_make_color(0xFF, 0xFF, 0xFF);
+    video_color_t default_text = video_make_color(0x00, 0x00, 0x00);
 
     css_style_t base_style = {0};
     base_style.has_color = true;
     base_style.color = default_text;
 
+    css_style_t html_style = html_view_style_for_tag(priv->sheet, &base_style, "html");
     css_style_t body_style = html_view_style_for_tag(priv->sheet, &base_style, "body");
-    video_color_t bg = body_style.has_background ? body_style.background : default_bg;
+    video_color_t page_bg = html_style.has_background ? html_style.background : default_page_bg;
+    video_color_t body_bg = body_style.has_background ? body_style.background : default_page_bg;
 
-    video_draw_rect(abs_x, abs_y, widget->width, widget->height, bg);
+    video_draw_rect(abs_x, abs_y, widget->width, widget->height, page_bg);
     video_draw_rect_outline(abs_x, abs_y, widget->width, widget->height, state->theme.window_border);
 
     atk_rect_t clip = { viewport_x, viewport_y, viewport_w, viewport_h };
 
-    int body_w = viewport_w;
-    if (body_style.has_width)
+    int base_font_px = atk_font_line_height();
+    int base_line_height = base_font_px + 4;
+    if (base_line_height < 8)
     {
-        int computed = html_view_length_to_px(&body_style.width, viewport_w, viewport_h, atk_font_line_height(), true);
-        if (computed > 0 && computed < body_w)
+        base_line_height = 8;
+    }
+
+    int border_px = 0;
+    if (body_style.has_border)
+    {
+        border_px = html_view_length_to_px(&body_style.border_width, viewport_w, viewport_h, base_font_px, true);
+        if (border_px < 0)
         {
-            body_w = computed;
+            border_px = 0;
         }
     }
-    if (body_w < 0) body_w = 0;
-    if (body_w > viewport_w) body_w = viewport_w;
 
-    int body_x = viewport_x;
+    int pad_top = 0;
+    int pad_right = 0;
+    int pad_bottom = 0;
+    int pad_left = 0;
+    if (body_style.has_padding)
+    {
+        pad_top = html_view_length_to_px(&body_style.padding.top, viewport_w, viewport_h, base_font_px, false);
+        pad_right = html_view_length_to_px(&body_style.padding.right, viewport_w, viewport_h, base_font_px, true);
+        pad_bottom = html_view_length_to_px(&body_style.padding.bottom, viewport_w, viewport_h, base_font_px, false);
+        pad_left = html_view_length_to_px(&body_style.padding.left, viewport_w, viewport_h, base_font_px, true);
+        if (pad_top < 0) pad_top = 0;
+        if (pad_right < 0) pad_right = 0;
+        if (pad_bottom < 0) pad_bottom = 0;
+        if (pad_left < 0) pad_left = 0;
+    }
+
+    int body_content_w = viewport_w;
+    if (body_style.has_width)
+    {
+        int computed = html_view_length_to_px(&body_style.width, viewport_w, viewport_h, base_font_px, true);
+        if (computed > 0)
+        {
+            body_content_w = computed;
+        }
+    }
+    if (body_content_w < 0) body_content_w = 0;
+
+    int body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    if (body_box_w > viewport_w)
+    {
+        int max_content = viewport_w - pad_left - pad_right - border_px * 2;
+        if (max_content < 0)
+        {
+            max_content = 0;
+        }
+        body_content_w = max_content;
+        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    }
+
+    int body_box_x = viewport_x;
     if (body_style.has_margin)
     {
         bool auto_left = body_style.margin.left.valid && body_style.margin.left.is_auto;
         bool auto_right = body_style.margin.right.valid && body_style.margin.right.is_auto;
         if (auto_left && auto_right)
         {
-            body_x = viewport_x + (viewport_w - body_w) / 2;
+            body_box_x = viewport_x + (viewport_w - body_box_w) / 2;
         }
         else if (body_style.margin.left.valid && !body_style.margin.left.is_auto)
         {
-            body_x = viewport_x + html_view_length_to_px(&body_style.margin.left, viewport_w, viewport_h, atk_font_line_height(), true);
+            body_box_x = viewport_x + html_view_length_to_px(&body_style.margin.left, viewport_w, viewport_h, base_font_px, true);
         }
     }
 
     int margin_top = 0;
     if (body_style.has_margin && body_style.margin.top.valid && !body_style.margin.top.is_auto)
     {
-        margin_top = html_view_length_to_px(&body_style.margin.top, viewport_w, viewport_h, atk_font_line_height(), false);
+        margin_top = html_view_length_to_px(&body_style.margin.top, viewport_w, viewport_h, base_font_px, false);
     }
 
     const html_node_t *body = NULL;
@@ -714,45 +1213,86 @@ static void html_view_draw_cb(const atk_state_t *state,
         body = html_view_find_first_element(priv->doc->root, "body");
     }
 
-    html_view_ctx_t ctx = {
+    int body_box_y0 = viewport_y + margin_top;
+    int body_content_x = body_box_x + border_px + pad_left;
+    int body_content_y0 = body_box_y0 + border_px + pad_top;
+
+    html_view_ctx_t layout = {
         .state = state,
         .widget = widget,
         .priv = priv,
         .sheet = priv->sheet,
-        .bg = bg,
+        .bg = body_bg,
         .clip = clip,
         .viewport_x = viewport_x,
         .viewport_y = viewport_y,
         .viewport_w = viewport_w,
         .viewport_h = viewport_h,
-        .body_x = body_x,
-        .body_w = body_w,
-        .line_height = atk_font_line_height() + 4,
+        .body_x = body_content_x,
+        .body_w = body_content_w,
+        .base_font_px = base_font_px,
+        .base_line_height = base_line_height,
+        .line_height = base_line_height,
         .space_w = atk_font_text_width(" "),
-        .x = body_x,
-        .y = viewport_y + margin_top,
-        .max_x = body_x + body_w,
-        .content_bottom = viewport_y + margin_top,
-        .pending_space = false
+        .x = body_content_x,
+        .y = body_content_y0,
+        .max_x = body_content_x + body_content_w,
+        .content_bottom = body_content_y0,
+        .list_level = 0,
+        .pending_space = false,
+        .draw = false
     };
-
-    if (ctx.line_height < 8)
-    {
-        ctx.line_height = 8;
-    }
 
     if (body)
     {
-        ctx.draw = true;
+        html_view_render_children(&layout, body, &body_style);
+    }
+    else
+    {
+        html_view_draw_text(&layout, "No document.\n", default_text, false, false);
+    }
+
+    int body_box_h = (layout.content_bottom - body_box_y0) + pad_bottom + border_px;
+    int min_h = border_px * 2 + pad_top + pad_bottom;
+    if (body_box_h < min_h)
+    {
+        body_box_h = min_h;
+    }
+
+    int body_draw_y = body_box_y0 - priv->scroll_y;
+    html_view_draw_rect_clipped(body_box_x, body_draw_y, body_box_w, body_box_h, body_bg, &clip);
+    if (border_px > 0)
+    {
+        video_color_t border_color = body_style.has_border_color ? body_style.border_color : video_make_color(0x00, 0x00, 0x00);
+        html_view_draw_border_clipped(body_box_x, body_draw_y, body_box_w, body_box_h, border_px, border_color, &clip);
+    }
+
+    html_view_ctx_t ctx = layout;
+    ctx.draw = true;
+    ctx.x = body_content_x;
+    ctx.y = body_content_y0;
+    ctx.content_bottom = body_content_y0;
+    ctx.list_level = 0;
+    ctx.line_height = base_line_height;
+    ctx.pending_space = false;
+
+    if (body)
+    {
         html_view_render_children(&ctx, body, &body_style);
     }
     else
     {
-        ctx.draw = true;
         html_view_draw_text(&ctx, "No document.\n", default_text, false, false);
     }
 
-    priv->content_height = ctx.content_bottom - viewport_y;
+    int final_bottom = ctx.content_bottom;
+    int body_bottom = body_box_y0 + body_box_h;
+    if (body_bottom > final_bottom)
+    {
+        final_bottom = body_bottom;
+    }
+
+    priv->content_height = final_bottom - viewport_y;
     if (priv->content_height < 0)
     {
         priv->content_height = 0;
@@ -770,6 +1310,13 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
     atk_html_view_priv_t *priv = html_view_priv_mut(widget);
     if (priv)
     {
+        html_view_images_clear(priv);
+        if (priv->external_css)
+        {
+            free(priv->external_css);
+            priv->external_css = NULL;
+            priv->external_css_len = 0;
+        }
         if (priv->doc)
         {
             html_document_destroy(priv->doc);
@@ -839,6 +1386,9 @@ atk_widget_t *atk_window_add_html_view(atk_widget_t *window, int x, int y, int w
     priv->last_height = height;
     priv->doc = NULL;
     priv->sheet = NULL;
+    priv->external_css = NULL;
+    priv->external_css_len = 0;
+    priv->images = NULL;
 
     atk_list_node_t *child_node = atk_list_push_back(&wpriv->children, view);
     if (!child_node)
@@ -885,6 +1435,13 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     {
         html_document_destroy(priv->doc);
     }
+    html_view_images_clear(priv);
+    if (priv->external_css)
+    {
+        free(priv->external_css);
+        priv->external_css = NULL;
+        priv->external_css_len = 0;
+    }
     priv->doc = doc;
     priv->scroll_y = 0;
     html_view_rebuild_stylesheet(priv);
@@ -904,5 +1461,88 @@ bool atk_html_view_set_html(atk_widget_t *view, const char *html, html_parse_err
         return false;
     }
     atk_html_view_set_document(view, doc);
+    return true;
+}
+
+void atk_html_view_set_external_stylesheet(atk_widget_t *view, const char *css_text)
+{
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return;
+    }
+
+    if (priv->external_css)
+    {
+        free(priv->external_css);
+        priv->external_css = NULL;
+        priv->external_css_len = 0;
+    }
+
+    if (css_text && css_text[0] != '\0')
+    {
+        priv->external_css = html_view_strdup(css_text);
+        if (priv->external_css)
+        {
+            priv->external_css_len = strlen(priv->external_css);
+        }
+    }
+
+    html_view_rebuild_stylesheet(priv);
+    html_view_invalidate(view);
+}
+
+bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint8_t *data, size_t size)
+{
+    if (!view || !src || src[0] == '\0' || !data || size == 0)
+    {
+        return false;
+    }
+
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return false;
+    }
+
+    if (html_view_image_find(priv, src))
+    {
+        return true;
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0;
+    int h = 0;
+    int stride_bytes = 0;
+    int rc = png_decode_rgba32(data, size, &pixels, &w, &h, &stride_bytes);
+    if (rc != 0 || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
+    {
+        free(pixels);
+        return false;
+    }
+
+    html_view_image_t *img = (html_view_image_t *)calloc(1, sizeof(*img));
+    if (!img)
+    {
+        free(pixels);
+        return false;
+    }
+
+    img->src = html_view_strdup(src);
+    if (!img->src)
+    {
+        free(pixels);
+        free(img);
+        return false;
+    }
+
+    img->pixels = pixels;
+    img->width = w;
+    img->height = h;
+    img->stride_bytes = stride_bytes;
+    img->next = priv->images;
+    priv->images = img;
+
+    html_view_invalidate(view);
     return true;
 }

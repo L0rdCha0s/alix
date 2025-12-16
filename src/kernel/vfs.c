@@ -1252,6 +1252,21 @@ void vfs_init(void)
     node->capacity = 0;
     node->data = NULL;
     root = node;
+
+    /* Common scratch directory for userland programs. Keep it heap-backed. */
+    vfs_node_t *tmp = vfs_alloc_node(VFS_NODE_DIR);
+    if (tmp)
+    {
+        tmp->name = vfs_strdup("tmp");
+        if (tmp->name)
+        {
+            vfs_attach_child(root, tmp);
+        }
+        else
+        {
+            free(tmp);
+        }
+    }
 }
 
 /*

@@ -2112,6 +2112,36 @@ bool tls_session_init_fd(tls_session_t *session, int socket_fd)
     return true;
 }
 
+tls_session_t *tls_session_create_fd(int socket_fd)
+{
+    if (socket_fd < 0)
+    {
+        return NULL;
+    }
+
+    tls_session_t *session = (tls_session_t *)malloc(sizeof(*session));
+    if (!session)
+    {
+        return NULL;
+    }
+    if (!tls_session_init_fd(session, socket_fd))
+    {
+        free(session);
+        return NULL;
+    }
+    return session;
+}
+
+void tls_session_destroy(tls_session_t *session)
+{
+    if (!session)
+    {
+        return;
+    }
+    tls_session_close(session);
+    free(session);
+}
+
 bool tls_session_handshake(tls_session_t *session, const char *hostname)
 {
     if (!session || session->socket_fd < 0)

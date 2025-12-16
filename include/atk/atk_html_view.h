@@ -33,6 +33,21 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc);
  */
 bool atk_html_view_set_html(atk_widget_t *view, const char *html, html_parse_error_t *error_out);
 
+/*
+ * Replace the external stylesheet text (typically from `<link rel="stylesheet">`).
+ *
+ * Passing NULL clears any previously set external stylesheet.
+ */
+void atk_html_view_set_external_stylesheet(atk_widget_t *view, const char *css_text);
+
+/*
+ * Add a PNG image resource that can be referenced by `<img src="...">`.
+ *
+ * `src` should match the `src` attribute value used in the DOM (often an
+ * absolute URL after resolution by the browser).
+ */
+bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint8_t *data, size_t size);
+
 extern const atk_class_t ATK_HTML_VIEW_CLASS;
 
 #ifdef __cplusplus
@@ -40,4 +55,3 @@ extern const atk_class_t ATK_HTML_VIEW_CLASS;
 #endif
 
 #endif /* ATK_HTML_VIEW_H */
-
