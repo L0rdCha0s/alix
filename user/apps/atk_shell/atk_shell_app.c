@@ -393,6 +393,7 @@ static bool shell_handle_tab_completion(atk_shell_app_t *app)
             memcpy(input + word_start + token_len, list.items[0] + token_len, add_len);
             len += add_len;
             cursor += add_len;
+            token_len = common;
             input[len] = '\0';
             updated = true;
         }

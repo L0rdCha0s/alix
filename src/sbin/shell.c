@@ -2005,6 +2005,7 @@ static bool cli_handle_tab(shell_state_t *shell,
             memcpy(buffer + word_start + token_len, list.items[0] + token_len, add_len);
             *len += add_len;
             cursor_pos += add_len;
+            token_len = common;
             buffer[*len] = '\0';
             updated = true;
         }
