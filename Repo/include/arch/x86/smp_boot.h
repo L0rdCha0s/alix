@@ -1,0 +1,23 @@
+#ifndef ARCH_X86_SMP_BOOT_H
+#define ARCH_X86_SMP_BOOT_H
+
+#ifdef __ASSEMBLER__
+#define SMP_BOOT_DATA_PHYS        0x0000000000007000
+#define SMP_TRAMPOLINE_PHYS       0x0000000000008000
+#else
+#define SMP_BOOT_DATA_PHYS        0x0000000000007000ULL
+#define SMP_TRAMPOLINE_PHYS       0x0000000000008000ULL
+#endif
+
+#define SMP_BOOT_STACK_OFFSET         0x00
+#define SMP_BOOT_ENTRY_OFFSET         0x08
+#define SMP_BOOT_PML4_OFFSET          0x10
+#define SMP_BOOT_APIC_ID_OFFSET       0x18
+#define SMP_BOOT_STAGE_OFFSET         0x20
+#define SMP_BOOT_CR4_OFFSET           0x28
+#define SMP_BOOT_EFER_OFFSET          0x30
+#define SMP_BOOT_CR0_OFFSET           0x38
+#define SMP_BOOT_IDT_LIMIT_OFFSET     0x40
+#define SMP_BOOT_IDT_BASE_OFFSET      0x42
+
+#endif /* ARCH_X86_SMP_BOOT_H */

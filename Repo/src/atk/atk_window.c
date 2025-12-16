@@ -1,0 +1,1557 @@
+#include "atk_window.h"
+
+#include <stddef.h>
+#include "libc.h"
+#include "serial.h"
+#include "video.h"
+#include "atk/atk_image.h"
+#include "atk/atk_label.h"
+#include "atk/atk_iconbox.h"
+#include "atk/atk_nav_stack.h"
+#include "atk/atk_scrollbar.h"
+#include "atk/atk_list_view.h"
+#include "atk/atk_tabs.h"
+#include "atk/atk_text_input.h"
+#ifndef KERNEL_BUILD
+#include "atk/atk_terminal.h"
+#endif
+#include "atk/atk_font.h"
+#ifdef KERNEL_BUILD
+#include "user_atk_host.h"
+#endif
+
+static inline bool pointer_is_canonical(const void *ptr)
+{
+    if (!ptr)
+    {
+        return true;
+    }
+    uint64_t v = (uint64_t)(uintptr_t)ptr;
+    uint64_t top = v >> 47;
+    return (top == 0u) || (top == 0x1FFFFu);
+}
+
+ #if ATK_DEBUG && defined(KERNEL_BUILD)
+#define ATK_WINDOW_LOG(...) serial_printf(__VA_ARGS__)
+#else
+#define ATK_WINDOW_LOG(...) ((void)0)
+#endif
+
+/* Forward decl for compilers if video.h doesn't expose it (no harm if duplicated). */
+static void atk_log(const char *msg);
+static bool window_list_pointer_valid(const void *ptr);
+static bool window_sanitize_list(atk_state_t *state);
+static void format_window_title(char *buffer, size_t capacity, int id);
+static void window_get_bounds(const atk_widget_t *window, int *x, int *y, int *width, int *height);
+static atk_widget_t *window_add_button(atk_widget_t *window,
+                                       const char *title,
+                                       int rel_x,
+                                       int rel_y,
+                                       int width,
+                                       int height,
+                                       atk_button_style_t style,
+                                       bool draggable,
+                                       atk_button_action_t action,
+                                       void *context);
+static void action_window_close(atk_widget_t *button, void *context);
+static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window);
+static void window_layout_close_button(atk_widget_t *window, atk_window_priv_t *priv);
+static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv);
+static void window_after_size_change(atk_widget_t *window);
+static atk_window_priv_t *window_priv_mut(atk_widget_t *window);
+static const atk_window_priv_t *window_priv(const atk_widget_t *window);
+static void window_destroy(atk_widget_t *window);
+static void window_destroy_value(void *value);
+static void window_debug_dump_node(const atk_list_node_t *node, size_t index);
+static void window_reset_children(atk_window_priv_t *priv, const char *where);
+static inline atk_list_node_t *window_child_next_safe(atk_list_node_t *node, const char *where);
+
+#define WINDOW_CHILD_GUARD_LIMIT 4096u
+
+extern const atk_class_t ATK_BUTTON_CLASS;
+static const atk_widget_vtable_t window_vtable = { 0 };
+const atk_class_t ATK_WINDOW_CLASS = { "Window", &ATK_WIDGET_CLASS, &window_vtable, sizeof(atk_window_priv_t) };
+
+static inline bool window_list_node_ok(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (window_list_pointer_valid(node))
+    {
+        return true;
+    }
+    ATK_WINDOW_LOG("[atk_window] window list corrupt node=%p (%s)", node, where ? where : "?");
+    return false;
+}
+
+static inline atk_list_node_t *window_list_next_safe(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (!window_list_node_ok(node, where))
+    {
+        return NULL;
+    }
+    atk_list_node_t *next = node->next;
+    if (next && !window_list_pointer_valid(next))
+    {
+        ATK_WINDOW_LOG("[atk_window] window list corrupt next=%p (%s)", next, where ? where : "?");
+        return NULL;
+    }
+    return next;
+}
+
+static inline atk_list_node_t *window_list_prev_safe(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (!window_list_node_ok(node, where))
+    {
+        return NULL;
+    }
+    atk_list_node_t *prev = node->prev;
+    if (prev && !window_list_pointer_valid(prev))
+    {
+        ATK_WINDOW_LOG("[atk_window] window list corrupt prev=%p (%s)", prev, where ? where : "?");
+        return NULL;
+    }
+    return prev;
+}
+
+static inline atk_list_node_t *window_child_next_safe(atk_list_node_t *node, const char *where)
+{
+    (void)where;
+    if (!window_list_node_ok(node, where))
+    {
+        return NULL;
+    }
+    atk_list_node_t *next = node->next;
+    if (next == node)
+    {
+        ATK_WINDOW_LOG("[atk][window] child list self-loop (%s)\r\n", where ? where : "?");
+        return NULL;
+    }
+    if (next && !window_list_pointer_valid(next))
+    {
+        ATK_WINDOW_LOG("[atk][window] child list corrupt next=%p (%s)\r\n", next, where ? where : "?");
+        return NULL;
+    }
+    return next;
+}
+
+static void window_reset_children(atk_window_priv_t *priv, const char *where)
+{
+    (void)where;
+    if (!priv)
+    {
+        return;
+    }
+    ATK_WINDOW_LOG("[atk][window] resetting children list (%s)\r\n", where ? where : "?");
+    priv->children.head = NULL;
+    priv->children.tail = NULL;
+    priv->children.size = 0;
+}
+
+void atk_window_reset_all(atk_state_t *state)
+{
+    if (!state)
+    {
+        return;
+    }
+
+    atk_guard_check(&state->windows_guard_front, &state->windows_guard_back, "state->windows");
+    bool list_safe = window_sanitize_list(state);
+    if (list_safe)
+    {
+        atk_list_clear(&state->windows, window_destroy_value);
+    }
+    atk_list_init(&state->windows);
+    atk_guard_reset(&state->windows_guard_front, &state->windows_guard_back);
+
+    state->next_window_id = 1;
+    state->dragging_window = 0;
+    state->drag_offset_x = 0;
+    state->drag_offset_y = 0;
+    state->resizing_window = NULL;
+    state->resize_edges = 0;
+    state->resize_start_cursor_x = 0;
+    state->resize_start_cursor_y = 0;
+    state->resize_start_x = 0;
+    state->resize_start_y = 0;
+    state->resize_start_width = 0;
+    state->resize_start_height = 0;
+    if (state->drag_scene)
+    {
+        free(state->drag_scene);
+        state->drag_scene = NULL;
+    }
+    state->drag_scene_w = 0;
+    state->drag_scene_h = 0;
+    state->drag_scene_stride_bytes = 0;
+    state->drag_scene_valid = false;
+    state->drag_window_surface = NULL;
+    state->drag_window_w = 0;
+    state->drag_window_h = 0;
+    state->drag_window_stride_bytes = 0;
+    state->drag_prev_x = 0;
+    state->drag_prev_y = 0;
+    state->drag_start_x = 0;
+    state->drag_start_y = 0;
+    state->drag_start_w = 0;
+    state->drag_start_h = 0;
+    state->drag_active = false;
+    if (state->drag_overlay)
+    {
+        free(state->drag_overlay);
+        state->drag_overlay = NULL;
+    }
+    state->drag_overlay_w = 0;
+    state->drag_overlay_h = 0;
+    state->drag_overlay_stride_bytes = 0;
+    state->resize_band.active = false;
+    state->resize_band.x = 0;
+    state->resize_band.y = 0;
+    state->resize_band.width = 0;
+    state->resize_band.height = 0;
+    state->resize_proposed_x = 0;
+    state->resize_proposed_y = 0;
+    state->resize_proposed_w = 0;
+    state->resize_proposed_h = 0;
+    state->pressed_window_button_window = 0;
+    state->pressed_window_button = 0;
+    state->title_click_last_ms = 0;
+    state->title_click_last_window = NULL;
+    state->title_click_last_x = 0;
+    state->title_click_last_y = 0;
+    state->focus_widget = NULL;
+    state->mouse_capture_widget = NULL;
+}
+
+static bool window_intersects_clip(const atk_widget_t *window, const atk_rect_t *clip)
+{
+    if (!clip || !window)
+    {
+        return true;
+    }
+    int x0 = window->x - ATK_WINDOW_BORDER;
+    int y0 = window->y - ATK_WINDOW_BORDER;
+    int x1 = x0 + window->width + ATK_WINDOW_BORDER * 2;
+    int y1 = y0 + window->height + ATK_WINDOW_BORDER * 2;
+    int clip_x1 = clip->x + clip->width;
+    int clip_y1 = clip->y + clip->height;
+    if (x1 <= clip->x || y1 <= clip->y || x0 >= clip_x1 || y0 >= clip_y1)
+    {
+        return false;
+    }
+    return true;
+}
+
+void atk_window_draw_all(const atk_state_t *state, const atk_rect_t *clip)
+{
+    if (!state)
+    {
+        return;
+    }
+
+    atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
+    for (atk_list_node_t *node = state->windows.head; node; )
+    {
+        atk_list_node_t *next = window_list_next_safe(node, "draw_all");
+        atk_widget_t *window = window_list_pointer_valid(node ? node->value : NULL)
+                                   ? (atk_widget_t *)node->value
+                                   : NULL;
+        if (!window && node)
+        {
+            ATK_WINDOW_LOG("[atk_window] window pointer corrupt node=%p (draw_all)", node);
+        }
+
+        if (window && window->used && window_intersects_clip(window, clip))
+        {
+            window_draw_internal(state, window);
+        }
+        node = next;
+    }
+}
+
+void atk_window_draw_all_except(const atk_state_t *state, const atk_rect_t *clip, const atk_widget_t *skip)
+{
+    if (!state)
+    {
+        return;
+    }
+
+    atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
+    for (atk_list_node_t *node = state->windows.head; node; )
+    {
+        atk_list_node_t *next = window_list_next_safe(node, "draw_all_except");
+        atk_widget_t *window = window_list_pointer_valid(node ? node->value : NULL)
+                                   ? (atk_widget_t *)node->value
+                                   : NULL;
+        if (!window && node)
+        {
+            ATK_WINDOW_LOG("[atk_window] window pointer corrupt node=%p (draw_all_except)", node);
+        }
+
+        if (window && window->used && (!skip || window != skip) && window_intersects_clip(window, clip))
+        {
+            window_draw_internal(state, window);
+        }
+        node = next;
+    }
+}
+
+bool atk_window_bring_to_front(atk_state_t *state, atk_widget_t *window)
+{
+    if (!state || !window)
+    {
+        return false;
+    }
+
+    atk_guard_check(&state->windows_guard_front, &state->windows_guard_back, "state->windows");
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv || !priv->list_node)
+    {
+        return false;
+    }
+
+    if (state->windows.tail == priv->list_node)
+    {
+        return false;
+    }
+
+    atk_list_move_to_back(&state->windows, priv->list_node);
+    return true;
+}
+
+atk_widget_t *atk_window_hit_test(const atk_state_t *state, int x, int y)
+{
+    if (!state)
+    {
+        return 0;
+    }
+
+    atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
+    ATK_LIST_FOR_EACH_REVERSE(node, &state->windows)
+    {
+        atk_widget_t *window = (atk_widget_t *)node->value;
+        if (!window || !window->used)
+        {
+            continue;
+        }
+        if (x >= window->x && x < window->x + window->width &&
+            y >= window->y && y < window->y + window->height)
+        {
+            return window;
+        }
+    }
+    return 0;
+}
+
+atk_widget_t *atk_window_title_hit_test(const atk_state_t *state, int x, int y)
+{
+    if (!state)
+    {
+        return 0;
+    }
+
+    atk_guard_check((uint64_t *)&state->windows_guard_front, (uint64_t *)&state->windows_guard_back, "state->windows");
+    ATK_LIST_FOR_EACH_REVERSE(node, &state->windows)
+    {
+        atk_widget_t *window = (atk_widget_t *)node->value;
+        if (!window || !window->used)
+        {
+            continue;
+        }
+        atk_window_priv_t *priv = window_priv_mut(window);
+        if (!priv || !priv->chrome_visible)
+        {
+            continue;
+        }
+        if (x >= window->x && x < window->x + window->width &&
+            y >= window->y && y < window->y + ATK_WINDOW_TITLE_HEIGHT)
+        {
+            return window;
+        }
+    }
+    return 0;
+}
+
+atk_widget_t *atk_window_get_button_at(atk_widget_t *window, int px, int py)
+{
+    if (!window || !window->used)
+    {
+        return 0;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return 0;
+    }
+
+    ATK_LIST_FOR_EACH_REVERSE(node, &priv->buttons)
+    {
+        atk_widget_t *btn = (atk_widget_t *)node->value;
+        if (!btn || !btn->used)
+        {
+            continue;
+        }
+        if (!priv->chrome_visible && btn == priv->close_button)
+        {
+            continue;
+        }
+        if (atk_button_hit_test(btn, window->x, window->y, px, py))
+        {
+            return btn;
+        }
+    }
+    return 0;
+}
+
+atk_widget_t *atk_window_widget_at(atk_widget_t *window, int px, int py)
+{
+    if (!window || !window->used)
+    {
+        return NULL;
+    }
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window))
+    {
+        return NULL;
+    }
+#endif
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return NULL;
+    }
+
+    /* Prioritize explicit scrollbar hit before general child iteration to ensure drags capture. */
+    ATK_LIST_FOR_EACH_REVERSE(sb_node, &priv->scrollbars)
+    {
+        atk_widget_t *sb = (atk_widget_t *)sb_node->value;
+        if (!sb || !sb->used || sb->parent != window)
+        {
+            continue;
+        }
+        if (atk_widget_hit_test(sb, window->x, window->y, px, py))
+        {
+            return sb;
+        }
+    }
+
+    for (atk_list_node_t *node = priv->children.tail; node; )
+    {
+        atk_list_node_t *prev = window_list_prev_safe(node, "widget_at");
+#if ATK_USER_POINTER_MIN > 0
+        if ((uintptr_t)node < ATK_USER_POINTER_MIN)
+        {
+            node = prev;
+            continue;
+        }
+#endif
+        atk_widget_t *child = window_list_pointer_valid(node ? node->value : NULL)
+                                   ? (atk_widget_t *)node->value
+                                   : NULL;
+        if (!child)
+        {
+            node = prev;
+            continue;
+        }
+        if (child->parent != window)
+        {
+            node = prev;
+            continue;
+        }
+        if (!child->used)
+        {
+            node = prev;
+            continue;
+        }
+#if ATK_USER_POINTER_MIN > 0
+        if ((uintptr_t)child < ATK_USER_POINTER_MIN)
+        {
+            node = prev;
+            continue;
+        }
+#endif
+        if (atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
+        {
+            if (!atk_tab_view_contains_point(child, px, py))
+            {
+                node = prev;
+                continue;
+            }
+
+            if (!atk_tab_view_point_in_tab_bar(child, px, py))
+            {
+                atk_widget_t *content = atk_tab_view_active_content(child);
+                if (content && atk_widget_validate(content, "tab_view content") && content->used)
+                {
+                    int cx = 0;
+                    int cy = 0;
+                    int cw = 0;
+                    int ch = 0;
+                    atk_widget_absolute_bounds(content, &cx, &cy, &cw, &ch);
+                    if (px >= cx && px < cx + cw && py >= cy && py < cy + ch)
+                    {
+                        return content;
+                    }
+                }
+            }
+
+            return child;
+        }
+
+        if (atk_widget_hit_test(child, window->x, window->y, px, py))
+        {
+            return child;
+        }
+        node = prev;
+    }
+    return NULL;
+}
+
+void atk_window_mark_dirty(const atk_widget_t *window)
+{
+    int x, y, w, h;
+    window_get_bounds(window, &x, &y, &w, &h);
+    if (w <= 0 || h <= 0)
+    {
+        return;
+    }
+    atk_window_priv_t *priv = window_priv_mut((atk_widget_t *)window);
+    if (priv)
+    {
+        priv->surface_valid = false;
+    }
+    atk_dirty_mark_rect(x, y, w, h);
+}
+
+void atk_window_request_layout(atk_widget_t *window)
+{
+    if (!window)
+    {
+        return;
+    }
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window))
+    {
+        ATK_WINDOW_LOG("[atk][layout] remote window=%p size=%dx%d pos=(%d,%d)\r\n",
+                       (void *)window,
+                       window->width,
+                       window->height,
+                       window->x,
+                       window->y);
+    }
+#endif
+    window_after_size_change(window);
+    atk_window_mark_dirty(window);
+}
+
+void atk_window_ensure_inside(atk_widget_t *window)
+{
+    if (!window)
+    {
+        return;
+    }
+
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    if (window->width > screen_w)
+    {
+        window->width = screen_w;
+    }
+    if (window->height > screen_h)
+    {
+        window->height = screen_h;
+    }
+
+    int max_x = screen_w - window->width;
+    int max_y = screen_h - window->height;
+
+    if (window->x < 0) window->x = 0;
+    if (window->y < 0) window->y = 0;
+    if (window->x > max_x) window->x = max_x;
+    if (window->y > max_y) window->y = max_y;
+}
+
+bool atk_window_supports_resize(const atk_widget_t *window)
+{
+    if (!window || !window->used)
+    {
+        return false;
+    }
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window) && !user_atk_window_is_resizable(window))
+    {
+        return false;
+    }
+#endif
+    const atk_window_priv_t *priv = window_priv(window);
+    if (priv && priv->shaded)
+    {
+        return false;
+    }
+    return true;
+}
+
+atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
+{
+    if (!state)
+    {
+        return 0;
+    }
+
+    atk_widget_t *window = atk_widget_create(&ATK_WINDOW_CLASS);
+    if (!window)
+    {
+        atk_log("window_create_at: allocation failed");
+        return 0;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        atk_widget_destroy(window);
+        return 0;
+    }
+
+    atk_list_init(&priv->buttons);
+    priv->close_button = NULL;
+    atk_list_init(&priv->children);
+    atk_list_init(&priv->text_inputs);
+    atk_list_init(&priv->terminals);
+    atk_list_init(&priv->scrollbars);
+    priv->list_node = 0;
+    priv->user_context = NULL;
+    priv->on_destroy = NULL;
+    priv->chrome_visible = true;
+    priv->shaded = false;
+    priv->shade_restore_height = 0;
+    priv->surface = NULL;
+    priv->surface_width = 0;
+    priv->surface_height = 0;
+    priv->surface_stride_bytes = 0;
+    priv->surface_valid = false;
+
+    window->used = true;
+    window->width = 600;
+    window->height = 400;
+    window->x = x - window->width / 2;
+    window->y = y - ATK_WINDOW_TITLE_HEIGHT / 2;
+    window->parent = 0;
+
+    format_window_title(priv->title, sizeof(priv->title), state->next_window_id++);
+
+    atk_window_ensure_inside(window);
+
+    int btn_margin = 4;
+    int btn_width = ATK_WINDOW_TITLE_HEIGHT - btn_margin * 2;
+    if (btn_width < ATK_FONT_WIDTH + 4)
+    {
+        btn_width = ATK_FONT_WIDTH + 4;
+    }
+    int btn_height = ATK_WINDOW_TITLE_HEIGHT - btn_margin * 2;
+
+    if (!window_add_button(window,
+                           "X",
+                           window->width - btn_width - btn_margin,
+                           btn_margin,
+                           btn_width,
+                           btn_height,
+                           ATK_BUTTON_STYLE_TITLE_INSIDE,
+                           false,
+                           action_window_close,
+                           window))
+    {
+        window_destroy(window);
+        atk_log("window_create_at: failed to add close button");
+        return 0;
+    }
+
+    atk_list_node_t *node = atk_list_push_back(&state->windows, window);
+    if (!node)
+    {
+        window_destroy(window);
+        atk_log("window_create_at: failed to track window");
+        return 0;
+    }
+
+    priv->list_node = node;
+
+    return window;
+}
+
+void atk_window_close(atk_state_t *state, atk_widget_t *window)
+{
+    if (!state || !window)
+    {
+        return;
+    }
+
+    if (state->dragging_window == window)
+    {
+        state->dragging_window = 0;
+        state->drag_window_surface = NULL;
+        state->drag_active = false;
+    }
+
+    if (state->pressed_window_button_window == window)
+    {
+        state->pressed_window_button_window = 0;
+        state->pressed_window_button = 0;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (priv && priv->list_node)
+    {
+        atk_list_remove(&state->windows, priv->list_node);
+        priv->list_node = 0;
+    }
+
+    atk_widget_t *focus = atk_state_focus_widget(state);
+    if (focus && focus->parent == window)
+    {
+        atk_state_set_focus_widget(state, NULL);
+    }
+
+    if (priv && priv->on_destroy && priv->user_context)
+    {
+        priv->on_destroy(priv->user_context);
+        priv->user_context = NULL;
+    }
+
+    int dirty_x = 0, dirty_y = 0, dirty_w = 0, dirty_h = 0;
+    window_get_bounds(window, &dirty_x, &dirty_y, &dirty_w, &dirty_h);
+    if (dirty_w > 0 && dirty_h > 0)
+    {
+        atk_dirty_mark_rect(dirty_x, dirty_y, dirty_w, dirty_h);
+    }
+
+    window_destroy(window);
+}
+
+const char *atk_window_title(const atk_widget_t *window)
+{
+    const atk_window_priv_t *priv = window_priv(window);
+    if (!priv)
+    {
+        return "";
+    }
+    return priv->title;
+}
+
+void atk_window_set_title_text(atk_widget_t *window, const char *title)
+{
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return;
+    }
+
+    size_t i = 0;
+    if (title)
+    {
+        for (; title[i] != '\0' && i < sizeof(priv->title) - 1; ++i)
+        {
+            priv->title[i] = title[i];
+        }
+    }
+    priv->title[i] = '\0';
+    priv->surface_valid = false;
+    atk_window_mark_dirty(window);
+}
+
+void atk_window_set_context(atk_widget_t *window, void *context, void (*on_destroy)(void *context))
+{
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return;
+    }
+    priv->user_context = context;
+    priv->on_destroy = on_destroy;
+}
+
+void *atk_window_context(const atk_widget_t *window)
+{
+    const atk_window_priv_t *priv = window_priv(window);
+    return priv ? priv->user_context : NULL;
+}
+
+bool atk_window_is_chrome_visible(const atk_widget_t *window)
+{
+    const atk_window_priv_t *priv = window_priv(window);
+    return priv ? priv->chrome_visible : true;
+}
+
+void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
+{
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv || priv->chrome_visible == visible)
+    {
+        return;
+    }
+
+    if (priv->shaded)
+    {
+        if (priv->shade_restore_height > 0)
+        {
+            window->height = priv->shade_restore_height;
+        }
+        priv->shaded = false;
+        priv->shade_restore_height = 0;
+    }
+
+    if (!visible)
+    {
+        window->y -= ATK_WINDOW_TITLE_HEIGHT;
+        window->height += ATK_WINDOW_TITLE_HEIGHT;
+    }
+    else
+    {
+        window->y += ATK_WINDOW_TITLE_HEIGHT;
+        if (window->height > ATK_WINDOW_TITLE_HEIGHT)
+        {
+            window->height -= ATK_WINDOW_TITLE_HEIGHT;
+        }
+    }
+
+    priv->chrome_visible = visible;
+    window_after_size_change(window);
+    priv->surface_valid = false;
+    atk_window_mark_dirty(window);
+}
+
+bool atk_window_is_shaded(const atk_widget_t *window)
+{
+    const atk_window_priv_t *priv = window_priv(window);
+    return priv ? priv->shaded : false;
+}
+
+void atk_window_toggle_shade(atk_widget_t *window)
+{
+    if (!window || !window->used)
+    {
+        return;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv || !priv->chrome_visible)
+    {
+        return;
+    }
+
+    atk_window_mark_dirty(window);
+
+    if (!priv->shaded)
+    {
+        priv->shade_restore_height = window->height;
+        priv->shaded = true;
+        window->height = ATK_WINDOW_TITLE_HEIGHT;
+    }
+    else
+    {
+        priv->shaded = false;
+        if (priv->shade_restore_height > 0)
+        {
+            window->height = priv->shade_restore_height;
+        }
+        priv->shade_restore_height = 0;
+        atk_window_ensure_inside(window);
+    }
+
+    if (window->height < ATK_WINDOW_TITLE_HEIGHT)
+    {
+        window->height = ATK_WINDOW_TITLE_HEIGHT;
+    }
+
+    priv->surface_valid = false;
+    atk_window_mark_dirty(window);
+}
+
+static void atk_log(const char *msg)
+{
+    (void)msg;
+    ATK_WINDOW_LOG("%s\r\n", msg);
+}
+
+static bool window_list_pointer_valid(const void *ptr)
+{
+    if (!ptr)
+    {
+        return true;
+    }
+    uintptr_t addr = (uintptr_t)ptr;
+    uint64_t top = (uint64_t)addr >> 47;
+    return (top == 0u) || (top == 0x1FFFFu);
+}
+
+static bool window_sanitize_list(atk_state_t *state)
+{
+    if (!state)
+    {
+        return true;
+    }
+
+    atk_list_t *list = &state->windows;
+    atk_list_node_t *node = list->head;
+    size_t guard = 0;
+    const size_t guard_limit = 4096;
+    bool corrupted = false;
+
+    while (node)
+    {
+        if (!window_list_pointer_valid(node))
+        {
+            corrupted = true;
+            break;
+        }
+
+        guard++;
+        if (guard > guard_limit)
+        {
+            corrupted = true;
+            break;
+        }
+
+        atk_list_node_t *next = node->next;
+        if (next && !window_list_pointer_valid(next))
+        {
+            corrupted = true;
+            break;
+        }
+
+        node = next;
+    }
+
+    if (corrupted)
+    {
+        ATK_WINDOW_LOG("%s", "atk: window list corrupted; resetting\r\n");
+        list->head = NULL;
+        list->tail = NULL;
+        list->size = 0;
+        return false;
+    }
+
+    if (list->tail && !window_list_pointer_valid(list->tail))
+    {
+        ATK_WINDOW_LOG("%s", "atk: window list tail corrupted; resetting\r\n");
+        list->head = NULL;
+        list->tail = NULL;
+        list->size = 0;
+        return false;
+    }
+
+    return true;
+}
+
+bool atk_window_list_validate(atk_state_t *state)
+{
+    return window_sanitize_list(state);
+}
+
+static void window_debug_dump_node(const atk_list_node_t *node, size_t index)
+{
+    (void)index;
+    const atk_widget_t *win = node ? (const atk_widget_t *)node->value : NULL;
+    ATK_WINDOW_LOG("%s", "[atk][winlist] idx=");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)index);
+    ATK_WINDOW_LOG("%s", " node=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)node));
+    ATK_WINDOW_LOG("%s", " next=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)(node ? node->next : NULL)));
+    ATK_WINDOW_LOG("%s", " win=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)win));
+    if (win)
+    {
+        ATK_WINDOW_LOG("%s", " used=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->used));
+        ATK_WINDOW_LOG("%s", " x=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->x));
+        ATK_WINDOW_LOG("%s", " y=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->y));
+        ATK_WINDOW_LOG("%s", " w=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->width));
+        ATK_WINDOW_LOG("%s", " h=");
+        ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)win->height));
+    }
+    ATK_WINDOW_LOG("%s", "\r\n");
+}
+
+void atk_window_list_dump(atk_state_t *state, const char *label)
+{
+    (void)label;
+    ATK_WINDOW_LOG("%s", "[atk][winlist] dump label=");
+    ATK_WINDOW_LOG("%s", label ? label : "?");
+    ATK_WINDOW_LOG("%s", "\r\n");
+
+    if (!state)
+    {
+        ATK_WINDOW_LOG("%s", "[atk][winlist] state null\r\n");
+        return;
+    }
+
+    atk_list_t *list = &state->windows;
+    ATK_WINDOW_LOG("%s", "[atk][winlist] head=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)list->head));
+    ATK_WINDOW_LOG("%s", " tail=0x");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)(uintptr_t)list->tail));
+    ATK_WINDOW_LOG("%s", " size=");
+    ATK_WINDOW_LOG("%016llX", (unsigned long long)((uint64_t)list->size));
+    ATK_WINDOW_LOG("%s", "\r\n");
+
+    const size_t max_nodes = 32;
+    size_t idx = 0;
+    for (atk_list_node_t *node = list->head; node && idx < max_nodes; node = node->next, ++idx)
+    {
+        window_debug_dump_node(node, idx);
+    }
+    if (idx >= max_nodes)
+    {
+        ATK_WINDOW_LOG("%s", "[atk][winlist] truncated\r\n");
+    }
+}
+
+static void window_layout_close_button(atk_widget_t *window, atk_window_priv_t *priv)
+{
+    if (!window || !priv || !priv->close_button)
+    {
+        return;
+    }
+
+    atk_widget_t *btn = priv->close_button;
+    if (!btn || !btn->used)
+    {
+        return;
+    }
+
+    int margin = 4;
+    int target_x = window->width - margin - btn->width;
+    if (target_x < margin)
+    {
+        target_x = margin;
+    }
+    btn->x = target_x;
+}
+
+static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv)
+{
+    if (!window || !priv)
+    {
+        return;
+    }
+
+    int saved_height = window->height;
+    bool override_height = priv->shaded &&
+                           priv->shade_restore_height > 0 &&
+                           priv->shade_restore_height != window->height;
+    if (override_height)
+    {
+        window->height = priv->shade_restore_height;
+    }
+
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->children.head; node && guard < WINDOW_CHILD_GUARD_LIMIT; node = window_child_next_safe(node, "layout_children"), guard++)
+    {
+        if (!window_list_pointer_valid(node))
+        {
+            ATK_WINDOW_LOG("%s", "[atk][layout] invalid child node; skipping\r\n");
+            continue;
+        }
+        atk_widget_t *child = (atk_widget_t *)node->value;
+        if (!child || !child->used)
+        {
+            continue;
+        }
+        if (child->parent != window)
+        {
+            continue;
+        }
+        if (!atk_widget_validate(child, "window_layout_children child"))
+        {
+            ATK_WINDOW_LOG("%s", "[atk][layout] invalid child widget; skipping\r\n");
+            continue;
+        }
+
+        atk_widget_apply_layout(child);
+
+        if (atk_widget_is_a(child, &ATK_TAB_VIEW_CLASS))
+        {
+            atk_tab_view_relayout(child);
+        }
+        else if (atk_widget_is_a(child, &ATK_NAV_STACK_CLASS))
+        {
+            atk_nav_stack_relayout(child);
+        }
+        else if (atk_widget_is_a(child, &ATK_ICONBOX_CLASS))
+        {
+            atk_iconbox_relayout(child);
+        }
+        else if (atk_widget_is_a(child, &ATK_LIST_VIEW_CLASS))
+        {
+            atk_list_view_relayout(child);
+        }
+#ifndef KERNEL_BUILD
+        else if (atk_widget_is_a(child, &ATK_TERMINAL_CLASS))
+        {
+            atk_terminal_handle_resize(child);
+        }
+#endif
+    }
+    if (guard >= WINDOW_CHILD_GUARD_LIMIT)
+    {
+        window_reset_children(priv, "layout_children_guard");
+    }
+
+    if (override_height)
+    {
+        window->height = saved_height;
+    }
+}
+
+static void window_after_size_change(atk_widget_t *window)
+{
+    if (!window || !window->used)
+    {
+        return;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return;
+    }
+
+    if (priv->chrome_visible)
+    {
+        window_layout_close_button(window, priv);
+    }
+
+    /* Layout remains responsible for user buttons regardless of chrome visibility. */
+    window_layout_children(window, priv);
+
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window))
+    {
+        user_atk_window_resized(window);
+    }
+#endif
+    priv->surface_valid = false;
+}
+
+static void window_draw_internal(const atk_state_t *state, const atk_widget_t *window)
+{
+    if (!state || !window || !window->used)
+    {
+        return;
+    }
+
+#ifdef KERNEL_BUILD
+    if (user_atk_window_is_remote(window))
+    {
+        ATK_WINDOW_LOG("[atk][draw] remote window=%p pos=(%d,%d) size=%dx%d\r\n",
+                       (void *)window,
+                       window->x,
+                       window->y,
+                       window->width,
+                       window->height);
+    }
+#endif
+
+    atk_state_theme_validate(state, "atk_window_draw");
+    const atk_theme_t *theme = &state->theme;
+    atk_window_priv_t *priv_mut = window_priv_mut((atk_widget_t *)window);
+    const atk_window_priv_t *priv = (const atk_window_priv_t *)priv_mut;
+    if (!priv)
+    {
+        return;
+    }
+    bool chrome_visible = priv->chrome_visible;
+    bool shaded = chrome_visible && priv->shaded;
+
+    if (chrome_visible)
+    {
+        window_layout_close_button((atk_widget_t *)window, priv_mut);
+
+        video_draw_rect(window->x - ATK_WINDOW_BORDER,
+                        window->y - ATK_WINDOW_BORDER,
+                        window->width + ATK_WINDOW_BORDER * 2,
+                        window->height + ATK_WINDOW_BORDER * 2,
+                        theme->window_border);
+
+        video_draw_rect(window->x,
+                        window->y,
+                        window->width,
+                        window->height,
+                        theme->window_body);
+
+        video_draw_rect(window->x,
+                        window->y,
+                        window->width,
+                        ATK_WINDOW_TITLE_HEIGHT,
+                        theme->window_title);
+
+        video_draw_rect_outline(window->x,
+                                window->y,
+                                window->width,
+                                ATK_WINDOW_TITLE_HEIGHT,
+                                theme->window_border);
+
+        int title_baseline = atk_font_baseline_for_rect(window->y, ATK_WINDOW_TITLE_HEIGHT);
+        atk_rect_t clip = { window->x, window->y, window->width, ATK_WINDOW_TITLE_HEIGHT };
+        atk_font_draw_string_clipped(window->x + ATK_WINDOW_TITLE_PADDING_X,
+                                     title_baseline,
+                                     priv->title,
+                                     theme->window_title_text,
+                                     theme->window_title,
+                                     &clip);
+
+        video_draw_rect_outline(window->x,
+                                window->y,
+                                window->width,
+                                window->height,
+                                theme->window_border);
+    }
+    else
+    {
+        video_draw_rect(window->x,
+                        window->y,
+                        window->width,
+                        window->height,
+                        theme->window_body);
+    }
+
+    size_t guard = 0;
+    for (atk_list_node_t *node = priv->children.head; node && guard < WINDOW_CHILD_GUARD_LIMIT; node = window_child_next_safe(node, "draw_children"), guard++)
+    {
+        if (!pointer_is_canonical(node))
+        {
+            window_reset_children(priv_mut, "draw_children_badptr");
+            break;
+        }
+#if ATK_USER_POINTER_MIN > 0
+        if ((uintptr_t)node < ATK_USER_POINTER_MIN)
+        {
+            continue;
+        }
+#endif
+        if (!pointer_is_canonical(node->value))
+        {
+            continue;
+        }
+        atk_widget_t *child = (atk_widget_t *)node->value;
+        if (!child || !child->used)
+        {
+            continue;
+        }
+#if ATK_USER_POINTER_MIN > 0
+        if ((uintptr_t)child < ATK_USER_POINTER_MIN)
+        {
+            continue;
+        }
+#endif
+        if (!pointer_is_canonical(child))
+        {
+            continue;
+        }
+        if (!atk_widget_validate(child, "atk_window_draw child"))
+        {
+            continue;
+        }
+        if (child->parent != window)
+        {
+            continue;
+        }
+        if (!chrome_visible && priv && child == priv->close_button)
+        {
+            continue;
+        }
+        if (shaded && child->y + child->height > ATK_WINDOW_TITLE_HEIGHT)
+        {
+            continue;
+        }
+
+        atk_widget_draw_any(state, child);
+    }
+    if (guard >= WINDOW_CHILD_GUARD_LIMIT)
+    {
+        window_reset_children(priv_mut, "draw_children_guard");
+    }
+}
+
+void atk_window_draw(atk_state_t *state, atk_widget_t *window)
+{
+    window_draw_internal(state, window);
+}
+
+void atk_window_draw_from(atk_state_t *state, atk_widget_t *start)
+{
+    if (!state || !start)
+    {
+        return;
+    }
+
+    atk_list_node_t *node = atk_list_find(&state->windows, start);
+    if (!node)
+    {
+        return;
+    }
+
+    for (atk_list_node_t *n = node; n; n = n->next)
+    {
+        atk_widget_t *window = (atk_widget_t *)n->value;
+        if (!window || !window->used)
+        {
+            continue;
+        }
+        window_draw_internal(state, window);
+    }
+}
+
+bool atk_window_contains(const atk_state_t *state, const atk_widget_t *window)
+{
+    if (!state || !window)
+    {
+        return false;
+    }
+    return atk_list_find(&state->windows, window) != NULL;
+}
+
+bool atk_window_is_topmost(const atk_state_t *state, const atk_widget_t *window)
+{
+    if (!state || !window || !state->windows.tail)
+    {
+        return false;
+    }
+    return state->windows.tail->value == window;
+}
+
+static void format_window_title(char *buffer, size_t capacity, int id)
+{
+    if (!buffer || capacity == 0)
+    {
+        return;
+    }
+    const char prefix[] = "Window ";
+    size_t pos = 0;
+    for (size_t i = 0; i < sizeof(prefix) - 1 && pos < capacity - 1; ++i)
+    {
+        buffer[pos++] = prefix[i];
+    }
+
+    char digits[16];
+    size_t digit_count = 0;
+    int value = id;
+    if (value <= 0)
+    {
+        digits[digit_count++] = '0';
+    }
+    else
+    {
+        while (value > 0 && digit_count < sizeof(digits))
+        {
+            digits[digit_count++] = (char)('0' + (value % 10));
+            value /= 10;
+        }
+    }
+
+    while (digit_count > 0 && pos < capacity - 1)
+    {
+        buffer[pos++] = digits[--digit_count];
+    }
+    buffer[pos] = '\0';
+}
+
+static void window_get_bounds(const atk_widget_t *window, int *x, int *y, int *width, int *height)
+{
+    if (!window || !window->used)
+    {
+        if (x) *x = 0;
+        if (y) *y = 0;
+        if (width) *width = 0;
+        if (height) *height = 0;
+        return;
+    }
+
+    const atk_window_priv_t *priv = window_priv(window);
+    bool chrome_visible = priv ? priv->chrome_visible : true;
+
+    int bx, by, bw, bh;
+    if (chrome_visible)
+    {
+        bx = window->x - ATK_WINDOW_BORDER;
+        by = window->y - ATK_WINDOW_BORDER;
+        bw = window->width + ATK_WINDOW_BORDER * 2;
+        bh = window->height + ATK_WINDOW_BORDER * 2;
+    }
+    else
+    {
+        bx = window->x;
+        by = window->y;
+        bw = window->width;
+        bh = window->height;
+    }
+
+    if (x) *x = bx;
+    if (y) *y = by;
+    if (width) *width = bw;
+    if (height) *height = bh;
+}
+
+static atk_widget_t *window_add_button(atk_widget_t *window,
+                                       const char *title,
+                                       int rel_x,
+                                       int rel_y,
+                                       int width,
+                                       int height,
+                                       atk_button_style_t style,
+                                       bool draggable,
+                                       atk_button_action_t action,
+                                       void *context)
+{
+    if (!window)
+    {
+        return 0;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv)
+    {
+        return 0;
+    }
+
+    atk_widget_t *btn = atk_widget_create(&ATK_BUTTON_CLASS);
+    if (!btn)
+    {
+        return 0;
+    }
+
+    btn->x = rel_x;
+    btn->y = rel_y;
+    btn->width = width;
+    btn->height = height;
+    btn->parent = window;
+
+    atk_button_configure(btn,
+                         title,
+                         style,
+                         draggable,
+                         false,
+                         action,
+                         context);
+    atk_list_node_t *child_node = atk_list_push_back(&priv->children, btn);
+    if (!child_node)
+    {
+        atk_widget_destroy(btn);
+        return 0;
+    }
+
+    atk_list_node_t *button_node = atk_list_push_back(&priv->buttons, btn);
+    if (!button_node)
+    {
+        atk_list_remove(&priv->children, child_node);
+        atk_widget_destroy(btn);
+        return 0;
+    }
+
+    atk_button_priv_t *btn_priv = (atk_button_priv_t *)atk_widget_priv(btn, &ATK_BUTTON_CLASS);
+    if (btn_priv)
+    {
+        btn_priv->list_node = button_node;
+    }
+
+    if (action == action_window_close)
+    {
+        priv->close_button = btn;
+    }
+
+    return btn;
+}
+
+atk_widget_t *atk_window_add_button(atk_widget_t *window,
+                                    const char *title,
+                                    int rel_x,
+                                    int rel_y,
+                                    int width,
+                                    int height,
+                                    atk_button_style_t style,
+                                    bool draggable,
+                                    atk_button_action_t action,
+                                    void *context)
+{
+    return window_add_button(window, title, rel_x, rel_y, width, height, style, draggable, action, context);
+}
+
+static void action_window_close(atk_widget_t *button, void *context)
+{
+    (void)button;
+    atk_widget_t *window = (atk_widget_t *)context;
+    atk_state_t *state = atk_state_get();
+    atk_window_close(state, window);
+}
+
+static atk_window_priv_t *window_priv_mut(atk_widget_t *window)
+{
+    if (!window)
+    {
+        return 0;
+    }
+    return (atk_window_priv_t *)atk_widget_priv(window, &ATK_WINDOW_CLASS);
+}
+
+static const atk_window_priv_t *window_priv(const atk_widget_t *window)
+{
+    if (!window)
+    {
+        return 0;
+    }
+    return (const atk_window_priv_t *)atk_widget_priv(window, &ATK_WINDOW_CLASS);
+}
+
+static void window_child_destroy(void *value)
+{
+    atk_widget_t *widget = (atk_widget_t *)value;
+    if (!widget)
+    {
+        return;
+    }
+    atk_widget_destroy_any(widget);
+}
+
+static void window_destroy(atk_widget_t *window)
+{
+    if (!window)
+    {
+        return;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (priv)
+    {
+        atk_list_clear(&priv->children, window_child_destroy);
+        atk_list_clear(&priv->buttons, NULL);
+        atk_list_clear(&priv->text_inputs, NULL);
+        atk_list_clear(&priv->terminals, NULL);
+        atk_list_clear(&priv->scrollbars, NULL);
+        priv->list_node = 0;
+        priv->user_context = NULL;
+        priv->on_destroy = NULL;
+        priv->close_button = NULL;
+        if (priv->surface)
+        {
+            free(priv->surface);
+            priv->surface = NULL;
+        }
+        priv->surface_width = 0;
+        priv->surface_height = 0;
+        priv->surface_stride_bytes = 0;
+        priv->surface_valid = false;
+    }
+
+    atk_widget_destroy(window);
+}
+
+static void window_destroy_value(void *value)
+{
+    window_destroy((atk_widget_t *)value);
+}
