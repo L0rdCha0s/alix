@@ -216,6 +216,10 @@ void atk_window_reset_all(atk_state_t *state)
     state->resize_proposed_h = 0;
     state->pressed_window_button_window = 0;
     state->pressed_window_button = 0;
+    state->title_click_last_ms = 0;
+    state->title_click_last_window = NULL;
+    state->title_click_last_x = 0;
+    state->title_click_last_y = 0;
     state->focus_widget = NULL;
     state->mouse_capture_widget = NULL;
 }
@@ -582,6 +586,11 @@ bool atk_window_supports_resize(const atk_widget_t *window)
         return false;
     }
 #endif
+    const atk_window_priv_t *priv = window_priv(window);
+    if (priv && priv->shaded)
+    {
+        return false;
+    }
     return true;
 }
 
@@ -616,6 +625,8 @@ atk_widget_t *atk_window_create_at(atk_state_t *state, int x, int y)
     priv->user_context = NULL;
     priv->on_destroy = NULL;
     priv->chrome_visible = true;
+    priv->shaded = false;
+    priv->shade_restore_height = 0;
     priv->surface = NULL;
     priv->surface_width = 0;
     priv->surface_height = 0;
@@ -781,6 +792,16 @@ void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
         return;
     }
 
+    if (priv->shaded)
+    {
+        if (priv->shade_restore_height > 0)
+        {
+            window->height = priv->shade_restore_height;
+        }
+        priv->shaded = false;
+        priv->shade_restore_height = 0;
+    }
+
     if (!visible)
     {
         window->y -= ATK_WINDOW_TITLE_HEIGHT;
@@ -797,6 +818,53 @@ void atk_window_set_chrome_visible(atk_widget_t *window, bool visible)
 
     priv->chrome_visible = visible;
     window_after_size_change(window);
+    priv->surface_valid = false;
+    atk_window_mark_dirty(window);
+}
+
+bool atk_window_is_shaded(const atk_widget_t *window)
+{
+    const atk_window_priv_t *priv = window_priv(window);
+    return priv ? priv->shaded : false;
+}
+
+void atk_window_toggle_shade(atk_widget_t *window)
+{
+    if (!window || !window->used)
+    {
+        return;
+    }
+
+    atk_window_priv_t *priv = window_priv_mut(window);
+    if (!priv || !priv->chrome_visible)
+    {
+        return;
+    }
+
+    atk_window_mark_dirty(window);
+
+    if (!priv->shaded)
+    {
+        priv->shade_restore_height = window->height;
+        priv->shaded = true;
+        window->height = ATK_WINDOW_TITLE_HEIGHT;
+    }
+    else
+    {
+        priv->shaded = false;
+        if (priv->shade_restore_height > 0)
+        {
+            window->height = priv->shade_restore_height;
+        }
+        priv->shade_restore_height = 0;
+        atk_window_ensure_inside(window);
+    }
+
+    if (window->height < ATK_WINDOW_TITLE_HEIGHT)
+    {
+        window->height = ATK_WINDOW_TITLE_HEIGHT;
+    }
+
     priv->surface_valid = false;
     atk_window_mark_dirty(window);
 }
@@ -973,6 +1041,15 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
         return;
     }
 
+    int saved_height = window->height;
+    bool override_height = priv->shaded &&
+                           priv->shade_restore_height > 0 &&
+                           priv->shade_restore_height != window->height;
+    if (override_height)
+    {
+        window->height = priv->shade_restore_height;
+    }
+
     size_t guard = 0;
     for (atk_list_node_t *node = priv->children.head; node && guard < WINDOW_CHILD_GUARD_LIMIT; node = window_child_next_safe(node, "layout_children"), guard++)
     {
@@ -1024,6 +1101,11 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
     if (guard >= WINDOW_CHILD_GUARD_LIMIT)
     {
         window_reset_children(priv, "layout_children_guard");
+    }
+
+    if (override_height)
+    {
+        window->height = saved_height;
     }
 }
 
@@ -1085,6 +1167,7 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
         return;
     }
     bool chrome_visible = priv->chrome_visible;
+    bool shaded = chrome_visible && priv->shaded;
 
     if (chrome_visible)
     {
@@ -1180,6 +1263,10 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
             continue;
         }
         if (!chrome_visible && priv && child == priv->close_button)
+        {
+            continue;
+        }
+        if (shaded && child->y + child->height > ATK_WINDOW_TITLE_HEIGHT)
         {
             continue;
         }

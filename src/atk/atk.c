@@ -15,11 +15,13 @@
 #include "atk/atk_text_input.h"
 #include "atk_event_debug.h"
 #ifdef KERNEL_BUILD
+#include "timekeeping.h"
 #include "vfs.h"
 #include "atk/util/png.h"
 #endif
 #ifndef KERNEL_BUILD
 #include "atk/atk_terminal.h"
+#include "usyscall.h"
 #endif
 #include "user_atk_host.h"
 #include "libc.h"
@@ -30,6 +32,15 @@
 #endif
 
 #define ATK_MAX_BG_RECTS 64
+
+static uint64_t atk_now_millis(void)
+{
+#ifdef KERNEL_BUILD
+    return timekeeping_now_millis();
+#else
+    return sys_time_millis();
+#endif
+}
 
 typedef struct
 {
@@ -1174,6 +1185,13 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                                   cursor_x,
                                                   cursor_y,
                                                   &result);
+                if (handled)
+                {
+                    state->title_click_last_ms = 0;
+                    state->title_click_last_window = NULL;
+                    state->title_click_last_x = 0;
+                    state->title_click_last_y = 0;
+                }
             }
 
             if (!handled && hover_window_initial && hover_window_initial->used)
@@ -1182,6 +1200,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                 atk_widget_t *btn = atk_window_get_button_at(win, cursor_x, cursor_y);
                 if (btn)
                 {
+                    state->title_click_last_ms = 0;
+                    state->title_click_last_window = NULL;
+                    state->title_click_last_x = 0;
+                    state->title_click_last_y = 0;
+
                     atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
                     bool moved = atk_window_bring_to_front(state, win);
                     if (moved)
@@ -1213,6 +1236,29 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                                   cursor_y < win->y + ATK_WINDOW_TITLE_HEIGHT;
                 if (over_title)
                 {
+                    uint64_t now_ms = atk_now_millis();
+                    const uint64_t double_click_threshold_ms = 500;
+                    const int double_click_slop_px = 4;
+                    bool double_click = (state->title_click_last_window == win) &&
+                                        state->title_click_last_ms != 0 &&
+                                        (now_ms - state->title_click_last_ms) <= double_click_threshold_ms &&
+                                        abs(cursor_x - state->title_click_last_x) <= double_click_slop_px &&
+                                        abs(cursor_y - state->title_click_last_y) <= double_click_slop_px;
+                    if (double_click)
+                    {
+                        state->title_click_last_ms = 0;
+                        state->title_click_last_window = NULL;
+                        state->title_click_last_x = 0;
+                        state->title_click_last_y = 0;
+                    }
+                    else
+                    {
+                        state->title_click_last_ms = now_ms;
+                        state->title_click_last_window = win;
+                        state->title_click_last_x = cursor_x;
+                        state->title_click_last_y = cursor_y;
+                    }
+
                     /* Keep focus on this window even when dragging its chrome. */
                     user_atk_focus_window(win);
 
@@ -1227,11 +1273,20 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                         }
                         result.redraw = true;
                     }
-                    state->dragging_window = win;
-                    state->drag_offset_x = cursor_x - win->x;
-                    state->drag_offset_y = cursor_y - win->y;
-                    state->drag_active = atk_drag_prepare(state, win);
-                    handled = true;
+                    if (double_click)
+                    {
+                        atk_window_toggle_shade(win);
+                        result.redraw = true;
+                        handled = true;
+                    }
+                    else
+                    {
+                        state->dragging_window = win;
+                        state->drag_offset_x = cursor_x - win->x;
+                        state->drag_offset_y = cursor_y - win->y;
+                        state->drag_active = atk_drag_prepare(state, win);
+                        handled = true;
+                    }
                 }
             }
 
@@ -1240,6 +1295,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                 atk_widget_t *win = atk_window_hit_test(state, cursor_x, cursor_y);
                 if (win && win->used)
                 {
+                    state->title_click_last_ms = 0;
+                    state->title_click_last_window = NULL;
+                    state->title_click_last_x = 0;
+                    state->title_click_last_y = 0;
+
                     atk_widget_t *prev_top = state->windows.tail ? (atk_widget_t *)state->windows.tail->value : NULL;
                     bool moved = atk_window_bring_to_front(state, win);
                     if (moved)
@@ -1306,6 +1366,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
                 atk_widget_t *btn = atk_desktop_button_hit_test(state, cursor_x, cursor_y);
                 if (btn && btn->used)
                 {
+                    state->title_click_last_ms = 0;
+                    state->title_click_last_window = NULL;
+                    state->title_click_last_x = 0;
+                    state->title_click_last_y = 0;
+
                     state->pressed_desktop_button = btn;
                     if (atk_button_is_draggable(btn))
                     {
@@ -1321,6 +1386,10 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
             if (!handled)
             {
+                state->title_click_last_ms = 0;
+                state->title_click_last_window = NULL;
+                state->title_click_last_x = 0;
+                state->title_click_last_y = 0;
                 atk_clear_focus_widget(state);
             }
         }
@@ -1418,6 +1487,11 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
             if (new_bx != old_bx || new_by != old_by)
             {
+                state->title_click_last_ms = 0;
+                state->title_click_last_window = NULL;
+                state->title_click_last_x = 0;
+                state->title_click_last_y = 0;
+
                 atk_dirty_mark_rect(old_bx, old_by, old_bw, old_bh);
                 atk_window_mark_dirty(win);
                 result.redraw = true;
@@ -2001,6 +2075,13 @@ static void atk_drag_step(atk_state_t *state, int cursor_x, int cursor_y)
 
     int old_x = state->drag_prev_x;
     int old_y = state->drag_prev_y;
+    if (new_bx != old_x || new_by != old_y)
+    {
+        state->title_click_last_ms = 0;
+        state->title_click_last_window = NULL;
+        state->title_click_last_x = 0;
+        state->title_click_last_y = 0;
+    }
     int w = state->drag_window_w;
     int h = state->drag_window_h;
 

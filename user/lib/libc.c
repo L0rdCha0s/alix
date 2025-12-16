@@ -177,6 +177,12 @@ static void split_block(heap_block_t *block, size_t size)
         return;
     }
 
+    if (block->next && !user_heap_addr_in_bounds((uintptr_t)block->next))
+    {
+        user_heap_log_corruption("split_block next", block, size, NULL, block->next);
+        return;
+    }
+
     uintptr_t base = (uintptr_t)block;
     uintptr_t new_block_addr = base + sizeof(heap_block_t) + size;
     heap_block_t *new_block = (heap_block_t *)new_block_addr;
@@ -189,6 +195,11 @@ static void split_block(heap_block_t *block, size_t size)
         if (!user_heap_addr_in_bounds((uintptr_t)new_block->next))
         {
             user_heap_log_corruption("split_block next", block, size, new_block, new_block->next);
+            new_block->next = NULL;
+            g_heap_tail = new_block;
+            block->next = new_block;
+            block->size = size;
+            return;
         }
         new_block->next->prev = new_block;
     }
@@ -210,6 +221,13 @@ static void coalesce(heap_block_t *block)
     if (block->next && block->next->free)
     {
         heap_block_t *next = block->next;
+        uintptr_t expected = (uintptr_t)block + sizeof(heap_block_t) + block->size;
+        if ((uintptr_t)next != expected)
+        {
+            user_heap_log_corruption("coalesce nonadjacent", block, 0, next, next);
+        }
+        else
+        {
         block->size += sizeof(heap_block_t) + next->size;
         block->next = next->next;
         if (block->next)
@@ -219,6 +237,7 @@ static void coalesce(heap_block_t *block)
         else
         {
             g_heap_tail = block;
+        }
         }
     }
 
@@ -305,14 +324,8 @@ static void *malloc_locked(size_t size)
         return (uint8_t *)block + sizeof(heap_block_t);
     }
 
-    /*
-     * Grow the heap without holding the spinlock across the syscall, then
-     * re-acquire the lock to splice the new block. This keeps list mutation
-     * serialized while avoiding blocking in sbrk with the lock held.
-     */
-    user_heap_lock_release();
+    /* Grow the heap with the lock held to preserve heap list ordering. */
     heap_block_t *new_block = request_block_unlinked(size);
-    user_heap_lock_acquire();
     if (!new_block)
     {
         return NULL;

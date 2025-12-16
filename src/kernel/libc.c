@@ -187,3 +187,8 @@ int close(int fd)
 {
     return fd_close(fd);
 }
+
+int abs(int value)
+{
+    return (value < 0) ? -value : value;
+}

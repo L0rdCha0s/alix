@@ -333,6 +333,7 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
                 tls_log("TLS: socket read timeout waiting for data");
                 return false;
             }
+            tls_thread_yield();
             continue;
         }
         if (got == 0)

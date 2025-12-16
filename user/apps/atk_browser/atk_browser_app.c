@@ -6,19 +6,27 @@
 #include "atk_menu_bar.h"
 #include "atk_window.h"
 #include "atk/layout.h"
+#include "atk/atk_html_view.h"
+#include "atk/atk_font.h"
+#include "atk/atk_menu.h"
 #include "atk/atk_rich_text.h"
 #include "atk/atk_text_input.h"
 #include "libc.h"
 #include "net/tls.h"
 #include "serial.h"
+#include "stdarg.h"
 #include "stdio.h"
 #include "video.h"
+#include "web/html.h"
 
 #define BROWSER_WIDTH  1000
 #define BROWSER_HEIGHT 720
 #define BROWSER_MARGIN 14
 #define BROWSER_GAP    10
 #define BROWSER_MAX_BYTES (2u * 1024u * 1024u)
+#define BROWSER_DEBUG_LOG_MAX_BYTES (256u * 1024u)
+#define BROWSER_DEBUG_WINDOW_WIDTH  860
+#define BROWSER_DEBUG_WINDOW_HEIGHT 420
 
 typedef struct
 {
@@ -32,6 +40,9 @@ typedef struct
 {
     atk_user_window_t remote;
     atk_widget_t *window;
+    atk_widget_t *menu_button;
+    atk_widget_t *menu_browser;
+    atk_widget_t *menu_open;
     atk_widget_t *url_input;
     atk_widget_t *viewer;
 
@@ -40,6 +51,15 @@ typedef struct
     alix_thread_t fetch_thread;
     char *pending_text;
     bool pending_ready;
+
+    atk_modal_session_t debug_modal;
+    atk_widget_t *debug_window;
+    atk_widget_t *debug_text;
+    char *debug_log;
+    size_t debug_log_len;
+    size_t debug_log_cap;
+    size_t debug_log_flush_offset;
+    bool debug_log_resync;
 } browser_app_t;
 
 static void apply_theme(atk_state_t *state)
@@ -458,6 +478,154 @@ static bool browser_has_token_ci(const char *value, size_t value_len, const char
     return false;
 }
 
+static void browser_http_copy_status_line(const char *headers,
+                                         size_t headers_len,
+                                         char *out,
+                                         size_t out_cap)
+{
+    if (!out || out_cap == 0)
+    {
+        return;
+    }
+    out[0] = '\0';
+    if (!headers || headers_len == 0)
+    {
+        return;
+    }
+
+    size_t max = headers_len;
+    for (size_t i = 0; i < max; ++i)
+    {
+        char c = headers[i];
+        if (c == '\r' || c == '\n')
+        {
+            max = i;
+            break;
+        }
+    }
+    if (max >= out_cap)
+    {
+        max = out_cap - 1;
+    }
+    memcpy(out, headers, max);
+    out[max] = '\0';
+}
+
+static int browser_http_parse_status_code(const char *headers, size_t headers_len)
+{
+    if (!headers || headers_len == 0)
+    {
+        return -1;
+    }
+
+    size_t i = 0;
+    while (i < headers_len && (headers[i] == ' ' || headers[i] == '\t'))
+    {
+        ++i;
+    }
+
+    while (i < headers_len && headers[i] != ' ' && headers[i] != '\t' && headers[i] != '\r' && headers[i] != '\n')
+    {
+        ++i;
+    }
+    while (i < headers_len && (headers[i] == ' ' || headers[i] == '\t'))
+    {
+        ++i;
+    }
+
+    if (i + 3 > headers_len)
+    {
+        return -1;
+    }
+    int code = 0;
+    for (int d = 0; d < 3; ++d)
+    {
+        char c = headers[i + (size_t)d];
+        if (c < '0' || c > '9')
+        {
+            return -1;
+        }
+        code = code * 10 + (c - '0');
+    }
+    return code;
+}
+
+static const html_node_t *browser_dom_find_first_element(const html_node_t *root, const char *tag)
+{
+    if (!root || !tag || tag[0] == '\0')
+    {
+        return NULL;
+    }
+
+    const html_node_t *stack[64];
+    size_t sp = 0;
+    stack[sp++] = root;
+
+    while (sp > 0)
+    {
+        const html_node_t *node = stack[--sp];
+        if (node->type == HTML_NODE_ELEMENT && node->name && strcmp(node->name, tag) == 0)
+        {
+            return node;
+        }
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (sp < sizeof(stack) / sizeof(stack[0]))
+            {
+                stack[sp++] = child;
+            }
+        }
+    }
+    return NULL;
+}
+
+static const char *browser_dom_first_text_child(const html_node_t *node)
+{
+    if (!node)
+    {
+        return NULL;
+    }
+    for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+    {
+        if (child->type == HTML_NODE_TEXT && child->text && child->text[0] != '\0')
+        {
+            return child->text;
+        }
+    }
+    return NULL;
+}
+
+static size_t browser_dom_count_nodes(const html_node_t *root, size_t limit)
+{
+    if (!root)
+    {
+        return 0;
+    }
+    if (limit == 0)
+    {
+        limit = 1;
+    }
+
+    const html_node_t *stack[128];
+    size_t sp = 0;
+    stack[sp++] = root;
+    size_t count = 0;
+
+    while (sp > 0 && count < limit)
+    {
+        const html_node_t *node = stack[--sp];
+        count++;
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (sp < sizeof(stack) / sizeof(stack[0]))
+            {
+                stack[sp++] = child;
+            }
+        }
+    }
+    return count;
+}
+
 typedef enum
 {
     BROWSER_CHUNK_READ_SIZE = 0,
@@ -659,6 +827,542 @@ static bool browser_chunked_consume(browser_chunked_t *st,
     return true;
 }
 
+static void browser_debug_log_trim_locked(browser_app_t *app)
+{
+    if (!app || !app->debug_log)
+    {
+        return;
+    }
+
+    if (app->debug_log_len <= BROWSER_DEBUG_LOG_MAX_BYTES)
+    {
+        return;
+    }
+
+    size_t excess = app->debug_log_len - BROWSER_DEBUG_LOG_MAX_BYTES;
+    size_t drop = excess;
+    while (drop < app->debug_log_len && app->debug_log[drop] != '\n')
+    {
+        drop++;
+    }
+    if (drop < app->debug_log_len)
+    {
+        drop++;
+    }
+    if (drop == 0 || drop > app->debug_log_len)
+    {
+        return;
+    }
+
+    memmove(app->debug_log, app->debug_log + drop, app->debug_log_len - drop + 1);
+    app->debug_log_len -= drop;
+    app->debug_log_flush_offset = 0;
+    app->debug_log_resync = true;
+}
+
+static void browser_debug_log_append_locked(browser_app_t *app, const char *data, size_t len)
+{
+    if (!app || !data || len == 0)
+    {
+        return;
+    }
+
+    size_t needed = app->debug_log_len + len + 1;
+    if (needed > app->debug_log_cap)
+    {
+        size_t new_cap = app->debug_log_cap ? app->debug_log_cap : 1024;
+        while (new_cap < needed)
+        {
+            new_cap *= 2;
+        }
+        char *next = (char *)realloc(app->debug_log, new_cap);
+        if (!next)
+        {
+            return;
+        }
+        app->debug_log = next;
+        app->debug_log_cap = new_cap;
+    }
+
+    memcpy(app->debug_log + app->debug_log_len, data, len);
+    app->debug_log_len += len;
+    app->debug_log[app->debug_log_len] = '\0';
+
+    browser_debug_log_trim_locked(app);
+}
+
+static void browser_debug_log_line(browser_app_t *app, const char *line)
+{
+    if (!app || !line)
+    {
+        return;
+    }
+    size_t len = strlen(line);
+
+    alix_mutex_lock(&app->lock);
+    browser_debug_log_append_locked(app, line, len);
+    if (len == 0 || line[len - 1] != '\n')
+    {
+        browser_debug_log_append_locked(app, "\n", 1);
+    }
+    alix_mutex_unlock(&app->lock);
+}
+
+static bool browser_debug_flush(browser_app_t *app);
+static void browser_debug_open_window(browser_app_t *app);
+static void browser_debug_clear(browser_app_t *app);
+
+static void browser_debug_logf(browser_app_t *app, const char *fmt, ...)
+{
+    if (!app || !fmt)
+    {
+        return;
+    }
+
+    char stack_buf[256];
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(stack_buf, sizeof(stack_buf), fmt, args);
+    va_end(args);
+
+    if (n < 0)
+    {
+        return;
+    }
+
+    if ((size_t)n < sizeof(stack_buf))
+    {
+        browser_debug_log_line(app, stack_buf);
+        return;
+    }
+
+    size_t len = (size_t)n;
+    char *heap_buf = (char *)malloc(len + 1);
+    if (!heap_buf)
+    {
+        browser_debug_log_line(app, "<debug log alloc failed>");
+        return;
+    }
+
+    va_start(args, fmt);
+    (void)vsnprintf(heap_buf, len + 1, fmt, args);
+    va_end(args);
+
+    browser_debug_log_line(app, heap_buf);
+    free(heap_buf);
+}
+
+static void browser_menu_open_debug(void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (app)
+    {
+        if (app->menu_browser)
+        {
+            atk_menu_hide(app->menu_browser);
+        }
+        app->menu_open = NULL;
+    }
+    browser_debug_open_window(app);
+}
+
+static void browser_menu_clear_debug(void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (app)
+    {
+        if (app->menu_browser)
+        {
+            atk_menu_hide(app->menu_browser);
+        }
+        app->menu_open = NULL;
+    }
+    browser_debug_clear(app);
+}
+
+static void browser_debug_window_on_destroy(void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+
+    alix_mutex_lock(&app->lock);
+    app->debug_window = NULL;
+    app->debug_text = NULL;
+    app->debug_log_flush_offset = 0;
+    app->debug_log_resync = true;
+    alix_mutex_unlock(&app->lock);
+}
+
+static void browser_debug_close_window(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    atk_state_t *state = atk_state_get();
+    if (state && app->debug_window && app->debug_window->used)
+    {
+        atk_window_close(state, app->debug_window);
+    }
+    app->debug_window = NULL;
+    app->debug_text = NULL;
+
+    if (app->debug_modal.active)
+    {
+        atk_modal_end(&app->debug_modal);
+    }
+}
+
+static void browser_on_close_event(void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app)
+    {
+        atk_main_request_exit();
+        return;
+    }
+
+    if (app->debug_modal.active)
+    {
+        browser_debug_close_window(app);
+        return;
+    }
+
+    atk_main_request_exit();
+}
+
+static void browser_debug_open_window(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    atk_state_t *state = atk_state_get();
+    if (!state)
+    {
+        return;
+    }
+
+    if (app->debug_modal.active)
+    {
+        (void)browser_debug_flush(app);
+        return;
+    }
+
+    alix_mutex_lock(&app->lock);
+    atk_widget_t *existing = app->debug_window;
+    atk_widget_t *existing_text = app->debug_text;
+    alix_mutex_unlock(&app->lock);
+
+    if (existing && existing->used)
+    {
+        if (existing_text && existing_text->used)
+        {
+            atk_rich_text_scroll_to_bottom(existing_text);
+        }
+        atk_window_mark_dirty(existing);
+        return;
+    }
+
+    if (!atk_modal_begin(&app->debug_modal,
+                         "Browser Debug",
+                         BROWSER_DEBUG_WINDOW_WIDTH,
+                         BROWSER_DEBUG_WINDOW_HEIGHT,
+                         0,
+                         app->window))
+    {
+        return;
+    }
+
+    int screen_w = video_screen_width();
+    int screen_h = video_screen_height();
+    if (screen_w <= 0)
+    {
+        screen_w = (int)BROWSER_DEBUG_WINDOW_WIDTH;
+    }
+    if (screen_h <= 0)
+    {
+        screen_h = (int)BROWSER_DEBUG_WINDOW_HEIGHT;
+    }
+
+    atk_widget_t *window = atk_window_create_at(state, screen_w / 2, screen_h / 2);
+    if (!window)
+    {
+        atk_modal_end(&app->debug_modal);
+        return;
+    }
+
+    atk_window_set_chrome_visible(window, false);
+    atk_window_set_title_text(window, "Browser Debug");
+    window->x = 0;
+    window->y = 0;
+    window->width = screen_w;
+    window->height = screen_h;
+    atk_window_ensure_inside(window);
+    atk_window_set_context(window, app, browser_debug_window_on_destroy);
+    atk_window_bring_to_front(state, window);
+
+    int chrome_top = atk_window_is_chrome_visible(window) ? ATK_WINDOW_TITLE_HEIGHT : 0;
+    int margin = 10;
+    int content_x = margin;
+    int content_y = chrome_top + margin;
+    int content_w = window->width - margin * 2;
+    int content_h = window->height - content_y - margin;
+    if (content_w < 16) content_w = 16;
+    if (content_h < 16) content_h = 16;
+
+    atk_widget_t *editor = atk_window_add_rich_text(window, content_x, content_y, content_w, content_h);
+    if (!editor)
+    {
+        atk_window_close(state, window);
+        return;
+    }
+    atk_widget_set_layout(editor,
+                          ATK_WIDGET_ANCHOR_LEFT | ATK_WIDGET_ANCHOR_RIGHT |
+                          ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_BOTTOM);
+    atk_rich_text_set_read_only(editor, true);
+
+    alix_mutex_lock(&app->lock);
+    app->debug_window = window;
+    app->debug_text = editor;
+    app->debug_log_flush_offset = 0;
+    app->debug_log_resync = true;
+    alix_mutex_unlock(&app->lock);
+    (void)browser_debug_flush(app);
+    atk_window_mark_dirty(window);
+}
+
+static bool browser_menu_button_hit_test(const atk_widget_t *button, int px, int py)
+{
+    if (!button || !button->used)
+    {
+        return false;
+    }
+
+    int origin_x = 0;
+    int origin_y = 0;
+    if (button->parent)
+    {
+        atk_widget_absolute_position(button->parent, &origin_x, &origin_y);
+    }
+    return atk_button_hit_test(button, origin_x, origin_y, px, py);
+}
+
+static void browser_menus_close(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    if (app->menu_browser)
+    {
+        atk_menu_hide(app->menu_browser);
+    }
+    app->menu_open = NULL;
+    if (app->window)
+    {
+        atk_window_mark_dirty(app->window);
+    }
+}
+
+static void browser_menu_toggle(browser_app_t *app, atk_widget_t *menu, atk_widget_t *button)
+{
+    if (!app || !app->window || !menu || !button)
+    {
+        return;
+    }
+
+    bool already_open = (app->menu_open == menu) && atk_menu_is_visible(menu);
+    browser_menus_close(app);
+    if (already_open)
+    {
+        return;
+    }
+
+    atk_window_priv_t *wpriv = (atk_window_priv_t *)atk_widget_priv(app->window, &ATK_WINDOW_CLASS);
+    if (wpriv)
+    {
+        atk_list_node_t *node = atk_list_find(&wpriv->children, menu);
+        if (node)
+        {
+            atk_list_move_to_back(&wpriv->children, node);
+        }
+    }
+
+    int menu_x = button->x;
+    int menu_y = button->y + button->height;
+    atk_menu_show(menu, menu_x, menu_y);
+    if (menu->width < button->width)
+    {
+        menu->width = button->width;
+    }
+    if (menu->width > app->window->width)
+    {
+        menu->width = app->window->width;
+    }
+    if (menu->x + menu->width > app->window->width - 2)
+    {
+        menu->x = app->window->width - menu->width - 2;
+    }
+    if (menu->x < 0)
+    {
+        menu->x = 0;
+    }
+
+    app->menu_open = menu;
+    atk_window_mark_dirty(app->window);
+}
+
+static void on_menu_button(atk_widget_t *button, void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app || !button)
+    {
+        return;
+    }
+
+    if (button == app->menu_button)
+    {
+        browser_menu_toggle(app, app->menu_browser, app->menu_button);
+    }
+}
+
+static bool browser_on_mouse_event(const user_atk_event_t *event, void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app || !event)
+    {
+        return false;
+    }
+
+    bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
+    bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
+    if (left && press && app->menu_open && atk_menu_is_visible(app->menu_open))
+    {
+        int px = event->x;
+        int py = event->y;
+        bool inside_menu = atk_menu_contains(app->menu_open, px, py);
+        bool inside_button = browser_menu_button_hit_test(app->menu_button, px, py);
+        if (!inside_menu && !inside_button)
+        {
+            browser_menus_close(app);
+        }
+    }
+
+    return false;
+}
+
+static void browser_debug_clear(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    atk_widget_t *editor = NULL;
+    alix_mutex_lock(&app->lock);
+    if (app->debug_log)
+    {
+        app->debug_log[0] = '\0';
+    }
+    app->debug_log_len = 0;
+    app->debug_log_flush_offset = 0;
+    app->debug_log_resync = false;
+    editor = app->debug_text;
+    alix_mutex_unlock(&app->lock);
+
+    if (editor && editor->used)
+    {
+        atk_rich_text_set_text(editor, "");
+        atk_rich_text_scroll_to_top(editor);
+    }
+}
+
+static bool browser_debug_flush(browser_app_t *app)
+{
+    if (!app)
+    {
+        return false;
+    }
+
+    atk_widget_t *editor = NULL;
+    atk_widget_t *window = NULL;
+    bool resync = false;
+    char *chunk = NULL;
+
+    alix_mutex_lock(&app->lock);
+    editor = app->debug_text;
+    window = app->debug_window;
+
+    if (!editor || !editor->used)
+    {
+        alix_mutex_unlock(&app->lock);
+        return false;
+    }
+
+    if (app->debug_log_resync)
+    {
+        resync = true;
+        size_t log_len = app->debug_log ? app->debug_log_len : 0;
+        chunk = (char *)malloc(log_len + 1);
+        if (!chunk)
+        {
+            alix_mutex_unlock(&app->lock);
+            return false;
+        }
+        if (log_len > 0 && app->debug_log)
+        {
+            memcpy(chunk, app->debug_log, log_len);
+        }
+        chunk[log_len] = '\0';
+        app->debug_log_flush_offset = log_len;
+        app->debug_log_resync = false;
+    }
+    else if (app->debug_log && app->debug_log_flush_offset < app->debug_log_len)
+    {
+        size_t start = app->debug_log_flush_offset;
+        size_t len = app->debug_log_len - start;
+        chunk = (char *)malloc(len + 1);
+        if (!chunk)
+        {
+            alix_mutex_unlock(&app->lock);
+            return false;
+        }
+        memcpy(chunk, app->debug_log + start, len);
+        chunk[len] = '\0';
+        app->debug_log_flush_offset = app->debug_log_len;
+    }
+    alix_mutex_unlock(&app->lock);
+
+    if (!chunk)
+    {
+        return false;
+    }
+
+    if (resync)
+    {
+        atk_rich_text_set_text(editor, chunk);
+    }
+    else
+    {
+        atk_rich_text_append(editor, chunk);
+    }
+    atk_rich_text_scroll_to_bottom(editor);
+    free(chunk);
+
+    if (window && window->used)
+    {
+        atk_window_mark_dirty(window);
+    }
+    return true;
+}
+
 static char *browser_format_error(const char *message)
 {
     if (!message)
@@ -701,31 +1405,47 @@ static char *browser_build_request(const char *host, const char *path)
     return req;
 }
 
-static char *browser_fetch_http(const browser_url_t *url)
+static char *browser_fetch_http(browser_app_t *app, const browser_url_t *url)
 {
     if (!url || !url->host || !url->path)
     {
+        browser_debug_logf(app, "[fetch] invalid url (missing host/path)");
         return browser_format_error("invalid url");
     }
+
+    browser_debug_logf(app,
+                       "[fetch] connect tls=%d host=%s port=%u path=%s",
+                       url->use_tls ? 1 : 0,
+                       url->host ? url->host : "(null)",
+                       (unsigned)url->port,
+                       url->path ? url->path : "(null)");
 
     int fd = socket_open(NULL);
     if (fd < 0)
     {
+        browser_debug_logf(app, "[net] socket_open failed");
         return browser_format_error("socket_open failed");
     }
 
     if (socket_connect(fd, url->host, url->port) != 0)
     {
+        browser_debug_logf(app, "[net] socket_connect failed");
         close(fd);
         return browser_format_error("socket_connect failed");
     }
+    browser_debug_logf(app, "[net] connected");
 
     char *request = browser_build_request(url->host, url->path);
     if (!request)
     {
+        browser_debug_logf(app, "[http] alloc request failed");
         close(fd);
         return browser_format_error("alloc request failed");
     }
+    browser_debug_logf(app,
+                       "[http] request GET %s Host: %s",
+                       url->path ? url->path : "/",
+                       url->host ? url->host : "(null)");
 
     char *header_buf = NULL;
     size_t header_len = 0;
@@ -745,6 +1465,7 @@ static char *browser_fetch_http(const browser_url_t *url)
     uint8_t *chunk = (uint8_t *)malloc(2048);
     if (!chunk)
     {
+        browser_debug_logf(app, "[http] alloc recv buffer failed");
         free(request);
         close(fd);
         return browser_format_error("alloc recv buffer failed");
@@ -752,9 +1473,11 @@ static char *browser_fetch_http(const browser_url_t *url)
 
     if (url->use_tls)
     {
+        browser_debug_logf(app, "[tls] handshake start");
         tls_session_t *tls = (tls_session_t *)malloc(sizeof(*tls));
         if (!tls)
         {
+            browser_debug_logf(app, "[tls] alloc tls session failed");
             free(chunk);
             free(request);
             close(fd);
@@ -763,6 +1486,7 @@ static char *browser_fetch_http(const browser_url_t *url)
 
         if (!tls_session_init_fd(tls, fd))
         {
+            browser_debug_logf(app, "[tls] tls_session_init_fd failed");
             free(tls);
             free(chunk);
             free(request);
@@ -772,6 +1496,7 @@ static char *browser_fetch_http(const browser_url_t *url)
 
         if (!tls_session_handshake(tls, url->host))
         {
+            browser_debug_logf(app, "[tls] handshake failed (see serial log)");
             tls_session_close(tls);
             free(tls);
             free(chunk);
@@ -779,9 +1504,11 @@ static char *browser_fetch_http(const browser_url_t *url)
             close(fd);
             return browser_format_error("tls handshake failed");
         }
+        browser_debug_logf(app, "[tls] handshake ok");
 
         if (!tls_session_send(tls, (const uint8_t *)request, strlen(request)))
         {
+            browser_debug_logf(app, "[tls] send failed");
             tls_session_close(tls);
             free(tls);
             free(chunk);
@@ -821,6 +1548,11 @@ static char *browser_fetch_http(const browser_url_t *url)
 
                 header_done = true;
 
+                char status_line[128];
+                browser_http_copy_status_line(header_buf, header_block_len, status_line, sizeof(status_line));
+                int status = browser_http_parse_status_code(header_buf, header_block_len);
+                browser_debug_logf(app, "[http] status %s (code=%d)", status_line, status);
+
                 const char *value = NULL;
                 size_t value_len = 0;
                 if (browser_http_find_header_value(header_buf, header_block_len,
@@ -845,6 +1577,41 @@ static char *browser_fetch_http(const browser_url_t *url)
                         content_length = parsed_len;
                     }
                 }
+
+                if (browser_http_find_header_value(header_buf, header_block_len,
+                                                   "content-type",
+                                                   &value, &value_len))
+                {
+                    char type_buf[96];
+                    size_t copy = value_len;
+                    if (copy >= sizeof(type_buf))
+                    {
+                        copy = sizeof(type_buf) - 1;
+                    }
+                    memcpy(type_buf, value, copy);
+                    type_buf[copy] = '\0';
+                    browser_debug_logf(app, "[http] content-type %s", type_buf);
+                }
+
+                if (browser_http_find_header_value(header_buf, header_block_len,
+                                                   "location",
+                                                   &value, &value_len))
+                {
+                    char loc_buf[160];
+                    size_t copy = value_len;
+                    if (copy >= sizeof(loc_buf))
+                    {
+                        copy = sizeof(loc_buf) - 1;
+                    }
+                    memcpy(loc_buf, value, copy);
+                    loc_buf[copy] = '\0';
+                    browser_debug_logf(app, "[http] location %s", loc_buf);
+                }
+
+                browser_debug_logf(app,
+                                   "[http] transfer=%s content-length=%u",
+                                   is_chunked ? "chunked" : "identity",
+                                   have_content_length ? (unsigned)content_length : 0u);
 
                 if (header_len > body_offset)
                 {
@@ -965,6 +1732,7 @@ static char *browser_fetch_http(const browser_url_t *url)
     {
         if (!browser_write_all(fd, (const uint8_t *)request, strlen(request)))
         {
+            browser_debug_logf(app, "[http] write failed");
             free(chunk);
             free(request);
             close(fd);
@@ -988,6 +1756,7 @@ static char *browser_fetch_http(const browser_url_t *url)
             {
                 if (!browser_buf_append(&header_buf, &header_len, &header_cap, chunk, got))
                 {
+                    browser_debug_logf(app, "[http] header too large");
                     free(request);
                     close(fd);
                     free(header_buf);
@@ -1004,6 +1773,11 @@ static char *browser_fetch_http(const browser_url_t *url)
                 }
 
                 header_done = true;
+
+                char status_line[128];
+                browser_http_copy_status_line(header_buf, header_block_len, status_line, sizeof(status_line));
+                int status = browser_http_parse_status_code(header_buf, header_block_len);
+                browser_debug_logf(app, "[http] status %s (code=%d)", status_line, status);
 
                 const char *value = NULL;
                 size_t value_len = 0;
@@ -1030,6 +1804,41 @@ static char *browser_fetch_http(const browser_url_t *url)
                     }
                 }
 
+                if (browser_http_find_header_value(header_buf, header_block_len,
+                                                   "content-type",
+                                                   &value, &value_len))
+                {
+                    char type_buf[96];
+                    size_t copy = value_len;
+                    if (copy >= sizeof(type_buf))
+                    {
+                        copy = sizeof(type_buf) - 1;
+                    }
+                    memcpy(type_buf, value, copy);
+                    type_buf[copy] = '\0';
+                    browser_debug_logf(app, "[http] content-type %s", type_buf);
+                }
+
+                if (browser_http_find_header_value(header_buf, header_block_len,
+                                                   "location",
+                                                   &value, &value_len))
+                {
+                    char loc_buf[160];
+                    size_t copy = value_len;
+                    if (copy >= sizeof(loc_buf))
+                    {
+                        copy = sizeof(loc_buf) - 1;
+                    }
+                    memcpy(loc_buf, value, copy);
+                    loc_buf[copy] = '\0';
+                    browser_debug_logf(app, "[http] location %s", loc_buf);
+                }
+
+                browser_debug_logf(app,
+                                   "[http] transfer=%s content-length=%u",
+                                   is_chunked ? "chunked" : "identity",
+                                   have_content_length ? (unsigned)content_length : 0u);
+
                 if (header_len > body_offset)
                 {
                     size_t body_bytes = header_len - body_offset;
@@ -1041,6 +1850,7 @@ static char *browser_fetch_http(const browser_url_t *url)
                                                      body_bytes,
                                                      &done))
                         {
+                            browser_debug_logf(app, "[http] response too large");
                             free(request);
                             close(fd);
                             free(header_buf);
@@ -1117,6 +1927,7 @@ static char *browser_fetch_http(const browser_url_t *url)
                     if (take > 0 &&
                         !browser_buf_append(&body_buf, &body_len, &body_cap, chunk, take))
                     {
+                        browser_debug_logf(app, "[http] response too large");
                         free(request);
                         close(fd);
                         free(body_buf);
@@ -1147,15 +1958,19 @@ static char *browser_fetch_http(const browser_url_t *url)
 
     if (have_content_length && body_len < content_length)
     {
+        browser_debug_logf(app, "[http] incomplete body got=%u expected=%u",
+                           (unsigned)body_len, (unsigned)content_length);
         free(body_buf);
         return browser_format_error("incomplete response body");
     }
 
     if (!body_buf)
     {
+        browser_debug_logf(app, "[http] empty response body");
         return browser_format_error("empty response");
     }
 
+    browser_debug_logf(app, "[http] body bytes=%u", (unsigned)body_len);
     return body_buf;
 }
 
@@ -1173,6 +1988,8 @@ static void browser_fetch_thread(void *arg)
     app->pending_text = NULL;
     alix_mutex_unlock(&app->lock);
 
+    browser_debug_logf(app, "[fetch] thread start url=%s", url_text ? url_text : "(null)");
+
     if (!url_text)
     {
         alix_mutex_lock(&app->lock);
@@ -1180,6 +1997,7 @@ static void browser_fetch_thread(void *arg)
         app->pending_ready = true;
         app->fetch_running = false;
         alix_mutex_unlock(&app->lock);
+        browser_debug_logf(app, "[fetch] missing url");
         return;
     }
 
@@ -1187,18 +2005,44 @@ static void browser_fetch_thread(void *arg)
     char *result = NULL;
     if (!browser_parse_url(url_text, &url))
     {
+        browser_debug_logf(app, "[fetch] invalid url");
         result = browser_format_error("invalid url");
     }
     else
     {
-        result = browser_fetch_http(&url);
+        browser_debug_logf(app,
+                           "[fetch] parsed tls=%d host=%s port=%u path=%s",
+                           url.use_tls ? 1 : 0,
+                           url.host ? url.host : "(null)",
+                           (unsigned)url.port,
+                           url.path ? url.path : "(null)");
+        result = browser_fetch_http(app, &url);
     }
     browser_url_destroy(&url);
     free(url_text);
 
     if (!result)
     {
+        browser_debug_logf(app, "[fetch] result null (allocation failed)");
         result = browser_format_error("allocation failed");
+    }
+    else if (strncmp(result, "Error:\n", 6) == 0)
+    {
+        const char *msg = result + 6;
+        char preview[96];
+        size_t mlen = strlen(msg);
+        size_t copy = mlen;
+        if (copy >= sizeof(preview))
+        {
+            copy = sizeof(preview) - 1;
+        }
+        memcpy(preview, msg, copy);
+        preview[copy] = '\0';
+        browser_debug_logf(app, "[fetch] error %s", preview);
+    }
+    else
+    {
+        browser_debug_logf(app, "[fetch] success bytes=%u", (unsigned)strlen(result));
     }
 
     alix_mutex_lock(&app->lock);
@@ -1224,13 +2068,17 @@ static void on_url_submit(atk_widget_t *input, void *context)
     {
         return;
     }
+    browser_debug_logf(app, "[ui] submit url=%s", text);
 
     alix_mutex_lock(&app->lock);
     bool busy = app->fetch_running;
     alix_mutex_unlock(&app->lock);
     if (busy)
     {
-        atk_rich_text_set_text(app->viewer, "Already loading...\n");
+        browser_debug_logf(app, "[ui] already loading");
+        (void)atk_html_view_set_html(app->viewer,
+                                     "<!doctype html><html><body><p>Already loading...</p></body></html>",
+                                     NULL);
         atk_window_mark_dirty(app->window);
         return;
     }
@@ -1238,7 +2086,10 @@ static void on_url_submit(atk_widget_t *input, void *context)
     char *url_copy = browser_strdup(text);
     if (!url_copy)
     {
-        atk_rich_text_set_text(app->viewer, "Allocation failed.\n");
+        browser_debug_logf(app, "[ui] allocation failed (url_copy)");
+        (void)atk_html_view_set_html(app->viewer,
+                                     "<!doctype html><html><body><p>Allocation failed.</p></body></html>",
+                                     NULL);
         atk_window_mark_dirty(app->window);
         return;
     }
@@ -1253,11 +2104,14 @@ static void on_url_submit(atk_widget_t *input, void *context)
     app->fetch_running = true;
     alix_mutex_unlock(&app->lock);
 
-    atk_rich_text_set_text(app->viewer, "Loading...\n");
+    (void)atk_html_view_set_html(app->viewer,
+                                 "<!doctype html><html><body><p>Loading...</p></body></html>",
+                                 NULL);
     atk_window_mark_dirty(app->window);
 
     if (alix_thread_create(&app->fetch_thread, "atk_browser_fetch", browser_fetch_thread, app) != 0)
     {
+        browser_debug_logf(app, "[ui] failed to start fetch thread");
         alix_mutex_lock(&app->lock);
         app->fetch_running = false;
         if (app->pending_text)
@@ -1266,7 +2120,9 @@ static void on_url_submit(atk_widget_t *input, void *context)
             app->pending_text = NULL;
         }
         alix_mutex_unlock(&app->lock);
-        atk_rich_text_set_text(app->viewer, "Failed to start fetch thread.\n");
+        (void)atk_html_view_set_html(app->viewer,
+                                     "<!doctype html><html><body><p>Failed to start fetch thread.</p></body></html>",
+                                     NULL);
         atk_window_mark_dirty(app->window);
     }
 }
@@ -1277,6 +2133,12 @@ static bool browser_tick(void *context)
     if (!app)
     {
         return false;
+    }
+
+    bool redraw = false;
+    if (browser_debug_flush(app))
+    {
+        redraw = true;
     }
 
     char *text = NULL;
@@ -1297,7 +2159,7 @@ static bool browser_tick(void *context)
 
     if (!ready)
     {
-        return false;
+        return redraw;
     }
 
     if (join_thread != 0)
@@ -1310,7 +2172,62 @@ static bool browser_tick(void *context)
         return false;
     }
 
-    atk_rich_text_set_text(app->viewer, text);
+    browser_debug_logf(app, "[ui] document ready bytes=%u", (unsigned)strlen(text));
+
+    if (strncmp(text, "Error:\n", 6) == 0)
+    {
+        const char *msg = text + 6;
+        char page[512];
+        snprintf(page,
+                 sizeof(page),
+                 "<!doctype html><html><body><p>Fetch error:</p><p>%s</p></body></html>",
+                 msg ? msg : "unknown");
+        (void)atk_html_view_set_html(app->viewer, page, NULL);
+        browser_debug_logf(app, "[render] showing fetch error page");
+        free(text);
+        atk_window_mark_dirty(app->window);
+        return true;
+    }
+
+    html_parse_error_t parse_err = {0};
+    html_document_t *doc = html_parse(text, &parse_err);
+    if (doc)
+    {
+        size_t node_count = browser_dom_count_nodes(doc->root, 50000);
+        const html_node_t *body = browser_dom_find_first_element(doc->root, "body");
+        const html_node_t *title = browser_dom_find_first_element(doc->root, "title");
+        const char *title_text = browser_dom_first_text_child(title);
+        if (title_text && title_text[0] != '\0')
+        {
+            char title_preview[96];
+            size_t tlen = strlen(title_text);
+            size_t copy = tlen;
+            if (copy >= sizeof(title_preview))
+            {
+                copy = sizeof(title_preview) - 1;
+            }
+            memcpy(title_preview, title_text, copy);
+            title_preview[copy] = '\0';
+            browser_debug_logf(app, "[parse] title %s", title_preview);
+        }
+        browser_debug_logf(app, "[parse] nodes=%u body=%s",
+                           (unsigned)node_count,
+                           body ? "yes" : "no");
+
+        atk_html_view_set_document(app->viewer, doc);
+        browser_debug_logf(app, "[render] set document ok");
+    }
+    else
+    {
+        char msg[256];
+        const char *detail = parse_err.message ? parse_err.message : "unknown error";
+        snprintf(msg,
+                 sizeof(msg),
+                 "<!doctype html><html><body><p>Failed to parse HTML: %s</p></body></html>",
+                 detail);
+        (void)atk_html_view_set_html(app->viewer, msg, NULL);
+        browser_debug_logf(app, "[parse] failed: %s", detail);
+    }
     free(text);
     atk_window_mark_dirty(app->window);
     return true;
@@ -1358,6 +2275,62 @@ static bool build_ui(browser_app_t *app)
     atk_text_input_focus(state, app->url_input);
 
     int url_h = app->url_input->height;
+    int menu_w = atk_font_text_width("Menu") + 32;
+    if (menu_w < 72)
+    {
+        menu_w = 72;
+    }
+    app->menu_button = atk_window_add_button(app->window,
+                                             "Menu",
+                                             content_x,
+                                             content_y,
+                                             menu_w,
+                                             url_h,
+                                             ATK_BUTTON_STYLE_TITLE_INSIDE,
+                                             false,
+                                             on_menu_button,
+                                             app);
+    if (!app->menu_button)
+    {
+        return false;
+    }
+    atk_widget_set_layout(app->menu_button, ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_LEFT);
+
+    int url_x = content_x + menu_w + BROWSER_GAP;
+    int url_w = content_w - menu_w - BROWSER_GAP;
+    if (url_w < 16)
+    {
+        url_w = 16;
+    }
+    app->url_input->x = url_x;
+    app->url_input->width = url_w;
+    atk_widget_set_layout(app->url_input,
+                          ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_LEFT | ATK_WIDGET_ANCHOR_RIGHT);
+
+    atk_window_priv_t *wpriv = (atk_window_priv_t *)atk_widget_priv(app->window, &ATK_WINDOW_CLASS);
+    if (!wpriv)
+    {
+        return false;
+    }
+    app->menu_browser = atk_menu_create();
+    if (!app->menu_browser)
+    {
+        return false;
+    }
+    app->menu_browser->parent = app->window;
+    if (!atk_list_push_back(&wpriv->children, app->menu_browser))
+    {
+        atk_menu_destroy(app->menu_browser);
+        app->menu_browser = NULL;
+        return false;
+    }
+    if (!atk_menu_add_item(app->menu_browser, "Open Debug Window", browser_menu_open_debug, app) ||
+        !atk_menu_add_item(app->menu_browser, "Clear Debug Log", browser_menu_clear_debug, app))
+    {
+        return false;
+    }
+    app->menu_open = NULL;
+
     int viewer_y = content_y + url_h + BROWSER_GAP;
     int viewer_h = (content_y + content_h) - viewer_y;
     if (viewer_h < 16)
@@ -1365,7 +2338,7 @@ static bool build_ui(browser_app_t *app)
         viewer_h = 16;
     }
 
-    app->viewer = atk_window_add_rich_text(app->window,
+    app->viewer = atk_window_add_html_view(app->window,
                                            content_x,
                                            viewer_y,
                                            content_w,
@@ -1377,9 +2350,9 @@ static bool build_ui(browser_app_t *app)
     atk_widget_set_layout(app->viewer,
                           ATK_WIDGET_ANCHOR_LEFT | ATK_WIDGET_ANCHOR_RIGHT |
                           ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_BOTTOM);
-    atk_rich_text_set_pagination_enabled(app->viewer, false);
-    atk_rich_text_set_read_only(app->viewer, true);
-    atk_rich_text_set_text(app->viewer, "Enter a URL above and press Enter.\n");
+    (void)atk_html_view_set_html(app->viewer,
+                                 "<!doctype html><html><body><p>Enter a URL above and press Enter.</p></body></html>",
+                                 NULL);
     return true;
 }
 
@@ -1412,6 +2385,8 @@ int main(void)
         .present_on_idle = false,
         .legacy_input = false
     };
+    atk_main_register_mouse_handler(browser_on_mouse_event, &app);
+    atk_main_register_close_handler(browser_on_close_event, &app);
     atk_main(&main_cfg);
 
     atk_user_close(&app.remote);

@@ -67,6 +67,8 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/syscall.c \
 	$(USER_DIR)/lib/libc.c \
 	$(USER_DIR)/lib/atk_user.c \
+	$(USER_DIR)/lib/web/html.c \
+	$(USER_DIR)/lib/web/css.c \
 	$(USER_DIR)/lib/video_surface.c \
 	$(USER_DIR)/lib/serial_stub.c \
 	$(USER_DIR)/lib/atk_user_host_stub.c
@@ -76,7 +78,9 @@ USER_LD_SCRIPT := $(USER_DIR)/lib/link.ld
 USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(wildcard $(ATK_DIR)/*.c))
 USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
 USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
-USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c $(USER_DIR)/lib/atk_app.c
+USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c \
+                          $(USER_DIR)/lib/atk/atk_html_view.c \
+                          $(USER_DIR)/lib/atk_app.c
 USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
 USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
 USER_DOOM_SOURCES := $(wildcard $(USER_DIR)/apps/doom/*.c)

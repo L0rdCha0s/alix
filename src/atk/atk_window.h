@@ -185,4 +185,15 @@ bool atk_window_list_validate(atk_state_t *state);
  */
 void atk_window_list_dump(atk_state_t *state, const char *label);
 
+/*
+ * Toggle "window shade" (roll-up) state for a window.
+ *
+ * When shaded, the window collapses to its title bar height; toggling restores
+ * the previous height without relaying out children.
+ */
+void atk_window_toggle_shade(atk_widget_t *window);
+
+/* Return whether the window is currently shaded. */
+bool atk_window_is_shaded(const atk_widget_t *window);
+
 #endif

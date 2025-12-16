@@ -75,6 +75,8 @@ typedef struct
     void *user_context;
     void (*on_destroy)(void *context);
     bool chrome_visible;
+    bool shaded;
+    int shade_restore_height;
     /* Cached surface of the window (including chrome). */
     video_color_t *surface;
     int surface_width;
@@ -124,6 +126,10 @@ typedef struct atk_state
 
     atk_widget_t *pressed_window_button_window;
     atk_widget_t *pressed_window_button;
+    uint64_t title_click_last_ms;
+    atk_widget_t *title_click_last_window;
+    int title_click_last_x;
+    int title_click_last_y;
 
     uint64_t desktop_guard_front;
     atk_list_t desktop_buttons;
