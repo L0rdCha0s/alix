@@ -43,6 +43,12 @@ typedef enum
 
 typedef enum
 {
+    CSS_TEXT_DECORATION_NONE = 0,
+    CSS_TEXT_DECORATION_UNDERLINE
+} css_text_decoration_t;
+
+typedef enum
+{
     CSS_DISPLAY_INLINE = 0,
     CSS_DISPLAY_BLOCK,
     CSS_DISPLAY_LIST_ITEM,
@@ -90,6 +96,8 @@ typedef struct
     css_clear_t clear_mode;
     bool has_text_align;
     css_text_align_t text_align;
+    bool has_text_decoration;
+    css_text_decoration_t text_decoration;
     bool has_text_shadow;
     css_length_t text_shadow_x;
     css_length_t text_shadow_y;

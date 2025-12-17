@@ -275,6 +275,12 @@ static bool css_parse_number_milli(const char *start, const char *end, int32_t *
         return false;
     }
 
+    /* Reject trailing units/suffixes (e.g. "12pt"). */
+    if (p != end)
+    {
+        return false;
+    }
+
     *out_milli = integer * 1000 + frac;
     return true;
 }
@@ -331,6 +337,12 @@ static bool css_parse_length_token(const char *start, const char *end, css_lengt
         if (ulen == 2 && (p[0] == 'p' || p[0] == 'P') && (p[1] == 'x' || p[1] == 'X'))
         {
             unit = CSS_UNIT_PX;
+        }
+        else if (ulen == 2 && (p[0] == 'p' || p[0] == 'P') && (p[1] == 't' || p[1] == 'T'))
+        {
+            /* Approximate: 1pt = 4/3 px */
+            unit = CSS_UNIT_PX;
+            number_milli = (int32_t)(((int64_t)number_milli * 4 + 1) / 3);
         }
         else if (ulen == 2 && (p[0] == 'v' || p[0] == 'V') && (p[1] == 'w' || p[1] == 'W'))
         {
@@ -518,6 +530,11 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_text_align = true;
         dst->text_align = src->text_align;
+    }
+    if (src->has_text_decoration)
+    {
+        dst->has_text_decoration = true;
+        dst->text_decoration = src->text_decoration;
     }
     if (src->has_text_shadow)
     {
@@ -897,6 +914,50 @@ static void css_style_apply_property(css_style_t *style,
         return;
     }
 
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "margin-top", 10) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_margin = true;
+            style->margin.top = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "margin-right", 12) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_margin = true;
+            style->margin.right = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 13 && strncasecmp(prop_start, "margin-bottom", 13) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_margin = true;
+            style->margin.bottom = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 11 && strncasecmp(prop_start, "margin-left", 11) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_margin = true;
+            style->margin.left = len;
+        }
+        return;
+    }
+
     if ((size_t)(prop_end - prop_start) == 5 && strncasecmp(prop_start, "float", 5) == 0)
     {
         const char *s = val_start;
@@ -946,6 +1007,50 @@ static void css_style_apply_property(css_style_t *style,
         {
             style->has_padding = true;
             style->padding = box;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 11 && strncasecmp(prop_start, "padding-top", 11) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_padding = true;
+            style->padding.top = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 13 && strncasecmp(prop_start, "padding-right", 13) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_padding = true;
+            style->padding.right = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 14 && strncasecmp(prop_start, "padding-bottom", 14) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_padding = true;
+            style->padding.bottom = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "padding-left", 12) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_padding = true;
+            style->padding.left = len;
         }
         return;
     }
@@ -1010,6 +1115,25 @@ static void css_style_apply_property(css_style_t *style,
         {
             style->has_text_align = true;
             style->text_align = CSS_TEXT_ALIGN_LEFT;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 15 && strncasecmp(prop_start, "text-decoration", 15) == 0)
+    {
+        const char *s = val_start;
+        const char *e = val_end;
+        css_trim_range(&s, &e);
+        size_t len = (size_t)(e - s);
+        if (len == 4 && strncasecmp(s, "none", 4) == 0)
+        {
+            style->has_text_decoration = true;
+            style->text_decoration = CSS_TEXT_DECORATION_NONE;
+        }
+        else if (len == 9 && strncasecmp(s, "underline", 9) == 0)
+        {
+            style->has_text_decoration = true;
+            style->text_decoration = CSS_TEXT_DECORATION_UNDERLINE;
         }
         return;
     }
