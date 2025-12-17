@@ -33,6 +33,17 @@ void atk_text_input_clear(atk_widget_t *input);
 void atk_text_input_set_text(atk_widget_t *input, const char *text);
 
 /*
+ * Toggle multiline mode (used for `<textarea>`).
+ *
+ * In multiline mode, Enter inserts a newline instead of invoking the submit
+ * handler. The widget continues to operate in simple append/backspace mode.
+ */
+void atk_text_input_set_multiline(atk_widget_t *input, bool multiline);
+
+/* Return whether this input is currently configured for multiline text. */
+bool atk_text_input_is_multiline(const atk_widget_t *input);
+
+/*
  * Hit test a text input against an absolute point.
  *
  * `origin_x`/`origin_y` are the absolute parent origin.

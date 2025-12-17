@@ -155,6 +155,49 @@ char *strstr(const char *haystack, const char *needle)
     return NULL;
 }
 
+char *strchr(const char *str, int ch)
+{
+    if (!str)
+    {
+        return NULL;
+    }
+    char c = (char)ch;
+    for (const char *p = str; ; ++p)
+    {
+        if (*p == c)
+        {
+            return (char *)p;
+        }
+        if (*p == '\0')
+        {
+            break;
+        }
+    }
+    return NULL;
+}
+
+char *strrchr(const char *str, int ch)
+{
+    if (!str)
+    {
+        return NULL;
+    }
+    char c = (char)ch;
+    const char *last = NULL;
+    for (const char *p = str; ; ++p)
+    {
+        if (*p == c)
+        {
+            last = p;
+        }
+        if (*p == '\0')
+        {
+            break;
+        }
+    }
+    return (char *)last;
+}
+
 int memcmp(const void *a, const void *b, size_t count)
 {
     const uint8_t *pa = (const uint8_t *)a;

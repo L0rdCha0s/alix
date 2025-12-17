@@ -45,8 +45,24 @@ typedef enum
 {
     CSS_DISPLAY_INLINE = 0,
     CSS_DISPLAY_BLOCK,
+    CSS_DISPLAY_LIST_ITEM,
     CSS_DISPLAY_NONE
 } css_display_t;
+
+typedef enum
+{
+    CSS_FLOAT_NONE = 0,
+    CSS_FLOAT_LEFT,
+    CSS_FLOAT_RIGHT
+} css_float_t;
+
+typedef enum
+{
+    CSS_CLEAR_NONE = 0,
+    CSS_CLEAR_LEFT,
+    CSS_CLEAR_RIGHT,
+    CSS_CLEAR_BOTH
+} css_clear_t;
 
 typedef struct
 {
@@ -58,14 +74,20 @@ typedef struct
     css_length_t font_size;
     bool has_width;
     css_length_t width;
+    bool has_height;
+    css_length_t height;
     bool has_margin;
     css_box_t margin;
     bool has_padding;
     css_box_t padding;
     bool has_border;
-    css_length_t border_width;
+    css_box_t border_width;
     bool has_border_color;
     video_color_t border_color;
+    bool has_float;
+    css_float_t float_mode;
+    bool has_clear;
+    css_clear_t clear_mode;
     bool has_text_align;
     css_text_align_t text_align;
     bool has_text_shadow;

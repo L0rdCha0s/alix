@@ -103,6 +103,62 @@ static bool css_parse_color(const char *start, const char *end, video_color_t *o
         return false;
     }
 
+    size_t len = (size_t)(end - start);
+    if (len >= 5 && strncasecmp(start, "rgb(", 4) == 0 && end[-1] == ')')
+    {
+        const char *p = start + 4;
+        int comps[3] = {0, 0, 0};
+        for (int i = 0; i < 3; ++i)
+        {
+            while (p < end && isspace((unsigned char)*p))
+            {
+                ++p;
+            }
+            if (p >= end || !isdigit((unsigned char)*p))
+            {
+                return false;
+            }
+            int value = 0;
+            while (p < end && isdigit((unsigned char)*p))
+            {
+                value = value * 10 + (*p - '0');
+                ++p;
+            }
+            bool percent = false;
+            if (p < end && *p == '%')
+            {
+                percent = true;
+                ++p;
+            }
+            if (percent)
+            {
+                if (value < 0) value = 0;
+                if (value > 100) value = 100;
+                value = (value * 255) / 100;
+            }
+            else
+            {
+                if (value < 0) value = 0;
+                if (value > 255) value = 255;
+            }
+            comps[i] = value;
+            while (p < end && isspace((unsigned char)*p))
+            {
+                ++p;
+            }
+            if (i < 2)
+            {
+                if (p >= end || *p != ',')
+                {
+                    return false;
+                }
+                ++p;
+            }
+        }
+        *out = video_make_color((uint8_t)comps[0], (uint8_t)comps[1], (uint8_t)comps[2]);
+        return true;
+    }
+
     size_t name_len = (size_t)(end - start);
     if (*start != '#')
     {
@@ -140,8 +196,8 @@ static bool css_parse_color(const char *start, const char *end, video_color_t *o
         return false;
     }
     start++;
-    size_t len = (size_t)(end - start);
-    if (len == 3)
+    size_t hex_len = (size_t)(end - start);
+    if (hex_len == 3)
     {
         uint8_t r, g, b;
         if (!css_parse_hex_digit(start[0], &r) ||
@@ -156,7 +212,7 @@ static bool css_parse_color(const char *start, const char *end, video_color_t *o
         *out = video_make_color(r, g, b);
         return true;
     }
-    if (len == 6)
+    if (hex_len == 6)
     {
         uint8_t hi, lo;
         uint8_t r, g, b;
@@ -387,6 +443,16 @@ static bool css_parse_margin_value(const char *start, const char *end, css_box_t
     return true;
 }
 
+static css_box_t css_box_from_length(css_length_t len)
+{
+    return (css_box_t){
+        .top = len,
+        .right = len,
+        .bottom = len,
+        .left = len,
+    };
+}
+
 void css_style_merge(css_style_t *dst, const css_style_t *src)
 {
     if (!dst || !src)
@@ -413,6 +479,11 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
         dst->has_width = true;
         dst->width = src->width;
     }
+    if (src->has_height)
+    {
+        dst->has_height = true;
+        dst->height = src->height;
+    }
     if (src->has_margin)
     {
         dst->has_margin = true;
@@ -427,11 +498,21 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_border = true;
         dst->border_width = src->border_width;
-        if (src->has_border_color)
-        {
-            dst->has_border_color = true;
-            dst->border_color = src->border_color;
-        }
+    }
+    if (src->has_border_color)
+    {
+        dst->has_border_color = true;
+        dst->border_color = src->border_color;
+    }
+    if (src->has_float)
+    {
+        dst->has_float = true;
+        dst->float_mode = src->float_mode;
+    }
+    if (src->has_clear)
+    {
+        dst->has_clear = true;
+        dst->clear_mode = src->clear_mode;
     }
     if (src->has_text_align)
     {
@@ -715,6 +796,74 @@ static void css_style_apply_property(css_style_t *style,
         return;
     }
 
+    if ((size_t)(prop_end - prop_start) == 4 && strncasecmp(prop_start, "font", 4) == 0)
+    {
+        const char *p = val_start;
+        const char *tok_s = NULL;
+        const char *tok_e = NULL;
+        while (css_next_token(&p, val_end, &tok_s, &tok_e))
+        {
+            if (!tok_s || tok_s >= tok_e)
+            {
+                continue;
+            }
+            if (!(isdigit((unsigned char)tok_s[0]) || tok_s[0] == '.'))
+            {
+                continue;
+            }
+            const char *slash = NULL;
+            for (const char *s = tok_s; s < tok_e; ++s)
+            {
+                if (*s == '/')
+                {
+                    slash = s;
+                    break;
+                }
+            }
+            const char *size_s = tok_s;
+            const char *size_e = slash ? slash : tok_e;
+
+            css_length_t font_size;
+            if (css_parse_length_token(size_s, size_e, &font_size))
+            {
+                style->has_font_size = true;
+                style->font_size = font_size;
+            }
+
+            if (slash && slash + 1 < tok_e)
+            {
+                const char *lh_s = slash + 1;
+                const char *lh_e = tok_e;
+                int32_t num_milli = 0;
+                if (css_parse_number_milli(lh_s, lh_e, &num_milli))
+                {
+                    if (num_milli < 0) num_milli = 0;
+                    style->has_line_height = true;
+                    style->line_height_milli = num_milli;
+                }
+                else
+                {
+                    css_length_t lh_len;
+                    if (css_parse_length_token(lh_s, lh_e, &lh_len) && !lh_len.is_auto)
+                    {
+                        if (lh_len.unit == CSS_UNIT_EM)
+                        {
+                            style->has_line_height = true;
+                            style->line_height_milli = lh_len.value_milli;
+                        }
+                        else if (lh_len.unit == CSS_UNIT_PERCENT)
+                        {
+                            style->has_line_height = true;
+                            style->line_height_milli = lh_len.value_milli / 100;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        return;
+    }
+
     if ((size_t)(prop_end - prop_start) == 5 && strncasecmp(prop_start, "width", 5) == 0)
     {
         css_length_t len;
@@ -726,6 +875,17 @@ static void css_style_apply_property(css_style_t *style,
         return;
     }
 
+    if ((size_t)(prop_end - prop_start) == 6 && strncasecmp(prop_start, "height", 6) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_height = true;
+            style->height = len;
+        }
+        return;
+    }
+
     if ((size_t)(prop_end - prop_start) == 6 && strncasecmp(prop_start, "margin", 6) == 0)
     {
         css_box_t box;
@@ -733,6 +893,48 @@ static void css_style_apply_property(css_style_t *style,
         {
             style->has_margin = true;
             style->margin = box;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 5 && strncasecmp(prop_start, "float", 5) == 0)
+    {
+        const char *s = val_start;
+        const char *e = val_end;
+        css_trim_range(&s, &e);
+        size_t len = (size_t)(e - s);
+        style->has_float = true;
+        style->float_mode = CSS_FLOAT_NONE;
+        if (len == 4 && strncasecmp(s, "left", 4) == 0)
+        {
+            style->float_mode = CSS_FLOAT_LEFT;
+        }
+        else if (len == 5 && strncasecmp(s, "right", 5) == 0)
+        {
+            style->float_mode = CSS_FLOAT_RIGHT;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 5 && strncasecmp(prop_start, "clear", 5) == 0)
+    {
+        const char *s = val_start;
+        const char *e = val_end;
+        css_trim_range(&s, &e);
+        size_t len = (size_t)(e - s);
+        style->has_clear = true;
+        style->clear_mode = CSS_CLEAR_NONE;
+        if (len == 4 && strncasecmp(s, "left", 4) == 0)
+        {
+            style->clear_mode = CSS_CLEAR_LEFT;
+        }
+        else if (len == 5 && strncasecmp(s, "right", 5) == 0)
+        {
+            style->clear_mode = CSS_CLEAR_RIGHT;
+        }
+        else if (len == 4 && strncasecmp(s, "both", 4) == 0)
+        {
+            style->clear_mode = CSS_CLEAR_BOTH;
         }
         return;
     }
@@ -756,12 +958,34 @@ static void css_style_apply_property(css_style_t *style,
         if (css_parse_border_value(val_start, val_end, &width, &color, &has_color))
         {
             style->has_border = true;
-            style->border_width = width;
+            style->border_width = css_box_from_length(width);
             if (has_color)
             {
                 style->has_border_color = true;
                 style->border_color = color;
             }
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "border-width", 12) == 0)
+    {
+        css_box_t box;
+        if (css_parse_margin_value(val_start, val_end, &box))
+        {
+            style->has_border = true;
+            style->border_width = box;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "border-color", 12) == 0)
+    {
+        video_color_t c;
+        if (css_parse_color(val_start, val_end, &c))
+        {
+            style->has_border_color = true;
+            style->border_color = c;
         }
         return;
     }
@@ -822,6 +1046,10 @@ static void css_style_apply_property(css_style_t *style,
         {
             style->display = CSS_DISPLAY_BLOCK;
         }
+        else if (len == 9 && strncasecmp(s, "list-item", 9) == 0)
+        {
+            style->display = CSS_DISPLAY_LIST_ITEM;
+        }
         else if (len == 4 && strncasecmp(s, "none", 4) == 0)
         {
             style->display = CSS_DISPLAY_NONE;
@@ -837,6 +1065,23 @@ static void css_style_apply_property(css_style_t *style,
             if (num_milli < 0) num_milli = 0;
             style->has_line_height = true;
             style->line_height_milli = num_milli;
+        }
+        else
+        {
+            css_length_t lh_len;
+            if (css_parse_length_token(val_start, val_end, &lh_len) && !lh_len.is_auto)
+            {
+                if (lh_len.unit == CSS_UNIT_EM)
+                {
+                    style->has_line_height = true;
+                    style->line_height_milli = lh_len.value_milli;
+                }
+                else if (lh_len.unit == CSS_UNIT_PERCENT)
+                {
+                    style->has_line_height = true;
+                    style->line_height_milli = lh_len.value_milli / 100;
+                }
+            }
         }
         return;
     }

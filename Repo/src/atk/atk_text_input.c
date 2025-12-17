@@ -20,6 +20,7 @@ typedef struct
     atk_text_input_submit_t submit;
     void *submit_context;
     bool focused;
+    bool multiline;
 } atk_text_input_priv_t;
 
 static atk_mouse_response_t text_input_mouse_cb(atk_widget_t *widget,
@@ -121,6 +122,7 @@ atk_widget_t *atk_window_add_text_input(atk_widget_t *window, int x, int y, int 
     input_priv->submit = NULL;
     input_priv->submit_context = NULL;
     input_priv->focused = false;
+    input_priv->multiline = false;
 
     atk_list_node_t *child_node = atk_list_push_back(&priv->children, input);
     if (!child_node)
@@ -202,6 +204,27 @@ void atk_text_input_set_text(atk_widget_t *input, const char *text)
     }
     priv->length = len;
     text_input_invalidate(input);
+}
+
+void atk_text_input_set_multiline(atk_widget_t *input, bool multiline)
+{
+    atk_text_input_priv_t *priv = (atk_text_input_priv_t *)atk_widget_priv(input, &ATK_TEXT_INPUT_CLASS);
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->multiline == multiline)
+    {
+        return;
+    }
+    priv->multiline = multiline;
+    text_input_invalidate(input);
+}
+
+bool atk_text_input_is_multiline(const atk_widget_t *input)
+{
+    const atk_text_input_priv_t *priv = (const atk_text_input_priv_t *)atk_widget_priv(input, &ATK_TEXT_INPUT_CLASS);
+    return priv ? priv->multiline : false;
 }
 
 bool atk_text_input_hit_test(const atk_widget_t *input, int origin_x, int origin_y, int px, int py)
@@ -287,6 +310,18 @@ atk_text_input_event_t atk_text_input_handle_char(atk_widget_t *input, char ch)
 
     if (ch == '\r' || ch == '\n')
     {
+        if (priv->multiline)
+        {
+            if (!text_input_ensure_capacity(priv, 1))
+            {
+                return ATK_TEXT_INPUT_EVENT_NONE;
+            }
+            priv->text[priv->length++] = '\n';
+            priv->text[priv->length] = '\0';
+            text_input_invalidate(input);
+            return ATK_TEXT_INPUT_EVENT_CHANGED;
+        }
+
         if (priv->submit)
         {
             priv->submit(input, priv->submit_context);
@@ -341,8 +376,12 @@ void atk_text_input_draw(const atk_state_t *state, const atk_widget_t *input)
 
     atk_state_theme_validate(state, "atk_text_input_draw");
 
-    int origin_x = input->parent ? input->parent->x : 0;
-    int origin_y = input->parent ? input->parent->y : 0;
+    int origin_x = 0;
+    int origin_y = 0;
+    if (input->parent)
+    {
+        atk_widget_absolute_position(input->parent, &origin_x, &origin_y);
+    }
     int x = origin_x + input->x;
     int y = origin_y + input->y;
     int width = input->width;
@@ -355,34 +394,173 @@ void atk_text_input_draw(const atk_state_t *state, const atk_widget_t *input)
     video_draw_rect_outline(x, y, width, height, border);
 
     const char *text = priv->text ? priv->text : "";
-    int line_height = atk_font_line_height();
-    int content_y = y + ATK_TEXT_INPUT_PADDING_Y;
-    int baseline = atk_font_baseline_for_rect(content_y, height - ATK_TEXT_INPUT_PADDING_Y * 2);
-    atk_rect_t clip = { x + ATK_TEXT_INPUT_PADDING_X,
-                        y + ATK_TEXT_INPUT_PADDING_Y,
-                        width - ATK_TEXT_INPUT_PADDING_X * 2,
-                        height - ATK_TEXT_INPUT_PADDING_Y * 2 };
-    atk_font_draw_string_clipped(x + ATK_TEXT_INPUT_PADDING_X,
-                                 baseline,
-                                 text,
-                                 state->theme.button_text,
-                                 face,
-                                 &clip);
+    int font_h = atk_font_line_height();
+    int line_height = font_h;
+    int pad_x = ATK_TEXT_INPUT_PADDING_X;
+    int pad_y = ATK_TEXT_INPUT_PADDING_Y;
+    if (height < font_h + pad_y * 2)
+    {
+        int avail = height - font_h;
+        pad_y = avail > 0 ? (avail / 2) : 0;
+    }
+
+    int content_x = x + pad_x;
+    int content_y = y + pad_y;
+    int content_w = width - pad_x * 2;
+    int content_h = height - pad_y * 2;
+    if (content_w < 0) content_w = 0;
+    if (content_h < 0) content_h = 0;
+
+    atk_rect_t clip = { content_x, content_y, content_w, content_h };
+
+    if (!priv->multiline)
+    {
+        int baseline = atk_font_baseline_for_rect(content_y, content_h);
+        atk_font_draw_string_clipped(content_x,
+                                     baseline,
+                                     text,
+                                     state->theme.button_text,
+                                     face,
+                                     &clip);
+
+        if (priv->focused)
+        {
+            int caret_x = content_x + atk_font_text_width(text);
+            if (caret_x > x + width - 2)
+            {
+                caret_x = x + width - 2;
+            }
+            int caret_height = line_height;
+            int caret_y = baseline - caret_height + 1;
+            if (caret_y < content_y)
+            {
+                caret_y = content_y;
+            }
+            if (caret_y + caret_height > y + height)
+            {
+                caret_height = (y + height) - caret_y;
+            }
+            if (caret_height > 0)
+            {
+                video_draw_rect(caret_x, caret_y, 2, caret_height, state->theme.button_text);
+            }
+        }
+        return;
+    }
+
+    size_t total_lines = 1;
+    for (const char *p = text; *p; ++p)
+    {
+        if (*p == '\n')
+        {
+            total_lines++;
+        }
+    }
+
+    int visible_lines = (line_height > 0) ? (content_h / line_height) : 1;
+    if (visible_lines < 1)
+    {
+        visible_lines = 1;
+    }
+    size_t start_line = 0;
+    if (total_lines > (size_t)visible_lines)
+    {
+        start_line = total_lines - (size_t)visible_lines;
+    }
+
+    const char *line_start = text;
+    size_t line_index = 0;
+    size_t drawn = 0;
+
+    while (line_start && *line_start)
+    {
+        const char *line_end = strchr(line_start, '\n');
+        size_t line_len = line_end ? (size_t)(line_end - line_start) : strlen(line_start);
+
+        if (line_index >= start_line)
+        {
+            int draw_top = content_y + (int)drawn * line_height;
+            int baseline = atk_font_baseline_for_rect(draw_top, line_height);
+
+            char scratch[128];
+            const char *to_draw = NULL;
+            char *heap = NULL;
+            if (line_len < sizeof(scratch))
+            {
+                memcpy(scratch, line_start, line_len);
+                scratch[line_len] = '\0';
+                to_draw = scratch;
+            }
+            else
+            {
+                heap = (char *)malloc(line_len + 1);
+                if (heap)
+                {
+                    memcpy(heap, line_start, line_len);
+                    heap[line_len] = '\0';
+                    to_draw = heap;
+                }
+            }
+            if (to_draw)
+            {
+                atk_font_draw_string_clipped(content_x,
+                                             baseline,
+                                             to_draw,
+                                             state->theme.button_text,
+                                             face,
+                                             &clip);
+            }
+            free(heap);
+
+            drawn++;
+            if (drawn >= (size_t)visible_lines)
+            {
+                break;
+            }
+        }
+
+        if (!line_end)
+        {
+            break;
+        }
+        line_start = line_end + 1;
+        line_index++;
+    }
 
     if (priv->focused)
     {
-        int caret_x = x + ATK_TEXT_INPUT_PADDING_X + atk_font_text_width(text);
+        const char *last_nl = strrchr(text, '\n');
+        const char *last_line = last_nl ? (last_nl + 1) : text;
+        int caret_line_visible = (int)(total_lines - 1 - start_line);
+        if (caret_line_visible < 0)
+        {
+            caret_line_visible = 0;
+        }
+        if (caret_line_visible >= visible_lines)
+        {
+            caret_line_visible = visible_lines - 1;
+        }
+        int caret_x = content_x + atk_font_text_width(last_line);
         if (caret_x > x + width - 2)
         {
             caret_x = x + width - 2;
         }
+        int caret_top = content_y + caret_line_visible * line_height;
+        int caret_baseline = atk_font_baseline_for_rect(caret_top, line_height);
         int caret_height = line_height;
-        int caret_y = baseline - caret_height + 1;
-        if (caret_y < y + ATK_TEXT_INPUT_PADDING_Y)
+        int caret_y = caret_baseline - caret_height + 1;
+        if (caret_y < content_y)
         {
-            caret_y = y + ATK_TEXT_INPUT_PADDING_Y;
+            caret_y = content_y;
         }
-        video_draw_rect(caret_x, caret_y, 2, caret_height, state->theme.button_text);
+        if (caret_y + caret_height > y + height)
+        {
+            caret_height = (y + height) - caret_y;
+        }
+        if (caret_height > 0)
+        {
+            video_draw_rect(caret_x, caret_y, 2, caret_height, state->theme.button_text);
+        }
     }
 }
 
@@ -403,6 +581,7 @@ void atk_text_input_destroy(atk_widget_t *input)
     priv->submit = NULL;
     priv->submit_context = NULL;
     priv->focused = false;
+    priv->multiline = false;
 }
 
 static atk_mouse_response_t text_input_mouse_cb(atk_widget_t *widget,
