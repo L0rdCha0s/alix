@@ -557,18 +557,53 @@ static void css_style_apply_property(css_style_t *style,
         const char *e = val_end;
         css_trim_range(&s, &e);
         size_t len = (size_t)(e - s);
-        style->has_display = true;
-        style->display = CSS_DISPLAY_INLINE;
         if (len == 5 && strncasecmp(s, "block", 5) == 0)
         {
+            style->has_display = true;
+            style->display = CSS_DISPLAY_BLOCK;
+        }
+        else if (len == 6 && strncasecmp(s, "inline", 6) == 0)
+        {
+            style->has_display = true;
+            style->display = CSS_DISPLAY_INLINE;
+        }
+        else if (len == 11 && strncasecmp(s, "inline-block", 11) == 0)
+        {
+            /* Closest supported fallback. */
+            style->has_display = true;
+            style->display = CSS_DISPLAY_INLINE;
+        }
+        else if (len == 4 && strncasecmp(s, "flex", 4) == 0)
+        {
+            /* Treat flex containers as block-level when flex layout isn't supported. */
+            style->has_display = true;
+            style->display = CSS_DISPLAY_BLOCK;
+        }
+        else if (len == 10 && strncasecmp(s, "inline-flex", 10) == 0)
+        {
+            /* Fallback: behave like inline. */
+            style->has_display = true;
+            style->display = CSS_DISPLAY_INLINE;
+        }
+        else if (len == 11 && strncasecmp(s, "-webkit-box", 11) == 0)
+        {
+            /* Old flexbox syntax; best-effort fallback. */
+            style->has_display = true;
+            style->display = CSS_DISPLAY_BLOCK;
+        }
+        else if (len == 12 && strncasecmp(s, "-webkit-flex", 12) == 0)
+        {
+            style->has_display = true;
             style->display = CSS_DISPLAY_BLOCK;
         }
         else if (len == 9 && strncasecmp(s, "list-item", 9) == 0)
         {
+            style->has_display = true;
             style->display = CSS_DISPLAY_LIST_ITEM;
         }
         else if (len == 4 && strncasecmp(s, "none", 4) == 0)
         {
+            style->has_display = true;
             style->display = CSS_DISPLAY_NONE;
         }
         return;
@@ -627,4 +662,3 @@ static void css_style_apply_property(css_style_t *style,
         return;
     }
 }
-
