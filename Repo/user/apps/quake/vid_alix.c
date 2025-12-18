@@ -38,6 +38,46 @@ static int g_last_mouse_y = -1;
 static int g_mouse_dx = 0;
 static int g_mouse_dy = 0;
 static bool g_mouse_btn_down = false;
+static bool g_mouse_captured = false;
+
+static unsigned char quake_scancode_to_ascii(uint32_t scancode)
+{
+    static const unsigned char map[128] = {
+        0,   27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b','\t',
+        'q','w','e','r','t','y','u','i','o','p','[',']','\n', 0, 'a','s',
+        'd','f','g','h','j','k','l',';','\'','`', 0,'\\','z','x','c','v',
+        'b','n','m',',','.','/', 0,'*', 0,' ', 0,  0,   0,   0,   0,   0,
+        0,   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+        0,   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+        0,   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+        0,   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+    };
+
+    if (scancode < 128)
+    {
+        return map[scancode];
+    }
+    return 0;
+}
+
+static void quake_reset_mouse_tracking(void)
+{
+    g_last_mouse_x = -1;
+    g_last_mouse_y = -1;
+    g_mouse_dx = 0;
+    g_mouse_dy = 0;
+}
+
+static void quake_set_mouse_capture(bool enable)
+{
+    if (!g_window_ready || g_mouse_captured == enable)
+    {
+        return;
+    }
+    atk_user_set_mouse_capture(&g_window, enable, true);
+    g_mouse_captured = enable;
+    quake_reset_mouse_tracking();
+}
 
 static void quake_blit_scaled(void)
 {
@@ -108,10 +148,6 @@ static int quake_translate_scancode(uint32_t scancode)
 {
     switch (scancode)
     {
-        case 0x48: return K_UPARROW;
-        case 0x50: return K_DOWNARROW;
-        case 0x4B: return K_LEFTARROW;
-        case 0x4D: return K_RIGHTARROW;
         case 0x01: return K_ESCAPE;
         case 0x0F: return K_TAB;
         case 0x1C: return K_ENTER;
@@ -145,6 +181,20 @@ static int quake_translate_key(const user_atk_event_t *ev)
         return 0;
     }
 
+    if ((ev->flags & USER_ATK_KEY_FLAG_EXTENDED) != 0)
+    {
+        switch (ev->data1)
+        {
+            case 0x48: /* Up */
+            case 0x50: /* Down */
+            case 0x4B: /* Left */
+            case 0x4D: /* Right */
+                return 0;
+            default:
+                break;
+        }
+    }
+
     int key = quake_translate_scancode(ev->data1);
     if (key)
     {
@@ -154,23 +204,7 @@ static int quake_translate_key(const user_atk_event_t *ev)
     unsigned char ch = (unsigned char)ev->data0;
     if (ch == 0)
     {
-        // Provide minimal scancode -> ASCII fallback for common binds.
-        switch (ev->data1)
-        {
-            case 0x39: return K_SPACE;
-            case 0x02: return '1';
-            case 0x03: return '2';
-            case 0x04: return '3';
-            case 0x05: return '4';
-            case 0x06: return '5';
-            case 0x07: return '6';
-            case 0x08: return '7';
-            case 0x09: return '8';
-            case 0x0A: return '9';
-            case 0x0B: return '0';
-            default:
-                break;
-        }
+        ch = quake_scancode_to_ascii(ev->data1);
     }
 
     if (ch >= 'A' && ch <= 'Z')
@@ -208,12 +242,34 @@ void Sys_SendKeyEvents(void)
                 int key = quake_translate_key(&ev);
                 if (key)
                 {
+                    if (down && key == K_ESCAPE && g_mouse_captured)
+                    {
+                        quake_set_mouse_capture(false);
+                    }
                     Key_Event(key, down);
                 }
                 break;
             }
             case USER_ATK_EVENT_MOUSE:
             {
+                if (!g_mouse_captured &&
+                    (ev.flags & (USER_ATK_MOUSE_FLAG_PRESS | USER_ATK_MOUSE_FLAG_LEFT)))
+                {
+                    quake_set_mouse_capture(true);
+                }
+                if (ev.flags & USER_ATK_MOUSE_FLAG_RELATIVE)
+                {
+                    if (!g_mouse_captured)
+                    {
+                        g_mouse_captured = true;
+                    }
+                }
+                else if (g_mouse_captured)
+                {
+                    g_mouse_captured = false;
+                    quake_reset_mouse_tracking();
+                }
+
                 if (ev.flags & USER_ATK_MOUSE_FLAG_PRESS)
                 {
                     if (!g_mouse_btn_down)
@@ -231,13 +287,23 @@ void Sys_SendKeyEvents(void)
                     }
                 }
 
-                if (g_last_mouse_x >= 0 && g_last_mouse_y >= 0)
+                if (ev.flags & USER_ATK_MOUSE_FLAG_RELATIVE)
                 {
-                    g_mouse_dx += ev.x - g_last_mouse_x;
-                    g_mouse_dy += g_last_mouse_y - ev.y;
+                    g_mouse_dx += (int32_t)ev.data0;
+                    g_mouse_dy += (int32_t)ev.data1;
+                    g_last_mouse_x = ev.x;
+                    g_last_mouse_y = ev.y;
                 }
-                g_last_mouse_x = ev.x;
-                g_last_mouse_y = ev.y;
+                else
+                {
+                    if (g_last_mouse_x >= 0 && g_last_mouse_y >= 0)
+                    {
+                        g_mouse_dx += ev.x - g_last_mouse_x;
+                        g_mouse_dy += ev.y - g_last_mouse_y;
+                    }
+                    g_last_mouse_x = ev.x;
+                    g_last_mouse_y = ev.y;
+                }
                 break;
             }
             case USER_ATK_EVENT_CLOSE:
@@ -255,10 +321,70 @@ void IN_Commands(void) {}
 
 void IN_Move(usercmd_t *cmd)
 {
-    (void)cmd;
-    // Mouse look is not wired up yet; keep deltas from growing unbounded.
+    if (!cmd)
+    {
+        return;
+    }
+
+    int dx = g_mouse_dx;
+    int dy = g_mouse_dy;
     g_mouse_dx = 0;
     g_mouse_dy = 0;
+    if (dx == 0 && dy == 0)
+    {
+        if (g_mouse_captured || (in_mlook.state & 1))
+        {
+            V_StopPitchDrift();
+        }
+        return;
+    }
+
+    qboolean mlook = g_mouse_captured || (in_mlook.state & 1);
+    if (!g_mouse_captured && !mlook)
+    {
+        return;
+    }
+
+    float mx = (float)dx * sensitivity.value;
+    float my = (float)dy * sensitivity.value;
+
+    if ((in_strafe.state & 1) || (lookstrafe.value && mlook))
+    {
+        cmd->sidemove += m_side.value * mx;
+    }
+    else
+    {
+        cl.viewangles[YAW] -= m_yaw.value * mx;
+    }
+
+    if (mlook)
+    {
+        V_StopPitchDrift();
+    }
+
+    if (mlook && !(in_strafe.state & 1))
+    {
+        cl.viewangles[PITCH] += m_pitch.value * my;
+        if (cl.viewangles[PITCH] > 80)
+        {
+            cl.viewangles[PITCH] = 80;
+        }
+        if (cl.viewangles[PITCH] < -70)
+        {
+            cl.viewangles[PITCH] = -70;
+        }
+    }
+    else
+    {
+        if ((in_strafe.state & 1) && noclip_anglehack)
+        {
+            cmd->upmove -= m_forward.value * my;
+        }
+        else
+        {
+            cmd->forwardmove -= m_forward.value * my;
+        }
+    }
 }
 
 void VID_HandlePause(qboolean pause)
@@ -335,11 +461,9 @@ void VID_Init(unsigned char *palette)
     VID_SetPalette(palette);
 
     g_window_ready = true;
-    g_last_mouse_x = -1;
-    g_last_mouse_y = -1;
-    g_mouse_dx = 0;
-    g_mouse_dy = 0;
+    quake_reset_mouse_tracking();
     g_mouse_btn_down = false;
+    g_mouse_captured = false;
 
     serial_printf("[quake][video] VID_Init done\n");
 }
@@ -348,6 +472,7 @@ void VID_Shutdown(void)
 {
     if (g_window_ready)
     {
+        quake_set_mouse_capture(false);
         atk_user_close(&g_window);
         g_window_ready = false;
     }
@@ -361,11 +486,9 @@ void VID_Shutdown(void)
     free(g_frame_rgba);
     g_frame_rgba = NULL;
 
-    g_last_mouse_x = -1;
-    g_last_mouse_y = -1;
-    g_mouse_dx = 0;
-    g_mouse_dy = 0;
+    quake_reset_mouse_tracking();
     g_mouse_btn_down = false;
+    g_mouse_captured = false;
 }
 
 void VID_Update(vrect_t *rects)

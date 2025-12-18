@@ -207,6 +207,15 @@ void Sys_SetFPCW(void) {}
 
 void Sys_Init(void) {}
 
+static void quake_setup_input_defaults(void)
+{
+    Cbuf_AddText("bind w +forward\n");
+    Cbuf_AddText("bind s +back\n");
+    Cbuf_AddText("bind a +moveleft\n");
+    Cbuf_AddText("bind d +moveright\n");
+    Cbuf_AddText("+mlook\n");
+}
+
 int main(int argc, char **argv)
 {
     quakeparms_t parms;
@@ -238,6 +247,8 @@ int main(int argc, char **argv)
     parms.basedir = "/usr/share/games/quake";
 
     Host_Init(&parms);
+    quake_setup_input_defaults();
+    Cbuf_Execute();
     Sys_Init();
 
     double oldtime = Sys_FloatTime() - 0.1;

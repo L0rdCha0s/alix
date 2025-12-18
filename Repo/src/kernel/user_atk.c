@@ -47,6 +47,8 @@ typedef struct user_atk_window
 static user_atk_window_t *g_windows_head = NULL;
 static user_atk_window_t *g_focus_window = NULL;
 static user_atk_window_t *g_capture_window = NULL;
+static bool g_capture_forced = false;
+static bool g_capture_relative = false;
 static process_t *g_focus_priority_owner = NULL;
 static process_t *g_capture_priority_owner = NULL;
 static uint32_t g_next_handle = 1;
@@ -135,6 +137,8 @@ void user_atk_init(void)
     g_windows_head = NULL;
     g_focus_window = NULL;
     g_capture_window = NULL;
+    g_capture_forced = false;
+    g_capture_relative = false;
     if (g_focus_priority_owner)
     {
         process_clear_priority_override(g_focus_priority_owner);
@@ -353,7 +357,17 @@ void user_atk_focus_window(const atk_widget_t *window)
     user_atk_apply_priorities();
 }
 
+bool user_atk_capture_relative_active(void)
+{
+    user_atk_window_t *win = __atomic_load_n(&g_capture_window, __ATOMIC_ACQUIRE);
+    bool forced = __atomic_load_n(&g_capture_forced, __ATOMIC_ACQUIRE);
+    bool relative = __atomic_load_n(&g_capture_relative, __ATOMIC_ACQUIRE);
+    return win && forced && relative;
+}
+
 bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
+                                int dx,
+                                int dy,
                                 int cursor_x,
                                 int cursor_y,
                                 bool pressed_edge,
@@ -362,25 +376,48 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
 {
     user_atk_windows_lock();
     user_atk_window_t *previous_capture = g_capture_window;
+    bool forced_capture = g_capture_forced;
+    bool relative_capture = g_capture_relative;
     if (previous_capture)
     {
         user_atk_window_retain(previous_capture);
     }
+    user_atk_windows_unlock();
 
-    user_atk_window_t *target = g_capture_window;
-    if (!target)
+    user_atk_window_t *hover_target = user_atk_from_window(hover_window);
+    bool dropped_forced_capture = false;
+    if (forced_capture && previous_capture && pressed_edge && hover_target != previous_capture)
     {
-        target = user_atk_from_window(hover_window);
+        user_atk_windows_lock();
+        if (g_capture_window == previous_capture && g_capture_forced)
+        {
+            g_capture_window = NULL;
+            g_capture_forced = false;
+            g_capture_relative = false;
+            dropped_forced_capture = true;
+        }
+        user_atk_windows_unlock();
+    }
+    if (dropped_forced_capture)
+    {
+        forced_capture = false;
+        relative_capture = false;
+    }
+
+    user_atk_window_t *target = NULL;
+    if (!dropped_forced_capture && previous_capture)
+    {
+        target = previous_capture;
+        /* target is already retained via previous_capture */
+    }
+    else
+    {
+        target = hover_target;
         if (target)
         {
             user_atk_window_retain(target);
         }
     }
-    else
-    {
-        /* target is already retained via previous_capture */
-    }
-    user_atk_windows_unlock();
 #if USER_ATK_DEBUG
     user_atk_log_pair("route_mouse hover", (uintptr_t)hover_window, (uintptr_t)(target ? target->window : NULL));
 #endif
@@ -407,7 +444,7 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
                    rel_x < target->content_width &&
                    rel_y < target->content_height);
 
-    if (!inside && !previous_capture)
+    if (!inside && target != previous_capture)
     {
 #if USER_ATK_DEBUG
         uint64_t coord = ((uint64_t)(uint32_t)rel_x << 32) | (uint32_t)(rel_y & 0xFFFFFFFFu);
@@ -440,9 +477,13 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     if (pressed_edge)
     {
         event.flags |= USER_ATK_MOUSE_FLAG_PRESS;
-        user_atk_windows_lock();
-        g_capture_window = target;
-        user_atk_windows_unlock();
+        if (!forced_capture)
+        {
+            user_atk_windows_lock();
+            g_capture_window = target;
+            g_capture_relative = false;
+            user_atk_windows_unlock();
+        }
 #if USER_ATK_DEBUG
         user_atk_log_pair("capture begin", target->handle, (uint64_t)event.flags);
 #endif
@@ -450,15 +491,26 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     if (released_edge)
     {
         event.flags |= USER_ATK_MOUSE_FLAG_RELEASE;
-        user_atk_windows_lock();
-        if (g_capture_window == target && !left_pressed)
+        if (!forced_capture)
         {
-            g_capture_window = NULL;
+            user_atk_windows_lock();
+            if (g_capture_window == target && !left_pressed)
+            {
+                g_capture_window = NULL;
+            }
+            g_capture_relative = false;
 #if USER_ATK_DEBUG
             user_atk_log_pair("capture end", target->handle, (uint64_t)event.flags);
 #endif
+            user_atk_windows_unlock();
         }
-        user_atk_windows_unlock();
+    }
+
+    if (forced_capture && relative_capture)
+    {
+        event.flags |= USER_ATK_MOUSE_FLAG_RELATIVE;
+        event.data0 = (uint32_t)dx;
+        event.data1 = (uint32_t)dy;
     }
 
 #if USER_ATK_DEBUG
@@ -620,6 +672,8 @@ static void user_atk_window_on_destroy(void *context)
     if (g_capture_window == win)
     {
         g_capture_window = NULL;
+        g_capture_forced = false;
+        g_capture_relative = false;
     }
     user_atk_windows_unlock();
     if (front_pixels)
@@ -684,6 +738,8 @@ static void user_atk_remove(user_atk_window_t *win, bool closing_kernel)
     if (g_capture_window == win)
     {
         g_capture_window = NULL;
+        g_capture_forced = false;
+        g_capture_relative = false;
     }
     user_atk_windows_unlock();
 
@@ -1019,6 +1075,36 @@ int64_t user_atk_sys_close(uint32_t handle)
     return 0;
 }
 
+int64_t user_atk_sys_capture(uint32_t handle, uint32_t flags)
+{
+    user_atk_window_t *win = user_atk_find(handle, process_current());
+    if (!win)
+    {
+        return -1;
+    }
+
+    bool enable = (flags & USER_ATK_CAPTURE_ENABLE) != 0;
+    bool relative = (flags & USER_ATK_CAPTURE_RELATIVE) != 0;
+
+    user_atk_windows_lock();
+    if (enable)
+    {
+        g_capture_window = win;
+        g_capture_forced = true;
+        g_capture_relative = relative;
+    }
+    else if (g_capture_window == win && g_capture_forced)
+    {
+        g_capture_window = NULL;
+        g_capture_forced = false;
+        g_capture_relative = false;
+    }
+    user_atk_windows_unlock();
+    user_atk_apply_priorities();
+    user_atk_window_release(win);
+    return 0;
+}
+
 void user_atk_on_process_destroy(process_t *process)
 {
     if (!process)
@@ -1209,10 +1295,22 @@ static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_e
     {
         return false;
     }
+    uint32_t relative_mask = USER_ATK_MOUSE_FLAG_RELATIVE;
+    if ((event->flags & relative_mask) != (last->flags & relative_mask))
+    {
+        return false;
+    }
 
     last->x = event->x;
     last->y = event->y;
     last->flags = event->flags;
+    if (event->flags & USER_ATK_MOUSE_FLAG_RELATIVE)
+    {
+        int32_t accum_dx = (int32_t)last->data0 + (int32_t)event->data0;
+        int32_t accum_dy = (int32_t)last->data1 + (int32_t)event->data1;
+        last->data0 = (uint32_t)accum_dx;
+        last->data1 = (uint32_t)accum_dy;
+    }
     return true;
 }
 

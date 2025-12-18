@@ -159,6 +159,24 @@ void atk_user_close(atk_user_window_t *win)
     win->track_dirty = false;
 }
 
+bool atk_user_set_mouse_capture(atk_user_window_t *win, bool enable, bool relative)
+{
+    if (!win || win->handle == 0)
+    {
+        return false;
+    }
+    uint32_t flags = 0;
+    if (enable)
+    {
+        flags |= USER_ATK_CAPTURE_ENABLE;
+        if (relative)
+        {
+            flags |= USER_ATK_CAPTURE_RELATIVE;
+        }
+    }
+    return sys_ui_capture(win->handle, flags) == 0;
+}
+
 static bool atk_user_window_open_internal(atk_user_window_t *win,
                                           const char *title,
                                           uint32_t width,

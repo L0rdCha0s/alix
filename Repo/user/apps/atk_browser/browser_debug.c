@@ -525,7 +525,14 @@ void browser_debug_service(browser_app_t *app)
                 bool left = (ev.flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
                 bool press = (ev.flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
                 bool release = (ev.flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
-                (void)atk_handle_mouse_event(ev.x, ev.y, press, release, left);
+                int dx = 0;
+                int dy = 0;
+                if (ev.flags & USER_ATK_MOUSE_FLAG_RELATIVE)
+                {
+                    dx = (int32_t)ev.data0;
+                    dy = (int32_t)ev.data1;
+                }
+                (void)atk_handle_mouse_event(dx, dy, ev.x, ev.y, press, release, left);
                 break;
             }
             case USER_ATK_EVENT_KEY:
@@ -578,4 +585,3 @@ void browser_debug_service(browser_app_t *app)
     browser_attach_remote(&app->remote);
     browser_dirty_restore(state, &dirty_before);
 }
-

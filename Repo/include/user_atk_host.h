@@ -15,6 +15,8 @@ bool user_atk_window_is_remote(const struct atk_widget *window);
 bool user_atk_window_is_resizable(const struct atk_widget *window);
 void user_atk_focus_window(const struct atk_widget *window);
 bool user_atk_route_mouse_event(const struct atk_widget *hover_window,
+                                int dx,
+                                int dy,
                                 int cursor_x,
                                 int cursor_y,
                                 bool pressed_edge,
@@ -22,10 +24,12 @@ bool user_atk_route_mouse_event(const struct atk_widget *hover_window,
                                 bool left_pressed);
 bool user_atk_route_key_event(const keyboard_event_t *event);
 void user_atk_window_resized(const struct atk_widget *window);
+bool user_atk_capture_relative_active(void);
 
 int64_t user_atk_sys_create(const user_atk_window_desc_t *desc);
 int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_t byte_len);
 int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, uint32_t flags);
 int64_t user_atk_sys_close(uint32_t handle);
+int64_t user_atk_sys_capture(uint32_t handle, uint32_t flags);
 
 #endif /* USER_ATK_HOST_H */

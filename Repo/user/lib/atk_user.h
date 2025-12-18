@@ -84,4 +84,12 @@ bool atk_user_poll_event(atk_user_window_t *win, user_atk_event_t *event);
  */
 void atk_user_close(atk_user_window_t *win);
 
+/*
+ * Request or release mouse capture for a window.
+ *
+ * When `relative` is true and capture is enabled, mouse events include
+ * raw deltas via USER_ATK_MOUSE_FLAG_RELATIVE.
+ */
+bool atk_user_set_mouse_capture(atk_user_window_t *win, bool enable, bool relative);
+
 #endif /* USER_ATK_USER_H */

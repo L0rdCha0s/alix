@@ -752,6 +752,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
                     is_spacer_gif = true;
                 }
             }
+            bool skip_placeholder = is_spacer_gif || web_url_is_svg(src);
 
             int draw_x = ctx->body_x;
             bool positioned = false;
@@ -805,14 +806,14 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
             }
             else
             {
-                if (!is_spacer_gif && img_w > 0 && img_h > 0)
+                if (!skip_placeholder && img_w > 0 && img_h > 0)
                 {
                     video_color_t ph = video_make_color(0xDD, 0xDD, 0xDD);
                     html_view_draw_rect_clipped(ctx, draw_x, draw_y, img_w, img_h, ph, &ctx->clip);
                 }
             }
 
-            if (style->has_border && img_w > 0 && img_h > 0)
+            if (style->has_border && img_w > 0 && img_h > 0 && (img || !skip_placeholder))
             {
                 int bt = html_view_length_to_px(&style->border_width.top,
                                                 ctx->viewport_w,

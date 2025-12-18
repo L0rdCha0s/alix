@@ -1099,6 +1099,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_UI_CLOSE:
             result = user_atk_sys_close((uint32_t)frame->rdi);
             break;
+        case SYSCALL_UI_CAPTURE:
+            result = user_atk_sys_capture((uint32_t)frame->rdi, (uint32_t)frame->rsi);
+            break;
         case SYSCALL_FONT_CACHE:
             result = font_cache_copy_to_user((void *)frame->rdi, (size_t)frame->rsi);
             break;

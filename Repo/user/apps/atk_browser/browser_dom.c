@@ -1,6 +1,7 @@
 #include "browser_internal.h"
 
 #include "string.h"
+#include "web/url.h"
 
 const html_node_t *browser_dom_find_first_element(const html_node_t *root, const char *tag)
 {
@@ -134,26 +135,6 @@ void browser_dom_set_attr(html_node_t *node, const char *name, const char *value
     node->attrs = attr;
 }
 
-static bool browser_url_is_svg(const char *url)
-{
-    if (!url || url[0] == '\0')
-    {
-        return false;
-    }
-
-    const char *end = url;
-    while (*end && *end != '?' && *end != '#')
-    {
-        ++end;
-    }
-    size_t len = (size_t)(end - url);
-    if (len < 4)
-    {
-        return false;
-    }
-    return strncasecmp(url + len - 4, ".svg", 4) == 0;
-}
-
 void browser_collect_resource_urls(browser_app_t *app,
                                   html_node_t *root,
                                   const browser_url_t *base_url,
@@ -201,7 +182,7 @@ void browser_collect_resource_urls(browser_app_t *app,
                     if (abs)
                     {
                         browser_dom_set_attr(node, "src", abs);
-                        if (!browser_url_is_svg(abs))
+                        if (!web_url_is_svg(abs))
                         {
                             img_urls[img_count++] = abs;
                             browser_debug_logf(app, "[img] discovered %s", abs);
@@ -242,4 +223,3 @@ void browser_collect_resource_urls(browser_app_t *app,
         browser_debug_logf(app, "[img] total images=%u", (unsigned)img_count);
     }
 }
-

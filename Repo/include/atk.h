@@ -54,14 +54,21 @@ void atk_enter_mode(void);
 void atk_render(void);
 
 /*
- * Feed an absolute mouse event into ATK.
+ * Feed a mouse event into ATK.
  *
- * Coordinates are in screen space. `pressed_edge`/`released_edge` indicate
- * button transitions for the current frame; `left_pressed` is the current state.
+ * Coordinates are in screen space. `dx`/`dy` are the raw relative deltas from
+ * the mouse driver. `pressed_edge`/`released_edge` indicate button transitions
+ * for the current frame; `left_pressed` is the current state.
  * ATK handles window chrome, menu bar interactions, mouse capture, and widget
  * dispatch. If `result.redraw` is true, call `atk_render()` then present/flush.
  */
-atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x, int cursor_y, bool pressed_edge, bool released_edge, bool left_pressed);
+atk_mouse_event_result_t atk_handle_mouse_event(int dx,
+                                                int dy,
+                                                int cursor_x,
+                                                int cursor_y,
+                                                bool pressed_edge,
+                                                bool released_edge,
+                                                bool left_pressed);
 
 /*
  * Feed a typed character into ATK.

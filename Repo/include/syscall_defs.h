@@ -41,6 +41,7 @@ typedef enum
     SYSCALL_THREAD_JOIN = 32,
     SYSCALL_THREAD_EXIT = 33,
     SYSCALL_THREAD_SELF = 34,
+    SYSCALL_UI_CAPTURE = 35,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)

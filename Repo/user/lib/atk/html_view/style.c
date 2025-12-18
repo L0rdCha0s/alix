@@ -493,6 +493,8 @@ static void html_view_style_for_node(css_style_t *out,
         {
             out->has_line_height = true;
             out->line_height_milli = parent->line_height_milli;
+            out->line_height_is_length = parent->line_height_is_length;
+            out->line_height = parent->line_height;
         }
         if (parent->has_text_align && !is_table_cell)
         {
@@ -525,10 +527,10 @@ static void html_view_style_for_node(css_style_t *out,
         html_view_apply_inline_style(out, inline_style);
     }
 
-    if (is_table_header && !out->has_text_align)
+    if (is_table_cell && !out->has_text_align)
     {
         out->has_text_align = true;
-        out->text_align = CSS_TEXT_ALIGN_CENTER;
+        out->text_align = is_table_header ? CSS_TEXT_ALIGN_CENTER : CSS_TEXT_ALIGN_LEFT;
     }
 }
 
@@ -648,12 +650,29 @@ static int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css
     int base_font_px = ctx->base_font_px > 0 ? ctx->base_font_px : actual_font_px;
     int line_height = ctx->base_line_height > 0 ? ctx->base_line_height : (base_font_px + 4);
 
-    if (style && style->has_line_height && style->line_height_milli > 0)
+    if (style && style->has_line_height)
     {
-        line_height = (int)(((int64_t)base_font_px * (int64_t)style->line_height_milli + 500LL) / 1000LL);
-        if (line_height < base_font_px)
+        if (style->line_height_is_length)
         {
-            line_height = base_font_px;
+            int px = html_view_length_to_px(&style->line_height,
+                                            ctx->viewport_w,
+                                            ctx->viewport_h,
+                                            ctx->viewport_w,
+                                            ctx->viewport_h,
+                                            base_font_px,
+                                            false);
+            if (px > 0)
+            {
+                line_height = px;
+            }
+        }
+        else if (style->line_height_milli > 0)
+        {
+            line_height = (int)(((int64_t)base_font_px * (int64_t)style->line_height_milli + 500LL) / 1000LL);
+            if (line_height < base_font_px)
+            {
+                line_height = base_font_px;
+            }
         }
     }
 
@@ -752,4 +771,3 @@ static void html_view_font_scope_pop(html_view_ctx_t *ctx, const html_view_font_
     ctx->line_height = saved->line_height;
     ctx->space_w = saved->space_w;
 }
-

@@ -9,6 +9,7 @@
 #include "video.h"
 #include "web/css.h"
 #include "web/html.h"
+#include "web/url.h"
 
 video_color_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -618,8 +619,22 @@ static bool css_serialize_style(sb_t *sb, const css_style_t *style, int depth)
     }
     if (style->has_line_height)
     {
-        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "line-height: ") ||
-            !css_append_milli(sb, style->line_height_milli) || !sb_append_char(sb, '\n'))
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "line-height: "))
+        {
+            return false;
+        }
+        if (style->line_height_is_length)
+        {
+            if (!css_append_length(sb, &style->line_height))
+            {
+                return false;
+            }
+        }
+        else if (!css_append_milli(sb, style->line_height_milli))
+        {
+            return false;
+        }
+        if (!sb_append_char(sb, '\n'))
         {
             return false;
         }
@@ -692,6 +707,15 @@ typedef struct
     const char *tag;
     bool expected_match;
 } css_match_case_t;
+
+typedef struct
+{
+    const char *suite;
+    const char *name;
+    bool expect_pass;
+    const char *url;
+    bool expected_svg;
+} url_case_t;
 
 typedef struct
 {
@@ -1992,6 +2016,14 @@ static const parse_case_t css_cases[] = {
              "p { line-height: 120%; }",
              "selector: p\n"
              "  line-height: 1.2\n"),
+    CSS_CASE("css/current", "line-height-px", true,
+             "p { line-height: 18px; }",
+             "selector: p\n"
+             "  line-height: 18px\n"),
+    CSS_CASE("css/current", "line-height-pt", true,
+             "p { line-height: 12pt; }",
+             "selector: p\n"
+             "  line-height: 16px\n"),
     CSS_CASE("css/current", "font-shorthand-percent-line-height", true,
              "p { font: 12pt/150% serif; }",
              "selector: p\n"
@@ -2173,10 +2205,6 @@ static const parse_case_t css_cases[] = {
              "div { height: 100svh; }",
              "selector: div\n"
              "  height: 100svh\n"),
-    CSS_CASE("css/css4", "line-height-px", false,
-             "p { line-height: 18px; }",
-             "selector: p\n"
-             "  line-height: 18px\n"),
     CSS_CASE("css/css4", "font-size-calc", false,
              "p { font-size: calc(1rem + 2px); }",
              "selector: p\n"
@@ -2220,6 +2248,17 @@ static const css_match_case_t css_match_cases[] = {
     { .suite = "css/css4", .name = "not-pseudo-class", .expect_pass = false, .selector = ":not(span)", .tag = "div", .expected_match = true },
     { .suite = "css/css4", .name = "is-pseudo-class", .expect_pass = false, .selector = ":is(div, span)", .tag = "div", .expected_match = true },
     { .suite = "css/css4", .name = "nth-child-pseudo-class", .expect_pass = false, .selector = ":nth-child(2)", .tag = "div", .expected_match = true },
+};
+
+static const url_case_t url_cases[] = {
+    { .suite = "url/current", .name = "svg-extension", .expect_pass = true, .url = "https://news.ycombinator.com/y18.svg", .expected_svg = true },
+    { .suite = "url/current", .name = "svg-extension-uppercase", .expect_pass = true, .url = "https://example.com/icon.SVG", .expected_svg = true },
+    { .suite = "url/current", .name = "svg-extension-query", .expect_pass = true, .url = "https://example.com/icon.svg?cache=1", .expected_svg = true },
+    { .suite = "url/current", .name = "svg-extension-fragment", .expect_pass = true, .url = "https://example.com/icon.svg#hash", .expected_svg = true },
+    { .suite = "url/current", .name = "svg-extensionz", .expect_pass = true, .url = "https://example.com/icon.svgz", .expected_svg = false },
+    { .suite = "url/current", .name = "png-extension", .expect_pass = true, .url = "https://example.com/icon.png", .expected_svg = false },
+    { .suite = "url/current", .name = "empty-url", .expect_pass = true, .url = "", .expected_svg = false },
+    { .suite = "url/current", .name = "null-url", .expect_pass = true, .url = NULL, .expected_svg = false },
 };
 
 static bool run_html_case(const parse_case_t *tc, sb_t *scratch, bool show_failures)
@@ -2290,6 +2329,25 @@ static bool run_css_match_case(const css_match_case_t *tc, bool show_failures)
     return true;
 }
 
+static bool run_url_case(const url_case_t *tc, bool show_failures)
+{
+    bool got = web_url_is_svg(tc->url);
+    if (got != tc->expected_svg)
+    {
+        if (show_failures)
+        {
+            printf("url: %s/%s: url=\"%s\" expected=%s got=%s\n",
+                   tc->suite,
+                   tc->name,
+                   tc->url ? tc->url : "<null>",
+                   tc->expected_svg ? "svg" : "not svg",
+                   got ? "svg" : "not svg");
+        }
+        return false;
+    }
+    return true;
+}
+
 static bool run_html_null_input_test(bool show_failures)
 {
     html_parse_error_t err = {0};
@@ -2338,6 +2396,7 @@ int main(void)
 
     test_counts_t html_counts = {0};
     test_counts_t css_counts = {0};
+    test_counts_t url_counts = {0};
 
     struct
     {
@@ -2375,11 +2434,19 @@ int main(void)
         test_counts_add(&css_counts, ok, css_match_cases[i].expect_pass);
     }
 
+    for (size_t i = 0; i < ARRAY_LEN(url_cases); ++i)
+    {
+        bool ok = run_url_case(&url_cases[i], verbose || url_cases[i].expect_pass);
+        test_counts_add(&url_counts, ok, url_cases[i].expect_pass);
+    }
+
     sb_destroy(&scratch);
 
     test_counts_t all_counts = test_counts_sum(html_counts, css_counts);
+    all_counts = test_counts_sum(all_counts, url_counts);
     test_counts_print("html", &html_counts);
     test_counts_print("css", &css_counts);
+    test_counts_print("url", &url_counts);
     test_counts_print("all", &all_counts);
 
     return all_counts.fail == 0 ? 0 : 1;

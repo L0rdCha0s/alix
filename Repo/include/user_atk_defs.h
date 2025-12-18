@@ -18,6 +18,7 @@ typedef enum
 #define USER_ATK_MOUSE_FLAG_PRESS   (1u << 0)
 #define USER_ATK_MOUSE_FLAG_RELEASE (1u << 1)
 #define USER_ATK_MOUSE_FLAG_LEFT    (1u << 2)
+#define USER_ATK_MOUSE_FLAG_RELATIVE (1u << 3)
 #define USER_ATK_KEY_FLAG_RELEASE   (1u << 0)
 #define USER_ATK_KEY_FLAG_EXTENDED  (1u << 1)
 #define USER_ATK_KEY_FLAG_REPEAT    (1u << 2)
@@ -42,5 +43,7 @@ typedef struct
 
 #define USER_ATK_POLL_FLAG_BLOCK (1u << 0)
 #define USER_ATK_WINDOW_FLAG_RESIZABLE (1u << 0)
+#define USER_ATK_CAPTURE_ENABLE (1u << 0)
+#define USER_ATK_CAPTURE_RELATIVE (1u << 1)
 
 #endif /* USER_ATK_DEFS_H */

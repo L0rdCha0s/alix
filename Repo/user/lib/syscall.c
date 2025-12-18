@@ -136,6 +136,11 @@ int sys_ui_close(uint32_t handle)
     return (int)syscall1(SYSCALL_UI_CLOSE, (long)handle);
 }
 
+int sys_ui_capture(uint32_t handle, uint32_t flags)
+{
+    return (int)syscall2(SYSCALL_UI_CAPTURE, (long)handle, (long)flags);
+}
+
 int sys_yield(void)
 {
     return (int)syscall0(SYSCALL_YIELD);

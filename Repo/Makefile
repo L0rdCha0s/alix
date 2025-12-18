@@ -71,6 +71,7 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/atk_user.c \
 	$(USER_DIR)/lib/web/html.c \
 	$(USER_DIR)/lib/web/css.c \
+	$(USER_DIR)/lib/web/url.c \
 	$(USER_DIR)/lib/video_surface.c \
 	$(USER_DIR)/lib/serial_stub.c \
 	$(USER_DIR)/lib/atk_user_host_stub.c
@@ -101,7 +102,7 @@ USER_TLS_SOURCES := \
 USER_TLS_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_TLS_SOURCES))
 USER_ATK_BROWSER_SOURCES := $(wildcard $(USER_DIR)/apps/atk_browser/*.c)
 USER_ATK_BROWSER_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_BROWSER_SOURCES))
-USER_QUAKE_REF_DIR := reference/WinQuake
+USER_QUAKE_REF_DIR := $(USER_DIR)/quake
 QUAKE_CFLAGS := -I$(USER_QUAKE_REF_DIR) -DALIXOS=1 -fcommon -Dstrnicmp=strncasecmp -Dstricmp=strcasecmp
 USER_QUAKE_REF_SOURCES := $(wildcard $(USER_QUAKE_REF_DIR)/*.c)
 USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/gl_%.c,$(USER_QUAKE_REF_SOURCES))
@@ -167,6 +168,7 @@ HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
 PNG_TEST_BIN := $(HOST_TEST_DIR)/png_host_test
 WEB_TEST_BIN := $(HOST_TEST_DIR)/web_host_test
+HTML_VIEW_TEST_BIN := $(HOST_TEST_DIR)/html_view_host_test
 TLS_TEST_BIN := $(HOST_TEST_DIR)/tls_host_test
 HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -iquote $(INCLUDE_DIR) -DTTF_HOST_BUILD
 
@@ -423,10 +425,15 @@ $(PNG_TEST_BIN): tests/png_host_test.c src/atk/util/png.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD tests/png_host_test.c src/atk/util/png.c -o $@
 
-$(WEB_TEST_BIN): tests/web_host_test.c user/lib/web/html.c user/lib/web/css.c
+$(WEB_TEST_BIN): tests/web_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
-	    tests/web_host_test.c user/lib/web/html.c user/lib/web/css.c -o $@
+	    tests/web_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c -o $@
+
+$(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/html_view_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c -o $@
 
 $(TLS_TEST_BIN): tests/tls_host_test.c \
                  src/net/tls.c src/net/tls_asn1.c \

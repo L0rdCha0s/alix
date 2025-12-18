@@ -245,29 +245,38 @@ static void css_style_apply_property(css_style_t *style,
                 const char *lh_s = slash + 1;
                 const char *lh_e = tok_e;
                 int32_t num_milli = 0;
-                if (css_parse_number_milli(lh_s, lh_e, &num_milli))
+            if (css_parse_number_milli(lh_s, lh_e, &num_milli))
+            {
+                if (num_milli < 0) num_milli = 0;
+                style->has_line_height = true;
+                style->line_height_milli = num_milli;
+                style->line_height_is_length = false;
+            }
+            else
+            {
+                css_length_t lh_len;
+                if (css_parse_length_token(lh_s, lh_e, &lh_len) && !lh_len.is_auto)
                 {
-                    if (num_milli < 0) num_milli = 0;
-                    style->has_line_height = true;
-                    style->line_height_milli = num_milli;
-                }
-                else
-                {
-                    css_length_t lh_len;
-                    if (css_parse_length_token(lh_s, lh_e, &lh_len) && !lh_len.is_auto)
+                    if (lh_len.unit == CSS_UNIT_EM)
                     {
-                        if (lh_len.unit == CSS_UNIT_EM)
-                        {
-                            style->has_line_height = true;
-                            style->line_height_milli = lh_len.value_milli;
-                        }
-                        else if (lh_len.unit == CSS_UNIT_PERCENT)
-                        {
-                            style->has_line_height = true;
-                            style->line_height_milli = lh_len.value_milli / 100;
-                        }
+                        style->has_line_height = true;
+                        style->line_height_milli = lh_len.value_milli;
+                        style->line_height_is_length = false;
+                    }
+                    else if (lh_len.unit == CSS_UNIT_PERCENT)
+                    {
+                        style->has_line_height = true;
+                        style->line_height_milli = lh_len.value_milli / 100;
+                        style->line_height_is_length = false;
+                    }
+                    else
+                    {
+                        style->has_line_height = true;
+                        style->line_height_is_length = true;
+                        style->line_height = lh_len;
                     }
                 }
+            }
             }
             break;
         }
@@ -617,6 +626,7 @@ static void css_style_apply_property(css_style_t *style,
             if (num_milli < 0) num_milli = 0;
             style->has_line_height = true;
             style->line_height_milli = num_milli;
+            style->line_height_is_length = false;
         }
         else
         {
@@ -627,11 +637,19 @@ static void css_style_apply_property(css_style_t *style,
                 {
                     style->has_line_height = true;
                     style->line_height_milli = lh_len.value_milli;
+                    style->line_height_is_length = false;
                 }
                 else if (lh_len.unit == CSS_UNIT_PERCENT)
                 {
                     style->has_line_height = true;
                     style->line_height_milli = lh_len.value_milli / 100;
+                    style->line_height_is_length = false;
+                }
+                else
+                {
+                    style->has_line_height = true;
+                    style->line_height_is_length = true;
+                    style->line_height = lh_len;
                 }
             }
         }

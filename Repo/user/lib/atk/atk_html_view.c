@@ -16,6 +16,7 @@
 #include "video.h"
 #include "web/css.h"
 #include "web/html.h"
+#include "web/url.h"
 
 #define ATK_HTML_VIEW_PADDING 8
 #define ATK_HTML_VIEW_SCROLLBAR_WIDTH 14

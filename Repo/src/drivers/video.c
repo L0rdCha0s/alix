@@ -1492,17 +1492,21 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
     cursor_restore_background();
 
     /* update cursor */
-    cursor_x += dx;
-    cursor_y += dy;
-    if (cursor_x < 0) cursor_x = 0;
-    if (cursor_y < 0) cursor_y = 0;
-    if (cursor_x > VIDEO_WIDTH - 1) cursor_x = VIDEO_WIDTH - 1;
-    if (cursor_y > VIDEO_HEIGHT - 1) cursor_y = VIDEO_HEIGHT - 1;
+    bool lock_cursor = user_atk_capture_relative_active();
+    if (!lock_cursor)
+    {
+        cursor_x += dx;
+        cursor_y += dy;
+        if (cursor_x < 0) cursor_x = 0;
+        if (cursor_y < 0) cursor_y = 0;
+        if (cursor_x > VIDEO_WIDTH - 1) cursor_x = VIDEO_WIDTH - 1;
+        if (cursor_y > VIDEO_HEIGHT - 1) cursor_y = VIDEO_HEIGHT - 1;
+    }
 
     bool pressed_edge  = (left_pressed && !last_left_down);
     bool released_edge = (!left_pressed && last_left_down);
 
-    atk_mouse_event_result_t result = atk_handle_mouse_event(cursor_x, cursor_y, pressed_edge, released_edge, left_pressed);
+    atk_mouse_event_result_t result = atk_handle_mouse_event(dx, dy, cursor_x, cursor_y, pressed_edge, released_edge, left_pressed);
 
     bool dragging_now = atk_drag_active();
     if (result.redraw && !dragging_now)

@@ -5,6 +5,7 @@
 #include "libc.h"
 #include "timer.h"
 #include "procfs.h"
+#include "spinlock.h"
 
 #define KBD_STATUS 0x64
 #define KBD_DATA   0x60
@@ -28,6 +29,7 @@ static uint8_t extended_code_pending = 0;
 static volatile uint8_t scancode_buffer[KBD_BUFFER_SIZE];
 static volatile size_t buffer_head = 0;
 static volatile size_t buffer_tail = 0;
+static spinlock_t g_kbd_buffer_lock = { 0 };
 static uint8_t key_down[128];
 #if ENABLE_USB
 static bool ps2_enabled = false; /* USB enabled: keep PS/2 keyboard path disabled by default. */
@@ -645,12 +647,15 @@ static bool buffer_full(void)
 
 static void buffer_push(uint8_t code)
 {
+    spinlock_lock(&g_kbd_buffer_lock);
     if (buffer_full())
     {
+        spinlock_unlock(&g_kbd_buffer_lock);
         return;
     }
     scancode_buffer[buffer_head] = code;
     buffer_head = (buffer_head + 1) % KBD_BUFFER_SIZE;
+    spinlock_unlock(&g_kbd_buffer_lock);
 
     //serial_write_string("keyboard.c: buffer_push scancode=0x");
     //static const char hex[] = "0123456789ABCDEF";
@@ -661,12 +666,15 @@ static void buffer_push(uint8_t code)
 
 static bool buffer_pop(uint8_t *code)
 {
+    spinlock_lock(&g_kbd_buffer_lock);
     if (buffer_empty())
     {
+        spinlock_unlock(&g_kbd_buffer_lock);
         return false;
     }
     *code = scancode_buffer[buffer_tail];
     buffer_tail = (buffer_tail + 1) % KBD_BUFFER_SIZE;
+    spinlock_unlock(&g_kbd_buffer_lock);
     return true;
 }
 
@@ -701,8 +709,10 @@ static void keyboard_reset_state(void)
     left_ctrl_pressed = 0;
     right_ctrl_pressed = 0;
     extended_code_pending = 0;
+    spinlock_lock(&g_kbd_buffer_lock);
     buffer_head = 0;
     buffer_tail = 0;
+    spinlock_unlock(&g_kbd_buffer_lock);
     for (size_t i = 0; i < sizeof(key_down); ++i)
     {
         key_down[i] = 0;
@@ -762,6 +772,7 @@ void keyboard_unread_char(char ch)
 
 void keyboard_init(void)
 {
+    spinlock_init(&g_kbd_buffer_lock);
 #if ENABLE_USB
     /* Skip PS/2 init when USB is present to avoid contention on the controller. */
     ps2_enabled = false;

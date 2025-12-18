@@ -90,6 +90,8 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_line_height = true;
         dst->line_height_milli = src->line_height_milli;
+        dst->line_height_is_length = src->line_height_is_length;
+        dst->line_height = src->line_height;
     }
     if (src->has_letter_spacing)
     {
@@ -137,4 +139,3 @@ bool css_rule_matches_tag(const css_rule_t *rule, const char *tag_name)
     }
     return strncasecmp(sel, tag_name, len) == 0;
 }
-

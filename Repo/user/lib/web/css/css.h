@@ -108,6 +108,8 @@ typedef struct
     css_display_t display;
     bool has_line_height;
     int32_t line_height_milli;
+    bool line_height_is_length;
+    css_length_t line_height;
     bool has_letter_spacing;
     css_length_t letter_spacing;
     bool has_opacity;

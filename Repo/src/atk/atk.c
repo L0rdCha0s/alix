@@ -1060,7 +1060,9 @@ out:
     atk_state_lock_release(irq_state);
 }
 
-atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
+atk_mouse_event_result_t atk_handle_mouse_event(int dx,
+                                                int dy,
+                                                int cursor_x,
                                                 int cursor_y,
                                                 bool pressed_edge,
                                                 bool released_edge,
@@ -1545,6 +1547,8 @@ atk_mouse_event_result_t atk_handle_mouse_event(int cursor_x,
 
     atk_widget_t *hover_window = atk_window_hit_test(state, cursor_x, cursor_y);
     bool remote_handled = user_atk_route_mouse_event(hover_window,
+                                                     dx,
+                                                     dy,
                                                      cursor_x,
                                                      cursor_y,
                                                      pressed_edge,

@@ -26,6 +26,8 @@ void user_atk_focus_window(const atk_widget_t *window)
 }
 
 bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
+                                int dx,
+                                int dy,
                                 int cursor_x,
                                 int cursor_y,
                                 bool pressed_edge,
@@ -33,6 +35,8 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
                                 bool left_pressed)
 {
     (void)hover_window;
+    (void)dx;
+    (void)dy;
     (void)cursor_x;
     (void)cursor_y;
     (void)pressed_edge;
@@ -50,6 +54,11 @@ bool user_atk_route_key_event(const keyboard_event_t *event)
 void user_atk_window_resized(const atk_widget_t *window)
 {
     (void)window;
+}
+
+bool user_atk_capture_relative_active(void)
+{
+    return false;
 }
 
 int64_t user_atk_sys_create(const user_atk_window_desc_t *desc)
@@ -77,5 +86,12 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
 int64_t user_atk_sys_close(uint32_t handle)
 {
     (void)handle;
+    return -1;
+}
+
+int64_t user_atk_sys_capture(uint32_t handle, uint32_t flags)
+{
+    (void)handle;
+    (void)flags;
     return -1;
 }

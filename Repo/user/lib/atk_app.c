@@ -430,7 +430,14 @@ static bool atk_main_handle_default_mouse(const user_atk_event_t *event)
     bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
     bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
     bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
-    atk_mouse_event_result_t res = atk_handle_mouse_event(event->x, event->y, press, release, left);
+    int dx = 0;
+    int dy = 0;
+    if (event->flags & USER_ATK_MOUSE_FLAG_RELATIVE)
+    {
+        dx = (int32_t)event->data0;
+        dy = (int32_t)event->data1;
+    }
+    atk_mouse_event_result_t res = atk_handle_mouse_event(dx, dy, event->x, event->y, press, release, left);
     if (res.exit_video)
     {
         atk_main_request_exit();
