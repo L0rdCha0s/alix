@@ -240,24 +240,6 @@ void aes128_init_decrypt(aes128_dec_ctx_t *ctx, const uint8_t key[16])
     {
         ctx->round_keys[i] = enc.round_keys[i];
     }
-    for (int round = 1; round < 10; ++round)
-    {
-        uint32_t *rk = ctx->round_keys + round * 4;
-        for (int i = 0; i < 4; ++i)
-        {
-            uint32_t v = rk[i];
-            uint8_t bytes[4];
-            bytes[0] = (uint8_t)(v >> 24);
-            bytes[1] = (uint8_t)(v >> 16);
-            bytes[2] = (uint8_t)(v >> 8);
-            bytes[3] = (uint8_t)(v);
-            inv_mix_single(bytes);
-            rk[i] = ((uint32_t)bytes[0] << 24) |
-                    ((uint32_t)bytes[1] << 16) |
-                    ((uint32_t)bytes[2] << 8) |
-                    ((uint32_t)bytes[3]);
-        }
-    }
 }
 
 void aes128_decrypt_block(const aes128_dec_ctx_t *ctx, uint8_t block[16])

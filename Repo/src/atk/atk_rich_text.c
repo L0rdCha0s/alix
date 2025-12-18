@@ -2669,15 +2669,15 @@ static void rich_text_draw_cb(const atk_state_t *state,
                     video_draw_rect(bg_x0, bg_y0, bg_x1 - bg_x0, bg_y1 - bg_y0, theme->menu_bar_highlight);
                 }
             }
-            if (glyph && glyph->ready)
-            {
-                const uint8_t *glyph_alpha = glyph->alpha;
-                int glyph_w = glyph->width;
-                int glyph_h = glyph->height;
-                int glyph_stride = glyph->stride;
+	            if (glyph && glyph->ready)
+	            {
+	                const uint8_t *glyph_alpha = glyph->alpha;
+	                int glyph_w = glyph->width;
+	                int glyph_h = glyph->height;
+	                int glyph_stride = glyph->stride;
 
-                if (glyph_alpha && glyph_w > 0 && glyph_h > 0 && glyph_stride > 0)
-                {
+	                if (glyph_alpha && glyph_w > 0 && glyph_h > 0 && glyph_stride > 0)
+	                {
                     int dst_x = pen_x + glyph->bearing_x;
                     int dst_y = baseline_y - glyph->bearing_y;
                     bool italic = (style & ATK_RICH_TEXT_STYLE_ITALIC) != 0;
@@ -2764,18 +2764,18 @@ static void rich_text_draw_cb(const atk_state_t *state,
                                                             true);
                             }
                         }
-                    }
-                    advance = glyph->advance;
-                }
-                else
-                {
-                    advance = rich_text_fallback_advance(size_px, codepoint);
-                }
-            }
-            else
-            {
-                advance = rich_text_fallback_advance(size_px, codepoint);
-            }
+	                    }
+	                    advance = glyph->advance;
+	                }
+	                else
+	                {
+	                    advance = glyph->advance;
+	                }
+	            }
+	            else
+	            {
+	                advance = rich_text_fallback_advance(size_px, codepoint);
+	            }
 
             if ((style & ATK_RICH_TEXT_STYLE_UNDERLINE) != 0 && advance > 0)
             {

@@ -4,6 +4,10 @@
 #include "types.h"
 #include "syscall_defs.h"
 
+#ifdef TTF_HOST_BUILD
+#include_next <sys/stat.h>
+typedef struct stat stat_t;
+#else
 typedef struct stat
 {
     uint64_t st_size;
@@ -15,4 +19,5 @@ typedef struct stat
 int fstat(int fd, struct stat *st);
 #endif
 
+#endif
 #endif /* SYS_STAT_H */

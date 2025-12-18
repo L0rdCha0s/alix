@@ -15,12 +15,15 @@
 
 #include "crypto/hmac.h"
 #include "crypto/p256.h"
+#include "crypto/p384.h"
 #include "net/tls_asn1.h"
 #include "serial.h"
 #include "libc.h"
 #ifdef KERNEL_BUILD
 #include "timer.h"
 #include "process.h"
+#elif defined(TTF_HOST_BUILD)
+#include <time.h>
 #else
 #include "usyscall.h"
 #endif
@@ -61,6 +64,7 @@
 #define TLS_EXT_SIGNATURE_ALGORITHMS  0x000D
 
 #define TLS_NAMED_CURVE_SECP256R1     23
+#define TLS_NAMED_CURVE_SECP384R1     24
 
 #define TLS_MAX_FRAGMENT              16384
 #define TLS_MAC_SIZE                  32
@@ -83,6 +87,10 @@ static uint64_t tls_time_ticks(void)
 {
 #ifdef KERNEL_BUILD
     return timer_ticks();
+#elif defined(TTF_HOST_BUILD)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000L);
 #else
     return sys_time_millis();
 #endif
@@ -93,6 +101,8 @@ static uint32_t tls_time_frequency(void)
 #ifdef KERNEL_BUILD
     uint32_t freq = timer_frequency();
     return freq ? freq : 100;
+#elif defined(TTF_HOST_BUILD)
+    return 1000;
 #else
     return 1000;
 #endif
@@ -102,6 +112,10 @@ static void tls_thread_yield(void)
 {
 #ifdef KERNEL_BUILD
     process_yield();
+#elif defined(TTF_HOST_BUILD)
+    struct timespec ts = {0};
+    ts.tv_nsec = 1000000L;
+    nanosleep(&ts, NULL);
 #else
     (void)sys_yield();
 #endif
@@ -990,7 +1004,11 @@ static bool tls_encrypt_record(tls_session_t *session,
     }
 
     uint8_t mac[TLS_MAC_SIZE];
-    tls_calculate_mac(mac, session->client_write_mac, session->client_seq, type, len, data);
+    if (!tls_calculate_mac(mac, session->client_write_mac, session->client_seq, type, len, data))
+    {
+        tls_log("TLS: failed to calculate record MAC");
+        return false;
+    }
     size_t total = len + TLS_MAC_SIZE;
 
     size_t pad_len = TLS_BLOCK_SIZE - ((total + 1) % TLS_BLOCK_SIZE);
@@ -1080,6 +1098,7 @@ static bool tls_decrypt_record(tls_session_t *session,
 
     if (*len < TLS_EXPLICIT_IV_SIZE || ((*len - TLS_EXPLICIT_IV_SIZE) % TLS_BLOCK_SIZE) != 0)
     {
+        tls_log("TLS: encrypted record length invalid");
         return false;
     }
 
@@ -1091,31 +1110,41 @@ static bool tls_decrypt_record(tls_session_t *session,
 
     if (cipher_len == 0)
     {
+        tls_log("TLS: encrypted record empty");
         return false;
     }
     size_t pad_len = ciphertext[cipher_len - 1];
     if (pad_len + 1 > cipher_len)
     {
+        tls_log("TLS: encrypted record padding length invalid");
         return false;
     }
     for (size_t i = 0; i <= pad_len; ++i)
     {
         if (ciphertext[cipher_len - 1 - i] != pad_len)
         {
+            tls_log("TLS: encrypted record padding mismatch");
             return false;
         }
     }
     size_t total = cipher_len - pad_len - 1;
     if (total < TLS_MAC_SIZE)
     {
+        tls_log("TLS: encrypted record too short for MAC");
         return false;
     }
     size_t body_len = total - TLS_MAC_SIZE;
 
     uint8_t mac[TLS_MAC_SIZE];
-    tls_calculate_mac(mac, session->server_write_mac, session->server_seq, type, body_len, ciphertext);
+    if (!tls_calculate_mac(mac, session->server_write_mac, session->server_seq, type, body_len, ciphertext))
+    {
+        tls_log("TLS: failed to calculate decrypted MAC");
+        memset(mac, 0, sizeof(mac));
+        return false;
+    }
     if (memcmp(mac, ciphertext + body_len, TLS_MAC_SIZE) != 0)
     {
+        tls_log("TLS: encrypted record MAC mismatch");
         memset(mac, 0, sizeof(mac));
         return false;
     }
@@ -1271,10 +1300,11 @@ rsa_public_key_set(&session->server_key, mod_ptr, mod_len, exp_ptr, exp_len);
     return true;
 }
 
-static bool tls_parse_certificate_ecdsa_p256(tls_session_t *session, const uint8_t *cert, size_t cert_len)
+static bool tls_parse_certificate_ecdsa(tls_session_t *session, const uint8_t *cert, size_t cert_len)
 {
     static const uint8_t oid_ec_public_key[] = {0x2A,0x86,0x48,0xCE,0x3D,0x02,0x01};
     static const uint8_t oid_prime256v1[] = {0x2A,0x86,0x48,0xCE,0x3D,0x03,0x01,0x07};
+    static const uint8_t oid_secp384r1[] = {0x2B,0x81,0x04,0x00,0x22};
 
     asn1_reader_t reader;
     asn1_reader_t seq;
@@ -1360,8 +1390,18 @@ static bool tls_parse_certificate_ecdsa_p256(tls_session_t *session, const uint8
     {
         TLS_FAIL("TLS: SPKI curve OID missing");
     }
-    if (curve_len != sizeof(oid_prime256v1) ||
-        memcmp(curve_ptr, oid_prime256v1, sizeof(oid_prime256v1)) != 0)
+    size_t expected_point_len = 0;
+    if (curve_len == sizeof(oid_prime256v1) &&
+        memcmp(curve_ptr, oid_prime256v1, sizeof(oid_prime256v1)) == 0)
+    {
+        expected_point_len = P256_POINT_SIZE;
+    }
+    else if (curve_len == sizeof(oid_secp384r1) &&
+             memcmp(curve_ptr, oid_secp384r1, sizeof(oid_secp384r1)) == 0)
+    {
+        expected_point_len = P384_POINT_SIZE;
+    }
+    else
     {
         TLS_FAIL("TLS: SPKI curve unsupported");
     }
@@ -1377,7 +1417,7 @@ static bool tls_parse_certificate_ecdsa_p256(tls_session_t *session, const uint8
 
     const uint8_t *point = value + 1;
     size_t point_len = value_len - 1;
-    if (point_len != P256_POINT_SIZE || point[0] != 0x04)
+    if (point_len != expected_point_len || point[0] != 0x04)
     {
         TLS_FAIL("TLS: ECDSA public key unsupported");
     }
@@ -1389,10 +1429,12 @@ static bool tls_parse_certificate_ecdsa_p256(tls_session_t *session, const uint8
 
 static bool tls_parse_ecdsa_signature_rs(const uint8_t *signature,
                                         size_t sig_len,
-                                        uint8_t r_out[P256_SCALAR_SIZE],
-                                        uint8_t s_out[P256_SCALAR_SIZE])
+                                        uint8_t r_out[TLS_EC_MAX_SCALAR_SIZE],
+                                        uint8_t s_out[TLS_EC_MAX_SCALAR_SIZE],
+                                        size_t scalar_size)
 {
-    if (!signature || sig_len == 0 || !r_out || !s_out)
+    if (!signature || sig_len == 0 || !r_out || !s_out ||
+        scalar_size == 0 || scalar_size > TLS_EC_MAX_SCALAR_SIZE)
     {
         return false;
     }
@@ -1420,7 +1462,7 @@ static bool tls_parse_ecdsa_signature_rs(const uint8_t *signature,
         value++;
         value_len--;
     }
-    if (value_len == 0 || value_len > P256_SCALAR_SIZE)
+    if (value_len == 0 || value_len > scalar_size)
     {
         return false;
     }
@@ -1428,8 +1470,8 @@ static bool tls_parse_ecdsa_signature_rs(const uint8_t *signature,
     {
         return false;
     }
-    memset(r_out, 0, P256_SCALAR_SIZE);
-    memcpy(r_out + (P256_SCALAR_SIZE - value_len), value, value_len);
+    memset(r_out, 0, scalar_size);
+    memcpy(r_out + (scalar_size - value_len), value, value_len);
 
     had_leading_zero = false;
     if (!asn1_read_element(&seq, &tag, &value, &value_len) || tag != 0x02)
@@ -1442,7 +1484,7 @@ static bool tls_parse_ecdsa_signature_rs(const uint8_t *signature,
         value++;
         value_len--;
     }
-    if (value_len == 0 || value_len > P256_SCALAR_SIZE)
+    if (value_len == 0 || value_len > scalar_size)
     {
         return false;
     }
@@ -1450,8 +1492,8 @@ static bool tls_parse_ecdsa_signature_rs(const uint8_t *signature,
     {
         return false;
     }
-    memset(s_out, 0, P256_SCALAR_SIZE);
-    memcpy(s_out + (P256_SCALAR_SIZE - value_len), value, value_len);
+    memset(s_out, 0, scalar_size);
+    memcpy(s_out + (scalar_size - value_len), value, value_len);
 
     return true;
 }
@@ -1477,7 +1519,16 @@ static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
     }
     uint16_t named_curve = tls_read_uint16(body + cursor);
     cursor += 2;
-    if (named_curve != TLS_NAMED_CURVE_SECP256R1)
+    size_t expected_pub_len = 0;
+    if (named_curve == TLS_NAMED_CURVE_SECP256R1)
+    {
+        expected_pub_len = P256_POINT_SIZE;
+    }
+    else if (named_curve == TLS_NAMED_CURVE_SECP384R1)
+    {
+        expected_pub_len = P384_POINT_SIZE;
+    }
+    else
     {
         TLS_FAIL("TLS: server advertised unsupported curve");
     }
@@ -1486,6 +1537,10 @@ static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
         TLS_FAIL("TLS: missing ECDHE public length");
     }
     uint8_t pub_len = body[cursor++];
+    if (pub_len != expected_pub_len)
+    {
+        TLS_FAIL("TLS: server advertised unsupported ECDHE point format");
+    }
     if (cursor + pub_len > hs_len)
     {
         TLS_FAIL("TLS: truncated ECDHE public key");
@@ -1579,7 +1634,16 @@ static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
     }
     else if (hash_algo == 0x04 && sig_algo == 0x03)
     {
-        if (session->server_ecdsa_public_len != P256_POINT_SIZE)
+        size_t scalar_size = 0;
+        if (session->server_ecdsa_public_len == P256_POINT_SIZE)
+        {
+            scalar_size = P256_SCALAR_SIZE;
+        }
+        else if (session->server_ecdsa_public_len == P384_POINT_SIZE)
+        {
+            scalar_size = P384_SCALAR_SIZE;
+        }
+        else
         {
             TLS_FAIL("TLS: missing server ECDSA public key");
         }
@@ -1587,15 +1651,25 @@ static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
         uint8_t digest[32];
         sha256_digest(signed_data, signed_len, digest);
 
-        uint8_t r_sig[P256_SCALAR_SIZE];
-        uint8_t s_sig[P256_SCALAR_SIZE];
-        if (!tls_parse_ecdsa_signature_rs(signature, sig_len, r_sig, s_sig))
+        uint8_t r_sig[TLS_EC_MAX_SCALAR_SIZE];
+        uint8_t s_sig[TLS_EC_MAX_SCALAR_SIZE];
+        if (!tls_parse_ecdsa_signature_rs(signature, sig_len, r_sig, s_sig, scalar_size))
         {
             TLS_FAIL("TLS: ECDSA signature parse failed");
         }
 
-        if (!p256_ecdsa_verify(session->server_ecdsa_public, session->server_ecdsa_public_len,
-                               digest, r_sig, s_sig))
+        bool ok = false;
+        if (scalar_size == P256_SCALAR_SIZE)
+        {
+            ok = p256_ecdsa_verify(session->server_ecdsa_public, session->server_ecdsa_public_len,
+                                   digest, r_sig, s_sig);
+        }
+        else
+        {
+            ok = p384_ecdsa_verify(session->server_ecdsa_public, session->server_ecdsa_public_len,
+                                   digest, r_sig, s_sig);
+        }
+        if (!ok)
         {
             TLS_FAIL("TLS: ECDSA signature verification failed");
         }
@@ -1608,7 +1682,16 @@ static bool tls_process_server_key_exchange_ecdhe(tls_session_t *session,
         TLS_FAIL("TLS: server signature scheme unsupported");
     }
 
-    if (!p256_is_valid_public(pub, pub_len))
+    bool pub_ok = false;
+    if (named_curve == TLS_NAMED_CURVE_SECP256R1)
+    {
+        pub_ok = p256_is_valid_public(pub, pub_len);
+    }
+    else
+    {
+        pub_ok = p384_is_valid_public(pub, pub_len);
+    }
+    if (!pub_ok)
     {
         TLS_FAIL("TLS: server ECDHE key invalid");
     }
@@ -1737,7 +1820,7 @@ static bool tls_process_server_handshake(tls_session_t *session,
                 const uint8_t *cert_ptr = body + 6;
                 if (session->key_exchange == TLS_KEY_EXCHANGE_ECDHE_ECDSA)
                 {
-                    if (!tls_parse_certificate_ecdsa_p256(session, cert_ptr, cert_len))
+                    if (!tls_parse_certificate_ecdsa(session, cert_ptr, cert_len))
                     {
                         TLS_FAIL("TLS: failed to parse ECDSA certificate");
                     }
@@ -1839,17 +1922,19 @@ static bool tls_send_client_hello(tls_session_t *session, const char *hostname)
         extensions_len += sni_total_len;
     }
 
-    /* supported_groups: secp256r1 */
+    /* supported_groups: secp384r1, secp256r1 */
     {
         body[offset++] = 0x00;
         body[offset++] = 0x0A;
         body[offset++] = 0x00;
+        body[offset++] = 0x06;
+        body[offset++] = 0x00;
         body[offset++] = 0x04;
         body[offset++] = 0x00;
-        body[offset++] = 0x02;
+        body[offset++] = TLS_NAMED_CURVE_SECP384R1;
         body[offset++] = 0x00;
         body[offset++] = TLS_NAMED_CURVE_SECP256R1;
-        extensions_len += 8;
+        extensions_len += 10;
     }
 
     /* ec_point_formats: uncompressed */
@@ -1919,7 +2004,11 @@ static bool tls_send_client_key_exchange_ecdhe(tls_session_t *session)
     {
         return false;
     }
-    uint8_t body[1 + P256_POINT_SIZE];
+    if (session->ecdhe_public_len == 0 || session->ecdhe_public_len > TLS_EC_MAX_POINT_SIZE)
+    {
+        return false;
+    }
+    uint8_t body[1 + TLS_EC_MAX_POINT_SIZE];
     body[0] = (uint8_t)session->ecdhe_public_len;
     memcpy(body + 1, session->ecdhe_public, session->ecdhe_public_len);
     size_t body_len = 1 + session->ecdhe_public_len;
@@ -1940,24 +2029,60 @@ static bool tls_generate_ecdhe_keypair(tls_session_t *session)
         return session && session->ecdhe_client_keys_ready;
     }
 
-    uint8_t scalar[P256_SCALAR_SIZE];
+    size_t scalar_len = 0;
+    size_t point_len = 0;
+    if (session->ecdhe_named_curve == TLS_NAMED_CURVE_SECP256R1)
+    {
+        scalar_len = P256_SCALAR_SIZE;
+        point_len = P256_POINT_SIZE;
+    }
+    else if (session->ecdhe_named_curve == TLS_NAMED_CURVE_SECP384R1)
+    {
+        scalar_len = P384_SCALAR_SIZE;
+        point_len = P384_POINT_SIZE;
+    }
+    else
+    {
+        return false;
+    }
+
+    uint8_t scalar[TLS_EC_MAX_SCALAR_SIZE];
+    bool ok = false;
     do
     {
-        if (!tls_random_bytes(scalar, sizeof(scalar)))
+        if (!tls_random_bytes(scalar, scalar_len))
         {
             return false;
         }
-    } while (!p256_scalar_is_valid(scalar));
+        if (session->ecdhe_named_curve == TLS_NAMED_CURVE_SECP256R1)
+        {
+            ok = p256_scalar_is_valid(scalar);
+        }
+        else
+        {
+            ok = p384_scalar_is_valid(scalar);
+        }
+    } while (!ok);
 
-    memcpy(session->ecdhe_private, scalar, sizeof(scalar));
+    memset(session->ecdhe_private, 0, sizeof(session->ecdhe_private));
+    memcpy(session->ecdhe_private, scalar, scalar_len);
     memset(scalar, 0, sizeof(scalar));
 
-    if (!p256_generate_public(session->ecdhe_private, session->ecdhe_public))
+    memset(session->ecdhe_public, 0, sizeof(session->ecdhe_public));
+    if (session->ecdhe_named_curve == TLS_NAMED_CURVE_SECP256R1)
+    {
+        ok = p256_generate_public(session->ecdhe_private, session->ecdhe_public);
+    }
+    else
+    {
+        ok = p384_generate_public(session->ecdhe_private, session->ecdhe_public);
+    }
+    if (!ok)
     {
         memset(session->ecdhe_private, 0, sizeof(session->ecdhe_private));
         return false;
     }
-    session->ecdhe_public_len = P256_POINT_SIZE;
+    session->ecdhe_public_len = point_len;
     session->ecdhe_client_keys_ready = true;
 #if TLS_DEBUG_SIG
     tls_log_hexdump("TLS: ECDHE private", session->ecdhe_private, sizeof(session->ecdhe_private));
@@ -1967,20 +2092,43 @@ static bool tls_generate_ecdhe_keypair(tls_session_t *session)
 }
 
 static bool tls_ecdhe_compute_shared_secret(tls_session_t *session,
-                                            uint8_t out_secret[P256_SCALAR_SIZE])
+                                            uint8_t out_secret[TLS_EC_MAX_SCALAR_SIZE],
+                                            size_t *out_len)
 {
     if (!session || !session->ecdhe_client_keys_ready || !session->ecdhe_server_params_ready)
     {
         return false;
     }
-    bool ok = p256_compute_shared(session->ecdhe_private,
-                                  session->ecdhe_server_public,
-                                  session->ecdhe_server_public_len,
-                                  out_secret);
+    bool ok = false;
+    size_t secret_len = 0;
+    if (session->ecdhe_named_curve == TLS_NAMED_CURVE_SECP256R1)
+    {
+        secret_len = P256_SCALAR_SIZE;
+        ok = p256_compute_shared(session->ecdhe_private,
+                                 session->ecdhe_server_public,
+                                 session->ecdhe_server_public_len,
+                                 out_secret);
+    }
+    else if (session->ecdhe_named_curve == TLS_NAMED_CURVE_SECP384R1)
+    {
+        secret_len = P384_SCALAR_SIZE;
+        ok = p384_compute_shared(session->ecdhe_private,
+                                 session->ecdhe_server_public,
+                                 session->ecdhe_server_public_len,
+                                 out_secret);
+    }
+    else
+    {
+        return false;
+    }
+    if (out_len)
+    {
+        *out_len = ok ? secret_len : 0;
+    }
 #if TLS_DEBUG_SIG
     if (ok)
     {
-        tls_log_hexdump("TLS: ECDHE shared secret", out_secret, P256_SCALAR_SIZE);
+        tls_log_hexdump("TLS: ECDHE shared secret", out_secret, secret_len);
     }
 #endif
     return ok;
@@ -2322,18 +2470,20 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
                     tls_log("TLS: failed to send ECDHE ClientKeyExchange");
                     return false;
                 }
-                uint8_t shared[P256_SCALAR_SIZE];
-                if (!tls_ecdhe_compute_shared_secret(session, shared))
+                uint8_t shared[TLS_EC_MAX_SCALAR_SIZE];
+                size_t shared_len = 0;
+                if (!tls_ecdhe_compute_shared_secret(session, shared, &shared_len) || shared_len == 0)
                 {
                     tls_log("TLS: failed to compute shared secret");
                     return false;
                 }
-                memcpy(pre_master, shared, sizeof(shared));
+                memset(pre_master, 0, sizeof(pre_master));
+                memcpy(pre_master, shared, shared_len);
 #if TLS_DEBUG_SIG
-                tls_log_hexdump("TLS: pre-master (ECDHE)", pre_master, sizeof(shared));
+                tls_log_hexdump("TLS: pre-master (ECDHE)", pre_master, shared_len);
 #endif
                 memset(shared, 0, sizeof(shared));
-                pre_master_len = P256_SCALAR_SIZE;
+                pre_master_len = shared_len;
             }
             else
             {

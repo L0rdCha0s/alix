@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <sys/types.h>
 #else
 typedef unsigned char      uint8_t;
 typedef signed char        int8_t;

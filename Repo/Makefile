@@ -93,9 +93,12 @@ USER_TLS_SOURCES := \
 	$(CRYPTO_DIR)/bignum.c \
 	$(CRYPTO_DIR)/hmac.c \
 	$(CRYPTO_DIR)/p256.c \
+	$(CRYPTO_DIR)/p384.c \
 	$(CRYPTO_DIR)/rsa.c \
 	$(CRYPTO_DIR)/sha256.c
 USER_TLS_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_TLS_SOURCES))
+USER_ATK_BROWSER_SOURCES := $(wildcard $(USER_DIR)/apps/atk_browser/*.c)
+USER_ATK_BROWSER_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_BROWSER_SOURCES))
 USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
@@ -133,7 +136,9 @@ HOST_TEST_DIR := $(OBJDIR)/host-tests
 HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
 PNG_TEST_BIN := $(HOST_TEST_DIR)/png_host_test
-HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -I$(INCLUDE_DIR) -DTTF_HOST_BUILD
+WEB_TEST_BIN := $(HOST_TEST_DIR)/web_host_test
+TLS_TEST_BIN := $(HOST_TEST_DIR)/tls_host_test
+HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -iquote $(INCLUDE_DIR) -DTTF_HOST_BUILD
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
 EFI_DIR    := build/EFI/BOOT
@@ -234,9 +239,9 @@ $(USER_OBJDIR)/atk_clock.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_clock/atk_clock_app.o
 
-$(USER_OBJDIR)/atk_browser.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_TLS_OBJECTS) $(USER_OBJDIR)/apps/atk_browser/atk_browser_app.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_browser.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_TLS_OBJECTS) $(USER_ATK_BROWSER_OBJECTS) $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_TLS_OBJECTS) $(USER_OBJDIR)/apps/atk_browser/atk_browser_app.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_TLS_OBJECTS) $(USER_ATK_BROWSER_OBJECTS)
 
 $(USER_OBJDIR)/atk_richtext.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_richtext/atk_richtext_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
@@ -374,6 +379,23 @@ $(SHA256_TEST_BIN): tests/sha256_host_test.c src/crypto/sha256.c include/crypto/
 $(PNG_TEST_BIN): tests/png_host_test.c src/atk/util/png.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD tests/png_host_test.c src/atk/util/png.c -o $@
+
+$(WEB_TEST_BIN): tests/web_host_test.c user/lib/web/html.c user/lib/web/css.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/web_host_test.c user/lib/web/html.c user/lib/web/css.c -o $@
+
+$(TLS_TEST_BIN): tests/tls_host_test.c \
+                 src/net/tls.c src/net/tls_asn1.c \
+                 src/crypto/aes.c src/crypto/bignum.c src/crypto/hmac.c \
+                 src/crypto/p256.c src/crypto/p384.c src/crypto/rsa.c src/crypto/sha256.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -DTLS_DEBUG_SIG=0 -DRSA_DEBUG_LOG=0 \
+	    tests/tls_host_test.c \
+	    src/net/tls.c src/net/tls_asn1.c \
+	    src/crypto/aes.c src/crypto/bignum.c src/crypto/hmac.c \
+	    src/crypto/p256.c src/crypto/p384.c src/crypto/rsa.c src/crypto/sha256.c \
+	    -o $@
 
 LOADER_HEADERS := \
 	$(INCLUDE_DIR)/uefi.h \
@@ -555,16 +577,32 @@ tests/dhcp_packet_test: tests/dhcp_packet_test.c
 test-dhcp: tests/dhcp_packet_test
 	./tests/dhcp_packet_test
 
+TTF_TEST_FONT ?= PublicSans.ttf
 ttf-test: $(HOST_TEST_BIN)
-	$(HOST_TEST_BIN) SF-Pro.ttf
+	$(HOST_TEST_BIN) $(TTF_TEST_FONT)
 
 sha256-test: $(SHA256_TEST_BIN)
 	$(SHA256_TEST_BIN)
 
-png-test: $(PNG_TEST_BIN)
-	$(PNG_TEST_BIN) lenna.png
+web-test: $(WEB_TEST_BIN)
+	$(WEB_TEST_BIN)
 
-.PHONY: all run run-hdd run-hdd-gdb clean test-dhcp ttf-test sha256-test png-test
+PNG_TEST_IMAGE ?=
+png-test: $(PNG_TEST_BIN)
+	$(PNG_TEST_BIN) $(PNG_TEST_IMAGE)
+
+tls-test: $(TLS_TEST_BIN)
+	$(TLS_TEST_BIN)
+
+test:
+	$(MAKE) test-dhcp
+	$(MAKE) sha256-test
+	$(MAKE) web-test
+	$(MAKE) png-test
+	$(MAKE) ttf-test
+	$(MAKE) tls-test
+
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test png-test tls-test
 
 -include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) \
          $(USER_OBJDIR)/*.d $(USER_OBJDIR)/atk/*.d $(USER_OBJDIR)/atk/util/*.d \

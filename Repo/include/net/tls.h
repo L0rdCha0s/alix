@@ -6,7 +6,9 @@
 #include "crypto/sha256.h"
 #include "crypto/aes.h"
 #include "crypto/rsa.h"
-#include "crypto/p256.h"
+
+#define TLS_EC_MAX_POINT_SIZE 97
+#define TLS_EC_MAX_SCALAR_SIZE 48
 
 typedef enum
 {
@@ -39,12 +41,12 @@ typedef struct
     uint64_t client_seq;
     uint64_t server_seq;
     rsa_public_key_t server_key;
-    uint8_t server_ecdsa_public[P256_POINT_SIZE];
+    uint8_t server_ecdsa_public[TLS_EC_MAX_POINT_SIZE];
     size_t server_ecdsa_public_len;
-    uint8_t ecdhe_private[P256_SCALAR_SIZE];
-    uint8_t ecdhe_public[P256_POINT_SIZE];
+    uint8_t ecdhe_private[TLS_EC_MAX_SCALAR_SIZE];
+    uint8_t ecdhe_public[TLS_EC_MAX_POINT_SIZE];
     size_t ecdhe_public_len;
-    uint8_t ecdhe_server_public[P256_POINT_SIZE];
+    uint8_t ecdhe_server_public[TLS_EC_MAX_POINT_SIZE];
     size_t ecdhe_server_public_len;
     uint16_t ecdhe_named_curve;
     bool ecdhe_client_keys_ready;

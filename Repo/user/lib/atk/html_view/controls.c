@@ -107,7 +107,11 @@ static void html_view_controls_build_node(atk_widget_t *view,
                 }
 
                 atk_widget_t *w = NULL;
-                if (strcmp(type, "checkbox") == 0)
+                if (strcasecmp(type, "hidden") == 0)
+                {
+                    /* Hidden inputs are non-rendered form state. */
+                }
+                else if (strcasecmp(type, "checkbox") == 0)
                 {
                     w = atk_window_add_checkbox(view->parent, "", 0, 0, 24);
                     if (w)
@@ -123,7 +127,7 @@ static void html_view_controls_build_node(atk_widget_t *view,
                         }
                     }
                 }
-                else if (strcmp(type, "radio") == 0)
+                else if (strcasecmp(type, "radio") == 0)
                 {
                     const char *name = html_attr_get(cur, "name");
                     bool ephemeral_group = !(name && name[0] != '\0');
@@ -147,6 +151,39 @@ static void html_view_controls_build_node(atk_widget_t *view,
                         else if (ephemeral_group)
                         {
                             atk_radio_group_destroy(group);
+                        }
+                    }
+                }
+                else if (strcasecmp(type, "submit") == 0 ||
+                         strcasecmp(type, "button") == 0 ||
+                         strcasecmp(type, "reset") == 0)
+                {
+                    const char *value = html_attr_get(cur, "value");
+                    const char *label = (value && value[0] != '\0') ? value :
+                                        (strcasecmp(type, "reset") == 0) ? "Reset" :
+                                        (strcasecmp(type, "button") == 0) ? "Button" :
+                                                                           "Submit";
+
+                    int btn_w = atk_font_text_width(label) + 20;
+                    if (btn_w < 80) btn_w = 80;
+                    int btn_h = atk_font_line_height() + 8;
+
+                    w = atk_window_add_button(view->parent,
+                                              label,
+                                              0,
+                                              0,
+                                              btn_w,
+                                              btn_h,
+                                              ATK_BUTTON_STYLE_TITLE_INSIDE,
+                                              false,
+                                              NULL,
+                                              NULL);
+                    if (w)
+                    {
+                        w->used = false;
+                        if (!html_view_controls_add(priv, cur, w, HTML_VIEW_CONTROL_BUTTON))
+                        {
+                            html_view_window_remove_widget(view->parent, w);
                         }
                     }
                 }
@@ -443,4 +480,3 @@ static const html_node_t *html_view_find_first_element(const html_node_t *root, 
 
     return NULL;
 }
-

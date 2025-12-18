@@ -97,6 +97,16 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
 
     if (strcmp(tag, "input") == 0)
     {
+        const char *type = html_attr_get(node, "type");
+        if (!type || type[0] == '\0')
+        {
+            type = "text";
+        }
+        if (strcasecmp(type, "hidden") == 0)
+        {
+            goto out;
+        }
+
         html_view_control_t *ctrl = html_view_control_find(ctx->priv, node);
         if (ctrl && ctrl->widget)
         {
@@ -105,6 +115,42 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
             if (ctrl->kind == HTML_VIEW_CONTROL_INPUT_TEXT)
             {
                 width = 240;
+                if (style->has_width && style->width.valid && !style->width.is_auto)
+                {
+                    int wpx = html_view_length_to_px(&style->width,
+                                                    ctx->viewport_w,
+                                                    ctx->viewport_h,
+                                                    ctx->body_w,
+                                                    ctx->viewport_h,
+                                                    ctx->base_font_px,
+                                                    true);
+                    if (wpx > 0)
+                    {
+                        width = wpx;
+                    }
+                }
+                else
+                {
+                    const char *size_attr = html_attr_get(node, "size");
+                    int size = (size_attr && size_attr[0] != '\0') ? atoi(size_attr) : 0;
+                    if (size > 0)
+                    {
+                        int ch_w = html_view_text_width(ctx, "0");
+                        if (ch_w <= 0)
+                        {
+                            ch_w = ctx->space_w > 0 ? ctx->space_w : 8;
+                        }
+                        int wpx = (size * ch_w) + 16;
+                        if (wpx > 0)
+                        {
+                            width = wpx;
+                        }
+                    }
+                }
+            }
+            else if (ctrl->kind == HTML_VIEW_CONTROL_BUTTON)
+            {
+                width = ctrl->widget->width > 0 ? ctrl->widget->width : 80;
             }
             else if (ctrl->kind == HTML_VIEW_CONTROL_CHECKBOX || ctrl->kind == HTML_VIEW_CONTROL_RADIO)
             {
@@ -675,6 +721,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
             }
 
             int draw_x = ctx->body_x;
+            bool positioned = false;
             if (style->has_margin)
             {
                 bool auto_left = style->margin.left.valid && style->margin.left.is_auto;
@@ -682,6 +729,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
                 if (auto_left && auto_right)
                 {
                     draw_x = ctx->body_x + (ctx->body_w - img_w) / 2;
+                    positioned = true;
                 }
                 else if (style->margin.left.valid && !style->margin.left.is_auto)
                 {
@@ -692,6 +740,18 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
                                                                   ctx->viewport_h,
                                                                   ctx->base_font_px,
                                                                   true);
+                    positioned = true;
+                }
+            }
+            if (!positioned && style->has_text_align)
+            {
+                if (style->text_align == CSS_TEXT_ALIGN_CENTER)
+                {
+                    draw_x = ctx->body_x + (ctx->body_w - img_w) / 2;
+                }
+                else if (style->text_align == CSS_TEXT_ALIGN_RIGHT)
+                {
+                    draw_x = ctx->body_x + (ctx->body_w - img_w);
                 }
             }
             if (draw_x < ctx->body_x)
