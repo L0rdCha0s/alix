@@ -10,6 +10,8 @@ extern "C" {
 typedef struct html_document html_document_t;
 typedef struct html_parse_error html_parse_error_t;
 
+typedef void (*atk_html_view_link_t)(atk_widget_t *view, const char *href, void *context);
+
 /*
  * Create an HTML view widget as a child of `window`.
  *
@@ -17,6 +19,13 @@ typedef struct html_parse_error html_parse_error_t;
  * for userland browser experiments.
  */
 atk_widget_t *atk_window_add_html_view(atk_widget_t *window, int x, int y, int width, int height);
+
+/*
+ * Set a callback invoked when a user clicks an `<a href="...">` link.
+ *
+ * The callback is invoked from the ATK event path; keep it fast.
+ */
+void atk_html_view_set_link_handler(atk_widget_t *view, atk_html_view_link_t handler, void *context);
 
 /*
  * Replace the currently displayed document.

@@ -93,6 +93,7 @@ static void browser_debug_logf(browser_app_t *app, const char *fmt, ...);
 static void browser_menus_close(browser_app_t *app);
 static void browser_open_url(browser_app_t *app, const char *url);
 static void on_url_submit(atk_widget_t *input, void *context);
+static void browser_html_link_clicked(atk_widget_t *view, const char *href, void *context);
 
 static char *browser_fetch_http(browser_app_t *app,
                                 const browser_url_t *url,
@@ -3029,6 +3030,77 @@ static void browser_open_url(browser_app_t *app, const char *url)
     on_url_submit(app->url_input, app);
 }
 
+static bool browser_href_supported(const char *href)
+{
+    if (!href || href[0] == '\0')
+    {
+        return false;
+    }
+
+    if (strncasecmp(href, "http://", 7) == 0 || strncasecmp(href, "https://", 8) == 0)
+    {
+        return true;
+    }
+
+    if (href[0] == '#' || href[0] == '/' || href[0] == '?' || href[0] == '.')
+    {
+        return true;
+    }
+
+    for (const char *p = href; *p; ++p)
+    {
+        if (*p == ':')
+        {
+            return false;
+        }
+        if (*p == '/' || *p == '?' || *p == '#')
+        {
+            break;
+        }
+    }
+    return true;
+}
+
+static void browser_html_link_clicked(atk_widget_t *view, const char *href, void *context)
+{
+    (void)view;
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app || !href || href[0] == '\0')
+    {
+        return;
+    }
+
+    if (!browser_href_supported(href))
+    {
+        browser_debug_logf(app, "[ui] link unsupported href=%s", href);
+        return;
+    }
+
+    const char *base_text = app->url_input ? atk_text_input_text(app->url_input) : NULL;
+    if (!base_text || base_text[0] == '\0')
+    {
+        return;
+    }
+
+    browser_url_t base_url = {0};
+    if (!browser_parse_url(base_text, &base_url))
+    {
+        browser_debug_logf(app, "[ui] link base parse failed base=%s", base_text);
+        return;
+    }
+
+    char *abs = browser_build_absolute_url(&base_url, href, strlen(href));
+    browser_url_destroy(&base_url);
+    if (!abs)
+    {
+        return;
+    }
+
+    browser_debug_logf(app, "[ui] link click url=%s", abs);
+    browser_open_url(app, abs);
+    free(abs);
+}
+
 static void on_url_submit(atk_widget_t *input, void *context)
 {
     browser_app_t *app = (browser_app_t *)context;
@@ -3364,6 +3436,7 @@ static bool build_ui(browser_app_t *app)
     {
         return false;
     }
+    atk_html_view_set_link_handler(app->viewer, browser_html_link_clicked, app);
     atk_widget_set_layout(app->viewer,
                           ATK_WIDGET_ANCHOR_LEFT | ATK_WIDGET_ANCHOR_RIGHT |
                           ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_BOTTOM);

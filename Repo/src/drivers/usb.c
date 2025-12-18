@@ -213,39 +213,20 @@ static inline uint64_t usb_now_ms(void)
 
 static void usb_delay_ms(uint32_t ms)
 {
-    /* Early boot and SMP bring-up: avoid relying on PIT ticks across CPUs. */
     if (ms == 0)
     {
         return;
     }
 
-    uint32_t freq = timer_frequency();
-    if (freq > 0)
+    /*
+     * We run the PIT at 100Hz (10ms granularity), so any delay smaller than a
+     * tick must round up to at least one tick. Sleeping is preferred once the
+     * scheduler is ready; it avoids CPU-speed-dependent busy waits that can
+     * cause flaky USB timing under QEMU TCG.
+     */
+    if (process_scheduler_ready())
     {
-        uint64_t ticks = ((uint64_t)ms * (uint64_t)freq + 999ULL) / 1000ULL;
-        if (ticks == 0)
-        {
-            ticks = 1;
-        }
-        uint64_t target = timer_ticks() + ticks;
-        uint64_t guard = ticks * 50000ULL; /* prevent spin forever if timer stalls */
-        if (guard < 50000ULL)
-        {
-            guard = 50000ULL;
-        }
-        while (timer_ticks() < target)
-        {
-            if (guard == 0)
-            {
-                serial_printf("[usb] delay guard hit ms=%u target=%llu now=%llu\r\n",
-                              (unsigned)ms,
-                              (unsigned long long)target,
-                              (unsigned long long)timer_ticks());
-                break;
-            }
-            guard--;
-            __asm__ volatile ("pause");
-        }
+        process_sleep_ms(ms);
         return;
     }
 
@@ -393,17 +374,34 @@ static inline uint32_t uhci_build_token(uint8_t pid,
            ((uint32_t)max_len_field << 21);
 }
 
-static bool uhci_wait_for_td(uhci_td_t *last, uint32_t timeout_ms)
+static bool uhci_wait_for_td(uhci_controller_t *hc,
+                             uhci_td_t *last,
+                             uint32_t timeout_ms,
+                             bool yield_on_frame)
 {
+    if (!hc)
+    {
+        return false;
+    }
     if (!last)
     {
         return false;
     }
-    uint64_t deadline = usb_now_ms() + timeout_ms;
-    uint32_t spin_guard = timeout_ms ? (timeout_ms * 2000u) : 50000u;
-    uint32_t snooze = 0;
+
+    /* UHCI FRNUM increments every 1ms frame (11-bit counter). */
+    uint32_t timeout_frames = timeout_ms ? timeout_ms : 1u;
+    if (timeout_frames > 0x7FFu)
+    {
+        timeout_frames = 0x7FFu;
+    }
+    uint16_t start_frame = (uint16_t)(inw(hc->iobase + UHCI_FRNUM) & 0x07FFu);
+    uint64_t fallback_deadline_ms = usb_now_ms() + (uint64_t)timeout_frames + 50ULL;
+
+    uint16_t last_frame = start_frame;
+    uint32_t same_frame_spins = 0;
     static int deadline_log_budget = 8;
-    while (spin_guard-- > 0)
+
+    while (1)
     {
         uint32_t ctrl = last->control;
         if ((ctrl & UHCI_TD_CTRL_ACTIVE) == 0)
@@ -419,7 +417,10 @@ static bool uhci_wait_for_td(uhci_td_t *last, uint32_t timeout_ms)
             }
             return true;
         }
-        if (usb_now_ms() >= deadline)
+
+        uint16_t frame = (uint16_t)(inw(hc->iobase + UHCI_FRNUM) & 0x07FFu);
+        uint16_t elapsed = (uint16_t)((frame - start_frame) & 0x07FFu);
+        if ((uint32_t)elapsed >= timeout_frames || usb_now_ms() >= fallback_deadline_ms)
         {
             if (deadline_log_budget > 0)
             {
@@ -428,10 +429,24 @@ static bool uhci_wait_for_td(uhci_td_t *last, uint32_t timeout_ms)
             }
             break;
         }
-        if (++snooze >= 2000)
+
+        if (frame == last_frame)
         {
-            snooze = 0;
-            process_sleep_ms(1);
+            /* Avoid burning an entire CPU if FRNUM is slow/paused under TCG. */
+            if (++same_frame_spins >= 20000)
+            {
+                same_frame_spins = 0;
+                process_yield();
+            }
+        }
+        else
+        {
+            last_frame = frame;
+            same_frame_spins = 0;
+            if (yield_on_frame)
+            {
+                process_yield();
+            }
         }
         __asm__ volatile ("pause");
     }
@@ -467,7 +482,8 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
                               uhci_td_t *tds,
                               size_t td_count,
                               bool short_ok,
-                              bool is_interrupt)
+                              bool is_interrupt,
+                              uint32_t wait_ms)
 {
     if (!hc || !tds || td_count == 0)
     {
@@ -481,8 +497,11 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
     spinlock_unlock(&hc->lock);
 
     uhci_td_t *last = &tds[td_count - 1];
-    uint32_t wait_ms = is_interrupt ? 2 : 200;
-    bool ok = uhci_wait_for_td(last, wait_ms);
+    if (wait_ms == 0)
+    {
+        wait_ms = is_interrupt ? 10 : 200;
+    }
+    bool ok = uhci_wait_for_td(hc, last, wait_ms, is_interrupt);
     bool soft_no_data = false;
     if (!ok && is_interrupt)
     {
@@ -602,7 +621,7 @@ static bool uhci_control_xfer(uhci_controller_t *hc,
     status_td->link = UHCI_LINK_TERMINATE;
 
     usb_log("[usb] control xfer submit");
-    bool ok = uhci_submit_chain(hc, tds, total_tds, true, false);
+    bool ok = uhci_submit_chain(hc, tds, total_tds, true, false, 200);
     usb_log(ok ? "[usb] control xfer ok" : "[usb] control xfer fail");
     td_pool_free_chain(tds, total_tds);
     return ok;
@@ -634,7 +653,16 @@ static bool uhci_interrupt_in_xfer_td(uhci_controller_t *hc,
     td->buffer = virt_to_phys(buffer);
     td->link = UHCI_LINK_TERMINATE;
 
-    bool ok = uhci_submit_chain(hc, td, 1, true, true);
+    uint32_t wait_ms = ep ? ep->interval_ms : 0;
+    if (wait_ms < 2)
+    {
+        wait_ms = 2;
+    }
+    if (wait_ms > 20)
+    {
+        wait_ms = 20;
+    }
+    bool ok = uhci_submit_chain(hc, td, 1, true, true, wait_ms);
     uint16_t actual = 0;
     if (ok && transferred)
     {

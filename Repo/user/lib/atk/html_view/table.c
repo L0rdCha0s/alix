@@ -1,0 +1,1244 @@
+typedef struct
+{
+    const html_node_t *node;
+    css_style_t style;
+    int colspan;
+    int x;
+    int y;
+    int w;
+    int h;
+    int content_x;
+    int content_y;
+    int content_w;
+    int pad_top;
+    int pad_right;
+    int pad_bottom;
+    int pad_left;
+    int border_top;
+    int border_right;
+    int border_bottom;
+    int border_left;
+} html_view_table_cell_layout_t;
+
+typedef struct
+{
+    const html_node_t *node;
+    css_style_t style;
+    html_view_table_cell_layout_t *cells;
+    size_t cell_count;
+    size_t cell_cap;
+    int y;
+    int h;
+    int min_h;
+} html_view_table_row_layout_t;
+
+typedef struct
+{
+    html_view_table_row_layout_t *rows;
+    size_t row_count;
+    size_t row_cap;
+    int col_count;
+    int *col_w;
+    int cellpadding;
+    int cellspacing;
+    int table_x;
+    int table_y;
+    int content_w;
+    int pad_top;
+    int pad_right;
+    int pad_bottom;
+    int pad_left;
+    int border_top;
+    int border_right;
+    int border_bottom;
+    int border_left;
+    int margin_top;
+    int margin_right;
+    int margin_bottom;
+    int margin_left;
+    int table_h;
+} html_view_table_layout_t;
+
+static void html_view_table_layout_destroy(html_view_table_layout_t *layout)
+{
+    if (!layout)
+    {
+        return;
+    }
+    for (size_t i = 0; i < layout->row_count; ++i)
+    {
+        free(layout->rows[i].cells);
+        layout->rows[i].cells = NULL;
+        layout->rows[i].cell_count = 0;
+        layout->rows[i].cell_cap = 0;
+    }
+    free(layout->rows);
+    layout->rows = NULL;
+    layout->row_count = 0;
+    layout->row_cap = 0;
+    free(layout->col_w);
+    layout->col_w = NULL;
+    layout->col_count = 0;
+}
+
+static int html_view_attr_to_int(const html_node_t *node, const char *name, int fallback)
+{
+    const char *v = html_attr_get(node, name);
+    if (!v || v[0] == '\0')
+    {
+        return fallback;
+    }
+    int n = atoi(v);
+    return n >= 0 ? n : fallback;
+}
+
+static int html_view_measure_text_width(html_view_ctx_t *ctx, const html_node_t *node)
+{
+    if (!ctx || !node)
+    {
+        return 0;
+    }
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    html_view_collect_text(node, &buf, &len, &cap);
+    int w = buf ? html_view_text_width(ctx, buf) : 0;
+    free(buf);
+    return w;
+}
+
+static bool html_view_table_row_add_cell(html_view_table_row_layout_t *row, const html_view_table_cell_layout_t *cell)
+{
+    if (!row || !cell)
+    {
+        return false;
+    }
+    if (row->cell_count == row->cell_cap)
+    {
+        size_t new_cap = row->cell_cap ? (row->cell_cap * 2) : 8;
+        html_view_table_cell_layout_t *new_cells = (html_view_table_cell_layout_t *)realloc(row->cells, new_cap * sizeof(*new_cells));
+        if (!new_cells)
+        {
+            return false;
+        }
+        row->cells = new_cells;
+        row->cell_cap = new_cap;
+    }
+    row->cells[row->cell_count++] = *cell;
+    return true;
+}
+
+static bool html_view_table_layout_add_row(html_view_table_layout_t *layout, const html_node_t *tr, const css_style_t *parent_style, html_view_ctx_t *ctx)
+{
+    if (!layout || !tr || !parent_style || !ctx)
+    {
+        return false;
+    }
+    if (layout->row_count == layout->row_cap)
+    {
+        size_t new_cap = layout->row_cap ? (layout->row_cap * 2) : 8;
+        html_view_table_row_layout_t *new_rows = (html_view_table_row_layout_t *)realloc(layout->rows, new_cap * sizeof(*new_rows));
+        if (!new_rows)
+        {
+            return false;
+        }
+        layout->rows = new_rows;
+        layout->row_cap = new_cap;
+    }
+
+    html_view_table_row_layout_t *row = &layout->rows[layout->row_count++];
+    memset(row, 0, sizeof(*row));
+    row->node = tr;
+    html_view_style_for_node(&row->style, ctx->sheet, parent_style, tr);
+
+    if (row->style.has_height && row->style.height.valid && !row->style.height.is_auto)
+    {
+        row->min_h = html_view_length_to_px(&row->style.height,
+                                            ctx->viewport_w,
+                                            ctx->viewport_h,
+                                            layout->content_w,
+                                            ctx->viewport_h,
+                                            ctx->base_font_px,
+                                            false);
+        if (row->min_h < 0)
+        {
+            row->min_h = 0;
+        }
+    }
+
+    for (const html_node_t *child = tr->first_child; child; child = child->next_sibling)
+    {
+        if (child->type != HTML_NODE_ELEMENT || !child->name)
+        {
+            continue;
+        }
+        if (strcmp(child->name, "td") != 0 && strcmp(child->name, "th") != 0)
+        {
+            continue;
+        }
+
+        html_view_table_cell_layout_t cell = {0};
+        cell.node = child;
+        html_view_style_for_node(&cell.style, ctx->sheet, &row->style, child);
+        cell.colspan = html_view_attr_to_int(child, "colspan", 1);
+        if (cell.colspan < 1)
+        {
+            cell.colspan = 1;
+        }
+        if (!html_view_table_row_add_cell(row, &cell))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool html_view_subtree_has_form_control(const html_node_t *root)
+{
+    if (!root)
+    {
+        return false;
+    }
+
+    const html_node_t *stack[64];
+    size_t sp = 0;
+    stack[sp++] = root;
+
+    while (sp > 0)
+    {
+        const html_node_t *node = stack[--sp];
+        if (node->type == HTML_NODE_ELEMENT && node->name && html_view_is_form_control_tag(node->name))
+        {
+            return true;
+        }
+        for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+        {
+            if (sp < (sizeof(stack) / sizeof(stack[0])))
+            {
+                stack[sp++] = child;
+            }
+        }
+    }
+
+    return false;
+}
+
+static void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
+
+static void html_view_render_table(html_view_ctx_t *ctx,
+                                   const html_node_t *node,
+                                   const css_style_t *style,
+                                   const css_style_t *parent_style);
+
+static void html_view_render_float_box(html_view_ctx_t *ctx,
+                                       const html_node_t *node,
+                                       const css_style_t *style,
+                                       css_float_t side)
+{
+    if (!ctx || !node || !style || side == CSS_FLOAT_NONE)
+    {
+        return;
+    }
+
+    if (ctx->x != ctx->body_x)
+    {
+        html_view_new_line(ctx);
+    }
+
+    int saved_line_height = ctx->line_height;
+    ctx->line_height = html_view_line_height_for_style(ctx, style);
+
+    int margin_top = 0;
+    int margin_right = 0;
+    int margin_bottom = 0;
+    int margin_left = 0;
+    if (style->has_margin)
+    {
+        if (style->margin.top.valid && !style->margin.top.is_auto)
+        {
+            margin_top = html_view_length_to_px(&style->margin.top,
+                                                ctx->viewport_w,
+                                                ctx->viewport_h,
+                                                ctx->body_w,
+                                                ctx->viewport_h,
+                                                ctx->base_font_px,
+                                                false);
+        }
+        if (style->margin.right.valid && !style->margin.right.is_auto)
+        {
+            margin_right = html_view_length_to_px(&style->margin.right,
+                                                  ctx->viewport_w,
+                                                  ctx->viewport_h,
+                                                  ctx->body_w,
+                                                  ctx->viewport_h,
+                                                  ctx->base_font_px,
+                                                  true);
+        }
+        if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
+        {
+            margin_bottom = html_view_length_to_px(&style->margin.bottom,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   ctx->body_w,
+                                                   ctx->viewport_h,
+                                                   ctx->base_font_px,
+                                                   false);
+        }
+        if (style->margin.left.valid && !style->margin.left.is_auto)
+        {
+            margin_left = html_view_length_to_px(&style->margin.left,
+                                                 ctx->viewport_w,
+                                                 ctx->viewport_h,
+                                                 ctx->body_w,
+                                                 ctx->viewport_h,
+                                                 ctx->base_font_px,
+                                                 true);
+        }
+    }
+
+    int pad_top = 0;
+    int pad_right = 0;
+    int pad_bottom = 0;
+    int pad_left = 0;
+    if (style->has_padding)
+    {
+        pad_top = html_view_length_to_px(&style->padding.top,
+                                         ctx->viewport_w,
+                                         ctx->viewport_h,
+                                         ctx->body_w,
+                                         ctx->viewport_h,
+                                         ctx->base_font_px,
+                                         false);
+        pad_right = html_view_length_to_px(&style->padding.right,
+                                           ctx->viewport_w,
+                                           ctx->viewport_h,
+                                           ctx->body_w,
+                                           ctx->viewport_h,
+                                           ctx->base_font_px,
+                                           true);
+        pad_bottom = html_view_length_to_px(&style->padding.bottom,
+                                            ctx->viewport_w,
+                                            ctx->viewport_h,
+                                            ctx->body_w,
+                                            ctx->viewport_h,
+                                            ctx->base_font_px,
+                                            false);
+        pad_left = html_view_length_to_px(&style->padding.left,
+                                          ctx->viewport_w,
+                                          ctx->viewport_h,
+                                          ctx->body_w,
+                                          ctx->viewport_h,
+                                          ctx->base_font_px,
+                                          true);
+    }
+
+    int border_top = 0;
+    int border_right = 0;
+    int border_bottom = 0;
+    int border_left = 0;
+    if (style->has_border)
+    {
+        border_top = html_view_length_to_px(&style->border_width.top,
+                                            ctx->viewport_w,
+                                            ctx->viewport_h,
+                                            ctx->body_w,
+                                            ctx->viewport_h,
+                                            ctx->base_font_px,
+                                            false);
+        border_right = html_view_length_to_px(&style->border_width.right,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              ctx->body_w,
+                                              ctx->viewport_h,
+                                              ctx->base_font_px,
+                                              true);
+        border_bottom = html_view_length_to_px(&style->border_width.bottom,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               ctx->body_w,
+                                               ctx->viewport_h,
+                                               ctx->base_font_px,
+                                               false);
+        border_left = html_view_length_to_px(&style->border_width.left,
+                                             ctx->viewport_w,
+                                             ctx->viewport_h,
+                                             ctx->body_w,
+                                             ctx->viewport_h,
+                                             ctx->base_font_px,
+                                             true);
+    }
+
+    if (margin_top < 0) margin_top = 0;
+    if (margin_right < 0) margin_right = 0;
+    if (margin_bottom < 0) margin_bottom = 0;
+    if (margin_left < 0) margin_left = 0;
+    if (pad_top < 0) pad_top = 0;
+    if (pad_right < 0) pad_right = 0;
+    if (pad_bottom < 0) pad_bottom = 0;
+    if (pad_left < 0) pad_left = 0;
+    if (border_top < 0) border_top = 0;
+    if (border_right < 0) border_right = 0;
+    if (border_bottom < 0) border_bottom = 0;
+    if (border_left < 0) border_left = 0;
+
+    int content_w = 0;
+    if (style->has_width && style->width.valid && !style->width.is_auto)
+    {
+        content_w = html_view_length_to_px(&style->width,
+                                           ctx->viewport_w,
+                                           ctx->viewport_h,
+                                           ctx->body_w,
+                                           ctx->viewport_h,
+                                           ctx->base_font_px,
+                                           true);
+    }
+    else
+    {
+        content_w = ctx->body_w;
+    }
+    if (content_w < 0)
+    {
+        content_w = 0;
+    }
+
+    int content_h = 0;
+    if (style->has_height && style->height.valid && !style->height.is_auto)
+    {
+        content_h = html_view_length_to_px(&style->height,
+                                           ctx->viewport_w,
+                                           ctx->viewport_h,
+                                           ctx->viewport_w,
+                                           ctx->viewport_h,
+                                           ctx->base_font_px,
+                                           false);
+    }
+    else
+    {
+        content_h = ctx->line_height;
+    }
+    if (content_h < 0)
+    {
+        content_h = 0;
+    }
+
+    int border_box_w = content_w + pad_left + pad_right + border_left + border_right;
+    int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
+    int outer_w = border_box_w + margin_left + margin_right;
+    int outer_h = border_box_h + margin_top + margin_bottom;
+
+    int place_y = ctx->y;
+    int place_x = ctx->body_x;
+    int container_w = ctx->body_w;
+    if (container_w < 0) container_w = 0;
+
+    for (int it = 0; it < 256; ++it)
+    {
+        int left = ctx->body_x;
+        int right = ctx->body_x + container_w;
+        html_view_float_bounds_at_y(ctx->floats, place_y, ctx->body_x, container_w, &left, &right);
+        int avail = right - left;
+        if (outer_w <= avail)
+        {
+            if (side == CSS_FLOAT_RIGHT)
+            {
+                place_x = right - outer_w;
+            }
+            else
+            {
+                place_x = left;
+            }
+            break;
+        }
+        place_y = html_view_float_next_y(ctx->floats, place_y);
+    }
+
+    if (ctx->floats && ctx->floats->count < (sizeof(ctx->floats->items) / sizeof(ctx->floats->items[0])))
+    {
+        ctx->floats->items[ctx->floats->count++] = (html_view_float_t){
+            .x = place_x,
+            .y = place_y,
+            .w = outer_w,
+            .h = outer_h,
+            .side = side,
+        };
+    }
+
+    int outer_bottom = place_y + outer_h;
+    if (outer_bottom > ctx->content_bottom)
+    {
+        ctx->content_bottom = outer_bottom;
+    }
+
+    int border_box_x = place_x + margin_left;
+    int border_box_y = place_y + margin_top;
+    int draw_y = border_box_y - ctx->priv->scroll_y;
+
+    if (ctx->draw)
+    {
+        if (style->has_background)
+        {
+            html_view_draw_rect_clipped(ctx, border_box_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
+        }
+
+        if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
+        {
+            video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
+            html_view_draw_border_sides_clipped(ctx,
+                                                border_box_x,
+                                                draw_y,
+                                                border_box_w,
+                                                border_box_h,
+                                                border_top,
+                                                border_right,
+                                                border_bottom,
+                                                border_left,
+                                                border_color,
+                                                &ctx->clip);
+        }
+    }
+
+    int saved_body_x = ctx->body_x;
+    int saved_body_w = ctx->body_w;
+    int saved_max_x = ctx->max_x;
+    int saved_x = ctx->x;
+    int saved_y = ctx->y;
+    bool saved_pending = ctx->pending_space;
+    video_color_t saved_bg = ctx->bg;
+    html_view_float_ctx_t *saved_floats = ctx->floats;
+
+    html_view_float_ctx_t *inner_floats = (html_view_float_ctx_t *)calloc(1, sizeof(*inner_floats));
+    ctx->floats = inner_floats ? inner_floats : saved_floats;
+
+    ctx->body_x = border_box_x + border_left + pad_left;
+    ctx->body_w = content_w;
+    ctx->max_x = ctx->body_x + content_w;
+    ctx->x = ctx->body_x;
+    ctx->y = border_box_y + border_top + pad_top;
+    ctx->pending_space = false;
+    if (style->has_background)
+    {
+        ctx->bg = style->background;
+    }
+
+    html_view_render_children(ctx, node, style);
+
+    ctx->floats = saved_floats;
+    free(inner_floats);
+    ctx->bg = saved_bg;
+    ctx->body_x = saved_body_x;
+    ctx->body_w = saved_body_w;
+    ctx->max_x = saved_max_x;
+    ctx->x = saved_x;
+    ctx->y = saved_y;
+    ctx->pending_space = saved_pending;
+    ctx->line_height = saved_line_height;
+}
+
+static void html_view_render_table(html_view_ctx_t *ctx,
+                                   const html_node_t *node,
+                                   const css_style_t *style,
+                                   const css_style_t *parent_style)
+{
+    if (!ctx || !node || !style)
+    {
+        return;
+    }
+
+    if (ctx->x != ctx->body_x)
+    {
+        html_view_new_line(ctx);
+    }
+
+    html_view_table_layout_t layout = {0};
+    layout.cellpadding = html_view_attr_to_int(node, "cellpadding", 0);
+    layout.cellspacing = html_view_attr_to_int(node, "cellspacing", 0);
+    if (layout.cellpadding < 0) layout.cellpadding = 0;
+    if (layout.cellspacing < 0) layout.cellspacing = 0;
+
+    layout.margin_top = 0;
+    layout.margin_right = 0;
+    layout.margin_bottom = 0;
+    layout.margin_left = 0;
+    if (style->has_margin)
+    {
+        if (style->margin.top.valid && !style->margin.top.is_auto)
+        {
+            layout.margin_top = html_view_length_to_px(&style->margin.top,
+                                                       ctx->viewport_w,
+                                                       ctx->viewport_h,
+                                                       ctx->body_w,
+                                                       ctx->viewport_h,
+                                                       ctx->base_font_px,
+                                                       false);
+        }
+        if (style->margin.right.valid && !style->margin.right.is_auto)
+        {
+            layout.margin_right = html_view_length_to_px(&style->margin.right,
+                                                         ctx->viewport_w,
+                                                         ctx->viewport_h,
+                                                         ctx->body_w,
+                                                         ctx->viewport_h,
+                                                         ctx->base_font_px,
+                                                         true);
+        }
+        if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
+        {
+            layout.margin_bottom = html_view_length_to_px(&style->margin.bottom,
+                                                          ctx->viewport_w,
+                                                          ctx->viewport_h,
+                                                          ctx->body_w,
+                                                          ctx->viewport_h,
+                                                          ctx->base_font_px,
+                                                          false);
+        }
+        if (style->margin.left.valid && !style->margin.left.is_auto)
+        {
+            layout.margin_left = html_view_length_to_px(&style->margin.left,
+                                                        ctx->viewport_w,
+                                                        ctx->viewport_h,
+                                                        ctx->body_w,
+                                                        ctx->viewport_h,
+                                                        ctx->base_font_px,
+                                                        true);
+        }
+    }
+    if (layout.margin_top < 0) layout.margin_top = 0;
+    if (layout.margin_right < 0) layout.margin_right = 0;
+    if (layout.margin_bottom < 0) layout.margin_bottom = 0;
+    if (layout.margin_left < 0) layout.margin_left = 0;
+
+    layout.pad_top = 0;
+    layout.pad_right = 0;
+    layout.pad_bottom = 0;
+    layout.pad_left = 0;
+    if (style->has_padding)
+    {
+        layout.pad_top = html_view_length_to_px(&style->padding.top,
+                                                ctx->viewport_w,
+                                                ctx->viewport_h,
+                                                ctx->body_w,
+                                                ctx->viewport_h,
+                                                ctx->base_font_px,
+                                                false);
+        layout.pad_right = html_view_length_to_px(&style->padding.right,
+                                                  ctx->viewport_w,
+                                                  ctx->viewport_h,
+                                                  ctx->body_w,
+                                                  ctx->viewport_h,
+                                                  ctx->base_font_px,
+                                                  true);
+        layout.pad_bottom = html_view_length_to_px(&style->padding.bottom,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   ctx->body_w,
+                                                   ctx->viewport_h,
+                                                   ctx->base_font_px,
+                                                   false);
+        layout.pad_left = html_view_length_to_px(&style->padding.left,
+                                                 ctx->viewport_w,
+                                                 ctx->viewport_h,
+                                                 ctx->body_w,
+                                                 ctx->viewport_h,
+                                                 ctx->base_font_px,
+                                                 true);
+    }
+    if (layout.pad_top < 0) layout.pad_top = 0;
+    if (layout.pad_right < 0) layout.pad_right = 0;
+    if (layout.pad_bottom < 0) layout.pad_bottom = 0;
+    if (layout.pad_left < 0) layout.pad_left = 0;
+
+    layout.border_top = 0;
+    layout.border_right = 0;
+    layout.border_bottom = 0;
+    layout.border_left = 0;
+    if (style->has_border)
+    {
+        layout.border_top = html_view_length_to_px(&style->border_width.top,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   ctx->body_w,
+                                                   ctx->viewport_h,
+                                                   ctx->base_font_px,
+                                                   false);
+        layout.border_right = html_view_length_to_px(&style->border_width.right,
+                                                     ctx->viewport_w,
+                                                     ctx->viewport_h,
+                                                     ctx->body_w,
+                                                     ctx->viewport_h,
+                                                     ctx->base_font_px,
+                                                     true);
+        layout.border_bottom = html_view_length_to_px(&style->border_width.bottom,
+                                                      ctx->viewport_w,
+                                                      ctx->viewport_h,
+                                                      ctx->body_w,
+                                                      ctx->viewport_h,
+                                                      ctx->base_font_px,
+                                                      false);
+        layout.border_left = html_view_length_to_px(&style->border_width.left,
+                                                    ctx->viewport_w,
+                                                    ctx->viewport_h,
+                                                    ctx->body_w,
+                                                    ctx->viewport_h,
+                                                    ctx->base_font_px,
+                                                    true);
+    }
+    if (layout.border_top < 0) layout.border_top = 0;
+    if (layout.border_right < 0) layout.border_right = 0;
+    if (layout.border_bottom < 0) layout.border_bottom = 0;
+    if (layout.border_left < 0) layout.border_left = 0;
+
+    layout.content_w = ctx->body_w;
+    if (style->has_width && style->width.valid && !style->width.is_auto)
+    {
+        int w = html_view_length_to_px(&style->width,
+                                       ctx->viewport_w,
+                                       ctx->viewport_h,
+                                       ctx->body_w,
+                                       ctx->viewport_h,
+                                       ctx->base_font_px,
+                                       true);
+        if (w > 0)
+        {
+            layout.content_w = w;
+        }
+    }
+    if (layout.content_w < 0)
+    {
+        layout.content_w = 0;
+    }
+    if (layout.content_w > ctx->body_w)
+    {
+        layout.content_w = ctx->body_w;
+    }
+
+    int table_box_w = layout.content_w + layout.pad_left + layout.pad_right + layout.border_left + layout.border_right;
+
+    int base_x = ctx->body_x + layout.margin_left;
+    bool centered = false;
+    if (style->has_margin)
+    {
+        bool auto_left = style->margin.left.valid && style->margin.left.is_auto;
+        bool auto_right = style->margin.right.valid && style->margin.right.is_auto;
+        if (auto_left && auto_right)
+        {
+            centered = true;
+        }
+    }
+    if (!centered && parent_style && parent_style->has_text_align && parent_style->text_align == CSS_TEXT_ALIGN_CENTER)
+    {
+        centered = true;
+    }
+    if (centered && table_box_w < ctx->body_w)
+    {
+        base_x = ctx->body_x + (ctx->body_w - table_box_w) / 2;
+    }
+
+    layout.table_x = base_x;
+    layout.table_y = ctx->y + layout.margin_top;
+
+    const html_node_t *child = node->first_child;
+    while (child)
+    {
+        if (child->type == HTML_NODE_ELEMENT && child->name)
+        {
+            if (strcmp(child->name, "tr") == 0)
+            {
+                if (!html_view_table_layout_add_row(&layout, child, style, ctx))
+                {
+                    html_view_table_layout_destroy(&layout);
+                    return;
+                }
+            }
+            else if (strcmp(child->name, "tbody") == 0 || strcmp(child->name, "thead") == 0 || strcmp(child->name, "tfoot") == 0)
+            {
+                for (const html_node_t *row = child->first_child; row; row = row->next_sibling)
+                {
+                    if (row->type == HTML_NODE_ELEMENT && row->name && strcmp(row->name, "tr") == 0)
+                    {
+                        if (!html_view_table_layout_add_row(&layout, row, style, ctx))
+                        {
+                            html_view_table_layout_destroy(&layout);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        child = child->next_sibling;
+    }
+
+    int col_count = 0;
+    for (size_t r = 0; r < layout.row_count; ++r)
+    {
+        int cols = 0;
+        for (size_t c = 0; c < layout.rows[r].cell_count; ++c)
+        {
+            cols += layout.rows[r].cells[c].colspan > 0 ? layout.rows[r].cells[c].colspan : 1;
+        }
+        if (cols > col_count)
+        {
+            col_count = cols;
+        }
+    }
+    layout.col_count = col_count;
+    if (layout.col_count <= 0)
+    {
+        if (ctx->draw || ctx->record)
+        {
+            html_view_render_children(ctx, node, style);
+        }
+        html_view_table_layout_destroy(&layout);
+        return;
+    }
+
+    layout.col_w = (int *)calloc((size_t)layout.col_count, sizeof(*layout.col_w));
+    if (!layout.col_w)
+    {
+        html_view_table_layout_destroy(&layout);
+        return;
+    }
+
+    for (size_t r = 0; r < layout.row_count; ++r)
+    {
+        int col = 0;
+        for (size_t c = 0; c < layout.rows[r].cell_count; ++c)
+        {
+            html_view_table_cell_layout_t *cell = &layout.rows[r].cells[c];
+            int colspan = cell->colspan > 0 ? cell->colspan : 1;
+            int cell_font_px = html_view_font_px_for_style(ctx, &cell->style, ctx->base_font_px);
+            if (cell_font_px <= 0)
+            {
+                cell_font_px = ctx->base_font_px;
+            }
+
+            int desired_content_w = 0;
+            if (cell->style.has_width && cell->style.width.valid && !cell->style.width.is_auto)
+            {
+                desired_content_w = html_view_length_to_px(&cell->style.width,
+                                                          ctx->viewport_w,
+                                                          ctx->viewport_h,
+                                                          layout.content_w,
+                                                          ctx->viewport_h,
+                                                          cell_font_px,
+                                                          true);
+            }
+            else
+            {
+                html_view_ctx_t measure_cell_ctx = *ctx;
+                measure_cell_ctx.base_font_px = cell_font_px;
+                measure_cell_ctx.actual_font_px = cell_font_px;
+                desired_content_w = html_view_measure_text_width(&measure_cell_ctx, cell->node);
+            }
+            if (desired_content_w < 0) desired_content_w = 0;
+
+            int pad_l = layout.cellpadding;
+            int pad_r = layout.cellpadding;
+            if (cell->style.has_padding)
+            {
+                pad_l += html_view_length_to_px(&cell->style.padding.left,
+                                                ctx->viewport_w,
+                                                ctx->viewport_h,
+                                                layout.content_w,
+                                                ctx->viewport_h,
+                                                cell_font_px,
+                                                true);
+                pad_r += html_view_length_to_px(&cell->style.padding.right,
+                                                ctx->viewport_w,
+                                                ctx->viewport_h,
+                                                layout.content_w,
+                                                ctx->viewport_h,
+                                                cell_font_px,
+                                                true);
+            }
+            if (pad_l < 0) pad_l = 0;
+            if (pad_r < 0) pad_r = 0;
+
+            int border_l = 0;
+            int border_r = 0;
+            if (cell->style.has_border)
+            {
+                border_l = html_view_length_to_px(&cell->style.border_width.left,
+                                                  ctx->viewport_w,
+                                                  ctx->viewport_h,
+                                                  layout.content_w,
+                                                  ctx->viewport_h,
+                                                  cell_font_px,
+                                                  true);
+                border_r = html_view_length_to_px(&cell->style.border_width.right,
+                                                  ctx->viewport_w,
+                                                  ctx->viewport_h,
+                                                  layout.content_w,
+                                                  ctx->viewport_h,
+                                                  cell_font_px,
+                                                  true);
+                if (border_l < 0) border_l = 0;
+                if (border_r < 0) border_r = 0;
+            }
+
+            int desired_total_w = desired_content_w + pad_l + pad_r + border_l + border_r;
+            if (desired_total_w < 0) desired_total_w = 0;
+
+            if (colspan == 1 && col < layout.col_count)
+            {
+                if (desired_total_w > layout.col_w[col])
+                {
+                    layout.col_w[col] = desired_total_w;
+                }
+            }
+            col += colspan;
+        }
+    }
+
+    int total_cols = 0;
+    for (int i = 0; i < layout.col_count; ++i)
+    {
+        if (layout.col_w[i] < 0) layout.col_w[i] = 0;
+        total_cols += layout.col_w[i];
+    }
+    int gaps = layout.cellspacing * (layout.col_count > 0 ? (layout.col_count - 1) : 0);
+    int total_w = total_cols + gaps;
+    if (total_w < layout.content_w)
+    {
+        layout.col_w[layout.col_count - 1] += layout.content_w - total_w;
+    }
+    else if (total_w > layout.content_w)
+    {
+        int over = total_w - layout.content_w;
+        if (layout.col_w[layout.col_count - 1] > over)
+        {
+            layout.col_w[layout.col_count - 1] -= over;
+        }
+    }
+
+    int rows_y0 = layout.table_y + layout.border_top + layout.pad_top + layout.cellspacing;
+    int y_cursor = rows_y0;
+    for (size_t r = 0; r < layout.row_count; ++r)
+    {
+        html_view_table_row_layout_t *row = &layout.rows[r];
+        row->y = y_cursor;
+        int row_h = row->min_h;
+
+        int x_cursor = layout.table_x + layout.border_left + layout.pad_left + layout.cellspacing;
+        int col = 0;
+        for (size_t c = 0; c < row->cell_count; ++c)
+        {
+            html_view_table_cell_layout_t *cell = &row->cells[c];
+            int colspan = cell->colspan > 0 ? cell->colspan : 1;
+
+            int cell_w = 0;
+            for (int k = 0; k < colspan && (col + k) < layout.col_count; ++k)
+            {
+                cell_w += layout.col_w[col + k];
+            }
+            if (cell_w < 0) cell_w = 0;
+
+            cell->x = x_cursor;
+            cell->y = row->y;
+            cell->w = cell_w;
+
+            int cell_font_px = html_view_font_px_for_style(ctx, &cell->style, ctx->base_font_px);
+            if (cell_font_px <= 0)
+            {
+                cell_font_px = ctx->base_font_px;
+            }
+
+            cell->pad_top = layout.cellpadding;
+            cell->pad_right = layout.cellpadding;
+            cell->pad_bottom = layout.cellpadding;
+            cell->pad_left = layout.cellpadding;
+            if (cell->style.has_padding)
+            {
+                cell->pad_top += html_view_length_to_px(&cell->style.padding.top,
+                                                        ctx->viewport_w,
+                                                        ctx->viewport_h,
+                                                        cell_w,
+                                                        ctx->viewport_h,
+                                                        cell_font_px,
+                                                        false);
+                cell->pad_right += html_view_length_to_px(&cell->style.padding.right,
+                                                          ctx->viewport_w,
+                                                          ctx->viewport_h,
+                                                          cell_w,
+                                                          ctx->viewport_h,
+                                                          cell_font_px,
+                                                          true);
+                cell->pad_bottom += html_view_length_to_px(&cell->style.padding.bottom,
+                                                           ctx->viewport_w,
+                                                           ctx->viewport_h,
+                                                           cell_w,
+                                                           ctx->viewport_h,
+                                                           cell_font_px,
+                                                           false);
+                cell->pad_left += html_view_length_to_px(&cell->style.padding.left,
+                                                         ctx->viewport_w,
+                                                         ctx->viewport_h,
+                                                         cell_w,
+                                                         ctx->viewport_h,
+                                                         cell_font_px,
+                                                         true);
+            }
+            if (cell->pad_top < 0) cell->pad_top = 0;
+            if (cell->pad_right < 0) cell->pad_right = 0;
+            if (cell->pad_bottom < 0) cell->pad_bottom = 0;
+            if (cell->pad_left < 0) cell->pad_left = 0;
+
+            cell->border_top = 0;
+            cell->border_right = 0;
+            cell->border_bottom = 0;
+            cell->border_left = 0;
+            if (cell->style.has_border)
+            {
+                cell->border_top = html_view_length_to_px(&cell->style.border_width.top,
+                                                          ctx->viewport_w,
+                                                          ctx->viewport_h,
+                                                          cell_w,
+                                                          ctx->viewport_h,
+                                                          cell_font_px,
+                                                          false);
+                cell->border_right = html_view_length_to_px(&cell->style.border_width.right,
+                                                            ctx->viewport_w,
+                                                            ctx->viewport_h,
+                                                            cell_w,
+                                                            ctx->viewport_h,
+                                                            cell_font_px,
+                                                            true);
+                cell->border_bottom = html_view_length_to_px(&cell->style.border_width.bottom,
+                                                             ctx->viewport_w,
+                                                             ctx->viewport_h,
+                                                             cell_w,
+                                                             ctx->viewport_h,
+                                                             cell_font_px,
+                                                             false);
+                cell->border_left = html_view_length_to_px(&cell->style.border_width.left,
+                                                           ctx->viewport_w,
+                                                           ctx->viewport_h,
+                                                           cell_w,
+                                                           ctx->viewport_h,
+                                                           cell_font_px,
+                                                           true);
+                if (cell->border_top < 0) cell->border_top = 0;
+                if (cell->border_right < 0) cell->border_right = 0;
+                if (cell->border_bottom < 0) cell->border_bottom = 0;
+                if (cell->border_left < 0) cell->border_left = 0;
+            }
+
+            cell->content_x = cell->x + cell->border_left + cell->pad_left;
+            cell->content_y = cell->y + cell->border_top + cell->pad_top;
+            cell->content_w = cell->w - (cell->border_left + cell->border_right + cell->pad_left + cell->pad_right);
+            if (cell->content_w < 0) cell->content_w = 0;
+
+            html_view_ctx_t measure = *ctx;
+            measure.draw = false;
+            measure.record = false;
+            measure.record_failed = false;
+            measure.floats = NULL;
+            measure.style_block = NULL;
+            measure.style_depth = 0;
+            measure.body_x = cell->content_x;
+            measure.body_w = cell->content_w;
+            measure.max_x = measure.body_x + measure.body_w;
+            measure.x = measure.body_x;
+            measure.y = cell->content_y;
+            measure.content_bottom = measure.y;
+            measure.pending_space = false;
+            measure.list_level = 0;
+            measure.base_font_px = cell_font_px;
+            measure.actual_font_px = cell_font_px;
+            measure.line_height = html_view_line_height_for_style(&measure, &cell->style);
+            measure.space_w = html_view_text_width(&measure, " ");
+            html_view_render_children(&measure, cell->node, &cell->style);
+            html_view_style_stack_destroy(&measure);
+
+            int content_h = measure.content_bottom - cell->content_y;
+            if (content_h < 0) content_h = 0;
+            if (cell->style.has_height && cell->style.height.valid && !cell->style.height.is_auto)
+            {
+                int h = html_view_length_to_px(&cell->style.height,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               cell->w,
+                                               ctx->viewport_h,
+                                               cell_font_px,
+                                               false);
+                if (h > content_h)
+                {
+                    content_h = h;
+                }
+            }
+
+            int cell_h = content_h + cell->pad_top + cell->pad_bottom + cell->border_top + cell->border_bottom;
+            if (cell_h > row_h)
+            {
+                row_h = cell_h;
+            }
+
+            col += colspan;
+            x_cursor += cell->w;
+            if (c + 1 < row->cell_count)
+            {
+                x_cursor += layout.cellspacing;
+            }
+        }
+
+        row->h = row_h;
+        for (size_t c = 0; c < row->cell_count; ++c)
+        {
+            row->cells[c].h = row_h;
+        }
+
+        y_cursor += row_h + layout.cellspacing;
+    }
+
+    int y_end = y_cursor;
+    layout.table_h = (y_end - layout.table_y) + layout.pad_bottom + layout.border_bottom;
+
+    if (ctx->draw || ctx->record)
+    {
+        if (style->has_background && table_box_w > 0 && layout.table_h > 0)
+        {
+            int draw_y = layout.table_y - ctx->priv->scroll_y;
+            html_view_draw_rect_clipped(ctx, layout.table_x, draw_y, table_box_w, layout.table_h, style->background, &ctx->clip);
+        }
+
+        if (style->has_border && (layout.border_top > 0 || layout.border_right > 0 || layout.border_bottom > 0 || layout.border_left > 0))
+        {
+            video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
+            int draw_y = layout.table_y - ctx->priv->scroll_y;
+            html_view_draw_border_sides_clipped(ctx,
+                                                layout.table_x,
+                                                draw_y,
+                                                table_box_w,
+                                                layout.table_h,
+                                                layout.border_top,
+                                                layout.border_right,
+                                                layout.border_bottom,
+                                                layout.border_left,
+                                                border_color,
+                                                &ctx->clip);
+        }
+
+        for (size_t r = 0; r < layout.row_count; ++r)
+        {
+            html_view_table_row_layout_t *row = &layout.rows[r];
+            for (size_t c = 0; c < row->cell_count; ++c)
+            {
+                html_view_table_cell_layout_t *cell = &row->cells[c];
+                if (cell->w <= 0 || cell->h <= 0)
+                {
+                    continue;
+                }
+
+                int cell_draw_y = cell->y - ctx->priv->scroll_y;
+                if (cell->style.has_background)
+                {
+                    html_view_draw_rect_clipped(ctx, cell->x, cell_draw_y, cell->w, cell->h, cell->style.background, &ctx->clip);
+                }
+                if (cell->style.has_border && (cell->border_top > 0 || cell->border_right > 0 || cell->border_bottom > 0 || cell->border_left > 0))
+                {
+                    video_color_t border_color = cell->style.has_border_color ? cell->style.border_color : video_make_color(0x00, 0x00, 0x00);
+                    html_view_draw_border_sides_clipped(ctx,
+                                                        cell->x,
+                                                        cell_draw_y,
+                                                        cell->w,
+                                                        cell->h,
+                                                        cell->border_top,
+                                                        cell->border_right,
+                                                        cell->border_bottom,
+                                                        cell->border_left,
+                                                        border_color,
+                                                        &ctx->clip);
+                }
+
+                html_view_ctx_t inner = *ctx;
+                inner.floats = NULL;
+                inner.style_block = NULL;
+                inner.style_depth = 0;
+                inner.body_x = cell->content_x;
+                inner.body_w = cell->content_w;
+                inner.max_x = inner.body_x + inner.body_w;
+                inner.x = inner.body_x;
+                inner.y = cell->content_y;
+                inner.content_bottom = inner.y;
+                inner.pending_space = false;
+                inner.list_level = 0;
+                inner.bg = cell->style.has_background ? cell->style.background : ctx->bg;
+                int cell_font_px = html_view_font_px_for_style(&inner, &cell->style, inner.base_font_px);
+                if (cell_font_px > 0)
+                {
+                    inner.base_font_px = cell_font_px;
+                    inner.actual_font_px = cell_font_px;
+                }
+                inner.line_height = html_view_line_height_for_style(&inner, &cell->style);
+                inner.space_w = html_view_text_width(&inner, " ");
+
+                if (cell->style.has_text_align &&
+                    (cell->style.text_align == CSS_TEXT_ALIGN_CENTER || cell->style.text_align == CSS_TEXT_ALIGN_RIGHT))
+                {
+                    html_view_ctx_t measure_align = inner;
+                    measure_align.draw = false;
+                    measure_align.record = false;
+                    measure_align.record_failed = false;
+                    measure_align.floats = NULL;
+                    measure_align.style_block = NULL;
+                    measure_align.style_depth = 0;
+                    measure_align.x = measure_align.body_x;
+                    measure_align.y = inner.y;
+                    measure_align.content_bottom = measure_align.y;
+                    measure_align.pending_space = false;
+                    measure_align.list_level = 0;
+                    measure_align.space_w = inner.space_w;
+
+                    html_view_render_children(&measure_align, cell->node, &cell->style);
+
+                    bool single_line = (measure_align.y == inner.y);
+                    int line_w = measure_align.x - measure_align.body_x;
+                    html_view_style_stack_destroy(&measure_align);
+
+                    if (single_line && inner.body_w > 0 && line_w > 0 && line_w < inner.body_w)
+                    {
+                        if (cell->style.text_align == CSS_TEXT_ALIGN_CENTER)
+                        {
+                            inner.x = inner.body_x + (inner.body_w - line_w) / 2;
+                        }
+                        else
+                        {
+                            inner.x = inner.body_x + (inner.body_w - line_w);
+                        }
+                        if (inner.x < inner.body_x)
+                        {
+                            inner.x = inner.body_x;
+                        }
+                    }
+                }
+
+                html_view_render_children(&inner, cell->node, &cell->style);
+                if (inner.record_failed)
+                {
+                    ctx->record_failed = true;
+                }
+                html_view_style_stack_destroy(&inner);
+                if (ctx->record_failed)
+                {
+                    break;
+                }
+            }
+            if (ctx->record_failed)
+            {
+                break;
+            }
+        }
+    }
+
+    int bottom = layout.table_y + layout.table_h + layout.margin_bottom;
+    if (bottom > ctx->y)
+    {
+        ctx->y = bottom;
+    }
+    ctx->x = ctx->body_x;
+    ctx->pending_space = false;
+    html_view_ensure_line_visible(ctx);
+
+    html_view_table_layout_destroy(&layout);
+}
+
