@@ -337,6 +337,9 @@ struct process
     uintptr_t user_entry_point;
     uintptr_t user_stack_top;
     size_t user_stack_size;
+    uintptr_t user_stack_committed;
+    paddr_t *user_stack_pages;
+    size_t user_stack_page_count;
     uintptr_t user_thread_stack_next;
     uintptr_t user_heap_base;
     uintptr_t user_heap_brk;
@@ -344,7 +347,6 @@ struct process
     uintptr_t user_heap_committed;
     process_heap_l2_t **heap_page_dirs;
     size_t heap_dir_count;
-    uint8_t *user_stack_host;
     uintptr_t user_initial_stack;
     size_t arg_count;
     char **arg_values;
@@ -694,6 +696,7 @@ bool process_pointer_valid(const process_t *process);
 bool thread_pointer_valid(const thread_t *thread);
 bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t end);
 bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes);
+bool process_stack_handle_page_fault(process_t *process, uintptr_t fault_addr, uintptr_t rsp);
 thread_t *thread_find_stack_owner(uintptr_t addr, size_t len);
 bool thread_stack_watch_activate(thread_t *thread, const char *context, uintptr_t suspect);
 void thread_stack_watch_deactivate(thread_t *thread);

@@ -162,12 +162,87 @@ static void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
     video_blit_rgba32_untracked(x0, y0, draw_w, draw_h, src, stride_bytes, true);
 }
 
+static void html_view_align_current_line(html_view_ctx_t *ctx)
+{
+    if (!ctx || !ctx->record || ctx->record_failed || !ctx->priv)
+    {
+        return;
+    }
+    if (ctx->text_align_mode == CSS_TEXT_ALIGN_LEFT)
+    {
+        ctx->line_op_start = ctx->priv->render_cache.op_count;
+        return;
+    }
+
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    size_t start = ctx->line_op_start;
+    size_t end = cache->op_count;
+    if (start >= end)
+    {
+        return;
+    }
+
+    int line_left = ctx->line_start_x;
+    int avail = ctx->max_x - line_left;
+    int line_w = ctx->x - line_left;
+    if (avail <= 0 || line_w <= 0 || line_w >= avail)
+    {
+        ctx->line_op_start = end;
+        return;
+    }
+
+    int delta = 0;
+    if (ctx->text_align_mode == CSS_TEXT_ALIGN_CENTER)
+    {
+        delta = (avail - line_w) / 2;
+    }
+    else if (ctx->text_align_mode == CSS_TEXT_ALIGN_RIGHT)
+    {
+        delta = (avail - line_w);
+    }
+
+    if (delta <= 0)
+    {
+        ctx->line_op_start = end;
+        return;
+    }
+
+    int max_shift_h = ctx->line_height + 2;
+    for (size_t i = start; i < end; ++i)
+    {
+        html_view_op_t *op = &cache->ops[i];
+        bool shift = false;
+        if (op->kind == HTML_VIEW_OP_TEXT || op->kind == HTML_VIEW_OP_CONTROL)
+        {
+            shift = true;
+        }
+        else if (op->kind == HTML_VIEW_OP_RECT)
+        {
+            shift = (op->h > 0 && op->h <= max_shift_h);
+        }
+        else if (op->kind == HTML_VIEW_OP_IMAGE)
+        {
+            shift = (op->h > 0 && op->h <= max_shift_h);
+        }
+
+        if (shift)
+        {
+            op->x += delta;
+        }
+    }
+
+    ctx->line_op_start = end;
+}
+
 static void html_view_new_line(html_view_ctx_t *ctx)
 {
     if (!ctx)
     {
         return;
     }
+
+    html_view_align_current_line(ctx);
+
     ctx->x = ctx->body_x;
     ctx->y += ctx->line_height;
     ctx->pending_space = false;
@@ -175,6 +250,17 @@ static void html_view_new_line(html_view_ctx_t *ctx)
     if (bottom > ctx->content_bottom)
     {
         ctx->content_bottom = bottom;
+    }
+
+    ctx->line_start_x = ctx->x;
+    ctx->line_start_y = ctx->y;
+    if (ctx->record && ctx->priv)
+    {
+        ctx->line_op_start = ctx->priv->render_cache.op_count;
+    }
+    else
+    {
+        ctx->line_op_start = 0;
     }
 }
 
@@ -462,6 +548,10 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
     }
 
     ctx->x += w;
+    if (ctx->x > ctx->measure_max_x)
+    {
+        ctx->measure_max_x = ctx->x;
+    }
     ctx->pending_space = true;
     html_view_ensure_line_visible(ctx);
 
@@ -595,6 +685,10 @@ static void html_view_place_inline_control(html_view_ctx_t *ctx,
     }
 
     ctx->x += width;
+    if (ctx->x > ctx->measure_max_x)
+    {
+        ctx->measure_max_x = ctx->x;
+    }
     ctx->pending_space = true;
     html_view_ensure_line_visible(ctx);
 }
@@ -652,9 +746,25 @@ static void html_view_place_block_control(html_view_ctx_t *ctx,
         }
     }
 
+    int right_edge = abs_x + width;
+    if (right_edge > ctx->measure_max_x)
+    {
+        ctx->measure_max_x = right_edge;
+    }
+
     ctx->y += height;
     ctx->x = ctx->body_x;
     ctx->pending_space = false;
+    ctx->line_start_x = ctx->x;
+    ctx->line_start_y = ctx->y;
+    if (ctx->record && ctx->priv)
+    {
+        ctx->line_op_start = ctx->priv->render_cache.op_count;
+    }
+    else
+    {
+        ctx->line_op_start = 0;
+    }
     html_view_ensure_line_visible(ctx);
 }
 

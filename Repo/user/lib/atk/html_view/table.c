@@ -92,19 +92,61 @@ static int html_view_attr_to_int(const html_node_t *node, const char *name, int 
     return n >= 0 ? n : fallback;
 }
 
-static int html_view_measure_text_width(html_view_ctx_t *ctx, const html_node_t *node)
+static void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
+
+static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *parent_style, int max_w, int *out_h)
 {
-    if (!ctx || !node)
+    if (out_h)
+    {
+        *out_h = 0;
+    }
+    if (!ctx || !node || !parent_style || max_w <= 0)
     {
         return 0;
     }
-    char *buf = NULL;
-    size_t len = 0;
-    size_t cap = 0;
-    html_view_collect_text(node, &buf, &len, &cap);
-    int w = buf ? html_view_text_width(ctx, buf) : 0;
-    free(buf);
-    return w;
+
+    html_view_ctx_t measure = *ctx;
+    measure.draw = false;
+    measure.record = false;
+    measure.record_failed = false;
+    measure.floats = NULL;
+    measure.style_block = NULL;
+    measure.style_depth = 0;
+    measure.body_x = 0;
+    measure.body_w = max_w;
+    measure.max_x = measure.body_x + measure.body_w;
+    measure.x = measure.body_x;
+    measure.y = 0;
+    measure.content_bottom = measure.y;
+    measure.pending_space = false;
+    measure.list_level = 0;
+    measure.measure_max_x = measure.x;
+    measure.space_w = html_view_text_width(&measure, " ");
+
+    html_view_render_children(&measure, node, parent_style);
+
+    int used_w = measure.measure_max_x - measure.body_x;
+    if (used_w < 0)
+    {
+        used_w = 0;
+    }
+    if (used_w > max_w)
+    {
+        used_w = max_w;
+    }
+
+    int used_h = measure.content_bottom;
+    if (used_h < 0)
+    {
+        used_h = 0;
+    }
+    if (out_h)
+    {
+        *out_h = used_h;
+    }
+
+    html_view_style_stack_destroy(&measure);
+    return used_w;
 }
 
 static bool html_view_table_row_add_cell(html_view_table_row_layout_t *row, const html_view_table_cell_layout_t *cell)
@@ -223,8 +265,6 @@ static bool html_view_subtree_has_form_control(const html_node_t *root)
 
     return false;
 }
-
-static void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
 
 static void html_view_render_table(html_view_ctx_t *ctx,
                                    const html_node_t *node,
@@ -383,7 +423,8 @@ static void html_view_render_float_box(html_view_ctx_t *ctx,
     if (border_left < 0) border_left = 0;
 
     int content_w = 0;
-    if (style->has_width && style->width.valid && !style->width.is_auto)
+    bool explicit_w = style->has_width && style->width.valid && !style->width.is_auto;
+    if (explicit_w)
     {
         content_w = html_view_length_to_px(&style->width,
                                            ctx->viewport_w,
@@ -393,17 +434,14 @@ static void html_view_render_float_box(html_view_ctx_t *ctx,
                                            ctx->base_font_px,
                                            true);
     }
-    else
-    {
-        content_w = ctx->body_w;
-    }
     if (content_w < 0)
     {
         content_w = 0;
     }
 
     int content_h = 0;
-    if (style->has_height && style->height.valid && !style->height.is_auto)
+    bool explicit_h = style->has_height && style->height.valid && !style->height.is_auto;
+    if (explicit_h)
     {
         content_h = html_view_length_to_px(&style->height,
                                            ctx->viewport_w,
@@ -413,13 +451,34 @@ static void html_view_render_float_box(html_view_ctx_t *ctx,
                                            ctx->base_font_px,
                                            false);
     }
-    else
-    {
-        content_h = ctx->line_height;
-    }
     if (content_h < 0)
     {
         content_h = 0;
+    }
+
+    if (!explicit_w || !explicit_h)
+    {
+        int measured_h = 0;
+        int measured_w = html_view_measure_rendered_width(ctx, node, style, ctx->body_w, &measured_h);
+        if (!explicit_w && measured_w > 0)
+        {
+            content_w = measured_w;
+        }
+        if (!explicit_h && measured_h > 0)
+        {
+            content_h = measured_h;
+        }
+    }
+
+    if (content_w <= 0)
+    {
+        content_w = ctx->body_w;
+        if (content_w < 0) content_w = 0;
+    }
+    if (content_h <= 0)
+    {
+        content_h = ctx->line_height;
+        if (content_h < 0) content_h = 0;
     }
 
     int border_box_w = content_w + pad_left + pad_right + border_left + border_right;
@@ -506,6 +565,10 @@ static void html_view_render_float_box(html_view_ctx_t *ctx,
     bool saved_pending = ctx->pending_space;
     video_color_t saved_bg = ctx->bg;
     html_view_float_ctx_t *saved_floats = ctx->floats;
+    css_text_align_t saved_align = ctx->text_align_mode;
+    size_t saved_line_op_start = ctx->line_op_start;
+    int saved_line_start_x = ctx->line_start_x;
+    int saved_line_start_y = ctx->line_start_y;
 
     html_view_float_ctx_t *inner_floats = (html_view_float_ctx_t *)calloc(1, sizeof(*inner_floats));
     ctx->floats = inner_floats ? inner_floats : saved_floats;
@@ -520,8 +583,13 @@ static void html_view_render_float_box(html_view_ctx_t *ctx,
     {
         ctx->bg = style->background;
     }
+    ctx->text_align_mode = style->has_text_align ? style->text_align : ctx->text_align_mode;
+    ctx->line_start_x = ctx->x;
+    ctx->line_start_y = ctx->y;
+    ctx->line_op_start = (ctx->record && ctx->priv) ? ctx->priv->render_cache.op_count : 0;
 
     html_view_render_children(ctx, node, style);
+    html_view_align_current_line(ctx);
 
     ctx->floats = saved_floats;
     free(inner_floats);
@@ -533,6 +601,10 @@ static void html_view_render_float_box(html_view_ctx_t *ctx,
     ctx->y = saved_y;
     ctx->pending_space = saved_pending;
     ctx->line_height = saved_line_height;
+    ctx->text_align_mode = saved_align;
+    ctx->line_op_start = saved_line_op_start;
+    ctx->line_start_x = saved_line_start_x;
+    ctx->line_start_y = saved_line_start_y;
 }
 
 static void html_view_render_table(html_view_ctx_t *ctx,
@@ -828,7 +900,9 @@ static void html_view_render_table(html_view_ctx_t *ctx,
                 html_view_ctx_t measure_cell_ctx = *ctx;
                 measure_cell_ctx.base_font_px = cell_font_px;
                 measure_cell_ctx.actual_font_px = cell_font_px;
-                desired_content_w = html_view_measure_text_width(&measure_cell_ctx, cell->node);
+                measure_cell_ctx.line_height = html_view_line_height_for_style(&measure_cell_ctx, &cell->style);
+                measure_cell_ctx.space_w = html_view_text_width(&measure_cell_ctx, " ");
+                desired_content_w = html_view_measure_rendered_width(&measure_cell_ctx, cell->node, &cell->style, layout.content_w, NULL);
             }
             if (desired_content_w < 0) desired_content_w = 0;
 
@@ -1163,6 +1237,11 @@ static void html_view_render_table(html_view_ctx_t *ctx,
                 inner.pending_space = false;
                 inner.list_level = 0;
                 inner.bg = cell->style.has_background ? cell->style.background : ctx->bg;
+                inner.measure_max_x = inner.x;
+                inner.text_align_mode = cell->style.has_text_align ? cell->style.text_align : ctx->text_align_mode;
+                inner.line_start_x = inner.x;
+                inner.line_start_y = inner.y;
+                inner.line_op_start = (inner.record && inner.priv) ? inner.priv->render_cache.op_count : 0;
                 int cell_font_px = html_view_font_px_for_style(&inner, &cell->style, inner.base_font_px);
                 if (cell_font_px > 0)
                 {
@@ -1172,47 +1251,8 @@ static void html_view_render_table(html_view_ctx_t *ctx,
                 inner.line_height = html_view_line_height_for_style(&inner, &cell->style);
                 inner.space_w = html_view_text_width(&inner, " ");
 
-                if (cell->style.has_text_align &&
-                    (cell->style.text_align == CSS_TEXT_ALIGN_CENTER || cell->style.text_align == CSS_TEXT_ALIGN_RIGHT))
-                {
-                    html_view_ctx_t measure_align = inner;
-                    measure_align.draw = false;
-                    measure_align.record = false;
-                    measure_align.record_failed = false;
-                    measure_align.floats = NULL;
-                    measure_align.style_block = NULL;
-                    measure_align.style_depth = 0;
-                    measure_align.x = measure_align.body_x;
-                    measure_align.y = inner.y;
-                    measure_align.content_bottom = measure_align.y;
-                    measure_align.pending_space = false;
-                    measure_align.list_level = 0;
-                    measure_align.space_w = inner.space_w;
-
-                    html_view_render_children(&measure_align, cell->node, &cell->style);
-
-                    bool single_line = (measure_align.y == inner.y);
-                    int line_w = measure_align.x - measure_align.body_x;
-                    html_view_style_stack_destroy(&measure_align);
-
-                    if (single_line && inner.body_w > 0 && line_w > 0 && line_w < inner.body_w)
-                    {
-                        if (cell->style.text_align == CSS_TEXT_ALIGN_CENTER)
-                        {
-                            inner.x = inner.body_x + (inner.body_w - line_w) / 2;
-                        }
-                        else
-                        {
-                            inner.x = inner.body_x + (inner.body_w - line_w);
-                        }
-                        if (inner.x < inner.body_x)
-                        {
-                            inner.x = inner.body_x;
-                        }
-                    }
-                }
-
                 html_view_render_children(&inner, cell->node, &cell->style);
+                html_view_align_current_line(&inner);
                 if (inner.record_failed)
                 {
                     ctx->record_failed = true;
@@ -1237,8 +1277,10 @@ static void html_view_render_table(html_view_ctx_t *ctx,
     }
     ctx->x = ctx->body_x;
     ctx->pending_space = false;
+    ctx->line_start_x = ctx->x;
+    ctx->line_start_y = ctx->y;
+    ctx->line_op_start = (ctx->record && ctx->priv) ? ctx->priv->render_cache.op_count : 0;
     html_view_ensure_line_visible(ctx);
 
     html_view_table_layout_destroy(&layout);
 }
-

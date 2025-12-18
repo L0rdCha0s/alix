@@ -362,8 +362,13 @@ static void html_view_draw_cb(const atk_state_t *state,
             .x = body_content_x,
             .y = body_content_y0,
             .max_x = body_content_x + body_content_w,
+            .measure_max_x = body_content_x,
             .content_bottom = body_content_y0,
             .list_level = 0,
+            .text_align_mode = body_style.has_text_align ? body_style.text_align : CSS_TEXT_ALIGN_LEFT,
+            .line_op_start = 0,
+            .line_start_x = body_content_x,
+            .line_start_y = body_content_y0,
             .pending_space = false,
             .draw = true,
             .record = true,
@@ -381,6 +386,7 @@ static void html_view_draw_cb(const atk_state_t *state,
         {
             html_view_draw_text(&record, "No document.\n", default_text, false, false);
         }
+        html_view_align_current_line(&record);
         html_view_style_stack_destroy(&record);
 
         if (!record.record_failed)
@@ -441,8 +447,13 @@ static void html_view_draw_cb(const atk_state_t *state,
         .x = body_content_x,
         .y = body_content_y0,
         .max_x = body_content_x + body_content_w,
+        .measure_max_x = body_content_x,
         .content_bottom = body_content_y0,
         .list_level = 0,
+        .text_align_mode = body_style.has_text_align ? body_style.text_align : CSS_TEXT_ALIGN_LEFT,
+        .line_op_start = 0,
+        .line_start_x = body_content_x,
+        .line_start_y = body_content_y0,
         .pending_space = false,
         .draw = true,
         .record = false,

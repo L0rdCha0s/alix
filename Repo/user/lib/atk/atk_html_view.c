@@ -225,8 +225,13 @@ typedef struct
     int x;
     int y;
     int max_x;
+    int measure_max_x;
     int content_bottom;
     int list_level;
+    css_text_align_t text_align_mode;
+    size_t line_op_start;
+    int line_start_x;
+    int line_start_y;
     bool text_underline;
     bool text_bold;
     const char *active_href;

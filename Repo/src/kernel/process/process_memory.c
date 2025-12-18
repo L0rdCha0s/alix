@@ -123,6 +123,9 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->user_entry_point = 0;
     proc->user_stack_top = 0;
     proc->user_stack_size = 0;
+    proc->user_stack_committed = 0;
+    proc->user_stack_pages = NULL;
+    proc->user_stack_page_count = 0;
     proc->user_thread_stack_next = is_user
                                    ? align_down_uintptr(g_mem_layout.user_pointer_limit + 1, PAGE_SIZE_BYTES_LOCAL)
                                    : 0;
@@ -143,6 +146,31 @@ void process_free_user_regions(process_t *process)
     {
         return;
     }
+
+    if (process->user_stack_pages && process->user_stack_page_count > 0 &&
+        process->user_stack_top != 0 && process->user_stack_size != 0)
+    {
+        for (size_t i = 0; i < process->user_stack_page_count; ++i)
+        {
+            paddr_t phys = process->user_stack_pages[i];
+            if (phys == 0)
+            {
+                continue;
+            }
+            process->user_stack_pages[i] = 0;
+            user_memory_free(phys, PAGE_SIZE_BYTES_LOCAL);
+        }
+    }
+    if (process->user_stack_pages)
+    {
+        free(process->user_stack_pages);
+        process->user_stack_pages = NULL;
+    }
+    process->user_stack_page_count = 0;
+    process->user_stack_committed = 0;
+    process->user_stack_top = 0;
+    process->user_stack_size = 0;
+    process->user_initial_stack = 0;
 
     process_user_region_t *region = process->user_regions;
     while (region)
@@ -587,19 +615,22 @@ bool process_map_user_segment(process_t *process,
 
 static bool process_setup_user_stack(process_t *process)
 {
-    void *host = NULL;
-    if (!process_map_user_segment(process,
-                                  USER_STACK_TOP - USER_STACK_SIZE,
-                                  USER_STACK_SIZE,
-                                  true,
-                                  false,
-                                  &host))
+    process->user_stack_top = USER_STACK_TOP;
+    process->user_stack_size = USER_STACK_SIZE;
+    process->user_stack_committed = USER_STACK_TOP;
+
+    size_t page_count = align_up_size(USER_STACK_SIZE, PAGE_SIZE_BYTES_LOCAL) / PAGE_SIZE_BYTES_LOCAL;
+    if (page_count == 0)
     {
         return false;
     }
-    process->user_stack_top = USER_STACK_TOP;
-    process->user_stack_size = USER_STACK_SIZE;
-    process->user_stack_host = (uint8_t *)host;
+    process->user_stack_pages = (paddr_t *)malloc(sizeof(paddr_t) * page_count);
+    if (!process->user_stack_pages)
+    {
+        return false;
+    }
+    memset(process->user_stack_pages, 0, sizeof(paddr_t) * page_count);
+    process->user_stack_page_count = page_count;
     return true;
 }
 
@@ -715,19 +746,319 @@ static void process_dump_stack_entry(uintptr_t addr, uintptr_t value, bool mark_
                   mark_rsp ? " <-- rsp" : "");
 }
 
-static inline bool process_write_stack_uintptr(uint8_t *host_base,
-                                               uintptr_t stack_bottom,
-                                               uintptr_t stack_top,
-                                               uintptr_t addr,
-                                               uintptr_t value)
+#define USER_STACK_GROW_PREFETCH_BYTES (32UL * 1024UL)
+
+static void process_dump_stack_entry_unmapped(uintptr_t addr, bool mark_rsp)
 {
-    if (!host_base || addr < stack_bottom || addr + sizeof(uintptr_t) > stack_top)
+    serial_printf("    [%016llX] = <unmapped>%s\r\n",
+                  (unsigned long long)addr,
+                  mark_rsp ? " <-- rsp" : "");
+}
+
+static uintptr_t process_stack_bottom(const process_t *process)
+{
+    if (!process || process->user_stack_top == 0 || process->user_stack_size == 0)
+    {
+        return 0;
+    }
+    return process->user_stack_top - process->user_stack_size;
+}
+
+static bool process_stack_translate(process_t *process,
+                                    uintptr_t addr,
+                                    uint8_t **host_out,
+                                    size_t *chunk_out)
+{
+    if (!process || !host_out || process->user_stack_top == 0 || process->user_stack_size == 0 ||
+        !process->user_stack_pages || process->user_stack_page_count == 0)
     {
         return false;
     }
-    size_t offset = (size_t)(addr - stack_bottom);
-    memcpy(host_base + offset, &value, sizeof(uintptr_t));
+
+    uintptr_t stack_top = process->user_stack_top;
+    uintptr_t stack_bottom = process_stack_bottom(process);
+    if (stack_bottom == 0 || addr < stack_bottom || addr >= stack_top)
+    {
+        return false;
+    }
+
+    uintptr_t page_base = align_down_uintptr(addr, PAGE_SIZE_BYTES_LOCAL);
+    size_t page_index = (size_t)((page_base - stack_bottom) / PAGE_SIZE_BYTES_LOCAL);
+    if (page_index >= process->user_stack_page_count)
+    {
+        return false;
+    }
+
+    paddr_t phys = process->user_stack_pages[page_index];
+    if (phys == 0)
+    {
+        return false;
+    }
+
+    size_t offset = (size_t)(addr - page_base);
+    *host_out = (uint8_t *)phys_to_virt(phys) + offset;
+
+    if (chunk_out)
+    {
+        size_t chunk = PAGE_SIZE_BYTES_LOCAL - offset;
+        uintptr_t max_end = page_base + PAGE_SIZE_BYTES_LOCAL;
+        if (max_end > stack_top)
+        {
+            chunk = (size_t)(stack_top - addr);
+        }
+        *chunk_out = chunk;
+    }
     return true;
+}
+
+static bool process_stack_copy_to(process_t *process,
+                                 uintptr_t addr,
+                                 const void *src,
+                                 size_t bytes)
+{
+    if (!process || !src || bytes == 0)
+    {
+        return bytes == 0;
+    }
+
+    const uint8_t *in = (const uint8_t *)src;
+    size_t remaining = bytes;
+    uintptr_t cursor = addr;
+    while (remaining > 0)
+    {
+        uint8_t *host = NULL;
+        size_t chunk = 0;
+        if (!process_stack_translate(process, cursor, &host, &chunk) || chunk == 0)
+        {
+            return false;
+        }
+        if (chunk > remaining)
+        {
+            chunk = remaining;
+        }
+        memcpy(host, in, chunk);
+        in += chunk;
+        cursor += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+static bool process_stack_copy_from(process_t *process,
+                                   uintptr_t addr,
+                                   void *dst,
+                                   size_t bytes)
+{
+    if (!process || !dst || bytes == 0)
+    {
+        return bytes == 0;
+    }
+
+    uint8_t *out = (uint8_t *)dst;
+    size_t remaining = bytes;
+    uintptr_t cursor = addr;
+    while (remaining > 0)
+    {
+        uint8_t *host = NULL;
+        size_t chunk = 0;
+        if (!process_stack_translate(process, cursor, &host, &chunk) || chunk == 0)
+        {
+            return false;
+        }
+        if (chunk > remaining)
+        {
+            chunk = remaining;
+        }
+        memcpy(out, host, chunk);
+        out += chunk;
+        cursor += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+static bool process_stack_commit_range(process_t *process, uintptr_t start, uintptr_t end)
+{
+    if (!process || start >= end)
+    {
+        return true;
+    }
+    if (!process->user_stack_pages || process->user_stack_page_count == 0 ||
+        process->user_stack_top == 0 || process->user_stack_size == 0)
+    {
+        return false;
+    }
+
+    uintptr_t stack_top = process->user_stack_top;
+    uintptr_t stack_bottom = process_stack_bottom(process);
+    if (stack_bottom == 0 || end <= stack_bottom || start >= stack_top)
+    {
+        return false;
+    }
+
+    uintptr_t aligned_start = align_down_uintptr(start, PAGE_SIZE_BYTES_LOCAL);
+    uintptr_t aligned_end = align_up_uintptr(end, PAGE_SIZE_BYTES_LOCAL);
+    if (aligned_start < stack_bottom)
+    {
+        aligned_start = stack_bottom;
+    }
+    if (aligned_end > stack_top)
+    {
+        aligned_end = stack_top;
+    }
+    if (aligned_start >= aligned_end)
+    {
+        return true;
+    }
+
+    uintptr_t old_committed = process->user_stack_committed ? process->user_stack_committed : stack_top;
+    if (aligned_end > old_committed)
+    {
+        aligned_end = old_committed;
+    }
+    if (aligned_start >= aligned_end)
+    {
+        return true;
+    }
+
+    uintptr_t page_addr = aligned_start;
+    for (; page_addr < aligned_end; page_addr += PAGE_SIZE_BYTES_LOCAL)
+    {
+        size_t page_index = (size_t)((page_addr - stack_bottom) / PAGE_SIZE_BYTES_LOCAL);
+        if (page_index >= process->user_stack_page_count)
+        {
+            break;
+        }
+        if (process->user_stack_pages[page_index] != 0)
+        {
+            continue;
+        }
+
+        paddr_t phys = 0;
+        if (!user_memory_alloc_page(&phys))
+        {
+            serial_printf("[stack] alloc_page failed pid=0x%016llX virt=0x%016llX avail=0x%016llX\r\n",
+                          (unsigned long long)process->pid,
+                          (unsigned long long)page_addr,
+                          (unsigned long long)user_memory_available());
+            break;
+        }
+        memset(phys_to_virt(phys), 0, PAGE_SIZE_BYTES_LOCAL);
+        if (!paging_map_user_page(&process->address_space, page_addr, (uintptr_t)phys, true, false))
+        {
+            serial_printf("[stack] map failed pid=0x%016llX virt=0x%016llX phys=0x%016llX\r\n",
+                          (unsigned long long)process->pid,
+                          (unsigned long long)page_addr,
+                          (unsigned long long)phys);
+            user_memory_free_page(phys);
+            break;
+        }
+        process->user_stack_pages[page_index] = phys;
+    }
+
+    if (page_addr == aligned_end)
+    {
+        process->user_stack_committed = aligned_start;
+        return true;
+    }
+
+    /* Roll back any pages we allocated for this range. */
+    for (uintptr_t rollback = aligned_start; rollback < page_addr; rollback += PAGE_SIZE_BYTES_LOCAL)
+    {
+        size_t page_index = (size_t)((rollback - stack_bottom) / PAGE_SIZE_BYTES_LOCAL);
+        if (page_index >= process->user_stack_page_count)
+        {
+            continue;
+        }
+        paddr_t phys = process->user_stack_pages[page_index];
+        if (phys == 0)
+        {
+            continue;
+        }
+        process->user_stack_pages[page_index] = 0;
+        paging_unmap_user_page(&process->address_space, rollback);
+        user_memory_free_page(phys);
+    }
+    process->user_stack_committed = old_committed;
+    return false;
+}
+
+static bool process_stack_ensure_range(process_t *process, uintptr_t addr, size_t bytes)
+{
+    if (!process || bytes == 0)
+    {
+        return true;
+    }
+    if (!process->user_stack_pages || process->user_stack_page_count == 0 ||
+        process->user_stack_top == 0 || process->user_stack_size == 0)
+    {
+        return false;
+    }
+
+    uintptr_t stack_top = process->user_stack_top;
+    uintptr_t stack_bottom = process_stack_bottom(process);
+    if (stack_bottom == 0)
+    {
+        return false;
+    }
+
+    uintptr_t end_addr = addr + bytes;
+    if (end_addr < addr || addr < stack_bottom || end_addr > stack_top)
+    {
+        return false;
+    }
+
+    uintptr_t required = align_down_uintptr(addr, PAGE_SIZE_BYTES_LOCAL);
+    uintptr_t desired = required;
+    if (desired > stack_bottom)
+    {
+        uintptr_t candidate = desired;
+        if (candidate >= stack_bottom + USER_STACK_GROW_PREFETCH_BYTES)
+        {
+            candidate -= USER_STACK_GROW_PREFETCH_BYTES;
+        }
+        else
+        {
+            candidate = stack_bottom;
+        }
+        desired = align_down_uintptr(candidate, PAGE_SIZE_BYTES_LOCAL);
+        if (desired < stack_bottom)
+        {
+            desired = stack_bottom;
+        }
+    }
+
+    uintptr_t committed = process->user_stack_committed ? process->user_stack_committed : stack_top;
+    if (desired >= committed)
+    {
+        return true;
+    }
+
+    return process_stack_commit_range(process, desired, committed);
+}
+
+bool process_stack_handle_page_fault(process_t *process, uintptr_t fault_addr, uintptr_t rsp)
+{
+    (void)rsp;
+
+    if (!process || !process->is_user)
+    {
+        return false;
+    }
+    if (!process->user_stack_pages || process->user_stack_page_count == 0 ||
+        process->user_stack_top == 0 || process->user_stack_size == 0)
+    {
+        return false;
+    }
+
+    uintptr_t stack_top = process->user_stack_top;
+    uintptr_t stack_bottom = process_stack_bottom(process);
+    if (stack_bottom == 0 || fault_addr < stack_bottom || fault_addr >= stack_top)
+    {
+        return false;
+    }
+
+    return process_stack_ensure_range(process, fault_addr, sizeof(uintptr_t));
 }
 
 static bool process_setup_preempt_stub(process_t *process)
@@ -762,7 +1093,8 @@ void process_dump_user_stack(process_t *process,
     {
         return;
     }
-    if (!process->user_stack_host || process->user_stack_size == 0 || rsp == 0)
+    if (!process->user_stack_pages || process->user_stack_page_count == 0 ||
+        process->user_stack_top == 0 || process->user_stack_size == 0 || rsp == 0)
     {
         serial_printf("%s", "  user stack: unavailable\r\n");
         return;
@@ -799,10 +1131,15 @@ void process_dump_user_stack(process_t *process,
 
         while (ready > 0 && addr >= stack_bottom)
         {
-            size_t offset = (size_t)(addr - stack_bottom);
             uintptr_t value = 0;
-            memcpy(&value, process->user_stack_host + offset, sizeof(uintptr_t));
-            process_dump_stack_entry(addr, value, false);
+            if (process_stack_copy_from(process, addr, &value, sizeof(value)))
+            {
+                process_dump_stack_entry(addr, value, false);
+            }
+            else
+            {
+                process_dump_stack_entry_unmapped(addr, false);
+            }
             addr += sizeof(uintptr_t);
             ready--;
         }
@@ -815,10 +1152,15 @@ void process_dump_user_stack(process_t *process,
         size_t remaining = max_entries_above;
         while (remaining > 0 && addr + sizeof(uintptr_t) <= stack_top)
         {
-            size_t offset = (size_t)(addr - stack_bottom);
             uintptr_t value = 0;
-            memcpy(&value, process->user_stack_host + offset, sizeof(uintptr_t));
-            process_dump_stack_entry(addr, value, addr == rsp);
+            if (process_stack_copy_from(process, addr, &value, sizeof(value)))
+            {
+                process_dump_stack_entry(addr, value, addr == rsp);
+            }
+            else
+            {
+                process_dump_stack_entry_unmapped(addr, addr == rsp);
+            }
             addr += sizeof(uintptr_t);
             remaining--;
         }
@@ -827,14 +1169,14 @@ void process_dump_user_stack(process_t *process,
 
 bool process_prepare_stack_with_args(process_t *process)
 {
-    if (!process || !process->user_stack_host || process->user_stack_size == 0)
+    if (!process || !process->user_stack_pages || process->user_stack_page_count == 0 ||
+        process->user_stack_top == 0 || process->user_stack_size == 0)
     {
         return false;
     }
 
     uintptr_t stack_top = process->user_stack_top;
     uintptr_t stack_bottom = stack_top - process->user_stack_size;
-    uint8_t *host = process->user_stack_host;
 
     size_t argc = process->arg_count;
     char **argv = process->arg_values;
@@ -862,8 +1204,12 @@ bool process_prepare_stack_with_args(process_t *process)
         }
         sp -= len;
         uintptr_t dst = sp;
-        size_t offset = (size_t)(dst - stack_bottom);
-        memcpy(host + offset, arg, len);
+        if (!process_stack_ensure_range(process, dst, len) ||
+            !process_stack_copy_to(process, dst, arg, len))
+        {
+            free(arg_ptrs);
+            return false;
+        }
         arg_ptrs[i] = dst;
     }
 
@@ -874,7 +1220,9 @@ bool process_prepare_stack_with_args(process_t *process)
         return false;
     }
     sp -= sizeof(uintptr_t);
-    if (!process_write_stack_uintptr(host, stack_bottom, stack_top, sp, 0))
+    uintptr_t null_sentinel = 0;
+    if (!process_stack_ensure_range(process, sp, sizeof(null_sentinel)) ||
+        !process_stack_copy_to(process, sp, &null_sentinel, sizeof(null_sentinel)))
     {
         free(arg_ptrs);
         return false;
@@ -888,7 +1236,9 @@ bool process_prepare_stack_with_args(process_t *process)
             return false;
         }
         sp -= sizeof(uintptr_t);
-        if (!process_write_stack_uintptr(host, stack_bottom, stack_top, sp, arg_ptrs[i - 1]))
+        uintptr_t arg_ptr = arg_ptrs[i - 1];
+        if (!process_stack_ensure_range(process, sp, sizeof(arg_ptr)) ||
+            !process_stack_copy_to(process, sp, &arg_ptr, sizeof(arg_ptr)))
         {
             free(arg_ptrs);
             return false;
@@ -903,7 +1253,9 @@ bool process_prepare_stack_with_args(process_t *process)
         return false;
     }
     sp -= sizeof(uintptr_t);
-    if (!process_write_stack_uintptr(host, stack_bottom, stack_top, sp, (uintptr_t)argc))
+    uintptr_t argc_value = (uintptr_t)argc;
+    if (!process_stack_ensure_range(process, sp, sizeof(argc_value)) ||
+        !process_stack_copy_to(process, sp, &argc_value, sizeof(argc_value)))
     {
         free(arg_ptrs);
         return false;

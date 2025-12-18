@@ -66,6 +66,11 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
 
     html_view_font_scope_t font_scope = {0};
     bool font_pushed = false;
+    css_text_align_t saved_align = ctx->text_align_mode;
+    if (style->has_text_align)
+    {
+        ctx->text_align_mode = style->text_align;
+    }
 
     if (style->has_display && style->display == CSS_DISPLAY_NONE)
     {
@@ -85,6 +90,34 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
 
     if (strcmp(tag, "br") == 0)
     {
+        const char *clear = html_attr_get(node, "clear");
+        if (clear && clear[0] != '\0' && ctx->floats)
+        {
+            css_clear_t clear_mode = CSS_CLEAR_NONE;
+            if (strcasecmp(clear, "all") == 0 || strcasecmp(clear, "both") == 0)
+            {
+                clear_mode = CSS_CLEAR_BOTH;
+            }
+            else if (strcasecmp(clear, "left") == 0)
+            {
+                clear_mode = CSS_CLEAR_LEFT;
+            }
+            else if (strcasecmp(clear, "right") == 0)
+            {
+                clear_mode = CSS_CLEAR_RIGHT;
+            }
+
+            if (clear_mode != CSS_CLEAR_NONE)
+            {
+                int clear_y = html_view_float_max_bottom(ctx->floats, clear_mode);
+                if (clear_y > ctx->y)
+                {
+                    ctx->y = clear_y;
+                    ctx->x = ctx->body_x;
+                    ctx->pending_space = false;
+                }
+            }
+        }
         html_view_new_line(ctx);
         goto out;
     }
@@ -847,6 +880,16 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         ctx->y += margin_bottom;
         ctx->x = ctx->body_x;
         ctx->pending_space = false;
+        ctx->line_start_x = ctx->x;
+        ctx->line_start_y = ctx->y;
+        if (ctx->record && ctx->priv)
+        {
+            ctx->line_op_start = ctx->priv->render_cache.op_count;
+        }
+        else
+        {
+            ctx->line_op_start = 0;
+        }
         html_view_ensure_line_visible(ctx);
         goto out;
     }
@@ -894,6 +937,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
     }
 
 out:
+    ctx->text_align_mode = saved_align;
     if (font_pushed)
     {
         html_view_font_scope_pop(ctx, &font_scope);

@@ -2813,7 +2813,7 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
     uintptr_t fault = (uintptr_t)address;
     if (fault < proc->user_heap_base || fault >= proc->user_heap_brk)
     {
-        return false;
+        return process_stack_handle_page_fault(proc, fault, (uintptr_t)frame->rsp);
     }
 
     uintptr_t page_base = align_down_uintptr(fault, PAGE_SIZE_BYTES_LOCAL);
