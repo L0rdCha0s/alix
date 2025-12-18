@@ -920,6 +920,7 @@ static const shell_command_t g_commands[] = {
     { "taskmgr",     shell_cmd_atktaskmgr },
     { "bgset",       shell_cmd_bgset },
     { "doom",        shell_cmd_doom },
+    { "quake",       shell_cmd_quake },
     { "wolf3d",      shell_cmd_wolf3d },
     { "runelf",      shell_cmd_runelf },
 };

@@ -9,6 +9,7 @@
 #define EIO 5
 #define ENOMEM 12
 #define EEXIST 17
+#define ENOSYS 38
 
 extern int errno;
 

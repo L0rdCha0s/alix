@@ -66,6 +66,8 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/crt0.c \
 	$(USER_DIR)/lib/syscall.c \
 	$(USER_DIR)/lib/libc.c \
+	$(USER_DIR)/lib/math.c \
+	$(USER_DIR)/lib/setjmp.c \
 	$(USER_DIR)/lib/atk_user.c \
 	$(USER_DIR)/lib/web/html.c \
 	$(USER_DIR)/lib/web/css.c \
@@ -99,10 +101,37 @@ USER_TLS_SOURCES := \
 USER_TLS_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_TLS_SOURCES))
 USER_ATK_BROWSER_SOURCES := $(wildcard $(USER_DIR)/apps/atk_browser/*.c)
 USER_ATK_BROWSER_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_BROWSER_SOURCES))
+USER_QUAKE_REF_DIR := reference/WinQuake
+QUAKE_CFLAGS := -I$(USER_QUAKE_REF_DIR) -DALIXOS=1 -fcommon -Dstrnicmp=strncasecmp -Dstricmp=strcasecmp
+USER_QUAKE_REF_SOURCES := $(wildcard $(USER_QUAKE_REF_DIR)/*.c)
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/gl_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/vid_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/sys_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/in_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/snd_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/cd_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/net_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/conproc.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/dos_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/mplib.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/mplpc.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/vregset.c,$(USER_QUAKE_REF_SOURCES))
+# Pull in loopback-only networking plus null audio backends.
+USER_QUAKE_REF_SOURCES += $(USER_QUAKE_REF_DIR)/net_main.c \
+                          $(USER_QUAKE_REF_DIR)/net_loop.c \
+                          $(USER_QUAKE_REF_DIR)/net_none.c \
+                          $(USER_QUAKE_REF_DIR)/net_vcr.c \
+                          $(USER_QUAKE_REF_DIR)/snd_null.c \
+                          $(USER_QUAKE_REF_DIR)/cd_null.c
+USER_QUAKE_REF_OBJECTS := $(patsubst $(USER_QUAKE_REF_DIR)/%.c,$(USER_OBJDIR)/quake_ref/%.o,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_APP_SOURCES := $(wildcard $(USER_DIR)/apps/quake/*.c)
+USER_QUAKE_APP_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_QUAKE_APP_SOURCES))
+USER_QUAKE_OBJECTS := $(USER_QUAKE_REF_OBJECTS) $(USER_QUAKE_APP_OBJECTS)
 USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/ttf_demo.elf \
              $(USER_OBJDIR)/wolf3d.elf \
              $(USER_OBJDIR)/doom.elf \
+             $(USER_OBJDIR)/quake.elf \
              $(USER_OBJDIR)/atk_shell.elf \
              $(USER_OBJDIR)/atk_clock.elf \
              $(USER_OBJDIR)/atk_browser.elf \
@@ -120,6 +149,7 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
              $(USER_BIN_DIR)/wolf3d \
              $(USER_BIN_DIR)/doom \
+             $(USER_BIN_DIR)/quake \
              $(USER_BIN_DIR)/atk_shell \
              $(USER_BIN_DIR)/atk_clock \
              $(USER_BIN_DIR)/atk_browser \
@@ -189,6 +219,11 @@ $(USER_OBJDIR)/%.o: $(USER_DIR)/%.c
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
 $(USER_OBJDIR)/apps/doom/%.o: USER_CFLAGS += -Wno-unused-const-variable
+$(USER_OBJDIR)/apps/quake/%.o: USER_CFLAGS += $(QUAKE_CFLAGS)
+
+$(USER_OBJDIR)/quake_ref/%.o: $(USER_QUAKE_REF_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) $(QUAKE_CFLAGS) -c -o $@ $<
 
 $(USER_OBJDIR)/atk/%.o: $(ATK_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -230,6 +265,10 @@ $(USER_OBJDIR)/wolf3d.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/wolf3d/wol
 $(USER_OBJDIR)/doom.elf: $(USER_COMMON_OBJECTS) $(USER_DOOM_OBJECTS) $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_DOOM_OBJECTS)
+
+$(USER_OBJDIR)/quake.elf: $(USER_COMMON_OBJECTS) $(USER_QUAKE_OBJECTS) $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_QUAKE_OBJECTS)
 
 $(USER_OBJDIR)/atk_shell.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_shell/atk_shell_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
@@ -317,6 +356,10 @@ $(USER_BIN_DIR)/wolf3d: $(USER_OBJDIR)/wolf3d.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/doom: $(USER_OBJDIR)/doom.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/quake: $(USER_OBJDIR)/quake.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 

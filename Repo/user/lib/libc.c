@@ -733,6 +733,108 @@ int atoi(const char *str)
     return result * sign;
 }
 
+double atof(const char *str)
+{
+    if (!str)
+    {
+        return 0.0;
+    }
+
+    const char *s = str;
+    while (isspace((unsigned char)*s))
+    {
+        ++s;
+    }
+
+    int sign = 1;
+    if (*s == '+' || *s == '-')
+    {
+        if (*s == '-')
+        {
+            sign = -1;
+        }
+        ++s;
+    }
+
+    double value = 0.0;
+    while (isdigit((unsigned char)*s))
+    {
+        value = value * 10.0 + (double)(*s - '0');
+        ++s;
+    }
+
+    if (*s == '.')
+    {
+        ++s;
+        double place = 0.1;
+        while (isdigit((unsigned char)*s))
+        {
+            value += (double)(*s - '0') * place;
+            place *= 0.1;
+            ++s;
+        }
+    }
+
+    if (*s == 'e' || *s == 'E')
+    {
+        ++s;
+        int exp_sign = 1;
+        if (*s == '+' || *s == '-')
+        {
+            if (*s == '-')
+            {
+                exp_sign = -1;
+            }
+            ++s;
+        }
+        int exp = 0;
+        while (isdigit((unsigned char)*s))
+        {
+            exp = exp * 10 + (*s - '0');
+            ++s;
+        }
+        exp *= exp_sign;
+
+        double pow10 = 1.0;
+        int e = exp < 0 ? -exp : exp;
+        double base = 10.0;
+        while (e)
+        {
+            if (e & 1)
+            {
+                pow10 *= base;
+            }
+            base *= base;
+            e >>= 1;
+        }
+
+        if (exp < 0)
+        {
+            value /= pow10;
+        }
+        else
+        {
+            value *= pow10;
+        }
+    }
+
+    return value * (double)sign;
+}
+
+static uint32_t g_rand_state = 1u;
+
+void srand(unsigned int seed)
+{
+    g_rand_state = seed ? (uint32_t)seed : 1u;
+}
+
+int rand(void)
+{
+    /* ANSI C compatible LCG; returns 0..32767. */
+    g_rand_state = g_rand_state * 1103515245u + 12345u;
+    return (int)((g_rand_state >> 16) & 0x7FFFu);
+}
+
 char *getenv(const char *name)
 {
     if (!name || name[0] == '\0' || name[0] == '=')
@@ -1730,6 +1832,31 @@ int fputc(int ch, FILE *stream)
     return (fwrite(&c, 1, 1, stream) == 1) ? (int)c : -1;
 }
 
+int fgetc(FILE *stream)
+{
+    unsigned char ch = 0;
+    size_t got = fread(&ch, 1, 1, stream);
+    if (got == 1)
+    {
+        return (int)ch;
+    }
+    return EOF;
+}
+
+int getc(FILE *stream)
+{
+    return fgetc(stream);
+}
+
+int feof(FILE *stream)
+{
+    if (!stream)
+    {
+        return 1;
+    }
+    return stream->eof != 0;
+}
+
 int fputs(const char *s, FILE *stream)
 {
     if (!s)
@@ -1770,6 +1897,13 @@ ssize_t write(int fd, const void *buffer, size_t count)
 int close(int fd)
 {
     return sys_close(fd);
+}
+
+int unlink(const char *path)
+{
+    (void)path;
+    errno = ENOSYS;
+    return -1;
 }
 
 int64_t lseek(int fd, int64_t offset, int whence)
@@ -1997,6 +2131,223 @@ int sscanf(const char *str, const char *fmt, ...)
     }
 
 done:
+    va_end(args);
+    return assigned;
+}
+
+static bool fscanf_read_token(FILE *stream, char *buf, size_t cap)
+{
+    if (!stream || !buf || cap == 0)
+    {
+        return false;
+    }
+
+    size_t out_len = 0;
+    buf[0] = '\0';
+
+    int ch = fgetc(stream);
+    while (ch != EOF && isspace((unsigned char)ch))
+    {
+        ch = fgetc(stream);
+    }
+    if (ch == EOF)
+    {
+        return false;
+    }
+
+    while (ch != EOF && !isspace((unsigned char)ch))
+    {
+        if (out_len + 1 < cap)
+        {
+            buf[out_len++] = (char)ch;
+        }
+        ch = fgetc(stream);
+    }
+
+    buf[out_len] = '\0';
+    return out_len > 0;
+}
+
+static double fscanf_parse_double(const char *text)
+{
+    if (!text)
+    {
+        return 0.0;
+    }
+
+    const char *s = text;
+    while (isspace((unsigned char)*s))
+    {
+        ++s;
+    }
+
+    int sign = 1;
+    if (*s == '+' || *s == '-')
+    {
+        if (*s == '-')
+        {
+            sign = -1;
+        }
+        ++s;
+    }
+
+    double value = 0.0;
+    while (isdigit((unsigned char)*s))
+    {
+        value = value * 10.0 + (double)(*s - '0');
+        ++s;
+    }
+
+    if (*s == '.')
+    {
+        ++s;
+        double place = 0.1;
+        while (isdigit((unsigned char)*s))
+        {
+            value += (double)(*s - '0') * place;
+            place *= 0.1;
+            ++s;
+        }
+    }
+
+    if (*s == 'e' || *s == 'E')
+    {
+        ++s;
+        int exp_sign = 1;
+        if (*s == '+' || *s == '-')
+        {
+            if (*s == '-')
+            {
+                exp_sign = -1;
+            }
+            ++s;
+        }
+        int exp = 0;
+        while (isdigit((unsigned char)*s))
+        {
+            exp = exp * 10 + (*s - '0');
+            ++s;
+        }
+        exp *= exp_sign;
+
+        double pow10 = 1.0;
+        int e = exp < 0 ? -exp : exp;
+        double base = 10.0;
+        while (e)
+        {
+            if (e & 1)
+            {
+                pow10 *= base;
+            }
+            base *= base;
+            e >>= 1;
+        }
+
+        if (exp < 0)
+        {
+            value /= pow10;
+        }
+        else
+        {
+            value *= pow10;
+        }
+    }
+
+    return value * (double)sign;
+}
+
+int fscanf(FILE *stream, const char *fmt, ...)
+{
+    if (!stream || !fmt)
+    {
+        return 0;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    int assigned = 0;
+
+    const char *f = fmt;
+    while (*f)
+    {
+        if (isspace((unsigned char)*f))
+        {
+            ++f;
+            continue;
+        }
+
+        if (*f != '%')
+        {
+            int ch = fgetc(stream);
+            if (ch == EOF)
+            {
+                break;
+            }
+            ++f;
+            continue;
+        }
+
+        ++f;
+        int width = 0;
+        while (isdigit((unsigned char)*f))
+        {
+            width = width * 10 + (*f - '0');
+            ++f;
+        }
+
+        char spec = *f ? *f : '\0';
+        if (!spec)
+        {
+            break;
+        }
+
+        if (spec == 'i' || spec == 'd')
+        {
+            int *out = va_arg(args, int *);
+            char tok[64];
+            if (!out || !fscanf_read_token(stream, tok, sizeof(tok)))
+            {
+                break;
+            }
+            *out = atoi(tok);
+            assigned++;
+        }
+        else if (spec == 'f')
+        {
+            float *out = va_arg(args, float *);
+            char tok[128];
+            if (!out || !fscanf_read_token(stream, tok, sizeof(tok)))
+            {
+                break;
+            }
+            *out = (float)fscanf_parse_double(tok);
+            assigned++;
+        }
+        else if (spec == 's')
+        {
+            char *out = va_arg(args, char *);
+            if (!out)
+            {
+                break;
+            }
+            if (width <= 0)
+            {
+                width = 63;
+            }
+            if (!fscanf_read_token(stream, out, (size_t)width + 1))
+            {
+                break;
+            }
+            assigned++;
+        }
+        else
+        {
+            break;
+        }
+
+        ++f;
+    }
+
     va_end(args);
     return assigned;
 }

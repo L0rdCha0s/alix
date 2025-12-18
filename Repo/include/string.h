@@ -18,6 +18,7 @@ char *strncpy(char *dst, const char *src, size_t n);
 char *strcat(char *dst, const char *src);
 char *strchr(const char *str, int ch);
 char *strrchr(const char *str, int ch);
+char *strstr(const char *haystack, const char *needle);
 int strcasecmp(const char *a, const char *b);
 int strncasecmp(const char *a, const char *b, size_t n);
 char *strerror(int errnum);
