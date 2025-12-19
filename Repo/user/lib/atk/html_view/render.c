@@ -36,6 +36,13 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
     }
 
     const char *tag = node->name;
+    if (strcmp(tag, "noscript") == 0)
+    {
+        if (ctx->priv && ctx->priv->js_enabled)
+        {
+            return;
+        }
+    }
     if (strcmp(tag, "head") == 0 ||
         strcmp(tag, "style") == 0 ||
         strcmp(tag, "meta") == 0 ||

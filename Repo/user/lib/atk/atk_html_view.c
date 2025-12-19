@@ -189,6 +189,7 @@ typedef struct
     volatile uint32_t js_dirty;
     js_runtime_t *js_runtime;
     bool js_runtime_ready;
+    bool js_enabled;
     html_view_js_script_t *js_script_head;
     html_view_js_script_t *js_script_tail;
     html_node_t **js_handles;

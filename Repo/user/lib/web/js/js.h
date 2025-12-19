@@ -11,6 +11,7 @@ typedef struct js_runtime js_runtime_t;
 typedef struct js_function js_function_t;
 typedef struct js_value js_value_t;
 typedef struct js_array js_array_t;
+typedef struct js_object js_object_t;
 
 typedef bool (*js_native_fn_t)(js_runtime_t *rt,
                                size_t argc,
@@ -18,6 +19,17 @@ typedef bool (*js_native_fn_t)(js_runtime_t *rt,
                                void *user_data,
                                js_value_t *out,
                                char **error_message);
+typedef bool (*js_host_get_fn_t)(js_runtime_t *rt,
+                                 void *user_data,
+                                 const char *name,
+                                 js_value_t *out,
+                                 char **error_message);
+typedef bool (*js_host_set_fn_t)(js_runtime_t *rt,
+                                 void *user_data,
+                                 const char *name,
+                                 const js_value_t *value,
+                                 char **error_message);
+typedef void (*js_host_finalize_fn_t)(void *user_data);
 
 typedef enum
 {
@@ -27,6 +39,7 @@ typedef enum
     JS_VALUE_NUMBER,
     JS_VALUE_STRING,
     JS_VALUE_ARRAY,
+    JS_VALUE_OBJECT,
     JS_VALUE_NATIVE_FN,
     JS_VALUE_FUNCTION
 } js_value_type_t;
@@ -44,6 +57,7 @@ struct js_value
             size_t len;
         } string;
         js_array_t *array;
+        js_object_t *object;
         struct
         {
             js_native_fn_t fn;
@@ -60,6 +74,11 @@ js_value_t js_value_make_number(double value);
 bool js_value_make_string(js_value_t *out, const char *data, size_t len);
 bool js_value_make_cstring(js_value_t *out, const char *text);
 bool js_value_make_array(js_value_t *out);
+bool js_value_make_host_object(js_value_t *out,
+                               js_host_get_fn_t get_fn,
+                               js_host_set_fn_t set_fn,
+                               js_host_finalize_fn_t finalize_fn,
+                               void *user_data);
 bool js_value_array_set(js_value_t *array_value, size_t index, const js_value_t *value);
 bool js_value_array_push(js_value_t *array_value, const js_value_t *value);
 void js_value_destroy(js_value_t *value);

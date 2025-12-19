@@ -128,6 +128,115 @@ static bool setup_native_counter(js_runtime_t *rt)
     return js_runtime_set_native(rt, "count", native_count, NULL);
 }
 
+typedef struct
+{
+    double value;
+} test_host_object_t;
+
+static bool host_object_inc(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out || !user_data)
+    {
+        return false;
+    }
+    test_host_object_t *obj = (test_host_object_t *)user_data;
+    double delta = 0.0;
+    if (argc > 0 && argv)
+    {
+        if (argv[0].type == JS_VALUE_NUMBER)
+        {
+            delta = argv[0].as.number;
+        }
+        else if (argv[0].type == JS_VALUE_BOOL)
+        {
+            delta = argv[0].as.boolean ? 1.0 : 0.0;
+        }
+    }
+    obj->value += delta;
+    *out = js_value_make_number(obj->value);
+    return true;
+}
+
+static bool host_object_get(js_runtime_t *rt,
+                            void *user_data,
+                            const char *name,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out || !name || !user_data)
+    {
+        return false;
+    }
+    test_host_object_t *obj = (test_host_object_t *)user_data;
+    if (strcmp(name, "value") == 0)
+    {
+        *out = js_value_make_number(obj->value);
+        return true;
+    }
+    if (strcmp(name, "inc") == 0)
+    {
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = host_object_inc;
+        out->as.native.user_data = obj;
+        return true;
+    }
+    *out = js_value_make_undefined();
+    return true;
+}
+
+static bool host_object_set(js_runtime_t *rt,
+                            void *user_data,
+                            const char *name,
+                            const js_value_t *value,
+                            char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!name || !user_data || !value)
+    {
+        return false;
+    }
+    test_host_object_t *obj = (test_host_object_t *)user_data;
+    if (strcmp(name, "value") == 0 && value->type == JS_VALUE_NUMBER)
+    {
+        obj->value = value->as.number;
+        return true;
+    }
+    return true;
+}
+
+static bool setup_host_object(js_runtime_t *rt)
+{
+    static test_host_object_t host = {0};
+    host.value = 5.0;
+    js_value_t obj;
+    if (!js_value_make_host_object(&obj, host_object_get, host_object_set, NULL, &host))
+    {
+        return false;
+    }
+    bool ok = js_runtime_set_global(rt, "obj", &obj);
+    js_value_destroy(&obj);
+    return ok;
+}
+
 #define JS_CASE_NUM(name, code, val) { name, code, EXPECT_NUMBER, val, NULL, false, NULL }
 #define JS_CASE_NUM_SETUP(name, code, val, setup_fn) { name, code, EXPECT_NUMBER, val, NULL, false, setup_fn }
 #define JS_CASE_BOOL(name, code, val) { name, code, EXPECT_BOOL, 0.0, NULL, val, NULL }
@@ -232,6 +341,8 @@ int main(void)
         JS_CASE_NUM("num-hex-upper", "0XfF;", 255.0),
         JS_CASE_NUM("num-binary", "0b1010;", 10.0),
         JS_CASE_NUM("num-octal", "0o77;", 63.0),
+        JS_CASE_NUM("builtin-number-string", "Number(\"3.5\");", 3.5),
+        JS_CASE_NUM("builtin-number-bool", "Number(true);", 1.0),
 
         JS_CASE_STR("str-basic", "\"hello\";", "hello"),
         JS_CASE_STR("str-escape-nl", "\"a\\nb\";", "a\nb"),
@@ -241,6 +352,8 @@ int main(void)
         JS_CASE_STR("str-escape-hex", "\"\\x41\";", "A"),
         JS_CASE_STR("str-escape-unicode", "\"\\u0042\";", "B"),
         JS_CASE_STR("str-escape-vtab", "\"\\v\";", "\v"),
+        JS_CASE_STR("str-concat-number", "\"Result: \" + 3;", "Result: 3"),
+        JS_CASE_STR("str-concat-float", "\"Value: \" + 2.5;", "Value: 2.5"),
 
         JS_CASE_BOOL("unary-not-bool", "!true;", false),
         JS_CASE_BOOL("unary-not-zero", "!0;", true),
@@ -348,6 +461,10 @@ int main(void)
         JS_CASE_NUM("array-assign-expr", "let a = [1, 2]; let i = 0; a[i] = a[i] + 5; a[0];", 6.0),
         JS_CASE_NUM("array-sum-while", "function sum(a) { var i = 0; var s = 0; while (i < a.length) { s = s + a[i]; i = i + 1; } return s; } let a = [1, 2, 3, 4]; sum(a);", 10.0),
         JS_CASE_NUM("string-length-prop", "\"hello\".length;", 5.0),
+        JS_CASE_NUM_SETUP("host-object-get", "obj.value;", 5.0, setup_host_object),
+        JS_CASE_NUM_SETUP("host-object-set", "obj.value = 12; obj.value;", 12.0, setup_host_object),
+        JS_CASE_NUM_SETUP("host-object-computed", "obj[\"value\"];", 5.0, setup_host_object),
+        JS_CASE_NUM_SETUP("host-object-method", "obj.inc(3);", 8.0, setup_host_object),
 
         JS_CASE_NUM("try-catch-no-error", "let x = 1; try { x = x + 1; } catch (e) { x = 9; } x;", 2.0),
         JS_CASE_NUM("try-catch-error", "let x = 0; try { x = missingVar; } catch (e) { x = 7; } x;", 7.0),

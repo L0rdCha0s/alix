@@ -65,8 +65,8 @@ static size_t pending_count = 0;
 #define KEYBOARD_REPEAT_INTERVAL_PATH "keyboard/repeat/repeat"
 #define KEYBOARD_REPEAT_MULTI_PATH "keyboard/repeat/multi_mode"
 
-static uint32_t repeat_initial_delay_ms = 500;
-static uint32_t repeat_interval_ms = 200;
+static uint32_t repeat_initial_delay_ms = 200;
+static uint32_t repeat_interval_ms = 100;
 static uint32_t repeat_initial_delay_ticks = 50;
 static uint32_t repeat_interval_ticks = 20;
 
