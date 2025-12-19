@@ -57,6 +57,14 @@ void atk_html_view_set_external_stylesheet(atk_widget_t *view, const char *css_t
 bool atk_html_view_add_script(atk_widget_t *view, const char *script_text, size_t len);
 
 /*
+ * Poll for JS-driven DOM changes that require a redraw.
+ *
+ * Call this from the UI thread (e.g. your main loop tick) to propagate
+ * invalidations from the JS thread into the ATK dirty region tracker.
+ */
+bool atk_html_view_poll_js(atk_widget_t *view);
+
+/*
  * Add a PNG image resource that can be referenced by `<img src="...">`.
  *
  * `src` should match the `src` attribute value used in the DOM (often an

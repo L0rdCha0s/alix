@@ -134,6 +134,7 @@ static void html_view_js_mark_dirty(atk_html_view_priv_t *priv, uint32_t flags)
         return;
     }
     __atomic_fetch_or(&priv->js_dirty, flags, __ATOMIC_RELEASE);
+    __atomic_store_n(&priv->js_redraw_pending, 1u, __ATOMIC_RELEASE);
 }
 
 static uint32_t html_view_js_take_dirty(atk_html_view_priv_t *priv)
@@ -1059,11 +1060,6 @@ static bool html_view_js_element_set(js_runtime_t *rt,
     }
     html_view_dom_unlock(priv);
 
-    if (ok)
-    {
-        html_view_invalidate(elem->view);
-    }
-
     free(text);
     return ok;
 }
@@ -1513,11 +1509,6 @@ static bool html_view_js_dom_set_attr(js_runtime_t *rt,
     }
     html_view_dom_unlock(priv);
 
-    if (ok)
-    {
-        html_view_invalidate(view);
-    }
-
     *out = js_value_make_bool(ok);
     return true;
 }
@@ -1656,11 +1647,6 @@ static bool html_view_js_dom_set_text(js_runtime_t *rt,
         }
     }
     html_view_dom_unlock(priv);
-
-    if (ok)
-    {
-        html_view_invalidate(view);
-    }
 
     *out = js_value_make_bool(ok);
     return true;
@@ -2180,9 +2166,10 @@ static bool html_view_js_view_invalidate(js_runtime_t *rt,
         return false;
     }
     atk_widget_t *view = (atk_widget_t *)user_data;
-    if (view)
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (priv)
     {
-        html_view_invalidate(view);
+        __atomic_store_n(&priv->js_redraw_pending, 1u, __ATOMIC_RELEASE);
     }
     *out = js_value_make_undefined();
     return true;
@@ -2435,6 +2422,7 @@ static void html_view_js_init(atk_html_view_priv_t *priv)
     priv->js_thread = 0;
     priv->js_stop = 0;
     priv->js_dirty = 0;
+    priv->js_redraw_pending = 0;
     priv->js_runtime = NULL;
     priv->js_runtime_ready = false;
     priv->js_enabled = true;
@@ -2498,6 +2486,7 @@ static void html_view_js_stop(atk_html_view_priv_t *priv)
 
     __atomic_store_n(&priv->js_stop, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&priv->js_dirty, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&priv->js_redraw_pending, 0u, __ATOMIC_RELEASE);
 
     html_view_dom_lock(priv);
     html_view_js_scripts_clear_locked(priv);

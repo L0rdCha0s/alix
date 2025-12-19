@@ -187,6 +187,7 @@ typedef struct
     alix_thread_t js_thread;
     volatile uint32_t js_stop;
     volatile uint32_t js_dirty;
+    volatile uint32_t js_redraw_pending;
     js_runtime_t *js_runtime;
     bool js_runtime_ready;
     bool js_enabled;

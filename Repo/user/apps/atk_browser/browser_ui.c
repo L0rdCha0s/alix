@@ -493,6 +493,10 @@ bool browser_tick(void *context)
     }
 
     browser_debug_service(app);
+    if (app->viewer && atk_html_view_poll_js(app->viewer))
+    {
+        redraw = true;
+    }
     return redraw;
 }
 

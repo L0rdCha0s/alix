@@ -738,6 +738,25 @@ bool atk_html_view_add_script(atk_widget_t *view, const char *script_text, size_
     return html_view_js_queue_external(view, priv, script_text, len);
 }
 
+bool atk_html_view_poll_js(atk_widget_t *view)
+{
+    if (!view || !view->parent)
+    {
+        return false;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return false;
+    }
+    if (__atomic_exchange_n(&priv->js_redraw_pending, 0u, __ATOMIC_ACQ_REL) == 0u)
+    {
+        return false;
+    }
+    html_view_invalidate(view);
+    return true;
+}
+
 bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint8_t *data, size_t size)
 {
     if (!view || !src || src[0] == '\0' || !data || size == 0)
