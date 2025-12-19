@@ -25,11 +25,12 @@ static uint8_t left_ctrl_pressed = 0;
 static uint8_t right_ctrl_pressed = 0;
 static uint8_t extended_code_pending = 0;
 
-#define KBD_BUFFER_SIZE 64
+#define KBD_BUFFER_SIZE 256
 static volatile uint8_t scancode_buffer[KBD_BUFFER_SIZE];
 static volatile size_t buffer_head = 0;
 static volatile size_t buffer_tail = 0;
 static spinlock_t g_kbd_buffer_lock = { 0 };
+static bool g_kbd_buffer_overflow_logged = false;
 static uint8_t key_down[128];
 #if ENABLE_USB
 static bool ps2_enabled = false; /* USB enabled: keep PS/2 keyboard path disabled by default. */
@@ -640,21 +641,21 @@ static bool buffer_empty(void)
     return buffer_head == buffer_tail;
 }
 
-static bool buffer_full(void)
-{
-    return ((buffer_head + 1) % KBD_BUFFER_SIZE) == buffer_tail;
-}
-
 static void buffer_push(uint8_t code)
 {
     spinlock_lock(&g_kbd_buffer_lock);
-    if (buffer_full())
+    size_t next_head = (buffer_head + 1) % KBD_BUFFER_SIZE;
+    if (next_head == buffer_tail)
     {
-        spinlock_unlock(&g_kbd_buffer_lock);
-        return;
+        buffer_tail = (buffer_tail + 1) % KBD_BUFFER_SIZE;
+        if (!g_kbd_buffer_overflow_logged)
+        {
+            serial_printf("%s", "[keyboard] buffer overflow (dropping oldest)\r\n");
+            g_kbd_buffer_overflow_logged = true;
+        }
     }
     scancode_buffer[buffer_head] = code;
-    buffer_head = (buffer_head + 1) % KBD_BUFFER_SIZE;
+    buffer_head = next_head;
     spinlock_unlock(&g_kbd_buffer_lock);
 
     //serial_write_string("keyboard.c: buffer_push scancode=0x");
@@ -674,6 +675,10 @@ static bool buffer_pop(uint8_t *code)
     }
     *code = scancode_buffer[buffer_tail];
     buffer_tail = (buffer_tail + 1) % KBD_BUFFER_SIZE;
+    if (buffer_head == buffer_tail)
+    {
+        g_kbd_buffer_overflow_logged = false;
+    }
     spinlock_unlock(&g_kbd_buffer_lock);
     return true;
 }
@@ -712,6 +717,7 @@ static void keyboard_reset_state(void)
     spinlock_lock(&g_kbd_buffer_lock);
     buffer_head = 0;
     buffer_tail = 0;
+    g_kbd_buffer_overflow_logged = false;
     spinlock_unlock(&g_kbd_buffer_lock);
     for (size_t i = 0; i < sizeof(key_down); ++i)
     {

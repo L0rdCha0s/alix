@@ -14,6 +14,8 @@
 #define TTF_FP_ONE   (1 << TTF_FP_SHIFT)
 
 #define TTF_MAX_FLATTEN_DEPTH 16
+#define TTF_SMOOTH_PIXEL_FINE_MAX 12
+#define TTF_SMOOTH_PIXEL_MAX 18
 
 typedef struct
 {
@@ -1045,6 +1047,20 @@ static bool ttf_point_in_winding(const ttf_edge_t *edges,
     return winding != 0;
 }
 
+static int ttf_sample_grid_for_size(int pixel_height)
+{
+    /* Use denser coverage sampling for small glyphs to smooth edges. */
+    if (pixel_height <= TTF_SMOOTH_PIXEL_FINE_MAX)
+    {
+        return 8;
+    }
+    if (pixel_height <= TTF_SMOOTH_PIXEL_MAX)
+    {
+        return 4;
+    }
+    return 2;
+}
+
 bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
                                   uint32_t codepoint,
                                   int pixel_height,
@@ -1286,6 +1302,10 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
     ttf_edge_list_t edges = {0};
     ttf_bounds_t bounds = {0};
     int32_t tolerance = TTF_FP_ONE / 2;
+    if (pixel_height <= TTF_SMOOTH_PIXEL_FINE_MAX)
+    {
+        tolerance = TTF_FP_ONE / 4;
+    }
 
     bool built = ttf_build_segments(points, end_points, (uint16_t)contour_count, &edges, &bounds, tolerance);
     free(flags);
@@ -1344,7 +1364,34 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         local_edges[i].y1 = shift_y - edges.edges[i].y1;
     }
 
-    const int32_t sample_offsets[2] = { TTF_FP_ONE / 4, (TTF_FP_ONE * 3) / 4 };
+    static const int32_t sample_offsets_2[2] = { TTF_FP_ONE / 4, (TTF_FP_ONE * 3) / 4 };
+    static const int32_t sample_offsets_4[4] = {
+        TTF_FP_ONE / 8,
+        (TTF_FP_ONE * 3) / 8,
+        (TTF_FP_ONE * 5) / 8,
+        (TTF_FP_ONE * 7) / 8
+    };
+    static const int32_t sample_offsets_8[8] = {
+        TTF_FP_ONE / 16,
+        (TTF_FP_ONE * 3) / 16,
+        (TTF_FP_ONE * 5) / 16,
+        (TTF_FP_ONE * 7) / 16,
+        (TTF_FP_ONE * 9) / 16,
+        (TTF_FP_ONE * 11) / 16,
+        (TTF_FP_ONE * 13) / 16,
+        (TTF_FP_ONE * 15) / 16
+    };
+    int sample_dim = ttf_sample_grid_for_size(pixel_height);
+    const int32_t *sample_offsets = sample_offsets_2;
+    if (sample_dim == 4)
+    {
+        sample_offsets = sample_offsets_4;
+    }
+    else if (sample_dim == 8)
+    {
+        sample_offsets = sample_offsets_8;
+    }
+    int total_samples = sample_dim * sample_dim;
     for (int py = 0; py < height; ++py)
     {
         for (int px = 0; px < width; ++px)
@@ -1352,10 +1399,10 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
             int coverage = 0;
             int32_t base_y = (int32_t)py << TTF_FP_SHIFT;
             int32_t base_x = (int32_t)px << TTF_FP_SHIFT;
-            for (int sy = 0; sy < 2; ++sy)
+            for (int sy = 0; sy < sample_dim; ++sy)
             {
                 int32_t sample_y = base_y + sample_offsets[sy];
-                for (int sx = 0; sx < 2; ++sx)
+                for (int sx = 0; sx < sample_dim; ++sx)
                 {
                     int32_t sample_x = base_x + sample_offsets[sx];
                     if (ttf_point_in_winding(local_edges, edges.count, sample_x, sample_y))
@@ -1364,7 +1411,7 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
                     }
                 }
             }
-            uint8_t alpha = (uint8_t)((coverage * 255 + 2) / 4);
+            uint8_t alpha = (uint8_t)((coverage * 255 + total_samples / 2) / total_samples);
             pixels[(size_t)py * (size_t)width + (size_t)px] = alpha;
         }
     }

@@ -374,18 +374,25 @@ static inline uint32_t uhci_build_token(uint8_t pid,
            ((uint32_t)max_len_field << 21);
 }
 
-static bool uhci_wait_for_td(uhci_controller_t *hc,
-                             uhci_td_t *last,
-                             uint32_t timeout_ms,
-                             bool yield_on_frame)
+typedef enum
+{
+    UHCI_WAIT_OK,
+    UHCI_WAIT_TIMEOUT,
+    UHCI_WAIT_ERROR
+} uhci_wait_result_t;
+
+static uhci_wait_result_t uhci_wait_for_td(uhci_controller_t *hc,
+                                           uhci_td_t *last,
+                                           uint32_t timeout_ms,
+                                           bool yield_on_frame)
 {
     if (!hc)
     {
-        return false;
+        return UHCI_WAIT_ERROR;
     }
     if (!last)
     {
-        return false;
+        return UHCI_WAIT_ERROR;
     }
 
     /* UHCI FRNUM increments every 1ms frame (11-bit counter). */
@@ -413,9 +420,9 @@ static bool uhci_wait_for_td(uhci_controller_t *hc,
                         UHCI_TD_CTRL_BITSTUFF))
             {
                 usb_log("[usb] td error status");
-                return false;
+                return UHCI_WAIT_ERROR;
             }
-            return true;
+            return UHCI_WAIT_OK;
         }
 
         uint16_t frame = (uint16_t)(inw(hc->iobase + UHCI_FRNUM) & 0x07FFu);
@@ -427,7 +434,7 @@ static bool uhci_wait_for_td(uhci_controller_t *hc,
                 deadline_log_budget--;
                 usb_log("[usb] td wait deadline");
             }
-            break;
+            return UHCI_WAIT_TIMEOUT;
         }
 
         if (frame == last_frame)
@@ -450,7 +457,7 @@ static bool uhci_wait_for_td(uhci_controller_t *hc,
         }
         __asm__ volatile ("pause");
     }
-    return false;
+    return UHCI_WAIT_TIMEOUT;
 }
 
 static void uhci_acquire_transfer(uhci_controller_t *hc)
@@ -501,28 +508,31 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
     {
         wait_ms = is_interrupt ? 10 : 200;
     }
-    bool ok = uhci_wait_for_td(hc, last, wait_ms, is_interrupt);
+    uhci_wait_result_t wait = uhci_wait_for_td(hc, last, wait_ms, is_interrupt);
+    bool ok = (wait == UHCI_WAIT_OK);
     bool soft_no_data = false;
-    if (!ok && is_interrupt)
+    if (wait == UHCI_WAIT_TIMEOUT && is_interrupt)
     {
         /* Interrupt endpoints can legitimately NAK with no data; treat as empty. */
         last->control &= ~UHCI_TD_CTRL_ACTIVE;
         last->control |= UHCI_TD_CTRL_SPD;
         /* Mark actual length as "no data" so callers see transferred=0. */
         last->control = (last->control & ~UHCI_TD_CTRL_ACTLEN_MASK) | UHCI_TD_CTRL_ACTLEN_MASK;
-        ok = true;
         soft_no_data = true;
+        ok = true;
     }
     /* Unlink the chain before releasing the lock so the controller does not
        keep walking freed TDs on subsequent frames. */
     uhci_release_transfer(hc);
     if (!ok)
     {
+        const char *reason = (wait == UHCI_WAIT_ERROR) ? "error" : "timeout";
         uint32_t token = tds[0].token;
         uint8_t pid = (uint8_t)(token & 0xFFu);
         uint8_t addr = (uint8_t)((token >> 8) & 0x7Fu);
         uint8_t ep = (uint8_t)((token >> 15) & 0x1Fu);
-        serial_printf("[usb] td chain timeout pid=0x%02X addr=%u ep=%u ctrl=0x%08X last_ctrl=0x%08X\r\n",
+        serial_printf("[usb] td chain %s pid=0x%02X addr=%u ep=%u ctrl=0x%08X last_ctrl=0x%08X\r\n",
+                      reason,
                       (unsigned)pid,
                       (unsigned)addr,
                       (unsigned)ep,
@@ -808,6 +818,9 @@ static bool usb_parse_config(usb_device_t *dev, uint8_t *config, uint16_t total_
 
     uint16_t idx = 0;
     uint8_t current_interface = 0xFF;
+    uint8_t selected_interface = 0xFF;
+    usb_device_type_t selected_type = USB_DEV_UNKNOWN;
+    usb_endpoint_t selected_ep = { 0 };
     while (idx + 2 < total_len)
     {
         uint8_t len = config[idx];
@@ -826,16 +839,28 @@ static bool usb_parse_config(usb_device_t *dev, uint8_t *config, uint16_t total_
             uint8_t iface_class = config[idx + 5];
             uint8_t iface_proto = config[idx + 7];
             current_interface = config[idx + 2];
-            dev->interface_number = current_interface;
             if (iface_class == USB_CLASS_HID)
             {
+                usb_device_type_t iface_type = USB_DEV_UNKNOWN;
                 if (iface_proto == 1)
                 {
-                    dev->type = USB_DEV_HID_KEYBOARD;
+                    iface_type = USB_DEV_HID_KEYBOARD;
                 }
                 else if (iface_proto == 2)
                 {
-                    dev->type = USB_DEV_HID_MOUSE;
+                    iface_type = USB_DEV_HID_MOUSE;
+                }
+                if (iface_type != USB_DEV_UNKNOWN)
+                {
+                    bool prefer = (selected_type == USB_DEV_UNKNOWN) ||
+                                  (selected_type == USB_DEV_HID_MOUSE &&
+                                   iface_type == USB_DEV_HID_KEYBOARD);
+                    if (prefer)
+                    {
+                        selected_type = iface_type;
+                        selected_interface = current_interface;
+                        memset(&selected_ep, 0, sizeof(selected_ep));
+                    }
                 }
             }
         }
@@ -845,15 +870,25 @@ static bool usb_parse_config(usb_device_t *dev, uint8_t *config, uint16_t total_
             uint8_t attributes = config[idx + 3];
             uint16_t mps = (uint16_t)config[idx + 4] | ((uint16_t)config[idx + 5] << 8);
             uint8_t interval = config[idx + 6];
-            if ((attributes & 0x3) == 0x3 && (ep_addr & 0x80))
+            if (current_interface == selected_interface &&
+                (attributes & 0x3) == 0x3 &&
+                (ep_addr & 0x80) &&
+                selected_ep.endpoint == 0)
             {
-                dev->intr_ep.endpoint = (uint8_t)(ep_addr & 0x0F);
-                dev->intr_ep.max_packet = mps ? mps : 8;
-                dev->intr_ep.interval_ms = interval ? interval : 10;
+                selected_ep.endpoint = (uint8_t)(ep_addr & 0x0F);
+                selected_ep.max_packet = mps ? mps : 8;
+                selected_ep.interval_ms = interval ? interval : 10;
             }
         }
 
         idx = (uint16_t)(idx + len);
+    }
+
+    dev->type = selected_type;
+    dev->interface_number = (selected_interface == 0xFF) ? 0 : selected_interface;
+    if (selected_ep.endpoint != 0)
+    {
+        dev->intr_ep = selected_ep;
     }
     return true;
 }

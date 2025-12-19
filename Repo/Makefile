@@ -176,6 +176,7 @@ SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
 PNG_TEST_BIN := $(HOST_TEST_DIR)/png_host_test
 WEB_TEST_BIN := $(HOST_TEST_DIR)/web_host_test
 HTML_VIEW_TEST_BIN := $(HOST_TEST_DIR)/html_view_host_test
+BROWSER_EVENT_TEST_BIN := $(HOST_TEST_DIR)/browser_event_host_test
 HTML_JS_TEST_BIN := $(HOST_TEST_DIR)/html_js_host_test
 TLS_TEST_BIN := $(HOST_TEST_DIR)/tls_host_test
 JS_TEST_BIN := $(HOST_TEST_DIR)/js_host_test
@@ -444,6 +445,11 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c user/lib/web/html.c user/lib/
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
 	    tests/html_view_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c -o $@
 
+$(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(USER_DIR)/apps/atk_browser \
+	    tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c -o $@
+
 $(HTML_JS_TEST_BIN): tests/html_js_host_test.c \
                      user/lib/web/html.c \
                      user/lib/web/js/internal.c user/lib/web/js/lexer.c user/lib/web/js/parser.c user/lib/web/js/runtime.c \
@@ -672,6 +678,9 @@ sha256-test: $(SHA256_TEST_BIN)
 web-test: $(WEB_TEST_BIN)
 	$(WEB_TEST_BIN)
 
+browser-event-test: $(BROWSER_EVENT_TEST_BIN)
+	$(BROWSER_EVENT_TEST_BIN)
+
 PNG_TEST_IMAGE ?=
 png-test: $(PNG_TEST_BIN)
 	$(PNG_TEST_BIN) $(PNG_TEST_IMAGE)
@@ -689,13 +698,14 @@ test:
 	$(MAKE) test-dhcp
 	$(MAKE) sha256-test
 	$(MAKE) web-test
+	$(MAKE) browser-event-test
 	$(MAKE) png-test
 	$(MAKE) ttf-test
 	$(MAKE) tls-test
 	$(MAKE) js-test
 	$(MAKE) html-js-test
 
-.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test png-test tls-test js-test html-js-test
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test browser-event-test png-test tls-test js-test html-js-test
 
 -include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) \
          $(USER_OBJDIR)/*.d $(USER_OBJDIR)/atk/*.d $(USER_OBJDIR)/atk/util/*.d \

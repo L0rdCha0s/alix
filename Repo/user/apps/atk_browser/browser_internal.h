@@ -173,6 +173,11 @@ void browser_untrack_load_thread(browser_app_t *app, alix_thread_t thread);
 void browser_app_css_reset(browser_app_t *app);
 bool browser_app_css_append(browser_app_t *app, const char *data, size_t len);
 bool browser_loader_start(browser_app_t *app, const char *url_text);
+bool browser_script_event_init(browser_ui_event_t *ev,
+                               uint64_t load_id,
+                               const char *src,
+                               char *script,
+                               size_t len);
 
 /* debug */
 void browser_debug_logf(browser_app_t *app, const char *fmt, ...);

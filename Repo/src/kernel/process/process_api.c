@@ -1151,9 +1151,9 @@ int64_t process_user_thread_create(const char *name,
 
     const uintptr_t guard_bytes = PAGE_SIZE_BYTES_LOCAL;
     uintptr_t top = proc->user_thread_stack_next;
-    if (top == 0)
+    if (top == 0 || top > USER_STUB_CODE_BASE)
     {
-        top = align_down_uintptr(g_mem_layout.user_pointer_limit + 1, PAGE_SIZE_BYTES_LOCAL);
+        top = align_down_uintptr(USER_STUB_CODE_BASE, PAGE_SIZE_BYTES_LOCAL);
     }
     if (top <= stack_bytes + guard_bytes)
     {

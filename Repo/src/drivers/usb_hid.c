@@ -19,6 +19,8 @@ static uint8_t g_prev_keys[6] = { 0 };
 static uint8_t g_prev_modifiers = 0;
 static bool g_usb_hid_started = false;
 
+static void hid_release_all_keys(void);
+
 static hid_map_t hid_usage_to_set1(uint8_t usage)
 {
     switch (usage)
@@ -168,13 +170,31 @@ static void handle_modifiers(uint8_t mods, bool release_only)
 
 static void process_keyboard_report(const uint8_t *report, size_t len)
 {
-    if (!report || len < 8)
+    if (!report)
     {
         return;
+    }
+    if (len < 8)
+    {
+        hid_release_all_keys();
+        return;
+    }
+    if (len > 8)
+    {
+        len = 8;
     }
 
     uint8_t modifiers = report[0];
     const uint8_t *keys = &report[2];
+
+    for (size_t i = 0; i < 6; ++i)
+    {
+        if (keys[i] >= 0x01 && keys[i] <= 0x03)
+        {
+            hid_release_all_keys();
+            return;
+        }
+    }
 
     handle_modifiers(modifiers, false);
 
@@ -214,6 +234,30 @@ static void process_keyboard_report(const uint8_t *report, size_t len)
     }
 }
 
+static void hid_release_all_keys(void)
+{
+    handle_modifiers(0, true);
+    for (size_t i = 0; i < 6; ++i)
+    {
+        uint8_t usage = g_prev_keys[i];
+        if (usage == 0)
+        {
+            continue;
+        }
+        hid_map_t map = hid_usage_to_set1(usage);
+        push_scancode(map.scancode, map.extended, true);
+        g_prev_keys[i] = 0;
+    }
+}
+
+static void hid_reset_endpoint_toggle(usb_endpoint_t *ep)
+{
+    if (ep)
+    {
+        ep->data_toggle = 0;
+    }
+}
+
 static void keyboard_thread(void *arg)
 {
     (void)arg;
@@ -239,11 +283,18 @@ static void keyboard_thread(void *arg)
     while (1)
     {
         uint16_t got = 0;
-        if (g_kbd && g_kbd_ep.max_packet > 0 &&
-            usb_interrupt_in_prealloc(g_kbd, &g_kbd_ep, buf, buf_len, &got, td) &&
-            got > 0)
+        if (g_kbd && g_kbd_ep.max_packet > 0)
         {
-            process_keyboard_report(buf, got);
+            bool ok = usb_interrupt_in_prealloc(g_kbd, &g_kbd_ep, buf, buf_len, &got, td);
+            if (ok && got > 0)
+            {
+                process_keyboard_report(buf, got);
+            }
+            else if (!ok)
+            {
+                hid_release_all_keys();
+                hid_reset_endpoint_toggle(&g_kbd_ep);
+            }
         }
         /* USB interrupt transfer already waits per endpoint interval; avoid extra 10ms sleep. */
         process_yield();
@@ -297,11 +348,17 @@ static void mouse_thread(void *arg)
     while (1)
     {
         uint16_t got = 0;
-        if (g_mouse && g_mouse_ep.max_packet > 0 &&
-            usb_interrupt_in_prealloc(g_mouse, &g_mouse_ep, buf, buf_len, &got, td) &&
-            got > 0)
+        if (g_mouse && g_mouse_ep.max_packet > 0)
         {
-            process_mouse_report(buf, got);
+            bool ok = usb_interrupt_in_prealloc(g_mouse, &g_mouse_ep, buf, buf_len, &got, td);
+            if (ok && got > 0)
+            {
+                process_mouse_report(buf, got);
+            }
+            else if (!ok)
+            {
+                hid_reset_endpoint_toggle(&g_mouse_ep);
+            }
         }
         /* Drain events immediately so UI stays responsive even during heavy CPU load. */
         mouse_dispatch_events();

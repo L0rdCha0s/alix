@@ -36,6 +36,10 @@ void process_system_init(void)
             fatal("unable to allocate console stdout fd");
         }
     }
+    if (fd_install(2, &console_stdout_ops, NULL) < 0)
+    {
+        /* Best effort: stderr may already be reserved. */
+    }
 
     g_process_list = NULL;
     for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)

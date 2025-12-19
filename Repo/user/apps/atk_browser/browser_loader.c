@@ -383,15 +383,16 @@ static void browser_load_thread(void *arg)
         if (js_body && strncmp(js_body, "Error:\n", 6) != 0)
         {
             browser_ui_event_t js_ev = {0};
-            js_ev.type = BROWSER_UI_EVENT_SCRIPT_APPEND;
-            js_ev.load_id = load_id;
-            js_ev.u.script_append.src = abs;
-            js_ev.u.script_append.script = js_body;
-            js_ev.u.script_append.len = js_len;
-            abs = NULL;
-            js_body = NULL;
-            browser_loader_emit_event(app, &js_ev);
-            browser_debug_logf(app, "[js] ok bytes=%u url=%s", (unsigned)js_len, js_ev.u.script_append.src);
+            if (browser_script_event_init(&js_ev, load_id, abs, js_body, js_len))
+            {
+                browser_debug_logf(app, "[js] ok bytes=%u url=%s", (unsigned)js_len, abs);
+                js_body = NULL;
+                browser_loader_emit_event(app, &js_ev);
+            }
+            else
+            {
+                browser_debug_logf(app, "[js] failed to queue url=%s", abs ? abs : "(null)");
+            }
         }
         else
         {

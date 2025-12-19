@@ -30,6 +30,7 @@ enum
 {
     AUDIO_RATE_HZ = 48000,
     AUDIO_TARGET_LATENCY_MS = 60,
+    AUDIO_MAX_WRITE_BYTES = 4096,
     DMA_BUFFER_BYTES = 1 << 16,
 };
 
@@ -181,42 +182,42 @@ void SNDDMA_Submit(void)
     }
 
     uint64_t bytes_to_write = frames_to_write * (uint64_t)frame_bytes;
-    while (bytes_to_write > 0)
+    if (bytes_to_write > AUDIO_MAX_WRITE_BYTES)
     {
-        size_t chunk = bytes_to_write;
-        if (chunk > sizeof(g_write_buffer))
-        {
-            chunk = sizeof(g_write_buffer);
-        }
-
-        uint64_t offset_bytes = (uint64_t)g_wbufp * (uint64_t)frame_bytes;
-        size_t idx = (size_t)(offset_bytes & (DMA_BUFFER_BYTES - 1));
-        size_t first = DMA_BUFFER_BYTES - idx;
-        if (first > chunk)
-        {
-            first = chunk;
-        }
-
-        memcpy(g_write_buffer, g_dma_buffer + idx, first);
-        if (first < chunk)
-        {
-            memcpy(g_write_buffer + first, g_dma_buffer, chunk - first);
-        }
-
-        ssize_t wrote = write(g_audio_fd, g_write_buffer, chunk);
-        if (wrote <= 0)
-        {
-            break;
-        }
-
-        size_t frames_written = (size_t)wrote / (size_t)frame_bytes;
-        g_wbufp += (int)frames_written;
-        g_audio_written_frames += (uint64_t)frames_written;
-        bytes_to_write -= (size_t)wrote;
-
-        if ((size_t)wrote < chunk)
-        {
-            break;
-        }
+        bytes_to_write = AUDIO_MAX_WRITE_BYTES;
     }
+
+    size_t chunk = (size_t)bytes_to_write;
+    if (chunk == 0)
+    {
+        return;
+    }
+    if (chunk > sizeof(g_write_buffer))
+    {
+        chunk = sizeof(g_write_buffer);
+    }
+
+    uint64_t offset_bytes = (uint64_t)g_wbufp * (uint64_t)frame_bytes;
+    size_t idx = (size_t)(offset_bytes & (DMA_BUFFER_BYTES - 1));
+    size_t first = DMA_BUFFER_BYTES - idx;
+    if (first > chunk)
+    {
+        first = chunk;
+    }
+
+    memcpy(g_write_buffer, g_dma_buffer + idx, first);
+    if (first < chunk)
+    {
+        memcpy(g_write_buffer + first, g_dma_buffer, chunk - first);
+    }
+
+    ssize_t wrote = write(g_audio_fd, g_write_buffer, chunk);
+    if (wrote <= 0)
+    {
+        return;
+    }
+
+    size_t frames_written = (size_t)wrote / (size_t)frame_bytes;
+    g_wbufp += (int)frames_written;
+    g_audio_written_frames += (uint64_t)frames_written;
 }

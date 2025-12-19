@@ -567,6 +567,72 @@ void Host_Savegame_f (void)
 }
 
 
+static int Host_ReadSaveBlock(FILE *f, char *buffer, size_t cap)
+{
+	size_t i = 0;
+	bool in_quote = false;
+	bool escape = false;
+	bool started = false;
+	int depth = 0;
+
+	if (!f || !buffer || cap == 0)
+	{
+		return 0;
+	}
+
+	while (i + 1 < cap)
+	{
+		int r = fgetc(f);
+		if (r == EOF || r == 0)
+		{
+			break;
+		}
+
+		buffer[i++] = (char)r;
+
+		if (escape)
+		{
+			escape = false;
+			continue;
+		}
+
+		if (r == '\\')
+		{
+			if (in_quote)
+			{
+				escape = true;
+			}
+			continue;
+		}
+
+		if (r == '"')
+		{
+			in_quote = !in_quote;
+			continue;
+		}
+
+		if (!in_quote)
+		{
+			if (r == '{')
+			{
+				started = true;
+				depth++;
+			}
+			else if (r == '}' && started)
+			{
+				depth--;
+				if (depth <= 0)
+				{
+					break;
+				}
+			}
+		}
+	}
+
+	buffer[i < cap ? i : (cap - 1)] = '\0';
+	return (int)i;
+}
+
 /*
 ===============
 Host_Loadgame_f
@@ -580,7 +646,7 @@ void Host_Loadgame_f (void)
 	float	time, tfloat;
 	static char	str[32768];
 	char	*start;
-	int		i, r;
+	int		i;
 	edict_t	*ent;
 	int		entnum;
 	int		version;
@@ -664,20 +730,11 @@ void Host_Loadgame_f (void)
 	entnum = -1;		// -1 is the globals
 	while (!feof(f))
 	{
-		for (i=0 ; i<sizeof(str)-1 ; i++)
-		{
-			r = fgetc (f);
-			if (r == EOF || !r)
-				break;
-			str[i] = r;
-			if (r == '}')
-			{
-				i++;
-				break;
-			}
-		}
-		if (i == sizeof(str)-1)
+		i = Host_ReadSaveBlock(f, str, sizeof(str));
+		if (i == (int)(sizeof(str) - 1))
 			Sys_Error ("Loadgame buffer overflow");
+		if (i <= 0)
+			break;
 		str[i] = 0;
 		start = str;
 		start = COM_Parse(str);

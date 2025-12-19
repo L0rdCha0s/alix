@@ -108,14 +108,16 @@ enum context_frame_index
 #define CONTEXT_SWITCH_SAVED_WORDS CTX_RET
 #define CONTEXT_GUARD_WORDS       CONTEXT_SWITCH_SAVED_WORDS
 
+#define PAGE_SIZE_BYTES_LOCAL     4096ULL
 #define USER_ADDRESS_SPACE_BASE   (g_mem_layout.user_pointer_base)
-#define USER_STUB_CODE_BASE       (USER_ADDRESS_SPACE_BASE + 0x00100000ULL)
-#define USER_PREEMPT_STUB_BASE    (USER_ADDRESS_SPACE_BASE + 0x00110000ULL)
+#define USER_ADDRESS_SPACE_LIMIT  (g_mem_layout.user_pointer_limit)
 #define USER_STACK_TOP            (g_mem_layout.user_stack_top)
 #define USER_STACK_SIZE           (g_mem_layout.user_stack_size)
 #define USER_HEAP_BASE            (g_mem_layout.user_heap_base)
 #define USER_HEAP_SIZE            (g_mem_layout.user_heap_size)
-#define PAGE_SIZE_BYTES_LOCAL     4096ULL
+#define USER_STUB_REGION_TOP      ((USER_ADDRESS_SPACE_LIMIT + 1ULL) & ~(PAGE_SIZE_BYTES_LOCAL - 1ULL))
+#define USER_STUB_CODE_BASE       (USER_STUB_REGION_TOP - (2ULL * PAGE_SIZE_BYTES_LOCAL))
+#define USER_PREEMPT_STUB_BASE    (USER_STUB_CODE_BASE + PAGE_SIZE_BYTES_LOCAL)
 #define PROCESS_HEAP_L2_SHIFT     9ULL
 #define PROCESS_HEAP_L2_ENTRIES   (1ULL << PROCESS_HEAP_L2_SHIFT)
 #define PROCESS_HEAP_L2_MASK      (PROCESS_HEAP_L2_ENTRIES - 1ULL)

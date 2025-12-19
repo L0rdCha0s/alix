@@ -126,8 +126,9 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->user_stack_committed = 0;
     proc->user_stack_pages = NULL;
     proc->user_stack_page_count = 0;
+    /* Keep user-mode stubs at the top of user space; thread stacks start below. */
     proc->user_thread_stack_next = is_user
-                                   ? align_down_uintptr(g_mem_layout.user_pointer_limit + 1, PAGE_SIZE_BYTES_LOCAL)
+                                   ? align_down_uintptr(USER_STUB_CODE_BASE, PAGE_SIZE_BYTES_LOCAL)
                                    : 0;
     proc->user_heap_base = 0;
     proc->user_heap_brk = 0;
