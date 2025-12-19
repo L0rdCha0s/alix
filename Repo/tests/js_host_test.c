@@ -328,6 +328,30 @@ static bool test_parse_execute(void)
     return ok;
 }
 
+static bool test_function_persistence(void)
+{
+    js_runtime_t *rt = js_runtime_create();
+    if (!rt)
+    {
+        return false;
+    }
+
+    js_exec_result_t res = js_eval(rt, "function add(a, b) { return a + b; }");
+    bool ok = res.ok;
+    js_exec_result_destroy(&res);
+    if (!ok)
+    {
+        js_runtime_destroy(rt);
+        return false;
+    }
+
+    res = js_eval(rt, "add(2, 3);");
+    ok = res.ok && value_is_number(&res.value, 5.0);
+    js_exec_result_destroy(&res);
+    js_runtime_destroy(rt);
+    return ok;
+}
+
 int main(void)
 {
     js_case_t cases[] = {
@@ -505,6 +529,16 @@ int main(void)
     else
     {
         printf("js_host_test: parse-execute failed\n");
+        fail++;
+    }
+
+    if (test_function_persistence())
+    {
+        pass++;
+    }
+    else
+    {
+        printf("js_host_test: function-persistence failed\n");
         fail++;
     }
 

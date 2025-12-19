@@ -5,6 +5,45 @@ typedef struct html_view_radio_group
     struct html_view_radio_group *next;
 } html_view_radio_group_t;
 
+static void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
+
+static html_view_control_t *html_view_control_find_by_widget(atk_html_view_priv_t *priv,
+                                                             const atk_widget_t *widget)
+{
+    if (!priv || !widget)
+    {
+        return NULL;
+    }
+    for (html_view_control_t *ctrl = priv->controls; ctrl; ctrl = ctrl->next)
+    {
+        if (ctrl->widget == widget)
+        {
+            return ctrl;
+        }
+    }
+    return NULL;
+}
+
+static void html_view_controls_button_action(atk_widget_t *widget, void *context)
+{
+    atk_widget_t *view = (atk_widget_t *)context;
+    if (!view || !widget)
+    {
+        return;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return;
+    }
+    html_view_control_t *ctrl = html_view_control_find_by_widget(priv, widget);
+    if (!ctrl || !ctrl->node)
+    {
+        return;
+    }
+    html_view_js_dispatch_click(view, ctrl->node);
+}
+
 static atk_radio_group_t *html_view_radio_group_get(html_view_radio_group_t **head, const char *name)
 {
     if (!head)
@@ -176,8 +215,8 @@ static void html_view_controls_build_node(atk_widget_t *view,
                                               btn_h,
                                               ATK_BUTTON_STYLE_TITLE_INSIDE,
                                               false,
-                                              NULL,
-                                              NULL);
+                                              html_view_controls_button_action,
+                                              view);
                     if (w)
                     {
                         w->used = false;
@@ -258,8 +297,8 @@ static void html_view_controls_build_node(atk_widget_t *view,
                                                         btn_h,
                                                         ATK_BUTTON_STYLE_TITLE_INSIDE,
                                                         false,
-                                                        NULL,
-                                                        NULL);
+                                                        html_view_controls_button_action,
+                                                        view);
                 free(label);
                 if (w)
                 {

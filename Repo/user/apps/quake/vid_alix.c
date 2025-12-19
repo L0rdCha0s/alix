@@ -39,6 +39,7 @@ static int g_mouse_dx = 0;
 static int g_mouse_dy = 0;
 static bool g_mouse_btn_down = false;
 static bool g_mouse_captured = false;
+static int g_keycode_by_scancode[512];
 
 static unsigned char quake_scancode_to_ascii(uint32_t scancode)
 {
@@ -251,6 +252,16 @@ void Sys_SendKeyEvents(void)
             {
                 bool down = (ev.flags & USER_ATK_KEY_FLAG_RELEASE) == 0;
                 int key = quake_translate_key(&ev);
+                int key_index = -1;
+                if (ev.data1 < 256)
+                {
+                    key_index = (int)ev.data1 | (((ev.flags & USER_ATK_KEY_FLAG_EXTENDED) != 0) ? 0x100 : 0);
+                }
+                if (!down && key_index >= 0 && g_keycode_by_scancode[key_index] != 0)
+                {
+                    key = g_keycode_by_scancode[key_index];
+                    g_keycode_by_scancode[key_index] = 0;
+                }
                 if (key)
                 {
                     if (down && key == K_ESCAPE && g_mouse_captured)
@@ -260,6 +271,10 @@ void Sys_SendKeyEvents(void)
                     if (down && key_dest == key_game && quake_is_arrow_key(key))
                     {
                         break;
+                    }
+                    if (down && key_index >= 0)
+                    {
+                        g_keycode_by_scancode[key_index] = key;
                     }
                     Key_Event(key, down);
                 }

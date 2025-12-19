@@ -1146,6 +1146,195 @@ static void printf_sink_print_int_formatted(printf_sink_t *sink,
                                      prefix_len);
 }
 
+static size_t printf_uint_to_buffer(char *buffer, size_t capacity, uint64_t value)
+{
+    if (!buffer || capacity == 0)
+    {
+        return 0;
+    }
+
+    size_t len = 0;
+    do
+    {
+        if (len + 1 >= capacity)
+        {
+            break;
+        }
+        buffer[len++] = (char)('0' + (value % 10));
+        value /= 10;
+    } while (value != 0);
+
+    for (size_t i = 0; i < len / 2; ++i)
+    {
+        char tmp = buffer[i];
+        buffer[i] = buffer[len - 1 - i];
+        buffer[len - 1 - i] = tmp;
+    }
+    buffer[len] = '\0';
+    return len;
+}
+
+static void printf_sink_print_literal(printf_sink_t *sink,
+                                      const char *prefix,
+                                      size_t prefix_len,
+                                      const char *text,
+                                      size_t text_len,
+                                      int width,
+                                      bool left_align)
+{
+    size_t total = prefix_len + text_len;
+    int pad = 0;
+    if (width > (int)total)
+    {
+        pad = width - (int)total;
+    }
+
+    if (!left_align)
+    {
+        printf_sink_pad(sink, ' ', pad);
+    }
+    if (prefix_len)
+    {
+        printf_sink_write(sink, prefix, prefix_len);
+    }
+    if (text_len)
+    {
+        printf_sink_write(sink, text, text_len);
+    }
+    if (left_align)
+    {
+        printf_sink_pad(sink, ' ', pad);
+    }
+}
+
+static void printf_sink_print_float_formatted(printf_sink_t *sink,
+                                              double value,
+                                              int width,
+                                              bool left_align,
+                                              bool zero_pad,
+                                              bool has_precision,
+                                              int precision,
+                                              bool uppercase)
+{
+    if (!sink)
+    {
+        return;
+    }
+
+    if (value != value)
+    {
+        const char *nan_text = uppercase ? "NAN" : "nan";
+        printf_sink_print_literal(sink, "", 0, nan_text, 3, width, left_align);
+        return;
+    }
+    if (value > 1.0e308 || value < -1.0e308)
+    {
+        bool negative = (value < 0.0);
+        const char *prefix = negative ? "-" : "";
+        size_t prefix_len = negative ? 1 : 0;
+        const char *inf_text = uppercase ? "INF" : "inf";
+        printf_sink_print_literal(sink, prefix, prefix_len, inf_text, 3, width, left_align);
+        return;
+    }
+
+    bool negative = (value < 0.0);
+    if (value == 0.0 && (1.0 / value) < 0.0)
+    {
+        negative = true;
+    }
+    double abs_value = negative ? -value : value;
+
+    int prec = has_precision ? precision : 6;
+    if (prec < 0)
+    {
+        prec = 0;
+    }
+    if (prec > 9)
+    {
+        prec = 9;
+    }
+
+    uint64_t pow10 = 1;
+    for (int i = 0; i < prec; ++i)
+    {
+        pow10 *= 10;
+    }
+
+    uint64_t int_part = 0;
+    uint64_t frac_part = 0;
+    if (prec == 0)
+    {
+        int_part = (uint64_t)(abs_value + 0.5);
+    }
+    else
+    {
+        double scaled = abs_value * (double)pow10 + 0.5;
+        uint64_t rounded = (uint64_t)scaled;
+        int_part = rounded / pow10;
+        frac_part = rounded % pow10;
+    }
+
+    char int_buf[32];
+    size_t int_len = printf_uint_to_buffer(int_buf, sizeof(int_buf), int_part);
+
+    char frac_buf[32];
+    size_t frac_len = 0;
+    if (prec > 0)
+    {
+        frac_len = (size_t)prec;
+        for (size_t i = 0; i < frac_len; ++i)
+        {
+            frac_buf[frac_len - 1 - i] = (char)('0' + (frac_part % 10));
+            frac_part /= 10;
+        }
+    }
+
+    size_t digits_len = int_len + ((prec > 0) ? (1 + frac_len) : 0);
+    const char *prefix = negative ? "-" : "";
+    size_t prefix_len = negative ? 1 : 0;
+    int pad = 0;
+    if (width > (int)(prefix_len + digits_len))
+    {
+        pad = width - (int)(prefix_len + digits_len);
+    }
+
+    if (!left_align)
+    {
+        if (zero_pad)
+        {
+            if (prefix_len)
+            {
+                printf_sink_write(sink, prefix, prefix_len);
+            }
+            printf_sink_pad(sink, '0', pad);
+        }
+        else
+        {
+            printf_sink_pad(sink, ' ', pad);
+            if (prefix_len)
+            {
+                printf_sink_write(sink, prefix, prefix_len);
+            }
+        }
+    }
+    else if (prefix_len)
+    {
+        printf_sink_write(sink, prefix, prefix_len);
+    }
+
+    printf_sink_write(sink, int_buf, int_len);
+    if (prec > 0)
+    {
+        printf_sink_putc(sink, '.');
+        printf_sink_write(sink, frac_buf, frac_len);
+    }
+
+    if (left_align)
+    {
+        printf_sink_pad(sink, ' ', pad);
+    }
+}
+
 static void printf_format(printf_sink_t *sink, const char *format, va_list args)
 {
     while (format && *format && sink && !sink->error)
@@ -1437,6 +1626,20 @@ static void printf_format(printf_sink_t *sink, const char *format, va_list args)
                                                  0,
                                                  "0x",
                                                  2);
+                break;
+            }
+            case 'f':
+            case 'F':
+            {
+                double value = va_arg(args, double);
+                printf_sink_print_float_formatted(sink,
+                                                  value,
+                                                  width,
+                                                  left_align,
+                                                  zero_pad,
+                                                  has_precision,
+                                                  precision,
+                                                  specifier == 'F');
                 break;
             }
             case '\0':

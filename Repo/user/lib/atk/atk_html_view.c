@@ -10,6 +10,7 @@
 #include "atk_window.h"
 #include "ctype.h"
 #include "libc.h"
+#include "stdio.h"
 #include "ttf.h"
 #include "usyscall.h"
 #include "utf8.h"
@@ -35,6 +36,15 @@
 #define HTML_VIEW_FONT_TEXT_GUARD 2048
 
 typedef struct html_view_js_script html_view_js_script_t;
+typedef struct html_view_js_listener html_view_js_listener_t;
+
+struct html_view_js_listener
+{
+    size_t handle;
+    char *handler_name;
+    js_program_t *call_program;
+    struct html_view_js_listener *next;
+};
 
 typedef struct html_view_image
 {
@@ -193,6 +203,8 @@ typedef struct
     bool js_enabled;
     html_view_js_script_t *js_script_head;
     html_view_js_script_t *js_script_tail;
+    html_view_js_listener_t *js_listeners;
+    uint32_t js_listener_seq;
     html_node_t **js_handles;
     size_t js_handle_count;
     size_t js_handle_cap;

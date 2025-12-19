@@ -443,12 +443,26 @@ void Host_SavegameComment (char *text)
 {
 	int		i;
 	char	kills[20];
+	size_t	name_len;
+	size_t	kills_len;
+	size_t	kills_offset;
 
 	for (i=0 ; i<SAVEGAME_COMMENT_LENGTH ; i++)
 		text[i] = ' ';
-	memcpy (text, cl.levelname, strlen(cl.levelname));
+	name_len = strlen(cl.levelname);
+	if (name_len > SAVEGAME_COMMENT_LENGTH)
+		name_len = SAVEGAME_COMMENT_LENGTH;
+	memcpy (text, cl.levelname, name_len);
 	sprintf (kills,"kills:%3i/%3i", cl.stats[STAT_MONSTERS], cl.stats[STAT_TOTALMONSTERS]);
-	memcpy (text+22, kills, strlen(kills));
+	kills_len = strlen(kills);
+	kills_offset = 22;
+	if (kills_offset < SAVEGAME_COMMENT_LENGTH)
+	{
+		size_t avail = SAVEGAME_COMMENT_LENGTH - kills_offset;
+		if (kills_len > avail)
+			kills_len = avail;
+		memcpy (text + kills_offset, kills, kills_len);
+	}
 // convert space to _ to make stdio happy
 	for (i=0 ; i<SAVEGAME_COMMENT_LENGTH ; i++)
 		if (text[i] == ' ')

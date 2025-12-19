@@ -2,6 +2,7 @@ typedef struct html_view_js_script
 {
     char *source;
     size_t len;
+    js_program_t *program;
     struct html_view_js_script *next;
 } html_view_js_script_t;
 
@@ -10,6 +11,13 @@ typedef struct
     atk_widget_t *view;
     size_t handle;
 } html_view_js_dom_element_t;
+
+static html_view_control_t *html_view_control_find(atk_html_view_priv_t *priv, const html_node_t *node);
+static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *priv);
+static void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
+static bool html_view_js_should_stop(const atk_html_view_priv_t *priv);
+static bool html_view_js_queue_source_locked(atk_html_view_priv_t *priv, const char *source, size_t len);
+static bool html_view_js_queue_program_locked(atk_html_view_priv_t *priv, js_program_t *program);
 
 static char *html_view_js_strdup_len(const char *src, size_t len)
 {
@@ -59,6 +67,48 @@ static void html_view_js_handles_reset(atk_html_view_priv_t *priv)
     priv->js_handles = NULL;
     priv->js_handle_count = 0;
     priv->js_handle_cap = 0;
+}
+
+static void html_view_js_listeners_clear(atk_html_view_priv_t *priv, js_runtime_t *rt)
+{
+    if (!priv)
+    {
+        return;
+    }
+    html_view_js_listener_t *cur = priv->js_listeners;
+    priv->js_listeners = NULL;
+    if (rt)
+    {
+        js_value_t undef = js_value_make_undefined();
+        while (cur)
+        {
+            html_view_js_listener_t *next = cur->next;
+            if (cur->handler_name)
+            {
+                (void)js_runtime_set_global(rt, cur->handler_name, &undef);
+            }
+            if (cur->call_program)
+            {
+                js_program_destroy(cur->call_program);
+            }
+            free(cur->handler_name);
+            free(cur);
+            cur = next;
+        }
+        return;
+    }
+
+    while (cur)
+    {
+        html_view_js_listener_t *next = cur->next;
+        if (cur->call_program)
+        {
+            js_program_destroy(cur->call_program);
+        }
+        free(cur->handler_name);
+        free(cur);
+        cur = next;
+    }
 }
 
 static size_t html_view_js_handle_for_node(atk_html_view_priv_t *priv, html_node_t *node)
@@ -116,6 +166,56 @@ static bool html_view_js_handle_from_value(const js_value_t *value, size_t *hand
     }
     *handle_out = handle;
     return true;
+}
+
+static bool html_view_js_dispatch_click_locked(atk_html_view_priv_t *priv, size_t handle)
+{
+    if (!priv || handle == 0)
+    {
+        return false;
+    }
+    bool queued = false;
+    for (html_view_js_listener_t *listener = priv->js_listeners; listener; listener = listener->next)
+    {
+        if (listener->handle == handle)
+        {
+            if (listener->call_program)
+            {
+                queued |= html_view_js_queue_program_locked(priv, listener->call_program);
+            }
+        }
+    }
+    return queued;
+}
+
+static void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node)
+{
+    if (!view || !node)
+    {
+        return;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return;
+    }
+
+    bool queued = false;
+    html_view_dom_lock(priv);
+    if (priv->js_runtime_ready && priv->js_runtime && !html_view_js_should_stop(priv))
+    {
+        size_t handle = html_view_js_handle_for_node(priv, (html_node_t *)node);
+        if (handle != 0)
+        {
+            queued = html_view_js_dispatch_click_locked(priv, handle);
+        }
+    }
+    html_view_dom_unlock(priv);
+
+    if (queued)
+    {
+        html_view_js_start_thread(view, priv);
+    }
 }
 
 static bool html_view_js_should_stop(const atk_html_view_priv_t *priv)
@@ -224,6 +324,34 @@ static bool html_view_js_queue_source_locked(atk_html_view_priv_t *priv, const c
         return false;
     }
     script->len = len;
+    script->program = NULL;
+    script->next = NULL;
+    if (priv->js_script_tail)
+    {
+        priv->js_script_tail->next = script;
+    }
+    else
+    {
+        priv->js_script_head = script;
+    }
+    priv->js_script_tail = script;
+    return true;
+}
+
+static bool html_view_js_queue_program_locked(atk_html_view_priv_t *priv, js_program_t *program)
+{
+    if (!priv || !program)
+    {
+        return false;
+    }
+    html_view_js_script_t *script = (html_view_js_script_t *)calloc(1, sizeof(*script));
+    if (!script)
+    {
+        return false;
+    }
+    script->source = NULL;
+    script->len = 0;
+    script->program = program;
     script->next = NULL;
     if (priv->js_script_tail)
     {
@@ -899,10 +1027,6 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
                                                     js_value_t *out,
                                                     char **error_message)
 {
-    (void)rt;
-    (void)argc;
-    (void)argv;
-    (void)user_data;
     if (error_message)
     {
         *error_message = NULL;
@@ -912,6 +1036,128 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
         return false;
     }
     *out = js_value_make_undefined();
+    if (!user_data || !argv || argc < 2)
+    {
+        return true;
+    }
+    html_view_js_dom_element_t *elem = (html_view_js_dom_element_t *)user_data;
+    if (!elem->view)
+    {
+        return true;
+    }
+    if (argv[0].type != JS_VALUE_STRING)
+    {
+        return true;
+    }
+    const char *event = argv[0].as.string.data ? argv[0].as.string.data : "";
+    size_t event_len = argv[0].as.string.len;
+    if (!(event_len == 5 && strncmp(event, "click", 5) == 0))
+    {
+        return true;
+    }
+    if (argv[1].type != JS_VALUE_FUNCTION && argv[1].type != JS_VALUE_NATIVE_FN)
+    {
+        return true;
+    }
+
+    atk_html_view_priv_t *priv = html_view_priv_mut(elem->view);
+    if (!priv)
+    {
+        return true;
+    }
+
+    char name_buf[32];
+    html_view_dom_lock(priv);
+    uint32_t seq = ++priv->js_listener_seq;
+    int name_len = snprintf(name_buf, sizeof(name_buf), "_atk_html_evt_%u", (unsigned)seq);
+    if (name_len <= 0 || (size_t)name_len >= sizeof(name_buf))
+    {
+        html_view_dom_unlock(priv);
+        if (error_message)
+        {
+            *error_message = html_view_strdup("listener name overflow");
+        }
+        return false;
+    }
+
+    char *handler_name = html_view_js_strdup_len(name_buf, (size_t)name_len);
+    if (!handler_name)
+    {
+        html_view_dom_unlock(priv);
+        if (error_message)
+        {
+            *error_message = html_view_strdup("allocation failed");
+        }
+        return false;
+    }
+
+    if (!js_runtime_set_global(rt, handler_name, &argv[1]))
+    {
+        html_view_dom_unlock(priv);
+        free(handler_name);
+        if (error_message)
+        {
+            *error_message = html_view_strdup("listener registration failed");
+        }
+        return false;
+    }
+
+    size_t call_len = (size_t)name_len + 3;
+    char *call_src = (char *)malloc(call_len + 1);
+    if (!call_src)
+    {
+        js_value_t undef = js_value_make_undefined();
+        (void)js_runtime_set_global(rt, handler_name, &undef);
+        html_view_dom_unlock(priv);
+        free(handler_name);
+        if (error_message)
+        {
+            *error_message = html_view_strdup("allocation failed");
+        }
+        return false;
+    }
+    memcpy(call_src, handler_name, (size_t)name_len);
+    call_src[name_len] = '(';
+    call_src[name_len + 1] = ')';
+    call_src[name_len + 2] = ';';
+    call_src[call_len] = '\0';
+
+    js_parse_error_t parse_err = {0};
+    js_program_t *call_program = js_parse(call_src, &parse_err);
+    free(call_src);
+    if (!call_program)
+    {
+        js_value_t undef = js_value_make_undefined();
+        (void)js_runtime_set_global(rt, handler_name, &undef);
+        html_view_dom_unlock(priv);
+        free(handler_name);
+        if (error_message)
+        {
+            *error_message = parse_err.message ? html_view_strdup(parse_err.message) : html_view_strdup("parse error");
+        }
+        return false;
+    }
+
+    html_view_js_listener_t *listener = (html_view_js_listener_t *)calloc(1, sizeof(*listener));
+    if (!listener)
+    {
+        js_program_destroy(call_program);
+        js_value_t undef = js_value_make_undefined();
+        (void)js_runtime_set_global(rt, handler_name, &undef);
+        html_view_dom_unlock(priv);
+        free(handler_name);
+        if (error_message)
+        {
+            *error_message = html_view_strdup("allocation failed");
+        }
+        return false;
+    }
+    listener->handle = elem->handle;
+    listener->handler_name = handler_name;
+    listener->call_program = call_program;
+    listener->next = priv->js_listeners;
+    priv->js_listeners = listener;
+    html_view_dom_unlock(priv);
     return true;
 }
 
@@ -955,6 +1201,18 @@ static bool html_view_js_element_get(js_runtime_t *rt,
 
     if (strcmp(name, "value") == 0)
     {
+        html_view_control_t *ctrl = html_view_control_find(priv, node);
+        if (ctrl &&
+            (ctrl->kind == HTML_VIEW_CONTROL_INPUT_TEXT ||
+             ctrl->kind == HTML_VIEW_CONTROL_TEXTAREA) &&
+            ctrl->widget)
+        {
+            const char *text = atk_text_input_text(ctrl->widget);
+            size_t len = text ? strlen(text) : 0;
+            bool ok = html_view_js_out_string(out, text ? text : "", len, error_message);
+            html_view_dom_unlock(priv);
+            return ok;
+        }
         const char *value = html_attr_get(node, "value");
         size_t len = value ? strlen(value) : 0;
         bool ok = html_view_js_out_string(out, value ? value : "", len, error_message);
@@ -2367,9 +2625,10 @@ static void html_view_js_thread(void *arg)
             break;
         }
 
-        if (script->source && script->source[0] != '\0')
+        if (script->program || (script->source && script->source[0] != '\0'))
         {
-            js_exec_result_t res = js_eval(rt, script->source);
+            js_exec_result_t res = script->program ? js_execute(rt, script->program)
+                                                   : js_eval(rt, script->source);
             if (!res.ok)
             {
                 printf("html_view_js: script %u error: %s\n",
@@ -2428,6 +2687,8 @@ static void html_view_js_init(atk_html_view_priv_t *priv)
     priv->js_enabled = true;
     priv->js_script_head = NULL;
     priv->js_script_tail = NULL;
+    priv->js_listeners = NULL;
+    priv->js_listener_seq = 0;
     priv->js_handles = NULL;
     priv->js_handle_count = 0;
     priv->js_handle_cap = 0;
@@ -2491,6 +2752,8 @@ static void html_view_js_stop(atk_html_view_priv_t *priv)
     html_view_dom_lock(priv);
     html_view_js_scripts_clear_locked(priv);
     html_view_js_handles_reset(priv);
+    html_view_js_listeners_clear(priv, priv->js_runtime);
+    priv->js_listener_seq = 0;
     html_view_dom_unlock(priv);
 
     html_view_js_runtime_destroy(priv);

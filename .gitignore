@@ -5,3 +5,4 @@
 *.fd
 build/
 vendor/OVMF_VARS-1024x768.fd
+qemu-net.pcap

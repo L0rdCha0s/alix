@@ -39,9 +39,16 @@ typedef struct js_env
     bool is_function;
 } js_env_t;
 
+typedef struct js_program_node
+{
+    js_program_t *program;
+    struct js_program_node *next;
+} js_program_node_t;
+
 struct js_runtime
 {
     js_env_t *global;
+    js_program_node_t *programs;
 };
 
 struct js_function
@@ -85,6 +92,7 @@ static void js_function_retain(js_function_t *fn);
 static void js_function_release(js_function_t *fn);
 static void js_env_retain(js_env_t *env);
 static void js_env_release(js_env_t *env);
+static bool js_runtime_track_program(js_runtime_t *rt, js_program_t *program);
 
 static js_value_t js_value_make_undefined_internal(void)
 {
@@ -552,6 +560,23 @@ static void js_env_release(js_env_t *env)
     }
 }
 
+static bool js_runtime_track_program(js_runtime_t *rt, js_program_t *program)
+{
+    if (!rt || !program)
+    {
+        return false;
+    }
+    js_program_node_t *node = (js_program_node_t *)calloc(1, sizeof(*node));
+    if (!node)
+    {
+        return false;
+    }
+    node->program = program;
+    node->next = rt->programs;
+    rt->programs = node;
+    return true;
+}
+
 static js_var_t *js_env_find_local(js_env_t *env, const char *name)
 {
     if (!env || !name)
@@ -698,6 +723,7 @@ js_runtime_t *js_runtime_create(void)
         free(rt);
         return NULL;
     }
+    rt->programs = NULL;
     if (!js_runtime_set_native(rt, "Number", js_builtin_number, NULL))
     {
         js_runtime_destroy(rt);
@@ -711,6 +737,17 @@ void js_runtime_destroy(js_runtime_t *rt)
     if (!rt)
     {
         return;
+    }
+    js_program_node_t *node = rt->programs;
+    while (node)
+    {
+        js_program_node_t *next = node->next;
+        if (node->program)
+        {
+            js_program_destroy(node->program);
+        }
+        free(node);
+        node = next;
     }
     js_env_release(rt->global);
     free(rt);
@@ -2839,8 +2876,13 @@ js_exec_result_t js_eval(js_runtime_t *rt, const char *source)
         out.error_message = err.message ? js_strdup(err.message) : js_strdup("parse error");
         return out;
     }
+    if (!js_runtime_track_program(rt, program))
+    {
+        js_program_destroy(program);
+        out.error_message = js_strdup("failed to retain program");
+        return out;
+    }
     out = js_execute(rt, program);
-    js_program_destroy(program);
     return out;
 }
 
