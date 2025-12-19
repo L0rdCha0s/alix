@@ -4,31 +4,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "atk/html_view/html_view_internal.h"
 #include "libc.h"
 #include "video.h"
 #include "web/css.h"
 #include "web/html.h"
-
-typedef struct html_view_style_block
-{
-    css_style_t styles[64];
-    size_t used;
-    struct html_view_style_block *prev;
-} html_view_style_block_t;
-
-typedef struct
-{
-    const css_stylesheet_t *sheet;
-    int actual_font_px;
-    int base_font_px;
-    int base_line_height;
-    int line_height;
-    int space_w;
-    int viewport_w;
-    int viewport_h;
-    html_view_style_block_t *style_block;
-    size_t style_depth;
-} html_view_ctx_t;
 
 int atk_font_line_height(void)
 {
@@ -49,8 +29,6 @@ video_color_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
 {
     return 0xFF000000U | ((video_color_t)r << 16) | ((video_color_t)g << 8) | (video_color_t)b;
 }
-
-#include "../user/lib/atk/html_view/style.c"
 
 static const html_node_t *find_first_tag(const html_node_t *root, const char *tag)
 {

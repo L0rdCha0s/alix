@@ -258,6 +258,40 @@ static void hid_reset_endpoint_toggle(usb_endpoint_t *ep)
     }
 }
 
+static void hid_clear_endpoint_halt(usb_device_t *dev, usb_endpoint_t *ep)
+{
+    if (!dev || !ep || ep->endpoint == 0)
+    {
+        return;
+    }
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0x02,
+        .bRequest = USB_REQ_CLEAR_FEATURE,
+        .wValue = 0,
+        .wIndex = (uint16_t)(0x80u | ep->endpoint),
+        .wLength = 0
+    };
+    usb_control_transfer(dev, &setup, NULL, 0);
+}
+
+static uint8_t hid_idle_units_from_interval(uint8_t interval_ms)
+{
+    if (interval_ms == 0)
+    {
+        interval_ms = 10;
+    }
+    uint16_t units = (uint16_t)((interval_ms + 3u) / 4u);
+    if (units == 0)
+    {
+        units = 1;
+    }
+    if (units > 0xFFu)
+    {
+        units = 0xFFu;
+    }
+    return (uint8_t)units;
+}
+
 static void keyboard_thread(void *arg)
 {
     (void)arg;
@@ -294,6 +328,7 @@ static void keyboard_thread(void *arg)
             {
                 hid_release_all_keys();
                 hid_reset_endpoint_toggle(&g_kbd_ep);
+                hid_clear_endpoint_halt(g_kbd, &g_kbd_ep);
             }
         }
         /* USB interrupt transfer already waits per endpoint interval; avoid extra 10ms sleep. */
@@ -358,6 +393,7 @@ static void mouse_thread(void *arg)
             else if (!ok)
             {
                 hid_reset_endpoint_toggle(&g_mouse_ep);
+                hid_clear_endpoint_halt(g_mouse, &g_mouse_ep);
             }
         }
         /* Drain events immediately so UI stays responsive even during heavy CPU load. */
@@ -377,10 +413,15 @@ static void configure_hid_device(usb_device_t *dev)
     {
         return;
     }
+    uint8_t idle_units = 0;
+    if (dev->type == USB_DEV_HID_KEYBOARD)
+    {
+        idle_units = hid_idle_units_from_interval(dev->intr_ep.interval_ms);
+    }
     usb_setup_packet_t set_idle = {
         .bmRequestType = 0x21,
         .bRequest = 0x0A,
-        .wValue = 0,
+        .wValue = (uint16_t)((uint16_t)idle_units << 8),
         .wIndex = dev->interface_number,
         .wLength = 0
     };

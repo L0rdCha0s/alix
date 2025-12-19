@@ -1,4 +1,9 @@
-static char *html_strdup_range(const char *start, const char *end, bool to_lower)
+#include "web/html/html_internal.h"
+
+#include "ctype.h"
+#include "libc.h"
+
+char *html_strdup_range(const char *start, const char *end, bool to_lower)
 {
     if (!start || !end || end < start)
     {
@@ -166,7 +171,7 @@ static bool html_decode_entity_one(const char *s, const char *end, size_t *consu
     return true;
 }
 
-static char *html_strdup_decoded_range(const char *start, const char *end)
+char *html_strdup_decoded_range(const char *start, const char *end)
 {
     if (!start || !end || end < start)
     {
@@ -200,4 +205,3 @@ static char *html_strdup_decoded_range(const char *start, const char *end)
     out[w] = '\0';
     return out;
 }
-

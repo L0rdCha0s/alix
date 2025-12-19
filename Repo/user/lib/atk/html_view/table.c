@@ -1,3 +1,5 @@
+#include "atk/html_view/html_view_internal.h"
+
 typedef struct
 {
     const html_node_t *node;
@@ -92,7 +94,7 @@ static int html_view_attr_to_int(const html_node_t *node, const char *name, int 
     return n >= 0 ? n : fallback;
 }
 
-static void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
+void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
 
 static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *parent_style, int max_w, int *out_h)
 {
@@ -236,7 +238,7 @@ static bool html_view_table_layout_add_row(html_view_table_layout_t *layout, con
     return true;
 }
 
-static bool html_view_subtree_has_form_control(const html_node_t *root)
+bool html_view_subtree_has_form_control(const html_node_t *root)
 {
     if (!root)
     {
@@ -266,15 +268,15 @@ static bool html_view_subtree_has_form_control(const html_node_t *root)
     return false;
 }
 
-static void html_view_render_table(html_view_ctx_t *ctx,
-                                   const html_node_t *node,
-                                   const css_style_t *style,
-                                   const css_style_t *parent_style);
+void html_view_render_table(html_view_ctx_t *ctx,
+                            const html_node_t *node,
+                            const css_style_t *style,
+                            const css_style_t *parent_style);
 
-static void html_view_render_float_box(html_view_ctx_t *ctx,
-                                       const html_node_t *node,
-                                       const css_style_t *style,
-                                       css_float_t side)
+void html_view_render_float_box(html_view_ctx_t *ctx,
+                                const html_node_t *node,
+                                const css_style_t *style,
+                                css_float_t side)
 {
     if (!ctx || !node || !style || side == CSS_FLOAT_NONE)
     {
@@ -607,10 +609,10 @@ static void html_view_render_float_box(html_view_ctx_t *ctx,
     ctx->line_start_y = saved_line_start_y;
 }
 
-static void html_view_render_table(html_view_ctx_t *ctx,
-                                   const html_node_t *node,
-                                   const css_style_t *style,
-                                   const css_style_t *parent_style)
+void html_view_render_table(html_view_ctx_t *ctx,
+                            const html_node_t *node,
+                            const css_style_t *style,
+                            const css_style_t *parent_style)
 {
     if (!ctx || !node || !style)
     {

@@ -1,10 +1,7 @@
-typedef struct html_view_js_script
-{
-    char *source;
-    size_t len;
-    js_program_t *program;
-    struct html_view_js_script *next;
-} html_view_js_script_t;
+#include "atk/html_view/html_view_internal.h"
+
+#include "ctype.h"
+#include "stdio.h"
 
 typedef struct
 {
@@ -12,9 +9,8 @@ typedef struct
     size_t handle;
 } html_view_js_dom_element_t;
 
-static html_view_control_t *html_view_control_find(atk_html_view_priv_t *priv, const html_node_t *node);
 static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *priv);
-static void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
+void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
 static bool html_view_js_should_stop(const atk_html_view_priv_t *priv);
 static bool html_view_js_queue_source_locked(atk_html_view_priv_t *priv, const char *source, size_t len);
 static bool html_view_js_queue_program_locked(atk_html_view_priv_t *priv, js_program_t *program);
@@ -39,7 +35,7 @@ static char *html_view_js_strdup_len(const char *src, size_t len)
     return dst;
 }
 
-static void html_view_dom_lock(atk_html_view_priv_t *priv)
+void html_view_dom_lock(atk_html_view_priv_t *priv)
 {
     if (!priv)
     {
@@ -48,7 +44,7 @@ static void html_view_dom_lock(atk_html_view_priv_t *priv)
     alix_mutex_lock(&priv->dom_lock);
 }
 
-static void html_view_dom_unlock(atk_html_view_priv_t *priv)
+void html_view_dom_unlock(atk_html_view_priv_t *priv)
 {
     if (!priv)
     {
@@ -188,7 +184,7 @@ static bool html_view_js_dispatch_click_locked(atk_html_view_priv_t *priv, size_
     return queued;
 }
 
-static void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node)
+void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node)
 {
     if (!view || !node)
     {
@@ -2643,7 +2639,7 @@ static void html_view_js_thread(void *arg)
     }
 }
 
-static void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
+void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
     if (!view || !priv)
     {
@@ -2671,7 +2667,7 @@ static void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *p
     }
 }
 
-static void html_view_js_init(atk_html_view_priv_t *priv)
+void html_view_js_init(atk_html_view_priv_t *priv)
 {
     if (!priv)
     {
@@ -2727,7 +2723,7 @@ static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *
     html_view_dom_unlock(priv);
 }
 
-static void html_view_js_stop(atk_html_view_priv_t *priv)
+void html_view_js_stop(atk_html_view_priv_t *priv)
 {
     if (!priv)
     {
@@ -2759,7 +2755,7 @@ static void html_view_js_stop(atk_html_view_priv_t *priv)
     html_view_js_runtime_destroy(priv);
 }
 
-static void html_view_js_start(atk_widget_t *view, atk_html_view_priv_t *priv)
+void html_view_js_start(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
     if (!view || !priv || !priv->doc || !priv->doc->root)
     {
@@ -2783,10 +2779,10 @@ static void html_view_js_start(atk_widget_t *view, atk_html_view_priv_t *priv)
     html_view_js_start_thread(view, priv);
 }
 
-static bool html_view_js_queue_external(atk_widget_t *view,
-                                        atk_html_view_priv_t *priv,
-                                        const char *script_text,
-                                        size_t len)
+bool html_view_js_queue_external(atk_widget_t *view,
+                                 atk_html_view_priv_t *priv,
+                                 const char *script_text,
+                                 size_t len)
 {
     if (!view || !priv || !script_text || len == 0)
     {
@@ -2806,7 +2802,7 @@ static bool html_view_js_queue_external(atk_widget_t *view,
     return true;
 }
 
-static void html_view_js_shutdown(atk_widget_t *view, atk_html_view_priv_t *priv)
+void html_view_js_shutdown(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
     (void)view;
     html_view_js_stop(priv);

@@ -1,9 +1,13 @@
-static atk_html_view_priv_t *html_view_priv_mut(atk_widget_t *view)
+#include "atk/html_view/html_view_internal.h"
+
+#include "ctype.h"
+
+atk_html_view_priv_t *html_view_priv_mut(atk_widget_t *view)
 {
     return (atk_html_view_priv_t *)atk_widget_priv(view, &ATK_HTML_VIEW_CLASS);
 }
 
-static void html_view_invalidate(const atk_widget_t *view)
+void html_view_invalidate(const atk_widget_t *view)
 {
     if (!view || !view->parent)
     {
@@ -15,12 +19,12 @@ static void html_view_invalidate(const atk_widget_t *view)
     video_request_refresh_window(view->parent);
 }
 
-static bool html_view_hit_test_cb(const atk_widget_t *widget,
-                                  int origin_x,
-                                  int origin_y,
-                                  int px,
-                                  int py,
-                                  void *context)
+bool html_view_hit_test_cb(const atk_widget_t *widget,
+                           int origin_x,
+                           int origin_y,
+                           int px,
+                           int py,
+                           void *context)
 {
     (void)context;
     if (!widget)
@@ -34,9 +38,9 @@ static bool html_view_hit_test_cb(const atk_widget_t *widget,
     return (px >= x0 && px < x1 && py >= y0 && py < y1);
 }
 
-static atk_mouse_response_t html_view_mouse_cb(atk_widget_t *widget,
-                                               const atk_mouse_event_t *event,
-                                               void *context)
+atk_mouse_response_t html_view_mouse_cb(atk_widget_t *widget,
+                                        const atk_mouse_event_t *event,
+                                        void *context)
 {
     (void)context;
 
@@ -149,11 +153,11 @@ static atk_mouse_response_t html_view_mouse_cb(atk_widget_t *widget,
     return ATK_MOUSE_RESPONSE_NONE;
 }
 
-static atk_key_response_t html_view_key_cb(atk_widget_t *widget,
-                                           int key,
-                                           int modifiers,
-                                           int action,
-                                           void *context)
+atk_key_response_t html_view_key_cb(atk_widget_t *widget,
+                                    int key,
+                                    int modifiers,
+                                    int action,
+                                    void *context)
 {
     (void)widget;
     (void)key;
@@ -163,7 +167,7 @@ static atk_key_response_t html_view_key_cb(atk_widget_t *widget,
     return ATK_KEY_RESPONSE_NONE;
 }
 
-static bool html_view_buf_append(char **buf, size_t *len, size_t *cap, const char *data, size_t data_len)
+bool html_view_buf_append(char **buf, size_t *len, size_t *cap, const char *data, size_t data_len)
 {
     if (!buf || !len || !cap)
     {
@@ -201,7 +205,7 @@ static bool html_view_buf_append(char **buf, size_t *len, size_t *cap, const cha
     return true;
 }
 
-static char *html_view_strdup(const char *src)
+char *html_view_strdup(const char *src)
 {
     if (!src)
     {
@@ -218,7 +222,7 @@ static char *html_view_strdup(const char *src)
     return dst;
 }
 
-static void html_view_render_cache_clear(html_view_render_cache_t *cache)
+void html_view_render_cache_clear(html_view_render_cache_t *cache)
 {
     if (!cache)
     {
@@ -318,7 +322,7 @@ static bool html_view_render_cache_add_op_to_tile(html_view_render_cache_t *cach
     return true;
 }
 
-static char *html_view_render_cache_strdup(html_view_render_cache_t *cache, const char *text)
+char *html_view_render_cache_strdup(html_view_render_cache_t *cache, const char *text)
 {
     if (!cache || !text)
     {
@@ -348,7 +352,7 @@ static char *html_view_render_cache_strdup(html_view_render_cache_t *cache, cons
     return dup;
 }
 
-static bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_view_op_t *op, int tile_h)
+bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_view_op_t *op, int tile_h)
 {
     if (!cache || !op || tile_h <= 0)
     {
@@ -440,7 +444,7 @@ static void html_view_render_cache_draw_text_span(html_view_ctx_t *ctx,
     free(heap);
 }
 
-static void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
+void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
 {
     if (!ctx || !ctx->priv)
     {
@@ -593,7 +597,7 @@ static void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
     }
 }
 
-static void html_view_images_clear(atk_html_view_priv_t *priv)
+void html_view_images_clear(atk_html_view_priv_t *priv)
 {
     if (!priv)
     {
@@ -611,7 +615,7 @@ static void html_view_images_clear(atk_html_view_priv_t *priv)
     priv->images = NULL;
 }
 
-static void html_view_window_remove_widget(atk_widget_t *window, atk_widget_t *child)
+void html_view_window_remove_widget(atk_widget_t *window, atk_widget_t *child)
 {
     if (!window || !child)
     {
@@ -664,7 +668,7 @@ static void html_view_window_remove_widget(atk_widget_t *window, atk_widget_t *c
     atk_widget_destroy_any(child);
 }
 
-static void html_view_controls_clear(atk_widget_t *view, atk_html_view_priv_t *priv)
+void html_view_controls_clear(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
     if (!view || !priv)
     {
@@ -686,7 +690,7 @@ static void html_view_controls_clear(atk_widget_t *view, atk_html_view_priv_t *p
     priv->controls = NULL;
 }
 
-static void html_view_controls_hide_all(atk_html_view_priv_t *priv)
+void html_view_controls_hide_all(atk_html_view_priv_t *priv)
 {
     if (!priv)
     {
@@ -701,7 +705,7 @@ static void html_view_controls_hide_all(atk_html_view_priv_t *priv)
     }
 }
 
-static html_view_control_t *html_view_control_find(atk_html_view_priv_t *priv, const html_node_t *node)
+html_view_control_t *html_view_control_find(atk_html_view_priv_t *priv, const html_node_t *node)
 {
     if (!priv || !node)
     {
@@ -717,7 +721,7 @@ static html_view_control_t *html_view_control_find(atk_html_view_priv_t *priv, c
     return NULL;
 }
 
-static void html_view_collect_text(const html_node_t *node, char **buf, size_t *len, size_t *cap)
+void html_view_collect_text(const html_node_t *node, char **buf, size_t *len, size_t *cap)
 {
     if (!node || !buf || !len || !cap)
     {
@@ -773,7 +777,7 @@ static void html_view_collect_text(const html_node_t *node, char **buf, size_t *
     free(stack);
 }
 
-static void html_view_trim_collapse_ws(char *text)
+void html_view_trim_collapse_ws(char *text)
 {
     if (!text)
     {

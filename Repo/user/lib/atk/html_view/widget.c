@@ -1,3 +1,5 @@
+#include "atk/html_view/html_view_internal.h"
+
 static void html_view_position_scrollbar(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
     if (!view || !priv || !priv->scrollbar)

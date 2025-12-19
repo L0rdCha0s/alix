@@ -5,7 +5,9 @@
 #include "types.h"
 
 #ifndef KERNEL_BUILD
-
+#ifdef TTF_HOST_BUILD
+#include <stdio.h>
+#else
 typedef struct FILE
 {
     int fd;
@@ -45,11 +47,17 @@ int fseek(FILE *stream, long offset, int whence);
 long ftell(FILE *stream);
 int fputc(int ch, FILE *stream);
 int fputs(const char *s, FILE *stream);
-
+#endif /* TTF_HOST_BUILD */
 #endif /* KERNEL_BUILD */
 
+#ifndef SEEK_SET
 #define SEEK_SET 0
+#endif
+#ifndef SEEK_CUR
 #define SEEK_CUR 1
+#endif
+#ifndef SEEK_END
 #define SEEK_END 2
+#endif
 
 #endif /* STDIO_H */

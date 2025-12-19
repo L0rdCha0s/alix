@@ -1,3 +1,5 @@
+#include "atk/html_view/html_view_internal.h"
+
 static void html_view_font_glyph_free(html_view_font_glyph_t *glyph)
 {
     if (!glyph)
@@ -30,7 +32,7 @@ static void html_view_font_cache_clear_glyphs(html_view_font_size_cache_t *cache
     cache->glyph_use_counter = 0;
 }
 
-static void html_view_font_state_reset(html_view_font_state_t *state)
+void html_view_font_state_reset(html_view_font_state_t *state)
 {
     if (!state)
     {
@@ -95,7 +97,7 @@ static bool html_view_font_state_load(html_view_font_state_t *state)
     return true;
 }
 
-static html_view_font_size_cache_t *html_view_font_state_get_cache(html_view_font_state_t *state, int pixel_height)
+html_view_font_size_cache_t *html_view_font_state_get_cache(html_view_font_state_t *state, int pixel_height)
 {
     if (!state)
     {
@@ -291,7 +293,7 @@ static html_view_font_size_cache_t *html_view_font_cache_for_ctx(const html_view
     return html_view_font_state_get_cache(&ctx->priv->font, ctx->actual_font_px);
 }
 
-static int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
+int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
 {
     if (!ctx || !text || *text == '\0')
     {
@@ -329,7 +331,7 @@ static int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
     return width;
 }
 
-static int html_view_baseline_for_rect(const html_view_ctx_t *ctx, int top, int height)
+int html_view_baseline_for_rect(const html_view_ctx_t *ctx, int top, int height)
 {
     if (!ctx)
     {
@@ -357,12 +359,12 @@ static int html_view_baseline_for_rect(const html_view_ctx_t *ctx, int top, int 
     return top + offset;
 }
 
-static void html_view_draw_string_clipped(const html_view_ctx_t *ctx,
-                                         int x,
-                                         int baseline_y,
-                                         const char *text,
-                                         video_color_t fg,
-                                         const atk_rect_t *clip)
+void html_view_draw_string_clipped(const html_view_ctx_t *ctx,
+                                   int x,
+                                   int baseline_y,
+                                   const char *text,
+                                   video_color_t fg,
+                                   const atk_rect_t *clip)
 {
     if (!ctx || !text || *text == '\0')
     {
@@ -505,4 +507,3 @@ static void html_view_draw_string_clipped(const html_view_ctx_t *ctx,
         pen_x += glyph_advance;
     }
 }
-

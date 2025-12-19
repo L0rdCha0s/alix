@@ -1,3 +1,8 @@
+#include "web/css/css_internal.h"
+
+#include "ctype.h"
+#include "libc.h"
+
 static bool css_next_token(const char **p, const char *end, const char **tok_start, const char **tok_end)
 {
     if (!p || !*p || !end || !tok_start || !tok_end)
@@ -144,11 +149,11 @@ static bool css_parse_text_shadow_value(const char *start,
     return true;
 }
 
-static void css_style_apply_property(css_style_t *style,
-                                     const char *prop_start,
-                                     const char *prop_end,
-                                     const char *val_start,
-                                     const char *val_end)
+void css_style_apply_property(css_style_t *style,
+                              const char *prop_start,
+                              const char *prop_end,
+                              const char *val_start,
+                              const char *val_end)
 {
     if (!style || !prop_start || !prop_end || !val_start || !val_end)
     {

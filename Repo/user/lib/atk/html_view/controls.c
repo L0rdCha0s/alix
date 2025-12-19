@@ -1,11 +1,11 @@
+#include "atk/html_view/html_view_internal.h"
+
 typedef struct html_view_radio_group
 {
     char *name;
     atk_radio_group_t *group;
     struct html_view_radio_group *next;
 } html_view_radio_group_t;
-
-static void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
 
 static html_view_control_t *html_view_control_find_by_widget(atk_html_view_priv_t *priv,
                                                              const atk_widget_t *widget)
@@ -348,7 +348,7 @@ static void html_view_controls_build_node(atk_widget_t *view,
     free(stack);
 }
 
-static void html_view_controls_build(atk_widget_t *view, atk_html_view_priv_t *priv)
+void html_view_controls_build(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
     if (!view || !priv || !priv->doc || !priv->doc->root)
     {
@@ -360,7 +360,7 @@ static void html_view_controls_build(atk_widget_t *view, atk_html_view_priv_t *p
     html_view_radio_groups_free(radio_groups);
 }
 
-static html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *src)
+html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *src)
 {
     if (!priv || !src || src[0] == '\0')
     {
@@ -445,7 +445,7 @@ static void html_view_collect_style_text(const html_node_t *node, char **buf, si
     free(stack);
 }
 
-static void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
+void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
 {
     if (!priv)
     {
@@ -489,7 +489,7 @@ static void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
     free(css_text);
 }
 
-static const html_node_t *html_view_find_first_element(const html_node_t *root, const char *tag)
+const html_node_t *html_view_find_first_element(const html_node_t *root, const char *tag)
 {
     if (!root || !tag || tag[0] == '\0')
     {

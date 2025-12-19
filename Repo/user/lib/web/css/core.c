@@ -1,4 +1,9 @@
-static void css_skip_ws_and_comments(const char **p)
+#include "web/css/css_internal.h"
+
+#include "ctype.h"
+#include "libc.h"
+
+void css_skip_ws_and_comments(const char **p)
 {
     if (!p || !*p)
     {
@@ -26,7 +31,7 @@ static void css_skip_ws_and_comments(const char **p)
     }
 }
 
-static void css_trim_range(const char **start, const char **end)
+void css_trim_range(const char **start, const char **end)
 {
     if (!start || !end || !*start || !*end)
     {
@@ -42,7 +47,7 @@ static void css_trim_range(const char **start, const char **end)
     }
 }
 
-static char *css_strdup_lower(const char *start, const char *end)
+char *css_strdup_lower(const char *start, const char *end)
 {
     if (!start || !end || end < start)
     {
@@ -86,7 +91,7 @@ static bool css_parse_hex_digit(char c, uint8_t *out)
     return false;
 }
 
-static bool css_parse_color(const char *start, const char *end, video_color_t *out)
+bool css_parse_color(const char *start, const char *end, video_color_t *out)
 {
     if (!start || !end || end <= start || !out)
     {
@@ -223,7 +228,7 @@ static bool css_parse_color(const char *start, const char *end, video_color_t *o
     return false;
 }
 
-static bool css_parse_number_milli(const char *start, const char *end, int32_t *out_milli)
+bool css_parse_number_milli(const char *start, const char *end, int32_t *out_milli)
 {
     if (!start || !end || end <= start || !out_milli)
     {
@@ -280,7 +285,7 @@ static bool css_parse_number_milli(const char *start, const char *end, int32_t *
     return true;
 }
 
-static bool css_parse_length_token(const char *start, const char *end, css_length_t *out)
+bool css_parse_length_token(const char *start, const char *end, css_length_t *out)
 {
     if (!out)
     {
@@ -364,7 +369,7 @@ static bool css_parse_length_token(const char *start, const char *end, css_lengt
     return true;
 }
 
-static bool css_parse_margin_value(const char *start, const char *end, css_box_t *out)
+bool css_parse_margin_value(const char *start, const char *end, css_box_t *out)
 {
     if (!out)
     {
@@ -450,7 +455,7 @@ static bool css_parse_margin_value(const char *start, const char *end, css_box_t
     return true;
 }
 
-static css_box_t css_box_from_length(css_length_t len)
+css_box_t css_box_from_length(css_length_t len)
 {
     return (css_box_t){
         .top = len,
@@ -459,4 +464,3 @@ static css_box_t css_box_from_length(css_length_t len)
         .left = len,
     };
 }
-

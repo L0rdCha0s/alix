@@ -1,4 +1,8 @@
-static html_node_t *html_node_create(html_node_type_t type)
+#include "web/html/html_internal.h"
+
+#include "libc.h"
+
+html_node_t *html_node_create(html_node_type_t type)
 {
     html_node_t *node = (html_node_t *)calloc(1, sizeof(*node));
     if (!node)
@@ -9,7 +13,7 @@ static html_node_t *html_node_create(html_node_type_t type)
     return node;
 }
 
-static void html_attr_free_list(html_attr_t *attr)
+void html_attr_free_list(html_attr_t *attr)
 {
     while (attr)
     {
@@ -21,7 +25,7 @@ static void html_attr_free_list(html_attr_t *attr)
     }
 }
 
-static void html_node_append_child(html_node_t *parent, html_node_t *child)
+void html_node_append_child(html_node_t *parent, html_node_t *child)
 {
     if (!parent || !child)
     {

@@ -1,3 +1,7 @@
+#include "web/css/css_internal.h"
+
+#include "libc.h"
+
 static bool css_append_rule(css_stylesheet_t *sheet, const char *selector_start, const char *selector_end, const css_style_t *style)
 {
     if (!sheet || !selector_start || !selector_end || selector_end <= selector_start || !style)

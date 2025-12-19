@@ -1,3 +1,8 @@
+#include "web/html/html_internal.h"
+
+#include "ctype.h"
+#include "libc.h"
+
 typedef struct
 {
     html_node_t **items;
@@ -643,4 +648,3 @@ html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
     html_stack_destroy(&stack);
     return doc;
 }
-

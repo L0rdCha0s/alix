@@ -1,4 +1,8 @@
-static void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
+#include "atk/html_view/html_view_internal.h"
+
+#include "ctype.h"
+
+void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
                                         int x,
                                         int y,
                                         int w,
@@ -59,7 +63,7 @@ static void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
     video_draw_rect(x0, y0, x1 - x0, y1 - y0, color);
 }
 
-static void html_view_draw_border_clipped(html_view_ctx_t *ctx,
+void html_view_draw_border_clipped(html_view_ctx_t *ctx,
                                          int x,
                                          int y,
                                          int w,
@@ -92,7 +96,7 @@ static void html_view_draw_border_clipped(html_view_ctx_t *ctx,
     html_view_draw_rect_clipped(ctx, x + w - thickness, y + thickness, thickness, h - thickness * 2, color, clip); /* right */
 }
 
-static void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
+void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
                                          int dst_x,
                                          int dst_y,
                                          int width,
@@ -162,7 +166,7 @@ static void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
     video_blit_rgba32_untracked(x0, y0, draw_w, draw_h, src, stride_bytes, true);
 }
 
-static void html_view_align_current_line(html_view_ctx_t *ctx)
+void html_view_align_current_line(html_view_ctx_t *ctx)
 {
     if (!ctx || !ctx->record || ctx->record_failed || !ctx->priv)
     {
@@ -234,7 +238,7 @@ static void html_view_align_current_line(html_view_ctx_t *ctx)
     ctx->line_op_start = end;
 }
 
-static void html_view_new_line(html_view_ctx_t *ctx)
+void html_view_new_line(html_view_ctx_t *ctx)
 {
     if (!ctx)
     {
@@ -264,7 +268,7 @@ static void html_view_new_line(html_view_ctx_t *ctx)
     }
 }
 
-static void html_view_ensure_line_visible(html_view_ctx_t *ctx)
+void html_view_ensure_line_visible(html_view_ctx_t *ctx)
 {
     if (!ctx)
     {
@@ -277,7 +281,7 @@ static void html_view_ensure_line_visible(html_view_ctx_t *ctx)
     }
 }
 
-static bool html_view_line_visible(const html_view_ctx_t *ctx)
+bool html_view_line_visible(const html_view_ctx_t *ctx)
 {
     if (!ctx)
     {
@@ -290,12 +294,12 @@ static bool html_view_line_visible(const html_view_ctx_t *ctx)
     return !(draw_bottom <= clip_y0 || draw_top >= clip_y1);
 }
 
-static void html_view_float_bounds_at_y(const html_view_float_ctx_t *floats,
-                                       int y,
-                                       int container_x,
-                                       int container_w,
-                                       int *out_left,
-                                       int *out_right)
+void html_view_float_bounds_at_y(const html_view_float_ctx_t *floats,
+                                 int y,
+                                 int container_x,
+                                 int container_w,
+                                 int *out_left,
+                                 int *out_right)
 {
     if (!out_left || !out_right)
     {
@@ -338,7 +342,7 @@ static void html_view_float_bounds_at_y(const html_view_float_ctx_t *floats,
     *out_right = right;
 }
 
-static int html_view_float_next_y(const html_view_float_ctx_t *floats, int y)
+int html_view_float_next_y(const html_view_float_ctx_t *floats, int y)
 {
     if (!floats)
     {
@@ -365,7 +369,7 @@ static int html_view_float_next_y(const html_view_float_ctx_t *floats, int y)
     return (next > y) ? next : (y + 1);
 }
 
-static int html_view_float_max_bottom(const html_view_float_ctx_t *floats, css_clear_t clear_mode)
+int html_view_float_max_bottom(const html_view_float_ctx_t *floats, css_clear_t clear_mode)
 {
     if (!floats || clear_mode == CSS_CLEAR_NONE)
     {
@@ -396,17 +400,17 @@ static int html_view_float_max_bottom(const html_view_float_ctx_t *floats, css_c
     return max_bottom;
 }
 
-static void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
-                                                int x,
-                                                int y,
-                                                int w,
-                                                int h,
-                                                int top,
-                                                int right,
-                                                int bottom,
-                                                int left,
-                                                video_color_t color,
-                                                const atk_rect_t *clip)
+void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
+                                         int x,
+                                         int y,
+                                         int w,
+                                         int h,
+                                         int top,
+                                         int right,
+                                         int bottom,
+                                         int left,
+                                         video_color_t color,
+                                         const atk_rect_t *clip)
 {
     if (w <= 0 || h <= 0)
     {
@@ -558,11 +562,11 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
     free(heap);
 }
 
-static void html_view_draw_text(html_view_ctx_t *ctx,
-                                const char *text,
-                                video_color_t color,
-                                bool underline,
-                                bool bold)
+void html_view_draw_text(html_view_ctx_t *ctx,
+                         const char *text,
+                         video_color_t color,
+                         bool underline,
+                         bool bold)
 {
     if (!ctx || !text)
     {
@@ -592,12 +596,12 @@ static void html_view_draw_text(html_view_ctx_t *ctx,
     }
 }
 
-static void html_view_place_control_widget(html_view_ctx_t *ctx,
-                                           atk_widget_t *child,
-                                           int abs_x,
-                                           int abs_y,
-                                           int width,
-                                           int height)
+void html_view_place_control_widget(html_view_ctx_t *ctx,
+                                    atk_widget_t *child,
+                                    int abs_x,
+                                    int abs_y,
+                                    int width,
+                                    int height)
 {
     if (!ctx || !child || width <= 0 || height <= 0)
     {
@@ -620,10 +624,10 @@ static void html_view_place_control_widget(html_view_ctx_t *ctx,
     child->used = visible;
 }
 
-static void html_view_place_inline_control(html_view_ctx_t *ctx,
-                                           atk_widget_t *child,
-                                           int width,
-                                           int height)
+void html_view_place_inline_control(html_view_ctx_t *ctx,
+                                    atk_widget_t *child,
+                                    int width,
+                                    int height)
 {
     if (!ctx || width <= 0 || height <= 0)
     {
@@ -693,10 +697,10 @@ static void html_view_place_inline_control(html_view_ctx_t *ctx,
     html_view_ensure_line_visible(ctx);
 }
 
-static void html_view_place_block_control(html_view_ctx_t *ctx,
-                                          atk_widget_t *child,
-                                          int width,
-                                          int height)
+void html_view_place_block_control(html_view_ctx_t *ctx,
+                                   atk_widget_t *child,
+                                   int width,
+                                   int height)
 {
     if (!ctx || width <= 0 || height <= 0)
     {
@@ -768,7 +772,7 @@ static void html_view_place_block_control(html_view_ctx_t *ctx,
     html_view_ensure_line_visible(ctx);
 }
 
-static bool html_view_is_block_tag(const char *tag)
+bool html_view_is_block_tag(const char *tag)
 {
     if (!tag)
     {
@@ -805,7 +809,7 @@ static bool html_view_is_block_tag(const char *tag)
            strcmp(tag, "img") == 0;
 }
 
-static bool html_view_is_form_control_tag(const char *tag)
+bool html_view_is_form_control_tag(const char *tag)
 {
     if (!tag)
     {

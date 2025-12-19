@@ -1,3 +1,7 @@
+#include "atk/html_view/html_view_internal.h"
+
+#include "ctype.h"
+
 static void html_view_trim_range(const char **start, const char **end)
 {
     if (!start || !end || !*start || !*end)
@@ -458,10 +462,10 @@ static void html_view_apply_inline_style(css_style_t *style, const char *inline_
     css_stylesheet_destroy(sheet);
 }
 
-static void html_view_style_for_node(css_style_t *out,
-                                     const css_stylesheet_t *sheet,
-                                     const css_style_t *parent,
-                                     const html_node_t *node)
+void html_view_style_for_node(css_style_t *out,
+                              const css_stylesheet_t *sheet,
+                              const css_style_t *parent,
+                              const html_node_t *node)
 {
     if (!out)
     {
@@ -534,7 +538,7 @@ static void html_view_style_for_node(css_style_t *out,
     }
 }
 
-static void html_view_style_stack_destroy(html_view_ctx_t *ctx)
+void html_view_style_stack_destroy(html_view_ctx_t *ctx)
 {
     if (!ctx)
     {
@@ -552,7 +556,7 @@ static void html_view_style_stack_destroy(html_view_ctx_t *ctx)
     ctx->style_depth = 0;
 }
 
-static const css_style_t *html_view_style_push(html_view_ctx_t *ctx, const css_style_t *parent, const html_node_t *node)
+const css_style_t *html_view_style_push(html_view_ctx_t *ctx, const css_style_t *parent, const html_node_t *node)
 {
     if (!ctx)
     {
@@ -576,7 +580,7 @@ static const css_style_t *html_view_style_push(html_view_ctx_t *ctx, const css_s
     return slot;
 }
 
-static void html_view_style_pop(html_view_ctx_t *ctx)
+void html_view_style_pop(html_view_ctx_t *ctx)
 {
     if (!ctx || ctx->style_depth == 0)
     {
@@ -601,13 +605,13 @@ static void html_view_style_pop(html_view_ctx_t *ctx)
     }
 }
 
-static int html_view_length_to_px(const css_length_t *len,
-                                  int viewport_w,
-                                  int viewport_h,
-                                  int ref_w,
-                                  int ref_h,
-                                  int font_px,
-                                  bool horizontal)
+int html_view_length_to_px(const css_length_t *len,
+                           int viewport_w,
+                           int viewport_h,
+                           int ref_w,
+                           int ref_h,
+                           int font_px,
+                           bool horizontal)
 {
     if (!len || !len->valid || len->is_auto)
     {
@@ -639,7 +643,7 @@ static int html_view_length_to_px(const css_length_t *len,
     }
 }
 
-static int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_t *style)
+int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_t *style)
 {
     if (!ctx)
     {
@@ -688,15 +692,7 @@ static int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css
     return line_height;
 }
 
-typedef struct
-{
-    int actual_font_px;
-    int base_font_px;
-    int line_height;
-    int space_w;
-} html_view_font_scope_t;
-
-static int html_view_font_px_for_style(const html_view_ctx_t *ctx, const css_style_t *style, int parent_font_px)
+int html_view_font_px_for_style(const html_view_ctx_t *ctx, const css_style_t *style, int parent_font_px)
 {
     if (!ctx || !style || !style->has_font_size || !style->font_size.valid || style->font_size.is_auto)
     {
@@ -720,7 +716,7 @@ static int html_view_font_px_for_style(const html_view_ctx_t *ctx, const css_sty
     return px > 0 ? px : parent_font_px;
 }
 
-static void html_view_font_scope_push(html_view_ctx_t *ctx, const css_style_t *style, bool block, html_view_font_scope_t *saved)
+void html_view_font_scope_push(html_view_ctx_t *ctx, const css_style_t *style, bool block, html_view_font_scope_t *saved)
 {
     if (!ctx || !saved)
     {
@@ -759,7 +755,7 @@ static void html_view_font_scope_push(html_view_ctx_t *ctx, const css_style_t *s
     }
 }
 
-static void html_view_font_scope_pop(html_view_ctx_t *ctx, const html_view_font_scope_t *saved)
+void html_view_font_scope_pop(html_view_ctx_t *ctx, const html_view_font_scope_t *saved)
 {
     if (!ctx || !saved)
     {

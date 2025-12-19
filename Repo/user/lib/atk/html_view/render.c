@@ -1,6 +1,8 @@
+#include "atk/html_view/html_view_internal.h"
+
 static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *parent_style);
 
-static void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style)
+void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style)
 {
     if (!ctx || !node)
     {

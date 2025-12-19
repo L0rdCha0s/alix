@@ -70,7 +70,14 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/setjmp.c \
 	$(USER_DIR)/lib/atk_user.c \
 	$(USER_DIR)/lib/web/html.c \
+	$(USER_DIR)/lib/web/html/entities.c \
+	$(USER_DIR)/lib/web/html/dom.c \
+	$(USER_DIR)/lib/web/html/parse.c \
 	$(USER_DIR)/lib/web/css.c \
+	$(USER_DIR)/lib/web/css/core.c \
+	$(USER_DIR)/lib/web/css/match.c \
+	$(USER_DIR)/lib/web/css/properties.c \
+	$(USER_DIR)/lib/web/css/parse.c \
 	$(USER_DIR)/lib/web/js/internal.c \
 	$(USER_DIR)/lib/web/js/lexer.c \
 	$(USER_DIR)/lib/web/js/parser.c \
@@ -88,6 +95,15 @@ USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
 USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
 USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c \
                           $(USER_DIR)/lib/atk/atk_html_view.c \
+                          $(USER_DIR)/lib/atk/html_view/core.c \
+                          $(USER_DIR)/lib/atk/html_view/font.c \
+                          $(USER_DIR)/lib/atk/html_view/controls.c \
+                          $(USER_DIR)/lib/atk/html_view/script.c \
+                          $(USER_DIR)/lib/atk/html_view/style.c \
+                          $(USER_DIR)/lib/atk/html_view/layout.c \
+                          $(USER_DIR)/lib/atk/html_view/table.c \
+                          $(USER_DIR)/lib/atk/html_view/render.c \
+                          $(USER_DIR)/lib/atk/html_view/widget.c \
                           $(USER_DIR)/lib/atk_app.c
 USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
 USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
@@ -435,29 +451,41 @@ $(PNG_TEST_BIN): tests/png_host_test.c src/atk/util/png.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD tests/png_host_test.c src/atk/util/png.c -o $@
 
-$(WEB_TEST_BIN): tests/web_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c
+$(WEB_TEST_BIN): tests/web_host_test.c \
+                 user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                 user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+                 user/lib/web/url.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
-	    tests/web_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c -o $@
+	    tests/web_host_test.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    user/lib/web/url.c -o $@
 
-$(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c
+$(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
+                       user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                       user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+                       user/lib/web/url.c user/lib/atk/html_view/style.c
 	@mkdir -p $(HOST_TEST_DIR)
-	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
-	    tests/html_view_host_test.c user/lib/web/html.c user/lib/web/css.c user/lib/web/url.c -o $@
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	    tests/html_view_host_test.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    user/lib/web/url.c user/lib/atk/html_view/style.c -o $@
 
 $(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c
 	@mkdir -p $(HOST_TEST_DIR)
-	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(USER_DIR)/apps/atk_browser \
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(USER_DIR)/apps/atk_browser -I$(ATK_DIR) \
 	    tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c -o $@
 
 $(HTML_JS_TEST_BIN): tests/html_js_host_test.c \
-                     user/lib/web/html.c \
+                     user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
                      user/lib/web/js/internal.c user/lib/web/js/lexer.c user/lib/web/js/parser.c user/lib/web/js/runtime.c \
                      user/lib/web/js/js.h user/lib/web/js/internal.h user/lib/web/js/lexer.h
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
 	    tests/html_js_host_test.c \
-	    user/lib/web/html.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
 	    user/lib/web/js/internal.c \
 	    user/lib/web/js/lexer.c \
 	    user/lib/web/js/parser.c \

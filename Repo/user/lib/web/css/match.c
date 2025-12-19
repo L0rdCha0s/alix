@@ -1,3 +1,8 @@
+#include "web/css/css_internal.h"
+
+#include "ctype.h"
+#include "libc.h"
+
 void css_style_merge(css_style_t *dst, const css_style_t *src)
 {
     if (!dst || !src)
