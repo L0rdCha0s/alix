@@ -117,12 +117,15 @@ USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/dos_%.c,$(USER_QUAK
 USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/mplib.c,$(USER_QUAKE_REF_SOURCES))
 USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/mplpc.c,$(USER_QUAKE_REF_SOURCES))
 USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/vregset.c,$(USER_QUAKE_REF_SOURCES))
-# Pull in loopback-only networking plus null audio backends.
+# Pull in loopback-only networking plus the Alix audio backend.
 USER_QUAKE_REF_SOURCES += $(USER_QUAKE_REF_DIR)/net_main.c \
                           $(USER_QUAKE_REF_DIR)/net_loop.c \
                           $(USER_QUAKE_REF_DIR)/net_none.c \
                           $(USER_QUAKE_REF_DIR)/net_vcr.c \
-                          $(USER_QUAKE_REF_DIR)/snd_null.c \
+                          $(USER_QUAKE_REF_DIR)/snd_dma.c \
+                          $(USER_QUAKE_REF_DIR)/snd_mix.c \
+                          $(USER_QUAKE_REF_DIR)/snd_mem.c \
+                          $(USER_QUAKE_REF_DIR)/snd_alix.c \
                           $(USER_QUAKE_REF_DIR)/cd_null.c
 USER_QUAKE_REF_OBJECTS := $(patsubst $(USER_QUAKE_REF_DIR)/%.c,$(USER_OBJDIR)/quake_ref/%.o,$(USER_QUAKE_REF_SOURCES))
 USER_QUAKE_APP_SOURCES := $(wildcard $(USER_DIR)/apps/quake/*.c)
