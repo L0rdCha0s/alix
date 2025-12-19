@@ -102,7 +102,11 @@ USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c \
                           $(USER_DIR)/lib/atk/html_view/style.c \
                           $(USER_DIR)/lib/atk/html_view/layout.c \
                           $(USER_DIR)/lib/atk/html_view/table.c \
-                          $(USER_DIR)/lib/atk/html_view/render.c \
+                          $(USER_DIR)/lib/atk/html_view/render/dispatch.c \
+                          $(USER_DIR)/lib/atk/html_view/render/flex.c \
+                          $(USER_DIR)/lib/atk/html_view/render/forms.c \
+                          $(USER_DIR)/lib/atk/html_view/render/blocks.c \
+                          $(USER_DIR)/lib/atk/html_view/render/inline.c \
                           $(USER_DIR)/lib/atk/html_view/widget.c \
                           $(USER_DIR)/lib/atk_app.c
 USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))

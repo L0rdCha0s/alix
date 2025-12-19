@@ -610,9 +610,127 @@ static bool css_serialize_style(sb_t *sb, const css_style_t *style, int depth)
         const char *v = "inline";
         if (style->display == CSS_DISPLAY_BLOCK) v = "block";
         else if (style->display == CSS_DISPLAY_LIST_ITEM) v = "list-item";
+        else if (style->display == CSS_DISPLAY_FLEX) v = "flex";
+        else if (style->display == CSS_DISPLAY_INLINE_FLEX) v = "inline-flex";
         else if (style->display == CSS_DISPLAY_NONE) v = "none";
         if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "display: ") ||
             !sb_append_cstr(sb, v) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_flex_direction)
+    {
+        const char *v = "row";
+        if (style->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE) v = "row-reverse";
+        else if (style->flex_direction == CSS_FLEX_DIRECTION_COLUMN) v = "column";
+        else if (style->flex_direction == CSS_FLEX_DIRECTION_COLUMN_REVERSE) v = "column-reverse";
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "flex-direction: ") ||
+            !sb_append_cstr(sb, v) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_flex_wrap)
+    {
+        const char *v = "nowrap";
+        if (style->flex_wrap == CSS_FLEX_WRAP_WRAP) v = "wrap";
+        else if (style->flex_wrap == CSS_FLEX_WRAP_WRAP_REVERSE) v = "wrap-reverse";
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "flex-wrap: ") ||
+            !sb_append_cstr(sb, v) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_justify_content)
+    {
+        const char *v = "flex-start";
+        if (style->justify_content == CSS_JUSTIFY_FLEX_END) v = "flex-end";
+        else if (style->justify_content == CSS_JUSTIFY_CENTER) v = "center";
+        else if (style->justify_content == CSS_JUSTIFY_SPACE_BETWEEN) v = "space-between";
+        else if (style->justify_content == CSS_JUSTIFY_SPACE_AROUND) v = "space-around";
+        else if (style->justify_content == CSS_JUSTIFY_SPACE_EVENLY) v = "space-evenly";
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "justify-content: ") ||
+            !sb_append_cstr(sb, v) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_align_items)
+    {
+        const char *v = "stretch";
+        if (style->align_items == CSS_ALIGN_FLEX_START) v = "flex-start";
+        else if (style->align_items == CSS_ALIGN_FLEX_END) v = "flex-end";
+        else if (style->align_items == CSS_ALIGN_CENTER) v = "center";
+        else if (style->align_items == CSS_ALIGN_BASELINE) v = "baseline";
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "align-items: ") ||
+            !sb_append_cstr(sb, v) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_align_self)
+    {
+        const char *v = "stretch";
+        if (style->align_self == CSS_ALIGN_FLEX_START) v = "flex-start";
+        else if (style->align_self == CSS_ALIGN_FLEX_END) v = "flex-end";
+        else if (style->align_self == CSS_ALIGN_CENTER) v = "center";
+        else if (style->align_self == CSS_ALIGN_BASELINE) v = "baseline";
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "align-self: ") ||
+            !sb_append_cstr(sb, v) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_align_content)
+    {
+        const char *v = "stretch";
+        if (style->align_content == CSS_ALIGN_FLEX_START) v = "flex-start";
+        else if (style->align_content == CSS_ALIGN_FLEX_END) v = "flex-end";
+        else if (style->align_content == CSS_ALIGN_CENTER) v = "center";
+        else if (style->align_content == CSS_ALIGN_BASELINE) v = "baseline";
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "align-content: ") ||
+            !sb_append_cstr(sb, v) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_row_gap)
+    {
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "row-gap: ") ||
+            !css_append_length(sb, &style->row_gap) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_column_gap)
+    {
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "column-gap: ") ||
+            !css_append_length(sb, &style->column_gap) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_flex_grow)
+    {
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "flex-grow: ") ||
+            !css_append_milli(sb, style->flex_grow_milli) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_flex_shrink)
+    {
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "flex-shrink: ") ||
+            !css_append_milli(sb, style->flex_shrink_milli) || !sb_append_char(sb, '\n'))
+        {
+            return false;
+        }
+    }
+    if (style->has_flex_basis)
+    {
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "flex-basis: ") ||
+            !css_append_length(sb, &style->flex_basis) || !sb_append_char(sb, '\n'))
         {
             return false;
         }

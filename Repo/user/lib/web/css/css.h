@@ -52,6 +52,8 @@ typedef enum
     CSS_DISPLAY_INLINE = 0,
     CSS_DISPLAY_BLOCK,
     CSS_DISPLAY_LIST_ITEM,
+    CSS_DISPLAY_FLEX,
+    CSS_DISPLAY_INLINE_FLEX,
     CSS_DISPLAY_NONE
 } css_display_t;
 
@@ -69,6 +71,40 @@ typedef enum
     CSS_CLEAR_RIGHT,
     CSS_CLEAR_BOTH
 } css_clear_t;
+
+typedef enum
+{
+    CSS_FLEX_DIRECTION_ROW = 0,
+    CSS_FLEX_DIRECTION_ROW_REVERSE,
+    CSS_FLEX_DIRECTION_COLUMN,
+    CSS_FLEX_DIRECTION_COLUMN_REVERSE
+} css_flex_direction_t;
+
+typedef enum
+{
+    CSS_FLEX_WRAP_NOWRAP = 0,
+    CSS_FLEX_WRAP_WRAP,
+    CSS_FLEX_WRAP_WRAP_REVERSE
+} css_flex_wrap_t;
+
+typedef enum
+{
+    CSS_JUSTIFY_FLEX_START = 0,
+    CSS_JUSTIFY_FLEX_END,
+    CSS_JUSTIFY_CENTER,
+    CSS_JUSTIFY_SPACE_BETWEEN,
+    CSS_JUSTIFY_SPACE_AROUND,
+    CSS_JUSTIFY_SPACE_EVENLY
+} css_justify_content_t;
+
+typedef enum
+{
+    CSS_ALIGN_STRETCH = 0,
+    CSS_ALIGN_FLEX_START,
+    CSS_ALIGN_FLEX_END,
+    CSS_ALIGN_CENTER,
+    CSS_ALIGN_BASELINE
+} css_align_t;
 
 typedef struct
 {
@@ -106,6 +142,28 @@ typedef struct
     video_color_t text_shadow_color;
     bool has_display;
     css_display_t display;
+    bool has_flex_direction;
+    css_flex_direction_t flex_direction;
+    bool has_flex_wrap;
+    css_flex_wrap_t flex_wrap;
+    bool has_justify_content;
+    css_justify_content_t justify_content;
+    bool has_align_items;
+    css_align_t align_items;
+    bool has_align_self;
+    css_align_t align_self;
+    bool has_align_content;
+    css_align_t align_content;
+    bool has_row_gap;
+    css_length_t row_gap;
+    bool has_column_gap;
+    css_length_t column_gap;
+    bool has_flex_grow;
+    int32_t flex_grow_milli;
+    bool has_flex_shrink;
+    int32_t flex_shrink_milli;
+    bool has_flex_basis;
+    css_length_t flex_basis;
     bool has_line_height;
     int32_t line_height_milli;
     bool line_height_is_length;

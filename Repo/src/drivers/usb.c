@@ -511,15 +511,24 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
     uhci_wait_result_t wait = uhci_wait_for_td(hc, last, wait_ms, is_interrupt);
     bool ok = (wait == UHCI_WAIT_OK);
     bool soft_no_data = false;
+    uint16_t status_snapshot = 0;
     if (wait == UHCI_WAIT_TIMEOUT && is_interrupt)
     {
-        /* Interrupt endpoints can legitimately NAK with no data; treat as empty. */
-        last->control &= ~UHCI_TD_CTRL_ACTIVE;
-        last->control |= UHCI_TD_CTRL_SPD;
-        /* Mark actual length as "no data" so callers see transferred=0. */
-        last->control = (last->control & ~UHCI_TD_CTRL_ACTLEN_MASK) | UHCI_TD_CTRL_ACTLEN_MASK;
-        soft_no_data = true;
-        ok = true;
+        status_snapshot = inw(hc->iobase + UHCI_USBSTS);
+        if (status_snapshot & (UHCI_STS_HCHALTED | UHCI_STS_HSE | UHCI_STS_HCPE | UHCI_STS_ERROR))
+        {
+            ok = false;
+        }
+        else
+        {
+            /* Interrupt endpoints can legitimately NAK with no data; treat as empty. */
+            last->control &= ~UHCI_TD_CTRL_ACTIVE;
+            last->control |= UHCI_TD_CTRL_SPD;
+            /* Mark actual length as "no data" so callers see transferred=0. */
+            last->control = (last->control & ~UHCI_TD_CTRL_ACTLEN_MASK) | UHCI_TD_CTRL_ACTLEN_MASK;
+            soft_no_data = true;
+            ok = true;
+        }
     }
     /* Unlink the chain before releasing the lock so the controller does not
        keep walking freed TDs on subsequent frames. */
@@ -531,19 +540,23 @@ static bool uhci_submit_chain(uhci_controller_t *hc,
         uint8_t pid = (uint8_t)(token & 0xFFu);
         uint8_t addr = (uint8_t)((token >> 8) & 0x7Fu);
         uint8_t ep = (uint8_t)((token >> 15) & 0x1Fu);
-        serial_printf("[usb] td chain %s pid=0x%02X addr=%u ep=%u ctrl=0x%08X last_ctrl=0x%08X\r\n",
+        if (status_snapshot == 0)
+        {
+            status_snapshot = inw(hc->iobase + UHCI_USBSTS);
+        }
+        serial_printf("[usb] td chain %s pid=0x%02X addr=%u ep=%u ctrl=0x%08X last_ctrl=0x%08X sts=0x%04X\r\n",
                       reason,
                       (unsigned)pid,
                       (unsigned)addr,
                       (unsigned)ep,
                       (unsigned)tds[0].control,
-                      (unsigned)last->control);
+                      (unsigned)last->control,
+                      (unsigned)status_snapshot);
         /* Stop the controller from continually re-walking this chain. */
         uhci_unlink_chain(tds, td_count);
-        outw(hc->iobase + UHCI_USBSTS, 0xFFFF);
+        outw(hc->iobase + UHCI_USBSTS, status_snapshot ? status_snapshot : 0xFFFF);
         /* If the controller halted, try to restart it so later transfers keep working. */
-        uint16_t sts = inw(hc->iobase + UHCI_USBSTS);
-        if (sts & UHCI_STS_HCHALTED)
+        if (status_snapshot & UHCI_STS_HCHALTED)
         {
             uhci_start(hc);
         }

@@ -1,245 +1,32 @@
-#include "atk/html_view/html_view_internal.h"
+#include "atk/html_view/render/render_internal.h"
 
-static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *parent_style);
-
-void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style)
+bool html_view_render_table_element(html_view_ctx_t *ctx,
+                                    const html_node_t *node,
+                                    const css_style_t *style,
+                                    const css_style_t *parent_style)
 {
-    if (!ctx || !node)
+    if (!ctx || !node || !style || node->type != HTML_NODE_ELEMENT || !node->name)
     {
-        return;
+        return false;
     }
-    for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+
+    if (strcmp(node->name, "table") != 0)
     {
-        html_view_render_node(ctx, child, style);
+        return false;
     }
+
+    html_view_render_table(ctx, node, style, parent_style);
+    return true;
 }
 
-static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *parent_style)
+bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style)
 {
-    if (!ctx || !node)
+    if (!ctx || !node || !style || node->type != HTML_NODE_ELEMENT || !node->name)
     {
-        return;
-    }
-
-    if (node->type == HTML_NODE_TEXT)
-    {
-        if (!node->text || !parent_style)
-        {
-            return;
-        }
-        video_color_t color = parent_style->has_color ? parent_style->color : video_make_color(0x00, 0x00, 0x00);
-        html_view_draw_text(ctx, node->text, color, ctx->text_underline, ctx->text_bold);
-        return;
-    }
-
-    if (node->type != HTML_NODE_ELEMENT || !node->name)
-    {
-        return;
+        return false;
     }
 
     const char *tag = node->name;
-    if (strcmp(tag, "noscript") == 0)
-    {
-        if (ctx->priv && ctx->priv->js_enabled)
-        {
-            return;
-        }
-    }
-    if (strcmp(tag, "head") == 0 ||
-        strcmp(tag, "style") == 0 ||
-        strcmp(tag, "meta") == 0 ||
-        strcmp(tag, "title") == 0 ||
-        strcmp(tag, "link") == 0 ||
-        strcmp(tag, "script") == 0)
-    {
-        return;
-    }
-
-    const css_style_t *style = html_view_style_push(ctx, parent_style, node);
-    if (!style)
-    {
-        return;
-    }
-    bool block = html_view_is_block_tag(tag);
-    if (style->has_display)
-    {
-        if (style->display == CSS_DISPLAY_INLINE)
-        {
-            block = false;
-        }
-        else if (style->display == CSS_DISPLAY_BLOCK || style->display == CSS_DISPLAY_LIST_ITEM)
-        {
-            block = true;
-        }
-    }
-
-    html_view_font_scope_t font_scope = {0};
-    bool font_pushed = false;
-    css_text_align_t saved_align = ctx->text_align_mode;
-    if (style->has_text_align)
-    {
-        ctx->text_align_mode = style->text_align;
-    }
-
-    if (style->has_display && style->display == CSS_DISPLAY_NONE)
-    {
-        goto out;
-    }
-
-    html_view_font_scope_push(ctx, style, block, &font_scope);
-    font_pushed = true;
-
-    if (style->has_float && style->float_mode != CSS_FLOAT_NONE &&
-        !html_view_is_form_control_tag(tag) &&
-        strcmp(tag, "img") != 0)
-    {
-        html_view_render_float_box(ctx, node, style, style->float_mode);
-        goto out;
-    }
-
-    if (strcmp(tag, "br") == 0)
-    {
-        const char *clear = html_attr_get(node, "clear");
-        if (clear && clear[0] != '\0' && ctx->floats)
-        {
-            css_clear_t clear_mode = CSS_CLEAR_NONE;
-            if (strcasecmp(clear, "all") == 0 || strcasecmp(clear, "both") == 0)
-            {
-                clear_mode = CSS_CLEAR_BOTH;
-            }
-            else if (strcasecmp(clear, "left") == 0)
-            {
-                clear_mode = CSS_CLEAR_LEFT;
-            }
-            else if (strcasecmp(clear, "right") == 0)
-            {
-                clear_mode = CSS_CLEAR_RIGHT;
-            }
-
-            if (clear_mode != CSS_CLEAR_NONE)
-            {
-                int clear_y = html_view_float_max_bottom(ctx->floats, clear_mode);
-                if (clear_y > ctx->y)
-                {
-                    ctx->y = clear_y;
-                    ctx->x = ctx->body_x;
-                    ctx->pending_space = false;
-                }
-            }
-        }
-        html_view_new_line(ctx);
-        goto out;
-    }
-
-    if (strcmp(tag, "table") == 0)
-    {
-        html_view_render_table(ctx, node, style, parent_style);
-        goto out;
-    }
-
-    if (strcmp(tag, "input") == 0)
-    {
-        const char *type = html_attr_get(node, "type");
-        if (!type || type[0] == '\0')
-        {
-            type = "text";
-        }
-        if (strcasecmp(type, "hidden") == 0)
-        {
-            goto out;
-        }
-
-        html_view_control_t *ctrl = html_view_control_find(ctx->priv, node);
-        if (ctrl && ctrl->widget)
-        {
-            int height = ctx->line_height;
-            int width = 24;
-            if (ctrl->kind == HTML_VIEW_CONTROL_INPUT_TEXT)
-            {
-                width = 240;
-                if (style->has_width && style->width.valid && !style->width.is_auto)
-                {
-                    int wpx = html_view_length_to_px(&style->width,
-                                                    ctx->viewport_w,
-                                                    ctx->viewport_h,
-                                                    ctx->body_w,
-                                                    ctx->viewport_h,
-                                                    ctx->base_font_px,
-                                                    true);
-                    if (wpx > 0)
-                    {
-                        width = wpx;
-                    }
-                }
-                else
-                {
-                    const char *size_attr = html_attr_get(node, "size");
-                    int size = (size_attr && size_attr[0] != '\0') ? atoi(size_attr) : 0;
-                    if (size > 0)
-                    {
-                        int ch_w = html_view_text_width(ctx, "0");
-                        if (ch_w <= 0)
-                        {
-                            ch_w = ctx->space_w > 0 ? ctx->space_w : 8;
-                        }
-                        int wpx = (size * ch_w) + 16;
-                        if (wpx > 0)
-                        {
-                            width = wpx;
-                        }
-                    }
-                }
-            }
-            else if (ctrl->kind == HTML_VIEW_CONTROL_BUTTON)
-            {
-                width = ctrl->widget->width > 0 ? ctrl->widget->width : 80;
-            }
-            else if (ctrl->kind == HTML_VIEW_CONTROL_CHECKBOX || ctrl->kind == HTML_VIEW_CONTROL_RADIO)
-            {
-                width = ctx->line_height;
-            }
-            html_view_place_inline_control(ctx, ctrl->widget, width, height);
-        }
-        else
-        {
-            video_color_t color = style->has_color ? style->color : video_make_color(0x00, 0x00, 0x00);
-            html_view_draw_text(ctx, "[input]", color, false, false);
-        }
-        goto out;
-    }
-
-    if (strcmp(tag, "textarea") == 0)
-    {
-        html_view_control_t *ctrl = html_view_control_find(ctx->priv, node);
-        if (ctrl && ctrl->widget)
-        {
-            int width = 360;
-            int height = ctx->line_height * 4;
-            if (height < 32)
-            {
-                height = 32;
-            }
-            html_view_place_block_control(ctx, ctrl->widget, width, height);
-        }
-        goto out;
-    }
-
-    if (strcmp(tag, "button") == 0)
-    {
-        html_view_control_t *ctrl = html_view_control_find(ctx->priv, node);
-        if (ctrl && ctrl->widget)
-        {
-            int height = ctx->line_height;
-            int width = ctrl->widget->width > 0 ? ctrl->widget->width : 100;
-            html_view_place_inline_control(ctx, ctrl->widget, width, height);
-        }
-        else
-        {
-            html_view_render_children(ctx, node, style);
-        }
-        goto out;
-    }
-
     if (strcmp(tag, "h1") == 0)
     {
         if (ctx->x != ctx->body_x)
@@ -426,7 +213,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         html_view_new_line(ctx);
         ctx->y += pad_bottom;
         ctx->pending_space = false;
-        goto out;
+        return true;
     }
 
     if (strcmp(tag, "p") == 0)
@@ -498,7 +285,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         html_view_ensure_line_visible(ctx);
         ctx->line_height = saved_line_height;
         ctx->pending_space = false;
-        goto out;
+        return true;
     }
 
     if (strcmp(tag, "ul") == 0)
@@ -525,7 +312,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
                 html_view_new_line(ctx);
             }
             ctx->pending_space = false;
-            goto out;
+            return true;
         }
 
         if (ctx->x != ctx->body_x)
@@ -548,7 +335,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
             html_view_new_line(ctx);
         }
         ctx->pending_space = false;
-        goto out;
+        return true;
     }
 
     if (strcmp(tag, "dl") == 0)
@@ -622,7 +409,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         ctx->y = new_y;
         ctx->pending_space = false;
         html_view_ensure_line_visible(ctx);
-        goto out;
+        return true;
     }
 
     if (strcmp(tag, "li") == 0)
@@ -641,7 +428,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
                 html_view_new_line(ctx);
             }
             ctx->pending_space = false;
-            goto out;
+            return true;
         }
 
         if (ctx->x != ctx->body_x)
@@ -679,7 +466,7 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
         ctx->max_x = saved_max_x;
         ctx->line_height = saved_line_height;
         ctx->pending_space = false;
-        goto out;
+        return true;
     }
 
     if (strcmp(tag, "img") == 0)
@@ -901,56 +688,8 @@ static void html_view_render_node(html_view_ctx_t *ctx, const html_node_t *node,
             ctx->line_op_start = 0;
         }
         html_view_ensure_line_visible(ctx);
-        goto out;
+        return true;
     }
 
-    if (strcmp(tag, "b") == 0 || strcmp(tag, "strong") == 0)
-    {
-        bool saved_bold = ctx->text_bold;
-        ctx->text_bold = true;
-        html_view_render_children(ctx, node, style);
-        ctx->text_bold = saved_bold;
-        goto out;
-    }
-
-    if (strcmp(tag, "a") == 0)
-    {
-        bool saved_underline = ctx->text_underline;
-        const char *saved_href = ctx->active_href;
-        const char *href = html_attr_get(node, "href");
-        if (!href || href[0] == '\0')
-        {
-            href = NULL;
-        }
-
-        bool underline = true;
-        if (style->has_text_decoration)
-        {
-            underline = (style->text_decoration == CSS_TEXT_DECORATION_UNDERLINE);
-        }
-        ctx->text_underline = underline;
-        ctx->active_href = href;
-        html_view_render_children(ctx, node, style);
-        ctx->text_underline = saved_underline;
-        ctx->active_href = saved_href;
-        goto out;
-    }
-
-    if (block && ctx->x != ctx->body_x)
-    {
-        html_view_new_line(ctx);
-    }
-    html_view_render_children(ctx, node, style);
-    if (block && ctx->x != ctx->body_x)
-    {
-        html_view_new_line(ctx);
-    }
-
-out:
-    ctx->text_align_mode = saved_align;
-    if (font_pushed)
-    {
-        html_view_font_scope_pop(ctx, &font_scope);
-    }
-    html_view_style_pop(ctx);
+    return false;
 }

@@ -91,6 +91,61 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
         dst->has_display = true;
         dst->display = src->display;
     }
+    if (src->has_flex_direction)
+    {
+        dst->has_flex_direction = true;
+        dst->flex_direction = src->flex_direction;
+    }
+    if (src->has_flex_wrap)
+    {
+        dst->has_flex_wrap = true;
+        dst->flex_wrap = src->flex_wrap;
+    }
+    if (src->has_justify_content)
+    {
+        dst->has_justify_content = true;
+        dst->justify_content = src->justify_content;
+    }
+    if (src->has_align_items)
+    {
+        dst->has_align_items = true;
+        dst->align_items = src->align_items;
+    }
+    if (src->has_align_self)
+    {
+        dst->has_align_self = true;
+        dst->align_self = src->align_self;
+    }
+    if (src->has_align_content)
+    {
+        dst->has_align_content = true;
+        dst->align_content = src->align_content;
+    }
+    if (src->has_row_gap)
+    {
+        dst->has_row_gap = true;
+        dst->row_gap = src->row_gap;
+    }
+    if (src->has_column_gap)
+    {
+        dst->has_column_gap = true;
+        dst->column_gap = src->column_gap;
+    }
+    if (src->has_flex_grow)
+    {
+        dst->has_flex_grow = true;
+        dst->flex_grow_milli = src->flex_grow_milli;
+    }
+    if (src->has_flex_shrink)
+    {
+        dst->has_flex_shrink = true;
+        dst->flex_shrink_milli = src->flex_shrink_milli;
+    }
+    if (src->has_flex_basis)
+    {
+        dst->has_flex_basis = true;
+        dst->flex_basis = src->flex_basis;
+    }
     if (src->has_line_height)
     {
         dst->has_line_height = true;

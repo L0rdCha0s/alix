@@ -149,6 +149,319 @@ static bool css_parse_text_shadow_value(const char *start,
     return true;
 }
 
+static bool css_parse_flex_direction_keyword(const char *start, const char *end, css_flex_direction_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    size_t len = (size_t)(end - start);
+    if (len == 3 && strncasecmp(start, "row", 3) == 0)
+    {
+        *out = CSS_FLEX_DIRECTION_ROW;
+        return true;
+    }
+    if (len == 11 && strncasecmp(start, "row-reverse", 11) == 0)
+    {
+        *out = CSS_FLEX_DIRECTION_ROW_REVERSE;
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "column", 6) == 0)
+    {
+        *out = CSS_FLEX_DIRECTION_COLUMN;
+        return true;
+    }
+    if (len == 14 && strncasecmp(start, "column-reverse", 14) == 0)
+    {
+        *out = CSS_FLEX_DIRECTION_COLUMN_REVERSE;
+        return true;
+    }
+    return false;
+}
+
+static bool css_parse_flex_wrap_keyword(const char *start, const char *end, css_flex_wrap_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    size_t len = (size_t)(end - start);
+    if (len == 6 && strncasecmp(start, "nowrap", 6) == 0)
+    {
+        *out = CSS_FLEX_WRAP_NOWRAP;
+        return true;
+    }
+    if (len == 4 && strncasecmp(start, "wrap", 4) == 0)
+    {
+        *out = CSS_FLEX_WRAP_WRAP;
+        return true;
+    }
+    if (len == 11 && strncasecmp(start, "wrap-reverse", 11) == 0)
+    {
+        *out = CSS_FLEX_WRAP_WRAP_REVERSE;
+        return true;
+    }
+    return false;
+}
+
+static bool css_parse_justify_keyword(const char *start, const char *end, css_justify_content_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    size_t len = (size_t)(end - start);
+    if ((len == 10 && strncasecmp(start, "flex-start", 10) == 0) ||
+        (len == 5 && strncasecmp(start, "start", 5) == 0))
+    {
+        *out = CSS_JUSTIFY_FLEX_START;
+        return true;
+    }
+    if ((len == 8 && strncasecmp(start, "flex-end", 8) == 0) ||
+        (len == 3 && strncasecmp(start, "end", 3) == 0))
+    {
+        *out = CSS_JUSTIFY_FLEX_END;
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "center", 6) == 0)
+    {
+        *out = CSS_JUSTIFY_CENTER;
+        return true;
+    }
+    if (len == 13 && strncasecmp(start, "space-between", 13) == 0)
+    {
+        *out = CSS_JUSTIFY_SPACE_BETWEEN;
+        return true;
+    }
+    if (len == 11 && strncasecmp(start, "space-around", 11) == 0)
+    {
+        *out = CSS_JUSTIFY_SPACE_AROUND;
+        return true;
+    }
+    if (len == 12 && strncasecmp(start, "space-evenly", 12) == 0)
+    {
+        *out = CSS_JUSTIFY_SPACE_EVENLY;
+        return true;
+    }
+    return false;
+}
+
+static bool css_parse_align_keyword(const char *start, const char *end, css_align_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    size_t len = (size_t)(end - start);
+    if (len == 7 && strncasecmp(start, "stretch", 7) == 0)
+    {
+        *out = CSS_ALIGN_STRETCH;
+        return true;
+    }
+    if ((len == 10 && strncasecmp(start, "flex-start", 10) == 0) ||
+        (len == 5 && strncasecmp(start, "start", 5) == 0))
+    {
+        *out = CSS_ALIGN_FLEX_START;
+        return true;
+    }
+    if ((len == 8 && strncasecmp(start, "flex-end", 8) == 0) ||
+        (len == 3 && strncasecmp(start, "end", 3) == 0))
+    {
+        *out = CSS_ALIGN_FLEX_END;
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "center", 6) == 0)
+    {
+        *out = CSS_ALIGN_CENTER;
+        return true;
+    }
+    if (len == 8 && strncasecmp(start, "baseline", 8) == 0)
+    {
+        *out = CSS_ALIGN_BASELINE;
+        return true;
+    }
+    return false;
+}
+
+static bool css_parse_gap_value(const char *start,
+                                const char *end,
+                                css_length_t *out_row,
+                                css_length_t *out_col,
+                                bool *out_row_set,
+                                bool *out_col_set)
+{
+    if (!out_row || !out_col || !out_row_set || !out_col_set)
+    {
+        return false;
+    }
+    *out_row_set = false;
+    *out_col_set = false;
+    css_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return false;
+    }
+    const char *p = start;
+    const char *tok_s = NULL;
+    const char *tok_e = NULL;
+    if (!css_next_token(&p, end, &tok_s, &tok_e))
+    {
+        return false;
+    }
+    if (!css_parse_length_token(tok_s, tok_e, out_row))
+    {
+        return false;
+    }
+    *out_row_set = true;
+
+    if (css_next_token(&p, end, &tok_s, &tok_e))
+    {
+        if (!css_parse_length_token(tok_s, tok_e, out_col))
+        {
+            return false;
+        }
+        *out_col_set = true;
+    }
+    else
+    {
+        *out_col = *out_row;
+        *out_col_set = true;
+    }
+    return true;
+}
+
+static void css_apply_flex_shorthand(css_style_t *style, const char *start, const char *end)
+{
+    if (!style)
+    {
+        return;
+    }
+    css_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return;
+    }
+    size_t len = (size_t)(end - start);
+    if (len == 4 && strncasecmp(start, "none", 4) == 0)
+    {
+        style->has_flex_grow = true;
+        style->flex_grow_milli = 0;
+        style->has_flex_shrink = true;
+        style->flex_shrink_milli = 0;
+        style->has_flex_basis = true;
+        style->flex_basis.valid = true;
+        style->flex_basis.is_auto = true;
+        style->flex_basis.value_milli = 0;
+        style->flex_basis.unit = CSS_UNIT_NONE;
+        return;
+    }
+    if (len == 4 && strncasecmp(start, "auto", 4) == 0)
+    {
+        style->has_flex_grow = true;
+        style->flex_grow_milli = 1000;
+        style->has_flex_shrink = true;
+        style->flex_shrink_milli = 1000;
+        style->has_flex_basis = true;
+        style->flex_basis.valid = true;
+        style->flex_basis.is_auto = true;
+        style->flex_basis.value_milli = 0;
+        style->flex_basis.unit = CSS_UNIT_NONE;
+        return;
+    }
+    if (len == 7 && strncasecmp(start, "initial", 7) == 0)
+    {
+        style->has_flex_grow = true;
+        style->flex_grow_milli = 0;
+        style->has_flex_shrink = true;
+        style->flex_shrink_milli = 1000;
+        style->has_flex_basis = true;
+        style->flex_basis.valid = true;
+        style->flex_basis.is_auto = true;
+        style->flex_basis.value_milli = 0;
+        style->flex_basis.unit = CSS_UNIT_NONE;
+        return;
+    }
+
+    int32_t grow = -1;
+    int32_t shrink = -1;
+    css_length_t basis = {0};
+    bool basis_set = false;
+
+    const char *p = start;
+    const char *tok_s = NULL;
+    const char *tok_e = NULL;
+    while (css_next_token(&p, end, &tok_s, &tok_e))
+    {
+        if (tok_s >= tok_e)
+        {
+            continue;
+        }
+        int32_t num_milli = 0;
+        if (css_parse_number_milli(tok_s, tok_e, &num_milli))
+        {
+            if (grow < 0)
+            {
+                grow = num_milli;
+            }
+            else if (shrink < 0)
+            {
+                shrink = num_milli;
+            }
+            continue;
+        }
+
+        if ((size_t)(tok_e - tok_s) == 4 && strncasecmp(tok_s, "auto", 4) == 0)
+        {
+            basis.valid = true;
+            basis.is_auto = true;
+            basis.value_milli = 0;
+            basis.unit = CSS_UNIT_NONE;
+            basis_set = true;
+            continue;
+        }
+
+        css_length_t len_val;
+        if (css_parse_length_token(tok_s, tok_e, &len_val))
+        {
+            basis = len_val;
+            basis_set = true;
+            continue;
+        }
+    }
+
+    if (grow >= 0)
+    {
+        style->has_flex_grow = true;
+        style->flex_grow_milli = grow;
+    }
+    if (shrink >= 0)
+    {
+        style->has_flex_shrink = true;
+        style->flex_shrink_milli = shrink;
+    }
+    if (basis_set)
+    {
+        style->has_flex_basis = true;
+        style->flex_basis = basis;
+    }
+
+    if (grow >= 0 && shrink < 0)
+    {
+        style->has_flex_shrink = true;
+        style->flex_shrink_milli = 1000;
+    }
+    if (grow >= 0 && !basis_set)
+    {
+        css_length_t zero = { .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_PX };
+        style->has_flex_basis = true;
+        style->flex_basis = zero;
+    }
+}
+
 void css_style_apply_property(css_style_t *style,
                               const char *prop_start,
                               const char *prop_end,
@@ -589,26 +902,23 @@ void css_style_apply_property(css_style_t *style,
         }
         else if (len == 4 && strncasecmp(s, "flex", 4) == 0)
         {
-            /* Treat flex containers as block-level when flex layout isn't supported. */
             style->has_display = true;
-            style->display = CSS_DISPLAY_BLOCK;
+            style->display = CSS_DISPLAY_FLEX;
         }
         else if (len == 10 && strncasecmp(s, "inline-flex", 10) == 0)
         {
-            /* Fallback: behave like inline. */
             style->has_display = true;
-            style->display = CSS_DISPLAY_INLINE;
+            style->display = CSS_DISPLAY_INLINE_FLEX;
         }
         else if (len == 11 && strncasecmp(s, "-webkit-box", 11) == 0)
         {
-            /* Old flexbox syntax; best-effort fallback. */
             style->has_display = true;
-            style->display = CSS_DISPLAY_BLOCK;
+            style->display = CSS_DISPLAY_FLEX;
         }
         else if (len == 12 && strncasecmp(s, "-webkit-flex", 12) == 0)
         {
             style->has_display = true;
-            style->display = CSS_DISPLAY_BLOCK;
+            style->display = CSS_DISPLAY_FLEX;
         }
         else if (len == 9 && strncasecmp(s, "list-item", 9) == 0)
         {
@@ -620,6 +930,157 @@ void css_style_apply_property(css_style_t *style,
             style->has_display = true;
             style->display = CSS_DISPLAY_NONE;
         }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 14 && strncasecmp(prop_start, "flex-direction", 14) == 0)
+    {
+        css_flex_direction_t dir = CSS_FLEX_DIRECTION_ROW;
+        if (css_parse_flex_direction_keyword(val_start, val_end, &dir))
+        {
+            style->has_flex_direction = true;
+            style->flex_direction = dir;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 9 && strncasecmp(prop_start, "flex-wrap", 9) == 0)
+    {
+        css_flex_wrap_t wrap = CSS_FLEX_WRAP_NOWRAP;
+        if (css_parse_flex_wrap_keyword(val_start, val_end, &wrap))
+        {
+            style->has_flex_wrap = true;
+            style->flex_wrap = wrap;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 15 && strncasecmp(prop_start, "justify-content", 15) == 0)
+    {
+        css_justify_content_t justify = CSS_JUSTIFY_FLEX_START;
+        if (css_parse_justify_keyword(val_start, val_end, &justify))
+        {
+            style->has_justify_content = true;
+            style->justify_content = justify;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 11 && strncasecmp(prop_start, "align-items", 11) == 0)
+    {
+        css_align_t align = CSS_ALIGN_STRETCH;
+        if (css_parse_align_keyword(val_start, val_end, &align))
+        {
+            style->has_align_items = true;
+            style->align_items = align;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "align-self", 10) == 0)
+    {
+        css_align_t align = CSS_ALIGN_STRETCH;
+        if (css_parse_align_keyword(val_start, val_end, &align))
+        {
+            style->has_align_self = true;
+            style->align_self = align;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 13 && strncasecmp(prop_start, "align-content", 13) == 0)
+    {
+        css_align_t align = CSS_ALIGN_STRETCH;
+        if (css_parse_align_keyword(val_start, val_end, &align))
+        {
+            style->has_align_content = true;
+            style->align_content = align;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 3 && strncasecmp(prop_start, "gap", 3) == 0)
+    {
+        css_length_t row = {0};
+        css_length_t col = {0};
+        bool row_set = false;
+        bool col_set = false;
+        if (css_parse_gap_value(val_start, val_end, &row, &col, &row_set, &col_set))
+        {
+            if (row_set)
+            {
+                style->has_row_gap = true;
+                style->row_gap = row;
+            }
+            if (col_set)
+            {
+                style->has_column_gap = true;
+                style->column_gap = col;
+            }
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 7 && strncasecmp(prop_start, "row-gap", 7) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_row_gap = true;
+            style->row_gap = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "column-gap", 10) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_column_gap = true;
+            style->column_gap = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 9 && strncasecmp(prop_start, "flex-grow", 9) == 0)
+    {
+        int32_t num_milli = 0;
+        if (css_parse_number_milli(val_start, val_end, &num_milli))
+        {
+            if (num_milli < 0) num_milli = 0;
+            style->has_flex_grow = true;
+            style->flex_grow_milli = num_milli;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 11 && strncasecmp(prop_start, "flex-shrink", 11) == 0)
+    {
+        int32_t num_milli = 0;
+        if (css_parse_number_milli(val_start, val_end, &num_milli))
+        {
+            if (num_milli < 0) num_milli = 0;
+            style->has_flex_shrink = true;
+            style->flex_shrink_milli = num_milli;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "flex-basis", 10) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_flex_basis = true;
+            style->flex_basis = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 4 && strncasecmp(prop_start, "flex", 4) == 0)
+    {
+        css_apply_flex_shorthand(style, val_start, val_end);
         return;
     }
 
