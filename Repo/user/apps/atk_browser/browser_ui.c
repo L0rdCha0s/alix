@@ -440,6 +440,26 @@ bool browser_tick(void *context)
                 }
                 break;
             }
+            case BROWSER_UI_EVENT_SCRIPT_APPEND:
+            {
+                if (browser_load_is_active(app, ev.load_id))
+                {
+                    bool ok = atk_html_view_add_script(app->viewer,
+                                                       ev.u.script_append.script,
+                                                       ev.u.script_append.len);
+                    browser_debug_logf(app,
+                                       "[js] %s src=%s bytes=%u",
+                                       ok ? "queued" : "failed",
+                                       ev.u.script_append.src ? ev.u.script_append.src : "(null)",
+                                       (unsigned)ev.u.script_append.len);
+                    if (ok)
+                    {
+                        atk_window_mark_dirty(app->window);
+                        redraw = true;
+                    }
+                }
+                break;
+            }
             case BROWSER_UI_EVENT_IMAGE_PNG:
             {
                 if (browser_load_is_active(app, ev.load_id))
@@ -643,4 +663,3 @@ bool browser_build_ui(browser_app_t *app)
                                  NULL);
     return true;
 }
-

@@ -29,6 +29,7 @@
 #define BROWSER_DEBUG_WINDOW_HEIGHT 420
 #define BROWSER_MAX_STYLESHEETS 8
 #define BROWSER_MAX_IMAGES 16
+#define BROWSER_MAX_SCRIPTS 16
 #define BROWSER_UI_EVENT_QUEUE_CAP 64
 #define BROWSER_MAX_LOAD_THREADS 32
 
@@ -45,6 +46,7 @@ typedef enum
     BROWSER_UI_EVENT_DOC_READY = 0,
     BROWSER_UI_EVENT_ERROR,
     BROWSER_UI_EVENT_CSS_APPEND,
+    BROWSER_UI_EVENT_SCRIPT_APPEND,
     BROWSER_UI_EVENT_IMAGE_PNG,
     BROWSER_UI_EVENT_THREAD_DONE
 } browser_ui_event_type_t;
@@ -69,6 +71,12 @@ typedef struct
             char *css;
             size_t len;
         } css_append;
+        struct
+        {
+            char *src;
+            char *script;
+            size_t len;
+        } script_append;
         struct
         {
             char *src;
@@ -145,7 +153,9 @@ void browser_collect_resource_urls(browser_app_t *app,
                                   char **css_urls,
                                   size_t *css_count_io,
                                   char **img_urls,
-                                  size_t *img_count_io);
+                                  size_t *img_count_io,
+                                  char **script_urls,
+                                  size_t *script_count_io);
 
 /* http */
 char *browser_fetch_http(browser_app_t *app,
@@ -178,4 +188,3 @@ bool browser_on_mouse_event(const user_atk_event_t *event, void *context);
 void browser_on_close_event(void *context);
 
 #endif /* ATK_BROWSER_INTERNAL_H */
-

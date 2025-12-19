@@ -1,0 +1,2059 @@
+typedef struct html_view_js_script
+{
+    char *source;
+    size_t len;
+    struct html_view_js_script *next;
+} html_view_js_script_t;
+
+static char *html_view_js_strdup_len(const char *src, size_t len)
+{
+    if (!src)
+    {
+        src = "";
+        len = 0;
+    }
+    char *dst = (char *)malloc(len + 1);
+    if (!dst)
+    {
+        return NULL;
+    }
+    if (len)
+    {
+        memcpy(dst, src, len);
+    }
+    dst[len] = '\0';
+    return dst;
+}
+
+static void html_view_dom_lock(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    alix_mutex_lock(&priv->dom_lock);
+}
+
+static void html_view_dom_unlock(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    alix_mutex_unlock(&priv->dom_lock);
+}
+
+static void html_view_js_handles_reset(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    free(priv->js_handles);
+    priv->js_handles = NULL;
+    priv->js_handle_count = 0;
+    priv->js_handle_cap = 0;
+}
+
+static size_t html_view_js_handle_for_node(atk_html_view_priv_t *priv, html_node_t *node)
+{
+    if (!priv || !node)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i < priv->js_handle_count; ++i)
+    {
+        if (priv->js_handles[i] == node)
+        {
+            return i + 1;
+        }
+    }
+    if (priv->js_handle_count == priv->js_handle_cap)
+    {
+        size_t new_cap = priv->js_handle_cap ? (priv->js_handle_cap * 2) : 64;
+        html_node_t **new_handles = (html_node_t **)realloc(priv->js_handles, new_cap * sizeof(*new_handles));
+        if (!new_handles)
+        {
+            return 0;
+        }
+        priv->js_handles = new_handles;
+        priv->js_handle_cap = new_cap;
+    }
+    priv->js_handles[priv->js_handle_count++] = node;
+    return priv->js_handle_count;
+}
+
+static html_node_t *html_view_js_node_for_handle(atk_html_view_priv_t *priv, size_t handle)
+{
+    if (!priv || handle == 0 || handle > priv->js_handle_count)
+    {
+        return NULL;
+    }
+    return priv->js_handles[handle - 1];
+}
+
+static bool html_view_js_handle_from_value(const js_value_t *value, size_t *handle_out)
+{
+    if (!handle_out || !value || value->type != JS_VALUE_NUMBER)
+    {
+        return false;
+    }
+    double number = value->as.number;
+    if (number < 1.0)
+    {
+        return false;
+    }
+    size_t handle = (size_t)number;
+    if ((double)handle != number)
+    {
+        return false;
+    }
+    *handle_out = handle;
+    return true;
+}
+
+static bool html_view_js_should_stop(const atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return true;
+    }
+    return __atomic_load_n(&priv->js_stop, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void html_view_js_mark_dirty(atk_html_view_priv_t *priv, uint32_t flags)
+{
+    if (!priv)
+    {
+        return;
+    }
+    __atomic_fetch_or(&priv->js_dirty, flags, __ATOMIC_RELEASE);
+}
+
+static uint32_t html_view_js_take_dirty(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return 0;
+    }
+    return __atomic_exchange_n(&priv->js_dirty, 0u, __ATOMIC_ACQ_REL);
+}
+
+static void html_view_js_scripts_clear_locked(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    html_view_js_script_t *cur = priv->js_script_head;
+    priv->js_script_head = NULL;
+    priv->js_script_tail = NULL;
+    while (cur)
+    {
+        html_view_js_script_t *next = cur->next;
+        free(cur->source);
+        free(cur);
+        cur = next;
+    }
+}
+
+static void html_view_js_scripts_append_locked(atk_html_view_priv_t *priv, html_view_js_script_t *scripts)
+{
+    if (!priv || !scripts)
+    {
+        return;
+    }
+    if (priv->js_script_tail)
+    {
+        priv->js_script_tail->next = scripts;
+    }
+    else
+    {
+        priv->js_script_head = scripts;
+    }
+    html_view_js_script_t *tail = scripts;
+    while (tail->next)
+    {
+        tail = tail->next;
+    }
+    priv->js_script_tail = tail;
+}
+
+static html_view_js_script_t *html_view_js_pop_script_locked(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return NULL;
+    }
+    html_view_js_script_t *script = priv->js_script_head;
+    if (!script)
+    {
+        return NULL;
+    }
+    priv->js_script_head = script->next;
+    if (!priv->js_script_head)
+    {
+        priv->js_script_tail = NULL;
+    }
+    script->next = NULL;
+    return script;
+}
+
+static bool html_view_js_queue_source_locked(atk_html_view_priv_t *priv, const char *source, size_t len)
+{
+    if (!priv || !source || len == 0)
+    {
+        return false;
+    }
+    html_view_js_script_t *script = (html_view_js_script_t *)calloc(1, sizeof(*script));
+    if (!script)
+    {
+        return false;
+    }
+    script->source = html_view_js_strdup_len(source, len);
+    if (!script->source)
+    {
+        free(script);
+        return false;
+    }
+    script->len = len;
+    script->next = NULL;
+    if (priv->js_script_tail)
+    {
+        priv->js_script_tail->next = script;
+    }
+    else
+    {
+        priv->js_script_head = script;
+    }
+    priv->js_script_tail = script;
+    return true;
+}
+
+static html_view_js_script_t *html_view_js_collect_scripts(const html_node_t *node)
+{
+    if (!node)
+    {
+        return NULL;
+    }
+
+    const html_node_t **stack = NULL;
+    size_t stack_cap = 0;
+    size_t sp = 0;
+    const html_node_t *cur = node->first_child;
+
+    html_view_js_script_t *head = NULL;
+    html_view_js_script_t *tail = NULL;
+
+    while (cur)
+    {
+        bool descend = cur->first_child != NULL;
+        if (cur->type == HTML_NODE_ELEMENT && cur->name && strcmp(cur->name, "script") == 0)
+        {
+            char *text = NULL;
+            size_t text_len = 0;
+            size_t text_cap = 0;
+            bool ok = true;
+
+            for (const html_node_t *txt = cur->first_child; txt; txt = txt->next_sibling)
+            {
+                if (txt->type == HTML_NODE_TEXT && txt->text)
+                {
+                    if (!html_view_buf_append(&text, &text_len, &text_cap, txt->text, strlen(txt->text)) ||
+                        !html_view_buf_append(&text, &text_len, &text_cap, "\n", 1))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+
+            if (ok && text && text_len > 0)
+            {
+                html_view_js_script_t *entry = (html_view_js_script_t *)calloc(1, sizeof(*entry));
+                if (entry)
+                {
+                    entry->source = text;
+                    entry->len = text_len;
+                    if (tail)
+                    {
+                        tail->next = entry;
+                    }
+                    else
+                    {
+                        head = entry;
+                    }
+                    tail = entry;
+                }
+                else
+                {
+                    free(text);
+                }
+            }
+            else
+            {
+                free(text);
+            }
+
+            descend = false;
+        }
+
+        if (descend)
+        {
+            if (cur->next_sibling)
+            {
+                if (sp == stack_cap)
+                {
+                    size_t new_cap = stack_cap ? (stack_cap * 2) : 64;
+                    const html_node_t **new_stack = (const html_node_t **)realloc(stack, new_cap * sizeof(*new_stack));
+                    if (!new_stack)
+                    {
+                        break;
+                    }
+                    stack = new_stack;
+                    stack_cap = new_cap;
+                }
+                stack[sp++] = cur->next_sibling;
+            }
+            cur = cur->first_child;
+            continue;
+        }
+
+        if (cur->next_sibling)
+        {
+            cur = cur->next_sibling;
+            continue;
+        }
+        if (sp > 0)
+        {
+            cur = stack[--sp];
+            continue;
+        }
+        break;
+    }
+
+    free(stack);
+    return head;
+}
+
+static bool html_view_js_node_name_is(const html_node_t *node, const char *tag)
+{
+    return node && node->type == HTML_NODE_ELEMENT && node->name && tag && strcmp(node->name, tag) == 0;
+}
+
+static bool html_view_js_node_is_style(const html_node_t *node)
+{
+    return html_view_js_node_name_is(node, "style");
+}
+
+static bool html_view_js_node_affects_controls(const html_node_t *node)
+{
+    for (const html_node_t *cur = node; cur; cur = cur->parent)
+    {
+        if (cur->type != HTML_NODE_ELEMENT || !cur->name)
+        {
+            continue;
+        }
+        if (strcmp(cur->name, "input") == 0 ||
+            strcmp(cur->name, "textarea") == 0 ||
+            strcmp(cur->name, "button") == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool html_view_js_attr_has_token(const char *value, const char *token)
+{
+    if (!value || !token || token[0] == '\0')
+    {
+        return false;
+    }
+    size_t token_len = strlen(token);
+    if (token_len == 0)
+    {
+        return false;
+    }
+    const char *p = value;
+    while (*p)
+    {
+        while (*p && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == token_len && strncmp(start, token, token_len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static html_node_t *html_view_js_find_element_by_id(const html_node_t *root, const char *id)
+{
+    if (!root || !id || id[0] == '\0')
+    {
+        return NULL;
+    }
+
+    const html_node_t **stack = NULL;
+    size_t stack_cap = 0;
+    size_t sp = 0;
+    const html_node_t *cur = root;
+
+    while (cur)
+    {
+        if (cur->type == HTML_NODE_ELEMENT && cur->name)
+        {
+            const char *attr = html_attr_get(cur, "id");
+            if (attr && strcmp(attr, id) == 0)
+            {
+                free(stack);
+                return (html_node_t *)cur;
+            }
+        }
+
+        if (cur->first_child)
+        {
+            if (cur->next_sibling)
+            {
+                if (sp == stack_cap)
+                {
+                    size_t new_cap = stack_cap ? (stack_cap * 2) : 64;
+                    const html_node_t **new_stack = (const html_node_t **)realloc(stack, new_cap * sizeof(*new_stack));
+                    if (!new_stack)
+                    {
+                        break;
+                    }
+                    stack = new_stack;
+                    stack_cap = new_cap;
+                }
+                stack[sp++] = cur->next_sibling;
+            }
+            cur = cur->first_child;
+            continue;
+        }
+
+        if (cur->next_sibling)
+        {
+            cur = cur->next_sibling;
+            continue;
+        }
+        if (sp > 0)
+        {
+            cur = stack[--sp];
+            continue;
+        }
+        break;
+    }
+
+    free(stack);
+    return NULL;
+}
+
+static html_node_t *html_view_js_create_node(html_node_type_t type)
+{
+    html_node_t *node = (html_node_t *)calloc(1, sizeof(*node));
+    if (!node)
+    {
+        return NULL;
+    }
+    node->type = type;
+    return node;
+}
+
+static void html_view_js_append_child(html_node_t *parent, html_node_t *child)
+{
+    if (!parent || !child)
+    {
+        return;
+    }
+    child->parent = parent;
+    child->prev_sibling = parent->last_child;
+    child->next_sibling = NULL;
+    if (parent->last_child)
+    {
+        parent->last_child->next_sibling = child;
+    }
+    else
+    {
+        parent->first_child = child;
+    }
+    parent->last_child = child;
+}
+
+static bool html_view_js_node_set_text(html_node_t *node, const char *text, size_t len)
+{
+    if (!node)
+    {
+        return false;
+    }
+
+    char *copy = html_view_js_strdup_len(text, len);
+    if (!copy)
+    {
+        return false;
+    }
+
+    if (node->type == HTML_NODE_TEXT)
+    {
+        free(node->text);
+        node->text = copy;
+        return true;
+    }
+
+    html_node_t *target = NULL;
+    for (html_node_t *child = node->first_child; child; child = child->next_sibling)
+    {
+        if (child->type == HTML_NODE_TEXT)
+        {
+            target = child;
+            break;
+        }
+    }
+    if (!target)
+    {
+        target = html_view_js_create_node(HTML_NODE_TEXT);
+        if (!target)
+        {
+            free(copy);
+            return false;
+        }
+        html_view_js_append_child(node, target);
+    }
+
+    free(target->text);
+    target->text = copy;
+    return true;
+}
+
+static bool html_view_js_node_set_attr(html_node_t *node, const char *name, const char *value)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT || !name || name[0] == '\0' || !value)
+    {
+        return false;
+    }
+
+    for (html_attr_t *attr = node->attrs; attr; attr = attr->next)
+    {
+        if (!attr->name)
+        {
+            continue;
+        }
+        if (strcasecmp(attr->name, name) != 0)
+        {
+            continue;
+        }
+        char *copy = html_view_strdup(value);
+        if (!copy)
+        {
+            return false;
+        }
+        free(attr->value);
+        attr->value = copy;
+        return true;
+    }
+
+    html_attr_t *attr = (html_attr_t *)calloc(1, sizeof(*attr));
+    if (!attr)
+    {
+        return false;
+    }
+    attr->name = html_view_strdup(name);
+    attr->value = html_view_strdup(value);
+    if (!attr->name || !attr->value)
+    {
+        free(attr->name);
+        free(attr->value);
+        free(attr);
+        return false;
+    }
+    attr->next = node->attrs;
+    node->attrs = attr;
+    return true;
+}
+
+static bool html_view_js_node_remove_attr(html_node_t *node, const char *name)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT || !name || name[0] == '\0')
+    {
+        return false;
+    }
+
+    html_attr_t *prev = NULL;
+    for (html_attr_t *attr = node->attrs; attr; attr = attr->next)
+    {
+        if (!attr->name)
+        {
+            prev = attr;
+            continue;
+        }
+        if (strcasecmp(attr->name, name) == 0)
+        {
+            if (prev)
+            {
+                prev->next = attr->next;
+            }
+            else
+            {
+                node->attrs = attr->next;
+            }
+            free(attr->name);
+            free(attr->value);
+            free(attr);
+            return true;
+        }
+        prev = attr;
+    }
+    return false;
+}
+
+static void html_view_js_note_dom_change(atk_html_view_priv_t *priv, bool styles_dirty, bool controls_dirty)
+{
+    uint32_t flags = HTML_VIEW_JS_DIRTY_RENDER;
+    if (styles_dirty)
+    {
+        flags |= HTML_VIEW_JS_DIRTY_STYLES;
+    }
+    if (controls_dirty)
+    {
+        flags |= HTML_VIEW_JS_DIRTY_CONTROLS;
+    }
+    html_view_js_mark_dirty(priv, flags);
+}
+
+static bool html_view_js_out_string(js_value_t *out,
+                                    const char *text,
+                                    size_t len,
+                                    char **error_message)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (!js_value_make_string(out, text, len))
+    {
+        if (error_message)
+        {
+            *error_message = html_view_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool html_view_js_out_array(js_value_t *out, char **error_message)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (!js_value_make_array(out))
+    {
+        if (error_message)
+        {
+            *error_message = html_view_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool html_view_js_array_push_handle(js_value_t *array, size_t handle, char **error_message)
+{
+    if (!array)
+    {
+        return false;
+    }
+    js_value_t value = js_value_make_number((double)handle);
+    if (!js_value_array_push(array, &value))
+    {
+        if (error_message)
+        {
+            *error_message = html_view_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool html_view_js_dom_get_root(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv || !priv->doc || !priv->doc->root)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    size_t handle = html_view_js_handle_for_node(priv, priv->doc->root);
+    html_view_dom_unlock(priv);
+
+    if (!handle)
+    {
+        *out = js_value_make_null();
+    }
+    else
+    {
+        *out = js_value_make_number((double)handle);
+    }
+    return true;
+}
+
+static bool html_view_js_dom_get_element_by_id(js_runtime_t *rt,
+                                               size_t argc,
+                                               const js_value_t *argv,
+                                               void *user_data,
+                                               js_value_t *out,
+                                               char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 1 || !argv || argv[0].type != JS_VALUE_STRING)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    const char *id = argv[0].as.string.data ? argv[0].as.string.data : "";
+    if (id[0] == '\0')
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv || !priv->doc || !priv->doc->root)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_find_element_by_id(priv->doc->root, id);
+    size_t handle = html_view_js_handle_for_node(priv, node);
+    html_view_dom_unlock(priv);
+
+    if (!handle)
+    {
+        *out = js_value_make_null();
+    }
+    else
+    {
+        *out = js_value_make_number((double)handle);
+    }
+    return true;
+}
+
+static bool html_view_js_dom_get_type(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 1 || !argv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    html_view_dom_unlock(priv);
+
+    if (!node)
+    {
+        *out = js_value_make_null();
+    }
+    else
+    {
+        *out = js_value_make_number((double)node->type);
+    }
+    return true;
+}
+
+static bool html_view_js_dom_get_tag(js_runtime_t *rt,
+                                     size_t argc,
+                                     const js_value_t *argv,
+                                     void *user_data,
+                                     js_value_t *out,
+                                     char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 1 || !argv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    const char *name = (node && node->type == HTML_NODE_ELEMENT && node->name) ? node->name : NULL;
+    size_t len = name ? strlen(name) : 0;
+    bool ok = true;
+    if (name)
+    {
+        ok = html_view_js_out_string(out, name, len, error_message);
+    }
+    else
+    {
+        *out = js_value_make_null();
+    }
+    html_view_dom_unlock(priv);
+    return ok;
+}
+
+static bool html_view_js_dom_get_attr(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 2 || !argv || argv[1].type != JS_VALUE_STRING)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    const char *attr_name = argv[1].as.string.data ? argv[1].as.string.data : "";
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    const char *value = (node && node->type == HTML_NODE_ELEMENT) ? html_attr_get(node, attr_name) : NULL;
+    size_t len = value ? strlen(value) : 0;
+    bool ok = true;
+    if (value)
+    {
+        ok = html_view_js_out_string(out, value, len, error_message);
+    }
+    else
+    {
+        *out = js_value_make_null();
+    }
+    html_view_dom_unlock(priv);
+    return ok;
+}
+
+static bool html_view_js_dom_set_attr(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 2 || !argv || argv[1].type != JS_VALUE_STRING)
+    {
+        *out = js_value_make_bool(false);
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_bool(false);
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_bool(false);
+        return true;
+    }
+
+    const char *attr_name = argv[1].as.string.data ? argv[1].as.string.data : "";
+    const char *attr_value = NULL;
+    bool remove_attr = false;
+
+    if (argc >= 3 && argv[2].type == JS_VALUE_STRING)
+    {
+        attr_value = argv[2].as.string.data ? argv[2].as.string.data : "";
+    }
+    else if (argc >= 3 && (argv[2].type == JS_VALUE_NULL || argv[2].type == JS_VALUE_UNDEFINED))
+    {
+        remove_attr = true;
+    }
+    else
+    {
+        *out = js_value_make_bool(false);
+        return true;
+    }
+
+    bool ok = false;
+    bool styles_dirty = false;
+    bool controls_dirty = false;
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    if (node && node->type == HTML_NODE_ELEMENT)
+    {
+        if (remove_attr)
+        {
+            ok = html_view_js_node_remove_attr(node, attr_name);
+        }
+        else
+        {
+            ok = html_view_js_node_set_attr(node, attr_name, attr_value);
+        }
+        if (ok)
+        {
+            controls_dirty = html_view_js_node_affects_controls(node);
+            html_view_js_note_dom_change(priv, styles_dirty, controls_dirty);
+        }
+    }
+    html_view_dom_unlock(priv);
+
+    if (ok)
+    {
+        html_view_invalidate(view);
+    }
+
+    *out = js_value_make_bool(ok);
+    return true;
+}
+
+static bool html_view_js_dom_get_text(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 1 || !argv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    if (!node)
+    {
+        html_view_dom_unlock(priv);
+        *out = js_value_make_null();
+        return true;
+    }
+
+    if (node->type == HTML_NODE_TEXT)
+    {
+        const char *text = node->text ? node->text : "";
+        size_t len = strlen(text);
+        bool ok = html_view_js_out_string(out, text, len, error_message);
+        html_view_dom_unlock(priv);
+        return ok;
+    }
+
+    char *text = NULL;
+    size_t text_len = 0;
+    size_t text_cap = 0;
+    html_view_collect_text(node, &text, &text_len, &text_cap);
+
+    bool ok = true;
+    if (text)
+    {
+        ok = html_view_js_out_string(out, text, text_len, error_message);
+    }
+    else
+    {
+        ok = html_view_js_out_string(out, "", 0, error_message);
+    }
+    free(text);
+    html_view_dom_unlock(priv);
+    return ok;
+}
+
+static bool html_view_js_dom_set_text(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 2 || !argv || argv[1].type != JS_VALUE_STRING)
+    {
+        *out = js_value_make_bool(false);
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_bool(false);
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_bool(false);
+        return true;
+    }
+
+    const char *text = argv[1].as.string.data ? argv[1].as.string.data : "";
+    size_t text_len = argv[1].as.string.len;
+
+    bool ok = false;
+    bool styles_dirty = false;
+    bool controls_dirty = false;
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    if (node)
+    {
+        ok = html_view_js_node_set_text(node, text, text_len);
+        if (ok)
+        {
+            if (html_view_js_node_is_style(node) || html_view_js_node_is_style(node->parent))
+            {
+                styles_dirty = true;
+            }
+            controls_dirty = html_view_js_node_affects_controls(node);
+            html_view_js_note_dom_change(priv, styles_dirty, controls_dirty);
+        }
+    }
+    html_view_dom_unlock(priv);
+
+    if (ok)
+    {
+        html_view_invalidate(view);
+    }
+
+    *out = js_value_make_bool(ok);
+    return true;
+}
+
+static bool html_view_js_dom_first_child(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 1 || !argv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    html_node_t *child = node ? node->first_child : NULL;
+    size_t child_handle = html_view_js_handle_for_node(priv, child);
+    html_view_dom_unlock(priv);
+
+    if (!child_handle)
+    {
+        *out = js_value_make_null();
+    }
+    else
+    {
+        *out = js_value_make_number((double)child_handle);
+    }
+    return true;
+}
+
+static bool html_view_js_dom_next_sibling(js_runtime_t *rt,
+                                          size_t argc,
+                                          const js_value_t *argv,
+                                          void *user_data,
+                                          js_value_t *out,
+                                          char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 1 || !argv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    html_node_t *next = node ? node->next_sibling : NULL;
+    size_t next_handle = html_view_js_handle_for_node(priv, next);
+    html_view_dom_unlock(priv);
+
+    if (!next_handle)
+    {
+        *out = js_value_make_null();
+    }
+    else
+    {
+        *out = js_value_make_number((double)next_handle);
+    }
+    return true;
+}
+
+static bool html_view_js_dom_parent(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc < 1 || !argv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        *out = js_value_make_null();
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    html_node_t *parent = node ? node->parent : NULL;
+    size_t parent_handle = html_view_js_handle_for_node(priv, parent);
+    html_view_dom_unlock(priv);
+
+    if (!parent_handle)
+    {
+        *out = js_value_make_null();
+    }
+    else
+    {
+        *out = js_value_make_number((double)parent_handle);
+    }
+    return true;
+}
+
+static bool html_view_js_tag_matches(const char *name, const char *tag)
+{
+    if (!name || !tag)
+    {
+        return false;
+    }
+    if (strcmp(tag, "*") == 0)
+    {
+        return true;
+    }
+    return strcasecmp(name, tag) == 0;
+}
+
+static bool html_view_js_dom_get_children(js_runtime_t *rt,
+                                          size_t argc,
+                                          const js_value_t *argv,
+                                          void *user_data,
+                                          js_value_t *out,
+                                          char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!html_view_js_out_array(out, error_message))
+    {
+        return false;
+    }
+    if (argc < 1 || !argv)
+    {
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return true;
+    }
+
+    size_t handle = 0;
+    if (!html_view_js_handle_from_value(&argv[0], &handle))
+    {
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *node = html_view_js_node_for_handle(priv, handle);
+    for (html_node_t *child = node ? node->first_child : NULL; child; child = child->next_sibling)
+    {
+        size_t child_handle = html_view_js_handle_for_node(priv, child);
+        if (child_handle && !html_view_js_array_push_handle(out, child_handle, error_message))
+        {
+            html_view_dom_unlock(priv);
+            js_value_destroy(out);
+            return false;
+        }
+    }
+    html_view_dom_unlock(priv);
+    return true;
+}
+
+static bool html_view_js_dom_get_elements_by_tag(js_runtime_t *rt,
+                                                 size_t argc,
+                                                 const js_value_t *argv,
+                                                 void *user_data,
+                                                 js_value_t *out,
+                                                 char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!html_view_js_out_array(out, error_message))
+    {
+        return false;
+    }
+    if (!argv || argc == 0)
+    {
+        return true;
+    }
+
+    const js_value_t *tag_value = NULL;
+    const js_value_t *root_value = NULL;
+    if (argc >= 2 && argv[0].type == JS_VALUE_NUMBER && argv[1].type == JS_VALUE_STRING)
+    {
+        root_value = &argv[0];
+        tag_value = &argv[1];
+    }
+    else if (argv[0].type == JS_VALUE_STRING)
+    {
+        tag_value = &argv[0];
+    }
+    else
+    {
+        return true;
+    }
+
+    const char *tag = tag_value && tag_value->as.string.data ? tag_value->as.string.data : "";
+    if (!tag || tag[0] == '\0')
+    {
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *root = (priv->doc && priv->doc->root) ? priv->doc->root : NULL;
+    if (root_value)
+    {
+        size_t handle = 0;
+        if (html_view_js_handle_from_value(root_value, &handle))
+        {
+            root = html_view_js_node_for_handle(priv, handle);
+        }
+        else
+        {
+            root = NULL;
+        }
+    }
+    if (!root)
+    {
+        html_view_dom_unlock(priv);
+        return true;
+    }
+
+    const html_node_t **stack = NULL;
+    size_t stack_cap = 0;
+    size_t sp = 0;
+
+    stack_cap = 64;
+    stack = (const html_node_t **)malloc(stack_cap * sizeof(*stack));
+    if (!stack)
+    {
+        html_view_dom_unlock(priv);
+        js_value_destroy(out);
+        if (error_message)
+        {
+            *error_message = html_view_strdup("allocation failed");
+        }
+        return false;
+    }
+    stack[sp++] = root;
+
+    while (sp > 0)
+    {
+        const html_node_t *node = stack[--sp];
+        if (node->type == HTML_NODE_ELEMENT && node->name && html_view_js_tag_matches(node->name, tag))
+        {
+            size_t handle = html_view_js_handle_for_node(priv, (html_node_t *)node);
+            if (handle && !html_view_js_array_push_handle(out, handle, error_message))
+            {
+                html_view_dom_unlock(priv);
+                free(stack);
+                js_value_destroy(out);
+                return false;
+            }
+        }
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (sp == stack_cap)
+            {
+                size_t new_cap = stack_cap ? (stack_cap * 2) : 64;
+                const html_node_t **new_stack = (const html_node_t **)realloc(stack, new_cap * sizeof(*new_stack));
+                if (!new_stack)
+                {
+                    break;
+                }
+                stack = new_stack;
+                stack_cap = new_cap;
+            }
+            if (sp < stack_cap)
+            {
+                stack[sp++] = child;
+            }
+        }
+    }
+
+    html_view_dom_unlock(priv);
+    free(stack);
+    return true;
+}
+
+static bool html_view_js_dom_get_elements_by_class(js_runtime_t *rt,
+                                                   size_t argc,
+                                                   const js_value_t *argv,
+                                                   void *user_data,
+                                                   js_value_t *out,
+                                                   char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!html_view_js_out_array(out, error_message))
+    {
+        return false;
+    }
+    if (!argv || argc == 0)
+    {
+        return true;
+    }
+
+    const js_value_t *class_value = NULL;
+    const js_value_t *root_value = NULL;
+    if (argc >= 2 && argv[0].type == JS_VALUE_NUMBER && argv[1].type == JS_VALUE_STRING)
+    {
+        root_value = &argv[0];
+        class_value = &argv[1];
+    }
+    else if (argv[0].type == JS_VALUE_STRING)
+    {
+        class_value = &argv[0];
+    }
+    else
+    {
+        return true;
+    }
+
+    const char *class_name = class_value && class_value->as.string.data ? class_value->as.string.data : "";
+    if (!class_name || class_name[0] == '\0')
+    {
+        return true;
+    }
+
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return true;
+    }
+
+    html_view_dom_lock(priv);
+    html_node_t *root = (priv->doc && priv->doc->root) ? priv->doc->root : NULL;
+    if (root_value)
+    {
+        size_t handle = 0;
+        if (html_view_js_handle_from_value(root_value, &handle))
+        {
+            root = html_view_js_node_for_handle(priv, handle);
+        }
+        else
+        {
+            root = NULL;
+        }
+    }
+    if (!root)
+    {
+        html_view_dom_unlock(priv);
+        return true;
+    }
+
+    const html_node_t **stack = NULL;
+    size_t stack_cap = 0;
+    size_t sp = 0;
+
+    stack_cap = 64;
+    stack = (const html_node_t **)malloc(stack_cap * sizeof(*stack));
+    if (!stack)
+    {
+        html_view_dom_unlock(priv);
+        js_value_destroy(out);
+        if (error_message)
+        {
+            *error_message = html_view_strdup("allocation failed");
+        }
+        return false;
+    }
+    stack[sp++] = root;
+
+    while (sp > 0)
+    {
+        const html_node_t *node = stack[--sp];
+        if (node->type == HTML_NODE_ELEMENT && node->name)
+        {
+            const char *class_attr = html_attr_get(node, "class");
+            if (class_attr && html_view_js_attr_has_token(class_attr, class_name))
+            {
+                size_t handle = html_view_js_handle_for_node(priv, (html_node_t *)node);
+                if (handle && !html_view_js_array_push_handle(out, handle, error_message))
+                {
+                    html_view_dom_unlock(priv);
+                    free(stack);
+                    js_value_destroy(out);
+                    return false;
+                }
+            }
+        }
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (sp == stack_cap)
+            {
+                size_t new_cap = stack_cap ? (stack_cap * 2) : 64;
+                const html_node_t **new_stack = (const html_node_t **)realloc(stack, new_cap * sizeof(*new_stack));
+                if (!new_stack)
+                {
+                    break;
+                }
+                stack = new_stack;
+                stack_cap = new_cap;
+            }
+            if (sp < stack_cap)
+            {
+                stack[sp++] = child;
+            }
+        }
+    }
+
+    html_view_dom_unlock(priv);
+    free(stack);
+    return true;
+}
+
+static bool html_view_js_view_invalidate(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    if (view)
+    {
+        html_view_invalidate(view);
+    }
+    *out = js_value_make_undefined();
+    return true;
+}
+
+static bool html_view_js_view_get_width(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    int width = view ? view->width : 0;
+    *out = js_value_make_number((double)width);
+    return true;
+}
+
+static bool html_view_js_view_get_height(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    int height = view ? view->height : 0;
+    *out = js_value_make_number((double)height);
+    return true;
+}
+
+static bool html_view_js_register_global_number(js_runtime_t *rt, const char *name, double value)
+{
+    if (!rt || !name)
+    {
+        return false;
+    }
+    js_value_t num = js_value_make_number(value);
+    return js_runtime_set_global(rt, name, &num);
+}
+
+static bool html_view_js_register_natives(js_runtime_t *rt, atk_widget_t *view)
+{
+    if (!rt || !view)
+    {
+        return false;
+    }
+
+    if (!js_runtime_set_native(rt, "dom_get_root", html_view_js_dom_get_root, view) ||
+        !js_runtime_set_native(rt, "dom_get_element_by_id", html_view_js_dom_get_element_by_id, view) ||
+        !js_runtime_set_native(rt, "dom_get_type", html_view_js_dom_get_type, view) ||
+        !js_runtime_set_native(rt, "dom_get_tag", html_view_js_dom_get_tag, view) ||
+        !js_runtime_set_native(rt, "dom_get_attr", html_view_js_dom_get_attr, view) ||
+        !js_runtime_set_native(rt, "dom_set_attr", html_view_js_dom_set_attr, view) ||
+        !js_runtime_set_native(rt, "dom_get_text", html_view_js_dom_get_text, view) ||
+        !js_runtime_set_native(rt, "dom_set_text", html_view_js_dom_set_text, view) ||
+        !js_runtime_set_native(rt, "dom_first_child", html_view_js_dom_first_child, view) ||
+        !js_runtime_set_native(rt, "dom_next_sibling", html_view_js_dom_next_sibling, view) ||
+        !js_runtime_set_native(rt, "dom_parent", html_view_js_dom_parent, view) ||
+        !js_runtime_set_native(rt, "dom_get_children", html_view_js_dom_get_children, view) ||
+        !js_runtime_set_native(rt, "dom_get_elements_by_tag", html_view_js_dom_get_elements_by_tag, view) ||
+        !js_runtime_set_native(rt, "dom_get_elements_by_class", html_view_js_dom_get_elements_by_class, view) ||
+        !js_runtime_set_native(rt, "view_invalidate", html_view_js_view_invalidate, view) ||
+        !js_runtime_set_native(rt, "view_get_width", html_view_js_view_get_width, view) ||
+        !js_runtime_set_native(rt, "view_get_height", html_view_js_view_get_height, view))
+    {
+        return false;
+    }
+
+    if (!html_view_js_register_global_number(rt, "DOM_NODE_DOCUMENT", (double)HTML_NODE_DOCUMENT) ||
+        !html_view_js_register_global_number(rt, "DOM_NODE_ELEMENT", (double)HTML_NODE_ELEMENT) ||
+        !html_view_js_register_global_number(rt, "DOM_NODE_TEXT", (double)HTML_NODE_TEXT) ||
+        !html_view_js_register_global_number(rt, "DOM_NODE_DOCTYPE", (double)HTML_NODE_DOCTYPE) ||
+        !html_view_js_register_global_number(rt, "DOM_NODE_COMMENT", (double)HTML_NODE_COMMENT))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static bool html_view_js_runtime_ensure(atk_widget_t *view, atk_html_view_priv_t *priv)
+{
+    if (!view || !priv)
+    {
+        return false;
+    }
+    if (priv->js_runtime)
+    {
+        return true;
+    }
+    priv->js_runtime = js_runtime_create();
+    if (!priv->js_runtime)
+    {
+        printf("html_view_js: runtime create failed\n");
+        return false;
+    }
+    if (!html_view_js_register_natives(priv->js_runtime, view))
+    {
+        printf("html_view_js: failed to register host functions\n");
+        js_runtime_destroy(priv->js_runtime);
+        priv->js_runtime = NULL;
+        return false;
+    }
+    priv->js_runtime_ready = true;
+    return true;
+}
+
+static void html_view_js_runtime_destroy(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->js_runtime)
+    {
+        js_runtime_destroy(priv->js_runtime);
+        priv->js_runtime = NULL;
+    }
+    priv->js_runtime_ready = false;
+}
+
+static void html_view_js_thread(void *arg)
+{
+    atk_widget_t *view = (atk_widget_t *)arg;
+    if (!view)
+    {
+        return;
+    }
+
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return;
+    }
+
+    js_runtime_t *rt = priv->js_runtime;
+    if (!rt)
+    {
+        printf("html_view_js: missing runtime\n");
+        return;
+    }
+
+    size_t index = 0;
+    while (!html_view_js_should_stop(priv))
+    {
+        html_view_dom_lock(priv);
+        html_view_js_script_t *script = html_view_js_pop_script_locked(priv);
+        html_view_dom_unlock(priv);
+
+        if (!script)
+        {
+            (void)sys_yield();
+            continue;
+        }
+
+        if (html_view_js_should_stop(priv))
+        {
+            free(script->source);
+            free(script);
+            break;
+        }
+
+        if (script->source && script->source[0] != '\0')
+        {
+            js_exec_result_t res = js_eval(rt, script->source);
+            if (!res.ok)
+            {
+                printf("html_view_js: script %u error: %s\n",
+                       (unsigned)index,
+                       res.error_message ? res.error_message : "<no message>");
+            }
+            js_exec_result_destroy(&res);
+        }
+        free(script->source);
+        free(script);
+        ++index;
+    }
+}
+
+static void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
+{
+    if (!view || !priv)
+    {
+        return;
+    }
+    uint32_t dirty = html_view_js_take_dirty(priv);
+    if (dirty == 0)
+    {
+        return;
+    }
+
+    if (dirty & HTML_VIEW_JS_DIRTY_STYLES)
+    {
+        html_view_rebuild_stylesheet(priv);
+    }
+    if (dirty & HTML_VIEW_JS_DIRTY_CONTROLS)
+    {
+        html_view_controls_clear(view, priv);
+        html_view_controls_build(view, priv);
+    }
+    if (dirty & HTML_VIEW_JS_DIRTY_RENDER)
+    {
+        html_view_render_cache_clear(&priv->render_cache);
+        priv->pressed_href = NULL;
+    }
+}
+
+static void html_view_js_init(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    alix_mutex_init(&priv->dom_lock);
+    priv->js_thread = 0;
+    priv->js_stop = 0;
+    priv->js_dirty = 0;
+    priv->js_runtime = NULL;
+    priv->js_runtime_ready = false;
+    priv->js_script_head = NULL;
+    priv->js_script_tail = NULL;
+    priv->js_handles = NULL;
+    priv->js_handle_count = 0;
+    priv->js_handle_cap = 0;
+}
+
+static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *priv)
+{
+    if (!view || !priv)
+    {
+        return;
+    }
+    html_view_dom_lock(priv);
+    bool running = (priv->js_thread != 0);
+    html_view_dom_unlock(priv);
+    if (running)
+    {
+        return;
+    }
+    if (!html_view_js_runtime_ensure(view, priv))
+    {
+        html_view_dom_lock(priv);
+        html_view_js_scripts_clear_locked(priv);
+        html_view_dom_unlock(priv);
+        return;
+    }
+
+    __atomic_store_n(&priv->js_stop, 0u, __ATOMIC_RELEASE);
+    alix_thread_t thread = 0;
+    if (alix_thread_create(&thread, "atk_html_js", html_view_js_thread, view) != 0)
+    {
+        return;
+    }
+
+    html_view_dom_lock(priv);
+    priv->js_thread = thread;
+    html_view_dom_unlock(priv);
+}
+
+static void html_view_js_stop(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+
+    __atomic_store_n(&priv->js_stop, 1u, __ATOMIC_RELEASE);
+    alix_thread_t thread = 0;
+    html_view_dom_lock(priv);
+    thread = priv->js_thread;
+    priv->js_thread = 0;
+    html_view_dom_unlock(priv);
+    if (thread)
+    {
+        (void)alix_thread_join(thread, NULL);
+    }
+
+    __atomic_store_n(&priv->js_stop, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&priv->js_dirty, 0u, __ATOMIC_RELEASE);
+
+    html_view_dom_lock(priv);
+    html_view_js_scripts_clear_locked(priv);
+    html_view_js_handles_reset(priv);
+    html_view_dom_unlock(priv);
+
+    html_view_js_runtime_destroy(priv);
+}
+
+static void html_view_js_start(atk_widget_t *view, atk_html_view_priv_t *priv)
+{
+    if (!view || !priv || !priv->doc || !priv->doc->root)
+    {
+        return;
+    }
+
+    html_view_dom_lock(priv);
+    html_view_js_script_t *scripts = html_view_js_collect_scripts(priv->doc->root);
+    if (scripts)
+    {
+        html_view_js_scripts_append_locked(priv, scripts);
+    }
+    bool has_scripts = (priv->js_script_head != NULL);
+    html_view_dom_unlock(priv);
+
+    if (!has_scripts)
+    {
+        return;
+    }
+
+    html_view_js_start_thread(view, priv);
+}
+
+static bool html_view_js_queue_external(atk_widget_t *view,
+                                        atk_html_view_priv_t *priv,
+                                        const char *script_text,
+                                        size_t len)
+{
+    if (!view || !priv || !script_text || len == 0)
+    {
+        return false;
+    }
+
+    bool queued = false;
+    html_view_dom_lock(priv);
+    queued = html_view_js_queue_source_locked(priv, script_text, len);
+    html_view_dom_unlock(priv);
+    if (!queued)
+    {
+        return false;
+    }
+
+    html_view_js_start_thread(view, priv);
+    return true;
+}
+
+static void html_view_js_shutdown(atk_widget_t *view, atk_html_view_priv_t *priv)
+{
+    (void)view;
+    html_view_js_stop(priv);
+}

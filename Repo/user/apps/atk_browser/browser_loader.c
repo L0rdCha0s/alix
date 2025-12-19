@@ -29,6 +29,13 @@ void browser_ui_event_free_payload(browser_ui_event_t *ev)
             ev->u.css_append.css = NULL;
             ev->u.css_append.len = 0;
             break;
+        case BROWSER_UI_EVENT_SCRIPT_APPEND:
+            free(ev->u.script_append.src);
+            ev->u.script_append.src = NULL;
+            free(ev->u.script_append.script);
+            ev->u.script_append.script = NULL;
+            ev->u.script_append.len = 0;
+            break;
         case BROWSER_UI_EVENT_IMAGE_PNG:
             free(ev->u.image_png.src);
             ev->u.image_png.src = NULL;
@@ -276,9 +283,19 @@ static void browser_load_thread(void *arg)
     size_t css_count = 0;
     char *img_urls[BROWSER_MAX_IMAGES] = {0};
     size_t img_count = 0;
+    char *script_urls[BROWSER_MAX_SCRIPTS] = {0};
+    size_t script_count = 0;
     if (doc->root)
     {
-        browser_collect_resource_urls(app, doc->root, &final_url, css_urls, &css_count, img_urls, &img_count);
+        browser_collect_resource_urls(app,
+                                      doc->root,
+                                      &final_url,
+                                      css_urls,
+                                      &css_count,
+                                      img_urls,
+                                      &img_count,
+                                      script_urls,
+                                      &script_count);
     }
 
     if (!browser_load_is_active(app, load_id))
@@ -338,6 +355,52 @@ static void browser_load_thread(void *arg)
         free(css_body);
         browser_url_destroy(&css_url);
         browser_url_destroy(&css_final);
+        free(abs);
+    }
+
+    for (size_t i = 0; i < script_count; ++i)
+    {
+        if (!browser_load_is_active(app, load_id))
+        {
+            break;
+        }
+        char *abs = script_urls[i];
+        script_urls[i] = NULL;
+        if (!abs)
+        {
+            continue;
+        }
+        browser_debug_logf(app, "[js] fetch %s", abs);
+
+        browser_url_t js_url = {0};
+        browser_url_t js_final = {0};
+        size_t js_len = 0;
+        char *js_body = NULL;
+        if (browser_parse_url(abs, &js_url))
+        {
+            js_body = browser_fetch_http(app, &js_url, &js_len, &js_final);
+        }
+        if (js_body && strncmp(js_body, "Error:\n", 6) != 0)
+        {
+            browser_ui_event_t js_ev = {0};
+            js_ev.type = BROWSER_UI_EVENT_SCRIPT_APPEND;
+            js_ev.load_id = load_id;
+            js_ev.u.script_append.src = abs;
+            js_ev.u.script_append.script = js_body;
+            js_ev.u.script_append.len = js_len;
+            abs = NULL;
+            js_body = NULL;
+            browser_loader_emit_event(app, &js_ev);
+            browser_debug_logf(app, "[js] ok bytes=%u url=%s", (unsigned)js_len, js_ev.u.script_append.src);
+        }
+        else
+        {
+            const char *msg = js_body ? (js_body + 6) : "allocation failed";
+            browser_debug_logf(app, "[js] failed url=%s err=%s", abs ? abs : "(null)", msg);
+        }
+        free(js_body);
+        browser_url_destroy(&js_url);
+        browser_url_destroy(&js_final);
         free(abs);
     }
 
@@ -411,6 +474,11 @@ done_resources:
     {
         free(img_urls[i]);
         img_urls[i] = NULL;
+    }
+    for (size_t i = 0; i < script_count; ++i)
+    {
+        free(script_urls[i]);
+        script_urls[i] = NULL;
     }
 
 done_fetch:
@@ -486,4 +554,3 @@ bool browser_loader_start(browser_app_t *app, const char *url_text)
     browser_track_load_thread(app, thread);
     return true;
 }
-

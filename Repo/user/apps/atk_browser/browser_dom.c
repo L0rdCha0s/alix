@@ -141,15 +141,19 @@ void browser_collect_resource_urls(browser_app_t *app,
                                   char **css_urls,
                                   size_t *css_count_io,
                                   char **img_urls,
-                                  size_t *img_count_io)
+                                  size_t *img_count_io,
+                                  char **script_urls,
+                                  size_t *script_count_io)
 {
-    if (!app || !root || !base_url || !base_url->host || !css_urls || !css_count_io || !img_urls || !img_count_io)
+    if (!app || !root || !base_url || !base_url->host || !css_urls || !css_count_io ||
+        !img_urls || !img_count_io || !script_urls || !script_count_io)
     {
         return;
     }
 
     size_t css_count = 0;
     size_t img_count = 0;
+    size_t script_count = 0;
 
     for (html_node_t *node = root; node;)
     {
@@ -195,6 +199,20 @@ void browser_collect_resource_urls(browser_app_t *app,
                     }
                 }
             }
+            else if (script_count < BROWSER_MAX_SCRIPTS && strcmp(node->name, "script") == 0)
+            {
+                const char *src = html_attr_get(node, "src");
+                if (src && src[0] != '\0')
+                {
+                    char *abs = browser_build_absolute_url(base_url, src, strlen(src));
+                    if (abs)
+                    {
+                        browser_dom_set_attr(node, "src", abs);
+                        script_urls[script_count++] = abs;
+                        browser_debug_logf(app, "[js] discovered %s", abs);
+                    }
+                }
+            }
         }
 
         if (node->first_child)
@@ -214,6 +232,7 @@ void browser_collect_resource_urls(browser_app_t *app,
 
     *css_count_io = css_count;
     *img_count_io = img_count;
+    *script_count_io = script_count;
     if (css_count > 0)
     {
         browser_debug_logf(app, "[css] total stylesheets=%u", (unsigned)css_count);
@@ -221,5 +240,9 @@ void browser_collect_resource_urls(browser_app_t *app,
     if (img_count > 0)
     {
         browser_debug_logf(app, "[img] total images=%u", (unsigned)img_count);
+    }
+    if (script_count > 0)
+    {
+        browser_debug_logf(app, "[js] total scripts=%u", (unsigned)script_count);
     }
 }

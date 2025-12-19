@@ -50,6 +50,10 @@ static atk_mouse_response_t html_view_mouse_cb(atk_widget_t *widget,
     {
         return ATK_MOUSE_RESPONSE_NONE;
     }
+    if (__atomic_load_n(&priv->js_dirty, __ATOMIC_ACQUIRE) & HTML_VIEW_JS_DIRTY_RENDER)
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
 
     const html_view_render_cache_t *cache = &priv->render_cache;
     if (!cache->valid || !cache->tiles || cache->tile_used == 0 || cache->op_count == 0)

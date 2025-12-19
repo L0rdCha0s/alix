@@ -71,6 +71,10 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/atk_user.c \
 	$(USER_DIR)/lib/web/html.c \
 	$(USER_DIR)/lib/web/css.c \
+	$(USER_DIR)/lib/web/js/internal.c \
+	$(USER_DIR)/lib/web/js/lexer.c \
+	$(USER_DIR)/lib/web/js/parser.c \
+	$(USER_DIR)/lib/web/js/runtime.c \
 	$(USER_DIR)/lib/web/url.c \
 	$(USER_DIR)/lib/video_surface.c \
 	$(USER_DIR)/lib/serial_stub.c \
@@ -173,6 +177,7 @@ PNG_TEST_BIN := $(HOST_TEST_DIR)/png_host_test
 WEB_TEST_BIN := $(HOST_TEST_DIR)/web_host_test
 HTML_VIEW_TEST_BIN := $(HOST_TEST_DIR)/html_view_host_test
 TLS_TEST_BIN := $(HOST_TEST_DIR)/tls_host_test
+JS_TEST_BIN := $(HOST_TEST_DIR)/js_host_test
 HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -iquote $(INCLUDE_DIR) -DTTF_HOST_BUILD
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
@@ -450,6 +455,18 @@ $(TLS_TEST_BIN): tests/tls_host_test.c \
 	    src/crypto/p256.c src/crypto/p384.c src/crypto/rsa.c src/crypto/sha256.c \
 	    -o $@
 
+$(JS_TEST_BIN): tests/js_host_test.c \
+                user/lib/web/js/internal.c user/lib/web/js/lexer.c user/lib/web/js/parser.c user/lib/web/js/runtime.c \
+                user/lib/web/js/js.h user/lib/web/js/internal.h user/lib/web/js/lexer.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/js_host_test.c \
+	    user/lib/web/js/internal.c \
+	    user/lib/web/js/lexer.c \
+	    user/lib/web/js/parser.c \
+	    user/lib/web/js/runtime.c \
+	    -o $@
+
 LOADER_HEADERS := \
 	$(INCLUDE_DIR)/uefi.h \
 	$(INCLUDE_DIR)/bootinfo.h \
@@ -647,6 +664,9 @@ png-test: $(PNG_TEST_BIN)
 tls-test: $(TLS_TEST_BIN)
 	$(TLS_TEST_BIN)
 
+js-test: $(JS_TEST_BIN)
+	$(JS_TEST_BIN)
+
 test:
 	$(MAKE) test-dhcp
 	$(MAKE) sha256-test
@@ -654,9 +674,11 @@ test:
 	$(MAKE) png-test
 	$(MAKE) ttf-test
 	$(MAKE) tls-test
+	$(MAKE) js-test
 
-.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test png-test tls-test
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test png-test tls-test js-test
 
 -include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) \
          $(USER_OBJDIR)/*.d $(USER_OBJDIR)/atk/*.d $(USER_OBJDIR)/atk/util/*.d \
-         $(USER_OBJDIR)/kernel/*.d $(USER_OBJDIR)/doom/*.d
+         $(USER_OBJDIR)/kernel/*.d $(USER_OBJDIR)/doom/*.d \
+         $(USER_OBJDIR)/lib/*.d $(USER_OBJDIR)/lib/atk/*.d $(USER_OBJDIR)/lib/web/*.d

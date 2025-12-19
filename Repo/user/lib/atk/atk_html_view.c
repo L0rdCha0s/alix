@@ -16,11 +16,15 @@
 #include "video.h"
 #include "web/css.h"
 #include "web/html.h"
+#include "web/js.h"
 #include "web/url.h"
 
 #define ATK_HTML_VIEW_PADDING 8
 #define ATK_HTML_VIEW_SCROLLBAR_WIDTH 14
 #define ATK_HTML_VIEW_RENDER_TILE_H 256
+#define HTML_VIEW_JS_DIRTY_RENDER 0x1u
+#define HTML_VIEW_JS_DIRTY_STYLES 0x2u
+#define HTML_VIEW_JS_DIRTY_CONTROLS 0x4u
 
 #define HTML_VIEW_FONT_CACHE_FIRST 32
 #define HTML_VIEW_FONT_CACHE_LAST  126
@@ -29,6 +33,8 @@
 #define HTML_VIEW_FONT_SIZE_CACHE_SLOTS 8
 #define HTML_VIEW_FONT_MAX_ROW_PIXELS 256
 #define HTML_VIEW_FONT_TEXT_GUARD 2048
+
+typedef struct html_view_js_script html_view_js_script_t;
 
 typedef struct html_view_image
 {
@@ -177,6 +183,17 @@ typedef struct
     atk_html_view_link_t link_handler;
     void *link_context;
     const char *pressed_href;
+    alix_mutex_t dom_lock;
+    alix_thread_t js_thread;
+    volatile uint32_t js_stop;
+    volatile uint32_t js_dirty;
+    js_runtime_t *js_runtime;
+    bool js_runtime_ready;
+    html_view_js_script_t *js_script_head;
+    html_view_js_script_t *js_script_tail;
+    html_node_t **js_handles;
+    size_t js_handle_count;
+    size_t js_handle_cap;
 } atk_html_view_priv_t;
 
 typedef struct
@@ -277,6 +294,7 @@ static void html_view_place_control_widget(html_view_ctx_t *ctx,
 #include "html_view/core.c"
 #include "html_view/font.c"
 #include "html_view/controls.c"
+#include "html_view/script.c"
 #include "html_view/style.c"
 #include "html_view/layout.c"
 #include "html_view/table.c"

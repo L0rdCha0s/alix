@@ -50,6 +50,13 @@ bool atk_html_view_set_html(atk_widget_t *view, const char *html, html_parse_err
 void atk_html_view_set_external_stylesheet(atk_widget_t *view, const char *css_text);
 
 /*
+ * Queue a script body for execution in the HTML view's JS thread.
+ *
+ * `script_text` is copied by the view.
+ */
+bool atk_html_view_add_script(atk_widget_t *view, const char *script_text, size_t len);
+
+/*
  * Add a PNG image resource that can be referenced by `<img src="...">`.
  *
  * `src` should match the `src` attribute value used in the DOM (often an

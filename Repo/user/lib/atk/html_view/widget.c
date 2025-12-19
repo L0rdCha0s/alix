@@ -73,6 +73,9 @@ static void html_view_draw_cb(const atk_state_t *state,
         return;
     }
 
+    html_view_dom_lock(priv);
+    html_view_js_apply_dirty((atk_widget_t *)widget, priv);
+
     html_view_controls_hide_all(priv);
 
     int abs_x = origin_x + widget->x;
@@ -467,7 +470,7 @@ static void html_view_draw_cb(const atk_state_t *state,
     if (!cache->valid)
     {
         html_view_draw_text(&ctx, "Render cache unavailable.\n", default_text, false, false);
-        return;
+        goto unlock;
     }
 
     priv->content_height = cache->content_height;
@@ -486,6 +489,9 @@ static void html_view_draw_cb(const atk_state_t *state,
     }
 
     html_view_render_cache_draw_visible(&ctx);
+
+unlock:
+    html_view_dom_unlock(priv);
 }
 
 static void html_view_destroy_cb(atk_widget_t *widget, void *context)
@@ -494,6 +500,7 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
     atk_html_view_priv_t *priv = html_view_priv_mut(widget);
     if (priv)
     {
+        html_view_js_shutdown(widget, priv);
         html_view_render_cache_clear(&priv->render_cache);
         html_view_control_t *ctrl = priv->controls;
         while (ctrl)
@@ -587,6 +594,7 @@ atk_widget_t *atk_window_add_html_view(atk_widget_t *window, int x, int y, int w
     priv->render_cache.tile_h = ATK_HTML_VIEW_RENDER_TILE_H;
     priv->link_handler = NULL;
     priv->link_context = NULL;
+    html_view_js_init(priv);
 
     atk_list_node_t *child_node = atk_list_push_back(&wpriv->children, view);
     if (!child_node)
@@ -640,6 +648,9 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
         return;
     }
 
+    html_view_js_stop(priv);
+
+    html_view_dom_lock(priv);
     html_view_render_cache_clear(&priv->render_cache);
     priv->pressed_href = NULL;
 
@@ -659,7 +670,9 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     priv->scroll_y = 0;
     html_view_rebuild_stylesheet(priv);
     html_view_controls_build(view, priv);
+    html_view_dom_unlock(priv);
     html_view_invalidate(view);
+    html_view_js_start(view, priv);
 }
 
 bool atk_html_view_set_html(atk_widget_t *view, const char *html, html_parse_error_t *error_out)
@@ -686,6 +699,7 @@ void atk_html_view_set_external_stylesheet(atk_widget_t *view, const char *css_t
         return;
     }
 
+    html_view_dom_lock(priv);
     html_view_render_cache_clear(&priv->render_cache);
     priv->pressed_href = NULL;
 
@@ -706,7 +720,22 @@ void atk_html_view_set_external_stylesheet(atk_widget_t *view, const char *css_t
     }
 
     html_view_rebuild_stylesheet(priv);
+    html_view_dom_unlock(priv);
     html_view_invalidate(view);
+}
+
+bool atk_html_view_add_script(atk_widget_t *view, const char *script_text, size_t len)
+{
+    if (!view || !script_text || len == 0)
+    {
+        return false;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return false;
+    }
+    return html_view_js_queue_external(view, priv, script_text, len);
 }
 
 bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint8_t *data, size_t size)
