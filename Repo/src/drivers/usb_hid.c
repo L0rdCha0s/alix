@@ -245,7 +245,8 @@ static void keyboard_thread(void *arg)
         {
             process_keyboard_report(buf, got);
         }
-        process_sleep_ms(4);
+        /* USB interrupt transfer already waits per endpoint interval; avoid extra 10ms sleep. */
+        process_yield();
     }
 }
 

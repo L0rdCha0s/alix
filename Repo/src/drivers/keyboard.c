@@ -831,126 +831,135 @@ bool keyboard_try_read_event(keyboard_event_t *event)
         event->ch = pending;
         return true;
     }
+    uint8_t scancode;
+    while (read_scancode(&scancode))
+    {
+        bool keypad_enter = false;
+        bool extended = false;
+
+        if (scancode == 0xE0)
+        {
+            extended_code_pending = 1;
+            continue;
+        }
+
+        bool released = (scancode & 0x80) != 0;
+        scancode &= 0x7F;
+
+        if (extended_code_pending)
+        {
+            extended_code_pending = 0;
+            extended = true;
+            if (scancode == 0x1C)
+            {
+                keypad_enter = true;
+            }
+        }
+
+        if (scancode == 0x2A)
+        {
+            left_shift_pressed = released ? 0 : 1;
+            if (scancode < 128)
+            {
+                key_down[scancode] = released ? 0 : 1;
+            }
+            keyboard_clear_event(event);
+            event->scancode = scancode;
+            event->extended = extended;
+            event->released = released;
+            return true;
+        }
+        if (scancode == 0x36)
+        {
+            right_shift_pressed = released ? 0 : 1;
+            if (scancode < 128)
+            {
+                key_down[scancode] = released ? 0 : 1;
+            }
+            keyboard_clear_event(event);
+            event->scancode = scancode;
+            event->extended = extended;
+            event->released = released;
+            return true;
+        }
+
+        if (scancode == 0x3A && !released)
+        {
+            caps_lock_enabled ^= 1;
+            keyboard_clear_event(event);
+            event->scancode = scancode;
+            event->extended = extended;
+            return true;
+        }
+
+        if (!extended && scancode == 0x1D)
+        {
+            left_ctrl_pressed = released ? 0 : 1;
+            if (scancode < 128)
+            {
+                key_down[scancode] = released ? 0 : 1;
+            }
+            keyboard_clear_event(event);
+            event->scancode = scancode;
+            event->extended = extended;
+            event->released = released;
+            return true;
+        }
+        if (extended && scancode == 0x1D)
+        {
+            right_ctrl_pressed = released ? 0 : 1;
+            keyboard_clear_event(event);
+            event->scancode = scancode;
+            event->extended = extended;
+            event->released = released;
+            return true;
+        }
+
+        if (released)
+        {
+            if (scancode < 128)
+            {
+                key_down[scancode] = 0;
+            }
+            keyboard_stop_repeat(scancode, extended);
+            keyboard_clear_event(event);
+            event->scancode = scancode;
+            event->extended = extended;
+            event->released = true;
+            return true;
+        }
+
+        bool was_down = false;
+        if (scancode < 128)
+        {
+            was_down = key_down[scancode] != 0;
+        }
+
+        char out_char = 0;
+        bool have_char = keyboard_emit_char(scancode, extended, keypad_enter, false, &out_char);
+        if (have_char)
+        {
+            keyboard_start_repeat(scancode, extended, keypad_enter);
+        }
+        if (!have_char && was_down)
+        {
+            continue;
+        }
+
+        keyboard_clear_event(event);
+        event->scancode = scancode;
+        event->extended = extended;
+        event->released = false;
+        event->repeat = false;
+        event->ch = have_char ? out_char : 0;
+        return true;
+    }
+
     if (keyboard_repeat_due(event))
     {
         return true;
     }
-
-    uint8_t scancode;
-    if (!read_scancode(&scancode))
-    {
-        return false;
-    }
-
-    bool keypad_enter = false;
-    bool extended = false;
-
-    if (scancode == 0xE0)
-    {
-        extended_code_pending = 1;
-        return false;
-    }
-
-    bool released = (scancode & 0x80) != 0;
-    scancode &= 0x7F;
-
-    if (extended_code_pending)
-    {
-        extended_code_pending = 0;
-        extended = true;
-        if (scancode == 0x1C)
-        {
-            keypad_enter = true;
-        }
-    }
-
-    if (scancode == 0x2A)
-    {
-        left_shift_pressed = released ? 0 : 1;
-        if (scancode < 128)
-        {
-            key_down[scancode] = released ? 0 : 1;
-        }
-        keyboard_clear_event(event);
-        event->scancode = scancode;
-        event->extended = extended;
-        event->released = released;
-        return true;
-    }
-    if (scancode == 0x36)
-    {
-        right_shift_pressed = released ? 0 : 1;
-        if (scancode < 128)
-        {
-            key_down[scancode] = released ? 0 : 1;
-        }
-        keyboard_clear_event(event);
-        event->scancode = scancode;
-        event->extended = extended;
-        event->released = released;
-        return true;
-    }
-
-    if (scancode == 0x3A && !released)
-    {
-        caps_lock_enabled ^= 1;
-        keyboard_clear_event(event);
-        event->scancode = scancode;
-        event->extended = extended;
-        return true;
-    }
-
-    if (!extended && scancode == 0x1D)
-    {
-        left_ctrl_pressed = released ? 0 : 1;
-        if (scancode < 128)
-        {
-            key_down[scancode] = released ? 0 : 1;
-        }
-        keyboard_clear_event(event);
-        event->scancode = scancode;
-        event->extended = extended;
-        event->released = released;
-        return true;
-    }
-    if (extended && scancode == 0x1D)
-    {
-        right_ctrl_pressed = released ? 0 : 1;
-        keyboard_clear_event(event);
-        event->scancode = scancode;
-        event->extended = extended;
-        event->released = released;
-        return true;
-    }
-
-    if (released)
-    {
-        if (scancode < 128)
-        {
-            key_down[scancode] = 0;
-        }
-        keyboard_stop_repeat(scancode, extended);
-        keyboard_clear_event(event);
-        event->scancode = scancode;
-        event->extended = extended;
-        event->released = true;
-        return true;
-    }
-
-    char out_char = 0;
-    bool have_char = keyboard_emit_char(scancode, extended, keypad_enter, false, &out_char);
-    if (have_char)
-    {
-        keyboard_start_repeat(scancode, extended, keypad_enter);
-    }
-
-    keyboard_clear_event(event);
-    event->scancode = scancode;
-    event->extended = extended;
-    event->released = false;
-    event->repeat = false;
-    event->ch = have_char ? out_char : 0;
-    return true;
+    return false;
 }
 
 bool keyboard_try_read(char *out_char)

@@ -747,7 +747,8 @@ qboolean	ED_ParseEpair (void *base, ddef_t *key, char *s)
 		break;
 		
 	case ev_vector:
-		strcpy (string, s);
+		Q_strncpy (string, s, sizeof(string) - 1);
+		string[sizeof(string) - 1] = 0;
 		v = string;
 		w = string;
 		for (i=0 ; i<3 ; i++)
@@ -837,7 +838,8 @@ else
 if (!strcmp(com_token, "light"))
 	strcpy (com_token, "light_lev");	// hack for single light def
 
-		strcpy (keyname, com_token);
+		Q_strncpy (keyname, com_token, sizeof(keyname) - 1);
+		keyname[sizeof(keyname) - 1] = 0;
 
 		// another hack to fix heynames with trailing spaces
 		n = strlen(keyname);
@@ -872,7 +874,8 @@ if (!strcmp(com_token, "light"))
 if (anglehack)
 {
 char	temp[32];
-strcpy (temp, com_token);
+Q_strncpy (temp, com_token, sizeof(temp) - 1);
+temp[sizeof(temp) - 1] = 0;
 sprintf (com_token, "0 %s 0", temp);
 }
 

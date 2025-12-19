@@ -466,8 +466,8 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
         .flags = 0,
         .x = rel_x,
         .y = rel_y,
-        .data0 = 0,
-        .data1 = 0,
+        .data0 = (uint32_t)dx,
+        .data1 = (uint32_t)dy,
     };
 
     if (left_pressed)
@@ -509,8 +509,6 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     if (forced_capture && relative_capture)
     {
         event.flags |= USER_ATK_MOUSE_FLAG_RELATIVE;
-        event.data0 = (uint32_t)dx;
-        event.data1 = (uint32_t)dy;
     }
 
 #if USER_ATK_DEBUG
@@ -1304,13 +1302,10 @@ static bool user_atk_try_coalesce_mouse(user_atk_window_t *win, const user_atk_e
     last->x = event->x;
     last->y = event->y;
     last->flags = event->flags;
-    if (event->flags & USER_ATK_MOUSE_FLAG_RELATIVE)
-    {
-        int32_t accum_dx = (int32_t)last->data0 + (int32_t)event->data0;
-        int32_t accum_dy = (int32_t)last->data1 + (int32_t)event->data1;
-        last->data0 = (uint32_t)accum_dx;
-        last->data1 = (uint32_t)accum_dy;
-    }
+    int32_t accum_dx = (int32_t)last->data0 + (int32_t)event->data0;
+    int32_t accum_dy = (int32_t)last->data1 + (int32_t)event->data1;
+    last->data0 = (uint32_t)accum_dx;
+    last->data1 = (uint32_t)accum_dy;
     return true;
 }
 

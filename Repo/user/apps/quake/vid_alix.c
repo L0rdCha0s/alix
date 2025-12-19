@@ -186,10 +186,13 @@ static int quake_translate_key(const user_atk_event_t *ev)
         switch (ev->data1)
         {
             case 0x48: /* Up */
+                return K_UPARROW;
             case 0x50: /* Down */
+                return K_DOWNARROW;
             case 0x4B: /* Left */
+                return K_LEFTARROW;
             case 0x4D: /* Right */
-                return 0;
+                return K_RIGHTARROW;
             default:
                 break;
         }
@@ -224,6 +227,14 @@ static int quake_translate_key(const user_atk_event_t *ev)
     }
 }
 
+static bool quake_is_arrow_key(int key)
+{
+    return key == K_UPARROW ||
+           key == K_DOWNARROW ||
+           key == K_LEFTARROW ||
+           key == K_RIGHTARROW;
+}
+
 void Sys_SendKeyEvents(void)
 {
     if (!g_window_ready)
@@ -245,6 +256,10 @@ void Sys_SendKeyEvents(void)
                     if (down && key == K_ESCAPE && g_mouse_captured)
                     {
                         quake_set_mouse_capture(false);
+                    }
+                    if (down && key_dest == key_game && quake_is_arrow_key(key))
+                    {
+                        break;
                     }
                     Key_Event(key, down);
                 }
@@ -287,7 +302,7 @@ void Sys_SendKeyEvents(void)
                     }
                 }
 
-                if (ev.flags & USER_ATK_MOUSE_FLAG_RELATIVE)
+                if ((ev.flags & USER_ATK_MOUSE_FLAG_RELATIVE) || g_mouse_captured)
                 {
                     g_mouse_dx += (int32_t)ev.data0;
                     g_mouse_dy += (int32_t)ev.data1;
@@ -339,22 +354,72 @@ void IN_Move(usercmd_t *cmd)
         return;
     }
 
+    float sens = sensitivity.value;
+    if (sens == 0.0f && sensitivity.string && sensitivity.string[0] != '\0')
+    {
+        sens = Q_atof(sensitivity.string);
+    }
+    if (sens == 0.0f && (!sensitivity.string || sensitivity.string[0] == '\0'))
+    {
+        sens = 3.0f;
+    }
+
+    float yaw_scale = m_yaw.value;
+    if (yaw_scale == 0.0f && m_yaw.string && m_yaw.string[0] != '\0')
+    {
+        yaw_scale = Q_atof(m_yaw.string);
+    }
+    if (yaw_scale == 0.0f && (!m_yaw.string || m_yaw.string[0] == '\0'))
+    {
+        yaw_scale = 0.022f;
+    }
+
+    float pitch_scale = m_pitch.value;
+    if (pitch_scale == 0.0f && m_pitch.string && m_pitch.string[0] != '\0')
+    {
+        pitch_scale = Q_atof(m_pitch.string);
+    }
+    if (pitch_scale == 0.0f && (!m_pitch.string || m_pitch.string[0] == '\0'))
+    {
+        pitch_scale = 0.022f;
+    }
+
+    float forward_scale = m_forward.value;
+    if (forward_scale == 0.0f && m_forward.string && m_forward.string[0] != '\0')
+    {
+        forward_scale = Q_atof(m_forward.string);
+    }
+    if (forward_scale == 0.0f && (!m_forward.string || m_forward.string[0] == '\0'))
+    {
+        forward_scale = 1.0f;
+    }
+
+    float side_scale = m_side.value;
+    if (side_scale == 0.0f && m_side.string && m_side.string[0] != '\0')
+    {
+        side_scale = Q_atof(m_side.string);
+    }
+    if (side_scale == 0.0f && (!m_side.string || m_side.string[0] == '\0'))
+    {
+        side_scale = 0.8f;
+    }
+
     qboolean mlook = g_mouse_captured || (in_mlook.state & 1);
     if (!g_mouse_captured && !mlook)
     {
         return;
     }
 
-    float mx = (float)dx * sensitivity.value;
-    float my = (float)dy * sensitivity.value;
+    float mx = (float)dx * sens;
+    float my = (float)dy * sens;
 
     if ((in_strafe.state & 1) || (lookstrafe.value && mlook))
     {
-        cmd->sidemove += m_side.value * mx;
+        cmd->sidemove += side_scale * mx;
     }
     else
     {
-        cl.viewangles[YAW] -= m_yaw.value * mx;
+        cl.viewangles[YAW] -= yaw_scale * mx;
     }
 
     if (mlook)
@@ -364,7 +429,7 @@ void IN_Move(usercmd_t *cmd)
 
     if (mlook && !(in_strafe.state & 1))
     {
-        cl.viewangles[PITCH] += m_pitch.value * my;
+        cl.viewangles[PITCH] += pitch_scale * my;
         if (cl.viewangles[PITCH] > 80)
         {
             cl.viewangles[PITCH] = 80;
@@ -378,11 +443,11 @@ void IN_Move(usercmd_t *cmd)
     {
         if ((in_strafe.state & 1) && noclip_anglehack)
         {
-            cmd->upmove -= m_forward.value * my;
+            cmd->upmove -= forward_scale * my;
         }
         else
         {
-            cmd->forwardmove -= m_forward.value * my;
+            cmd->forwardmove -= forward_scale * my;
         }
     }
 }
