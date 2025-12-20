@@ -17,6 +17,7 @@
 #define SHELL_PROMPT         "alex@alix$ "
 #define SHELL_OUTPUT_BUFFER  4096
 #define SHELL_INPUT_CAPACITY 256
+#define SHELL_TICK_MS        50u
 
 typedef struct
 {
@@ -706,7 +707,8 @@ int main(void)
         .tick = shell_on_tick,
         .tick_context = &app,
         .present_on_idle = false,
-        .legacy_input = false
+        .legacy_input = false,
+        .tick_interval_ms = SHELL_TICK_MS
     };
 
     atk_main_register_resize_handler(shell_on_resize_event, &app);

@@ -1421,6 +1421,12 @@ atk_mouse_event_result_t atk_handle_mouse_event(int dx,
         }
         else if (released_edge)
         {
+            bool was_resizing_window = (state->resizing_window != NULL);
+            bool was_dragging_window = (state->dragging_window != NULL);
+            bool was_dragging_desktop = (state->dragging_desktop_button != NULL);
+            bool was_window_button = (state->pressed_window_button != NULL);
+            bool was_desktop_button = (state->pressed_desktop_button != NULL);
+
             if (state->resizing_window)
             {
                 atk_widget_t *win = state->resizing_window;
@@ -1483,6 +1489,34 @@ atk_mouse_event_result_t atk_handle_mouse_event(int dx,
             }
             state->pressed_desktop_button = NULL;
             state->desktop_drag_moved = false;
+
+            if (!was_resizing_window && !was_dragging_window &&
+                !was_dragging_desktop && !was_window_button &&
+                !was_desktop_button)
+            {
+                atk_widget_t *win = atk_window_hit_test(state, cursor_x, cursor_y);
+                if (win && win->used)
+                {
+                    atk_widget_t *child = atk_window_widget_at(win, cursor_x, cursor_y);
+                    if (child)
+                    {
+                        bool consumed = atk_dispatch_widget_mouse(state,
+                                                                 child,
+                                                                 cursor_x,
+                                                                 cursor_y,
+                                                                 pressed_edge,
+                                                                 released_edge,
+                                                                 left_pressed,
+                                                                 "child-release",
+                                                                 event_id,
+                                                                 &result);
+                        if (consumed)
+                        {
+                            user_atk_focus_window(win);
+                        }
+                    }
+                }
+            }
         }
     }
 

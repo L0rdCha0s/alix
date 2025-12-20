@@ -19,6 +19,7 @@
 #define TASKMGR_CPU_CAP     SYSCALL_CPU_MAX
 #define TASKMGR_NET_CAP     8
 #define TASKMGR_REFRESH_MS 5000
+#define TASKMGR_TICK_MS    250u
 #define TASKMGR_WINDOW_WIDTH  800
 #define TASKMGR_WINDOW_HEIGHT 600
 
@@ -915,7 +916,8 @@ int main(void)
         .tick = taskmgr_on_tick,
         .tick_context = &app,
         .present_on_idle = false,
-        .legacy_input = false
+        .legacy_input = false,
+        .tick_interval_ms = TASKMGR_TICK_MS
     };
 
     atk_main_register_resize_handler(taskmgr_on_resize_event, &app);
