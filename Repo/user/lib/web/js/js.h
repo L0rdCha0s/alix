@@ -119,8 +119,10 @@ typedef enum
 {
     JS_EXPR_LITERAL = 0,
     JS_EXPR_IDENTIFIER,
+    JS_EXPR_THIS,
     JS_EXPR_BINARY,
     JS_EXPR_UNARY,
+    JS_EXPR_UPDATE,
     JS_EXPR_ASSIGN,
     JS_EXPR_NEW,
     JS_EXPR_CALL,
@@ -128,6 +130,7 @@ typedef enum
     JS_EXPR_ARRAY,
     JS_EXPR_OBJECT,
     JS_EXPR_MEMBER,
+    JS_EXPR_REGEXP_SUBCLASS,
     JS_EXPR_FUNCTION
 } js_expr_type_t;
 
@@ -163,7 +166,8 @@ typedef enum
 {
     JS_UNARY_NEGATE = 0,
     JS_UNARY_NOT,
-    JS_UNARY_POSITIVE
+    JS_UNARY_POSITIVE,
+    JS_UNARY_TYPEOF
 } js_unary_op_t;
 
 typedef enum
@@ -320,6 +324,13 @@ typedef struct
 
 typedef struct
 {
+    bool is_prefix;
+    bool is_increment;
+    js_expr_t *target;
+} js_update_expr_t;
+
+typedef struct
+{
     js_assign_op_t op;
     js_expr_t *target;
     js_expr_t *value;
@@ -374,6 +385,11 @@ typedef struct
     js_expr_t *else_expr;
 } js_ternary_expr_t;
 
+typedef struct
+{
+    int dummy;
+} js_regexp_subclass_expr_t;
+
 struct js_expr
 {
     js_expr_type_t type;
@@ -383,6 +399,7 @@ struct js_expr
         js_identifier_expr_t ident;
         js_binary_expr_t binary;
         js_unary_expr_t unary;
+        js_update_expr_t update;
         js_assign_expr_t assign;
         js_new_expr_t new_expr;
         js_call_expr_t call;
@@ -390,6 +407,7 @@ struct js_expr
         js_array_expr_t array;
         js_object_expr_t object;
         js_member_expr_t member;
+        js_regexp_subclass_expr_t regexp_subclass;
         js_function_expr_t func;
     } as;
 };

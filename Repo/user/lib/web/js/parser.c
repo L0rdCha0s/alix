@@ -1,6 +1,8 @@
 #include "web/js.h"
+#include "web/js/internal.h"
 #include "web/js/lexer.h"
 
+#include "ctype.h"
 #include "libc.h"
 
 typedef struct
@@ -132,6 +134,10 @@ static bool js_parser_consume_semicolon(js_parser_t *parser)
     if (parser->current.type == JS_TOKEN_SEMICOLON)
     {
         js_parser_advance(parser);
+        return true;
+    }
+    if (parser->current.line_terminator)
+    {
         return true;
     }
     if (parser->current.type == JS_TOKEN_EOF || parser->current.type == JS_TOKEN_RBRACE)
@@ -432,12 +438,17 @@ static void js_expr_destroy(js_expr_t *expr)
         case JS_EXPR_IDENTIFIER:
             free(expr->as.ident.name);
             break;
+        case JS_EXPR_THIS:
+            break;
         case JS_EXPR_BINARY:
             js_expr_destroy(expr->as.binary.left);
             js_expr_destroy(expr->as.binary.right);
             break;
         case JS_EXPR_UNARY:
             js_expr_destroy(expr->as.unary.expr);
+            break;
+        case JS_EXPR_UPDATE:
+            js_expr_destroy(expr->as.update.target);
             break;
         case JS_EXPR_ASSIGN:
             js_expr_destroy(expr->as.assign.target);
@@ -489,6 +500,8 @@ static void js_expr_destroy(js_expr_t *expr)
             }
             free(expr->as.member.property);
             break;
+        case JS_EXPR_REGEXP_SUBCLASS:
+            break;
         case JS_EXPR_TERNARY:
             js_expr_destroy(expr->as.ternary.condition);
             js_expr_destroy(expr->as.ternary.then_expr);
@@ -532,6 +545,174 @@ static bool js_parse_function_common(js_parser_t *parser, bool require_name, js_
 static bool js_parse_function_tail(js_parser_t *parser, js_function_expr_t *out);
 static js_expr_t *js_parse_arrow_function(js_parser_t *parser);
 static js_expr_t *js_parse_member_suffix(js_parser_t *parser, js_expr_t *expr);
+
+static js_expr_t *js_parse_regex_literal(js_parser_t *parser)
+{
+    if (!parser || parser->current.type != JS_TOKEN_SLASH)
+    {
+        return NULL;
+    }
+    size_t offset = parser->current.offset;
+    const char *start = parser->lexer.cur;
+    const char *cur = start;
+    bool escaped = false;
+    bool in_class = false;
+    while (*cur)
+    {
+        char c = *cur;
+        if (escaped)
+        {
+            escaped = false;
+            ++cur;
+            continue;
+        }
+        if (c == '\\')
+        {
+            escaped = true;
+            ++cur;
+            continue;
+        }
+        if (c == '[')
+        {
+            in_class = true;
+            ++cur;
+            continue;
+        }
+        if (c == ']' && in_class)
+        {
+            in_class = false;
+            ++cur;
+            continue;
+        }
+        if (c == '/' && !in_class)
+        {
+            break;
+        }
+        ++cur;
+    }
+    if (*cur != '/')
+    {
+        js_parser_error(parser, offset, "unterminated regex");
+        return NULL;
+    }
+    size_t pattern_len = (size_t)(cur - start);
+    char *pattern = js_strdup_len(start, pattern_len);
+    if (!pattern)
+    {
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    for (size_t i = 0; i < pattern_len; ++i)
+    {
+        if ((unsigned char)pattern[i] == JS_EVAL_NUL_SENTINEL)
+        {
+            pattern[i] = '\0';
+        }
+    }
+    ++cur;
+    const char *flag_start = cur;
+    while (isalpha((unsigned char)*cur) != 0)
+    {
+        ++cur;
+    }
+    size_t flag_len = (size_t)(cur - flag_start);
+    char *flags = NULL;
+    if (flag_len)
+    {
+        flags = js_strdup_len(flag_start, flag_len);
+        if (!flags)
+        {
+            free(pattern);
+            js_parser_error(parser, offset, "allocation failed");
+            return NULL;
+        }
+    }
+
+    parser->lexer.cur = cur;
+    parser->lexer.offset = (size_t)(cur - parser->lexer.source);
+    js_parser_advance(parser);
+
+    js_expr_t *callee = js_new_expr(JS_EXPR_IDENTIFIER);
+    if (!callee)
+    {
+        free(pattern);
+        free(flags);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    callee->as.ident.name = js_strdup("RegExp");
+    if (!callee->as.ident.name)
+    {
+        free(pattern);
+        free(flags);
+        js_expr_destroy(callee);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+
+    js_expr_t *pattern_expr = js_new_expr(JS_EXPR_LITERAL);
+    if (!pattern_expr)
+    {
+        free(pattern);
+        free(flags);
+        js_expr_destroy(callee);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    pattern_expr->as.literal.value.type = JS_VALUE_STRING;
+    pattern_expr->as.literal.value.as.string.data = pattern;
+    pattern_expr->as.literal.value.as.string.len = pattern_len;
+
+    size_t arg_count = flag_len ? 2 : 1;
+    js_expr_t **args = (js_expr_t **)calloc(arg_count, sizeof(*args));
+    if (!args)
+    {
+        js_expr_destroy(pattern_expr);
+        js_expr_destroy(callee);
+        free(flags);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    args[0] = pattern_expr;
+
+    if (flag_len)
+    {
+        js_expr_t *flag_expr = js_new_expr(JS_EXPR_LITERAL);
+        if (!flag_expr)
+        {
+            free(flags);
+            free(args);
+            js_expr_destroy(pattern_expr);
+            js_expr_destroy(callee);
+            js_parser_error(parser, offset, "allocation failed");
+            return NULL;
+        }
+        flag_expr->as.literal.value.type = JS_VALUE_STRING;
+        flag_expr->as.literal.value.as.string.data = flags;
+        flag_expr->as.literal.value.as.string.len = flag_len;
+        args[1] = flag_expr;
+    }
+
+    js_expr_t *call = js_new_expr(JS_EXPR_CALL);
+    if (!call)
+    {
+        for (size_t i = 0; i < arg_count; ++i)
+        {
+            if (args[i])
+            {
+                js_expr_destroy(args[i]);
+            }
+        }
+        free(args);
+        js_expr_destroy(callee);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    call->as.call.callee = callee;
+    call->as.call.args = args;
+    call->as.call.arg_count = arg_count;
+    return call;
+}
 
 static bool js_parser_peek_arrow_after_ident(js_parser_t *parser)
 {
@@ -771,6 +952,65 @@ static js_expr_t *js_parse_arrow_function(js_parser_t *parser)
     return expr;
 }
 
+static js_expr_t *js_parse_class_expression(js_parser_t *parser)
+{
+    if (!parser)
+    {
+        return NULL;
+    }
+    size_t offset = parser->current.offset;
+    char *class_kw = js_token_take_text(&parser->current);
+    free(class_kw);
+    js_parser_advance(parser);
+    if (parser->current.type == JS_TOKEN_IDENTIFIER &&
+        parser->current.text &&
+        strcmp(parser->current.text, "extends") != 0)
+    {
+        char *name = js_token_take_text(&parser->current);
+        free(name);
+        js_parser_advance(parser);
+    }
+    if (!(parser->current.type == JS_TOKEN_IDENTIFIER &&
+          parser->current.text &&
+          strcmp(parser->current.text, "extends") == 0))
+    {
+        js_parser_error(parser, parser->current.offset, "expected 'extends'");
+        return NULL;
+    }
+    char *extends_kw = js_token_take_text(&parser->current);
+    free(extends_kw);
+    js_parser_advance(parser);
+    if (parser->current.type != JS_TOKEN_IDENTIFIER || !parser->current.text)
+    {
+        js_parser_error(parser, parser->current.offset, "expected base class");
+        return NULL;
+    }
+    char *base = js_token_take_text(&parser->current);
+    js_parser_advance(parser);
+    bool is_regexp = base && strcmp(base, "RegExp") == 0;
+    free(base);
+    if (!is_regexp)
+    {
+        js_parser_error(parser, offset, "unsupported class base");
+        return NULL;
+    }
+    if (!js_parser_expect(parser, JS_TOKEN_LBRACE, "expected '{'") )
+    {
+        return NULL;
+    }
+    if (!js_parser_expect(parser, JS_TOKEN_RBRACE, "expected '}'") )
+    {
+        return NULL;
+    }
+    js_expr_t *expr = js_new_expr(JS_EXPR_REGEXP_SUBCLASS);
+    if (!expr)
+    {
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    return expr;
+}
+
 static js_expr_t *js_parse_primary(js_parser_t *parser)
 {
     if (!parser)
@@ -781,12 +1021,22 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
     {
         return js_parse_arrow_function(parser);
     }
+    if (parser->current.type == JS_TOKEN_IDENTIFIER &&
+        parser->current.text &&
+        strcmp(parser->current.text, "class") == 0)
+    {
+        return js_parse_class_expression(parser);
+    }
     if (parser->current.type == JS_TOKEN_LPAREN && js_parser_peek_arrow_after_paren(parser))
     {
         return js_parse_arrow_function(parser);
     }
     switch (parser->current.type)
     {
+        case JS_TOKEN_SLASH:
+        {
+            return js_parse_regex_literal(parser);
+        }
         case JS_TOKEN_NUMBER:
         {
             js_expr_t *expr = js_new_expr(JS_EXPR_LITERAL);
@@ -850,6 +1100,17 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
                 return NULL;
             }
             expr->as.literal.value = js_value_make_undefined();
+            js_parser_advance(parser);
+            return expr;
+        }
+        case JS_TOKEN_KW_THIS:
+        {
+            js_expr_t *expr = js_new_expr(JS_EXPR_THIS);
+            if (!expr)
+            {
+                js_parser_error(parser, parser->current.offset, "allocation failed");
+                return NULL;
+            }
             js_parser_advance(parser);
             return expr;
         }
@@ -1332,6 +1593,29 @@ static js_expr_t *js_parse_unary(js_parser_t *parser)
     {
         return NULL;
     }
+    if (parser->current.type == JS_TOKEN_PLUS_PLUS ||
+        parser->current.type == JS_TOKEN_MINUS_MINUS)
+    {
+        bool increment = (parser->current.type == JS_TOKEN_PLUS_PLUS);
+        size_t offset = parser->current.offset;
+        js_parser_advance(parser);
+        js_expr_t *target = js_parse_unary(parser);
+        if (!target)
+        {
+            return NULL;
+        }
+        js_expr_t *expr = js_new_expr(JS_EXPR_UPDATE);
+        if (!expr)
+        {
+            js_expr_destroy(target);
+            js_parser_error(parser, offset, "allocation failed");
+            return NULL;
+        }
+        expr->as.update.is_prefix = true;
+        expr->as.update.is_increment = increment;
+        expr->as.update.target = target;
+        return expr;
+    }
     if (parser->current.type == JS_TOKEN_KW_NEW)
     {
         size_t offset = parser->current.offset;
@@ -1410,11 +1694,91 @@ static js_expr_t *js_parse_unary(js_parser_t *parser)
         expr->as.new_expr.callee = callee;
         expr->as.new_expr.args = args.items;
         expr->as.new_expr.arg_count = args.count;
+        expr = js_parse_member_suffix(parser, expr);
+        if (!expr)
+        {
+            return NULL;
+        }
+        for (;;)
+        {
+            if (!js_parser_match(parser, JS_TOKEN_LPAREN))
+            {
+                break;
+            }
+            js_expr_list_t call_args = {0};
+            if (parser->current.type != JS_TOKEN_RPAREN)
+            {
+                for (;;)
+                {
+                    js_expr_t *arg = js_parse_expression(parser);
+                    if (!arg)
+                    {
+                        for (size_t i = 0; i < call_args.count; ++i)
+                        {
+                            js_expr_destroy(call_args.items[i]);
+                        }
+                        free(call_args.items);
+                        js_expr_destroy(expr);
+                        return NULL;
+                    }
+                    if (!js_expr_list_push(&call_args, arg))
+                    {
+                        js_expr_destroy(arg);
+                        for (size_t i = 0; i < call_args.count; ++i)
+                        {
+                            js_expr_destroy(call_args.items[i]);
+                        }
+                        free(call_args.items);
+                        js_expr_destroy(expr);
+                        js_parser_error(parser, parser->current.offset, "allocation failed");
+                        return NULL;
+                    }
+                    if (parser->current.type == JS_TOKEN_COMMA)
+                    {
+                        js_parser_advance(parser);
+                        continue;
+                    }
+                    break;
+                }
+            }
+            if (!js_parser_expect(parser, JS_TOKEN_RPAREN, "expected ')'") )
+            {
+                for (size_t i = 0; i < call_args.count; ++i)
+                {
+                    js_expr_destroy(call_args.items[i]);
+                }
+                free(call_args.items);
+                js_expr_destroy(expr);
+                return NULL;
+            }
+            js_expr_t *call = js_new_expr(JS_EXPR_CALL);
+            if (!call)
+            {
+                for (size_t i = 0; i < call_args.count; ++i)
+                {
+                    js_expr_destroy(call_args.items[i]);
+                }
+                free(call_args.items);
+                js_expr_destroy(expr);
+                js_parser_error(parser, parser->current.offset, "allocation failed");
+                return NULL;
+            }
+            call->as.call.callee = expr;
+            call->as.call.args = call_args.items;
+            call->as.call.arg_count = call_args.count;
+            expr = call;
+            expr = js_parse_member_suffix(parser, expr);
+            if (!expr)
+            {
+                return NULL;
+            }
+        }
         return expr;
     }
     if (parser->current.type == JS_TOKEN_BANG ||
         parser->current.type == JS_TOKEN_MINUS ||
-        parser->current.type == JS_TOKEN_PLUS)
+        parser->current.type == JS_TOKEN_PLUS ||
+        parser->current.type == JS_TOKEN_KW_TYPEOF)
     {
         js_unary_op_t op = JS_UNARY_NOT;
         if (parser->current.type == JS_TOKEN_MINUS)
@@ -1424,6 +1788,10 @@ static js_expr_t *js_parse_unary(js_parser_t *parser)
         else if (parser->current.type == JS_TOKEN_PLUS)
         {
             op = JS_UNARY_POSITIVE;
+        }
+        else if (parser->current.type == JS_TOKEN_KW_TYPEOF)
+        {
+            op = JS_UNARY_TYPEOF;
         }
         size_t offset = parser->current.offset;
         js_parser_advance(parser);
@@ -1443,7 +1811,30 @@ static js_expr_t *js_parse_unary(js_parser_t *parser)
         expr->as.unary.expr = right;
         return expr;
     }
-    return js_parse_call(parser);
+    js_expr_t *expr = js_parse_call(parser);
+    if (!expr)
+    {
+        return NULL;
+    }
+    if (parser->current.type == JS_TOKEN_PLUS_PLUS ||
+        parser->current.type == JS_TOKEN_MINUS_MINUS)
+    {
+        bool increment = (parser->current.type == JS_TOKEN_PLUS_PLUS);
+        size_t offset = parser->current.offset;
+        js_parser_advance(parser);
+        js_expr_t *update = js_new_expr(JS_EXPR_UPDATE);
+        if (!update)
+        {
+            js_expr_destroy(expr);
+            js_parser_error(parser, offset, "allocation failed");
+            return NULL;
+        }
+        update->as.update.is_prefix = false;
+        update->as.update.is_increment = increment;
+        update->as.update.target = expr;
+        return update;
+    }
+    return expr;
 }
 
 static js_expr_t *js_parse_factor(js_parser_t *parser)

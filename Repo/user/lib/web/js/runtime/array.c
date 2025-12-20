@@ -2,6 +2,22 @@
 
 #include "libc.h"
 
+static js_property_t *js_array_find(js_array_t *array, const char *name)
+{
+    if (!array || !name)
+    {
+        return NULL;
+    }
+    for (js_property_t *prop = array->properties; prop; prop = prop->next)
+    {
+        if (prop->name && strcmp(prop->name, name) == 0)
+        {
+            return prop;
+        }
+    }
+    return NULL;
+}
+
 js_array_t *js_array_create(void)
 {
     js_array_t *array = (js_array_t *)calloc(1, sizeof(*array));
@@ -45,6 +61,15 @@ void js_array_release(js_array_t *array)
         js_value_destroy(&array->items[i]);
     }
     free(array->items);
+    js_property_t *prop = array->properties;
+    while (prop)
+    {
+        js_property_t *next = prop->next;
+        free(prop->name);
+        js_value_destroy(&prop->value);
+        free(prop);
+        prop = next;
+    }
     free(array);
 }
 
@@ -124,4 +149,58 @@ bool js_array_get(const js_array_t *array, size_t index, js_value_t *out)
         return true;
     }
     return js_value_copy(out, &array->items[index]);
+}
+
+bool js_array_get_property(js_array_t *array, const char *name, js_value_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (!array || !name)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    js_property_t *prop = js_array_find(array, name);
+    if (!prop)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    return js_value_copy(out, &prop->value);
+}
+
+bool js_array_set_property(js_array_t *array, const char *name, const js_value_t *value)
+{
+    if (!array || !name || !value)
+    {
+        return false;
+    }
+    js_property_t *prop = js_array_find(array, name);
+    if (prop)
+    {
+        js_value_destroy(&prop->value);
+        return js_value_copy(&prop->value, value);
+    }
+    js_property_t *new_prop = (js_property_t *)calloc(1, sizeof(*new_prop));
+    if (!new_prop)
+    {
+        return false;
+    }
+    new_prop->name = js_strdup(name);
+    if (!new_prop->name)
+    {
+        free(new_prop);
+        return false;
+    }
+    if (!js_value_copy(&new_prop->value, value))
+    {
+        free(new_prop->name);
+        free(new_prop);
+        return false;
+    }
+    new_prop->next = array->properties;
+    array->properties = new_prop;
+    return true;
 }

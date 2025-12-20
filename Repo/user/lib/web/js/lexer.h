@@ -21,8 +21,10 @@ typedef enum
     JS_TOKEN_QUESTION,
     JS_TOKEN_COLON,
     JS_TOKEN_PLUS,
+    JS_TOKEN_PLUS_PLUS,
     JS_TOKEN_PLUS_EQUAL,
     JS_TOKEN_MINUS,
+    JS_TOKEN_MINUS_MINUS,
     JS_TOKEN_STAR,
     JS_TOKEN_SLASH,
     JS_TOKEN_PERCENT,
@@ -49,6 +51,8 @@ typedef enum
     JS_TOKEN_KW_FALSE,
     JS_TOKEN_KW_NULL,
     JS_TOKEN_KW_UNDEFINED,
+    JS_TOKEN_KW_THIS,
+    JS_TOKEN_KW_TYPEOF,
     JS_TOKEN_KW_IF,
     JS_TOKEN_KW_ELSE,
     JS_TOKEN_KW_WHILE,
@@ -71,6 +75,7 @@ typedef struct
     double number;
     char *text;
     size_t length;
+    bool line_terminator;
 } js_token_t;
 
 typedef struct

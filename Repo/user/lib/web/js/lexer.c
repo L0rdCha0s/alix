@@ -12,6 +12,7 @@ void js_token_destroy(js_token_t *tok)
     free(tok->text);
     tok->text = NULL;
     tok->length = 0;
+    tok->line_terminator = false;
 }
 
 char *js_token_take_text(js_token_t *tok)
@@ -96,6 +97,8 @@ static js_token_type_t js_keyword_type(const char *start, size_t len)
     if (len == 5 && strncmp(start, "false", len) == 0) return JS_TOKEN_KW_FALSE;
     if (len == 4 && strncmp(start, "null", len) == 0) return JS_TOKEN_KW_NULL;
     if (len == 9 && strncmp(start, "undefined", len) == 0) return JS_TOKEN_KW_UNDEFINED;
+    if (len == 4 && strncmp(start, "this", len) == 0) return JS_TOKEN_KW_THIS;
+    if (len == 6 && strncmp(start, "typeof", len) == 0) return JS_TOKEN_KW_TYPEOF;
     if (len == 2 && strncmp(start, "if", len) == 0) return JS_TOKEN_KW_IF;
     if (len == 4 && strncmp(start, "else", len) == 0) return JS_TOKEN_KW_ELSE;
     if (len == 5 && strncmp(start, "while", len) == 0) return JS_TOKEN_KW_WHILE;
@@ -163,17 +166,26 @@ static bool js_utf8_append(char *buf, size_t cap, size_t *len, unsigned int code
     return false;
 }
 
-static bool js_lexer_skip_ws_and_comments(js_lexer_t *lex, js_parse_error_t *error_out)
+static bool js_lexer_skip_ws_and_comments(js_lexer_t *lex, js_parse_error_t *error_out, bool *saw_line_terminator)
 {
+    bool saw_line = false;
     for (;;)
     {
         char c = js_lexer_peek(lex);
         if (c == '\0')
         {
+            if (saw_line_terminator)
+            {
+                *saw_line_terminator = saw_line;
+            }
             return true;
         }
         if (isspace((unsigned char)c) != 0)
         {
+            if (c == '\n' || c == '\r')
+            {
+                saw_line = true;
+            }
             (void)js_lexer_advance(lex);
             continue;
         }
@@ -203,6 +215,10 @@ static bool js_lexer_skip_ws_and_comments(js_lexer_t *lex, js_parse_error_t *err
                         js_parse_error_set(error_out, start_offset, "unterminated comment");
                         return false;
                     }
+                    if (c == '\n' || c == '\r')
+                    {
+                        saw_line = true;
+                    }
                     if (c == '*' && js_lexer_peek_next(lex) == '/')
                     {
                         (void)js_lexer_advance(lex);
@@ -213,6 +229,10 @@ static bool js_lexer_skip_ws_and_comments(js_lexer_t *lex, js_parse_error_t *err
                 }
                 continue;
             }
+        }
+        if (saw_line_terminator)
+        {
+            *saw_line_terminator = saw_line;
         }
         return true;
     }
@@ -602,11 +622,14 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
     out->number = 0.0;
     out->text = NULL;
     out->length = 0;
+    out->line_terminator = false;
 
-    if (!js_lexer_skip_ws_and_comments(lex, error_out))
+    bool saw_line_terminator = false;
+    if (!js_lexer_skip_ws_and_comments(lex, error_out, &saw_line_terminator))
     {
         return false;
     }
+    out->line_terminator = saw_line_terminator;
 
     char c = js_lexer_peek(lex);
     if (c == '\0')
@@ -654,7 +677,12 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
         case '?': out->type = JS_TOKEN_QUESTION; out->offset = start_offset; return true;
         case ':': out->type = JS_TOKEN_COLON; out->offset = start_offset; return true;
         case '+':
-            if (js_lexer_peek(lex) == '=')
+            if (js_lexer_peek(lex) == '+')
+            {
+                (void)js_lexer_advance(lex);
+                out->type = JS_TOKEN_PLUS_PLUS;
+            }
+            else if (js_lexer_peek(lex) == '=')
             {
                 (void)js_lexer_advance(lex);
                 out->type = JS_TOKEN_PLUS_EQUAL;
@@ -665,7 +693,18 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
             }
             out->offset = start_offset;
             return true;
-        case '-': out->type = JS_TOKEN_MINUS; out->offset = start_offset; return true;
+        case '-':
+            if (js_lexer_peek(lex) == '-')
+            {
+                (void)js_lexer_advance(lex);
+                out->type = JS_TOKEN_MINUS_MINUS;
+            }
+            else
+            {
+                out->type = JS_TOKEN_MINUS;
+            }
+            out->offset = start_offset;
+            return true;
         case '*': out->type = JS_TOKEN_STAR; out->offset = start_offset; return true;
         case '%': out->type = JS_TOKEN_PERCENT; out->offset = start_offset; return true;
         case '/': out->type = JS_TOKEN_SLASH; out->offset = start_offset; return true;

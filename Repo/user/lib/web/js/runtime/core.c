@@ -24,6 +24,64 @@ static js_native_meta_t *js_native_meta_find(js_runtime_t *rt, const js_value_t 
     return NULL;
 }
 
+static bool js_global_object_get(js_runtime_t *rt,
+                                 void *user_data,
+                                 const char *name,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!name)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    js_env_t *env = (js_env_t *)user_data;
+    if (!js_env_get(env, name, out))
+    {
+        *out = js_value_make_undefined_internal();
+    }
+    return true;
+}
+
+static bool js_global_object_set(js_runtime_t *rt,
+                                 void *user_data,
+                                 const char *name,
+                                 const js_value_t *value,
+                                 char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!name || !value)
+    {
+        return false;
+    }
+    js_env_t *env = (js_env_t *)user_data;
+    if (!js_env_assign(env, name, value))
+    {
+        if (!js_env_define_local(env, name, value, false, true))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("global assignment failed");
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool js_runtime_register_native(js_runtime_t *rt,
                                        const char *name,
                                        js_native_fn_t fn,
@@ -93,7 +151,20 @@ js_runtime_t *js_runtime_create(void)
     }
     rt->programs = NULL;
     rt->native_meta = NULL;
+    rt->global_object = NULL;
+    js_value_t global_obj;
+    if (!js_value_make_host_object(&global_obj, js_global_object_get, js_global_object_set, NULL, rt->global))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    rt->global_object = global_obj.as.object;
     if (!js_runtime_register_native(rt, "Number", js_builtin_number, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_register_native(rt, "String", js_builtin_string, NULL, true, 1))
     {
         js_runtime_destroy(rt);
         return NULL;
@@ -103,7 +174,22 @@ js_runtime_t *js_runtime_create(void)
         js_runtime_destroy(rt);
         return NULL;
     }
+    if (!js_runtime_register_native(rt, "SyntaxError", js_builtin_syntax_error, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
     if (!js_runtime_register_native(rt, "Test262Error", js_builtin_test262_error, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_register_native(rt, "RegExp", js_builtin_regexp, NULL, true, 2))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_register_native(rt, "Object", js_builtin_object, NULL, true, 1))
     {
         js_runtime_destroy(rt);
         return NULL;
@@ -118,39 +204,65 @@ js_runtime_t *js_runtime_create(void)
         js_runtime_destroy(rt);
         return NULL;
     }
+    if (!js_runtime_register_native(rt, "eval", js_builtin_eval, NULL, false, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
     if (!js_runtime_register_native(rt, "verifyProperty", js_builtin_verify_property, NULL, false, 3))
     {
         js_runtime_destroy(rt);
         return NULL;
     }
-    js_value_t symbol_obj;
-    if (!js_value_make_host_object(&symbol_obj, NULL, NULL, NULL, NULL))
+    if (!js_runtime_register_native(rt, "Symbol", js_builtin_symbol, NULL, false, 0))
     {
         js_runtime_destroy(rt);
         return NULL;
     }
-    js_value_t to_prim;
-    if (!js_value_make_cstring(&to_prim, "Symbol.toPrimitive"))
+    if (!js_runtime_register_native(rt, "testWithTypedArrayConstructors",
+                                    js_builtin_test_with_typed_array_constructors,
+                                    NULL,
+                                    false,
+                                    2))
     {
-        js_value_destroy(&symbol_obj);
         js_runtime_destroy(rt);
         return NULL;
     }
-    if (!js_object_set_slot(symbol_obj.as.object, "toPrimitive", &to_prim))
+    js_value_t host_helpers;
+    if (!js_value_make_host_object(&host_helpers, NULL, NULL, NULL, NULL))
     {
-        js_value_destroy(&to_prim);
-        js_value_destroy(&symbol_obj);
         js_runtime_destroy(rt);
         return NULL;
     }
-    js_value_destroy(&to_prim);
-    if (!js_runtime_set_global(rt, "Symbol", &symbol_obj))
+    js_value_t is_html_dda;
+    memset(&is_html_dda, 0, sizeof(is_html_dda));
+    is_html_dda.type = JS_VALUE_NATIVE_FN;
+    is_html_dda.as.native.fn = js_builtin_is_html_dda;
+    is_html_dda.as.native.user_data = NULL;
+    if (!js_object_set_slot(host_helpers.as.object, "IsHTMLDDA", &is_html_dda))
     {
-        js_value_destroy(&symbol_obj);
+        js_value_destroy(&host_helpers);
         js_runtime_destroy(rt);
         return NULL;
     }
-    js_value_destroy(&symbol_obj);
+    js_value_t create_realm;
+    memset(&create_realm, 0, sizeof(create_realm));
+    create_realm.type = JS_VALUE_NATIVE_FN;
+    create_realm.as.native.fn = js_builtin_create_realm;
+    create_realm.as.native.user_data = NULL;
+    if (!js_object_set_slot(host_helpers.as.object, "createRealm", &create_realm))
+    {
+        js_value_destroy(&host_helpers);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_set_global(rt, "$262", &host_helpers))
+    {
+        js_value_destroy(&host_helpers);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_destroy(&host_helpers);
     js_value_t nan_value = js_value_make_number(js_nan());
     if (!js_runtime_set_global(rt, "NaN", &nan_value))
     {
@@ -172,6 +284,11 @@ void js_runtime_destroy(js_runtime_t *rt)
     if (!rt)
     {
         return;
+    }
+    if (rt->global_object)
+    {
+        js_object_release(rt->global_object);
+        rt->global_object = NULL;
     }
     js_program_node_t *node = rt->programs;
     while (node)
@@ -222,7 +339,16 @@ bool js_value_is_constructor(js_runtime_t *rt, const js_value_t *value)
     if (value->type == JS_VALUE_NATIVE_FN)
     {
         js_native_meta_t *meta = js_native_meta_find(rt, value);
-        return meta ? meta->is_constructor : false;
+        if (meta)
+        {
+            return meta->is_constructor;
+        }
+        if (value->as.native.fn == js_builtin_regexp ||
+            value->as.native.fn == js_builtin_regexp_subclass)
+        {
+            return true;
+        }
+        return false;
     }
     return false;
 }
@@ -230,7 +356,39 @@ bool js_value_is_constructor(js_runtime_t *rt, const js_value_t *value)
 const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
 {
     js_native_meta_t *meta = js_native_meta_find(rt, value);
-    return meta ? meta->name : NULL;
+    if (meta)
+    {
+        return meta->name;
+    }
+    if (value && value->type == JS_VALUE_NATIVE_FN)
+    {
+        if (value->as.native.fn == js_regexp_compile ||
+            value->as.native.fn == js_regexp_compile_proto)
+        {
+            return "compile";
+        }
+        if (value->as.native.fn == js_regexp_exec)
+        {
+            return "exec";
+        }
+        if (value->as.native.fn == js_builtin_string_from_char_code)
+        {
+            return "fromCharCode";
+        }
+        if (value->as.native.fn == js_builtin_define_property)
+        {
+            return "defineProperty";
+        }
+        if (value->as.native.fn == js_builtin_define_properties)
+        {
+            return "defineProperties";
+        }
+        if (value->as.native.fn == js_builtin_number_to_string)
+        {
+            return "toString";
+        }
+    }
+    return NULL;
 }
 
 bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *out_len)
@@ -242,6 +400,60 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
     js_native_meta_t *meta = js_native_meta_find(rt, value);
     if (!meta)
     {
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_regexp_compile || value->as.native.fn == js_regexp_compile_proto))
+        {
+            if (out_len)
+            {
+                *out_len = 2;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_regexp_exec)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_string_from_char_code)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_define_property)
+        {
+            if (out_len)
+            {
+                *out_len = 3;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_define_properties)
+        {
+            if (out_len)
+            {
+                *out_len = 2;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_number_to_string)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
         return false;
     }
     if (out_len)

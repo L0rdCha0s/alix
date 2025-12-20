@@ -12,6 +12,8 @@ char *js_strdup_len(const char *src, size_t len);
 char *js_strdup(const char *src);
 int js_hex_value(char c);
 
+#define JS_EVAL_NUL_SENTINEL 0xC0
+
 #ifdef __cplusplus
 }
 #endif

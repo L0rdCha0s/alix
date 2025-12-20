@@ -4,6 +4,61 @@
 #include "float.h"
 #include "libc.h"
 
+typedef struct
+{
+    char *description;
+} js_symbol_data_t;
+
+static bool js_symbol_get(js_runtime_t *rt,
+                          void *user_data,
+                          const char *name,
+                          js_value_t *out,
+                          char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!name)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    js_symbol_data_t *sym = (js_symbol_data_t *)user_data;
+    if (strcmp(name, "description") == 0)
+    {
+        if (!sym || !sym->description)
+        {
+            *out = js_value_make_undefined_internal();
+            return true;
+        }
+        return js_value_make_cstring(out, sym->description);
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static void js_symbol_finalize(void *user_data)
+{
+    js_symbol_data_t *sym = (js_symbol_data_t *)user_data;
+    if (!sym)
+    {
+        return;
+    }
+    free(sym->description);
+    free(sym);
+}
+
+bool js_object_is_symbol(const js_object_t *object)
+{
+    return object && object->get_fn == js_symbol_get;
+}
+
 js_value_t js_value_make_undefined_internal(void)
 {
     js_value_t value;
@@ -112,6 +167,35 @@ bool js_value_make_host_object(js_value_t *out,
     object->user_data = user_data;
     out->type = JS_VALUE_OBJECT;
     out->as.object = object;
+    return true;
+}
+
+bool js_value_make_symbol(js_value_t *out, const char *description)
+{
+    if (!out)
+    {
+        return false;
+    }
+    js_symbol_data_t *sym = (js_symbol_data_t *)calloc(1, sizeof(*sym));
+    if (!sym)
+    {
+        return false;
+    }
+    if (description)
+    {
+        sym->description = js_strdup(description);
+        if (!sym->description)
+        {
+            free(sym);
+            return false;
+        }
+    }
+    if (!js_value_make_host_object(out, js_symbol_get, NULL, js_symbol_finalize, sym))
+    {
+        free(sym->description);
+        free(sym);
+        return false;
+    }
     return true;
 }
 
@@ -622,6 +706,14 @@ bool js_temp_string_from_value(js_runtime_t *rt,
 
     if (value->type == JS_VALUE_OBJECT)
     {
+        if (js_object_is_symbol(value->as.object))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("TypeError: cannot convert Symbol to string");
+            }
+            return false;
+        }
         if (rt)
         {
             js_value_t prim = js_value_make_undefined_internal();

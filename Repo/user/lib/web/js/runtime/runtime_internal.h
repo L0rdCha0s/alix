@@ -19,6 +19,7 @@ struct js_array
     js_value_t *items;
     size_t length;
     size_t capacity;
+    js_property_t *properties;
 };
 
 struct js_object
@@ -63,6 +64,7 @@ struct js_runtime
     js_env_t *global;
     js_program_node_t *programs;
     js_native_meta_t *native_meta;
+    js_object_t *global_object;
 };
 
 typedef struct
@@ -96,12 +98,17 @@ void js_array_retain(js_array_t *array);
 void js_array_release(js_array_t *array);
 bool js_array_set(js_array_t *array, size_t index, const js_value_t *value);
 bool js_array_get(const js_array_t *array, size_t index, js_value_t *out);
+bool js_array_get_property(js_array_t *array, const char *name, js_value_t *out);
+bool js_array_set_property(js_array_t *array, const char *name, const js_value_t *value);
 
 void js_object_retain(js_object_t *object);
 void js_object_release(js_object_t *object);
 bool js_object_get_slot(js_object_t *object, const char *name, js_value_t *out);
 bool js_object_set_slot(js_object_t *object, const char *name, const js_value_t *value);
 bool js_object_has_slot(js_object_t *object, const char *name);
+bool js_object_is_symbol(const js_object_t *object);
+
+bool js_value_make_symbol(js_value_t *out, const char *description);
 
 js_function_t *js_function_create(const js_function_decl_t *decl,
                                   const js_function_expr_t *expr,
@@ -141,6 +148,30 @@ bool js_builtin_number(js_runtime_t *rt,
                        void *user_data,
                        js_value_t *out,
                        char **error_message);
+bool js_builtin_string(js_runtime_t *rt,
+                       size_t argc,
+                       const js_value_t *argv,
+                       void *user_data,
+                       js_value_t *out,
+                       char **error_message);
+bool js_builtin_string_from_char_code(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message);
+bool js_builtin_regexp(js_runtime_t *rt,
+                       size_t argc,
+                       const js_value_t *argv,
+                       void *user_data,
+                       js_value_t *out,
+                       char **error_message);
+bool js_builtin_regexp_subclass(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
 bool js_builtin_escape(js_runtime_t *rt,
                        size_t argc,
                        const js_value_t *argv,
@@ -153,12 +184,102 @@ bool js_builtin_unescape(js_runtime_t *rt,
                          void *user_data,
                          js_value_t *out,
                          char **error_message);
+bool js_builtin_eval(js_runtime_t *rt,
+                     size_t argc,
+                     const js_value_t *argv,
+                     void *user_data,
+                     js_value_t *out,
+                     char **error_message);
+bool js_builtin_symbol(js_runtime_t *rt,
+                       size_t argc,
+                       const js_value_t *argv,
+                       void *user_data,
+                       js_value_t *out,
+                       char **error_message);
+bool js_regexp_compile(js_runtime_t *rt,
+                       size_t argc,
+                       const js_value_t *argv,
+                       void *user_data,
+                       js_value_t *out,
+                       char **error_message);
+bool js_regexp_exec(js_runtime_t *rt,
+                    size_t argc,
+                    const js_value_t *argv,
+                    void *user_data,
+                    js_value_t *out,
+                    char **error_message);
+bool js_regexp_compile_proto(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_builtin_is_html_dda(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_builtin_create_realm(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_builtin_test_with_typed_array_constructors(js_runtime_t *rt,
+                                                   size_t argc,
+                                                   const js_value_t *argv,
+                                                   void *user_data,
+                                                   js_value_t *out,
+                                                   char **error_message);
+bool js_builtin_string_match(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_builtin_number_to_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_builtin_define_property(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+bool js_builtin_define_properties(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
+bool js_builtin_function_call(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message);
+bool js_builtin_object(js_runtime_t *rt,
+                       size_t argc,
+                       const js_value_t *argv,
+                       void *user_data,
+                       js_value_t *out,
+                       char **error_message);
 bool js_builtin_type_error(js_runtime_t *rt,
                            size_t argc,
                            const js_value_t *argv,
                            void *user_data,
                            js_value_t *out,
                            char **error_message);
+bool js_builtin_syntax_error(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
 bool js_builtin_test262_error(js_runtime_t *rt,
                               size_t argc,
                               const js_value_t *argv,
