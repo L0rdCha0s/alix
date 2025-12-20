@@ -10,6 +10,7 @@
 #include "atk/atk_nav_stack.h"
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_list_view.h"
+#include "atk/atk_tree_view.h"
 #include "atk/atk_tabs.h"
 #include "atk/atk_text_input.h"
 #ifndef KERNEL_BUILD
@@ -1090,6 +1091,10 @@ static void window_layout_children(atk_widget_t *window, atk_window_priv_t *priv
         else if (atk_widget_is_a(child, &ATK_LIST_VIEW_CLASS))
         {
             atk_list_view_relayout(child);
+        }
+        else if (atk_widget_is_a(child, &ATK_TREE_VIEW_CLASS))
+        {
+            atk_tree_view_relayout(child);
         }
 #ifndef KERNEL_BUILD
         else if (atk_widget_is_a(child, &ATK_TERMINAL_CLASS))

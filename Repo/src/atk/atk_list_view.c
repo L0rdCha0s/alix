@@ -409,6 +409,31 @@ void atk_list_view_force_vertical_scrollbar(atk_widget_t *list, bool force)
     priv->layout_dirty = true;
 }
 
+void atk_list_view_set_active(atk_widget_t *list, bool active)
+{
+    if (!list)
+    {
+        return;
+    }
+    atk_list_view_priv_t *priv = list_priv_mut(list);
+    if (!priv)
+    {
+        return;
+    }
+    list->used = active;
+    if (priv->vscroll)
+    {
+        priv->vscroll->used = active;
+        atk_scrollbar_mark_dirty(priv->vscroll);
+    }
+    if (priv->hscroll)
+    {
+        priv->hscroll->used = active;
+        atk_scrollbar_mark_dirty(priv->hscroll);
+    }
+    list_view_mark_dirty(list);
+}
+
 bool atk_list_view_is_over_separator(const atk_widget_t *list, int local_x, int local_y)
 {
     const atk_list_view_priv_t *priv = list_priv(list);
@@ -1448,9 +1473,9 @@ static atk_mouse_response_t list_view_mouse_cb(atk_widget_t *widget,
         }
     }
 
-    bool click_select = event->pressed_edge || event->released_edge || (event->left_pressed && !priv->resizing);
+    bool click_select = event->released_edge && !priv->resizing;
 
-    if (click_select && !priv->resizing)
+    if (click_select)
     {
         int header_h = priv->header_visible_height;
         int local_y = event->local_y;

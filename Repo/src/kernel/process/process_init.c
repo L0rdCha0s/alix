@@ -260,6 +260,7 @@ void process_bind_idle_to_bsp(void)
     idle->preempt_pending = false;
     idle->time_slice_remaining = scheduler_time_slice_ticks();
     __atomic_store_n(&idle->running_cpu, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_cpu_usage[0].last_tick, timer_ticks(), __ATOMIC_RELAXED);
     arch_cpu_set_kernel_stack(0, idle->kernel_stack_top);
     wrmsr(MSR_GS_BASE, idle->gs_base);
     wrmsr(MSR_FS_BASE, idle->fs_base);
@@ -294,6 +295,7 @@ void process_run_secondary_cpu(uint32_t cpu_index)
     idle->preempt_pending = false;
     idle->time_slice_remaining = scheduler_time_slice_ticks();
     __atomic_store_n(&idle->running_cpu, cpu, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_cpu_usage[cpu].last_tick, timer_ticks(), __ATOMIC_RELAXED);
 
     arch_cpu_set_kernel_stack(cpu, idle->kernel_stack_top);
     wrmsr(MSR_GS_BASE, idle->gs_base);

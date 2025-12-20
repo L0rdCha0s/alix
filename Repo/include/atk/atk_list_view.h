@@ -79,6 +79,9 @@ void atk_list_view_set_select_handler(atk_widget_t *list, atk_list_view_select_t
  */
 void atk_list_view_force_vertical_scrollbar(atk_widget_t *list, bool force);
 
+/* Enable/disable the list view (inactive lists may ignore input). */
+void atk_list_view_set_active(atk_widget_t *list, bool active);
+
 /* Draw the list view into the current backbuffer. */
 void atk_list_view_draw(const struct atk_state *state, const atk_widget_t *list);
 

@@ -198,7 +198,35 @@ static void taskmgr_format_percent(uint32_t value, char *buffer, size_t len)
     }
 }
 
-static uint32_t taskmgr_percent_of_total(uint64_t numerator, uint64_t denominator, uint32_t cap)
+static void taskmgr_format_percent_tenths(uint32_t value, char *buffer, size_t len)
+{
+    if (!buffer || len == 0)
+    {
+        return;
+    }
+
+    uint32_t whole = value / 10U;
+    uint32_t tenths = value % 10U;
+    taskmgr_format_u64(whole, buffer, len);
+    size_t used = strlen(buffer);
+    if (used + 2 < len)
+    {
+        buffer[used++] = '.';
+        buffer[used++] = (char)('0' + (tenths % 10U));
+        buffer[used] = '\0';
+    }
+    used = strlen(buffer);
+    if (used + 1 < len)
+    {
+        buffer[used++] = '%';
+        buffer[used] = '\0';
+    }
+}
+
+static uint32_t taskmgr_scaled_of_total(uint64_t numerator,
+                                        uint64_t denominator,
+                                        uint32_t scale,
+                                        uint32_t cap)
 {
     if (denominator == 0)
     {
@@ -207,13 +235,17 @@ static uint32_t taskmgr_percent_of_total(uint64_t numerator, uint64_t denominato
 
     uint64_t limit = (uint64_t)(~(uint64_t)0);
     uint64_t scaled = numerator;
-    if (scaled > limit / 100ULL)
+    if (scale == 0)
+    {
+        return 0;
+    }
+    if (scaled > limit / (uint64_t)scale)
     {
         scaled = limit;
     }
     else
     {
-        scaled *= 100ULL;
+        scaled *= (uint64_t)scale;
     }
 
     uint64_t value = scaled / denominator;
@@ -222,6 +254,11 @@ static uint32_t taskmgr_percent_of_total(uint64_t numerator, uint64_t denominato
         value = cap;
     }
     return (uint32_t)value;
+}
+
+static uint32_t taskmgr_percent_of_total(uint64_t numerator, uint64_t denominator, uint32_t cap)
+{
+    return taskmgr_scaled_of_total(numerator, denominator, 100U, cap);
 }
 
 static taskmgr_net_history_t *taskmgr_history_slot(const char *name)
@@ -481,7 +518,7 @@ static uint64_t taskmgr_refresh_cpu(atk_taskmgr_app_t *app)
         taskmgr_cpu_history_t *hist = taskmgr_cpu_history_slot((uint32_t)info->cpu_index);
         uint64_t total_delta = 0;
         uint64_t idle_delta = 0;
-        uint32_t load_percent = 0;
+        uint32_t load_tenths = 0;
 
         if (hist)
         {
@@ -498,7 +535,7 @@ static uint64_t taskmgr_refresh_cpu(atk_taskmgr_app_t *app)
                 if (total_delta > 0 && idle_delta <= total_delta)
                 {
                     uint64_t busy = total_delta - idle_delta;
-                    load_percent = taskmgr_percent_of_total(busy, total_delta, 100);
+                    load_tenths = taskmgr_scaled_of_total(busy, total_delta, 1000U, 1000U);
                 }
             }
             hist->cpu_index = (uint32_t)info->cpu_index;
@@ -512,7 +549,7 @@ static uint64_t taskmgr_refresh_cpu(atk_taskmgr_app_t *app)
         char cells[9][32];
         taskmgr_format_u64(info->cpu_index, cells[0], sizeof(cells[0]));
         taskmgr_copy_string(cells[1], sizeof(cells[1]), info->online ? "yes" : "no");
-        taskmgr_format_percent(load_percent, cells[2], sizeof(cells[2]));
+        taskmgr_format_percent_tenths(load_tenths, cells[2], sizeof(cells[2]));
         taskmgr_format_u64(info->run_queue_depth, cells[3], sizeof(cells[3]));
         taskmgr_format_u64(info->switch_count, cells[4], sizeof(cells[4]));
         taskmgr_format_u64(info->current_pid, cells[5], sizeof(cells[5]));

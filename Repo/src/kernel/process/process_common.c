@@ -204,27 +204,39 @@ void cpu_account_tick(thread_t *thread)
     cpu_usage_counters_t *usage = &g_cpu_usage[cpu_index];
     uint64_t tick = timer_ticks();
     uint64_t last_tick = __atomic_load_n(&usage->last_tick, __ATOMIC_RELAXED);
+    if (last_tick == 0)
+    {
+        __atomic_store_n(&usage->last_tick, tick, __ATOMIC_RELAXED);
+        return;
+    }
     if (last_tick == tick)
     {
         return;
     }
 
+    if (tick < last_tick)
+    {
+        __atomic_store_n(&usage->last_tick, tick, __ATOMIC_RELAXED);
+        return;
+    }
+
+    uint64_t delta = tick - last_tick;
     __atomic_store_n(&usage->last_tick, tick, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&usage->total_ticks, 1ULL, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&usage->total_ticks, delta, __ATOMIC_RELAXED);
 
     if (!thread || thread->is_idle)
     {
-        __atomic_fetch_add(&usage->idle_ticks, 1ULL, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&usage->idle_ticks, delta, __ATOMIC_RELAXED);
         return;
     }
 
     __atomic_store_n(&thread->last_cpu_index, cpu_index, __ATOMIC_RELEASE);
-    __atomic_fetch_add(&thread->runtime_ticks, 1ULL, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&thread->runtime_ticks, delta, __ATOMIC_RELAXED);
 
     process_t *proc = thread->process;
     if (proc)
     {
-        __atomic_fetch_add(&proc->runtime_ticks, 1ULL, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&proc->runtime_ticks, delta, __ATOMIC_RELAXED);
     }
 }
 

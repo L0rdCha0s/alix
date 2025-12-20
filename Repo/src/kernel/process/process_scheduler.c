@@ -1714,6 +1714,7 @@ void thread_remove_from_wait_queue(thread_t *thread)
         return;
     }
 
+    spinlock_lock(&queue->lock);
     thread_t *prev = NULL;
     thread_t *cursor = queue->head;
     while (cursor)
@@ -1737,9 +1738,9 @@ void thread_remove_from_wait_queue(thread_t *thread)
         prev = cursor;
         cursor = cursor->wait_queue_next;
     }
-
     thread->waiting_queue = NULL;
     thread->wait_queue_next = NULL;
+    spinlock_unlock(&queue->lock);
 }
 
 void sleep_queue_insert(thread_t *thread)
@@ -1820,6 +1821,10 @@ void sleep_queue_wake_due(uint64_t now)
         thread->sleep_queue_next = NULL;
         thread->sleeping = false;
         spinlock_unlock(&g_sleep_queue_lock);
+        if (thread->waiting_queue)
+        {
+            thread_remove_from_wait_queue(thread);
+        }
         SCHED_SLEEP_LOG("[sleep] wake thread=%s pid=0x%016llX now=%llu wake_tick=%llu\r\n",
                         thread->name[0] ? thread->name : "<unnamed>",
                         (unsigned long long)(thread->process ? thread->process->pid : 0),

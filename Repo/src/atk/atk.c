@@ -185,6 +185,7 @@ static void action_open_atk_terminal(atk_widget_t *button, void *context);
 static void action_open_atk_browser(atk_widget_t *button, void *context);
 static void action_open_atk_demo(atk_widget_t *button, void *context);
 static void action_open_control_panel(atk_widget_t *button, void *context);
+static void action_open_atk_fileman(atk_widget_t *button, void *context);
 static void atk_schedule_user_launch(const char *launcher_name, const void *info);
 static void atk_launch_user_binary(void *arg) __attribute__((noreturn));
 
@@ -994,6 +995,17 @@ void atk_enter_mode(void)
                            true,
                            action_open_atk_browser,
                            state);
+
+    atk_desktop_add_button(state,
+                           740,
+                           80,
+                           88,
+                           88,
+                           "Files",
+                           ATK_BUTTON_STYLE_TITLE_BELOW,
+                           true,
+                           action_open_atk_fileman,
+                           state);
 #else
     (void)action_exit_to_text;
 #endif
@@ -1735,6 +1747,11 @@ static const atk_user_launch_info_t g_atk_taskmgr_launch = {
     .name = "atk_taskmgr"
 };
 
+static const atk_user_launch_info_t g_atk_fileman_launch = {
+    .path = "/usr/bin/atk_fileman.elf",
+    .name = "atk_fileman"
+};
+
 static const atk_user_launch_info_t g_atk_browser_launch = {
     .path = "/usr/bin/atk_browser.elf",
     .name = "atk_browser"
@@ -2284,6 +2301,13 @@ static void action_open_control_panel(atk_widget_t *button, void *context)
     (void)button;
     (void)context;
     atk_schedule_user_launch("control_panel_launcher", &g_control_panel_launch);
+}
+
+static void action_open_atk_fileman(atk_widget_t *button, void *context)
+{
+    (void)button;
+    (void)context;
+    atk_schedule_user_launch("atk_fileman_launcher", &g_atk_fileman_launch);
 }
 
 static void atk_schedule_user_launch(const char *launcher_name, const void *info)

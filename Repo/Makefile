@@ -172,6 +172,7 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/atk_browser.elf \
              $(USER_OBJDIR)/atk_richtext.elf \
              $(USER_OBJDIR)/atk_taskmgr.elf \
+             $(USER_OBJDIR)/atk_fileman.elf \
              $(USER_OBJDIR)/atk_mp3.elf \
              $(USER_OBJDIR)/atk_threads.elf \
              $(USER_OBJDIR)/control_panel.elf \
@@ -190,6 +191,7 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/atk_browser \
              $(USER_BIN_DIR)/atk_richtext \
              $(USER_BIN_DIR)/atk_taskmgr \
+             $(USER_BIN_DIR)/atk_fileman \
              $(USER_BIN_DIR)/atk_mp3 \
              $(USER_BIN_DIR)/atk_threads \
              $(USER_BIN_DIR)/control_panel \
@@ -330,6 +332,10 @@ $(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USE
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_taskmgr/atk_taskmgr_app.o
 
+$(USER_OBJDIR)/atk_fileman.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_fileman/atk_fileman_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_fileman/atk_fileman_app.o
+
 $(USER_OBJDIR)/atk_mp3.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_mp3/atk_mp3_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_mp3/atk_mp3_app.o
@@ -420,6 +426,10 @@ $(USER_BIN_DIR)/atk_richtext: $(USER_OBJDIR)/atk_richtext.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/atk_taskmgr: $(USER_OBJDIR)/atk_taskmgr.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_fileman: $(USER_OBJDIR)/atk_fileman.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 

@@ -230,6 +230,10 @@ void process_set_thread_priority(thread_t *thread, thread_priority_t priority);
 
 void wait_queue_init(wait_queue_t *queue);
 void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void *context);
+bool wait_queue_wait_timeout(wait_queue_t *queue,
+                             wait_queue_predicate_t predicate,
+                             void *context,
+                             uint64_t timeout_ticks);
 void wait_queue_wake_one(wait_queue_t *queue);
 void wait_queue_wake_all(wait_queue_t *queue);
 

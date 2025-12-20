@@ -833,6 +833,87 @@ void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void
     }
 }
 
+bool wait_queue_wait_timeout(wait_queue_t *queue,
+                             wait_queue_predicate_t predicate,
+                             void *context,
+                             uint64_t timeout_ticks)
+{
+    if (!queue)
+    {
+        process_sleep_ticks(timeout_ticks ? timeout_ticks : 1);
+        return predicate ? predicate(context) : true;
+    }
+    thread_t *thread = current_thread_local();
+    if (!thread)
+    {
+        process_sleep_ticks(timeout_ticks ? timeout_ticks : 1);
+        return predicate ? predicate(context) : false;
+    }
+
+    uint64_t now = timer_ticks();
+    uint64_t deadline = 0;
+    if (timeout_ticks > 0)
+    {
+        deadline = now + timeout_ticks;
+        if (deadline <= now)
+        {
+            deadline = now + 1;
+        }
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    uint64_t sched_flags = scheduler_lock_acquire("wait_queue_wait_timeout");
+
+    for (;;)
+    {
+        spinlock_lock(&queue->lock);
+
+        bool ready = !predicate || predicate(context);
+        now = timer_ticks();
+        bool timed_out = (timeout_ticks > 0 && now >= deadline);
+        if (ready || timed_out)
+        {
+            if (thread->waiting_queue == queue)
+            {
+                wait_queue_remove_thread_locked(queue, thread);
+                thread->waiting_queue = NULL;
+            }
+            if (thread->sleeping)
+            {
+                sleep_queue_remove(thread);
+            }
+            thread->state = THREAD_STATE_RUNNING;
+            spinlock_unlock(&queue->lock);
+            scheduler_lock_release(sched_flags);
+            cpu_restore_flags(flags);
+            return ready;
+        }
+
+        if (thread_in_run_queue_load(thread))
+        {
+            remove_from_run_queue(thread);
+        }
+        thread->state = THREAD_STATE_BLOCKED;
+        thread->waiting_queue = queue;
+        wait_queue_enqueue_locked(queue, thread);
+        if (timeout_ticks > 0)
+        {
+            thread->sleep_until_tick = deadline;
+            if (!thread->sleeping)
+            {
+                sleep_queue_insert(thread);
+            }
+        }
+
+        spinlock_unlock(&queue->lock);
+        scheduler_lock_release(sched_flags);
+
+        scheduler_schedule(false);
+        sched_flags = scheduler_lock_acquire("wait_queue_wait_timeout");
+    }
+}
+
 void wait_queue_wake_one(wait_queue_t *queue)
 {
     if (!queue)
