@@ -102,6 +102,7 @@ typedef enum
     JS_STMT_EXPR,
     JS_STMT_BLOCK,
     JS_STMT_RETURN,
+    JS_STMT_THROW,
     JS_STMT_FUNCTION_DECL,
     JS_STMT_IF,
     JS_STMT_WHILE,
@@ -125,6 +126,7 @@ typedef enum
     JS_EXPR_CALL,
     JS_EXPR_TERNARY,
     JS_EXPR_ARRAY,
+    JS_EXPR_OBJECT,
     JS_EXPR_MEMBER,
     JS_EXPR_FUNCTION
 } js_expr_type_t;
@@ -164,14 +166,26 @@ typedef enum
     JS_UNARY_POSITIVE
 } js_unary_op_t;
 
+typedef enum
+{
+    JS_ASSIGN_SET = 0,
+    JS_ASSIGN_ADD
+} js_assign_op_t;
+
 typedef struct js_expr js_expr_t;
 typedef struct js_stmt js_stmt_t;
 
 typedef struct
 {
-    js_var_kind_t kind;
     char *name;
     js_expr_t *init;
+} js_var_binding_t;
+
+typedef struct
+{
+    js_var_kind_t kind;
+    js_var_binding_t *bindings;
+    size_t count;
 } js_var_decl_t;
 
 typedef struct
@@ -189,6 +203,11 @@ typedef struct
 {
     js_expr_t *value;
 } js_return_stmt_t;
+
+typedef struct
+{
+    js_expr_t *expr;
+} js_throw_stmt_t;
 
 typedef struct
 {
@@ -265,6 +284,7 @@ struct js_stmt
         js_expr_stmt_t expr;
         js_block_t block;
         js_return_stmt_t ret;
+        js_throw_stmt_t throw_stmt;
         js_function_decl_t func;
         js_if_stmt_t if_stmt;
         js_while_stmt_t while_stmt;
@@ -300,6 +320,7 @@ typedef struct
 
 typedef struct
 {
+    js_assign_op_t op;
     js_expr_t *target;
     js_expr_t *value;
 } js_assign_expr_t;
@@ -323,6 +344,20 @@ typedef struct
     js_expr_t **items;
     size_t count;
 } js_array_expr_t;
+
+typedef struct
+{
+    bool computed;
+    char *name;
+    js_expr_t *name_expr;
+    js_expr_t *value;
+} js_object_property_t;
+
+typedef struct
+{
+    js_object_property_t *props;
+    size_t count;
+} js_object_expr_t;
 
 typedef struct
 {
@@ -353,6 +388,7 @@ struct js_expr
         js_call_expr_t call;
         js_ternary_expr_t ternary;
         js_array_expr_t array;
+        js_object_expr_t object;
         js_member_expr_t member;
         js_function_expr_t func;
     } as;

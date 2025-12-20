@@ -29,7 +29,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 enum
 {
     AUDIO_RATE_HZ = 48000,
-    AUDIO_TARGET_LATENCY_MS = 60,
+    AUDIO_TARGET_LATENCY_MS = 20,
     AUDIO_MAX_WRITE_BYTES = 4096,
     DMA_BUFFER_BYTES = 1 << 16,
 };
@@ -73,6 +73,10 @@ static void audio_update_playback(void)
     uint64_t frames = total / 1000ULL;
     g_audio_frac = (uint32_t)(total % 1000ULL);
     g_audio_played_frames += frames;
+    if (g_audio_played_frames > g_audio_written_frames)
+    {
+        g_audio_played_frames = g_audio_written_frames;
+    }
 }
 
 qboolean SNDDMA_Init(void)

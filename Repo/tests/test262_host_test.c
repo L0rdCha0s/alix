@@ -36,6 +36,7 @@ typedef struct
     size_t limit;
     size_t run_count;
     bool verbose;
+    bool fail_fast;
     bool stop;
     test262_stats_t stats;
 } test262_ctx_t;
@@ -975,11 +976,9 @@ static bool run_test_file(const char *path, test262_ctx_t *ctx)
     if (!source)
     {
         ctx->stats.fail++;
-        if (ctx->verbose)
-        {
-            fprintf(stderr, "FAIL %s (read error)\n", path);
-        }
-        return true;
+        fprintf(stderr, "FAIL %s (read error)\n", path);
+        ctx->stop = true;
+        return false;
     }
 
     test262_meta_t meta;
@@ -999,22 +998,18 @@ static bool run_test_file(const char *path, test262_ctx_t *ctx)
     {
         ctx->stats.fail++;
         free(source);
-        if (ctx->verbose)
-        {
-            fprintf(stderr, "FAIL %s (runtime create)\n", path);
-        }
-        return true;
+        fprintf(stderr, "FAIL %s (runtime create)\n", path);
+        ctx->stop = true;
+        return false;
     }
     if (!setup_harness(rt))
     {
         ctx->stats.fail++;
         js_runtime_destroy(rt);
         free(source);
-        if (ctx->verbose)
-        {
-            fprintf(stderr, "FAIL %s (harness setup)\n", path);
-        }
-        return true;
+        fprintf(stderr, "FAIL %s (harness setup)\n", path);
+        ctx->stop = true;
+        return false;
     }
 
     js_exec_result_t res = js_eval(rt, source);
@@ -1027,6 +1022,10 @@ static bool run_test_file(const char *path, test262_ctx_t *ctx)
     else
     {
         ctx->stats.fail++;
+        if (ctx->fail_fast)
+        {
+            ctx->stop = true;
+        }
     }
 
     if (!passed)
@@ -1047,7 +1046,7 @@ static bool run_test_file(const char *path, test262_ctx_t *ctx)
     js_exec_result_destroy(&res);
     js_runtime_destroy(rt);
     free(source);
-    return true;
+    return !ctx->stop;
 }
 
 static bool walk_dir(const char *path, test262_ctx_t *ctx)
@@ -1150,6 +1149,7 @@ int main(int argc, char **argv)
     memset(&ctx, 0, sizeof(ctx));
     ctx.filter = getenv("TEST262_FILTER");
     ctx.verbose = getenv("TEST262_VERBOSE") != NULL;
+    ctx.fail_fast = getenv("TEST262_FAIL_FAST") != NULL;
 
     const char *limit_text = getenv("TEST262_LIMIT");
     if (limit_text && limit_text[0])

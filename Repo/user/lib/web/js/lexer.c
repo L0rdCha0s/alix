@@ -91,6 +91,7 @@ static js_token_type_t js_keyword_type(const char *start, size_t len)
     if (len == 5 && strncmp(start, "const", len) == 0) return JS_TOKEN_KW_CONST;
     if (len == 8 && strncmp(start, "function", len) == 0) return JS_TOKEN_KW_FUNCTION;
     if (len == 6 && strncmp(start, "return", len) == 0) return JS_TOKEN_KW_RETURN;
+    if (len == 5 && strncmp(start, "throw", len) == 0) return JS_TOKEN_KW_THROW;
     if (len == 4 && strncmp(start, "true", len) == 0) return JS_TOKEN_KW_TRUE;
     if (len == 5 && strncmp(start, "false", len) == 0) return JS_TOKEN_KW_FALSE;
     if (len == 4 && strncmp(start, "null", len) == 0) return JS_TOKEN_KW_NULL;
@@ -109,6 +110,57 @@ static js_token_type_t js_keyword_type(const char *start, size_t len)
     if (len == 5 && strncmp(start, "catch", len) == 0) return JS_TOKEN_KW_CATCH;
     if (len == 3 && strncmp(start, "new", len) == 0) return JS_TOKEN_KW_NEW;
     return JS_TOKEN_IDENTIFIER;
+}
+
+static bool js_utf8_append(char *buf, size_t cap, size_t *len, unsigned int code)
+{
+    if (!buf || !len)
+    {
+        return false;
+    }
+    if (code <= 0x7F)
+    {
+        if (*len + 1 > cap)
+        {
+            return false;
+        }
+        buf[(*len)++] = (char)code;
+        return true;
+    }
+    if (code <= 0x7FF)
+    {
+        if (*len + 2 > cap)
+        {
+            return false;
+        }
+        buf[(*len)++] = (char)(0xC0 | (code >> 6));
+        buf[(*len)++] = (char)(0x80 | (code & 0x3F));
+        return true;
+    }
+    if (code <= 0xFFFF)
+    {
+        if (*len + 3 > cap)
+        {
+            return false;
+        }
+        buf[(*len)++] = (char)(0xE0 | (code >> 12));
+        buf[(*len)++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[(*len)++] = (char)(0x80 | (code & 0x3F));
+        return true;
+    }
+    if (code <= 0x10FFFF)
+    {
+        if (*len + 4 > cap)
+        {
+            return false;
+        }
+        buf[(*len)++] = (char)(0xF0 | (code >> 18));
+        buf[(*len)++] = (char)(0x80 | ((code >> 12) & 0x3F));
+        buf[(*len)++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        buf[(*len)++] = (char)(0x80 | (code & 0x3F));
+        return true;
+    }
+    return false;
 }
 
 static bool js_lexer_skip_ws_and_comments(js_lexer_t *lex, js_parse_error_t *error_out)
@@ -217,6 +269,10 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
                 p++;
                 digit = js_hex_value(*p);
             }
+            if (*p == 'n')
+            {
+                p++;
+            }
             lex->cur = p;
             lex->offset = (size_t)(p - lex->source);
             out->type = JS_TOKEN_NUMBER;
@@ -239,6 +295,10 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
                 value = value * 2.0 + (double)(*p - '0');
                 p++;
             }
+            if (*p == 'n')
+            {
+                p++;
+            }
             lex->cur = p;
             lex->offset = (size_t)(p - lex->source);
             out->type = JS_TOKEN_NUMBER;
@@ -259,6 +319,10 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
             while (*p >= '0' && *p <= '7')
             {
                 value = value * 8.0 + (double)(*p - '0');
+                p++;
+            }
+            if (*p == 'n')
+            {
                 p++;
             }
             lex->cur = p;
@@ -361,6 +425,11 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
         }
     }
 
+    if (*p == 'n')
+    {
+        p++;
+    }
+
     lex->cur = p;
     lex->offset = (size_t)(p - lex->source);
 
@@ -397,7 +466,8 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
     }
 
     size_t raw_len = (size_t)(p - start);
-    char *buf = (char *)malloc(raw_len + 1);
+    size_t cap = raw_len * 4 + 1;
+    char *buf = (char *)malloc(cap);
     if (!buf)
     {
         js_parse_error_set(error_out, start_offset, "allocation failed");
@@ -443,6 +513,39 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                 }
                 case 'u':
                 {
+                    if (*s == '{')
+                    {
+                        s++;
+                        unsigned int value = 0;
+                        size_t digits = 0;
+                        while (s < p && *s != '}')
+                        {
+                            int hv = js_hex_value(*s);
+                            if (hv < 0)
+                            {
+                                free(buf);
+                                js_parse_error_set(error_out, start_offset, "invalid unicode escape");
+                                return false;
+                            }
+                            value = (value << 4) | (unsigned int)hv;
+                            digits++;
+                            s++;
+                        }
+                        if (s >= p || *s != '}' || digits == 0)
+                        {
+                            free(buf);
+                            js_parse_error_set(error_out, start_offset, "invalid unicode escape");
+                            return false;
+                        }
+                        s++;
+                        if (!js_utf8_append(buf, cap, &out_len, value))
+                        {
+                            free(buf);
+                            js_parse_error_set(error_out, start_offset, "allocation failed");
+                            return false;
+                        }
+                        continue;
+                    }
                     int v0 = js_hex_value(s[0]);
                     int v1 = js_hex_value(s[1]);
                     int v2 = js_hex_value(s[2]);
@@ -453,20 +556,24 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                         js_parse_error_set(error_out, start_offset, "invalid unicode escape");
                         return false;
                     }
-                    int value = (v0 << 12) | (v1 << 8) | (v2 << 4) | v3;
-                    if (value < 0x20 || value > 0x7E)
-                    {
-                        c = '?';
-                    }
-                    else
-                    {
-                        c = (char)value;
-                    }
+                    unsigned int value = (unsigned int)((v0 << 12) | (v1 << 8) | (v2 << 4) | v3);
                     s += 4;
-                    break;
+                    if (!js_utf8_append(buf, cap, &out_len, value))
+                    {
+                        free(buf);
+                        js_parse_error_set(error_out, start_offset, "allocation failed");
+                        return false;
+                    }
+                    continue;
                 }
                 default: c = esc; break;
             }
+        }
+        if (out_len + 1 > cap)
+        {
+            free(buf);
+            js_parse_error_set(error_out, start_offset, "allocation failed");
+            return false;
         }
         buf[out_len++] = c;
     }
@@ -546,7 +653,18 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
         case '.': out->type = JS_TOKEN_DOT; out->offset = start_offset; return true;
         case '?': out->type = JS_TOKEN_QUESTION; out->offset = start_offset; return true;
         case ':': out->type = JS_TOKEN_COLON; out->offset = start_offset; return true;
-        case '+': out->type = JS_TOKEN_PLUS; out->offset = start_offset; return true;
+        case '+':
+            if (js_lexer_peek(lex) == '=')
+            {
+                (void)js_lexer_advance(lex);
+                out->type = JS_TOKEN_PLUS_EQUAL;
+            }
+            else
+            {
+                out->type = JS_TOKEN_PLUS;
+            }
+            out->offset = start_offset;
+            return true;
         case '-': out->type = JS_TOKEN_MINUS; out->offset = start_offset; return true;
         case '*': out->type = JS_TOKEN_STAR; out->offset = start_offset; return true;
         case '%': out->type = JS_TOKEN_PERCENT; out->offset = start_offset; return true;

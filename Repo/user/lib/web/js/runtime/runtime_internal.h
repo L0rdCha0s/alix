@@ -11,6 +11,7 @@ typedef struct js_env js_env_t;
 typedef struct js_var js_var_t;
 typedef struct js_program_node js_program_node_t;
 typedef struct js_native_meta js_native_meta_t;
+typedef struct js_property js_property_t;
 
 struct js_array
 {
@@ -27,6 +28,7 @@ struct js_object
     js_host_set_fn_t set_fn;
     js_host_finalize_fn_t finalize_fn;
     void *user_data;
+    js_property_t *properties;
 };
 
 struct js_function
@@ -45,7 +47,15 @@ struct js_native_meta
     void *user_data;
     const char *name;
     bool is_constructor;
+    size_t length;
     js_native_meta_t *next;
+};
+
+struct js_property
+{
+    char *name;
+    js_value_t value;
+    js_property_t *next;
 };
 
 struct js_runtime
@@ -73,7 +83,10 @@ double js_value_to_number(const js_value_t *value, bool *ok_out);
 bool js_value_strict_equal(const js_value_t *a, const js_value_t *b);
 bool js_value_loose_equal(const js_value_t *a, const js_value_t *b);
 
-bool js_temp_string_from_value(const js_value_t *value, js_temp_string_t *out);
+bool js_temp_string_from_value(js_runtime_t *rt,
+                               const js_value_t *value,
+                               js_temp_string_t *out,
+                               char **error_message);
 void js_temp_string_release(js_temp_string_t *temp);
 
 bool js_parse_number_text(const char *text, double *out);
@@ -86,6 +99,9 @@ bool js_array_get(const js_array_t *array, size_t index, js_value_t *out);
 
 void js_object_retain(js_object_t *object);
 void js_object_release(js_object_t *object);
+bool js_object_get_slot(js_object_t *object, const char *name, js_value_t *out);
+bool js_object_set_slot(js_object_t *object, const char *name, const js_value_t *value);
+bool js_object_has_slot(js_object_t *object, const char *name);
 
 js_function_t *js_function_create(const js_function_decl_t *decl,
                                   const js_function_expr_t *expr,
@@ -110,6 +126,7 @@ bool js_env_get(js_env_t *env, const char *name, js_value_t *out);
 bool js_runtime_track_program(js_runtime_t *rt, js_program_t *program);
 bool js_value_is_constructor(js_runtime_t *rt, const js_value_t *value);
 const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value);
+bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *out_len);
 
 bool js_call_value(js_runtime_t *rt,
                    const js_value_t *callee,
@@ -130,12 +147,30 @@ bool js_builtin_escape(js_runtime_t *rt,
                        void *user_data,
                        js_value_t *out,
                        char **error_message);
+bool js_builtin_unescape(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
 bool js_builtin_type_error(js_runtime_t *rt,
                            size_t argc,
                            const js_value_t *argv,
                            void *user_data,
                            js_value_t *out,
                            char **error_message);
+bool js_builtin_test262_error(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message);
+bool js_builtin_verify_property(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
 
 #ifdef __cplusplus
 }

@@ -367,8 +367,168 @@ static char *js_number_to_string(double value, size_t *out_len)
     return out;
 }
 
-bool js_temp_string_from_value(const js_value_t *value, js_temp_string_t *out)
+static bool js_value_is_primitive(const js_value_t *value)
 {
+    if (!value)
+    {
+        return false;
+    }
+    switch (value->type)
+    {
+        case JS_VALUE_UNDEFINED:
+        case JS_VALUE_NULL:
+        case JS_VALUE_BOOL:
+        case JS_VALUE_NUMBER:
+        case JS_VALUE_STRING:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool js_object_get_value(js_runtime_t *rt,
+                                js_object_t *object,
+                                const char *name,
+                                js_value_t *out,
+                                char **error_message)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (!object || !name)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (object->get_fn)
+    {
+        return object->get_fn(rt, object->user_data, name, out, error_message);
+    }
+    return js_object_get_slot(object, name, out);
+}
+
+static bool js_try_object_method(js_runtime_t *rt,
+                                 js_object_t *object,
+                                 const char *name,
+                                 js_value_t *out,
+                                 bool *called,
+                                 char **error_message)
+{
+    if (called)
+    {
+        *called = false;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_value_t method = js_value_make_undefined_internal();
+    if (!js_object_get_value(rt, object, name, &method, error_message))
+    {
+        return false;
+    }
+    if (method.type != JS_VALUE_FUNCTION && method.type != JS_VALUE_NATIVE_FN)
+    {
+        js_value_destroy(&method);
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (called)
+    {
+        *called = true;
+    }
+    js_value_t result = js_value_make_undefined_internal();
+    char *err = NULL;
+    bool ok = js_call_value(rt, &method, 0, NULL, &result, &err);
+    js_value_destroy(&method);
+    if (!ok)
+    {
+        if (error_message)
+        {
+            *error_message = err ? err : js_strdup("method call failed");
+        }
+        else
+        {
+            free(err);
+        }
+        return false;
+    }
+    *out = result;
+    return true;
+}
+
+static bool js_object_to_primitive(js_runtime_t *rt,
+                                   js_object_t *object,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!rt || !object || !out)
+    {
+        return false;
+    }
+
+    bool called = false;
+    js_value_t result = js_value_make_undefined_internal();
+    if (!js_try_object_method(rt, object, "Symbol.toPrimitive", &result, &called, error_message))
+    {
+        return false;
+    }
+    if (called)
+    {
+        if (js_value_is_primitive(&result))
+        {
+            *out = result;
+            return true;
+        }
+        js_value_destroy(&result);
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: @@toPrimitive must return a primitive");
+        }
+        return false;
+    }
+
+    const char *order[2] = {"toString", "valueOf"};
+    for (size_t i = 0; i < 2; ++i)
+    {
+        called = false;
+        result = js_value_make_undefined_internal();
+        if (!js_try_object_method(rt, object, order[i], &result, &called, error_message))
+        {
+            return false;
+        }
+        if (!called)
+        {
+            continue;
+        }
+        if (js_value_is_primitive(&result))
+        {
+            *out = result;
+            return true;
+        }
+        js_value_destroy(&result);
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: cannot convert object to primitive");
+    }
+    return false;
+}
+
+bool js_temp_string_from_value(js_runtime_t *rt,
+                               const js_value_t *value,
+                               js_temp_string_t *out,
+                               char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
     if (!out)
     {
         return false;
@@ -387,9 +547,14 @@ bool js_temp_string_from_value(const js_value_t *value, js_temp_string_t *out)
     }
     if (value->type == JS_VALUE_STRING)
     {
-        out->data = value->as.string.data;
+        char *copy = js_strdup_len(value->as.string.data ? value->as.string.data : "", value->as.string.len);
+        if (!copy)
+        {
+            return false;
+        }
+        out->data = copy;
         out->len = value->as.string.len;
-        out->owned = false;
+        out->owned = true;
         return true;
     }
 
@@ -457,6 +622,29 @@ bool js_temp_string_from_value(const js_value_t *value, js_temp_string_t *out)
 
     if (value->type == JS_VALUE_OBJECT)
     {
+        if (rt)
+        {
+            js_value_t prim = js_value_make_undefined_internal();
+            char *err = NULL;
+            if (js_object_to_primitive(rt, value->as.object, &prim, &err))
+            {
+                bool ok = js_temp_string_from_value(rt, &prim, out, error_message);
+                js_value_destroy(&prim);
+                return ok;
+            }
+            if (err)
+            {
+                if (error_message)
+                {
+                    *error_message = err;
+                }
+                else
+                {
+                    free(err);
+                }
+                return false;
+            }
+        }
         out->data = js_strdup("[object]");
         if (!out->data)
         {
