@@ -1,64 +1,7 @@
-#include "web/js.h"
-#include "web/js/internal.h"
+#include "web/js/runtime/runtime_internal.h"
 
-#include "ctype.h"
-#include "float.h"
 #include "libc.h"
 #include "math.h"
-
-typedef struct js_var
-{
-    char *name;
-    js_value_t value;
-    bool is_const;
-    struct js_var *next;
-} js_var_t;
-
-struct js_array
-{
-    int refcount;
-    js_value_t *items;
-    size_t length;
-    size_t capacity;
-};
-
-struct js_object
-{
-    int refcount;
-    js_host_get_fn_t get_fn;
-    js_host_set_fn_t set_fn;
-    js_host_finalize_fn_t finalize_fn;
-    void *user_data;
-};
-
-typedef struct js_env
-{
-    struct js_env *parent;
-    js_var_t *vars;
-    int refcount;
-    bool is_function;
-} js_env_t;
-
-typedef struct js_program_node
-{
-    js_program_t *program;
-    struct js_program_node *next;
-} js_program_node_t;
-
-struct js_runtime
-{
-    js_env_t *global;
-    js_program_node_t *programs;
-};
-
-struct js_function
-{
-    int refcount;
-    const js_function_decl_t *decl;
-    const js_function_expr_t *expr;
-    bool is_expr;
-    js_env_t *closure;
-};
 
 typedef enum
 {
@@ -75,1327 +18,6 @@ typedef struct
     js_value_t value;
     char *error_message;
 } js_eval_result_t;
-
-static void js_array_retain(js_array_t *array);
-static void js_array_release(js_array_t *array);
-static js_array_t *js_array_create(void);
-static bool js_array_set(js_array_t *array, size_t index, const js_value_t *value);
-static void js_object_retain(js_object_t *object);
-static void js_object_release(js_object_t *object);
-static bool js_builtin_number(js_runtime_t *rt,
-                              size_t argc,
-                              const js_value_t *argv,
-                              void *user_data,
-                              js_value_t *out,
-                              char **error_message);
-static void js_function_retain(js_function_t *fn);
-static void js_function_release(js_function_t *fn);
-static void js_env_retain(js_env_t *env);
-static void js_env_release(js_env_t *env);
-static bool js_runtime_track_program(js_runtime_t *rt, js_program_t *program);
-
-static js_value_t js_value_make_undefined_internal(void)
-{
-    js_value_t value;
-    memset(&value, 0, sizeof(value));
-    value.type = JS_VALUE_UNDEFINED;
-    return value;
-}
-
-js_value_t js_value_make_undefined(void)
-{
-    return js_value_make_undefined_internal();
-}
-
-js_value_t js_value_make_null(void)
-{
-    js_value_t value;
-    memset(&value, 0, sizeof(value));
-    value.type = JS_VALUE_NULL;
-    return value;
-}
-
-js_value_t js_value_make_bool(bool value)
-{
-    js_value_t out;
-    memset(&out, 0, sizeof(out));
-    out.type = JS_VALUE_BOOL;
-    out.as.boolean = value;
-    return out;
-}
-
-js_value_t js_value_make_number(double value)
-{
-    js_value_t out;
-    memset(&out, 0, sizeof(out));
-    out.type = JS_VALUE_NUMBER;
-    out.as.number = value;
-    return out;
-}
-
-bool js_value_make_string(js_value_t *out, const char *data, size_t len)
-{
-    if (!out)
-    {
-        return false;
-    }
-    if (!data)
-    {
-        data = "";
-        len = 0;
-    }
-    char *copy = js_strdup_len(data, len);
-    if (!copy)
-    {
-        return false;
-    }
-    out->type = JS_VALUE_STRING;
-    out->as.string.data = copy;
-    out->as.string.len = len;
-    return true;
-}
-
-bool js_value_make_cstring(js_value_t *out, const char *text)
-{
-    if (!text)
-    {
-        text = "";
-    }
-    return js_value_make_string(out, text, strlen(text));
-}
-
-bool js_value_make_array(js_value_t *out)
-{
-    if (!out)
-    {
-        return false;
-    }
-    js_array_t *array = js_array_create();
-    if (!array)
-    {
-        return false;
-    }
-    out->type = JS_VALUE_ARRAY;
-    out->as.array = array;
-    return true;
-}
-
-bool js_value_make_host_object(js_value_t *out,
-                               js_host_get_fn_t get_fn,
-                               js_host_set_fn_t set_fn,
-                               js_host_finalize_fn_t finalize_fn,
-                               void *user_data)
-{
-    if (!out)
-    {
-        return false;
-    }
-    js_object_t *object = (js_object_t *)calloc(1, sizeof(*object));
-    if (!object)
-    {
-        return false;
-    }
-    object->refcount = 1;
-    object->get_fn = get_fn;
-    object->set_fn = set_fn;
-    object->finalize_fn = finalize_fn;
-    object->user_data = user_data;
-    out->type = JS_VALUE_OBJECT;
-    out->as.object = object;
-    return true;
-}
-
-bool js_value_array_set(js_value_t *array_value, size_t index, const js_value_t *value)
-{
-    if (!array_value || array_value->type != JS_VALUE_ARRAY || !value || !array_value->as.array)
-    {
-        return false;
-    }
-    return js_array_set(array_value->as.array, index, value);
-}
-
-bool js_value_array_push(js_value_t *array_value, const js_value_t *value)
-{
-    if (!array_value || array_value->type != JS_VALUE_ARRAY || !value || !array_value->as.array)
-    {
-        return false;
-    }
-    return js_array_set(array_value->as.array, array_value->as.array->length, value);
-}
-
-void js_value_destroy(js_value_t *value)
-{
-    if (!value)
-    {
-        return;
-    }
-    if (value->type == JS_VALUE_STRING)
-    {
-        free(value->as.string.data);
-        value->as.string.data = NULL;
-        value->as.string.len = 0;
-    }
-    else if (value->type == JS_VALUE_ARRAY)
-    {
-        js_array_release(value->as.array);
-        value->as.array = NULL;
-    }
-    else if (value->type == JS_VALUE_OBJECT)
-    {
-        js_object_release(value->as.object);
-        value->as.object = NULL;
-    }
-    else if (value->type == JS_VALUE_FUNCTION)
-    {
-        js_function_release(value->as.function);
-        value->as.function = NULL;
-    }
-    value->type = JS_VALUE_UNDEFINED;
-}
-
-static bool js_value_copy(js_value_t *out, const js_value_t *in)
-{
-    if (!out || !in)
-    {
-        return false;
-    }
-    *out = *in;
-    if (in->type == JS_VALUE_STRING)
-    {
-        char *copy = js_strdup_len(in->as.string.data ? in->as.string.data : "", in->as.string.len);
-        if (!copy)
-        {
-            out->type = JS_VALUE_UNDEFINED;
-            out->as.string.data = NULL;
-            out->as.string.len = 0;
-            return false;
-        }
-        out->as.string.data = copy;
-        out->as.string.len = in->as.string.len;
-    }
-    else if (in->type == JS_VALUE_ARRAY)
-    {
-        js_array_retain(in->as.array);
-    }
-    else if (in->type == JS_VALUE_OBJECT)
-    {
-        js_object_retain(in->as.object);
-    }
-    else if (in->type == JS_VALUE_FUNCTION)
-    {
-        js_function_retain(in->as.function);
-    }
-    return true;
-}
-
-static void js_function_retain(js_function_t *fn)
-{
-    if (!fn)
-    {
-        return;
-    }
-    fn->refcount++;
-}
-
-static void js_function_release(js_function_t *fn)
-{
-    if (!fn)
-    {
-        return;
-    }
-    if (fn->refcount <= 0)
-    {
-        return;
-    }
-    fn->refcount--;
-    if (fn->refcount > 0)
-    {
-        return;
-    }
-    js_env_release(fn->closure);
-    free(fn);
-}
-
-static const js_function_decl_t *js_function_def(const js_function_t *fn)
-{
-    if (!fn)
-    {
-        return NULL;
-    }
-    return fn->is_expr ? (const js_function_decl_t *)fn->expr : fn->decl;
-}
-
-static js_function_t *js_function_create(const js_function_decl_t *decl,
-                                         const js_function_expr_t *expr,
-                                         js_env_t *closure)
-{
-    js_function_t *fn = (js_function_t *)calloc(1, sizeof(*fn));
-    if (!fn)
-    {
-        return NULL;
-    }
-    fn->refcount = 1;
-    fn->decl = decl;
-    fn->expr = expr;
-    fn->is_expr = (expr != NULL);
-    fn->closure = closure;
-    if (closure)
-    {
-        js_env_retain(closure);
-    }
-    return fn;
-}
-
-static js_array_t *js_array_create(void)
-{
-    js_array_t *array = (js_array_t *)calloc(1, sizeof(*array));
-    if (!array)
-    {
-        return NULL;
-    }
-    array->refcount = 1;
-    array->items = NULL;
-    array->length = 0;
-    array->capacity = 0;
-    return array;
-}
-
-static void js_array_retain(js_array_t *array)
-{
-    if (!array)
-    {
-        return;
-    }
-    array->refcount++;
-}
-
-static void js_array_release(js_array_t *array)
-{
-    if (!array)
-    {
-        return;
-    }
-    if (array->refcount <= 0)
-    {
-        return;
-    }
-    array->refcount--;
-    if (array->refcount > 0)
-    {
-        return;
-    }
-    for (size_t i = 0; i < array->length; ++i)
-    {
-        js_value_destroy(&array->items[i]);
-    }
-    free(array->items);
-    free(array);
-}
-
-static void js_object_retain(js_object_t *object)
-{
-    if (!object)
-    {
-        return;
-    }
-    object->refcount++;
-}
-
-static void js_object_release(js_object_t *object)
-{
-    if (!object)
-    {
-        return;
-    }
-    if (object->refcount <= 0)
-    {
-        return;
-    }
-    object->refcount--;
-    if (object->refcount > 0)
-    {
-        return;
-    }
-    if (object->finalize_fn)
-    {
-        object->finalize_fn(object->user_data);
-    }
-    free(object);
-}
-
-static bool js_array_reserve(js_array_t *array, size_t needed)
-{
-    if (!array)
-    {
-        return false;
-    }
-    if (needed <= array->capacity)
-    {
-        return true;
-    }
-    size_t new_cap = array->capacity ? array->capacity : 4u;
-    while (new_cap < needed)
-    {
-        if (new_cap > SIZE_MAX / 2u)
-        {
-            new_cap = needed;
-            break;
-        }
-        new_cap *= 2u;
-    }
-    js_value_t *new_items = (js_value_t *)realloc(array->items, new_cap * sizeof(*new_items));
-    if (!new_items)
-    {
-        return false;
-    }
-    if (new_cap > array->capacity)
-    {
-        memset(new_items + array->capacity, 0, (new_cap - array->capacity) * sizeof(*new_items));
-    }
-    array->items = new_items;
-    array->capacity = new_cap;
-    return true;
-}
-
-static bool js_array_set(js_array_t *array, size_t index, const js_value_t *value)
-{
-    if (!array || !value)
-    {
-        return false;
-    }
-    if (!js_array_reserve(array, index + 1))
-    {
-        return false;
-    }
-    if (index >= array->length)
-    {
-        for (size_t i = array->length; i <= index; ++i)
-        {
-            array->items[i] = js_value_make_undefined_internal();
-        }
-        array->length = index + 1;
-    }
-    else
-    {
-        js_value_destroy(&array->items[index]);
-    }
-    if (!js_value_copy(&array->items[index], value))
-    {
-        array->items[index] = js_value_make_undefined_internal();
-        return false;
-    }
-    return true;
-}
-
-static bool js_array_get(const js_array_t *array, size_t index, js_value_t *out)
-{
-    if (!out)
-    {
-        return false;
-    }
-    if (!array || index >= array->length)
-    {
-        *out = js_value_make_undefined_internal();
-        return true;
-    }
-    return js_value_copy(out, &array->items[index]);
-}
-
-static void js_env_retain(js_env_t *env)
-{
-    if (!env)
-    {
-        return;
-    }
-    env->refcount++;
-}
-
-static js_env_t *js_env_create(js_env_t *parent, bool is_function)
-{
-    js_env_t *env = (js_env_t *)calloc(1, sizeof(*env));
-    if (!env)
-    {
-        return NULL;
-    }
-    env->parent = parent;
-    env->vars = NULL;
-    env->refcount = 1;
-    env->is_function = is_function;
-    if (parent)
-    {
-        js_env_retain(parent);
-    }
-    return env;
-}
-
-static void js_env_release(js_env_t *env)
-{
-    if (!env)
-    {
-        return;
-    }
-    if (env->refcount <= 0)
-    {
-        return;
-    }
-    env->refcount--;
-    if (env->refcount > 0)
-    {
-        return;
-    }
-    js_var_t *var = env->vars;
-    while (var)
-    {
-        js_var_t *next = var->next;
-        free(var->name);
-        js_value_destroy(&var->value);
-        free(var);
-        var = next;
-    }
-    js_env_t *parent = env->parent;
-    free(env);
-    if (parent)
-    {
-        js_env_release(parent);
-    }
-}
-
-static bool js_runtime_track_program(js_runtime_t *rt, js_program_t *program)
-{
-    if (!rt || !program)
-    {
-        return false;
-    }
-    js_program_node_t *node = (js_program_node_t *)calloc(1, sizeof(*node));
-    if (!node)
-    {
-        return false;
-    }
-    node->program = program;
-    node->next = rt->programs;
-    rt->programs = node;
-    return true;
-}
-
-static js_var_t *js_env_find_local(js_env_t *env, const char *name)
-{
-    if (!env || !name)
-    {
-        return NULL;
-    }
-    for (js_var_t *var = env->vars; var; var = var->next)
-    {
-        if (var->name && strcmp(var->name, name) == 0)
-        {
-            return var;
-        }
-    }
-    return NULL;
-}
-
-static js_var_t *js_env_find(js_env_t *env, const char *name)
-{
-    for (js_env_t *cur = env; cur; cur = cur->parent)
-    {
-        js_var_t *var = js_env_find_local(cur, name);
-        if (var)
-        {
-            return var;
-        }
-    }
-    return NULL;
-}
-
-static bool js_env_define_local(js_env_t *env,
-                                const char *name,
-                                const js_value_t *value,
-                                bool is_const,
-                                bool allow_redeclare)
-{
-    if (!env || !name || !value)
-    {
-        return false;
-    }
-    js_var_t *existing = js_env_find_local(env, name);
-    if (existing)
-    {
-        if (existing->is_const || !allow_redeclare)
-        {
-            return false;
-        }
-        js_value_destroy(&existing->value);
-        if (!js_value_copy(&existing->value, value))
-        {
-            return false;
-        }
-        existing->is_const = existing->is_const || is_const;
-        return true;
-    }
-
-    js_var_t *var = (js_var_t *)calloc(1, sizeof(*var));
-    if (!var)
-    {
-        return false;
-    }
-    var->name = js_strdup(name);
-    if (!var->name)
-    {
-        free(var);
-        return false;
-    }
-    if (!js_value_copy(&var->value, value))
-    {
-        free(var->name);
-        free(var);
-        return false;
-    }
-    var->is_const = is_const;
-    var->next = env->vars;
-    env->vars = var;
-    return true;
-}
-
-static bool js_env_define_if_absent(js_env_t *env, const char *name, const js_value_t *value, bool is_const)
-{
-    if (!env || !name || !value)
-    {
-        return false;
-    }
-    js_var_t *existing = js_env_find_local(env, name);
-    if (existing)
-    {
-        return true;
-    }
-    return js_env_define_local(env, name, value, is_const, true);
-}
-
-static js_env_t *js_env_find_var_scope(js_env_t *env)
-{
-    for (js_env_t *cur = env; cur; cur = cur->parent)
-    {
-        if (cur->is_function)
-        {
-            return cur;
-        }
-    }
-    return env;
-}
-
-static bool js_env_assign(js_env_t *env, const char *name, const js_value_t *value)
-{
-    js_var_t *var = js_env_find(env, name);
-    if (!var)
-    {
-        return false;
-    }
-    if (var->is_const)
-    {
-        return false;
-    }
-    js_value_destroy(&var->value);
-    return js_value_copy(&var->value, value);
-}
-
-static bool js_env_get(js_env_t *env, const char *name, js_value_t *out)
-{
-    if (!out)
-    {
-        return false;
-    }
-    js_var_t *var = js_env_find(env, name);
-    if (!var)
-    {
-        return false;
-    }
-    return js_value_copy(out, &var->value);
-}
-
-js_runtime_t *js_runtime_create(void)
-{
-    js_runtime_t *rt = (js_runtime_t *)calloc(1, sizeof(*rt));
-    if (!rt)
-    {
-        return NULL;
-    }
-    rt->global = js_env_create(NULL, true);
-    if (!rt->global)
-    {
-        free(rt);
-        return NULL;
-    }
-    rt->programs = NULL;
-    if (!js_runtime_set_native(rt, "Number", js_builtin_number, NULL))
-    {
-        js_runtime_destroy(rt);
-        return NULL;
-    }
-    return rt;
-}
-
-void js_runtime_destroy(js_runtime_t *rt)
-{
-    if (!rt)
-    {
-        return;
-    }
-    js_program_node_t *node = rt->programs;
-    while (node)
-    {
-        js_program_node_t *next = node->next;
-        if (node->program)
-        {
-            js_program_destroy(node->program);
-        }
-        free(node);
-        node = next;
-    }
-    js_env_release(rt->global);
-    free(rt);
-}
-
-bool js_runtime_set_global(js_runtime_t *rt, const char *name, const js_value_t *value)
-{
-    if (!rt || !rt->global)
-    {
-        return false;
-    }
-    return js_env_define_local(rt->global, name, value, false, true);
-}
-
-bool js_runtime_set_native(js_runtime_t *rt, const char *name, js_native_fn_t fn, void *user_data)
-{
-    if (!rt || !rt->global)
-    {
-        return false;
-    }
-    js_value_t value;
-    memset(&value, 0, sizeof(value));
-    value.type = JS_VALUE_NATIVE_FN;
-    value.as.native.fn = fn;
-    value.as.native.user_data = user_data;
-    return js_env_define_local(rt->global, name, &value, true, true);
-}
-
-static double js_nan(void)
-{
-    volatile double zero = 0.0;
-    return zero / zero;
-}
-
-static bool js_is_nan(double value)
-{
-    return value != value;
-}
-
-static bool js_value_is_truthy(const js_value_t *value)
-{
-    if (!value)
-    {
-        return false;
-    }
-    switch (value->type)
-    {
-        case JS_VALUE_UNDEFINED:
-        case JS_VALUE_NULL:
-            return false;
-        case JS_VALUE_BOOL:
-            return value->as.boolean;
-        case JS_VALUE_NUMBER:
-            return value->as.number != 0.0 && !js_is_nan(value->as.number);
-        case JS_VALUE_STRING:
-            return value->as.string.len != 0;
-        case JS_VALUE_ARRAY:
-        case JS_VALUE_OBJECT:
-        case JS_VALUE_NATIVE_FN:
-        case JS_VALUE_FUNCTION:
-            return true;
-    }
-    return false;
-}
-
-typedef struct
-{
-    char *data;
-    size_t len;
-    bool owned;
-} js_temp_string_t;
-
-static char *js_number_to_string(double value, size_t *out_len)
-{
-    if (out_len)
-    {
-        *out_len = 0;
-    }
-
-    if (js_is_nan(value))
-    {
-        if (out_len)
-        {
-            *out_len = 3;
-        }
-        return js_strdup_len("NaN", 3);
-    }
-
-    if (value > DBL_MAX)
-    {
-        if (out_len)
-        {
-            *out_len = 8;
-        }
-        return js_strdup_len("Infinity", 8);
-    }
-    if (value < -DBL_MAX)
-    {
-        if (out_len)
-        {
-            *out_len = 9;
-        }
-        return js_strdup_len("-Infinity", 9);
-    }
-
-    bool neg = value < 0.0;
-    if (neg)
-    {
-        value = -value;
-    }
-
-    uint64_t int_part = (uint64_t)value;
-    double frac = value - (double)int_part;
-
-    const int max_frac = 6;
-    double rounder = 0.5;
-    for (int i = 0; i < max_frac; ++i)
-    {
-        rounder *= 0.1;
-    }
-    frac += rounder;
-    if (frac >= 1.0)
-    {
-        uint64_t max_uint64 = ~(uint64_t)0;
-        if (int_part < max_uint64)
-        {
-            int_part += 1;
-        }
-        frac -= 1.0;
-    }
-
-    char *int_digits = (char *)malloc(32);
-    if (!int_digits)
-    {
-        return NULL;
-    }
-    size_t int_len = 0;
-    do
-    {
-        int digit = (int)(int_part % 10u);
-        int_digits[int_len++] = (char)('0' + digit);
-        int_part /= 10u;
-    } while (int_part > 0u && int_len < 32);
-
-    char *frac_digits = NULL;
-    size_t frac_len = 0;
-    if (frac > 0.0)
-    {
-        frac_digits = (char *)malloc((size_t)max_frac);
-        if (!frac_digits)
-        {
-            free(int_digits);
-            return NULL;
-        }
-        double scaled = frac;
-        for (int i = 0; i < max_frac; ++i)
-        {
-            scaled *= 10.0;
-            int digit = (int)scaled;
-            if (digit < 0) digit = 0;
-            if (digit > 9) digit = 9;
-            frac_digits[frac_len++] = (char)('0' + digit);
-            scaled -= (double)digit;
-        }
-        while (frac_len > 0 && frac_digits[frac_len - 1] == '0')
-        {
-            frac_len--;
-        }
-    }
-
-    size_t total_len = (neg ? 1u : 0u) + int_len + (frac_len ? (1u + frac_len) : 0u);
-    char *out = (char *)malloc(total_len + 1);
-    if (!out)
-    {
-        free(int_digits);
-        free(frac_digits);
-        return NULL;
-    }
-    size_t pos = 0;
-    if (neg)
-    {
-        out[pos++] = '-';
-    }
-    for (size_t i = 0; i < int_len; ++i)
-    {
-        out[pos++] = int_digits[int_len - 1 - i];
-    }
-    if (frac_len)
-    {
-        out[pos++] = '.';
-        memcpy(out + pos, frac_digits, frac_len);
-        pos += frac_len;
-    }
-    out[pos] = '\0';
-
-    if (out_len)
-    {
-        *out_len = pos;
-    }
-    free(int_digits);
-    free(frac_digits);
-    return out;
-}
-
-static bool js_temp_string_from_value(const js_value_t *value, js_temp_string_t *out)
-{
-    if (!out)
-    {
-        return false;
-    }
-    memset(out, 0, sizeof(*out));
-    if (!value)
-    {
-        out->data = js_strdup("undefined");
-        if (!out->data)
-        {
-            return false;
-        }
-        out->len = strlen(out->data);
-        out->owned = true;
-        return true;
-    }
-    if (value->type == JS_VALUE_STRING)
-    {
-        out->data = value->as.string.data;
-        out->len = value->as.string.len;
-        out->owned = false;
-        return true;
-    }
-
-    if (value->type == JS_VALUE_BOOL)
-    {
-        const char *text = value->as.boolean ? "true" : "false";
-        out->data = js_strdup(text);
-        if (!out->data)
-        {
-            return false;
-        }
-        out->len = strlen(out->data);
-        out->owned = true;
-        return true;
-    }
-
-    if (value->type == JS_VALUE_NULL)
-    {
-        out->data = js_strdup("null");
-        if (!out->data)
-        {
-            return false;
-        }
-        out->len = strlen(out->data);
-        out->owned = true;
-        return true;
-    }
-
-    if (value->type == JS_VALUE_UNDEFINED)
-    {
-        out->data = js_strdup("undefined");
-        if (!out->data)
-        {
-            return false;
-        }
-        out->len = strlen(out->data);
-        out->owned = true;
-        return true;
-    }
-
-    if (value->type == JS_VALUE_NUMBER)
-    {
-        size_t len = 0;
-        out->data = js_number_to_string(value->as.number, &len);
-        if (!out->data)
-        {
-            return false;
-        }
-        out->len = len;
-        out->owned = true;
-        return true;
-    }
-
-    if (value->type == JS_VALUE_ARRAY)
-    {
-        out->data = js_strdup("[array]");
-        if (!out->data)
-        {
-            return false;
-        }
-        out->len = strlen(out->data);
-        out->owned = true;
-        return true;
-    }
-
-    if (value->type == JS_VALUE_OBJECT)
-    {
-        out->data = js_strdup("[object]");
-        if (!out->data)
-        {
-            return false;
-        }
-        out->len = strlen(out->data);
-        out->owned = true;
-        return true;
-    }
-
-    out->data = js_strdup("[function]");
-    if (!out->data)
-    {
-        return false;
-    }
-    out->len = strlen(out->data);
-    out->owned = true;
-    return true;
-}
-
-static void js_temp_string_release(js_temp_string_t *temp)
-{
-    if (!temp)
-    {
-        return;
-    }
-    if (temp->owned)
-    {
-        free(temp->data);
-    }
-    temp->data = NULL;
-    temp->len = 0;
-    temp->owned = false;
-}
-
-static bool js_value_strict_equal(const js_value_t *a, const js_value_t *b)
-{
-    if (!a || !b)
-    {
-        return false;
-    }
-    if (a->type != b->type)
-    {
-        return false;
-    }
-    switch (a->type)
-    {
-        case JS_VALUE_UNDEFINED:
-        case JS_VALUE_NULL:
-            return true;
-        case JS_VALUE_BOOL:
-            return a->as.boolean == b->as.boolean;
-        case JS_VALUE_NUMBER:
-            return a->as.number == b->as.number;
-        case JS_VALUE_STRING:
-            if (a->as.string.len != b->as.string.len)
-            {
-                return false;
-            }
-            if (a->as.string.len == 0)
-            {
-                return true;
-            }
-            return memcmp(a->as.string.data, b->as.string.data, a->as.string.len) == 0;
-        case JS_VALUE_NATIVE_FN:
-            return a->as.native.fn == b->as.native.fn && a->as.native.user_data == b->as.native.user_data;
-        case JS_VALUE_ARRAY:
-            return a->as.array == b->as.array;
-        case JS_VALUE_OBJECT:
-            return a->as.object == b->as.object;
-        case JS_VALUE_FUNCTION:
-            return a->as.function == b->as.function;
-    }
-    return false;
-}
-
-static bool js_parse_number_text(const char *text, double *out)
-{
-    if (!out)
-    {
-        return false;
-    }
-    if (!text)
-    {
-        *out = 0.0;
-        return true;
-    }
-    const char *s = text;
-    while (isspace((unsigned char)*s))
-    {
-        ++s;
-    }
-    if (*s == '\0')
-    {
-        *out = 0.0;
-        return true;
-    }
-    int sign = 1;
-    if (*s == '+' || *s == '-')
-    {
-        if (*s == '-')
-        {
-            sign = -1;
-        }
-        ++s;
-    }
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
-    {
-        s += 2;
-        int digit = js_hex_value(*s);
-        if (digit < 0)
-        {
-            return false;
-        }
-        double value = 0.0;
-        while (digit >= 0)
-        {
-            value = value * 16.0 + (double)digit;
-            ++s;
-            digit = js_hex_value(*s);
-        }
-        while (isspace((unsigned char)*s))
-        {
-            ++s;
-        }
-        if (*s != '\0')
-        {
-            return false;
-        }
-        *out = value * (double)sign;
-        return true;
-    }
-    bool had_digit = false;
-    double value = 0.0;
-    while (isdigit((unsigned char)*s))
-    {
-        had_digit = true;
-        value = value * 10.0 + (double)(*s - '0');
-        ++s;
-    }
-    if (*s == '.')
-    {
-        ++s;
-        double place = 0.1;
-        while (isdigit((unsigned char)*s))
-        {
-            had_digit = true;
-            value += (double)(*s - '0') * place;
-            place *= 0.1;
-            ++s;
-        }
-    }
-    if (!had_digit)
-    {
-        return false;
-    }
-    if (*s == 'e' || *s == 'E')
-    {
-        ++s;
-        int exp_sign = 1;
-        if (*s == '+' || *s == '-')
-        {
-            if (*s == '-')
-            {
-                exp_sign = -1;
-            }
-            ++s;
-        }
-        if (!isdigit((unsigned char)*s))
-        {
-            return false;
-        }
-        int exp = 0;
-        while (isdigit((unsigned char)*s))
-        {
-            exp = exp * 10 + (*s - '0');
-            ++s;
-        }
-        exp *= exp_sign;
-
-        double pow10 = 1.0;
-        int e = exp < 0 ? -exp : exp;
-        double base = 10.0;
-        while (e)
-        {
-            if (e & 1)
-            {
-                pow10 *= base;
-            }
-            base *= base;
-            e >>= 1;
-        }
-
-        if (exp < 0)
-        {
-            value /= pow10;
-        }
-        else
-        {
-            value *= pow10;
-        }
-    }
-    while (isspace((unsigned char)*s))
-    {
-        ++s;
-    }
-    if (*s != '\0')
-    {
-        return false;
-    }
-    *out = value * (double)sign;
-    return true;
-}
-
-static double js_value_to_number(const js_value_t *value, bool *ok_out)
-{
-    if (ok_out)
-    {
-        *ok_out = true;
-    }
-    if (!value)
-    {
-        if (ok_out)
-        {
-            *ok_out = false;
-        }
-        return js_nan();
-    }
-    switch (value->type)
-    {
-        case JS_VALUE_NUMBER:
-            return value->as.number;
-        case JS_VALUE_BOOL:
-            return value->as.boolean ? 1.0 : 0.0;
-        case JS_VALUE_NULL:
-            return 0.0;
-        case JS_VALUE_UNDEFINED:
-            if (ok_out)
-            {
-                *ok_out = false;
-            }
-            return js_nan();
-        case JS_VALUE_STRING:
-        {
-            double out = 0.0;
-            if (!js_parse_number_text(value->as.string.data ? value->as.string.data : "", &out))
-            {
-                if (ok_out)
-                {
-                    *ok_out = false;
-                }
-                return js_nan();
-            }
-            return out;
-        }
-        case JS_VALUE_ARRAY:
-        case JS_VALUE_OBJECT:
-        case JS_VALUE_NATIVE_FN:
-        case JS_VALUE_FUNCTION:
-            if (ok_out)
-            {
-                *ok_out = false;
-            }
-            return js_nan();
-    }
-    if (ok_out)
-    {
-        *ok_out = false;
-    }
-    return js_nan();
-}
-
-static bool js_builtin_number(js_runtime_t *rt,
-                              size_t argc,
-                              const js_value_t *argv,
-                              void *user_data,
-                              js_value_t *out,
-                              char **error_message)
-{
-    (void)rt;
-    (void)user_data;
-    if (error_message)
-    {
-        *error_message = NULL;
-    }
-    if (!out)
-    {
-        return false;
-    }
-    if (argc == 0 || !argv)
-    {
-        *out = js_value_make_number(0.0);
-        return true;
-    }
-    bool ok = true;
-    double value = js_value_to_number(&argv[0], &ok);
-    if (!ok)
-    {
-        value = js_nan();
-    }
-    *out = js_value_make_number(value);
-    return true;
-}
-
-static bool js_value_loose_equal(const js_value_t *a, const js_value_t *b)
-{
-    if (!a || !b)
-    {
-        return false;
-    }
-    if (a->type == b->type)
-    {
-        return js_value_strict_equal(a, b);
-    }
-    if ((a->type == JS_VALUE_NULL && b->type == JS_VALUE_UNDEFINED) ||
-        (a->type == JS_VALUE_UNDEFINED && b->type == JS_VALUE_NULL))
-    {
-        return true;
-    }
-    if (a->type == JS_VALUE_BOOL)
-    {
-        bool ok = false;
-        double an = js_value_to_number(a, &ok);
-        double bn = js_value_to_number(b, NULL);
-        if (!ok || js_is_nan(an) || js_is_nan(bn))
-        {
-            return false;
-        }
-        return an == bn;
-    }
-    if (b->type == JS_VALUE_BOOL)
-    {
-        bool ok = false;
-        double an = js_value_to_number(a, NULL);
-        double bn = js_value_to_number(b, &ok);
-        if (!ok || js_is_nan(an) || js_is_nan(bn))
-        {
-            return false;
-        }
-        return an == bn;
-    }
-    if ((a->type == JS_VALUE_NUMBER && b->type == JS_VALUE_STRING) ||
-        (a->type == JS_VALUE_STRING && b->type == JS_VALUE_NUMBER))
-    {
-        double an = js_value_to_number(a, NULL);
-        double bn = js_value_to_number(b, NULL);
-        if (js_is_nan(an) || js_is_nan(bn))
-        {
-            return false;
-        }
-        return an == bn;
-    }
-    return false;
-}
 
 static double js_trunc(double value)
 {
@@ -1801,6 +423,15 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
     return js_eval_ok(js_value_make_undefined_internal());
 }
 
+static const js_function_decl_t *js_function_def(const js_function_t *fn)
+{
+    if (!fn)
+    {
+        return NULL;
+    }
+    return fn->is_expr ? (const js_function_decl_t *)fn->expr : fn->decl;
+}
+
 static js_eval_result_t js_eval_call_function(js_runtime_t *rt, js_function_t *fn, size_t argc, js_value_t *args)
 {
     const js_function_decl_t *def = js_function_def(fn);
@@ -1859,6 +490,55 @@ static js_eval_result_t js_eval_call_function(js_runtime_t *rt, js_function_t *f
     js_value_destroy(&res.value);
     res.value = js_value_make_undefined_internal();
     return res;
+}
+
+bool js_call_value(js_runtime_t *rt,
+                   const js_value_t *callee,
+                   size_t argc,
+                   const js_value_t *argv,
+                   js_value_t *out,
+                   char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!rt || !callee || !out)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("invalid call");
+        }
+        return false;
+    }
+    if (callee->type == JS_VALUE_NATIVE_FN)
+    {
+        return callee->as.native.fn(rt, argc, argv, callee->as.native.user_data, out, error_message);
+    }
+    if (callee->type == JS_VALUE_FUNCTION)
+    {
+        js_eval_result_t res = js_eval_call_function(rt, callee->as.function, argc, (js_value_t *)argv);
+        if (res.ok)
+        {
+            *out = res.value;
+            return true;
+        }
+        if (error_message)
+        {
+            *error_message = res.error_message ? res.error_message : js_strdup("call failed");
+        }
+        else
+        {
+            free(res.error_message);
+        }
+        js_value_destroy(&res.value);
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("value is not callable");
+    }
+    return false;
 }
 
 static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_expr_t *expr)
@@ -2189,6 +869,87 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             js_value_destroy(&value.value);
             return js_eval_error("invalid assignment target");
         }
+        case JS_EXPR_NEW:
+        {
+            js_eval_result_t callee_res = js_eval_expr(rt, env, expr->as.new_expr.callee);
+            if (!callee_res.ok)
+            {
+                return callee_res;
+            }
+            js_value_t callee = callee_res.value;
+            size_t argc = expr->as.new_expr.arg_count;
+            js_value_t *args = NULL;
+            if (argc)
+            {
+                args = (js_value_t *)calloc(argc, sizeof(*args));
+                if (!args)
+                {
+                    js_value_destroy(&callee);
+                    return js_eval_error("allocation failed");
+                }
+            }
+            for (size_t i = 0; i < argc; ++i)
+            {
+                js_eval_result_t arg = js_eval_expr(rt, env, expr->as.new_expr.args[i]);
+                if (!arg.ok)
+                {
+                    for (size_t j = 0; j < i; ++j)
+                    {
+                        js_value_destroy(&args[j]);
+                    }
+                    free(args);
+                    js_value_destroy(&callee);
+                    return arg;
+                }
+                args[i] = arg.value;
+            }
+
+            if (!js_value_is_constructor(rt, &callee))
+            {
+                for (size_t i = 0; i < argc; ++i)
+                {
+                    js_value_destroy(&args[i]);
+                }
+                free(args);
+                js_value_destroy(&callee);
+                return js_eval_error("TypeError: not a constructor");
+            }
+
+            js_value_t out = js_value_make_undefined_internal();
+            char *err = NULL;
+            bool ok = js_call_value(rt, &callee, argc, args, &out, &err);
+            for (size_t i = 0; i < argc; ++i)
+            {
+                js_value_destroy(&args[i]);
+            }
+            free(args);
+            js_value_destroy(&callee);
+            if (!ok)
+            {
+                if (err)
+                {
+                    js_eval_result_t res = js_eval_error(err);
+                    free(err);
+                    return res;
+                }
+                return js_eval_error("constructor failed");
+            }
+
+            if (out.type == JS_VALUE_OBJECT ||
+                out.type == JS_VALUE_ARRAY ||
+                out.type == JS_VALUE_FUNCTION)
+            {
+                return js_eval_ok(out);
+            }
+
+            js_value_destroy(&out);
+            js_value_t constructed;
+            if (!js_value_make_host_object(&constructed, NULL, NULL, NULL, NULL))
+            {
+                return js_eval_error("allocation failed");
+            }
+            return js_eval_ok(constructed);
+        }
         case JS_EXPR_CALL:
         {
             js_eval_result_t callee_res = js_eval_expr(rt, env, expr->as.call.callee);
@@ -2365,7 +1126,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
         }
         case JS_EXPR_FUNCTION:
         {
-            js_function_t *fn = js_function_create(NULL, &expr->as.func, env);
+            js_function_t *fn = js_function_create(NULL, &expr->as.func, env, !expr->as.func.is_arrow);
             if (!fn)
             {
                 return js_eval_error("allocation failed");
@@ -2475,7 +1236,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
         }
         case JS_STMT_FUNCTION_DECL:
         {
-            js_function_t *fn = js_function_create(&stmt->as.func, NULL, env);
+            js_function_t *fn = js_function_create(&stmt->as.func, NULL, env, true);
             if (!fn)
             {
                 return js_eval_error("allocation failed");

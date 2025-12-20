@@ -251,6 +251,7 @@ int main(int argc, char **argv)
     Cbuf_Execute();
     Sys_Init();
 
+    const double frame_min = 1.0 / 72.0;
     double oldtime = Sys_FloatTime() - 0.1;
     while (1)
     {
@@ -262,6 +263,9 @@ int main(int argc, char **argv)
         }
         Host_Frame((float)time);
         oldtime = newtime;
-        sys_yield();
+        if (time < frame_min)
+        {
+            sys_yield();
+        }
     }
 }

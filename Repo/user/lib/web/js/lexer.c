@@ -107,6 +107,7 @@ static js_token_type_t js_keyword_type(const char *start, size_t len)
     if (len == 2 && strncmp(start, "do", len) == 0) return JS_TOKEN_KW_DO;
     if (len == 3 && strncmp(start, "try", len) == 0) return JS_TOKEN_KW_TRY;
     if (len == 5 && strncmp(start, "catch", len) == 0) return JS_TOKEN_KW_CATCH;
+    if (len == 3 && strncmp(start, "new", len) == 0) return JS_TOKEN_KW_NEW;
     return JS_TOKEN_IDENTIFIER;
 }
 
@@ -597,7 +598,12 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
             out->offset = start_offset;
             return true;
         case '=':
-            if (js_lexer_peek(lex) == '=')
+            if (js_lexer_peek(lex) == '>')
+            {
+                (void)js_lexer_advance(lex);
+                out->type = JS_TOKEN_ARROW;
+            }
+            else if (js_lexer_peek(lex) == '=')
             {
                 (void)js_lexer_advance(lex);
                 if (js_lexer_peek(lex) == '=')

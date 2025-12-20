@@ -29,6 +29,7 @@ typedef enum
     JS_TOKEN_BANG_EQUAL,
     JS_TOKEN_BANG_EQUAL_EQUAL,
     JS_TOKEN_EQUAL,
+    JS_TOKEN_ARROW,
     JS_TOKEN_EQUAL_EQUAL,
     JS_TOKEN_EQUAL_EQUAL_EQUAL,
     JS_TOKEN_LT,
@@ -57,7 +58,8 @@ typedef enum
     JS_TOKEN_KW_DEFAULT,
     JS_TOKEN_KW_DO,
     JS_TOKEN_KW_TRY,
-    JS_TOKEN_KW_CATCH
+    JS_TOKEN_KW_CATCH,
+    JS_TOKEN_KW_NEW
 } js_token_type_t;
 
 typedef struct

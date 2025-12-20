@@ -121,6 +121,7 @@ typedef enum
     JS_EXPR_BINARY,
     JS_EXPR_UNARY,
     JS_EXPR_ASSIGN,
+    JS_EXPR_NEW,
     JS_EXPR_CALL,
     JS_EXPR_TERNARY,
     JS_EXPR_ARRAY,
@@ -203,6 +204,7 @@ typedef struct
     char **params;
     size_t param_count;
     js_block_t body;
+    bool is_arrow;
 } js_function_expr_t;
 
 typedef struct
@@ -307,6 +309,13 @@ typedef struct
     js_expr_t *callee;
     js_expr_t **args;
     size_t arg_count;
+} js_new_expr_t;
+
+typedef struct
+{
+    js_expr_t *callee;
+    js_expr_t **args;
+    size_t arg_count;
 } js_call_expr_t;
 
 typedef struct
@@ -340,6 +349,7 @@ struct js_expr
         js_binary_expr_t binary;
         js_unary_expr_t unary;
         js_assign_expr_t assign;
+        js_new_expr_t new_expr;
         js_call_expr_t call;
         js_ternary_expr_t ternary;
         js_array_expr_t array;
