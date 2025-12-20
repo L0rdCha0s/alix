@@ -29,6 +29,7 @@ bool user_atk_capture_relative_active(void);
 int64_t user_atk_sys_create(const user_atk_window_desc_t *desc);
 int64_t user_atk_sys_present(uint32_t handle, const video_color_t *pixels, size_t byte_len);
 int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, uint32_t flags);
+int64_t user_atk_sys_poll_event_timeout(uint32_t handle, user_atk_event_t *event_out, uint32_t timeout_ms);
 int64_t user_atk_sys_close(uint32_t handle);
 int64_t user_atk_sys_capture(uint32_t handle, uint32_t flags);
 

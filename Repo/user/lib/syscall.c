@@ -131,6 +131,11 @@ int sys_ui_poll_event(uint32_t handle, user_atk_event_t *event, uint32_t flags)
     return (int)syscall3(SYSCALL_UI_POLL_EVENT, (long)handle, (long)event, (long)flags);
 }
 
+int sys_ui_poll_event_timeout(uint32_t handle, user_atk_event_t *event, uint32_t timeout_ms)
+{
+    return (int)syscall3(SYSCALL_UI_POLL_EVENT_TIMEOUT, (long)handle, (long)event, (long)timeout_ms);
+}
+
 int sys_ui_close(uint32_t handle)
 {
     return (int)syscall1(SYSCALL_UI_CLOSE, (long)handle);
@@ -144,6 +149,11 @@ int sys_ui_capture(uint32_t handle, uint32_t flags)
 int sys_yield(void)
 {
     return (int)syscall0(SYSCALL_YIELD);
+}
+
+int sys_sleep_ms(uint32_t ms)
+{
+    return (int)syscall1(SYSCALL_SLEEP_MS, (long)ms);
 }
 
 int sys_serial_write(const char *buffer, size_t length)

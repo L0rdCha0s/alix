@@ -116,6 +116,28 @@ bool atk_user_wait_event(atk_user_window_t *win, user_atk_event_t *event)
     return ok;
 }
 
+bool atk_user_wait_event_timeout(atk_user_window_t *win, user_atk_event_t *event, uint32_t timeout_ms)
+{
+    if (!win || !event)
+    {
+        return false;
+    }
+    bool ok = sys_ui_poll_event_timeout(win->handle, event, timeout_ms) == 1;
+#if ATK_USER_TRACE
+    if (ok)
+    {
+        atk_user_trace("wait_event_timeout type",
+                       event->type,
+                       ((uint64_t)(uint32_t)event->x << 32) | (uint32_t)(event->y & 0xFFFFFFFFu));
+    }
+#endif
+    if (ok && event->type == USER_ATK_EVENT_RESIZE)
+    {
+        atk_user_handle_resize_event(win, event);
+    }
+    return ok;
+}
+
 bool atk_user_poll_event(atk_user_window_t *win, user_atk_event_t *event)
 {
     if (!win || !event)

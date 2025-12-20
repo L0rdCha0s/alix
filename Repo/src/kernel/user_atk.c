@@ -8,6 +8,7 @@
 #include "process.h"
 #include "serial.h"
 #include "spinlock.h"
+#include "timer.h"
 #include "video.h"
 #include "user_copy.h"
 
@@ -1054,6 +1055,90 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
     }
 #if USER_ATK_DEBUG
     user_atk_log_pair("sys_poll_event", handle, event.type);
+#endif
+    user_atk_window_release(win);
+    return 1;
+}
+
+static uint64_t user_atk_timeout_to_ticks(uint32_t timeout_ms)
+{
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        return timeout_ms ? 1 : 0;
+    }
+    uint64_t ticks = ((uint64_t)timeout_ms * (uint64_t)freq + 999ULL) / 1000ULL;
+    if (ticks == 0 && timeout_ms > 0)
+    {
+        ticks = 1;
+    }
+    return ticks;
+}
+
+int64_t user_atk_sys_poll_event_timeout(uint32_t handle, user_atk_event_t *event_out, uint32_t timeout_ms)
+{
+    if (!event_out)
+    {
+        return -1;
+    }
+    if (!user_ptr_range_valid(event_out, sizeof(*event_out)))
+    {
+        return -1;
+    }
+    user_atk_window_t *win = user_atk_find(handle, process_current());
+    if (!win)
+    {
+        return -1;
+    }
+
+    user_atk_event_t event = { 0 };
+    if (timeout_ms == 0)
+    {
+        if (!user_atk_pop_event(win, &event) || win->closed)
+        {
+            user_atk_event_t zero = { 0 };
+            user_copy_to_user(event_out, &zero, sizeof(zero));
+            user_atk_window_release(win);
+            return 0;
+        }
+        if (!user_copy_to_user(event_out, &event, sizeof(event)))
+        {
+            user_atk_window_release(win);
+            return -1;
+        }
+        user_atk_window_release(win);
+        return 1;
+    }
+
+    uint64_t timeout_ticks = user_atk_timeout_to_ticks(timeout_ms);
+    while (!user_atk_pop_event(win, &event))
+    {
+        if (win->closed)
+        {
+            user_atk_event_t zero = { 0 };
+            user_copy_to_user(event_out, &zero, sizeof(zero));
+            user_atk_window_release(win);
+            return 0;
+        }
+        if (!wait_queue_wait_timeout(&win->event_waiters,
+                                     user_atk_event_ready,
+                                     win,
+                                     timeout_ticks))
+        {
+            user_atk_event_t zero = { 0 };
+            user_copy_to_user(event_out, &zero, sizeof(zero));
+            user_atk_window_release(win);
+            return 0;
+        }
+    }
+
+    if (!user_copy_to_user(event_out, &event, sizeof(event)))
+    {
+        user_atk_window_release(win);
+        return -1;
+    }
+#if USER_ATK_DEBUG
+    user_atk_log_pair("sys_poll_event_timeout", handle, event.type);
 #endif
     user_atk_window_release(win);
     return 1;

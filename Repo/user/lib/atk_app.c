@@ -23,6 +23,9 @@
 #ifndef ATK_MAIN_MAX_CLOSE_HANDLERS
 #define ATK_MAIN_MAX_CLOSE_HANDLERS 4
 #endif
+#ifndef ATK_MAIN_DEFAULT_TICK_MS
+#define ATK_MAIN_DEFAULT_TICK_MS 16u
+#endif
 
 typedef struct
 {
@@ -587,6 +590,15 @@ int atk_main(const atk_main_config_t *config)
     g_atk_main.legacy_input = config->legacy_input;
     g_atk_main.exit_requested = false;
     g_atk_main.stack_changed = false;
+    uint32_t tick_wait_ms = 0;
+    if (config->tick)
+    {
+        tick_wait_ms = config->tick_interval_ms;
+        if (tick_wait_ms == 0)
+        {
+            tick_wait_ms = ATK_MAIN_DEFAULT_TICK_MS;
+        }
+    }
 
     if (!atk_main_push_window(config->window))
     {
@@ -652,7 +664,11 @@ int atk_main(const atk_main_config_t *config)
         }
         else if (!had_event)
         {
-            sys_yield();
+            uint32_t idle_sleep_ms = tick_wait_ms ? tick_wait_ms : 1u;
+            if (sys_sleep_ms(idle_sleep_ms) < 0)
+            {
+                sys_yield();
+            }
         }
     }
 

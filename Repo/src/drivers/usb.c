@@ -443,19 +443,33 @@ static uhci_wait_result_t uhci_wait_for_td(uhci_controller_t *hc,
             if (++same_frame_spins >= 20000)
             {
                 same_frame_spins = 0;
-                process_yield();
+                if (!yield_on_frame)
+                {
+                    process_yield();
+                }
             }
         }
         else
         {
             last_frame = frame;
             same_frame_spins = 0;
-            if (yield_on_frame)
+        }
+
+        if (yield_on_frame)
+        {
+            if (process_scheduler_ready())
+            {
+                process_sleep_ms(1);
+            }
+            else
             {
                 process_yield();
             }
         }
-        __asm__ volatile ("pause");
+        else
+        {
+            __asm__ volatile ("pause");
+        }
     }
     return UHCI_WAIT_TIMEOUT;
 }

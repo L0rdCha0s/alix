@@ -83,6 +83,14 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
     return -1;
 }
 
+int64_t user_atk_sys_poll_event_timeout(uint32_t handle, user_atk_event_t *event_out, uint32_t timeout_ms)
+{
+    (void)handle;
+    (void)event_out;
+    (void)timeout_ms;
+    return -1;
+}
+
 int64_t user_atk_sys_close(uint32_t handle)
 {
     (void)handle;

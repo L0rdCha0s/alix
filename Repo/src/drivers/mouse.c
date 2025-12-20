@@ -32,6 +32,8 @@ static uint32_t g_mouse_queue_head = 0;
 static uint32_t g_mouse_queue_tail = 0;
 static spinlock_t g_mouse_queue_lock = { 0 };
 static bool g_mouse_queue_overflow_logged = false;
+static bool g_mouse_last_left_valid = false;
+static bool g_mouse_last_left = false;
 static bool g_mouse_daemon_started = false;
 #if ENABLE_USB
 /* When USB is enabled, keep PS/2 mouse disabled to avoid double-handling input. */
@@ -107,6 +109,8 @@ static void mouse_queue_reset(void)
     g_mouse_queue_head = 0;
     g_mouse_queue_tail = 0;
     g_mouse_queue_overflow_logged = false;
+    g_mouse_last_left_valid = false;
+    g_mouse_last_left = false;
     spinlock_unlock(&g_mouse_queue_lock);
     mouse_irq_restore(flags);
 }
@@ -115,6 +119,15 @@ static void mouse_queue_push(int dx, int dy, bool left)
 {
     uint64_t flags = mouse_irq_save();
     spinlock_lock(&g_mouse_queue_lock);
+
+    if (dx == 0 && dy == 0 && g_mouse_last_left_valid && g_mouse_last_left == left)
+    {
+        spinlock_unlock(&g_mouse_queue_lock);
+        mouse_irq_restore(flags);
+        return;
+    }
+    g_mouse_last_left_valid = true;
+    g_mouse_last_left = left;
 
     uint32_t next_head = (g_mouse_queue_head + 1u) % MOUSE_QUEUE_CAP;
     if (next_head == g_mouse_queue_tail)

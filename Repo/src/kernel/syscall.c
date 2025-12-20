@@ -1080,6 +1080,20 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             }
             result = 0;
             break;
+        case SYSCALL_SLEEP_MS:
+        {
+            uint32_t ms = (uint32_t)frame->rdi;
+            if (ms == 0)
+            {
+                process_yield();
+            }
+            else
+            {
+                process_sleep_ms(ms);
+            }
+            result = 0;
+            break;
+        }
         case SYSCALL_SBRK:
             result = process_user_sbrk(process_current(), (int64_t)frame->rdi);
             break;
@@ -1095,6 +1109,11 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = user_atk_sys_poll_event((uint32_t)frame->rdi,
                                              (user_atk_event_t *)frame->rsi,
                                              (uint32_t)frame->rdx);
+            break;
+        case SYSCALL_UI_POLL_EVENT_TIMEOUT:
+            result = user_atk_sys_poll_event_timeout((uint32_t)frame->rdi,
+                                                     (user_atk_event_t *)frame->rsi,
+                                                     (uint32_t)frame->rdx);
             break;
         case SYSCALL_UI_CLOSE:
             result = user_atk_sys_close((uint32_t)frame->rdi);

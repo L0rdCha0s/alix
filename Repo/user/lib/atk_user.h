@@ -69,6 +69,13 @@ void atk_user_enable_dirty_tracking(atk_user_window_t *win, bool enable);
 bool atk_user_wait_event(atk_user_window_t *win, user_atk_event_t *event);
 
 /*
+ * Block until an event is available for `win` or `timeout_ms` elapses.
+ *
+ * Returns true when an event was dequeued; returns false on timeout or error.
+ */
+bool atk_user_wait_event_timeout(atk_user_window_t *win, user_atk_event_t *event, uint32_t timeout_ms);
+
+/*
  * Poll for the next event without blocking.
  *
  * Returns true and fills `event` when an event was dequeued; returns false when

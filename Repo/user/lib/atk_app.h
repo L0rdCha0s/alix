@@ -26,6 +26,7 @@ typedef struct
     void *tick_context;
     bool present_on_idle;
     bool legacy_input;
+    uint32_t tick_interval_ms;
 } atk_main_config_t;
 
 /*
@@ -41,6 +42,9 @@ typedef struct
  * callback, renders when ATK marks state dirty, and presents via
  * `atk_user_present()` (or `atk_user_present_force()` when `present_on_idle` is
  * true).
+ *
+ * When `tick` is set, `tick_interval_ms` controls how long the loop blocks for
+ * events while idle (0 uses a default cadence).
  *
  * Returns 0 on clean exit and -1 on invalid arguments or when the remote window
  * cannot be made active.
