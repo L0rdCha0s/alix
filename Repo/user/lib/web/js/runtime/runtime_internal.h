@@ -100,6 +100,7 @@ bool js_array_set(js_array_t *array, size_t index, const js_value_t *value);
 bool js_array_get(const js_array_t *array, size_t index, js_value_t *out);
 bool js_array_get_property(js_array_t *array, const char *name, js_value_t *out);
 bool js_array_set_property(js_array_t *array, const char *name, const js_value_t *value);
+bool js_array_set_length(js_array_t *array, size_t new_length);
 
 void js_object_retain(js_object_t *object);
 void js_object_release(js_object_t *object);
@@ -196,6 +197,18 @@ bool js_builtin_symbol(js_runtime_t *rt,
                        void *user_data,
                        js_value_t *out,
                        char **error_message);
+bool js_builtin_set(js_runtime_t *rt,
+                    size_t argc,
+                    const js_value_t *argv,
+                    void *user_data,
+                    js_value_t *out,
+                    char **error_message);
+bool js_set_iterator(js_runtime_t *rt,
+                     size_t argc,
+                     const js_value_t *argv,
+                     void *user_data,
+                     js_value_t *out,
+                     char **error_message);
 bool js_regexp_compile(js_runtime_t *rt,
                        size_t argc,
                        const js_value_t *argv,
@@ -256,6 +269,12 @@ bool js_builtin_define_properties(js_runtime_t *rt,
                                   void *user_data,
                                   js_value_t *out,
                                   char **error_message);
+bool js_builtin_object_get_prototype_of(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message);
 bool js_builtin_function_call(js_runtime_t *rt,
                               size_t argc,
                               const js_value_t *argv,
@@ -274,6 +293,12 @@ bool js_builtin_type_error(js_runtime_t *rt,
                            void *user_data,
                            js_value_t *out,
                            char **error_message);
+bool js_builtin_range_error(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
 bool js_builtin_syntax_error(js_runtime_t *rt,
                              size_t argc,
                              const js_value_t *argv,

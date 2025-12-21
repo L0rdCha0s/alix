@@ -30,6 +30,24 @@ typedef struct
 static int js_realm_next_id = 1;
 static js_realm_t js_default_realm = {0};
 static const char *js_accessor_get_prefix = "__get__";
+static js_object_t *js_set_iterator_proto = NULL;
+
+static bool js_set_get(js_runtime_t *rt,
+                       void *user_data,
+                       const char *name,
+                       js_value_t *out,
+                       char **error_message);
+static bool js_set_iterator_get(js_runtime_t *rt,
+                                void *user_data,
+                                const char *name,
+                                js_value_t *out,
+                                char **error_message);
+static bool js_set_iterator_proto_get(js_runtime_t *rt,
+                                      void *user_data,
+                                      const char *name,
+                                      js_value_t *out,
+                                      char **error_message);
+static js_object_t *js_get_set_iterator_proto(void);
 
 typedef enum
 {
@@ -582,6 +600,8 @@ static bool js_regexp_match_class(const char *pattern, size_t len, char target)
         int start_char = 0;
         bool special_digit = false;
         bool special_nondigit = false;
+        bool special_word = false;
+        bool special_nonword = false;
         if (pattern[i] == '\\' && i + 1 < len)
         {
             char esc = pattern[i + 1];
@@ -593,6 +613,16 @@ static bool js_regexp_match_class(const char *pattern, size_t len, char target)
             else if (esc == 'D')
             {
                 special_nondigit = true;
+                i += 2;
+            }
+            else if (esc == 'w')
+            {
+                special_word = true;
+                i += 2;
+            }
+            else if (esc == 'W')
+            {
+                special_nonword = true;
                 i += 2;
             }
             else if (esc >= '0' && esc <= '7')
@@ -623,6 +653,15 @@ static bool js_regexp_match_class(const char *pattern, size_t len, char target)
         {
             bool is_digit = (target >= '0' && target <= '9');
             if ((special_digit && is_digit) || (special_nondigit && !is_digit))
+            {
+                matched = true;
+            }
+            continue;
+        }
+        if (special_word || special_nonword)
+        {
+            bool is_word = (isalnum((unsigned char)target) != 0 || target == '_');
+            if ((special_word && is_word) || (special_nonword && !is_word))
             {
                 matched = true;
             }
@@ -853,6 +892,142 @@ static bool js_regexp_flags_valid(const char *flags, size_t len)
     return true;
 }
 
+static js_object_t *js_get_set_iterator_proto(void)
+{
+    if (js_set_iterator_proto)
+    {
+        return js_set_iterator_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_set_iterator_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    js_set_iterator_proto = proto_val.as.object;
+    js_object_retain(js_set_iterator_proto);
+    js_value_destroy(&proto_val);
+    return js_set_iterator_proto;
+}
+
+static bool js_set_iterator_proto_get(js_runtime_t *rt,
+                                      void *user_data,
+                                      const char *name,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (name && strcmp(name, "Symbol.toStringTag") == 0)
+    {
+        return js_value_make_cstring(out, "Set Iterator");
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_set_iterator_next(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!js_value_make_host_object(out, NULL, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_value_t value = js_value_make_undefined_internal();
+    js_value_t done = js_value_make_bool(true);
+    (void)js_object_set_slot(out->as.object, "value", &value);
+    (void)js_object_set_slot(out->as.object, "done", &done);
+    return true;
+}
+
+static bool js_set_iterator_get(js_runtime_t *rt,
+                                void *user_data,
+                                const char *name,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (name && strcmp(name, "next") == 0)
+    {
+        memset(out, 0, sizeof(*out));
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = js_set_iterator_next;
+        out->as.native.user_data = NULL;
+        return true;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_set_get(js_runtime_t *rt,
+                       void *user_data,
+                       const char *name,
+                       js_value_t *out,
+                       char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (name && strcmp(name, "Symbol.iterator") == 0)
+    {
+        memset(out, 0, sizeof(*out));
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = js_set_iterator;
+        out->as.native.user_data = NULL;
+        return true;
+    }
+    if (name && strcmp(name, "size") == 0)
+    {
+        *out = js_value_make_number(0.0);
+        return true;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
 static bool js_regexp_set_flags(js_regexp_t *re, const char *flags, size_t len)
 {
     if (!re)
@@ -1037,7 +1212,7 @@ static bool js_regexp_parse_atom(const char *pattern,
     if (c == '\\' && *index + 1 < len)
     {
         char esc = pattern[*index + 1];
-        if (esc == 'd' || esc == 'D')
+        if (esc == 'd' || esc == 'D' || esc == 'w' || esc == 'W')
         {
             out->kind = JS_REGEXP_ATOM_CLASS;
             out->class_pattern = pattern + *index;
@@ -1239,6 +1414,14 @@ static bool js_regexp_match_from(const char *pattern,
     return false;
 }
 
+static bool js_regexp_find_match_from(const char *pattern,
+                                      size_t pattern_len,
+                                      const char *text,
+                                      size_t text_len,
+                                      size_t start_index,
+                                      size_t *out_start,
+                                      size_t *out_end);
+
 static bool js_regexp_find_match(const char *pattern,
                                  size_t pattern_len,
                                  const char *text,
@@ -1246,17 +1429,32 @@ static bool js_regexp_find_match(const char *pattern,
                                  size_t *out_start,
                                  size_t *out_end)
 {
+    return js_regexp_find_match_from(pattern, pattern_len, text, text_len, 0, out_start, out_end);
+}
+
+static bool js_regexp_find_match_from(const char *pattern,
+                                      size_t pattern_len,
+                                      const char *text,
+                                      size_t text_len,
+                                      size_t start_index,
+                                      size_t *out_start,
+                                      size_t *out_end)
+{
     if (!pattern || !text || !out_start || !out_end)
+    {
+        return false;
+    }
+    if (start_index > text_len)
     {
         return false;
     }
     if (pattern_len == 0)
     {
-        *out_start = 0;
-        *out_end = 0;
+        *out_start = start_index;
+        *out_end = start_index;
         return true;
     }
-    for (size_t start = 0; start <= text_len; ++start)
+    for (size_t start = start_index; start <= text_len; ++start)
     {
         size_t end = 0;
         if (js_regexp_match_from(pattern, pattern_len, 0, text, text_len, start, &end))
@@ -1429,6 +1627,11 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
             out->writable = true;
             out->enumerable = false;
             out->configurable = true;
+            if (obj->as.object->get_fn == js_set_iterator_proto_get &&
+                strcmp(name, "Symbol.toStringTag") == 0)
+            {
+                out->writable = false;
+            }
             return true;
         }
         out->exists = js_object_has_slot(obj->as.object, name);
@@ -1767,12 +1970,59 @@ bool js_regexp_exec(js_runtime_t *rt,
     size_t pattern_len = re ? re->pattern_len : 0;
     const char *text = temp.data ? temp.data : "";
     size_t text_len = temp.len;
+    bool global = re && re->flags && strchr(re->flags, 'g') != NULL;
+    bool sticky = re && re->flags && strchr(re->flags, 'y') != NULL;
+    bool use_last_index = global || sticky;
+    size_t search_start = 0;
+    if (use_last_index && re && re->object && js_object_has_slot(re->object, "lastIndex"))
+    {
+        js_value_t last = js_value_make_undefined_internal();
+        if (js_object_get_slot(re->object, "lastIndex", &last))
+        {
+            bool ok = true;
+            double num = js_value_to_number(&last, &ok);
+            if (ok && !js_is_nan(num) && num > 0.0)
+            {
+                if (num > (double)text_len)
+                {
+                    search_start = text_len + 1;
+                }
+                else
+                {
+                    search_start = (size_t)num;
+                }
+            }
+        }
+        js_value_destroy(&last);
+    }
     size_t start = 0;
     size_t end = 0;
-    bool matched = js_regexp_find_match(pattern, pattern_len, text, text_len, &start, &end);
+    bool matched = false;
+    if (use_last_index && search_start > text_len)
+    {
+        matched = false;
+    }
+    else if (sticky)
+    {
+        matched = js_regexp_match_from(pattern, pattern_len, 0, text, text_len, search_start, &end);
+        start = search_start;
+    }
+    else if (use_last_index)
+    {
+        matched = js_regexp_find_match_from(pattern, pattern_len, text, text_len, search_start, &start, &end);
+    }
+    else
+    {
+        matched = js_regexp_find_match(pattern, pattern_len, text, text_len, &start, &end);
+    }
     if (!matched)
     {
         js_temp_string_release(&temp);
+        if (use_last_index && re && re->object)
+        {
+            js_value_t zero = js_value_make_number(0.0);
+            (void)js_object_set_slot(re->object, "lastIndex", &zero);
+        }
         *out = js_value_make_null();
         return true;
     }
@@ -1805,6 +2055,23 @@ bool js_regexp_exec(js_runtime_t *rt,
     (void)js_object_set_slot(result.as.object, "input", &input_value);
     js_value_destroy(&input_value);
     js_temp_string_release(&temp);
+    if (use_last_index && re && re->object)
+    {
+        size_t new_last_index = end;
+        if (end == start)
+        {
+            if (end < text_len)
+            {
+                new_last_index = end + 1;
+            }
+            else
+            {
+                new_last_index = end + 1;
+            }
+        }
+        js_value_t last = js_value_make_number((double)new_last_index);
+        (void)js_object_set_slot(re->object, "lastIndex", &last);
+    }
     *out = result;
     return true;
 }
@@ -2999,6 +3266,124 @@ bool js_builtin_object(js_runtime_t *rt,
     return js_value_make_host_object(out, NULL, NULL, NULL, NULL);
 }
 
+bool js_builtin_object_get_prototype_of(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc == 0 || !argv || argv[0].type != JS_VALUE_OBJECT)
+    {
+        *out = js_value_make_undefined();
+        return true;
+    }
+    js_object_t *obj = argv[0].as.object;
+    if (!obj)
+    {
+        *out = js_value_make_undefined();
+        return true;
+    }
+    if (js_object_has_slot(obj, "__proto__"))
+    {
+        if (!js_object_get_slot(obj, "__proto__", out))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        return true;
+    }
+    *out = js_value_make_null();
+    return true;
+}
+
+bool js_builtin_set(js_runtime_t *rt,
+                    size_t argc,
+                    const js_value_t *argv,
+                    void *user_data,
+                    js_value_t *out,
+                    char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!js_value_make_host_object(out, js_set_get, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
+bool js_set_iterator(js_runtime_t *rt,
+                     size_t argc,
+                     const js_value_t *argv,
+                     void *user_data,
+                     js_value_t *out,
+                     char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_object_t *proto = js_get_set_iterator_proto();
+    if (!proto)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!js_value_make_host_object(out, js_set_iterator_get, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_value_t proto_val;
+    memset(&proto_val, 0, sizeof(proto_val));
+    proto_val.type = JS_VALUE_OBJECT;
+    proto_val.as.object = proto;
+    (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    return true;
+}
+
 bool js_builtin_regexp(js_runtime_t *rt,
                        size_t argc,
                        const js_value_t *argv,
@@ -3620,6 +4005,29 @@ bool js_builtin_type_error(js_runtime_t *rt,
                            void *user_data,
                            js_value_t *out,
                            char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined();
+    return true;
+}
+
+bool js_builtin_range_error(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
 {
     (void)rt;
     (void)argc;

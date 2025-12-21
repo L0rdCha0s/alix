@@ -83,11 +83,44 @@ static bool js_value_to_index(const js_value_t *value, size_t *out_index)
     {
         return false;
     }
+    if (num >= 4294967295.0)
+    {
+        return false;
+    }
     if (num > (double)SIZE_MAX)
     {
         return false;
     }
     *out_index = (size_t)num;
+    return true;
+}
+
+static bool js_value_to_array_length(const js_value_t *value, size_t *out_length)
+{
+    if (!value || !out_length)
+    {
+        return false;
+    }
+    bool ok = true;
+    double num = js_value_to_number(value, &ok);
+    if (!ok || js_is_nan(num))
+    {
+        return false;
+    }
+    if (num < 0.0 || num >= 4294967296.0)
+    {
+        return false;
+    }
+    double trunc = js_trunc(num);
+    if (trunc != num)
+    {
+        return false;
+    }
+    if (num > (double)SIZE_MAX)
+    {
+        return false;
+    }
+    *out_length = (size_t)num;
     return true;
 }
 
@@ -724,7 +757,7 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
             }
             return js_eval_ok(js_value_make_number((double)length));
         }
-        return js_eval_error("unknown property");
+        return js_eval_error(access->property ? access->property : "unknown property");
     }
     if (access->object.type == JS_VALUE_ARRAY)
     {
@@ -829,52 +862,72 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
             value.as.native.user_data = NULL;
             return js_eval_ok(value);
         }
+        if (native_name && access->property && strcmp(native_name, "Object") == 0 &&
+            strcmp(access->property, "getPrototypeOf") == 0)
+        {
+            js_value_t value;
+            memset(&value, 0, sizeof(value));
+            value.type = JS_VALUE_NATIVE_FN;
+            value.as.native.fn = js_builtin_object_get_prototype_of;
+            value.as.native.user_data = NULL;
+            return js_eval_ok(value);
+        }
         if (native_name && access->property && strcmp(native_name, "Symbol") == 0)
         {
             if (strcmp(access->property, "toPrimitive") == 0)
             {
-                        js_value_t value;
-                        if (!js_value_make_cstring(&value, "Symbol.toPrimitive"))
-                        {
-                            return js_eval_error("allocation failed");
-                        }
-                        return js_eval_ok(value);
-                    }
-                    if (strcmp(access->property, "iterator") == 0)
-                    {
-                        js_value_t value;
-                        if (!js_value_make_cstring(&value, "Symbol.iterator"))
-                        {
-                            return js_eval_error("allocation failed");
-                        }
-                        return js_eval_ok(value);
-                    }
-                    if (strcmp(access->property, "match") == 0)
-                    {
-                        js_value_t value;
-                        if (!js_value_make_cstring(&value, "Symbol.match"))
-                        {
-                            return js_eval_error("allocation failed");
-                        }
-                        return js_eval_ok(value);
-                    }
-                    if (strcmp(access->property, "split") == 0)
-                    {
-                        js_value_t value;
-                        if (!js_value_make_cstring(&value, "Symbol.split"))
-                        {
-                            return js_eval_error("allocation failed");
-                        }
-                        return js_eval_ok(value);
-                    }
+                js_value_t value;
+                if (!js_value_make_cstring(&value, "Symbol.toPrimitive"))
+                {
+                    return js_eval_error("allocation failed");
                 }
-                return js_eval_error("unknown property");
+                return js_eval_ok(value);
             }
-            if (access->object.type == JS_VALUE_OBJECT)
+            if (strcmp(access->property, "iterator") == 0)
             {
-                js_value_t value = js_value_make_undefined_internal();
-                char *err = NULL;
-                if (!js_object_get_property(rt, access->object.as.object, access->property, &value, &err))
+                js_value_t value;
+                if (!js_value_make_cstring(&value, "Symbol.iterator"))
+                {
+                    return js_eval_error("allocation failed");
+                }
+                return js_eval_ok(value);
+            }
+            if (strcmp(access->property, "match") == 0)
+            {
+                js_value_t value;
+                if (!js_value_make_cstring(&value, "Symbol.match"))
+                {
+                    return js_eval_error("allocation failed");
+                }
+                return js_eval_ok(value);
+            }
+            if (strcmp(access->property, "split") == 0)
+            {
+                js_value_t value;
+                if (!js_value_make_cstring(&value, "Symbol.split"))
+                {
+                    return js_eval_error("allocation failed");
+                }
+                return js_eval_ok(value);
+            }
+            if (strcmp(access->property, "toStringTag") == 0)
+            {
+                js_value_t value;
+                if (!js_value_make_cstring(&value, "Symbol.toStringTag"))
+                {
+                    return js_eval_error("allocation failed");
+                }
+                return js_eval_ok(value);
+            }
+            return js_eval_error("unknown property");
+        }
+        return js_eval_error("unknown property");
+    }
+    if (access->object.type == JS_VALUE_OBJECT)
+    {
+        js_value_t value = js_value_make_undefined_internal();
+        char *err = NULL;
+        if (!js_object_get_property(rt, access->object.as.object, access->property, &value, &err))
         {
             if (err)
             {
@@ -1173,6 +1226,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             js_value_t current = js_value_make_undefined_internal();
             js_member_access_t access;
             bool has_access = false;
+            bool length_update = false;
             if (target->type == JS_EXPR_IDENTIFIER)
             {
                 if (!js_env_get(env, target->as.ident.name, &current))
@@ -1190,8 +1244,12 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 js_value_destroy(&access_res.value);
                 if (access.is_length)
                 {
-                    js_member_access_release(&access);
-                    return js_eval_error("invalid assignment");
+                    if (access.object.type != JS_VALUE_ARRAY)
+                    {
+                        js_member_access_release(&access);
+                        return js_eval_error("invalid assignment");
+                    }
+                    length_update = true;
                 }
                 js_eval_result_t cur_res = js_member_access_value(rt, &access);
                 if (!cur_res.ok)
@@ -1228,7 +1286,26 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             }
             else if (has_access)
             {
-                if (access.object.type == JS_VALUE_ARRAY)
+                if (length_update)
+                {
+                    size_t new_length = 0;
+                    if (!js_value_to_array_length(&new_value, &new_length))
+                    {
+                        js_member_access_release(&access);
+                        js_value_destroy(&new_value);
+                        js_value_destroy(&current);
+                        return js_eval_error("RangeError: invalid array length");
+                    }
+                    if (!js_array_set_length(access.object.as.array, new_length))
+                    {
+                        js_member_access_release(&access);
+                        js_value_destroy(&new_value);
+                        js_value_destroy(&current);
+                        return js_eval_error("allocation failed");
+                    }
+                    assigned_ok = true;
+                }
+                else if (access.object.type == JS_VALUE_ARRAY)
                 {
                     if (access.has_index)
                     {
@@ -1426,9 +1503,12 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 js_value_destroy(&access_res.value);
                 if (access.is_length)
                 {
-                    js_member_access_release(&access);
-                    js_value_destroy(&rhs.value);
-                    return js_eval_error("invalid assignment");
+                    if (access.object.type != JS_VALUE_ARRAY)
+                    {
+                        js_member_access_release(&access);
+                        js_value_destroy(&rhs.value);
+                        return js_eval_error("invalid assignment");
+                    }
                 }
                 js_eval_result_t current = js_member_access_value(rt, &access);
                 if (!current.ok)
@@ -1442,6 +1522,24 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 js_value_destroy(&rhs.value);
                 if (!add_res.ok)
                 {
+                    js_member_access_release(&access);
+                    return add_res;
+                }
+                if (access.is_length)
+                {
+                    size_t new_length = 0;
+                    if (!js_value_to_array_length(&add_res.value, &new_length))
+                    {
+                        js_member_access_release(&access);
+                        js_value_destroy(&add_res.value);
+                        return js_eval_error("RangeError: invalid array length");
+                    }
+                    if (!js_array_set_length(access.object.as.array, new_length))
+                    {
+                        js_member_access_release(&access);
+                        js_value_destroy(&add_res.value);
+                        return js_eval_error("allocation failed");
+                    }
                     js_member_access_release(&access);
                     return add_res;
                 }
@@ -1544,11 +1642,30 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 js_value_destroy(&access_res.value);
                 if (access.is_length)
                 {
-                    js_member_access_release(&access);
-                    js_value_destroy(&assigned.value);
-                    return js_eval_error("invalid assignment");
+                    if (access.object.type != JS_VALUE_ARRAY)
+                    {
+                        js_member_access_release(&access);
+                        js_value_destroy(&assigned.value);
+                        return js_eval_error("invalid assignment");
+                    }
                 }
-                if (access.object.type == JS_VALUE_ARRAY)
+                if (access.is_length)
+                {
+                    size_t new_length = 0;
+                    if (!js_value_to_array_length(&assigned.value, &new_length))
+                    {
+                        js_member_access_release(&access);
+                        js_value_destroy(&assigned.value);
+                        return js_eval_error("RangeError: invalid array length");
+                    }
+                    if (!js_array_set_length(access.object.as.array, new_length))
+                    {
+                        js_member_access_release(&access);
+                        js_value_destroy(&assigned.value);
+                        return js_eval_error("allocation failed");
+                    }
+                }
+                else if (access.object.type == JS_VALUE_ARRAY)
                 {
                     if (access.has_index)
                     {
@@ -2092,6 +2209,19 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     js_member_access_release(&access);
                     return result;
                 }
+                if (native_name && access.property && strcmp(native_name, "Symbol") == 0 &&
+                    strcmp(access.property, "toStringTag") == 0)
+                {
+                    js_value_t value;
+                    if (!js_value_make_cstring(&value, "Symbol.toStringTag"))
+                    {
+                        js_member_access_release(&access);
+                        return js_eval_error("allocation failed");
+                    }
+                    result = js_eval_ok(value);
+                    js_member_access_release(&access);
+                    return result;
+                }
                 if (native_name && access.property && strcmp(native_name, "Object") == 0 &&
                     strcmp(access.property, "defineProperty") == 0)
                 {
@@ -2099,6 +2229,18 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     memset(&value, 0, sizeof(value));
                     value.type = JS_VALUE_NATIVE_FN;
                     value.as.native.fn = js_builtin_define_property;
+                    value.as.native.user_data = NULL;
+                    result = js_eval_ok(value);
+                    js_member_access_release(&access);
+                    return result;
+                }
+                if (native_name && access.property && strcmp(native_name, "Object") == 0 &&
+                    strcmp(access.property, "getPrototypeOf") == 0)
+                {
+                    js_value_t value;
+                    memset(&value, 0, sizeof(value));
+                    value.type = JS_VALUE_NATIVE_FN;
+                    value.as.native.fn = js_builtin_object_get_prototype_of;
                     value.as.native.user_data = NULL;
                     result = js_eval_ok(value);
                     js_member_access_release(&access);

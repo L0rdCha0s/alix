@@ -174,6 +174,11 @@ js_runtime_t *js_runtime_create(void)
         js_runtime_destroy(rt);
         return NULL;
     }
+    if (!js_runtime_register_native(rt, "RangeError", js_builtin_range_error, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
     if (!js_runtime_register_native(rt, "SyntaxError", js_builtin_syntax_error, NULL, true, 1))
     {
         js_runtime_destroy(rt);
@@ -190,6 +195,11 @@ js_runtime_t *js_runtime_create(void)
         return NULL;
     }
     if (!js_runtime_register_native(rt, "Object", js_builtin_object, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_register_native(rt, "Set", js_builtin_set, NULL, true, 0))
     {
         js_runtime_destroy(rt);
         return NULL;
@@ -383,6 +393,14 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         {
             return "defineProperties";
         }
+        if (value->as.native.fn == js_builtin_object_get_prototype_of)
+        {
+            return "getPrototypeOf";
+        }
+        if (value->as.native.fn == js_set_iterator)
+        {
+            return "values";
+        }
         if (value->as.native.fn == js_builtin_number_to_string)
         {
             return "toString";
@@ -442,6 +460,24 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
             if (out_len)
             {
                 *out_len = 2;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_object_get_prototype_of)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_set_iterator)
+        {
+            if (out_len)
+            {
+                *out_len = 0;
             }
             return true;
         }
