@@ -32,6 +32,7 @@ static js_realm_t js_default_realm = {0};
 static const char *js_accessor_get_prefix = "__get__";
 static const char *js_accessor_set_prefix = "__set__";
 static js_object_t *js_set_iterator_proto = NULL;
+static js_object_t *js_iterator_proto = NULL;
 
 static bool js_set_get(js_runtime_t *rt,
                        void *user_data,
@@ -49,6 +50,24 @@ static bool js_set_iterator_proto_get(js_runtime_t *rt,
                                       js_value_t *out,
                                       char **error_message);
 static js_object_t *js_get_set_iterator_proto(void);
+static bool js_iterator_map_get(js_runtime_t *rt,
+                                void *user_data,
+                                const char *name,
+                                js_value_t *out,
+                                char **error_message);
+static bool js_iterator_map_next(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+static bool js_iterator_map_return(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message);
+static void js_iterator_map_finalize(void *user_data);
 
 typedef enum
 {
@@ -1026,6 +1045,619 @@ static bool js_set_get(js_runtime_t *rt,
         return true;
     }
     *out = js_value_make_undefined_internal();
+    return true;
+}
+
+typedef struct
+{
+    js_value_t iterator;
+    js_value_t next_method;
+    js_value_t mapper;
+    size_t index;
+    size_t array_index;
+    bool done;
+    bool closed;
+    bool executing;
+    bool is_array;
+} js_iterator_map_state_t;
+
+static bool js_iterator_make_result(js_value_t *out, const js_value_t *value, bool done)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (!js_value_make_host_object(out, NULL, NULL, NULL, NULL))
+    {
+        return false;
+    }
+    js_value_t done_val = js_value_make_bool(done);
+    if (!js_object_set_slot(out->as.object, "done", &done_val))
+    {
+        js_value_destroy(out);
+        return false;
+    }
+    if (!js_object_set_slot(out->as.object, "value", value))
+    {
+        js_value_destroy(out);
+        return false;
+    }
+    return true;
+}
+
+static bool js_iterator_close(js_runtime_t *rt, const js_value_t *iterator, char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!iterator || iterator->type != JS_VALUE_OBJECT || !iterator->as.object)
+    {
+        return true;
+    }
+    js_value_t return_method = js_value_make_undefined_internal();
+    char *err = NULL;
+    if (!js_object_get_property(rt, iterator->as.object, "return", &return_method, &err))
+    {
+        if (error_message)
+        {
+            *error_message = err ? err : js_strdup("iterator close failed");
+        }
+        else
+        {
+            free(err);
+        }
+        return false;
+    }
+    if (return_method.type == JS_VALUE_FUNCTION || return_method.type == JS_VALUE_NATIVE_FN)
+    {
+        js_value_t result = js_value_make_undefined_internal();
+        bool ok = js_call_value(rt, &return_method, 0, NULL, &result, &err);
+        js_value_destroy(&result);
+        js_value_destroy(&return_method);
+        if (!ok)
+        {
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("iterator close failed");
+            }
+            else
+            {
+                free(err);
+            }
+            return false;
+        }
+        free(err);
+        return true;
+    }
+    js_value_destroy(&return_method);
+    return true;
+}
+
+static bool js_iterator_map_get(js_runtime_t *rt,
+                                void *user_data,
+                                const char *name,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (name && strcmp(name, "next") == 0)
+    {
+        memset(out, 0, sizeof(*out));
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = js_iterator_map_next;
+        out->as.native.user_data = user_data;
+        return true;
+    }
+    if (name && strcmp(name, "return") == 0)
+    {
+        memset(out, 0, sizeof(*out));
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = js_iterator_map_return;
+        out->as.native.user_data = user_data;
+        return true;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_iterator_map_next(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_iterator_map_state_t *state = (js_iterator_map_state_t *)user_data;
+    if (!state)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("iterator state missing");
+        }
+        return false;
+    }
+    if (state->executing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: generator is running");
+        }
+        return false;
+    }
+    if (state->done)
+    {
+        js_value_t undef = js_value_make_undefined_internal();
+        return js_iterator_make_result(out, &undef, true);
+    }
+    state->executing = true;
+
+    js_value_t value = js_value_make_undefined_internal();
+    if (state->is_array)
+    {
+        if (state->iterator.type != JS_VALUE_ARRAY || !state->iterator.as.array)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("iterator invalid");
+            }
+            state->executing = false;
+            return false;
+        }
+        if (state->array_index >= state->iterator.as.array->length)
+        {
+            state->done = true;
+            js_value_t undef = js_value_make_undefined_internal();
+            state->executing = false;
+            return js_iterator_make_result(out, &undef, true);
+        }
+        if (!js_array_get(state->iterator.as.array, state->array_index, &value))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            state->executing = false;
+            return false;
+        }
+        state->array_index++;
+    }
+    else
+    {
+        js_value_t next_result = js_value_make_undefined_internal();
+        char *err = NULL;
+        if (!js_call_value(rt, &state->next_method, 0, NULL, &next_result, &err))
+        {
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("iterator next failed");
+            }
+            else
+            {
+                free(err);
+            }
+            state->executing = false;
+            return false;
+        }
+        if (next_result.type != JS_VALUE_OBJECT || !next_result.as.object)
+        {
+            js_value_destroy(&next_result);
+            if (error_message)
+            {
+                *error_message = js_strdup("TypeError: iterator result is not an object");
+            }
+            state->executing = false;
+            return false;
+        }
+        js_value_t done_val = js_value_make_undefined_internal();
+        char *done_err = NULL;
+        if (!js_object_get_property(rt, next_result.as.object, "done", &done_val, &done_err))
+        {
+            js_value_destroy(&next_result);
+            if (error_message)
+            {
+                *error_message = done_err ? done_err : js_strdup("iterator done failed");
+            }
+            else
+            {
+                free(done_err);
+            }
+            state->executing = false;
+            return false;
+        }
+        bool done = js_value_is_truthy(&done_val);
+        js_value_destroy(&done_val);
+        if (done)
+        {
+            js_value_destroy(&next_result);
+            state->done = true;
+            js_value_t undef = js_value_make_undefined_internal();
+            state->executing = false;
+            return js_iterator_make_result(out, &undef, true);
+        }
+        js_value_t value_val = js_value_make_undefined_internal();
+        char *value_err = NULL;
+        if (!js_object_get_property(rt, next_result.as.object, "value", &value_val, &value_err))
+        {
+            js_value_destroy(&next_result);
+            if (error_message)
+            {
+                *error_message = value_err ? value_err : js_strdup("iterator value failed");
+            }
+            else
+            {
+                free(value_err);
+            }
+            state->executing = false;
+            return false;
+        }
+        js_value_destroy(&next_result);
+        value = value_val;
+    }
+
+    js_value_t mapped = js_value_make_undefined_internal();
+    if (state->mapper.type == JS_VALUE_FUNCTION || state->mapper.type == JS_VALUE_NATIVE_FN)
+    {
+        js_value_t index_val = js_value_make_number((double)state->index);
+        js_value_t *call_args = (js_value_t *)calloc(2, sizeof(*call_args));
+        if (!call_args)
+        {
+            js_value_destroy(&value);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            state->executing = false;
+            return false;
+        }
+        call_args[0] = value;
+        call_args[1] = index_val;
+        char *call_err = NULL;
+        bool ok = js_call_value(rt, &state->mapper, 2, call_args, &mapped, &call_err);
+        js_value_destroy(&call_args[0]);
+        js_value_destroy(&call_args[1]);
+        free(call_args);
+        if (!ok)
+        {
+            char *close_err = NULL;
+            bool closed_ok = js_iterator_close(rt, &state->iterator, &close_err);
+            if (!closed_ok)
+            {
+                if (error_message)
+                {
+                    *error_message = close_err ? close_err : js_strdup("iterator close failed");
+                }
+                else
+                {
+                    free(close_err);
+                }
+                free(call_err);
+                state->executing = false;
+                return false;
+            }
+            if (error_message)
+            {
+                *error_message = call_err ? call_err : js_strdup("mapper failed");
+            }
+            else
+            {
+                free(call_err);
+            }
+            state->executing = false;
+            return false;
+        }
+        state->index++;
+    }
+    else
+    {
+        js_value_destroy(&value);
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: mapper is not callable");
+        }
+        state->executing = false;
+        return false;
+    }
+
+    bool ok = js_iterator_make_result(out, &mapped, false);
+    js_value_destroy(&mapped);
+    if (!ok)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        state->executing = false;
+        return false;
+    }
+    state->executing = false;
+    return true;
+}
+
+static bool js_iterator_map_return(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_iterator_map_state_t *state = (js_iterator_map_state_t *)user_data;
+    if (!state)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("iterator state missing");
+        }
+        return false;
+    }
+    if (!state->done && !state->closed)
+    {
+        char *close_err = NULL;
+        state->closed = true;
+        state->done = true;
+        if (!js_iterator_close(rt, &state->iterator, &close_err))
+        {
+            if (error_message)
+            {
+                *error_message = close_err ? close_err : js_strdup("iterator close failed");
+            }
+            else
+            {
+                free(close_err);
+            }
+            return false;
+        }
+        free(close_err);
+    }
+    const js_value_t *value = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_value_t undef = js_value_make_undefined_internal();
+    if (!value)
+    {
+        value = &undef;
+    }
+    if (!js_iterator_make_result(out, value, true))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
+static void js_iterator_map_finalize(void *user_data)
+{
+    js_iterator_map_state_t *state = (js_iterator_map_state_t *)user_data;
+    if (!state)
+    {
+        return;
+    }
+    js_value_destroy(&state->iterator);
+    js_value_destroy(&state->next_method);
+    js_value_destroy(&state->mapper);
+    free(state);
+}
+
+js_object_t *js_get_iterator_proto(void)
+{
+    if (js_iterator_proto)
+    {
+        return js_iterator_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, NULL, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    js_iterator_proto = proto_val.as.object;
+    js_object_retain(js_iterator_proto);
+    js_value_destroy(&proto_val);
+    js_value_t map_val;
+    memset(&map_val, 0, sizeof(map_val));
+    map_val.type = JS_VALUE_NATIVE_FN;
+    map_val.as.native.fn = js_builtin_iterator_map;
+    map_val.as.native.user_data = NULL;
+    (void)js_object_set_slot(js_iterator_proto, "map", &map_val);
+    return js_iterator_proto;
+}
+
+bool js_builtin_iterator(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Iterator is not callable");
+    }
+    return false;
+}
+
+bool js_builtin_iterator_map(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    const js_value_t *mapper_val = (argc > 1 && argv) ? &argv[1] : NULL;
+    if (!this_val || (this_val->type != JS_VALUE_OBJECT && this_val->type != JS_VALUE_ARRAY))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid iterator");
+        }
+        return false;
+    }
+    if (this_val->type == JS_VALUE_OBJECT && !this_val->as.object)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid iterator");
+        }
+        return false;
+    }
+    bool mapper_callable = mapper_val &&
+                           (mapper_val->type == JS_VALUE_FUNCTION || mapper_val->type == JS_VALUE_NATIVE_FN);
+    if (!mapper_callable)
+    {
+        char *close_err = NULL;
+        if (!js_iterator_close(rt, this_val, &close_err))
+        {
+            if (error_message)
+            {
+                *error_message = close_err ? close_err : js_strdup("iterator close failed");
+            }
+            else
+            {
+                free(close_err);
+            }
+            return false;
+        }
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: mapper is not callable");
+        }
+        return false;
+    }
+
+    js_iterator_map_state_t *state = (js_iterator_map_state_t *)calloc(1, sizeof(*state));
+    if (!state)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!js_value_copy(&state->iterator, this_val))
+    {
+        free(state);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!js_value_copy(&state->mapper, mapper_val))
+    {
+        js_value_destroy(&state->iterator);
+        free(state);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    state->done = false;
+    state->closed = false;
+    state->index = 0;
+    state->array_index = 0;
+    state->is_array = (this_val->type == JS_VALUE_ARRAY);
+
+    if (!state->is_array)
+    {
+        js_value_t next_method = js_value_make_undefined_internal();
+        char *next_err = NULL;
+        if (!js_object_get_property(rt, this_val->as.object, "next", &next_method, &next_err))
+        {
+            js_value_destroy(&state->iterator);
+            js_value_destroy(&state->mapper);
+            free(state);
+            if (error_message)
+            {
+                *error_message = next_err ? next_err : js_strdup("iterator next failed");
+            }
+            else
+            {
+                free(next_err);
+            }
+            return false;
+        }
+        if (next_method.type != JS_VALUE_FUNCTION && next_method.type != JS_VALUE_NATIVE_FN)
+        {
+            js_value_destroy(&state->iterator);
+            js_value_destroy(&state->mapper);
+            js_value_destroy(&next_method);
+            free(state);
+            if (error_message)
+            {
+                *error_message = js_strdup("TypeError: iterator next is not callable");
+            }
+            return false;
+        }
+        state->next_method = next_method;
+    }
+
+    if (!js_value_make_host_object(out, js_iterator_map_get, NULL, js_iterator_map_finalize, state))
+    {
+        js_iterator_map_finalize(state);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_iterator_proto();
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
     return true;
 }
 

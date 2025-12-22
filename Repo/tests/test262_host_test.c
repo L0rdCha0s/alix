@@ -992,6 +992,9 @@ static bool run_test_file(const char *path, test262_ctx_t *ctx)
         return true;
     }
 
+    fprintf(stderr, "START %s\n", path);
+    fflush(stderr);
+
     ctx->run_count++;
     js_runtime_t *rt = js_runtime_create();
     if (!rt)

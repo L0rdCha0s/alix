@@ -204,6 +204,11 @@ js_runtime_t *js_runtime_create(void)
         js_runtime_destroy(rt);
         return NULL;
     }
+    if (!js_runtime_register_native(rt, "Iterator", js_builtin_iterator, NULL, false, 0))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
     if (!js_runtime_register_native(rt, "escape", js_builtin_escape, NULL, false, 1))
     {
         js_runtime_destroy(rt);
@@ -372,6 +377,14 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
     }
     if (value && value->type == JS_VALUE_NATIVE_FN)
     {
+        if (value->as.native.fn == js_builtin_iterator)
+        {
+            return "Iterator";
+        }
+        if (value->as.native.fn == js_builtin_iterator_map)
+        {
+            return "map";
+        }
         if (value->as.native.fn == js_regexp_compile ||
             value->as.native.fn == js_regexp_compile_proto)
         {
@@ -418,6 +431,24 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
     js_native_meta_t *meta = js_native_meta_find(rt, value);
     if (!meta)
     {
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_iterator)
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_iterator_map)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
         if (value && value->type == JS_VALUE_NATIVE_FN &&
             (value->as.native.fn == js_regexp_compile || value->as.native.fn == js_regexp_compile_proto))
         {

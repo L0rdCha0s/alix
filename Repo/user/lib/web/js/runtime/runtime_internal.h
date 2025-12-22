@@ -66,6 +66,8 @@ struct js_runtime
     js_native_meta_t *native_meta;
     js_object_t *global_object;
     js_array_t *yield_array;
+    size_t yield_limit;
+    size_t yield_count;
 };
 
 typedef struct
@@ -109,6 +111,11 @@ bool js_object_get_slot(js_object_t *object, const char *name, js_value_t *out);
 bool js_object_set_slot(js_object_t *object, const char *name, const js_value_t *value);
 bool js_object_has_slot(js_object_t *object, const char *name);
 bool js_object_is_symbol(const js_object_t *object);
+bool js_object_get_property(js_runtime_t *rt,
+                            js_object_t *object,
+                            const char *name,
+                            js_value_t *out,
+                            char **error_message);
 
 bool js_value_make_symbol(js_value_t *out, const char *description);
 
@@ -288,6 +295,19 @@ bool js_builtin_object(js_runtime_t *rt,
                        void *user_data,
                        js_value_t *out,
                        char **error_message);
+bool js_builtin_iterator(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
+bool js_builtin_iterator_map(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+js_object_t *js_get_iterator_proto(void);
 bool js_builtin_type_error(js_runtime_t *rt,
                            size_t argc,
                            const js_value_t *argv,

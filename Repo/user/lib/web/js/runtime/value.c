@@ -470,28 +470,6 @@ static bool js_value_is_primitive(const js_value_t *value)
     }
 }
 
-static const char *js_accessor_get_prefix = "__get__";
-
-static char *js_accessor_slot_name(const char *prefix, const char *name)
-{
-    if (!prefix || !name)
-    {
-        return NULL;
-    }
-    size_t prefix_len = strlen(prefix);
-    size_t name_len = strlen(name);
-    size_t total_len = prefix_len + name_len;
-    char *buf = (char *)malloc(total_len + 1);
-    if (!buf)
-    {
-        return NULL;
-    }
-    memcpy(buf, prefix, prefix_len);
-    memcpy(buf + prefix_len, name, name_len);
-    buf[total_len] = '\0';
-    return buf;
-}
-
 static bool js_object_get_value(js_runtime_t *rt,
                                 js_object_t *object,
                                 const char *name,
@@ -506,65 +484,7 @@ static bool js_object_get_value(js_runtime_t *rt,
     {
         *error_message = NULL;
     }
-    if (!object || !name)
-    {
-        *out = js_value_make_undefined_internal();
-        return true;
-    }
-    if (object->get_fn)
-    {
-        return object->get_fn(rt, object->user_data, name, out, error_message);
-    }
-    char *get_slot = js_accessor_slot_name(js_accessor_get_prefix, name);
-    if (!get_slot)
-    {
-        if (error_message)
-        {
-            *error_message = js_strdup("allocation failed");
-        }
-        return false;
-    }
-    if (js_object_has_slot(object, get_slot))
-    {
-        js_value_t getter = js_value_make_undefined_internal();
-        if (!js_object_get_slot(object, get_slot, &getter))
-        {
-            free(get_slot);
-            if (error_message)
-            {
-                *error_message = js_strdup("allocation failed");
-            }
-            return false;
-        }
-        free(get_slot);
-        if (getter.type == JS_VALUE_FUNCTION || getter.type == JS_VALUE_NATIVE_FN)
-        {
-            js_value_t result = js_value_make_undefined_internal();
-            char *err = NULL;
-            bool ok = js_call_value(rt, &getter, 0, NULL, &result, &err);
-            js_value_destroy(&getter);
-            if (!ok)
-            {
-                if (error_message)
-                {
-                    *error_message = err;
-                }
-                else
-                {
-                    free(err);
-                }
-                js_value_destroy(&result);
-                return false;
-            }
-            *out = result;
-            return true;
-        }
-        js_value_destroy(&getter);
-        *out = js_value_make_undefined_internal();
-        return true;
-    }
-    free(get_slot);
-    return js_object_get_slot(object, name, out);
+    return js_object_get_property(rt, object, name, out, error_message);
 }
 
 static bool js_try_object_method(js_runtime_t *rt,
