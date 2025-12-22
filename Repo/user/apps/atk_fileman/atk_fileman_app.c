@@ -32,6 +32,7 @@
 #define FILEMAN_VIEW_BUTTON_SPACING 8
 #define FILEMAN_ICON_BASE "/usr/share/icons/48x48"
 #define FILEMAN_ICON_MIMETYPE_DIR FILEMAN_ICON_BASE "/mimetypes"
+#define FILEMAN_PREVIEW_ELF "/usr/bin/atk_preview.elf"
 
 typedef struct fileman_app fileman_app_t;
 
@@ -44,6 +45,7 @@ typedef struct
     const atk_iconbox_image_t *icon;
     bool is_dir;
     bool is_elf;
+    bool is_image;
 } fileman_entry_t;
 
 typedef struct
@@ -128,6 +130,13 @@ static bool fileman_has_extension(const char *name, const char *ext)
         return false;
     }
     return strcasecmp(dot, ext) == 0;
+}
+
+static bool fileman_is_image_name(const char *name)
+{
+    return fileman_has_extension(name, ".png") ||
+           fileman_has_extension(name, ".jpg") ||
+           fileman_has_extension(name, ".jpeg");
 }
 
 static bool fileman_has_suffix(const char *name, const char *suffix)
@@ -639,6 +648,7 @@ static void fileman_refresh_right_view(fileman_app_t *app)
         dst->size_bytes = ent->size_bytes;
         dst->is_dir = fileman_dirent_is_dir(ent, dst->path);
         dst->is_elf = (!dst->is_dir && fileman_has_extension(dst->name, ".elf"));
+        dst->is_image = (!dst->is_dir && fileman_is_image_name(dst->name));
         dst->icon = fileman_icon_for_entry(app, dst);
     }
 
@@ -723,6 +733,22 @@ static void fileman_run_elf(fileman_app_t *app, const char *path)
     sys_shell_exec(app->shell_handle, command, 0);
 }
 
+static void fileman_run_preview(fileman_app_t *app, const char *path)
+{
+    if (!app || !path || !path[0])
+    {
+        return;
+    }
+    if (app->shell_handle < 0)
+    {
+        return;
+    }
+    char command[FILEMAN_PATH_MAX + 64];
+    snprintf(command, sizeof(command), "runelf %s %s", FILEMAN_PREVIEW_ELF, path);
+    command[sizeof(command) - 1] = '\0';
+    sys_shell_exec(app->shell_handle, command, 0);
+}
+
 static void fileman_open_entry(fileman_app_t *app, fileman_entry_t *entry)
 {
     if (!app || !entry)
@@ -742,6 +768,11 @@ static void fileman_open_entry(fileman_app_t *app, fileman_entry_t *entry)
         {
             fileman_set_current_path(app, entry->path);
         }
+        return;
+    }
+    if (entry->is_image)
+    {
+        fileman_run_preview(app, entry->path);
         return;
     }
     if (entry->is_elf)

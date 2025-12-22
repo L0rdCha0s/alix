@@ -870,8 +870,8 @@ void shell_main(void)
     g_active_shell = shell;
     char input[INPUT_CAPACITY];
 
-    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, pwd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\n");
-    serial_printf("%s", "In-memory FS shell ready. Commands: echo, cat, mkdir, cd, pwd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\r\n");
+    console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, pwd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, preview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\n");
+    serial_printf("%s", "In-memory FS shell ready. Commands: echo, cat, mkdir, cd, pwd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, preview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\r\n");
 
     while (1)
     {
@@ -903,6 +903,7 @@ static const shell_command_t g_commands[] = {
     { "nslookup",    shell_cmd_nslookup },
     { "wget",        shell_cmd_wget },
     { "imgview",     shell_cmd_imgview },
+    { "preview",     shell_cmd_preview },
     { "logcat",      shell_cmd_logcat },
     { "sha1sum",     shell_cmd_sha1sum },
     { "dhclient",    shell_cmd_dhclient },

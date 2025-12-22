@@ -174,6 +174,7 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/atk_taskmgr.elf \
              $(USER_OBJDIR)/atk_fileman.elf \
              $(USER_OBJDIR)/atk_mp3.elf \
+             $(USER_OBJDIR)/atk_preview.elf \
              $(USER_OBJDIR)/atk_threads.elf \
              $(USER_OBJDIR)/control_panel.elf \
              $(USER_OBJDIR)/loop.elf \
@@ -194,6 +195,7 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/atk_taskmgr \
              $(USER_BIN_DIR)/atk_fileman \
              $(USER_BIN_DIR)/atk_mp3 \
+             $(USER_BIN_DIR)/atk_preview \
              $(USER_BIN_DIR)/atk_threads \
              $(USER_BIN_DIR)/control_panel \
              $(USER_BIN_DIR)/loop \
@@ -342,6 +344,10 @@ $(USER_OBJDIR)/atk_mp3.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OB
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_mp3/atk_mp3_app.o
 
+$(USER_OBJDIR)/atk_preview.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_preview/atk_preview_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_preview/atk_preview_app.o
+
 $(USER_OBJDIR)/atk_threads.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_threads/atk_threads_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_threads/atk_threads_app.o
@@ -440,6 +446,10 @@ $(USER_BIN_DIR)/atk_fileman: $(USER_OBJDIR)/atk_fileman.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/atk_mp3: $(USER_OBJDIR)/atk_mp3.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_preview: $(USER_OBJDIR)/atk_preview.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 

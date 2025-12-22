@@ -39,7 +39,7 @@ typedef struct
 
 static const char *g_shell_commands[] = {
     "echo", "cat", "mkdir", "cd", "pwd", "rm", "mkfs", "mount", "tzset", "tzstatus",
-    "tzsync", "ntpdate", "shutdown", "ls", "ip", "ping", "nslookup", "wget", "imgview",
+    "tzsync", "ntpdate", "shutdown", "ls", "ip", "ping", "nslookup", "wget", "imgview", "preview",
     "logcat", "sha1sum", "dhclient", "start_video", "net_mac", "dnsdebug", "alloc1m",
     "free", "loop1", "loop2", "letters", "top", "useratk", "atkshell", "taskmgr",
     "bgset", "doom", "wolf3d", "runelf"
