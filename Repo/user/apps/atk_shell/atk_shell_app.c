@@ -592,7 +592,7 @@ static bool shell_init_ui(atk_shell_app_t *app)
     window->width = SHELL_WINDOW_WIDTH;
     window->height = SHELL_WINDOW_HEIGHT;
 
-    int margin = 8;
+    int margin = 2;
     int top = margin;
     atk_widget_t *terminal = atk_window_add_terminal(window,
                                                      margin,

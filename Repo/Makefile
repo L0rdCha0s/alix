@@ -179,7 +179,8 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/loop.elf \
              $(USER_OBJDIR)/playsound.elf \
              $(USER_OBJDIR)/playmp3.elf \
-             $(USER_OBJDIR)/socket_demo.elf
+             $(USER_OBJDIR)/socket_demo.elf \
+             $(USER_OBJDIR)/unzip.elf
 USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
@@ -198,7 +199,8 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/loop \
              $(USER_BIN_DIR)/playsound \
              $(USER_BIN_DIR)/playmp3 \
-             $(USER_BIN_DIR)/socket_demo
+             $(USER_BIN_DIR)/socket_demo \
+             $(USER_BIN_DIR)/unzip
 HOST_TEST_DIR := $(OBJDIR)/host-tests
 HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
@@ -364,6 +366,10 @@ $(USER_OBJDIR)/socket_demo.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/socke
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/socket_demo/socket_demo.o
 
+$(USER_OBJDIR)/unzip.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o
+
 $(DL_SCRIPT_SRC): $(USER_ELFS)
 	@mkdir -p $(GENERATED_DIR)
 	@{ \
@@ -458,6 +464,10 @@ $(USER_BIN_DIR)/playmp3: $(USER_OBJDIR)/playmp3.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/socket_demo: $(USER_OBJDIR)/socket_demo.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/unzip: $(USER_OBJDIR)/unzip.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 

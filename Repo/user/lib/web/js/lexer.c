@@ -673,7 +673,19 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
         case '[': out->type = JS_TOKEN_LBRACKET; out->offset = start_offset; return true;
         case ']': out->type = JS_TOKEN_RBRACKET; out->offset = start_offset; return true;
         case ',': out->type = JS_TOKEN_COMMA; out->offset = start_offset; return true;
-        case '.': out->type = JS_TOKEN_DOT; out->offset = start_offset; return true;
+        case '.':
+            if (js_lexer_peek(lex) == '.' && js_lexer_peek_next(lex) == '.')
+            {
+                (void)js_lexer_advance(lex);
+                (void)js_lexer_advance(lex);
+                out->type = JS_TOKEN_ELLIPSIS;
+            }
+            else
+            {
+                out->type = JS_TOKEN_DOT;
+            }
+            out->offset = start_offset;
+            return true;
         case '?': out->type = JS_TOKEN_QUESTION; out->offset = start_offset; return true;
         case ':': out->type = JS_TOKEN_COLON; out->offset = start_offset; return true;
         case '+':

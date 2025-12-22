@@ -19,6 +19,8 @@ typedef struct
     atk_widget_t *button;
     atk_list_node_t *node;
     bool manual_position;
+    bool has_image;
+    atk_iconbox_image_t image;
 } atk_iconbox_icon_t;
 
 typedef struct
@@ -47,6 +49,13 @@ static void iconbox_draw_cb(const atk_state_t *state,
                             int origin_x,
                             int origin_y,
                             void *context);
+static bool iconbox_rect_intersects(const atk_rect_t *clip, int x, int y, int width, int height);
+static void iconbox_blit_rgba32_clipped(int x,
+                                        int y,
+                                        int width,
+                                        int height,
+                                        const atk_iconbox_image_t *image,
+                                        const atk_rect_t *clip);
 static bool iconbox_hit_test_cb(const atk_widget_t *widget,
                                 int origin_x,
                                 int origin_y,
@@ -115,6 +124,15 @@ static void iconbox_destroy_icon(void *value)
         icon->button = NULL;
     }
     free(icon);
+}
+
+static int iconbox_scrollbar_width(const atk_iconbox_priv_t *priv)
+{
+    if (!priv || !priv->scrollbar || !priv->scrollbar->used)
+    {
+        return 0;
+    }
+    return priv->scrollbar_size;
 }
 
 static void iconbox_scroll_changed(atk_widget_t *scrollbar, void *context, int value)
@@ -186,6 +204,20 @@ static void iconbox_update_scrollbar(atk_widget_t *iconbox, atk_iconbox_priv_t *
     {
         return;
     }
+    bool need_scroll = (priv->content_height > iconbox->height);
+    bool show_scroll = need_scroll && iconbox->used;
+    if (!show_scroll)
+    {
+        priv->scroll_y = 0;
+        atk_scrollbar_set_value(priv->scrollbar, 0);
+        if (priv->scrollbar->used)
+        {
+            priv->scrollbar->used = false;
+            atk_scrollbar_mark_dirty(priv->scrollbar);
+        }
+        return;
+    }
+    priv->scrollbar->used = true;
     int max_scroll = priv->content_height - iconbox->height;
     if (max_scroll < 0)
     {
@@ -213,6 +245,7 @@ static void iconbox_update_scrollbar(atk_widget_t *iconbox, atk_iconbox_priv_t *
     priv->scrollbar->y = abs_y - parent_abs_y;
     priv->scrollbar->width = priv->scrollbar_size;
     priv->scrollbar->height = iconbox->height;
+    atk_scrollbar_mark_dirty(priv->scrollbar);
 }
 
 static void iconbox_refresh_content_height(atk_iconbox_priv_t *priv)
@@ -243,14 +276,14 @@ static void iconbox_refresh_content_height(atk_iconbox_priv_t *priv)
     }
 }
 
-static void iconbox_apply_layout(atk_widget_t *iconbox, atk_iconbox_priv_t *priv)
+static int iconbox_layout_pass(atk_widget_t *iconbox, atk_iconbox_priv_t *priv, int scrollbar_width)
 {
     if (!iconbox || !priv)
     {
-        return;
+        return 0;
     }
 
-    int client_width = iconbox->width - priv->scrollbar_size - priv->padding * 2;
+    int client_width = iconbox->width - scrollbar_width - priv->padding * 2;
     if (client_width < priv->icon_width)
     {
         client_width = priv->icon_width;
@@ -304,8 +337,33 @@ static void iconbox_apply_layout(atk_widget_t *iconbox, atk_iconbox_priv_t *priv
         }
     }
 
-    priv->content_height = max_y + priv->padding;
+    int content_height = max_y + priv->padding;
+    if (content_height < priv->padding * 2)
+    {
+        content_height = priv->padding * 2;
+    }
+    return content_height;
+}
+
+static void iconbox_apply_layout(atk_widget_t *iconbox, atk_iconbox_priv_t *priv)
+{
+    if (!iconbox || !priv)
+    {
+        return;
+    }
+    int content_height = iconbox_layout_pass(iconbox, priv, 0);
+    bool need_scroll = (content_height > iconbox->height);
+    if (need_scroll && priv->scrollbar_size > 0)
+    {
+        content_height = iconbox_layout_pass(iconbox, priv, priv->scrollbar_size);
+    }
+
+    priv->content_height = content_height;
     priv->layout_dirty = false;
+    if (priv->scrollbar)
+    {
+        priv->scrollbar->used = need_scroll;
+    }
     iconbox_update_scrollbar(iconbox, priv);
 }
 
@@ -372,6 +430,14 @@ atk_widget_t *atk_window_add_iconbox(atk_widget_t *window, int x, int y, int wid
     priv->drag_offset_y = 0;
     priv->drag_moved = false;
 
+    atk_list_node_t *child_node = atk_list_push_back(&win_priv->children, iconbox);
+    if (!child_node)
+    {
+        atk_widget_destroy(iconbox);
+        return NULL;
+    }
+    priv->list_node = child_node;
+
     atk_widget_t *scrollbar = atk_window_add_scrollbar(window,
                                                        x + width - priv->scrollbar_size,
                                                        y,
@@ -380,6 +446,8 @@ atk_widget_t *atk_window_add_iconbox(atk_widget_t *window, int x, int y, int wid
                                                        ATK_SCROLLBAR_VERTICAL);
     if (!scrollbar)
     {
+        atk_list_remove(&win_priv->children, child_node);
+        priv->list_node = NULL;
         atk_widget_destroy(iconbox);
         return NULL;
     }
@@ -387,19 +455,14 @@ atk_widget_t *atk_window_add_iconbox(atk_widget_t *window, int x, int y, int wid
     priv->scrollbar = scrollbar;
     atk_scrollbar_set_change_handler(scrollbar, iconbox_scroll_changed, iconbox);
     atk_scrollbar_set_range(scrollbar, 0, 0, height);
-
-    atk_list_node_t *child_node = atk_list_push_back(&win_priv->children, iconbox);
-    if (!child_node)
-    {
-        priv->scrollbar->used = false;
-        atk_widget_destroy(iconbox);
-        return NULL;
-    }
-    priv->list_node = child_node;
     return iconbox;
 }
 
-bool atk_iconbox_add_icon(atk_widget_t *iconbox, const char *title, atk_button_action_t action, void *context)
+static bool iconbox_add_icon_internal(atk_widget_t *iconbox,
+                                      const char *title,
+                                      const atk_iconbox_image_t *image,
+                                      atk_button_action_t action,
+                                      void *context)
 {
     atk_iconbox_priv_t *priv = iconbox_priv_mut(iconbox);
     if (!priv)
@@ -434,6 +497,15 @@ bool atk_iconbox_add_icon(atk_widget_t *iconbox, const char *title, atk_button_a
 
     icon->button = btn;
     icon->manual_position = false;
+    icon->has_image = (image && image->pixels && image->width > 0 && image->height > 0);
+    if (icon->has_image)
+    {
+        icon->image = *image;
+    }
+    else
+    {
+        memset(&icon->image, 0, sizeof(icon->image));
+    }
     icon->node = atk_list_push_back(&priv->icons, icon);
     if (!icon->node)
     {
@@ -447,6 +519,20 @@ bool atk_iconbox_add_icon(atk_widget_t *iconbox, const char *title, atk_button_a
     return true;
 }
 
+bool atk_iconbox_add_icon(atk_widget_t *iconbox, const char *title, atk_button_action_t action, void *context)
+{
+    return iconbox_add_icon_internal(iconbox, title, NULL, action, context);
+}
+
+bool atk_iconbox_add_icon_with_image(atk_widget_t *iconbox,
+                                     const char *title,
+                                     const atk_iconbox_image_t *image,
+                                     atk_button_action_t action,
+                                     void *context)
+{
+    return iconbox_add_icon_internal(iconbox, title, image, action, context);
+}
+
 void atk_iconbox_set_active(atk_widget_t *iconbox, bool active)
 {
     atk_iconbox_priv_t *priv = iconbox_priv_mut(iconbox);
@@ -457,7 +543,22 @@ void atk_iconbox_set_active(atk_widget_t *iconbox, bool active)
     iconbox->used = active;
     if (priv->scrollbar)
     {
-        priv->scrollbar->used = active;
+        if (active)
+        {
+            if (priv->layout_dirty)
+            {
+                iconbox_apply_layout(iconbox, priv);
+            }
+            else
+            {
+                iconbox_update_scrollbar(iconbox, priv);
+            }
+        }
+        else
+        {
+            priv->scrollbar->used = false;
+            atk_scrollbar_mark_dirty(priv->scrollbar);
+        }
     }
     iconbox_mark_dirty(iconbox);
 }
@@ -516,6 +617,110 @@ static void iconbox_destroy_cb(atk_widget_t *widget, void *context)
     atk_widget_destroy(widget);
 }
 
+static bool iconbox_rect_intersects(const atk_rect_t *clip, int x, int y, int width, int height)
+{
+    if (!clip)
+    {
+        return true;
+    }
+    if (width <= 0 || height <= 0)
+    {
+        return false;
+    }
+    int x1 = x + width;
+    int y1 = y + height;
+    int clip_x1 = clip->x + clip->width;
+    int clip_y1 = clip->y + clip->height;
+    if (x1 <= clip->x || x >= clip_x1 || y1 <= clip->y || y >= clip_y1)
+    {
+        return false;
+    }
+    return true;
+}
+
+static void iconbox_blit_rgba32_clipped(int x,
+                                        int y,
+                                        int width,
+                                        int height,
+                                        const atk_iconbox_image_t *image,
+                                        const atk_rect_t *clip)
+{
+    if (!image || !image->pixels || width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    if (!clip)
+    {
+        int stride_bytes = image->stride_bytes;
+        if (stride_bytes <= 0)
+        {
+            stride_bytes = image->width * (int)sizeof(video_color_t);
+        }
+        video_blit_rgba32(x, y, width, height, image->pixels, stride_bytes, image->use_alpha);
+        return;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+    int clip_x0 = clip->x;
+    int clip_y0 = clip->y;
+    int clip_x1 = clip->x + clip->width;
+    int clip_y1 = clip->y + clip->height;
+
+    if (x1 <= clip_x0 || x0 >= clip_x1 || y1 <= clip_y0 || y0 >= clip_y1)
+    {
+        return;
+    }
+
+    int src_x = 0;
+    int src_y = 0;
+    if (x0 < clip_x0)
+    {
+        src_x = clip_x0 - x0;
+        x0 = clip_x0;
+    }
+    if (y0 < clip_y0)
+    {
+        src_y = clip_y0 - y0;
+        y0 = clip_y0;
+    }
+    if (x1 > clip_x1)
+    {
+        x1 = clip_x1;
+    }
+    if (y1 > clip_y1)
+    {
+        y1 = clip_y1;
+    }
+
+    int draw_w = x1 - x0;
+    int draw_h = y1 - y0;
+    if (draw_w <= 0 || draw_h <= 0)
+    {
+        return;
+    }
+
+    int stride_bytes = image->stride_bytes;
+    if (stride_bytes <= 0)
+    {
+        stride_bytes = image->width * (int)sizeof(video_color_t);
+    }
+
+    const uint8_t *src = (const uint8_t *)image->pixels +
+                         (size_t)src_y * (size_t)stride_bytes +
+                         (size_t)src_x * sizeof(video_color_t);
+    video_blit_rgba32(x0,
+                      y0,
+                      draw_w,
+                      draw_h,
+                      (const video_color_t *)src,
+                      stride_bytes,
+                      image->use_alpha);
+}
+
 static void iconbox_draw_cb(const atk_state_t *state,
                             const atk_widget_t *widget,
                             int origin_x,
@@ -539,8 +744,16 @@ static void iconbox_draw_cb(const atk_state_t *state,
 
     int box_x = origin_x + widget->x;
     int box_y = origin_y + widget->y;
+    atk_rect_t clip = { box_x, box_y, widget->width, widget->height };
 
     video_draw_rect(box_x, box_y, widget->width, widget->height, theme->window_body);
+
+    atk_button_draw_opts_t button_opts = { 0 };
+    button_opts.clip = &clip;
+    button_opts.override_text_color = true;
+    button_opts.text_color = theme->button_text;
+    button_opts.override_label_bg = true;
+    button_opts.label_bg = theme->window_body;
 
     int button_origin_y = box_y - priv->scroll_y;
     ATK_LIST_FOR_EACH(node, &priv->icons)
@@ -552,13 +765,46 @@ static void iconbox_draw_cb(const atk_state_t *state,
         }
 
         int tile_height = atk_button_effective_height(icon->button);
+        int abs_x = box_x + icon->button->x;
         int abs_y = icon->button->y + button_origin_y;
-        if (abs_y + tile_height < box_y || abs_y > box_y + widget->height)
+        if (!iconbox_rect_intersects(&clip, abs_x, abs_y, icon->button->width, tile_height))
         {
             continue;
         }
 
-        atk_button_draw(state, icon->button, box_x, button_origin_y);
+        atk_button_draw_ex(state, icon->button, box_x, button_origin_y, &button_opts);
+        if (icon->has_image)
+        {
+            int button_x = box_x + icon->button->x;
+            int button_y = button_origin_y + icon->button->y;
+            int pad = 6;
+            int max_w = icon->button->width - pad * 2;
+            int max_h = icon->button->height - pad * 2;
+            if (max_w < 1)
+            {
+                max_w = icon->button->width;
+            }
+            if (max_h < 1)
+            {
+                max_h = icon->button->height;
+            }
+            int draw_w = icon->image.width;
+            int draw_h = icon->image.height;
+            if (draw_w > max_w)
+            {
+                draw_w = max_w;
+            }
+            if (draw_h > max_h)
+            {
+                draw_h = max_h;
+            }
+            if (draw_w > 0 && draw_h > 0)
+            {
+                int draw_x = button_x + (icon->button->width - draw_w) / 2;
+                int draw_y = button_y + (icon->button->height - draw_h) / 2;
+                iconbox_blit_rgba32_clipped(draw_x, draw_y, draw_w, draw_h, &icon->image, &clip);
+            }
+        }
     }
 
     video_draw_rect_outline(box_x, box_y, widget->width, widget->height, theme->window_border);
@@ -602,7 +848,8 @@ static void iconbox_update_drag_target(atk_widget_t *iconbox,
     int target_y = event->local_y + priv->scroll_y - priv->drag_offset_y;
 
     int min_x = priv->padding;
-    int max_x = iconbox->width - priv->scrollbar_size - priv->padding - icon->button->width;
+    int scrollbar_width = iconbox_scrollbar_width(priv);
+    int max_x = iconbox->width - scrollbar_width - priv->padding - icon->button->width;
     if (max_x < min_x)
     {
         max_x = min_x;

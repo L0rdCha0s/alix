@@ -1275,12 +1275,31 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
         {
             continue;
         }
+        if (atk_widget_is_a(child, &ATK_SCROLLBAR_CLASS))
+        {
+            continue;
+        }
 
         atk_widget_draw_any(state, child);
     }
     if (guard >= WINDOW_CHILD_GUARD_LIMIT)
     {
         window_reset_children(priv_mut, "draw_children_guard");
+    }
+
+    /* Draw scrollbars last so they stay visible above content. */
+    ATK_LIST_FOR_EACH(sb_node, &priv->scrollbars)
+    {
+        atk_widget_t *sb = (atk_widget_t *)sb_node->value;
+        if (!sb || !sb->used || sb->parent != window)
+        {
+            continue;
+        }
+        if (!atk_widget_validate(sb, "atk_window_draw scrollbar"))
+        {
+            continue;
+        }
+        atk_widget_draw_any(state, sb);
     }
 }
 

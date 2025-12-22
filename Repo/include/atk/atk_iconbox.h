@@ -9,6 +9,15 @@ extern "C" {
 
 struct atk_state;
 
+typedef struct
+{
+    const video_color_t *pixels;
+    int width;
+    int height;
+    int stride_bytes;
+    bool use_alpha;
+} atk_iconbox_image_t;
+
 /*
  * Create an iconbox widget as a child of `window`.
  *
@@ -25,6 +34,17 @@ void atk_iconbox_set_active(atk_widget_t *iconbox, bool active);
  * Returns false on allocation failure. The iconbox owns the created widget.
  */
 bool atk_iconbox_add_icon(atk_widget_t *iconbox, const char *title, atk_button_action_t action, void *context);
+
+/*
+ * Add an icon button with an optional image.
+ *
+ * `image` may be NULL to skip drawing an icon bitmap.
+ */
+bool atk_iconbox_add_icon_with_image(atk_widget_t *iconbox,
+                                     const char *title,
+                                     const atk_iconbox_image_t *image,
+                                     atk_button_action_t action,
+                                     void *context);
 
 /* Remove all icons from the iconbox. */
 void atk_iconbox_clear(atk_widget_t *iconbox);

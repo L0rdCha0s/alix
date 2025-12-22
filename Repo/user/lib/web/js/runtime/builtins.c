@@ -30,6 +30,7 @@ typedef struct
 static int js_realm_next_id = 1;
 static js_realm_t js_default_realm = {0};
 static const char *js_accessor_get_prefix = "__get__";
+static const char *js_accessor_set_prefix = "__set__";
 static js_object_t *js_set_iterator_proto = NULL;
 
 static bool js_set_get(js_runtime_t *rt,
@@ -1493,7 +1494,20 @@ static const js_function_decl_t *js_builtin_function_def(const js_function_t *fn
 static size_t js_builtin_function_length(const js_function_t *fn)
 {
     const js_function_decl_t *def = js_builtin_function_def(fn);
-    return def ? def->param_count : 0;
+    if (!def)
+    {
+        return 0;
+    }
+    size_t count = 0;
+    for (size_t i = 0; i < def->param_count; ++i)
+    {
+        if (def->params[i].is_rest || def->params[i].init)
+        {
+            break;
+        }
+        count++;
+    }
+    return count;
 }
 
 static bool js_builtin_get_prop_desc(js_runtime_t *rt,
@@ -3103,6 +3117,30 @@ bool js_builtin_define_property(js_runtime_t *rt,
                     free(get_slot);
                 }
                 js_value_destroy(&getter);
+            }
+        }
+        if (js_object_has_slot(desc->as.object, "set"))
+        {
+            js_value_t setter = js_value_make_undefined_internal();
+            if (js_object_get_slot(desc->as.object, "set", &setter))
+            {
+                if (setter.type == JS_VALUE_FUNCTION || setter.type == JS_VALUE_NATIVE_FN)
+                {
+                    char *set_slot = js_accessor_slot_name(js_accessor_set_prefix, prop_name);
+                    if (!set_slot)
+                    {
+                        js_value_destroy(&setter);
+                        free(prop_name);
+                        if (error_message)
+                        {
+                            *error_message = js_strdup("allocation failed");
+                        }
+                        return false;
+                    }
+                    (void)js_object_set_slot(target->as.object, set_slot, &setter);
+                    free(set_slot);
+                }
+                js_value_destroy(&setter);
             }
         }
         if (js_object_has_slot(desc->as.object, "value"))

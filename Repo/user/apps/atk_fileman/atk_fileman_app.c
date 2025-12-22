@@ -8,7 +8,7 @@
 #include "atk/atk_list_view.h"
 #include "atk/atk_iconbox.h"
 #include "atk/atk_tree_view.h"
-#include "atk/atk_tabs.h"
+#include "atk/util/png.h"
 #include "libc.h"
 #include "stdio.h"
 #include "video.h"
@@ -26,6 +26,12 @@
 #define FILEMAN_MAX_ENTRIES 256
 #define FILEMAN_DBLCLICK_MS 500
 #define FILEMAN_CLICK_DEBOUNCE_MS 150
+#define FILEMAN_VIEW_BUTTON_HEIGHT 24
+#define FILEMAN_VIEW_BUTTON_WIDTH 80
+#define FILEMAN_VIEW_BUTTON_GAP 8
+#define FILEMAN_VIEW_BUTTON_SPACING 8
+#define FILEMAN_ICON_BASE "/usr/share/icons/48x48"
+#define FILEMAN_ICON_MIMETYPE_DIR FILEMAN_ICON_BASE "/mimetypes"
 
 typedef struct fileman_app fileman_app_t;
 
@@ -35,22 +41,39 @@ typedef struct
     char name[SYSCALL_DIR_NAME_MAX];
     char path[FILEMAN_PATH_MAX];
     uint64_t size_bytes;
+    const atk_iconbox_image_t *icon;
     bool is_dir;
     bool is_elf;
 } fileman_entry_t;
+
+typedef struct
+{
+    char *path;
+    video_color_t *pixels;
+    atk_iconbox_image_t image;
+} fileman_icon_cache_entry_t;
+
+typedef struct
+{
+    fileman_icon_cache_entry_t *entries;
+    size_t count;
+    size_t capacity;
+} fileman_icon_cache_t;
 
 struct fileman_app
 {
     atk_user_window_t remote;
     atk_widget_t *window;
     atk_widget_t *tree;
-    atk_widget_t *tab_view;
+    atk_widget_t *list_button;
+    atk_widget_t *icon_button;
     atk_widget_t *list_view;
     atk_widget_t *iconbox;
     int shell_handle;
     char current_path[FILEMAN_PATH_MAX];
     fileman_entry_t *entries;
     size_t entry_count;
+    fileman_icon_cache_t icon_cache;
     const fileman_entry_t *last_click_entry;
     uint64_t last_click_ms;
     size_t view_mode;
@@ -65,6 +88,7 @@ enum
 
 static void fileman_tree_on_select(atk_widget_t *tree, void *context, atk_tree_node_t *node);
 static void fileman_icon_action(atk_widget_t *button, void *context);
+static void fileman_set_view_mode(fileman_app_t *app, size_t mode);
 
 static char *fileman_strdup(const char *src)
 {
@@ -106,6 +130,21 @@ static bool fileman_has_extension(const char *name, const char *ext)
     return strcasecmp(dot, ext) == 0;
 }
 
+static bool fileman_has_suffix(const char *name, const char *suffix)
+{
+    if (!name || !suffix)
+    {
+        return false;
+    }
+    size_t name_len = strlen(name);
+    size_t suffix_len = strlen(suffix);
+    if (suffix_len == 0 || suffix_len > name_len)
+    {
+        return false;
+    }
+    return strcasecmp(name + (name_len - suffix_len), suffix) == 0;
+}
+
 static void fileman_join_path(char *dst, size_t cap, const char *base, const char *name)
 {
     if (!dst || cap == 0)
@@ -136,6 +175,287 @@ static void fileman_normalize_path(char *path)
         path[len - 1] = '\0';
         len--;
     }
+}
+
+typedef struct
+{
+    const char *suffix;
+    const char *icon_name;
+} fileman_icon_map_t;
+
+static const fileman_icon_map_t FILEMAN_ICON_MAP[] = {
+    { ".tar.gz", "application-x-compressed-tar.png" },
+    { ".tgz", "application-x-compressed-tar.png" },
+    { ".tar.bz2", "application-x-bzip-compressed-tar.png" },
+    { ".tbz2", "application-x-bzip-compressed-tar.png" },
+    { ".tbz", "application-x-bzip-compressed-tar.png" },
+    { ".tar.xz", "application-x-lzma-compressed-tar.png" },
+    { ".txz", "application-x-lzma-compressed-tar.png" },
+    { ".7z", "application-x-7z-compressed.png" },
+    { ".zip", "application-zip.png" },
+    { ".rar", "application-x-rar.png" },
+    { ".tar", "application-x-tar.png" },
+    { ".gz", "application-x-gzip.png" },
+    { ".bz2", "application-x-bzip.png" },
+    { ".xz", "application-x-lzma-compressed-tar.png" },
+    { ".epub", "application-epub+zip.png" },
+    { ".pdf", "application-pdf.png" },
+    { ".ps", "application-postscript.png" },
+    { ".rtf", "application-rtf.png" },
+    { ".doc", "application-msword.png" },
+    { ".docx", "application-vnd.openxmlformats-officedocument.wordprocessingml.document.png" },
+    { ".odt", "application-vnd.oasis.opendocument.text.png" },
+    { ".xls", "application-vnd.ms-excel.png" },
+    { ".xlsx", "application-vnd.ms-excel.png" },
+    { ".ods", "application-vnd.oasis.opendocument.spreadsheet.png" },
+    { ".ppt", "application-vnd.ms-powerpoint.png" },
+    { ".pptx", "application-vnd.ms-powerpoint.png" },
+    { ".odp", "application-vnd.oasis.opendocument.presentation.png" },
+    { ".iso", "application-x-cd-image.png" },
+    { ".c", "text-x-csrc.png" },
+    { ".h", "text-x-chdr.png" },
+    { ".cc", "text-x-c++src.png" },
+    { ".cpp", "text-x-c++src.png" },
+    { ".hh", "text-x-c++hdr.png" },
+    { ".hpp", "text-x-c++hdr.png" },
+    { ".py", "text-x-python.png" },
+    { ".js", "application-javascript.png" },
+    { ".css", "text-css.png" },
+    { ".html", "text-html.png" },
+    { ".htm", "text-html.png" },
+    { ".xml", "text-xml.png" },
+    { ".csv", "text-csv.png" },
+    { ".md", "text-x-readme.png" },
+    { ".txt", "text-plain.png" },
+    { ".log", "text-x-log.png" },
+    { ".sh", "application-x-shellscript.png" },
+    { ".bash", "application-x-shellscript.png" },
+    { ".exe", "application-x-ms-dos-executable.png" },
+    { ".elf", "application-x-executable.png" },
+    { ".png", "image-x-generic.png" },
+    { ".jpg", "image-x-generic.png" },
+    { ".jpeg", "image-x-generic.png" },
+    { ".gif", "image-x-generic.png" },
+    { ".bmp", "image-x-generic.png" },
+    { ".svg", "image-svg+xml.png" },
+    { ".mp3", "audio-x-generic.png" },
+    { ".wav", "audio-x-wav.png" },
+    { ".flac", "audio-x-flac.png" },
+    { ".ogg", "audio-x-generic.png" },
+    { ".mp4", "video-x-generic.png" },
+    { ".mkv", "video-x-generic.png" },
+    { ".avi", "video-x-generic.png" },
+    { ".mov", "video-x-generic.png" },
+};
+
+static bool fileman_path_is_dir(const char *path)
+{
+    if (!path || !path[0])
+    {
+        return false;
+    }
+    syscall_dirent_t *scratch = (syscall_dirent_t *)malloc(sizeof(syscall_dirent_t));
+    if (!scratch)
+    {
+        return false;
+    }
+    ssize_t count = sys_list_dir(path, scratch, 1);
+    free(scratch);
+    return count >= 0;
+}
+
+static bool fileman_dirent_is_dir(const syscall_dirent_t *ent, const char *path)
+{
+    if (!ent || !path)
+    {
+        return false;
+    }
+    if (ent->type == SYSCALL_NODE_TYPE_DIR)
+    {
+        return true;
+    }
+    if (ent->type != SYSCALL_NODE_TYPE_SYMLINK)
+    {
+        return false;
+    }
+    return fileman_path_is_dir(path);
+}
+
+static fileman_icon_cache_entry_t *fileman_icon_cache_alloc(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return NULL;
+    }
+    if (app->icon_cache.count == app->icon_cache.capacity)
+    {
+        size_t next_capacity = app->icon_cache.capacity ? app->icon_cache.capacity * 2 : 8;
+        fileman_icon_cache_entry_t *next_entries = (fileman_icon_cache_entry_t *)realloc(app->icon_cache.entries,
+                                                                                          next_capacity * sizeof(fileman_icon_cache_entry_t));
+        if (!next_entries)
+        {
+            return NULL;
+        }
+        app->icon_cache.entries = next_entries;
+        app->icon_cache.capacity = next_capacity;
+    }
+    fileman_icon_cache_entry_t *entry = &app->icon_cache.entries[app->icon_cache.count];
+    memset(entry, 0, sizeof(*entry));
+    app->icon_cache.count++;
+    return entry;
+}
+
+static const atk_iconbox_image_t *fileman_icon_cache_load(fileman_app_t *app, const char *path)
+{
+    if (!app || !path || !path[0])
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < app->icon_cache.count; ++i)
+    {
+        fileman_icon_cache_entry_t *entry = &app->icon_cache.entries[i];
+        if (entry->path && strcmp(entry->path, path) == 0)
+        {
+            return entry->pixels ? &entry->image : NULL;
+        }
+    }
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+    {
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        fclose(fp);
+        return NULL;
+    }
+    long size_long = ftell(fp);
+    if (size_long <= 0)
+    {
+        fclose(fp);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0)
+    {
+        fclose(fp);
+        return NULL;
+    }
+
+    size_t size = (size_t)size_long;
+    uint8_t *data = (uint8_t *)malloc(size);
+    if (!data)
+    {
+        fclose(fp);
+        return NULL;
+    }
+    size_t read = fread(data, 1, size, fp);
+    fclose(fp);
+    if (read != size)
+    {
+        free(data);
+        return NULL;
+    }
+
+    video_color_t *pixels = NULL;
+    int width = 0;
+    int height = 0;
+    int stride_bytes = 0;
+    int rc = png_decode_rgba32(data, size, &pixels, &width, &height, &stride_bytes);
+    free(data);
+    if (rc != 0 || !pixels)
+    {
+        return NULL;
+    }
+
+    fileman_icon_cache_entry_t *entry = fileman_icon_cache_alloc(app);
+    if (!entry)
+    {
+        free(pixels);
+        return NULL;
+    }
+    entry->path = fileman_strdup(path);
+    if (!entry->path)
+    {
+        app->icon_cache.count--;
+        free(pixels);
+        return NULL;
+    }
+    entry->pixels = pixels;
+    entry->image.pixels = pixels;
+    entry->image.width = width;
+    entry->image.height = height;
+    entry->image.stride_bytes = stride_bytes;
+    entry->image.use_alpha = true;
+    return &entry->image;
+}
+
+static void fileman_icon_cache_clear(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+    for (size_t i = 0; i < app->icon_cache.count; ++i)
+    {
+        fileman_icon_cache_entry_t *entry = &app->icon_cache.entries[i];
+        free(entry->pixels);
+        free(entry->path);
+    }
+    free(app->icon_cache.entries);
+    app->icon_cache.entries = NULL;
+    app->icon_cache.count = 0;
+    app->icon_cache.capacity = 0;
+}
+
+static const char *fileman_icon_name_for_file(const char *name)
+{
+    if (!name)
+    {
+        return "unknown.png";
+    }
+    for (size_t i = 0; i < sizeof(FILEMAN_ICON_MAP) / sizeof(FILEMAN_ICON_MAP[0]); ++i)
+    {
+        if (fileman_has_suffix(name, FILEMAN_ICON_MAP[i].suffix))
+        {
+            return FILEMAN_ICON_MAP[i].icon_name;
+        }
+    }
+    return "unknown.png";
+}
+
+static const atk_iconbox_image_t *fileman_icon_for_entry(fileman_app_t *app, const fileman_entry_t *entry)
+{
+    if (!app || !entry)
+    {
+        return NULL;
+    }
+    const char *icon_name = NULL;
+    if (entry->is_dir)
+    {
+        icon_name = "inode-directory.png";
+    }
+    else if (entry->is_elf)
+    {
+        icon_name = "application-x-executable.png";
+    }
+    else
+    {
+        icon_name = fileman_icon_name_for_file(entry->name);
+    }
+
+    char path[FILEMAN_PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", FILEMAN_ICON_MIMETYPE_DIR, icon_name);
+    path[sizeof(path) - 1] = '\0';
+    const atk_iconbox_image_t *icon = fileman_icon_cache_load(app, path);
+    if (icon)
+    {
+        return icon;
+    }
+
+    snprintf(path, sizeof(path), "%s/unknown.png", FILEMAN_ICON_MIMETYPE_DIR);
+    path[sizeof(path) - 1] = '\0';
+    return fileman_icon_cache_load(app, path);
 }
 
 static void fileman_entries_clear(fileman_app_t *app)
@@ -317,8 +637,9 @@ static void fileman_refresh_right_view(fileman_app_t *app)
         dst->name[name_len] = '\0';
         fileman_join_path(dst->path, sizeof(dst->path), path, dst->name);
         dst->size_bytes = ent->size_bytes;
-        dst->is_dir = (ent->type == SYSCALL_NODE_TYPE_DIR);
+        dst->is_dir = fileman_dirent_is_dir(ent, dst->path);
         dst->is_elf = (!dst->is_dir && fileman_has_extension(dst->name, ".elf"));
+        dst->icon = fileman_icon_for_entry(app, dst);
     }
 
     app->entry_count = out;
@@ -339,7 +660,7 @@ static void fileman_refresh_right_view(fileman_app_t *app)
     for (size_t i = 0; i < app->entry_count; ++i)
     {
         fileman_entry_t *entry = &app->entries[i];
-        atk_iconbox_add_icon(app->iconbox, entry->name, fileman_icon_action, entry);
+        atk_iconbox_add_icon_with_image(app->iconbox, entry->name, entry->icon, fileman_icon_action, entry);
     }
     atk_iconbox_relayout(app->iconbox);
 
@@ -446,22 +767,24 @@ static bool fileman_tree_lazy_load(atk_widget_t *tree, void *context, atk_tree_n
     ssize_t count = sys_list_dir(path, entries, FILEMAN_MAX_ENTRIES);
     if (count <= 0)
     {
+        atk_tree_view_set_node_expandable(node, false);
         return true;
     }
 
+    bool added = false;
     for (ssize_t i = 0; i < count; ++i)
     {
         syscall_dirent_t *ent = &entries[i];
-        if (ent->type != SYSCALL_NODE_TYPE_DIR)
-        {
-            continue;
-        }
         if (fileman_is_dot_entry(ent->name))
         {
             continue;
         }
         char child_path[FILEMAN_PATH_MAX];
         fileman_join_path(child_path, sizeof(child_path), path, ent->name);
+        if (!fileman_dirent_is_dir(ent, child_path))
+        {
+            continue;
+        }
         char *path_copy = fileman_strdup(child_path);
         if (!path_copy)
         {
@@ -474,6 +797,11 @@ static bool fileman_tree_lazy_load(atk_widget_t *tree, void *context, atk_tree_n
             continue;
         }
         atk_tree_view_set_node_expandable(child, true);
+        added = true;
+    }
+    if (!added)
+    {
+        atk_tree_view_set_node_expandable(node, false);
     }
     return true;
 }
@@ -535,10 +863,8 @@ static void fileman_icon_action(atk_widget_t *button, void *context)
     }
 }
 
-static void fileman_view_changed(atk_widget_t *tab_view, void *context, size_t index)
+static void fileman_set_view_mode(fileman_app_t *app, size_t index)
 {
-    (void)tab_view;
-    fileman_app_t *app = (fileman_app_t *)context;
     if (!app)
     {
         return;
@@ -563,9 +889,21 @@ static void fileman_view_changed(atk_widget_t *tab_view, void *context, size_t i
     }
 }
 
+static void fileman_list_view_action(atk_widget_t *button, void *context)
+{
+    (void)button;
+    fileman_set_view_mode((fileman_app_t *)context, FILEMAN_VIEW_LIST);
+}
+
+static void fileman_icon_view_action(atk_widget_t *button, void *context)
+{
+    (void)button;
+    fileman_set_view_mode((fileman_app_t *)context, FILEMAN_VIEW_ICONS);
+}
+
 static void fileman_layout(fileman_app_t *app)
 {
-    if (!app || !app->window || !app->tree || !app->tab_view)
+    if (!app || !app->window || !app->tree || !app->list_view || !app->iconbox)
     {
         return;
     }
@@ -608,21 +946,59 @@ static void fileman_layout(fileman_app_t *app)
     app->tree->width = tree_w;
     app->tree->height = content_h;
 
-    app->tab_view->x = content_x + tree_w + FILEMAN_MARGIN;
-    app->tab_view->y = content_y;
-    app->tab_view->width = right_w;
-    app->tab_view->height = content_h;
+    int right_x = content_x + tree_w + FILEMAN_MARGIN;
+    int right_y = content_y;
+    int right_h = content_h;
+
+    int button_w = FILEMAN_VIEW_BUTTON_WIDTH;
+    int button_h = FILEMAN_VIEW_BUTTON_HEIGHT;
+    if (right_w > 0 && right_w < button_w * 2 + FILEMAN_VIEW_BUTTON_GAP)
+    {
+        button_w = (right_w - FILEMAN_VIEW_BUTTON_GAP) / 2;
+        if (button_w < 0)
+        {
+            button_w = 0;
+        }
+    }
+    if (button_h > right_h)
+    {
+        button_h = right_h;
+    }
+
+    if (app->list_button)
+    {
+        app->list_button->x = right_x;
+        app->list_button->y = right_y;
+        app->list_button->width = button_w;
+        app->list_button->height = button_h;
+    }
+    if (app->icon_button)
+    {
+        app->icon_button->x = right_x + button_w + FILEMAN_VIEW_BUTTON_GAP;
+        app->icon_button->y = right_y;
+        app->icon_button->width = button_w;
+        app->icon_button->height = button_h;
+    }
+
+    int view_y = right_y + button_h + FILEMAN_VIEW_BUTTON_SPACING;
+    int view_h = right_h - (button_h + FILEMAN_VIEW_BUTTON_SPACING);
+    if (view_h < 0)
+    {
+        view_h = 0;
+    }
 
     atk_tree_view_relayout(app->tree);
-    atk_tab_view_relayout(app->tab_view);
-    if (app->list_view)
-    {
-        atk_list_view_relayout(app->list_view);
-    }
-    if (app->iconbox)
-    {
-        atk_iconbox_relayout(app->iconbox);
-    }
+    app->list_view->x = right_x;
+    app->list_view->y = view_y;
+    app->list_view->width = right_w;
+    app->list_view->height = view_h;
+    atk_list_view_relayout(app->list_view);
+
+    app->iconbox->x = right_x;
+    app->iconbox->y = view_y;
+    app->iconbox->width = right_w;
+    app->iconbox->height = view_h;
+    atk_iconbox_relayout(app->iconbox);
     fileman_apply_view_state(app);
     atk_window_mark_dirty(app->window);
 }
@@ -656,13 +1032,7 @@ static bool fileman_init_ui(fileman_app_t *app)
         return false;
     }
 
-    atk_widget_t *tab_view = atk_window_add_tab_view(window, 0, 0, 100, 100);
-    if (!tab_view)
-    {
-        return false;
-    }
-
-    atk_widget_t *list_view = atk_list_view_create();
+    atk_widget_t *list_view = atk_window_add_list_view(window, 0, 0, 100, 100);
     if (!list_view)
     {
         return false;
@@ -681,15 +1051,35 @@ static bool fileman_init_ui(fileman_app_t *app)
         return false;
     }
 
-    if (!atk_tab_view_add_page(tab_view, "List", list_view))
+    atk_widget_t *list_button = atk_window_add_button(window,
+                                                      "List",
+                                                      0,
+                                                      0,
+                                                      FILEMAN_VIEW_BUTTON_WIDTH,
+                                                      FILEMAN_VIEW_BUTTON_HEIGHT,
+                                                      ATK_BUTTON_STYLE_TITLE_INSIDE,
+                                                      false,
+                                                      fileman_list_view_action,
+                                                      app);
+    if (!list_button)
     {
         return false;
     }
-    if (!atk_tab_view_add_page(tab_view, "Icons", iconbox))
+
+    atk_widget_t *icon_button = atk_window_add_button(window,
+                                                      "Icons",
+                                                      0,
+                                                      0,
+                                                      FILEMAN_VIEW_BUTTON_WIDTH,
+                                                      FILEMAN_VIEW_BUTTON_HEIGHT,
+                                                      ATK_BUTTON_STYLE_TITLE_INSIDE,
+                                                      false,
+                                                      fileman_icon_view_action,
+                                                      app);
+    if (!icon_button)
     {
         return false;
     }
-    atk_tab_view_set_change_handler(tab_view, fileman_view_changed, app);
 
     atk_tree_view_set_select_handler(tree, fileman_tree_on_select, app);
     atk_tree_view_set_lazy_load_handler(tree, fileman_tree_lazy_load, app);
@@ -707,13 +1097,14 @@ static bool fileman_init_ui(fileman_app_t *app)
 
     app->window = window;
     app->tree = tree;
-    app->tab_view = tab_view;
+    app->list_button = list_button;
+    app->icon_button = icon_button;
     app->list_view = list_view;
     app->iconbox = iconbox;
     app->view_mode = FILEMAN_VIEW_LIST;
 
     fileman_layout(app);
-    fileman_view_changed(tab_view, app, FILEMAN_VIEW_LIST);
+    fileman_set_view_mode(app, FILEMAN_VIEW_LIST);
     fileman_tree_on_select(tree, app, root);
     return true;
 }
@@ -792,6 +1183,7 @@ int main(void)
     atk_main(&main_cfg);
 
     fileman_entries_clear(&app);
+    fileman_icon_cache_clear(&app);
     if (app.shell_handle >= 0)
     {
         sys_shell_close(app.shell_handle);

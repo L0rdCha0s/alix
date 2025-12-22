@@ -896,6 +896,7 @@ void atk_init(void)
     uint64_t irq_state = atk_state_lock_acquire();
     atk_state_t *state = atk_state_get();
     atk_state_guard_init(state);
+    atk_apply_default_theme(state);
     atk_window_reset_all(state);
     atk_desktop_reset(state);
     atk_menu_bar_reset(state);

@@ -65,6 +65,7 @@ struct js_runtime
     js_program_node_t *programs;
     js_native_meta_t *native_meta;
     js_object_t *global_object;
+    js_array_t *yield_array;
 };
 
 typedef struct

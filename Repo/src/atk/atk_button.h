@@ -46,6 +46,27 @@ bool atk_button_hit_test(const atk_widget_t *widget, int origin_x, int origin_y,
  */
 void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int origin_x, int origin_y);
 
+/* Optional draw overrides for custom containers (e.g., clip rect or text colors). */
+typedef struct
+{
+    const atk_rect_t *clip;
+    bool override_text_color;
+    video_color_t text_color;
+    bool override_label_bg;
+    video_color_t label_bg;
+} atk_button_draw_opts_t;
+
+/*
+ * Draw a button with optional overrides.
+ *
+ * Passing NULL opts preserves default behavior.
+ */
+void atk_button_draw_ex(const atk_state_t *state,
+                        const atk_widget_t *widget,
+                        int origin_x,
+                        int origin_y,
+                        const atk_button_draw_opts_t *opts);
+
 /* Return the current title string (always non-NULL). */
 const char *atk_button_title(const atk_widget_t *widget);
 

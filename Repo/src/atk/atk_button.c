@@ -23,6 +23,9 @@ typedef struct
 static void button_layout_label(const char *title, int max_width, button_label_layout_t *out);
 static int button_label_height_px(const atk_widget_t *widget, const atk_button_priv_t *priv);
 static void button_append_ellipsis(char *line, int max_width);
+static bool button_clip_rect(const atk_rect_t *clip, const atk_rect_t *rect, atk_rect_t *out);
+static void button_draw_rect_clipped(int x, int y, int width, int height, video_color_t color, const atk_rect_t *clip);
+static void button_draw_rect_outline_clipped(int x, int y, int width, int height, video_color_t color, const atk_rect_t *clip);
 static void button_draw_cb(const atk_state_t *state,
                            const atk_widget_t *widget,
                            int origin_x,
@@ -133,6 +136,15 @@ bool atk_button_hit_test(const atk_widget_t *widget, int origin_x, int origin_y,
 
 void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int origin_x, int origin_y)
 {
+    atk_button_draw_ex(state, widget, origin_x, origin_y, NULL);
+}
+
+void atk_button_draw_ex(const atk_state_t *state,
+                        const atk_widget_t *widget,
+                        int origin_x,
+                        int origin_y,
+                        const atk_button_draw_opts_t *opts)
+{
     if (!state || !widget || !widget->used)
     {
         return;
@@ -156,8 +168,14 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
         text_color = theme->window_title_text;
     }
 
-    video_draw_rect(bx, by, widget->width, widget->height, face_color);
-    video_draw_rect_outline(bx, by, widget->width, widget->height, border_color);
+    if (opts && opts->override_text_color)
+    {
+        text_color = opts->text_color;
+    }
+
+    const atk_rect_t *clip = opts ? opts->clip : NULL;
+    button_draw_rect_clipped(bx, by, widget->width, widget->height, face_color, clip);
+    button_draw_rect_outline_clipped(bx, by, widget->width, widget->height, border_color, clip);
 
     const char *title = priv->title;
     int title_px_width = atk_font_text_width(title);
@@ -170,11 +188,20 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
             text_x = bx + (widget->width - title_px_width) / 2;
         }
         int baseline = atk_font_baseline_for_rect(by, widget->height);
-        atk_rect_t clip = { bx, by, widget->width, widget->height };
-        atk_font_draw_string_clipped(text_x, baseline, title, text_color, face_color, &clip);
+        atk_rect_t rect = { bx, by, widget->width, widget->height };
+        atk_rect_t clip_rect;
+        if (button_clip_rect(clip, &rect, &clip_rect))
+        {
+            atk_font_draw_string_clipped(text_x, baseline, title, text_color, face_color, &clip_rect);
+        }
     }
     else
     {
+        video_color_t label_bg = theme->background;
+        if (opts && opts->override_label_bg)
+        {
+            label_bg = opts->label_bg;
+        }
         int label_y = by + widget->height + 2;
         button_label_layout_t layout;
         button_layout_label(title, widget->width, &layout);
@@ -189,9 +216,13 @@ void atk_button_draw(const atk_state_t *state, const atk_widget_t *widget, int o
         {
             int line_w = atk_font_text_width(layout.lines[i]);
             int line_x = (line_w < widget->width) ? bx + (widget->width - line_w) / 2 : bx;
-            atk_rect_t clip = { bx, y, widget->width, line_height };
-            int baseline = atk_font_baseline_for_rect(y, line_height);
-            atk_font_draw_string_clipped(line_x, baseline, layout.lines[i], text_color, theme->background, &clip);
+            atk_rect_t rect = { bx, y, widget->width, line_height };
+            atk_rect_t clip_rect;
+            if (button_clip_rect(clip, &rect, &clip_rect))
+            {
+                int baseline = atk_font_baseline_for_rect(y, line_height);
+                atk_font_draw_string_clipped(line_x, baseline, layout.lines[i], text_color, label_bg, &clip_rect);
+            }
             y += line_height + k_button_label_line_spacing;
         }
     }
@@ -434,6 +465,73 @@ static void button_append_ellipsis(char *line, int max_width)
     size_t copy_len = (ellipsis_len < ATK_BUTTON_TITLE_MAX - 1) ? ellipsis_len : (ATK_BUTTON_TITLE_MAX - 1);
     memcpy(line, ellipsis, copy_len);
     line[copy_len] = '\0';
+}
+
+static bool button_clip_rect(const atk_rect_t *clip, const atk_rect_t *rect, atk_rect_t *out)
+{
+    if (!rect || !out)
+    {
+        return false;
+    }
+    if (!clip)
+    {
+        *out = *rect;
+        return (rect->width > 0 && rect->height > 0);
+    }
+
+    int x0 = rect->x;
+    int y0 = rect->y;
+    int x1 = rect->x + rect->width;
+    int y1 = rect->y + rect->height;
+    int clip_x1 = clip->x + clip->width;
+    int clip_y1 = clip->y + clip->height;
+
+    if (x1 <= clip->x || x0 >= clip_x1 || y1 <= clip->y || y0 >= clip_y1)
+    {
+        return false;
+    }
+
+    if (x0 < clip->x) x0 = clip->x;
+    if (y0 < clip->y) y0 = clip->y;
+    if (x1 > clip_x1) x1 = clip_x1;
+    if (y1 > clip_y1) y1 = clip_y1;
+
+    int w = x1 - x0;
+    int h = y1 - y0;
+    if (w <= 0 || h <= 0)
+    {
+        return false;
+    }
+
+    out->x = x0;
+    out->y = y0;
+    out->width = w;
+    out->height = h;
+    return true;
+}
+
+static void button_draw_rect_clipped(int x, int y, int width, int height, video_color_t color, const atk_rect_t *clip)
+{
+    atk_rect_t rect = { x, y, width, height };
+    atk_rect_t clip_rect;
+    if (!button_clip_rect(clip, &rect, &clip_rect))
+    {
+        return;
+    }
+    video_draw_rect(clip_rect.x, clip_rect.y, clip_rect.width, clip_rect.height, color);
+}
+
+static void button_draw_rect_outline_clipped(int x, int y, int width, int height, video_color_t color, const atk_rect_t *clip)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    button_draw_rect_clipped(x, y, width, 1, color, clip);
+    button_draw_rect_clipped(x, y + height - 1, width, 1, color, clip);
+    button_draw_rect_clipped(x, y, 1, height, color, clip);
+    button_draw_rect_clipped(x + width - 1, y, 1, height, color, clip);
 }
 
 static void button_draw_cb(const atk_state_t *state,

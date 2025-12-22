@@ -11,6 +11,7 @@ typedef struct
     js_token_t current;
     bool had_error;
     js_parse_error_t *error_out;
+    bool in_generator;
 } js_parser_t;
 
 typedef struct
@@ -29,7 +30,7 @@ typedef struct
 
 typedef struct
 {
-    char **items;
+    js_param_t *items;
     size_t count;
     size_t cap;
 } js_param_list_t;
@@ -54,6 +55,8 @@ typedef struct
     size_t count;
     size_t cap;
 } js_var_list_t;
+
+static bool js_token_is_identifier(const js_token_t *tok, const char *text);
 
 static void js_parser_init(js_parser_t *parser, const char *source, js_parse_error_t *error_out)
 {
@@ -198,7 +201,7 @@ static bool js_expr_list_push(js_expr_list_t *list, js_expr_t *expr)
     return true;
 }
 
-static bool js_param_list_push(js_param_list_t *list, char *param)
+static bool js_param_list_push(js_param_list_t *list, const js_param_t *param)
 {
     if (!list || !param)
     {
@@ -211,7 +214,7 @@ static bool js_param_list_push(js_param_list_t *list, char *param)
         {
             new_cap = list->count + 1;
         }
-        char **new_items = (char **)realloc(list->items, new_cap * sizeof(*new_items));
+        js_param_t *new_items = (js_param_t *)realloc(list->items, new_cap * sizeof(*new_items));
         if (!new_items)
         {
             return false;
@@ -219,7 +222,7 @@ static bool js_param_list_push(js_param_list_t *list, char *param)
         list->items = new_items;
         list->cap = new_cap;
     }
-    list->items[list->count++] = param;
+    list->items[list->count++] = *param;
     return true;
 }
 
@@ -298,6 +301,84 @@ static bool js_var_list_push(js_var_list_t *list, const js_var_binding_t *bindin
     return true;
 }
 
+static bool js_binding_element_list_push(js_binding_element_t **items,
+                                         size_t *count,
+                                         size_t *cap,
+                                         const js_binding_element_t *elem)
+{
+    if (!items || !count || !cap || !elem)
+    {
+        return false;
+    }
+    if (*count + 1 > *cap)
+    {
+        size_t new_cap = *cap ? (*cap * 2u) : 4u;
+        if (new_cap < *count + 1)
+        {
+            new_cap = *count + 1;
+        }
+        js_binding_element_t *new_items =
+            (js_binding_element_t *)realloc(*items, new_cap * sizeof(*new_items));
+        if (!new_items)
+        {
+            return false;
+        }
+        *items = new_items;
+        *cap = new_cap;
+    }
+    (*items)[(*count)++] = *elem;
+    return true;
+}
+
+static bool js_binding_prop_list_push(js_binding_property_t **items,
+                                      size_t *count,
+                                      size_t *cap,
+                                      const js_binding_property_t *prop)
+{
+    if (!items || !count || !cap || !prop)
+    {
+        return false;
+    }
+    if (*count + 1 > *cap)
+    {
+        size_t new_cap = *cap ? (*cap * 2u) : 4u;
+        if (new_cap < *count + 1)
+        {
+            new_cap = *count + 1;
+        }
+        js_binding_property_t *new_items =
+            (js_binding_property_t *)realloc(*items, new_cap * sizeof(*new_items));
+        if (!new_items)
+        {
+            return false;
+        }
+        *items = new_items;
+        *cap = new_cap;
+    }
+    (*items)[(*count)++] = *prop;
+    return true;
+}
+
+static void js_expr_destroy(js_expr_t *expr);
+static void js_binding_destroy(js_binding_t *binding);
+
+static void js_param_list_destroy(js_param_list_t *params)
+{
+    if (!params)
+    {
+        return;
+    }
+    for (size_t i = 0; i < params->count; ++i)
+    {
+        js_binding_destroy(params->items[i].binding);
+        js_expr_destroy(params->items[i].init);
+    }
+    free(params->items);
+    params->items = NULL;
+    params->count = 0;
+    params->cap = 0;
+}
+
 static js_expr_t *js_new_expr(js_expr_type_t type)
 {
     js_expr_t *expr = (js_expr_t *)calloc(1, sizeof(*expr));
@@ -320,7 +401,46 @@ static js_stmt_t *js_new_stmt(js_stmt_type_t type)
     return stmt;
 }
 
-static void js_expr_destroy(js_expr_t *expr);
+static void js_binding_destroy(js_binding_t *binding)
+{
+    if (!binding)
+    {
+        return;
+    }
+    switch (binding->type)
+    {
+        case JS_BINDING_IDENTIFIER:
+            free(binding->as.ident.name);
+            break;
+        case JS_BINDING_ARRAY:
+            for (size_t i = 0; i < binding->as.array.count; ++i)
+            {
+                js_binding_destroy(binding->as.array.elements[i].binding);
+                js_expr_destroy(binding->as.array.elements[i].init);
+            }
+            free(binding->as.array.elements);
+            js_binding_destroy(binding->as.array.rest);
+            break;
+        case JS_BINDING_OBJECT:
+            for (size_t i = 0; i < binding->as.object.count; ++i)
+            {
+                if (binding->as.object.props[i].computed)
+                {
+                    js_expr_destroy(binding->as.object.props[i].name_expr);
+                }
+                else
+                {
+                    free(binding->as.object.props[i].name);
+                }
+                js_binding_destroy(binding->as.object.props[i].binding);
+                js_expr_destroy(binding->as.object.props[i].init);
+            }
+            free(binding->as.object.props);
+            free(binding->as.object.rest_name);
+            break;
+    }
+    free(binding);
+}
 
 static void js_stmt_destroy(js_stmt_t *stmt)
 {
@@ -333,7 +453,7 @@ static void js_stmt_destroy(js_stmt_t *stmt)
         case JS_STMT_VAR:
             for (size_t i = 0; i < stmt->as.var.count; ++i)
             {
-                free(stmt->as.var.bindings[i].name);
+                js_binding_destroy(stmt->as.var.bindings[i].binding);
                 js_expr_destroy(stmt->as.var.bindings[i].init);
             }
             free(stmt->as.var.bindings);
@@ -358,7 +478,8 @@ static void js_stmt_destroy(js_stmt_t *stmt)
             free(stmt->as.func.name);
             for (size_t p = 0; p < stmt->as.func.param_count; ++p)
             {
-                free(stmt->as.func.params[p]);
+                js_binding_destroy(stmt->as.func.params[p].binding);
+                js_expr_destroy(stmt->as.func.params[p].init);
             }
             free(stmt->as.func.params);
             for (size_t i = 0; i < stmt->as.func.body.count; ++i)
@@ -385,6 +506,13 @@ static void js_stmt_destroy(js_stmt_t *stmt)
             js_expr_destroy(stmt->as.for_stmt.condition);
             js_expr_destroy(stmt->as.for_stmt.post);
             js_stmt_destroy(stmt->as.for_stmt.body);
+            break;
+        case JS_STMT_FOR_IN:
+        case JS_STMT_FOR_OF:
+            js_binding_destroy(stmt->as.for_inof.binding);
+            js_expr_destroy(stmt->as.for_inof.target);
+            js_expr_destroy(stmt->as.for_inof.expr);
+            js_stmt_destroy(stmt->as.for_inof.body);
             break;
         case JS_STMT_SWITCH:
             js_expr_destroy(stmt->as.switch_stmt.expr);
@@ -511,7 +639,8 @@ static void js_expr_destroy(js_expr_t *expr)
             free(expr->as.func.name);
             for (size_t p = 0; p < expr->as.func.param_count; ++p)
             {
-                free(expr->as.func.params[p]);
+                js_binding_destroy(expr->as.func.params[p].binding);
+                js_expr_destroy(expr->as.func.params[p].init);
             }
             free(expr->as.func.params);
             for (size_t i = 0; i < expr->as.func.body.count; ++i)
@@ -519,6 +648,9 @@ static void js_expr_destroy(js_expr_t *expr)
                 js_stmt_destroy(expr->as.func.body.stmts[i]);
             }
             free(expr->as.func.body.stmts);
+            break;
+        case JS_EXPR_YIELD:
+            js_expr_destroy(expr->as.yield.value);
             break;
     }
     free(expr);
@@ -545,6 +677,8 @@ static bool js_parse_function_common(js_parser_t *parser, bool require_name, js_
 static bool js_parse_function_tail(js_parser_t *parser, js_function_expr_t *out);
 static js_expr_t *js_parse_arrow_function(js_parser_t *parser);
 static js_expr_t *js_parse_member_suffix(js_parser_t *parser, js_expr_t *expr);
+static js_binding_t *js_new_binding(js_binding_type_t type);
+static js_binding_t *js_parse_binding_pattern(js_parser_t *parser);
 
 static js_expr_t *js_parse_regex_literal(js_parser_t *parser)
 {
@@ -759,12 +893,65 @@ static bool js_parser_peek_arrow_after_paren(js_parser_t *parser)
         js_token_destroy(&tok);
         return ok;
     }
+    size_t paren_depth = 0;
+    size_t brace_depth = 0;
+    size_t bracket_depth = 0;
     for (;;)
     {
-        if (tok.type != JS_TOKEN_IDENTIFIER)
+        if (tok.type == JS_TOKEN_EOF)
         {
             js_token_destroy(&tok);
             return false;
+        }
+        switch (tok.type)
+        {
+            case JS_TOKEN_LPAREN:
+                paren_depth++;
+                break;
+            case JS_TOKEN_LBRACE:
+                brace_depth++;
+                break;
+            case JS_TOKEN_LBRACKET:
+                bracket_depth++;
+                break;
+            case JS_TOKEN_RPAREN:
+                if (paren_depth == 0 && brace_depth == 0 && bracket_depth == 0)
+                {
+                    js_token_destroy(&tok);
+                    if (!js_lexer_next(&lex, &tok, &err))
+                    {
+                        js_token_destroy(&tok);
+                        return false;
+                    }
+                    bool ok = (tok.type == JS_TOKEN_ARROW);
+                    js_token_destroy(&tok);
+                    return ok;
+                }
+                if (paren_depth == 0)
+                {
+                    js_token_destroy(&tok);
+                    return false;
+                }
+                paren_depth--;
+                break;
+            case JS_TOKEN_RBRACE:
+                if (brace_depth == 0)
+                {
+                    js_token_destroy(&tok);
+                    return false;
+                }
+                brace_depth--;
+                break;
+            case JS_TOKEN_RBRACKET:
+                if (bracket_depth == 0)
+                {
+                    js_token_destroy(&tok);
+                    return false;
+                }
+                bracket_depth--;
+                break;
+            default:
+                break;
         }
         js_token_destroy(&tok);
         if (!js_lexer_next(&lex, &tok, &err))
@@ -772,31 +959,144 @@ static bool js_parser_peek_arrow_after_paren(js_parser_t *parser)
             js_token_destroy(&tok);
             return false;
         }
-        if (tok.type == JS_TOKEN_COMMA)
-        {
-            js_token_destroy(&tok);
-            if (!js_lexer_next(&lex, &tok, &err))
-            {
-                js_token_destroy(&tok);
-                return false;
-            }
-            continue;
-        }
-        if (tok.type == JS_TOKEN_RPAREN)
-        {
-            js_token_destroy(&tok);
-            if (!js_lexer_next(&lex, &tok, &err))
-            {
-                js_token_destroy(&tok);
-                return false;
-            }
-            bool ok = (tok.type == JS_TOKEN_ARROW);
-            js_token_destroy(&tok);
-            return ok;
-        }
+    }
+}
+
+static const char *js_keyword_text(js_token_type_t type)
+{
+    switch (type)
+    {
+        case JS_TOKEN_KW_VAR:
+            return "var";
+        case JS_TOKEN_KW_LET:
+            return "let";
+        case JS_TOKEN_KW_CONST:
+            return "const";
+        case JS_TOKEN_KW_FUNCTION:
+            return "function";
+        case JS_TOKEN_KW_RETURN:
+            return "return";
+        case JS_TOKEN_KW_THROW:
+            return "throw";
+        case JS_TOKEN_KW_TRUE:
+            return "true";
+        case JS_TOKEN_KW_FALSE:
+            return "false";
+        case JS_TOKEN_KW_NULL:
+            return "null";
+        case JS_TOKEN_KW_UNDEFINED:
+            return "undefined";
+        case JS_TOKEN_KW_THIS:
+            return "this";
+        case JS_TOKEN_KW_TYPEOF:
+            return "typeof";
+        case JS_TOKEN_KW_IF:
+            return "if";
+        case JS_TOKEN_KW_ELSE:
+            return "else";
+        case JS_TOKEN_KW_WHILE:
+            return "while";
+        case JS_TOKEN_KW_FOR:
+            return "for";
+        case JS_TOKEN_KW_BREAK:
+            return "break";
+        case JS_TOKEN_KW_CONTINUE:
+            return "continue";
+        case JS_TOKEN_KW_SWITCH:
+            return "switch";
+        case JS_TOKEN_KW_CASE:
+            return "case";
+        case JS_TOKEN_KW_DEFAULT:
+            return "default";
+        case JS_TOKEN_KW_DO:
+            return "do";
+        case JS_TOKEN_KW_TRY:
+            return "try";
+        case JS_TOKEN_KW_CATCH:
+            return "catch";
+        case JS_TOKEN_KW_NEW:
+            return "new";
+        default:
+            return NULL;
+    }
+}
+
+static bool js_token_is_keyword(js_token_type_t type)
+{
+    return js_keyword_text(type) != NULL;
+}
+
+static bool js_parser_peek_accessor(js_parser_t *parser)
+{
+    if (!parser || parser->current.type != JS_TOKEN_IDENTIFIER || !parser->current.text)
+    {
+        return false;
+    }
+    if (strcmp(parser->current.text, "get") != 0 && strcmp(parser->current.text, "set") != 0)
+    {
+        return false;
+    }
+    js_lexer_t lex = parser->lexer;
+    js_parse_error_t err = {0};
+    js_token_t tok = {0};
+    if (!js_lexer_next(&lex, &tok, &err))
+    {
         js_token_destroy(&tok);
         return false;
     }
+    if (tok.type == JS_TOKEN_LBRACKET)
+    {
+        size_t depth = 0;
+        for (;;)
+        {
+            js_token_destroy(&tok);
+            if (!js_lexer_next(&lex, &tok, &err))
+            {
+                js_token_destroy(&tok);
+                return false;
+            }
+            if (tok.type == JS_TOKEN_EOF)
+            {
+                js_token_destroy(&tok);
+                return false;
+            }
+            if (tok.type == JS_TOKEN_LBRACKET)
+            {
+                depth++;
+            }
+            else if (tok.type == JS_TOKEN_RBRACKET)
+            {
+                if (depth == 0)
+                {
+                    break;
+                }
+                depth--;
+            }
+        }
+        js_token_destroy(&tok);
+        if (!js_lexer_next(&lex, &tok, &err))
+        {
+            js_token_destroy(&tok);
+            return false;
+        }
+        bool ok = (tok.type == JS_TOKEN_LPAREN);
+        js_token_destroy(&tok);
+        return ok;
+    }
+    if (tok.type == JS_TOKEN_IDENTIFIER || tok.type == JS_TOKEN_STRING || js_token_is_keyword(tok.type))
+    {
+        js_token_destroy(&tok);
+        if (!js_lexer_next(&lex, &tok, &err))
+        {
+            js_token_destroy(&tok);
+            return false;
+        }
+        bool ok = (tok.type == JS_TOKEN_LPAREN);
+        js_token_destroy(&tok);
+        return ok;
+    }
+    js_token_destroy(&tok);
+    return false;
 }
 
 static bool js_build_return_block(js_expr_t *expr, js_block_t *out)
@@ -824,6 +1124,90 @@ static bool js_build_return_block(js_expr_t *expr, js_block_t *out)
     return true;
 }
 
+static bool js_parse_param_list_body(js_parser_t *parser, js_param_list_t *params)
+{
+    if (!parser || !params)
+    {
+        return false;
+    }
+    if (parser->current.type == JS_TOKEN_RPAREN)
+    {
+        return true;
+    }
+    bool saw_rest = false;
+    for (;;)
+    {
+        js_param_t param;
+        memset(&param, 0, sizeof(param));
+        if (parser->current.type == JS_TOKEN_ELLIPSIS)
+        {
+            if (saw_rest)
+            {
+                js_parser_error(parser, parser->current.offset, "invalid rest parameter");
+                js_param_list_destroy(params);
+                return false;
+            }
+            saw_rest = true;
+            param.is_rest = true;
+            js_parser_advance(parser);
+            param.binding = js_parse_binding_pattern(parser);
+            if (!param.binding)
+            {
+                js_param_list_destroy(params);
+                return false;
+            }
+        }
+        else
+        {
+            param.binding = js_parse_binding_pattern(parser);
+            if (!param.binding)
+            {
+                js_param_list_destroy(params);
+                return false;
+            }
+        }
+        if (!param.is_rest && parser->current.type == JS_TOKEN_EQUAL)
+        {
+            js_parser_advance(parser);
+            param.init = js_parse_expression(parser);
+            if (!param.init)
+            {
+                js_binding_destroy(param.binding);
+                js_param_list_destroy(params);
+                return false;
+            }
+        }
+        else if (param.is_rest && parser->current.type == JS_TOKEN_EQUAL)
+        {
+            js_binding_destroy(param.binding);
+            js_parser_error(parser, parser->current.offset, "invalid rest parameter");
+            js_param_list_destroy(params);
+            return false;
+        }
+
+        if (!js_param_list_push(params, &param))
+        {
+            js_binding_destroy(param.binding);
+            js_expr_destroy(param.init);
+            js_param_list_destroy(params);
+            return false;
+        }
+        if (parser->current.type == JS_TOKEN_COMMA)
+        {
+            if (saw_rest)
+            {
+                js_parser_error(parser, parser->current.offset, "expected ')'");
+                js_param_list_destroy(params);
+                return false;
+            }
+            js_parser_advance(parser);
+            continue;
+        }
+        break;
+    }
+    return true;
+}
+
 static bool js_parse_arrow_params(js_parser_t *parser, js_param_list_t *params)
 {
     if (!parser || !params)
@@ -832,11 +1216,22 @@ static bool js_parse_arrow_params(js_parser_t *parser, js_param_list_t *params)
     }
     if (parser->current.type == JS_TOKEN_IDENTIFIER)
     {
-        char *name = js_token_take_text(&parser->current);
-        js_parser_advance(parser);
-        if (!js_param_list_push(params, name))
+        js_param_t param;
+        memset(&param, 0, sizeof(param));
+        js_binding_t *binding = js_new_binding(JS_BINDING_IDENTIFIER);
+        if (!binding)
         {
-            free(name);
+            js_parser_error(parser, parser->current.offset, "allocation failed");
+            return false;
+        }
+        binding->as.ident.name = js_token_take_text(&parser->current);
+        js_parser_advance(parser);
+        param.binding = binding;
+        param.is_rest = false;
+        if (!js_param_list_push(params, &param))
+        {
+            js_binding_destroy(binding);
+            js_param_list_destroy(params);
             return false;
         }
         return true;
@@ -845,29 +1240,9 @@ static bool js_parse_arrow_params(js_parser_t *parser, js_param_list_t *params)
     {
         return false;
     }
-    if (parser->current.type != JS_TOKEN_RPAREN)
+    if (!js_parse_param_list_body(parser, params))
     {
-        for (;;)
-        {
-            if (parser->current.type != JS_TOKEN_IDENTIFIER)
-            {
-                js_parser_error(parser, parser->current.offset, "expected parameter name");
-                return false;
-            }
-            char *param = js_token_take_text(&parser->current);
-            js_parser_advance(parser);
-            if (!js_param_list_push(params, param))
-            {
-                free(param);
-                return false;
-            }
-            if (parser->current.type == JS_TOKEN_COMMA)
-            {
-                js_parser_advance(parser);
-                continue;
-            }
-            break;
-        }
+        return false;
     }
     return js_parser_expect(parser, JS_TOKEN_RPAREN, "expected ')'");
 }
@@ -882,24 +1257,19 @@ static js_expr_t *js_parse_arrow_function(js_parser_t *parser)
     }
     if (!js_parser_expect(parser, JS_TOKEN_ARROW, "expected '=>'"))
     {
-        for (size_t p = 0; p < params.count; ++p)
-        {
-            free(params.items[p]);
-        }
-        free(params.items);
+        js_param_list_destroy(&params);
         return NULL;
     }
 
     js_block_t body = {0};
+    bool prev_in_generator = parser->in_generator;
+    parser->in_generator = false;
     if (parser->current.type == JS_TOKEN_LBRACE)
     {
         if (!js_parse_block(parser, true, &body))
         {
-            for (size_t p = 0; p < params.count; ++p)
-            {
-                free(params.items[p]);
-            }
-            free(params.items);
+            parser->in_generator = prev_in_generator;
+            js_param_list_destroy(&params);
             return NULL;
         }
     }
@@ -908,34 +1278,25 @@ static js_expr_t *js_parse_arrow_function(js_parser_t *parser)
         js_expr_t *expr = js_parse_expression(parser);
         if (!expr)
         {
-            for (size_t p = 0; p < params.count; ++p)
-            {
-                free(params.items[p]);
-            }
-            free(params.items);
+            parser->in_generator = prev_in_generator;
+            js_param_list_destroy(&params);
             return NULL;
         }
         if (!js_build_return_block(expr, &body))
         {
             js_expr_destroy(expr);
-            for (size_t p = 0; p < params.count; ++p)
-            {
-                free(params.items[p]);
-            }
-            free(params.items);
+            parser->in_generator = prev_in_generator;
+            js_param_list_destroy(&params);
             js_parser_error(parser, offset, "allocation failed");
             return NULL;
         }
     }
+    parser->in_generator = prev_in_generator;
 
     js_expr_t *expr = js_new_expr(JS_EXPR_FUNCTION);
     if (!expr)
     {
-        for (size_t p = 0; p < params.count; ++p)
-        {
-            free(params.items[p]);
-        }
-        free(params.items);
+        js_param_list_destroy(&params);
         for (size_t i = 0; i < body.count; ++i)
         {
             js_stmt_destroy(body.stmts[i]);
@@ -949,7 +1310,366 @@ static js_expr_t *js_parse_arrow_function(js_parser_t *parser)
     expr->as.func.param_count = params.count;
     expr->as.func.body = body;
     expr->as.func.is_arrow = true;
+    expr->as.func.is_generator = false;
     return expr;
+}
+
+static js_binding_t *js_new_binding(js_binding_type_t type)
+{
+    js_binding_t *binding = (js_binding_t *)calloc(1, sizeof(*binding));
+    if (!binding)
+    {
+        return NULL;
+    }
+    binding->type = type;
+    return binding;
+}
+
+static js_binding_t *js_parse_binding_pattern(js_parser_t *parser);
+
+static void js_binding_prop_cleanup(js_binding_property_t *prop)
+{
+    if (!prop)
+    {
+        return;
+    }
+    if (prop->computed)
+    {
+        js_expr_destroy(prop->name_expr);
+    }
+    else
+    {
+        free(prop->name);
+    }
+    js_binding_destroy(prop->binding);
+    js_expr_destroy(prop->init);
+    memset(prop, 0, sizeof(*prop));
+}
+
+static js_binding_t *js_parse_binding_array(js_parser_t *parser)
+{
+    size_t offset = parser ? parser->current.offset : 0;
+    if (!js_parser_expect(parser, JS_TOKEN_LBRACKET, "expected '['"))
+    {
+        return NULL;
+    }
+
+    js_binding_t *binding = js_new_binding(JS_BINDING_ARRAY);
+    if (!binding)
+    {
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+
+    js_binding_element_t *elements = NULL;
+    size_t count = 0;
+    size_t cap = 0;
+    js_binding_t *rest = NULL;
+
+    if (parser->current.type != JS_TOKEN_RBRACKET)
+    {
+        for (;;)
+        {
+            if (parser->current.type == JS_TOKEN_COMMA)
+            {
+                js_binding_element_t elem = {0};
+                if (!js_binding_element_list_push(&elements, &count, &cap, &elem))
+                {
+                    js_parser_error(parser, parser->current.offset, "allocation failed");
+                    goto error;
+                }
+                js_parser_advance(parser);
+                if (parser->current.type == JS_TOKEN_RBRACKET)
+                {
+                    break;
+                }
+                continue;
+            }
+            if (parser->current.type == JS_TOKEN_ELLIPSIS)
+            {
+                js_parser_advance(parser);
+                rest = js_parse_binding_pattern(parser);
+                if (!rest)
+                {
+                    goto error;
+                }
+                if (!js_parser_expect(parser, JS_TOKEN_RBRACKET, "expected ']'"))
+                {
+                    goto error;
+                }
+                break;
+            }
+
+            js_binding_t *item_binding = js_parse_binding_pattern(parser);
+            if (!item_binding)
+            {
+                goto error;
+            }
+            js_expr_t *init = NULL;
+            if (parser->current.type == JS_TOKEN_EQUAL)
+            {
+                js_parser_advance(parser);
+                init = js_parse_expression(parser);
+                if (!init)
+                {
+                    js_binding_destroy(item_binding);
+                    goto error;
+                }
+            }
+            js_binding_element_t elem = {0};
+            elem.binding = item_binding;
+            elem.init = init;
+            if (!js_binding_element_list_push(&elements, &count, &cap, &elem))
+            {
+                js_binding_destroy(item_binding);
+                js_expr_destroy(init);
+                js_parser_error(parser, parser->current.offset, "allocation failed");
+                goto error;
+            }
+            if (parser->current.type == JS_TOKEN_COMMA)
+            {
+                js_parser_advance(parser);
+                if (parser->current.type == JS_TOKEN_RBRACKET)
+                {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+    }
+
+    if (parser->current.type != JS_TOKEN_RBRACKET)
+    {
+        js_parser_error(parser, parser->current.offset, "expected ']'");
+        goto error;
+    }
+    js_parser_advance(parser);
+
+    binding->as.array.elements = elements;
+    binding->as.array.count = count;
+    binding->as.array.rest = rest;
+    return binding;
+
+error:
+    for (size_t i = 0; i < count; ++i)
+    {
+        js_binding_destroy(elements[i].binding);
+        js_expr_destroy(elements[i].init);
+    }
+    free(elements);
+    js_binding_destroy(rest);
+    js_binding_destroy(binding);
+    return NULL;
+}
+
+static js_binding_t *js_parse_binding_object(js_parser_t *parser)
+{
+    size_t offset = parser ? parser->current.offset : 0;
+    if (!js_parser_expect(parser, JS_TOKEN_LBRACE, "expected '{'"))
+    {
+        return NULL;
+    }
+
+    js_binding_t *binding = js_new_binding(JS_BINDING_OBJECT);
+    if (!binding)
+    {
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+
+    js_binding_property_t *props = NULL;
+    size_t count = 0;
+    size_t cap = 0;
+    char *rest_name = NULL;
+
+    if (parser->current.type != JS_TOKEN_RBRACE)
+    {
+        for (;;)
+        {
+            if (parser->current.type == JS_TOKEN_ELLIPSIS)
+            {
+                if (rest_name)
+                {
+                    js_parser_error(parser, parser->current.offset, "invalid rest binding");
+                    goto error;
+                }
+                js_parser_advance(parser);
+                if (parser->current.type != JS_TOKEN_IDENTIFIER)
+                {
+                    js_parser_error(parser, parser->current.offset, "expected identifier");
+                    goto error;
+                }
+                rest_name = js_token_take_text(&parser->current);
+                js_parser_advance(parser);
+                if (parser->current.type == JS_TOKEN_COMMA)
+                {
+                    js_parser_advance(parser);
+                }
+                break;
+            }
+
+            js_binding_property_t prop;
+            memset(&prop, 0, sizeof(prop));
+
+            if (parser->current.type == JS_TOKEN_LBRACKET)
+            {
+                prop.computed = true;
+                js_parser_advance(parser);
+                prop.name_expr = js_parse_expression(parser);
+                if (!prop.name_expr)
+                {
+                    js_binding_prop_cleanup(&prop);
+                    goto error;
+                }
+                if (!js_parser_expect(parser, JS_TOKEN_RBRACKET, "expected ']'"))
+                {
+                    js_binding_prop_cleanup(&prop);
+                    goto error;
+                }
+            }
+            else if (parser->current.type == JS_TOKEN_IDENTIFIER)
+            {
+                prop.name = js_token_take_text(&parser->current);
+                js_parser_advance(parser);
+            }
+            else if (parser->current.type == JS_TOKEN_STRING)
+            {
+                prop.name = js_token_take_text(&parser->current);
+                js_parser_advance(parser);
+            }
+            else
+            {
+                js_parser_error(parser, parser->current.offset, "expected property name");
+                js_binding_prop_cleanup(&prop);
+                goto error;
+            }
+
+            if (parser->current.type == JS_TOKEN_COLON)
+            {
+                js_parser_advance(parser);
+                prop.binding = js_parse_binding_pattern(parser);
+                if (!prop.binding)
+                {
+                    js_binding_prop_cleanup(&prop);
+                    goto error;
+                }
+            }
+            else
+            {
+                if (prop.computed || !prop.name)
+                {
+                    js_parser_error(parser, parser->current.offset, "expected ':'");
+                    js_binding_prop_cleanup(&prop);
+                    goto error;
+                }
+                prop.binding = js_new_binding(JS_BINDING_IDENTIFIER);
+                if (!prop.binding)
+                {
+                    js_parser_error(parser, parser->current.offset, "allocation failed");
+                    js_binding_prop_cleanup(&prop);
+                    goto error;
+                }
+                prop.binding->as.ident.name = js_strdup(prop.name);
+                if (!prop.binding->as.ident.name)
+                {
+                    js_parser_error(parser, parser->current.offset, "allocation failed");
+                    js_binding_prop_cleanup(&prop);
+                    goto error;
+                }
+            }
+
+            if (parser->current.type == JS_TOKEN_EQUAL)
+            {
+                js_parser_advance(parser);
+                prop.init = js_parse_expression(parser);
+                if (!prop.init)
+                {
+                    js_binding_prop_cleanup(&prop);
+                    goto error;
+                }
+            }
+
+            if (!js_binding_prop_list_push(&props, &count, &cap, &prop))
+            {
+                js_parser_error(parser, parser->current.offset, "allocation failed");
+                js_binding_prop_cleanup(&prop);
+                goto error;
+            }
+
+            if (parser->current.type == JS_TOKEN_COMMA)
+            {
+                js_parser_advance(parser);
+                if (parser->current.type == JS_TOKEN_RBRACE)
+                {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+    }
+
+    if (parser->current.type != JS_TOKEN_RBRACE)
+    {
+        js_parser_error(parser, parser->current.offset, "expected '}'");
+        goto error;
+    }
+    js_parser_advance(parser);
+
+    binding->as.object.props = props;
+    binding->as.object.count = count;
+    binding->as.object.rest_name = rest_name;
+    return binding;
+
+error:
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (props[i].computed)
+        {
+            js_expr_destroy(props[i].name_expr);
+        }
+        else
+        {
+            free(props[i].name);
+        }
+        js_binding_destroy(props[i].binding);
+        js_expr_destroy(props[i].init);
+    }
+    free(props);
+    free(rest_name);
+    js_binding_destroy(binding);
+    return NULL;
+}
+
+static js_binding_t *js_parse_binding_pattern(js_parser_t *parser)
+{
+    if (!parser)
+    {
+        return NULL;
+    }
+    if (parser->current.type == JS_TOKEN_IDENTIFIER)
+    {
+        js_binding_t *binding = js_new_binding(JS_BINDING_IDENTIFIER);
+        if (!binding)
+        {
+            js_parser_error(parser, parser->current.offset, "allocation failed");
+            return NULL;
+        }
+        binding->as.ident.name = js_token_take_text(&parser->current);
+        js_parser_advance(parser);
+        return binding;
+    }
+    if (parser->current.type == JS_TOKEN_LBRACKET)
+    {
+        return js_parse_binding_array(parser);
+    }
+    if (parser->current.type == JS_TOKEN_LBRACE)
+    {
+        return js_parse_binding_object(parser);
+    }
+    js_parser_error(parser, parser->current.offset, "expected identifier");
+    return NULL;
 }
 
 static js_expr_t *js_parse_class_expression(js_parser_t *parser)
@@ -1202,6 +1922,15 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
                 for (;;)
                 {
                     js_object_property_t prop = {0};
+                    bool is_accessor = false;
+                    bool accessor_is_getter = false;
+                    bool allow_shorthand = false;
+                    if (parser->current.type == JS_TOKEN_IDENTIFIER && js_parser_peek_accessor(parser))
+                    {
+                        accessor_is_getter = (strcmp(parser->current.text, "get") == 0);
+                        is_accessor = true;
+                        js_parser_advance(parser);
+                    }
                     if (parser->current.type == JS_TOKEN_LBRACKET)
                     {
                         prop.computed = true;
@@ -1221,11 +1950,28 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
                     else if (parser->current.type == JS_TOKEN_IDENTIFIER)
                     {
                         prop.name = js_token_take_text(&parser->current);
+                        allow_shorthand = true;
                         js_parser_advance(parser);
                     }
                     else if (parser->current.type == JS_TOKEN_STRING)
                     {
                         prop.name = js_token_take_text(&parser->current);
+                        js_parser_advance(parser);
+                    }
+                    else if (js_token_is_keyword(parser->current.type))
+                    {
+                        const char *kw = js_keyword_text(parser->current.type);
+                        if (!kw)
+                        {
+                            js_parser_error(parser, parser->current.offset, "expected property name");
+                            break;
+                        }
+                        prop.name = js_strdup(kw);
+                        if (!prop.name)
+                        {
+                            js_parser_error(parser, parser->current.offset, "allocation failed");
+                            break;
+                        }
                         js_parser_advance(parser);
                     }
                     else
@@ -1234,7 +1980,7 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
                         break;
                     }
 
-                    if (parser->current.type == JS_TOKEN_LPAREN)
+                    if (is_accessor)
                     {
                         js_function_expr_t func = {0};
                         if (!js_parse_function_tail(parser, &func))
@@ -1262,7 +2008,54 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
                             }
                             for (size_t p = 0; p < func.param_count; ++p)
                             {
-                                free(func.params[p]);
+                                js_binding_destroy(func.params[p].binding);
+                                js_expr_destroy(func.params[p].init);
+                            }
+                            free(func.params);
+                            for (size_t i = 0; i < func.body.count; ++i)
+                            {
+                                js_stmt_destroy(func.body.stmts[i]);
+                            }
+                            free(func.body.stmts);
+                            js_parser_error(parser, parser->current.offset, "allocation failed");
+                            break;
+                        }
+                        fn_expr->as.func = func;
+                        fn_expr->as.func.is_arrow = false;
+                        prop.value = fn_expr;
+                        prop.is_getter = accessor_is_getter;
+                        prop.is_setter = !accessor_is_getter;
+                    }
+                    else if (parser->current.type == JS_TOKEN_LPAREN)
+                    {
+                        js_function_expr_t func = {0};
+                        if (!js_parse_function_tail(parser, &func))
+                        {
+                            if (prop.computed)
+                            {
+                                js_expr_destroy(prop.name_expr);
+                            }
+                            else
+                            {
+                                free(prop.name);
+                            }
+                            break;
+                        }
+                        js_expr_t *fn_expr = js_new_expr(JS_EXPR_FUNCTION);
+                        if (!fn_expr)
+                        {
+                            if (prop.computed)
+                            {
+                                js_expr_destroy(prop.name_expr);
+                            }
+                            else
+                            {
+                                free(prop.name);
+                            }
+                            for (size_t p = 0; p < func.param_count; ++p)
+                            {
+                                js_binding_destroy(func.params[p].binding);
+                                js_expr_destroy(func.params[p].init);
                             }
                             free(func.params);
                             for (size_t i = 0; i < func.body.count; ++i)
@@ -1277,20 +2070,9 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
                         fn_expr->as.func.is_arrow = false;
                         prop.value = fn_expr;
                     }
-                    else
+                    else if (parser->current.type == JS_TOKEN_COLON)
                     {
-                        if (!js_parser_expect(parser, JS_TOKEN_COLON, "expected ':'"))
-                        {
-                            if (prop.computed)
-                            {
-                                js_expr_destroy(prop.name_expr);
-                            }
-                            else
-                            {
-                                free(prop.name);
-                            }
-                            break;
-                        }
+                        js_parser_advance(parser);
                         js_expr_t *value = js_parse_expression(parser);
                         if (!value)
                         {
@@ -1305,6 +2087,41 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
                             break;
                         }
                         prop.value = value;
+                    }
+                    else if (!prop.computed && prop.name &&
+                             allow_shorthand &&
+                             (parser->current.type == JS_TOKEN_COMMA ||
+                              parser->current.type == JS_TOKEN_RBRACE))
+                    {
+                        js_expr_t *value = js_new_expr(JS_EXPR_IDENTIFIER);
+                        if (!value)
+                        {
+                            free(prop.name);
+                            js_parser_error(parser, parser->current.offset, "allocation failed");
+                            break;
+                        }
+                        value->as.ident.name = js_strdup(prop.name);
+                        if (!value->as.ident.name)
+                        {
+                            js_expr_destroy(value);
+                            free(prop.name);
+                            js_parser_error(parser, parser->current.offset, "allocation failed");
+                            break;
+                        }
+                        prop.value = value;
+                    }
+                    else
+                    {
+                        js_parser_error(parser, parser->current.offset, "expected ':'");
+                        if (prop.computed)
+                        {
+                            js_expr_destroy(prop.name_expr);
+                        }
+                        else
+                        {
+                            free(prop.name);
+                        }
+                        break;
                     }
 
                     if (!js_prop_list_push(&props, &prop))
@@ -1388,7 +2205,8 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
                 free(func.name);
                 for (size_t p = 0; p < func.param_count; ++p)
                 {
-                    free(func.params[p]);
+                    js_binding_destroy(func.params[p].binding);
+                    js_expr_destroy(func.params[p].init);
                 }
                 free(func.params);
                 for (size_t i = 0; i < func.body.count; ++i)
@@ -2154,8 +2972,14 @@ static js_expr_t *js_parse_ternary(js_parser_t *parser)
     return expr;
 }
 
+static js_expr_t *js_parse_yield(js_parser_t *parser);
+
 static js_expr_t *js_parse_assignment(js_parser_t *parser)
 {
+    if (parser && parser->in_generator && js_token_is_identifier(&parser->current, "yield"))
+    {
+        return js_parse_yield(parser);
+    }
     js_expr_t *expr = js_parse_ternary(parser);
     if (!expr)
     {
@@ -2199,6 +3023,39 @@ static js_expr_t *js_parse_expression(js_parser_t *parser)
     return js_parse_assignment(parser);
 }
 
+static js_expr_t *js_parse_yield(js_parser_t *parser)
+{
+    if (!parser || !js_token_is_identifier(&parser->current, "yield"))
+    {
+        return NULL;
+    }
+    size_t offset = parser->current.offset;
+    js_parser_advance(parser);
+    js_expr_t *value = NULL;
+    if (parser->current.type != JS_TOKEN_SEMICOLON &&
+        parser->current.type != JS_TOKEN_RPAREN &&
+        parser->current.type != JS_TOKEN_RBRACE &&
+        parser->current.type != JS_TOKEN_RBRACKET &&
+        parser->current.type != JS_TOKEN_COMMA &&
+        parser->current.type != JS_TOKEN_EOF)
+    {
+        value = js_parse_ternary(parser);
+        if (!value)
+        {
+            return NULL;
+        }
+    }
+    js_expr_t *expr = js_new_expr(JS_EXPR_YIELD);
+    if (!expr)
+    {
+        js_expr_destroy(value);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    expr->as.yield.value = value;
+    return expr;
+}
+
 static js_stmt_t *js_parse_var_decl_impl(js_parser_t *parser, js_var_kind_t kind, bool consume_semi)
 {
     if (!parser)
@@ -2208,13 +3065,11 @@ static js_stmt_t *js_parse_var_decl_impl(js_parser_t *parser, js_var_kind_t kind
     js_var_list_t bindings = {0};
     for (;;)
     {
-        if (parser->current.type != JS_TOKEN_IDENTIFIER)
+        js_binding_t *pattern = js_parse_binding_pattern(parser);
+        if (!pattern)
         {
-            js_parser_error(parser, parser->current.offset, "expected identifier");
             break;
         }
-        char *name = js_token_take_text(&parser->current);
-        js_parser_advance(parser);
         js_expr_t *init = NULL;
         if (parser->current.type == JS_TOKEN_EQUAL)
         {
@@ -2222,23 +3077,29 @@ static js_stmt_t *js_parse_var_decl_impl(js_parser_t *parser, js_var_kind_t kind
             init = js_parse_expression(parser);
             if (!init)
             {
-                free(name);
+                js_binding_destroy(pattern);
                 break;
             }
         }
         if (kind == JS_VAR_CONST && !init)
         {
             js_parser_error(parser, parser->current.offset, "const requires initializer");
-            free(name);
+            js_binding_destroy(pattern);
             break;
         }
-        js_var_binding_t binding = {0};
-        binding.name = name;
-        binding.init = init;
-        if (!js_var_list_push(&bindings, &binding))
+        if (!init && pattern->type != JS_BINDING_IDENTIFIER)
+        {
+            js_parser_error(parser, parser->current.offset, "missing initializer");
+            js_binding_destroy(pattern);
+            break;
+        }
+        js_var_binding_t entry = {0};
+        entry.binding = pattern;
+        entry.init = init;
+        if (!js_var_list_push(&bindings, &entry))
         {
             js_expr_destroy(init);
-            free(name);
+            js_binding_destroy(pattern);
             js_parser_error(parser, parser->current.offset, "allocation failed");
             break;
         }
@@ -2253,7 +3114,7 @@ static js_stmt_t *js_parse_var_decl_impl(js_parser_t *parser, js_var_kind_t kind
     {
         for (size_t i = 0; i < bindings.count; ++i)
         {
-            free(bindings.items[i].name);
+            js_binding_destroy(bindings.items[i].binding);
             js_expr_destroy(bindings.items[i].init);
         }
         free(bindings.items);
@@ -2265,7 +3126,7 @@ static js_stmt_t *js_parse_var_decl_impl(js_parser_t *parser, js_var_kind_t kind
         {
             for (size_t i = 0; i < bindings.count; ++i)
             {
-                free(bindings.items[i].name);
+                js_binding_destroy(bindings.items[i].binding);
                 js_expr_destroy(bindings.items[i].init);
             }
             free(bindings.items);
@@ -2277,7 +3138,7 @@ static js_stmt_t *js_parse_var_decl_impl(js_parser_t *parser, js_var_kind_t kind
     {
         for (size_t i = 0; i < bindings.count; ++i)
         {
-            free(bindings.items[i].name);
+            js_binding_destroy(bindings.items[i].binding);
             js_expr_destroy(bindings.items[i].init);
         }
         free(bindings.items);
@@ -2355,53 +3216,28 @@ static bool js_parse_function_tail(js_parser_t *parser, js_function_expr_t *out)
     }
 
     js_param_list_t params = {0};
-    if (parser->current.type != JS_TOKEN_RPAREN)
+    if (!js_parse_param_list_body(parser, &params))
     {
-        for (;;)
-        {
-            if (parser->current.type != JS_TOKEN_IDENTIFIER)
-            {
-                js_parser_error(parser, parser->current.offset, "expected parameter name");
-                break;
-            }
-            char *param = js_token_take_text(&parser->current);
-            js_parser_advance(parser);
-            if (!js_param_list_push(&params, param))
-            {
-                free(param);
-                js_parser_error(parser, parser->current.offset, "allocation failed");
-                break;
-            }
-            if (parser->current.type == JS_TOKEN_COMMA)
-            {
-                js_parser_advance(parser);
-                continue;
-            }
-            break;
-        }
+        return false;
     }
 
     if (parser->had_error || !js_parser_expect(parser, JS_TOKEN_RPAREN, "expected ')'") )
     {
-        for (size_t p = 0; p < params.count; ++p)
-        {
-            free(params.items[p]);
-        }
-        free(params.items);
+        js_param_list_destroy(&params);
         return false;
     }
 
     js_block_t body = {0};
+    bool prev_in_generator = parser->in_generator;
+    parser->in_generator = false;
     if (!js_parse_block(parser, true, &body))
     {
-        for (size_t p = 0; p < params.count; ++p)
-        {
-            free(params.items[p]);
-        }
-        free(params.items);
+        parser->in_generator = prev_in_generator;
+        js_param_list_destroy(&params);
         js_parser_error(parser, parser->current.offset, "invalid function body");
         return false;
     }
+    parser->in_generator = prev_in_generator;
 
     out->params = params.items;
     out->param_count = params.count;
@@ -2416,6 +3252,12 @@ static bool js_parse_function_common(js_parser_t *parser, bool require_name, js_
         return false;
     }
     memset(out, 0, sizeof(*out));
+
+    if (parser->current.type == JS_TOKEN_STAR)
+    {
+        out->is_generator = true;
+        js_parser_advance(parser);
+    }
 
     if (parser->current.type == JS_TOKEN_IDENTIFIER)
     {
@@ -2436,57 +3278,34 @@ static bool js_parse_function_common(js_parser_t *parser, bool require_name, js_
     }
 
     js_param_list_t params = {0};
-    if (parser->current.type != JS_TOKEN_RPAREN)
+    if (!js_parse_param_list_body(parser, &params))
     {
-        for (;;)
-        {
-            if (parser->current.type != JS_TOKEN_IDENTIFIER)
-            {
-                js_parser_error(parser, parser->current.offset, "expected parameter name");
-                break;
-            }
-            char *param = js_token_take_text(&parser->current);
-            js_parser_advance(parser);
-            if (!js_param_list_push(&params, param))
-            {
-                free(param);
-                js_parser_error(parser, parser->current.offset, "allocation failed");
-                break;
-            }
-            if (parser->current.type == JS_TOKEN_COMMA)
-            {
-                js_parser_advance(parser);
-                continue;
-            }
-            break;
-        }
+        free(out->name);
+        out->name = NULL;
+        return false;
     }
 
     if (parser->had_error || !js_parser_expect(parser, JS_TOKEN_RPAREN, "expected ')'") )
     {
-        for (size_t p = 0; p < params.count; ++p)
-        {
-            free(params.items[p]);
-        }
-        free(params.items);
+        js_param_list_destroy(&params);
         free(out->name);
         out->name = NULL;
         return false;
     }
 
     js_block_t body = {0};
+    bool prev_in_generator = parser->in_generator;
+    parser->in_generator = out->is_generator;
     if (!js_parse_block(parser, true, &body))
     {
-        for (size_t p = 0; p < params.count; ++p)
-        {
-            free(params.items[p]);
-        }
-        free(params.items);
+        parser->in_generator = prev_in_generator;
+        js_param_list_destroy(&params);
         free(out->name);
         out->name = NULL;
         js_parser_error(parser, parser->current.offset, "invalid function body");
         return false;
     }
+    parser->in_generator = prev_in_generator;
 
     out->params = params.items;
     out->param_count = params.count;
@@ -2513,7 +3332,8 @@ static js_stmt_t *js_parse_function_decl(js_parser_t *parser)
         free(func.name);
         for (size_t p = 0; p < func.param_count; ++p)
         {
-            free(func.params[p]);
+            js_binding_destroy(func.params[p].binding);
+            js_expr_destroy(func.params[p].init);
         }
         free(func.params);
         for (size_t i = 0; i < func.body.count; ++i)
@@ -2528,6 +3348,8 @@ static js_stmt_t *js_parse_function_decl(js_parser_t *parser)
     stmt->as.func.params = func.params;
     stmt->as.func.param_count = func.param_count;
     stmt->as.func.body = func.body;
+    stmt->as.func.is_arrow = false;
+    stmt->as.func.is_generator = func.is_generator;
     return stmt;
 }
 
@@ -2744,6 +3566,11 @@ static js_stmt_t *js_parse_do_while_statement(js_parser_t *parser, bool allow_re
     return stmt;
 }
 
+static bool js_token_is_identifier(const js_token_t *tok, const char *text)
+{
+    return tok && tok->type == JS_TOKEN_IDENTIFIER && tok->text && strcmp(tok->text, text) == 0;
+}
+
 static js_stmt_t *js_parse_for_statement(js_parser_t *parser, bool allow_return)
 {
     if (!parser)
@@ -2756,6 +3583,13 @@ static js_stmt_t *js_parse_for_statement(js_parser_t *parser, bool allow_return)
     }
 
     js_stmt_t *init = NULL;
+    js_binding_t *for_binding = NULL;
+    js_expr_t *for_target = NULL;
+    js_expr_t *for_expr = NULL;
+    js_var_kind_t for_kind = JS_VAR_VAR;
+    bool for_is_decl = false;
+    bool for_is_of = false;
+    bool for_inof = false;
     if (parser->current.type != JS_TOKEN_SEMICOLON)
     {
         if (parser->current.type == JS_TOKEN_KW_VAR ||
@@ -2772,10 +3606,160 @@ static js_stmt_t *js_parse_for_statement(js_parser_t *parser, bool allow_return)
                 kind = JS_VAR_CONST;
             }
             js_parser_advance(parser);
-            init = js_parse_var_decl_impl(parser, kind, false);
-            if (!init)
+            js_binding_t *pattern = js_parse_binding_pattern(parser);
+            if (!pattern)
             {
                 return NULL;
+            }
+            js_expr_t *init_expr = NULL;
+            if (parser->current.type == JS_TOKEN_EQUAL)
+            {
+                js_parser_advance(parser);
+                init_expr = js_parse_expression(parser);
+                if (!init_expr)
+                {
+                    js_binding_destroy(pattern);
+                    return NULL;
+                }
+            }
+
+            if (js_token_is_identifier(&parser->current, "in") ||
+                js_token_is_identifier(&parser->current, "of"))
+            {
+                if (init_expr)
+                {
+                    js_expr_destroy(init_expr);
+                    js_binding_destroy(pattern);
+                    js_parser_error(parser, parser->current.offset, "invalid for-in/of initializer");
+                    return NULL;
+                }
+                for_is_decl = true;
+                for_is_of = js_token_is_identifier(&parser->current, "of");
+                for_inof = true;
+                for_kind = kind;
+                for_binding = pattern;
+                js_parser_advance(parser);
+                for_expr = js_parse_expression(parser);
+                if (!for_expr)
+                {
+                    js_binding_destroy(for_binding);
+                    return NULL;
+                }
+            }
+            else
+            {
+                if (kind == JS_VAR_CONST && !init_expr)
+                {
+                    js_parser_error(parser, parser->current.offset, "const requires initializer");
+                    js_binding_destroy(pattern);
+                    return NULL;
+                }
+                if (!init_expr && pattern->type != JS_BINDING_IDENTIFIER)
+                {
+                    js_parser_error(parser, parser->current.offset, "missing initializer");
+                    js_binding_destroy(pattern);
+                    return NULL;
+                }
+                js_var_list_t list = {0};
+                js_var_binding_t entry = {0};
+                entry.binding = pattern;
+                entry.init = init_expr;
+                if (!js_var_list_push(&list, &entry))
+                {
+                    js_expr_destroy(init_expr);
+                    js_binding_destroy(pattern);
+                    js_parser_error(parser, parser->current.offset, "allocation failed");
+                    return NULL;
+                }
+
+                while (parser->current.type == JS_TOKEN_COMMA)
+                {
+                    js_parser_advance(parser);
+                    js_binding_t *next = js_parse_binding_pattern(parser);
+                    if (!next)
+                    {
+                        for (size_t i = 0; i < list.count; ++i)
+                        {
+                            js_binding_destroy(list.items[i].binding);
+                            js_expr_destroy(list.items[i].init);
+                        }
+                        free(list.items);
+                        return NULL;
+                    }
+                    js_expr_t *next_init = NULL;
+                    if (parser->current.type == JS_TOKEN_EQUAL)
+                    {
+                        js_parser_advance(parser);
+                        next_init = js_parse_expression(parser);
+                        if (!next_init)
+                        {
+                            js_binding_destroy(next);
+                            for (size_t i = 0; i < list.count; ++i)
+                            {
+                                js_binding_destroy(list.items[i].binding);
+                                js_expr_destroy(list.items[i].init);
+                            }
+                            free(list.items);
+                            return NULL;
+                        }
+                    }
+                    if (kind == JS_VAR_CONST && !next_init)
+                    {
+                        js_parser_error(parser, parser->current.offset, "const requires initializer");
+                        js_binding_destroy(next);
+                        for (size_t i = 0; i < list.count; ++i)
+                        {
+                            js_binding_destroy(list.items[i].binding);
+                            js_expr_destroy(list.items[i].init);
+                        }
+                        free(list.items);
+                        return NULL;
+                    }
+                    if (!next_init && next->type != JS_BINDING_IDENTIFIER)
+                    {
+                        js_parser_error(parser, parser->current.offset, "missing initializer");
+                        js_binding_destroy(next);
+                        for (size_t i = 0; i < list.count; ++i)
+                        {
+                            js_binding_destroy(list.items[i].binding);
+                            js_expr_destroy(list.items[i].init);
+                        }
+                        free(list.items);
+                        return NULL;
+                    }
+                    js_var_binding_t next_entry = {0};
+                    next_entry.binding = next;
+                    next_entry.init = next_init;
+                    if (!js_var_list_push(&list, &next_entry))
+                    {
+                        js_expr_destroy(next_init);
+                        js_binding_destroy(next);
+                        for (size_t i = 0; i < list.count; ++i)
+                        {
+                            js_binding_destroy(list.items[i].binding);
+                            js_expr_destroy(list.items[i].init);
+                        }
+                        free(list.items);
+                        js_parser_error(parser, parser->current.offset, "allocation failed");
+                        return NULL;
+                    }
+                }
+
+                init = js_new_stmt(JS_STMT_VAR);
+                if (!init)
+                {
+                    for (size_t i = 0; i < list.count; ++i)
+                    {
+                        js_binding_destroy(list.items[i].binding);
+                        js_expr_destroy(list.items[i].init);
+                    }
+                    free(list.items);
+                    js_parser_error(parser, parser->current.offset, "allocation failed");
+                    return NULL;
+                }
+                init->as.var.kind = kind;
+                init->as.var.bindings = list.items;
+                init->as.var.count = list.count;
             }
         }
         else
@@ -2785,16 +3769,79 @@ static js_stmt_t *js_parse_for_statement(js_parser_t *parser, bool allow_return)
             {
                 return NULL;
             }
-            init = js_new_stmt(JS_STMT_EXPR);
-            if (!init)
+            if (js_token_is_identifier(&parser->current, "in") ||
+                js_token_is_identifier(&parser->current, "of"))
             {
-                js_expr_destroy(expr);
-                js_parser_error(parser, parser->current.offset, "allocation failed");
-                return NULL;
+                if (expr->type != JS_EXPR_IDENTIFIER && expr->type != JS_EXPR_MEMBER)
+                {
+                    js_expr_destroy(expr);
+                    js_parser_error(parser, parser->current.offset, "invalid for-in/of target");
+                    return NULL;
+                }
+                for_inof = true;
+                for_is_of = js_token_is_identifier(&parser->current, "of");
+                for_target = expr;
+                js_parser_advance(parser);
+                for_expr = js_parse_expression(parser);
+                if (!for_expr)
+                {
+                    js_expr_destroy(for_target);
+                    return NULL;
+                }
             }
-            init->as.expr.expr = expr;
+            else
+            {
+                init = js_new_stmt(JS_STMT_EXPR);
+                if (!init)
+                {
+                    js_expr_destroy(expr);
+                    js_parser_error(parser, parser->current.offset, "allocation failed");
+                    return NULL;
+                }
+                init->as.expr.expr = expr;
+            }
         }
     }
+
+    if (for_inof)
+    {
+        if (!js_parser_expect(parser, JS_TOKEN_RPAREN, "expected ')'") )
+        {
+            js_stmt_destroy(init);
+            js_binding_destroy(for_binding);
+            js_expr_destroy(for_target);
+            js_expr_destroy(for_expr);
+            return NULL;
+        }
+        js_stmt_t *body = js_parse_statement(parser, allow_return);
+        if (!body)
+        {
+            js_stmt_destroy(init);
+            js_binding_destroy(for_binding);
+            js_expr_destroy(for_target);
+            js_expr_destroy(for_expr);
+            return NULL;
+        }
+        js_stmt_t *stmt = js_new_stmt(for_is_of ? JS_STMT_FOR_OF : JS_STMT_FOR_IN);
+        if (!stmt)
+        {
+            js_stmt_destroy(init);
+            js_binding_destroy(for_binding);
+            js_expr_destroy(for_target);
+            js_expr_destroy(for_expr);
+            js_stmt_destroy(body);
+            js_parser_error(parser, parser->current.offset, "allocation failed");
+            return NULL;
+        }
+        stmt->as.for_inof.is_decl = for_is_decl;
+        stmt->as.for_inof.kind = for_kind;
+        stmt->as.for_inof.binding = for_binding;
+        stmt->as.for_inof.target = for_target;
+        stmt->as.for_inof.expr = for_expr;
+        stmt->as.for_inof.body = body;
+        return stmt;
+    }
+
     if (!js_parser_expect(parser, JS_TOKEN_SEMICOLON, "expected ';'") )
     {
         js_stmt_destroy(init);

@@ -1,7 +1,9 @@
 #include "web/js/runtime/runtime_internal.h"
 
+#include "ctype.h"
 #include "libc.h"
 #include "math.h"
+#include "stdio.h"
 
 typedef enum
 {
@@ -268,6 +270,49 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
 
 static bool js_hoist_vars_in_stmt(js_env_t *var_env, const js_stmt_t *stmt);
 
+static bool js_hoist_binding(js_env_t *var_env, const js_binding_t *binding)
+{
+    if (!var_env || !binding)
+    {
+        return true;
+    }
+    switch (binding->type)
+    {
+        case JS_BINDING_IDENTIFIER:
+        {
+            js_value_t undef = js_value_make_undefined_internal();
+            return js_env_define_if_absent(var_env, binding->as.ident.name, &undef, false);
+        }
+        case JS_BINDING_ARRAY:
+            for (size_t i = 0; i < binding->as.array.count; ++i)
+            {
+                if (!js_hoist_binding(var_env, binding->as.array.elements[i].binding))
+                {
+                    return false;
+                }
+            }
+            return js_hoist_binding(var_env, binding->as.array.rest);
+        case JS_BINDING_OBJECT:
+            for (size_t i = 0; i < binding->as.object.count; ++i)
+            {
+                if (!js_hoist_binding(var_env, binding->as.object.props[i].binding))
+                {
+                    return false;
+                }
+            }
+            if (binding->as.object.rest_name)
+            {
+                js_value_t undef = js_value_make_undefined_internal();
+                if (!js_env_define_if_absent(var_env, binding->as.object.rest_name, &undef, false))
+                {
+                    return false;
+                }
+            }
+            return true;
+    }
+    return true;
+}
+
 static bool js_hoist_vars(js_env_t *var_env, js_stmt_t **stmts, size_t count)
 {
     if (!var_env)
@@ -297,8 +342,7 @@ static bool js_hoist_vars_in_stmt(js_env_t *var_env, const js_stmt_t *stmt)
             {
                 for (size_t i = 0; i < stmt->as.var.count; ++i)
                 {
-                    js_value_t undef = js_value_make_undefined_internal();
-                    if (!js_env_define_if_absent(var_env, stmt->as.var.bindings[i].name, &undef, false))
+                    if (!js_hoist_binding(var_env, stmt->as.var.bindings[i].binding))
                     {
                         return false;
                     }
@@ -323,6 +367,16 @@ static bool js_hoist_vars_in_stmt(js_env_t *var_env, const js_stmt_t *stmt)
                 return false;
             }
             return js_hoist_vars_in_stmt(var_env, stmt->as.for_stmt.body);
+        case JS_STMT_FOR_IN:
+        case JS_STMT_FOR_OF:
+            if (stmt->as.for_inof.is_decl && stmt->as.for_inof.kind == JS_VAR_VAR)
+            {
+                if (!js_hoist_binding(var_env, stmt->as.for_inof.binding))
+                {
+                    return false;
+                }
+            }
+            return js_hoist_vars_in_stmt(var_env, stmt->as.for_inof.body);
         case JS_STMT_SWITCH:
             for (size_t c = 0; c < stmt->as.switch_stmt.case_count; ++c)
             {
@@ -436,6 +490,29 @@ static bool js_value_to_property_name(js_runtime_t *rt,
     return true;
 }
 
+static const char *js_accessor_get_prefix = "__get__";
+static const char *js_accessor_set_prefix = "__set__";
+
+static char *js_accessor_slot_name(const char *prefix, const char *name)
+{
+    if (!prefix || !name)
+    {
+        return NULL;
+    }
+    size_t prefix_len = strlen(prefix);
+    size_t name_len = strlen(name);
+    size_t total_len = prefix_len + name_len;
+    char *buf = (char *)malloc(total_len + 1);
+    if (!buf)
+    {
+        return NULL;
+    }
+    memcpy(buf, prefix, prefix_len);
+    memcpy(buf + prefix_len, name, name_len);
+    buf[total_len] = '\0';
+    return buf;
+}
+
 static bool js_object_get_property(js_runtime_t *rt,
                                    js_object_t *object,
                                    const char *name,
@@ -446,6 +523,10 @@ static bool js_object_get_property(js_runtime_t *rt,
     {
         return false;
     }
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
     if (!object)
     {
         *out = js_value_make_undefined_internal();
@@ -455,6 +536,55 @@ static bool js_object_get_property(js_runtime_t *rt,
     {
         return object->get_fn(rt, object->user_data, name, out, error_message);
     }
+    char *get_slot = js_accessor_slot_name(js_accessor_get_prefix, name);
+    if (!get_slot)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (js_object_has_slot(object, get_slot))
+    {
+        js_value_t getter = js_value_make_undefined_internal();
+        if (!js_object_get_slot(object, get_slot, &getter))
+        {
+            free(get_slot);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        free(get_slot);
+        if (getter.type == JS_VALUE_FUNCTION || getter.type == JS_VALUE_NATIVE_FN)
+        {
+            js_value_t result = js_value_make_undefined_internal();
+            char *err = NULL;
+            bool ok = js_call_value(rt, &getter, 0, NULL, &result, &err);
+            js_value_destroy(&getter);
+            if (!ok)
+            {
+                if (error_message)
+                {
+                    *error_message = err;
+                }
+                else
+                {
+                    free(err);
+                }
+                js_value_destroy(&result);
+                return false;
+            }
+            *out = result;
+            return true;
+        }
+        js_value_destroy(&getter);
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    free(get_slot);
     return js_object_get_slot(object, name, out);
 }
 
@@ -468,15 +598,62 @@ static bool js_object_set_property(js_runtime_t *rt,
     {
         return false;
     }
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
     if (object->set_fn)
     {
         return object->set_fn(rt, object->user_data, name, value, error_message);
     }
     (void)rt;
-    if (error_message)
+    char *set_slot = js_accessor_slot_name(js_accessor_set_prefix, name);
+    if (!set_slot)
     {
-        *error_message = NULL;
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
     }
+    if (js_object_has_slot(object, set_slot))
+    {
+        js_value_t setter = js_value_make_undefined_internal();
+        if (!js_object_get_slot(object, set_slot, &setter))
+        {
+            free(set_slot);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        free(set_slot);
+        if (setter.type == JS_VALUE_FUNCTION || setter.type == JS_VALUE_NATIVE_FN)
+        {
+            js_value_t result = js_value_make_undefined_internal();
+            char *err = NULL;
+            bool ok = js_call_value(rt, &setter, 1, value, &result, &err);
+            js_value_destroy(&setter);
+            js_value_destroy(&result);
+            if (!ok)
+            {
+                if (error_message)
+                {
+                    *error_message = err;
+                }
+                else
+                {
+                    free(err);
+                }
+                return false;
+            }
+            return true;
+        }
+        js_value_destroy(&setter);
+        return true;
+    }
+    free(set_slot);
     return js_object_set_slot(object, name, value);
 }
 
@@ -942,6 +1119,781 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
     return js_eval_error("value is not indexable");
 }
 
+typedef struct
+{
+    char *name;
+    bool owned;
+} js_name_ref_t;
+
+static bool js_name_list_push(js_name_ref_t **items,
+                              size_t *count,
+                              size_t *cap,
+                              const char *name,
+                              bool owned)
+{
+    if (!items || !count || !cap || !name)
+    {
+        return false;
+    }
+    if (*count + 1 > *cap)
+    {
+        size_t new_cap = *cap ? (*cap * 2u) : 4u;
+        if (new_cap < *count + 1)
+        {
+            new_cap = *count + 1;
+        }
+        js_name_ref_t *next = (js_name_ref_t *)realloc(*items, new_cap * sizeof(*next));
+        if (!next)
+        {
+            return false;
+        }
+        *items = next;
+        *cap = new_cap;
+    }
+    (*items)[*count].name = (char *)name;
+    (*items)[*count].owned = owned;
+    (*count)++;
+    return true;
+}
+
+static bool js_name_list_contains(const js_name_ref_t *items, size_t count, const char *name)
+{
+    if (!name)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (items[i].name && strcmp(items[i].name, name) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void js_name_list_destroy(js_name_ref_t *items, size_t count)
+{
+    if (!items)
+    {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (items[i].owned)
+        {
+            free(items[i].name);
+        }
+    }
+    free(items);
+}
+
+static bool js_parse_index_key(const char *text, size_t *out_index)
+{
+    if (!text || !*text || !out_index)
+    {
+        return false;
+    }
+    size_t value = 0;
+    for (const char *p = text; *p; ++p)
+    {
+        if (!isdigit((unsigned char)*p))
+        {
+            return false;
+        }
+        size_t digit = (size_t)(*p - '0');
+        if (value > (SIZE_MAX - digit) / 10u)
+        {
+            return false;
+        }
+        value = value * 10u + digit;
+    }
+    *out_index = value;
+    return true;
+}
+
+static bool js_make_single_char_string(js_value_t *out, char c)
+{
+    if (!out)
+    {
+        return false;
+    }
+    char buf[2] = {c, '\0'};
+    return js_value_make_string(out, buf, 1);
+}
+
+static bool js_binding_get_index_value(js_runtime_t *rt,
+                                       const js_value_t *value,
+                                       size_t index,
+                                       js_value_t *out,
+                                       char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!value)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (value->type == JS_VALUE_ARRAY)
+    {
+        if (!js_array_get(value->as.array, index, out))
+        {
+            return false;
+        }
+        return true;
+    }
+    if (value->type == JS_VALUE_STRING)
+    {
+        if (index < value->as.string.len && value->as.string.data)
+        {
+            return js_make_single_char_string(out, value->as.string.data[index]);
+        }
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (value->type == JS_VALUE_OBJECT)
+    {
+        char key[32];
+        int len = snprintf(key, sizeof(key), "%zu", index);
+        if (len < 0 || (size_t)len >= sizeof(key))
+        {
+            *out = js_value_make_undefined_internal();
+            return true;
+        }
+        return js_object_get_property(rt, value->as.object, key, out, error_message);
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_binding_get_property_value(js_runtime_t *rt,
+                                          const js_value_t *value,
+                                          const char *name,
+                                          js_value_t *out,
+                                          char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!value || !name)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (value->type == JS_VALUE_OBJECT)
+    {
+        return js_object_get_property(rt, value->as.object, name, out, error_message);
+    }
+    if (value->type == JS_VALUE_ARRAY)
+    {
+        return js_array_get_property(value->as.array, name, out);
+    }
+    if (value->type == JS_VALUE_STRING)
+    {
+        if (strcmp(name, "length") == 0)
+        {
+            *out = js_value_make_number((double)value->as.string.len);
+            return true;
+        }
+        size_t index = 0;
+        if (js_parse_index_key(name, &index) && index < value->as.string.len && value->as.string.data)
+        {
+            return js_make_single_char_string(out, value->as.string.data[index]);
+        }
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static size_t js_binding_length(js_runtime_t *rt, const js_value_t *value)
+{
+    if (!value)
+    {
+        return 0;
+    }
+    if (value->type == JS_VALUE_ARRAY)
+    {
+        return value->as.array ? value->as.array->length : 0;
+    }
+    if (value->type == JS_VALUE_STRING)
+    {
+        return value->as.string.len;
+    }
+    if (value->type == JS_VALUE_OBJECT)
+    {
+        js_value_t len_value = js_value_make_undefined_internal();
+        char *err = NULL;
+        if (js_object_get_property(rt, value->as.object, "length", &len_value, &err))
+        {
+            size_t length = 0;
+            if (js_value_to_array_length(&len_value, &length))
+            {
+                js_value_destroy(&len_value);
+                free(err);
+                return length;
+            }
+            js_value_destroy(&len_value);
+        }
+        free(err);
+    }
+    return 0;
+}
+
+static js_eval_result_t js_binding_apply(js_runtime_t *rt,
+                                         js_env_t *env,
+                                         const js_binding_t *binding,
+                                         const js_value_t *value,
+                                         bool is_decl,
+                                         js_var_kind_t kind,
+                                         bool allow_redeclare);
+
+static js_eval_result_t js_binding_apply_identifier(js_env_t *env,
+                                                    const char *name,
+                                                    const js_value_t *value,
+                                                    bool is_decl,
+                                                    js_var_kind_t kind,
+                                                    bool allow_redeclare)
+{
+    if (!env || !name)
+    {
+        return js_eval_error("invalid binding");
+    }
+    const js_value_t *use_value = value;
+    js_value_t undef = js_value_make_undefined_internal();
+    if (!use_value)
+    {
+        use_value = &undef;
+    }
+    if (is_decl)
+    {
+        if (kind == JS_VAR_VAR)
+        {
+            js_env_t *var_env = js_env_find_var_scope(env);
+            if (!js_env_define_if_absent(var_env, name, &undef, false))
+            {
+                return js_eval_error("failed to define variable");
+            }
+            if (!js_env_assign(var_env, name, use_value))
+            {
+                return js_eval_error("assignment failed");
+            }
+            return js_eval_ok(js_value_make_undefined_internal());
+        }
+        bool is_const = (kind == JS_VAR_CONST);
+        if (!js_env_define_local(env, name, use_value, is_const, allow_redeclare))
+        {
+            return js_eval_error("failed to define variable");
+        }
+        return js_eval_ok(js_value_make_undefined_internal());
+    }
+    if (!js_env_assign(env, name, use_value))
+    {
+        return js_eval_error("assignment failed");
+    }
+    return js_eval_ok(js_value_make_undefined_internal());
+}
+
+static js_eval_result_t js_binding_apply_array(js_runtime_t *rt,
+                                               js_env_t *env,
+                                               const js_binding_t *binding,
+                                               const js_value_t *value,
+                                               bool is_decl,
+                                               js_var_kind_t kind,
+                                               bool allow_redeclare)
+{
+    if (!binding || !env)
+    {
+        return js_eval_error("invalid binding");
+    }
+    if (!value || value->type == JS_VALUE_UNDEFINED || value->type == JS_VALUE_NULL)
+    {
+        return js_eval_error("TypeError: cannot destructure");
+    }
+    for (size_t i = 0; i < binding->as.array.count; ++i)
+    {
+        if (!binding->as.array.elements[i].binding)
+        {
+            continue;
+        }
+        js_value_t elem_value = js_value_make_undefined_internal();
+        char *err = NULL;
+        if (!js_binding_get_index_value(rt, value, i, &elem_value, &err))
+        {
+            js_eval_result_t res = js_eval_error(err ? err : "allocation failed");
+            free(err);
+            return res;
+        }
+        if (elem_value.type == JS_VALUE_UNDEFINED && binding->as.array.elements[i].init)
+        {
+            js_eval_result_t init_res = js_eval_expr(rt, env, binding->as.array.elements[i].init);
+            js_value_destroy(&elem_value);
+            if (!init_res.ok)
+            {
+                return init_res;
+            }
+            elem_value = init_res.value;
+        }
+        js_eval_result_t bind_res =
+            js_binding_apply(rt,
+                             env,
+                             binding->as.array.elements[i].binding,
+                             &elem_value,
+                             is_decl,
+                             kind,
+                             allow_redeclare);
+        js_value_destroy(&elem_value);
+        if (!bind_res.ok)
+        {
+            return bind_res;
+        }
+        js_value_destroy(&bind_res.value);
+    }
+
+    if (binding->as.array.rest)
+    {
+        size_t length = js_binding_length(rt, value);
+        size_t start = binding->as.array.count;
+        js_value_t rest_value = js_value_make_undefined_internal();
+        if (!js_value_make_array(&rest_value))
+        {
+            return js_eval_error("allocation failed");
+        }
+        for (size_t i = start; i < length; ++i)
+        {
+            js_value_t item = js_value_make_undefined_internal();
+            char *err = NULL;
+            if (!js_binding_get_index_value(rt, value, i, &item, &err))
+            {
+                js_value_destroy(&rest_value);
+                js_eval_result_t res = js_eval_error(err ? err : "allocation failed");
+                free(err);
+                return res;
+            }
+            if (!js_value_array_push(&rest_value, &item))
+            {
+                js_value_destroy(&item);
+                js_value_destroy(&rest_value);
+                return js_eval_error("allocation failed");
+            }
+            js_value_destroy(&item);
+        }
+        js_eval_result_t bind_res =
+            js_binding_apply(rt, env, binding->as.array.rest, &rest_value, is_decl, kind, allow_redeclare);
+        js_value_destroy(&rest_value);
+        if (!bind_res.ok)
+        {
+            return bind_res;
+        }
+        js_value_destroy(&bind_res.value);
+    }
+    return js_eval_ok(js_value_make_undefined_internal());
+}
+
+static bool js_binding_add_object_prop(js_runtime_t *rt,
+                                       js_value_t *obj,
+                                       const char *name,
+                                       const js_value_t *value,
+                                       char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!obj || obj->type != JS_VALUE_OBJECT || !name || !value)
+    {
+        return false;
+    }
+    return js_object_set_property(rt, obj->as.object, name, value, error_message);
+}
+
+static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
+                                                js_env_t *env,
+                                                const js_binding_t *binding,
+                                                const js_value_t *value,
+                                                bool is_decl,
+                                                js_var_kind_t kind,
+                                                bool allow_redeclare)
+{
+    if (!binding || !env)
+    {
+        return js_eval_error("invalid binding");
+    }
+    if (!value || value->type == JS_VALUE_UNDEFINED || value->type == JS_VALUE_NULL)
+    {
+        return js_eval_error("TypeError: cannot destructure");
+    }
+    js_name_ref_t *exclude = NULL;
+    size_t exclude_count = 0;
+    size_t exclude_cap = 0;
+
+    for (size_t i = 0; i < binding->as.object.count; ++i)
+    {
+        const js_binding_property_t *prop = &binding->as.object.props[i];
+        char *prop_name = NULL;
+        bool owned = false;
+        if (prop->computed)
+        {
+            js_eval_result_t key_res = js_eval_expr(rt, env, prop->name_expr);
+            if (!key_res.ok)
+            {
+                js_name_list_destroy(exclude, exclude_count);
+                return key_res;
+            }
+            char *key_err = NULL;
+            if (!js_value_to_property_name(rt, &key_res.value, &prop_name, &key_err))
+            {
+                js_value_destroy(&key_res.value);
+                js_name_list_destroy(exclude, exclude_count);
+                js_eval_result_t res = js_eval_error(key_err ? key_err : "allocation failed");
+                free(key_err);
+                return res;
+            }
+            js_value_destroy(&key_res.value);
+            owned = true;
+        }
+        else
+        {
+            prop_name = prop->name;
+        }
+
+        if (!js_name_list_push(&exclude, &exclude_count, &exclude_cap, prop_name, owned))
+        {
+            if (owned)
+            {
+                free(prop_name);
+            }
+            js_name_list_destroy(exclude, exclude_count);
+            return js_eval_error("allocation failed");
+        }
+
+        js_value_t prop_value = js_value_make_undefined_internal();
+        char *err = NULL;
+        if (!js_binding_get_property_value(rt, value, prop_name, &prop_value, &err))
+        {
+            js_name_list_destroy(exclude, exclude_count);
+            js_eval_result_t res = js_eval_error(err ? err : "allocation failed");
+            free(err);
+            return res;
+        }
+        if (prop_value.type == JS_VALUE_UNDEFINED && prop->init)
+        {
+            js_eval_result_t init_res = js_eval_expr(rt, env, prop->init);
+            js_value_destroy(&prop_value);
+            if (!init_res.ok)
+            {
+                js_name_list_destroy(exclude, exclude_count);
+                return init_res;
+            }
+            prop_value = init_res.value;
+        }
+
+        js_eval_result_t bind_res =
+            js_binding_apply(rt, env, prop->binding, &prop_value, is_decl, kind, allow_redeclare);
+        js_value_destroy(&prop_value);
+        if (!bind_res.ok)
+        {
+            js_name_list_destroy(exclude, exclude_count);
+            return bind_res;
+        }
+        js_value_destroy(&bind_res.value);
+    }
+
+    if (binding->as.object.rest_name)
+    {
+        js_value_t rest_obj = js_value_make_undefined_internal();
+        if (!js_value_make_host_object(&rest_obj, NULL, NULL, NULL, NULL))
+        {
+            js_name_list_destroy(exclude, exclude_count);
+            return js_eval_error("allocation failed");
+        }
+        if (value->type == JS_VALUE_OBJECT && value->as.object)
+        {
+            for (js_property_t *prop = value->as.object->properties; prop; prop = prop->next)
+            {
+                if (!prop->name || js_name_list_contains(exclude, exclude_count, prop->name))
+                {
+                    continue;
+                }
+                char *err = NULL;
+                if (!js_binding_add_object_prop(rt, &rest_obj, prop->name, &prop->value, &err))
+                {
+                    js_name_list_destroy(exclude, exclude_count);
+                    js_value_destroy(&rest_obj);
+                    js_eval_result_t res = js_eval_error(err ? err : "property set failed");
+                    free(err);
+                    return res;
+                }
+            }
+        }
+        else if (value->type == JS_VALUE_ARRAY && value->as.array)
+        {
+            for (size_t i = 0; i < value->as.array->length; ++i)
+            {
+                char key[32];
+                int len = snprintf(key, sizeof(key), "%zu", i);
+                if (len < 0 || (size_t)len >= sizeof(key))
+                {
+                    continue;
+                }
+                if (js_name_list_contains(exclude, exclude_count, key))
+                {
+                    continue;
+                }
+                js_value_t item = js_value_make_undefined_internal();
+                if (!js_array_get(value->as.array, i, &item))
+                {
+                    js_name_list_destroy(exclude, exclude_count);
+                    js_value_destroy(&rest_obj);
+                    return js_eval_error("allocation failed");
+                }
+                char *err = NULL;
+                if (!js_binding_add_object_prop(rt, &rest_obj, key, &item, &err))
+                {
+                    js_value_destroy(&item);
+                    js_name_list_destroy(exclude, exclude_count);
+                    js_value_destroy(&rest_obj);
+                    js_eval_result_t res = js_eval_error(err ? err : "property set failed");
+                    free(err);
+                    return res;
+                }
+                js_value_destroy(&item);
+            }
+            for (js_property_t *prop = value->as.array->properties; prop; prop = prop->next)
+            {
+                if (!prop->name || js_name_list_contains(exclude, exclude_count, prop->name))
+                {
+                    continue;
+                }
+                char *err = NULL;
+                if (!js_binding_add_object_prop(rt, &rest_obj, prop->name, &prop->value, &err))
+                {
+                    js_name_list_destroy(exclude, exclude_count);
+                    js_value_destroy(&rest_obj);
+                    js_eval_result_t res = js_eval_error(err ? err : "property set failed");
+                    free(err);
+                    return res;
+                }
+            }
+        }
+        else if (value->type == JS_VALUE_STRING)
+        {
+            for (size_t i = 0; i < value->as.string.len; ++i)
+            {
+                char key[32];
+                int len = snprintf(key, sizeof(key), "%zu", i);
+                if (len < 0 || (size_t)len >= sizeof(key))
+                {
+                    continue;
+                }
+                if (js_name_list_contains(exclude, exclude_count, key))
+                {
+                    continue;
+                }
+                js_value_t item = js_value_make_undefined_internal();
+                if (!js_make_single_char_string(&item, value->as.string.data[i]))
+                {
+                    js_name_list_destroy(exclude, exclude_count);
+                    js_value_destroy(&rest_obj);
+                    return js_eval_error("allocation failed");
+                }
+                char *err = NULL;
+                if (!js_binding_add_object_prop(rt, &rest_obj, key, &item, &err))
+                {
+                    js_value_destroy(&item);
+                    js_name_list_destroy(exclude, exclude_count);
+                    js_value_destroy(&rest_obj);
+                    js_eval_result_t res = js_eval_error(err ? err : "property set failed");
+                    free(err);
+                    return res;
+                }
+                js_value_destroy(&item);
+            }
+        }
+
+        js_binding_t rest_binding;
+        memset(&rest_binding, 0, sizeof(rest_binding));
+        rest_binding.type = JS_BINDING_IDENTIFIER;
+        rest_binding.as.ident.name = binding->as.object.rest_name;
+        js_eval_result_t bind_res =
+            js_binding_apply(rt, env, &rest_binding, &rest_obj, is_decl, kind, allow_redeclare);
+        js_value_destroy(&rest_obj);
+        if (!bind_res.ok)
+        {
+            js_name_list_destroy(exclude, exclude_count);
+            return bind_res;
+        }
+        js_value_destroy(&bind_res.value);
+    }
+
+    js_name_list_destroy(exclude, exclude_count);
+    return js_eval_ok(js_value_make_undefined_internal());
+}
+
+static js_eval_result_t js_binding_apply(js_runtime_t *rt,
+                                         js_env_t *env,
+                                         const js_binding_t *binding,
+                                         const js_value_t *value,
+                                         bool is_decl,
+                                         js_var_kind_t kind,
+                                         bool allow_redeclare)
+{
+    if (!binding)
+    {
+        return js_eval_ok(js_value_make_undefined_internal());
+    }
+    switch (binding->type)
+    {
+        case JS_BINDING_IDENTIFIER:
+            return js_binding_apply_identifier(env,
+                                               binding->as.ident.name,
+                                               value,
+                                               is_decl,
+                                               kind,
+                                               allow_redeclare);
+        case JS_BINDING_ARRAY:
+            return js_binding_apply_array(rt, env, binding, value, is_decl, kind, allow_redeclare);
+        case JS_BINDING_OBJECT:
+            return js_binding_apply_object(rt, env, binding, value, is_decl, kind, allow_redeclare);
+    }
+    return js_eval_ok(js_value_make_undefined_internal());
+}
+
+static js_eval_result_t js_assign_to_target(js_runtime_t *rt,
+                                            js_env_t *env,
+                                            const js_expr_t *target,
+                                            const js_value_t *value)
+{
+    if (!target || !env || !value)
+    {
+        return js_eval_error("invalid assignment");
+    }
+    if (target->type == JS_EXPR_IDENTIFIER)
+    {
+        if (!js_env_assign(env, target->as.ident.name, value))
+        {
+            return js_eval_error("assignment failed");
+        }
+        return js_eval_ok(js_value_make_undefined_internal());
+    }
+    if (target->type != JS_EXPR_MEMBER)
+    {
+        return js_eval_error("invalid assignment target");
+    }
+
+    js_member_access_t access;
+    js_eval_result_t access_res = js_eval_member_access(rt, env, &target->as.member, &access);
+    if (!access_res.ok)
+    {
+        return access_res;
+    }
+    js_value_destroy(&access_res.value);
+
+    if (access.is_length)
+    {
+        if (access.object.type != JS_VALUE_ARRAY)
+        {
+            js_member_access_release(&access);
+            return js_eval_error("invalid assignment");
+        }
+        size_t new_length = 0;
+        if (!js_value_to_array_length(value, &new_length))
+        {
+            js_member_access_release(&access);
+            return js_eval_error("RangeError: invalid array length");
+        }
+        if (!js_array_set_length(access.object.as.array, new_length))
+        {
+            js_member_access_release(&access);
+            return js_eval_error("allocation failed");
+        }
+        js_member_access_release(&access);
+        return js_eval_ok(js_value_make_undefined_internal());
+    }
+
+    if (access.object.type == JS_VALUE_ARRAY)
+    {
+        if (access.has_index)
+        {
+            if (!js_array_set(access.object.as.array, access.index, value))
+            {
+                js_member_access_release(&access);
+                return js_eval_error("assignment failed");
+            }
+        }
+        else if (access.property)
+        {
+            if (!js_array_set_property(access.object.as.array, access.property, value))
+            {
+                js_member_access_release(&access);
+                return js_eval_error("assignment failed");
+            }
+        }
+        else
+        {
+            js_member_access_release(&access);
+            return js_eval_error("invalid assignment");
+        }
+    }
+    else if (access.object.type == JS_VALUE_OBJECT)
+    {
+        char *err = NULL;
+        bool ok = js_object_set_property(rt, access.object.as.object, access.property, value, &err);
+        if (!ok)
+        {
+            js_member_access_release(&access);
+            if (err)
+            {
+                js_eval_result_t res = js_eval_error(err);
+                free(err);
+                return res;
+            }
+            return js_eval_error("assignment failed");
+        }
+    }
+    else
+    {
+        js_member_access_release(&access);
+        return js_eval_error("invalid assignment");
+    }
+
+    js_member_access_release(&access);
+    return js_eval_ok(js_value_make_undefined_internal());
+}
+
+static js_eval_result_t js_for_in_fail(js_value_t *keys,
+                                       size_t key_count,
+                                       js_value_t *iterable,
+                                       const char *message)
+{
+    if (keys)
+    {
+        for (size_t i = 0; i < key_count; ++i)
+        {
+            js_value_destroy(&keys[i]);
+        }
+        free(keys);
+    }
+    if (iterable)
+    {
+        js_value_destroy(iterable);
+    }
+    return js_eval_error(message);
+}
+
 static const js_function_decl_t *js_function_def(const js_function_t *fn)
 {
     if (!fn)
@@ -963,6 +1915,22 @@ static js_eval_result_t js_eval_call_function(js_runtime_t *rt, js_function_t *f
     {
         return js_eval_error("allocation failed");
     }
+    js_array_t *yield_array = NULL;
+    js_array_t *prev_yield = NULL;
+    if (def->is_generator)
+    {
+        yield_array = js_array_create();
+        if (!yield_array)
+        {
+            js_env_release(call_env);
+            return js_eval_error("allocation failed");
+        }
+        if (rt)
+        {
+            prev_yield = rt->yield_array;
+            rt->yield_array = yield_array;
+        }
+    }
     if (fn->is_expr && def->name)
     {
         js_value_t self_value;
@@ -971,26 +1939,135 @@ static js_eval_result_t js_eval_call_function(js_runtime_t *rt, js_function_t *f
         self_value.as.function = fn;
         if (!js_env_define_local(call_env, def->name, &self_value, true, false))
         {
+            if (def->is_generator && rt)
+            {
+                rt->yield_array = prev_yield;
+            }
+            if (def->is_generator)
+            {
+                js_array_release(yield_array);
+            }
             js_env_release(call_env);
             return js_eval_error("failed to bind function name");
         }
     }
     for (size_t i = 0; i < def->param_count; ++i)
     {
+        const js_param_t *param = &def->params[i];
         js_value_t value = js_value_make_undefined_internal();
-        if (i < argc)
+        bool value_owned = false;
+        if (param->is_rest)
         {
-            value = args[i];
+            if (!js_value_make_array(&value))
+            {
+                if (def->is_generator && rt)
+                {
+                    rt->yield_array = prev_yield;
+                }
+                if (def->is_generator)
+                {
+                    js_array_release(yield_array);
+                }
+                js_env_release(call_env);
+                return js_eval_error("allocation failed");
+            }
+            value_owned = true;
+            for (size_t j = i; j < argc; ++j)
+            {
+                if (!js_value_array_push(&value, &args[j]))
+                {
+                    js_value_destroy(&value);
+                    if (def->is_generator && rt)
+                    {
+                        rt->yield_array = prev_yield;
+                    }
+                    if (def->is_generator)
+                    {
+                        js_array_release(yield_array);
+                    }
+                    js_env_release(call_env);
+                    return js_eval_error("allocation failed");
+                }
+            }
         }
-        if (!js_env_define_local(call_env, def->params[i], &value, false, true))
+        else if (i < argc)
         {
+            if (!js_value_copy(&value, &args[i]))
+            {
+                if (def->is_generator && rt)
+                {
+                    rt->yield_array = prev_yield;
+                }
+                if (def->is_generator)
+                {
+                    js_array_release(yield_array);
+                }
+                js_env_release(call_env);
+                return js_eval_error("allocation failed");
+            }
+            value_owned = true;
+        }
+
+        if (param->init && value.type == JS_VALUE_UNDEFINED)
+        {
+            if (value_owned)
+            {
+                js_value_destroy(&value);
+            }
+            js_eval_result_t init_res = js_eval_expr(rt, call_env, param->init);
+            if (!init_res.ok)
+            {
+                if (def->is_generator && rt)
+                {
+                    rt->yield_array = prev_yield;
+                }
+                if (def->is_generator)
+                {
+                    js_array_release(yield_array);
+                }
+                js_env_release(call_env);
+                return init_res;
+            }
+            value = init_res.value;
+            value_owned = true;
+        }
+
+        js_eval_result_t bind_res =
+            js_binding_apply(rt, call_env, param->binding, &value, true, JS_VAR_LET, true);
+        if (value_owned)
+        {
+            js_value_destroy(&value);
+        }
+        if (!bind_res.ok)
+        {
+            if (def->is_generator && rt)
+            {
+                rt->yield_array = prev_yield;
+            }
+            if (def->is_generator)
+            {
+                js_array_release(yield_array);
+            }
             js_env_release(call_env);
-            return js_eval_error("failed to bind parameter");
+            return bind_res;
+        }
+        js_value_destroy(&bind_res.value);
+        if (param->is_rest)
+        {
+            break;
         }
     }
     js_value_t args_array;
     if (!js_value_make_array(&args_array))
     {
+        if (def->is_generator && rt)
+        {
+            rt->yield_array = prev_yield;
+        }
+        if (def->is_generator)
+        {
+            js_array_release(yield_array);
+        }
         js_env_release(call_env);
         return js_eval_error("allocation failed");
     }
@@ -999,6 +2076,14 @@ static js_eval_result_t js_eval_call_function(js_runtime_t *rt, js_function_t *f
         if (!js_value_array_set(&args_array, i, &args[i]))
         {
             js_value_destroy(&args_array);
+            if (def->is_generator && rt)
+            {
+                rt->yield_array = prev_yield;
+            }
+            if (def->is_generator)
+            {
+                js_array_release(yield_array);
+            }
             js_env_release(call_env);
             return js_eval_error("allocation failed");
         }
@@ -1006,17 +2091,52 @@ static js_eval_result_t js_eval_call_function(js_runtime_t *rt, js_function_t *f
     if (!js_env_define_local(call_env, "arguments", &args_array, false, true))
     {
         js_value_destroy(&args_array);
+        if (def->is_generator && rt)
+        {
+            rt->yield_array = prev_yield;
+        }
+        if (def->is_generator)
+        {
+            js_array_release(yield_array);
+        }
         js_env_release(call_env);
         return js_eval_error("failed to bind arguments");
     }
     js_value_destroy(&args_array);
     if (!js_hoist_vars(call_env, def->body.stmts, def->body.count))
     {
+        if (def->is_generator && rt)
+        {
+            rt->yield_array = prev_yield;
+        }
+        if (def->is_generator)
+        {
+            js_array_release(yield_array);
+        }
         js_env_release(call_env);
         return js_eval_error("failed to hoist vars");
     }
     js_eval_result_t res = js_eval_statements(rt, call_env, def->body.stmts, def->body.count);
+    if (def->is_generator && rt)
+    {
+        rt->yield_array = prev_yield;
+    }
     js_env_release(call_env);
+    if (def->is_generator)
+    {
+        if (!res.ok)
+        {
+            js_array_release(yield_array);
+            return res;
+        }
+        js_value_destroy(&res.value);
+        res.control = JS_CTRL_NONE;
+        js_value_t out;
+        memset(&out, 0, sizeof(out));
+        out.type = JS_VALUE_ARRAY;
+        out.as.array = yield_array;
+        return js_eval_ok(out);
+    }
     if (res.control == JS_CTRL_RETURN)
     {
         res.control = JS_CTRL_NONE;
@@ -1036,7 +2156,20 @@ static js_eval_result_t js_eval_call_function(js_runtime_t *rt, js_function_t *f
 static size_t js_function_length(const js_function_t *fn)
 {
     const js_function_decl_t *def = js_function_def(fn);
-    return def ? def->param_count : 0;
+    if (!def)
+    {
+        return 0;
+    }
+    size_t count = 0;
+    for (size_t i = 0; i < def->param_count; ++i)
+    {
+        if (def->params[i].is_rest || def->params[i].init)
+        {
+            break;
+        }
+        count++;
+    }
+    return count;
 }
 
 static const char *js_function_name(const js_function_t *fn)
@@ -1981,24 +3114,28 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     js_value_destroy(&obj_value);
                     return item;
                 }
-                char *err = NULL;
-                bool ok = js_object_set_property(rt,
-                                                 obj_value.as.object,
-                                                 prop_name,
-                                                 &item.value,
-                                                 &err);
+                bool ok = false;
+                if (expr->as.object.props[i].is_getter || expr->as.object.props[i].is_setter)
+                {
+                    const char *prefix = expr->as.object.props[i].is_getter ? js_accessor_get_prefix
+                                                                            : js_accessor_set_prefix;
+                    char *slot_name = js_accessor_slot_name(prefix, prop_name);
+                    if (slot_name)
+                    {
+                        ok = js_object_set_slot(obj_value.as.object, slot_name, &item.value);
+                        free(slot_name);
+                    }
+                }
+                else
+                {
+                    ok = js_object_set_slot(obj_value.as.object, prop_name, &item.value);
+                }
                 js_value_destroy(&item.value);
                 free(owned_name);
                 if (!ok)
                 {
                     js_value_destroy(&obj_value);
-                    if (err)
-                    {
-                        js_eval_result_t res = js_eval_error(err);
-                        free(err);
-                        return res;
-                    }
-                    return js_eval_error("property set failed");
+                    return js_eval_error("allocation failed");
                 }
             }
             return js_eval_ok(obj_value);
@@ -2315,7 +3452,8 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
         }
         case JS_EXPR_FUNCTION:
         {
-            js_function_t *fn = js_function_create(NULL, &expr->as.func, env, !expr->as.func.is_arrow);
+            bool constructible = (!expr->as.func.is_arrow && !expr->as.func.is_generator);
+            js_function_t *fn = js_function_create(NULL, &expr->as.func, env, constructible);
             if (!fn)
             {
                 return js_eval_error("allocation failed");
@@ -2341,6 +3479,29 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             }
             return js_eval_expr(rt, env, expr->as.ternary.else_expr);
         }
+        case JS_EXPR_YIELD:
+        {
+            if (!rt || !rt->yield_array)
+            {
+                return js_eval_error("invalid yield");
+            }
+            js_value_t value = js_value_make_undefined_internal();
+            if (expr->as.yield.value)
+            {
+                js_eval_result_t yielded = js_eval_expr(rt, env, expr->as.yield.value);
+                if (!yielded.ok)
+                {
+                    return yielded;
+                }
+                value = yielded.value;
+            }
+            if (!js_array_set(rt->yield_array, rt->yield_array->length, &value))
+            {
+                js_value_destroy(&value);
+                return js_eval_error("allocation failed");
+            }
+            return js_eval_ok(value);
+        }
     }
     return js_eval_error("unknown expression");
 }
@@ -2357,8 +3518,10 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
         {
             for (size_t i = 0; i < stmt->as.var.count; ++i)
             {
+                bool has_init = (stmt->as.var.bindings[i].init != NULL);
                 js_value_t value = js_value_make_undefined_internal();
-                if (stmt->as.var.bindings[i].init)
+                bool value_owned = false;
+                if (has_init)
                 {
                     js_eval_result_t init_res = js_eval_expr(rt, env, stmt->as.var.bindings[i].init);
                     if (!init_res.ok)
@@ -2366,35 +3529,57 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                         return init_res;
                     }
                     value = init_res.value;
+                    value_owned = true;
                 }
+
                 if (stmt->as.var.kind == JS_VAR_VAR)
                 {
-                    js_env_t *var_env = js_env_find_var_scope(env);
-                    js_value_t undef = js_value_make_undefined_internal();
-                    if (!js_env_define_if_absent(var_env, stmt->as.var.bindings[i].name, &undef, false))
+                    if (!has_init && stmt->as.var.bindings[i].binding &&
+                        stmt->as.var.bindings[i].binding->type == JS_BINDING_IDENTIFIER)
                     {
-                        js_value_destroy(&value);
-                        return js_eval_error("failed to define variable");
-                    }
-                    if (stmt->as.var.bindings[i].init)
-                    {
-                        if (!js_env_assign(var_env, stmt->as.var.bindings[i].name, &value))
+                        if (value_owned)
                         {
                             js_value_destroy(&value);
-                            return js_eval_error("assignment failed");
                         }
+                        continue;
                     }
-                    js_value_destroy(&value);
+                    js_eval_result_t bind_res =
+                        js_binding_apply(rt,
+                                         env,
+                                         stmt->as.var.bindings[i].binding,
+                                         &value,
+                                         true,
+                                         JS_VAR_VAR,
+                                         false);
+                    if (value_owned)
+                    {
+                        js_value_destroy(&value);
+                    }
+                    if (!bind_res.ok)
+                    {
+                        return bind_res;
+                    }
+                    js_value_destroy(&bind_res.value);
                 }
                 else
                 {
-                    bool is_const = (stmt->as.var.kind == JS_VAR_CONST);
-                    bool ok = js_env_define_local(env, stmt->as.var.bindings[i].name, &value, is_const, false);
-                    js_value_destroy(&value);
-                    if (!ok)
+                    js_eval_result_t bind_res =
+                        js_binding_apply(rt,
+                                         env,
+                                         stmt->as.var.bindings[i].binding,
+                                         &value,
+                                         true,
+                                         stmt->as.var.kind,
+                                         false);
+                    if (value_owned)
                     {
-                        return js_eval_error("failed to define variable");
+                        js_value_destroy(&value);
                     }
+                    if (!bind_res.ok)
+                    {
+                        return bind_res;
+                    }
+                    js_value_destroy(&bind_res.value);
                 }
             }
             return js_eval_ok(js_value_make_undefined_internal());
@@ -2459,7 +3644,8 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
         }
         case JS_STMT_FUNCTION_DECL:
         {
-            js_function_t *fn = js_function_create(&stmt->as.func, NULL, env, true);
+            bool constructible = !stmt->as.func.is_generator;
+            js_function_t *fn = js_function_create(&stmt->as.func, NULL, env, constructible);
             if (!fn)
             {
                 return js_eval_error("allocation failed");
@@ -2646,6 +3832,349 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
             }
 
             js_env_release(loop_env);
+            return js_eval_ok(js_value_make_undefined_internal());
+        }
+        case JS_STMT_FOR_IN:
+        case JS_STMT_FOR_OF:
+        {
+            bool is_of = (stmt->type == JS_STMT_FOR_OF);
+            js_eval_result_t rhs = js_eval_expr(rt, env, stmt->as.for_inof.expr);
+            if (!rhs.ok)
+            {
+                return rhs;
+            }
+            js_value_t iterable = rhs.value;
+
+            if (is_of)
+            {
+                if (iterable.type != JS_VALUE_ARRAY && iterable.type != JS_VALUE_STRING)
+                {
+                    js_value_destroy(&iterable);
+                    return js_eval_error("TypeError: not iterable");
+                }
+                size_t length = (iterable.type == JS_VALUE_ARRAY && iterable.as.array)
+                                    ? iterable.as.array->length
+                                    : iterable.as.string.len;
+                for (size_t i = 0; i < length; ++i)
+                {
+                    js_value_t item = js_value_make_undefined_internal();
+                    if (iterable.type == JS_VALUE_ARRAY)
+                    {
+                        if (!js_array_get(iterable.as.array, i, &item))
+                        {
+                            js_value_destroy(&iterable);
+                            return js_eval_error("allocation failed");
+                        }
+                    }
+                    else
+                    {
+                        if (!js_make_single_char_string(&item, iterable.as.string.data[i]))
+                        {
+                            js_value_destroy(&iterable);
+                            return js_eval_error("allocation failed");
+                        }
+                    }
+
+                    js_env_t *iter_env = env;
+                    if (stmt->as.for_inof.is_decl && stmt->as.for_inof.kind != JS_VAR_VAR)
+                    {
+                        iter_env = js_env_create(env, false);
+                        if (!iter_env)
+                        {
+                            js_value_destroy(&item);
+                            js_value_destroy(&iterable);
+                            return js_eval_error("allocation failed");
+                        }
+                    }
+
+                    js_eval_result_t bind_res;
+                    if (stmt->as.for_inof.is_decl)
+                    {
+                        bind_res = js_binding_apply(rt,
+                                                    iter_env,
+                                                    stmt->as.for_inof.binding,
+                                                    &item,
+                                                    true,
+                                                    stmt->as.for_inof.kind,
+                                                    false);
+                    }
+                    else if (stmt->as.for_inof.binding)
+                    {
+                        bind_res = js_binding_apply(rt,
+                                                    iter_env,
+                                                    stmt->as.for_inof.binding,
+                                                    &item,
+                                                    false,
+                                                    stmt->as.for_inof.kind,
+                                                    false);
+                    }
+                    else
+                    {
+                        bind_res = js_assign_to_target(rt, iter_env, stmt->as.for_inof.target, &item);
+                    }
+                    js_value_destroy(&item);
+                    if (!bind_res.ok)
+                    {
+                        if (iter_env != env)
+                        {
+                            js_env_release(iter_env);
+                        }
+                        js_value_destroy(&iterable);
+                        return bind_res;
+                    }
+                    js_value_destroy(&bind_res.value);
+
+                    js_eval_result_t body = js_eval_statement(rt, iter_env, stmt->as.for_inof.body);
+                    if (iter_env != env)
+                    {
+                        js_env_release(iter_env);
+                    }
+                    if (!body.ok)
+                    {
+                        js_value_destroy(&iterable);
+                        return body;
+                    }
+                    if (body.control == JS_CTRL_RETURN)
+                    {
+                        js_value_destroy(&iterable);
+                        return body;
+                    }
+                    if (body.control == JS_CTRL_BREAK)
+                    {
+                        js_value_destroy(&body.value);
+                        break;
+                    }
+                    if (body.control == JS_CTRL_CONTINUE)
+                    {
+                        js_value_destroy(&body.value);
+                        continue;
+                    }
+                    js_value_destroy(&body.value);
+                }
+                js_value_destroy(&iterable);
+                return js_eval_ok(js_value_make_undefined_internal());
+            }
+
+            if (iterable.type == JS_VALUE_UNDEFINED || iterable.type == JS_VALUE_NULL)
+            {
+                js_value_destroy(&iterable);
+                return js_eval_error("TypeError: cannot convert object to primitive");
+            }
+
+            js_value_t *keys = NULL;
+            size_t key_count = 0;
+            size_t key_cap = 0;
+            if (iterable.type == JS_VALUE_ARRAY && iterable.as.array)
+            {
+                for (size_t i = 0; i < iterable.as.array->length; ++i)
+                {
+                    char key[32];
+                    int len = snprintf(key, sizeof(key), "%zu", i);
+                    if (len < 0 || (size_t)len >= sizeof(key))
+                    {
+                        continue;
+                    }
+                    if (key_count + 1 > key_cap)
+                    {
+                        size_t new_cap = key_cap ? key_cap * 2u : 8u;
+                        js_value_t *next = (js_value_t *)realloc(keys, new_cap * sizeof(*next));
+                        if (!next)
+                        {
+                            return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
+                        }
+                        keys = next;
+                        key_cap = new_cap;
+                    }
+                    if (!js_value_make_string(&keys[key_count], key, (size_t)len))
+                    {
+                        return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
+                    }
+                    key_count++;
+                }
+                for (js_property_t *prop = iterable.as.array->properties; prop; prop = prop->next)
+                {
+                    if (!prop->name)
+                    {
+                        continue;
+                    }
+                    size_t len = strlen(prop->name);
+                    if (key_count + 1 > key_cap)
+                    {
+                        size_t new_cap = key_cap ? key_cap * 2u : 8u;
+                        js_value_t *next = (js_value_t *)realloc(keys, new_cap * sizeof(*next));
+                        if (!next)
+                        {
+                            return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
+                        }
+                        keys = next;
+                        key_cap = new_cap;
+                    }
+                    if (!js_value_make_string(&keys[key_count], prop->name, len))
+                    {
+                        return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
+                    }
+                    key_count++;
+                }
+            }
+            else if (iterable.type == JS_VALUE_OBJECT && iterable.as.object)
+            {
+                for (js_property_t *prop = iterable.as.object->properties; prop; prop = prop->next)
+                {
+                    if (!prop->name)
+                    {
+                        continue;
+                    }
+                    size_t len = strlen(prop->name);
+                    if (key_count + 1 > key_cap)
+                    {
+                        size_t new_cap = key_cap ? key_cap * 2u : 8u;
+                        js_value_t *next = (js_value_t *)realloc(keys, new_cap * sizeof(*next));
+                        if (!next)
+                        {
+                            return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
+                        }
+                        keys = next;
+                        key_cap = new_cap;
+                    }
+                    if (!js_value_make_string(&keys[key_count], prop->name, len))
+                    {
+                        return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
+                    }
+                    key_count++;
+                }
+            }
+            else if (iterable.type == JS_VALUE_STRING)
+            {
+                for (size_t i = 0; i < iterable.as.string.len; ++i)
+                {
+                    char key[32];
+                    int len = snprintf(key, sizeof(key), "%zu", i);
+                    if (len < 0 || (size_t)len >= sizeof(key))
+                    {
+                        continue;
+                    }
+                    if (key_count + 1 > key_cap)
+                    {
+                        size_t new_cap = key_cap ? key_cap * 2u : 8u;
+                        js_value_t *next = (js_value_t *)realloc(keys, new_cap * sizeof(*next));
+                        if (!next)
+                        {
+                            return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
+                        }
+                        keys = next;
+                        key_cap = new_cap;
+                    }
+                    if (!js_value_make_string(&keys[key_count], key, (size_t)len))
+                    {
+                        return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
+                    }
+                    key_count++;
+                }
+            }
+
+            for (size_t i = 0; i < key_count; ++i)
+            {
+                js_env_t *iter_env = env;
+                if (stmt->as.for_inof.is_decl && stmt->as.for_inof.kind != JS_VAR_VAR)
+                {
+                    iter_env = js_env_create(env, false);
+                    if (!iter_env)
+                    {
+                        for (size_t k = 0; k < key_count; ++k)
+                        {
+                            js_value_destroy(&keys[k]);
+                        }
+                        free(keys);
+                        js_value_destroy(&iterable);
+                        return js_eval_error("allocation failed");
+                    }
+                }
+
+                js_eval_result_t bind_res;
+                if (stmt->as.for_inof.is_decl)
+                {
+                    bind_res = js_binding_apply(rt,
+                                                iter_env,
+                                                stmt->as.for_inof.binding,
+                                                &keys[i],
+                                                true,
+                                                stmt->as.for_inof.kind,
+                                                false);
+                }
+                else if (stmt->as.for_inof.binding)
+                {
+                    bind_res = js_binding_apply(rt,
+                                                iter_env,
+                                                stmt->as.for_inof.binding,
+                                                &keys[i],
+                                                false,
+                                                stmt->as.for_inof.kind,
+                                                false);
+                }
+                else
+                {
+                    bind_res = js_assign_to_target(rt, iter_env, stmt->as.for_inof.target, &keys[i]);
+                }
+                if (!bind_res.ok)
+                {
+                    if (iter_env != env)
+                    {
+                        js_env_release(iter_env);
+                    }
+                    for (size_t k = 0; k < key_count; ++k)
+                    {
+                        js_value_destroy(&keys[k]);
+                    }
+                    free(keys);
+                    js_value_destroy(&iterable);
+                    return bind_res;
+                }
+                js_value_destroy(&bind_res.value);
+
+                js_eval_result_t body = js_eval_statement(rt, iter_env, stmt->as.for_inof.body);
+                if (iter_env != env)
+                {
+                    js_env_release(iter_env);
+                }
+                if (!body.ok)
+                {
+                    for (size_t k = 0; k < key_count; ++k)
+                    {
+                        js_value_destroy(&keys[k]);
+                    }
+                    free(keys);
+                    js_value_destroy(&iterable);
+                    return body;
+                }
+                if (body.control == JS_CTRL_RETURN)
+                {
+                    for (size_t k = 0; k < key_count; ++k)
+                    {
+                        js_value_destroy(&keys[k]);
+                    }
+                    free(keys);
+                    js_value_destroy(&iterable);
+                    return body;
+                }
+                if (body.control == JS_CTRL_BREAK)
+                {
+                    js_value_destroy(&body.value);
+                    break;
+                }
+                if (body.control == JS_CTRL_CONTINUE)
+                {
+                    js_value_destroy(&body.value);
+                    continue;
+                }
+                js_value_destroy(&body.value);
+            }
+
+            for (size_t k = 0; k < key_count; ++k)
+            {
+                js_value_destroy(&keys[k]);
+            }
+            free(keys);
+            js_value_destroy(&iterable);
             return js_eval_ok(js_value_make_undefined_internal());
         }
         case JS_STMT_SWITCH:

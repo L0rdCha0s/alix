@@ -108,6 +108,8 @@ typedef enum
     JS_STMT_WHILE,
     JS_STMT_DO_WHILE,
     JS_STMT_FOR,
+    JS_STMT_FOR_IN,
+    JS_STMT_FOR_OF,
     JS_STMT_SWITCH,
     JS_STMT_TRY,
     JS_STMT_BREAK,
@@ -131,7 +133,8 @@ typedef enum
     JS_EXPR_OBJECT,
     JS_EXPR_MEMBER,
     JS_EXPR_REGEXP_SUBCLASS,
-    JS_EXPR_FUNCTION
+    JS_EXPR_FUNCTION,
+    JS_EXPR_YIELD
 } js_expr_type_t;
 
 typedef enum
@@ -179,9 +182,57 @@ typedef enum
 typedef struct js_expr js_expr_t;
 typedef struct js_stmt js_stmt_t;
 
+typedef enum
+{
+    JS_BINDING_IDENTIFIER = 0,
+    JS_BINDING_ARRAY,
+    JS_BINDING_OBJECT
+} js_binding_type_t;
+
+typedef struct js_binding js_binding_t;
+
 typedef struct
 {
+    js_binding_t *binding;
+    js_expr_t *init;
+} js_binding_element_t;
+
+typedef struct
+{
+    bool computed;
     char *name;
+    js_expr_t *name_expr;
+    js_binding_t *binding;
+    js_expr_t *init;
+} js_binding_property_t;
+
+struct js_binding
+{
+    js_binding_type_t type;
+    union
+    {
+        struct
+        {
+            char *name;
+        } ident;
+        struct
+        {
+            js_binding_element_t *elements;
+            size_t count;
+            js_binding_t *rest;
+        } array;
+        struct
+        {
+            js_binding_property_t *props;
+            size_t count;
+            char *rest_name;
+        } object;
+    } as;
+};
+
+typedef struct
+{
+    js_binding_t *binding;
     js_expr_t *init;
 } js_var_binding_t;
 
@@ -196,6 +247,13 @@ typedef struct
 {
     js_expr_t *expr;
 } js_expr_stmt_t;
+
+typedef struct
+{
+    js_binding_t *binding;
+    js_expr_t *init;
+    bool is_rest;
+} js_param_t;
 
 typedef struct
 {
@@ -216,18 +274,21 @@ typedef struct
 typedef struct
 {
     char *name;
-    char **params;
+    js_param_t *params;
     size_t param_count;
     js_block_t body;
+    bool is_arrow;
+    bool is_generator;
 } js_function_decl_t;
 
 typedef struct
 {
     char *name;
-    char **params;
+    js_param_t *params;
     size_t param_count;
     js_block_t body;
     bool is_arrow;
+    bool is_generator;
 } js_function_expr_t;
 
 typedef struct
@@ -250,6 +311,16 @@ typedef struct
     js_expr_t *post;
     js_stmt_t *body;
 } js_for_stmt_t;
+
+typedef struct
+{
+    bool is_decl;
+    js_var_kind_t kind;
+    js_binding_t *binding;
+    js_expr_t *target;
+    js_expr_t *expr;
+    js_stmt_t *body;
+} js_for_inof_stmt_t;
 
 typedef struct
 {
@@ -293,6 +364,7 @@ struct js_stmt
         js_if_stmt_t if_stmt;
         js_while_stmt_t while_stmt;
         js_for_stmt_t for_stmt;
+        js_for_inof_stmt_t for_inof;
         js_do_while_stmt_t do_while_stmt;
         js_switch_stmt_t switch_stmt;
         js_try_stmt_t try_stmt;
@@ -359,6 +431,8 @@ typedef struct
 typedef struct
 {
     bool computed;
+    bool is_getter;
+    bool is_setter;
     char *name;
     js_expr_t *name_expr;
     js_expr_t *value;
@@ -390,6 +464,11 @@ typedef struct
     int dummy;
 } js_regexp_subclass_expr_t;
 
+typedef struct
+{
+    js_expr_t *value;
+} js_yield_expr_t;
+
 struct js_expr
 {
     js_expr_type_t type;
@@ -409,6 +488,7 @@ struct js_expr
         js_member_expr_t member;
         js_regexp_subclass_expr_t regexp_subclass;
         js_function_expr_t func;
+        js_yield_expr_t yield;
     } as;
 };
 
