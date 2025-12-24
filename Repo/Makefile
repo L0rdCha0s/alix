@@ -1,7 +1,7 @@
 CC       := x86_64-elf-gcc
 LD       := x86_64-elf-ld
 OBJCOPY  := x86_64-elf-objcopy
-QEMU     := qemu-system-x86_64
+QEMU     := qemu-system-x86_64  -display cocoa,zoom-to-fit=on 
 HOST_CC  ?= cc
 
 SRC_DIR     := src

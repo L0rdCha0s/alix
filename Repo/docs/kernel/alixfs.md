@@ -18,7 +18,7 @@ AlixFS2 is intentionally small and pragmatic:
 Non-goals (current):
 
 - No journaling.
-- No permissions/ownership/ACLs.
+- No permissions or ACLs.
 - No timestamps.
 - No hardlinks.
 - No checksums or corruption hardening.
@@ -47,7 +47,7 @@ Defined in `src/kernel/alixfs.c` as a packed struct.
 Key fields:
 
 - `magic[8]`: `"ALIXFS2"`
-- `version`: currently `2`
+- `version`: currently `3` (version `2` is accepted for legacy mounts without ownership metadata)
 - `node_capacity`: fixed number of chunk table entries (default `4096` at format time)
 - `node_count`: count of allocated node IDs (best-effort bookkeeping)
 - `root_id`: chunk table ID for the mount root
@@ -84,6 +84,8 @@ Each allocated node ID points to a payload chunk containing:
    - `type`: VFS node type (`VFS_NODE_DIR`, `VFS_NODE_FILE`, `VFS_NODE_SYMLINK`, …)
    - `name_len`: bytes of the name (no implicit NUL)
    - `data_len`: bytes of file data / symlink target
+   - `uid`: owner user ID (version `3+`)
+   - `gid`: owner group ID (version `3+`)
 2. `name[name_len]`
 3. `data[data_len]` (only meaningful for file/symlink)
 
@@ -167,7 +169,7 @@ Supported:
 Current limitations (important for expectations):
 
 - Fixed maximum node count per filesystem (`node_capacity`)
-- No metadata beyond name/type/parent + file bytes
+- No metadata beyond name/type/parent + uid/gid + file bytes
 - No integrity features (checksums, journal, fsck)
 - Not hardened against media corruption (assumes trusted storage and relatively clean shutdown)
 
@@ -176,4 +178,3 @@ Current limitations (important for expectations):
 - Format a device: shell `mkfs /dev/<disk>`
 - Mount a device: shell `mount /dev/<disk> /mnt`
 - List mounts and dirty state: shell `mount` (no args) uses `vfs_snapshot_mounts`
-

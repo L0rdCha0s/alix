@@ -31,7 +31,8 @@ static const tzset_option_t g_tz_options[] = {
     { "UTC+5:30", 330, "India Standard Time", false, 330, {0}, {0} },
     { "UTC+8",  480, "China Standard Time", false, 480, {0}, {0} },
     { "UTC+9",  540, "Japan Standard Time", false, 540, {0}, {0} },
-    { "UTC+10", 600, "Australian Eastern Time", false, 600, {0}, {0} }
+    { "UTC+10", 600, "Australian Eastern Time", false, 600, {0}, {0} },
+    { "UTC+11", 660, "Australian Eastern Time (AEDT)", false, 660, {0}, {0} }
 };
 
 static const char *tzset_skip_spaces(const char *text)

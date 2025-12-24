@@ -174,6 +174,7 @@ static void vfs_unlock_node_data(vfs_node_t *node);
 static void vfs_free_subtree(vfs_node_t *node);
 static bool vfs_node_allows_mutation(const vfs_node_t *node);
 static void vfs_inherit_mutability(vfs_node_t *parent, vfs_node_t *child);
+static void vfs_inherit_ownership(vfs_node_t *parent, vfs_node_t *child);
 static void vfs_set_subtree_mutable_locked(vfs_node_t *node, bool allow);
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all);
@@ -588,6 +589,8 @@ static vfs_node_t *vfs_alloc_node(vfs_node_type_t type)
         n->type = type;
         n->disk_id = UINT32_MAX;
         n->allow_mutation = true;
+        n->uid = VFS_UID_ROOT;
+        n->gid = VFS_GID_ROOT;
         n->refcount = 1;
         n->pending_dirty_bytes = 0;
         spinlock_init(&n->data_lock);
@@ -626,6 +629,19 @@ static void vfs_inherit_mutability(vfs_node_t *parent, vfs_node_t *child)
     }
 }
 
+static void vfs_inherit_ownership(vfs_node_t *parent, vfs_node_t *child)
+{
+    if (!child)
+    {
+        return;
+    }
+    if (parent)
+    {
+        child->uid = parent->uid;
+        child->gid = parent->gid;
+    }
+}
+
 static void vfs_set_subtree_mutable_locked(vfs_node_t *node, bool allow)
 {
     if (!node)
@@ -645,6 +661,7 @@ static void vfs_attach_child(vfs_node_t *parent, vfs_node_t *child)
     child->parent = parent;
     child->mount = parent->mount;
     vfs_inherit_mutability(parent, child);
+    vfs_inherit_ownership(parent, child);
     child->next_sibling = parent->first_child;
     parent->first_child = child;
 }
@@ -655,6 +672,7 @@ static void vfs_attach_child_tail(vfs_node_t *parent, vfs_node_t *child)
     child->parent = parent;
     child->mount = parent->mount;
     vfs_inherit_mutability(parent, child);
+    vfs_inherit_ownership(parent, child);
     child->next_sibling = NULL;
     if (!parent->first_child)
     {
@@ -2015,6 +2033,54 @@ vfs_node_t *vfs_first_child(vfs_node_t *dir)
 vfs_node_t *vfs_next_sibling(vfs_node_t *node)
 {
     return node ? node->next_sibling : NULL;
+}
+
+void vfs_node_get_owner(const vfs_node_t *node, uint32_t *uid_out, uint32_t *gid_out)
+{
+    if (!node)
+    {
+        if (uid_out)
+        {
+            *uid_out = VFS_UID_ROOT;
+        }
+        if (gid_out)
+        {
+            *gid_out = VFS_GID_ROOT;
+        }
+        return;
+    }
+    vfs_node_t *mutable_node = (vfs_node_t *)node;
+    vfs_lock_node_data(mutable_node);
+    if (uid_out)
+    {
+        *uid_out = mutable_node->uid;
+    }
+    if (gid_out)
+    {
+        *gid_out = mutable_node->gid;
+    }
+    vfs_unlock_node_data(mutable_node);
+}
+
+void vfs_node_set_owner(vfs_node_t *node, uint32_t uid, uint32_t gid)
+{
+    if (!node)
+    {
+        return;
+    }
+    bool changed = false;
+    vfs_lock_node_data(node);
+    if (node->uid != uid || node->gid != gid)
+    {
+        node->uid = uid;
+        node->gid = gid;
+        changed = true;
+    }
+    vfs_unlock_node_data(node);
+    if (changed)
+    {
+        vfs_mark_meta_dirty(node);
+    }
 }
 
 /*

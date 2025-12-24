@@ -6,10 +6,10 @@
 typedef uint32_t video_color_t;
 
 #ifndef VIDEO_WIDTH
-#define VIDEO_WIDTH  1280
+#define VIDEO_WIDTH  1920
 #endif
 #ifndef VIDEO_HEIGHT
-#define VIDEO_HEIGHT 1024
+#define VIDEO_HEIGHT 1080
 #endif
 
 struct atk_widget;

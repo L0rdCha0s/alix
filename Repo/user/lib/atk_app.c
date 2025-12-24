@@ -26,6 +26,9 @@
 #ifndef ATK_MAIN_DEFAULT_TICK_MS
 #define ATK_MAIN_DEFAULT_TICK_MS 16u
 #endif
+#ifndef ATK_MAIN_TRACE
+#define ATK_MAIN_TRACE 0
+#endif
 
 typedef struct
 {
@@ -76,6 +79,92 @@ static struct
     atk_main_resize_slot_t resize_handlers[ATK_MAIN_MAX_RESIZE_HANDLERS];
     atk_main_close_slot_t close_handlers[ATK_MAIN_MAX_CLOSE_HANDLERS];
 } g_atk_main = { 0 };
+
+static inline atk_user_window_t *atk_main_top_window(void);
+static bool atk_main_state_dirty(void);
+
+#if ATK_MAIN_TRACE
+static bool atk_main_trace_should_log(const user_atk_event_t *event)
+{
+    if (!event)
+    {
+        return false;
+    }
+    switch (event->type)
+    {
+        case USER_ATK_EVENT_MOUSE:
+            return (event->flags & (USER_ATK_MOUSE_FLAG_PRESS | USER_ATK_MOUSE_FLAG_RELEASE)) != 0;
+        case USER_ATK_EVENT_KEY:
+        case USER_ATK_EVENT_RESIZE:
+        case USER_ATK_EVENT_CLOSE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void atk_main_trace_event(const user_atk_event_t *event, bool redraw)
+{
+    if (!atk_main_trace_should_log(event))
+    {
+        return;
+    }
+
+    atk_user_window_t *active = atk_main_top_window();
+    uint32_t handle = active ? active->handle : 0;
+    int dirty = atk_main_state_dirty() ? 1 : 0;
+    int stack_changed = g_atk_main.stack_changed ? 1 : 0;
+    int exit_requested = g_atk_main.exit_requested ? 1 : 0;
+
+    switch (event->type)
+    {
+        case USER_ATK_EVENT_MOUSE:
+            serial_printf("[atk_main] mouse handle=%u flags=0x%X x=%d y=%d dx=%d dy=%d redraw=%d dirty=%d stack=%d exit=%d",
+                          handle,
+                          event->flags,
+                          event->x,
+                          event->y,
+                          (int32_t)event->data0,
+                          (int32_t)event->data1,
+                          redraw ? 1 : 0,
+                          dirty,
+                          stack_changed,
+                          exit_requested);
+            break;
+        case USER_ATK_EVENT_KEY:
+            serial_printf("[atk_main] key handle=%u flags=0x%X ch=0x%02X sc=0x%X redraw=%d dirty=%d stack=%d exit=%d",
+                          handle,
+                          event->flags,
+                          event->data0 & 0xFFu,
+                          event->data1,
+                          redraw ? 1 : 0,
+                          dirty,
+                          stack_changed,
+                          exit_requested);
+            break;
+        case USER_ATK_EVENT_RESIZE:
+            serial_printf("[atk_main] resize handle=%u w=%u h=%u redraw=%d dirty=%d stack=%d exit=%d",
+                          handle,
+                          event->data0,
+                          event->data1,
+                          redraw ? 1 : 0,
+                          dirty,
+                          stack_changed,
+                          exit_requested);
+            break;
+        case USER_ATK_EVENT_CLOSE:
+            serial_printf("[atk_main] close handle=%u redraw=%d dirty=%d stack=%d exit=%d",
+                          handle,
+                          redraw ? 1 : 0,
+                          dirty,
+                          stack_changed,
+                          exit_requested);
+            break;
+        default:
+            break;
+    }
+}
+#endif
 
 static inline atk_user_window_t *atk_main_top_window(void)
 {
@@ -491,30 +580,35 @@ static bool atk_main_dispatch_event(const user_atk_event_t *event)
 
     const atk_app_event_handlers_t *handlers = g_atk_main.handlers;
     void *ctx = g_atk_main.handler_ctx;
+    bool redraw = false;
 
     switch (event->type)
     {
         case USER_ATK_EVENT_MOUSE:
             if (g_atk_main.legacy_input && handlers && handlers->on_mouse)
             {
-                return handlers->on_mouse(event, ctx);
+                redraw = handlers->on_mouse(event, ctx);
+                break;
             }
-            return atk_main_handle_default_mouse(event) | atk_main_fire_mouse_handlers(event);
+            redraw = atk_main_handle_default_mouse(event) | atk_main_fire_mouse_handlers(event);
+            break;
         case USER_ATK_EVENT_KEY:
             if (g_atk_main.legacy_input && handlers && handlers->on_key)
             {
-                return handlers->on_key(event, ctx);
+                redraw = handlers->on_key(event, ctx);
+                break;
             }
-            return atk_main_handle_default_key(event) | atk_main_fire_key_handlers(event);
+            redraw = atk_main_handle_default_key(event) | atk_main_fire_key_handlers(event);
+            break;
         case USER_ATK_EVENT_RESIZE:
         {
             bool handled = false;
-            bool redraw = false;
+            bool resize_redraw = false;
             bool registered = false;
             if (g_atk_main.legacy_input && handlers && handlers->on_resize)
             {
                 handled = true;
-                redraw |= handlers->on_resize((uint32_t)event->data0, (uint32_t)event->data1, ctx);
+                resize_redraw |= handlers->on_resize((uint32_t)event->data0, (uint32_t)event->data1, ctx);
             }
             for (int i = 0; i < ATK_MAIN_MAX_RESIZE_HANDLERS; ++i)
             {
@@ -524,12 +618,14 @@ static bool atk_main_dispatch_event(const user_atk_event_t *event)
                     break;
                 }
             }
-            redraw |= atk_main_fire_resize_handlers((uint32_t)event->data0, (uint32_t)event->data1);
+            resize_redraw |= atk_main_fire_resize_handlers((uint32_t)event->data0, (uint32_t)event->data1);
             if (!handled && !registered)
             {
-                return true;
+                redraw = true;
+                break;
             }
-            return redraw;
+            redraw = resize_redraw;
+            break;
         }
         case USER_ATK_EVENT_CLOSE:
             if (g_atk_main.legacy_input && handlers && handlers->on_close)
@@ -556,11 +652,15 @@ static bool atk_main_dispatch_event(const user_atk_event_t *event)
                     atk_main_handle_default_close();
                 }
             }
-            return false;
+            redraw = false;
+            break;
         default:
             break;
     }
-    return false;
+#if ATK_MAIN_TRACE
+    atk_main_trace_event(event, redraw);
+#endif
+    return redraw;
 }
 
 int atk_main(const atk_main_config_t *config)
@@ -599,6 +699,11 @@ int atk_main(const atk_main_config_t *config)
             tick_wait_ms = ATK_MAIN_DEFAULT_TICK_MS;
         }
     }
+    uint64_t next_tick_ms = 0;
+    if (tick_wait_ms > 0)
+    {
+        next_tick_ms = sys_time_millis() + (uint64_t)tick_wait_ms;
+    }
 
     if (!atk_main_push_window(config->window))
     {
@@ -614,23 +719,63 @@ int atk_main(const atk_main_config_t *config)
         }
 
         bool redraw = false;
-        bool had_event = false;
         g_atk_main.stack_changed = false;
 
         user_atk_event_t ev;
-        while (!g_atk_main.exit_requested && atk_user_poll_event(active, &ev))
+        bool got_event = false;
+
+        if (g_atk_main.tick)
         {
-            had_event = true;
-            redraw |= atk_main_dispatch_event(&ev);
-            if (g_atk_main.stack_changed)
+            uint64_t now_ms = sys_time_millis();
+            uint32_t wait_ms = 0;
+            if (now_ms < next_tick_ms)
+            {
+                uint64_t delta = next_tick_ms - now_ms;
+                wait_ms = delta > UINT32_MAX ? UINT32_MAX : (uint32_t)delta;
+            }
+            got_event = atk_user_wait_event_timeout(active, &ev, wait_ms);
+        }
+        else
+        {
+            got_event = atk_user_wait_event(active, &ev);
+            if (!got_event)
             {
                 break;
             }
         }
 
-        if (g_atk_main.exit_requested)
+        if (got_event)
         {
-            break;
+            redraw |= atk_main_dispatch_event(&ev);
+            if (g_atk_main.exit_requested)
+            {
+                break;
+            }
+            if (g_atk_main.stack_changed)
+            {
+                atk_user_window_t *cur = atk_main_top_window();
+                if (cur)
+                {
+                    atk_dirty_mark_all();
+                    atk_render();
+                    atk_user_present_force(cur);
+                }
+                continue;
+            }
+
+            while (!g_atk_main.exit_requested && atk_user_poll_event(active, &ev))
+            {
+                redraw |= atk_main_dispatch_event(&ev);
+                if (g_atk_main.stack_changed)
+                {
+                    break;
+                }
+            }
+
+            if (g_atk_main.exit_requested)
+            {
+                break;
+            }
         }
 
         if (g_atk_main.stack_changed)
@@ -647,7 +792,24 @@ int atk_main(const atk_main_config_t *config)
 
         if (g_atk_main.tick)
         {
-            redraw |= g_atk_main.tick(g_atk_main.tick_ctx);
+            uint64_t now_ms = sys_time_millis();
+            if (now_ms >= next_tick_ms)
+            {
+                redraw |= g_atk_main.tick(g_atk_main.tick_ctx);
+                next_tick_ms = now_ms + (uint64_t)tick_wait_ms;
+            }
+        }
+
+        if (g_atk_main.stack_changed)
+        {
+            atk_user_window_t *cur = atk_main_top_window();
+            if (cur)
+            {
+                atk_dirty_mark_all();
+                atk_render();
+                atk_user_present_force(cur);
+            }
+            continue;
         }
 
         if (redraw || atk_main_state_dirty())
@@ -660,14 +822,6 @@ int atk_main(const atk_main_config_t *config)
             else
             {
                 atk_user_present(active);
-            }
-        }
-        else if (!had_event)
-        {
-            uint32_t idle_sleep_ms = tick_wait_ms ? tick_wait_ms : 1u;
-            if (sys_sleep_ms(idle_sleep_ms) < 0)
-            {
-                sys_yield();
             }
         }
     }

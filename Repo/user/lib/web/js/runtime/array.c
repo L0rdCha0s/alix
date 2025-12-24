@@ -24,6 +24,20 @@ static js_property_t *js_array_find(js_array_t *array, const char *name)
     return NULL;
 }
 
+js_property_t *js_array_find_property(js_array_t *array, const char *name)
+{
+    return js_array_find(array, name);
+}
+
+bool js_array_has_property(js_array_t *array, const char *name)
+{
+    if (!array || !name)
+    {
+        return false;
+    }
+    return js_array_find(array, name) != NULL;
+}
+
 static bool js_array_index_key(size_t index, char *buf, size_t buf_len)
 {
     int len = snprintf(buf, buf_len, "%zu", index);
@@ -80,6 +94,8 @@ void js_array_release(js_array_t *array)
         js_property_t *next = prop->next;
         free(prop->name);
         js_value_destroy(&prop->value);
+        js_value_destroy(&prop->getter);
+        js_value_destroy(&prop->setter);
         free(prop);
         prop = next;
     }
@@ -197,11 +213,15 @@ bool js_array_get(const js_array_t *array, size_t index, js_value_t *out)
     return js_value_copy(out, &prop->value);
 }
 
-bool js_array_get_property(js_array_t *array, const char *name, js_value_t *out)
+bool js_array_get_property(js_runtime_t *rt, js_array_t *array, const char *name, js_value_t *out, char **error_message)
 {
     if (!out)
     {
         return false;
+    }
+    if (error_message)
+    {
+        *error_message = NULL;
     }
     if (!array || !name)
     {
@@ -211,6 +231,54 @@ bool js_array_get_property(js_array_t *array, const char *name, js_value_t *out)
     js_property_t *prop = js_array_find(array, name);
     if (!prop)
     {
+        js_object_t *proto = js_get_array_proto(rt);
+        if (proto)
+        {
+            js_value_t value = js_value_make_undefined_internal();
+            char *err = NULL;
+            if (!js_object_get_property(rt, proto, name, &value, &err))
+            {
+                if (error_message)
+                {
+                    *error_message = err ? err : js_strdup("property lookup failed");
+                }
+                else
+                {
+                    free(err);
+                }
+                return false;
+            }
+            free(err);
+            *out = value;
+            return true;
+        }
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (prop->is_accessor)
+    {
+        if (prop->getter.type == JS_VALUE_FUNCTION || prop->getter.type == JS_VALUE_NATIVE_FN)
+        {
+            js_value_t result = js_value_make_undefined_internal();
+            char *err = NULL;
+            bool ok = js_call_value(rt, &prop->getter, 0, NULL, &result, &err);
+            if (!ok)
+            {
+                if (error_message)
+                {
+                    *error_message = err ? err : js_strdup("getter failed");
+                }
+                else
+                {
+                    free(err);
+                }
+                js_value_destroy(&result);
+                return false;
+            }
+            free(err);
+            *out = result;
+            return true;
+        }
         *out = js_value_make_undefined_internal();
         return true;
     }
@@ -226,6 +294,15 @@ bool js_array_set_property(js_array_t *array, const char *name, const js_value_t
     js_property_t *prop = js_array_find(array, name);
     if (prop)
     {
+        if (prop->is_accessor)
+        {
+            js_value_destroy(&prop->getter);
+            js_value_destroy(&prop->setter);
+            prop->getter = js_value_make_undefined_internal();
+            prop->setter = js_value_make_undefined_internal();
+            prop->is_accessor = false;
+            prop->writable = true;
+        }
         js_value_destroy(&prop->value);
         return js_value_copy(&prop->value, value);
     }
@@ -240,6 +317,13 @@ bool js_array_set_property(js_array_t *array, const char *name, const js_value_t
         free(new_prop);
         return false;
     }
+    new_prop->value = js_value_make_undefined_internal();
+    new_prop->getter = js_value_make_undefined_internal();
+    new_prop->setter = js_value_make_undefined_internal();
+    new_prop->writable = true;
+    new_prop->enumerable = true;
+    new_prop->configurable = true;
+    new_prop->is_accessor = false;
     if (!js_value_copy(&new_prop->value, value))
     {
         free(new_prop->name);

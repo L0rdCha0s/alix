@@ -168,6 +168,17 @@ bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *args)
                     shell_output_write(out, " bytes");
                 }
             }
+            uint32_t uid = 0;
+            uint32_t gid = 0;
+            vfs_node_get_owner(child, &uid, &gid);
+            char uid_buf[16];
+            char gid_buf[16];
+            ls_write_number(uid_buf, sizeof(uid_buf), uid);
+            ls_write_number(gid_buf, sizeof(gid_buf), gid);
+            shell_output_write(out, "  ");
+            shell_output_write(out, uid_buf);
+            shell_output_write(out, ":");
+            shell_output_write(out, gid_buf);
         }
         shell_output_write(out, "\n");
     }

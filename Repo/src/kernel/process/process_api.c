@@ -670,6 +670,26 @@ uint64_t process_current_pid(void)
     return proc ? proc->pid : 0;
 }
 
+uint32_t process_get_uid(const process_t *process)
+{
+    return process ? process->uid : VFS_UID_ROOT;
+}
+
+uint32_t process_get_gid(const process_t *process)
+{
+    return process ? process->gid : VFS_GID_ROOT;
+}
+
+void process_set_identity(process_t *process, uint32_t uid, uint32_t gid)
+{
+    if (!process)
+    {
+        return;
+    }
+    process->uid = uid;
+    process->gid = gid;
+}
+
 vfs_node_t *process_current_cwd(void)
 {
     process_t *proc = process_current();
@@ -909,6 +929,8 @@ bool wait_queue_wait_timeout(wait_queue_t *queue,
         spinlock_unlock(&queue->lock);
         scheduler_lock_release(sched_flags);
 
+        /* Mirror process_sleep_ticks: clear running_cpu before blocking. */
+        thread_clear_running_cpu(thread);
         scheduler_schedule(false);
         sched_flags = scheduler_lock_acquire("wait_queue_wait_timeout");
     }

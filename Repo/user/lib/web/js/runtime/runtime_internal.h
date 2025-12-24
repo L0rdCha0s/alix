@@ -12,6 +12,7 @@ typedef struct js_var js_var_t;
 typedef struct js_program_node js_program_node_t;
 typedef struct js_native_meta js_native_meta_t;
 typedef struct js_property js_property_t;
+typedef struct js_bound_fn js_bound_fn_t;
 
 struct js_array
 {
@@ -56,6 +57,12 @@ struct js_property
 {
     char *name;
     js_value_t value;
+    js_value_t getter;
+    js_value_t setter;
+    bool writable;
+    bool enumerable;
+    bool configurable;
+    bool is_accessor;
     js_property_t *next;
 };
 
@@ -65,9 +72,16 @@ struct js_runtime
     js_program_node_t *programs;
     js_native_meta_t *native_meta;
     js_object_t *global_object;
+    js_object_t *object_proto;
+    js_object_t *function_proto;
+    js_object_t *array_proto;
+    js_object_t *math_object;
+    js_object_t *iterator_proto;
+    js_object_t *set_iterator_proto;
     js_array_t *yield_array;
     size_t yield_limit;
     size_t yield_count;
+    js_bound_fn_t *bound_functions;
 };
 
 typedef struct
@@ -101,16 +115,20 @@ void js_array_retain(js_array_t *array);
 void js_array_release(js_array_t *array);
 bool js_array_set(js_array_t *array, size_t index, const js_value_t *value);
 bool js_array_get(const js_array_t *array, size_t index, js_value_t *out);
-bool js_array_get_property(js_array_t *array, const char *name, js_value_t *out);
+bool js_array_get_property(js_runtime_t *rt, js_array_t *array, const char *name, js_value_t *out, char **error_message);
 bool js_array_set_property(js_array_t *array, const char *name, const js_value_t *value);
 bool js_array_set_length(js_array_t *array, size_t new_length);
+bool js_array_has_property(js_array_t *array, const char *name);
+js_property_t *js_array_find_property(js_array_t *array, const char *name);
 
 void js_object_retain(js_object_t *object);
 void js_object_release(js_object_t *object);
 bool js_object_get_slot(js_object_t *object, const char *name, js_value_t *out);
 bool js_object_set_slot(js_object_t *object, const char *name, const js_value_t *value);
 bool js_object_has_slot(js_object_t *object, const char *name);
+bool js_object_has_property(js_runtime_t *rt, js_object_t *object, const char *name);
 bool js_object_is_symbol(const js_object_t *object);
+js_property_t *js_object_find_property(js_object_t *object, const char *name);
 bool js_object_get_property(js_runtime_t *rt,
                             js_object_t *object,
                             const char *name,
@@ -143,6 +161,7 @@ bool js_runtime_track_program(js_runtime_t *rt, js_program_t *program);
 bool js_value_is_constructor(js_runtime_t *rt, const js_value_t *value);
 const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value);
 bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *out_len);
+bool js_native_needs_this(js_native_fn_t fn);
 
 bool js_call_value(js_runtime_t *rt,
                    const js_value_t *callee,
@@ -283,18 +302,111 @@ bool js_builtin_object_get_prototype_of(js_runtime_t *rt,
                                         void *user_data,
                                         js_value_t *out,
                                         char **error_message);
+bool js_builtin_object_get_own_property_descriptor(js_runtime_t *rt,
+                                                   size_t argc,
+                                                   const js_value_t *argv,
+                                                   void *user_data,
+                                                   js_value_t *out,
+                                                   char **error_message);
+bool js_builtin_object_get_own_property_names(js_runtime_t *rt,
+                                              size_t argc,
+                                              const js_value_t *argv,
+                                              void *user_data,
+                                              js_value_t *out,
+                                              char **error_message);
+bool js_builtin_object_get_own_property_descriptors(js_runtime_t *rt,
+                                                    size_t argc,
+                                                    const js_value_t *argv,
+                                                    void *user_data,
+                                                    js_value_t *out,
+                                                    char **error_message);
+bool js_builtin_object_has_own_property(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message);
+bool js_builtin_object_property_is_enumerable(js_runtime_t *rt,
+                                              size_t argc,
+                                              const js_value_t *argv,
+                                              void *user_data,
+                                              js_value_t *out,
+                                              char **error_message);
+bool js_builtin_object_to_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+js_object_t *js_get_object_proto(js_runtime_t *rt);
 bool js_builtin_function_call(js_runtime_t *rt,
                               size_t argc,
                               const js_value_t *argv,
                               void *user_data,
                               js_value_t *out,
                               char **error_message);
+bool js_builtin_function_bind(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message);
+bool js_builtin_function(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
+bool js_builtin_function_stub(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message);
+js_object_t *js_get_function_proto(js_runtime_t *rt);
 bool js_builtin_object(js_runtime_t *rt,
                        size_t argc,
                        const js_value_t *argv,
                        void *user_data,
                        js_value_t *out,
                        char **error_message);
+bool js_builtin_array(js_runtime_t *rt,
+                      size_t argc,
+                      const js_value_t *argv,
+                      void *user_data,
+                      js_value_t *out,
+                      char **error_message);
+bool js_builtin_array_is_array(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_builtin_array_join(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_builtin_array_push(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_builtin_array_map(js_runtime_t *rt,
+                          size_t argc,
+                          const js_value_t *argv,
+                          void *user_data,
+                          js_value_t *out,
+                          char **error_message);
+js_object_t *js_get_array_proto(js_runtime_t *rt);
+bool js_builtin_math_pow(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
 bool js_builtin_iterator(js_runtime_t *rt,
                          size_t argc,
                          const js_value_t *argv,
@@ -307,7 +419,9 @@ bool js_builtin_iterator_map(js_runtime_t *rt,
                              void *user_data,
                              js_value_t *out,
                              char **error_message);
-js_object_t *js_get_iterator_proto(void);
+js_object_t *js_get_iterator_proto(js_runtime_t *rt);
+js_object_t *js_get_math_object(js_runtime_t *rt);
+void js_release_bound_functions(js_runtime_t *rt);
 bool js_builtin_type_error(js_runtime_t *rt,
                            size_t argc,
                            const js_value_t *argv,

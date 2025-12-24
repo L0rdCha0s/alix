@@ -113,6 +113,8 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->thread_count = 0;
     proc->next = NULL;
     proc->stdout_fd = g_console_stdout_fd;
+    proc->uid = VFS_UID_ROOT;
+    proc->gid = VFS_GID_ROOT;
     proc->is_user = is_user;
     proc->parent = NULL;
     proc->first_child = NULL;

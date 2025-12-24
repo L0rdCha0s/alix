@@ -8,6 +8,8 @@
 
 #define PROCESS_NAME_MAX 32
 #define PROCESS_DEFAULT_STACK_SIZE (128UL * 1024UL)
+#define PROCESS_UID_INVALID 0xFFFFFFFFu
+#define PROCESS_GID_INVALID 0xFFFFFFFFu
 
 typedef struct process process_t;
 typedef struct thread thread_t;
@@ -157,6 +159,9 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
                                     uint64_t error_code,
                                     uint64_t address);
 uint64_t process_current_pid(void);
+uint32_t process_get_uid(const process_t *process);
+uint32_t process_get_gid(const process_t *process);
+void process_set_identity(process_t *process, uint32_t uid, uint32_t gid);
 vfs_node_t *process_current_cwd(void);
 void process_set_cwd(process_t *process, vfs_node_t *dir);
 int process_current_stdout_fd(void);

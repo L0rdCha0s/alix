@@ -24,6 +24,9 @@ typedef enum
     VFS_NODE_SYMLINK = 3
 } vfs_node_type_t;
 
+#define VFS_UID_ROOT 0u
+#define VFS_GID_ROOT 0u
+
 typedef ssize_t (*vfs_read_cb_t)(vfs_node_t *node, size_t offset, void *buffer, size_t count, void *context);
 typedef ssize_t (*vfs_write_cb_t)(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
 
@@ -58,6 +61,8 @@ size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity);
 bool vfs_remove_file(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_first_child(vfs_node_t *dir);
 vfs_node_t *vfs_next_sibling(vfs_node_t *node);
+void vfs_node_get_owner(const vfs_node_t *node, uint32_t *uid_out, uint32_t *gid_out);
+void vfs_node_set_owner(vfs_node_t *node, uint32_t uid, uint32_t gid);
 typedef bool (*vfs_enum_cb_t)(const vfs_node_t *child, void *context);
 size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context);
 vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device_t *device);

@@ -23,6 +23,8 @@ struct vfs_node
     struct vfs_node *next_sibling;
     struct vfs_mount *mount;
     bool allow_mutation;
+    uint32_t uid;
+    uint32_t gid;
 
     size_t refcount;
     size_t size;

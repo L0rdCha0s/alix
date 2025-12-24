@@ -141,6 +141,8 @@ process_t *process_finalize_new_process(process_t *proc,
     vfs_node_t *inherit_cwd = NULL;
     if (actual_parent)
     {
+        proc->uid = actual_parent->uid;
+        proc->gid = actual_parent->gid;
         process_attach_child(actual_parent, proc);
         inherit_cwd = actual_parent->cwd;
     }

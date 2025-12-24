@@ -7,7 +7,7 @@ The kernel’s VFS is a heap-backed tree of nodes with optional backing storage 
 `vfs_node_t` represents a directory, file, block device, or symlink:
 
 - Tree links: `parent`, `first_child`, `next_sibling`
-- Identity: `name`, `type`
+- Identity: `name`, `type`, `uid/gid`
 - Data:
   - For regular files: `data` buffer + `size/capacity` (heap-backed)
   - For callback-backed nodes: `read_cb`/`write_cb` + `callback_context` (procfs/devfs style)

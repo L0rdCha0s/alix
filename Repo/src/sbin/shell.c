@@ -8,6 +8,7 @@
 #include "libc.h"
 #include "process.h"
 #include "vfs.h"
+#include "user_auth.h"
 #include "keyboard.h"
 #include "video.h"
 
@@ -40,12 +41,14 @@ typedef struct
 static bool cli_try_read_char(char *out);
 static char cli_get_char(void);
 static size_t cli_read_line(shell_state_t *shell, char *buffer, size_t capacity);
+static size_t cli_read_line_simple(char *buffer, size_t capacity, bool echo);
 static bool cli_handle_escape_sequence(char *buffer,
                                        size_t *len,
                                        size_t *cursor,
                                        size_t capacity,
                                        size_t *rendered_len);
 static bool cli_wait_for_char(char *out, int attempts);
+static void cli_discard_escape_sequence(void);
 static void cli_render_line(const char *buffer,
                             size_t len,
                             size_t cursor,
@@ -99,6 +102,9 @@ static bool shell_collect_path_completions(shell_state_t *shell,
                                            shell_completion_list_t *list);
 static size_t shell_completion_common_prefix(shell_completion_list_t *list);
 static void shell_completion_render_options(shell_completion_list_t *list);
+static size_t cli_read_line_hidden(char *buffer, size_t capacity);
+static bool shell_prompt_login(shell_state_t *shell);
+static void shell_write_text(const char *text);
 
 static shell_state_t *g_active_shell = NULL;
 static shell_console_tap_fn g_console_tap_fn = NULL;
@@ -847,6 +853,53 @@ static bool shell_run_script(shell_state_t *shell,
     return overall_ok;
 }
 
+static bool shell_prompt_login(shell_state_t *shell)
+{
+    if (!shell)
+    {
+        return false;
+    }
+
+    char user_buf[64];
+    char pass_buf[64];
+
+    while (1)
+    {
+        shell_write_text("login: ");
+        cli_read_line_simple(user_buf, sizeof(user_buf), true);
+        char *user = trim_whitespace(user_buf);
+        if (!user || user[0] == '\0')
+        {
+            continue;
+        }
+
+        shell_write_text("password: ");
+        cli_read_line_hidden(pass_buf, sizeof(pass_buf));
+        char *pass = trim_whitespace(pass_buf);
+
+        user_record_t record;
+        memset(&record, 0, sizeof(record));
+        bool ok = user_auth_lookup(user, &record) && user_auth_check_password(user, pass);
+        if (ok)
+        {
+            process_set_identity(shell->owner_process, record.uid, record.gid);
+            if (record.home && record.home[0] != '\0')
+            {
+                vfs_node_t *home = vfs_resolve(vfs_root(), record.home);
+                if (home && vfs_is_dir(home))
+                {
+                    process_set_cwd(shell->owner_process, home);
+                }
+            }
+            user_auth_free_record(&record);
+            shell->cwd = process_current_cwd();
+            return true;
+        }
+        user_auth_free_record(&record);
+        shell_write_text("Login incorrect\n");
+    }
+}
+
 void shell_main(void)
 {
     /* Commands run in separate threads mutate shell state, so keep it off-stack. */
@@ -869,6 +922,12 @@ void shell_main(void)
     shell->cwd_changed_context = NULL;
     g_active_shell = shell;
     char input[INPUT_CAPACITY];
+
+    if (shell->owner_process)
+    {
+        process_set_identity(shell->owner_process, PROCESS_UID_INVALID, PROCESS_GID_INVALID);
+    }
+    (void)shell_prompt_login(shell);
 
     console_write("In-memory FS shell ready. Commands: echo, cat, mkdir, cd, pwd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, preview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\n");
     serial_printf("%s", "In-memory FS shell ready. Commands: echo, cat, mkdir, cd, pwd, rm, mkfs, mount, tzset, tzstatus, tzsync, ntpdate, shutdown, ls, ip, ping, nslookup, wget, imgview, preview, logcat, sha1sum, dhclient, start_video, net_mac, dnsdebug, alloc1m, free, loop1, loop2, letters, top, useratk, atkshell, taskmgr, wolf3d, doom, bgset, runelf, or ./path for binaries.\r\n");
@@ -1356,6 +1415,16 @@ static void shell_print_prompt(void)
     serial_output_bytes(SHELL_PROMPT, sizeof(SHELL_PROMPT) - 1);
 }
 
+static void shell_write_text(const char *text)
+{
+    if (!text)
+    {
+        return;
+    }
+    console_write(text);
+    serial_output_bytes(text, strlen(text));
+}
+
 static bool cli_try_read_char(char *out)
 {
     if (!out)
@@ -1408,6 +1477,38 @@ static bool cli_wait_for_char(char *out, int attempts)
         mouse_poll();
     }
     return false;
+}
+
+static void cli_discard_escape_sequence(void)
+{
+    char next = 0;
+    if (!cli_wait_for_char(&next, 8))
+    {
+        return;
+    }
+    if (next != '[')
+    {
+        return;
+    }
+    char final = 0;
+    if (!cli_wait_for_char(&final, 8))
+    {
+        return;
+    }
+    if ((final >= '0' && final <= '9') || final == ';')
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            if (!cli_wait_for_char(&final, 8))
+            {
+                break;
+            }
+            if ((final >= 'A' && final <= 'Z') || (final >= 'a' && final <= 'z'))
+            {
+                break;
+            }
+        }
+    }
 }
 
 static void shell_wait_for_interrupt(void *context)
@@ -1571,6 +1672,86 @@ static size_t cli_read_line(shell_state_t *shell, char *buffer, size_t capacity)
             cursor++;
             buffer[len] = '\0';
             cli_render_line(buffer, len, cursor, &rendered_len);
+        }
+    }
+}
+
+static size_t cli_read_line_hidden(char *buffer, size_t capacity)
+{
+    return cli_read_line_simple(buffer, capacity, false);
+}
+
+static size_t cli_read_line_simple(char *buffer, size_t capacity, bool echo)
+{
+    size_t len = 0;
+    if (buffer && capacity > 0)
+    {
+        buffer[0] = '\0';
+    }
+
+    while (1)
+    {
+        char c = cli_get_char();
+
+        if (c == 0x1B)
+        {
+            cli_discard_escape_sequence();
+            continue;
+        }
+        if (c == 0x03)
+        {
+            console_write("^C\n");
+            serial_output_bytes("^C\r\n", 4);
+            if (buffer && capacity > 0)
+            {
+                buffer[0] = '\0';
+            }
+            return 0;
+        }
+        if (c == '\r')
+        {
+            c = '\n';
+        }
+
+        if (c == '\n')
+        {
+            console_putc('\n');
+            serial_emit_char('\n');
+            if (buffer)
+            {
+                buffer[len] = '\0';
+            }
+            return len;
+        }
+
+        if (c == '\b' || c == 0x7F)
+        {
+            if (len > 0)
+            {
+                len--;
+                buffer[len] = '\0';
+                if (echo)
+                {
+                    console_putc('\b');
+                    console_putc(' ');
+                    console_putc('\b');
+                    serial_emit_char('\b');
+                    serial_emit_char(' ');
+                    serial_emit_char('\b');
+                }
+            }
+            continue;
+        }
+
+        if (c >= ' ' && len < capacity - 1)
+        {
+            buffer[len++] = c;
+            buffer[len] = '\0';
+            if (echo)
+            {
+                console_putc(c);
+                serial_emit_char(c);
+            }
         }
     }
 }

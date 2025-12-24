@@ -462,6 +462,40 @@ static void ensure_system_layout(void)
     {
         serial_printf("%s", "[alix] warn: unable to ensure /usr symlink\r\n");
     }
+    vfs_node_t *passwd_file = vfs_open_file(vfs_root(), "/etc/passwd", false, false);
+    if (!passwd_file)
+    {
+        passwd_file = vfs_open_file(vfs_root(), "/etc/passwd", true, true);
+        if (passwd_file)
+        {
+            static const char default_passwd[] = "root:0:0:Root:/root\n";
+            if (!vfs_append(passwd_file, default_passwd, sizeof(default_passwd) - 1))
+            {
+                serial_printf("%s", "[alix] warn: unable to write default passwd\r\n");
+            }
+        }
+        else
+        {
+            serial_printf("%s", "[alix] warn: unable to create default passwd file\r\n");
+        }
+    }
+    vfs_node_t *shadow_file = vfs_open_file(vfs_root(), "/etc/shadow", false, false);
+    if (!shadow_file)
+    {
+        shadow_file = vfs_open_file(vfs_root(), "/etc/shadow", true, true);
+        if (shadow_file)
+        {
+            static const char default_shadow[] = "root:root\n";
+            if (!vfs_append(shadow_file, default_shadow, sizeof(default_shadow) - 1))
+            {
+                serial_printf("%s", "[alix] warn: unable to write default shadow\r\n");
+            }
+        }
+        else
+        {
+            serial_printf("%s", "[alix] warn: unable to create default shadow file\r\n");
+        }
+    }
     vfs_node_t *ntp_server = vfs_open_file(vfs_root(), "/etc/ntp/server", false, false);
     if (!ntp_server)
     {

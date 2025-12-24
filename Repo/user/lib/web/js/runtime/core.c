@@ -199,6 +199,16 @@ js_runtime_t *js_runtime_create(void)
         js_runtime_destroy(rt);
         return NULL;
     }
+    if (!js_runtime_register_native(rt, "Function", js_builtin_function, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_register_native(rt, "Array", js_builtin_array, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
     if (!js_runtime_register_native(rt, "Set", js_builtin_set, NULL, true, 0))
     {
         js_runtime_destroy(rt);
@@ -234,6 +244,24 @@ js_runtime_t *js_runtime_create(void)
         js_runtime_destroy(rt);
         return NULL;
     }
+    js_object_t *math_obj = js_get_math_object(rt);
+    if (!math_obj)
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_t math_val;
+    memset(&math_val, 0, sizeof(math_val));
+    math_val.type = JS_VALUE_OBJECT;
+    math_val.as.object = math_obj;
+    js_object_retain(math_obj);
+    if (!js_runtime_set_global(rt, "Math", &math_val))
+    {
+        js_value_destroy(&math_val);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_destroy(&math_val);
     if (!js_runtime_register_native(rt, "testWithTypedArrayConstructors",
                                     js_builtin_test_with_typed_array_constructors,
                                     NULL,
@@ -300,6 +328,7 @@ void js_runtime_destroy(js_runtime_t *rt)
     {
         return;
     }
+    js_release_bound_functions(rt);
     if (rt->global_object)
     {
         js_object_release(rt->global_object);
@@ -324,6 +353,36 @@ void js_runtime_destroy(js_runtime_t *rt)
         meta = next;
     }
     js_env_release(rt->global);
+    if (rt->math_object)
+    {
+        js_object_release(rt->math_object);
+        rt->math_object = NULL;
+    }
+    if (rt->iterator_proto)
+    {
+        js_object_release(rt->iterator_proto);
+        rt->iterator_proto = NULL;
+    }
+    if (rt->set_iterator_proto)
+    {
+        js_object_release(rt->set_iterator_proto);
+        rt->set_iterator_proto = NULL;
+    }
+    if (rt->function_proto)
+    {
+        js_object_release(rt->function_proto);
+        rt->function_proto = NULL;
+    }
+    if (rt->array_proto)
+    {
+        js_object_release(rt->array_proto);
+        rt->array_proto = NULL;
+    }
+    if (rt->object_proto)
+    {
+        js_object_release(rt->object_proto);
+        rt->object_proto = NULL;
+    }
     free(rt);
 }
 
@@ -406,9 +465,29 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         {
             return "defineProperties";
         }
+        if (value->as.native.fn == js_builtin_object_get_own_property_descriptor)
+        {
+            return "getOwnPropertyDescriptor";
+        }
+        if (value->as.native.fn == js_builtin_object_get_own_property_names)
+        {
+            return "getOwnPropertyNames";
+        }
+        if (value->as.native.fn == js_builtin_object_get_own_property_descriptors)
+        {
+            return "getOwnPropertyDescriptors";
+        }
         if (value->as.native.fn == js_builtin_object_get_prototype_of)
         {
             return "getPrototypeOf";
+        }
+        if (value->as.native.fn == js_builtin_object_has_own_property)
+        {
+            return "hasOwnProperty";
+        }
+        if (value->as.native.fn == js_builtin_object_property_is_enumerable)
+        {
+            return "propertyIsEnumerable";
         }
         if (value->as.native.fn == js_set_iterator)
         {
@@ -417,6 +496,42 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         if (value->as.native.fn == js_builtin_number_to_string)
         {
             return "toString";
+        }
+        if (value->as.native.fn == js_builtin_object_to_string)
+        {
+            return "toString";
+        }
+        if (value->as.native.fn == js_builtin_function_call)
+        {
+            return "call";
+        }
+        if (value->as.native.fn == js_builtin_function_bind)
+        {
+            return "bind";
+        }
+        if (value->as.native.fn == js_builtin_function_stub)
+        {
+            return "anonymous";
+        }
+        if (value->as.native.fn == js_builtin_array_is_array)
+        {
+            return "isArray";
+        }
+        if (value->as.native.fn == js_builtin_array_join)
+        {
+            return "join";
+        }
+        if (value->as.native.fn == js_builtin_array_push)
+        {
+            return "push";
+        }
+        if (value->as.native.fn == js_builtin_array_map)
+        {
+            return "map";
+        }
+        if (value->as.native.fn == js_builtin_math_pow)
+        {
+            return "pow";
         }
     }
     return NULL;
@@ -500,6 +615,132 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
             if (out_len)
             {
                 *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_object_get_own_property_descriptor)
+        {
+            if (out_len)
+            {
+                *out_len = 2;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_object_get_own_property_names)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_object_get_own_property_descriptors)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_object_has_own_property)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_object_property_is_enumerable)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_object_to_string)
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_function_call)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_function_bind)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_function_stub)
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_array_is_array)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_array_join)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_array_push)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_array_map)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_math_pow)
+        {
+            if (out_len)
+            {
+                *out_len = 2;
             }
             return true;
         }

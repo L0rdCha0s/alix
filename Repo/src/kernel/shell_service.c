@@ -6,6 +6,7 @@
 #include "process.h"
 #include "shell.h"
 #include "spinlock.h"
+#include "user_auth.h"
 #include "vfs.h"
 #include "procfs.h"
 #include "serial.h"
@@ -38,6 +39,12 @@ typedef struct shell_session
     bool completed;
     int last_status;
     process_t *runner;
+    bool authenticated;
+    bool awaiting_password;
+    uint32_t pending_uid;
+    uint32_t pending_gid;
+    char pending_user[PROCESS_NAME_MAX];
+    char *pending_home;
     struct shell_session *next;
     spinlock_t lock;
 } shell_session_t;
@@ -73,6 +80,7 @@ static shell_session_t *shell_session_find_locked(uint32_t handle, process_t *ow
 static bool shell_session_reserve(shell_session_t *session, size_t extra);
 static void shell_session_reset(shell_session_t *session);
 static bool shell_session_append(shell_session_t *session, const char *data, size_t len);
+static bool shell_session_handle_login(shell_session_t *session, char *line);
 static ssize_t shell_session_fd_write(void *ctx, const void *buffer, size_t count);
 static int shell_session_fd_close(void *ctx);
 static void shell_session_stream(void *context, const char *data, size_t len);
@@ -177,6 +185,17 @@ int shell_service_open_session(void)
     session->state.wait_hook = NULL;
 
     session->owner = owner;
+    session->authenticated = (process_get_uid(owner) != PROCESS_UID_INVALID);
+    session->awaiting_password = false;
+    session->pending_uid = VFS_UID_ROOT;
+    session->pending_gid = VFS_GID_ROOT;
+    session->pending_user[0] = '\0';
+    session->pending_home = NULL;
+
+    if (!session->authenticated)
+    {
+        shell_session_append(session, "login: ", sizeof("login: ") - 1);
+    }
 
     shell_list_lock();
     session->handle = g_next_shell_handle++;
@@ -218,6 +237,14 @@ int shell_service_exec(uint32_t handle,
                       (unsigned long long)(owner ? process_get_pid(owner) : 0));
         free(line);
         return -1;
+    }
+
+    if (!session->authenticated)
+    {
+        bool handled = shell_session_handle_login(session, line);
+        shell_session_unlock(session);
+        free(line);
+        return handled ? 0 : -1;
     }
 
     if (session->running)
@@ -344,6 +371,7 @@ bool shell_service_close_session(uint32_t handle)
             {
                 fd_close(session->stdout_fd);
             }
+            free(session->pending_home);
             free(session->capture);
             free(session);
             shell_list_unlock();
@@ -512,6 +540,7 @@ void shell_service_cleanup_process(process_t *process)
             {
                 fd_close(session->stdout_fd);
             }
+            free(session->pending_home);
             free(session->capture);
             free(session);
 
@@ -606,6 +635,22 @@ static void shell_session_reset(shell_session_t *session)
     }
 }
 
+static bool shell_session_append_locked(shell_session_t *session, const char *data, size_t len)
+{
+    if (!session || !data || len == 0)
+    {
+        return true;
+    }
+    if (!shell_session_reserve(session, len))
+    {
+        return false;
+    }
+    memcpy(session->capture + session->capture_len, data, len);
+    session->capture_len += len;
+    session->capture[session->capture_len] = '\0';
+    return true;
+}
+
 static bool shell_session_append(shell_session_t *session, const char *data, size_t len)
 {
     if (!session || !data || len == 0)
@@ -613,15 +658,120 @@ static bool shell_session_append(shell_session_t *session, const char *data, siz
         return true;
     }
     shell_session_lock(session);
-    if (!shell_session_reserve(session, len))
+    bool ok = shell_session_append_locked(session, data, len);
+    shell_session_unlock(session);
+    return ok;
+}
+
+static char *shellsvc_trim_whitespace(char *text)
+{
+    if (!text)
     {
-        shell_session_unlock(session);
+        return text;
+    }
+    while (*text == ' ' || *text == '\t')
+    {
+        ++text;
+    }
+    size_t len = strlen(text);
+    while (len > 0 && (text[len - 1] == ' ' || text[len - 1] == '\t'))
+    {
+        text[--len] = '\0';
+    }
+    return text;
+}
+
+static void shell_session_auth_reset(shell_session_t *session)
+{
+    if (!session)
+    {
+        return;
+    }
+    session->pending_user[0] = '\0';
+    session->pending_uid = VFS_UID_ROOT;
+    session->pending_gid = VFS_GID_ROOT;
+    if (session->pending_home)
+    {
+        free(session->pending_home);
+        session->pending_home = NULL;
+    }
+    session->awaiting_password = false;
+}
+
+static bool shell_session_handle_login(shell_session_t *session, char *line)
+{
+    if (!session || !line || session->authenticated)
+    {
         return false;
     }
-    memcpy(session->capture + session->capture_len, data, len);
-    session->capture_len += len;
-    session->capture[session->capture_len] = '\0';
-    shell_session_unlock(session);
+    char *trimmed = shellsvc_trim_whitespace(line);
+    if (!session->awaiting_password)
+    {
+        if (!trimmed || trimmed[0] == '\0')
+        {
+            shell_session_append_locked(session, "login: ", sizeof("login: ") - 1);
+            return true;
+        }
+        user_record_t record;
+        memset(&record, 0, sizeof(record));
+        if (!user_auth_lookup(trimmed, &record))
+        {
+            shell_session_auth_reset(session);
+            shell_session_append_locked(session,
+                                        "Login incorrect\nlogin: ",
+                                        sizeof("Login incorrect\nlogin: ") - 1);
+            user_auth_free_record(&record);
+            return true;
+        }
+        size_t user_len = strlen(trimmed);
+        if (user_len >= sizeof(session->pending_user))
+        {
+            user_len = sizeof(session->pending_user) - 1;
+        }
+        memcpy(session->pending_user, trimmed, user_len);
+        session->pending_user[user_len] = '\0';
+        session->pending_uid = record.uid;
+        session->pending_gid = record.gid;
+        if (record.home)
+        {
+            session->pending_home = record.home;
+            record.home = NULL;
+        }
+        user_auth_free_record(&record);
+        session->awaiting_password = true;
+        shell_session_append_locked(session, "password: ", sizeof("password: ") - 1);
+        return true;
+    }
+
+    if (session->pending_user[0] == '\0')
+    {
+        shell_session_auth_reset(session);
+        shell_session_append_locked(session, "login: ", sizeof("login: ") - 1);
+        return true;
+    }
+
+    if (user_auth_check_password(session->pending_user, trimmed))
+    {
+        session->authenticated = true;
+        session->awaiting_password = false;
+        process_set_identity(session->owner, session->pending_uid, session->pending_gid);
+        if (session->pending_home && session->pending_home[0] != '\0')
+        {
+            vfs_node_t *home = vfs_resolve(vfs_root(), session->pending_home);
+            if (home && vfs_is_dir(home))
+            {
+                session->state.cwd = home;
+            }
+        }
+        shell_session_auth_reset(session);
+        shell_session_append_locked(session, "login ok\n", sizeof("login ok\n") - 1);
+        return true;
+    }
+
+    shell_session_auth_reset(session);
+    shell_session_append_locked(session,
+                                "Login incorrect\nlogin: ",
+                                sizeof("Login incorrect\nlogin: ") - 1);
     return true;
 }
 

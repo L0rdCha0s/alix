@@ -328,6 +328,8 @@ struct process
     int exit_status;
     struct process *next;
     int stdout_fd;
+    uint32_t uid;
+    uint32_t gid;
     uint64_t runtime_ticks;
     bool is_user;
     process_t *parent;
