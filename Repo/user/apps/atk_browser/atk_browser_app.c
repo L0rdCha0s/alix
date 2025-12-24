@@ -3,6 +3,19 @@
 #include "stdio.h"
 #include "string.h"
 
+static bool browser_on_resize_event(uint32_t width, uint32_t height, void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app || !app->window)
+    {
+        return false;
+    }
+    app->window->width = (int)width;
+    app->window->height = (int)height;
+    atk_window_request_layout(app->window);
+    return true;
+}
+
 int main(void)
 {
     browser_app_t *app = (browser_app_t *)calloc(1, sizeof(*app));
@@ -13,7 +26,11 @@ int main(void)
     }
     alix_mutex_init(&app->lock);
 
-    if (!atk_user_window_open(&app->remote, "atk_browser", BROWSER_WIDTH, BROWSER_HEIGHT))
+    if (!atk_user_window_open_with_flags(&app->remote,
+                                         "atk_browser",
+                                         BROWSER_WIDTH,
+                                         BROWSER_HEIGHT,
+                                         USER_ATK_WINDOW_FLAG_RESIZABLE))
     {
         printf("atk_browser: failed to open window\n");
         free(app);
@@ -40,6 +57,7 @@ int main(void)
         .legacy_input = false,
     };
     atk_main_register_mouse_handler(browser_on_mouse_event, app);
+    atk_main_register_resize_handler(browser_on_resize_event, app);
     atk_main_register_close_handler(browser_on_close_event, app);
     atk_main(&main_cfg);
 
@@ -87,4 +105,3 @@ int main(void)
     free(app);
     return 0;
 }
-

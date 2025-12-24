@@ -1079,7 +1079,10 @@ atk_mouse_event_result_t atk_handle_mouse_event(int dx,
                                                 int cursor_y,
                                                 bool pressed_edge,
                                                 bool released_edge,
-                                                bool left_pressed)
+                                                bool left_pressed,
+                                                bool right_pressed_edge,
+                                                bool right_released_edge,
+                                                bool right_pressed)
 {
     atk_state_lock_init();
     uint64_t irq_state = atk_state_lock_acquire();
@@ -1600,7 +1603,10 @@ atk_mouse_event_result_t atk_handle_mouse_event(int dx,
                                                      cursor_y,
                                                      pressed_edge,
                                                      released_edge,
-                                                     left_pressed);
+                                                     left_pressed,
+                                                     right_pressed_edge,
+                                                     right_released_edge,
+                                                     right_pressed);
     if (pressed_edge || released_edge)
     {
         atk_event_debug_remote(event_id, hover_window, remote_handled);

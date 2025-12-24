@@ -94,6 +94,13 @@ void atk_list_view_relayout(atk_widget_t *list);
 /* Return true if (local_x, local_y) lies on a column resize separator. */
 bool atk_list_view_is_over_separator(const atk_widget_t *list, int local_x, int local_y);
 
+/*
+ * Return the row index under (local_x, local_y).
+ *
+ * Returns `ATK_LIST_VIEW_NO_SELECTION` when no row hits.
+ */
+size_t atk_list_view_row_at(atk_widget_t *list, int local_x, int local_y);
+
 extern const atk_class_t ATK_LIST_VIEW_CLASS;
 
 #ifdef __cplusplus

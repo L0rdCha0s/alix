@@ -525,6 +525,9 @@ void browser_debug_service(browser_app_t *app)
                 bool left = (ev.flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
                 bool press = (ev.flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
                 bool release = (ev.flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
+                bool right = (ev.flags & USER_ATK_MOUSE_FLAG_RIGHT) != 0;
+                bool right_press = (ev.flags & USER_ATK_MOUSE_FLAG_RIGHT_PRESS) != 0;
+                bool right_release = (ev.flags & USER_ATK_MOUSE_FLAG_RIGHT_RELEASE) != 0;
                 int dx = 0;
                 int dy = 0;
                 if (ev.flags & USER_ATK_MOUSE_FLAG_RELATIVE)
@@ -532,7 +535,16 @@ void browser_debug_service(browser_app_t *app)
                     dx = (int32_t)ev.data0;
                     dy = (int32_t)ev.data1;
                 }
-                (void)atk_handle_mouse_event(dx, dy, ev.x, ev.y, press, release, left);
+                (void)atk_handle_mouse_event(dx,
+                                             dy,
+                                             ev.x,
+                                             ev.y,
+                                             press,
+                                             release,
+                                             left,
+                                             right_press,
+                                             right_release,
+                                             right);
                 break;
             }
             case USER_ATK_EVENT_KEY:

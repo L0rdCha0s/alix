@@ -373,7 +373,10 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
                                 int cursor_y,
                                 bool pressed_edge,
                                 bool released_edge,
-                                bool left_pressed)
+                                bool left_pressed,
+                                bool right_pressed_edge,
+                                bool right_released_edge,
+                                bool right_pressed)
 {
     user_atk_windows_lock();
     user_atk_window_t *previous_capture = g_capture_window;
@@ -475,6 +478,10 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     {
         event.flags |= USER_ATK_MOUSE_FLAG_LEFT;
     }
+    if (right_pressed)
+    {
+        event.flags |= USER_ATK_MOUSE_FLAG_RIGHT;
+    }
     if (pressed_edge)
     {
         event.flags |= USER_ATK_MOUSE_FLAG_PRESS;
@@ -505,6 +512,15 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
 #endif
             user_atk_windows_unlock();
         }
+    }
+
+    if (right_pressed_edge)
+    {
+        event.flags |= USER_ATK_MOUSE_FLAG_RIGHT_PRESS;
+    }
+    if (right_released_edge)
+    {
+        event.flags |= USER_ATK_MOUSE_FLAG_RIGHT_RELEASE;
     }
 
     if (forced_capture && relative_capture)

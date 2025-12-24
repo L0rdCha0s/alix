@@ -120,11 +120,12 @@ void video_init(void) {}
 bool video_enter_mode(void) { return true; }
 void video_run_loop(void) {}
 void video_exit_mode(void) {}
-void video_on_mouse_event(int dx, int dy, bool left_pressed)
+void video_on_mouse_event(int dx, int dy, bool left_pressed, bool right_pressed)
 {
     (void)dx;
     (void)dy;
     (void)left_pressed;
+    (void)right_pressed;
 }
 
 void video_cursor_set_shape(video_cursor_shape_t shape)

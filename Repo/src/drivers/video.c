@@ -93,6 +93,7 @@ static int prev_cursor_y = 0;
 static bool cursor_under_valid = false;
 static uint32_t cursor_under[2][CURSOR_W * CURSOR_H];
 static bool last_left_down = false;
+static bool last_right_down = false;
 static bool logged_first_mouse = false;
 
 static int video_mouse_log_count = 0;
@@ -1326,6 +1327,7 @@ bool video_enter_mode(void)
     prev_cursor_y = cursor_y;
     cursor_under_valid = false;
     last_left_down = false;
+    last_right_down = false;
     exit_requested = false;
     video_active = true;
     logged_first_mouse = false;
@@ -1463,7 +1465,7 @@ static void video_poll_keyboard(void)
     video_perform_refresh();
 }
 
-void video_on_mouse_event(int dx, int dy, bool left_pressed)
+void video_on_mouse_event(int dx, int dy, bool left_pressed, bool right_pressed)
 {
     if (!video_active)
     {
@@ -1505,8 +1507,19 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     bool pressed_edge  = (left_pressed && !last_left_down);
     bool released_edge = (!left_pressed && last_left_down);
+    bool right_pressed_edge = (right_pressed && !last_right_down);
+    bool right_released_edge = (!right_pressed && last_right_down);
 
-    atk_mouse_event_result_t result = atk_handle_mouse_event(dx, dy, cursor_x, cursor_y, pressed_edge, released_edge, left_pressed);
+    atk_mouse_event_result_t result = atk_handle_mouse_event(dx,
+                                                             dy,
+                                                             cursor_x,
+                                                             cursor_y,
+                                                             pressed_edge,
+                                                             released_edge,
+                                                             left_pressed,
+                                                             right_pressed_edge,
+                                                             right_released_edge,
+                                                             right_pressed);
 
     bool dragging_now = atk_drag_active();
     if (result.redraw && !dragging_now)
@@ -1536,6 +1549,7 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed)
 
     /* Track button state even if we bail out for a refresh to keep edge detection consistent. */
     last_left_down = left_pressed;
+    last_right_down = right_pressed;
 
     if (pending_refresh)
     {

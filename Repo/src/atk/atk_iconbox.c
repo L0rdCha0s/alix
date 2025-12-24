@@ -21,6 +21,7 @@ typedef struct
     bool manual_position;
     bool has_image;
     atk_iconbox_image_t image;
+    void *context;
 } atk_iconbox_icon_t;
 
 typedef struct
@@ -506,6 +507,7 @@ static bool iconbox_add_icon_internal(atk_widget_t *iconbox,
     {
         memset(&icon->image, 0, sizeof(icon->image));
     }
+    icon->context = context;
     icon->node = atk_list_push_back(&priv->icons, icon);
     if (!icon->node)
     {
@@ -585,6 +587,19 @@ size_t atk_iconbox_count(const atk_widget_t *iconbox)
 {
     const atk_iconbox_priv_t *priv = iconbox_priv(iconbox);
     return priv ? priv->icons.size : 0;
+}
+
+void *atk_iconbox_context_at(atk_widget_t *iconbox, int cursor_x, int cursor_y)
+{
+    atk_iconbox_priv_t *priv = iconbox_priv_mut(iconbox);
+    if (!iconbox || !priv || !iconbox->used)
+    {
+        return NULL;
+    }
+
+    iconbox_sync_layout(iconbox, priv);
+    atk_iconbox_icon_t *icon = iconbox_icon_at(iconbox, priv, cursor_x, cursor_y);
+    return icon ? icon->context : NULL;
 }
 
 void atk_iconbox_relayout(atk_widget_t *iconbox)

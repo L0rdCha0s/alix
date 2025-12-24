@@ -55,6 +55,13 @@ void atk_iconbox_relayout(atk_widget_t *iconbox);
 /* Return the number of icons currently in the iconbox. */
 size_t atk_iconbox_count(const atk_widget_t *iconbox);
 
+/*
+ * Return the action context for the icon under an absolute point.
+ *
+ * Returns NULL if no icon hits the point.
+ */
+void *atk_iconbox_context_at(atk_widget_t *iconbox, int cursor_x, int cursor_y);
+
 extern const atk_class_t ATK_ICONBOX_CLASS;
 
 #ifdef __cplusplus

@@ -21,7 +21,10 @@ bool user_atk_route_mouse_event(const struct atk_widget *hover_window,
                                 int cursor_y,
                                 bool pressed_edge,
                                 bool released_edge,
-                                bool left_pressed);
+                                bool left_pressed,
+                                bool right_pressed_edge,
+                                bool right_released_edge,
+                                bool right_pressed);
 bool user_atk_route_key_event(const keyboard_event_t *event);
 void user_atk_window_resized(const struct atk_widget *window);
 bool user_atk_capture_relative_active(void);

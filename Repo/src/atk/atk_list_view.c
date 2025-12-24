@@ -464,6 +464,39 @@ bool atk_list_view_is_over_separator(const atk_widget_t *list, int local_x, int 
     return false;
 }
 
+size_t atk_list_view_row_at(atk_widget_t *list, int local_x, int local_y)
+{
+    (void)local_x;
+    atk_list_view_priv_t *priv = list_priv_mut(list);
+    if (!list || !priv)
+    {
+        return ATK_LIST_VIEW_NO_SELECTION;
+    }
+
+    if (priv->layout_dirty)
+    {
+        list_view_sync_layout(list, priv);
+    }
+
+    int header_h = priv->header_visible_height;
+    if (local_y < header_h || priv->row_height <= 0)
+    {
+        return ATK_LIST_VIEW_NO_SELECTION;
+    }
+
+    size_t relative_row = (size_t)((local_y - header_h) / priv->row_height);
+    size_t absolute_row = relative_row;
+    if (priv->scroll_row > 0)
+    {
+        absolute_row += (size_t)priv->scroll_row;
+    }
+    if (absolute_row >= priv->row_count)
+    {
+        return ATK_LIST_VIEW_NO_SELECTION;
+    }
+    return absolute_row;
+}
+
 void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
 {
     atk_list_view_priv_t *priv_mut = list_priv_mut((atk_widget_t *)list);

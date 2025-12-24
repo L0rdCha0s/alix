@@ -2051,6 +2051,37 @@ int getc(FILE *stream)
     return fgetc(stream);
 }
 
+char *fgets(char *s, int size, FILE *stream)
+{
+    if (!s || size <= 0 || !stream)
+    {
+        return NULL;
+    }
+    s[0] = '\0';
+
+    int idx = 0;
+    while (idx < size - 1)
+    {
+        int ch = fgetc(stream);
+        if (ch == EOF)
+        {
+            break;
+        }
+        s[idx++] = (char)ch;
+        if (ch == '\n')
+        {
+            break;
+        }
+    }
+
+    if (idx == 0)
+    {
+        return NULL;
+    }
+    s[idx] = '\0';
+    return s;
+}
+
 int feof(FILE *stream)
 {
     if (!stream)

@@ -32,7 +32,10 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
                                 int cursor_y,
                                 bool pressed_edge,
                                 bool released_edge,
-                                bool left_pressed)
+                                bool left_pressed,
+                                bool right_pressed_edge,
+                                bool right_released_edge,
+                                bool right_pressed)
 {
     (void)hover_window;
     (void)dx;
@@ -42,6 +45,9 @@ bool user_atk_route_mouse_event(const atk_widget_t *hover_window,
     (void)pressed_edge;
     (void)released_edge;
     (void)left_pressed;
+    (void)right_pressed_edge;
+    (void)right_released_edge;
+    (void)right_pressed;
     return false;
 }
 

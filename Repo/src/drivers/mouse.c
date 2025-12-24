@@ -24,6 +24,7 @@ typedef struct
     int dx;
     int dy;
     bool left;
+    bool right;
 } mouse_event_t;
 
 #define MOUSE_QUEUE_CAP 128
@@ -32,8 +33,9 @@ static uint32_t g_mouse_queue_head = 0;
 static uint32_t g_mouse_queue_tail = 0;
 static spinlock_t g_mouse_queue_lock = { 0 };
 static bool g_mouse_queue_overflow_logged = false;
-static bool g_mouse_last_left_valid = false;
+static bool g_mouse_last_buttons_valid = false;
 static bool g_mouse_last_left = false;
+static bool g_mouse_last_right = false;
 static bool g_mouse_daemon_started = false;
 #if ENABLE_USB
 /* When USB is enabled, keep PS/2 mouse disabled to avoid double-handling input. */
@@ -109,25 +111,28 @@ static void mouse_queue_reset(void)
     g_mouse_queue_head = 0;
     g_mouse_queue_tail = 0;
     g_mouse_queue_overflow_logged = false;
-    g_mouse_last_left_valid = false;
+    g_mouse_last_buttons_valid = false;
     g_mouse_last_left = false;
+    g_mouse_last_right = false;
     spinlock_unlock(&g_mouse_queue_lock);
     mouse_irq_restore(flags);
 }
 
-static void mouse_queue_push(int dx, int dy, bool left)
+static void mouse_queue_push(int dx, int dy, bool left, bool right)
 {
     uint64_t flags = mouse_irq_save();
     spinlock_lock(&g_mouse_queue_lock);
 
-    if (dx == 0 && dy == 0 && g_mouse_last_left_valid && g_mouse_last_left == left)
+    if (dx == 0 && dy == 0 && g_mouse_last_buttons_valid &&
+        g_mouse_last_left == left && g_mouse_last_right == right)
     {
         spinlock_unlock(&g_mouse_queue_lock);
         mouse_irq_restore(flags);
         return;
     }
-    g_mouse_last_left_valid = true;
+    g_mouse_last_buttons_valid = true;
     g_mouse_last_left = left;
+    g_mouse_last_right = right;
 
     uint32_t next_head = (g_mouse_queue_head + 1u) % MOUSE_QUEUE_CAP;
     if (next_head == g_mouse_queue_tail)
@@ -144,15 +149,16 @@ static void mouse_queue_push(int dx, int dy, bool left)
     g_mouse_queue[g_mouse_queue_head].dx = dx;
     g_mouse_queue[g_mouse_queue_head].dy = dy;
     g_mouse_queue[g_mouse_queue_head].left = left;
+    g_mouse_queue[g_mouse_queue_head].right = right;
     g_mouse_queue_head = next_head;
 
     spinlock_unlock(&g_mouse_queue_lock);
     mouse_irq_restore(flags);
 }
 
-void mouse_inject_event(int dx, int dy, bool left)
+void mouse_inject_event(int dx, int dy, bool left, bool right)
 {
-    mouse_queue_push(dx, dy, left);
+    mouse_queue_push(dx, dy, left, right);
 }
 
 static bool mouse_queue_pop(mouse_event_t *out)
@@ -196,7 +202,7 @@ void mouse_dispatch_events(void)
     mouse_event_t ev;
     while (mouse_queue_pop(&ev))
     {
-        g_listener(ev.dx, ev.dy, ev.left);
+        g_listener(ev.dx, ev.dy, ev.left, ev.right);
     }
 }
 
@@ -286,6 +292,7 @@ static void mouse_process_byte(uint8_t byte)
     int out_dx = 0;
     int out_dy = 0;
     bool out_left = false;
+    bool out_right = false;
     bool emit = false;
     uint64_t irq_state = mouse_irq_save();
     spinlock_lock(&g_mouse_lock);
@@ -315,6 +322,7 @@ static void mouse_process_byte(uint8_t byte)
         goto unlock;
     }
     out_left = (packet[0] & 0x01) != 0;
+    out_right = (packet[0] & 0x02) != 0;
     emit = true;
 
 unlock:
@@ -328,14 +336,15 @@ unlock:
 
     if (mouse_packet_log < 16)
     {
-        serial_printf("mouse packet dx=%016llX dy=%016llX left=%d\r\n",
+        serial_printf("mouse packet dx=%016llX dy=%016llX left=%d right=%d\r\n",
                       (unsigned long long)((uint64_t)(int64_t)out_dx),
                       (unsigned long long)((uint64_t)(int64_t)out_dy),
-                      out_left ? 1 : 0);
+                      out_left ? 1 : 0,
+                      out_right ? 1 : 0);
         mouse_packet_log++;
     }
 
-    mouse_inject_event(out_dx, -out_dy, out_left);
+    mouse_inject_event(out_dx, -out_dy, out_left, out_right);
 }
 
 void mouse_on_irq(uint8_t byte)

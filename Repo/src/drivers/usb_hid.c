@@ -345,17 +345,19 @@ static void process_mouse_report(const uint8_t *buf, size_t len)
     int dx = (int8_t)buf[1];
     int dy = (int8_t)buf[2];
     bool left = (buf[0] & 0x01u) != 0;
+    bool right = (buf[0] & 0x02u) != 0;
     static int log_budget = 8;
     if (log_budget > 0)
     {
-        serial_printf("[usb] mouse report len=%u dx=%d dy=%d left=%u\r\n",
+        serial_printf("[usb] mouse report len=%u dx=%d dy=%d left=%u right=%u\r\n",
                       (unsigned)len,
                       dx,
                       dy,
-                      left ? 1u : 0u);
+                      left ? 1u : 0u,
+                      right ? 1u : 0u);
         log_budget--;
     }
-    mouse_inject_event(dx, dy, left);
+    mouse_inject_event(dx, dy, left, right);
 }
 
 static void mouse_thread(void *arg)
