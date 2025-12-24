@@ -318,13 +318,18 @@ void atk_scrollbar_draw(const atk_state_t *state, const atk_widget_t *scrollbar)
         atk_state_theme_validate(state, "atk_scrollbar_draw");
     }
     const atk_theme_t *theme = state ? &state->theme : NULL;
-    video_color_t track_color = theme ? theme->window_body : video_make_color(0xD0, 0xD0, 0xD0);
-    video_color_t track_border = theme ? theme->window_border : video_make_color(0x70, 0x70, 0x70);
+    video_color_t track_color = theme ? atk_color_tint(theme->window_body, -8) : video_make_color(0xD0, 0xD0, 0xD0);
+    video_color_t track_border = theme ? atk_color_tint(theme->window_border, 12) : video_make_color(0x70, 0x70, 0x70);
     video_color_t thumb_face = theme ? theme->button_face : video_make_color(0xB0, 0xB0, 0xB0);
     video_color_t thumb_border = theme ? theme->button_border : video_make_color(0x50, 0x50, 0x50);
 
     video_draw_rect(x, y, scrollbar->width, scrollbar->height, track_color);
-    video_draw_rect_outline(x, y, scrollbar->width, scrollbar->height, track_border);
+    atk_draw_bevel_outline(x,
+                           y,
+                           scrollbar->width,
+                           scrollbar->height,
+                           atk_color_tint(track_color, 10),
+                           atk_color_tint(track_border, -12));
 
     int track_length = scrollbar_track_length(scrollbar, priv);
     if (track_length <= 0)
@@ -341,8 +346,15 @@ void atk_scrollbar_draw(const atk_state_t *state, const atk_widget_t *scrollbar)
         int thumb_height = thumb_length;
         int thumb_width = scrollbar->width > 2 ? scrollbar->width - 2 : scrollbar->width;
         int thumb_x = x + (scrollbar->width - thumb_width) / 2;
-        video_draw_rect(thumb_x, thumb_y, thumb_width, thumb_height, thumb_face);
-        video_draw_rect_outline(thumb_x, thumb_y, thumb_width, thumb_height, thumb_border);
+        video_color_t thumb_top = atk_color_tint(thumb_face, priv->dragging ? -8 : 14);
+        video_color_t thumb_bottom = atk_color_tint(thumb_face, priv->dragging ? 6 : -10);
+        atk_draw_vertical_gradient(thumb_x, thumb_y, thumb_width, thumb_height, thumb_top, thumb_bottom);
+        atk_draw_bevel_outline(thumb_x,
+                               thumb_y,
+                               thumb_width,
+                               thumb_height,
+                               atk_color_tint(thumb_border, 24),
+                               atk_color_tint(thumb_border, -18));
     }
     else
     {
@@ -350,8 +362,15 @@ void atk_scrollbar_draw(const atk_state_t *state, const atk_widget_t *scrollbar)
         int thumb_width = thumb_length;
         int thumb_height = scrollbar->height > 2 ? scrollbar->height - 2 : scrollbar->height;
         int thumb_y = y + (scrollbar->height - thumb_height) / 2;
-        video_draw_rect(thumb_x, thumb_y, thumb_width, thumb_height, thumb_face);
-        video_draw_rect_outline(thumb_x, thumb_y, thumb_width, thumb_height, thumb_border);
+        video_color_t thumb_top = atk_color_tint(thumb_face, priv->dragging ? -8 : 14);
+        video_color_t thumb_bottom = atk_color_tint(thumb_face, priv->dragging ? 6 : -10);
+        atk_draw_vertical_gradient(thumb_x, thumb_y, thumb_width, thumb_height, thumb_top, thumb_bottom);
+        atk_draw_bevel_outline(thumb_x,
+                               thumb_y,
+                               thumb_width,
+                               thumb_height,
+                               atk_color_tint(thumb_border, 24),
+                               atk_color_tint(thumb_border, -18));
     }
 }
 

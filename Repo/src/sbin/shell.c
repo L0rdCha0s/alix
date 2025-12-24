@@ -1,5 +1,6 @@
 #include "shell.h"
 #include "shell_commands.h"
+#include "shell_prompt.h"
 
 #include "console.h"
 #include "serial.h"
@@ -73,6 +74,8 @@ static void shell_print_prompt(void);
 static void shell_run_and_display(shell_state_t *shell, const char *input);
 static char *shell_duplicate_empty(void);
 static char *shell_duplicate_string(const char *text);
+static void shell_prompt_refresh(shell_state_t *shell);
+static const char *shell_prompt_get(size_t *len_out);
 static void shell_command_runner(void *arg);
 static void shell_stream_console_write(void *context, const char *data, size_t len);
 static void cli_history_record(const char *line);
@@ -82,7 +85,9 @@ static void cli_history_load_current(char *buffer, size_t *len, size_t capacity)
 static void cli_history_load_text(const char *text, char *buffer, size_t *len, size_t capacity);
 static void cli_history_save_current(const char *buffer, size_t len);
 static bool cli_line_is_blank(const char *line);
-static const char SHELL_PROMPT[] = "alex@alix$ ";
+static const char SHELL_PROMPT_FALLBACK[] = "user@alix$ ";
+static char *g_shell_prompt = NULL;
+static size_t g_shell_prompt_len = 0;
 
 typedef struct
 {
@@ -893,6 +898,7 @@ static bool shell_prompt_login(shell_state_t *shell)
             }
             user_auth_free_record(&record);
             shell->cwd = process_current_cwd();
+            shell_prompt_refresh(shell);
             return true;
         }
         user_auth_free_record(&record);
@@ -1409,10 +1415,56 @@ static char *shell_duplicate_string(const char *text)
     return copy;
 }
 
+static void shell_prompt_refresh(shell_state_t *shell)
+{
+    if (g_shell_prompt)
+    {
+        free(g_shell_prompt);
+        g_shell_prompt = NULL;
+        g_shell_prompt_len = 0;
+    }
+
+    process_t *owner = shell ? shell->owner_process : process_current();
+    char *prompt = shell_prompt_build(owner);
+    if (!prompt)
+    {
+        return;
+    }
+    g_shell_prompt = prompt;
+    g_shell_prompt_len = strlen(prompt);
+}
+
+static const char *shell_prompt_get(size_t *len_out)
+{
+    if (!g_shell_prompt)
+    {
+        shell_prompt_refresh(g_active_shell);
+    }
+    if (g_shell_prompt)
+    {
+        if (len_out)
+        {
+            *len_out = g_shell_prompt_len;
+        }
+        return g_shell_prompt;
+    }
+    if (len_out)
+    {
+        *len_out = sizeof(SHELL_PROMPT_FALLBACK) - 1;
+    }
+    return SHELL_PROMPT_FALLBACK;
+}
+
 static void shell_print_prompt(void)
 {
-    console_write(SHELL_PROMPT);
-    serial_output_bytes(SHELL_PROMPT, sizeof(SHELL_PROMPT) - 1);
+    size_t prompt_len = 0;
+    const char *prompt = shell_prompt_get(&prompt_len);
+    if (!prompt)
+    {
+        return;
+    }
+    console_write(prompt);
+    serial_output_bytes(prompt, prompt_len);
 }
 
 static void shell_write_text(const char *text)
@@ -1802,7 +1854,8 @@ static void cli_render_line(const char *buffer,
                             size_t *rendered_len)
 {
     size_t previous_len = rendered_len ? *rendered_len : len;
-    size_t prompt_len = sizeof(SHELL_PROMPT) - 1;
+    size_t prompt_len = 0;
+    (void)shell_prompt_get(&prompt_len);
 
     console_write("\r");
     serial_emit_char('\r');

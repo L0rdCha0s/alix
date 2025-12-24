@@ -761,12 +761,14 @@ static void iconbox_draw_cb(const atk_state_t *state,
     int box_y = origin_y + widget->y;
     atk_rect_t clip = { box_x, box_y, widget->width, widget->height };
 
-    video_draw_rect(box_x, box_y, widget->width, widget->height, theme->window_body);
+    video_color_t box_top = atk_color_tint(theme->window_body, 4);
+    video_color_t box_bottom = atk_color_tint(theme->window_body, -6);
+    atk_draw_vertical_gradient(box_x, box_y, widget->width, widget->height, box_top, box_bottom);
 
     atk_button_draw_opts_t button_opts = { 0 };
     button_opts.clip = &clip;
     button_opts.override_text_color = true;
-    button_opts.text_color = theme->button_text;
+    button_opts.text_color = theme->desktop_icon_text;
     button_opts.override_label_bg = true;
     button_opts.label_bg = theme->window_body;
 
@@ -822,7 +824,12 @@ static void iconbox_draw_cb(const atk_state_t *state,
         }
     }
 
-    video_draw_rect_outline(box_x, box_y, widget->width, widget->height, theme->window_border);
+    atk_draw_bevel_outline(box_x,
+                           box_y,
+                           widget->width,
+                           widget->height,
+                           atk_color_tint(theme->window_body, 18),
+                           atk_color_tint(theme->window_border, -10));
 }
 
 static bool iconbox_hit_test_cb(const atk_widget_t *widget,

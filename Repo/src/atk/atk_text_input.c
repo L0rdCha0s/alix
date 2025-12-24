@@ -389,9 +389,24 @@ void atk_text_input_draw(const atk_state_t *state, const atk_widget_t *input)
 
     video_color_t face = state->theme.window_body;
     video_color_t border = priv->focused ? state->theme.window_title : state->theme.button_border;
-
-    video_draw_rect(x, y, width, height, face);
-    video_draw_rect_outline(x, y, width, height, border);
+    video_color_t face_top = atk_color_tint(face, 6);
+    video_color_t face_bottom = atk_color_tint(face, -8);
+    atk_draw_vertical_gradient(x, y, width, height, face_top, face_bottom);
+    atk_draw_bevel_outline(x,
+                           y,
+                           width,
+                           height,
+                           atk_color_tint(border, priv->focused ? 18 : 12),
+                           atk_color_tint(border, priv->focused ? -18 : -14));
+    if (priv->focused && width > 4 && height > 4)
+    {
+        atk_draw_bevel_outline(x + 1,
+                               y + 1,
+                               width - 2,
+                               height - 2,
+                               atk_color_tint(border, 28),
+                               atk_color_tint(border, -24));
+    }
 
     const char *text = priv->text ? priv->text : "";
     int font_h = atk_font_line_height();
@@ -442,7 +457,7 @@ void atk_text_input_draw(const atk_state_t *state, const atk_widget_t *input)
             }
             if (caret_height > 0)
             {
-                video_draw_rect(caret_x, caret_y, 2, caret_height, state->theme.button_text);
+            video_draw_rect(caret_x, caret_y, 2, caret_height, state->theme.window_title);
             }
         }
         return;
@@ -559,7 +574,7 @@ void atk_text_input_draw(const atk_state_t *state, const atk_widget_t *input)
         }
         if (caret_height > 0)
         {
-            video_draw_rect(caret_x, caret_y, 2, caret_height, state->theme.button_text);
+            video_draw_rect(caret_x, caret_y, 2, caret_height, state->theme.window_title);
         }
     }
 }

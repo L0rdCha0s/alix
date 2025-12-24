@@ -463,7 +463,7 @@ static bool tree_view_draw_nodes(const atk_state_t *state,
     }
 
     const atk_theme_t *theme = &state->theme;
-    video_color_t stripe_colors[2] = { theme->window_body, theme->button_face };
+    video_color_t stripe_colors[2] = { theme->window_body, atk_color_tint(theme->window_body, -6) };
     int row_height = priv->row_height;
     if (row_height <= 0)
     {
@@ -1016,7 +1016,9 @@ void atk_tree_view_draw(const atk_state_t *state, const atk_widget_t *tree)
     atk_widget_absolute_position(tree, &origin_x, &origin_y);
 
     const atk_theme_t *theme = &state->theme;
-    video_draw_rect(origin_x, origin_y, tree->width, tree->height, theme->window_body);
+    video_color_t body_top = atk_color_tint(theme->window_body, 4);
+    video_color_t body_bottom = atk_color_tint(theme->window_body, -6);
+    atk_draw_vertical_gradient(origin_x, origin_y, tree->width, tree->height, body_top, body_bottom);
 
     tree_view_sync_layout((atk_widget_t *)tree, priv);
 
@@ -1033,7 +1035,12 @@ void atk_tree_view_draw(const atk_state_t *state, const atk_widget_t *tree)
     size_t row_index = 0;
     tree_view_draw_nodes(state, tree, priv, &priv->roots, 0, &row_index, origin_x, origin_y, client_width);
 
-    video_draw_rect_outline(origin_x, origin_y, tree->width, tree->height, theme->window_border);
+    atk_draw_bevel_outline(origin_x,
+                           origin_y,
+                           tree->width,
+                           tree->height,
+                           atk_color_tint(theme->window_body, 18),
+                           atk_color_tint(theme->window_border, -10));
 }
 
 void atk_tree_view_destroy(atk_widget_t *tree)

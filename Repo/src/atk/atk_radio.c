@@ -463,15 +463,21 @@ void atk_radio_button_draw(const atk_state_t *state, const atk_widget_t *radio)
     int cx = x + ATK_RADIO_PADDING_X + r;
     int cy = y + h / 2;
 
-    video_color_t border = state->theme.window_border;
+    video_color_t border = atk_color_tint(state->theme.window_border, 12);
     video_color_t fill = state->theme.button_face;
-    radio_draw_circle_outline(cx, cy, r, border, fill);
+    video_color_t fill_inner = atk_color_tint(fill, -6);
+    radio_draw_circle_outline(cx, cy, r, border, fill_inner);
 
     if (priv->selected)
     {
         int inner_r = r - 3;
         if (inner_r < 2) inner_r = 2;
-        radio_draw_filled_circle(cx, cy, inner_r, state->theme.window_title);
+        video_color_t dot = state->theme.window_title;
+        radio_draw_filled_circle(cx, cy, inner_r, dot);
+        if (inner_r > 2)
+        {
+            radio_draw_filled_circle(cx, cy, inner_r - 1, atk_color_tint(dot, 20));
+        }
     }
 
     const char *label = (priv->label ? priv->label : "");

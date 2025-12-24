@@ -14,5 +14,6 @@ typedef struct
 bool user_auth_lookup(const char *username, user_record_t *out);
 bool user_auth_check_password(const char *username, const char *password);
 void user_auth_free_record(user_record_t *record);
+char *user_auth_username_for_uid(uint32_t uid);
 
 #endif

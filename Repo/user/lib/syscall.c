@@ -215,6 +215,15 @@ ssize_t sys_shell_get_cwd(int handle, char *buffer, size_t capacity)
     return (ssize_t)syscall3(SYSCALL_SHELL_CWD, handle, (long)buffer, (long)capacity);
 }
 
+ssize_t sys_shell_prompt(int handle, char *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return -1;
+    }
+    return (ssize_t)syscall3(SYSCALL_SHELL_PROMPT, handle, (long)buffer, (long)capacity);
+}
+
 ssize_t sys_proc_snapshot(syscall_process_info_t *buffer, size_t capacity)
 {
     return (ssize_t)syscall2(SYSCALL_PROC_SNAPSHOT, (long)buffer, (long)capacity);

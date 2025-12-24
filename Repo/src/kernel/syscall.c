@@ -59,6 +59,7 @@ typedef struct
 #define SYSCALL_MAX_COMMAND_LEN  4096u
 #define SYSCALL_MAX_SERIAL_BYTES 4096u
 #define SYSCALL_MAX_IP_TEXT_LEN  256u
+#define SYSCALL_MAX_PROMPT_LEN   256u
 
 typedef struct
 {
@@ -1299,6 +1300,49 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                 result = -1;
                 break;
             }
+            result = written;
+            break;
+        }
+        case SYSCALL_SHELL_PROMPT:
+        {
+            char *output_user = (char *)frame->rsi;
+            size_t output_capacity = (size_t)frame->rdx;
+            if (!output_user || output_capacity == 0 ||
+                !user_ptr_range_valid(output_user, output_capacity))
+            {
+                result = -1;
+                break;
+            }
+
+            size_t buffer_cap = output_capacity;
+            if (buffer_cap > SYSCALL_MAX_PROMPT_LEN)
+            {
+                buffer_cap = SYSCALL_MAX_PROMPT_LEN;
+            }
+
+            char *prompt_buf = (char *)malloc(buffer_cap);
+            if (!prompt_buf)
+            {
+                result = -1;
+                break;
+            }
+
+            ssize_t written = shell_service_get_prompt((uint32_t)frame->rdi,
+                                                       prompt_buf,
+                                                       buffer_cap);
+            if (written < 0 || (size_t)written + 1 > output_capacity)
+            {
+                free(prompt_buf);
+                result = -1;
+                break;
+            }
+            if (!user_copy_to_user(output_user, prompt_buf, (size_t)written + 1))
+            {
+                free(prompt_buf);
+                result = -1;
+                break;
+            }
+            free(prompt_buf);
             result = written;
             break;
         }

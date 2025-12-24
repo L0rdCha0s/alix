@@ -1190,17 +1190,27 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
                         window->height,
                         theme->window_body);
 
+        video_color_t title_top = atk_color_tint(theme->window_title, 18);
+        video_color_t title_bottom = atk_color_tint(theme->window_title, -12);
+        atk_draw_vertical_gradient(window->x,
+                                   window->y,
+                                   window->width,
+                                   ATK_WINDOW_TITLE_HEIGHT,
+                                   title_top,
+                                   title_bottom);
+        if (window->width > 2 && ATK_WINDOW_TITLE_HEIGHT > 2)
+        {
+            video_draw_rect(window->x + 1,
+                            window->y + 1,
+                            window->width - 2,
+                            1,
+                            atk_color_tint(theme->window_title, 32));
+        }
         video_draw_rect(window->x,
-                        window->y,
+                        window->y + ATK_WINDOW_TITLE_HEIGHT - 1,
                         window->width,
-                        ATK_WINDOW_TITLE_HEIGHT,
-                        theme->window_title);
-
-        video_draw_rect_outline(window->x,
-                                window->y,
-                                window->width,
-                                ATK_WINDOW_TITLE_HEIGHT,
-                                theme->window_border);
+                        1,
+                        atk_color_tint(theme->window_border, 12));
 
         int title_baseline = atk_font_baseline_for_rect(window->y, ATK_WINDOW_TITLE_HEIGHT);
         atk_rect_t clip = { window->x, window->y, window->width, ATK_WINDOW_TITLE_HEIGHT };
@@ -1211,11 +1221,9 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
                                      theme->window_title,
                                      &clip);
 
-        video_draw_rect_outline(window->x,
-                                window->y,
-                                window->width,
-                                window->height,
-                                theme->window_border);
+        video_color_t inner_light = atk_color_tint(theme->window_body, 18);
+        video_color_t inner_dark = atk_color_tint(theme->window_border, -10);
+        atk_draw_bevel_outline(window->x, window->y, window->width, window->height, inner_light, inner_dark);
     }
     else
     {
@@ -1224,6 +1232,9 @@ static void window_draw_internal(const atk_state_t *state, const atk_widget_t *w
                         window->width,
                         window->height,
                         theme->window_body);
+        video_color_t inner_light = atk_color_tint(theme->window_body, 18);
+        video_color_t inner_dark = atk_color_tint(theme->window_border, -10);
+        atk_draw_bevel_outline(window->x, window->y, window->width, window->height, inner_light, inner_dark);
     }
 
     size_t guard = 0;

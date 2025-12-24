@@ -175,6 +175,38 @@ static bool auth_parse_passwd_line(const char *line,
     return true;
 }
 
+static bool auth_parse_passwd_line_uid(const char *line,
+                                       const char *end,
+                                       uint32_t uid,
+                                       char **username_out)
+{
+    const char *colon1 = auth_find_char_range(line, end, ':');
+    if (!colon1)
+    {
+        return false;
+    }
+    const char *colon2 = auth_find_char_range(colon1 + 1, end, ':');
+    if (!colon2)
+    {
+        return false;
+    }
+    uint32_t parsed_uid = 0;
+    if (!auth_parse_u32(colon1 + 1, colon2, &parsed_uid))
+    {
+        return false;
+    }
+    if (parsed_uid != uid)
+    {
+        return false;
+    }
+    if (!username_out)
+    {
+        return true;
+    }
+    *username_out = auth_copy_field(line, colon1);
+    return *username_out != NULL;
+}
+
 bool user_auth_lookup(const char *username, user_record_t *out)
 {
     if (!username || !out)
@@ -214,6 +246,42 @@ bool user_auth_lookup(const char *username, user_record_t *out)
     }
 
     return false;
+}
+
+char *user_auth_username_for_uid(uint32_t uid)
+{
+    auth_file_view_t view = { 0 };
+    if (!auth_load_file("/etc/passwd", &view))
+    {
+        return NULL;
+    }
+
+    size_t pos = 0;
+    while (pos < view.size)
+    {
+        size_t line_end = pos;
+        while (line_end < view.size && view.data[line_end] != '\n' && view.data[line_end] != '\r')
+        {
+            ++line_end;
+        }
+        if (line_end > pos)
+        {
+            const char *line = view.data + pos;
+            const char *end = view.data + line_end;
+            char *username = NULL;
+            if (auth_parse_passwd_line_uid(line, end, uid, &username))
+            {
+                return username;
+            }
+        }
+        while (line_end < view.size && (view.data[line_end] == '\n' || view.data[line_end] == '\r'))
+        {
+            ++line_end;
+        }
+        pos = line_end;
+    }
+
+    return NULL;
 }
 
 bool user_auth_check_password(const char *username, const char *password)

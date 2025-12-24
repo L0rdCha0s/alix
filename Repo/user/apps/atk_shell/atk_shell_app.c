@@ -14,10 +14,10 @@
 
 #define SHELL_WINDOW_WIDTH   640
 #define SHELL_WINDOW_HEIGHT  480
-#define SHELL_PROMPT         "alex@alix$ "
 #define SHELL_OUTPUT_BUFFER  4096
 #define SHELL_INPUT_CAPACITY 256
 #define SHELL_TICK_MS        50u
+#define SHELL_PROMPT_MAX     128u
 
 typedef struct
 {
@@ -491,9 +491,36 @@ static void shell_append(atk_shell_app_t *app, const char *text)
     }
 }
 
+static char *shell_fetch_prompt(atk_shell_app_t *app)
+{
+    if (!app || app->shell_handle < 0)
+    {
+        return NULL;
+    }
+    char *buffer = (char *)malloc(SHELL_PROMPT_MAX);
+    if (!buffer)
+    {
+        return NULL;
+    }
+    ssize_t written = sys_shell_prompt(app->shell_handle, buffer, SHELL_PROMPT_MAX);
+    if (written <= 0)
+    {
+        free(buffer);
+        return NULL;
+    }
+    buffer[written] = '\0';
+    return buffer;
+}
+
 static void shell_append_prompt(atk_shell_app_t *app)
 {
-    shell_append(app, SHELL_PROMPT);
+    char *prompt = shell_fetch_prompt(app);
+    if (!prompt)
+    {
+        return;
+    }
+    shell_append(app, prompt);
+    free(prompt);
     if (app)
     {
         app->last_output_newline = false;
@@ -616,7 +643,6 @@ static bool shell_init_ui(atk_shell_app_t *app)
 
     app->window = window;
     app->terminal = terminal;
-    shell_append_prompt(app);
     atk_window_mark_dirty(window);
     return true;
 }
@@ -700,6 +726,7 @@ int main(void)
         return 1;
     }
 
+    shell_append_prompt(&app);
     shell_render(&app);
 
     atk_main_config_t main_cfg = {

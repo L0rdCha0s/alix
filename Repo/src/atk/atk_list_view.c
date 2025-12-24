@@ -554,7 +554,9 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
 
     if (header_h > 0 && client_width > 0)
     {
-        video_draw_rect(origin_x, origin_y, client_width, header_h, theme->button_face);
+        video_color_t header_top = atk_color_tint(theme->button_face, 12);
+        video_color_t header_bottom = atk_color_tint(theme->button_face, -10);
+        atk_draw_vertical_gradient(origin_x, origin_y, client_width, header_h, header_top, header_bottom);
     }
 
     int row_area_height = client_height - header_h;
@@ -633,7 +635,7 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
                               ? (size_t)(row_area_height / priv->row_height)
                               : 0;
     size_t row_index = (priv->scroll_row >= 0) ? (size_t)priv->scroll_row : 0;
-    video_color_t stripe_colors[2] = { theme->window_body, theme->button_face };
+    video_color_t stripe_colors[2] = { theme->window_body, atk_color_tint(theme->window_body, -6) };
 
     for (size_t drawn = 0; drawn < visible_rows && row_index < priv->row_count; ++drawn, ++row_index)
     {
@@ -737,7 +739,11 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
                 {
                     continue;
                 }
-                video_draw_rect(boundary, line_top, 1, line_bottom - line_top, theme->window_border);
+                video_draw_rect(boundary,
+                                line_top,
+                                1,
+                                line_bottom - line_top,
+                                atk_color_tint(theme->window_border, 16));
             }
         }
     }
@@ -756,7 +762,7 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
             {
                 line_height = 0;
             }
-            video_draw_rect(hover_x, origin_y, 1, line_height, theme->window_border);
+            video_draw_rect(hover_x, origin_y, 1, line_height, atk_color_tint(theme->window_border, 16));
         }
     }
 
@@ -766,9 +772,14 @@ void atk_list_view_draw(const atk_state_t *state, const atk_widget_t *list)
                         origin_y + header_h - 1,
                         client_width,
                         1,
-                        theme->window_border);
+                        atk_color_tint(theme->window_border, 12));
     }
-    video_draw_rect_outline(origin_x, origin_y, list->width, list->height, theme->window_border);
+    atk_draw_bevel_outline(origin_x,
+                           origin_y,
+                           list->width,
+                           list->height,
+                           atk_color_tint(theme->window_body, 18),
+                           atk_color_tint(theme->window_border, -10));
 }
 
 void atk_list_view_destroy(atk_widget_t *list)

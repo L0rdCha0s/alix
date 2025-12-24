@@ -341,7 +341,27 @@ static void atk_paint_background_region(const atk_state_t *state, int x, int y, 
      * areas stay deterministic. */
     if (!have_wall || !wall_covers_screen)
     {
-        video_draw_rect(x, y, width, height, state->theme.background);
+        video_color_t base_top = atk_color_tint(state->theme.background, 8);
+        video_color_t base_bottom = atk_color_tint(state->theme.background, -10);
+        int screen_h = video_screen_height();
+        if (screen_h > 1)
+        {
+            int y0 = y;
+            int y1 = y + height - 1;
+            if (y0 < 0) y0 = 0;
+            if (y1 < 0) y1 = 0;
+            if (y0 > screen_h - 1) y0 = screen_h - 1;
+            if (y1 > screen_h - 1) y1 = screen_h - 1;
+            uint8_t t0 = (uint8_t)((y0 * 255) / (screen_h - 1));
+            uint8_t t1 = (uint8_t)((y1 * 255) / (screen_h - 1));
+            video_color_t top = atk_color_mix(base_top, base_bottom, t0);
+            video_color_t bottom = atk_color_mix(base_top, base_bottom, t1);
+            atk_draw_vertical_gradient(x, y, width, height, top, bottom);
+        }
+        else
+        {
+            video_draw_rect(x, y, width, height, state->theme.background);
+        }
     }
 
     if (!have_wall)
@@ -400,7 +420,27 @@ static void atk_paint_background_region(const atk_state_t *state, int x, int y, 
     {
         return;
     }
-    video_draw_rect(x, y, width, height, state->theme.background);
+    video_color_t base_top = atk_color_tint(state->theme.background, 8);
+    video_color_t base_bottom = atk_color_tint(state->theme.background, -10);
+    int screen_h = video_screen_height();
+    if (screen_h > 1)
+    {
+        int y0 = y;
+        int y1 = y + height - 1;
+        if (y0 < 0) y0 = 0;
+        if (y1 < 0) y1 = 0;
+        if (y0 > screen_h - 1) y0 = screen_h - 1;
+        if (y1 > screen_h - 1) y1 = screen_h - 1;
+        uint8_t t0 = (uint8_t)((y0 * 255) / (screen_h - 1));
+        uint8_t t1 = (uint8_t)((y1 * 255) / (screen_h - 1));
+        video_color_t top = atk_color_mix(base_top, base_bottom, t0);
+        video_color_t bottom = atk_color_mix(base_top, base_bottom, t1);
+        atk_draw_vertical_gradient(x, y, width, height, top, bottom);
+    }
+    else
+    {
+        video_draw_rect(x, y, width, height, state->theme.background);
+    }
 }
 #endif
 
@@ -1702,23 +1742,23 @@ static void atk_apply_default_theme(atk_state_t *state)
     }
 
     atk_guard_check(&state->theme_guard_front, &state->theme_guard_back, "state->theme");
-    state->theme.background = video_make_color(0x3B, 0x6E, 0xA5);
-    state->theme.window_border = video_make_color(0x20, 0x20, 0x20);
-    state->theme.window_title = video_make_color(0x30, 0x60, 0xA0);
-    state->theme.window_title_text = video_make_color(0xFF, 0xFF, 0xFF);
-    state->theme.window_body = video_make_color(0xF0, 0xF0, 0xF0);
-    state->theme.button_face = video_make_color(0xE0, 0xE0, 0xE0);
-    state->theme.button_border = video_make_color(0x40, 0x40, 0x40);
-    state->theme.button_text = video_make_color(0x10, 0x10, 0x10);
-    state->theme.desktop_icon_face = video_make_color(0x50, 0x90, 0xD0);
+    state->theme.background = video_make_color(0xE2, 0xDF, 0xD6);
+    state->theme.window_border = video_make_color(0x5C, 0x58, 0x53);
+    state->theme.window_title = video_make_color(0x2E, 0x5F, 0x6B);
+    state->theme.window_title_text = video_make_color(0xF7, 0xF8, 0xFA);
+    state->theme.window_body = video_make_color(0xF8, 0xF5, 0xEF);
+    state->theme.button_face = video_make_color(0xED, 0xE8, 0xE0);
+    state->theme.button_border = video_make_color(0x8D, 0x85, 0x7B);
+    state->theme.button_text = video_make_color(0x2A, 0x2A, 0x2A);
+    state->theme.desktop_icon_face = video_make_color(0x4D, 0x8E, 0x9E);
     state->theme.desktop_icon_text = state->theme.window_title_text;
-    state->theme.menu_bar_face = video_make_color(0x15, 0x29, 0x43);
-    state->theme.menu_bar_text = video_make_color(0xF0, 0xF4, 0xF9);
-    state->theme.menu_bar_highlight = video_make_color(0x28, 0x45, 0x6B);
-    state->theme.menu_dropdown_face = video_make_color(0xF6, 0xF6, 0xF6);
-    state->theme.menu_dropdown_border = video_make_color(0x30, 0x30, 0x30);
-    state->theme.menu_dropdown_text = video_make_color(0x20, 0x20, 0x20);
-    state->theme.menu_dropdown_highlight = video_make_color(0x36, 0x58, 0x8A);
+    state->theme.menu_bar_face = video_make_color(0xF1, 0xEC, 0xE4);
+    state->theme.menu_bar_text = video_make_color(0x2A, 0x2A, 0x2A);
+    state->theme.menu_bar_highlight = video_make_color(0x2E, 0x5F, 0x6B);
+    state->theme.menu_dropdown_face = video_make_color(0xFB, 0xF9, 0xF4);
+    state->theme.menu_dropdown_border = video_make_color(0x8D, 0x85, 0x7B);
+    state->theme.menu_dropdown_text = video_make_color(0x24, 0x24, 0x24);
+    state->theme.menu_dropdown_highlight = video_make_color(0x2E, 0x5F, 0x6B);
     atk_state_theme_commit(state);
 #if ATK_DEBUG
     atk_state_theme_log(state, "default theme");

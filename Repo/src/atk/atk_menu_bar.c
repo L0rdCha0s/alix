@@ -710,8 +710,12 @@ void atk_menu_bar_draw(const atk_state_t *state)
     }
     const atk_theme_t *theme = &state->theme;
 
-    video_draw_rect(0, 0, video_screen_width(), height, theme->menu_bar_face);
-    video_draw_rect(0, height - 1, video_screen_width(), 1, theme->menu_dropdown_border);
+    int screen_w = video_screen_width();
+    video_color_t bar_top = atk_color_tint(theme->menu_bar_face, 8);
+    video_color_t bar_bottom = atk_color_tint(theme->menu_bar_face, -8);
+    atk_draw_vertical_gradient(0, 0, screen_w, height, bar_top, bar_bottom);
+    video_draw_rect(0, height - 1, screen_w, 1, atk_color_tint(theme->menu_dropdown_border, 8));
+    video_draw_rect(0, 0, screen_w, 1, atk_color_tint(theme->menu_bar_face, 18));
 
     if (state->menu_logo && state->menu_logo->used)
     {
@@ -732,11 +736,18 @@ void atk_menu_bar_draw(const atk_state_t *state)
         {
             if (highlighted)
             {
-                video_draw_rect(entry->x,
-                                0,
-                                entry->width,
-                                height - 1,
-                                theme->menu_bar_highlight);
+                video_color_t entry_top = atk_color_tint(theme->menu_bar_highlight, 10);
+                video_color_t entry_bottom = atk_color_tint(theme->menu_bar_highlight, -12);
+                atk_draw_vertical_gradient(entry->x, 0, entry->width, height - 1, entry_top, entry_bottom);
+                if (entry->width > 2 && height > 3)
+                {
+                    atk_draw_bevel_outline(entry->x,
+                                           0,
+                                           entry->width,
+                                           height - 1,
+                                           atk_color_tint(theme->menu_bar_highlight, 18),
+                                           atk_color_tint(theme->menu_bar_highlight, -18));
+                }
                 if (state->menu_logo && state->menu_logo->used)
                 {
                     atk_image_draw(state, state->menu_logo);
@@ -746,13 +757,20 @@ void atk_menu_bar_draw(const atk_state_t *state)
         }
         if (highlighted)
         {
-            video_draw_rect(entry->x,
-                            0,
-                            entry->width,
-                            height - 1,
-                            theme->menu_bar_highlight);
+            video_color_t entry_top = atk_color_tint(theme->menu_bar_highlight, 10);
+            video_color_t entry_bottom = atk_color_tint(theme->menu_bar_highlight, -12);
+            atk_draw_vertical_gradient(entry->x, 0, entry->width, height - 1, entry_top, entry_bottom);
+            if (entry->width > 2 && height > 3)
+            {
+                atk_draw_bevel_outline(entry->x,
+                                       0,
+                                       entry->width,
+                                       height - 1,
+                                       atk_color_tint(theme->menu_bar_highlight, 18),
+                                       atk_color_tint(theme->menu_bar_highlight, -18));
+            }
         }
-        video_color_t fg = highlighted ? theme->menu_dropdown_border : theme->menu_bar_text;
+        video_color_t fg = highlighted ? theme->menu_dropdown_face : theme->menu_bar_text;
         video_color_t bg = highlighted ? theme->menu_bar_highlight : theme->menu_bar_face;
         int text_width = entry->text_width;
         if (text_width <= 0)
@@ -782,18 +800,23 @@ void atk_menu_bar_draw(const atk_state_t *state)
 
     bool volume_open = g_volume_window != NULL;
     video_color_t volume_bg = volume_open ? theme->menu_bar_highlight : theme->menu_bar_face;
-    video_color_t volume_fg = volume_open ? theme->menu_dropdown_border : theme->menu_bar_text;
-    video_draw_rect(volume_x, 0, volume_width, height - 1, volume_bg);
+    video_color_t volume_fg = volume_open ? theme->menu_dropdown_face : theme->menu_bar_text;
+    if (volume_open)
+    {
+        video_color_t volume_top = atk_color_tint(volume_bg, 10);
+        video_color_t volume_bottom = atk_color_tint(volume_bg, -12);
+        atk_draw_vertical_gradient(volume_x, 0, volume_width, height - 1, volume_top, volume_bottom);
+    }
+    else
+    {
+        atk_draw_vertical_gradient(volume_x, 0, volume_width, height - 1, bar_top, bar_bottom);
+    }
     atk_menu_bar_draw_speaker_icon(volume_x, 0, volume_width, height, volume_fg);
 
     char clock_text[16];
     timekeeping_format_time(clock_text, sizeof(clock_text));
     int clock_padding = 8;
-    video_draw_rect(clock_x,
-                    0,
-                    clock_box_width,
-                    height - 1,
-                    theme->menu_bar_face);
+    atk_draw_vertical_gradient(clock_x, 0, clock_box_width, height - 1, bar_top, bar_bottom);
     atk_rect_t clock_clip = { clock_x, 0, clock_box_width, height };
     atk_font_draw_string_clipped(clock_x + clock_padding,
                                  baseline,

@@ -42,6 +42,81 @@ typedef struct atk_rect
 #define ATK_USER_POINTER_MIN 0ULL
 #endif
 
+static inline int atk_color_clamp(int value)
+{
+    if (value < 0)
+    {
+        return 0;
+    }
+    if (value > 255)
+    {
+        return 255;
+    }
+    return value;
+}
+
+static inline uint8_t atk_color_r(video_color_t color)
+{
+    return (uint8_t)((color >> 16) & 0xFFu);
+}
+
+static inline uint8_t atk_color_g(video_color_t color)
+{
+    return (uint8_t)((color >> 8) & 0xFFu);
+}
+
+static inline uint8_t atk_color_b(video_color_t color)
+{
+    return (uint8_t)(color & 0xFFu);
+}
+
+static inline video_color_t atk_color_tint(video_color_t color, int delta)
+{
+    int r = atk_color_clamp((int)atk_color_r(color) + delta);
+    int g = atk_color_clamp((int)atk_color_g(color) + delta);
+    int b = atk_color_clamp((int)atk_color_b(color) + delta);
+    return video_make_color((uint8_t)r, (uint8_t)g, (uint8_t)b);
+}
+
+static inline video_color_t atk_color_mix(video_color_t a, video_color_t b, uint8_t t)
+{
+    int inv = 255 - (int)t;
+    int r = ((int)atk_color_r(a) * inv + (int)atk_color_r(b) * (int)t) / 255;
+    int g = ((int)atk_color_g(a) * inv + (int)atk_color_g(b) * (int)t) / 255;
+    int bch = ((int)atk_color_b(a) * inv + (int)atk_color_b(b) * (int)t) / 255;
+    return video_make_color((uint8_t)r, (uint8_t)g, (uint8_t)bch);
+}
+
+static inline void atk_draw_vertical_gradient(int x, int y, int width, int height, video_color_t top, video_color_t bottom)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+    if (height == 1)
+    {
+        video_draw_rect(x, y, width, height, top);
+        return;
+    }
+    for (int i = 0; i < height; ++i)
+    {
+        uint8_t t = (uint8_t)((i * 255) / (height - 1));
+        video_draw_rect(x, y + i, width, 1, atk_color_mix(top, bottom, t));
+    }
+}
+
+static inline void atk_draw_bevel_outline(int x, int y, int width, int height, video_color_t light, video_color_t dark)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+    video_draw_rect(x, y, width, 1, light);
+    video_draw_rect(x, y, 1, height, light);
+    video_draw_rect(x, y + height - 1, width, 1, dark);
+    video_draw_rect(x + width - 1, y, 1, height, dark);
+}
+
 typedef enum
 {
     ATK_BUTTON_STYLE_TITLE_INSIDE = 0,

@@ -689,18 +689,24 @@ static void dropdown_draw_cb(const atk_state_t *state,
     {
         face = theme->menu_bar_face;
         fg = theme->menu_bar_text;
+        border = theme->menu_dropdown_border;
     }
     if (priv->open)
     {
         face = theme->menu_bar_highlight;
-        if (priv->style == ATK_DROPDOWN_STYLE_MENU)
-        {
-            fg = theme->menu_bar_face;
-        }
+        border = theme->menu_bar_highlight;
+        fg = theme->menu_dropdown_face;
     }
 
-    video_draw_rect(abs_x, abs_y, widget->width, widget->height, face);
-    video_draw_rect_outline(abs_x, abs_y, widget->width, widget->height, border);
+    video_color_t face_top = atk_color_tint(face, priv->open ? 10 : 12);
+    video_color_t face_bottom = atk_color_tint(face, priv->open ? -12 : -10);
+    atk_draw_vertical_gradient(abs_x, abs_y, widget->width, widget->height, face_top, face_bottom);
+    atk_draw_bevel_outline(abs_x,
+                           abs_y,
+                           widget->width,
+                           widget->height,
+                           atk_color_tint(border, 22),
+                           atk_color_tint(border, -18));
 
     const char *display = "";
     if (priv->style == ATK_DROPDOWN_STYLE_MENU)
@@ -751,15 +757,31 @@ static void dropdown_draw_cb(const atk_state_t *state,
         return;
     }
 
-    video_draw_rect(list_rect.x, list_rect.y, list_rect.width, list_rect.height, theme->menu_dropdown_face);
-    video_draw_rect_outline(list_rect.x, list_rect.y, list_rect.width, list_rect.height, theme->menu_dropdown_border);
+    video_color_t list_top = atk_color_tint(theme->menu_dropdown_face, 8);
+    video_color_t list_bottom = atk_color_tint(theme->menu_dropdown_face, -6);
+    atk_draw_vertical_gradient(list_rect.x, list_rect.y, list_rect.width, list_rect.height, list_top, list_bottom);
+    atk_draw_bevel_outline(list_rect.x,
+                           list_rect.y,
+                           list_rect.width,
+                           list_rect.height,
+                           atk_color_tint(theme->menu_dropdown_face, 14),
+                           atk_color_tint(theme->menu_dropdown_border, -10));
 
     int item_w = list_rect.width;
     int item_h = priv->item_height;
+    int list_h = list_rect.height;
     for (size_t i = 0; i < priv->count; ++i)
     {
         int row_y = list_rect.y + (int)i * item_h;
-        video_color_t row_bg = theme->menu_dropdown_face;
+        uint8_t t = 0;
+        if (list_h > 1)
+        {
+            int rel_y = row_y - list_rect.y;
+            if (rel_y < 0) rel_y = 0;
+            if (rel_y > list_h - 1) rel_y = list_h - 1;
+            t = (uint8_t)((rel_y * 255) / (list_h - 1));
+        }
+        video_color_t row_bg = atk_color_mix(list_top, list_bottom, t);
         video_color_t row_fg = theme->menu_dropdown_text;
         bool highlighted = ((int)i == priv->highlighted);
         if (highlighted)
@@ -767,7 +789,31 @@ static void dropdown_draw_cb(const atk_state_t *state,
             row_bg = theme->menu_dropdown_highlight;
             row_fg = theme->menu_dropdown_face;
         }
-        video_draw_rect(list_rect.x + 1, row_y, item_w - 2, item_h, row_bg);
+        if (highlighted)
+        {
+            int draw_x = list_rect.x + 1;
+            int draw_w = item_w - 2;
+            int draw_h = item_h;
+            if (draw_w > 0 && draw_h > 0)
+            {
+                video_color_t hl_top = atk_color_tint(row_bg, 10);
+                video_color_t hl_bottom = atk_color_tint(row_bg, -12);
+                atk_draw_vertical_gradient(draw_x, row_y, draw_w, draw_h, hl_top, hl_bottom);
+                if (draw_w > 2 && draw_h > 2)
+                {
+                    atk_draw_bevel_outline(draw_x,
+                                           row_y,
+                                           draw_w,
+                                           draw_h,
+                                           atk_color_tint(row_bg, 18),
+                                           atk_color_tint(row_bg, -18));
+                }
+            }
+        }
+        else
+        {
+            video_draw_rect(list_rect.x + 1, row_y, item_w - 2, item_h, row_bg);
+        }
 
         int row_baseline = atk_font_baseline_for_rect(row_y, item_h);
         int text_start_x = list_rect.x + ATK_DROPDOWN_PADDING_X;

@@ -320,16 +320,15 @@ void atk_menu_draw(const atk_state_t *state, const atk_widget_t *menu)
     int abs_x = ox + menu->x;
     int abs_y = oy + menu->y;
 
-    video_draw_rect(abs_x,
-                    abs_y,
-                    menu->width,
-                    menu->height,
-                    theme->menu_dropdown_face);
-    video_draw_rect_outline(abs_x,
-                            abs_y,
-                            menu->width,
-                            menu->height,
-                            theme->menu_dropdown_border);
+    video_color_t menu_top = atk_color_tint(theme->menu_dropdown_face, 8);
+    video_color_t menu_bottom = atk_color_tint(theme->menu_dropdown_face, -6);
+    atk_draw_vertical_gradient(abs_x, abs_y, menu->width, menu->height, menu_top, menu_bottom);
+    atk_draw_bevel_outline(abs_x,
+                           abs_y,
+                           menu->width,
+                           menu->height,
+                           atk_color_tint(theme->menu_dropdown_face, 14),
+                           atk_color_tint(theme->menu_dropdown_border, -10));
 
     for (size_t i = 0; i < priv->count; ++i)
     {
@@ -340,11 +339,25 @@ void atk_menu_draw(const atk_state_t *state, const atk_widget_t *menu)
         {
             bg = theme->menu_dropdown_highlight;
             fg = theme->menu_dropdown_face;
-            video_draw_rect(abs_x + 1,
-                            item_y + 1,
-                            menu->width - 2,
-                            priv->item_height - 2,
-                            bg);
+            int draw_w = menu->width - 2;
+            int draw_h = priv->item_height - 2;
+            int draw_x = abs_x + 1;
+            int draw_y = item_y + 1;
+            if (draw_w > 0 && draw_h > 0)
+            {
+                video_color_t hl_top = atk_color_tint(bg, 10);
+                video_color_t hl_bottom = atk_color_tint(bg, -12);
+                atk_draw_vertical_gradient(draw_x, draw_y, draw_w, draw_h, hl_top, hl_bottom);
+                if (draw_w > 2 && draw_h > 2)
+                {
+                    atk_draw_bevel_outline(draw_x,
+                                           draw_y,
+                                           draw_w,
+                                           draw_h,
+                                           atk_color_tint(bg, 18),
+                                           atk_color_tint(bg, -18));
+                }
+            }
         }
         int text_x = abs_x + ATK_MENU_ITEM_PADDING_X;
         int baseline = atk_font_baseline_for_rect(item_y, priv->item_height);

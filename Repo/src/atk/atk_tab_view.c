@@ -550,7 +550,9 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
 
     const atk_theme_t *theme = &state->theme;
     video_draw_rect(origin_x, origin_y, tab_view->width, tab_view->height, theme->window_body);
-    video_draw_rect(origin_x, origin_y, tab_view->width, priv->tab_height, theme->button_face);
+    video_color_t tabbar_top = atk_color_tint(theme->button_face, 10);
+    video_color_t tabbar_bottom = atk_color_tint(theme->button_face, -8);
+    atk_draw_vertical_gradient(origin_x, origin_y, tab_view->width, priv->tab_height, tabbar_top, tabbar_bottom);
 
     int tab_x = origin_x + priv->content_padding;
     int tab_y = origin_y;
@@ -589,9 +591,15 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
         video_color_t bg = active ? theme->window_body : theme->button_face;
         video_color_t border = theme->window_border;
         video_color_t text = theme->button_text;
-
-        video_draw_rect(tab_x, tab_y, width, priv->tab_height, bg);
-        video_draw_rect_outline(tab_x, tab_y, width, priv->tab_height, border);
+        video_color_t tab_top = atk_color_tint(bg, active ? 6 : 10);
+        video_color_t tab_bottom = atk_color_tint(bg, active ? -6 : -10);
+        atk_draw_vertical_gradient(tab_x, tab_y, width, priv->tab_height, tab_top, tab_bottom);
+        atk_draw_bevel_outline(tab_x,
+                               tab_y,
+                               width,
+                               priv->tab_height,
+                               atk_color_tint(border, 20),
+                               atk_color_tint(border, -16));
 
         int line_height = atk_font_line_height();
         int text_width = atk_font_text_width(page->title);
@@ -631,7 +639,12 @@ void atk_tab_view_draw(const atk_state_t *state, const atk_widget_t *tab_view)
     content_x += origin_x;
     content_y += origin_y;
     video_draw_rect(content_x, content_y, content_w, content_h, theme->window_body);
-    video_draw_rect_outline(origin_x, origin_y, tab_view->width, tab_view->height, theme->window_border);
+    atk_draw_bevel_outline(origin_x,
+                           origin_y,
+                           tab_view->width,
+                           tab_view->height,
+                           atk_color_tint(theme->window_body, 18),
+                           atk_color_tint(theme->window_border, -10));
     if (guard >= TAB_PAGE_GUARD_LIMIT)
     {
         tab_view_reset_pages((atk_tab_view_priv_t *)priv, "draw_guard");

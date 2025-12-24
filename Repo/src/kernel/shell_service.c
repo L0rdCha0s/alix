@@ -5,6 +5,7 @@
 #include "libc.h"
 #include "process.h"
 #include "shell.h"
+#include "shell_prompt.h"
 #include "spinlock.h"
 #include "user_auth.h"
 #include "vfs.h"
@@ -485,6 +486,45 @@ ssize_t shell_service_get_cwd(uint32_t handle, char *buffer, size_t capacity)
     }
     buffer[written] = '\0';
     return (ssize_t)written;
+}
+
+ssize_t shell_service_get_prompt(uint32_t handle, char *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0)
+    {
+        return -1;
+    }
+    process_t *owner = process_current();
+    shell_session_t *session = shell_session_find_locked(handle, owner);
+    if (!session)
+    {
+        return -1;
+    }
+
+    if (!session->authenticated)
+    {
+        buffer[0] = '\0';
+        shell_session_unlock(session);
+        return 0;
+    }
+
+    char *prompt = shell_prompt_build(session->owner);
+    shell_session_unlock(session);
+    if (!prompt)
+    {
+        return -1;
+    }
+
+    size_t len = strlen(prompt);
+    if (len + 1 > capacity)
+    {
+        free(prompt);
+        return -1;
+    }
+
+    memcpy(buffer, prompt, len + 1);
+    free(prompt);
+    return (ssize_t)len;
 }
 
 void shell_service_cleanup_process(process_t *process)

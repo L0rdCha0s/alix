@@ -310,8 +310,15 @@ void atk_checkbox_draw(const atk_state_t *state, const atk_widget_t *checkbox)
 
     video_color_t border = state->theme.window_border;
     video_color_t fill = state->theme.button_face;
-    video_draw_rect(box_x, box_y, box, box, fill);
-    video_draw_rect_outline(box_x, box_y, box, box, border);
+    video_color_t fill_top = atk_color_tint(fill, 8);
+    video_color_t fill_bottom = atk_color_tint(fill, -8);
+    atk_draw_vertical_gradient(box_x, box_y, box, box, fill_top, fill_bottom);
+    atk_draw_bevel_outline(box_x,
+                           box_y,
+                           box,
+                           box,
+                           atk_color_tint(border, 20),
+                           atk_color_tint(border, -18));
 
     if (priv->checked)
     {
@@ -320,7 +327,17 @@ void atk_checkbox_draw(const atk_state_t *state, const atk_widget_t *checkbox)
         if (inner < 2) inner = 2;
         int ix = box_x + (box - inner) / 2;
         int iy = box_y + (box - inner) / 2;
-        video_draw_rect(ix, iy, inner, inner, state->theme.window_title);
+        video_color_t check = state->theme.window_title;
+        video_draw_rect(ix, iy, inner, inner, check);
+        if (inner > 2)
+        {
+            atk_draw_bevel_outline(ix,
+                                   iy,
+                                   inner,
+                                   inner,
+                                   atk_color_tint(check, 20),
+                                   atk_color_tint(check, -20));
+        }
     }
 
     const char *label = (priv->label ? priv->label : "");

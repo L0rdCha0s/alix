@@ -25,7 +25,8 @@ static int button_label_height_px(const atk_widget_t *widget, const atk_button_p
 static void button_append_ellipsis(char *line, int max_width);
 static bool button_clip_rect(const atk_rect_t *clip, const atk_rect_t *rect, atk_rect_t *out);
 static void button_draw_rect_clipped(int x, int y, int width, int height, video_color_t color, const atk_rect_t *clip);
-static void button_draw_rect_outline_clipped(int x, int y, int width, int height, video_color_t color, const atk_rect_t *clip);
+static void button_draw_gradient_clipped(int x, int y, int width, int height, video_color_t top, video_color_t bottom, const atk_rect_t *clip);
+static void button_draw_bevel_outline_clipped(int x, int y, int width, int height, video_color_t light, video_color_t dark, const atk_rect_t *clip);
 static void button_draw_cb(const atk_state_t *state,
                            const atk_widget_t *widget,
                            int origin_x,
@@ -174,8 +175,12 @@ void atk_button_draw_ex(const atk_state_t *state,
     }
 
     const atk_rect_t *clip = opts ? opts->clip : NULL;
-    button_draw_rect_clipped(bx, by, widget->width, widget->height, face_color, clip);
-    button_draw_rect_outline_clipped(bx, by, widget->width, widget->height, border_color, clip);
+    video_color_t face_top = atk_color_tint(face_color, priv->pressed ? -10 : 16);
+    video_color_t face_bottom = atk_color_tint(face_color, priv->pressed ? 6 : -12);
+    video_color_t edge_light = atk_color_tint(border_color, priv->pressed ? -6 : 28);
+    video_color_t edge_dark = atk_color_tint(border_color, priv->pressed ? -24 : -18);
+    button_draw_gradient_clipped(bx, by, widget->width, widget->height, face_top, face_bottom, clip);
+    button_draw_bevel_outline_clipped(bx, by, widget->width, widget->height, edge_light, edge_dark, clip);
 
     const char *title = priv->title;
     int title_px_width = atk_font_text_width(title);
@@ -188,6 +193,11 @@ void atk_button_draw_ex(const atk_state_t *state,
             text_x = bx + (widget->width - title_px_width) / 2;
         }
         int baseline = atk_font_baseline_for_rect(by, widget->height);
+        if (priv->pressed)
+        {
+            text_x += 1;
+            baseline += 1;
+        }
         atk_rect_t rect = { bx, by, widget->width, widget->height };
         atk_rect_t clip_rect;
         if (button_clip_rect(clip, &rect, &clip_rect))
@@ -521,17 +531,34 @@ static void button_draw_rect_clipped(int x, int y, int width, int height, video_
     video_draw_rect(clip_rect.x, clip_rect.y, clip_rect.width, clip_rect.height, color);
 }
 
-static void button_draw_rect_outline_clipped(int x, int y, int width, int height, video_color_t color, const atk_rect_t *clip)
+static void button_draw_gradient_clipped(int x, int y, int width, int height, video_color_t top, video_color_t bottom, const atk_rect_t *clip)
 {
     if (width <= 0 || height <= 0)
     {
         return;
     }
+    if (height == 1)
+    {
+        button_draw_rect_clipped(x, y, width, height, top, clip);
+        return;
+    }
+    for (int i = 0; i < height; ++i)
+    {
+        uint8_t t = (uint8_t)((i * 255) / (height - 1));
+        button_draw_rect_clipped(x, y + i, width, 1, atk_color_mix(top, bottom, t), clip);
+    }
+}
 
-    button_draw_rect_clipped(x, y, width, 1, color, clip);
-    button_draw_rect_clipped(x, y + height - 1, width, 1, color, clip);
-    button_draw_rect_clipped(x, y, 1, height, color, clip);
-    button_draw_rect_clipped(x + width - 1, y, 1, height, color, clip);
+static void button_draw_bevel_outline_clipped(int x, int y, int width, int height, video_color_t light, video_color_t dark, const atk_rect_t *clip)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+    button_draw_rect_clipped(x, y, width, 1, light, clip);
+    button_draw_rect_clipped(x, y, 1, height, light, clip);
+    button_draw_rect_clipped(x, y + height - 1, width, 1, dark, clip);
+    button_draw_rect_clipped(x + width - 1, y, 1, height, dark, clip);
 }
 
 static void button_draw_cb(const atk_state_t *state,
