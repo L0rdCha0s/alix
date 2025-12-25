@@ -12,6 +12,7 @@ typedef struct js_function js_function_t;
 typedef struct js_value js_value_t;
 typedef struct js_array js_array_t;
 typedef struct js_object js_object_t;
+typedef struct js_bigint js_bigint_t;
 
 typedef bool (*js_native_fn_t)(js_runtime_t *rt,
                                size_t argc,
@@ -37,6 +38,7 @@ typedef enum
     JS_VALUE_NULL,
     JS_VALUE_BOOL,
     JS_VALUE_NUMBER,
+    JS_VALUE_BIGINT,
     JS_VALUE_STRING,
     JS_VALUE_ARRAY,
     JS_VALUE_OBJECT,
@@ -51,6 +53,7 @@ struct js_value
     {
         bool boolean;
         double number;
+        js_bigint_t *bigint;
         struct
         {
             char *data;
@@ -71,6 +74,8 @@ js_value_t js_value_make_undefined(void);
 js_value_t js_value_make_null(void);
 js_value_t js_value_make_bool(bool value);
 js_value_t js_value_make_number(double value);
+bool js_value_make_bigint(js_value_t *out, const char *text, int base);
+bool js_value_make_bigint_from_int64(js_value_t *out, int64_t value);
 bool js_value_make_string(js_value_t *out, const char *data, size_t len);
 bool js_value_make_cstring(js_value_t *out, const char *text);
 bool js_value_make_array(js_value_t *out);
@@ -131,6 +136,7 @@ typedef enum
     JS_EXPR_TERNARY,
     JS_EXPR_ARRAY,
     JS_EXPR_OBJECT,
+    JS_EXPR_TEMPLATE,
     JS_EXPR_MEMBER,
     JS_EXPR_REGEXP_SUBCLASS,
     JS_EXPR_FUNCTION,
@@ -140,6 +146,7 @@ typedef enum
 typedef enum
 {
     JS_LITERAL_NUMBER = 0,
+    JS_LITERAL_BIGINT,
     JS_LITERAL_STRING,
     JS_LITERAL_BOOL,
     JS_LITERAL_NULL,
@@ -153,6 +160,7 @@ typedef enum
     JS_BINARY_MUL,
     JS_BINARY_DIV,
     JS_BINARY_MOD,
+    JS_BINARY_EXP,
     JS_BINARY_EQ,
     JS_BINARY_NEQ,
     JS_BINARY_STRICT_EQ,
@@ -161,6 +169,7 @@ typedef enum
     JS_BINARY_LTE,
     JS_BINARY_GT,
     JS_BINARY_GTE,
+    JS_BINARY_INSTANCEOF,
     JS_BINARY_AND,
     JS_BINARY_OR
 } js_binary_op_t;
@@ -446,6 +455,20 @@ typedef struct
 
 typedef struct
 {
+    char *data;
+    size_t len;
+} js_template_segment_t;
+
+typedef struct
+{
+    js_template_segment_t *segments;
+    size_t segment_count;
+    js_expr_t **exprs;
+    size_t expr_count;
+} js_template_expr_t;
+
+typedef struct
+{
     js_expr_t *object;
     bool computed;
     char *property;
@@ -485,6 +508,7 @@ struct js_expr
         js_ternary_expr_t ternary;
         js_array_expr_t array;
         js_object_expr_t object;
+        js_template_expr_t template;
         js_member_expr_t member;
         js_regexp_subclass_expr_t regexp_subclass;
         js_function_expr_t func;

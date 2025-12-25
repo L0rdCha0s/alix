@@ -2,12 +2,449 @@
 
 #include "ctype.h"
 #include "float.h"
+#include "math.h"
+#include "stdio.h"
 #include "libc.h"
 
 typedef struct
 {
     char *description;
 } js_symbol_data_t;
+
+struct js_bigint
+{
+    bool negative;
+    uint32_t *digits;
+    size_t length;
+};
+
+#define JS_BIGINT_BASE 1000000000u
+#define JS_BIGINT_BASE_DIGITS 9
+
+static double js_trunc_local(double value)
+{
+    return (value < 0.0) ? ceil(value) : floor(value);
+}
+
+static js_bigint_t *js_bigint_new(size_t length)
+{
+    js_bigint_t *value = (js_bigint_t *)calloc(1, sizeof(*value));
+    if (!value)
+    {
+        return NULL;
+    }
+    if (length)
+    {
+        value->digits = (uint32_t *)calloc(length, sizeof(uint32_t));
+        if (!value->digits)
+        {
+            free(value);
+            return NULL;
+        }
+        value->length = length;
+    }
+    return value;
+}
+
+static void js_bigint_free(js_bigint_t *value)
+{
+    if (!value)
+    {
+        return;
+    }
+    free(value->digits);
+    free(value);
+}
+
+static void js_bigint_trim(js_bigint_t *value)
+{
+    if (!value)
+    {
+        return;
+    }
+    while (value->length > 0 && value->digits[value->length - 1] == 0)
+    {
+        value->length--;
+    }
+    if (value->length == 0)
+    {
+        value->negative = false;
+    }
+}
+
+static js_bigint_t *js_bigint_from_u64(uint64_t input)
+{
+    if (input == 0)
+    {
+        return js_bigint_new(0);
+    }
+    uint64_t tmp = input;
+    size_t count = 0;
+    while (tmp > 0)
+    {
+        tmp /= JS_BIGINT_BASE;
+        count++;
+    }
+    js_bigint_t *value = js_bigint_new(count);
+    if (!value)
+    {
+        return NULL;
+    }
+    size_t index = 0;
+    while (input > 0)
+    {
+        value->digits[index++] = (uint32_t)(input % JS_BIGINT_BASE);
+        input /= JS_BIGINT_BASE;
+    }
+    return value;
+}
+
+static js_bigint_t *js_bigint_clone_internal(const js_bigint_t *value)
+{
+    if (!value)
+    {
+        return NULL;
+    }
+    js_bigint_t *copy = js_bigint_new(value->length);
+    if (!copy)
+    {
+        return NULL;
+    }
+    copy->negative = value->negative;
+    if (value->length)
+    {
+        memcpy(copy->digits, value->digits, value->length * sizeof(uint32_t));
+    }
+    return copy;
+}
+
+static int js_bigint_compare_abs(const js_bigint_t *a, const js_bigint_t *b)
+{
+    if (!a || !b)
+    {
+        return 0;
+    }
+    if (a->length < b->length)
+    {
+        return -1;
+    }
+    if (a->length > b->length)
+    {
+        return 1;
+    }
+    for (size_t i = a->length; i > 0; --i)
+    {
+        uint32_t da = a->digits[i - 1];
+        uint32_t db = b->digits[i - 1];
+        if (da < db)
+        {
+            return -1;
+        }
+        if (da > db)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static js_bigint_t *js_bigint_add_abs(const js_bigint_t *a, const js_bigint_t *b)
+{
+    size_t len = (a->length > b->length) ? a->length : b->length;
+    js_bigint_t *out = js_bigint_new(len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    uint64_t carry = 0;
+    for (size_t i = 0; i < len; ++i)
+    {
+        uint64_t sum = carry;
+        if (i < a->length)
+        {
+            sum += a->digits[i];
+        }
+        if (i < b->length)
+        {
+            sum += b->digits[i];
+        }
+        out->digits[i] = (uint32_t)(sum % JS_BIGINT_BASE);
+        carry = sum / JS_BIGINT_BASE;
+    }
+    if (carry)
+    {
+        out->digits[len] = (uint32_t)carry;
+        out->length = len + 1;
+    }
+    else
+    {
+        out->length = len;
+    }
+    return out;
+}
+
+static js_bigint_t *js_bigint_sub_abs(const js_bigint_t *a, const js_bigint_t *b)
+{
+    js_bigint_t *out = js_bigint_new(a->length);
+    if (!out)
+    {
+        return NULL;
+    }
+    int64_t carry = 0;
+    for (size_t i = 0; i < a->length; ++i)
+    {
+        int64_t diff = (int64_t)a->digits[i] - carry;
+        if (i < b->length)
+        {
+            diff -= b->digits[i];
+        }
+        if (diff < 0)
+        {
+            diff += JS_BIGINT_BASE;
+            carry = 1;
+        }
+        else
+        {
+            carry = 0;
+        }
+        out->digits[i] = (uint32_t)diff;
+    }
+    out->length = a->length;
+    js_bigint_trim(out);
+    return out;
+}
+
+static js_bigint_t *js_bigint_mul_abs(const js_bigint_t *a, const js_bigint_t *b)
+{
+    if (a->length == 0 || b->length == 0)
+    {
+        return js_bigint_new(0);
+    }
+    js_bigint_t *out = js_bigint_new(a->length + b->length);
+    if (!out)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < a->length; ++i)
+    {
+        uint64_t carry = 0;
+        for (size_t j = 0; j < b->length; ++j)
+        {
+            uint64_t cur = out->digits[i + j] + carry;
+            cur += (uint64_t)a->digits[i] * (uint64_t)b->digits[j];
+            out->digits[i + j] = (uint32_t)(cur % JS_BIGINT_BASE);
+            carry = cur / JS_BIGINT_BASE;
+        }
+        if (carry)
+        {
+            out->digits[i + b->length] += (uint32_t)carry;
+        }
+    }
+    out->length = a->length + b->length;
+    js_bigint_trim(out);
+    return out;
+}
+
+static bool js_bigint_mul_small(js_bigint_t *value, uint32_t mul)
+{
+    if (!value)
+    {
+        return false;
+    }
+    if (value->length == 0 || mul == 0)
+    {
+        value->length = 0;
+        value->negative = false;
+        return true;
+    }
+    uint64_t carry = 0;
+    for (size_t i = 0; i < value->length; ++i)
+    {
+        uint64_t cur = (uint64_t)value->digits[i] * (uint64_t)mul + carry;
+        value->digits[i] = (uint32_t)(cur % JS_BIGINT_BASE);
+        carry = cur / JS_BIGINT_BASE;
+    }
+    if (carry)
+    {
+        size_t new_len = value->length + 1;
+        uint32_t *digits = (uint32_t *)realloc(value->digits, new_len * sizeof(uint32_t));
+        if (!digits)
+        {
+            return false;
+        }
+        digits[value->length] = (uint32_t)carry;
+        value->digits = digits;
+        value->length = new_len;
+    }
+    return true;
+}
+
+static bool js_bigint_add_small(js_bigint_t *value, uint32_t add)
+{
+    if (!value)
+    {
+        return false;
+    }
+    if (value->length == 0)
+    {
+        value->digits = (uint32_t *)calloc(1, sizeof(uint32_t));
+        if (!value->digits)
+        {
+            return false;
+        }
+        value->length = 1;
+        value->digits[0] = add;
+        return true;
+    }
+    uint64_t cur = (uint64_t)value->digits[0] + add;
+    value->digits[0] = (uint32_t)(cur % JS_BIGINT_BASE);
+    uint64_t carry = cur / JS_BIGINT_BASE;
+    size_t i = 1;
+    while (carry && i < value->length)
+    {
+        cur = (uint64_t)value->digits[i] + carry;
+        value->digits[i] = (uint32_t)(cur % JS_BIGINT_BASE);
+        carry = cur / JS_BIGINT_BASE;
+        i++;
+    }
+    if (carry)
+    {
+        size_t new_len = value->length + 1;
+        uint32_t *digits = (uint32_t *)realloc(value->digits, new_len * sizeof(uint32_t));
+        if (!digits)
+        {
+            return false;
+        }
+        digits[value->length] = (uint32_t)carry;
+        value->digits = digits;
+        value->length = new_len;
+    }
+    return true;
+}
+
+static js_bigint_t *js_bigint_from_string_internal(const char *text, int base, bool *ok_out)
+{
+    if (ok_out)
+    {
+        *ok_out = false;
+    }
+    if (!text || base < 2 || base > 36)
+    {
+        return NULL;
+    }
+    js_bigint_t *value = js_bigint_new(0);
+    if (!value)
+    {
+        return NULL;
+    }
+    bool had_digit = false;
+    for (const char *p = text; *p; ++p)
+    {
+        if (*p == '_')
+        {
+            continue;
+        }
+        int digit = -1;
+        if (*p >= '0' && *p <= '9')
+        {
+            digit = *p - '0';
+        }
+        else if (*p >= 'a' && *p <= 'z')
+        {
+            digit = *p - 'a' + 10;
+        }
+        else if (*p >= 'A' && *p <= 'Z')
+        {
+            digit = *p - 'A' + 10;
+        }
+        if (digit < 0 || digit >= base)
+        {
+            js_bigint_free(value);
+            return NULL;
+        }
+        had_digit = true;
+        if (!js_bigint_mul_small(value, (uint32_t)base) ||
+            !js_bigint_add_small(value, (uint32_t)digit))
+        {
+            js_bigint_free(value);
+            return NULL;
+        }
+    }
+    if (!had_digit)
+    {
+        js_bigint_free(value);
+        return NULL;
+    }
+    if (ok_out)
+    {
+        *ok_out = true;
+    }
+    return value;
+}
+
+static bool js_bigint_divmod_small(const js_bigint_t *a,
+                                   uint32_t divisor,
+                                   js_bigint_t **out_quot,
+                                   uint32_t *out_rem)
+{
+    if (!a || divisor == 0)
+    {
+        return false;
+    }
+    js_bigint_t *quot = js_bigint_new(a->length);
+    if (!quot)
+    {
+        return false;
+    }
+    uint64_t rem = 0;
+    for (size_t i = a->length; i > 0; --i)
+    {
+        uint64_t cur = rem * JS_BIGINT_BASE + a->digits[i - 1];
+        uint64_t q = cur / divisor;
+        rem = cur % divisor;
+        quot->digits[i - 1] = (uint32_t)q;
+    }
+    quot->length = a->length;
+    js_bigint_trim(quot);
+    if (out_quot)
+    {
+        *out_quot = quot;
+    }
+    else
+    {
+        js_bigint_free(quot);
+    }
+    if (out_rem)
+    {
+        *out_rem = (uint32_t)rem;
+    }
+    return true;
+}
+
+static bool js_bigint_is_small(const js_bigint_t *value, uint32_t *out)
+{
+    if (!value)
+    {
+        return false;
+    }
+    if (value->length == 0)
+    {
+        if (out)
+        {
+            *out = 0;
+        }
+        return true;
+    }
+    if (value->length > 1)
+    {
+        return false;
+    }
+    if (out)
+    {
+        *out = value->digits[0];
+    }
+    return true;
+}
 
 static bool js_symbol_get(js_runtime_t *rt,
                           void *user_data,
@@ -199,6 +636,315 @@ bool js_value_make_symbol(js_value_t *out, const char *description)
     return true;
 }
 
+bool js_value_make_bigint(js_value_t *out, const char *text, int base)
+{
+    if (!out)
+    {
+        return false;
+    }
+    bool ok = false;
+    js_bigint_t *value = js_bigint_from_string_internal(text, base, &ok);
+    if (!value || !ok)
+    {
+        js_bigint_free(value);
+        return false;
+    }
+    out->type = JS_VALUE_BIGINT;
+    out->as.bigint = value;
+    return true;
+}
+
+bool js_value_make_bigint_from_int64(js_value_t *out, int64_t value)
+{
+    if (!out)
+    {
+        return false;
+    }
+    uint64_t abs_value = (value < 0) ? (uint64_t)(-(value + 1)) + 1u : (uint64_t)value;
+    js_bigint_t *bigint = js_bigint_from_u64(abs_value);
+    if (!bigint)
+    {
+        return false;
+    }
+    bigint->negative = (value < 0 && bigint->length > 0);
+    out->type = JS_VALUE_BIGINT;
+    out->as.bigint = bigint;
+    return true;
+}
+
+js_bigint_t *js_bigint_clone(const js_bigint_t *value)
+{
+    return js_bigint_clone_internal(value);
+}
+
+void js_bigint_destroy(js_bigint_t *value)
+{
+    js_bigint_free(value);
+}
+
+bool js_bigint_is_zero(const js_bigint_t *value)
+{
+    return !value || value->length == 0;
+}
+
+int js_bigint_compare(const js_bigint_t *a, const js_bigint_t *b)
+{
+    if (!a || !b)
+    {
+        return 0;
+    }
+    if (a->negative != b->negative)
+    {
+        return a->negative ? -1 : 1;
+    }
+    int cmp = js_bigint_compare_abs(a, b);
+    return a->negative ? -cmp : cmp;
+}
+
+js_bigint_t *js_bigint_add(const js_bigint_t *a, const js_bigint_t *b)
+{
+    if (!a || !b)
+    {
+        return NULL;
+    }
+    if (a->negative == b->negative)
+    {
+        js_bigint_t *sum = js_bigint_add_abs(a, b);
+        if (sum)
+        {
+            sum->negative = a->negative;
+        }
+        return sum;
+    }
+    int cmp = js_bigint_compare_abs(a, b);
+    if (cmp == 0)
+    {
+        return js_bigint_new(0);
+    }
+    if (cmp > 0)
+    {
+        js_bigint_t *diff = js_bigint_sub_abs(a, b);
+        if (diff)
+        {
+            diff->negative = a->negative;
+        }
+        return diff;
+    }
+    js_bigint_t *diff = js_bigint_sub_abs(b, a);
+    if (diff)
+    {
+        diff->negative = b->negative;
+    }
+    return diff;
+}
+
+js_bigint_t *js_bigint_sub(const js_bigint_t *a, const js_bigint_t *b)
+{
+    if (!a || !b)
+    {
+        return NULL;
+    }
+    js_bigint_t neg_b = *b;
+    neg_b.negative = !b->negative;
+    return js_bigint_add(a, &neg_b);
+}
+
+js_bigint_t *js_bigint_mul(const js_bigint_t *a, const js_bigint_t *b)
+{
+    if (!a || !b)
+    {
+        return NULL;
+    }
+    js_bigint_t *prod = js_bigint_mul_abs(a, b);
+    if (!prod)
+    {
+        return NULL;
+    }
+    prod->negative = (a->negative != b->negative) && prod->length > 0;
+    return prod;
+}
+
+bool js_bigint_divmod(const js_bigint_t *a,
+                      const js_bigint_t *b,
+                      js_bigint_t **out_quot,
+                      js_bigint_t **out_rem,
+                      char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!a || !b || js_bigint_is_zero(b))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: division by zero");
+        }
+        return false;
+    }
+    uint32_t divisor = 0;
+    if (!js_bigint_is_small(b, &divisor))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: bigint divisor too large");
+        }
+        return false;
+    }
+    js_bigint_t *quot = NULL;
+    uint32_t rem = 0;
+    if (!js_bigint_divmod_small(a, divisor, &quot, &rem))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    quot->negative = (a->negative != b->negative) && quot->length > 0;
+    js_bigint_t *rem_val = js_bigint_from_u64(rem);
+    if (!rem_val)
+    {
+        js_bigint_free(quot);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    rem_val->negative = a->negative && rem_val->length > 0;
+    if (out_quot)
+    {
+        *out_quot = quot;
+    }
+    else
+    {
+        js_bigint_free(quot);
+    }
+    if (out_rem)
+    {
+        *out_rem = rem_val;
+    }
+    else
+    {
+        js_bigint_free(rem_val);
+    }
+    return true;
+}
+
+js_bigint_t *js_bigint_pow(const js_bigint_t *base,
+                           const js_bigint_t *exp,
+                           char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!base || !exp)
+    {
+        return NULL;
+    }
+    if (exp->negative)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: exponent must be non-negative");
+        }
+        return NULL;
+    }
+    uint32_t exp_value = 0;
+    if (!js_bigint_is_small(exp, &exp_value))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: exponent too large");
+        }
+        return NULL;
+    }
+    js_bigint_t *result = js_bigint_from_u64(1);
+    if (!result)
+    {
+        return NULL;
+    }
+    js_bigint_t *base_pow = js_bigint_clone_internal(base);
+    if (!base_pow)
+    {
+        js_bigint_free(result);
+        return NULL;
+    }
+    uint32_t exp_work = exp_value;
+    while (exp_work > 0)
+    {
+        if (exp_work & 1u)
+        {
+            js_bigint_t *tmp = js_bigint_mul(result, base_pow);
+            js_bigint_free(result);
+            if (!tmp)
+            {
+                js_bigint_free(base_pow);
+                return NULL;
+            }
+            result = tmp;
+        }
+        exp_work >>= 1u;
+        if (exp_work)
+        {
+            js_bigint_t *tmp = js_bigint_mul(base_pow, base_pow);
+            js_bigint_free(base_pow);
+            if (!tmp)
+            {
+                js_bigint_free(result);
+                return NULL;
+            }
+            base_pow = tmp;
+        }
+    }
+    js_bigint_free(base_pow);
+    return result;
+}
+
+char *js_bigint_to_string(const js_bigint_t *value)
+{
+    if (!value || value->length == 0)
+    {
+        return js_strdup("0");
+    }
+    size_t buf_len = value->length * JS_BIGINT_BASE_DIGITS + 2;
+    char *buf = (char *)malloc(buf_len);
+    if (!buf)
+    {
+        return NULL;
+    }
+    size_t pos = 0;
+    if (value->negative)
+    {
+        buf[pos++] = '-';
+    }
+    size_t idx = value->length;
+    idx--;
+    pos += (size_t)snprintf(buf + pos, buf_len - pos, "%u", value->digits[idx]);
+    while (idx-- > 0)
+    {
+        pos += (size_t)snprintf(buf + pos, buf_len - pos, "%09u", value->digits[idx]);
+    }
+    buf[pos] = '\0';
+    return buf;
+}
+
+double js_bigint_to_double(const js_bigint_t *value)
+{
+    if (!value || value->length == 0)
+    {
+        return 0.0;
+    }
+    double result = 0.0;
+    for (size_t i = value->length; i > 0; --i)
+    {
+        result = result * (double)JS_BIGINT_BASE + (double)value->digits[i - 1];
+    }
+    return value->negative ? -result : result;
+}
+
 bool js_value_array_set(js_value_t *array_value, size_t index, const js_value_t *value)
 {
     if (!array_value || array_value->type != JS_VALUE_ARRAY || !value || !array_value->as.array)
@@ -228,6 +974,11 @@ void js_value_destroy(js_value_t *value)
         free(value->as.string.data);
         value->as.string.data = NULL;
         value->as.string.len = 0;
+    }
+    else if (value->type == JS_VALUE_BIGINT)
+    {
+        js_bigint_free(value->as.bigint);
+        value->as.bigint = NULL;
     }
     else if (value->type == JS_VALUE_ARRAY)
     {
@@ -266,6 +1017,17 @@ bool js_value_copy(js_value_t *out, const js_value_t *in)
         }
         out->as.string.data = copy;
         out->as.string.len = in->as.string.len;
+    }
+    else if (in->type == JS_VALUE_BIGINT)
+    {
+        js_bigint_t *copy = js_bigint_clone_internal(in->as.bigint);
+        if (!copy)
+        {
+            out->type = JS_VALUE_UNDEFINED;
+            out->as.bigint = NULL;
+            return false;
+        }
+        out->as.bigint = copy;
     }
     else if (in->type == JS_VALUE_ARRAY)
     {
@@ -308,6 +1070,8 @@ bool js_value_is_truthy(const js_value_t *value)
             return value->as.boolean;
         case JS_VALUE_NUMBER:
             return value->as.number != 0.0 && !js_is_nan(value->as.number);
+        case JS_VALUE_BIGINT:
+            return value->as.bigint && !js_bigint_is_zero(value->as.bigint);
         case JS_VALUE_STRING:
             return value->as.string.len != 0;
         case JS_VALUE_ARRAY:
@@ -463,6 +1227,7 @@ static bool js_value_is_primitive(const js_value_t *value)
         case JS_VALUE_NULL:
         case JS_VALUE_BOOL:
         case JS_VALUE_NUMBER:
+        case JS_VALUE_BIGINT:
         case JS_VALUE_STRING:
             return true;
         default:
@@ -687,6 +1452,18 @@ bool js_temp_string_from_value(js_runtime_t *rt,
         return true;
     }
 
+    if (value->type == JS_VALUE_BIGINT)
+    {
+        out->data = js_bigint_to_string(value->as.bigint);
+        if (!out->data)
+        {
+            return false;
+        }
+        out->len = strlen(out->data);
+        out->owned = true;
+        return true;
+    }
+
     if (value->type == JS_VALUE_ARRAY)
     {
         out->data = js_strdup("[array]");
@@ -786,6 +1563,8 @@ bool js_value_strict_equal(const js_value_t *a, const js_value_t *b)
             return a->as.boolean == b->as.boolean;
         case JS_VALUE_NUMBER:
             return a->as.number == b->as.number;
+        case JS_VALUE_BIGINT:
+            return js_bigint_compare(a->as.bigint, b->as.bigint) == 0;
         case JS_VALUE_STRING:
             if (a->as.string.len != b->as.string.len)
             {
@@ -964,6 +1743,8 @@ double js_value_to_number(const js_value_t *value, bool *ok_out)
     {
         case JS_VALUE_NUMBER:
             return value->as.number;
+        case JS_VALUE_BIGINT:
+            return js_bigint_to_double(value->as.bigint);
         case JS_VALUE_BOOL:
             return value->as.boolean ? 1.0 : 0.0;
         case JS_VALUE_NULL:
@@ -1002,6 +1783,208 @@ double js_value_to_number(const js_value_t *value, bool *ok_out)
         *ok_out = false;
     }
     return js_nan();
+}
+
+bool js_value_to_bigint(js_runtime_t *rt,
+                        const js_value_t *value,
+                        js_bigint_t **out,
+                        char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = NULL;
+    if (!value)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: cannot convert undefined to BigInt");
+        }
+        return false;
+    }
+    if (value->type == JS_VALUE_BIGINT)
+    {
+        js_bigint_t *copy = js_bigint_clone_internal(value->as.bigint);
+        if (!copy)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        *out = copy;
+        return true;
+    }
+    if (value->type == JS_VALUE_BOOL)
+    {
+        js_bigint_t *big = js_bigint_from_u64(value->as.boolean ? 1u : 0u);
+        if (!big)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        *out = big;
+        return true;
+    }
+    if (value->type == JS_VALUE_NUMBER)
+    {
+        if (js_is_nan(value->as.number) || value->as.number == INFINITY || value->as.number == -INFINITY)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("RangeError: invalid number");
+            }
+            return false;
+        }
+        double trunc = js_trunc_local(value->as.number);
+        if (trunc != value->as.number)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("RangeError: invalid number");
+            }
+            return false;
+        }
+        if (trunc > (double)INT64_MAX || trunc < (double)INT64_MIN)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("RangeError: bigint out of range");
+            }
+            return false;
+        }
+        int64_t ival = (int64_t)trunc;
+        uint64_t abs_val = (ival < 0) ? (uint64_t)(-(ival + 1)) + 1u : (uint64_t)ival;
+        js_bigint_t *big = js_bigint_from_u64(abs_val);
+        if (!big)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        big->negative = (ival < 0 && big->length > 0);
+        *out = big;
+        return true;
+    }
+    if (value->type == JS_VALUE_STRING)
+    {
+        const char *text = value->as.string.data ? value->as.string.data : "";
+        size_t len = value->as.string.len;
+        while (len && isspace((unsigned char)text[0]))
+        {
+            text++;
+            len--;
+        }
+        while (len && isspace((unsigned char)text[len - 1]))
+        {
+            len--;
+        }
+        if (len == 0)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("SyntaxError: invalid BigInt literal");
+            }
+            return false;
+        }
+        bool negative = false;
+        if (text[0] == '+' || text[0] == '-')
+        {
+            negative = (text[0] == '-');
+            text++;
+            len--;
+        }
+        int base = 10;
+        if (len > 1 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+        {
+            base = 16;
+            text += 2;
+            len -= 2;
+        }
+        else if (len > 1 && text[0] == '0' && (text[1] == 'b' || text[1] == 'B'))
+        {
+            base = 2;
+            text += 2;
+            len -= 2;
+        }
+        else if (len > 1 && text[0] == '0' && (text[1] == 'o' || text[1] == 'O'))
+        {
+            base = 8;
+            text += 2;
+            len -= 2;
+        }
+        char *buf = js_strdup_len(text, len);
+        if (!buf)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        bool ok = false;
+        js_bigint_t *big = js_bigint_from_string_internal(buf, base, &ok);
+        free(buf);
+        if (!big || !ok)
+        {
+            js_bigint_free(big);
+            if (error_message)
+            {
+                *error_message = js_strdup("SyntaxError: invalid BigInt literal");
+            }
+            return false;
+        }
+        big->negative = negative && big->length > 0;
+        *out = big;
+        return true;
+    }
+    if (value->type == JS_VALUE_NULL || value->type == JS_VALUE_UNDEFINED)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: cannot convert undefined or null to BigInt");
+        }
+        return false;
+    }
+    if (value->type == JS_VALUE_OBJECT && rt)
+    {
+        js_value_t prim = js_value_make_undefined_internal();
+        char *err = NULL;
+        if (!js_object_to_primitive(rt, value->as.object, &prim, &err))
+        {
+            if (err)
+            {
+                if (error_message)
+                {
+                    *error_message = err;
+                }
+                else
+                {
+                    free(err);
+                }
+            }
+            return false;
+        }
+        bool ok = js_value_to_bigint(rt, &prim, out, error_message);
+        js_value_destroy(&prim);
+        return ok;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: cannot convert to BigInt");
+    }
+    return false;
 }
 
 bool js_value_loose_equal(const js_value_t *a, const js_value_t *b)
@@ -1051,6 +2034,25 @@ bool js_value_loose_equal(const js_value_t *a, const js_value_t *b)
             return false;
         }
         return an == bn;
+    }
+    if ((a->type == JS_VALUE_BIGINT && (b->type == JS_VALUE_NUMBER || b->type == JS_VALUE_STRING)) ||
+        (b->type == JS_VALUE_BIGINT && (a->type == JS_VALUE_NUMBER || a->type == JS_VALUE_STRING)))
+    {
+        const js_value_t *big = (a->type == JS_VALUE_BIGINT) ? a : b;
+        const js_value_t *other = (a->type == JS_VALUE_BIGINT) ? b : a;
+        bool ok = true;
+        double num = js_value_to_number(other, &ok);
+        if (!ok || js_is_nan(num))
+        {
+            return false;
+        }
+        double intpart = js_trunc_local(num);
+        if (intpart != num)
+        {
+            return false;
+        }
+        double bignum = js_bigint_to_double(big->as.bigint);
+        return bignum == intpart;
     }
     return false;
 }

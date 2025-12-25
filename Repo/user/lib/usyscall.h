@@ -53,5 +53,7 @@ int64_t sys_thread_create(uintptr_t entry,
 int sys_thread_join(uint64_t tid, int *status_out);
 void sys_thread_exit(int status) __attribute__((noreturn));
 ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacity);
+uint32_t sys_getuid(void);
+int sys_mkdir(const char *path);
 
 #endif

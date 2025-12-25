@@ -164,6 +164,11 @@ js_runtime_t *js_runtime_create(void)
         js_runtime_destroy(rt);
         return NULL;
     }
+    if (!js_runtime_register_native(rt, "BigInt", js_builtin_bigint, NULL, false, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
     if (!js_runtime_register_native(rt, "String", js_builtin_string, NULL, true, 1))
     {
         js_runtime_destroy(rt);
@@ -190,6 +195,11 @@ js_runtime_t *js_runtime_create(void)
         return NULL;
     }
     if (!js_runtime_register_native(rt, "RegExp", js_builtin_regexp, NULL, true, 2))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_register_native(rt, "Date", js_builtin_date, NULL, true, 7))
     {
         js_runtime_destroy(rt);
         return NULL;
@@ -262,6 +272,24 @@ js_runtime_t *js_runtime_create(void)
         return NULL;
     }
     js_value_destroy(&math_val);
+    js_object_t *temporal_obj = js_get_temporal_object(rt);
+    if (!temporal_obj)
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_t temporal_val;
+    memset(&temporal_val, 0, sizeof(temporal_val));
+    temporal_val.type = JS_VALUE_OBJECT;
+    temporal_val.as.object = temporal_obj;
+    js_object_retain(temporal_obj);
+    if (!js_runtime_set_global(rt, "Temporal", &temporal_val))
+    {
+        js_value_destroy(&temporal_val);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_destroy(&temporal_val);
     if (!js_runtime_register_native(rt, "testWithTypedArrayConstructors",
                                     js_builtin_test_with_typed_array_constructors,
                                     NULL,
@@ -358,6 +386,71 @@ void js_runtime_destroy(js_runtime_t *rt)
         js_object_release(rt->math_object);
         rt->math_object = NULL;
     }
+    if (rt->date_proto)
+    {
+        js_object_release(rt->date_proto);
+        rt->date_proto = NULL;
+    }
+    if (rt->number_proto)
+    {
+        js_object_release(rt->number_proto);
+        rt->number_proto = NULL;
+    }
+    if (rt->symbol_proto)
+    {
+        js_object_release(rt->symbol_proto);
+        rt->symbol_proto = NULL;
+    }
+    if (rt->temporal_plain_month_day_proto)
+    {
+        js_object_release(rt->temporal_plain_month_day_proto);
+        rt->temporal_plain_month_day_proto = NULL;
+    }
+    if (rt->temporal_plain_year_month_proto)
+    {
+        js_object_release(rt->temporal_plain_year_month_proto);
+        rt->temporal_plain_year_month_proto = NULL;
+    }
+    if (rt->temporal_zoned_date_time_proto)
+    {
+        js_object_release(rt->temporal_zoned_date_time_proto);
+        rt->temporal_zoned_date_time_proto = NULL;
+    }
+    if (rt->temporal_plain_date_time_proto)
+    {
+        js_object_release(rt->temporal_plain_date_time_proto);
+        rt->temporal_plain_date_time_proto = NULL;
+    }
+    if (rt->temporal_plain_time_proto)
+    {
+        js_object_release(rt->temporal_plain_time_proto);
+        rt->temporal_plain_time_proto = NULL;
+    }
+    if (rt->temporal_plain_date_proto)
+    {
+        js_object_release(rt->temporal_plain_date_proto);
+        rt->temporal_plain_date_proto = NULL;
+    }
+    if (rt->temporal_instant_proto)
+    {
+        js_object_release(rt->temporal_instant_proto);
+        rt->temporal_instant_proto = NULL;
+    }
+    if (rt->temporal_duration_proto)
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+    }
+    if (rt->temporal_now_object)
+    {
+        js_object_release(rt->temporal_now_object);
+        rt->temporal_now_object = NULL;
+    }
+    if (rt->temporal_object)
+    {
+        js_object_release(rt->temporal_object);
+        rt->temporal_object = NULL;
+    }
     if (rt->iterator_proto)
     {
         js_object_release(rt->iterator_proto);
@@ -419,6 +512,17 @@ bool js_value_is_constructor(js_runtime_t *rt, const js_value_t *value)
         }
         if (value->as.native.fn == js_builtin_regexp ||
             value->as.native.fn == js_builtin_regexp_subclass)
+        {
+            return true;
+        }
+        if (value->as.native.fn == js_builtin_temporal_duration ||
+            value->as.native.fn == js_builtin_temporal_instant ||
+            value->as.native.fn == js_builtin_temporal_plain_date ||
+            value->as.native.fn == js_builtin_temporal_plain_time ||
+            value->as.native.fn == js_builtin_temporal_plain_date_time ||
+            value->as.native.fn == js_builtin_temporal_zoned_date_time ||
+            value->as.native.fn == js_builtin_temporal_plain_year_month ||
+            value->as.native.fn == js_builtin_temporal_plain_month_day)
         {
             return true;
         }
@@ -497,6 +601,158 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         {
             return "toString";
         }
+        if (value->as.native.fn == js_builtin_bigint_to_string)
+        {
+            return "toString";
+        }
+        if (value->as.native.fn == js_builtin_bigint_value_of)
+        {
+            return "valueOf";
+        }
+        if (value->as.native.fn == js_builtin_temporal_duration)
+        {
+            return "Duration";
+        }
+        if (value->as.native.fn == js_builtin_temporal_instant)
+        {
+            return "Instant";
+        }
+        if (value->as.native.fn == js_builtin_temporal_plain_date)
+        {
+            return "PlainDate";
+        }
+        if (value->as.native.fn == js_builtin_temporal_plain_time)
+        {
+            return "PlainTime";
+        }
+        if (value->as.native.fn == js_builtin_temporal_plain_date_time)
+        {
+            return "PlainDateTime";
+        }
+        if (value->as.native.fn == js_builtin_temporal_zoned_date_time)
+        {
+            return "ZonedDateTime";
+        }
+        if (value->as.native.fn == js_builtin_temporal_plain_year_month)
+        {
+            return "PlainYearMonth";
+        }
+        if (value->as.native.fn == js_builtin_temporal_plain_month_day)
+        {
+            return "PlainMonthDay";
+        }
+        if (value->as.native.fn == js_temporal_duration_negated)
+        {
+            return "negated";
+        }
+        if (value->as.native.fn == js_temporal_duration_abs)
+        {
+            return "abs";
+        }
+        if (value->as.native.fn == js_temporal_duration_to_string)
+        {
+            return "toString";
+        }
+        if (value->as.native.fn == js_temporal_duration_to_json)
+        {
+            return "toJSON";
+        }
+        if (value->as.native.fn == js_temporal_duration_to_locale_string)
+        {
+            return "toLocaleString";
+        }
+        if (value->as.native.fn == js_temporal_duration_value_of)
+        {
+            return "valueOf";
+        }
+        if (value->as.native.fn == js_temporal_duration_with)
+        {
+            return "with";
+        }
+        if (value->as.native.fn == js_temporal_duration_add)
+        {
+            return "add";
+        }
+        if (value->as.native.fn == js_temporal_duration_subtract)
+        {
+            return "subtract";
+        }
+        if (value->as.native.fn == js_temporal_duration_round)
+        {
+            return "round";
+        }
+        if (value->as.native.fn == js_temporal_duration_total)
+        {
+            return "total";
+        }
+        if (value->as.native.fn == js_temporal_instant_to_string)
+        {
+            return "toString";
+        }
+        if (value->as.native.fn == js_temporal_instant_to_json)
+        {
+            return "toJSON";
+        }
+        if (value->as.native.fn == js_temporal_instant_to_locale_string)
+        {
+            return "toLocaleString";
+        }
+        if (value->as.native.fn == js_temporal_instant_value_of)
+        {
+            return "valueOf";
+        }
+        if (value->as.native.fn == js_temporal_instant_add)
+        {
+            return "add";
+        }
+        if (value->as.native.fn == js_temporal_instant_subtract)
+        {
+            return "subtract";
+        }
+        if (value->as.native.fn == js_temporal_instant_since)
+        {
+            return "since";
+        }
+        if (value->as.native.fn == js_temporal_instant_until)
+        {
+            return "until";
+        }
+        if (value->as.native.fn == js_temporal_instant_round)
+        {
+            return "round";
+        }
+        if (value->as.native.fn == js_temporal_instant_equals)
+        {
+            return "equals";
+        }
+        if (value->as.native.fn == js_temporal_instant_to_zoned_date_time_iso)
+        {
+            return "toZonedDateTimeISO";
+        }
+        if (value->as.native.fn == js_temporal_now_instant)
+        {
+            return "instant";
+        }
+        if (value->as.native.fn == js_temporal_now_plain_date_iso)
+        {
+            return "plainDateISO";
+        }
+        if (value->as.native.fn == js_temporal_now_plain_time_iso)
+        {
+            return "plainTimeISO";
+        }
+        if (value->as.native.fn == js_temporal_now_plain_date_time_iso)
+        {
+            return "plainDateTimeISO";
+        }
+        if (value->as.native.fn == js_temporal_now_zoned_date_time_iso)
+        {
+            return "zonedDateTimeISO";
+        }
+        if (value->as.native.fn == js_temporal_now_time_zone_id)
+        {
+            return "timeZoneId";
+        }
         if (value->as.native.fn == js_builtin_object_to_string)
         {
             return "toString";
@@ -532,6 +788,190 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         if (value->as.native.fn == js_builtin_math_pow)
         {
             return "pow";
+        }
+        if (value->as.native.fn == js_builtin_date_now)
+        {
+            return "now";
+        }
+        if (value->as.native.fn == js_builtin_date_parse)
+        {
+            return "parse";
+        }
+        if (value->as.native.fn == js_builtin_date_utc)
+        {
+            return "UTC";
+        }
+        if (value->as.native.fn == js_date_proto_to_string)
+        {
+            return "toString";
+        }
+        if (value->as.native.fn == js_date_proto_to_date_string)
+        {
+            return "toDateString";
+        }
+        if (value->as.native.fn == js_date_proto_to_time_string)
+        {
+            return "toTimeString";
+        }
+        if (value->as.native.fn == js_date_proto_to_utc_string)
+        {
+            return "toUTCString";
+        }
+        if (value->as.native.fn == js_date_proto_to_gmt_string)
+        {
+            return "toGMTString";
+        }
+        if (value->as.native.fn == js_date_proto_to_iso_string)
+        {
+            return "toISOString";
+        }
+        if (value->as.native.fn == js_date_proto_to_json)
+        {
+            return "toJSON";
+        }
+        if (value->as.native.fn == js_date_proto_value_of)
+        {
+            return "valueOf";
+        }
+        if (value->as.native.fn == js_date_proto_get_time)
+        {
+            return "getTime";
+        }
+        if (value->as.native.fn == js_date_proto_get_full_year)
+        {
+            return "getFullYear";
+        }
+        if (value->as.native.fn == js_date_proto_get_utc_full_year)
+        {
+            return "getUTCFullYear";
+        }
+        if (value->as.native.fn == js_date_proto_get_month)
+        {
+            return "getMonth";
+        }
+        if (value->as.native.fn == js_date_proto_get_utc_month)
+        {
+            return "getUTCMonth";
+        }
+        if (value->as.native.fn == js_date_proto_get_date)
+        {
+            return "getDate";
+        }
+        if (value->as.native.fn == js_date_proto_get_utc_date)
+        {
+            return "getUTCDate";
+        }
+        if (value->as.native.fn == js_date_proto_get_day)
+        {
+            return "getDay";
+        }
+        if (value->as.native.fn == js_date_proto_get_utc_day)
+        {
+            return "getUTCDay";
+        }
+        if (value->as.native.fn == js_date_proto_get_hours)
+        {
+            return "getHours";
+        }
+        if (value->as.native.fn == js_date_proto_get_utc_hours)
+        {
+            return "getUTCHours";
+        }
+        if (value->as.native.fn == js_date_proto_get_minutes)
+        {
+            return "getMinutes";
+        }
+        if (value->as.native.fn == js_date_proto_get_utc_minutes)
+        {
+            return "getUTCMinutes";
+        }
+        if (value->as.native.fn == js_date_proto_get_seconds)
+        {
+            return "getSeconds";
+        }
+        if (value->as.native.fn == js_date_proto_get_utc_seconds)
+        {
+            return "getUTCSeconds";
+        }
+        if (value->as.native.fn == js_date_proto_get_milliseconds)
+        {
+            return "getMilliseconds";
+        }
+        if (value->as.native.fn == js_date_proto_get_utc_milliseconds)
+        {
+            return "getUTCMilliseconds";
+        }
+        if (value->as.native.fn == js_date_proto_get_timezone_offset)
+        {
+            return "getTimezoneOffset";
+        }
+        if (value->as.native.fn == js_date_proto_set_time)
+        {
+            return "setTime";
+        }
+        if (value->as.native.fn == js_date_proto_set_full_year)
+        {
+            return "setFullYear";
+        }
+        if (value->as.native.fn == js_date_proto_set_utc_full_year)
+        {
+            return "setUTCFullYear";
+        }
+        if (value->as.native.fn == js_date_proto_set_month)
+        {
+            return "setMonth";
+        }
+        if (value->as.native.fn == js_date_proto_set_utc_month)
+        {
+            return "setUTCMonth";
+        }
+        if (value->as.native.fn == js_date_proto_set_date)
+        {
+            return "setDate";
+        }
+        if (value->as.native.fn == js_date_proto_set_utc_date)
+        {
+            return "setUTCDate";
+        }
+        if (value->as.native.fn == js_date_proto_set_hours)
+        {
+            return "setHours";
+        }
+        if (value->as.native.fn == js_date_proto_set_utc_hours)
+        {
+            return "setUTCHours";
+        }
+        if (value->as.native.fn == js_date_proto_set_minutes)
+        {
+            return "setMinutes";
+        }
+        if (value->as.native.fn == js_date_proto_set_utc_minutes)
+        {
+            return "setUTCMinutes";
+        }
+        if (value->as.native.fn == js_date_proto_set_seconds)
+        {
+            return "setSeconds";
+        }
+        if (value->as.native.fn == js_date_proto_set_utc_seconds)
+        {
+            return "setUTCSeconds";
+        }
+        if (value->as.native.fn == js_date_proto_set_milliseconds)
+        {
+            return "setMilliseconds";
+        }
+        if (value->as.native.fn == js_date_proto_set_utc_milliseconds)
+        {
+            return "setUTCMilliseconds";
+        }
+        if (value->as.native.fn == js_date_proto_get_year)
+        {
+            return "getYear";
+        }
+        if (value->as.native.fn == js_date_proto_set_year)
+        {
+            return "setYear";
         }
     }
     return NULL;
@@ -673,6 +1113,106 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
             return true;
         }
         if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_temporal_duration)
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_temporal_instant)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_builtin_temporal_plain_date ||
+             value->as.native.fn == js_builtin_temporal_plain_time ||
+             value->as.native.fn == js_builtin_temporal_plain_date_time ||
+             value->as.native.fn == js_builtin_temporal_zoned_date_time ||
+             value->as.native.fn == js_builtin_temporal_plain_year_month ||
+             value->as.native.fn == js_builtin_temporal_plain_month_day))
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_temporal_duration_negated ||
+             value->as.native.fn == js_temporal_duration_abs ||
+             value->as.native.fn == js_temporal_duration_to_string ||
+             value->as.native.fn == js_temporal_duration_to_json ||
+             value->as.native.fn == js_temporal_duration_to_locale_string ||
+             value->as.native.fn == js_temporal_duration_value_of))
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_temporal_duration_with ||
+             value->as.native.fn == js_temporal_duration_add ||
+             value->as.native.fn == js_temporal_duration_subtract ||
+             value->as.native.fn == js_temporal_duration_round ||
+             value->as.native.fn == js_temporal_duration_total))
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_temporal_instant_to_string ||
+             value->as.native.fn == js_temporal_instant_to_json ||
+             value->as.native.fn == js_temporal_instant_to_locale_string ||
+             value->as.native.fn == js_temporal_instant_value_of))
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_temporal_instant_add ||
+             value->as.native.fn == js_temporal_instant_subtract ||
+             value->as.native.fn == js_temporal_instant_since ||
+             value->as.native.fn == js_temporal_instant_until ||
+             value->as.native.fn == js_temporal_instant_round ||
+             value->as.native.fn == js_temporal_instant_equals ||
+             value->as.native.fn == js_temporal_instant_to_zoned_date_time_iso))
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_temporal_now_instant ||
+             value->as.native.fn == js_temporal_now_plain_date_iso ||
+             value->as.native.fn == js_temporal_now_plain_time_iso ||
+             value->as.native.fn == js_temporal_now_plain_date_time_iso ||
+             value->as.native.fn == js_temporal_now_zoned_date_time_iso ||
+             value->as.native.fn == js_temporal_now_time_zone_id))
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
             value->as.native.fn == js_builtin_function_call)
         {
             if (out_len)
@@ -759,6 +1299,142 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
             if (out_len)
             {
                 *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_bigint_to_string)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_bigint_value_of)
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_date_now)
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_date_parse)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_date_utc)
+        {
+            if (out_len)
+            {
+                *out_len = 7;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_date_proto_to_string ||
+             value->as.native.fn == js_date_proto_to_date_string ||
+             value->as.native.fn == js_date_proto_to_time_string ||
+             value->as.native.fn == js_date_proto_to_utc_string ||
+             value->as.native.fn == js_date_proto_to_gmt_string ||
+             value->as.native.fn == js_date_proto_to_iso_string ||
+             value->as.native.fn == js_date_proto_value_of ||
+             value->as.native.fn == js_date_proto_get_time ||
+             value->as.native.fn == js_date_proto_get_full_year ||
+             value->as.native.fn == js_date_proto_get_utc_full_year ||
+             value->as.native.fn == js_date_proto_get_month ||
+             value->as.native.fn == js_date_proto_get_utc_month ||
+             value->as.native.fn == js_date_proto_get_date ||
+             value->as.native.fn == js_date_proto_get_utc_date ||
+             value->as.native.fn == js_date_proto_get_day ||
+             value->as.native.fn == js_date_proto_get_utc_day ||
+             value->as.native.fn == js_date_proto_get_hours ||
+             value->as.native.fn == js_date_proto_get_utc_hours ||
+             value->as.native.fn == js_date_proto_get_minutes ||
+             value->as.native.fn == js_date_proto_get_utc_minutes ||
+             value->as.native.fn == js_date_proto_get_seconds ||
+             value->as.native.fn == js_date_proto_get_utc_seconds ||
+             value->as.native.fn == js_date_proto_get_milliseconds ||
+             value->as.native.fn == js_date_proto_get_utc_milliseconds ||
+             value->as.native.fn == js_date_proto_get_timezone_offset ||
+             value->as.native.fn == js_date_proto_get_year))
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_date_proto_to_json)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_date_proto_set_time ||
+             value->as.native.fn == js_date_proto_set_date ||
+             value->as.native.fn == js_date_proto_set_utc_date ||
+             value->as.native.fn == js_date_proto_set_milliseconds ||
+             value->as.native.fn == js_date_proto_set_utc_milliseconds ||
+             value->as.native.fn == js_date_proto_set_year))
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_date_proto_set_month ||
+             value->as.native.fn == js_date_proto_set_utc_month ||
+             value->as.native.fn == js_date_proto_set_seconds ||
+             value->as.native.fn == js_date_proto_set_utc_seconds))
+        {
+            if (out_len)
+            {
+                *out_len = 2;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_date_proto_set_full_year ||
+             value->as.native.fn == js_date_proto_set_utc_full_year ||
+             value->as.native.fn == js_date_proto_set_minutes ||
+             value->as.native.fn == js_date_proto_set_utc_minutes))
+        {
+            if (out_len)
+            {
+                *out_len = 3;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_date_proto_set_hours ||
+             value->as.native.fn == js_date_proto_set_utc_hours))
+        {
+            if (out_len)
+            {
+                *out_len = 4;
             }
             return true;
         }

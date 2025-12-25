@@ -1,4 +1,5 @@
 #include "atk/html_view/html_view_internal.h"
+#include "atk/atk_dropdown.h"
 
 typedef struct html_view_radio_group
 {
@@ -241,6 +242,63 @@ static void html_view_controls_build_node(atk_widget_t *view,
                         {
                             html_view_window_remove_widget(view->parent, w);
                         }
+                    }
+                }
+            }
+            else if (strcmp(cur->name, "select") == 0)
+            {
+                int height = atk_font_line_height() + 8;
+                atk_widget_t *w = atk_window_add_dropdown(view->parent,
+                                                          0,
+                                                          0,
+                                                          160,
+                                                          height,
+                                                          ATK_DROPDOWN_STYLE_COMBO,
+                                                          NULL,
+                                                          NULL);
+                if (w)
+                {
+                    w->used = false;
+                    size_t option_index = 0;
+                    size_t selected_index = (size_t)-1;
+                    for (const html_node_t *opt = cur->first_child; opt; opt = opt->next_sibling)
+                    {
+                        if (opt->type != HTML_NODE_ELEMENT || !opt->name || strcmp(opt->name, "option") != 0)
+                        {
+                            continue;
+                        }
+                        char *label = NULL;
+                        size_t label_len = 0;
+                        size_t label_cap = 0;
+                        html_view_collect_text(opt, &label, &label_len, &label_cap);
+                        if (label)
+                        {
+                            html_view_trim_collapse_ws(label);
+                        }
+
+                        const char *value = html_attr_get(opt, "value");
+                        const char *title = (label && label[0] != '\0') ? label :
+                                            (value && value[0] != '\0') ? value : "Option";
+                        if (atk_dropdown_add_item(w, title, (uintptr_t)option_index))
+                        {
+                            if (html_attr_get(opt, "selected"))
+                            {
+                                selected_index = option_index;
+                            }
+                            option_index++;
+                        }
+                        free(label);
+                    }
+
+                    if (option_index > 0)
+                    {
+                        size_t use_index = (selected_index != (size_t)-1) ? selected_index : 0;
+                        (void)atk_dropdown_set_selected(w, use_index);
+                    }
+
+                    if (!html_view_controls_add(priv, cur, w, HTML_VIEW_CONTROL_SELECT))
+                    {
+                        html_view_window_remove_widget(view->parent, w);
                     }
                 }
             }

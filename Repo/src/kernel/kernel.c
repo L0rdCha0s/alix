@@ -418,6 +418,14 @@ static void ensure_system_layout(void)
     {
         serial_printf("%s", "[alix] warn: unable to ensure /root\r\n");
     }
+    if (!ensure_directory_path("/root/home"))
+    {
+        serial_printf("%s", "[alix] warn: unable to ensure /root/home\r\n");
+    }
+    if (!ensure_directory_path("/root/home/root"))
+    {
+        serial_printf("%s", "[alix] warn: unable to ensure /root/home/root\r\n");
+    }
     if (!ensure_directory_path("/root/etc"))
     {
         serial_printf("%s", "[alix] warn: unable to ensure /root/etc\r\n");
@@ -454,6 +462,10 @@ static void ensure_system_layout(void)
     {
         serial_printf("%s", "[alix] warn: unable to ensure /root/usr/share/zoneinfo/src\r\n");
     }
+    if (!vfs_force_symlink(vfs_root(), "/root/home", "/home"))
+    {
+        serial_printf("%s", "[alix] warn: unable to ensure /home symlink\r\n");
+    }
     if (!vfs_force_symlink(vfs_root(), "/root/etc", "/etc"))
     {
         serial_printf("%s", "[alix] warn: unable to ensure /etc symlink\r\n");
@@ -468,7 +480,7 @@ static void ensure_system_layout(void)
         passwd_file = vfs_open_file(vfs_root(), "/etc/passwd", true, true);
         if (passwd_file)
         {
-            static const char default_passwd[] = "root:0:0:Root:/root\n";
+            static const char default_passwd[] = "root:0:0:Root:/home/root\n";
             if (!vfs_append(passwd_file, default_passwd, sizeof(default_passwd) - 1))
             {
                 serial_printf("%s", "[alix] warn: unable to write default passwd\r\n");

@@ -38,6 +38,40 @@ static void browser_debug_log_trim_locked(browser_app_t *app)
     app->debug_log_resync = true;
 }
 
+static void browser_debug_log_make_room_locked(browser_app_t *app, size_t extra)
+{
+    if (!app || !app->debug_log || extra == 0)
+    {
+        return;
+    }
+
+    size_t cap = app->debug_log_cap;
+    if (cap == 0 || app->debug_log_len + extra + 1 <= cap)
+    {
+        return;
+    }
+
+    size_t needed = app->debug_log_len + extra + 1 - cap;
+    size_t drop = needed;
+    while (drop < app->debug_log_len && app->debug_log[drop] != '\n')
+    {
+        drop++;
+    }
+    if (drop < app->debug_log_len)
+    {
+        drop++;
+    }
+    if (drop == 0 || drop > app->debug_log_len)
+    {
+        return;
+    }
+
+    memmove(app->debug_log, app->debug_log + drop, app->debug_log_len - drop + 1);
+    app->debug_log_len -= drop;
+    app->debug_log_flush_offset = 0;
+    app->debug_log_resync = true;
+}
+
 static void browser_debug_log_append_locked(browser_app_t *app, const char *data, size_t len)
 {
     if (!app || !data || len == 0)
@@ -45,22 +79,21 @@ static void browser_debug_log_append_locked(browser_app_t *app, const char *data
         return;
     }
 
-    size_t needed = app->debug_log_len + len + 1;
-    if (needed > app->debug_log_cap)
+    if (app->debug_log_cap == 0)
     {
-        size_t new_cap = app->debug_log_cap ? app->debug_log_cap : 1024;
-        while (new_cap < needed)
-        {
-            new_cap *= 2;
-        }
-        char *next = (char *)realloc(app->debug_log, new_cap);
-        if (!next)
-        {
-            return;
-        }
-        app->debug_log = next;
-        app->debug_log_cap = new_cap;
+        return;
     }
+
+    if (len >= app->debug_log_cap)
+    {
+        data += len - (app->debug_log_cap - 1);
+        len = app->debug_log_cap - 1;
+        app->debug_log_len = 0;
+        app->debug_log_flush_offset = 0;
+        app->debug_log_resync = true;
+    }
+
+    browser_debug_log_make_room_locked(app, len);
 
     memcpy(app->debug_log + app->debug_log_len, data, len);
     app->debug_log_len += len;
@@ -69,9 +102,76 @@ static void browser_debug_log_append_locked(browser_app_t *app, const char *data
     browser_debug_log_trim_locked(app);
 }
 
+static bool browser_debug_log_ensure_buffer(browser_app_t *app)
+{
+    if (!app)
+    {
+        return false;
+    }
+
+    const size_t cap = BROWSER_DEBUG_LOG_MAX_BYTES + 1;
+    if (app->debug_log && app->debug_log_cap >= cap)
+    {
+        return true;
+    }
+
+    char *buf = (char *)malloc(cap);
+    if (!buf)
+    {
+        return false;
+    }
+    buf[0] = '\0';
+
+    char *old_buf = NULL;
+    size_t old_len = 0;
+    bool keep_new = false;
+
+    alix_mutex_lock(&app->lock);
+    if (!app->debug_log)
+    {
+        app->debug_log = buf;
+        app->debug_log_cap = cap;
+        app->debug_log_len = 0;
+        keep_new = true;
+    }
+    else if (app->debug_log_cap < cap)
+    {
+        old_buf = app->debug_log;
+        old_len = app->debug_log_len;
+        if (old_len >= cap)
+        {
+            old_len = cap - 1;
+        }
+        memcpy(buf, old_buf, old_len);
+        buf[old_len] = '\0';
+        app->debug_log = buf;
+        app->debug_log_cap = cap;
+        app->debug_log_len = old_len;
+        app->debug_log_flush_offset = 0;
+        app->debug_log_resync = true;
+        keep_new = true;
+    }
+    alix_mutex_unlock(&app->lock);
+
+    if (!keep_new)
+    {
+        free(buf);
+        return true;
+    }
+    if (old_buf)
+    {
+        free(old_buf);
+    }
+    return true;
+}
+
 static void browser_debug_log_line(browser_app_t *app, const char *line)
 {
     if (!app || !line)
+    {
+        return;
+    }
+    if (!browser_debug_log_ensure_buffer(app))
     {
         return;
     }
@@ -418,7 +518,9 @@ static bool browser_debug_flush(browser_app_t *app)
     atk_widget_t *editor = NULL;
     atk_widget_t *window = NULL;
     bool resync = false;
-    char *chunk = NULL;
+    size_t start = 0;
+    size_t take = 0;
+    char chunk[4096];
 
     alix_mutex_lock(&app->lock);
     editor = app->debug_text;
@@ -433,43 +535,37 @@ static bool browser_debug_flush(browser_app_t *app)
     if (app->debug_log_resync)
     {
         resync = true;
-        size_t log_len = app->debug_log ? app->debug_log_len : 0;
-        chunk = (char *)malloc(log_len + 1);
-        if (!chunk)
-        {
-            alix_mutex_unlock(&app->lock);
-            return false;
-        }
-        if (log_len > 0 && app->debug_log)
-        {
-            memcpy(chunk, app->debug_log, log_len);
-        }
-        chunk[log_len] = '\0';
-        app->debug_log_flush_offset = log_len;
-        app->debug_log_resync = false;
+        start = app->debug_log_flush_offset;
     }
     else if (app->debug_log && app->debug_log_flush_offset < app->debug_log_len)
     {
-        size_t start = app->debug_log_flush_offset;
-        size_t len = app->debug_log_len - start;
-        chunk = (char *)malloc(len + 1);
-        if (!chunk)
+        start = app->debug_log_flush_offset;
+    }
+
+    if (app->debug_log && start < app->debug_log_len)
+    {
+        size_t available = app->debug_log_len - start;
+        take = available < (sizeof(chunk) - 1) ? available : (sizeof(chunk) - 1);
+        memcpy(chunk, app->debug_log + start, take);
+        chunk[take] = '\0';
+        app->debug_log_flush_offset = start + take;
+        if (resync && app->debug_log_flush_offset >= app->debug_log_len)
         {
-            alix_mutex_unlock(&app->lock);
-            return false;
+            app->debug_log_resync = false;
         }
-        memcpy(chunk, app->debug_log + start, len);
-        chunk[len] = '\0';
-        app->debug_log_flush_offset = app->debug_log_len;
+    }
+    else if (resync)
+    {
+        app->debug_log_resync = false;
     }
     alix_mutex_unlock(&app->lock);
 
-    if (!chunk)
+    if (take == 0)
     {
         return false;
     }
 
-    if (resync)
+    if (resync && start == 0)
     {
         atk_rich_text_set_text(editor, chunk);
     }
@@ -478,7 +574,6 @@ static bool browser_debug_flush(browser_app_t *app)
         atk_rich_text_append(editor, chunk);
     }
     atk_rich_text_scroll_to_bottom(editor);
-    free(chunk);
 
     if (window && window->used)
     {

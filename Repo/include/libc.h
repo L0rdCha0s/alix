@@ -38,6 +38,8 @@ int atoi(const char *str);
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
 char *getenv(const char *name);
+uint32_t getuid(void);
+int mkdir(const char *path, uint32_t mode);
 
 ssize_t read(int fd, void *buffer, size_t count);
 ssize_t write(int fd, const void *buffer, size_t count);

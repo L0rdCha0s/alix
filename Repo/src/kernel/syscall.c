@@ -510,6 +510,9 @@ static int64_t syscall_do_socket_connect(int fd,
         free(ip_text);
         return -1;
     }
+    serial_printf("[sock_connect] start host=%s port=%u",
+                  ip_text[0] ? ip_text : "<none>",
+                  (unsigned)port);
 
     uint32_t ipv4 = 0;
     bool parsed = net_parse_ipv4(ip_text, &ipv4);
@@ -522,21 +525,41 @@ static int64_t syscall_do_socket_connect(int fd,
             parsed = true;
         }
     }
+    if (parsed && ipv4 != 0)
+    {
+        uint8_t a = (uint8_t)((ipv4 >> 24) & 0xFF);
+        uint8_t b = (uint8_t)((ipv4 >> 16) & 0xFF);
+        uint8_t c = (uint8_t)((ipv4 >> 8) & 0xFF);
+        uint8_t d = (uint8_t)(ipv4 & 0xFF);
+        serial_printf("[sock_connect] resolved host=%s ip=%u.%u.%u.%u",
+                      ip_text[0] ? ip_text : "<none>",
+                      (unsigned)a,
+                      (unsigned)b,
+                      (unsigned)c,
+                      (unsigned)d);
+    }
     free(ip_text);
     if (!parsed || ipv4 == 0)
     {
+        serial_printf("%s", "[sock_connect] resolve failed");
         return -1;
     }
 
     net_tcp_socket_t *socket = net_tcp_socket_from_fd(fd);
     if (!socket)
     {
+        serial_printf("[sock_connect] socket missing fd=%d", fd);
         return -1;
     }
     if (!net_tcp_socket_connect(socket, ipv4, port))
     {
+        serial_printf("[sock_connect] connect failed ip=0x%08X port=%u",
+                      (unsigned)ipv4,
+                      (unsigned)port);
         return -1;
     }
+    serial_printf("[sock_connect] connect issued state=%s",
+                  net_tcp_socket_state(socket));
 
     const uint32_t step_ms = 10;
     const uint32_t timeout_ms = 15000;
@@ -887,6 +910,44 @@ static int64_t syscall_do_list_dir(const char *path, syscall_dirent_t *out_entri
     return (int64_t)ctx.count;
 }
 
+static int64_t syscall_do_mkdir(const char *path)
+{
+    if (!path)
+    {
+        return -1;
+    }
+
+    char *path_buf = (char *)malloc(SYSCALL_MAX_PATH_LEN);
+    if (!path_buf)
+    {
+        return -1;
+    }
+    size_t copied_len = 0;
+    if (!user_copy_string_from_user(path_buf, SYSCALL_MAX_PATH_LEN, path, &copied_len))
+    {
+        free(path_buf);
+        return -1;
+    }
+    if (copied_len == 0 || path_buf[0] == '\0')
+    {
+        free(path_buf);
+        return -1;
+    }
+
+    vfs_node_t *cwd = process_current_cwd();
+    if (!cwd)
+    {
+        cwd = vfs_root();
+    }
+    vfs_node_t *dir = vfs_mkdir(cwd, path_buf);
+    free(path_buf);
+    if (!dir || !vfs_is_dir(dir))
+    {
+        return -1;
+    }
+    return 0;
+}
+
 /*
  * Open a VFS file and return an FD.
  *
@@ -1063,6 +1124,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = syscall_do_list_dir((const char *)frame->rdi,
                                          (syscall_dirent_t *)frame->rsi,
                                          (size_t)frame->rdx);
+            break;
+        case SYSCALL_MKDIR:
+            result = syscall_do_mkdir((const char *)frame->rdi);
             break;
         case SYSCALL_YIELD:
             process_preempt_hook();
@@ -1378,6 +1442,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         }
         case SYSCALL_TIME_MILLIS:
             result = (int64_t)timekeeping_now_millis();
+            break;
+        case SYSCALL_GETUID:
+            result = (int64_t)process_get_uid(process_current());
             break;
         case SYSCALL_SOCKET_OPEN:
             result = syscall_do_socket_open((const char *)frame->rdi);

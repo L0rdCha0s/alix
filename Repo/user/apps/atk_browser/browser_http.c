@@ -1,9 +1,495 @@
 #include "browser_internal.h"
 
+#include "crypto/sha1.h"
 #include "net/tls.h"
+#include "usyscall.h"
 
 #include "stdio.h"
 #include "string.h"
+
+#define BROWSER_MAX_PASSWD_BYTES (64u * 1024u)
+
+static bool browser_parse_u32_range(const char *start, const char *end, uint32_t *out)
+{
+    if (!start || !end || !out || start >= end)
+    {
+        return false;
+    }
+    uint32_t value = 0;
+    for (const char *cur = start; cur < end; ++cur)
+    {
+        if (*cur < '0' || *cur > '9')
+        {
+            return false;
+        }
+        uint32_t digit = (uint32_t)(*cur - '0');
+        uint32_t next = value * 10u + digit;
+        if (next < value)
+        {
+            return false;
+        }
+        value = next;
+    }
+    *out = value;
+    return true;
+}
+
+static char *browser_read_file_all(const char *path, size_t *len_out, size_t max_bytes)
+{
+    if (len_out)
+    {
+        *len_out = 0;
+    }
+    if (!path || path[0] == '\0')
+    {
+        return NULL;
+    }
+
+    int fd = open(path, SYSCALL_OPEN_READ);
+    if (fd < 0)
+    {
+        return NULL;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    if (st.st_size == 0)
+    {
+        close(fd);
+        return NULL;
+    }
+    if (st.st_size > (uint64_t)max_bytes)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    size_t size = (size_t)st.st_size;
+    char *buf = (char *)malloc(size + 1);
+    if (!buf)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    size_t offset = 0;
+    while (offset < size)
+    {
+        ssize_t got = read(fd, buf + offset, size - offset);
+        if (got <= 0)
+        {
+            free(buf);
+            close(fd);
+            return NULL;
+        }
+        offset += (size_t)got;
+    }
+    buf[size] = '\0';
+    close(fd);
+
+    if (len_out)
+    {
+        *len_out = size;
+    }
+    return buf;
+}
+
+static bool browser_passwd_line_home(const char *line,
+                                     const char *end,
+                                     uint32_t *uid_out,
+                                     const char **home_start_out,
+                                     size_t *home_len_out)
+{
+    if (!line || !end || line >= end || !uid_out || !home_start_out || !home_len_out)
+    {
+        return false;
+    }
+
+    const char *colon1 = NULL;
+    const char *colon2 = NULL;
+    const char *colon3 = NULL;
+    const char *colon4 = NULL;
+    for (const char *cur = line; cur < end; ++cur)
+    {
+        if (*cur == ':')
+        {
+            if (!colon1)
+            {
+                colon1 = cur;
+            }
+            else if (!colon2)
+            {
+                colon2 = cur;
+            }
+            else if (!colon3)
+            {
+                colon3 = cur;
+            }
+            else
+            {
+                colon4 = cur;
+                break;
+            }
+        }
+    }
+
+    if (!colon1 || !colon2 || !colon3 || !colon4)
+    {
+        return false;
+    }
+
+    uint32_t uid = 0;
+    if (!browser_parse_u32_range(colon1 + 1, colon2, &uid))
+    {
+        return false;
+    }
+
+    const char *home_start = colon4 + 1;
+    if (home_start > end)
+    {
+        return false;
+    }
+    size_t home_len = (size_t)(end - home_start);
+    if (home_len == 0)
+    {
+        return false;
+    }
+
+    *uid_out = uid;
+    *home_start_out = home_start;
+    *home_len_out = home_len;
+    return true;
+}
+
+static char *browser_home_from_passwd(uint32_t uid)
+{
+    size_t data_len = 0;
+    char *data = browser_read_file_all("/etc/passwd", &data_len, BROWSER_MAX_PASSWD_BYTES);
+    if (!data || data_len == 0)
+    {
+        free(data);
+        return NULL;
+    }
+
+    char *home = NULL;
+    char *root_home = NULL;
+    size_t pos = 0;
+    while (pos < data_len)
+    {
+        size_t line_end = pos;
+        while (line_end < data_len && data[line_end] != '\n' && data[line_end] != '\r')
+        {
+            ++line_end;
+        }
+
+        if (line_end > pos)
+        {
+            const char *line = data + pos;
+            const char *end = data + line_end;
+            uint32_t line_uid = 0;
+            const char *home_start = NULL;
+            size_t home_len = 0;
+            if (browser_passwd_line_home(line, end, &line_uid, &home_start, &home_len))
+            {
+                if (!home && line_uid == uid)
+                {
+                    home = browser_strdup_len(home_start, home_len);
+                }
+                if (!root_home && line_uid == 0)
+                {
+                    root_home = browser_strdup_len(home_start, home_len);
+                }
+            }
+        }
+
+        while (line_end < data_len && (data[line_end] == '\n' || data[line_end] == '\r'))
+        {
+            ++line_end;
+        }
+        pos = line_end;
+    }
+
+    free(data);
+    if (home)
+    {
+        free(root_home);
+        return home;
+    }
+    return root_home;
+}
+
+static bool browser_dir_exists(const char *path)
+{
+    if (!path || path[0] == '\0')
+    {
+        return false;
+    }
+    syscall_dirent_t *scratch = (syscall_dirent_t *)malloc(sizeof(*scratch));
+    if (!scratch)
+    {
+        return false;
+    }
+    ssize_t count = sys_list_dir(path, scratch, 1);
+    free(scratch);
+    return count >= 0;
+}
+
+static bool browser_ensure_dir_path(const char *path)
+{
+    if (!path || path[0] == '\0')
+    {
+        return false;
+    }
+
+    char *copy = browser_strdup(path);
+    if (!copy)
+    {
+        return false;
+    }
+
+    size_t len = strlen(copy);
+    if (len == 0)
+    {
+        free(copy);
+        return false;
+    }
+
+    size_t pos = 0;
+    if (copy[0] == '/')
+    {
+        pos = 1;
+        while (copy[pos] == '/')
+        {
+            pos++;
+        }
+    }
+
+    for (; pos <= len; ++pos)
+    {
+        if (copy[pos] == '/' || copy[pos] == '\0')
+        {
+            char saved = copy[pos];
+            copy[pos] = '\0';
+            if (copy[0] != '\0' && !(copy[0] == '/' && copy[1] == '\0'))
+            {
+                if (mkdir(copy, 0) != 0)
+                {
+                    if (!browser_dir_exists(copy))
+                    {
+                        free(copy);
+                        return false;
+                    }
+                }
+            }
+            copy[pos] = saved;
+            while (copy[pos] == '/')
+            {
+                pos++;
+            }
+        }
+    }
+
+    free(copy);
+    return true;
+}
+
+static const char *browser_cache_dir(browser_app_t *app)
+{
+    if (!app)
+    {
+        return NULL;
+    }
+
+    alix_mutex_lock(&app->lock);
+    if (app->cache_ready)
+    {
+        const char *dir = app->cache_dir;
+        alix_mutex_unlock(&app->lock);
+        return dir;
+    }
+    if (app->cache_attempted)
+    {
+        alix_mutex_unlock(&app->lock);
+        return NULL;
+    }
+    app->cache_attempted = true;
+    alix_mutex_unlock(&app->lock);
+
+    char *home = browser_home_from_passwd(getuid());
+    if (!home || home[0] == '\0')
+    {
+        free(home);
+        return NULL;
+    }
+
+    size_t home_len = strlen(home);
+    while (home_len > 1 && home[home_len - 1] == '/')
+    {
+        home_len--;
+    }
+    home[home_len] = '\0';
+
+    if (!browser_ensure_dir_path(home))
+    {
+        free(home);
+        return NULL;
+    }
+
+    const char suffix[] = "/.browser/cache";
+    size_t suffix_len = sizeof(suffix) - 1;
+    size_t cache_len = home_len + suffix_len;
+    char *cache_dir = (char *)malloc(cache_len + 1);
+    if (!cache_dir)
+    {
+        free(home);
+        return NULL;
+    }
+
+    memcpy(cache_dir, home, home_len);
+    memcpy(cache_dir + home_len, suffix, suffix_len);
+    cache_dir[cache_len] = '\0';
+    free(home);
+
+    if (!browser_ensure_dir_path(cache_dir))
+    {
+        free(cache_dir);
+        return NULL;
+    }
+
+    alix_mutex_lock(&app->lock);
+    if (!app->cache_ready)
+    {
+        app->cache_dir = cache_dir;
+        app->cache_ready = true;
+    }
+    const char *dir = app->cache_dir;
+    alix_mutex_unlock(&app->lock);
+
+    if (dir != cache_dir)
+    {
+        free(cache_dir);
+    }
+    return dir;
+}
+
+static bool browser_cache_hash_uri(const char *uri, char out[41])
+{
+    if (!uri || !out)
+    {
+        return false;
+    }
+
+    uint8_t digest[20];
+    sha1_ctx_t ctx;
+    sha1_init(&ctx);
+    sha1_update(&ctx, uri, strlen(uri));
+    sha1_final(&ctx, digest);
+
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(digest); ++i)
+    {
+        out[i * 2] = hex[(digest[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = hex[digest[i] & 0x0F];
+    }
+    out[40] = '\0';
+    return true;
+}
+
+static char *browser_cache_path_for_uri(const char *cache_dir, const char *uri)
+{
+    if (!cache_dir || !uri)
+    {
+        return NULL;
+    }
+
+    char hash[41];
+    if (!browser_cache_hash_uri(uri, hash))
+    {
+        return NULL;
+    }
+
+    size_t dir_len = strlen(cache_dir);
+    size_t path_len = dir_len + 1 + sizeof(hash) - 1;
+    char *path = (char *)malloc(path_len + 1);
+    if (!path)
+    {
+        return NULL;
+    }
+
+    memcpy(path, cache_dir, dir_len);
+    path[dir_len] = '/';
+    memcpy(path + dir_len + 1, hash, sizeof(hash));
+    path[path_len] = '\0';
+    return path;
+}
+
+static char *browser_cache_read(browser_app_t *app, const char *uri, size_t *body_len_out)
+{
+    if (body_len_out)
+    {
+        *body_len_out = 0;
+    }
+    if (!app || !uri || uri[0] == '\0')
+    {
+        return NULL;
+    }
+
+    const char *cache_dir = browser_cache_dir(app);
+    if (!cache_dir)
+    {
+        return NULL;
+    }
+
+    char *path = browser_cache_path_for_uri(cache_dir, uri);
+    if (!path)
+    {
+        return NULL;
+    }
+
+    char *data = browser_read_file_all(path, body_len_out, BROWSER_MAX_BYTES);
+    if (data)
+    {
+        browser_debug_logf(app, "[cache] hit url=%s", uri);
+    }
+    free(path);
+    return data;
+}
+
+static void browser_cache_write(browser_app_t *app, const char *uri, const uint8_t *data, size_t len)
+{
+    if (!app || !uri || uri[0] == '\0' || !data || len == 0 || len > BROWSER_MAX_BYTES)
+    {
+        return;
+    }
+
+    const char *cache_dir = browser_cache_dir(app);
+    if (!cache_dir)
+    {
+        return;
+    }
+
+    char *path = browser_cache_path_for_uri(cache_dir, uri);
+    if (!path)
+    {
+        return;
+    }
+
+    int fd = open(path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE);
+    if (fd >= 0)
+    {
+        if (browser_write_all(fd, data, len))
+        {
+            browser_debug_logf(app, "[cache] store url=%s bytes=%u", uri, (unsigned)len);
+        }
+        close(fd);
+    }
+    free(path);
+}
 
 static bool browser_http_find_header_end(const char *data,
                                         size_t len,
@@ -1195,6 +1681,27 @@ char *browser_fetch_http(browser_app_t *app,
                          size_t *body_len_out,
                          browser_url_t *final_url_out)
 {
-    return browser_fetch_http_internal(app, url, 0, body_len_out, final_url_out);
-}
+    char *url_text = browser_url_to_string(url);
+    if (url_text)
+    {
+        char *cached = browser_cache_read(app, url_text, body_len_out);
+        if (cached)
+        {
+            if (final_url_out)
+            {
+                (void)browser_url_clone(url, final_url_out);
+            }
+            free(url_text);
+            return cached;
+        }
+    }
 
+    char *body = browser_fetch_http_internal(app, url, 0, body_len_out, final_url_out);
+    if (body && url_text && body_len_out && *body_len_out > 0 &&
+        strncmp(body, "Error:\n", 6) != 0)
+    {
+        browser_cache_write(app, url_text, (const uint8_t *)body, *body_len_out);
+    }
+    free(url_text);
+    return body;
+}

@@ -849,6 +849,11 @@ char *getenv(const char *name)
     return g_env_entries[index].value;
 }
 
+uint32_t getuid(void)
+{
+    return sys_getuid();
+}
+
 int setenv(const char *name, const char *value, int overwrite)
 {
     if (!name || name[0] == '\0' || strchr(name, '='))
@@ -903,6 +908,22 @@ int setenv(const char *name, const char *value, int overwrite)
 
     free(g_env_entries[index].value);
     g_env_entries[index].value = value_copy;
+    return 0;
+}
+
+int mkdir(const char *path, uint32_t mode)
+{
+    (void)mode;
+    if (!path || path[0] == '\0')
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if (sys_mkdir(path) != 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
     return 0;
 }
 

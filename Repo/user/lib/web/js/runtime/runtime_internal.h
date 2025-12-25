@@ -7,6 +7,10 @@
 extern "C" {
 #endif
 
+#ifndef INFINITY
+#define INFINITY (1.0 / 0.0)
+#endif
+
 typedef struct js_env js_env_t;
 typedef struct js_var js_var_t;
 typedef struct js_program_node js_program_node_t;
@@ -75,6 +79,19 @@ struct js_runtime
     js_object_t *object_proto;
     js_object_t *function_proto;
     js_object_t *array_proto;
+    js_object_t *date_proto;
+    js_object_t *number_proto;
+    js_object_t *symbol_proto;
+    js_object_t *temporal_object;
+    js_object_t *temporal_now_object;
+    js_object_t *temporal_duration_proto;
+    js_object_t *temporal_instant_proto;
+    js_object_t *temporal_plain_date_proto;
+    js_object_t *temporal_plain_time_proto;
+    js_object_t *temporal_plain_date_time_proto;
+    js_object_t *temporal_zoned_date_time_proto;
+    js_object_t *temporal_plain_year_month_proto;
+    js_object_t *temporal_plain_month_day_proto;
     js_object_t *math_object;
     js_object_t *iterator_proto;
     js_object_t *set_iterator_proto;
@@ -82,6 +99,8 @@ struct js_runtime
     size_t yield_limit;
     size_t yield_count;
     js_bound_fn_t *bound_functions;
+    bool constructing;
+    js_native_fn_t constructing_fn;
 };
 
 typedef struct
@@ -136,6 +155,30 @@ bool js_object_get_property(js_runtime_t *rt,
                             char **error_message);
 
 bool js_value_make_symbol(js_value_t *out, const char *description);
+bool js_value_make_bigint(js_value_t *out, const char *text, int base);
+bool js_value_make_bigint_from_int64(js_value_t *out, int64_t value);
+
+bool js_value_to_bigint(js_runtime_t *rt,
+                        const js_value_t *value,
+                        js_bigint_t **out,
+                        char **error_message);
+js_bigint_t *js_bigint_clone(const js_bigint_t *value);
+void js_bigint_destroy(js_bigint_t *value);
+bool js_bigint_is_zero(const js_bigint_t *value);
+int js_bigint_compare(const js_bigint_t *a, const js_bigint_t *b);
+js_bigint_t *js_bigint_add(const js_bigint_t *a, const js_bigint_t *b);
+js_bigint_t *js_bigint_sub(const js_bigint_t *a, const js_bigint_t *b);
+js_bigint_t *js_bigint_mul(const js_bigint_t *a, const js_bigint_t *b);
+bool js_bigint_divmod(const js_bigint_t *a,
+                      const js_bigint_t *b,
+                      js_bigint_t **out_quot,
+                      js_bigint_t **out_rem,
+                      char **error_message);
+js_bigint_t *js_bigint_pow(const js_bigint_t *base,
+                           const js_bigint_t *exp,
+                           char **error_message);
+char *js_bigint_to_string(const js_bigint_t *value);
+double js_bigint_to_double(const js_bigint_t *value);
 
 js_function_t *js_function_create(const js_function_decl_t *decl,
                                   const js_function_expr_t *expr,
@@ -176,6 +219,24 @@ bool js_builtin_number(js_runtime_t *rt,
                        void *user_data,
                        js_value_t *out,
                        char **error_message);
+bool js_builtin_bigint(js_runtime_t *rt,
+                       size_t argc,
+                       const js_value_t *argv,
+                       void *user_data,
+                       js_value_t *out,
+                       char **error_message);
+bool js_builtin_bigint_to_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_builtin_bigint_value_of(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
 bool js_builtin_string(js_runtime_t *rt,
                        size_t argc,
                        const js_value_t *argv,
@@ -224,6 +285,30 @@ bool js_builtin_symbol(js_runtime_t *rt,
                        void *user_data,
                        js_value_t *out,
                        char **error_message);
+bool js_builtin_date(js_runtime_t *rt,
+                     size_t argc,
+                     const js_value_t *argv,
+                     void *user_data,
+                     js_value_t *out,
+                     char **error_message);
+bool js_builtin_date_now(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
+bool js_builtin_date_parse(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_builtin_date_utc(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
 bool js_builtin_set(js_runtime_t *rt,
                     size_t argc,
                     const js_value_t *argv,
@@ -421,6 +506,19 @@ bool js_builtin_iterator_map(js_runtime_t *rt,
                              char **error_message);
 js_object_t *js_get_iterator_proto(js_runtime_t *rt);
 js_object_t *js_get_math_object(js_runtime_t *rt);
+js_object_t *js_get_date_proto(js_runtime_t *rt);
+js_object_t *js_get_number_proto(js_runtime_t *rt);
+js_object_t *js_get_symbol_proto(js_runtime_t *rt);
+js_object_t *js_get_temporal_object(js_runtime_t *rt);
+js_object_t *js_get_temporal_now_object(js_runtime_t *rt);
+js_object_t *js_get_temporal_duration_proto(js_runtime_t *rt);
+js_object_t *js_get_temporal_instant_proto(js_runtime_t *rt);
+js_object_t *js_get_temporal_plain_date_proto(js_runtime_t *rt);
+js_object_t *js_get_temporal_plain_time_proto(js_runtime_t *rt);
+js_object_t *js_get_temporal_plain_date_time_proto(js_runtime_t *rt);
+js_object_t *js_get_temporal_zoned_date_time_proto(js_runtime_t *rt);
+js_object_t *js_get_temporal_plain_year_month_proto(js_runtime_t *rt);
+js_object_t *js_get_temporal_plain_month_day_proto(js_runtime_t *rt);
 void js_release_bound_functions(js_runtime_t *rt);
 bool js_builtin_type_error(js_runtime_t *rt,
                            size_t argc,
@@ -452,6 +550,497 @@ bool js_builtin_verify_property(js_runtime_t *rt,
                                 void *user_data,
                                 js_value_t *out,
                                 char **error_message);
+
+bool js_date_proto_to_string(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_date_proto_to_date_string(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
+bool js_date_proto_to_time_string(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
+bool js_date_proto_to_utc_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_to_gmt_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_to_iso_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_to_json(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_date_proto_value_of(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_date_proto_get_time(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_date_proto_get_full_year(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_get_utc_full_year(js_runtime_t *rt,
+                                     size_t argc,
+                                     const js_value_t *argv,
+                                     void *user_data,
+                                     js_value_t *out,
+                                     char **error_message);
+bool js_date_proto_get_month(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_date_proto_get_utc_month(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_get_date(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_date_proto_get_utc_date(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+bool js_date_proto_get_day(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_date_proto_get_utc_day(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_date_proto_get_hours(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_date_proto_get_utc_hours(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_get_minutes(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_date_proto_get_utc_minutes(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message);
+bool js_date_proto_get_seconds(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_date_proto_get_utc_seconds(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message);
+bool js_date_proto_get_milliseconds(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message);
+bool js_date_proto_get_utc_milliseconds(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message);
+bool js_date_proto_get_timezone_offset(js_runtime_t *rt,
+                                       size_t argc,
+                                       const js_value_t *argv,
+                                       void *user_data,
+                                       js_value_t *out,
+                                       char **error_message);
+bool js_date_proto_set_time(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_date_proto_set_full_year(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_set_utc_full_year(js_runtime_t *rt,
+                                     size_t argc,
+                                     const js_value_t *argv,
+                                     void *user_data,
+                                     js_value_t *out,
+                                     char **error_message);
+bool js_date_proto_set_month(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_date_proto_set_utc_month(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_set_date(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_date_proto_set_utc_date(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+bool js_date_proto_set_hours(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_date_proto_set_utc_hours(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_date_proto_set_minutes(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_date_proto_set_utc_minutes(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message);
+bool js_date_proto_set_seconds(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_date_proto_set_utc_seconds(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message);
+bool js_date_proto_set_milliseconds(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message);
+bool js_date_proto_set_utc_milliseconds(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message);
+bool js_date_proto_get_year(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_date_proto_set_year(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+
+bool js_builtin_temporal_duration(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
+bool js_builtin_temporal_instant(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_builtin_temporal_plain_date(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message);
+bool js_builtin_temporal_plain_time(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message);
+bool js_builtin_temporal_plain_date_time(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message);
+bool js_builtin_temporal_zoned_date_time(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message);
+bool js_builtin_temporal_plain_year_month(js_runtime_t *rt,
+                                          size_t argc,
+                                          const js_value_t *argv,
+                                          void *user_data,
+                                          js_value_t *out,
+                                          char **error_message);
+bool js_builtin_temporal_plain_month_day(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message);
+
+bool js_temporal_duration_getter(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_temporal_duration_negated(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
+bool js_temporal_duration_abs(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message);
+bool js_temporal_duration_to_string(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message);
+bool js_temporal_duration_to_json(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
+bool js_temporal_duration_to_locale_string(js_runtime_t *rt,
+                                           size_t argc,
+                                           const js_value_t *argv,
+                                           void *user_data,
+                                           js_value_t *out,
+                                           char **error_message);
+bool js_temporal_duration_value_of(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message);
+bool js_temporal_duration_with(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_temporal_duration_add(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message);
+bool js_temporal_duration_subtract(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message);
+bool js_temporal_duration_round(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+bool js_temporal_duration_total(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+
+bool js_temporal_instant_getter(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+bool js_temporal_instant_to_string(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message);
+bool js_temporal_instant_to_json(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_temporal_instant_to_locale_string(js_runtime_t *rt,
+                                          size_t argc,
+                                          const js_value_t *argv,
+                                          void *user_data,
+                                          js_value_t *out,
+                                          char **error_message);
+bool js_temporal_instant_value_of(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
+bool js_temporal_instant_add(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_temporal_instant_subtract(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
+bool js_temporal_instant_since(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_temporal_instant_until(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_temporal_instant_round(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_temporal_instant_equals(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+bool js_temporal_instant_to_zoned_date_time_iso(js_runtime_t *rt,
+                                                size_t argc,
+                                                const js_value_t *argv,
+                                                void *user_data,
+                                                js_value_t *out,
+                                                char **error_message);
+
+bool js_temporal_now_instant(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_temporal_now_plain_date_iso(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message);
+bool js_temporal_now_plain_time_iso(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message);
+bool js_temporal_now_plain_date_time_iso(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message);
+bool js_temporal_now_zoned_date_time_iso(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message);
+bool js_temporal_now_time_zone_id(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message);
 
 #ifdef __cplusplus
 }

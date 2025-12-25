@@ -30,6 +30,13 @@ typedef struct
 
 typedef struct
 {
+    js_template_segment_t *items;
+    size_t count;
+    size_t cap;
+} js_template_segment_list_t;
+
+typedef struct
+{
     js_param_t *items;
     size_t count;
     size_t cap;
@@ -198,6 +205,143 @@ static bool js_expr_list_push(js_expr_list_t *list, js_expr_t *expr)
         list->cap = new_cap;
     }
     list->items[list->count++] = expr;
+    return true;
+}
+
+static bool js_template_segment_list_push(js_template_segment_list_t *list, const js_template_segment_t *segment)
+{
+    if (!list || !segment)
+    {
+        return false;
+    }
+    if (list->count + 1 > list->cap)
+    {
+        size_t new_cap = list->cap ? list->cap * 2u : 4u;
+        if (new_cap < list->count + 1)
+        {
+            new_cap = list->count + 1;
+        }
+        js_template_segment_t *new_items =
+            (js_template_segment_t *)realloc(list->items, new_cap * sizeof(*new_items));
+        if (!new_items)
+        {
+            return false;
+        }
+        list->items = new_items;
+        list->cap = new_cap;
+    }
+    list->items[list->count++] = *segment;
+    return true;
+}
+
+static bool js_template_buf_append(char **buf, size_t *len, size_t *cap, const char *data, size_t data_len)
+{
+    if (!buf || !len || !cap)
+    {
+        return false;
+    }
+    if (data_len == 0)
+    {
+        return true;
+    }
+    if (!data)
+    {
+        return false;
+    }
+    if (*len > SIZE_MAX - data_len)
+    {
+        return false;
+    }
+    size_t needed = *len + data_len;
+    if (needed + 1 > *cap)
+    {
+        size_t new_cap = *cap ? *cap * 2u : 32u;
+        if (new_cap < needed + 1)
+        {
+            new_cap = needed + 1;
+        }
+        char *next = (char *)realloc(*buf, new_cap);
+        if (!next)
+        {
+            return false;
+        }
+        *buf = next;
+        *cap = new_cap;
+    }
+    memcpy(*buf + *len, data, data_len);
+    *len = needed;
+    (*buf)[*len] = '\0';
+    return true;
+}
+
+static bool js_template_buf_append_char(char **buf, size_t *len, size_t *cap, char c)
+{
+    return js_template_buf_append(buf, len, cap, &c, 1);
+}
+
+static bool js_template_buf_append_utf8(char **buf, size_t *len, size_t *cap, unsigned int code)
+{
+    char tmp[4];
+    size_t tmp_len = 0;
+    if (code <= 0x7F)
+    {
+        tmp[tmp_len++] = (char)code;
+    }
+    else if (code <= 0x7FF)
+    {
+        tmp[tmp_len++] = (char)(0xC0 | (code >> 6));
+        tmp[tmp_len++] = (char)(0x80 | (code & 0x3F));
+    }
+    else if (code <= 0xFFFF)
+    {
+        tmp[tmp_len++] = (char)(0xE0 | (code >> 12));
+        tmp[tmp_len++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        tmp[tmp_len++] = (char)(0x80 | (code & 0x3F));
+    }
+    else if (code <= 0x10FFFF)
+    {
+        tmp[tmp_len++] = (char)(0xF0 | (code >> 18));
+        tmp[tmp_len++] = (char)(0x80 | ((code >> 12) & 0x3F));
+        tmp[tmp_len++] = (char)(0x80 | ((code >> 6) & 0x3F));
+        tmp[tmp_len++] = (char)(0x80 | (code & 0x3F));
+    }
+    else
+    {
+        return false;
+    }
+    return js_template_buf_append(buf, len, cap, tmp, tmp_len);
+}
+
+static bool js_template_flush_segment(js_parser_t *parser,
+                                      size_t offset,
+                                      js_template_segment_list_t *segments,
+                                      char **buffer,
+                                      size_t *buffer_len)
+{
+    if (!segments || !buffer || !buffer_len)
+    {
+        return false;
+    }
+    char *copy = js_strdup_len(*buffer ? *buffer : "", *buffer_len);
+    if (!copy)
+    {
+        js_parser_error(parser, offset, "allocation failed");
+        return false;
+    }
+    js_template_segment_t segment = {0};
+    segment.data = copy;
+    segment.len = *buffer_len;
+    if (!js_template_segment_list_push(segments, &segment))
+    {
+        free(copy);
+        js_parser_error(parser, offset, "allocation failed");
+        return false;
+    }
+    *buffer_len = 0;
+    if (*buffer)
+    {
+        (*buffer)[0] = '\0';
+    }
     return true;
 }
 
@@ -620,6 +764,18 @@ static void js_expr_destroy(js_expr_t *expr)
             }
             free(expr->as.object.props);
             break;
+        case JS_EXPR_TEMPLATE:
+            for (size_t i = 0; i < expr->as.template.segment_count; ++i)
+            {
+                free(expr->as.template.segments[i].data);
+            }
+            free(expr->as.template.segments);
+            for (size_t i = 0; i < expr->as.template.expr_count; ++i)
+            {
+                js_expr_destroy(expr->as.template.exprs[i]);
+            }
+            free(expr->as.template.exprs);
+            break;
         case JS_EXPR_MEMBER:
             js_expr_destroy(expr->as.member.object);
             if (expr->as.member.computed)
@@ -679,6 +835,7 @@ static js_expr_t *js_parse_arrow_function(js_parser_t *parser);
 static js_expr_t *js_parse_member_suffix(js_parser_t *parser, js_expr_t *expr);
 static js_binding_t *js_new_binding(js_binding_type_t type);
 static js_binding_t *js_parse_binding_pattern(js_parser_t *parser);
+static js_expr_t *js_parse_template_literal(js_parser_t *parser);
 
 static js_expr_t *js_parse_regex_literal(js_parser_t *parser)
 {
@@ -846,6 +1003,240 @@ static js_expr_t *js_parse_regex_literal(js_parser_t *parser)
     call->as.call.args = args;
     call->as.call.arg_count = arg_count;
     return call;
+}
+
+static js_expr_t *js_parse_template_literal(js_parser_t *parser)
+{
+    if (!parser || parser->current.type != JS_TOKEN_BACKTICK)
+    {
+        return NULL;
+    }
+    size_t offset = parser->current.offset;
+    const char *cur = parser->lexer.cur;
+    js_template_segment_list_t segments = {0};
+    js_expr_list_t exprs = {0};
+    char *buffer = NULL;
+    size_t buffer_len = 0;
+    size_t buffer_cap = 0;
+
+    for (;;)
+    {
+        char c = *cur;
+        if (c == '\0')
+        {
+            js_parser_error(parser, offset, "unterminated template");
+            goto error;
+        }
+        if (c == '`')
+        {
+            if (!js_template_flush_segment(parser, offset, &segments, &buffer, &buffer_len))
+            {
+                goto error;
+            }
+            ++cur;
+            break;
+        }
+        if (c == '$' && cur[1] == '{')
+        {
+            if (!js_template_flush_segment(parser, offset, &segments, &buffer, &buffer_len))
+            {
+                goto error;
+            }
+            cur += 2;
+            parser->lexer.cur = cur;
+            parser->lexer.offset = (size_t)(cur - parser->lexer.source);
+            js_parser_advance(parser);
+            js_expr_t *expr = js_parse_expression(parser);
+            if (!expr)
+            {
+                goto error;
+            }
+            if (parser->current.type != JS_TOKEN_RBRACE)
+            {
+                js_expr_destroy(expr);
+                js_parser_error(parser, parser->current.offset, "expected '}'");
+                goto error;
+            }
+            if (!js_expr_list_push(&exprs, expr))
+            {
+                js_expr_destroy(expr);
+                js_parser_error(parser, parser->current.offset, "allocation failed");
+                goto error;
+            }
+            cur = parser->lexer.cur;
+            continue;
+        }
+        if (c == '\\')
+        {
+            ++cur;
+            char esc = *cur;
+            if (esc == '\0')
+            {
+                js_parser_error(parser, offset, "unterminated template");
+                goto error;
+            }
+            if (esc == '\n')
+            {
+                ++cur;
+                continue;
+            }
+            if (esc == '\r')
+            {
+                ++cur;
+                if (*cur == '\n')
+                {
+                    ++cur;
+                }
+                continue;
+            }
+            switch (esc)
+            {
+                case 'n': c = '\n'; ++cur; break;
+                case 'r': c = '\r'; ++cur; break;
+                case 't': c = '\t'; ++cur; break;
+                case 'b': c = '\b'; ++cur; break;
+                case 'f': c = '\f'; ++cur; break;
+                case 'v': c = '\v'; ++cur; break;
+                case '\\': c = '\\'; ++cur; break;
+                case '\'': c = '\''; ++cur; break;
+                case '\"': c = '\"'; ++cur; break;
+                case '`': c = '`'; ++cur; break;
+                case 'x':
+                {
+                    if (cur[1] == '\0' || cur[2] == '\0')
+                    {
+                        js_parser_error(parser, offset, "invalid hex escape");
+                        goto error;
+                    }
+                    int hi = js_hex_value(cur[1]);
+                    int lo = js_hex_value(cur[2]);
+                    if (hi < 0 || lo < 0)
+                    {
+                        js_parser_error(parser, offset, "invalid hex escape");
+                        goto error;
+                    }
+                    unsigned int value = (unsigned int)((hi << 4) | lo);
+                    if (!js_template_buf_append_char(&buffer, &buffer_len, &buffer_cap, (char)value))
+                    {
+                        js_parser_error(parser, offset, "allocation failed");
+                        goto error;
+                    }
+                    cur += 3;
+                    continue;
+                }
+                case 'u':
+                {
+                    if (cur[1] == '{')
+                    {
+                        const char *scan = cur + 2;
+                        unsigned int value = 0;
+                        size_t digits = 0;
+                        while (*scan && *scan != '}')
+                        {
+                            int hv = js_hex_value(*scan);
+                            if (hv < 0)
+                            {
+                                js_parser_error(parser, offset, "invalid unicode escape");
+                                goto error;
+                            }
+                            value = (value << 4) | (unsigned int)hv;
+                            digits++;
+                            scan++;
+                        }
+                        if (*scan != '}' || digits == 0)
+                        {
+                            js_parser_error(parser, offset, "invalid unicode escape");
+                            goto error;
+                        }
+                        if (!js_template_buf_append_utf8(&buffer, &buffer_len, &buffer_cap, value))
+                        {
+                            js_parser_error(parser, offset, "allocation failed");
+                            goto error;
+                        }
+                        cur = scan + 1;
+                        continue;
+                    }
+                    if (cur[1] == '\0' || cur[2] == '\0' || cur[3] == '\0' || cur[4] == '\0')
+                    {
+                        js_parser_error(parser, offset, "invalid unicode escape");
+                        goto error;
+                    }
+                    int v0 = js_hex_value(cur[1]);
+                    int v1 = js_hex_value(cur[2]);
+                    int v2 = js_hex_value(cur[3]);
+                    int v3 = js_hex_value(cur[4]);
+                    if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0)
+                    {
+                        js_parser_error(parser, offset, "invalid unicode escape");
+                        goto error;
+                    }
+                    unsigned int value = (unsigned int)((v0 << 12) | (v1 << 8) | (v2 << 4) | v3);
+                    if (!js_template_buf_append_utf8(&buffer, &buffer_len, &buffer_cap, value))
+                    {
+                        js_parser_error(parser, offset, "allocation failed");
+                        goto error;
+                    }
+                    cur += 5;
+                    continue;
+                }
+                default:
+                    c = esc;
+                    ++cur;
+                    break;
+            }
+            if (!js_template_buf_append_char(&buffer, &buffer_len, &buffer_cap, c))
+            {
+                js_parser_error(parser, offset, "allocation failed");
+                goto error;
+            }
+            continue;
+        }
+        if (c == '\r')
+        {
+            if (cur[1] == '\n')
+            {
+                ++cur;
+            }
+            c = '\n';
+        }
+        if (!js_template_buf_append_char(&buffer, &buffer_len, &buffer_cap, c))
+        {
+            js_parser_error(parser, offset, "allocation failed");
+            goto error;
+        }
+        ++cur;
+    }
+
+    parser->lexer.cur = cur;
+    parser->lexer.offset = (size_t)(cur - parser->lexer.source);
+    js_parser_advance(parser);
+
+    js_expr_t *expr = js_new_expr(JS_EXPR_TEMPLATE);
+    if (!expr)
+    {
+        js_parser_error(parser, offset, "allocation failed");
+        goto error;
+    }
+    expr->as.template.segments = segments.items;
+    expr->as.template.segment_count = segments.count;
+    expr->as.template.exprs = exprs.items;
+    expr->as.template.expr_count = exprs.count;
+    free(buffer);
+    return expr;
+
+error:
+    free(buffer);
+    for (size_t i = 0; i < segments.count; ++i)
+    {
+        free(segments.items[i].data);
+    }
+    free(segments.items);
+    for (size_t i = 0; i < exprs.count; ++i)
+    {
+        js_expr_destroy(exprs.items[i]);
+    }
+    free(exprs.items);
+    return NULL;
 }
 
 static bool js_parser_peek_arrow_after_ident(js_parser_t *parser)
@@ -1769,6 +2160,47 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
             js_parser_advance(parser);
             return expr;
         }
+        case JS_TOKEN_BIGINT:
+        {
+            js_expr_t *expr = js_new_expr(JS_EXPR_LITERAL);
+            if (!expr)
+            {
+                js_parser_error(parser, parser->current.offset, "allocation failed");
+                return NULL;
+            }
+            char *text = js_token_take_text(&parser->current);
+            bool ok = false;
+            if (text)
+            {
+                const char *digits = text;
+                int base = 10;
+                if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X'))
+                {
+                    base = 16;
+                    digits += 2;
+                }
+                else if (digits[0] == '0' && (digits[1] == 'b' || digits[1] == 'B'))
+                {
+                    base = 2;
+                    digits += 2;
+                }
+                else if (digits[0] == '0' && (digits[1] == 'o' || digits[1] == 'O'))
+                {
+                    base = 8;
+                    digits += 2;
+                }
+                ok = js_value_make_bigint(&expr->as.literal.value, digits, base);
+            }
+            free(text);
+            if (!ok)
+            {
+                js_expr_destroy(expr);
+                js_parser_error(parser, parser->current.offset, "invalid bigint literal");
+                return NULL;
+            }
+            js_parser_advance(parser);
+            return expr;
+        }
         case JS_TOKEN_STRING:
         {
             js_expr_t *expr = js_new_expr(JS_EXPR_LITERAL);
@@ -1784,6 +2216,10 @@ static js_expr_t *js_parse_primary(js_parser_t *parser)
             expr->as.literal.value.as.string.len = len;
             js_parser_advance(parser);
             return expr;
+        }
+        case JS_TOKEN_BACKTICK:
+        {
+            return js_parse_template_literal(parser);
         }
         case JS_TOKEN_KW_TRUE:
         case JS_TOKEN_KW_FALSE:
@@ -2655,9 +3091,42 @@ static js_expr_t *js_parse_unary(js_parser_t *parser)
     return expr;
 }
 
-static js_expr_t *js_parse_factor(js_parser_t *parser)
+static js_expr_t *js_parse_exponent(js_parser_t *parser)
 {
     js_expr_t *expr = js_parse_unary(parser);
+    if (!expr)
+    {
+        return NULL;
+    }
+    if (parser->current.type == JS_TOKEN_STAR_STAR)
+    {
+        size_t offset = parser->current.offset;
+        js_parser_advance(parser);
+        js_expr_t *right = js_parse_exponent(parser);
+        if (!right)
+        {
+            js_expr_destroy(expr);
+            return NULL;
+        }
+        js_expr_t *binary = js_new_expr(JS_EXPR_BINARY);
+        if (!binary)
+        {
+            js_expr_destroy(expr);
+            js_expr_destroy(right);
+            js_parser_error(parser, offset, "allocation failed");
+            return NULL;
+        }
+        binary->as.binary.op = JS_BINARY_EXP;
+        binary->as.binary.left = expr;
+        binary->as.binary.right = right;
+        return binary;
+    }
+    return expr;
+}
+
+static js_expr_t *js_parse_factor(js_parser_t *parser)
+{
+    js_expr_t *expr = js_parse_exponent(parser);
     if (!expr)
     {
         return NULL;
@@ -2683,7 +3152,7 @@ static js_expr_t *js_parse_factor(js_parser_t *parser)
         }
         size_t offset = parser->current.offset;
         js_parser_advance(parser);
-        js_expr_t *right = js_parse_unary(parser);
+        js_expr_t *right = js_parse_exponent(parser);
         if (!right)
         {
             js_expr_destroy(expr);
@@ -2776,6 +3245,10 @@ static js_expr_t *js_parse_relational(js_parser_t *parser)
         else if (parser->current.type == JS_TOKEN_GTE)
         {
             op = JS_BINARY_GTE;
+        }
+        else if (parser->current.type == JS_TOKEN_KW_INSTANCEOF)
+        {
+            op = JS_BINARY_INSTANCEOF;
         }
         else
         {

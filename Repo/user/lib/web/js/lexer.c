@@ -99,6 +99,7 @@ static js_token_type_t js_keyword_type(const char *start, size_t len)
     if (len == 9 && strncmp(start, "undefined", len) == 0) return JS_TOKEN_KW_UNDEFINED;
     if (len == 4 && strncmp(start, "this", len) == 0) return JS_TOKEN_KW_THIS;
     if (len == 6 && strncmp(start, "typeof", len) == 0) return JS_TOKEN_KW_TYPEOF;
+    if (len == 10 && strncmp(start, "instanceof", len) == 0) return JS_TOKEN_KW_INSTANCEOF;
     if (len == 2 && strncmp(start, "if", len) == 0) return JS_TOKEN_KW_IF;
     if (len == 4 && strncmp(start, "else", len) == 0) return JS_TOKEN_KW_ELSE;
     if (len == 5 && strncmp(start, "while", len) == 0) return JS_TOKEN_KW_WHILE;
@@ -268,6 +269,7 @@ static bool js_lexer_read_identifier(js_lexer_t *lex, js_token_t *out)
 static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_dot, js_parse_error_t *error_out)
 {
     size_t start_offset = lex->offset;
+    const char *start = lex->cur;
     const char *p = lex->cur;
     double value = 0.0;
 
@@ -277,82 +279,141 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
         if (next == 'x' || next == 'X')
         {
             p += 2;
-            int digit = js_hex_value(*p);
-            if (digit < 0)
+            bool had_digit = false;
+            for (;;)
+            {
+                if (*p == '_')
+                {
+                    p++;
+                    continue;
+                }
+                int digit = js_hex_value(*p);
+                if (digit < 0)
+                {
+                    break;
+                }
+                had_digit = true;
+                value = value * 16.0 + (double)digit;
+                p++;
+            }
+            if (!had_digit)
             {
                 js_parse_error_set(error_out, start_offset, "invalid hex literal");
                 return false;
             }
-            while (digit >= 0)
-            {
-                value = value * 16.0 + (double)digit;
-                p++;
-                digit = js_hex_value(*p);
-            }
+            bool is_bigint = false;
             if (*p == 'n')
             {
+                is_bigint = true;
                 p++;
             }
             lex->cur = p;
             lex->offset = (size_t)(p - lex->source);
-            out->type = JS_TOKEN_NUMBER;
             out->offset = start_offset;
             out->number = value;
-            out->text = NULL;
             out->length = 0;
-            return true;
+            out->text = NULL;
+            out->type = JS_TOKEN_NUMBER;
+            if (is_bigint)
+            {
+                size_t len = (size_t)((p - start) - 1);
+                out->text = js_strdup_len(start, len);
+                out->length = out->text ? len : 0;
+                out->type = JS_TOKEN_BIGINT;
+            }
+            return out->type != JS_TOKEN_BIGINT || out->text != NULL;
         }
         if (next == 'b' || next == 'B')
         {
             p += 2;
-            if (*p != '0' && *p != '1')
+            bool had_digit = false;
+            for (;;)
+            {
+                if (*p == '_')
+                {
+                    p++;
+                    continue;
+                }
+                if (*p != '0' && *p != '1')
+                {
+                    break;
+                }
+                had_digit = true;
+                value = value * 2.0 + (double)(*p - '0');
+                p++;
+            }
+            if (!had_digit)
             {
                 js_parse_error_set(error_out, start_offset, "invalid binary literal");
                 return false;
             }
-            while (*p == '0' || *p == '1')
-            {
-                value = value * 2.0 + (double)(*p - '0');
-                p++;
-            }
+            bool is_bigint = false;
             if (*p == 'n')
             {
+                is_bigint = true;
                 p++;
             }
             lex->cur = p;
             lex->offset = (size_t)(p - lex->source);
-            out->type = JS_TOKEN_NUMBER;
             out->offset = start_offset;
             out->number = value;
-            out->text = NULL;
             out->length = 0;
-            return true;
+            out->text = NULL;
+            out->type = JS_TOKEN_NUMBER;
+            if (is_bigint)
+            {
+                size_t len = (size_t)((p - start) - 1);
+                out->text = js_strdup_len(start, len);
+                out->length = out->text ? len : 0;
+                out->type = JS_TOKEN_BIGINT;
+            }
+            return out->type != JS_TOKEN_BIGINT || out->text != NULL;
         }
         if (next == 'o' || next == 'O')
         {
             p += 2;
-            if (*p < '0' || *p > '7')
+            bool had_digit = false;
+            for (;;)
+            {
+                if (*p == '_')
+                {
+                    p++;
+                    continue;
+                }
+                if (*p < '0' || *p > '7')
+                {
+                    break;
+                }
+                had_digit = true;
+                value = value * 8.0 + (double)(*p - '0');
+                p++;
+            }
+            if (!had_digit)
             {
                 js_parse_error_set(error_out, start_offset, "invalid octal literal");
                 return false;
             }
-            while (*p >= '0' && *p <= '7')
-            {
-                value = value * 8.0 + (double)(*p - '0');
-                p++;
-            }
+            bool is_bigint = false;
             if (*p == 'n')
             {
+                is_bigint = true;
                 p++;
             }
             lex->cur = p;
             lex->offset = (size_t)(p - lex->source);
-            out->type = JS_TOKEN_NUMBER;
             out->offset = start_offset;
             out->number = value;
-            out->text = NULL;
             out->length = 0;
-            return true;
+            out->text = NULL;
+            out->type = JS_TOKEN_NUMBER;
+            if (is_bigint)
+            {
+                size_t len = (size_t)((p - start) - 1);
+                out->text = js_strdup_len(start, len);
+                out->length = out->text ? len : 0;
+                out->type = JS_TOKEN_BIGINT;
+            }
+            return out->type != JS_TOKEN_BIGINT || out->text != NULL;
         }
     }
 
@@ -361,8 +422,17 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
     {
         p++;
         double scale = 0.1;
-        while (isdigit((unsigned char)*p) != 0)
+        while (*p)
         {
+            if (*p == '_')
+            {
+                p++;
+                continue;
+            }
+            if (isdigit((unsigned char)*p) == 0)
+            {
+                break;
+            }
             had_digit = true;
             value += (double)(*p - '0') * scale;
             scale *= 0.1;
@@ -371,8 +441,17 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
     }
     else
     {
-        while (isdigit((unsigned char)*p) != 0)
+        while (*p)
         {
+            if (*p == '_')
+            {
+                p++;
+                continue;
+            }
+            if (isdigit((unsigned char)*p) == 0)
+            {
+                break;
+            }
             had_digit = true;
             value = value * 10.0 + (double)(*p - '0');
             p++;
@@ -382,8 +461,17 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
         {
             p++;
             double scale = 0.1;
-            while (isdigit((unsigned char)*p) != 0)
+            while (*p)
             {
+                if (*p == '_')
+                {
+                    p++;
+                    continue;
+                }
+                if (isdigit((unsigned char)*p) == 0)
+                {
+                    break;
+                }
                 had_digit = true;
                 value += (double)(*p - '0') * scale;
                 scale *= 0.1;
@@ -410,14 +498,27 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
             }
             p++;
         }
+        while (*p == '_')
+        {
+            p++;
+        }
         if (!isdigit((unsigned char)*p))
         {
             js_parse_error_set(error_out, start_offset, "invalid exponent");
             return false;
         }
         int exp = 0;
-        while (isdigit((unsigned char)*p) != 0)
+        while (*p)
         {
+            if (*p == '_')
+            {
+                p++;
+                continue;
+            }
+            if (isdigit((unsigned char)*p) == 0)
+            {
+                break;
+            }
             exp = exp * 10 + (*p - '0');
             p++;
         }
@@ -445,8 +546,10 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
         }
     }
 
+    bool is_bigint = false;
     if (*p == 'n')
     {
+        is_bigint = true;
         p++;
     }
 
@@ -458,6 +561,14 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
     out->number = value;
     out->text = NULL;
     out->length = 0;
+    if (is_bigint)
+    {
+        size_t len = (size_t)((p - start) - 1);
+        out->text = js_strdup_len(start, len);
+        out->length = out->text ? len : 0;
+        out->type = JS_TOKEN_BIGINT;
+        return out->text != NULL;
+    }
     return true;
 }
 
@@ -717,7 +828,18 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
             }
             out->offset = start_offset;
             return true;
-        case '*': out->type = JS_TOKEN_STAR; out->offset = start_offset; return true;
+        case '*':
+            if (js_lexer_peek(lex) == '*')
+            {
+                (void)js_lexer_advance(lex);
+                out->type = JS_TOKEN_STAR_STAR;
+            }
+            else
+            {
+                out->type = JS_TOKEN_STAR;
+            }
+            out->offset = start_offset;
+            return true;
         case '%': out->type = JS_TOKEN_PERCENT; out->offset = start_offset; return true;
         case '/': out->type = JS_TOKEN_SLASH; out->offset = start_offset; return true;
         case '&':
@@ -815,6 +937,7 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
             }
             out->offset = start_offset;
             return true;
+        case '`': out->type = JS_TOKEN_BACKTICK; out->offset = start_offset; return true;
         case '\"':
         case '\'':
             return js_lexer_read_string(lex, out, c, start_offset, error_out);

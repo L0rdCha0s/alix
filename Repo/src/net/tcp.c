@@ -856,16 +856,20 @@ static uint32_t tcp_initial_seq(void)
 
 net_tcp_socket_t *net_tcp_socket_open(net_interface_t *iface)
 {
+    net_tcp_socket_t *socket = NULL;
+
+    uint64_t lock_flags = tcp_lock();
     for (size_t i = 0; i < NET_TCP_MAX_SOCKETS; ++i)
     {
         if (g_sockets[i].state == TCP_STATE_UNUSED)
         {
-            net_tcp_socket_t *socket = &g_sockets[i];
+            socket = &g_sockets[i];
             tcp_reset_socket(socket);
             if (!tcp_init_rx_buffer(socket) || !tcp_init_tx_buffer(socket))
             {
                 tcp_reset_socket(socket);
-                return NULL;
+                socket = NULL;
+                break;
             }
             socket->state = TCP_STATE_CLOSED;
             socket->iface = iface;
@@ -873,38 +877,39 @@ net_tcp_socket_t *net_tcp_socket_open(net_interface_t *iface)
             if (socket->local_port == 0)
             {
                 tcp_reset_socket(socket);
-                return NULL;
+                socket = NULL;
+                break;
             }
             int fd = fd_allocate(&g_tcp_fd_ops, socket);
             if (fd < 0)
             {
                 tcp_reset_socket(socket);
-                return NULL;
+                socket = NULL;
+                break;
             }
             socket->fd = fd;
             socket->fd_registered = true;
             socket->owner = thread_current();
-#if TCP_TRACE_VERBOSE
-            {
-                if (!tcp_debug_enabled())
-                {
-                    return socket;
-                }
-                const char *owner_name = process_thread_name_const(socket->owner);
-                process_t *owner_proc = process_thread_owner(socket->owner);
-                uint64_t owner_pid = owner_proc ? process_get_pid(owner_proc) : 0;
-                TCP_LOG("[tcp] open socket=0x%016llX owner=%s pid=0x%016llX local_port=%u iface=%s\r\n",
-                              (unsigned long long)(uintptr_t)socket,
-                              (owner_name && owner_name[0]) ? owner_name : "<none>",
-                              (unsigned long long)owner_pid,
-                              (unsigned)socket->local_port,
-                              iface && iface->name[0] ? iface->name : "<none>");
-            }
-#endif
-            return socket;
+            break;
         }
     }
-    return NULL;
+    tcp_unlock(lock_flags);
+
+#if TCP_TRACE_VERBOSE
+    if (socket && tcp_debug_enabled())
+    {
+        const char *owner_name = process_thread_name_const(socket->owner);
+        process_t *owner_proc = process_thread_owner(socket->owner);
+        uint64_t owner_pid = owner_proc ? process_get_pid(owner_proc) : 0;
+        TCP_LOG("[tcp] open socket=0x%016llX owner=%s pid=0x%016llX local_port=%u iface=%s\r\n",
+                      (unsigned long long)(uintptr_t)socket,
+                      (owner_name && owner_name[0]) ? owner_name : "<none>",
+                      (unsigned long long)owner_pid,
+                      (unsigned)socket->local_port,
+                      iface && iface->name[0] ? iface->name : "<none>");
+    }
+#endif
+    return socket;
 }
 
 bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16_t remote_port)
@@ -913,15 +918,19 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
     {
         return false;
     }
+
+    bool ok = false;
+    uint64_t lock_flags = tcp_lock();
     if (socket->state != TCP_STATE_CLOSED)
     {
+        tcp_unlock(lock_flags);
         return false;
     }
 
     if (!socket->rx_buffer && !tcp_init_rx_buffer(socket))
     {
         tcp_mark_error(socket, "rx alloc failed");
-        return false;
+        goto done;
     }
 
     /* Announce our IP->MAC so the gateway learns/refreshes its neighbor entry. */
@@ -933,7 +942,7 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
     if (!tcp_prepare_route(socket, remote_ip, remote_port))
     {
         tcp_mark_error(socket, "route failure");
-        return false;
+        goto done;
     }
 
     socket->seq_next = tcp_initial_seq();
@@ -960,7 +969,7 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
         if (!tcp_send_syn(socket))
         {
             tcp_mark_error(socket, "syn send failed");
-            return false;
+            goto done;
         }
         socket->state = TCP_STATE_SYN_SENT;
     }
@@ -969,13 +978,16 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
         if (!net_arp_send_request(socket->iface, socket->next_hop_ip))
         {
             tcp_mark_error(socket, "arp request failed");
-            return false;
+            goto done;
         }
         socket->state = TCP_STATE_ARP;
         socket->last_arp_request_tick = now;
     }
 
-    return true;
+    ok = true;
+done:
+    tcp_unlock(lock_flags);
+    return ok;
 }
 
 
@@ -1295,8 +1307,10 @@ void net_tcp_socket_close(net_tcp_socket_t *socket)
         return;
     }
 
+    uint64_t lock_flags = tcp_lock();
     if (socket->state == TCP_STATE_UNUSED)
     {
+        tcp_unlock(lock_flags);
         return;
     }
 
@@ -1307,6 +1321,7 @@ void net_tcp_socket_close(net_tcp_socket_t *socket)
         {
             socket->connect_deadline = timer_ticks() + g_connect_timeout_ticks;
             socket->state = TCP_STATE_FIN_WAIT_1;
+            tcp_unlock(lock_flags);
             return;
         }
         tcp_mark_error(socket, "fin send failed");
@@ -1319,6 +1334,7 @@ void net_tcp_socket_close(net_tcp_socket_t *socket)
         {
             socket->connect_deadline = timer_ticks() + g_connect_timeout_ticks;
             socket->state = TCP_STATE_LAST_ACK;
+            tcp_unlock(lock_flags);
             return;
         }
         tcp_mark_error(socket, "fin send failed");
@@ -1328,6 +1344,7 @@ void net_tcp_socket_close(net_tcp_socket_t *socket)
     {
         tcp_reset_socket(socket);
     }
+    tcp_unlock(lock_flags);
 }
 
 void net_tcp_socket_release(net_tcp_socket_t *socket)
@@ -1336,7 +1353,9 @@ void net_tcp_socket_release(net_tcp_socket_t *socket)
     {
         return;
     }
+    uint64_t lock_flags = tcp_lock();
     tcp_reset_socket(socket);
+    tcp_unlock(lock_flags);
 }
 
 uint64_t net_tcp_socket_last_activity(const net_tcp_socket_t *socket)

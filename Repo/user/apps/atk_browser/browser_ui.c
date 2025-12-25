@@ -36,7 +36,7 @@ static void browser_menu_open_debug(void *context)
         return;
     }
     browser_menus_close(app);
-    browser_debug_open_window(app);
+    app->debug_open_requested = true;
 }
 
 static void browser_menu_clear_debug(void *context)
@@ -47,7 +47,7 @@ static void browser_menu_clear_debug(void *context)
         return;
     }
     browser_menus_close(app);
-    browser_debug_clear(app);
+    app->debug_clear_requested = true;
 }
 
 static void browser_menu_bookmark_example(void *context)
@@ -354,6 +354,16 @@ bool browser_tick(void *context)
     }
 
     bool redraw = false;
+    if (app->debug_open_requested)
+    {
+        app->debug_open_requested = false;
+        browser_debug_open_window(app);
+    }
+    if (app->debug_clear_requested)
+    {
+        app->debug_clear_requested = false;
+        browser_debug_clear(app);
+    }
     browser_debug_service(app);
 
     browser_ui_event_t ev = {0};

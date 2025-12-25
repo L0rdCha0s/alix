@@ -45,6 +45,8 @@ typedef enum
     SYSCALL_SLEEP_MS = 36,
     SYSCALL_UI_POLL_EVENT_TIMEOUT = 37,
     SYSCALL_SHELL_PROMPT = 38,
+    SYSCALL_GETUID = 39,
+    SYSCALL_MKDIR = 40,
 } syscall_id_t;
 
 #define SYSCALL_OPEN_READ     (1u << 0)

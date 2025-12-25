@@ -816,6 +816,7 @@ bool html_view_is_form_control_tag(const char *tag)
         return false;
     }
     return strcmp(tag, "input") == 0 ||
+           strcmp(tag, "select") == 0 ||
            strcmp(tag, "textarea") == 0 ||
            strcmp(tag, "button") == 0;
 }

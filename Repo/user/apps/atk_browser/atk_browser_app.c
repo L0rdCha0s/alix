@@ -102,6 +102,7 @@ int main(void)
     }
     atk_user_close(&app->remote);
     free(app->debug_log);
+    free(app->cache_dir);
     free(app);
     return 0;
 }

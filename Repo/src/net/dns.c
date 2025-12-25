@@ -590,6 +590,11 @@ static bool dns_send_query(dns_pending_t *pending)
         serial_printf("%s", "\r\n");
     }
 
+    serial_printf("[dns] send_query id=0x%04X host=%s len=0x%X",
+                  pending->id,
+                  pending->qname_current[0] ? pending->qname_current : "<none>",
+                  (unsigned)frame_len);
+
     if (!net_if_send_copy(iface, packet, frame_len))
     {
         dns_log("send_query: net_if_send failed");
@@ -597,6 +602,7 @@ static bool dns_send_query(dns_pending_t *pending)
         free(packet);
         return false;
     }
+    serial_printf("[dns] send_query dispatched id=0x%04X", pending->id);
 
     pending->sent_tick = timer_ticks();
     pending->retries++;

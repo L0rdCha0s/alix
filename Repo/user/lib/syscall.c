@@ -284,6 +284,16 @@ ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacit
     return (ssize_t)syscall3(SYSCALL_LIST_DIR, (long)path, (long)entries, (long)capacity);
 }
 
+uint32_t sys_getuid(void)
+{
+    return (uint32_t)syscall0(SYSCALL_GETUID);
+}
+
+int sys_mkdir(const char *path)
+{
+    return (int)syscall1(SYSCALL_MKDIR, (long)path);
+}
+
 ssize_t sys_socket_available(int fd)
 {
     return (ssize_t)syscall1(SYSCALL_SOCKET_AVAILABLE, fd);

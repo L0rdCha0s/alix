@@ -11,6 +11,7 @@ int close(int fd);
 int access(const char *path, int mode);
 int unlink(const char *path);
 int64_t lseek(int fd, int64_t offset, int whence);
+uint32_t getuid(void);
 #endif
 
 #define R_OK 4

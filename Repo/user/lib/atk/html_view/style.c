@@ -210,75 +210,226 @@ static bool html_view_selector_matches(const char *selector, const html_node_t *
     return false;
 }
 
-static bool html_view_parse_hex_color(const char *s, video_color_t *out)
+static bool html_view_parse_color(const char *s, video_color_t *out)
 {
     if (!s || !out || s[0] == '\0')
     {
         return false;
     }
 
-    while (*s && isspace((unsigned char)*s))
+    const char *start = s;
+    while (*start && isspace((unsigned char)*start))
     {
-        ++s;
+        ++start;
     }
-    if (*s != '#')
+    const char *end = start + strlen(start);
+    while (end > start && isspace((unsigned char)end[-1]))
+    {
+        --end;
+    }
+    if (end <= start)
     {
         return false;
     }
-    ++s;
 
-    uint32_t value = 0;
-    size_t digits = 0;
-    while (*s)
+    if (*start == '#')
     {
-        unsigned char c = (unsigned char)*s;
-        if (isspace(c))
+        ++start;
+        size_t len = (size_t)(end - start);
+        if (len != 3 && len != 6)
         {
-            break;
+            return false;
         }
-        uint32_t d = 0;
-        if (c >= '0' && c <= '9')
-        {
-            d = (uint32_t)(c - '0');
-        }
-        else if (c >= 'a' && c <= 'f')
-        {
-            d = 10u + (uint32_t)(c - 'a');
-        }
-        else if (c >= 'A' && c <= 'F')
-        {
-            d = 10u + (uint32_t)(c - 'A');
-        }
-        else
-        {
-            break;
-        }
-        value = (value << 4) | d;
-        ++digits;
-        ++s;
-        if (digits > 6)
-        {
-            break;
-        }
-    }
 
-    if (digits == 3)
-    {
-        uint8_t r = (uint8_t)(((value >> 8) & 0xFu) * 17u);
-        uint8_t g = (uint8_t)(((value >> 4) & 0xFu) * 17u);
-        uint8_t b = (uint8_t)(((value >> 0) & 0xFu) * 17u);
-        *out = video_make_color(r, g, b);
-        return true;
-    }
-    if (digits == 6)
-    {
+        uint32_t value = 0;
+        for (size_t i = 0; i < len; ++i)
+        {
+            unsigned char c = (unsigned char)start[i];
+            uint32_t d = 0;
+            if (c >= '0' && c <= '9')
+            {
+                d = (uint32_t)(c - '0');
+            }
+            else if (c >= 'a' && c <= 'f')
+            {
+                d = 10u + (uint32_t)(c - 'a');
+            }
+            else if (c >= 'A' && c <= 'F')
+            {
+                d = 10u + (uint32_t)(c - 'A');
+            }
+            else
+            {
+                return false;
+            }
+            value = (value << 4) | d;
+        }
+
+        if (len == 3)
+        {
+            uint8_t r = (uint8_t)(((value >> 8) & 0xFu) * 17u);
+            uint8_t g = (uint8_t)(((value >> 4) & 0xFu) * 17u);
+            uint8_t b = (uint8_t)(((value >> 0) & 0xFu) * 17u);
+            *out = video_make_color(r, g, b);
+            return true;
+        }
+
         uint8_t r = (uint8_t)((value >> 16) & 0xFFu);
         uint8_t g = (uint8_t)((value >> 8) & 0xFFu);
         uint8_t b = (uint8_t)((value >> 0) & 0xFFu);
         *out = video_make_color(r, g, b);
         return true;
     }
+
+    size_t len = (size_t)(end - start);
+    if (len == 5 && strncasecmp(start, "black", 5) == 0)
+    {
+        *out = video_make_color(0x00, 0x00, 0x00);
+        return true;
+    }
+    if (len == 5 && strncasecmp(start, "white", 5) == 0)
+    {
+        *out = video_make_color(0xFF, 0xFF, 0xFF);
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "silver", 6) == 0)
+    {
+        *out = video_make_color(0xC0, 0xC0, 0xC0);
+        return true;
+    }
+    if ((len == 4 && strncasecmp(start, "gray", 4) == 0) ||
+        (len == 4 && strncasecmp(start, "grey", 4) == 0))
+    {
+        *out = video_make_color(0x80, 0x80, 0x80);
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "maroon", 6) == 0)
+    {
+        *out = video_make_color(0x80, 0x00, 0x00);
+        return true;
+    }
+    if (len == 3 && strncasecmp(start, "red", 3) == 0)
+    {
+        *out = video_make_color(0xFF, 0x00, 0x00);
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "purple", 6) == 0)
+    {
+        *out = video_make_color(0x80, 0x00, 0x80);
+        return true;
+    }
+    if (len == 7 && strncasecmp(start, "fuchsia", 7) == 0)
+    {
+        *out = video_make_color(0xFF, 0x00, 0xFF);
+        return true;
+    }
+    if (len == 5 && strncasecmp(start, "green", 5) == 0)
+    {
+        *out = video_make_color(0x00, 0x80, 0x00);
+        return true;
+    }
+    if (len == 4 && strncasecmp(start, "lime", 4) == 0)
+    {
+        *out = video_make_color(0x00, 0xFF, 0x00);
+        return true;
+    }
+    if (len == 5 && strncasecmp(start, "olive", 5) == 0)
+    {
+        *out = video_make_color(0x80, 0x80, 0x00);
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "yellow", 6) == 0)
+    {
+        *out = video_make_color(0xFF, 0xFF, 0x00);
+        return true;
+    }
+    if (len == 4 && strncasecmp(start, "navy", 4) == 0)
+    {
+        *out = video_make_color(0x00, 0x00, 0x80);
+        return true;
+    }
+    if (len == 4 && strncasecmp(start, "blue", 4) == 0)
+    {
+        *out = video_make_color(0x00, 0x00, 0xFF);
+        return true;
+    }
+    if (len == 4 && strncasecmp(start, "teal", 4) == 0)
+    {
+        *out = video_make_color(0x00, 0x80, 0x80);
+        return true;
+    }
+    if (len == 4 && strncasecmp(start, "aqua", 4) == 0)
+    {
+        *out = video_make_color(0x00, 0xFF, 0xFF);
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "orange", 6) == 0)
+    {
+        *out = video_make_color(0xFF, 0xA5, 0x00);
+        return true;
+    }
+
     return false;
+}
+
+static int html_view_font_size_percent(int size)
+{
+    static const int sizes[] = {67, 83, 100, 117, 150, 200, 300};
+    if (size < 1)
+    {
+        size = 1;
+    }
+    if (size > (int)(sizeof(sizes) / sizeof(sizes[0])))
+    {
+        size = (int)(sizeof(sizes) / sizeof(sizes[0]));
+    }
+    return sizes[size - 1];
+}
+
+static bool html_view_parse_font_size_attr(const char *value, css_length_t *out)
+{
+    if (!value || !out)
+    {
+        return false;
+    }
+    while (*value && isspace((unsigned char)*value))
+    {
+        ++value;
+    }
+    if (*value == '\0')
+    {
+        return false;
+    }
+
+    bool relative = false;
+    int sign = 1;
+    if (*value == '+' || *value == '-')
+    {
+        relative = true;
+        sign = (*value == '-') ? -1 : 1;
+        ++value;
+    }
+
+    int number = 0;
+    bool have_digit = false;
+    while (*value && isdigit((unsigned char)*value))
+    {
+        have_digit = true;
+        number = number * 10 + (*value - '0');
+        ++value;
+    }
+    if (!have_digit)
+    {
+        return false;
+    }
+
+    int size = relative ? (3 + sign * number) : number;
+    int percent = html_view_font_size_percent(size);
+    out->valid = true;
+    out->is_auto = false;
+    out->value_milli = percent * 1000;
+    out->unit = CSS_UNIT_PERCENT;
+    return true;
 }
 
 static bool html_view_parse_html_length_attr(const char *value, css_length_t *out)
@@ -343,10 +494,21 @@ static void html_view_apply_presentational_attrs(css_style_t *style, const css_s
     if (bgcolor && bgcolor[0] != '\0' && !style->has_background)
     {
         video_color_t c;
-        if (html_view_parse_hex_color(bgcolor, &c))
+        if (html_view_parse_color(bgcolor, &c))
         {
             style->has_background = true;
             style->background = c;
+        }
+    }
+
+    const char *color = html_attr_get(node, "color");
+    if (color && color[0] != '\0' && !style->has_color)
+    {
+        video_color_t c;
+        if (html_view_parse_color(color, &c))
+        {
+            style->has_color = true;
+            style->color = c;
         }
     }
 
@@ -429,6 +591,20 @@ static void html_view_apply_presentational_attrs(css_style_t *style, const css_s
     {
         style->has_text_align = true;
         style->text_align = CSS_TEXT_ALIGN_CENTER;
+    }
+
+    if (strcmp(node->name, "font") == 0)
+    {
+        const char *size = html_attr_get(node, "size");
+        if (size && size[0] != '\0' && !style->has_font_size)
+        {
+            css_length_t len = {0};
+            if (html_view_parse_font_size_attr(size, &len))
+            {
+                style->has_font_size = true;
+                style->font_size = len;
+            }
+        }
     }
 }
 

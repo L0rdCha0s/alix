@@ -129,6 +129,7 @@ USER_TLS_SOURCES := \
 	$(CRYPTO_DIR)/p256.c \
 	$(CRYPTO_DIR)/p384.c \
 	$(CRYPTO_DIR)/rsa.c \
+	$(CRYPTO_DIR)/sha1.c \
 	$(CRYPTO_DIR)/sha256.c
 USER_TLS_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_TLS_SOURCES))
 USER_ATK_BROWSER_SOURCES := $(wildcard $(USER_DIR)/apps/atk_browser/*.c)

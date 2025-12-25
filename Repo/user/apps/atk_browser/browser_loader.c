@@ -175,6 +175,227 @@ typedef struct
     char *url_text;
 } browser_load_job_t;
 
+static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev);
+
+typedef enum
+{
+    BROWSER_RESOURCE_CSS = 0,
+    BROWSER_RESOURCE_SCRIPT,
+    BROWSER_RESOURCE_IMAGE
+} browser_resource_kind_t;
+
+typedef struct
+{
+    browser_app_t *app;
+    uint64_t load_id;
+    browser_resource_kind_t kind;
+    char *url;
+} browser_resource_job_t;
+
+static bool browser_can_spawn_load_thread(browser_app_t *app)
+{
+    if (!app)
+    {
+        return false;
+    }
+    bool ok = false;
+    alix_mutex_lock(&app->lock);
+    ok = app->load_thread_count < BROWSER_MAX_LOAD_THREADS;
+    alix_mutex_unlock(&app->lock);
+    return ok;
+}
+
+static void browser_resource_fetch(browser_app_t *app,
+                                   uint64_t load_id,
+                                   browser_resource_kind_t kind,
+                                   char *abs)
+{
+    if (!abs)
+    {
+        return;
+    }
+    if (!app)
+    {
+        free(abs);
+        return;
+    }
+    if (!browser_load_is_active(app, load_id))
+    {
+        free(abs);
+        return;
+    }
+
+    if (kind == BROWSER_RESOURCE_CSS)
+    {
+        browser_debug_logf(app, "[css] fetch %s", abs);
+    }
+    else if (kind == BROWSER_RESOURCE_SCRIPT)
+    {
+        browser_debug_logf(app, "[js] fetch %s", abs);
+    }
+    else if (kind == BROWSER_RESOURCE_IMAGE)
+    {
+        browser_debug_logf(app, "[img] fetch %s", abs);
+    }
+
+    browser_url_t res_url = {0};
+    browser_url_t res_final = {0};
+    size_t res_len = 0;
+    char *res_body = NULL;
+    if (browser_parse_url(abs, &res_url))
+    {
+        res_body = browser_fetch_http(app, &res_url, &res_len, &res_final);
+    }
+
+    if (!browser_load_is_active(app, load_id))
+    {
+        free(res_body);
+        browser_url_destroy(&res_url);
+        browser_url_destroy(&res_final);
+        free(abs);
+        return;
+    }
+
+    if (res_body && strncmp(res_body, "Error:\n", 6) != 0)
+    {
+        if (kind == BROWSER_RESOURCE_CSS)
+        {
+            browser_ui_event_t css_ev = {0};
+            css_ev.type = BROWSER_UI_EVENT_CSS_APPEND;
+            css_ev.load_id = load_id;
+            css_ev.u.css_append.css = res_body;
+            css_ev.u.css_append.len = res_len;
+            res_body = NULL;
+            browser_loader_emit_event(app, &css_ev);
+            browser_debug_logf(app, "[css] ok bytes=%u url=%s", (unsigned)res_len, abs);
+        }
+        else if (kind == BROWSER_RESOURCE_SCRIPT)
+        {
+            browser_ui_event_t js_ev = {0};
+            if (browser_script_event_init(&js_ev, load_id, abs, res_body, res_len))
+            {
+                browser_debug_logf(app, "[js] ok bytes=%u url=%s", (unsigned)res_len, abs);
+                res_body = NULL;
+                browser_loader_emit_event(app, &js_ev);
+            }
+            else
+            {
+                browser_debug_logf(app, "[js] failed to queue url=%s", abs ? abs : "(null)");
+            }
+        }
+        else if (kind == BROWSER_RESOURCE_IMAGE)
+        {
+            if (browser_is_png_bytes((const uint8_t *)res_body, res_len))
+            {
+                browser_ui_event_t img_ev = {0};
+                img_ev.type = BROWSER_UI_EVENT_IMAGE_PNG;
+                img_ev.load_id = load_id;
+                img_ev.u.image_png.src = browser_strdup(abs);
+                img_ev.u.image_png.data = (uint8_t *)res_body;
+                img_ev.u.image_png.len = res_len;
+                if (!img_ev.u.image_png.src)
+                {
+                    browser_ui_event_free_payload(&img_ev);
+                    res_body = NULL;
+                }
+                else
+                {
+                    res_body = NULL;
+                    browser_loader_emit_event(app, &img_ev);
+                    browser_debug_logf(app, "[img] ok bytes=%u url=%s", (unsigned)res_len, abs);
+                }
+            }
+            else
+            {
+                browser_debug_logf(app, "[img] skipped (not png) url=%s", abs);
+            }
+        }
+    }
+    else
+    {
+        const char *msg = res_body ? (res_body + 6) : "allocation failed";
+        if (kind == BROWSER_RESOURCE_CSS)
+        {
+            browser_debug_logf(app, "[css] failed url=%s err=%s", abs, msg);
+        }
+        else if (kind == BROWSER_RESOURCE_SCRIPT)
+        {
+            browser_debug_logf(app, "[js] failed url=%s err=%s", abs ? abs : "(null)", msg);
+        }
+        else if (kind == BROWSER_RESOURCE_IMAGE)
+        {
+            browser_debug_logf(app, "[img] failed url=%s err=%s", abs, msg);
+        }
+    }
+
+    free(res_body);
+    browser_url_destroy(&res_url);
+    browser_url_destroy(&res_final);
+    free(abs);
+}
+
+static void browser_resource_thread(void *arg)
+{
+    browser_resource_job_t *job = (browser_resource_job_t *)arg;
+    if (!job)
+    {
+        return;
+    }
+
+    browser_app_t *app = job->app;
+    uint64_t load_id = job->load_id;
+    browser_resource_kind_t kind = job->kind;
+    char *url = job->url;
+    job->app = NULL;
+    job->url = NULL;
+    free(job);
+
+    browser_resource_fetch(app, load_id, kind, url);
+
+    if (app)
+    {
+        browser_ui_event_t done_ev = {0};
+        done_ev.type = BROWSER_UI_EVENT_THREAD_DONE;
+        done_ev.load_id = load_id;
+        done_ev.u.thread_done.thread = alix_thread_self();
+        browser_loader_emit_event(app, &done_ev);
+    }
+}
+
+static bool browser_spawn_resource_thread(browser_app_t *app,
+                                          uint64_t load_id,
+                                          browser_resource_kind_t kind,
+                                          char *url)
+{
+    if (!app || !url)
+    {
+        return false;
+    }
+    if (!browser_can_spawn_load_thread(app))
+    {
+        return false;
+    }
+
+    browser_resource_job_t *job = (browser_resource_job_t *)calloc(1, sizeof(*job));
+    if (!job)
+    {
+        return false;
+    }
+    job->app = app;
+    job->load_id = load_id;
+    job->kind = kind;
+    job->url = url;
+
+    alix_thread_t thread;
+    if (alix_thread_create(&thread, "atk_browser_res", browser_resource_thread, job) != 0)
+    {
+        free(job);
+        return false;
+    }
+    browser_track_load_thread(app, thread);
+    return true;
+}
+
 static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev)
 {
     if (!app || !ev)
@@ -326,36 +547,14 @@ static void browser_load_thread(void *arg)
         {
             continue;
         }
-        browser_debug_logf(app, "[css] fetch %s", abs);
-
-        browser_url_t css_url = {0};
-        browser_url_t css_final = {0};
-        size_t css_len = 0;
-        char *css_body = NULL;
-        if (browser_parse_url(abs, &css_url))
+        if (browser_spawn_resource_thread(app, load_id, BROWSER_RESOURCE_CSS, abs))
         {
-            css_body = browser_fetch_http(app, &css_url, &css_len, &css_final);
+            abs = NULL;
         }
-        if (css_body && strncmp(css_body, "Error:\n", 6) != 0)
+        if (abs)
         {
-            browser_ui_event_t css_ev = {0};
-            css_ev.type = BROWSER_UI_EVENT_CSS_APPEND;
-            css_ev.load_id = load_id;
-            css_ev.u.css_append.css = css_body;
-            css_ev.u.css_append.len = css_len;
-            css_body = NULL;
-            browser_loader_emit_event(app, &css_ev);
-            browser_debug_logf(app, "[css] ok bytes=%u url=%s", (unsigned)css_len, abs);
+            browser_resource_fetch(app, load_id, BROWSER_RESOURCE_CSS, abs);
         }
-        else
-        {
-            const char *msg = css_body ? (css_body + 6) : "allocation failed";
-            browser_debug_logf(app, "[css] failed url=%s err=%s", abs, msg);
-        }
-        free(css_body);
-        browser_url_destroy(&css_url);
-        browser_url_destroy(&css_final);
-        free(abs);
     }
 
     for (size_t i = 0; i < script_count; ++i)
@@ -370,39 +569,14 @@ static void browser_load_thread(void *arg)
         {
             continue;
         }
-        browser_debug_logf(app, "[js] fetch %s", abs);
-
-        browser_url_t js_url = {0};
-        browser_url_t js_final = {0};
-        size_t js_len = 0;
-        char *js_body = NULL;
-        if (browser_parse_url(abs, &js_url))
+        if (browser_spawn_resource_thread(app, load_id, BROWSER_RESOURCE_SCRIPT, abs))
         {
-            js_body = browser_fetch_http(app, &js_url, &js_len, &js_final);
+            abs = NULL;
         }
-        if (js_body && strncmp(js_body, "Error:\n", 6) != 0)
+        if (abs)
         {
-            browser_ui_event_t js_ev = {0};
-            if (browser_script_event_init(&js_ev, load_id, abs, js_body, js_len))
-            {
-                browser_debug_logf(app, "[js] ok bytes=%u url=%s", (unsigned)js_len, abs);
-                js_body = NULL;
-                browser_loader_emit_event(app, &js_ev);
-            }
-            else
-            {
-                browser_debug_logf(app, "[js] failed to queue url=%s", abs ? abs : "(null)");
-            }
+            browser_resource_fetch(app, load_id, BROWSER_RESOURCE_SCRIPT, abs);
         }
-        else
-        {
-            const char *msg = js_body ? (js_body + 6) : "allocation failed";
-            browser_debug_logf(app, "[js] failed url=%s err=%s", abs ? abs : "(null)", msg);
-        }
-        free(js_body);
-        browser_url_destroy(&js_url);
-        browser_url_destroy(&js_final);
-        free(abs);
     }
 
     for (size_t i = 0; i < img_count; ++i)
@@ -417,52 +591,14 @@ static void browser_load_thread(void *arg)
         {
             continue;
         }
-        browser_debug_logf(app, "[img] fetch %s", abs);
-
-        browser_url_t img_url = {0};
-        browser_url_t img_final = {0};
-        size_t img_len = 0;
-        char *img_body = NULL;
-        if (browser_parse_url(abs, &img_url))
+        if (browser_spawn_resource_thread(app, load_id, BROWSER_RESOURCE_IMAGE, abs))
         {
-            img_body = browser_fetch_http(app, &img_url, &img_len, &img_final);
+            abs = NULL;
         }
-        if (img_body && strncmp(img_body, "Error:\n", 6) != 0)
+        if (abs)
         {
-            if (browser_is_png_bytes((const uint8_t *)img_body, img_len))
-            {
-                browser_ui_event_t img_ev = {0};
-                img_ev.type = BROWSER_UI_EVENT_IMAGE_PNG;
-                img_ev.load_id = load_id;
-                img_ev.u.image_png.src = browser_strdup(abs);
-                img_ev.u.image_png.data = (uint8_t *)img_body;
-                img_ev.u.image_png.len = img_len;
-                if (!img_ev.u.image_png.src)
-                {
-                    browser_ui_event_free_payload(&img_ev);
-                    img_body = NULL;
-                }
-                else
-                {
-                    img_body = NULL;
-                    browser_loader_emit_event(app, &img_ev);
-                    browser_debug_logf(app, "[img] ok bytes=%u url=%s", (unsigned)img_len, abs);
-                }
-            }
-            else
-            {
-                browser_debug_logf(app, "[img] skipped (not png) url=%s", abs);
-            }
+            browser_resource_fetch(app, load_id, BROWSER_RESOURCE_IMAGE, abs);
         }
-        else
-        {
-            const char *msg = img_body ? (img_body + 6) : "allocation failed";
-            browser_debug_logf(app, "[img] failed url=%s err=%s", abs, msg);
-        }
-        free(img_body);
-        browser_url_destroy(&img_url);
-        browser_url_destroy(&img_final);
-        free(abs);
     }
 
 done_resources:

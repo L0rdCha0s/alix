@@ -24,10 +24,51 @@ typedef struct
 static bool js_parse_index_key(const char *text, size_t *out_index);
 static bool js_make_single_char_string(js_value_t *out, char c);
 static const char *js_function_name(const js_function_t *fn);
+static bool js_string_builder_append(char **buf, size_t *len, size_t *cap, const char *data, size_t data_len);
 
 static double js_trunc(double value)
 {
     return (value < 0.0) ? ceil(value) : floor(value);
+}
+
+static bool js_string_builder_append(char **buf, size_t *len, size_t *cap, const char *data, size_t data_len)
+{
+    if (!buf || !len || !cap)
+    {
+        return false;
+    }
+    if (data_len == 0)
+    {
+        return true;
+    }
+    if (!data)
+    {
+        return false;
+    }
+    if (*len > SIZE_MAX - data_len)
+    {
+        return false;
+    }
+    size_t needed = *len + data_len;
+    if (needed + 1 > *cap)
+    {
+        size_t new_cap = *cap ? *cap * 2u : 64u;
+        if (new_cap < needed + 1)
+        {
+            new_cap = needed + 1;
+        }
+        char *next = (char *)realloc(*buf, new_cap);
+        if (!next)
+        {
+            return false;
+        }
+        *buf = next;
+        *cap = new_cap;
+    }
+    memcpy(*buf + *len, data, data_len);
+    *len = needed;
+    (*buf)[*len] = '\0';
+    return true;
 }
 
 static bool js_string_equals_len(const char *data, size_t len, const char *text)
@@ -146,6 +187,8 @@ static const char *js_typeof_name(const js_value_t *value)
             return "boolean";
         case JS_VALUE_NUMBER:
             return "number";
+        case JS_VALUE_BIGINT:
+            return "bigint";
         case JS_VALUE_STRING:
             return "string";
         case JS_VALUE_FUNCTION:
@@ -225,6 +268,23 @@ static js_eval_result_t js_eval_add_values(js_runtime_t *rt, const js_value_t *l
         result.type = JS_VALUE_STRING;
         result.as.string.data = joined;
         result.as.string.len = total;
+        return js_eval_ok(result);
+    }
+    if (left->type == JS_VALUE_BIGINT || right->type == JS_VALUE_BIGINT)
+    {
+        if (left->type != JS_VALUE_BIGINT || right->type != JS_VALUE_BIGINT)
+        {
+            return js_eval_error("TypeError: cannot mix BigInt and other types");
+        }
+        js_bigint_t *sum = js_bigint_add(left->as.bigint, right->as.bigint);
+        if (!sum)
+        {
+            return js_eval_error("allocation failed");
+        }
+        js_value_t result;
+        memset(&result, 0, sizeof(result));
+        result.type = JS_VALUE_BIGINT;
+        result.as.bigint = sum;
         return js_eval_ok(result);
     }
 
@@ -557,6 +617,7 @@ bool js_object_get_property(js_runtime_t *rt,
         *out = js_value_make_undefined_internal();
         return true;
     }
+    js_object_t *receiver = object;
     js_object_t *current = object;
     for (size_t depth = 0; current && depth < 32; ++depth)
     {
@@ -579,7 +640,34 @@ bool js_object_get_property(js_runtime_t *rt,
         {
             if (prop->is_accessor)
             {
-                if (prop->getter.type == JS_VALUE_FUNCTION || prop->getter.type == JS_VALUE_NATIVE_FN)
+                if (prop->getter.type == JS_VALUE_NATIVE_FN)
+                {
+                    js_value_t result = js_value_make_undefined_internal();
+                    js_value_t receiver_val = js_value_make_undefined_internal();
+                    receiver_val.type = JS_VALUE_OBJECT;
+                    receiver_val.as.object = receiver;
+                    js_object_retain(receiver);
+                    char *err = NULL;
+                    bool ok = js_call_value(rt, &prop->getter, 1, &receiver_val, &result, &err);
+                    js_value_destroy(&receiver_val);
+                    if (!ok)
+                    {
+                        if (error_message)
+                        {
+                            *error_message = err;
+                        }
+                        else
+                        {
+                            free(err);
+                        }
+                        js_value_destroy(&result);
+                        return false;
+                    }
+                    free(err);
+                    *out = result;
+                    return true;
+                }
+                if (prop->getter.type == JS_VALUE_FUNCTION)
                 {
                     js_value_t result = js_value_make_undefined_internal();
                     char *err = NULL;
@@ -1044,6 +1132,23 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                 return res;
             }
         }
+        else if (out->object.type == JS_VALUE_BIGINT)
+        {
+            char *prop_err = NULL;
+            if (js_value_to_property_name(rt, &prop_res.value, &out->property, &prop_err))
+            {
+                out->property_owned = true;
+                handled = true;
+            }
+            else if (prop_err)
+            {
+                js_value_destroy(&prop_res.value);
+                js_member_access_release(out);
+                js_eval_result_t res = js_eval_error(prop_err);
+                free(prop_err);
+                return res;
+            }
+        }
         else if (out->object.type == JS_VALUE_BOOL)
         {
             char *prop_err = NULL;
@@ -1169,6 +1274,10 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
             {
                 out->property = member->property;
             }
+        }
+        else if (out->object.type == JS_VALUE_BIGINT)
+        {
+            out->property = member->property;
         }
         else if (out->object.type == JS_VALUE_BOOL)
         {
@@ -1322,6 +1431,28 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
         }
         return js_eval_ok(js_value_make_undefined_internal());
     }
+    if (access->object.type == JS_VALUE_BIGINT)
+    {
+        if (access->property && strcmp(access->property, "toString") == 0)
+        {
+            js_value_t value;
+            memset(&value, 0, sizeof(value));
+            value.type = JS_VALUE_NATIVE_FN;
+            value.as.native.fn = js_builtin_bigint_to_string;
+            value.as.native.user_data = &access->object;
+            return js_eval_ok(value);
+        }
+        if (access->property && strcmp(access->property, "valueOf") == 0)
+        {
+            js_value_t value;
+            memset(&value, 0, sizeof(value));
+            value.type = JS_VALUE_NATIVE_FN;
+            value.as.native.fn = js_builtin_bigint_value_of;
+            value.as.native.user_data = &access->object;
+            return js_eval_ok(value);
+        }
+        return js_eval_ok(js_value_make_undefined_internal());
+    }
     if (access->object.type == JS_VALUE_BOOL)
     {
         return js_eval_ok(js_value_make_undefined_internal());
@@ -1401,6 +1532,50 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
             {
                 proto = js_get_function_proto(rt);
             }
+            else if (native_name && strcmp(native_name, "Date") == 0)
+            {
+                proto = js_get_date_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "Number") == 0)
+            {
+                proto = js_get_number_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "Symbol") == 0)
+            {
+                proto = js_get_symbol_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "Duration") == 0)
+            {
+                proto = js_get_temporal_duration_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "Instant") == 0)
+            {
+                proto = js_get_temporal_instant_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainDate") == 0)
+            {
+                proto = js_get_temporal_plain_date_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainTime") == 0)
+            {
+                proto = js_get_temporal_plain_time_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainDateTime") == 0)
+            {
+                proto = js_get_temporal_plain_date_time_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "ZonedDateTime") == 0)
+            {
+                proto = js_get_temporal_zoned_date_time_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainYearMonth") == 0)
+            {
+                proto = js_get_temporal_plain_year_month_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainMonthDay") == 0)
+            {
+                proto = js_get_temporal_plain_month_day_proto(rt);
+            }
             if (proto)
             {
                 js_value_t value;
@@ -1457,6 +1632,31 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
             value.as.native.fn = js_builtin_string_from_char_code;
             value.as.native.user_data = NULL;
             return js_eval_ok(value);
+        }
+        if (native_name && access->property && strcmp(native_name, "Date") == 0)
+        {
+            js_native_fn_t fn = NULL;
+            if (strcmp(access->property, "now") == 0)
+            {
+                fn = js_builtin_date_now;
+            }
+            else if (strcmp(access->property, "parse") == 0)
+            {
+                fn = js_builtin_date_parse;
+            }
+            else if (strcmp(access->property, "UTC") == 0)
+            {
+                fn = js_builtin_date_utc;
+            }
+            if (fn)
+            {
+                js_value_t value;
+                memset(&value, 0, sizeof(value));
+                value.type = JS_VALUE_NATIVE_FN;
+                value.as.native.fn = fn;
+                value.as.native.user_data = NULL;
+                return js_eval_ok(value);
+            }
         }
         if (native_name && access->property && strcmp(native_name, "Object") == 0 &&
             strcmp(access->property, "defineProperties") == 0)
@@ -2736,7 +2936,74 @@ bool js_native_needs_this(js_native_fn_t fn)
            fn == js_builtin_array_map ||
            fn == js_builtin_object_has_own_property ||
            fn == js_builtin_object_property_is_enumerable ||
-           fn == js_builtin_object_to_string;
+           fn == js_builtin_object_to_string ||
+           fn == js_date_proto_to_string ||
+           fn == js_date_proto_to_date_string ||
+           fn == js_date_proto_to_time_string ||
+           fn == js_date_proto_to_utc_string ||
+           fn == js_date_proto_to_gmt_string ||
+           fn == js_date_proto_to_iso_string ||
+           fn == js_date_proto_to_json ||
+           fn == js_date_proto_value_of ||
+           fn == js_date_proto_get_time ||
+           fn == js_date_proto_get_full_year ||
+           fn == js_date_proto_get_utc_full_year ||
+           fn == js_date_proto_get_month ||
+           fn == js_date_proto_get_utc_month ||
+           fn == js_date_proto_get_date ||
+           fn == js_date_proto_get_utc_date ||
+           fn == js_date_proto_get_day ||
+           fn == js_date_proto_get_utc_day ||
+           fn == js_date_proto_get_hours ||
+           fn == js_date_proto_get_utc_hours ||
+           fn == js_date_proto_get_minutes ||
+           fn == js_date_proto_get_utc_minutes ||
+           fn == js_date_proto_get_seconds ||
+           fn == js_date_proto_get_utc_seconds ||
+           fn == js_date_proto_get_milliseconds ||
+           fn == js_date_proto_get_utc_milliseconds ||
+           fn == js_date_proto_get_timezone_offset ||
+           fn == js_date_proto_set_time ||
+           fn == js_date_proto_set_full_year ||
+           fn == js_date_proto_set_utc_full_year ||
+           fn == js_date_proto_set_month ||
+           fn == js_date_proto_set_utc_month ||
+           fn == js_date_proto_set_date ||
+           fn == js_date_proto_set_utc_date ||
+           fn == js_date_proto_set_hours ||
+           fn == js_date_proto_set_utc_hours ||
+           fn == js_date_proto_set_minutes ||
+           fn == js_date_proto_set_utc_minutes ||
+           fn == js_date_proto_set_seconds ||
+           fn == js_date_proto_set_utc_seconds ||
+           fn == js_date_proto_set_milliseconds ||
+           fn == js_date_proto_set_utc_milliseconds ||
+           fn == js_date_proto_get_year ||
+           fn == js_date_proto_set_year ||
+           fn == js_temporal_duration_getter ||
+           fn == js_temporal_duration_negated ||
+           fn == js_temporal_duration_abs ||
+           fn == js_temporal_duration_to_string ||
+           fn == js_temporal_duration_to_json ||
+           fn == js_temporal_duration_to_locale_string ||
+           fn == js_temporal_duration_value_of ||
+           fn == js_temporal_duration_with ||
+           fn == js_temporal_duration_add ||
+           fn == js_temporal_duration_subtract ||
+           fn == js_temporal_duration_round ||
+           fn == js_temporal_duration_total ||
+           fn == js_temporal_instant_getter ||
+           fn == js_temporal_instant_to_string ||
+           fn == js_temporal_instant_to_json ||
+           fn == js_temporal_instant_to_locale_string ||
+           fn == js_temporal_instant_value_of ||
+           fn == js_temporal_instant_add ||
+           fn == js_temporal_instant_subtract ||
+           fn == js_temporal_instant_since ||
+           fn == js_temporal_instant_until ||
+           fn == js_temporal_instant_round ||
+           fn == js_temporal_instant_equals ||
+           fn == js_temporal_instant_to_zoned_date_time_iso;
 }
 
 bool js_call_value(js_runtime_t *rt,
@@ -2821,6 +3088,83 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             }
             return js_eval_ok(copy);
         }
+        case JS_EXPR_TEMPLATE:
+        {
+            const js_template_expr_t *templ = &expr->as.template;
+            char *joined = NULL;
+            size_t joined_len = 0;
+            size_t joined_cap = 0;
+            if (templ->segment_count == 0)
+            {
+                js_value_t out;
+                if (!js_value_make_cstring(&out, ""))
+                {
+                    return js_eval_error("allocation failed");
+                }
+                return js_eval_ok(out);
+            }
+            for (size_t i = 0; i < templ->segment_count; ++i)
+            {
+                const js_template_segment_t *seg = &templ->segments[i];
+                if (!js_string_builder_append(&joined,
+                                              &joined_len,
+                                              &joined_cap,
+                                              seg->data ? seg->data : "",
+                                              seg->len))
+                {
+                    free(joined);
+                    return js_eval_error("allocation failed");
+                }
+                if (i < templ->expr_count)
+                {
+                    js_eval_result_t expr_res = js_eval_expr(rt, env, templ->exprs[i]);
+                    if (!expr_res.ok)
+                    {
+                        free(joined);
+                        return expr_res;
+                    }
+                    js_temp_string_t temp = {0};
+                    char *err = NULL;
+                    if (!js_temp_string_from_value(rt, &expr_res.value, &temp, &err))
+                    {
+                        js_value_destroy(&expr_res.value);
+                        free(joined);
+                        if (err)
+                        {
+                            js_eval_result_t res = js_eval_error(err);
+                            free(err);
+                            return res;
+                        }
+                        return js_eval_error("allocation failed");
+                    }
+                    js_value_destroy(&expr_res.value);
+                    if (!js_string_builder_append(&joined,
+                                                  &joined_len,
+                                                  &joined_cap,
+                                                  temp.data ? temp.data : "",
+                                                  temp.len))
+                    {
+                        js_temp_string_release(&temp);
+                        free(joined);
+                        return js_eval_error("allocation failed");
+                    }
+                    js_temp_string_release(&temp);
+                }
+            }
+            if (!joined)
+            {
+                joined = js_strdup_len("", 0);
+                if (!joined)
+                {
+                    return js_eval_error("allocation failed");
+                }
+            }
+            js_value_t out;
+            out.type = JS_VALUE_STRING;
+            out.as.string.data = joined;
+            out.as.string.len = joined_len;
+            return js_eval_ok(out);
+        }
         case JS_EXPR_IDENTIFIER:
         {
             js_value_t value;
@@ -2895,20 +3239,46 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             }
             else
             {
-                bool ok = true;
-                double num = js_value_to_number(&right.value, &ok);
-                if (!ok || js_is_nan(num))
+                if (right.value.type == JS_VALUE_BIGINT)
                 {
-                    js_value_destroy(&right.value);
-                    return js_eval_error("expected number");
-                }
-                if (expr->as.unary.op == JS_UNARY_NEGATE)
-                {
-                    result = js_value_make_number(-num);
+                    if (expr->as.unary.op == JS_UNARY_POSITIVE)
+                    {
+                        js_value_destroy(&right.value);
+                        return js_eval_error("TypeError: cannot convert BigInt to number");
+                    }
+                    js_value_t zero_val;
+                    if (!js_value_make_bigint_from_int64(&zero_val, 0))
+                    {
+                        js_value_destroy(&right.value);
+                        return js_eval_error("allocation failed");
+                    }
+                    js_bigint_t *negated = js_bigint_sub(zero_val.as.bigint, right.value.as.bigint);
+                    js_value_destroy(&zero_val);
+                    if (!negated)
+                    {
+                        js_value_destroy(&right.value);
+                        return js_eval_error("allocation failed");
+                    }
+                    result.type = JS_VALUE_BIGINT;
+                    result.as.bigint = negated;
                 }
                 else
                 {
-                    result = js_value_make_number(num);
+                    bool ok = true;
+                    double num = js_value_to_number(&right.value, &ok);
+                    if (!ok || js_is_nan(num))
+                    {
+                        js_value_destroy(&right.value);
+                        return js_eval_error("expected number");
+                    }
+                    if (expr->as.unary.op == JS_UNARY_NEGATE)
+                    {
+                        result = js_value_make_number(-num);
+                    }
+                    else
+                    {
+                        result = js_value_make_number(num);
+                    }
                 }
             }
             js_value_destroy(&right.value);
@@ -2959,19 +3329,51 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 return js_eval_error("invalid assignment target");
             }
 
-            bool ok_num = true;
-            double num = js_value_to_number(&current, &ok_num);
-            if (!ok_num || js_is_nan(num))
+            js_value_t new_value = js_value_make_undefined_internal();
+            if (current.type == JS_VALUE_BIGINT)
             {
-                if (has_access)
+                js_value_t one_value = js_value_make_undefined_internal();
+                if (!js_value_make_bigint_from_int64(&one_value, 1))
                 {
-                    js_member_access_release(&access);
+                    if (has_access)
+                    {
+                        js_member_access_release(&access);
+                    }
+                    js_value_destroy(&current);
+                    return js_eval_error("allocation failed");
                 }
-                js_value_destroy(&current);
-                return js_eval_error("expected number");
+                js_bigint_t *updated = expr->as.update.is_increment
+                    ? js_bigint_add(current.as.bigint, one_value.as.bigint)
+                    : js_bigint_sub(current.as.bigint, one_value.as.bigint);
+                js_value_destroy(&one_value);
+                if (!updated)
+                {
+                    if (has_access)
+                    {
+                        js_member_access_release(&access);
+                    }
+                    js_value_destroy(&current);
+                    return js_eval_error("allocation failed");
+                }
+                new_value.type = JS_VALUE_BIGINT;
+                new_value.as.bigint = updated;
             }
-            double new_num = expr->as.update.is_increment ? (num + 1.0) : (num - 1.0);
-            js_value_t new_value = js_value_make_number(new_num);
+            else
+            {
+                bool ok_num = true;
+                double num = js_value_to_number(&current, &ok_num);
+                if (!ok_num || js_is_nan(num))
+                {
+                    if (has_access)
+                    {
+                        js_member_access_release(&access);
+                    }
+                    js_value_destroy(&current);
+                    return js_eval_error("expected number");
+                }
+                double new_num = expr->as.update.is_increment ? (num + 1.0) : (num - 1.0);
+                new_value = js_value_make_number(new_num);
+            }
 
             bool assigned_ok = false;
             if (target->type == JS_EXPR_IDENTIFIER)
@@ -3039,9 +3441,23 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 return js_eval_error("assignment failed");
             }
 
-            js_value_t result = expr->as.update.is_prefix ? new_value : js_value_make_number(num);
-            if (!expr->as.update.is_prefix)
+            js_value_t result = js_value_make_undefined_internal();
+            if (expr->as.update.is_prefix)
             {
+                result = new_value;
+            }
+            else
+            {
+                if (!js_value_copy(&result, &current))
+                {
+                    js_value_destroy(&new_value);
+                    if (has_access)
+                    {
+                        js_member_access_release(&access);
+                    }
+                    js_value_destroy(&current);
+                    return js_eval_error("allocation failed");
+                }
                 js_value_destroy(&new_value);
             }
             if (has_access)
@@ -3099,32 +3515,240 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             }
             else if (op == JS_BINARY_SUB || op == JS_BINARY_MUL || op == JS_BINARY_DIV || op == JS_BINARY_MOD)
             {
-                bool ok_left = true;
-                bool ok_right = true;
-                double ln = js_value_to_number(&left.value, &ok_left);
-                double rn = js_value_to_number(&right.value, &ok_right);
-                if (!ok_left || !ok_right || js_is_nan(ln) || js_is_nan(rn))
+                if (left.value.type == JS_VALUE_BIGINT || right.value.type == JS_VALUE_BIGINT)
                 {
-                    js_value_destroy(&left.value);
-                    js_value_destroy(&right.value);
-                    return js_eval_error("expected number");
-                }
-                if (op == JS_BINARY_SUB)
-                {
-                    result = js_value_make_number(ln - rn);
-                }
-                else if (op == JS_BINARY_MUL)
-                {
-                    result = js_value_make_number(ln * rn);
-                }
-                else if (op == JS_BINARY_DIV)
-                {
-                    result = js_value_make_number(ln / rn);
+                    if (left.value.type != JS_VALUE_BIGINT || right.value.type != JS_VALUE_BIGINT)
+                    {
+                        js_value_destroy(&left.value);
+                        js_value_destroy(&right.value);
+                        return js_eval_error("TypeError: cannot mix BigInt and other types");
+                    }
+                    js_bigint_t *big_result = NULL;
+                    if (op == JS_BINARY_SUB)
+                    {
+                        big_result = js_bigint_sub(left.value.as.bigint, right.value.as.bigint);
+                    }
+                    else if (op == JS_BINARY_MUL)
+                    {
+                        big_result = js_bigint_mul(left.value.as.bigint, right.value.as.bigint);
+                    }
+                    else
+                    {
+                        js_bigint_t *quot = NULL;
+                        js_bigint_t *rem = NULL;
+                        char *err = NULL;
+                        bool ok = js_bigint_divmod(left.value.as.bigint, right.value.as.bigint, &quot, &rem, &err);
+                        if (!ok)
+                        {
+                            js_value_destroy(&left.value);
+                            js_value_destroy(&right.value);
+                            if (err)
+                            {
+                                js_eval_result_t res = js_eval_error(err);
+                                free(err);
+                                return res;
+                            }
+                            return js_eval_error("division failed");
+                        }
+                        if (op == JS_BINARY_DIV)
+                        {
+                            big_result = quot;
+                            js_bigint_destroy(rem);
+                        }
+                        else
+                        {
+                            big_result = rem;
+                            js_bigint_destroy(quot);
+                        }
+                    }
+                    if (!big_result)
+                    {
+                        js_value_destroy(&left.value);
+                        js_value_destroy(&right.value);
+                        return js_eval_error("allocation failed");
+                    }
+                    result.type = JS_VALUE_BIGINT;
+                    result.as.bigint = big_result;
                 }
                 else
                 {
-                    double quotient = ln / rn;
-                    result = js_value_make_number(ln - js_trunc(quotient) * rn);
+                    bool ok_left = true;
+                    bool ok_right = true;
+                    double ln = js_value_to_number(&left.value, &ok_left);
+                    double rn = js_value_to_number(&right.value, &ok_right);
+                    if (!ok_left || !ok_right || js_is_nan(ln) || js_is_nan(rn))
+                    {
+                        js_value_destroy(&left.value);
+                        js_value_destroy(&right.value);
+                        return js_eval_error("expected number");
+                    }
+                    if (op == JS_BINARY_SUB)
+                    {
+                        result = js_value_make_number(ln - rn);
+                    }
+                    else if (op == JS_BINARY_MUL)
+                    {
+                        result = js_value_make_number(ln * rn);
+                    }
+                    else if (op == JS_BINARY_DIV)
+                    {
+                        result = js_value_make_number(ln / rn);
+                    }
+                    else
+                    {
+                        double quotient = ln / rn;
+                        result = js_value_make_number(ln - js_trunc(quotient) * rn);
+                    }
+                }
+            }
+            else if (op == JS_BINARY_EXP)
+            {
+                if (left.value.type == JS_VALUE_BIGINT || right.value.type == JS_VALUE_BIGINT)
+                {
+                    if (left.value.type != JS_VALUE_BIGINT || right.value.type != JS_VALUE_BIGINT)
+                    {
+                        js_value_destroy(&left.value);
+                        js_value_destroy(&right.value);
+                        return js_eval_error("TypeError: cannot mix BigInt and other types");
+                    }
+                    char *err = NULL;
+                    js_bigint_t *pow_val = js_bigint_pow(left.value.as.bigint, right.value.as.bigint, &err);
+                    if (!pow_val)
+                    {
+                        js_value_destroy(&left.value);
+                        js_value_destroy(&right.value);
+                        if (err)
+                        {
+                            js_eval_result_t res = js_eval_error(err);
+                            free(err);
+                            return res;
+                        }
+                        return js_eval_error("pow failed");
+                    }
+                    result.type = JS_VALUE_BIGINT;
+                    result.as.bigint = pow_val;
+                }
+                else
+                {
+                    bool ok_left = true;
+                    bool ok_right = true;
+                    double ln = js_value_to_number(&left.value, &ok_left);
+                    double rn = js_value_to_number(&right.value, &ok_right);
+                    if (!ok_left || !ok_right || js_is_nan(ln) || js_is_nan(rn))
+                    {
+                        js_value_destroy(&left.value);
+                        js_value_destroy(&right.value);
+                        return js_eval_error("expected number");
+                    }
+                    result = js_value_make_number(pow(ln, rn));
+                }
+            }
+            else if (op == JS_BINARY_INSTANCEOF)
+            {
+                if (right.value.type != JS_VALUE_NATIVE_FN)
+                {
+                    js_value_destroy(&left.value);
+                    js_value_destroy(&right.value);
+                    return js_eval_error("TypeError: right-hand side of instanceof is not callable");
+                }
+                if (left.value.type != JS_VALUE_OBJECT || !left.value.as.object)
+                {
+                    result = js_value_make_bool(false);
+                }
+                else
+                {
+                    js_object_t *proto = NULL;
+                    const char *native_name = js_value_native_name(rt, &right.value);
+                    if (right.value.as.native.fn == js_builtin_iterator)
+                    {
+                        proto = js_get_iterator_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "Object") == 0)
+                    {
+                        proto = js_get_object_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "Array") == 0)
+                    {
+                        proto = js_get_array_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "Function") == 0)
+                    {
+                        proto = js_get_function_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "Date") == 0)
+                    {
+                        proto = js_get_date_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "Number") == 0)
+                    {
+                        proto = js_get_number_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "Symbol") == 0)
+                    {
+                        proto = js_get_symbol_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "Duration") == 0)
+                    {
+                        proto = js_get_temporal_duration_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "Instant") == 0)
+                    {
+                        proto = js_get_temporal_instant_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "PlainDate") == 0)
+                    {
+                        proto = js_get_temporal_plain_date_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "PlainTime") == 0)
+                    {
+                        proto = js_get_temporal_plain_time_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "PlainDateTime") == 0)
+                    {
+                        proto = js_get_temporal_plain_date_time_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "ZonedDateTime") == 0)
+                    {
+                        proto = js_get_temporal_zoned_date_time_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "PlainYearMonth") == 0)
+                    {
+                        proto = js_get_temporal_plain_year_month_proto(rt);
+                    }
+                    else if (native_name && strcmp(native_name, "PlainMonthDay") == 0)
+                    {
+                        proto = js_get_temporal_plain_month_day_proto(rt);
+                    }
+                    if (!proto)
+                    {
+                        js_value_destroy(&left.value);
+                        js_value_destroy(&right.value);
+                        return js_eval_error("TypeError: invalid prototype");
+                    }
+                    js_object_t *cursor = left.value.as.object;
+                    bool found = false;
+                    while (cursor)
+                    {
+                        js_value_t proto_val = js_value_make_undefined_internal();
+                        if (!js_object_get_slot(cursor, "__proto__", &proto_val))
+                        {
+                            break;
+                        }
+                        if (proto_val.type == JS_VALUE_OBJECT && proto_val.as.object == proto)
+                        {
+                            found = true;
+                            js_value_destroy(&proto_val);
+                            break;
+                        }
+                        if (proto_val.type != JS_VALUE_OBJECT || !proto_val.as.object)
+                        {
+                            js_value_destroy(&proto_val);
+                            break;
+                        }
+                        cursor = proto_val.as.object;
+                        js_value_destroy(&proto_val);
+                    }
+                    result = js_value_make_bool(found);
                 }
             }
             else if (op == JS_BINARY_EQ || op == JS_BINARY_NEQ || op == JS_BINARY_STRICT_EQ || op == JS_BINARY_STRICT_NEQ)
@@ -3147,7 +3771,43 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             else
             {
                 bool cmp = false;
-                if (left.value.type == JS_VALUE_STRING && right.value.type == JS_VALUE_STRING)
+                if (left.value.type == JS_VALUE_BIGINT || right.value.type == JS_VALUE_BIGINT)
+                {
+                    if (left.value.type == JS_VALUE_BIGINT && right.value.type == JS_VALUE_BIGINT)
+                    {
+                        int ord = js_bigint_compare(left.value.as.bigint, right.value.as.bigint);
+                        switch (op)
+                        {
+                            case JS_BINARY_LT: cmp = ord < 0; break;
+                            case JS_BINARY_LTE: cmp = ord <= 0; break;
+                            case JS_BINARY_GT: cmp = ord > 0; break;
+                            case JS_BINARY_GTE: cmp = ord >= 0; break;
+                            default: cmp = false; break;
+                        }
+                    }
+                    else
+                    {
+                        bool ok_left = true;
+                        bool ok_right = true;
+                        double ln = js_value_to_number(&left.value, &ok_left);
+                        double rn = js_value_to_number(&right.value, &ok_right);
+                        if (!ok_left || !ok_right || js_is_nan(ln) || js_is_nan(rn))
+                        {
+                            js_value_destroy(&left.value);
+                            js_value_destroy(&right.value);
+                            return js_eval_error("expected number");
+                        }
+                        switch (op)
+                        {
+                            case JS_BINARY_LT: cmp = ln < rn; break;
+                            case JS_BINARY_LTE: cmp = ln <= rn; break;
+                            case JS_BINARY_GT: cmp = ln > rn; break;
+                            case JS_BINARY_GTE: cmp = ln >= rn; break;
+                            default: cmp = false; break;
+                        }
+                    }
+                }
+                else if (left.value.type == JS_VALUE_STRING && right.value.type == JS_VALUE_STRING)
                 {
                     int ord = strcmp(left.value.as.string.data ? left.value.as.string.data : "",
                                      right.value.as.string.data ? right.value.as.string.data : "");
@@ -3504,7 +4164,14 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
 
             js_value_t out = js_value_make_undefined_internal();
             char *err = NULL;
+            bool prev_constructing = rt->constructing;
+            js_native_fn_t prev_constructing_fn = rt->constructing_fn;
+            rt->constructing = true;
+            rt->constructing_fn =
+                (callee.type == JS_VALUE_NATIVE_FN) ? callee.as.native.fn : NULL;
             bool ok = js_call_value(rt, &callee, argc, args, &out, &err);
+            rt->constructing = prev_constructing;
+            rt->constructing_fn = prev_constructing_fn;
             for (size_t i = 0; i < argc; ++i)
             {
                 js_value_destroy(&args[i]);

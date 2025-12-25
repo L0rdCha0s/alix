@@ -110,6 +110,10 @@ typedef struct
     alix_thread_t load_threads[BROWSER_MAX_LOAD_THREADS];
     size_t load_thread_count;
 
+    char *cache_dir;
+    bool cache_ready;
+    bool cache_attempted;
+
     char *external_css;
     size_t external_css_len;
     size_t external_css_cap;
@@ -125,6 +129,8 @@ typedef struct
     size_t debug_log_cap;
     size_t debug_log_flush_offset;
     bool debug_log_resync;
+    bool debug_open_requested;
+    bool debug_clear_requested;
 } browser_app_t;
 
 /* common */

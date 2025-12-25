@@ -3,6 +3,12 @@
 #include "libc.h"
 #include "math.h"
 #include "stdio.h"
+#ifdef TTF_HOST_BUILD
+#include <sys/time.h>
+#include <time.h>
+#else
+#include "usyscall.h"
+#endif
 
 typedef struct
 {
@@ -29,6 +35,30 @@ typedef struct
 
 typedef struct
 {
+    double time_ms;
+} js_date_t;
+
+typedef struct
+{
+    int64_t years;
+    int64_t months;
+    int64_t weeks;
+    int64_t days;
+    int64_t hours;
+    int64_t minutes;
+    int64_t seconds;
+    int64_t milliseconds;
+    int64_t microseconds;
+    int64_t nanoseconds;
+} js_temporal_duration_t;
+
+typedef struct
+{
+    js_bigint_t *epoch_nanoseconds;
+} js_temporal_instant_t;
+
+typedef struct
+{
     int id;
 } js_realm_t;
 
@@ -44,6 +74,1120 @@ struct js_bound_fn
 
 static int js_realm_next_id = 1;
 static js_realm_t js_default_realm = {0};
+
+#define JS_DATE_MS_PER_SECOND 1000LL
+#define JS_DATE_MS_PER_MINUTE (60LL * JS_DATE_MS_PER_SECOND)
+#define JS_DATE_MS_PER_HOUR   (60LL * JS_DATE_MS_PER_MINUTE)
+#define JS_DATE_MS_PER_DAY    (24LL * JS_DATE_MS_PER_HOUR)
+#define JS_DATE_TIME_MAX      8640000000000000.0
+
+static const int64_t JS_TEMPORAL_MAX_YMW = 4294967295LL;
+static const int64_t JS_TEMPORAL_MAX_SECONDS = 9007199254740991LL;
+static const __int128 JS_TEMPORAL_MAX_TOTAL_NS =
+    (((__int128)JS_TEMPORAL_MAX_SECONDS) * 1000000000LL) + 999999999LL;
+static const char JS_TEMPORAL_INSTANT_MAX_NS[] = "8640000000000000000000";
+static const char JS_TEMPORAL_TAG[] = "Temporal";
+static const char JS_TEMPORAL_TAG_DURATION[] = "Temporal.Duration";
+static const char JS_TEMPORAL_TAG_INSTANT[] = "Temporal.Instant";
+static const char JS_TEMPORAL_TAG_PLAIN_DATE[] = "Temporal.PlainDate";
+static const char JS_TEMPORAL_TAG_PLAIN_TIME[] = "Temporal.PlainTime";
+static const char JS_TEMPORAL_TAG_PLAIN_DATE_TIME[] = "Temporal.PlainDateTime";
+static const char JS_TEMPORAL_TAG_ZONED_DATE_TIME[] = "Temporal.ZonedDateTime";
+static const char JS_TEMPORAL_TAG_PLAIN_YEAR_MONTH[] = "Temporal.PlainYearMonth";
+static const char JS_TEMPORAL_TAG_PLAIN_MONTH_DAY[] = "Temporal.PlainMonthDay";
+static const char JS_TEMPORAL_TAG_NOW[] = "Temporal.Now";
+
+static const char JS_TEMPORAL_DURATION_FIELD_YEARS[] = "years";
+static const char JS_TEMPORAL_DURATION_FIELD_MONTHS[] = "months";
+static const char JS_TEMPORAL_DURATION_FIELD_WEEKS[] = "weeks";
+static const char JS_TEMPORAL_DURATION_FIELD_DAYS[] = "days";
+static const char JS_TEMPORAL_DURATION_FIELD_HOURS[] = "hours";
+static const char JS_TEMPORAL_DURATION_FIELD_MINUTES[] = "minutes";
+static const char JS_TEMPORAL_DURATION_FIELD_SECONDS[] = "seconds";
+static const char JS_TEMPORAL_DURATION_FIELD_MILLISECONDS[] = "milliseconds";
+static const char JS_TEMPORAL_DURATION_FIELD_MICROSECONDS[] = "microseconds";
+static const char JS_TEMPORAL_DURATION_FIELD_NANOSECONDS[] = "nanoseconds";
+static const char JS_TEMPORAL_DURATION_FIELD_SIGN[] = "sign";
+static const char JS_TEMPORAL_DURATION_FIELD_BLANK[] = "blank";
+
+static const char JS_TEMPORAL_INSTANT_FIELD_EPOCH_NANOSECONDS[] = "epochNanoseconds";
+static const char JS_TEMPORAL_INSTANT_FIELD_EPOCH_MILLISECONDS[] = "epochMilliseconds";
+
+static const char *JS_DATE_MONTH_NAMES[12] =
+{
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+
+static const char *JS_DATE_DAY_NAMES[7] =
+{
+    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+};
+
+typedef struct
+{
+    int64_t year;
+    int month;
+    int day;
+    int hour;
+    int minute;
+    int second;
+    int millisecond;
+    int weekday;
+} js_date_parts_t;
+
+static double js_date_trunc(double value)
+{
+    return (value < 0.0) ? ceil(value) : floor(value);
+}
+
+static double js_date_time_clip(double value)
+{
+    if (js_is_nan(value) || value > JS_DATE_TIME_MAX || value < -JS_DATE_TIME_MAX)
+    {
+        return js_nan();
+    }
+    return js_date_trunc(value);
+}
+
+static int64_t js_date_floor_div(int64_t a, int64_t b)
+{
+    int64_t q = a / b;
+    int64_t r = a % b;
+    if (r < 0)
+    {
+        q -= 1;
+    }
+    return q;
+}
+
+static int64_t js_date_mod(int64_t a, int64_t b)
+{
+    int64_t r = a % b;
+    if (r < 0)
+    {
+        r += b;
+    }
+    return r;
+}
+
+static bool js_date_is_leap_year(int64_t year)
+{
+    if ((year % 4) != 0)
+    {
+        return false;
+    }
+    if ((year % 100) != 0)
+    {
+        return true;
+    }
+    return (year % 400) == 0;
+}
+
+static int js_date_days_in_month(int64_t year, int month)
+{
+    static const int days[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month < 1 || month > 12)
+    {
+        return 31;
+    }
+    if (month == 2 && js_date_is_leap_year(year))
+    {
+        return 29;
+    }
+    return days[month - 1];
+}
+
+static int64_t js_date_days_from_civil(int64_t year, int month, int day)
+{
+    int64_t y = year;
+    int64_t m = month;
+    y -= (m <= 2);
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    uint64_t yoe = (uint64_t)(y - era * 400);
+    uint64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + (uint64_t)day - 1;
+    uint64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (int64_t)doe - 719468;
+}
+
+static void js_date_civil_from_days(int64_t z, int64_t *year, int *month, int *day)
+{
+    z += 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    uint64_t doe = (uint64_t)(z - era * 146097);
+    uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t y = (int64_t)yoe + era * 400;
+    uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    uint64_t mp = (5 * doy + 2) / 153;
+    uint64_t d = doy - (153 * mp + 2) / 5 + 1;
+    uint64_t m = mp + (mp < 10 ? 3 :  -9);
+    y += (m <= 2);
+    if (year)
+    {
+        *year = y;
+    }
+    if (month)
+    {
+        *month = (int)m;
+    }
+    if (day)
+    {
+        *day = (int)d;
+    }
+}
+
+static double js_date_now_ms(void)
+{
+#ifdef TTF_HOST_BUILD
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) == 0)
+    {
+        return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
+    }
+    return 0.0;
+#else
+    return (double)sys_time_millis();
+#endif
+}
+
+static bool js_date_breakdown(double time_ms, js_date_parts_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (js_is_nan(time_ms))
+    {
+        return false;
+    }
+    int64_t ms = (int64_t)js_date_trunc(time_ms);
+    int64_t days = js_date_floor_div(ms, JS_DATE_MS_PER_DAY);
+    int64_t time_part = ms - days * JS_DATE_MS_PER_DAY;
+    if (time_part < 0)
+    {
+        time_part += JS_DATE_MS_PER_DAY;
+        days -= 1;
+    }
+    int64_t year = 0;
+    int month = 0;
+    int day = 0;
+    js_date_civil_from_days(days, &year, &month, &day);
+    int weekday = (int)js_date_mod(days + 4, 7);
+
+    int64_t hour = time_part / JS_DATE_MS_PER_HOUR;
+    time_part -= hour * JS_DATE_MS_PER_HOUR;
+    int64_t minute = time_part / JS_DATE_MS_PER_MINUTE;
+    time_part -= minute * JS_DATE_MS_PER_MINUTE;
+    int64_t second = time_part / JS_DATE_MS_PER_SECOND;
+    time_part -= second * JS_DATE_MS_PER_SECOND;
+
+    out->year = year;
+    out->month = month;
+    out->day = day;
+    out->hour = (int)hour;
+    out->minute = (int)minute;
+    out->second = (int)second;
+    out->millisecond = (int)time_part;
+    out->weekday = weekday;
+    return true;
+}
+
+static bool js_date_double_to_int64(double value, int64_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (js_is_nan(value) || value > (double)INT64_MAX || value < (double)INT64_MIN)
+    {
+        return false;
+    }
+    *out = (int64_t)js_date_trunc(value);
+    return true;
+}
+
+static double js_date_make_time_value(int64_t year,
+                                      int64_t month,
+                                      int64_t day,
+                                      int64_t hour,
+                                      int64_t minute,
+                                      int64_t second,
+                                      int64_t millisecond)
+{
+    int64_t y = year;
+    int64_t m = month;
+    int64_t month_adjust = js_date_floor_div(m, 12);
+    if (month_adjust != 0)
+    {
+        y += month_adjust;
+        m -= month_adjust * 12;
+    }
+    if (m < 0)
+    {
+        m += 12;
+        y -= 1;
+    }
+    int64_t day_base = js_date_days_from_civil(y, (int)(m + 1), 1);
+    int64_t day_count = day_base + (day - 1);
+    int64_t time_part = hour * JS_DATE_MS_PER_HOUR +
+                        minute * JS_DATE_MS_PER_MINUTE +
+                        second * JS_DATE_MS_PER_SECOND +
+                        millisecond;
+    double total = (double)day_count * (double)JS_DATE_MS_PER_DAY + (double)time_part;
+    return total;
+}
+
+static void js_date_trim(const char **text, size_t *len)
+{
+    if (!text || !len || !*text)
+    {
+        return;
+    }
+    const char *start = *text;
+    size_t length = *len;
+    while (length && isspace((unsigned char)start[0]))
+    {
+        start++;
+        length--;
+    }
+    while (length && isspace((unsigned char)start[length - 1]))
+    {
+        length--;
+    }
+    *text = start;
+    *len = length;
+}
+
+static bool js_date_parse_digits(const char *text,
+                                 size_t len,
+                                 size_t *index,
+                                 int count,
+                                 int *out)
+{
+    if (!text || !index || !out)
+    {
+        return false;
+    }
+    if (*index + (size_t)count > len)
+    {
+        return false;
+    }
+    int value = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        char c = text[*index + (size_t)i];
+        if (!isdigit((unsigned char)c))
+        {
+            return false;
+        }
+        value = value * 10 + (c - '0');
+    }
+    *index += (size_t)count;
+    *out = value;
+    return true;
+}
+
+static bool js_date_parse_year_token(const char *text,
+                                     size_t len,
+                                     size_t *index,
+                                     int64_t *out)
+{
+    if (!text || !index || !out)
+    {
+        return false;
+    }
+    size_t i = *index;
+    int sign = 1;
+    if (i < len && (text[i] == '+' || text[i] == '-'))
+    {
+        sign = (text[i] == '-') ? -1 : 1;
+        i++;
+    }
+    size_t start = i;
+    while (i < len && isdigit((unsigned char)text[i]))
+    {
+        i++;
+    }
+    size_t digits = i - start;
+    if (digits < 4)
+    {
+        return false;
+    }
+    int64_t value = 0;
+    for (size_t j = start; j < i; ++j)
+    {
+        value = value * 10 + (text[j] - '0');
+    }
+    *index = i;
+    *out = (int64_t)sign * value;
+    return true;
+}
+
+static bool js_date_parse_month_name(const char *text,
+                                     size_t len,
+                                     size_t *index,
+                                     int *out_month)
+{
+    if (!text || !index || !out_month)
+    {
+        return false;
+    }
+    if (*index + 3 > len)
+    {
+        return false;
+    }
+    for (int i = 0; i < 12; ++i)
+    {
+        if (strncmp(text + *index, JS_DATE_MONTH_NAMES[i], 3) == 0)
+        {
+            *out_month = i + 1;
+            *index += 3;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool js_date_parse_iso(const char *text, size_t len, double *out)
+{
+    if (!text || !out)
+    {
+        return false;
+    }
+    size_t i = 0;
+    int sign = 1;
+    int64_t year = 0;
+    if (i < len && (text[i] == '+' || text[i] == '-'))
+    {
+        sign = (text[i] == '-') ? -1 : 1;
+        i++;
+        int value = 0;
+        if (!js_date_parse_digits(text, len, &i, 6, &value))
+        {
+            return false;
+        }
+        if (sign < 0 && value == 0)
+        {
+            return false;
+        }
+        year = (int64_t)sign * value;
+    }
+    else
+    {
+        int value = 0;
+        if (!js_date_parse_digits(text, len, &i, 4, &value))
+        {
+            return false;
+        }
+        year = value;
+    }
+    if (i >= len || text[i] != '-')
+    {
+        return false;
+    }
+    i++;
+    int month = 0;
+    if (!js_date_parse_digits(text, len, &i, 2, &month))
+    {
+        return false;
+    }
+    if (month < 1 || month > 12)
+    {
+        return false;
+    }
+    if (i >= len || text[i] != '-')
+    {
+        return false;
+    }
+    i++;
+    int day = 0;
+    if (!js_date_parse_digits(text, len, &i, 2, &day))
+    {
+        return false;
+    }
+    if (day < 1 || day > js_date_days_in_month(year, month))
+    {
+        return false;
+    }
+
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int millisecond = 0;
+    if (i < len && (text[i] == 'T' || text[i] == 't'))
+    {
+        i++;
+        if (!js_date_parse_digits(text, len, &i, 2, &hour))
+        {
+            return false;
+        }
+        if (i >= len || text[i] != ':')
+        {
+            return false;
+        }
+        i++;
+        if (!js_date_parse_digits(text, len, &i, 2, &minute))
+        {
+            return false;
+        }
+        if (i < len && text[i] == ':')
+        {
+            i++;
+            if (!js_date_parse_digits(text, len, &i, 2, &second))
+            {
+                return false;
+            }
+        }
+        if (i < len && text[i] == '.')
+        {
+            i++;
+            int digits = 0;
+            int value = 0;
+            while (i < len && isdigit((unsigned char)text[i]) && digits < 3)
+            {
+                value = value * 10 + (text[i] - '0');
+                digits++;
+                i++;
+            }
+            while (digits < 3)
+            {
+                value *= 10;
+                digits++;
+            }
+            while (i < len && isdigit((unsigned char)text[i]))
+            {
+                i++;
+            }
+            millisecond = value;
+        }
+    }
+
+    if (hour > 24 || minute > 59 || second > 59 || millisecond > 999)
+    {
+        return false;
+    }
+    if (hour == 24 && (minute != 0 || second != 0 || millisecond != 0))
+    {
+        return false;
+    }
+
+    int offset_minutes = 0;
+    bool has_tz = false;
+    if (i < len)
+    {
+        if (text[i] == 'Z' || text[i] == 'z')
+        {
+            has_tz = true;
+            i++;
+        }
+        else if (text[i] == '+' || text[i] == '-')
+        {
+            has_tz = true;
+            int offset_sign = (text[i] == '-') ? -1 : 1;
+            i++;
+            int off_hour = 0;
+            int off_min = 0;
+            if (!js_date_parse_digits(text, len, &i, 2, &off_hour))
+            {
+                return false;
+            }
+            if (i < len && text[i] == ':')
+            {
+                i++;
+                if (!js_date_parse_digits(text, len, &i, 2, &off_min))
+                {
+                    return false;
+                }
+            }
+            else if (i + 1 < len && isdigit((unsigned char)text[i]) && isdigit((unsigned char)text[i + 1]))
+            {
+                if (!js_date_parse_digits(text, len, &i, 2, &off_min))
+                {
+                    return false;
+                }
+            }
+            offset_minutes = offset_sign * (off_hour * 60 + off_min);
+        }
+        else
+        {
+            return false;
+        }
+    }
+    if (i != len)
+    {
+        return false;
+    }
+
+    int64_t day_adjust = day;
+    int64_t hour_adjust = hour;
+    if (hour == 24)
+    {
+        hour_adjust = 0;
+        day_adjust += 1;
+    }
+
+    double total = js_date_make_time_value(year,
+                                           (int64_t)(month - 1),
+                                           day_adjust,
+                                           hour_adjust,
+                                           minute,
+                                           second,
+                                           millisecond);
+    if (has_tz)
+    {
+        total -= (double)offset_minutes * (double)JS_DATE_MS_PER_MINUTE;
+    }
+    total = js_date_time_clip(total);
+    *out = total;
+    return true;
+}
+
+static bool js_date_parse_rfc1123(const char *text, size_t len, double *out)
+{
+    if (!text || !out)
+    {
+        return false;
+    }
+    size_t i = 0;
+    if (len < 4)
+    {
+        return false;
+    }
+    i += 3;
+    if (i >= len || text[i] != ',')
+    {
+        return false;
+    }
+    i++;
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    int day = 0;
+    if (!js_date_parse_digits(text, len, &i, 2, &day))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    int month = 0;
+    if (!js_date_parse_month_name(text, len, &i, &month))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    int64_t year = 0;
+    if (!js_date_parse_year_token(text, len, &i, &year))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (!js_date_parse_digits(text, len, &i, 2, &hour))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ':')
+    {
+        return false;
+    }
+    i++;
+    if (!js_date_parse_digits(text, len, &i, 2, &minute))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ':')
+    {
+        return false;
+    }
+    i++;
+    if (!js_date_parse_digits(text, len, &i, 2, &second))
+    {
+        return false;
+    }
+    if (hour > 23 || minute > 59 || second > 59)
+    {
+        return false;
+    }
+    if (i + 4 > len || strncmp(text + i, " GMT", 4) != 0)
+    {
+        return false;
+    }
+    i += 4;
+    if (i != len)
+    {
+        return false;
+    }
+    if (day < 1 || day > js_date_days_in_month(year, month))
+    {
+        return false;
+    }
+    double total = js_date_make_time_value(year,
+                                           (int64_t)(month - 1),
+                                           day,
+                                           hour,
+                                           minute,
+                                           second,
+                                           0);
+    total = js_date_time_clip(total);
+    *out = total;
+    return true;
+}
+
+static bool js_date_parse_to_string(const char *text, size_t len, double *out)
+{
+    if (!text || !out)
+    {
+        return false;
+    }
+    size_t i = 0;
+    if (len < 4)
+    {
+        return false;
+    }
+    i += 3;
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    int month = 0;
+    if (!js_date_parse_month_name(text, len, &i, &month))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    int day = 0;
+    if (!js_date_parse_digits(text, len, &i, 2, &day))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    int64_t year = 0;
+    if (!js_date_parse_year_token(text, len, &i, &year))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (!js_date_parse_digits(text, len, &i, 2, &hour))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ':')
+    {
+        return false;
+    }
+    i++;
+    if (!js_date_parse_digits(text, len, &i, 2, &minute))
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ':')
+    {
+        return false;
+    }
+    i++;
+    if (!js_date_parse_digits(text, len, &i, 2, &second))
+    {
+        return false;
+    }
+    if (hour > 23 || minute > 59 || second > 59)
+    {
+        return false;
+    }
+    if (i >= len || text[i] != ' ')
+    {
+        return false;
+    }
+    i++;
+    if (i + 3 > len || strncmp(text + i, "GMT", 3) != 0)
+    {
+        return false;
+    }
+    i += 3;
+    if (i >= len)
+    {
+        return false;
+    }
+    int offset_minutes = 0;
+    if (text[i] == '+' || text[i] == '-')
+    {
+        int offset_sign = (text[i] == '-') ? -1 : 1;
+        i++;
+        int off_hour = 0;
+        int off_min = 0;
+        if (!js_date_parse_digits(text, len, &i, 2, &off_hour))
+        {
+            return false;
+        }
+        if (!js_date_parse_digits(text, len, &i, 2, &off_min))
+        {
+            return false;
+        }
+        offset_minutes = offset_sign * (off_hour * 60 + off_min);
+    }
+    else
+    {
+        return false;
+    }
+    if (day < 1 || day > js_date_days_in_month(year, month))
+    {
+        return false;
+    }
+    double total = js_date_make_time_value(year,
+                                           (int64_t)(month - 1),
+                                           day,
+                                           hour,
+                                           minute,
+                                           second,
+                                           0);
+    total -= (double)offset_minutes * (double)JS_DATE_MS_PER_MINUTE;
+    total = js_date_time_clip(total);
+    *out = total;
+    return true;
+}
+
+static double js_date_parse_string(const char *text, size_t len)
+{
+    if (!text)
+    {
+        return js_nan();
+    }
+    const char *ptr = text;
+    size_t use_len = len;
+    if (use_len == (size_t)-1)
+    {
+        use_len = strlen(text);
+    }
+    js_date_trim(&ptr, &use_len);
+    if (use_len == 0)
+    {
+        return js_nan();
+    }
+    double result = js_nan();
+    if (js_date_parse_iso(ptr, use_len, &result))
+    {
+        return result;
+    }
+    if (js_date_parse_rfc1123(ptr, use_len, &result))
+    {
+        return result;
+    }
+    if (js_date_parse_to_string(ptr, use_len, &result))
+    {
+        return result;
+    }
+    return js_nan();
+}
+
+static void js_date_finalize(void *user_data)
+{
+    js_date_t *date = (js_date_t *)user_data;
+    if (!date)
+    {
+        return;
+    }
+    free(date);
+}
+
+static void js_temporal_duration_finalize(void *user_data)
+{
+    js_temporal_duration_t *duration = (js_temporal_duration_t *)user_data;
+    if (!duration)
+    {
+        return;
+    }
+    free(duration);
+}
+
+static void js_temporal_instant_finalize(void *user_data)
+{
+    js_temporal_instant_t *instant = (js_temporal_instant_t *)user_data;
+    if (!instant)
+    {
+        return;
+    }
+    if (instant->epoch_nanoseconds)
+    {
+        js_bigint_destroy(instant->epoch_nanoseconds);
+    }
+    free(instant);
+}
+
+static bool js_object_define_data_property(js_object_t *obj,
+                                           const char *name,
+                                           const js_value_t *value,
+                                           bool writable,
+                                           bool enumerable,
+                                           bool configurable,
+                                           char **error_message)
+{
+    if (!obj || !name || !value)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_property_t *prop = js_object_find_property(obj, name);
+    if (!prop)
+    {
+        if (!js_object_set_slot(obj, name, value))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        prop = js_object_find_property(obj, name);
+        if (!prop)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+    }
+    if (prop->is_accessor)
+    {
+        js_value_destroy(&prop->getter);
+        js_value_destroy(&prop->setter);
+        prop->getter = js_value_make_undefined_internal();
+        prop->setter = js_value_make_undefined_internal();
+        prop->is_accessor = false;
+    }
+    js_value_destroy(&prop->value);
+    if (!js_value_copy(&prop->value, value))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    prop->writable = writable;
+    prop->enumerable = enumerable;
+    prop->configurable = configurable;
+    return true;
+}
+
+static bool js_object_define_accessor_property(js_object_t *obj,
+                                               const char *name,
+                                               const js_value_t *getter,
+                                               const js_value_t *setter,
+                                               bool enumerable,
+                                               bool configurable,
+                                               char **error_message)
+{
+    if (!obj || !name)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_property_t *prop = js_object_find_property(obj, name);
+    if (!prop)
+    {
+        js_value_t init = js_value_make_undefined_internal();
+        if (!js_object_set_slot(obj, name, &init))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        prop = js_object_find_property(obj, name);
+        if (!prop)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+    }
+    if (!prop->is_accessor)
+    {
+        js_value_destroy(&prop->value);
+        prop->value = js_value_make_undefined_internal();
+    }
+    prop->is_accessor = true;
+    prop->writable = false;
+    prop->enumerable = enumerable;
+    prop->configurable = configurable;
+    js_value_destroy(&prop->getter);
+    js_value_destroy(&prop->setter);
+    prop->getter = js_value_make_undefined_internal();
+    prop->setter = js_value_make_undefined_internal();
+    if (getter && getter->type != JS_VALUE_UNDEFINED)
+    {
+        if (!js_value_copy(&prop->getter, getter))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+    }
+    if (setter && setter->type != JS_VALUE_UNDEFINED)
+    {
+        if (!js_value_copy(&prop->setter, setter))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool js_object_define_native_method(js_object_t *obj,
+                                           const char *name,
+                                           js_native_fn_t fn,
+                                           void *user_data,
+                                           bool writable,
+                                           bool enumerable,
+                                           bool configurable,
+                                           char **error_message)
+{
+    if (!obj || !name || !fn)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_value_t value;
+    value.type = JS_VALUE_NATIVE_FN;
+    value.as.native.fn = fn;
+    value.as.native.user_data = user_data;
+    return js_object_define_data_property(obj, name, &value, writable, enumerable, configurable, error_message);
+}
+
+static bool js_temporal_duration_get(js_runtime_t *rt,
+                                     void *user_data,
+                                     const char *name,
+                                     js_value_t *out,
+                                     char **error_message);
+static bool js_temporal_duration_proto_get(js_runtime_t *rt,
+                                           void *user_data,
+                                           const char *name,
+                                           js_value_t *out,
+                                           char **error_message);
+static bool js_temporal_instant_get(js_runtime_t *rt,
+                                    void *user_data,
+                                    const char *name,
+                                    js_value_t *out,
+                                    char **error_message);
+static bool js_temporal_instant_proto_get(js_runtime_t *rt,
+                                          void *user_data,
+                                          const char *name,
+                                          js_value_t *out,
+                                          char **error_message);
+static bool js_temporal_plain_date_get(js_runtime_t *rt,
+                                       void *user_data,
+                                       const char *name,
+                                       js_value_t *out,
+                                       char **error_message);
+static bool js_temporal_plain_date_proto_get(js_runtime_t *rt,
+                                             void *user_data,
+                                             const char *name,
+                                             js_value_t *out,
+                                             char **error_message);
+static bool js_temporal_plain_time_get(js_runtime_t *rt,
+                                       void *user_data,
+                                       const char *name,
+                                       js_value_t *out,
+                                       char **error_message);
+static bool js_temporal_plain_time_proto_get(js_runtime_t *rt,
+                                             void *user_data,
+                                             const char *name,
+                                             js_value_t *out,
+                                             char **error_message);
+static bool js_temporal_plain_date_time_get(js_runtime_t *rt,
+                                            void *user_data,
+                                            const char *name,
+                                            js_value_t *out,
+                                            char **error_message);
+static bool js_temporal_plain_date_time_proto_get(js_runtime_t *rt,
+                                                  void *user_data,
+                                                  const char *name,
+                                                  js_value_t *out,
+                                                  char **error_message);
+static bool js_temporal_zoned_date_time_get(js_runtime_t *rt,
+                                            void *user_data,
+                                            const char *name,
+                                            js_value_t *out,
+                                            char **error_message);
+static bool js_temporal_zoned_date_time_proto_get(js_runtime_t *rt,
+                                                  void *user_data,
+                                                  const char *name,
+                                                  js_value_t *out,
+                                                  char **error_message);
+static bool js_temporal_plain_year_month_get(js_runtime_t *rt,
+                                             void *user_data,
+                                             const char *name,
+                                             js_value_t *out,
+                                             char **error_message);
+static bool js_temporal_plain_year_month_proto_get(js_runtime_t *rt,
+                                                   void *user_data,
+                                                   const char *name,
+                                                   js_value_t *out,
+                                                   char **error_message);
+static bool js_temporal_plain_month_day_get(js_runtime_t *rt,
+                                            void *user_data,
+                                            const char *name,
+                                            js_value_t *out,
+                                            char **error_message);
+static bool js_temporal_plain_month_day_proto_get(js_runtime_t *rt,
+                                                  void *user_data,
+                                                  const char *name,
+                                                  js_value_t *out,
+                                                  char **error_message);
+static bool js_temporal_now_get(js_runtime_t *rt,
+                                void *user_data,
+                                const char *name,
+                                js_value_t *out,
+                                char **error_message);
 
 static bool js_set_get(js_runtime_t *rt,
                        void *user_data,
@@ -76,6 +1220,16 @@ static bool js_array_proto_get(js_runtime_t *rt,
                                const char *name,
                                js_value_t *out,
                                char **error_message);
+static bool js_date_get(js_runtime_t *rt,
+                        void *user_data,
+                        const char *name,
+                        js_value_t *out,
+                        char **error_message);
+static bool js_date_proto_get(js_runtime_t *rt,
+                              void *user_data,
+                              const char *name,
+                              js_value_t *out,
+                              char **error_message);
 static bool js_math_get(js_runtime_t *rt,
                         void *user_data,
                         const char *name,
@@ -85,6 +1239,8 @@ js_object_t *js_get_object_proto(js_runtime_t *rt);
 js_object_t *js_get_function_proto(js_runtime_t *rt);
 js_object_t *js_get_array_proto(js_runtime_t *rt);
 js_object_t *js_get_math_object(js_runtime_t *rt);
+js_object_t *js_get_number_proto(js_runtime_t *rt);
+js_object_t *js_get_symbol_proto(js_runtime_t *rt);
 static bool js_iterator_map_get(js_runtime_t *rt,
                                 void *user_data,
                                 const char *name,
@@ -638,6 +1794,28 @@ static bool js_regexp_match_class(const char *pattern, size_t len, char target)
                 special_nonword = true;
                 i += 2;
             }
+            else if (esc == 'c')
+            {
+                if (i + 2 < len)
+                {
+                    char ctrl = pattern[i + 2];
+                    if ((ctrl >= 'A' && ctrl <= 'Z') || (ctrl >= 'a' && ctrl <= 'z'))
+                    {
+                        start_char = (int)(((unsigned char)ctrl) % 32);
+                        i += 3;
+                    }
+                    else
+                    {
+                        start_char = '\\';
+                        i += 1;
+                    }
+                }
+                else
+                {
+                    start_char = '\\';
+                    i += 1;
+                }
+            }
             else if (esc >= '0' && esc <= '7')
             {
                 size_t oct_index = i + 1;
@@ -698,6 +1876,28 @@ static bool js_regexp_match_class(const char *pattern, size_t len, char target)
                     {
                         end_char = esc;
                         i += 2;
+                    }
+                }
+                else if (esc == 'c')
+                {
+                    if (i + 2 < len)
+                    {
+                        char ctrl = pattern[i + 2];
+                        if ((ctrl >= 'A' && ctrl <= 'Z') || (ctrl >= 'a' && ctrl <= 'z'))
+                        {
+                            end_char = (int)(((unsigned char)ctrl) % 32);
+                            i += 3;
+                        }
+                        else
+                        {
+                            end_char = '\\';
+                            i += 1;
+                        }
+                    }
+                    else
+                    {
+                        end_char = '\\';
+                        i += 1;
                     }
                 }
                 else
@@ -1630,6 +2830,236 @@ static bool js_array_proto_get(js_runtime_t *rt,
     return true;
 }
 
+static bool js_date_get(js_runtime_t *rt,
+                        void *user_data,
+                        const char *name,
+                        js_value_t *out,
+                        char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_date_proto_get(js_runtime_t *rt,
+                              void *user_data,
+                              const char *name,
+                              js_value_t *out,
+                              char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!name)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    js_native_fn_t fn = NULL;
+    if (strcmp(name, "constructor") == 0)
+    {
+        fn = js_builtin_date;
+    }
+    else if (strcmp(name, "toString") == 0)
+    {
+        fn = js_date_proto_to_string;
+    }
+    else if (strcmp(name, "toDateString") == 0)
+    {
+        fn = js_date_proto_to_date_string;
+    }
+    else if (strcmp(name, "toTimeString") == 0)
+    {
+        fn = js_date_proto_to_time_string;
+    }
+    else if (strcmp(name, "toUTCString") == 0)
+    {
+        fn = js_date_proto_to_utc_string;
+    }
+    else if (strcmp(name, "toGMTString") == 0)
+    {
+        fn = js_date_proto_to_gmt_string;
+    }
+    else if (strcmp(name, "toISOString") == 0)
+    {
+        fn = js_date_proto_to_iso_string;
+    }
+    else if (strcmp(name, "toJSON") == 0)
+    {
+        fn = js_date_proto_to_json;
+    }
+    else if (strcmp(name, "valueOf") == 0)
+    {
+        fn = js_date_proto_value_of;
+    }
+    else if (strcmp(name, "getTime") == 0)
+    {
+        fn = js_date_proto_get_time;
+    }
+    else if (strcmp(name, "getFullYear") == 0)
+    {
+        fn = js_date_proto_get_full_year;
+    }
+    else if (strcmp(name, "getUTCFullYear") == 0)
+    {
+        fn = js_date_proto_get_utc_full_year;
+    }
+    else if (strcmp(name, "getMonth") == 0)
+    {
+        fn = js_date_proto_get_month;
+    }
+    else if (strcmp(name, "getUTCMonth") == 0)
+    {
+        fn = js_date_proto_get_utc_month;
+    }
+    else if (strcmp(name, "getDate") == 0)
+    {
+        fn = js_date_proto_get_date;
+    }
+    else if (strcmp(name, "getUTCDate") == 0)
+    {
+        fn = js_date_proto_get_utc_date;
+    }
+    else if (strcmp(name, "getDay") == 0)
+    {
+        fn = js_date_proto_get_day;
+    }
+    else if (strcmp(name, "getUTCDay") == 0)
+    {
+        fn = js_date_proto_get_utc_day;
+    }
+    else if (strcmp(name, "getHours") == 0)
+    {
+        fn = js_date_proto_get_hours;
+    }
+    else if (strcmp(name, "getUTCHours") == 0)
+    {
+        fn = js_date_proto_get_utc_hours;
+    }
+    else if (strcmp(name, "getMinutes") == 0)
+    {
+        fn = js_date_proto_get_minutes;
+    }
+    else if (strcmp(name, "getUTCMinutes") == 0)
+    {
+        fn = js_date_proto_get_utc_minutes;
+    }
+    else if (strcmp(name, "getSeconds") == 0)
+    {
+        fn = js_date_proto_get_seconds;
+    }
+    else if (strcmp(name, "getUTCSeconds") == 0)
+    {
+        fn = js_date_proto_get_utc_seconds;
+    }
+    else if (strcmp(name, "getMilliseconds") == 0)
+    {
+        fn = js_date_proto_get_milliseconds;
+    }
+    else if (strcmp(name, "getUTCMilliseconds") == 0)
+    {
+        fn = js_date_proto_get_utc_milliseconds;
+    }
+    else if (strcmp(name, "getTimezoneOffset") == 0)
+    {
+        fn = js_date_proto_get_timezone_offset;
+    }
+    else if (strcmp(name, "setTime") == 0)
+    {
+        fn = js_date_proto_set_time;
+    }
+    else if (strcmp(name, "setFullYear") == 0)
+    {
+        fn = js_date_proto_set_full_year;
+    }
+    else if (strcmp(name, "setUTCFullYear") == 0)
+    {
+        fn = js_date_proto_set_utc_full_year;
+    }
+    else if (strcmp(name, "setMonth") == 0)
+    {
+        fn = js_date_proto_set_month;
+    }
+    else if (strcmp(name, "setUTCMonth") == 0)
+    {
+        fn = js_date_proto_set_utc_month;
+    }
+    else if (strcmp(name, "setDate") == 0)
+    {
+        fn = js_date_proto_set_date;
+    }
+    else if (strcmp(name, "setUTCDate") == 0)
+    {
+        fn = js_date_proto_set_utc_date;
+    }
+    else if (strcmp(name, "setHours") == 0)
+    {
+        fn = js_date_proto_set_hours;
+    }
+    else if (strcmp(name, "setUTCHours") == 0)
+    {
+        fn = js_date_proto_set_utc_hours;
+    }
+    else if (strcmp(name, "setMinutes") == 0)
+    {
+        fn = js_date_proto_set_minutes;
+    }
+    else if (strcmp(name, "setUTCMinutes") == 0)
+    {
+        fn = js_date_proto_set_utc_minutes;
+    }
+    else if (strcmp(name, "setSeconds") == 0)
+    {
+        fn = js_date_proto_set_seconds;
+    }
+    else if (strcmp(name, "setUTCSeconds") == 0)
+    {
+        fn = js_date_proto_set_utc_seconds;
+    }
+    else if (strcmp(name, "setMilliseconds") == 0)
+    {
+        fn = js_date_proto_set_milliseconds;
+    }
+    else if (strcmp(name, "setUTCMilliseconds") == 0)
+    {
+        fn = js_date_proto_set_utc_milliseconds;
+    }
+    else if (strcmp(name, "getYear") == 0)
+    {
+        fn = js_date_proto_get_year;
+    }
+    else if (strcmp(name, "setYear") == 0)
+    {
+        fn = js_date_proto_set_year;
+    }
+    if (fn)
+    {
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = fn;
+        out->as.native.user_data = NULL;
+        return true;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
 static bool js_math_get(js_runtime_t *rt,
                         void *user_data,
                         const char *name,
@@ -1773,6 +3203,1069 @@ js_object_t *js_get_math_object(js_runtime_t *rt)
         (void)js_object_set_slot(rt->math_object, "__proto__", &proto_slot);
     }
     return rt->math_object;
+}
+
+js_object_t *js_get_date_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->date_proto)
+    {
+        return rt->date_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_date_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->date_proto = proto_val.as.object;
+    js_object_retain(rt->date_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->date_proto, "__proto__", &proto_slot);
+    }
+    return rt->date_proto;
+}
+
+js_object_t *js_get_number_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->number_proto)
+    {
+        return rt->number_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, NULL, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->number_proto = proto_val.as.object;
+    js_object_retain(rt->number_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->number_proto, "__proto__", &proto_slot);
+    }
+    return rt->number_proto;
+}
+
+js_object_t *js_get_symbol_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->symbol_proto)
+    {
+        return rt->symbol_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, NULL, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->symbol_proto = proto_val.as.object;
+    js_object_retain(rt->symbol_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->symbol_proto, "__proto__", &proto_slot);
+    }
+    return rt->symbol_proto;
+}
+
+js_object_t *js_get_temporal_now_object(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_now_object)
+    {
+        return rt->temporal_now_object;
+    }
+    js_value_t now_val;
+    if (!js_value_make_host_object(&now_val, js_temporal_now_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_now_object = now_val.as.object;
+    js_object_retain(rt->temporal_now_object);
+    js_value_destroy(&now_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_now_object, "__proto__", &proto_slot);
+    }
+    if (!js_object_define_native_method(rt->temporal_now_object,
+                                        "instant",
+                                        js_temporal_now_instant,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_now_object,
+                                        "plainDateISO",
+                                        js_temporal_now_plain_date_iso,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_now_object,
+                                        "plainTimeISO",
+                                        js_temporal_now_plain_time_iso,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_now_object,
+                                        "plainDateTimeISO",
+                                        js_temporal_now_plain_date_time_iso,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_now_object,
+                                        "zonedDateTimeISO",
+                                        js_temporal_now_zoned_date_time_iso,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_now_object,
+                                        "timeZoneId",
+                                        js_temporal_now_time_zone_id,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_object_release(rt->temporal_now_object);
+        rt->temporal_now_object = NULL;
+        return NULL;
+    }
+    js_value_t tag = js_value_make_undefined_internal();
+    if (!js_value_make_cstring(&tag, JS_TEMPORAL_TAG_NOW) ||
+        !js_object_define_data_property(rt->temporal_now_object,
+                                        "Symbol.toStringTag",
+                                        &tag,
+                                        false,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_value_destroy(&tag);
+        js_object_release(rt->temporal_now_object);
+        rt->temporal_now_object = NULL;
+        return NULL;
+    }
+    js_value_destroy(&tag);
+    return rt->temporal_now_object;
+}
+
+js_object_t *js_get_temporal_object(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_object)
+    {
+        return rt->temporal_object;
+    }
+    js_value_t obj_val;
+    if (!js_value_make_host_object(&obj_val, NULL, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_object = obj_val.as.object;
+    js_object_retain(rt->temporal_object);
+    js_value_destroy(&obj_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_object, "__proto__", &proto_slot);
+    }
+    if (!js_object_define_native_method(rt->temporal_object,
+                                        "Duration",
+                                        js_builtin_temporal_duration,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_object,
+                                        "Instant",
+                                        js_builtin_temporal_instant,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_object,
+                                        "PlainDate",
+                                        js_builtin_temporal_plain_date,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_object,
+                                        "PlainTime",
+                                        js_builtin_temporal_plain_time,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_object,
+                                        "PlainDateTime",
+                                        js_builtin_temporal_plain_date_time,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_object,
+                                        "ZonedDateTime",
+                                        js_builtin_temporal_zoned_date_time,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_object,
+                                        "PlainYearMonth",
+                                        js_builtin_temporal_plain_year_month,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_object,
+                                        "PlainMonthDay",
+                                        js_builtin_temporal_plain_month_day,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_object_release(rt->temporal_object);
+        rt->temporal_object = NULL;
+        return NULL;
+    }
+    js_object_t *now_obj = js_get_temporal_now_object(rt);
+    if (!now_obj)
+    {
+        js_object_release(rt->temporal_object);
+        rt->temporal_object = NULL;
+        return NULL;
+    }
+    js_value_t now_val;
+    memset(&now_val, 0, sizeof(now_val));
+    now_val.type = JS_VALUE_OBJECT;
+    now_val.as.object = now_obj;
+    js_object_retain(now_obj);
+    if (!js_object_define_data_property(rt->temporal_object,
+                                        "Now",
+                                        &now_val,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_value_destroy(&now_val);
+        js_object_release(rt->temporal_object);
+        rt->temporal_object = NULL;
+        return NULL;
+    }
+    js_value_destroy(&now_val);
+    js_value_t tag = js_value_make_undefined_internal();
+    if (!js_value_make_cstring(&tag, JS_TEMPORAL_TAG) ||
+        !js_object_define_data_property(rt->temporal_object,
+                                        "Symbol.toStringTag",
+                                        &tag,
+                                        false,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_value_destroy(&tag);
+        js_object_release(rt->temporal_object);
+        rt->temporal_object = NULL;
+        return NULL;
+    }
+    js_value_destroy(&tag);
+    return rt->temporal_object;
+}
+
+js_object_t *js_get_temporal_duration_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_duration_proto)
+    {
+        return rt->temporal_duration_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_temporal_duration_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_duration_proto = proto_val.as.object;
+    js_object_retain(rt->temporal_duration_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_duration_proto, "__proto__", &proto_slot);
+    }
+    if (!js_object_define_native_method(rt->temporal_duration_proto,
+                                        "constructor",
+                                        js_builtin_temporal_duration,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "negated",
+                                        js_temporal_duration_negated,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "abs",
+                                        js_temporal_duration_abs,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "toString",
+                                        js_temporal_duration_to_string,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "toJSON",
+                                        js_temporal_duration_to_json,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "toLocaleString",
+                                        js_temporal_duration_to_locale_string,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "valueOf",
+                                        js_temporal_duration_value_of,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "with",
+                                        js_temporal_duration_with,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "add",
+                                        js_temporal_duration_add,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "subtract",
+                                        js_temporal_duration_subtract,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "round",
+                                        js_temporal_duration_round,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_duration_proto,
+                                        "total",
+                                        js_temporal_duration_total,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    js_value_t getter;
+    getter.type = JS_VALUE_NATIVE_FN;
+    getter.as.native.fn = js_temporal_duration_getter;
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_YEARS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "years",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_MONTHS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "months",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_WEEKS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "weeks",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_DAYS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "days",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_HOURS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "hours",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_MINUTES;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "minutes",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_SECONDS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "seconds",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_MILLISECONDS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "milliseconds",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_MICROSECONDS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "microseconds",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_NANOSECONDS;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "nanoseconds",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_SIGN;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "sign",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_DURATION_FIELD_BLANK;
+    if (!js_object_define_accessor_property(rt->temporal_duration_proto,
+                                            "blank",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    js_value_t tag = js_value_make_undefined_internal();
+    if (!js_value_make_cstring(&tag, JS_TEMPORAL_TAG_DURATION) ||
+        !js_object_define_data_property(rt->temporal_duration_proto,
+                                        "Symbol.toStringTag",
+                                        &tag,
+                                        false,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_value_destroy(&tag);
+        js_object_release(rt->temporal_duration_proto);
+        rt->temporal_duration_proto = NULL;
+        return NULL;
+    }
+    js_value_destroy(&tag);
+    return rt->temporal_duration_proto;
+}
+
+js_object_t *js_get_temporal_instant_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_instant_proto)
+    {
+        return rt->temporal_instant_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_temporal_instant_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_instant_proto = proto_val.as.object;
+    js_object_retain(rt->temporal_instant_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_instant_proto, "__proto__", &proto_slot);
+    }
+    if (!js_object_define_native_method(rt->temporal_instant_proto,
+                                        "constructor",
+                                        js_builtin_temporal_instant,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "toString",
+                                        js_temporal_instant_to_string,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "toJSON",
+                                        js_temporal_instant_to_json,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "toLocaleString",
+                                        js_temporal_instant_to_locale_string,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "valueOf",
+                                        js_temporal_instant_value_of,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "add",
+                                        js_temporal_instant_add,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "subtract",
+                                        js_temporal_instant_subtract,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "since",
+                                        js_temporal_instant_since,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "until",
+                                        js_temporal_instant_until,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "round",
+                                        js_temporal_instant_round,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "equals",
+                                        js_temporal_instant_equals,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL) ||
+        !js_object_define_native_method(rt->temporal_instant_proto,
+                                        "toZonedDateTimeISO",
+                                        js_temporal_instant_to_zoned_date_time_iso,
+                                        NULL,
+                                        true,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_object_release(rt->temporal_instant_proto);
+        rt->temporal_instant_proto = NULL;
+        return NULL;
+    }
+    js_value_t getter;
+    getter.type = JS_VALUE_NATIVE_FN;
+    getter.as.native.fn = js_temporal_instant_getter;
+    getter.as.native.user_data = (void *)JS_TEMPORAL_INSTANT_FIELD_EPOCH_NANOSECONDS;
+    if (!js_object_define_accessor_property(rt->temporal_instant_proto,
+                                            "epochNanoseconds",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_instant_proto);
+        rt->temporal_instant_proto = NULL;
+        return NULL;
+    }
+    getter.as.native.user_data = (void *)JS_TEMPORAL_INSTANT_FIELD_EPOCH_MILLISECONDS;
+    if (!js_object_define_accessor_property(rt->temporal_instant_proto,
+                                            "epochMilliseconds",
+                                            &getter,
+                                            NULL,
+                                            false,
+                                            true,
+                                            NULL))
+    {
+        js_object_release(rt->temporal_instant_proto);
+        rt->temporal_instant_proto = NULL;
+        return NULL;
+    }
+    js_value_t tag = js_value_make_undefined_internal();
+    if (!js_value_make_cstring(&tag, JS_TEMPORAL_TAG_INSTANT) ||
+        !js_object_define_data_property(rt->temporal_instant_proto,
+                                        "Symbol.toStringTag",
+                                        &tag,
+                                        false,
+                                        false,
+                                        true,
+                                        NULL))
+    {
+        js_value_destroy(&tag);
+        js_object_release(rt->temporal_instant_proto);
+        rt->temporal_instant_proto = NULL;
+        return NULL;
+    }
+    js_value_destroy(&tag);
+    return rt->temporal_instant_proto;
+}
+
+static bool js_temporal_set_simple_proto(js_object_t *proto,
+                                         js_native_fn_t ctor,
+                                         const char *tag)
+{
+    if (!proto || !ctor || !tag)
+    {
+        return false;
+    }
+    if (!js_object_define_native_method(proto, "constructor", ctor, NULL, true, false, true, NULL))
+    {
+        return false;
+    }
+    js_value_t tag_val = js_value_make_undefined_internal();
+    if (!js_value_make_cstring(&tag_val, tag) ||
+        !js_object_define_data_property(proto, "Symbol.toStringTag", &tag_val, false, false, true, NULL))
+    {
+        js_value_destroy(&tag_val);
+        return false;
+    }
+    js_value_destroy(&tag_val);
+    return true;
+}
+
+js_object_t *js_get_temporal_plain_date_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_plain_date_proto)
+    {
+        return rt->temporal_plain_date_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_temporal_plain_date_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_plain_date_proto = proto_val.as.object;
+    js_object_retain(rt->temporal_plain_date_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_plain_date_proto, "__proto__", &proto_slot);
+    }
+    if (!js_temporal_set_simple_proto(rt->temporal_plain_date_proto,
+                                      js_builtin_temporal_plain_date,
+                                      JS_TEMPORAL_TAG_PLAIN_DATE))
+    {
+        js_object_release(rt->temporal_plain_date_proto);
+        rt->temporal_plain_date_proto = NULL;
+        return NULL;
+    }
+    return rt->temporal_plain_date_proto;
+}
+
+js_object_t *js_get_temporal_plain_time_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_plain_time_proto)
+    {
+        return rt->temporal_plain_time_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_temporal_plain_time_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_plain_time_proto = proto_val.as.object;
+    js_object_retain(rt->temporal_plain_time_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_plain_time_proto, "__proto__", &proto_slot);
+    }
+    if (!js_temporal_set_simple_proto(rt->temporal_plain_time_proto,
+                                      js_builtin_temporal_plain_time,
+                                      JS_TEMPORAL_TAG_PLAIN_TIME))
+    {
+        js_object_release(rt->temporal_plain_time_proto);
+        rt->temporal_plain_time_proto = NULL;
+        return NULL;
+    }
+    return rt->temporal_plain_time_proto;
+}
+
+js_object_t *js_get_temporal_plain_date_time_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_plain_date_time_proto)
+    {
+        return rt->temporal_plain_date_time_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_temporal_plain_date_time_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_plain_date_time_proto = proto_val.as.object;
+    js_object_retain(rt->temporal_plain_date_time_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_plain_date_time_proto, "__proto__", &proto_slot);
+    }
+    if (!js_temporal_set_simple_proto(rt->temporal_plain_date_time_proto,
+                                      js_builtin_temporal_plain_date_time,
+                                      JS_TEMPORAL_TAG_PLAIN_DATE_TIME))
+    {
+        js_object_release(rt->temporal_plain_date_time_proto);
+        rt->temporal_plain_date_time_proto = NULL;
+        return NULL;
+    }
+    return rt->temporal_plain_date_time_proto;
+}
+
+js_object_t *js_get_temporal_zoned_date_time_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_zoned_date_time_proto)
+    {
+        return rt->temporal_zoned_date_time_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_temporal_zoned_date_time_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_zoned_date_time_proto = proto_val.as.object;
+    js_object_retain(rt->temporal_zoned_date_time_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_zoned_date_time_proto, "__proto__", &proto_slot);
+    }
+    if (!js_temporal_set_simple_proto(rt->temporal_zoned_date_time_proto,
+                                      js_builtin_temporal_zoned_date_time,
+                                      JS_TEMPORAL_TAG_ZONED_DATE_TIME))
+    {
+        js_object_release(rt->temporal_zoned_date_time_proto);
+        rt->temporal_zoned_date_time_proto = NULL;
+        return NULL;
+    }
+    return rt->temporal_zoned_date_time_proto;
+}
+
+js_object_t *js_get_temporal_plain_year_month_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_plain_year_month_proto)
+    {
+        return rt->temporal_plain_year_month_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_temporal_plain_year_month_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_plain_year_month_proto = proto_val.as.object;
+    js_object_retain(rt->temporal_plain_year_month_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_plain_year_month_proto, "__proto__", &proto_slot);
+    }
+    if (!js_temporal_set_simple_proto(rt->temporal_plain_year_month_proto,
+                                      js_builtin_temporal_plain_year_month,
+                                      JS_TEMPORAL_TAG_PLAIN_YEAR_MONTH))
+    {
+        js_object_release(rt->temporal_plain_year_month_proto);
+        rt->temporal_plain_year_month_proto = NULL;
+        return NULL;
+    }
+    return rt->temporal_plain_year_month_proto;
+}
+
+js_object_t *js_get_temporal_plain_month_day_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->temporal_plain_month_day_proto)
+    {
+        return rt->temporal_plain_month_day_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_temporal_plain_month_day_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->temporal_plain_month_day_proto = proto_val.as.object;
+    js_object_retain(rt->temporal_plain_month_day_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->temporal_plain_month_day_proto, "__proto__", &proto_slot);
+    }
+    if (!js_temporal_set_simple_proto(rt->temporal_plain_month_day_proto,
+                                      js_builtin_temporal_plain_month_day,
+                                      JS_TEMPORAL_TAG_PLAIN_MONTH_DAY))
+    {
+        js_object_release(rt->temporal_plain_month_day_proto);
+        rt->temporal_plain_month_day_proto = NULL;
+        return NULL;
+    }
+    return rt->temporal_plain_month_day_proto;
 }
 
 bool js_builtin_iterator(js_runtime_t *rt,
@@ -2150,6 +4643,20 @@ static bool js_regexp_parse_atom(const char *pattern,
                 out->literal = (char)value;
                 *index = oct_index;
                 return true;
+            }
+        }
+        if (esc == 'c')
+        {
+            if (*index + 2 < len)
+            {
+                char ctrl = pattern[*index + 2];
+                if ((ctrl >= 'A' && ctrl <= 'Z') || (ctrl >= 'a' && ctrl <= 'z'))
+                {
+                    out->kind = JS_REGEXP_ATOM_LITERAL;
+                    out->literal = (char)(((unsigned char)ctrl) % 32);
+                    *index += 3;
+                    return true;
+                }
             }
         }
         out->kind = JS_REGEXP_ATOM_LITERAL;
@@ -2702,6 +5209,50 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
             {
                 proto = js_get_function_proto(rt);
             }
+            else if (native_name && strcmp(native_name, "Date") == 0)
+            {
+                proto = js_get_date_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "Number") == 0)
+            {
+                proto = js_get_number_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "Symbol") == 0)
+            {
+                proto = js_get_symbol_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "Duration") == 0)
+            {
+                proto = js_get_temporal_duration_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "Instant") == 0)
+            {
+                proto = js_get_temporal_instant_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainDate") == 0)
+            {
+                proto = js_get_temporal_plain_date_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainTime") == 0)
+            {
+                proto = js_get_temporal_plain_time_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainDateTime") == 0)
+            {
+                proto = js_get_temporal_plain_date_time_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "ZonedDateTime") == 0)
+            {
+                proto = js_get_temporal_zoned_date_time_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainYearMonth") == 0)
+            {
+                proto = js_get_temporal_plain_year_month_proto(rt);
+            }
+            else if (native_name && strcmp(native_name, "PlainMonthDay") == 0)
+            {
+                proto = js_get_temporal_plain_month_day_proto(rt);
+            }
             if (proto)
             {
                 out->exists = true;
@@ -2771,6 +5322,32 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
             out->writable = true;
             out->enumerable = false;
             out->configurable = true;
+        }
+        if (native_name && strcmp(native_name, "Date") == 0)
+        {
+            js_native_fn_t fn = NULL;
+            if (strcmp(name, "now") == 0)
+            {
+                fn = js_builtin_date_now;
+            }
+            else if (strcmp(name, "parse") == 0)
+            {
+                fn = js_builtin_date_parse;
+            }
+            else if (strcmp(name, "UTC") == 0)
+            {
+                fn = js_builtin_date_utc;
+            }
+            if (fn)
+            {
+                out->exists = true;
+                out->value.type = JS_VALUE_NATIVE_FN;
+                out->value.as.native.fn = fn;
+                out->value.as.native.user_data = NULL;
+                out->writable = true;
+                out->enumerable = false;
+                out->configurable = true;
+            }
         }
         return true;
     }
@@ -3214,11 +5791,7 @@ static bool js_builtin_object_get_value(js_runtime_t *rt,
         *out = js_value_make_undefined_internal();
         return true;
     }
-    if (object->get_fn)
-    {
-        return object->get_fn(rt, object->user_data, name, out, error_message);
-    }
-    return js_object_get_slot(object, name, out);
+    return js_object_get_property(rt, object, name, out, error_message);
 }
 
 static bool js_value_is_primitive_local(const js_value_t *value)
@@ -3227,12 +5800,17 @@ static bool js_value_is_primitive_local(const js_value_t *value)
     {
         return false;
     }
+    if (value->type == JS_VALUE_OBJECT && value->as.object && js_object_is_symbol(value->as.object))
+    {
+        return true;
+    }
     switch (value->type)
     {
         case JS_VALUE_UNDEFINED:
         case JS_VALUE_NULL:
         case JS_VALUE_BOOL:
         case JS_VALUE_NUMBER:
+        case JS_VALUE_BIGINT:
         case JS_VALUE_STRING:
             return true;
         default:
@@ -3272,8 +5850,117 @@ static bool js_try_object_method_number(js_runtime_t *rt,
     }
     js_value_t result = js_value_make_undefined_internal();
     char *err = NULL;
-    bool ok = js_call_value(rt, &method, 0, NULL, &result, &err);
+    bool ok = false;
+    if (method.type == JS_VALUE_NATIVE_FN && js_native_needs_this(method.as.native.fn))
+    {
+        js_value_t this_arg;
+        memset(&this_arg, 0, sizeof(this_arg));
+        this_arg.type = JS_VALUE_OBJECT;
+        this_arg.as.object = object;
+        ok = js_call_value(rt, &method, 1, &this_arg, &result, &err);
+    }
+    else if (method.type == JS_VALUE_FUNCTION && rt && object)
+    {
+        js_object_t *prev_global = rt->global_object;
+        rt->global_object = object;
+        ok = js_call_value(rt, &method, 0, NULL, &result, &err);
+        rt->global_object = prev_global;
+    }
+    else
+    {
+        ok = js_call_value(rt, &method, 0, NULL, &result, &err);
+    }
     js_value_destroy(&method);
+    if (!ok)
+    {
+        if (error_message)
+        {
+            *error_message = err ? err : js_strdup("method call failed");
+        }
+        else
+        {
+            free(err);
+        }
+        return false;
+    }
+    *out = result;
+    return true;
+}
+
+static bool js_try_object_method_with_hint(js_runtime_t *rt,
+                                           js_object_t *object,
+                                           const char *name,
+                                           const char *hint,
+                                           js_value_t *out,
+                                           bool *called,
+                                           char **error_message)
+{
+    if (called)
+    {
+        *called = false;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_value_t method = js_value_make_undefined_internal();
+    if (!js_builtin_object_get_value(rt, object, name, &method, error_message))
+    {
+        return false;
+    }
+    if (method.type != JS_VALUE_FUNCTION && method.type != JS_VALUE_NATIVE_FN)
+    {
+        js_value_destroy(&method);
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (called)
+    {
+        *called = true;
+    }
+    js_value_t hint_val = js_value_make_undefined_internal();
+    if (!js_value_make_cstring(&hint_val, hint ? hint : "default"))
+    {
+        js_value_destroy(&method);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_value_t result = js_value_make_undefined_internal();
+    char *err = NULL;
+    bool ok = false;
+    if (method.type == JS_VALUE_NATIVE_FN && js_native_needs_this(method.as.native.fn))
+    {
+        js_value_t args[2];
+        if (!js_value_copy(&args[0], &(js_value_t){ .type = JS_VALUE_OBJECT, .as.object = object }))
+        {
+            js_value_destroy(&method);
+            js_value_destroy(&hint_val);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        args[1] = hint_val;
+        ok = js_call_value(rt, &method, 2, args, &result, &err);
+        js_value_destroy(&args[0]);
+    }
+    else if (method.type == JS_VALUE_FUNCTION && rt && object)
+    {
+        js_object_t *prev_global = rt->global_object;
+        rt->global_object = object;
+        ok = js_call_value(rt, &method, 1, &hint_val, &result, &err);
+        rt->global_object = prev_global;
+    }
+    else
+    {
+        ok = js_call_value(rt, &method, 1, &hint_val, &result, &err);
+    }
+    js_value_destroy(&method);
+    js_value_destroy(&hint_val);
     if (!ok)
     {
         if (error_message)
@@ -3303,11 +5990,92 @@ static bool js_object_to_primitive_number(js_runtime_t *rt,
     {
         return false;
     }
+    bool called = false;
+    js_value_t result = js_value_make_undefined_internal();
+    if (!js_try_object_method_with_hint(rt, object, "Symbol.toPrimitive", "number", &result, &called, error_message))
+    {
+        return false;
+    }
+    if (called)
+    {
+        if (js_value_is_primitive_local(&result))
+        {
+            *out = result;
+            return true;
+        }
+        js_value_destroy(&result);
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: @@toPrimitive must return a primitive");
+        }
+        return false;
+    }
+
     const char *order[2] = {"valueOf", "toString"};
     for (size_t i = 0; i < 2; ++i)
     {
-        bool called = false;
-        js_value_t result = js_value_make_undefined_internal();
+        called = false;
+        result = js_value_make_undefined_internal();
+        if (!js_try_object_method_number(rt, object, order[i], &result, &called, error_message))
+        {
+            return false;
+        }
+        if (!called)
+        {
+            continue;
+        }
+        if (js_value_is_primitive_local(&result))
+        {
+            *out = result;
+            return true;
+        }
+        js_value_destroy(&result);
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: cannot convert object to primitive");
+    }
+    return false;
+}
+
+static bool js_date_object_to_primitive_default(js_runtime_t *rt,
+                                                js_object_t *object,
+                                                js_value_t *out,
+                                                char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!rt || !object || !out)
+    {
+        return false;
+    }
+    bool called = false;
+    js_value_t result = js_value_make_undefined_internal();
+    if (!js_try_object_method_with_hint(rt, object, "Symbol.toPrimitive", "default", &result, &called, error_message))
+    {
+        return false;
+    }
+    if (called)
+    {
+        if (js_value_is_primitive_local(&result))
+        {
+            *out = result;
+            return true;
+        }
+        js_value_destroy(&result);
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: @@toPrimitive must return a primitive");
+        }
+        return false;
+    }
+    const char *order[2] = {"valueOf", "toString"};
+    for (size_t i = 0; i < 2; ++i)
+    {
+        called = false;
+        result = js_value_make_undefined_internal();
         if (!js_try_object_method_number(rt, object, order[i], &result, &called, error_message))
         {
             return false;
@@ -6583,6 +9351,8 @@ bool js_builtin_object_to_string(js_runtime_t *rt,
             return js_value_make_cstring(out, "[object Boolean]");
         case JS_VALUE_NUMBER:
             return js_value_make_cstring(out, "[object Number]");
+        case JS_VALUE_BIGINT:
+            return js_value_make_cstring(out, "[object BigInt]");
         case JS_VALUE_STRING:
             return js_value_make_cstring(out, "[object String]");
         case JS_VALUE_ARRAY:
@@ -6597,6 +9367,39 @@ bool js_builtin_object_to_string(js_runtime_t *rt,
             }
             if (this_val->as.object)
             {
+                js_value_t tag = js_value_make_undefined_internal();
+                if (js_object_get_property(rt, this_val->as.object, "Symbol.toStringTag", &tag, NULL))
+                {
+                    if (tag.type == JS_VALUE_STRING && tag.as.string.data)
+                    {
+                        size_t tag_len = tag.as.string.len;
+                        size_t total_len = tag_len + 9;
+                        char *buffer = (char *)malloc(total_len + 1);
+                        if (!buffer)
+                        {
+                            js_value_destroy(&tag);
+                            if (error_message)
+                            {
+                                *error_message = js_strdup("allocation failed");
+                            }
+                            return false;
+                        }
+                        memcpy(buffer, "[object ", 8);
+                        memcpy(buffer + 8, tag.as.string.data, tag_len);
+                        buffer[8 + tag_len] = ']';
+                        buffer[total_len] = '\0';
+                        bool ok = js_value_make_string(out, buffer, total_len);
+                        free(buffer);
+                        js_value_destroy(&tag);
+                        return ok;
+                    }
+                    js_value_destroy(&tag);
+                }
+                if (this_val->as.object->get_fn == js_date_get ||
+                    this_val->as.object->get_fn == js_date_proto_get)
+                {
+                    return js_value_make_cstring(out, "[object Date]");
+                }
                 js_object_t *array_proto = js_get_array_proto(rt);
                 if (array_proto && this_val->as.object == array_proto)
                 {
@@ -7574,6 +10377,146 @@ bool js_builtin_number(js_runtime_t *rt,
     return true;
 }
 
+bool js_builtin_bigint(js_runtime_t *rt,
+                       size_t argc,
+                       const js_value_t *argv,
+                       void *user_data,
+                       js_value_t *out,
+                       char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (rt && rt->constructing && rt->constructing_fn == js_builtin_bigint)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: BigInt is not a constructor");
+        }
+        return false;
+    }
+    if (argc == 0 || !argv)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: cannot convert undefined to BigInt");
+        }
+        return false;
+    }
+    js_bigint_t *big = NULL;
+    if (!js_value_to_bigint(rt, &argv[0], &big, error_message))
+    {
+        return false;
+    }
+    out->type = JS_VALUE_BIGINT;
+    out->as.bigint = big;
+    return true;
+}
+
+bool js_builtin_bigint_to_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (const js_value_t *)user_data;
+    if (!this_val || this_val->type != JS_VALUE_BIGINT || !this_val->as.bigint)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: BigInt.prototype.toString called on non-bigint");
+        }
+        return false;
+    }
+    int radix = 10;
+    if (argc > 0 && argv && argv[0].type != JS_VALUE_UNDEFINED)
+    {
+        bool ok = true;
+        double r = js_value_to_number(&argv[0], &ok);
+        if (ok && !js_is_nan(r))
+        {
+            radix = (int)r;
+        }
+        if (radix != 10)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("RangeError: invalid radix");
+            }
+            return false;
+        }
+    }
+    char *text = js_bigint_to_string(this_val->as.bigint);
+    if (!text)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    out->type = JS_VALUE_STRING;
+    out->as.string.data = text;
+    out->as.string.len = strlen(text);
+    return true;
+}
+
+bool js_builtin_bigint_value_of(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (const js_value_t *)user_data;
+    if (!this_val || this_val->type != JS_VALUE_BIGINT || !this_val->as.bigint)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: BigInt.prototype.valueOf called on non-bigint");
+        }
+        return false;
+    }
+    out->type = JS_VALUE_BIGINT;
+    out->as.bigint = js_bigint_clone(this_val->as.bigint);
+    if (!out->as.bigint)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
 bool js_builtin_escape(js_runtime_t *rt,
                        size_t argc,
                        const js_value_t *argv,
@@ -7849,6 +10792,15 @@ bool js_builtin_symbol(js_runtime_t *rt,
             }
             return false;
         }
+        js_object_t *proto = js_get_symbol_proto(rt);
+        if (proto && out->type == JS_VALUE_OBJECT && out->as.object)
+        {
+            js_value_t proto_val;
+            memset(&proto_val, 0, sizeof(proto_val));
+            proto_val.type = JS_VALUE_OBJECT;
+            proto_val.as.object = proto;
+            (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+        }
         return true;
     }
     js_temp_string_t temp = {0};
@@ -7858,6 +10810,18 @@ bool js_builtin_symbol(js_runtime_t *rt,
     }
     bool ok = js_value_make_symbol(out, temp.data ? temp.data : "");
     js_temp_string_release(&temp);
+    if (ok)
+    {
+        js_object_t *proto = js_get_symbol_proto(rt);
+        if (proto && out->type == JS_VALUE_OBJECT && out->as.object)
+        {
+            js_value_t proto_val;
+            memset(&proto_val, 0, sizeof(proto_val));
+            proto_val.type = JS_VALUE_OBJECT;
+            proto_val.as.object = proto;
+            (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+        }
+    }
     if (!ok && error_message)
     {
         *error_message = js_strdup("allocation failed");
@@ -8431,6 +11395,4876 @@ bool js_builtin_verify_property(js_runtime_t *rt,
     js_value_destroy(&actual.setter);
     *out = js_value_make_bool(true);
     free(name);
+    return true;
+}
+
+typedef struct
+{
+    js_value_t primitive;
+} js_boxed_primitive_t;
+
+static void js_boxed_primitive_finalize(void *user_data)
+{
+    js_boxed_primitive_t *boxed = (js_boxed_primitive_t *)user_data;
+    if (!boxed)
+    {
+        return;
+    }
+    js_value_destroy(&boxed->primitive);
+    free(boxed);
+}
+
+static bool js_boxed_primitive_value_of(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_boxed_primitive_t *boxed = (js_boxed_primitive_t *)user_data;
+    if (!boxed)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    return js_value_copy(out, &boxed->primitive);
+}
+
+static bool js_date_box_number(js_runtime_t *rt,
+                               const js_value_t *value,
+                               js_value_t *out,
+                               char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_boxed_primitive_t *boxed = (js_boxed_primitive_t *)calloc(1, sizeof(*boxed));
+    if (!boxed)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!js_value_copy(&boxed->primitive, value))
+    {
+        free(boxed);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!js_value_make_host_object(out, NULL, NULL, js_boxed_primitive_finalize, boxed))
+    {
+        js_value_destroy(&boxed->primitive);
+        free(boxed);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_number_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    js_value_t value_of;
+    memset(&value_of, 0, sizeof(value_of));
+    value_of.type = JS_VALUE_NATIVE_FN;
+    value_of.as.native.fn = js_boxed_primitive_value_of;
+    value_of.as.native.user_data = boxed;
+    (void)js_object_set_slot(out->as.object, "valueOf", &value_of);
+    js_value_t to_string;
+    memset(&to_string, 0, sizeof(to_string));
+    to_string.type = JS_VALUE_NATIVE_FN;
+    to_string.as.native.fn = js_builtin_number_to_string;
+    to_string.as.native.user_data = &boxed->primitive;
+    (void)js_object_set_slot(out->as.object, "toString", &to_string);
+    return true;
+}
+
+static bool js_date_require_object(const js_value_t *this_val,
+                                   js_date_t **out_date,
+                                   char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out_date)
+    {
+        return false;
+    }
+    if (!this_val || this_val->type != JS_VALUE_OBJECT || !this_val->as.object ||
+        this_val->as.object->get_fn != js_date_get)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Date method called on non-Date object");
+        }
+        return false;
+    }
+    js_date_t *date = (js_date_t *)this_val->as.object->user_data;
+    if (!date)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Date method called on non-Date object");
+        }
+        return false;
+    }
+    *out_date = date;
+    return true;
+}
+
+static void js_date_format_year(int64_t year, char *buf, size_t len)
+{
+    if (!buf || len == 0)
+    {
+        return;
+    }
+    if (year >= 0 && year <= 9999)
+    {
+        (void)snprintf(buf, len, "%04lld", (long long)year);
+        return;
+    }
+    if (year < 0)
+    {
+        int64_t abs_year = -year;
+        if (abs_year < 10000)
+        {
+            (void)snprintf(buf, len, "-%04lld", (long long)abs_year);
+        }
+        else
+        {
+            (void)snprintf(buf, len, "-%lld", (long long)abs_year);
+        }
+        return;
+    }
+    (void)snprintf(buf, len, "%lld", (long long)year);
+}
+
+static void js_date_format_iso_year(int64_t year, char *buf, size_t len)
+{
+    if (!buf || len == 0)
+    {
+        return;
+    }
+    if (year >= 0 && year <= 9999)
+    {
+        (void)snprintf(buf, len, "%04lld", (long long)year);
+        return;
+    }
+    char sign = (year < 0) ? '-' : '+';
+    int64_t abs_year = (year < 0) ? -year : year;
+    (void)snprintf(buf, len, "%c%06lld", sign, (long long)abs_year);
+}
+
+static bool js_date_is_finite_number(double value)
+{
+    return !js_is_nan(value) && value < 1.0e308 && value > -1.0e308;
+}
+
+static bool js_date_to_number(js_runtime_t *rt,
+                              const js_value_t *value,
+                              double *out,
+                              char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!value)
+    {
+        *out = js_nan();
+        return true;
+    }
+    js_value_t prim = js_value_make_undefined_internal();
+    bool prim_owned = false;
+    if (value->type == JS_VALUE_OBJECT && value->as.object)
+    {
+        if (js_object_is_symbol(value->as.object))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("TypeError: cannot convert Symbol to number");
+            }
+            return false;
+        }
+        if (!js_object_to_primitive_number(rt, value->as.object, &prim, error_message))
+        {
+            return false;
+        }
+        prim_owned = true;
+        value = &prim;
+    }
+    if (value->type == JS_VALUE_OBJECT && value->as.object && js_object_is_symbol(value->as.object))
+    {
+        if (prim_owned)
+        {
+            js_value_destroy(&prim);
+        }
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: cannot convert Symbol to number");
+        }
+        return false;
+    }
+    bool ok_num = true;
+    double num = js_value_to_number(value, &ok_num);
+    if (!ok_num)
+    {
+        num = js_nan();
+    }
+    if (prim_owned)
+    {
+        js_value_destroy(&prim);
+    }
+    *out = num;
+    return true;
+}
+
+static bool js_date_to_primitive_default_value(js_runtime_t *rt,
+                                               const js_value_t *value,
+                                               js_value_t *out,
+                                               char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!value)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (value->type == JS_VALUE_OBJECT && value->as.object)
+    {
+        return js_date_object_to_primitive_default(rt, value->as.object, out, error_message);
+    }
+    return js_value_copy(out, value);
+}
+
+bool js_builtin_date(js_runtime_t *rt,
+                     size_t argc,
+                     const js_value_t *argv,
+                     void *user_data,
+                     js_value_t *out,
+                     char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_date;
+    if (!constructing)
+    {
+        double now = js_date_now_ms();
+        if (js_is_nan(now))
+        {
+            return js_value_make_cstring(out, "Invalid Date");
+        }
+        js_date_parts_t parts;
+        if (!js_date_breakdown(now, &parts))
+        {
+            return js_value_make_cstring(out, "Invalid Date");
+        }
+        char year_buf[32];
+        js_date_format_year(parts.year, year_buf, sizeof(year_buf));
+        char buf[128];
+        int len = snprintf(buf, sizeof(buf),
+                           "%s %s %02d %s %02d:%02d:%02d GMT+0000",
+                           JS_DATE_DAY_NAMES[parts.weekday],
+                           JS_DATE_MONTH_NAMES[parts.month - 1],
+                           parts.day,
+                           year_buf,
+                           parts.hour,
+                           parts.minute,
+                           parts.second);
+        if (len < 0)
+        {
+            return false;
+        }
+        return js_value_make_string(out, buf, (size_t)len);
+    }
+
+    double time_ms = js_nan();
+    if (!argv || argc == 0)
+    {
+        time_ms = js_date_now_ms();
+    }
+    else if (argc == 1)
+    {
+        const js_value_t *arg = &argv[0];
+        if (arg->type == JS_VALUE_OBJECT && arg->as.object &&
+            arg->as.object->get_fn == js_date_get)
+        {
+            js_date_t *other = (js_date_t *)arg->as.object->user_data;
+            time_ms = other ? other->time_ms : js_nan();
+        }
+        else
+        {
+            js_value_t prim = js_value_make_undefined_internal();
+            if (arg->type == JS_VALUE_OBJECT && arg->as.object)
+            {
+                if (!js_date_to_primitive_default_value(rt, arg, &prim, error_message))
+                {
+                    return false;
+                }
+                arg = &prim;
+            }
+            if (arg->type == JS_VALUE_STRING)
+            {
+                time_ms = js_date_parse_string(arg->as.string.data, arg->as.string.len);
+            }
+            else
+            {
+                double num = js_nan();
+                if (!js_date_to_number(rt, arg, &num, error_message))
+                {
+                    js_value_destroy(&prim);
+                    return false;
+                }
+                time_ms = num;
+            }
+            js_value_destroy(&prim);
+        }
+    }
+    else
+    {
+        double year_num = js_nan();
+        double month_num = js_nan();
+        double date_num = 1.0;
+        double hour_num = 0.0;
+        double minute_num = 0.0;
+        double second_num = 0.0;
+        double millisecond_num = 0.0;
+        if (!js_date_to_number(rt, &argv[0], &year_num, error_message))
+        {
+            return false;
+        }
+        if (!js_date_to_number(rt, &argv[1], &month_num, error_message))
+        {
+            return false;
+        }
+        if (argc > 2)
+        {
+            if (!js_date_to_number(rt, &argv[2], &date_num, error_message))
+            {
+                return false;
+            }
+        }
+        if (argc > 3)
+        {
+            if (!js_date_to_number(rt, &argv[3], &hour_num, error_message))
+            {
+                return false;
+            }
+        }
+        if (argc > 4)
+        {
+            if (!js_date_to_number(rt, &argv[4], &minute_num, error_message))
+            {
+                return false;
+            }
+        }
+        if (argc > 5)
+        {
+            if (!js_date_to_number(rt, &argv[5], &second_num, error_message))
+            {
+                return false;
+            }
+        }
+        if (argc > 6)
+        {
+            if (!js_date_to_number(rt, &argv[6], &millisecond_num, error_message))
+            {
+                return false;
+            }
+        }
+        bool any_nan = js_is_nan(year_num) ||
+                       js_is_nan(month_num) ||
+                       js_is_nan(date_num) ||
+                       js_is_nan(hour_num) ||
+                       js_is_nan(minute_num) ||
+                       js_is_nan(second_num) ||
+                       js_is_nan(millisecond_num);
+        if (any_nan)
+        {
+            time_ms = js_nan();
+        }
+        else
+        {
+            int64_t year_int = 0;
+            int64_t month_int = 0;
+            int64_t date_int = 0;
+            int64_t hour_int = 0;
+            int64_t minute_int = 0;
+            int64_t second_int = 0;
+            int64_t ms_int = 0;
+            if (!js_date_double_to_int64(year_num, &year_int) ||
+                !js_date_double_to_int64(month_num, &month_int) ||
+                !js_date_double_to_int64(date_num, &date_int) ||
+                !js_date_double_to_int64(hour_num, &hour_int) ||
+                !js_date_double_to_int64(minute_num, &minute_int) ||
+                !js_date_double_to_int64(second_num, &second_int) ||
+                !js_date_double_to_int64(millisecond_num, &ms_int))
+            {
+                time_ms = js_nan();
+            }
+            else
+            {
+                if (year_int >= 0 && year_int <= 99)
+                {
+                    year_int += 1900;
+                }
+                time_ms = js_date_make_time_value(year_int,
+                                                  month_int,
+                                                  date_int,
+                                                  hour_int,
+                                                  minute_int,
+                                                  second_int,
+                                                  ms_int);
+            }
+        }
+    }
+    time_ms = js_date_time_clip(time_ms);
+
+    js_date_t *date = (js_date_t *)calloc(1, sizeof(*date));
+    if (!date)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    date->time_ms = time_ms;
+    if (!js_value_make_host_object(out, js_date_get, NULL, js_date_finalize, date))
+    {
+        free(date);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_date_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    return true;
+}
+
+bool js_builtin_date_now(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_number(js_date_now_ms());
+    return true;
+}
+
+bool js_builtin_date_parse(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *arg = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_temp_string_t temp = {0};
+    if (!js_temp_string_from_value(rt, arg, &temp, error_message))
+    {
+        return false;
+    }
+    double time_ms = js_date_parse_string(temp.data, temp.len);
+    js_temp_string_release(&temp);
+    *out = js_value_make_number(time_ms);
+    return true;
+}
+
+bool js_builtin_date_utc(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    double year_num = js_nan();
+    double month_num = 0.0;
+    double date_num = 1.0;
+    double hour_num = 0.0;
+    double minute_num = 0.0;
+    double second_num = 0.0;
+    double millisecond_num = 0.0;
+    if (argc > 0 && argv)
+    {
+        if (!js_date_to_number(rt, &argv[0], &year_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 1 && argv)
+    {
+        if (!js_date_to_number(rt, &argv[1], &month_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 2 && argv)
+    {
+        if (!js_date_to_number(rt, &argv[2], &date_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 3 && argv)
+    {
+        if (!js_date_to_number(rt, &argv[3], &hour_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 4 && argv)
+    {
+        if (!js_date_to_number(rt, &argv[4], &minute_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 5 && argv)
+    {
+        if (!js_date_to_number(rt, &argv[5], &second_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 6 && argv)
+    {
+        if (!js_date_to_number(rt, &argv[6], &millisecond_num, error_message))
+        {
+            return false;
+        }
+    }
+    bool any_nan = js_is_nan(year_num) ||
+                   js_is_nan(month_num) ||
+                   js_is_nan(date_num) ||
+                   js_is_nan(hour_num) ||
+                   js_is_nan(minute_num) ||
+                   js_is_nan(second_num) ||
+                   js_is_nan(millisecond_num);
+    double time_ms = js_nan();
+    if (!any_nan)
+    {
+        int64_t year_int = 0;
+        int64_t month_int = 0;
+        int64_t date_int = 0;
+        int64_t hour_int = 0;
+        int64_t minute_int = 0;
+        int64_t second_int = 0;
+        int64_t ms_int = 0;
+        if (js_date_double_to_int64(year_num, &year_int) &&
+            js_date_double_to_int64(month_num, &month_int) &&
+            js_date_double_to_int64(date_num, &date_int) &&
+            js_date_double_to_int64(hour_num, &hour_int) &&
+            js_date_double_to_int64(minute_num, &minute_int) &&
+            js_date_double_to_int64(second_num, &second_int) &&
+            js_date_double_to_int64(millisecond_num, &ms_int))
+        {
+            if (year_int >= 0 && year_int <= 99)
+            {
+                year_int += 1900;
+            }
+            time_ms = js_date_make_time_value(year_int,
+                                              month_int,
+                                              date_int,
+                                              hour_int,
+                                              minute_int,
+                                              second_int,
+                                              ms_int);
+        }
+    }
+    time_ms = js_date_time_clip(time_ms);
+    *out = js_value_make_number(time_ms);
+    return true;
+}
+
+bool js_date_proto_to_string(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        return js_value_make_cstring(out, "Invalid Date");
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        return js_value_make_cstring(out, "Invalid Date");
+    }
+    char year_buf[32];
+    js_date_format_year(parts.year, year_buf, sizeof(year_buf));
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf),
+                       "%s %s %02d %s %02d:%02d:%02d GMT+0000",
+                       JS_DATE_DAY_NAMES[parts.weekday],
+                       JS_DATE_MONTH_NAMES[parts.month - 1],
+                       parts.day,
+                       year_buf,
+                       parts.hour,
+                       parts.minute,
+                       parts.second);
+    if (len < 0)
+    {
+        return false;
+    }
+    return js_value_make_string(out, buf, (size_t)len);
+}
+
+bool js_date_proto_to_date_string(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        return js_value_make_cstring(out, "Invalid Date");
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        return js_value_make_cstring(out, "Invalid Date");
+    }
+    char year_buf[32];
+    js_date_format_year(parts.year, year_buf, sizeof(year_buf));
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf),
+                       "%s %s %02d %s",
+                       JS_DATE_DAY_NAMES[parts.weekday],
+                       JS_DATE_MONTH_NAMES[parts.month - 1],
+                       parts.day,
+                       year_buf);
+    if (len < 0)
+    {
+        return false;
+    }
+    return js_value_make_string(out, buf, (size_t)len);
+}
+
+bool js_date_proto_to_time_string(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        return js_value_make_cstring(out, "Invalid Date");
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        return js_value_make_cstring(out, "Invalid Date");
+    }
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf),
+                       "%02d:%02d:%02d GMT+0000",
+                       parts.hour,
+                       parts.minute,
+                       parts.second);
+    if (len < 0)
+    {
+        return false;
+    }
+    return js_value_make_string(out, buf, (size_t)len);
+}
+
+bool js_date_proto_to_utc_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        return js_value_make_cstring(out, "Invalid Date");
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        return js_value_make_cstring(out, "Invalid Date");
+    }
+    char year_buf[32];
+    js_date_format_year(parts.year, year_buf, sizeof(year_buf));
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf),
+                       "%s, %02d %s %s %02d:%02d:%02d GMT",
+                       JS_DATE_DAY_NAMES[parts.weekday],
+                       parts.day,
+                       JS_DATE_MONTH_NAMES[parts.month - 1],
+                       year_buf,
+                       parts.hour,
+                       parts.minute,
+                       parts.second);
+    if (len < 0)
+    {
+        return false;
+    }
+    return js_value_make_string(out, buf, (size_t)len);
+}
+
+bool js_date_proto_to_gmt_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    return js_date_proto_to_utc_string(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_to_iso_string(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid time value");
+        }
+        return false;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid time value");
+        }
+        return false;
+    }
+    char year_buf[32];
+    js_date_format_iso_year(parts.year, year_buf, sizeof(year_buf));
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf),
+                       "%s-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                       year_buf,
+                       parts.month,
+                       parts.day,
+                       parts.hour,
+                       parts.minute,
+                       parts.second,
+                       parts.millisecond);
+    if (len < 0)
+    {
+        return false;
+    }
+    return js_value_make_string(out, buf, (size_t)len);
+}
+
+bool js_date_proto_to_json(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!this_val || this_val->type == JS_VALUE_UNDEFINED || this_val->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: cannot convert undefined or null to object");
+        }
+        return false;
+    }
+    js_value_t obj_value = js_value_make_undefined_internal();
+    bool obj_owned = false;
+    if (this_val->type == JS_VALUE_NUMBER)
+    {
+        if (!js_date_box_number(rt, this_val, &obj_value, error_message))
+        {
+            return false;
+        }
+        obj_owned = true;
+    }
+    else if (this_val->type == JS_VALUE_OBJECT)
+    {
+        obj_value = *this_val;
+    }
+    else
+    {
+        obj_value = *this_val;
+    }
+
+    js_value_t prim = js_value_make_undefined_internal();
+    if (obj_value.type == JS_VALUE_OBJECT && obj_value.as.object)
+    {
+        if (!js_object_to_primitive_number(rt, obj_value.as.object, &prim, error_message))
+        {
+            if (obj_owned)
+            {
+                js_value_destroy(&obj_value);
+            }
+            return false;
+        }
+        if (prim.type == JS_VALUE_NUMBER && !js_date_is_finite_number(prim.as.number))
+        {
+            js_value_destroy(&prim);
+            if (obj_owned)
+            {
+                js_value_destroy(&obj_value);
+            }
+            *out = js_value_make_null();
+            return true;
+        }
+        js_value_destroy(&prim);
+    }
+    else
+    {
+        bool ok_num = true;
+        double num = js_value_to_number(&obj_value, &ok_num);
+        if (!ok_num || !js_date_is_finite_number(num))
+        {
+            if (obj_owned)
+            {
+                js_value_destroy(&obj_value);
+            }
+            *out = js_value_make_null();
+            return true;
+        }
+    }
+
+    js_value_t method = js_value_make_undefined_internal();
+    if (obj_value.type == JS_VALUE_OBJECT && obj_value.as.object)
+    {
+        char *err = NULL;
+        if (!js_object_get_property(rt, obj_value.as.object, "toISOString", &method, &err))
+        {
+            if (obj_owned)
+            {
+                js_value_destroy(&obj_value);
+            }
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("toISOString lookup failed");
+            }
+            else
+            {
+                free(err);
+            }
+            return false;
+        }
+    }
+    if (method.type != JS_VALUE_FUNCTION && method.type != JS_VALUE_NATIVE_FN)
+    {
+        js_value_destroy(&method);
+        if (obj_owned)
+        {
+            js_value_destroy(&obj_value);
+        }
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: toISOString is not callable");
+        }
+        return false;
+    }
+    js_value_t result = js_value_make_undefined_internal();
+    char *call_err = NULL;
+    if (method.type == JS_VALUE_NATIVE_FN && js_native_needs_this(method.as.native.fn))
+    {
+        js_value_t args[1];
+        if (!js_value_copy(&args[0], &obj_value))
+        {
+            js_value_destroy(&method);
+            if (obj_owned)
+            {
+                js_value_destroy(&obj_value);
+            }
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        bool ok = js_call_value(rt, &method, 1, args, &result, &call_err);
+        js_value_destroy(&args[0]);
+        js_value_destroy(&method);
+        if (obj_owned)
+        {
+            js_value_destroy(&obj_value);
+        }
+        if (!ok)
+        {
+            if (error_message)
+            {
+                *error_message = call_err ? call_err : js_strdup("toISOString failed");
+            }
+            else
+            {
+                free(call_err);
+            }
+            js_value_destroy(&result);
+            return false;
+        }
+        *out = result;
+        return true;
+    }
+    bool ok = js_call_value(rt, &method, 0, NULL, &result, &call_err);
+    js_value_destroy(&method);
+    if (obj_owned)
+    {
+        js_value_destroy(&obj_value);
+    }
+    if (!ok)
+    {
+        if (error_message)
+        {
+            *error_message = call_err ? call_err : js_strdup("toISOString failed");
+        }
+        else
+        {
+            free(call_err);
+        }
+        js_value_destroy(&result);
+        return false;
+    }
+    *out = result;
+    return true;
+}
+
+bool js_date_proto_value_of(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    *out = js_value_make_number(date ? date->time_ms : js_nan());
+    return true;
+}
+
+bool js_date_proto_get_time(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    return js_date_proto_value_of(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_full_year(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)parts.year);
+    return true;
+}
+
+bool js_date_proto_get_utc_full_year(js_runtime_t *rt,
+                                     size_t argc,
+                                     const js_value_t *argv,
+                                     void *user_data,
+                                     js_value_t *out,
+                                     char **error_message)
+{
+    return js_date_proto_get_full_year(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_month(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)(parts.month - 1));
+    return true;
+}
+
+bool js_date_proto_get_utc_month(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    return js_date_proto_get_month(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_date(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)parts.day);
+    return true;
+}
+
+bool js_date_proto_get_utc_date(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    return js_date_proto_get_date(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_day(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)parts.weekday);
+    return true;
+}
+
+bool js_date_proto_get_utc_day(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    return js_date_proto_get_day(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_hours(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)parts.hour);
+    return true;
+}
+
+bool js_date_proto_get_utc_hours(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    return js_date_proto_get_hours(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_minutes(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)parts.minute);
+    return true;
+}
+
+bool js_date_proto_get_utc_minutes(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    return js_date_proto_get_minutes(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_seconds(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)parts.second);
+    return true;
+}
+
+bool js_date_proto_get_utc_seconds(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    return js_date_proto_get_seconds(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_milliseconds(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)parts.millisecond);
+    return true;
+}
+
+bool js_date_proto_get_utc_milliseconds(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message)
+{
+    return js_date_proto_get_milliseconds(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_timezone_offset(js_runtime_t *rt,
+                                       size_t argc,
+                                       const js_value_t *argv,
+                                       void *user_data,
+                                       js_value_t *out,
+                                       char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    (void)date;
+    *out = js_value_make_number(0.0);
+    return true;
+}
+
+bool js_date_proto_set_time(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    const js_value_t *arg = (argc > 1 && argv) ? &argv[1] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    double time_num = js_nan();
+    if (!js_date_to_number(rt, arg, &time_num, error_message))
+    {
+        return false;
+    }
+    double clipped = js_date_time_clip(time_num);
+    date->time_ms = clipped;
+    *out = js_value_make_number(clipped);
+    return true;
+}
+
+static bool js_date_set_full_year_internal(js_runtime_t *rt,
+                                           size_t argc,
+                                           const js_value_t *argv,
+                                           bool utc,
+                                           js_date_t *date,
+                                           js_value_t *out,
+                                           char **error_message)
+{
+    (void)utc;
+    double t = date->time_ms;
+    bool t_is_nan = js_is_nan(t);
+    bool have_month = argc > 2;
+    bool have_date = argc > 3;
+    double year_num = js_nan();
+    double month_num = js_nan();
+    double date_num = js_nan();
+    if (!js_date_to_number(rt, (argc > 1) ? &argv[1] : NULL, &year_num, error_message))
+    {
+        return false;
+    }
+    if (argc > 2)
+    {
+        if (!js_date_to_number(rt, &argv[2], &month_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 3)
+    {
+        if (!js_date_to_number(rt, &argv[3], &date_num, error_message))
+        {
+            return false;
+        }
+    }
+    double base_time = t_is_nan ? 0.0 : t;
+    js_date_parts_t parts;
+    if (!js_date_breakdown(base_time, &parts))
+    {
+        parts.year = 1970;
+        parts.month = 1;
+        parts.day = 1;
+        parts.hour = 0;
+        parts.minute = 0;
+        parts.second = 0;
+        parts.millisecond = 0;
+    }
+    if (!have_month)
+    {
+        month_num = (double)(parts.month - 1);
+    }
+    if (!have_date)
+    {
+        date_num = (double)parts.day;
+    }
+    if (js_is_nan(year_num) ||
+        (have_month && js_is_nan(month_num)) ||
+        (have_date && js_is_nan(date_num)))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    int64_t year_int = 0;
+    int64_t month_int = 0;
+    int64_t day_int = 0;
+    if (!js_date_double_to_int64(year_num, &year_int) ||
+        !js_date_double_to_int64(month_num, &month_int) ||
+        !js_date_double_to_int64(date_num, &day_int))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    if (year_int >= 0 && year_int <= 99)
+    {
+        year_int += 1900;
+    }
+    double new_time = js_date_make_time_value(year_int,
+                                              month_int,
+                                              day_int,
+                                              parts.hour,
+                                              parts.minute,
+                                              parts.second,
+                                              parts.millisecond);
+    new_time = js_date_time_clip(new_time);
+    date->time_ms = new_time;
+    *out = js_value_make_number(new_time);
+    return true;
+}
+
+bool js_date_proto_set_full_year(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    return js_date_set_full_year_internal(rt, argc, argv, false, date, out, error_message);
+}
+
+bool js_date_proto_set_utc_full_year(js_runtime_t *rt,
+                                     size_t argc,
+                                     const js_value_t *argv,
+                                     void *user_data,
+                                     js_value_t *out,
+                                     char **error_message)
+{
+    return js_date_proto_set_full_year(rt, argc, argv, user_data, out, error_message);
+}
+
+static bool js_date_set_month_internal(js_runtime_t *rt,
+                                       size_t argc,
+                                       const js_value_t *argv,
+                                       bool utc,
+                                       js_date_t *date,
+                                       js_value_t *out,
+                                       char **error_message)
+{
+    (void)utc;
+    double t = date->time_ms;
+    bool t_is_nan = js_is_nan(t);
+    bool have_date = argc > 2;
+    double month_num = js_nan();
+    double date_num = js_nan();
+    if (!js_date_to_number(rt, (argc > 1) ? &argv[1] : NULL, &month_num, error_message))
+    {
+        return false;
+    }
+    if (argc > 2)
+    {
+        if (!js_date_to_number(rt, &argv[2], &date_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (t_is_nan)
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(t, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    if (!have_date)
+    {
+        date_num = (double)parts.day;
+    }
+    if (js_is_nan(month_num) || (have_date && js_is_nan(date_num)))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    int64_t month_int = 0;
+    int64_t day_int = 0;
+    if (!js_date_double_to_int64(month_num, &month_int) ||
+        !js_date_double_to_int64(date_num, &day_int))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    double new_time = js_date_make_time_value(parts.year,
+                                              month_int,
+                                              day_int,
+                                              parts.hour,
+                                              parts.minute,
+                                              parts.second,
+                                              parts.millisecond);
+    new_time = js_date_time_clip(new_time);
+    date->time_ms = new_time;
+    *out = js_value_make_number(new_time);
+    return true;
+}
+
+bool js_date_proto_set_month(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    return js_date_set_month_internal(rt, argc, argv, false, date, out, error_message);
+}
+
+bool js_date_proto_set_utc_month(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    return js_date_proto_set_month(rt, argc, argv, user_data, out, error_message);
+}
+
+static bool js_date_set_date_internal(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      bool utc,
+                                      js_date_t *date,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)utc;
+    double t = date->time_ms;
+    bool t_is_nan = js_is_nan(t);
+    double date_num = js_nan();
+    if (!js_date_to_number(rt, (argc > 1) ? &argv[1] : NULL, &date_num, error_message))
+    {
+        return false;
+    }
+    if (t_is_nan)
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(t, &parts))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    if (js_is_nan(date_num))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    int64_t day_int = 0;
+    if (!js_date_double_to_int64(date_num, &day_int))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    double new_time = js_date_make_time_value(parts.year,
+                                              (int64_t)(parts.month - 1),
+                                              day_int,
+                                              parts.hour,
+                                              parts.minute,
+                                              parts.second,
+                                              parts.millisecond);
+    new_time = js_date_time_clip(new_time);
+    date->time_ms = new_time;
+    *out = js_value_make_number(new_time);
+    return true;
+}
+
+bool js_date_proto_set_date(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    return js_date_set_date_internal(rt, argc, argv, false, date, out, error_message);
+}
+
+bool js_date_proto_set_utc_date(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    return js_date_proto_set_date(rt, argc, argv, user_data, out, error_message);
+}
+
+static bool js_date_set_time_parts_internal(js_runtime_t *rt,
+                                            size_t argc,
+                                            const js_value_t *argv,
+                                            bool utc,
+                                            js_date_t *date,
+                                            js_value_t *out,
+                                            char **error_message)
+{
+    (void)utc;
+    double t = date->time_ms;
+    bool t_is_nan = js_is_nan(t);
+    bool have_minute = argc > 2;
+    bool have_second = argc > 3;
+    bool have_ms = argc > 4;
+    double hour_num = js_nan();
+    double minute_num = js_nan();
+    double second_num = js_nan();
+    double ms_num = js_nan();
+    if (!js_date_to_number(rt, (argc > 1) ? &argv[1] : NULL, &hour_num, error_message))
+    {
+        return false;
+    }
+    if (argc > 2)
+    {
+        if (!js_date_to_number(rt, &argv[2], &minute_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 3)
+    {
+        if (!js_date_to_number(rt, &argv[3], &second_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 4)
+    {
+        if (!js_date_to_number(rt, &argv[4], &ms_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (t_is_nan)
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(t, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    if (!have_minute)
+    {
+        minute_num = (double)parts.minute;
+    }
+    if (!have_second)
+    {
+        second_num = (double)parts.second;
+    }
+    if (!have_ms)
+    {
+        ms_num = (double)parts.millisecond;
+    }
+    if (js_is_nan(hour_num) ||
+        (have_minute && js_is_nan(minute_num)) ||
+        (have_second && js_is_nan(second_num)) ||
+        (have_ms && js_is_nan(ms_num)))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    int64_t hour_int = 0;
+    int64_t minute_int = 0;
+    int64_t second_int = 0;
+    int64_t ms_int = 0;
+    if (!js_date_double_to_int64(hour_num, &hour_int) ||
+        !js_date_double_to_int64(minute_num, &minute_int) ||
+        !js_date_double_to_int64(second_num, &second_int) ||
+        !js_date_double_to_int64(ms_num, &ms_int))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    double new_time = js_date_make_time_value(parts.year,
+                                              (int64_t)(parts.month - 1),
+                                              parts.day,
+                                              hour_int,
+                                              minute_int,
+                                              second_int,
+                                              ms_int);
+    new_time = js_date_time_clip(new_time);
+    date->time_ms = new_time;
+    *out = js_value_make_number(new_time);
+    return true;
+}
+
+bool js_date_proto_set_hours(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    return js_date_set_time_parts_internal(rt, argc, argv, false, date, out, error_message);
+}
+
+bool js_date_proto_set_utc_hours(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    return js_date_proto_set_hours(rt, argc, argv, user_data, out, error_message);
+}
+
+static bool js_date_set_minutes_internal(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         bool utc,
+                                         js_date_t *date,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)utc;
+    double t = date->time_ms;
+    bool t_is_nan = js_is_nan(t);
+    bool have_second = argc > 2;
+    bool have_ms = argc > 3;
+    double minute_num = js_nan();
+    double second_num = js_nan();
+    double ms_num = js_nan();
+    if (!js_date_to_number(rt, (argc > 1) ? &argv[1] : NULL, &minute_num, error_message))
+    {
+        return false;
+    }
+    if (argc > 2)
+    {
+        if (!js_date_to_number(rt, &argv[2], &second_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 3)
+    {
+        if (!js_date_to_number(rt, &argv[3], &ms_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (t_is_nan)
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(t, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    if (!have_second)
+    {
+        second_num = (double)parts.second;
+    }
+    if (!have_ms)
+    {
+        ms_num = (double)parts.millisecond;
+    }
+    if (js_is_nan(minute_num) ||
+        (have_second && js_is_nan(second_num)) ||
+        (have_ms && js_is_nan(ms_num)))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    int64_t minute_int = 0;
+    int64_t second_int = 0;
+    int64_t ms_int = 0;
+    if (!js_date_double_to_int64(minute_num, &minute_int) ||
+        !js_date_double_to_int64(second_num, &second_int) ||
+        !js_date_double_to_int64(ms_num, &ms_int))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    double new_time = js_date_make_time_value(parts.year,
+                                              (int64_t)(parts.month - 1),
+                                              parts.day,
+                                              parts.hour,
+                                              minute_int,
+                                              second_int,
+                                              ms_int);
+    new_time = js_date_time_clip(new_time);
+    date->time_ms = new_time;
+    *out = js_value_make_number(new_time);
+    return true;
+}
+
+bool js_date_proto_set_minutes(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    return js_date_set_minutes_internal(rt, argc, argv, false, date, out, error_message);
+}
+
+bool js_date_proto_set_utc_minutes(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    return js_date_proto_set_minutes(rt, argc, argv, user_data, out, error_message);
+}
+
+static bool js_date_set_seconds_internal(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         bool utc,
+                                         js_date_t *date,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)utc;
+    double t = date->time_ms;
+    bool t_is_nan = js_is_nan(t);
+    bool have_ms = argc > 2;
+    double second_num = js_nan();
+    double ms_num = js_nan();
+    if (!js_date_to_number(rt, (argc > 1) ? &argv[1] : NULL, &second_num, error_message))
+    {
+        return false;
+    }
+    if (argc > 2)
+    {
+        if (!js_date_to_number(rt, &argv[2], &ms_num, error_message))
+        {
+            return false;
+        }
+    }
+    if (t_is_nan)
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(t, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    if (!have_ms)
+    {
+        ms_num = (double)parts.millisecond;
+    }
+    if (js_is_nan(second_num) || (have_ms && js_is_nan(ms_num)))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    int64_t second_int = 0;
+    int64_t ms_int = 0;
+    if (!js_date_double_to_int64(second_num, &second_int) ||
+        !js_date_double_to_int64(ms_num, &ms_int))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    double new_time = js_date_make_time_value(parts.year,
+                                              (int64_t)(parts.month - 1),
+                                              parts.day,
+                                              parts.hour,
+                                              parts.minute,
+                                              second_int,
+                                              ms_int);
+    new_time = js_date_time_clip(new_time);
+    date->time_ms = new_time;
+    *out = js_value_make_number(new_time);
+    return true;
+}
+
+bool js_date_proto_set_seconds(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    return js_date_set_seconds_internal(rt, argc, argv, false, date, out, error_message);
+}
+
+bool js_date_proto_set_utc_seconds(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    return js_date_proto_set_seconds(rt, argc, argv, user_data, out, error_message);
+}
+
+static bool js_date_set_milliseconds_internal(js_runtime_t *rt,
+                                              size_t argc,
+                                              const js_value_t *argv,
+                                              bool utc,
+                                              js_date_t *date,
+                                              js_value_t *out,
+                                              char **error_message)
+{
+    (void)utc;
+    double t = date->time_ms;
+    bool t_is_nan = js_is_nan(t);
+    double ms_num = js_nan();
+    if (!js_date_to_number(rt, (argc > 1) ? &argv[1] : NULL, &ms_num, error_message))
+    {
+        return false;
+    }
+    if (t_is_nan)
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(t, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    if (js_is_nan(ms_num))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    int64_t ms_int = 0;
+    if (!js_date_double_to_int64(ms_num, &ms_int))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    double new_time = js_date_make_time_value(parts.year,
+                                              (int64_t)(parts.month - 1),
+                                              parts.day,
+                                              parts.hour,
+                                              parts.minute,
+                                              parts.second,
+                                              ms_int);
+    new_time = js_date_time_clip(new_time);
+    date->time_ms = new_time;
+    *out = js_value_make_number(new_time);
+    return true;
+}
+
+bool js_date_proto_set_milliseconds(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    return js_date_set_milliseconds_internal(rt, argc, argv, false, date, out, error_message);
+}
+
+bool js_date_proto_set_utc_milliseconds(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message)
+{
+    return js_date_proto_set_milliseconds(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_date_proto_get_year(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    if (!date || js_is_nan(date->time_ms))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    js_date_parts_t parts;
+    if (!js_date_breakdown(date->time_ms, &parts))
+    {
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    *out = js_value_make_number((double)(parts.year - 1900));
+    return true;
+}
+
+bool js_date_proto_set_year(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_date_t *date = NULL;
+    if (!js_date_require_object(this_val, &date, error_message))
+    {
+        return false;
+    }
+    double t = date->time_ms;
+    bool t_is_nan = js_is_nan(t);
+    double year_num = js_nan();
+    if (!js_date_to_number(rt, (argc > 1) ? &argv[1] : NULL, &year_num, error_message))
+    {
+        return false;
+    }
+    double base_time = t_is_nan ? 0.0 : t;
+    js_date_parts_t parts;
+    if (!js_date_breakdown(base_time, &parts))
+    {
+        parts.year = 1970;
+        parts.month = 1;
+        parts.day = 1;
+        parts.hour = 0;
+        parts.minute = 0;
+        parts.second = 0;
+        parts.millisecond = 0;
+    }
+    if (js_is_nan(year_num))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    int64_t year_int = 0;
+    if (!js_date_double_to_int64(year_num, &year_int))
+    {
+        date->time_ms = js_nan();
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    if (year_int >= 0 && year_int <= 99)
+    {
+        year_int += 1900;
+    }
+    double new_time = js_date_make_time_value(year_int,
+                                              (int64_t)(parts.month - 1),
+                                              parts.day,
+                                              parts.hour,
+                                              parts.minute,
+                                              parts.second,
+                                              parts.millisecond);
+    new_time = js_date_time_clip(new_time);
+    date->time_ms = new_time;
+    *out = js_value_make_number(new_time);
+    return true;
+}
+
+static bool js_temporal_duration_get(js_runtime_t *rt,
+                                     void *user_data,
+                                     const char *name,
+                                     js_value_t *out,
+                                     char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_duration_proto_get(js_runtime_t *rt,
+                                           void *user_data,
+                                           const char *name,
+                                           js_value_t *out,
+                                           char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_instant_get(js_runtime_t *rt,
+                                    void *user_data,
+                                    const char *name,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_instant_proto_get(js_runtime_t *rt,
+                                          void *user_data,
+                                          const char *name,
+                                          js_value_t *out,
+                                          char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_date_get(js_runtime_t *rt,
+                                       void *user_data,
+                                       const char *name,
+                                       js_value_t *out,
+                                       char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_date_proto_get(js_runtime_t *rt,
+                                             void *user_data,
+                                             const char *name,
+                                             js_value_t *out,
+                                             char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_time_get(js_runtime_t *rt,
+                                       void *user_data,
+                                       const char *name,
+                                       js_value_t *out,
+                                       char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_time_proto_get(js_runtime_t *rt,
+                                             void *user_data,
+                                             const char *name,
+                                             js_value_t *out,
+                                             char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_date_time_get(js_runtime_t *rt,
+                                            void *user_data,
+                                            const char *name,
+                                            js_value_t *out,
+                                            char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_date_time_proto_get(js_runtime_t *rt,
+                                                  void *user_data,
+                                                  const char *name,
+                                                  js_value_t *out,
+                                                  char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_zoned_date_time_get(js_runtime_t *rt,
+                                            void *user_data,
+                                            const char *name,
+                                            js_value_t *out,
+                                            char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_zoned_date_time_proto_get(js_runtime_t *rt,
+                                                  void *user_data,
+                                                  const char *name,
+                                                  js_value_t *out,
+                                                  char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_year_month_get(js_runtime_t *rt,
+                                             void *user_data,
+                                             const char *name,
+                                             js_value_t *out,
+                                             char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_year_month_proto_get(js_runtime_t *rt,
+                                                   void *user_data,
+                                                   const char *name,
+                                                   js_value_t *out,
+                                                   char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_month_day_get(js_runtime_t *rt,
+                                            void *user_data,
+                                            const char *name,
+                                            js_value_t *out,
+                                            char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_plain_month_day_proto_get(js_runtime_t *rt,
+                                                  void *user_data,
+                                                  const char *name,
+                                                  js_value_t *out,
+                                                  char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_now_get(js_runtime_t *rt,
+                                void *user_data,
+                                const char *name,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    (void)name;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+static bool js_temporal_require_duration(const js_value_t *this_val,
+                                         js_temporal_duration_t **out,
+                                         char **error_message)
+{
+    if (!out)
+    {
+        return false;
+    }
+    *out = NULL;
+    if (!this_val || this_val->type != JS_VALUE_OBJECT || !this_val->as.object ||
+        this_val->as.object->get_fn != js_temporal_duration_get)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.Duration method called on non-Temporal.Duration object");
+        }
+        return false;
+    }
+    js_temporal_duration_t *duration = (js_temporal_duration_t *)this_val->as.object->user_data;
+    if (!duration)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid Temporal.Duration object");
+        }
+        return false;
+    }
+    *out = duration;
+    return true;
+}
+
+static bool js_temporal_require_instant(const js_value_t *this_val,
+                                        js_temporal_instant_t **out,
+                                        char **error_message)
+{
+    if (!out)
+    {
+        return false;
+    }
+    *out = NULL;
+    if (!this_val || this_val->type != JS_VALUE_OBJECT || !this_val->as.object ||
+        this_val->as.object->get_fn != js_temporal_instant_get)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.Instant method called on non-Temporal.Instant object");
+        }
+        return false;
+    }
+    js_temporal_instant_t *instant = (js_temporal_instant_t *)this_val->as.object->user_data;
+    if (!instant || !instant->epoch_nanoseconds)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid Temporal.Instant object");
+        }
+        return false;
+    }
+    *out = instant;
+    return true;
+}
+
+static int64_t js_temporal_int64_abs(int64_t value)
+{
+    return (value < 0) ? -value : value;
+}
+
+static bool js_temporal_duration_is_zero(const js_temporal_duration_t *duration)
+{
+    if (!duration)
+    {
+        return true;
+    }
+    return duration->years == 0 &&
+           duration->months == 0 &&
+           duration->weeks == 0 &&
+           duration->days == 0 &&
+           duration->hours == 0 &&
+           duration->minutes == 0 &&
+           duration->seconds == 0 &&
+           duration->milliseconds == 0 &&
+           duration->microseconds == 0 &&
+           duration->nanoseconds == 0;
+}
+
+static int js_temporal_duration_sign(const js_temporal_duration_t *duration)
+{
+    if (!duration || js_temporal_duration_is_zero(duration))
+    {
+        return 0;
+    }
+    if (duration->years > 0 ||
+        duration->months > 0 ||
+        duration->weeks > 0 ||
+        duration->days > 0 ||
+        duration->hours > 0 ||
+        duration->minutes > 0 ||
+        duration->seconds > 0 ||
+        duration->milliseconds > 0 ||
+        duration->microseconds > 0 ||
+        duration->nanoseconds > 0)
+    {
+        return 1;
+    }
+    return -1;
+}
+
+static bool js_temporal_to_integer_if_integral(js_runtime_t *rt,
+                                               const js_value_t *value,
+                                               int64_t *out,
+                                               char **error_message)
+{
+    if (!out)
+    {
+        return false;
+    }
+    *out = 0;
+    if (!value || value->type == JS_VALUE_UNDEFINED)
+    {
+        return true;
+    }
+    if (value->type == JS_VALUE_OBJECT && value->as.object && js_object_is_symbol(value->as.object))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid Temporal value");
+        }
+        return false;
+    }
+    if (value->type == JS_VALUE_BIGINT)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid Temporal value");
+        }
+        return false;
+    }
+    const js_value_t *use = value;
+    js_value_t prim = js_value_make_undefined_internal();
+    if (value->type == JS_VALUE_OBJECT && value->as.object)
+    {
+        if (!js_object_to_primitive_number(rt, value->as.object, &prim, error_message))
+        {
+            return false;
+        }
+        use = &prim;
+    }
+    bool ok = true;
+    double num = js_value_to_number(use, &ok);
+    js_value_destroy(&prim);
+    if (!ok || js_is_nan(num) || num == INFINITY || num == -INFINITY)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal value");
+        }
+        return false;
+    }
+    double trunc = js_trunc_local(num);
+    if (trunc != num)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal value");
+        }
+        return false;
+    }
+    if (trunc > (double)INT64_MAX || trunc < (double)INT64_MIN)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal value");
+        }
+        return false;
+    }
+    *out = (int64_t)trunc;
+    return true;
+}
+
+static bool js_temporal_duration_create(js_runtime_t *rt,
+                                        int64_t years,
+                                        int64_t months,
+                                        int64_t weeks,
+                                        int64_t days,
+                                        int64_t hours,
+                                        int64_t minutes,
+                                        int64_t seconds,
+                                        int64_t milliseconds,
+                                        int64_t microseconds,
+                                        int64_t nanoseconds,
+                                        js_value_t *out,
+                                        char **error_message)
+{
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_duration_t *duration = (js_temporal_duration_t *)calloc(1, sizeof(*duration));
+    if (!duration)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    duration->years = years;
+    duration->months = months;
+    duration->weeks = weeks;
+    duration->days = days;
+    duration->hours = hours;
+    duration->minutes = minutes;
+    duration->seconds = seconds;
+    duration->milliseconds = milliseconds;
+    duration->microseconds = microseconds;
+    duration->nanoseconds = nanoseconds;
+    if (!js_value_make_host_object(out, js_temporal_duration_get, NULL, js_temporal_duration_finalize, duration))
+    {
+        free(duration);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_temporal_duration_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    return true;
+}
+
+static bool js_temporal_instant_create(js_runtime_t *rt,
+                                       js_bigint_t *epoch_nanoseconds,
+                                       js_value_t *out,
+                                       char **error_message)
+{
+    if (!out || !epoch_nanoseconds)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_temporal_instant_t *instant = (js_temporal_instant_t *)calloc(1, sizeof(*instant));
+    if (!instant)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    instant->epoch_nanoseconds = epoch_nanoseconds;
+    if (!js_value_make_host_object(out, js_temporal_instant_get, NULL, js_temporal_instant_finalize, instant))
+    {
+        js_temporal_instant_finalize(instant);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_temporal_instant_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    return true;
+}
+
+static bool js_temporal_instant_in_range(const js_bigint_t *value, char **error_message)
+{
+    if (!value)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal instant");
+        }
+        return false;
+    }
+    js_value_t limit_val;
+    if (!js_value_make_bigint(&limit_val, JS_TEMPORAL_INSTANT_MAX_NS, 10))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_value_t zero_val;
+    if (!js_value_make_bigint_from_int64(&zero_val, 0))
+    {
+        js_value_destroy(&limit_val);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_bigint_t *neg_limit = js_bigint_sub(zero_val.as.bigint, limit_val.as.bigint);
+    if (!neg_limit)
+    {
+        js_value_destroy(&limit_val);
+        js_value_destroy(&zero_val);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    int cmp_high = js_bigint_compare(value, limit_val.as.bigint);
+    int cmp_low = js_bigint_compare(value, neg_limit);
+    js_bigint_destroy(neg_limit);
+    js_value_destroy(&limit_val);
+    js_value_destroy(&zero_val);
+    if (cmp_high > 0 || cmp_low < 0)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal instant");
+        }
+        return false;
+    }
+    return true;
+}
+
+bool js_builtin_temporal_duration(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_temporal_duration;
+    if (!constructing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.Duration must be called with new");
+        }
+        return false;
+    }
+    int64_t years = 0;
+    int64_t months = 0;
+    int64_t weeks = 0;
+    int64_t days = 0;
+    int64_t hours = 0;
+    int64_t minutes = 0;
+    int64_t seconds = 0;
+    int64_t milliseconds = 0;
+    int64_t microseconds = 0;
+    int64_t nanoseconds = 0;
+    if (argc > 0 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[0], &years, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 1 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[1], &months, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 2 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[2], &weeks, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 3 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[3], &days, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 4 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[4], &hours, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 5 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[5], &minutes, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 6 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[6], &seconds, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 7 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[7], &milliseconds, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 8 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[8], &microseconds, error_message))
+        {
+            return false;
+        }
+    }
+    if (argc > 9 && argv)
+    {
+        if (!js_temporal_to_integer_if_integral(rt, &argv[9], &nanoseconds, error_message))
+        {
+            return false;
+        }
+    }
+    bool has_pos = false;
+    bool has_neg = false;
+    int64_t fields[10] =
+    {
+        years, months, weeks, days, hours, minutes, seconds, milliseconds, microseconds, nanoseconds
+    };
+    for (size_t i = 0; i < 10; ++i)
+    {
+        if (fields[i] > 0)
+        {
+            has_pos = true;
+        }
+        else if (fields[i] < 0)
+        {
+            has_neg = true;
+        }
+    }
+    if (has_pos && has_neg)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal duration");
+        }
+        return false;
+    }
+    if (js_temporal_int64_abs(years) > JS_TEMPORAL_MAX_YMW ||
+        js_temporal_int64_abs(months) > JS_TEMPORAL_MAX_YMW ||
+        js_temporal_int64_abs(weeks) > JS_TEMPORAL_MAX_YMW ||
+        js_temporal_int64_abs(days) > JS_TEMPORAL_MAX_YMW)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal duration");
+        }
+        return false;
+    }
+    __int128 total_ns = 0;
+    total_ns += (__int128)days * 86400LL * 1000000000LL;
+    total_ns += (__int128)hours * 3600LL * 1000000000LL;
+    total_ns += (__int128)minutes * 60LL * 1000000000LL;
+    total_ns += (__int128)seconds * 1000000000LL;
+    total_ns += (__int128)milliseconds * 1000000LL;
+    total_ns += (__int128)microseconds * 1000LL;
+    total_ns += (__int128)nanoseconds;
+    if (total_ns > JS_TEMPORAL_MAX_TOTAL_NS || total_ns < -JS_TEMPORAL_MAX_TOTAL_NS)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal duration");
+        }
+        return false;
+    }
+    return js_temporal_duration_create(rt,
+                                       years,
+                                       months,
+                                       weeks,
+                                       days,
+                                       hours,
+                                       minutes,
+                                       seconds,
+                                       milliseconds,
+                                       microseconds,
+                                       nanoseconds,
+                                       out,
+                                       error_message);
+}
+
+bool js_builtin_temporal_instant(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_temporal_instant;
+    if (!constructing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.Instant must be called with new");
+        }
+        return false;
+    }
+    if (argc == 0 || !argv)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.Instant requires a value");
+        }
+        return false;
+    }
+    if (argv[0].type != JS_VALUE_BIGINT)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.Instant requires a BigInt");
+        }
+        return false;
+    }
+    js_bigint_t *epoch_ns = js_bigint_clone(argv[0].as.bigint);
+    if (!epoch_ns)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!js_temporal_instant_in_range(epoch_ns, error_message))
+    {
+        js_bigint_destroy(epoch_ns);
+        return false;
+    }
+    return js_temporal_instant_create(rt, epoch_ns, out, error_message);
+}
+
+bool js_temporal_duration_getter(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_temporal_duration_t *duration = NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    const char *field = (const char *)user_data;
+    if (field == JS_TEMPORAL_DURATION_FIELD_SIGN)
+    {
+        *out = js_value_make_number((double)js_temporal_duration_sign(duration));
+        return true;
+    }
+    if (field == JS_TEMPORAL_DURATION_FIELD_BLANK)
+    {
+        *out = js_value_make_bool(js_temporal_duration_is_zero(duration));
+        return true;
+    }
+    int64_t value = 0;
+    if (field == JS_TEMPORAL_DURATION_FIELD_YEARS)
+    {
+        value = duration->years;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_MONTHS)
+    {
+        value = duration->months;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_WEEKS)
+    {
+        value = duration->weeks;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_DAYS)
+    {
+        value = duration->days;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_HOURS)
+    {
+        value = duration->hours;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_MINUTES)
+    {
+        value = duration->minutes;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_SECONDS)
+    {
+        value = duration->seconds;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_MILLISECONDS)
+    {
+        value = duration->milliseconds;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_MICROSECONDS)
+    {
+        value = duration->microseconds;
+    }
+    else if (field == JS_TEMPORAL_DURATION_FIELD_NANOSECONDS)
+    {
+        value = duration->nanoseconds;
+    }
+    *out = js_value_make_number((double)value);
+    return true;
+}
+
+bool js_temporal_duration_negated(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_temporal_duration_t *duration = NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    return js_temporal_duration_create(rt,
+                                       -duration->years,
+                                       -duration->months,
+                                       -duration->weeks,
+                                       -duration->days,
+                                       -duration->hours,
+                                       -duration->minutes,
+                                       -duration->seconds,
+                                       -duration->milliseconds,
+                                       -duration->microseconds,
+                                       -duration->nanoseconds,
+                                       out,
+                                       error_message);
+}
+
+bool js_temporal_duration_abs(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_temporal_duration_t *duration = NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    return js_temporal_duration_create(rt,
+                                       js_temporal_int64_abs(duration->years),
+                                       js_temporal_int64_abs(duration->months),
+                                       js_temporal_int64_abs(duration->weeks),
+                                       js_temporal_int64_abs(duration->days),
+                                       js_temporal_int64_abs(duration->hours),
+                                       js_temporal_int64_abs(duration->minutes),
+                                       js_temporal_int64_abs(duration->seconds),
+                                       js_temporal_int64_abs(duration->milliseconds),
+                                       js_temporal_int64_abs(duration->microseconds),
+                                       js_temporal_int64_abs(duration->nanoseconds),
+                                       out,
+                                       error_message);
+}
+
+bool js_temporal_duration_to_string(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_temporal_duration_t *duration = NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    if (js_temporal_duration_is_zero(duration))
+    {
+        return js_value_make_cstring(out, "PT0S");
+    }
+    int sign = js_temporal_duration_sign(duration);
+    int64_t years = js_temporal_int64_abs(duration->years);
+    int64_t months = js_temporal_int64_abs(duration->months);
+    int64_t weeks = js_temporal_int64_abs(duration->weeks);
+    int64_t days = js_temporal_int64_abs(duration->days);
+    int64_t hours = js_temporal_int64_abs(duration->hours);
+    int64_t minutes = js_temporal_int64_abs(duration->minutes);
+    int64_t seconds = js_temporal_int64_abs(duration->seconds);
+    int64_t milliseconds = js_temporal_int64_abs(duration->milliseconds);
+    int64_t microseconds = js_temporal_int64_abs(duration->microseconds);
+    int64_t nanoseconds = js_temporal_int64_abs(duration->nanoseconds);
+    bool has_time = hours || minutes || seconds || milliseconds || microseconds || nanoseconds;
+    size_t cap = 512;
+    char *buf = (char *)malloc(cap);
+    if (!buf)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    size_t pos = 0;
+    if (sign < 0)
+    {
+        buf[pos++] = '-';
+    }
+    buf[pos++] = 'P';
+#define JS_APPEND_FMT(fmt, ...)                                                         \
+    do                                                                                  \
+    {                                                                                   \
+        int written = snprintf(buf + pos, cap - pos, fmt, __VA_ARGS__);                 \
+        if (written < 0 || (size_t)written >= cap - pos)                                \
+        {                                                                               \
+            free(buf);                                                                  \
+            if (error_message)                                                          \
+            {                                                                           \
+                *error_message = js_strdup("allocation failed");                        \
+            }                                                                           \
+            return false;                                                               \
+        }                                                                               \
+        pos += (size_t)written;                                                         \
+    } while (0)
+    if (years)
+    {
+        JS_APPEND_FMT("%lldY", (long long)years);
+    }
+    if (months)
+    {
+        JS_APPEND_FMT("%lldM", (long long)months);
+    }
+    if (weeks)
+    {
+        JS_APPEND_FMT("%lldW", (long long)weeks);
+    }
+    if (days)
+    {
+        JS_APPEND_FMT("%lldD", (long long)days);
+    }
+    if (has_time)
+    {
+        buf[pos++] = 'T';
+        if (hours)
+        {
+            JS_APPEND_FMT("%lldH", (long long)hours);
+        }
+        if (minutes)
+        {
+            JS_APPEND_FMT("%lldM", (long long)minutes);
+        }
+        int64_t frac_ns = milliseconds * 1000000LL + microseconds * 1000LL + nanoseconds;
+        if (seconds || frac_ns)
+        {
+            if (frac_ns)
+            {
+                char frac_buf[16];
+                (void)snprintf(frac_buf, sizeof(frac_buf), "%09lld", (long long)frac_ns);
+                size_t frac_len = 9;
+                while (frac_len > 0 && frac_buf[frac_len - 1] == '0')
+                {
+                    frac_len--;
+                }
+                JS_APPEND_FMT("%lld", (long long)seconds);
+                if (frac_len > 0)
+                {
+                    if (pos + 1 + frac_len >= cap)
+                    {
+                        free(buf);
+                        if (error_message)
+                        {
+                            *error_message = js_strdup("allocation failed");
+                        }
+                        return false;
+                    }
+                    buf[pos++] = '.';
+                    memcpy(buf + pos, frac_buf, frac_len);
+                    pos += frac_len;
+                }
+                if (pos + 1 >= cap)
+                {
+                    free(buf);
+                    if (error_message)
+                    {
+                        *error_message = js_strdup("allocation failed");
+                    }
+                    return false;
+                }
+                buf[pos++] = 'S';
+            }
+            else
+            {
+                JS_APPEND_FMT("%lldS", (long long)seconds);
+            }
+        }
+    }
+#undef JS_APPEND_FMT
+    bool ok = js_value_make_string(out, buf, pos);
+    free(buf);
+    return ok;
+}
+
+bool js_temporal_duration_to_json(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    return js_temporal_duration_to_string(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_temporal_duration_to_locale_string(js_runtime_t *rt,
+                                           size_t argc,
+                                           const js_value_t *argv,
+                                           void *user_data,
+                                           js_value_t *out,
+                                           char **error_message)
+{
+    return js_temporal_duration_to_string(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_temporal_duration_value_of(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_duration_t *duration = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Duration.prototype.valueOf is not supported");
+    }
+    return false;
+}
+
+bool js_temporal_duration_with(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_duration_t *duration = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Duration.prototype.with not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_duration_add(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_duration_t *duration = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Duration.prototype.add not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_duration_subtract(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_duration_t *duration = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Duration.prototype.subtract not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_duration_round(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_duration_t *duration = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Duration.prototype.round not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_duration_total(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_duration_t *duration = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_duration(this_val, &duration, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Duration.prototype.total not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_instant_getter(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_temporal_instant_t *instant = NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    const char *field = (const char *)user_data;
+    if (field == JS_TEMPORAL_INSTANT_FIELD_EPOCH_NANOSECONDS)
+    {
+        out->type = JS_VALUE_BIGINT;
+        out->as.bigint = js_bigint_clone(instant->epoch_nanoseconds);
+        if (!out->as.bigint)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        return true;
+    }
+    if (field == JS_TEMPORAL_INSTANT_FIELD_EPOCH_MILLISECONDS)
+    {
+        js_value_t divisor;
+        if (!js_value_make_bigint_from_int64(&divisor, 1000000))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        js_bigint_t *quot = NULL;
+        js_bigint_t *rem = NULL;
+        char *err = NULL;
+        bool ok = js_bigint_divmod(instant->epoch_nanoseconds,
+                                   divisor.as.bigint,
+                                   &quot,
+                                   &rem,
+                                   &err);
+        js_value_destroy(&divisor);
+        if (!ok)
+        {
+            js_bigint_destroy(quot);
+            js_bigint_destroy(rem);
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("RangeError: invalid Temporal instant");
+            }
+            else
+            {
+                free(err);
+            }
+            return false;
+        }
+        double ms = js_bigint_to_double(quot);
+        js_bigint_destroy(quot);
+        js_bigint_destroy(rem);
+        *out = js_value_make_number(ms);
+        return true;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+bool js_temporal_instant_to_string(js_runtime_t *rt,
+                                   size_t argc,
+                                   const js_value_t *argv,
+                                   void *user_data,
+                                   js_value_t *out,
+                                   char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    js_temporal_instant_t *instant = NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    js_value_t divisor;
+    if (!js_value_make_bigint_from_int64(&divisor, 1000000))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_bigint_t *quot = NULL;
+    js_bigint_t *rem = NULL;
+    char *err = NULL;
+    bool ok = js_bigint_divmod(instant->epoch_nanoseconds,
+                               divisor.as.bigint,
+                               &quot,
+                               &rem,
+                               &err);
+    js_value_destroy(&divisor);
+    if (!ok)
+    {
+        if (error_message)
+        {
+            *error_message = err ? err : js_strdup("RangeError: invalid Temporal instant");
+        }
+        else
+        {
+            free(err);
+        }
+        js_bigint_destroy(quot);
+        js_bigint_destroy(rem);
+        return false;
+    }
+    int64_t rem_ns = (int64_t)js_bigint_to_double(rem);
+    double ms = js_bigint_to_double(quot);
+    if (rem_ns < 0)
+    {
+        rem_ns += 1000000;
+        ms -= 1.0;
+    }
+    js_bigint_destroy(quot);
+    js_bigint_destroy(rem);
+    js_date_parts_t parts;
+    if (!js_date_breakdown(ms, &parts))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal instant");
+        }
+        return false;
+    }
+    int64_t frac_ns = (int64_t)parts.millisecond * 1000000LL + rem_ns;
+    char year_buf[32];
+    js_date_format_iso_year(parts.year, year_buf, sizeof(year_buf));
+    size_t cap = 256;
+    char *buf = (char *)malloc(cap);
+    if (!buf)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    int len = snprintf(buf,
+                       cap,
+                       "%s-%02d-%02dT%02d:%02d:%02d",
+                       year_buf,
+                       parts.month,
+                       parts.day,
+                       parts.hour,
+                       parts.minute,
+                       parts.second);
+    if (len < 0 || (size_t)len >= cap)
+    {
+        free(buf);
+        return false;
+    }
+    size_t pos = (size_t)len;
+    if (frac_ns > 0)
+    {
+        char frac_buf[16];
+        (void)snprintf(frac_buf, sizeof(frac_buf), "%09lld", (long long)frac_ns);
+        size_t frac_len = 9;
+        while (frac_len > 0 && frac_buf[frac_len - 1] == '0')
+        {
+            frac_len--;
+        }
+        if (pos + 1 + frac_len >= cap)
+        {
+            free(buf);
+            return false;
+        }
+        buf[pos++] = '.';
+        memcpy(buf + pos, frac_buf, frac_len);
+        pos += frac_len;
+    }
+    if (pos + 1 >= cap)
+    {
+        free(buf);
+        return false;
+    }
+    buf[pos++] = 'Z';
+    ok = js_value_make_string(out, buf, pos);
+    free(buf);
+    return ok;
+}
+
+bool js_temporal_instant_to_json(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    return js_temporal_instant_to_string(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_temporal_instant_to_locale_string(js_runtime_t *rt,
+                                          size_t argc,
+                                          const js_value_t *argv,
+                                          void *user_data,
+                                          js_value_t *out,
+                                          char **error_message)
+{
+    return js_temporal_instant_to_string(rt, argc, argv, user_data, out, error_message);
+}
+
+bool js_temporal_instant_value_of(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_instant_t *instant = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Instant.prototype.valueOf is not supported");
+    }
+    return false;
+}
+
+bool js_temporal_instant_add(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_instant_t *instant = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Instant.prototype.add not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_instant_subtract(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_instant_t *instant = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Instant.prototype.subtract not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_instant_since(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_instant_t *instant = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Instant.prototype.since not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_instant_until(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_instant_t *instant = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Instant.prototype.until not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_instant_round(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_instant_t *instant = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Instant.prototype.round not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_instant_equals(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_instant_t *instant = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    const js_value_t *other_val = (argc > 1 && argv) ? &argv[1] : NULL;
+    if (!other_val || other_val->type != JS_VALUE_OBJECT || !other_val->as.object ||
+        other_val->as.object->get_fn != js_temporal_instant_get)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.Instant expected");
+        }
+        return false;
+    }
+    js_temporal_instant_t *other = (js_temporal_instant_t *)other_val->as.object->user_data;
+    if (!other || !other->epoch_nanoseconds)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.Instant expected");
+        }
+        return false;
+    }
+    int cmp = js_bigint_compare(instant->epoch_nanoseconds, other->epoch_nanoseconds);
+    *out = js_value_make_bool(cmp == 0);
+    return true;
+}
+
+bool js_temporal_instant_to_zoned_date_time_iso(js_runtime_t *rt,
+                                                size_t argc,
+                                                const js_value_t *argv,
+                                                void *user_data,
+                                                js_value_t *out,
+                                                char **error_message)
+{
+    (void)rt;
+    (void)argv;
+    (void)argc;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_temporal_instant_t *instant = NULL;
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!js_temporal_require_instant(this_val, &instant, error_message))
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Instant.prototype.toZonedDateTimeISO not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_now_instant(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    double now_ms = js_date_now_ms();
+    if (js_is_nan(now_ms))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("RangeError: invalid Temporal instant");
+        }
+        return false;
+    }
+    int64_t ms_int = (int64_t)js_date_trunc(now_ms);
+    int64_t ns_int = ms_int * 1000000LL;
+    js_value_t tmp;
+    if (!js_value_make_bigint_from_int64(&tmp, ns_int))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_bigint_t *epoch_ns = js_bigint_clone(tmp.as.bigint);
+    js_value_destroy(&tmp);
+    if (!epoch_ns)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!js_temporal_instant_in_range(epoch_ns, error_message))
+    {
+        js_bigint_destroy(epoch_ns);
+        return false;
+    }
+    return js_temporal_instant_create(rt, epoch_ns, out, error_message);
+}
+
+bool js_temporal_now_plain_date_iso(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Now.plainDateISO not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_now_plain_time_iso(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Now.plainTimeISO not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_now_plain_date_time_iso(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Now.plainDateTimeISO not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_now_zoned_date_time_iso(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: Temporal.Now.zonedDateTimeISO not implemented");
+    }
+    return false;
+}
+
+bool js_temporal_now_time_zone_id(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    (void)rt;
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    return js_value_make_cstring(out, "UTC");
+}
+
+bool js_builtin_temporal_plain_date(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_temporal_plain_date;
+    if (!constructing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.PlainDate must be called with new");
+        }
+        return false;
+    }
+    if (!js_value_make_host_object(out, js_temporal_plain_date_get, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_temporal_plain_date_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    return true;
+}
+
+bool js_builtin_temporal_plain_time(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_temporal_plain_time;
+    if (!constructing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.PlainTime must be called with new");
+        }
+        return false;
+    }
+    if (!js_value_make_host_object(out, js_temporal_plain_time_get, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_temporal_plain_time_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    return true;
+}
+
+bool js_builtin_temporal_plain_date_time(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_temporal_plain_date_time;
+    if (!constructing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.PlainDateTime must be called with new");
+        }
+        return false;
+    }
+    if (!js_value_make_host_object(out, js_temporal_plain_date_time_get, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_temporal_plain_date_time_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    return true;
+}
+
+bool js_builtin_temporal_zoned_date_time(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_temporal_zoned_date_time;
+    if (!constructing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.ZonedDateTime must be called with new");
+        }
+        return false;
+    }
+    if (!js_value_make_host_object(out, js_temporal_zoned_date_time_get, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_temporal_zoned_date_time_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    return true;
+}
+
+bool js_builtin_temporal_plain_year_month(js_runtime_t *rt,
+                                          size_t argc,
+                                          const js_value_t *argv,
+                                          void *user_data,
+                                          js_value_t *out,
+                                          char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_temporal_plain_year_month;
+    if (!constructing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.PlainYearMonth must be called with new");
+        }
+        return false;
+    }
+    if (!js_value_make_host_object(out, js_temporal_plain_year_month_get, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_temporal_plain_year_month_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
+    return true;
+}
+
+bool js_builtin_temporal_plain_month_day(js_runtime_t *rt,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         void *user_data,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    bool constructing = rt && rt->constructing && rt->constructing_fn == js_builtin_temporal_plain_month_day;
+    if (!constructing)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Temporal.PlainMonthDay must be called with new");
+        }
+        return false;
+    }
+    if (!js_value_make_host_object(out, js_temporal_plain_month_day_get, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_object_t *proto = js_get_temporal_plain_month_day_proto(rt);
+    if (proto)
+    {
+        js_value_t proto_val;
+        memset(&proto_val, 0, sizeof(proto_val));
+        proto_val.type = JS_VALUE_OBJECT;
+        proto_val.as.object = proto;
+        (void)js_object_set_slot(out->as.object, "__proto__", &proto_val);
+    }
     return true;
 }
 
