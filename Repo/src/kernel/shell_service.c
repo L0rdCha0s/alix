@@ -368,6 +368,9 @@ bool shell_service_close_session(uint32_t handle)
             *cursor = session->next;
             shell_session_unlock(session);
 
+            shell_clear_active_shell(&session->state);
+            shell_clear_console_tap_if_matches(session->state.stream_fn, session->state.stream_context);
+
             if (session->stdout_fd >= 0)
             {
                 fd_close(session->stdout_fd);
@@ -575,6 +578,9 @@ void shell_service_cleanup_process(process_t *process)
             }
             *cursor = session->next;
             shell_session_unlock(session);
+
+            shell_clear_active_shell(&session->state);
+            shell_clear_console_tap_if_matches(session->state.stream_fn, session->state.stream_context);
 
             if (session->stdout_fd >= 0)
             {

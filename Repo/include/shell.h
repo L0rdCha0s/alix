@@ -74,5 +74,7 @@ bool shell_execute_binary(shell_state_t *shell,
 void shell_set_console_tap(shell_console_tap_fn fn, void *context);
 void shell_get_console_tap(shell_console_tap_fn *fn_out, void **ctx_out);
 void shell_emit_console_tap(const char *data, size_t len);
+void shell_clear_active_shell(shell_state_t *shell);
+void shell_clear_console_tap_if_matches(shell_console_tap_fn fn, void *context);
 
 #endif

@@ -8,6 +8,7 @@
 #include "atk/atk_menu.h"
 #include "atk/atk_label.h"
 #include "atk/atk_list_view.h"
+#include "atk/atk_dropdown.h"
 #include "atk/atk_iconbox.h"
 #include "atk/atk_tree_view.h"
 #include "atk/util/png.h"
@@ -33,6 +34,8 @@
 #define FILEMAN_VIEW_BUTTON_WIDTH 80
 #define FILEMAN_VIEW_BUTTON_GAP 8
 #define FILEMAN_VIEW_BUTTON_SPACING 8
+#define FILEMAN_SORT_DROPDOWN_WIDTH 140
+#define FILEMAN_SORT_DROPDOWN_GAP 8
 #define FILEMAN_ICON_BASE "/usr/share/icons/48x48"
 #define FILEMAN_ICON_MIMETYPE_DIR FILEMAN_ICON_BASE "/mimetypes"
 #define FILEMAN_PREVIEW_ELF "/usr/bin/atk_preview.elf"
@@ -91,6 +94,7 @@ struct fileman_app
     atk_widget_t *tree;
     atk_widget_t *list_button;
     atk_widget_t *icon_button;
+    atk_widget_t *sort_dropdown;
     atk_widget_t *list_view;
     atk_widget_t *iconbox;
     int shell_handle;
@@ -101,6 +105,7 @@ struct fileman_app
     const fileman_entry_t *last_click_entry;
     uint64_t last_click_ms;
     size_t view_mode;
+    size_t sort_mode;
     fileman_default_apps_t default_apps;
     atk_widget_t *context_menu;
     const fileman_entry_t *context_entry;
@@ -115,10 +120,18 @@ enum
     FILEMAN_VIEW_ICONS = 1
 };
 
+enum
+{
+    FILEMAN_SORT_NAME = 0,
+    FILEMAN_SORT_SIZE = 1
+};
+
 static void fileman_tree_on_select(atk_widget_t *tree, void *context, atk_tree_node_t *node);
 static void fileman_icon_action(atk_widget_t *button, void *context);
 static void fileman_set_view_mode(fileman_app_t *app, size_t mode);
+static void fileman_set_sort_mode(fileman_app_t *app, size_t mode);
 static bool fileman_on_mouse_event(const user_atk_event_t *event, void *context);
+static void fileman_sort_on_select(atk_widget_t *dropdown, void *context, size_t index, uintptr_t value);
 
 static char *fileman_strdup(const char *src)
 {
@@ -758,7 +771,31 @@ static void fileman_entries_clear(fileman_app_t *app)
     app->entry_count = 0;
 }
 
-static void fileman_sort_entries(fileman_entry_t *entries, size_t count)
+static int fileman_compare_entries(const fileman_entry_t *a, const fileman_entry_t *b, size_t sort_mode)
+{
+    if (!a || !b)
+    {
+        return 0;
+    }
+    if (a->is_dir != b->is_dir)
+    {
+        return a->is_dir ? -1 : 1;
+    }
+    if (sort_mode == FILEMAN_SORT_SIZE && !a->is_dir && !b->is_dir)
+    {
+        if (a->size_bytes < b->size_bytes)
+        {
+            return -1;
+        }
+        if (a->size_bytes > b->size_bytes)
+        {
+            return 1;
+        }
+    }
+    return strcmp(a->name, b->name);
+}
+
+static void fileman_sort_entries(fileman_entry_t *entries, size_t count, size_t sort_mode)
 {
     if (!entries || count < 2)
     {
@@ -770,17 +807,7 @@ static void fileman_sort_entries(fileman_entry_t *entries, size_t count)
         {
             fileman_entry_t *a = &entries[i];
             fileman_entry_t *b = &entries[j];
-            if (a->is_dir != b->is_dir)
-            {
-                if (!a->is_dir && b->is_dir)
-                {
-                    fileman_entry_t tmp = *a;
-                    *a = *b;
-                    *b = tmp;
-                }
-                continue;
-            }
-            if (strcmp(a->name, b->name) > 0)
+            if (fileman_compare_entries(a, b, sort_mode) > 0)
             {
                 fileman_entry_t tmp = *a;
                 *a = *b;
@@ -790,7 +817,7 @@ static void fileman_sort_entries(fileman_entry_t *entries, size_t count)
     }
 }
 
-static void fileman_format_size(char *dst, size_t cap, const fileman_entry_t *entry)
+static void fileman_format_size_bytes(char *dst, size_t cap, const fileman_entry_t *entry)
 {
     if (!dst || cap == 0)
     {
@@ -808,6 +835,61 @@ static void fileman_format_size(char *dst, size_t cap, const fileman_entry_t *en
     else
     {
         snprintf(dst, cap, "%llu", (unsigned long long)entry->size_bytes);
+    }
+    dst[cap - 1] = '\0';
+}
+
+static void fileman_format_size_human(char *dst, size_t cap, const fileman_entry_t *entry)
+{
+    if (!dst || cap == 0)
+    {
+        return;
+    }
+    if (!entry)
+    {
+        dst[0] = '\0';
+        return;
+    }
+    if (entry->is_dir)
+    {
+        snprintf(dst, cap, "<DIR>");
+        dst[cap - 1] = '\0';
+        return;
+    }
+
+    static const char *k_units[] = { "B", "KB", "MB", "GB", "TB" };
+    const size_t unit_count = sizeof(k_units) / sizeof(k_units[0]);
+    uint64_t size = entry->size_bytes;
+    size_t unit = 0;
+    uint64_t divisor = 1;
+    while (unit + 1 < unit_count && (size / divisor) >= 1024)
+    {
+        divisor *= 1024;
+        unit++;
+    }
+
+    if (unit == 0)
+    {
+        snprintf(dst, cap, "%llu B", (unsigned long long)size);
+        dst[cap - 1] = '\0';
+        return;
+    }
+
+    uint64_t whole = size / divisor;
+    uint64_t rem = size % divisor;
+    uint64_t frac = (rem * 10 + divisor / 2) / divisor;
+    if (frac >= 10)
+    {
+        whole += 1;
+        frac = 0;
+    }
+    if (frac == 0)
+    {
+        snprintf(dst, cap, "%llu %s", (unsigned long long)whole, k_units[unit]);
+    }
+    else
+    {
+        snprintf(dst, cap, "%llu.%llu %s", (unsigned long long)whole, (unsigned long long)frac, k_units[unit]);
     }
     dst[cap - 1] = '\0';
 }
@@ -906,7 +988,7 @@ static void fileman_properties_open(fileman_app_t *app, const fileman_entry_t *e
     }
 
     char size_buf[32];
-    fileman_format_size(size_buf, sizeof(size_buf), entry);
+    fileman_format_size_bytes(size_buf, sizeof(size_buf), entry);
     const char *size_suffix = entry->is_dir ? "" : " bytes";
 
     size_t cap = strlen(entry->name) + strlen(entry->path) + 128;
@@ -1208,16 +1290,19 @@ static void fileman_refresh_right_view(fileman_app_t *app)
     }
 
     app->entry_count = out;
-    fileman_sort_entries(app->entries, app->entry_count);
+    fileman_sort_entries(app->entries, app->entry_count, app->sort_mode);
 
     atk_list_view_set_row_count(app->list_view, app->entry_count);
     for (size_t i = 0; i < app->entry_count; ++i)
     {
         fileman_entry_t *entry = &app->entries[i];
         atk_list_view_set_cell_text(app->list_view, i, 0, entry->name);
-        char size_buf[32];
-        fileman_format_size(size_buf, sizeof(size_buf), entry);
-        atk_list_view_set_cell_text(app->list_view, i, 1, size_buf);
+        char size_human[32];
+        char size_bytes[32];
+        fileman_format_size_human(size_human, sizeof(size_human), entry);
+        fileman_format_size_bytes(size_bytes, sizeof(size_bytes), entry);
+        atk_list_view_set_cell_text(app->list_view, i, 1, size_human);
+        atk_list_view_set_cell_text(app->list_view, i, 2, size_bytes);
     }
     atk_list_view_set_selected(app->list_view, ATK_LIST_VIEW_NO_SELECTION);
     atk_list_view_relayout(app->list_view);
@@ -1499,6 +1584,24 @@ static void fileman_set_view_mode(fileman_app_t *app, size_t index)
     }
 }
 
+static void fileman_set_sort_mode(fileman_app_t *app, size_t index)
+{
+    if (!app)
+    {
+        return;
+    }
+    if (index > FILEMAN_SORT_SIZE)
+    {
+        index = FILEMAN_SORT_NAME;
+    }
+    if (app->sort_mode == index)
+    {
+        return;
+    }
+    app->sort_mode = index;
+    fileman_refresh_right_view(app);
+}
+
 static void fileman_list_view_action(atk_widget_t *button, void *context)
 {
     (void)button;
@@ -1509,6 +1612,13 @@ static void fileman_icon_view_action(atk_widget_t *button, void *context)
 {
     (void)button;
     fileman_set_view_mode((fileman_app_t *)context, FILEMAN_VIEW_ICONS);
+}
+
+static void fileman_sort_on_select(atk_widget_t *dropdown, void *context, size_t index, uintptr_t value)
+{
+    (void)dropdown;
+    (void)index;
+    fileman_set_sort_mode((fileman_app_t *)context, (size_t)value);
 }
 
 static void fileman_layout(fileman_app_t *app)
@@ -1562,12 +1672,24 @@ static void fileman_layout(fileman_app_t *app)
 
     int button_w = FILEMAN_VIEW_BUTTON_WIDTH;
     int button_h = FILEMAN_VIEW_BUTTON_HEIGHT;
-    if (right_w > 0 && right_w < button_w * 2 + FILEMAN_VIEW_BUTTON_GAP)
+    int sort_w = FILEMAN_SORT_DROPDOWN_WIDTH;
+    int total_controls = button_w * 2 + FILEMAN_VIEW_BUTTON_GAP + FILEMAN_SORT_DROPDOWN_GAP + sort_w;
+    if (right_w > 0 && right_w < total_controls)
     {
-        button_w = (right_w - FILEMAN_VIEW_BUTTON_GAP) / 2;
+        int available = right_w - FILEMAN_VIEW_BUTTON_GAP - FILEMAN_SORT_DROPDOWN_GAP;
+        if (available < 0)
+        {
+            available = 0;
+        }
+        button_w = available / 3;
+        sort_w = available - button_w * 2;
         if (button_w < 0)
         {
             button_w = 0;
+        }
+        if (sort_w < 0)
+        {
+            sort_w = 0;
         }
     }
     if (button_h > right_h)
@@ -1588,6 +1710,13 @@ static void fileman_layout(fileman_app_t *app)
         app->icon_button->y = right_y;
         app->icon_button->width = button_w;
         app->icon_button->height = button_h;
+    }
+    if (app->sort_dropdown)
+    {
+        app->sort_dropdown->x = right_x + button_w * 2 + FILEMAN_VIEW_BUTTON_GAP + FILEMAN_SORT_DROPDOWN_GAP;
+        app->sort_dropdown->y = right_y;
+        app->sort_dropdown->width = sort_w;
+        app->sort_dropdown->height = button_h;
     }
 
     int view_y = right_y + button_h + FILEMAN_VIEW_BUTTON_SPACING;
@@ -1622,6 +1751,12 @@ static bool fileman_init_ui(fileman_app_t *app)
 
     atk_init();
     atk_state_t *state = atk_state_get();
+    if (!state)
+    {
+        return false;
+    }
+    state->theme.desktop_icon_text = state->theme.button_text;
+    atk_state_theme_commit(state);
     atk_menu_bar_set_enabled(state, false);
 
     atk_widget_t *window = atk_window_create_at(state, FILEMAN_WINDOW_WIDTH / 2, FILEMAN_WINDOW_HEIGHT / 2);
@@ -1650,6 +1785,7 @@ static bool fileman_init_ui(fileman_app_t *app)
     static const atk_list_view_column_def_t FILEMAN_COLUMNS[] = {
         { "Name", 0 },
         { "Size", ATK_COL(10) },
+        { "Bytes", ATK_COL(12) },
     };
     atk_list_view_configure_columns(list_view, FILEMAN_COLUMNS, sizeof(FILEMAN_COLUMNS) / sizeof(FILEMAN_COLUMNS[0]));
     atk_list_view_force_vertical_scrollbar(list_view, true);
@@ -1687,6 +1823,26 @@ static bool fileman_init_ui(fileman_app_t *app)
                                                       fileman_icon_view_action,
                                                       app);
     if (!icon_button)
+    {
+        return false;
+    }
+
+    atk_widget_t *sort_dropdown = atk_window_add_dropdown(window,
+                                                          0,
+                                                          0,
+                                                          FILEMAN_SORT_DROPDOWN_WIDTH,
+                                                          FILEMAN_VIEW_BUTTON_HEIGHT,
+                                                          ATK_DROPDOWN_STYLE_COMBO,
+                                                          fileman_sort_on_select,
+                                                          app);
+    if (!sort_dropdown)
+    {
+        return false;
+    }
+    atk_dropdown_set_title(sort_dropdown, "Sort");
+    if (!atk_dropdown_add_item(sort_dropdown, "Name", FILEMAN_SORT_NAME) ||
+        !atk_dropdown_add_item(sort_dropdown, "Size", FILEMAN_SORT_SIZE) ||
+        !atk_dropdown_set_selected(sort_dropdown, FILEMAN_SORT_NAME))
     {
         return false;
     }
@@ -1734,10 +1890,12 @@ static bool fileman_init_ui(fileman_app_t *app)
     app->tree = tree;
     app->list_button = list_button;
     app->icon_button = icon_button;
+    app->sort_dropdown = sort_dropdown;
     app->list_view = list_view;
     app->iconbox = iconbox;
     app->context_menu = context_menu;
     app->view_mode = FILEMAN_VIEW_ICONS;
+    app->sort_mode = FILEMAN_SORT_NAME;
 
     fileman_layout(app);
     fileman_set_view_mode(app, FILEMAN_VIEW_ICONS);

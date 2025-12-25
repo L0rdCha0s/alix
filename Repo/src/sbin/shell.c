@@ -155,6 +155,36 @@ void shell_emit_console_tap(const char *data, size_t len)
     }
 }
 
+void shell_clear_active_shell(shell_state_t *shell)
+{
+    if (!shell)
+    {
+        return;
+    }
+    shell_state_t *expected = shell;
+    (void)__atomic_compare_exchange_n(&g_active_shell,
+                                      &expected,
+                                      NULL,
+                                      false,
+                                      __ATOMIC_ACQ_REL,
+                                      __ATOMIC_RELAXED);
+}
+
+void shell_clear_console_tap_if_matches(shell_console_tap_fn fn, void *context)
+{
+    if (!fn && !context)
+    {
+        return;
+    }
+    shell_console_tap_fn current_fn = __atomic_load_n(&g_console_tap_fn, __ATOMIC_ACQUIRE);
+    void *current_ctx = __atomic_load_n(&g_console_tap_ctx, __ATOMIC_ACQUIRE);
+    if (current_fn == fn && current_ctx == context)
+    {
+        __atomic_store_n(&g_console_tap_fn, NULL, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_console_tap_ctx, NULL, __ATOMIC_RELEASE);
+    }
+}
+
 void shell_output_init_console(shell_output_t *out)
 {
     out->to_file = false;

@@ -18,7 +18,7 @@
 #define TASKMGR_PROCESS_CAP 64
 #define TASKMGR_CPU_CAP     SYSCALL_CPU_MAX
 #define TASKMGR_NET_CAP     8
-#define TASKMGR_REFRESH_MS 5000
+#define TASKMGR_REFRESH_MS 3000
 #define TASKMGR_TICK_MS    250u
 #define TASKMGR_WINDOW_WIDTH  800
 #define TASKMGR_WINDOW_HEIGHT 600
@@ -32,7 +32,19 @@ typedef struct
     atk_widget_t *process_list;
     atk_widget_t *memory_list;
     atk_widget_t *network_list;
-    bool running;
+    volatile uint32_t running;
+    alix_thread_t proc_thread;
+    alix_mutex_t proc_lock;
+    syscall_process_info_t *proc_snapshot;
+    syscall_process_info_t *proc_snapshot_work;
+    syscall_process_info_t *proc_snapshot_copy;
+    syscall_cpu_stats_t *proc_cpu_snapshot;
+    size_t proc_snapshot_count;
+    uint64_t proc_snapshot_total_ticks;
+    uint64_t proc_snapshot_total_ticks_last;
+    uint64_t proc_snapshot_seq;
+    uint64_t proc_snapshot_seq_seen;
+    volatile uint32_t proc_snapshot_ready;
     uint64_t last_refresh_ms;
     uint64_t last_render_ms;
 } atk_taskmgr_app_t;
@@ -345,6 +357,195 @@ static taskmgr_proc_history_t *taskmgr_proc_history_slot(uint64_t pid)
     return &g_proc_history[0];
 }
 
+static void taskmgr_proc_worker(void *context)
+{
+    atk_taskmgr_app_t *app = (atk_taskmgr_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+
+    while (__atomic_load_n(&app->running, __ATOMIC_ACQUIRE) != 0)
+    {
+        syscall_process_info_t *buffer = app->proc_snapshot_work;
+        if (!buffer)
+        {
+            (void)sys_sleep_ms(TASKMGR_REFRESH_MS);
+            continue;
+        }
+        uint64_t total_ticks_sum = 0;
+        syscall_cpu_stats_t *cpu_stats = app->proc_cpu_snapshot;
+        if (cpu_stats)
+        {
+            ssize_t cpu_count = sys_cpu_snapshot(cpu_stats, TASKMGR_CPU_CAP);
+            if (cpu_count < 0)
+            {
+                cpu_count = 0;
+            }
+            if ((size_t)cpu_count > TASKMGR_CPU_CAP)
+            {
+                cpu_count = TASKMGR_CPU_CAP;
+            }
+            for (ssize_t i = 0; i < cpu_count; ++i)
+            {
+                total_ticks_sum += cpu_stats[i].total_ticks;
+            }
+        }
+        ssize_t count = sys_proc_snapshot(buffer, TASKMGR_PROCESS_CAP);
+        if (count < 0)
+        {
+            count = 0;
+        }
+        if ((size_t)count > TASKMGR_PROCESS_CAP)
+        {
+            count = TASKMGR_PROCESS_CAP;
+        }
+
+        alix_mutex_lock(&app->proc_lock);
+        syscall_process_info_t *swap = app->proc_snapshot;
+        app->proc_snapshot = app->proc_snapshot_work;
+        app->proc_snapshot_work = swap;
+        app->proc_snapshot_count = (size_t)count;
+        app->proc_snapshot_total_ticks = total_ticks_sum;
+        app->proc_snapshot_seq++;
+        __atomic_store_n(&app->proc_snapshot_ready, 1u, __ATOMIC_RELEASE);
+        alix_mutex_unlock(&app->proc_lock);
+
+        (void)sys_sleep_ms(TASKMGR_REFRESH_MS);
+    }
+
+    alix_thread_exit(0);
+}
+
+static bool taskmgr_start_proc_worker(atk_taskmgr_app_t *app)
+{
+    if (!app)
+    {
+        return false;
+    }
+
+    alix_mutex_init(&app->proc_lock);
+    app->proc_snapshot = (syscall_process_info_t *)calloc(TASKMGR_PROCESS_CAP,
+                                                          sizeof(*app->proc_snapshot));
+    app->proc_snapshot_work = (syscall_process_info_t *)calloc(TASKMGR_PROCESS_CAP,
+                                                               sizeof(*app->proc_snapshot_work));
+    app->proc_snapshot_copy = (syscall_process_info_t *)calloc(TASKMGR_PROCESS_CAP,
+                                                               sizeof(*app->proc_snapshot_copy));
+    app->proc_cpu_snapshot = (syscall_cpu_stats_t *)calloc(TASKMGR_CPU_CAP,
+                                                           sizeof(*app->proc_cpu_snapshot));
+    if (!app->proc_snapshot || !app->proc_snapshot_work || !app->proc_snapshot_copy || !app->proc_cpu_snapshot)
+    {
+        free(app->proc_snapshot);
+        free(app->proc_snapshot_work);
+        free(app->proc_snapshot_copy);
+        free(app->proc_cpu_snapshot);
+        app->proc_snapshot = NULL;
+        app->proc_snapshot_work = NULL;
+        app->proc_snapshot_copy = NULL;
+        app->proc_cpu_snapshot = NULL;
+        return false;
+    }
+
+    app->proc_snapshot_count = 0;
+    __atomic_store_n(&app->proc_snapshot_ready, 0u, __ATOMIC_RELEASE);
+
+    alix_thread_t thread = 0;
+    if (alix_thread_create(&thread, "taskmgr_procs", taskmgr_proc_worker, app) != 0)
+    {
+        free(app->proc_snapshot);
+        free(app->proc_snapshot_work);
+        free(app->proc_snapshot_copy);
+        free(app->proc_cpu_snapshot);
+        app->proc_snapshot = NULL;
+        app->proc_snapshot_work = NULL;
+        app->proc_snapshot_copy = NULL;
+        app->proc_cpu_snapshot = NULL;
+        return false;
+    }
+    app->proc_thread = thread;
+    return true;
+}
+
+static void taskmgr_stop_proc_worker(atk_taskmgr_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    if (app->proc_thread)
+    {
+        (void)alix_thread_join(app->proc_thread, NULL);
+        app->proc_thread = 0;
+    }
+
+    free(app->proc_snapshot);
+    free(app->proc_snapshot_work);
+    free(app->proc_snapshot_copy);
+    free(app->proc_cpu_snapshot);
+    app->proc_snapshot = NULL;
+    app->proc_snapshot_work = NULL;
+    app->proc_snapshot_copy = NULL;
+    app->proc_cpu_snapshot = NULL;
+}
+
+static bool taskmgr_copy_process_snapshot(atk_taskmgr_app_t *app,
+                                          size_t *count_out,
+                                          uint64_t *total_tick_delta_out)
+{
+    if (!app || !app->proc_snapshot || !app->proc_snapshot_copy)
+    {
+        return false;
+    }
+
+    size_t count = 0;
+    uint64_t total_ticks = 0;
+    alix_mutex_lock(&app->proc_lock);
+    if (app->proc_snapshot_ready == 0)
+    {
+        alix_mutex_unlock(&app->proc_lock);
+        return false;
+    }
+    if (app->proc_snapshot_seq == app->proc_snapshot_seq_seen)
+    {
+        alix_mutex_unlock(&app->proc_lock);
+        return false;
+    }
+
+    count = app->proc_snapshot_count;
+    if (count > TASKMGR_PROCESS_CAP)
+    {
+        count = TASKMGR_PROCESS_CAP;
+    }
+    if (count > 0)
+    {
+        memcpy(app->proc_snapshot_copy,
+               app->proc_snapshot,
+               count * sizeof(*app->proc_snapshot_copy));
+    }
+    total_ticks = app->proc_snapshot_total_ticks;
+    app->proc_snapshot_seq_seen = app->proc_snapshot_seq;
+    alix_mutex_unlock(&app->proc_lock);
+
+    uint64_t total_tick_delta = 0;
+    if (app->proc_snapshot_total_ticks_last != 0 &&
+        total_ticks >= app->proc_snapshot_total_ticks_last)
+    {
+        total_tick_delta = total_ticks - app->proc_snapshot_total_ticks_last;
+    }
+    app->proc_snapshot_total_ticks_last = total_ticks;
+
+    if (count_out)
+    {
+        *count_out = count;
+    }
+    if (total_tick_delta_out)
+    {
+        *total_tick_delta_out = total_tick_delta;
+    }
+    return true;
+}
+
 static void taskmgr_format_mac(const uint8_t mac[6], char *out, size_t len)
 {
     if (!out || len < 18)
@@ -581,11 +782,21 @@ static uint64_t taskmgr_refresh_cpu(atk_taskmgr_app_t *app)
     return total_delta_sum;
 }
 
-static void taskmgr_refresh_processes(atk_taskmgr_app_t *app, uint64_t total_tick_delta)
+static void taskmgr_refresh_processes(atk_taskmgr_app_t *app)
 {
-    syscall_process_info_t procs[TASKMGR_PROCESS_CAP];
-    ssize_t count = sys_proc_snapshot(procs, TASKMGR_PROCESS_CAP);
-    if (count < 0)
+    if (!app || !app->process_list)
+    {
+        return;
+    }
+
+    size_t rows = 0;
+    uint64_t total_tick_delta = 0;
+    if (!taskmgr_copy_process_snapshot(app, &rows, &total_tick_delta))
+    {
+        return;
+    }
+
+    if (rows == 0)
     {
         atk_list_view_clear(app->process_list);
         if (app->memory_list)
@@ -594,14 +805,9 @@ static void taskmgr_refresh_processes(atk_taskmgr_app_t *app, uint64_t total_tic
         }
         return;
     }
-    if ((size_t)count > TASKMGR_PROCESS_CAP)
-    {
-        count = TASKMGR_PROCESS_CAP;
-    }
 
-    size_t rows = (size_t)count;
-    taskmgr_populate_process_table(app, procs, rows, total_tick_delta);
-    taskmgr_populate_memory_table(app, procs, rows);
+    taskmgr_populate_process_table(app, app->proc_snapshot_copy, rows, total_tick_delta);
+    taskmgr_populate_memory_table(app, app->proc_snapshot_copy, rows);
     if (app->window)
     {
         atk_window_mark_dirty(app->window);
@@ -829,7 +1035,7 @@ static void taskmgr_on_close_event(void *context)
     atk_taskmgr_app_t *app = (atk_taskmgr_app_t *)context;
     if (app)
     {
-        app->running = false;
+        __atomic_store_n(&app->running, 0u, __ATOMIC_RELEASE);
     }
     atk_main_request_exit();
 }
@@ -837,7 +1043,7 @@ static void taskmgr_on_close_event(void *context)
 static bool taskmgr_on_tick(void *context)
 {
     atk_taskmgr_app_t *app = (atk_taskmgr_app_t *)context;
-    if (!app || !app->running)
+    if (!app || __atomic_load_n(&app->running, __ATOMIC_ACQUIRE) == 0)
     {
         return false;
     }
@@ -852,8 +1058,8 @@ static bool taskmgr_on_tick(void *context)
     uint64_t elapsed_ms = now_ms - app->last_refresh_ms;
     if (elapsed_ms >= TASKMGR_REFRESH_MS)
     {
-        uint64_t refresh_cpu_delta = taskmgr_refresh_cpu(app);
-        taskmgr_refresh_processes(app, refresh_cpu_delta);
+        (void)taskmgr_refresh_cpu(app);
+        taskmgr_refresh_processes(app);
         taskmgr_refresh_network(app);
         needs_render = true;
         app->last_refresh_ms = now_ms;
@@ -879,52 +1085,69 @@ static bool taskmgr_on_tick(void *context)
 
 int main(void)
 {
-    atk_taskmgr_app_t app;
-    memset(&app, 0, sizeof(app));
-    app.running = true;
+    atk_taskmgr_app_t *app = (atk_taskmgr_app_t *)calloc(1, sizeof(*app));
+    if (!app)
+    {
+        printf("atk_taskmgr: failed to allocate app state\n");
+        return 1;
+    }
+    __atomic_store_n(&app->running, 1u, __ATOMIC_RELEASE);
 
-    if (!atk_user_window_open_with_flags(&app.remote,
+    if (!atk_user_window_open_with_flags(&app->remote,
                                          "Task Manager",
                                          TASKMGR_WINDOW_WIDTH,
                                          TASKMGR_WINDOW_HEIGHT,
                                          USER_ATK_WINDOW_FLAG_RESIZABLE))
     {
         printf("atk_taskmgr: failed to open remote window\n");
+        free(app);
         return 1;
     }
-    atk_user_enable_dirty_tracking(&app.remote, true);
+    atk_user_enable_dirty_tracking(&app->remote, true);
 
-    if (!taskmgr_init_ui(&app))
+    if (!taskmgr_init_ui(app))
     {
         printf("atk_taskmgr: failed to init UI\n");
-        atk_user_close(&app.remote);
+        atk_user_close(&app->remote);
+        free(app);
+        return 1;
+    }
+
+    if (!taskmgr_start_proc_worker(app))
+    {
+        printf("atk_taskmgr: failed to start process worker\n");
+        atk_user_close(&app->remote);
+        free(app);
         return 1;
     }
 
     memset(g_net_history, 0, sizeof(g_net_history));
     memset(g_cpu_history, 0, sizeof(g_cpu_history));
     memset(g_proc_history, 0, sizeof(g_proc_history));
-    uint64_t cpu_delta = taskmgr_refresh_cpu(&app);
-    taskmgr_refresh_processes(&app, cpu_delta);
-    taskmgr_refresh_network(&app);
-    taskmgr_render(&app);
-    app.last_refresh_ms = sys_time_millis();
-    app.last_render_ms = app.last_refresh_ms;
+    (void)taskmgr_refresh_cpu(app);
+    taskmgr_refresh_processes(app);
+    taskmgr_refresh_network(app);
+    taskmgr_render(app);
+    app->last_refresh_ms = sys_time_millis();
+    app->last_render_ms = app->last_refresh_ms;
 
     atk_main_config_t main_cfg = {
-        .window = &app.remote,
+        .window = &app->remote,
         .tick = taskmgr_on_tick,
-        .tick_context = &app,
+        .tick_context = app,
         .present_on_idle = false,
         .legacy_input = false,
         .tick_interval_ms = TASKMGR_TICK_MS
     };
 
-    atk_main_register_resize_handler(taskmgr_on_resize_event, &app);
-    atk_main_register_close_handler(taskmgr_on_close_event, &app);
+    atk_main_register_resize_handler(taskmgr_on_resize_event, app);
+    atk_main_register_close_handler(taskmgr_on_close_event, app);
 
     atk_main(&main_cfg);
 
-    atk_user_close(&app.remote);
+    __atomic_store_n(&app->running, 0u, __ATOMIC_RELEASE);
+    taskmgr_stop_proc_worker(app);
+    atk_user_close(&app->remote);
+    free(app);
     return 0;
 }
