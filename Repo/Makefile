@@ -337,9 +337,9 @@ $(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USE
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_taskmgr/atk_taskmgr_app.o
 
-$(USER_OBJDIR)/atk_fileman.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_fileman/atk_fileman_app.o $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_fileman.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/crypto/sha1.o $(USER_OBJDIR)/apps/atk_fileman/atk_fileman_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_fileman/atk_fileman_app.o
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/crypto/sha1.o $(USER_OBJDIR)/apps/atk_fileman/atk_fileman_app.o
 
 $(USER_OBJDIR)/atk_mp3.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_mp3/atk_mp3_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)

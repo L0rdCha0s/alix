@@ -979,14 +979,14 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     size_t copied_len = 0;
     if (!user_copy_string_from_user(path_buf, SYSCALL_MAX_PATH_LEN, path, &copied_len))
     {
-        serial_printf("%s", "[sys_open] copy failed\n");
+        // serial_printf("%s", "[sys_open] copy failed\n");
         free(path_buf);
         return -1;
     }
-    serial_printf("[sys_open] path=%s len=0x%016llX flags=0x%016llX\n",
-                  path_buf,
-                  (unsigned long long)copied_len,
-                  (unsigned long long)flags);
+    // serial_printf("[sys_open] path=%s len=0x%016llX flags=0x%016llX\n",
+    //               path_buf,
+    //               (unsigned long long)copied_len,
+    //               (unsigned long long)flags);
 
     file_handle_t *handle = (file_handle_t *)malloc(sizeof(file_handle_t));
     if (!handle)

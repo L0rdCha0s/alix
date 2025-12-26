@@ -535,6 +535,40 @@ bool atk_iconbox_add_icon_with_image(atk_widget_t *iconbox,
     return iconbox_add_icon_internal(iconbox, title, image, action, context);
 }
 
+bool atk_iconbox_set_icon_image(atk_widget_t *iconbox,
+                                void *context,
+                                const atk_iconbox_image_t *image)
+{
+    atk_iconbox_priv_t *priv = iconbox_priv_mut(iconbox);
+    if (!priv || !context)
+    {
+        return false;
+    }
+
+    ATK_LIST_FOR_EACH(node, &priv->icons)
+    {
+        atk_iconbox_icon_t *icon = (atk_iconbox_icon_t *)node->value;
+        if (!icon || icon->context != context)
+        {
+            continue;
+        }
+
+        icon->has_image = (image && image->pixels && image->width > 0 && image->height > 0);
+        if (icon->has_image)
+        {
+            icon->image = *image;
+        }
+        else
+        {
+            memset(&icon->image, 0, sizeof(icon->image));
+        }
+        iconbox_mark_dirty(iconbox);
+        return true;
+    }
+
+    return false;
+}
+
 void atk_iconbox_set_active(atk_widget_t *iconbox, bool active)
 {
     atk_iconbox_priv_t *priv = iconbox_priv_mut(iconbox);

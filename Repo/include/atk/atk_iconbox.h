@@ -46,6 +46,15 @@ bool atk_iconbox_add_icon_with_image(atk_widget_t *iconbox,
                                      atk_button_action_t action,
                                      void *context);
 
+/*
+ * Update the icon image for the icon associated with `context`.
+ *
+ * Returns false if the icon cannot be found.
+ */
+bool atk_iconbox_set_icon_image(atk_widget_t *iconbox,
+                                void *context,
+                                const atk_iconbox_image_t *image);
+
 /* Remove all icons from the iconbox. */
 void atk_iconbox_clear(atk_widget_t *iconbox);
 

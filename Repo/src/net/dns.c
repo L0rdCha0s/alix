@@ -81,6 +81,32 @@ static uint16_t g_next_port = 0xC000;
 static spinlock_t g_dns_lock;
 static bool g_dns_debug_enabled = false;
 
+static inline uint64_t dns_irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("cli" ::: "memory");
+    return flags;
+}
+
+static inline void dns_irq_restore(uint64_t flags)
+{
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
+}
+
+static inline uint64_t dns_lock(void)
+{
+    uint64_t flags = dns_irq_save();
+    spinlock_lock(&g_dns_lock);
+    return flags;
+}
+
+static inline void dns_unlock(uint64_t flags)
+{
+    spinlock_unlock(&g_dns_lock);
+    dns_irq_restore(flags);
+}
+
 static void dns_log(const char *msg);
 static void dns_debug_log(const char *msg);
 static uint16_t read_be16(const uint8_t *p);
@@ -110,7 +136,7 @@ static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_
 void net_dns_init(void)
 {
     spinlock_init(&g_dns_lock);
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     g_server_count = 0;
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
@@ -120,7 +146,7 @@ void net_dns_init(void)
     {
         g_dns_cache[i].valid = false;
     }
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
 }
 
 void net_dns_set_debug(bool enable)
@@ -186,7 +212,7 @@ static bool dns_cache_lookup(const char *hostname, uint16_t qtype, net_dns_resul
     uint32_t addr = 0;
     bool hit = false;
 
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     for (size_t i = 0; i < NET_DNS_CACHE_SIZE; ++i)
     {
         dns_cache_entry_t *entry = &g_dns_cache[i];
@@ -212,7 +238,7 @@ static bool dns_cache_lookup(const char *hostname, uint16_t qtype, net_dns_resul
         hit = true;
         break;
     }
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
 
     if (hit)
     {
@@ -237,7 +263,7 @@ static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_
     uint64_t oldest_tick = 0;
     bool have_oldest = false;
 
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     for (size_t i = 0; i < NET_DNS_CACHE_SIZE; ++i)
     {
         dns_cache_entry_t *entry = &g_dns_cache[i];
@@ -247,7 +273,7 @@ static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_
             entry->addr = addr;
             entry->expires_tick = expires_tick;
             entry->last_used_tick = now;
-            spinlock_unlock(&g_dns_lock);
+            dns_unlock(flags);
             return;
         }
     }
@@ -289,18 +315,18 @@ static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_
         entry->expires_tick = expires_tick;
         entry->last_used_tick = now;
     }
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
 }
 
 
 
 void net_dns_set_servers(const uint32_t *servers, size_t count)
 {
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     g_server_count = 0;
     if (!servers || count == 0)
     {
-        spinlock_unlock(&g_dns_lock);
+        dns_unlock(flags);
         dns_log("set_servers: empty input");
         return;
     }
@@ -313,7 +339,7 @@ void net_dns_set_servers(const uint32_t *servers, size_t count)
         }
     }
     size_t total = g_server_count;
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
     if (total == 0)
     {
         dns_log("set_servers: no usable servers");
@@ -331,16 +357,16 @@ void net_dns_set_servers(const uint32_t *servers, size_t count)
 
 size_t net_dns_server_count(void)
 {
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     size_t count = g_server_count;
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
     return count;
 }
 
 static dns_pending_t *dns_allocate_pending(void)
 {
     dns_pending_t *pending = NULL;
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
         if (!g_pending[i].active)
@@ -351,7 +377,7 @@ static dns_pending_t *dns_allocate_pending(void)
             break;
         }
     }
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
     return pending;
 }
 
@@ -359,12 +385,12 @@ static void dns_release_pending(dns_pending_t *pending)
 {
     if (pending)
     {
-        spinlock_lock(&g_dns_lock);
+        uint64_t flags = dns_lock();
         pending->active = false;
         pending->local_port = 0;
         pending->server_snapshot_count = 0;
         pending->iface = NULL;
-        spinlock_unlock(&g_dns_lock);
+        dns_unlock(flags);
     }
 }
 
@@ -388,9 +414,9 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
         return true;
     }
 
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     size_t configured_servers = g_server_count;
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
     if (configured_servers == 0)
     {
         dns_log("no dns servers configured");
@@ -403,7 +429,7 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
         return false;
     }
 
-    spinlock_lock(&g_dns_lock);
+    flags = dns_lock();
     pending->server_snapshot_count = g_server_count;
     if (pending->server_snapshot_count > NET_DNS_MAX_SERVERS)
     {
@@ -415,7 +441,7 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
                g_servers,
                pending->server_snapshot_count * sizeof(uint32_t));
     }
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
     if (pending->server_snapshot_count == 0)
     {
         dns_log("no dns servers available");
@@ -833,7 +859,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     if (udp_len < 8 || (size_t)(udp - ip) + udp_len > ip_total_len) return;
 
     dns_pending_t *pending = NULL;
-    spinlock_lock(&g_dns_lock);
+    uint64_t lock_flags = dns_lock();
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
         if (g_pending[i].active && g_pending[i].local_port == dst_port)
@@ -842,7 +868,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             break;
         }
     }
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(lock_flags);
     if (!pending) return;
     if (src_port != 53) return;
     if (g_dns_debug_enabled)
@@ -1383,7 +1409,7 @@ static uint16_t checksum16(const uint8_t *data, size_t len)
 
 static uint16_t dns_allocate_port(void)
 {
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     uint16_t result = 0;
     for (size_t attempt = 0; attempt < 0x8000; ++attempt)
     {
@@ -1411,18 +1437,18 @@ static uint16_t dns_allocate_port(void)
             break;
         }
     }
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
     return result;
 }
 
 static uint16_t dns_allocate_id(void)
 {
-    spinlock_lock(&g_dns_lock);
+    uint64_t flags = dns_lock();
     uint16_t id = g_next_id++;
     if (g_next_id == 0)
     {
         g_next_id = 0x1234;
     }
-    spinlock_unlock(&g_dns_lock);
+    dns_unlock(flags);
     return id;
 }

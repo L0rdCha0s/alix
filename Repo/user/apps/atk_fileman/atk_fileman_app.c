@@ -11,7 +11,9 @@
 #include "atk/atk_dropdown.h"
 #include "atk/atk_iconbox.h"
 #include "atk/atk_tree_view.h"
+#include "atk/util/jpeg.h"
 #include "atk/util/png.h"
+#include "crypto/sha1.h"
 #include "ctype.h"
 #include "libc.h"
 #include "stdio.h"
@@ -44,6 +46,12 @@
 #define FILEMAN_DEFAULT_APPS_LINE_MAX 512
 #define FILEMAN_PROPERTIES_WIDTH 360
 #define FILEMAN_PROPERTIES_HEIGHT 220
+#define FILEMAN_THUMB_DIR_SUFFIX "/.fileman/thumbnails"
+#define FILEMAN_THUMB_SIZE 48
+#define FILEMAN_THUMB_MAX_BYTES (16u * 1024u * 1024u)
+#define FILEMAN_THUMB_MAGIC 0x54484D42u
+#define FILEMAN_THUMB_VERSION 1u
+#define FILEMAN_THUMB_POLL_MS 50u
 
 typedef struct fileman_app fileman_app_t;
 
@@ -53,7 +61,7 @@ typedef struct
     char name[SYSCALL_DIR_NAME_MAX];
     char path[FILEMAN_PATH_MAX];
     uint64_t size_bytes;
-    const atk_iconbox_image_t *icon;
+    atk_iconbox_image_t icon;
     bool is_dir;
     bool is_elf;
     bool is_image;
@@ -87,6 +95,30 @@ typedef struct
     size_t capacity;
 } fileman_default_apps_t;
 
+typedef struct __attribute__((packed))
+{
+    uint32_t magic;
+    uint16_t version;
+    uint16_t width;
+    uint16_t height;
+    uint16_t reserved;
+    uint32_t stride_bytes;
+} fileman_thumb_header_t;
+
+typedef struct fileman_thumb_task
+{
+    struct fileman_thumb_task *next;
+    char *src_path;
+    char *thumb_path;
+} fileman_thumb_task_t;
+
+typedef struct fileman_thumb_msg
+{
+    struct fileman_thumb_msg *next;
+    char *src_path;
+    char *thumb_path;
+} fileman_thumb_msg_t;
+
 struct fileman_app
 {
     atk_user_window_t remote;
@@ -111,6 +143,15 @@ struct fileman_app
     const fileman_entry_t *context_entry;
     atk_widget_t *properties_window;
     atk_widget_t *properties_label;
+    alix_thread_t thumb_thread;
+    alix_mutex_t thumb_task_lock;
+    fileman_thumb_task_t *thumb_task_head;
+    fileman_thumb_task_t *thumb_task_tail;
+    alix_mutex_t thumb_msg_lock;
+    fileman_thumb_msg_t *thumb_msg_head;
+    fileman_thumb_msg_t *thumb_msg_tail;
+    char *thumb_dir;
+    bool thumbs_enabled;
     bool running;
 };
 
@@ -131,6 +172,7 @@ static void fileman_icon_action(atk_widget_t *button, void *context);
 static void fileman_set_view_mode(fileman_app_t *app, size_t mode);
 static void fileman_set_sort_mode(fileman_app_t *app, size_t mode);
 static bool fileman_on_mouse_event(const user_atk_event_t *event, void *context);
+static bool fileman_on_tick(void *context);
 static void fileman_sort_on_select(atk_widget_t *dropdown, void *context, size_t index, uintptr_t value);
 
 static char *fileman_strdup(const char *src)
@@ -148,6 +190,317 @@ static char *fileman_strdup(const char *src)
     memcpy(dst, src, len);
     dst[len] = '\0';
     return dst;
+}
+
+static bool fileman_file_exists(const char *path)
+{
+    if (!path || path[0] == '\0')
+    {
+        return false;
+    }
+    int fd = open(path, SYSCALL_OPEN_READ);
+    if (fd < 0)
+    {
+        return false;
+    }
+    close(fd);
+    return true;
+}
+
+static bool fileman_thumb_hash_path(const char *path, char out[41])
+{
+    if (!path || !out)
+    {
+        return false;
+    }
+
+    uint8_t digest[20];
+    sha1_ctx_t ctx;
+    sha1_init(&ctx);
+    sha1_update(&ctx, path, strlen(path));
+    sha1_final(&ctx, digest);
+
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(digest); ++i)
+    {
+        out[i * 2] = hex[(digest[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = hex[digest[i] & 0x0F];
+    }
+    out[40] = '\0';
+    return true;
+}
+
+static bool fileman_thumb_dir_init(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return false;
+    }
+    if (app->thumb_dir)
+    {
+        return true;
+    }
+
+    char *home = alix_home_dir();
+    if (!home || home[0] == '\0')
+    {
+        free(home);
+        return false;
+    }
+
+    size_t home_len = strlen(home);
+    while (home_len > 1 && home[home_len - 1] == '/')
+    {
+        home_len--;
+    }
+    home[home_len] = '\0';
+
+    if (!alix_ensure_dir_path(home))
+    {
+        free(home);
+        return false;
+    }
+
+    const char suffix[] = FILEMAN_THUMB_DIR_SUFFIX;
+    size_t suffix_len = sizeof(suffix) - 1;
+    size_t dir_len = home_len + suffix_len;
+    char *dir = (char *)malloc(dir_len + 1);
+    if (!dir)
+    {
+        free(home);
+        return false;
+    }
+
+    memcpy(dir, home, home_len);
+    memcpy(dir + home_len, suffix, suffix_len);
+    dir[dir_len] = '\0';
+    free(home);
+
+    if (!alix_ensure_dir_path(dir))
+    {
+        free(dir);
+        return false;
+    }
+
+    app->thumb_dir = dir;
+    return true;
+}
+
+static char *fileman_thumb_path_for_file(fileman_app_t *app, const char *path)
+{
+    if (!app || !path || !app->thumb_dir)
+    {
+        return NULL;
+    }
+
+    char hash[41];
+    if (!fileman_thumb_hash_path(path, hash))
+    {
+        return NULL;
+    }
+
+    size_t dir_len = strlen(app->thumb_dir);
+    size_t path_len = dir_len + 1 + sizeof(hash) - 1;
+    char *out = (char *)malloc(path_len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+
+    memcpy(out, app->thumb_dir, dir_len);
+    out[dir_len] = '/';
+    memcpy(out + dir_len + 1, hash, sizeof(hash));
+    out[path_len] = '\0';
+    return out;
+}
+
+static void fileman_thumb_task_free(fileman_thumb_task_t *task)
+{
+    if (!task)
+    {
+        return;
+    }
+    free(task->src_path);
+    free(task->thumb_path);
+    free(task);
+}
+
+static void fileman_thumb_msg_free(fileman_thumb_msg_t *msg)
+{
+    if (!msg)
+    {
+        return;
+    }
+    free(msg->src_path);
+    free(msg->thumb_path);
+    free(msg);
+}
+
+static bool fileman_thumb_task_is_queued_locked(fileman_app_t *app, const char *src_path)
+{
+    if (!app || !src_path)
+    {
+        return false;
+    }
+    for (fileman_thumb_task_t *cur = app->thumb_task_head; cur; cur = cur->next)
+    {
+        if (cur->src_path && strcmp(cur->src_path, src_path) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool fileman_thumb_task_enqueue(fileman_app_t *app, const char *src_path, const char *thumb_path)
+{
+    if (!app || !src_path || !thumb_path || !app->thumbs_enabled)
+    {
+        return false;
+    }
+
+    alix_mutex_lock(&app->thumb_task_lock);
+    if (fileman_thumb_task_is_queued_locked(app, src_path))
+    {
+        alix_mutex_unlock(&app->thumb_task_lock);
+        return false;
+    }
+
+    fileman_thumb_task_t *task = (fileman_thumb_task_t *)calloc(1, sizeof(*task));
+    if (!task)
+    {
+        alix_mutex_unlock(&app->thumb_task_lock);
+        return false;
+    }
+    task->src_path = fileman_strdup(src_path);
+    task->thumb_path = fileman_strdup(thumb_path);
+    if (!task->src_path || !task->thumb_path)
+    {
+        fileman_thumb_task_free(task);
+        alix_mutex_unlock(&app->thumb_task_lock);
+        return false;
+    }
+
+    if (!app->thumb_task_tail)
+    {
+        app->thumb_task_head = task;
+    }
+    else
+    {
+        app->thumb_task_tail->next = task;
+    }
+    app->thumb_task_tail = task;
+    alix_mutex_unlock(&app->thumb_task_lock);
+    return true;
+}
+
+static fileman_thumb_task_t *fileman_thumb_task_dequeue(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return NULL;
+    }
+
+    alix_mutex_lock(&app->thumb_task_lock);
+    fileman_thumb_task_t *task = app->thumb_task_head;
+    if (task)
+    {
+        app->thumb_task_head = task->next;
+        if (!app->thumb_task_head)
+        {
+            app->thumb_task_tail = NULL;
+        }
+        task->next = NULL;
+    }
+    alix_mutex_unlock(&app->thumb_task_lock);
+    return task;
+}
+
+static void fileman_thumb_msg_enqueue(fileman_app_t *app, const char *src_path, const char *thumb_path)
+{
+    if (!app || !src_path || !thumb_path)
+    {
+        return;
+    }
+
+    fileman_thumb_msg_t *msg = (fileman_thumb_msg_t *)calloc(1, sizeof(*msg));
+    if (!msg)
+    {
+        return;
+    }
+    msg->src_path = fileman_strdup(src_path);
+    msg->thumb_path = fileman_strdup(thumb_path);
+    if (!msg->src_path || !msg->thumb_path)
+    {
+        fileman_thumb_msg_free(msg);
+        return;
+    }
+
+    alix_mutex_lock(&app->thumb_msg_lock);
+    if (!app->thumb_msg_tail)
+    {
+        app->thumb_msg_head = msg;
+    }
+    else
+    {
+        app->thumb_msg_tail->next = msg;
+    }
+    app->thumb_msg_tail = msg;
+    alix_mutex_unlock(&app->thumb_msg_lock);
+}
+
+static fileman_thumb_msg_t *fileman_thumb_msg_dequeue(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return NULL;
+    }
+
+    alix_mutex_lock(&app->thumb_msg_lock);
+    fileman_thumb_msg_t *msg = app->thumb_msg_head;
+    if (msg)
+    {
+        app->thumb_msg_head = msg->next;
+        if (!app->thumb_msg_head)
+        {
+            app->thumb_msg_tail = NULL;
+        }
+        msg->next = NULL;
+    }
+    alix_mutex_unlock(&app->thumb_msg_lock);
+    return msg;
+}
+
+static void fileman_thumb_queue_clear(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    alix_mutex_lock(&app->thumb_task_lock);
+    fileman_thumb_task_t *task = app->thumb_task_head;
+    app->thumb_task_head = NULL;
+    app->thumb_task_tail = NULL;
+    alix_mutex_unlock(&app->thumb_task_lock);
+    while (task)
+    {
+        fileman_thumb_task_t *next = task->next;
+        fileman_thumb_task_free(task);
+        task = next;
+    }
+
+    alix_mutex_lock(&app->thumb_msg_lock);
+    fileman_thumb_msg_t *msg = app->thumb_msg_head;
+    app->thumb_msg_head = NULL;
+    app->thumb_msg_tail = NULL;
+    alix_mutex_unlock(&app->thumb_msg_lock);
+    while (msg)
+    {
+        fileman_thumb_msg_t *next = msg->next;
+        fileman_thumb_msg_free(msg);
+        msg = next;
+    }
 }
 
 static bool fileman_is_dot_entry(const char *name)
@@ -200,6 +553,294 @@ static bool fileman_has_suffix(const char *name, const char *suffix)
         return false;
     }
     return strcasecmp(name + (name_len - suffix_len), suffix) == 0;
+}
+
+static uint8_t *fileman_read_file_all(const char *path, size_t *len_out, size_t max_bytes)
+{
+    if (len_out)
+    {
+        *len_out = 0;
+    }
+    if (!path || path[0] == '\0')
+    {
+        return NULL;
+    }
+
+    int fd = open(path, SYSCALL_OPEN_READ);
+    if (fd < 0)
+    {
+        return NULL;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    if (st.st_size == 0 || st.st_size > (uint64_t)max_bytes)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    size_t size = (size_t)st.st_size;
+    uint8_t *buf = (uint8_t *)malloc(size);
+    if (!buf)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    size_t offset = 0;
+    while (offset < size)
+    {
+        ssize_t got = read(fd, buf + offset, size - offset);
+        if (got <= 0)
+        {
+            free(buf);
+            close(fd);
+            return NULL;
+        }
+        offset += (size_t)got;
+    }
+    close(fd);
+
+    if (len_out)
+    {
+        *len_out = size;
+    }
+    return buf;
+}
+
+static bool fileman_is_png_data(const uint8_t *data, size_t size)
+{
+    static const uint8_t signature[] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    return data && size >= sizeof(signature) && memcmp(data, signature, sizeof(signature)) == 0;
+}
+
+static bool fileman_is_jpeg_data(const uint8_t *data, size_t size)
+{
+    return data && size >= 2 && data[0] == 0xFF && data[1] == 0xD8;
+}
+
+static bool fileman_decode_image(const uint8_t *data,
+                                 size_t size,
+                                 video_color_t **pixels_out,
+                                 int *width_out,
+                                 int *height_out,
+                                 int *stride_out)
+{
+    if (!data || !pixels_out || !width_out || !height_out || !stride_out)
+    {
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+    int rc = -1;
+    if (fileman_is_png_data(data, size))
+    {
+        rc = png_decode_rgba32(data, size, &pixels, &width, &height, &stride);
+    }
+    else if (fileman_is_jpeg_data(data, size))
+    {
+        rc = jpeg_decode_rgba32(data, size, &pixels, &width, &height, &stride);
+    }
+    else
+    {
+        return false;
+    }
+
+    if (rc != 0 || !pixels || width <= 0 || height <= 0)
+    {
+        free(pixels);
+        return false;
+    }
+
+    *pixels_out = pixels;
+    *width_out = width;
+    *height_out = height;
+    *stride_out = stride;
+    return true;
+}
+
+static video_color_t *fileman_scale_thumbnail(const video_color_t *pixels,
+                                              int width,
+                                              int height,
+                                              int stride_bytes,
+                                              int *stride_out)
+{
+    if (!pixels || width <= 0 || height <= 0)
+    {
+        return NULL;
+    }
+
+    const int target = FILEMAN_THUMB_SIZE;
+    size_t total = (size_t)target * (size_t)target;
+    video_color_t *thumb = (video_color_t *)calloc(total, sizeof(video_color_t));
+    if (!thumb)
+    {
+        return NULL;
+    }
+
+    int max_dim = width > height ? width : height;
+    int draw_w = width;
+    int draw_h = height;
+    if (max_dim > target)
+    {
+        draw_w = (width * target) / max_dim;
+        draw_h = (height * target) / max_dim;
+        if (draw_w < 1)
+        {
+            draw_w = 1;
+        }
+        if (draw_h < 1)
+        {
+            draw_h = 1;
+        }
+    }
+
+    int x_off = (target - draw_w) / 2;
+    int y_off = (target - draw_h) / 2;
+    int src_stride = stride_bytes > 0 ? stride_bytes : width * (int)sizeof(video_color_t);
+    const uint8_t *src_bytes = (const uint8_t *)pixels;
+
+    for (int y = 0; y < draw_h; ++y)
+    {
+        int src_y = (y * height) / draw_h;
+        const video_color_t *src_row = (const video_color_t *)(src_bytes + (size_t)src_y * (size_t)src_stride);
+        video_color_t *dst_row = thumb + (size_t)(y + y_off) * target + (size_t)x_off;
+        for (int x = 0; x < draw_w; ++x)
+        {
+            int src_x = (x * width) / draw_w;
+            dst_row[x] = src_row[src_x];
+        }
+    }
+
+    if (stride_out)
+    {
+        *stride_out = target * (int)sizeof(video_color_t);
+    }
+    return thumb;
+}
+
+static bool fileman_write_thumbnail(const char *path,
+                                    const video_color_t *pixels,
+                                    int width,
+                                    int height,
+                                    int stride_bytes)
+{
+    if (!path || !pixels || width <= 0 || height <= 0 || stride_bytes <= 0)
+    {
+        return false;
+    }
+
+    FILE *fp = fopen(path, "wb");
+    if (!fp)
+    {
+        return false;
+    }
+
+    fileman_thumb_header_t header = {
+        .magic = FILEMAN_THUMB_MAGIC,
+        .version = FILEMAN_THUMB_VERSION,
+        .width = (uint16_t)width,
+        .height = (uint16_t)height,
+        .reserved = 0,
+        .stride_bytes = (uint32_t)stride_bytes
+    };
+
+    size_t header_written = fwrite(&header, 1, sizeof(header), fp);
+    if (header_written != sizeof(header))
+    {
+        fclose(fp);
+        return false;
+    }
+
+    size_t bytes = (size_t)height * (size_t)stride_bytes;
+    size_t wrote = fwrite(pixels, 1, bytes, fp);
+    fclose(fp);
+    return wrote == bytes;
+}
+
+static bool fileman_generate_thumbnail(const char *src_path, const char *thumb_path)
+{
+    if (!src_path || !thumb_path)
+    {
+        return false;
+    }
+
+    size_t data_len = 0;
+    uint8_t *data = fileman_read_file_all(src_path, &data_len, FILEMAN_THUMB_MAX_BYTES);
+    if (!data)
+    {
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+    bool ok = fileman_decode_image(data, data_len, &pixels, &width, &height, &stride);
+    free(data);
+    if (!ok)
+    {
+        free(pixels);
+        return false;
+    }
+
+    int thumb_stride = 0;
+    video_color_t *thumb = fileman_scale_thumbnail(pixels, width, height, stride, &thumb_stride);
+    free(pixels);
+    if (!thumb)
+    {
+        return false;
+    }
+
+    ok = fileman_write_thumbnail(thumb_path,
+                                 thumb,
+                                 FILEMAN_THUMB_SIZE,
+                                 FILEMAN_THUMB_SIZE,
+                                 thumb_stride);
+    free(thumb);
+    return ok;
+}
+
+static void fileman_thumb_thread(void *arg)
+{
+    fileman_app_t *app = (fileman_app_t *)arg;
+    if (!app)
+    {
+        alix_thread_exit(0);
+    }
+
+    while (__atomic_load_n(&app->running, __ATOMIC_ACQUIRE))
+    {
+        fileman_thumb_task_t *task = fileman_thumb_task_dequeue(app);
+        if (!task)
+        {
+            (void)sys_sleep_ms(FILEMAN_THUMB_POLL_MS);
+            continue;
+        }
+
+        bool have_thumb = fileman_file_exists(task->thumb_path);
+        if (!have_thumb)
+        {
+            have_thumb = fileman_generate_thumbnail(task->src_path, task->thumb_path);
+        }
+        if (have_thumb)
+        {
+            fileman_thumb_msg_enqueue(app, task->src_path, task->thumb_path);
+        }
+
+        fileman_thumb_task_free(task);
+    }
+
+    alix_thread_exit(0);
 }
 
 static char *fileman_trim_whitespace(char *text)
@@ -663,12 +1304,41 @@ static const atk_iconbox_image_t *fileman_icon_cache_load(fileman_app_t *app, co
     int width = 0;
     int height = 0;
     int stride_bytes = 0;
-    int rc = png_decode_rgba32(data, size, &pixels, &width, &height, &stride_bytes);
-    free(data);
-    if (rc != 0 || !pixels)
+
+    if (size >= sizeof(fileman_thumb_header_t))
     {
-        return NULL;
+        const fileman_thumb_header_t *header = (const fileman_thumb_header_t *)data;
+        if (header->magic == FILEMAN_THUMB_MAGIC && header->version == FILEMAN_THUMB_VERSION)
+        {
+            width = (int)header->width;
+            height = (int)header->height;
+            stride_bytes = (int)header->stride_bytes;
+            if (width > 0 && height > 0 && stride_bytes >= width * (int)sizeof(video_color_t))
+            {
+                size_t pixel_bytes = (size_t)height * (size_t)stride_bytes;
+                size_t needed = sizeof(fileman_thumb_header_t) + pixel_bytes;
+                if (needed <= size)
+                {
+                    pixels = (video_color_t *)malloc(pixel_bytes);
+                    if (pixels)
+                    {
+                        memcpy(pixels, data + sizeof(fileman_thumb_header_t), pixel_bytes);
+                    }
+                }
+            }
+        }
     }
+
+    if (!pixels)
+    {
+        int rc = png_decode_rgba32(data, size, &pixels, &width, &height, &stride_bytes);
+        if (rc != 0 || !pixels)
+        {
+            free(data);
+            return NULL;
+        }
+    }
+    free(data);
 
     fileman_icon_cache_entry_t *entry = fileman_icon_cache_alloc(app);
     if (!entry)
@@ -710,6 +1380,78 @@ static void fileman_icon_cache_clear(fileman_app_t *app)
     app->icon_cache.capacity = 0;
 }
 
+static fileman_entry_t *fileman_find_entry_by_path(fileman_app_t *app, const char *path)
+{
+    if (!app || !path || !app->entries)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < app->entry_count; ++i)
+    {
+        fileman_entry_t *entry = &app->entries[i];
+        if (strcmp(entry->path, path) == 0)
+        {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static void fileman_entry_set_icon(fileman_entry_t *entry, const atk_iconbox_image_t *image)
+{
+    if (!entry)
+    {
+        return;
+    }
+    if (image)
+    {
+        entry->icon = *image;
+    }
+    else
+    {
+        memset(&entry->icon, 0, sizeof(entry->icon));
+    }
+}
+
+static bool fileman_process_thumb_messages(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return false;
+    }
+
+    bool redraw = false;
+    while (true)
+    {
+        fileman_thumb_msg_t *msg = fileman_thumb_msg_dequeue(app);
+        if (!msg)
+        {
+            break;
+        }
+
+        fileman_entry_t *entry = fileman_find_entry_by_path(app, msg->src_path);
+        if (entry)
+        {
+            const atk_iconbox_image_t *thumb = fileman_icon_cache_load(app, msg->thumb_path);
+            if (thumb)
+            {
+                fileman_entry_set_icon(entry, thumb);
+                if (app->iconbox)
+                {
+                    if (atk_iconbox_set_icon_image(app->iconbox, entry, &entry->icon))
+                    {
+                        redraw = true;
+                    }
+                }
+            }
+        }
+
+        fileman_thumb_msg_free(msg);
+    }
+
+    return redraw;
+}
+
 static const char *fileman_icon_name_for_file(const char *name)
 {
     if (!name)
@@ -731,6 +1473,24 @@ static const atk_iconbox_image_t *fileman_icon_for_entry(fileman_app_t *app, con
     if (!app || !entry)
     {
         return NULL;
+    }
+    if (entry->is_image && app->thumb_dir)
+    {
+        char *thumb_path = fileman_thumb_path_for_file(app, entry->path);
+        if (thumb_path)
+        {
+            const atk_iconbox_image_t *thumb = fileman_icon_cache_load(app, thumb_path);
+            if (thumb)
+            {
+                free(thumb_path);
+                return thumb;
+            }
+            if (app->thumbs_enabled && !fileman_file_exists(thumb_path))
+            {
+                (void)fileman_thumb_task_enqueue(app, entry->path, thumb_path);
+            }
+            free(thumb_path);
+        }
     }
     const char *icon_name = NULL;
     if (entry->is_dir)
@@ -1197,6 +1957,12 @@ static bool fileman_on_mouse_event(const user_atk_event_t *event, void *context)
     return redraw;
 }
 
+static bool fileman_on_tick(void *context)
+{
+    fileman_app_t *app = (fileman_app_t *)context;
+    return fileman_process_thumb_messages(app);
+}
+
 static void fileman_refresh_right_view(fileman_app_t *app)
 {
     if (!app || !app->list_view || !app->iconbox)
@@ -1286,7 +2052,7 @@ static void fileman_refresh_right_view(fileman_app_t *app)
         dst->is_elf = (!dst->is_dir && fileman_has_extension(dst->name, ".elf"));
         dst->is_image = (!dst->is_dir && fileman_is_image_name(dst->name));
         dst->is_font = (!dst->is_dir && fileman_is_font_name(dst->name));
-        dst->icon = fileman_icon_for_entry(app, dst);
+        fileman_entry_set_icon(dst, fileman_icon_for_entry(app, dst));
     }
 
     app->entry_count = out;
@@ -1310,7 +2076,7 @@ static void fileman_refresh_right_view(fileman_app_t *app)
     for (size_t i = 0; i < app->entry_count; ++i)
     {
         fileman_entry_t *entry = &app->entries[i];
-        atk_iconbox_add_icon_with_image(app->iconbox, entry->name, entry->icon, fileman_icon_action, entry);
+        atk_iconbox_add_icon_with_image(app->iconbox, entry->name, &entry->icon, fileman_icon_action, entry);
     }
     atk_iconbox_relayout(app->iconbox);
 
@@ -1903,6 +2669,56 @@ static bool fileman_init_ui(fileman_app_t *app)
     return true;
 }
 
+static void fileman_thumb_start(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    app->thumbs_enabled = false;
+    alix_mutex_init(&app->thumb_task_lock);
+    alix_mutex_init(&app->thumb_msg_lock);
+    app->thumb_task_head = NULL;
+    app->thumb_task_tail = NULL;
+    app->thumb_msg_head = NULL;
+    app->thumb_msg_tail = NULL;
+
+    if (!fileman_thumb_dir_init(app))
+    {
+        return;
+    }
+
+    alix_thread_t thread = 0;
+    if (alix_thread_create(&thread, "fileman_thumb", fileman_thumb_thread, app) != 0)
+    {
+        return;
+    }
+
+    app->thumb_thread = thread;
+    app->thumbs_enabled = true;
+}
+
+static void fileman_thumb_stop(fileman_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    __atomic_store_n(&app->running, false, __ATOMIC_RELEASE);
+    if (app->thumb_thread)
+    {
+        (void)alix_thread_join(app->thumb_thread, NULL);
+        app->thumb_thread = 0;
+    }
+
+    fileman_thumb_queue_clear(app);
+    free(app->thumb_dir);
+    app->thumb_dir = NULL;
+    app->thumbs_enabled = false;
+}
+
 static bool fileman_on_resize_event(uint32_t width, uint32_t height, void *context)
 {
     fileman_app_t *app = (fileman_app_t *)context;
@@ -1922,74 +2738,85 @@ static void fileman_on_close_event(void *context)
     fileman_app_t *app = (fileman_app_t *)context;
     if (app)
     {
-        app->running = false;
+        __atomic_store_n(&app->running, false, __ATOMIC_RELEASE);
     }
     atk_main_request_exit();
 }
 
 int main(void)
 {
-    fileman_app_t app;
-    memset(&app, 0, sizeof(app));
-    app.shell_handle = sys_shell_open();
-    app.running = true;
+    fileman_app_t *app = (fileman_app_t *)calloc(1, sizeof(*app));
+    if (!app)
+    {
+        printf("atk_fileman: failed to allocate app state\n");
+        return 1;
+    }
+    app->shell_handle = sys_shell_open();
+    __atomic_store_n(&app->running, true, __ATOMIC_RELEASE);
 
-    if (!atk_user_window_open_with_flags(&app.remote,
+    if (!atk_user_window_open_with_flags(&app->remote,
                                          "File Manager",
                                          FILEMAN_WINDOW_WIDTH,
                                          FILEMAN_WINDOW_HEIGHT,
                                          USER_ATK_WINDOW_FLAG_RESIZABLE))
     {
         printf("atk_fileman: failed to open remote window\n");
-        if (app.shell_handle >= 0)
+        if (app->shell_handle >= 0)
         {
-            sys_shell_close(app.shell_handle);
+            sys_shell_close(app->shell_handle);
         }
+        free(app);
         return 1;
     }
-    atk_user_enable_dirty_tracking(&app.remote, true);
+    atk_user_enable_dirty_tracking(&app->remote, true);
+    fileman_thumb_start(app);
 
-    if (!fileman_init_ui(&app))
+    if (!fileman_init_ui(app))
     {
         printf("atk_fileman: failed to init UI\n");
-        atk_user_close(&app.remote);
-        if (app.shell_handle >= 0)
+        fileman_thumb_stop(app);
+        atk_user_close(&app->remote);
+        if (app->shell_handle >= 0)
         {
-            sys_shell_close(app.shell_handle);
+            sys_shell_close(app->shell_handle);
         }
+        free(app);
         return 1;
     }
 
-    (void)fileman_default_apps_load(&app);
+    (void)fileman_default_apps_load(app);
 
     atk_render();
-    atk_user_present_force(&app.remote);
+    atk_user_present_force(&app->remote);
 
     atk_main_config_t main_cfg = {
-        .window = &app.remote,
-        .tick = NULL,
-        .tick_context = NULL,
+        .window = &app->remote,
+        .tick = fileman_on_tick,
+        .tick_context = app,
         .present_on_idle = false,
-        .legacy_input = false
+        .legacy_input = false,
+        .tick_interval_ms = 0
     };
 
-    atk_main_register_resize_handler(fileman_on_resize_event, &app);
-    atk_main_register_close_handler(fileman_on_close_event, &app);
-    atk_main_register_mouse_handler(fileman_on_mouse_event, &app);
+    atk_main_register_resize_handler(fileman_on_resize_event, app);
+    atk_main_register_close_handler(fileman_on_close_event, app);
+    atk_main_register_mouse_handler(fileman_on_mouse_event, app);
 
     atk_main(&main_cfg);
 
-    if (app.properties_window)
+    if (app->properties_window)
     {
-        atk_window_close(atk_state_get(), app.properties_window);
+        atk_window_close(atk_state_get(), app->properties_window);
     }
-    fileman_entries_clear(&app);
-    fileman_icon_cache_clear(&app);
-    fileman_default_apps_clear(&app);
-    if (app.shell_handle >= 0)
+    fileman_thumb_stop(app);
+    fileman_entries_clear(app);
+    fileman_icon_cache_clear(app);
+    fileman_default_apps_clear(app);
+    if (app->shell_handle >= 0)
     {
-        sys_shell_close(app.shell_handle);
+        sys_shell_close(app->shell_handle);
     }
-    atk_user_close(&app.remote);
+    atk_user_close(&app->remote);
+    free(app);
     return 0;
 }

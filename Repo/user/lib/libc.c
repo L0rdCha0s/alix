@@ -10,6 +10,7 @@ int errno = 0;
 
 #define ALIGNMENT 16UL
 #define SIZE_MAX_VALUE ((size_t)-1)
+#define LIBC_MAX_PASSWD_BYTES (64u * 1024u)
 
 typedef struct heap_block
 {
@@ -852,6 +853,319 @@ char *getenv(const char *name)
 uint32_t getuid(void)
 {
     return sys_getuid();
+}
+
+static char *libc_strdup_len(const char *src, size_t len)
+{
+    if (!src && len != 0)
+    {
+        return NULL;
+    }
+    char *dst = (char *)malloc(len + 1);
+    if (!dst)
+    {
+        return NULL;
+    }
+    if (len > 0)
+    {
+        memcpy(dst, src, len);
+    }
+    dst[len] = '\0';
+    return dst;
+}
+
+static char *libc_strdup(const char *src)
+{
+    if (!src)
+    {
+        return NULL;
+    }
+    return libc_strdup_len(src, strlen(src));
+}
+
+static bool libc_parse_u32_range(const char *start, const char *end, uint32_t *out)
+{
+    if (!start || !end || !out || start >= end)
+    {
+        return false;
+    }
+    uint32_t value = 0;
+    for (const char *cur = start; cur < end; ++cur)
+    {
+        if (*cur < '0' || *cur > '9')
+        {
+            return false;
+        }
+        uint32_t digit = (uint32_t)(*cur - '0');
+        uint32_t next = value * 10u + digit;
+        if (next < value)
+        {
+            return false;
+        }
+        value = next;
+    }
+    *out = value;
+    return true;
+}
+
+static char *libc_read_file_all(const char *path, size_t *len_out, size_t max_bytes)
+{
+    if (len_out)
+    {
+        *len_out = 0;
+    }
+    if (!path || path[0] == '\0')
+    {
+        return NULL;
+    }
+
+    int fd = open(path, SYSCALL_OPEN_READ);
+    if (fd < 0)
+    {
+        return NULL;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    if (st.st_size == 0 || st.st_size > (uint64_t)max_bytes)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    size_t size = (size_t)st.st_size;
+    char *buf = (char *)malloc(size + 1);
+    if (!buf)
+    {
+        close(fd);
+        return NULL;
+    }
+
+    size_t offset = 0;
+    while (offset < size)
+    {
+        ssize_t got = read(fd, buf + offset, size - offset);
+        if (got <= 0)
+        {
+            free(buf);
+            close(fd);
+            return NULL;
+        }
+        offset += (size_t)got;
+    }
+    buf[size] = '\0';
+    close(fd);
+
+    if (len_out)
+    {
+        *len_out = size;
+    }
+    return buf;
+}
+
+static bool libc_passwd_line_home(const char *line,
+                                  const char *end,
+                                  uint32_t *uid_out,
+                                  const char **home_start_out,
+                                  size_t *home_len_out)
+{
+    if (!line || !end || line >= end || !uid_out || !home_start_out || !home_len_out)
+    {
+        return false;
+    }
+
+    const char *colon1 = NULL;
+    const char *colon2 = NULL;
+    const char *colon3 = NULL;
+    const char *colon4 = NULL;
+    for (const char *cur = line; cur < end; ++cur)
+    {
+        if (*cur == ':')
+        {
+            if (!colon1)
+            {
+                colon1 = cur;
+            }
+            else if (!colon2)
+            {
+                colon2 = cur;
+            }
+            else if (!colon3)
+            {
+                colon3 = cur;
+            }
+            else
+            {
+                colon4 = cur;
+                break;
+            }
+        }
+    }
+
+    if (!colon1 || !colon2 || !colon3 || !colon4)
+    {
+        return false;
+    }
+
+    uint32_t uid = 0;
+    if (!libc_parse_u32_range(colon1 + 1, colon2, &uid))
+    {
+        return false;
+    }
+
+    const char *home_start = colon4 + 1;
+    if (home_start > end)
+    {
+        return false;
+    }
+    size_t home_len = (size_t)(end - home_start);
+    if (home_len == 0)
+    {
+        return false;
+    }
+
+    *uid_out = uid;
+    *home_start_out = home_start;
+    *home_len_out = home_len;
+    return true;
+}
+
+char *alix_home_dir(void)
+{
+    size_t data_len = 0;
+    char *data = libc_read_file_all("/etc/passwd", &data_len, LIBC_MAX_PASSWD_BYTES);
+    if (!data || data_len == 0)
+    {
+        free(data);
+        return NULL;
+    }
+
+    uint32_t uid = getuid();
+    char *home = NULL;
+    char *root_home = NULL;
+    size_t pos = 0;
+    while (pos < data_len)
+    {
+        size_t line_end = pos;
+        while (line_end < data_len && data[line_end] != '\n' && data[line_end] != '\r')
+        {
+            ++line_end;
+        }
+
+        if (line_end > pos)
+        {
+            const char *line = data + pos;
+            const char *end = data + line_end;
+            uint32_t line_uid = 0;
+            const char *home_start = NULL;
+            size_t home_len = 0;
+            if (libc_passwd_line_home(line, end, &line_uid, &home_start, &home_len))
+            {
+                if (!home && line_uid == uid)
+                {
+                    home = libc_strdup_len(home_start, home_len);
+                }
+                if (!root_home && line_uid == 0)
+                {
+                    root_home = libc_strdup_len(home_start, home_len);
+                }
+            }
+        }
+
+        while (line_end < data_len && (data[line_end] == '\n' || data[line_end] == '\r'))
+        {
+            ++line_end;
+        }
+        pos = line_end;
+    }
+
+    free(data);
+    if (home)
+    {
+        free(root_home);
+        return home;
+    }
+    return root_home;
+}
+
+static bool libc_dir_exists(const char *path)
+{
+    if (!path || path[0] == '\0')
+    {
+        return false;
+    }
+    syscall_dirent_t *scratch = (syscall_dirent_t *)malloc(sizeof(*scratch));
+    if (!scratch)
+    {
+        return false;
+    }
+    ssize_t count = sys_list_dir(path, scratch, 1);
+    free(scratch);
+    return count >= 0;
+}
+
+bool alix_ensure_dir_path(const char *path)
+{
+    if (!path || path[0] == '\0')
+    {
+        return false;
+    }
+
+    char *copy = libc_strdup(path);
+    if (!copy)
+    {
+        return false;
+    }
+
+    size_t len = strlen(copy);
+    if (len == 0)
+    {
+        free(copy);
+        return false;
+    }
+
+    size_t pos = 0;
+    if (copy[0] == '/')
+    {
+        pos = 1;
+        while (copy[pos] == '/')
+        {
+            pos++;
+        }
+    }
+
+    for (; pos <= len; ++pos)
+    {
+        if (copy[pos] == '/' || copy[pos] == '\0')
+        {
+            char saved = copy[pos];
+            copy[pos] = '\0';
+            if (copy[0] != '\0' && !(copy[0] == '/' && copy[1] == '\0'))
+            {
+                if (mkdir(copy, 0) != 0)
+                {
+                    if (!libc_dir_exists(copy))
+                    {
+                        free(copy);
+                        return false;
+                    }
+                }
+            }
+            copy[pos] = saved;
+            while (copy[pos] == '/')
+            {
+                pos++;
+            }
+        }
+    }
+
+    free(copy);
+    return true;
 }
 
 int setenv(const char *name, const char *value, int overwrite)

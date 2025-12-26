@@ -24,6 +24,20 @@ void atk_button_configure(atk_widget_t *widget,
 void atk_button_set_title(atk_widget_t *widget, const char *title);
 
 /*
+ * Set or clear an icon for a button.
+ *
+ * When `pixels` is NULL, the icon is cleared. If `take_ownership` is true, the
+ * button will free the pixel buffer when replaced or destroyed.
+ */
+void atk_button_set_icon(atk_widget_t *widget,
+                         video_color_t *pixels,
+                         int width,
+                         int height,
+                         int stride_bytes,
+                         bool use_alpha,
+                         bool take_ownership);
+
+/*
  * Return the effective pixel height used for hit testing and layout.
  *
  * For `ATK_BUTTON_STYLE_TITLE_BELOW`, this includes the extra label block under

@@ -85,7 +85,7 @@ typedef struct tcp_reass_segment
 {
     uint32_t seq;
     size_t len;
-    uint8_t *data;
+    uint8_t data[NET_TCP_MAX_PAYLOAD];
     struct tcp_reass_segment *next;
 } tcp_reass_segment_t;
 
@@ -177,6 +177,9 @@ static void tcp_log_send_block(const net_tcp_socket_t *socket, const char *reaso
 }
 
 static net_tcp_socket_t g_sockets[NET_TCP_MAX_SOCKETS];
+/* Fixed pool allocated at init to keep TCP reassembly off the heap in IRQ-driven RX paths. */
+static tcp_reass_segment_t *g_reass_pool = NULL;
+static tcp_reass_segment_t *g_reass_free = NULL;
 static uint16_t g_next_ephemeral_port = 49152;
 static uint64_t g_retransmit_ticks = 50;
 static uint64_t g_arp_retry_ticks = 50;
@@ -209,6 +212,9 @@ static void tcp_rx_consume(net_tcp_socket_t *socket, size_t consumed);
 static void tcp_reassembly_clear(net_tcp_socket_t *socket);
 static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const uint8_t *data, size_t len);
 static void tcp_reassembly_drain(net_tcp_socket_t *socket);
+static void tcp_reassembly_pool_init(void);
+static tcp_reass_segment_t *tcp_reass_alloc(void);
+static void tcp_reass_release(tcp_reass_segment_t *seg);
 static void tcp_log_size(const char *label, size_t value) __attribute__((unused));
 static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
 static ssize_t tcp_fd_read(void *ctx, void *buffer, size_t count);
@@ -272,6 +278,7 @@ static inline void tcp_unlock(uint64_t flags)
 void net_tcp_init(void)
 {
     spinlock_init(&g_tcp_lock);
+    tcp_reassembly_pool_init();
     uint32_t freq = timer_frequency();
     if (freq == 0)
     {
@@ -379,6 +386,52 @@ static bool tcp_init_tx_buffer(net_tcp_socket_t *socket)
     return true;
 }
 
+static void tcp_reassembly_pool_init(void)
+{
+    if (g_reass_pool)
+    {
+        return;
+    }
+    g_reass_free = NULL;
+    size_t pool_bytes = sizeof(tcp_reass_segment_t) * NET_TCP_REASS_MAX_SEGMENTS;
+    g_reass_pool = (tcp_reass_segment_t *)malloc(pool_bytes);
+    if (!g_reass_pool)
+    {
+        return;
+    }
+    for (size_t i = 0; i < NET_TCP_REASS_MAX_SEGMENTS; ++i)
+    {
+        g_reass_pool[i].seq = 0;
+        g_reass_pool[i].len = 0;
+        g_reass_pool[i].next = g_reass_free;
+        g_reass_free = &g_reass_pool[i];
+    }
+}
+
+static tcp_reass_segment_t *tcp_reass_alloc(void)
+{
+    tcp_reass_segment_t *node = g_reass_free;
+    if (!node)
+    {
+        return NULL;
+    }
+    g_reass_free = node->next;
+    node->next = NULL;
+    node->seq = 0;
+    node->len = 0;
+    return node;
+}
+
+static void tcp_reass_release(tcp_reass_segment_t *seg)
+{
+    if (!seg)
+    {
+        return;
+    }
+    seg->next = g_reass_free;
+    g_reass_free = seg;
+}
+
 static void tcp_reassembly_clear(net_tcp_socket_t *socket)
 {
     if (!socket)
@@ -389,11 +442,7 @@ static void tcp_reassembly_clear(net_tcp_socket_t *socket)
     while (seg)
     {
         tcp_reass_segment_t *next = seg->next;
-        if (seg->data)
-        {
-            free(seg->data);
-        }
-        free(seg);
+        tcp_reass_release(seg);
         seg = next;
     }
     socket->reass_head = NULL;
@@ -407,6 +456,10 @@ static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const u
     if (!socket || !data || len == 0)
     {
         return true;
+    }
+    if (len > NET_TCP_MAX_PAYLOAD)
+    {
+        return false;
     }
 
     uint32_t recv_next = socket->recv_next;
@@ -482,21 +535,14 @@ static bool tcp_reassembly_store(net_tcp_socket_t *socket, uint32_t seq, const u
         return false;
     }
 
-    tcp_reass_segment_t *node = (tcp_reass_segment_t *)malloc(sizeof(tcp_reass_segment_t));
+    tcp_reass_segment_t *node = tcp_reass_alloc();
     if (!node)
     {
         return false;
     }
-    uint8_t *copy = (uint8_t *)malloc(len);
-    if (!copy)
-    {
-        free(node);
-        return false;
-    }
-    memcpy(copy, data, len);
+    memcpy(node->data, data, len);
     node->seq = seq;
     node->len = len;
-    node->data = copy;
     node->next = NULL;
 
     tcp_reass_segment_t **link = &socket->reass_head;
@@ -550,12 +596,12 @@ static void tcp_reassembly_drain(net_tcp_socket_t *socket)
         memcpy(socket->rx_buffer + socket->rx_head + socket->rx_size, seg->data, seg->len);
         socket->rx_size += seg->len;
         socket->recv_next += (uint32_t)seg->len;
-    socket->reass_head = seg->next;
-    socket->reass_bytes -= seg->len;
-    if (socket->reass_segments > 0)
-    {
-        socket->reass_segments -= 1;
-    }
+        socket->reass_head = seg->next;
+        socket->reass_bytes -= seg->len;
+        if (socket->reass_segments > 0)
+        {
+            socket->reass_segments -= 1;
+        }
 #if TCP_TRACE_VERBOSE
         if (tcp_debug_enabled())
         {
@@ -570,8 +616,7 @@ static void tcp_reassembly_drain(net_tcp_socket_t *socket)
             TCP_LOG("%s", "\r\n");
         }
 #endif
-        free(seg->data);
-        free(seg);
+        tcp_reass_release(seg);
     }
 }
 

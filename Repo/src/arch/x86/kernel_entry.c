@@ -33,6 +33,7 @@ extern uint8_t __kernel_data_start[];
 extern uint8_t __kernel_data_end[];
 extern uint8_t __bss_start[];
 extern uint8_t __bss_end[];
+extern uint8_t __kernel_vma_end[];
 extern bootinfo_t boot_info;
 
 uintptr_t kernel_heap_base = KERNEL_HEAP_BASE;
@@ -300,9 +301,15 @@ static void configure_heap_from_e820(void)
 
     const uint64_t desired_size = KERNEL_HEAP_SIZE;
     const uint64_t max_addr = 0xFFFFFFFFULL; /* identity mapped limit */
-    const uint64_t min_base = 0x02000000ULL; /* avoid low memory */
+    const uint64_t align = 0x200000ULL;
+    uint64_t min_base = 0x02000000ULL; /* avoid low memory */
     uint64_t best_base = 0;
     uint64_t best_size = 0;
+    uint64_t kernel_end = (uint64_t)(uintptr_t)__kernel_vma_end;
+    if (kernel_end > min_base)
+    {
+        min_base = (kernel_end + (align - 1)) & ~(align - 1);
+    }
 
     for (uint32_t i = 0; i < count; ++i)
     {
@@ -331,7 +338,6 @@ static void configure_heap_from_e820(void)
             candidate_base = min_base;
         }
         /* Align to 2 MiB to reduce fragmentation and respect hugepage boundaries. */
-        const uint64_t align = 0x200000ULL;
         candidate_base = (candidate_base + (align - 1)) & ~(align - 1);
         if (candidate_base >= entry_end)
         {

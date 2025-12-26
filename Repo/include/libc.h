@@ -40,6 +40,8 @@ int unsetenv(const char *name);
 char *getenv(const char *name);
 uint32_t getuid(void);
 int mkdir(const char *path, uint32_t mode);
+char *alix_home_dir(void);
+bool alix_ensure_dir_path(const char *path);
 
 ssize_t read(int fd, void *buffer, size_t count);
 ssize_t write(int fd, const void *buffer, size_t count);

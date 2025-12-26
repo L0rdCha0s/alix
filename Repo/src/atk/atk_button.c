@@ -9,6 +9,7 @@
 static void button_set_title(atk_button_priv_t *priv, const char *title);
 static atk_button_priv_t *button_priv_mut(atk_widget_t *widget);
 static const atk_button_priv_t *button_priv(const atk_widget_t *widget);
+static void button_clear_icon(atk_button_priv_t *priv);
 
 static const atk_widget_vtable_t button_vtable = { 0 };
 static const int k_button_label_max_lines = 2;
@@ -27,6 +28,14 @@ static bool button_clip_rect(const atk_rect_t *clip, const atk_rect_t *rect, atk
 static void button_draw_rect_clipped(int x, int y, int width, int height, video_color_t color, const atk_rect_t *clip);
 static void button_draw_gradient_clipped(int x, int y, int width, int height, video_color_t top, video_color_t bottom, const atk_rect_t *clip);
 static void button_draw_bevel_outline_clipped(int x, int y, int width, int height, video_color_t light, video_color_t dark, const atk_rect_t *clip);
+static void button_blit_rgba32_clipped(int x,
+                                       int y,
+                                       int width,
+                                       int height,
+                                       const video_color_t *pixels,
+                                       int stride_bytes,
+                                       bool use_alpha,
+                                       const atk_rect_t *clip);
 static void button_draw_cb(const atk_state_t *state,
                            const atk_widget_t *widget,
                            int origin_x,
@@ -70,6 +79,7 @@ void atk_button_configure(atk_widget_t *widget,
     atk_button_priv_t *priv = button_priv_mut(widget);
     widget->used = true;
     atk_widget_set_ops(widget, &g_button_ops, NULL);
+    button_clear_icon(priv);
     priv->style = style;
     priv->draggable = draggable;
     priv->absolute = absolute;
@@ -98,6 +108,48 @@ void atk_button_set_title(atk_widget_t *widget, const char *title)
     int origin_y = widget->parent ? widget->parent->y : 0;
     int height = atk_button_effective_height(widget);
     atk_dirty_mark_rect(origin_x + widget->x, origin_y + widget->y, widget->width, height);
+    if (widget->parent)
+    {
+        video_request_refresh_window(widget->parent);
+    }
+}
+
+void atk_button_set_icon(atk_widget_t *widget,
+                         video_color_t *pixels,
+                         int width,
+                         int height,
+                         int stride_bytes,
+                         bool use_alpha,
+                         bool take_ownership)
+{
+    if (!widget)
+    {
+        return;
+    }
+
+    atk_button_priv_t *priv = button_priv_mut(widget);
+    if (!priv)
+    {
+        return;
+    }
+
+    button_clear_icon(priv);
+    if (!pixels || width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    priv->icon_pixels = pixels;
+    priv->icon_width = width;
+    priv->icon_height = height;
+    priv->icon_stride_bytes = (stride_bytes > 0) ? stride_bytes : width * (int)sizeof(video_color_t);
+    priv->icon_use_alpha = use_alpha;
+    priv->icon_owned = take_ownership;
+
+    int origin_x = widget->parent ? widget->parent->x : 0;
+    int origin_y = widget->parent ? widget->parent->y : 0;
+    int height_px = atk_button_effective_height(widget);
+    atk_dirty_mark_rect(origin_x + widget->x, origin_y + widget->y, widget->width, height_px);
     if (widget->parent)
     {
         video_request_refresh_window(widget->parent);
@@ -181,6 +233,52 @@ void atk_button_draw_ex(const atk_state_t *state,
     video_color_t edge_dark = atk_color_tint(border_color, priv->pressed ? -24 : -18);
     button_draw_gradient_clipped(bx, by, widget->width, widget->height, face_top, face_bottom, clip);
     button_draw_bevel_outline_clipped(bx, by, widget->width, widget->height, edge_light, edge_dark, clip);
+
+    if (priv->style == ATK_BUTTON_STYLE_TITLE_BELOW &&
+        priv->icon_pixels &&
+        priv->icon_width > 0 &&
+        priv->icon_height > 0)
+    {
+        int pad = 6;
+        int max_w = widget->width - pad * 2;
+        int max_h = widget->height - pad * 2;
+        if (max_w < 1)
+        {
+            max_w = widget->width;
+        }
+        if (max_h < 1)
+        {
+            max_h = widget->height;
+        }
+        int draw_w = priv->icon_width;
+        int draw_h = priv->icon_height;
+        if (draw_w > max_w)
+        {
+            draw_w = max_w;
+        }
+        if (draw_h > max_h)
+        {
+            draw_h = max_h;
+        }
+        if (draw_w > 0 && draw_h > 0)
+        {
+            int draw_x = bx + (widget->width - draw_w) / 2;
+            int draw_y = by + (widget->height - draw_h) / 2;
+            if (priv->pressed)
+            {
+                draw_x += 1;
+                draw_y += 1;
+            }
+            button_blit_rgba32_clipped(draw_x,
+                                       draw_y,
+                                       draw_w,
+                                       draw_h,
+                                       priv->icon_pixels,
+                                       priv->icon_stride_bytes,
+                                       priv->icon_use_alpha,
+                                       clip);
+        }
+    }
 
     const char *title = priv->title;
     int title_px_width = atk_font_text_width(title);
@@ -301,6 +399,24 @@ static const atk_button_priv_t *button_priv(const atk_widget_t *widget)
         return 0;
     }
     return (const atk_button_priv_t *)atk_widget_priv(widget, &ATK_BUTTON_CLASS);
+}
+
+static void button_clear_icon(atk_button_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->icon_pixels && priv->icon_owned)
+    {
+        free(priv->icon_pixels);
+    }
+    priv->icon_pixels = NULL;
+    priv->icon_width = 0;
+    priv->icon_height = 0;
+    priv->icon_stride_bytes = 0;
+    priv->icon_use_alpha = false;
+    priv->icon_owned = false;
 }
 
 static void button_layout_label(const char *title, int max_width, button_label_layout_t *out)
@@ -561,6 +677,82 @@ static void button_draw_bevel_outline_clipped(int x, int y, int width, int heigh
     button_draw_rect_clipped(x + width - 1, y, 1, height, dark, clip);
 }
 
+static void button_blit_rgba32_clipped(int x,
+                                       int y,
+                                       int width,
+                                       int height,
+                                       const video_color_t *pixels,
+                                       int stride_bytes,
+                                       bool use_alpha,
+                                       const atk_rect_t *clip)
+{
+    if (!pixels || width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    if (!clip)
+    {
+        int stride = stride_bytes > 0 ? stride_bytes : width * (int)sizeof(video_color_t);
+        video_blit_rgba32(x, y, width, height, pixels, stride, use_alpha);
+        return;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+    int clip_x0 = clip->x;
+    int clip_y0 = clip->y;
+    int clip_x1 = clip->x + clip->width;
+    int clip_y1 = clip->y + clip->height;
+
+    if (x1 <= clip_x0 || x0 >= clip_x1 || y1 <= clip_y0 || y0 >= clip_y1)
+    {
+        return;
+    }
+
+    int src_x = 0;
+    int src_y = 0;
+    if (x0 < clip_x0)
+    {
+        src_x = clip_x0 - x0;
+        x0 = clip_x0;
+    }
+    if (y0 < clip_y0)
+    {
+        src_y = clip_y0 - y0;
+        y0 = clip_y0;
+    }
+    if (x1 > clip_x1)
+    {
+        x1 = clip_x1;
+    }
+    if (y1 > clip_y1)
+    {
+        y1 = clip_y1;
+    }
+
+    int draw_w = x1 - x0;
+    int draw_h = y1 - y0;
+    if (draw_w <= 0 || draw_h <= 0)
+    {
+        return;
+    }
+
+    int stride = stride_bytes > 0 ? stride_bytes : width * (int)sizeof(video_color_t);
+    const uint8_t *src = (const uint8_t *)pixels +
+                         (size_t)src_y * (size_t)stride +
+                         (size_t)src_x * sizeof(video_color_t);
+    video_blit_rgba32(x0,
+                      y0,
+                      draw_w,
+                      draw_h,
+                      (const video_color_t *)src,
+                      stride,
+                      use_alpha);
+}
+
 static void button_draw_cb(const atk_state_t *state,
                            const atk_widget_t *widget,
                            int origin_x,
@@ -637,6 +829,7 @@ static void button_destroy_cb(atk_widget_t *widget, void *context)
     atk_button_priv_t *priv = button_priv_mut(widget);
     if (priv)
     {
+        button_clear_icon(priv);
         priv->list_node = NULL;
     }
     atk_widget_destroy(widget);

@@ -170,5 +170,5 @@ static void desktop_button_destroy(void *value)
         priv->list_node = 0;
     }
 
-    atk_widget_destroy(widget);
+    atk_widget_destroy_any(widget);
 }

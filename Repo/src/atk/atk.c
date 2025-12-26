@@ -32,6 +32,7 @@
 #endif
 
 #define ATK_MAX_BG_RECTS 64
+#define ATK_DESKTOP_ICON_BASE "/usr/share/icons/48x48/apps"
 
 static uint64_t atk_now_millis(void)
 {
@@ -183,7 +184,6 @@ static void atk_resize_band_clear(atk_state_t *state);
 static void action_open_task_manager(atk_widget_t *button, void *context);
 static void action_open_atk_terminal(atk_widget_t *button, void *context);
 static void action_open_atk_browser(atk_widget_t *button, void *context);
-static void action_open_atk_demo(atk_widget_t *button, void *context);
 static void action_open_control_panel(atk_widget_t *button, void *context);
 static void action_open_atk_fileman(atk_widget_t *button, void *context);
 static void atk_schedule_user_launch(const char *launcher_name, const void *info);
@@ -322,6 +322,68 @@ static void atk_background_reload_if_needed(void)
         atk_background_clear();
     }
 }
+
+#if defined(KERNEL_BUILD) && !defined(ATK_NO_DESKTOP_APPS)
+static bool atk_desktop_load_icon(const char *path,
+                                  video_color_t **pixels_out,
+                                  int *width_out,
+                                  int *height_out,
+                                  int *stride_out)
+{
+    if (!path || !pixels_out || !width_out || !height_out || !stride_out)
+    {
+        return false;
+    }
+
+    vfs_node_t *node = vfs_resolve(vfs_root(), path);
+    if (!node || !vfs_is_file(node))
+    {
+        return false;
+    }
+
+    size_t size = 0;
+    const char *data = vfs_data(node, &size);
+    if (!data || size == 0)
+    {
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0;
+    int h = 0;
+    int stride = 0;
+    int rc = png_decode_rgba32((const uint8_t *)data, size, &pixels, &w, &h, &stride);
+    if (rc != 0 || !pixels)
+    {
+        return false;
+    }
+
+    *pixels_out = pixels;
+    *width_out = w;
+    *height_out = h;
+    *stride_out = stride;
+    return true;
+}
+
+static void atk_desktop_set_button_icon(atk_widget_t *button, const char *path)
+{
+    if (!button || !path || path[0] == '\0')
+    {
+        return;
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0;
+    int h = 0;
+    int stride = 0;
+    if (!atk_desktop_load_icon(path, &pixels, &w, &h, &stride))
+    {
+        return;
+    }
+
+    atk_button_set_icon(button, pixels, w, h, stride, true, true);
+}
+#endif
 
 static void atk_paint_background_region(const atk_state_t *state, int x, int y, int width, int height)
 {
@@ -982,71 +1044,67 @@ void atk_enter_mode(void)
 #endif
 
 #ifndef ATK_NO_DESKTOP_APPS
-    atk_desktop_add_button(state,
-                           240,
-                           80,
-                           88,
-                           88,
-                           "Tasks",
-                           ATK_BUTTON_STYLE_TITLE_BELOW,
-                           true,
-                           action_open_task_manager,
-                           state);
+    atk_widget_t *button = atk_desktop_add_button(state,
+                                                  240,
+                                                  80,
+                                                  88,
+                                                  88,
+                                                  "Tasks",
+                                                  ATK_BUTTON_STYLE_TITLE_BELOW,
+                                                  true,
+                                                  action_open_task_manager,
+                                                  state);
+    atk_desktop_set_button_icon(button, ATK_DESKTOP_ICON_BASE "/preferences-system-time.png");
 
-    atk_desktop_add_button(state,
-                           340,
-                           80,
-                           88,
-                           88,
-                           "Terminal",
-                           ATK_BUTTON_STYLE_TITLE_BELOW,
-                           true,
-                           action_open_atk_terminal,
-                           state);
+    button = atk_desktop_add_button(state,
+                                    340,
+                                    80,
+                                    88,
+                                    88,
+                                    "Terminal",
+                                    ATK_BUTTON_STYLE_TITLE_BELOW,
+                                    true,
+                                    action_open_atk_terminal,
+                                    state);
+    atk_desktop_set_button_icon(button, ATK_DESKTOP_ICON_BASE "/utilities-terminal.png");
 
-    atk_desktop_add_button(state,
-                           440,
-                           80,
-                           88,
-                           88,
-                           "ATK Demo",
-                           ATK_BUTTON_STYLE_TITLE_BELOW,
-                           true,
-                           action_open_atk_demo,
-                           state);
 
-    atk_desktop_add_button(state,
-                           540,
-                           80,
-                           88,
-                           88,
-                           "Control Panel",
-                           ATK_BUTTON_STYLE_TITLE_BELOW,
-                           true,
-                           action_open_control_panel,
-                           state);
 
-    atk_desktop_add_button(state,
-                           640,
-                           80,
-                           88,
-                           88,
-                           "Browser",
-                           ATK_BUTTON_STYLE_TITLE_BELOW,
-                           true,
-                           action_open_atk_browser,
-                           state);
+    button = atk_desktop_add_button(state,
+                                    540,
+                                    80,
+                                    88,
+                                    88,
+                                    "Control Panel",
+                                    ATK_BUTTON_STYLE_TITLE_BELOW,
+                                    true,
+                                    action_open_control_panel,
+                                    state);
+    atk_desktop_set_button_icon(button, ATK_DESKTOP_ICON_BASE "/system-software-update.png");
 
-    atk_desktop_add_button(state,
-                           740,
-                           80,
-                           88,
-                           88,
-                           "Files",
-                           ATK_BUTTON_STYLE_TITLE_BELOW,
-                           true,
-                           action_open_atk_fileman,
-                           state);
+    button = atk_desktop_add_button(state,
+                                    640,
+                                    80,
+                                    88,
+                                    88,
+                                    "Browser",
+                                    ATK_BUTTON_STYLE_TITLE_BELOW,
+                                    true,
+                                    action_open_atk_browser,
+                                    state);
+    atk_desktop_set_button_icon(button, ATK_DESKTOP_ICON_BASE "/konqueror.png");
+
+    button = atk_desktop_add_button(state,
+                                    740,
+                                    80,
+                                    88,
+                                    88,
+                                    "Files",
+                                    ATK_BUTTON_STYLE_TITLE_BELOW,
+                                    true,
+                                    action_open_atk_fileman,
+                                    state);
+    atk_desktop_set_button_icon(button, ATK_DESKTOP_ICON_BASE "/partitionmanager.png");
 #else
     (void)action_exit_to_text;
 #endif
@@ -1838,11 +1896,6 @@ static const atk_user_launch_info_t g_atk_browser_launch = {
     .name = "atk_browser"
 };
 
-static const atk_user_launch_info_t g_atk_demo_launch = {
-    .path = "/usr/bin/atk_demo.elf",
-    .name = "atk_demo"
-};
-
 static const atk_user_launch_info_t g_control_panel_launch = {
     .path = "/usr/bin/control_panel.elf",
     .name = "control_panel"
@@ -2368,13 +2421,6 @@ static void action_open_atk_browser(atk_widget_t *button, void *context)
     (void)button;
     (void)context;
     atk_schedule_user_launch("atk_browser_launcher", &g_atk_browser_launch);
-}
-
-static void action_open_atk_demo(atk_widget_t *button, void *context)
-{
-    (void)button;
-    (void)context;
-    atk_schedule_user_launch("atk_demo_launcher", &g_atk_demo_launch);
 }
 
 static void action_open_control_panel(atk_widget_t *button, void *context)

@@ -131,6 +131,12 @@ typedef struct
     bool draggable;
     bool absolute;
     bool pressed;
+    bool icon_use_alpha;
+    bool icon_owned;
+    video_color_t *icon_pixels;
+    int icon_width;
+    int icon_height;
+    int icon_stride_bytes;
     char title[ATK_BUTTON_TITLE_MAX];
     atk_button_action_t action;
     void *action_context;
