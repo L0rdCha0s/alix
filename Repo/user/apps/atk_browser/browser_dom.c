@@ -89,6 +89,31 @@ bool browser_is_png_bytes(const uint8_t *data, size_t len)
     return memcmp(data, signature, sizeof(signature)) == 0;
 }
 
+bool browser_is_gif_bytes(const uint8_t *data, size_t len)
+{
+    if (!data || len < 6)
+    {
+        return false;
+    }
+    return (memcmp(data, "GIF87a", 6) == 0) || (memcmp(data, "GIF89a", 6) == 0);
+}
+
+static bool browser_url_list_contains(char *const *list, size_t count, const char *url)
+{
+    if (!list || !url || url[0] == '\0')
+    {
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (list[i] && strcmp(list[i], url) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void browser_dom_set_attr(html_node_t *node, const char *name, const char *value)
 {
     if (!node || node->type != HTML_NODE_ELEMENT || !name || name[0] == '\0' || !value)
@@ -171,8 +196,15 @@ void browser_collect_resource_urls(browser_app_t *app,
                         if (abs)
                         {
                             browser_dom_set_attr(node, "href", abs);
-                            css_urls[css_count++] = abs;
-                            browser_debug_logf(app, "[css] discovered %s", abs);
+                            if (!browser_url_list_contains(css_urls, css_count, abs))
+                            {
+                                css_urls[css_count++] = abs;
+                                browser_debug_logf(app, "[css] discovered %s", abs);
+                            }
+                            else
+                            {
+                                free(abs);
+                            }
                         }
                     }
                 }
@@ -188,8 +220,15 @@ void browser_collect_resource_urls(browser_app_t *app,
                         browser_dom_set_attr(node, "src", abs);
                         if (!web_url_is_svg(abs))
                         {
-                            img_urls[img_count++] = abs;
-                            browser_debug_logf(app, "[img] discovered %s", abs);
+                            if (!browser_url_list_contains(img_urls, img_count, abs))
+                            {
+                                img_urls[img_count++] = abs;
+                                browser_debug_logf(app, "[img] discovered %s", abs);
+                            }
+                            else
+                            {
+                                free(abs);
+                            }
                         }
                         else
                         {
@@ -208,8 +247,15 @@ void browser_collect_resource_urls(browser_app_t *app,
                     if (abs)
                     {
                         browser_dom_set_attr(node, "src", abs);
-                        script_urls[script_count++] = abs;
-                        browser_debug_logf(app, "[js] discovered %s", abs);
+                        if (!browser_url_list_contains(script_urls, script_count, abs))
+                        {
+                            script_urls[script_count++] = abs;
+                            browser_debug_logf(app, "[js] discovered %s", abs);
+                        }
+                        else
+                        {
+                            free(abs);
+                        }
                     }
                 }
             }

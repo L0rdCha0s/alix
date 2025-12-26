@@ -339,6 +339,7 @@ static void on_url_submit(atk_widget_t *input, void *context)
     {
         return;
     }
+    browser_debug_log_reset_file(app);
     browser_debug_logf(app, "[ui] submit url=%s", text);
 
     browser_menus_close(app);
@@ -366,9 +367,12 @@ bool browser_tick(void *context)
     }
     browser_debug_service(app);
 
+    size_t events_processed = 0;
     browser_ui_event_t ev = {0};
-    while (browser_ui_event_dequeue(app, &ev))
+    while (events_processed < BROWSER_UI_EVENTS_PER_TICK &&
+           browser_ui_event_dequeue(app, &ev))
     {
+        events_processed++;
         switch (ev.type)
         {
             case BROWSER_UI_EVENT_DOC_READY:
@@ -483,6 +487,45 @@ bool browser_tick(void *context)
                                        ok ? "loaded" : "failed",
                                        ev.u.image_png.src ? ev.u.image_png.src : "(null)",
                                        (unsigned)ev.u.image_png.len);
+                    atk_window_mark_dirty(app->window);
+                    redraw = true;
+                }
+                break;
+            }
+            case BROWSER_UI_EVENT_IMAGE_GIF:
+            {
+                if (browser_load_is_active(app, ev.load_id))
+                {
+                    bool ok = atk_html_view_add_image_gif(app->viewer,
+                                                         ev.u.image_gif.src ? ev.u.image_gif.src : "",
+                                                         ev.u.image_gif.data,
+                                                         ev.u.image_gif.len);
+                    browser_debug_logf(app,
+                                       "[img] %s src=%s bytes=%u",
+                                       ok ? "loaded" : "failed",
+                                       ev.u.image_gif.src ? ev.u.image_gif.src : "(null)",
+                                       (unsigned)ev.u.image_gif.len);
+                    atk_window_mark_dirty(app->window);
+                    redraw = true;
+                }
+                break;
+            }
+            case BROWSER_UI_EVENT_IMAGE_RGBA:
+            {
+                if (browser_load_is_active(app, ev.load_id))
+                {
+                    bool ok = atk_html_view_add_image_rgba(app->viewer,
+                                                          ev.u.image_rgba.src ? ev.u.image_rgba.src : "",
+                                                          ev.u.image_rgba.pixels,
+                                                          ev.u.image_rgba.width,
+                                                          ev.u.image_rgba.height,
+                                                          ev.u.image_rgba.stride_bytes);
+                    browser_debug_logf(app,
+                                       "[img] %s src=%s bytes=%u",
+                                       ok ? "loaded" : "failed",
+                                       ev.u.image_rgba.src ? ev.u.image_rgba.src : "(null)",
+                                       (unsigned)(ev.u.image_rgba.stride_bytes * ev.u.image_rgba.height));
+                    ev.u.image_rgba.pixels = NULL;
                     atk_window_mark_dirty(app->window);
                     redraw = true;
                 }

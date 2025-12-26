@@ -3,6 +3,7 @@
 #include "atk_internal.h"
 #include "atk/util/jpeg.h"
 #include "atk/util/png.h"
+#include "atk/util/gif.h"
 #include "video.h"
 #include "libc.h"
 #include "heap.h"
@@ -15,6 +16,12 @@ static bool atk_image_is_png(const uint8_t *data, size_t size)
 {
     static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
     return data && size >= sizeof(sig) && memcmp(data, sig, sizeof(sig)) == 0;
+}
+
+static bool atk_image_is_gif(const uint8_t *data, size_t size)
+{
+    return data && size >= 6 &&
+           (memcmp(data, "GIF87a", 6) == 0 || memcmp(data, "GIF89a", 6) == 0);
 }
 
 static bool atk_image_is_jpeg(const uint8_t *data, size_t size)
@@ -197,8 +204,38 @@ bool atk_image_load_png(atk_widget_t *image, const uint8_t *data, size_t size)
     return atk_image_set_pixels(image, pixels, width, height, stride_bytes, true);
 }
 
+bool atk_image_load_gif(atk_widget_t *image, const uint8_t *data, size_t size)
+{
+    if (!image || !data || size == 0)
+    {
+        return false;
+    }
+
+    atk_image_priv_t *priv = (atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
+    if (!priv)
+    {
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int width = 0;
+    int height = 0;
+    int stride_bytes = 0;
+    int rc = gif_decode_rgba32(data, size, &pixels, &width, &height, &stride_bytes);
+    if (rc != 0 || !pixels)
+    {
+        return false;
+    }
+
+    return atk_image_set_pixels(image, pixels, width, height, stride_bytes, true);
+}
+
 bool atk_image_load_image(atk_widget_t *image, const uint8_t *data, size_t size)
 {
+    if (atk_image_is_gif(data, size))
+    {
+        return atk_image_load_gif(image, data, size);
+    }
     if (atk_image_is_png(data, size))
     {
         return atk_image_load_png(image, data, size);
@@ -208,6 +245,10 @@ bool atk_image_load_image(atk_widget_t *image, const uint8_t *data, size_t size)
         return atk_image_load_jpeg(image, data, size);
     }
 
+    if (atk_image_load_gif(image, data, size))
+    {
+        return true;
+    }
     if (atk_image_load_png(image, data, size))
     {
         return true;

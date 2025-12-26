@@ -814,3 +814,112 @@ bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint
     html_view_invalidate(view);
     return true;
 }
+
+bool atk_html_view_add_image_gif(atk_widget_t *view, const char *src, const uint8_t *data, size_t size)
+{
+    if (!view || !src || src[0] == '\0' || !data || size == 0)
+    {
+        return false;
+    }
+
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return false;
+    }
+
+    if (html_view_image_find(priv, src))
+    {
+        return true;
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0;
+    int h = 0;
+    int stride_bytes = 0;
+    int rc = gif_decode_rgba32(data, size, &pixels, &w, &h, &stride_bytes);
+    if (rc != 0 || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
+    {
+        free(pixels);
+        return false;
+    }
+
+    html_view_image_t *img = (html_view_image_t *)calloc(1, sizeof(*img));
+    if (!img)
+    {
+        free(pixels);
+        return false;
+    }
+
+    img->src = html_view_strdup(src);
+    if (!img->src)
+    {
+        free(pixels);
+        free(img);
+        return false;
+    }
+
+    img->pixels = pixels;
+    img->width = w;
+    img->height = h;
+    img->stride_bytes = stride_bytes;
+    img->next = priv->images;
+    priv->images = img;
+
+    html_view_render_cache_clear(&priv->render_cache);
+    html_view_invalidate(view);
+    return true;
+}
+
+bool atk_html_view_add_image_rgba(atk_widget_t *view,
+                                  const char *src,
+                                  video_color_t *pixels,
+                                  int width,
+                                  int height,
+                                  int stride_bytes)
+{
+    if (!view || !src || src[0] == '\0' || !pixels || width <= 0 || height <= 0 || stride_bytes <= 0)
+    {
+        free(pixels);
+        return false;
+    }
+
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        free(pixels);
+        return false;
+    }
+
+    if (html_view_image_find(priv, src))
+    {
+        free(pixels);
+        return true;
+    }
+
+    html_view_image_t *img = (html_view_image_t *)calloc(1, sizeof(*img));
+    if (!img)
+    {
+        free(pixels);
+        return false;
+    }
+
+    img->src = html_view_strdup(src);
+    if (!img->src)
+    {
+        free(pixels);
+        free(img);
+        return false;
+    }
+
+    img->pixels = pixels;
+    img->width = width;
+    img->height = height;
+    img->stride_bytes = stride_bytes;
+    img->next = priv->images;
+    priv->images = img;
+
+    html_view_render_cache_clear(&priv->render_cache);
+    html_view_invalidate(view);
+    return true;
+}

@@ -4,6 +4,10 @@
 #include "stdarg.h"
 #include "stdio.h"
 #include "string.h"
+#include "fcntl.h"
+#include "unistd.h"
+
+static const char *const BROWSER_DEBUG_LOG_PATH = "/tmp/atk_browser_debug.log";
 
 static void browser_debug_log_trim_locked(browser_app_t *app)
 {
@@ -177,13 +181,41 @@ static void browser_debug_log_line(browser_app_t *app, const char *line)
     }
     size_t len = strlen(line);
 
+    bool add_newline = (len == 0 || line[len - 1] != '\n');
+
     alix_mutex_lock(&app->lock);
     browser_debug_log_append_locked(app, line, len);
-    if (len == 0 || line[len - 1] != '\n')
+    if (add_newline)
     {
         browser_debug_log_append_locked(app, "\n", 1);
     }
     alix_mutex_unlock(&app->lock);
+
+    int fd = open(BROWSER_DEBUG_LOG_PATH, O_WRONLY | O_CREAT);
+    if (fd >= 0)
+    {
+        (void)lseek(fd, 0, SYSCALL_SEEK_END);
+        (void)browser_write_all(fd, (const uint8_t *)line, len);
+        if (add_newline)
+        {
+            (void)browser_write_all(fd, (const uint8_t *)"\n", 1);
+        }
+        close(fd);
+    }
+}
+
+void browser_debug_log_reset_file(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    int fd = open(BROWSER_DEBUG_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0)
+    {
+        close(fd);
+    }
 }
 
 typedef struct

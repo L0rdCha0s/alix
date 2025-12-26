@@ -32,6 +32,7 @@
 #define BROWSER_MAX_SCRIPTS 16
 #define BROWSER_UI_EVENT_QUEUE_CAP 64
 #define BROWSER_MAX_LOAD_THREADS 32
+#define BROWSER_UI_EVENTS_PER_TICK 8
 
 typedef struct
 {
@@ -48,6 +49,8 @@ typedef enum
     BROWSER_UI_EVENT_CSS_APPEND,
     BROWSER_UI_EVENT_SCRIPT_APPEND,
     BROWSER_UI_EVENT_IMAGE_PNG,
+    BROWSER_UI_EVENT_IMAGE_GIF,
+    BROWSER_UI_EVENT_IMAGE_RGBA,
     BROWSER_UI_EVENT_THREAD_DONE
 } browser_ui_event_type_t;
 
@@ -85,6 +88,20 @@ typedef struct
         } image_png;
         struct
         {
+            char *src;
+            uint8_t *data;
+            size_t len;
+        } image_gif;
+        struct
+        {
+            char *src;
+            video_color_t *pixels;
+            int width;
+            int height;
+            int stride_bytes;
+        } image_rgba;
+        struct
+        {
             alix_thread_t thread;
         } thread_done;
     } u;
@@ -104,6 +121,7 @@ typedef struct
     atk_widget_t *viewer;
 
     alix_mutex_t lock;
+    alix_mutex_t decode_lock;
     uint64_t next_load_id;
     uint64_t active_load_id;
 
@@ -152,6 +170,7 @@ const html_node_t *browser_dom_find_first_element(const html_node_t *root, const
 const char *browser_dom_first_text_child(const html_node_t *node);
 size_t browser_dom_count_nodes(const html_node_t *root, size_t limit);
 bool browser_is_png_bytes(const uint8_t *data, size_t len);
+bool browser_is_gif_bytes(const uint8_t *data, size_t len);
 void browser_dom_set_attr(html_node_t *node, const char *name, const char *value);
 void browser_collect_resource_urls(browser_app_t *app,
                                   html_node_t *root,
@@ -187,6 +206,7 @@ bool browser_script_event_init(browser_ui_event_t *ev,
 
 /* debug */
 void browser_debug_logf(browser_app_t *app, const char *fmt, ...);
+void browser_debug_log_reset_file(browser_app_t *app);
 void browser_debug_open_window(browser_app_t *app);
 void browser_debug_close_window(browser_app_t *app);
 void browser_debug_clear(browser_app_t *app);

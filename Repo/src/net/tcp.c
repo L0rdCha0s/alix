@@ -71,7 +71,7 @@ static inline void tcp_irq_restore(uint64_t flags)
 #define TCP_FLAG_PSH 0x08
 #define TCP_FLAG_ACK 0x10
 
-#define NET_TCP_MAX_SOCKETS           4
+#define NET_TCP_MAX_SOCKETS           1024
 #define NET_TCP_MAX_PAYLOAD           1460
 #define NET_TCP_DEFAULT_MSS           NET_TCP_MAX_PAYLOAD
 #define NET_TCP_RX_MAX_CAPACITY       (5U * 1024U * 1024U)

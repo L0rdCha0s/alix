@@ -25,6 +25,7 @@ int main(void)
         return 1;
     }
     alix_mutex_init(&app->lock);
+    alix_mutex_init(&app->decode_lock);
 
     if (!atk_user_window_open_with_flags(&app->remote,
                                          "atk_browser",

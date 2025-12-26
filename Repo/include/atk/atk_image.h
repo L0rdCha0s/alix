@@ -33,9 +33,16 @@ bool atk_image_load_jpeg(atk_widget_t *image, const uint8_t *data, size_t size);
 bool atk_image_load_png(atk_widget_t *image, const uint8_t *data, size_t size);
 
 /*
+ * Decode a GIF into RGBA32 pixels and set the image contents.
+ *
+ * The decoded pixel buffer is owned by the image widget.
+ */
+bool atk_image_load_gif(atk_widget_t *image, const uint8_t *data, size_t size);
+
+/*
  * Load an image by sniffing the input format.
  *
- * Prefers PNG/JPEG signature detection and falls back to trying both decoders.
+ * Prefers GIF/PNG/JPEG signature detection and falls back to trying each decoder.
  */
 bool atk_image_load_image(atk_widget_t *image, const uint8_t *data, size_t size);
 

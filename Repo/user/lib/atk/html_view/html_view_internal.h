@@ -8,6 +8,7 @@
 #include "atk/atk_scrollbar.h"
 #include "atk/atk_text_input.h"
 #include "atk/util/png.h"
+#include "atk/util/gif.h"
 #include "atk_internal.h"
 #include "atk_window.h"
 #include "libc.h"

@@ -2,6 +2,7 @@
 #define ATK_HTML_VIEW_H
 
 #include "atk/object.h"
+#include "video.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,6 +72,23 @@ bool atk_html_view_poll_js(atk_widget_t *view);
  * absolute URL after resolution by the browser).
  */
 bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint8_t *data, size_t size);
+
+/*
+ * Add a GIF image resource that can be referenced by `<img src="...">`.
+ */
+bool atk_html_view_add_image_gif(atk_widget_t *view, const char *src, const uint8_t *data, size_t size);
+
+/*
+ * Add an RGBA image resource that can be referenced by `<img src="...">`.
+ *
+ * The view takes ownership of `pixels`.
+ */
+bool atk_html_view_add_image_rgba(atk_widget_t *view,
+                                  const char *src,
+                                  video_color_t *pixels,
+                                  int width,
+                                  int height,
+                                  int stride_bytes);
 
 extern const atk_class_t ATK_HTML_VIEW_CLASS;
 

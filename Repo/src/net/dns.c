@@ -15,8 +15,11 @@
 #include "spinlock.h"
 
 #define NET_DNS_MAX_SERVERS 4
-#define NET_DNS_MAX_PENDING 4
+#define NET_DNS_MAX_PENDING 128
 #define NET_DNS_MAX_PACKET  512
+#define NET_DNS_CACHE_SIZE 128
+#define NET_DNS_CACHE_TTL_DEFAULT_SEC 60
+#define NET_DNS_CACHE_TTL_MAX_SEC 3600
 
 #define DNS_FLAG_QR (1U << 15)
 #define DNS_FLAG_OPCODE_SHIFT 11
@@ -57,10 +60,21 @@ typedef struct
     char scratch_tmp[NET_DNS_NAME_MAX + 1];
 } dns_pending_t;
 
+typedef struct
+{
+    bool valid;
+    uint16_t qtype;
+    uint32_t addr;
+    uint64_t expires_tick;
+    uint64_t last_used_tick;
+    char name[NET_DNS_NAME_MAX + 1];
+} dns_cache_entry_t;
+
 
 static uint32_t g_servers[NET_DNS_MAX_SERVERS];
 static size_t g_server_count = 0;
 static dns_pending_t g_pending[NET_DNS_MAX_PENDING];
+static dns_cache_entry_t g_dns_cache[NET_DNS_CACHE_SIZE];
 static uint16_t g_next_id = 0x1234;
 static uint32_t g_retry_count = 3;
 static uint16_t g_next_port = 0xC000;
@@ -70,6 +84,7 @@ static bool g_dns_debug_enabled = false;
 static void dns_log(const char *msg);
 static void dns_debug_log(const char *msg);
 static uint16_t read_be16(const uint8_t *p);
+static uint32_t read_be32(const uint8_t *p);
 #define DNS_TRACE(label, dest, len) \
     process_debug_log_stack_write(label, __builtin_return_address(0), (dest), (len))
 
@@ -88,6 +103,9 @@ static uint16_t dns_allocate_port(void);
 static uint16_t dns_allocate_id(void);
 static void dns_log_ipv4(const char *prefix, uint32_t addr);
 static void dns_debug_ipv4(const char *prefix, uint32_t addr);
+static uint64_t dns_cache_expiry_tick(uint32_t ttl_sec, uint64_t now);
+static bool dns_cache_lookup(const char *hostname, uint16_t qtype, net_dns_result_t *result);
+static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_sec);
 
 void net_dns_init(void)
 {
@@ -97,6 +115,10 @@ void net_dns_init(void)
     for (size_t i = 0; i < NET_DNS_MAX_PENDING; ++i)
     {
         g_pending[i].active = false;
+    }
+    for (size_t i = 0; i < NET_DNS_CACHE_SIZE; ++i)
+    {
+        g_dns_cache[i].valid = false;
     }
     spinlock_unlock(&g_dns_lock);
 }
@@ -127,6 +149,147 @@ static bool dns_name_equal(const char *a, const char *b)
         if (ca != cb) return false;
     }
     return true;
+}
+
+static uint64_t dns_cache_expiry_tick(uint32_t ttl_sec, uint64_t now)
+{
+    uint32_t freq = timer_frequency();
+    if (freq == 0)
+    {
+        freq = 100;
+    }
+    uint32_t ttl = ttl_sec;
+    if (ttl == 0)
+    {
+        ttl = NET_DNS_CACHE_TTL_DEFAULT_SEC;
+    }
+    if (ttl > NET_DNS_CACHE_TTL_MAX_SEC)
+    {
+        ttl = NET_DNS_CACHE_TTL_MAX_SEC;
+    }
+    uint64_t ttl_ticks = (uint64_t)ttl * (uint64_t)freq;
+    if (ttl_ticks == 0)
+    {
+        ttl_ticks = (uint64_t)NET_DNS_CACHE_TTL_DEFAULT_SEC * (uint64_t)freq;
+    }
+    return now + ttl_ticks;
+}
+
+static bool dns_cache_lookup(const char *hostname, uint16_t qtype, net_dns_result_t *result)
+{
+    if (!hostname || !result || qtype != NET_DNS_TYPE_A)
+    {
+        return false;
+    }
+
+    uint64_t now = timer_ticks();
+    uint32_t addr = 0;
+    bool hit = false;
+
+    spinlock_lock(&g_dns_lock);
+    for (size_t i = 0; i < NET_DNS_CACHE_SIZE; ++i)
+    {
+        dns_cache_entry_t *entry = &g_dns_cache[i];
+        if (!entry->valid)
+        {
+            continue;
+        }
+        if (entry->expires_tick != 0 && now >= entry->expires_tick)
+        {
+            entry->valid = false;
+            continue;
+        }
+        if (entry->qtype != qtype)
+        {
+            continue;
+        }
+        if (!dns_name_equal(entry->name, hostname))
+        {
+            continue;
+        }
+        entry->last_used_tick = now;
+        addr = entry->addr;
+        hit = true;
+        break;
+    }
+    spinlock_unlock(&g_dns_lock);
+
+    if (hit)
+    {
+        memset(result, 0, sizeof(*result));
+        result->has_a = true;
+        result->addr = addr;
+        result->rr_type = NET_DNS_TYPE_A;
+    }
+    return hit;
+}
+
+static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_sec)
+{
+    if (!hostname || hostname[0] == '\0')
+    {
+        return;
+    }
+
+    uint64_t now = timer_ticks();
+    uint64_t expires_tick = dns_cache_expiry_tick(ttl_sec, now);
+    size_t replace = NET_DNS_CACHE_SIZE;
+    uint64_t oldest_tick = 0;
+    bool have_oldest = false;
+
+    spinlock_lock(&g_dns_lock);
+    for (size_t i = 0; i < NET_DNS_CACHE_SIZE; ++i)
+    {
+        dns_cache_entry_t *entry = &g_dns_cache[i];
+        if (entry->valid && entry->qtype == NET_DNS_TYPE_A &&
+            dns_name_equal(entry->name, hostname))
+        {
+            entry->addr = addr;
+            entry->expires_tick = expires_tick;
+            entry->last_used_tick = now;
+            spinlock_unlock(&g_dns_lock);
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < NET_DNS_CACHE_SIZE; ++i)
+    {
+        dns_cache_entry_t *entry = &g_dns_cache[i];
+        if (!entry->valid)
+        {
+            replace = i;
+            break;
+        }
+        if (entry->expires_tick != 0 && now >= entry->expires_tick)
+        {
+            replace = i;
+            break;
+        }
+        if (!have_oldest || entry->last_used_tick < oldest_tick)
+        {
+            oldest_tick = entry->last_used_tick;
+            have_oldest = true;
+            replace = i;
+        }
+    }
+
+    if (replace < NET_DNS_CACHE_SIZE)
+    {
+        dns_cache_entry_t *entry = &g_dns_cache[replace];
+        size_t len = strlen(hostname);
+        if (len > NET_DNS_NAME_MAX)
+        {
+            len = NET_DNS_NAME_MAX;
+        }
+        memcpy(entry->name, hostname, len);
+        entry->name[len] = '\0';
+        entry->valid = true;
+        entry->qtype = NET_DNS_TYPE_A;
+        entry->addr = addr;
+        entry->expires_tick = expires_tick;
+        entry->last_used_tick = now;
+    }
+    spinlock_unlock(&g_dns_lock);
 }
 
 
@@ -218,6 +381,11 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
     {
         dns_log("resolve: hostname invalid length");
         return false;
+    }
+
+    if (dns_cache_lookup(hostname, qtype, result))
+    {
+        return true;
     }
 
     spinlock_lock(&g_dns_lock);
@@ -805,6 +973,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     /* Look for A(target) in Answer section */
     bool found_a = false;
     uint32_t found_addr = 0;
+    uint32_t found_ttl = 0;
     {
         size_t o = answers_start;
         for (uint16_t i = 0; i < ancount; ++i)
@@ -814,6 +983,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             if (o + 10 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
             uint16_t type   = read_be16(dns + o + 0);
             uint16_t rr_cls = read_be16(dns + o + 2);
+            uint32_t ttl    = read_be32(dns + o + 4);
             uint16_t rdlen  = read_be16(dns + o + 8);
             o += 10;
             if (o + rdlen > dns_len) { dns_finish_pending(pending, false, NULL); return; }
@@ -823,6 +993,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
                 found_a = true;
                 found_addr = ((uint32_t)dns[o] << 24) | ((uint32_t)dns[o+1] << 16) |
                              ((uint32_t)dns[o+2] << 8)  |  (uint32_t)dns[o+3];
+                found_ttl = ttl;
             }
             o += rdlen;
         }
@@ -839,6 +1010,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             if (o + 10 > dns_len) { dns_finish_pending(pending, false, NULL); return; }
             uint16_t type   = read_be16(dns + o + 0);
             uint16_t rr_cls = read_be16(dns + o + 2);
+            uint32_t ttl    = read_be32(dns + o + 4);
             uint16_t rdlen  = read_be16(dns + o + 8);
             o += 10;
             if (o + rdlen > dns_len) { dns_finish_pending(pending, false, NULL); return; }
@@ -850,6 +1022,7 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
                     found_a = true;
                     found_addr = ((uint32_t)dns[o] << 24) | ((uint32_t)dns[o+1] << 16) |
                                  ((uint32_t)dns[o+2] << 8)  |  (uint32_t)dns[o+3];
+                    found_ttl = ttl;
                 }
             }
             o += rdlen;
@@ -858,6 +1031,14 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
     if (found_a)
     {
+        if (pending->qtype == NET_DNS_TYPE_A)
+        {
+            dns_cache_store_a(pending->hostname, found_addr, found_ttl);
+            if (target[0] && !dns_name_equal(target, pending->hostname))
+            {
+                dns_cache_store_a(target, found_addr, found_ttl);
+            }
+        }
         net_dns_result_t res;
         memset(&res, 0, sizeof(res));
         res.has_a  = true;
@@ -1049,6 +1230,12 @@ static void write_be32(uint8_t *p, uint32_t value)
 static uint16_t read_be16(const uint8_t *p)
 {
     return (uint16_t)((p[0] << 8) | p[1]);
+}
+
+static uint32_t read_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | ((uint32_t)p[3]);
 }
 
 static void write_be16(uint8_t *p, uint16_t value)

@@ -1,5 +1,7 @@
 #include "browser_internal.h"
 
+#include "atk/util/gif.h"
+#include "atk/util/png.h"
 #include "string.h"
 
 void browser_ui_event_free_payload(browser_ui_event_t *ev)
@@ -42,6 +44,22 @@ void browser_ui_event_free_payload(browser_ui_event_t *ev)
             free(ev->u.image_png.data);
             ev->u.image_png.data = NULL;
             ev->u.image_png.len = 0;
+            break;
+        case BROWSER_UI_EVENT_IMAGE_GIF:
+            free(ev->u.image_gif.src);
+            ev->u.image_gif.src = NULL;
+            free(ev->u.image_gif.data);
+            ev->u.image_gif.data = NULL;
+            ev->u.image_gif.len = 0;
+            break;
+        case BROWSER_UI_EVENT_IMAGE_RGBA:
+            free(ev->u.image_rgba.src);
+            ev->u.image_rgba.src = NULL;
+            free(ev->u.image_rgba.pixels);
+            ev->u.image_rgba.pixels = NULL;
+            ev->u.image_rgba.width = 0;
+            ev->u.image_rgba.height = 0;
+            ev->u.image_rgba.stride_bytes = 0;
             break;
         case BROWSER_UI_EVENT_THREAD_DONE:
             break;
@@ -285,29 +303,71 @@ static void browser_resource_fetch(browser_app_t *app,
         }
         else if (kind == BROWSER_RESOURCE_IMAGE)
         {
-            if (browser_is_png_bytes((const uint8_t *)res_body, res_len))
+            bool is_gif = browser_is_gif_bytes((const uint8_t *)res_body, res_len);
+            bool is_png = (!is_gif && browser_is_png_bytes((const uint8_t *)res_body, res_len));
+            if (is_gif || is_png)
             {
-                browser_ui_event_t img_ev = {0};
-                img_ev.type = BROWSER_UI_EVENT_IMAGE_PNG;
-                img_ev.load_id = load_id;
-                img_ev.u.image_png.src = browser_strdup(abs);
-                img_ev.u.image_png.data = (uint8_t *)res_body;
-                img_ev.u.image_png.len = res_len;
-                if (!img_ev.u.image_png.src)
+                video_color_t *pixels = NULL;
+                int w = 0;
+                int h = 0;
+                int stride_bytes = 0;
+                int rc = -1;
+
+                alix_mutex_lock(&app->decode_lock);
+                if (is_gif)
                 {
-                    browser_ui_event_free_payload(&img_ev);
-                    res_body = NULL;
+                    rc = gif_decode_rgba32((const uint8_t *)res_body,
+                                           res_len,
+                                           &pixels,
+                                           &w,
+                                           &h,
+                                           &stride_bytes);
                 }
                 else
                 {
-                    res_body = NULL;
-                    browser_loader_emit_event(app, &img_ev);
-                    browser_debug_logf(app, "[img] ok bytes=%u url=%s", (unsigned)res_len, abs);
+                    rc = png_decode_rgba32((const uint8_t *)res_body,
+                                           res_len,
+                                           &pixels,
+                                           &w,
+                                           &h,
+                                           &stride_bytes);
+                }
+                alix_mutex_unlock(&app->decode_lock);
+
+                if (rc == 0 && pixels && w > 0 && h > 0 && stride_bytes > 0)
+                {
+                    browser_ui_event_t img_ev = {0};
+                    img_ev.type = BROWSER_UI_EVENT_IMAGE_RGBA;
+                    img_ev.load_id = load_id;
+                    img_ev.u.image_rgba.src = browser_strdup(abs);
+                    img_ev.u.image_rgba.pixels = pixels;
+                    img_ev.u.image_rgba.width = w;
+                    img_ev.u.image_rgba.height = h;
+                    img_ev.u.image_rgba.stride_bytes = stride_bytes;
+                    if (!img_ev.u.image_rgba.src)
+                    {
+                        browser_ui_event_free_payload(&img_ev);
+                    }
+                    else
+                    {
+                        pixels = NULL;
+                        browser_loader_emit_event(app, &img_ev);
+                        browser_debug_logf(app, "[img] ok bytes=%u url=%s", (unsigned)res_len, abs);
+                    }
+                }
+                else
+                {
+                    const char *err = is_gif ? gif_last_error() : png_last_error();
+                    browser_debug_logf(app,
+                                       "[img] decode failed url=%s err=%s",
+                                       abs ? abs : "(null)",
+                                       err ? err : "(unknown)");
+                    free(pixels);
                 }
             }
             else
             {
-                browser_debug_logf(app, "[img] skipped (not png) url=%s", abs);
+                browser_debug_logf(app, "[img] skipped (not png/gif) url=%s", abs);
             }
         }
     }
