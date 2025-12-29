@@ -826,6 +826,25 @@ int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_
         return atk_font_line_height() + 4;
     }
 
+    int metrics_total = 0;
+    if (ctx->priv && ctx->actual_font_px > 0)
+    {
+        html_view_font_size_cache_t *cache = html_view_font_state_get_cache(&ctx->priv->font, ctx->actual_font_px);
+        if (cache)
+        {
+            int descent = cache->metrics.descent;
+            if (descent < 0)
+            {
+                descent = -descent;
+            }
+            metrics_total = cache->metrics.ascent + descent;
+            if (cache->metrics.line_gap > 0)
+            {
+                metrics_total += cache->metrics.line_gap;
+            }
+        }
+    }
+
     int actual_font_px = ctx->actual_font_px > 0 ? ctx->actual_font_px : atk_font_line_height();
     int base_font_px = ctx->base_font_px > 0 ? ctx->base_font_px : actual_font_px;
     int line_height = ctx->base_line_height > 0 ? ctx->base_line_height : (base_font_px + 4);
@@ -859,6 +878,10 @@ int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_
     if (line_height < actual_font_px)
     {
         line_height = actual_font_px;
+    }
+    if (metrics_total > line_height)
+    {
+        line_height = metrics_total;
     }
 
     if (line_height < 8)
@@ -927,6 +950,15 @@ void html_view_font_scope_push(html_view_ctx_t *ctx, const css_style_t *style, b
     if (font_px <= 0)
     {
         font_px = parent_font_px;
+    }
+
+    if (style && style->has_font_size && font_px > 0)
+    {
+        css_style_t *mutable_style = (css_style_t *)style;
+        mutable_style->font_size.valid = true;
+        mutable_style->font_size.is_auto = false;
+        mutable_style->font_size.unit = CSS_UNIT_PX;
+        mutable_style->font_size.value_milli = font_px * 1000;
     }
 
     ctx->base_font_px = font_px;

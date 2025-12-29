@@ -329,7 +329,8 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         effective_font_px = atk_font_line_height();
     }
 
-    if (!html_view_font_state_get_cache(&priv->font, effective_font_px))
+    html_view_font_size_cache_t *font_cache = html_view_font_state_get_cache(&priv->font, effective_font_px);
+    if (!font_cache)
     {
         effective_font_px = atk_font_line_height();
         base_font_px = effective_font_px;
@@ -337,6 +338,25 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         if (base_line_height < 8)
         {
             base_line_height = 8;
+        }
+        font_cache = html_view_font_state_get_cache(&priv->font, effective_font_px);
+    }
+
+    if (font_cache)
+    {
+        int descent = font_cache->metrics.descent;
+        if (descent < 0)
+        {
+            descent = -descent;
+        }
+        int metrics_line = font_cache->metrics.ascent + descent;
+        if (font_cache->metrics.line_gap > 0)
+        {
+            metrics_line += font_cache->metrics.line_gap;
+        }
+        if (metrics_line > base_line_height)
+        {
+            base_line_height = metrics_line;
         }
     }
 
@@ -806,7 +826,8 @@ static void html_view_draw_cb(const atk_state_t *state,
         effective_font_px = atk_font_line_height();
     }
 
-    if (!html_view_font_state_get_cache(&priv->font, effective_font_px))
+    html_view_font_size_cache_t *font_cache = html_view_font_state_get_cache(&priv->font, effective_font_px);
+    if (!font_cache)
     {
         effective_font_px = atk_font_line_height();
         base_font_px = effective_font_px;
@@ -814,6 +835,25 @@ static void html_view_draw_cb(const atk_state_t *state,
         if (base_line_height < 8)
         {
             base_line_height = 8;
+        }
+        font_cache = html_view_font_state_get_cache(&priv->font, effective_font_px);
+    }
+
+    if (font_cache)
+    {
+        int descent = font_cache->metrics.descent;
+        if (descent < 0)
+        {
+            descent = -descent;
+        }
+        int metrics_line = font_cache->metrics.ascent + descent;
+        if (font_cache->metrics.line_gap > 0)
+        {
+            metrics_line += font_cache->metrics.line_gap;
+        }
+        if (metrics_line > base_line_height)
+        {
+            base_line_height = metrics_line;
         }
     }
 
