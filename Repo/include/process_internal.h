@@ -736,6 +736,7 @@ bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *st
 void thread_stack_watch_maybe_arm(thread_t *thread);
 void thread_registry_add(thread_t *thread);
 void procfs_register_process_priority(process_t *process);
+void procfs_unregister_process(process_t *process);
 void process_destroy_marked(process_t *process);
 void thread_debug_check_ownership(const thread_t *thread, const char *where);
 void scheduler_trace(const char *prefix, thread_t *thread);

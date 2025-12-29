@@ -11,6 +11,7 @@ int errno = 0;
 #define ALIGNMENT 16UL
 #define SIZE_MAX_VALUE ((size_t)-1)
 #define LIBC_MAX_PASSWD_BYTES (64u * 1024u)
+#define USER_HEAP_LARGE_THRESHOLD ((size_t)(64u * 1024u * 1024u))
 
 typedef struct heap_block
 {
@@ -2133,6 +2134,12 @@ int snprintf(char *buf, size_t size, const char *format, ...)
 void *malloc(size_t size)
 {
     user_heap_log("malloc req=", size);
+    if (size >= USER_HEAP_LARGE_THRESHOLD)
+    {
+        serial_printf("[uheap] large malloc size=0x%016llX caller=0x%016llX",
+                      (unsigned long long)size,
+                      (unsigned long long)(uintptr_t)__builtin_return_address(0));
+    }
     user_heap_lock_acquire();
     void *ptr = malloc_locked(size);
     user_heap_lock_release();
@@ -2152,6 +2159,13 @@ void *realloc(void *ptr, size_t size)
 {
     user_heap_log("realloc ptr=", (uintptr_t)ptr);
     user_heap_log("realloc size=", size);
+    if (size >= USER_HEAP_LARGE_THRESHOLD)
+    {
+        serial_printf("[uheap] large realloc ptr=0x%016llX size=0x%016llX caller=0x%016llX",
+                      (unsigned long long)(uintptr_t)ptr,
+                      (unsigned long long)size,
+                      (unsigned long long)(uintptr_t)__builtin_return_address(0));
+    }
     user_heap_lock_acquire();
     void *res = realloc_locked(ptr, size);
     user_heap_lock_release();
@@ -2167,6 +2181,14 @@ void *calloc(size_t count, size_t size)
         return NULL;
     }
     size_t total = count * size;
+    if (total >= USER_HEAP_LARGE_THRESHOLD)
+    {
+        serial_printf("[uheap] large calloc count=0x%016llX size=0x%016llX total=0x%016llX caller=0x%016llX",
+                      (unsigned long long)count,
+                      (unsigned long long)size,
+                      (unsigned long long)total,
+                      (unsigned long long)(uintptr_t)__builtin_return_address(0));
+    }
     user_heap_lock_acquire();
     void *ptr = malloc_locked(total);
     user_heap_lock_release();

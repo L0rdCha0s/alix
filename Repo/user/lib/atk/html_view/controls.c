@@ -547,6 +547,30 @@ void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
     free(css_text);
 }
 
+void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    __atomic_store_n(&priv->stylesheet_dirty, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&priv->render_cache_dirty, 1u, __ATOMIC_RELEASE);
+    html_view_render_request(priv);
+}
+
+void html_view_stylesheet_rebuild_if_needed(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    if (__atomic_exchange_n(&priv->stylesheet_dirty, 0u, __ATOMIC_ACQ_REL) == 0u)
+    {
+        return;
+    }
+    html_view_rebuild_stylesheet(priv);
+}
+
 const html_node_t *html_view_find_first_element(const html_node_t *root, const char *tag)
 {
     if (!root || !tag || tag[0] == '\0')

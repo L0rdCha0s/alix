@@ -49,6 +49,12 @@ bool atk_html_view_set_html(atk_widget_t *view, const char *html, html_parse_err
  * Passing NULL clears any previously set external stylesheet.
  */
 void atk_html_view_set_external_stylesheet(atk_widget_t *view, const char *css_text);
+/*
+ * Non-blocking stylesheet update; returns false if the view is busy.
+ *
+ * The caller retains ownership of `css_text` regardless of return value.
+ */
+bool atk_html_view_try_set_external_stylesheet(atk_widget_t *view, const char *css_text);
 
 /*
  * Queue a script body for execution in the HTML view's JS thread.
@@ -56,6 +62,25 @@ void atk_html_view_set_external_stylesheet(atk_widget_t *view, const char *css_t
  * `script_text` is copied by the view.
  */
 bool atk_html_view_add_script(atk_widget_t *view, const char *script_text, size_t len);
+/*
+ * Non-blocking script queue; returns false if the view is busy.
+ *
+ * The script is copied by the view when queued.
+ */
+bool atk_html_view_try_add_script(atk_widget_t *view, const char *script_text, size_t len);
+
+/*
+ * Stop JS execution and clear queued scripts/listeners for the view.
+ */
+void atk_html_view_stop_js(atk_widget_t *view);
+
+/*
+ * Enable or disable asynchronous render cache builds.
+ *
+ * When enabled, the view rebuilds its render cache on a worker thread and
+ * only draws when a fresh cache is ready.
+ */
+void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled);
 
 /*
  * Poll for JS-driven DOM changes that require a redraw.
@@ -89,6 +114,17 @@ bool atk_html_view_add_image_rgba(atk_widget_t *view,
                                   int width,
                                   int height,
                                   int stride_bytes);
+/*
+ * Non-blocking RGBA image registration; returns false if the view is busy.
+ *
+ * Ownership of `pixels` is transferred only on success.
+ */
+bool atk_html_view_try_add_image_rgba(atk_widget_t *view,
+                                      const char *src,
+                                      video_color_t *pixels,
+                                      int width,
+                                      int height,
+                                      int stride_bytes);
 
 extern const atk_class_t ATK_HTML_VIEW_CLASS;
 

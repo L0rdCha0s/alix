@@ -123,7 +123,6 @@ float	timescale = 0.01;
 
 void R_EntityParticles (entity_t *ent)
 {
-	int			count;
 	int			i;
 	particle_t	*p;
 	float		angle;
@@ -132,13 +131,14 @@ void R_EntityParticles (entity_t *ent)
 	float		dist;
 	
 	dist = 64;
-	count = 50;
 
-if (!avelocities[0][0])
-{
-for (i=0 ; i<NUMVERTEXNORMALS*3 ; i++)
-avelocities[0][i] = (rand()&255) * 0.01;
-}
+	if (!avelocities[0][0])
+	{
+		float *avel_data = (float *)avelocities;
+
+		for (i=0 ; i<NUMVERTEXNORMALS*3 ; i++)
+			avel_data[i] = (rand()&255) * 0.01f;
+	}
 
 
 	for (i=0 ; i<NUMVERTEXNORMALS ; i++)
@@ -152,6 +152,8 @@ avelocities[0][i] = (rand()&255) * 0.01;
 		angle = cl.time * avelocities[i][2];
 		sr = sin(angle);
 		cr = cos(angle);
+		(void)sr;
+		(void)cr;
 	
 		forward[0] = cp*cy;
 		forward[1] = cp*sy;
@@ -260,10 +262,14 @@ void R_ParseParticleEffect (void)
 	msgcount = MSG_ReadByte ();
 	color = MSG_ReadByte ();
 
-if (msgcount == 255)
-	count = 1024;
-else
-	count = msgcount;
+	if (msgcount == 255)
+	{
+		count = 1024;
+	}
+	else
+	{
+		count = msgcount;
+	}
 	
 	R_RunParticleEffect (org, dir, color, count);
 }
@@ -797,4 +803,3 @@ void R_DrawParticles (void)
 	D_EndParticles ();
 #endif
 }
-

@@ -68,18 +68,18 @@ int 		desired_bits = 16;
 
 int sound_started=0;
 
-cvar_t bgmvolume = {"bgmvolume", "1", true};
-cvar_t volume = {"volume", "0.7", true};
+cvar_t bgmvolume = CVAR_INIT_ARCHIVE("bgmvolume", "1");
+cvar_t volume = CVAR_INIT_ARCHIVE("volume", "0.7");
 
-cvar_t nosound = {"nosound", "0"};
-cvar_t precache = {"precache", "1"};
-cvar_t loadas8bit = {"loadas8bit", "0"};
-cvar_t bgmbuffer = {"bgmbuffer", "4096"};
-cvar_t ambient_level = {"ambient_level", "0.3"};
-cvar_t ambient_fade = {"ambient_fade", "100"};
-cvar_t snd_noextraupdate = {"snd_noextraupdate", "0"};
-cvar_t snd_show = {"snd_show", "0"};
-cvar_t _snd_mixahead = {"_snd_mixahead", "0.1", true};
+cvar_t nosound = CVAR_INIT("nosound", "0");
+cvar_t precache = CVAR_INIT("precache", "1");
+cvar_t loadas8bit = CVAR_INIT("loadas8bit", "0");
+cvar_t bgmbuffer = CVAR_INIT("bgmbuffer", "4096");
+cvar_t ambient_level = CVAR_INIT("ambient_level", "0.3");
+cvar_t ambient_fade = CVAR_INIT("ambient_fade", "100");
+cvar_t snd_noextraupdate = CVAR_INIT("snd_noextraupdate", "0");
+cvar_t snd_show = CVAR_INIT("snd_show", "0");
+cvar_t _snd_mixahead = CVAR_INIT_ARCHIVE("_snd_mixahead", "0.1");
 
 
 // ====================================================================
@@ -398,10 +398,9 @@ SND_Spatialize
 void SND_Spatialize(channel_t *ch)
 {
     vec_t dot;
-    vec_t ldist, rdist, dist;
+    vec_t dist;
     vec_t lscale, rscale, scale;
     vec3_t source_vec;
-	sfx_t *snd;
 
 // anything coming from the view entity will allways be full volume
 	if (ch->entnum == cl.viewentity)
@@ -413,7 +412,6 @@ void SND_Spatialize(channel_t *ch)
 
 // calculate stereo seperation and distance attenuation
 
-	snd = ch->sfx;
 	VectorSubtract(ch->origin, listener_origin, source_vec);
 	
 	dist = VectorNormalize(source_vec) * ch->dist_mult;
@@ -874,7 +872,7 @@ void S_Update_(void)
 // mix ahead of current position
 	endtime = soundtime + _snd_mixahead.value * shm->speed;
 	samps = shm->samples >> (shm->channels-1);
-	if (endtime - soundtime > samps)
+	if (endtime - soundtime > (unsigned)samps)
 		endtime = soundtime + samps;
 
 #ifdef _WIN32
@@ -1014,4 +1012,3 @@ void S_BeginPrecaching (void)
 void S_EndPrecaching (void)
 {
 }
-

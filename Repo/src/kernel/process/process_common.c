@@ -389,6 +389,53 @@ void procfs_register_process_priority(process_t *process)
     (void)procfs_create_file_at(path, process_priority_read, NULL, process);
 }
 
+static char *procfs_format_pid(uint64_t pid)
+{
+    const size_t cap = 21;
+    char *buf = (char *)malloc(cap + 1);
+    if (!buf)
+    {
+        return NULL;
+    }
+    size_t pos = cap;
+    buf[pos] = '\0';
+    if (pid == 0)
+    {
+        buf[--pos] = '0';
+    }
+    else
+    {
+        while (pid > 0 && pos > 0)
+        {
+            buf[--pos] = (char)('0' + (pid % 10));
+            pid /= 10;
+        }
+    }
+    if (pid != 0)
+    {
+        free(buf);
+        return NULL;
+    }
+    size_t len = cap - pos;
+    memmove(buf, buf + pos, len + 1);
+    return buf;
+}
+
+void procfs_unregister_process(process_t *process)
+{
+    if (!process_pointer_valid(process))
+    {
+        return;
+    }
+    char *pid_path = procfs_format_pid(process->pid);
+    if (!pid_path)
+    {
+        return;
+    }
+    vfs_remove_tree(procfs_root(), pid_path);
+    free(pid_path);
+}
+
 static inline int32_t thread_find_running_cpu(const thread_t *thread)
 {
     if (!thread)

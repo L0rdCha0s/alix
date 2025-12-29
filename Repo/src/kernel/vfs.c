@@ -2016,6 +2016,77 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
 }
 
 /*
+ * Remove a file, symlink, or directory subtree at `path`.
+ *
+ * - Directories are removed recursively (children released).
+ * - Refuses to remove mount points.
+ * - Respects subtree mutability on the parent and target directory.
+ */
+bool vfs_remove_tree(vfs_node_t *cwd, const char *path)
+{
+    if (!path || *path == '\0')
+    {
+        return false;
+    }
+
+    spinlock_lock(&g_vfs_tree_lock);
+
+    vfs_node_t *parent = NULL;
+    char *name = NULL;
+    if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
+    {
+        spinlock_unlock(&g_vfs_tree_lock);
+        return false;
+    }
+    if (!parent)
+    {
+        free(name);
+        spinlock_unlock(&g_vfs_tree_lock);
+        return false;
+    }
+
+    vfs_node_t *node = vfs_find_child(parent, name);
+    free(name);
+    if (!node)
+    {
+        spinlock_unlock(&g_vfs_tree_lock);
+        return false;
+    }
+
+    if (!vfs_node_allows_mutation(parent))
+    {
+        spinlock_unlock(&g_vfs_tree_lock);
+        return false;
+    }
+
+    if (node->type == VFS_NODE_DIR)
+    {
+        if (vfs_is_mount_point(node))
+        {
+            spinlock_unlock(&g_vfs_tree_lock);
+            return false;
+        }
+        if (!vfs_node_allows_mutation(node))
+        {
+            spinlock_unlock(&g_vfs_tree_lock);
+            return false;
+        }
+        vfs_clear_directory(node);
+    }
+    else if (node->type != VFS_NODE_FILE && node->type != VFS_NODE_SYMLINK)
+    {
+        spinlock_unlock(&g_vfs_tree_lock);
+        return false;
+    }
+
+    vfs_detach_child(node);
+    vfs_node_release(node);
+    vfs_mark_meta_dirty(parent);
+    spinlock_unlock(&g_vfs_tree_lock);
+    return true;
+}
+
+/*
  * Return the first child of a directory (or NULL).
  *
  * Note: this is a raw pointer into the tree; callers should avoid mutating the

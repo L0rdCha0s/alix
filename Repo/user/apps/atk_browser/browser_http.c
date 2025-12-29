@@ -305,20 +305,20 @@ static const char *browser_cache_dir(browser_app_t *app)
         return NULL;
     }
 
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     if (app->cache_ready)
     {
         const char *dir = app->cache_dir;
-        alix_mutex_unlock(&app->lock);
+        browser_lock_exit(app, &app->lock, "app_lock");
         return dir;
     }
     if (app->cache_attempted)
     {
-        alix_mutex_unlock(&app->lock);
+        browser_lock_exit(app, &app->lock, "app_lock");
         return NULL;
     }
     app->cache_attempted = true;
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
 
     char *home = browser_home_from_passwd(getuid());
     if (!home || home[0] == '\0')
@@ -361,14 +361,14 @@ static const char *browser_cache_dir(browser_app_t *app)
         return NULL;
     }
 
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     if (!app->cache_ready)
     {
         app->cache_dir = cache_dir;
         app->cache_ready = true;
     }
     const char *dir = app->cache_dir;
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
 
     if (dir != cache_dir)
     {

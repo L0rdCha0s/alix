@@ -21,10 +21,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 
-cvar_t	chase_back = {"chase_back", "100"};
-cvar_t	chase_up = {"chase_up", "16"};
-cvar_t	chase_right = {"chase_right", "0"};
-cvar_t	chase_active = {"chase_active", "0"};
+cvar_t	chase_back = CVAR_INIT("chase_back", "100");
+cvar_t	chase_up = CVAR_INIT("chase_up", "16");
+cvar_t	chase_right = CVAR_INIT("chase_right", "0");
+cvar_t	chase_active = CVAR_INIT("chase_active", "0");
 
 vec3_t	chase_pos;
 vec3_t	chase_angles;
@@ -89,4 +89,3 @@ void Chase_Update (void)
 	// move towards destination
 	VectorCopy (chase_dest, r_refdef.vieworg);
 }
-

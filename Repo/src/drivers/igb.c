@@ -454,7 +454,7 @@ void igb_on_irq(void)
     spinlock_lock(&g_tx_lock);
     igb_reclaim_tx();
     spinlock_unlock(&g_tx_lock);
-    net_tcp_poll();
+    /* TCP maintenance runs in tcp_timerd to avoid IRQ-context polling. */
 }
 
 void igb_poll(void)
@@ -467,7 +467,6 @@ void igb_poll(void)
     spinlock_lock(&g_tx_lock);
     igb_reclaim_tx();
     spinlock_unlock(&g_tx_lock);
-    net_tcp_poll();
 }
 
 bool igb_is_present(void)

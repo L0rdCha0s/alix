@@ -1086,21 +1086,17 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     shell_output_error(out, "no data received (timeout)");
                     goto cleanup;
                 }
+                process_sleep_ms(1);
                 continue;
             }
         }
         else
         {
-            ssize_t got = read(socket_fd, chunk, WGET_CHUNK_SIZE);
-            // serial_printf("[wget] recv plain bytes=%zd err=%u remote_closed=%u\r\n",
-            //               (long long)got,
+            size_t got = net_tcp_socket_read(socket, chunk, WGET_CHUNK_SIZE);
+            // serial_printf("[wget] recv plain bytes=%zu err=%u remote_closed=%u\r\n",
+            //               got,
             //               net_tcp_socket_has_error(socket) ? 1U : 0U,
             //               net_tcp_socket_remote_closed(socket) ? 1U : 0U);
-            if (got < 0)
-            {
-                shell_output_error(out, "socket read failed");
-                goto cleanup;
-            }
             if (got == 0)
             {
                 if (net_tcp_socket_remote_closed(socket))
@@ -1135,9 +1131,10 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     shell_output_error(out, "no data received (timeout)");
                     goto cleanup;
                 }
+                process_sleep_ms(1);
                 continue;
             }
-            bytes_read = (size_t)got;
+            bytes_read = got;
         }
         last_progress = timer_ticks();
 

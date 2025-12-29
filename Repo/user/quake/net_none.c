@@ -37,7 +37,8 @@ net_driver_t net_drivers[MAX_NET_DRIVERS] =
 	Loop_CanSendMessage,
 	Loop_CanSendUnreliableMessage,
 	Loop_Close,
-	Loop_Shutdown
+	Loop_Shutdown,
+	0
 	}
 };
 int net_numdrivers = 1;

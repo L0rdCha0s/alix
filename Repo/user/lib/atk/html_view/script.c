@@ -1,7 +1,12 @@
 #include "atk/html_view/html_view_internal.h"
 
 #include "ctype.h"
+#include "serial.h"
 #include "stdio.h"
+#include "usyscall.h"
+
+#define HTML_VIEW_DOM_LOCK_LOG_MIN_MS 2u
+#define HTML_VIEW_DOM_LOCK_LOG_RATE_MS 250u
 
 typedef struct
 {
@@ -41,7 +46,34 @@ void html_view_dom_lock(atk_html_view_priv_t *priv)
     {
         return;
     }
+    if (html_view_dom_try_lock(priv))
+    {
+        return;
+    }
+
+    uint64_t start_ms = sys_time_millis();
     alix_mutex_lock(&priv->dom_lock);
+    uint64_t waited_ms = sys_time_millis() - start_ms;
+    if (waited_ms >= HTML_VIEW_DOM_LOCK_LOG_MIN_MS)
+    {
+        static uint64_t last_log_ms = 0;
+        uint64_t now_ms = sys_time_millis();
+        uint64_t last = __atomic_load_n(&last_log_ms, __ATOMIC_RELAXED);
+        if (now_ms - last >= HTML_VIEW_DOM_LOCK_LOG_RATE_MS)
+        {
+            __atomic_store_n(&last_log_ms, now_ms, __ATOMIC_RELAXED);
+            serial_printf("[html_view] dom_lock wait=%u ms", (unsigned)waited_ms);
+        }
+    }
+}
+
+bool html_view_dom_try_lock(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return false;
+    }
+    return __sync_lock_test_and_set(&priv->dom_lock.state, 1u) == 0u;
 }
 
 void html_view_dom_unlock(atk_html_view_priv_t *priv)
@@ -231,6 +263,10 @@ static void html_view_js_mark_dirty(atk_html_view_priv_t *priv, uint32_t flags)
     }
     __atomic_fetch_or(&priv->js_dirty, flags, __ATOMIC_RELEASE);
     __atomic_store_n(&priv->js_redraw_pending, 1u, __ATOMIC_RELEASE);
+    if (flags != 0u)
+    {
+        html_view_render_request(priv);
+    }
 }
 
 static uint32_t html_view_js_take_dirty(atk_html_view_priv_t *priv)
@@ -2602,6 +2638,9 @@ static void html_view_js_thread(void *arg)
     }
 
     size_t index = 0;
+    serial_printf("[html_js] thread start tid=%llu view=%p",
+                  (unsigned long long)alix_thread_self(),
+                  (void *)view);
     while (!html_view_js_should_stop(priv))
     {
         html_view_dom_lock(priv);
@@ -2637,6 +2676,10 @@ static void html_view_js_thread(void *arg)
         free(script);
         ++index;
     }
+    serial_printf("[html_js] thread exit tid=%llu view=%p scripts=%u",
+                  (unsigned long long)alix_thread_self(),
+                  (void *)view,
+                  (unsigned)index);
 }
 
 void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
@@ -2653,7 +2696,11 @@ void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
 
     if (dirty & HTML_VIEW_JS_DIRTY_STYLES)
     {
-        html_view_rebuild_stylesheet(priv);
+        html_view_stylesheet_mark_dirty(priv);
+        if (!priv->render_async)
+        {
+            html_view_stylesheet_rebuild_if_needed(priv);
+        }
     }
     if (dirty & HTML_VIEW_JS_DIRTY_CONTROLS)
     {
@@ -2662,8 +2709,12 @@ void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
     }
     if (dirty & HTML_VIEW_JS_DIRTY_RENDER)
     {
-        html_view_render_cache_clear(&priv->render_cache);
+        html_view_render_cache_invalidate_locked(priv);
         priv->pressed_href = NULL;
+    }
+    if (dirty != 0u)
+    {
+        html_view_render_request(priv);
     }
 }
 
@@ -2701,6 +2752,7 @@ static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *
     html_view_dom_unlock(priv);
     if (running)
     {
+        serial_printf("[html_js] start skip view=%p (already running)", (void *)view);
         return;
     }
     if (!html_view_js_runtime_ensure(view, priv))
@@ -2721,6 +2773,9 @@ static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *
     html_view_dom_lock(priv);
     priv->js_thread = thread;
     html_view_dom_unlock(priv);
+    serial_printf("[html_js] start view=%p thread=%llu",
+                  (void *)view,
+                  (unsigned long long)thread);
 }
 
 void html_view_js_stop(atk_html_view_priv_t *priv)
@@ -2730,15 +2785,29 @@ void html_view_js_stop(atk_html_view_priv_t *priv)
         return;
     }
 
-    __atomic_store_n(&priv->js_stop, 1u, __ATOMIC_RELEASE);
     alix_thread_t thread = 0;
     html_view_dom_lock(priv);
     thread = priv->js_thread;
-    priv->js_thread = 0;
+    if (thread)
+    {
+        __atomic_store_n(&priv->js_stop, 1u, __ATOMIC_RELEASE);
+    }
     html_view_dom_unlock(priv);
     if (thread)
     {
+        uint64_t start_ms = sys_time_millis();
+        serial_printf("[html_js] stop begin tid=%llu", (unsigned long long)thread);
         (void)alix_thread_join(thread, NULL);
+        uint64_t waited_ms = sys_time_millis() - start_ms;
+        serial_printf("[html_js] stop done tid=%llu wait=%llu",
+                      (unsigned long long)thread,
+                      (unsigned long long)waited_ms);
+        html_view_dom_lock(priv);
+        if (priv->js_thread == thread)
+        {
+            priv->js_thread = 0;
+        }
+        html_view_dom_unlock(priv);
     }
 
     __atomic_store_n(&priv->js_stop, 0u, __ATOMIC_RELEASE);
@@ -2779,10 +2848,11 @@ void html_view_js_start(atk_widget_t *view, atk_html_view_priv_t *priv)
     html_view_js_start_thread(view, priv);
 }
 
-bool html_view_js_queue_external(atk_widget_t *view,
-                                 atk_html_view_priv_t *priv,
-                                 const char *script_text,
-                                 size_t len)
+static bool html_view_js_queue_external_impl(atk_widget_t *view,
+                                             atk_html_view_priv_t *priv,
+                                             const char *script_text,
+                                             size_t len,
+                                             bool try_only)
 {
     if (!view || !priv || !script_text || len == 0)
     {
@@ -2790,7 +2860,17 @@ bool html_view_js_queue_external(atk_widget_t *view,
     }
 
     bool queued = false;
-    html_view_dom_lock(priv);
+    if (try_only)
+    {
+        if (!html_view_dom_try_lock(priv))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        html_view_dom_lock(priv);
+    }
     queued = html_view_js_queue_source_locked(priv, script_text, len);
     html_view_dom_unlock(priv);
     if (!queued)
@@ -2800,6 +2880,22 @@ bool html_view_js_queue_external(atk_widget_t *view,
 
     html_view_js_start_thread(view, priv);
     return true;
+}
+
+bool html_view_js_queue_external(atk_widget_t *view,
+                                 atk_html_view_priv_t *priv,
+                                 const char *script_text,
+                                 size_t len)
+{
+    return html_view_js_queue_external_impl(view, priv, script_text, len, false);
+}
+
+bool html_view_js_queue_external_try(atk_widget_t *view,
+                                     atk_html_view_priv_t *priv,
+                                     const char *script_text,
+                                     size_t len)
+{
+    return html_view_js_queue_external_impl(view, priv, script_text, len, true);
 }
 
 void html_view_js_shutdown(atk_widget_t *view, atk_html_view_priv_t *priv)

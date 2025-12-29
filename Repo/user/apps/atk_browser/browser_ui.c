@@ -3,11 +3,17 @@
 #include "atk_menu_bar.h"
 #include "stdio.h"
 #include "string.h"
+#include "usyscall.h"
+
+#define BROWSER_TICK_SLOW_MS 16u
+#define BROWSER_TICK_LOG_RATE_MS 250u
 
 static void browser_menus_close(browser_app_t *app);
 static void browser_open_url(browser_app_t *app, const char *url);
 static void on_url_submit(atk_widget_t *input, void *context);
 static void browser_html_link_clicked(atk_widget_t *view, const char *href, void *context);
+static bool browser_requeue_event(browser_app_t *app, browser_ui_event_t *ev);
+static void browser_cancel_active_load(browser_app_t *app);
 
 static void apply_theme(atk_state_t *state)
 {
@@ -103,9 +109,9 @@ void browser_on_close_event(void *context)
         return;
     }
 
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     app->active_load_id = 0;
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
 
     if (app->debug_remote.handle != 0)
     {
@@ -327,6 +333,46 @@ static void browser_html_link_clicked(atk_widget_t *view, const char *href, void
     free(abs);
 }
 
+static void browser_cancel_active_load(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    browser_lock_enter(app, &app->lock, "app_lock");
+    app->active_load_id = 0;
+    browser_lock_exit(app, &app->lock, "app_lock");
+
+    if (app->viewer)
+    {
+        atk_html_view_stop_js(app->viewer);
+    }
+
+    browser_ui_event_t ev = {0};
+    while (browser_ui_event_dequeue(app, &ev))
+    {
+        browser_ui_event_free_payload(&ev);
+        memset(&ev, 0, sizeof(ev));
+    }
+    browser_app_css_reset(app);
+}
+
+static bool browser_requeue_event(browser_app_t *app, browser_ui_event_t *ev)
+{
+    if (!app || !ev)
+    {
+        return false;
+    }
+    if (browser_ui_event_enqueue(app, ev))
+    {
+        return true;
+    }
+    browser_debug_logf(app, "[ui] drop deferred event type=%u", (unsigned)ev->type);
+    browser_ui_event_free_payload(ev);
+    return false;
+}
+
 static void on_url_submit(atk_widget_t *input, void *context)
 {
     browser_app_t *app = (browser_app_t *)context;
@@ -339,6 +385,7 @@ static void on_url_submit(atk_widget_t *input, void *context)
     {
         return;
     }
+    browser_cancel_active_load(app);
     browser_debug_log_reset_file(app);
     browser_debug_logf(app, "[ui] submit url=%s", text);
 
@@ -354,6 +401,8 @@ bool browser_tick(void *context)
         return false;
     }
 
+    uint64_t tick_start_ms = sys_time_millis();
+    size_t event_counts[BROWSER_UI_EVENT_THREAD_DONE + 1] = {0};
     bool redraw = false;
     if (app->debug_open_requested)
     {
@@ -367,12 +416,28 @@ bool browser_tick(void *context)
     }
     browser_debug_service(app);
 
+    uint64_t start_ms = sys_time_millis();
     size_t events_processed = 0;
     browser_ui_event_t ev = {0};
-    while (events_processed < BROWSER_UI_EVENTS_PER_TICK &&
-           browser_ui_event_dequeue(app, &ev))
+    while (events_processed < BROWSER_UI_EVENTS_PER_TICK)
     {
+        if (BROWSER_UI_EVENT_BUDGET_MS > 0 &&
+            (sys_time_millis() - start_ms) >= BROWSER_UI_EVENT_BUDGET_MS)
+        {
+            break;
+        }
+        if (!browser_ui_event_dequeue(app, &ev))
+        {
+            break;
+        }
+
         events_processed++;
+        if ((unsigned)ev.type <= (unsigned)BROWSER_UI_EVENT_THREAD_DONE)
+        {
+            event_counts[ev.type]++;
+        }
+        bool skip_free = false;
+        bool defer_event = false;
         switch (ev.type)
         {
             case BROWSER_UI_EVENT_DOC_READY:
@@ -411,7 +476,6 @@ bool browser_tick(void *context)
                     browser_app_css_reset(app);
                     ev.u.doc_ready.doc = NULL;
                     atk_html_view_set_document(app->viewer, doc);
-                    atk_html_view_set_external_stylesheet(app->viewer, NULL);
                     browser_debug_logf(app, "[render] set document ok");
                     atk_window_mark_dirty(app->window);
                     redraw = true;
@@ -443,9 +507,11 @@ bool browser_tick(void *context)
                     if (browser_app_css_append(app, ev.u.css_append.css, ev.u.css_append.len))
                     {
                         (void)browser_app_css_append(app, "\n", 1);
-                        atk_html_view_set_external_stylesheet(app->viewer, app->external_css);
-                        atk_window_mark_dirty(app->window);
-                        redraw = true;
+                        if (!app->css_dirty)
+                        {
+                            app->css_dirty = true;
+                            app->css_dirty_since_ms = sys_time_millis();
+                        }
                     }
                     else
                     {
@@ -458,19 +524,32 @@ bool browser_tick(void *context)
             {
                 if (browser_load_is_active(app, ev.load_id))
                 {
-                    bool ok = atk_html_view_add_script(app->viewer,
-                                                       ev.u.script_append.script,
-                                                       ev.u.script_append.len);
+                    bool ok = atk_html_view_try_add_script(app->viewer,
+                                                           ev.u.script_append.script,
+                                                           ev.u.script_append.len);
+                    if (!ok)
+                    {
+                        browser_debug_logf(app,
+                                           "[js] defer src=%s bytes=%u",
+                                           ev.u.script_append.src ? ev.u.script_append.src : "(null)",
+                                           (unsigned)ev.u.script_append.len);
+                        if (browser_requeue_event(app, &ev))
+                        {
+                            skip_free = true;
+                            defer_event = true;
+                        }
+                        else
+                        {
+                            skip_free = true;
+                        }
+                        break;
+                    }
                     browser_debug_logf(app,
-                                       "[js] %s src=%s bytes=%u",
-                                       ok ? "queued" : "failed",
+                                       "[js] queued src=%s bytes=%u",
                                        ev.u.script_append.src ? ev.u.script_append.src : "(null)",
                                        (unsigned)ev.u.script_append.len);
-                    if (ok)
-                    {
-                        atk_window_mark_dirty(app->window);
-                        redraw = true;
-                    }
+                    atk_window_mark_dirty(app->window);
+                    redraw = true;
                 }
                 break;
             }
@@ -514,15 +593,31 @@ bool browser_tick(void *context)
             {
                 if (browser_load_is_active(app, ev.load_id))
                 {
-                    bool ok = atk_html_view_add_image_rgba(app->viewer,
-                                                          ev.u.image_rgba.src ? ev.u.image_rgba.src : "",
-                                                          ev.u.image_rgba.pixels,
-                                                          ev.u.image_rgba.width,
-                                                          ev.u.image_rgba.height,
-                                                          ev.u.image_rgba.stride_bytes);
+                    bool ok = atk_html_view_try_add_image_rgba(app->viewer,
+                                                              ev.u.image_rgba.src ? ev.u.image_rgba.src : "",
+                                                              ev.u.image_rgba.pixels,
+                                                              ev.u.image_rgba.width,
+                                                              ev.u.image_rgba.height,
+                                                              ev.u.image_rgba.stride_bytes);
+                    if (!ok)
+                    {
+                        browser_debug_logf(app,
+                                           "[img] defer src=%s bytes=%u",
+                                           ev.u.image_rgba.src ? ev.u.image_rgba.src : "(null)",
+                                           (unsigned)(ev.u.image_rgba.stride_bytes * ev.u.image_rgba.height));
+                        if (browser_requeue_event(app, &ev))
+                        {
+                            skip_free = true;
+                            defer_event = true;
+                        }
+                        else
+                        {
+                            skip_free = true;
+                        }
+                        break;
+                    }
                     browser_debug_logf(app,
-                                       "[img] %s src=%s bytes=%u",
-                                       ok ? "loaded" : "failed",
+                                       "[img] loaded src=%s bytes=%u",
                                        ev.u.image_rgba.src ? ev.u.image_rgba.src : "(null)",
                                        (unsigned)(ev.u.image_rgba.stride_bytes * ev.u.image_rgba.height));
                     ev.u.image_rgba.pixels = NULL;
@@ -541,14 +636,68 @@ bool browser_tick(void *context)
                 break;
         }
 
-        browser_ui_event_free_payload(&ev);
+        if (!skip_free)
+        {
+            browser_ui_event_free_payload(&ev);
+        }
         memset(&ev, 0, sizeof(ev));
+        if (defer_event)
+        {
+            break;
+        }
+    }
+
+    if (app->css_dirty && app->viewer && app->window)
+    {
+        uint64_t now_ms = sys_time_millis();
+        bool budget_ok = true;
+        if (BROWSER_UI_EVENT_BUDGET_MS > 0 &&
+            (now_ms - start_ms) >= BROWSER_UI_EVENT_BUDGET_MS)
+        {
+            budget_ok = false;
+        }
+        if (budget_ok && (now_ms - app->css_dirty_since_ms) >= BROWSER_CSS_APPLY_DEBOUNCE_MS)
+        {
+            if (atk_html_view_try_set_external_stylesheet(app->viewer, app->external_css))
+            {
+                app->css_dirty = false;
+                app->css_dirty_since_ms = 0;
+                atk_window_mark_dirty(app->window);
+                redraw = true;
+            }
+            else
+            {
+                app->css_dirty_since_ms = now_ms;
+            }
+        }
     }
 
     browser_debug_service(app);
     if (app->viewer && atk_html_view_poll_js(app->viewer))
     {
         redraw = true;
+    }
+
+    uint64_t tick_elapsed_ms = sys_time_millis() - tick_start_ms;
+    if (tick_elapsed_ms >= BROWSER_TICK_SLOW_MS)
+    {
+        static uint64_t last_log_ms = 0;
+        uint64_t now_ms = sys_time_millis();
+        if (now_ms - last_log_ms >= BROWSER_TICK_LOG_RATE_MS)
+        {
+            last_log_ms = now_ms;
+            size_t img_events = event_counts[BROWSER_UI_EVENT_IMAGE_PNG] +
+                                event_counts[BROWSER_UI_EVENT_IMAGE_GIF] +
+                                event_counts[BROWSER_UI_EVENT_IMAGE_RGBA];
+            serial_printf("[ui] tick slow ms=%llu tid=%llu events=%u css=%u js=%u img=%u dirty=%u",
+                          (unsigned long long)tick_elapsed_ms,
+                          (unsigned long long)alix_thread_self(),
+                          (unsigned)events_processed,
+                          (unsigned)event_counts[BROWSER_UI_EVENT_CSS_APPEND],
+                          (unsigned)event_counts[BROWSER_UI_EVENT_SCRIPT_APPEND],
+                          (unsigned)img_events,
+                          app->css_dirty ? 1u : 0u);
+        }
     }
     return redraw;
 }
@@ -711,6 +860,7 @@ bool browser_build_ui(browser_app_t *app)
     {
         return false;
     }
+    atk_html_view_enable_async_render(app->viewer, true);
     atk_html_view_set_link_handler(app->viewer, browser_html_link_clicked, app);
     atk_widget_set_layout(app->viewer,
                           ATK_WIDGET_ANCHOR_LEFT | ATK_WIDGET_ANCHOR_RIGHT |

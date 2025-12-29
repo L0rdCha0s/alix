@@ -13,6 +13,8 @@
 #include "atk/atk_menu.h"
 #include "atk/atk_text_input.h"
 #include "libc.h"
+#include "serial.h"
+#include "usyscall.h"
 #include "video.h"
 #include "video_surface.h"
 #include "web/html.h"
@@ -31,8 +33,10 @@
 #define BROWSER_MAX_IMAGES 16
 #define BROWSER_MAX_SCRIPTS 16
 #define BROWSER_UI_EVENT_QUEUE_CAP 64
-#define BROWSER_MAX_LOAD_THREADS 32
+#define BROWSER_MAX_LOAD_THREADS 8
 #define BROWSER_UI_EVENTS_PER_TICK 8
+#define BROWSER_UI_EVENT_BUDGET_MS 4
+#define BROWSER_CSS_APPLY_DEBOUNCE_MS 64
 
 typedef struct
 {
@@ -107,6 +111,34 @@ typedef struct
     } u;
 } browser_ui_event_t;
 
+typedef enum
+{
+    BROWSER_RESOURCE_CSS = 0,
+    BROWSER_RESOURCE_SCRIPT,
+    BROWSER_RESOURCE_IMAGE
+} browser_resource_kind_t;
+
+typedef struct
+{
+    char *url;
+    uint32_t hash;
+    browser_resource_kind_t kind;
+} browser_resource_entry_t;
+
+typedef struct
+{
+    browser_resource_entry_t *entries;
+    size_t cap;
+    size_t count;
+} browser_resource_set_t;
+
+typedef enum
+{
+    BROWSER_RESOURCE_TRACK_NEW = 0,
+    BROWSER_RESOURCE_TRACK_DUP,
+    BROWSER_RESOURCE_TRACK_ERROR
+} browser_resource_track_t;
+
 typedef struct
 {
     atk_user_window_t remote;
@@ -121,6 +153,7 @@ typedef struct
     atk_widget_t *viewer;
 
     alix_mutex_t lock;
+    alix_mutex_t debug_lock;
     alix_mutex_t decode_lock;
     uint64_t next_load_id;
     uint64_t active_load_id;
@@ -135,6 +168,8 @@ typedef struct
     char *external_css;
     size_t external_css_len;
     size_t external_css_cap;
+    bool css_dirty;
+    uint64_t css_dirty_since_ms;
 
     browser_ui_event_t ui_events[BROWSER_UI_EVENT_QUEUE_CAP];
     size_t ui_event_head;
@@ -203,14 +238,79 @@ bool browser_script_event_init(browser_ui_event_t *ev,
                                const char *src,
                                char *script,
                                size_t len);
+bool browser_resource_set_init(browser_resource_set_t *set);
+void browser_resource_set_destroy(browser_resource_set_t *set);
+browser_resource_track_t browser_resource_set_track(browser_resource_set_t *set,
+                                                    browser_resource_kind_t kind,
+                                                    const char *url);
 
 /* debug */
 void browser_debug_logf(browser_app_t *app, const char *fmt, ...);
+void browser_debug_logf_locked(browser_app_t *app, const char *fmt, ...);
 void browser_debug_log_reset_file(browser_app_t *app);
 void browser_debug_open_window(browser_app_t *app);
 void browser_debug_close_window(browser_app_t *app);
 void browser_debug_clear(browser_app_t *app);
 void browser_debug_service(browser_app_t *app);
+
+static inline void browser_lock_enter(browser_app_t *app, alix_mutex_t *mutex, const char *name)
+{
+    if (!mutex)
+    {
+        return;
+    }
+    bool log_enabled = (app && name && name[0] != '\0');
+    if (log_enabled && mutex == &app->debug_lock)
+    {
+        log_enabled = false;
+    }
+    uint64_t start_ms = 0;
+    uint64_t tid = 0;
+    if (log_enabled)
+    {
+        start_ms = sys_time_millis();
+        tid = alix_thread_self();
+    }
+    alix_mutex_lock(mutex);
+    if (log_enabled)
+    {
+        uint64_t waited_ms = sys_time_millis() - start_ms;
+        // serial_printf("[lock] enter name=%s tid=%llu wait=%llu",
+        //               name,
+        //               (unsigned long long)tid,
+        //               (unsigned long long)waited_ms);
+        // browser_debug_logf(app,
+        //                    "[lock] enter %s tid=%llu wait=%llu",
+        //                    name,
+        //                    (unsigned long long)tid,
+        //                    (unsigned long long)waited_ms);
+    }
+}
+
+static inline void browser_lock_exit(browser_app_t *app, alix_mutex_t *mutex, const char *name)
+{
+    if (!mutex)
+    {
+        return;
+    }
+    bool log_enabled = (app && name && name[0] != '\0');
+    if (log_enabled && mutex == &app->debug_lock)
+    {
+        log_enabled = false;
+    }
+    if (log_enabled)
+    {
+        uint64_t tid = alix_thread_self();
+        // serial_printf("[lock] exit name=%s tid=%llu",
+        //               name,
+        //               (unsigned long long)tid);
+        // browser_debug_logf(app,
+        //                    "[lock] exit %s tid=%llu",
+        //                    name,
+        //                    (unsigned long long)tid);
+    }
+    alix_mutex_unlock(mutex);
+}
 
 /* ui */
 bool browser_build_ui(browser_app_t *app);

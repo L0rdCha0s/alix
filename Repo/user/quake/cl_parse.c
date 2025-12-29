@@ -335,7 +335,6 @@ void CL_ParseUpdate (int bits)
 	qboolean	forcelink;
 	entity_t	*ent;
 	int			num;
-	int			skin;
 
 	if (cls.signon == SIGNONS - 1)
 	{	// first update is the final signon stage
@@ -356,9 +355,11 @@ void CL_ParseUpdate (int bits)
 
 	ent = CL_EntityNum (num);
 
-for (i=0 ; i<16 ; i++)
-if (bits&(1<<i))
-	bitcounts[i]++;
+	for (i=0 ; i<16 ; i++)
+	{
+		if (bits&(1<<i))
+			bitcounts[i]++;
+	}
 
 	if (ent->msgtime != cl.mtime[1])
 		forcelink = true;	// no previous frame to lerp from
@@ -416,6 +417,8 @@ if (bits&(1<<i))
 	}
 
 #ifdef GLQUAKE
+	int		skin;
+
 	if (bits & U_SKIN)
 		skin = MSG_ReadByte();
 	else
@@ -786,8 +789,9 @@ void CL_ParseServerMessage (void)
 				Host_Error ("CL_ParseServerMessage: Server is protocol %i instead of %i\n", i, PROTOCOL_VERSION);
 			break;
 			
-		case svc_disconnect:
-			Host_EndGame ("Server disconnected\n");
+	case svc_disconnect:
+		Host_EndGame ("Server disconnected\n");
+		break;
 
 		case svc_print:
 			Con_Printf ("%s", MSG_ReadString ());
@@ -960,4 +964,3 @@ void CL_ParseServerMessage (void)
 		}
 	}
 }
-

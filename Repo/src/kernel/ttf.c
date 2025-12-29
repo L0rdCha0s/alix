@@ -16,6 +16,8 @@
 #define TTF_MAX_FLATTEN_DEPTH 16
 #define TTF_SMOOTH_PIXEL_FINE_MAX 12
 #define TTF_SMOOTH_PIXEL_MAX 18
+#define TTF_GLYPH_MAX_DIM 4096
+#define TTF_GLYPH_MAX_PIXELS ((size_t)TTF_GLYPH_MAX_DIM * (size_t)TTF_GLYPH_MAX_DIM)
 
 typedef struct
 {
@@ -147,6 +149,30 @@ static void __attribute__((unused)) ttf_log_u32(const char *prefix, uint32_t val
     serial_printf("%s", "\r\n");
 }
 #endif
+
+static void ttf_log_glyph_alloc_fail(const char *reason,
+                                     uint32_t codepoint,
+                                     int pixel_height,
+                                     int width,
+                                     int height)
+{
+#if TTF_HOST_BUILD
+    fprintf(stderr,
+            "[ttf] glyph %s codepoint=0x%08X px=%d w=%d h=%d\n",
+            reason ? reason : "invalid",
+            (unsigned int)codepoint,
+            pixel_height,
+            width,
+            height);
+#else
+    serial_printf("[ttf] glyph %s codepoint=0x%08X px=%d w=%d h=%d",
+                  reason ? reason : "invalid",
+                  (unsigned int)codepoint,
+                  pixel_height,
+                  width,
+                  height);
+#endif
+}
 
 static bool ttf_fail(const char *msg)
 {
@@ -1337,7 +1363,21 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         return true;
     }
 
-    size_t pixel_count = (size_t)width * (size_t)height;
+    if (width > TTF_GLYPH_MAX_DIM || height > TTF_GLYPH_MAX_DIM)
+    {
+        ttf_log_glyph_alloc_fail("oversize", codepoint, pixel_height, width, height);
+        ttf_edge_list_reset(&edges);
+        return false;
+    }
+
+    size_t pixel_count = 0;
+    if (__builtin_mul_overflow((size_t)width, (size_t)height, &pixel_count) ||
+        pixel_count > TTF_GLYPH_MAX_PIXELS)
+    {
+        ttf_log_glyph_alloc_fail("pixels", codepoint, pixel_height, width, height);
+        ttf_edge_list_reset(&edges);
+        return false;
+    }
     uint8_t *pixels = (uint8_t *)malloc(pixel_count);
     if (!pixels)
     {

@@ -1394,7 +1394,7 @@ void M_UnbindCommand (char *command)
 
 void M_Keys_Draw (void)
 {
-	int		i, l;
+	int		i;
 	int		keys[2];
 	char	*name;
 	int		x, y;
@@ -1409,13 +1409,11 @@ void M_Keys_Draw (void)
 		M_Print (18, 32, "Enter to change, backspace to clear");
 
 // search for known bindings
-	for (i=0 ; i<NUMCOMMANDS ; i++)
+	for (i=0 ; i<(int)NUMCOMMANDS ; i++)
 	{
 		y = 48 + 8*i;
 
 		M_Print (16, y, bindnames[i][1]);
-
-		l = strlen (bindnames[i][0]);
 
 		M_FindKeysForCommand (bindnames[i][0], keys);
 
@@ -1475,16 +1473,16 @@ void M_Keys_Key (int k)
 	case K_UPARROW:
 		S_LocalSound ("misc/menu1.wav");
 		keys_cursor--;
-		if (keys_cursor < 0)
-			keys_cursor = NUMCOMMANDS-1;
+			if (keys_cursor < 0)
+				keys_cursor = (int)NUMCOMMANDS-1;
 		break;
 
 	case K_DOWNARROW:
 	case K_RIGHTARROW:
 		S_LocalSound ("misc/menu1.wav");
 		keys_cursor++;
-		if (keys_cursor >= NUMCOMMANDS)
-			keys_cursor = 0;
+			if (keys_cursor >= (int)NUMCOMMANDS)
+				keys_cursor = 0;
 		break;
 
 	case K_ENTER:		// go into bind mode
@@ -1990,16 +1988,20 @@ forward:
 	}
 
 	if (DirectConfig && (serialConfig_cursor == 3 || serialConfig_cursor == 4))
+	{
 		if (key == K_UPARROW)
 			serialConfig_cursor = 2;
 		else
 			serialConfig_cursor = 5;
+	}
 
 	if (SerialConfig && StartingGame && serialConfig_cursor == 4)
+	{
 		if (key == K_UPARROW)
 			serialConfig_cursor = 3;
 		else
 			serialConfig_cursor = 5;
+	}
 }
 
 //=============================================================================
@@ -2363,10 +2365,12 @@ void M_LanConfig_Key (int key)
 	}
 
 	if (StartingGame && lanConfig_cursor == 2)
+	{
 		if (key == K_UPARROW)
 			lanConfig_cursor = 1;
 		else
 			lanConfig_cursor = 0;
+	}
 
 	l =  Q_atoi(lanConfig_portname);
 	if (l > 65535)
@@ -2891,6 +2895,7 @@ void M_Search_Draw (void)
 
 void M_Search_Key (int key)
 {
+	(void)key;
 }
 
 //=============================================================================

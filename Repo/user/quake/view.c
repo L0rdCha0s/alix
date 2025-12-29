@@ -31,38 +31,38 @@ when crossing a water boudnary.
 
 */
 
-cvar_t		lcd_x = {"lcd_x","0"};
-cvar_t		lcd_yaw = {"lcd_yaw","0"};
+cvar_t		lcd_x = CVAR_INIT("lcd_x", "0");
+cvar_t		lcd_yaw = CVAR_INIT("lcd_yaw", "0");
 
-cvar_t	scr_ofsx = {"scr_ofsx","0", false};
-cvar_t	scr_ofsy = {"scr_ofsy","0", false};
-cvar_t	scr_ofsz = {"scr_ofsz","0", false};
+cvar_t	scr_ofsx = CVAR_INIT("scr_ofsx", "0");
+cvar_t	scr_ofsy = CVAR_INIT("scr_ofsy", "0");
+cvar_t	scr_ofsz = CVAR_INIT("scr_ofsz", "0");
 
-cvar_t	cl_rollspeed = {"cl_rollspeed", "200"};
-cvar_t	cl_rollangle = {"cl_rollangle", "2.0"};
+cvar_t	cl_rollspeed = CVAR_INIT("cl_rollspeed", "200");
+cvar_t	cl_rollangle = CVAR_INIT("cl_rollangle", "2.0");
 
-cvar_t	cl_bob = {"cl_bob","0.02", false};
-cvar_t	cl_bobcycle = {"cl_bobcycle","0.6", false};
-cvar_t	cl_bobup = {"cl_bobup","0.5", false};
+cvar_t	cl_bob = CVAR_INIT("cl_bob", "0.02");
+cvar_t	cl_bobcycle = CVAR_INIT("cl_bobcycle", "0.6");
+cvar_t	cl_bobup = CVAR_INIT("cl_bobup", "0.5");
 
-cvar_t	v_kicktime = {"v_kicktime", "0.5", false};
-cvar_t	v_kickroll = {"v_kickroll", "0.6", false};
-cvar_t	v_kickpitch = {"v_kickpitch", "0.6", false};
+cvar_t	v_kicktime = CVAR_INIT("v_kicktime", "0.5");
+cvar_t	v_kickroll = CVAR_INIT("v_kickroll", "0.6");
+cvar_t	v_kickpitch = CVAR_INIT("v_kickpitch", "0.6");
 
-cvar_t	v_iyaw_cycle = {"v_iyaw_cycle", "2", false};
-cvar_t	v_iroll_cycle = {"v_iroll_cycle", "0.5", false};
-cvar_t	v_ipitch_cycle = {"v_ipitch_cycle", "1", false};
-cvar_t	v_iyaw_level = {"v_iyaw_level", "0.3", false};
-cvar_t	v_iroll_level = {"v_iroll_level", "0.1", false};
-cvar_t	v_ipitch_level = {"v_ipitch_level", "0.3", false};
+cvar_t	v_iyaw_cycle = CVAR_INIT("v_iyaw_cycle", "2");
+cvar_t	v_iroll_cycle = CVAR_INIT("v_iroll_cycle", "0.5");
+cvar_t	v_ipitch_cycle = CVAR_INIT("v_ipitch_cycle", "1");
+cvar_t	v_iyaw_level = CVAR_INIT("v_iyaw_level", "0.3");
+cvar_t	v_iroll_level = CVAR_INIT("v_iroll_level", "0.1");
+cvar_t	v_ipitch_level = CVAR_INIT("v_ipitch_level", "0.3");
 
-cvar_t	v_idlescale = {"v_idlescale", "0", false};
+cvar_t	v_idlescale = CVAR_INIT("v_idlescale", "0");
 
-cvar_t	crosshair = {"crosshair", "0", true};
-cvar_t	cl_crossx = {"cl_crossx", "0", false};
-cvar_t	cl_crossy = {"cl_crossy", "0", false};
+cvar_t	crosshair = CVAR_INIT_ARCHIVE("crosshair", "0");
+cvar_t	cl_crossx = CVAR_INIT("cl_crossx", "0");
+cvar_t	cl_crossy = CVAR_INIT("cl_crossy", "0");
 
-cvar_t	gl_cshiftpercent = {"gl_cshiftpercent", "100", false};
+cvar_t	gl_cshiftpercent = CVAR_INIT("gl_cshiftpercent", "100");
 
 float	v_dmg_time, v_dmg_roll, v_dmg_pitch;
 
@@ -139,8 +139,8 @@ float V_CalcBob (void)
 //=============================================================================
 
 
-cvar_t	v_centermove = {"v_centermove", "0.15", false};
-cvar_t	v_centerspeed = {"v_centerspeed","500"};
+cvar_t	v_centermove = CVAR_INIT("v_centermove", "0.15");
+cvar_t	v_centerspeed = CVAR_INIT("v_centerspeed", "500");
 
 
 void V_StartPitchDrift (void)
@@ -256,7 +256,7 @@ cshift_t	cshift_water = { {130,80,50}, 128 };
 cshift_t	cshift_slime = { {0,25,5}, 150 };
 cshift_t	cshift_lava = { {255,80,0}, 150 };
 
-cvar_t		v_gamma = {"gamma", "1", true};
+cvar_t		v_gamma = CVAR_INIT_ARCHIVE("gamma", "1");
 
 byte		gammatable[256];	// palette is sent through this
 
@@ -957,26 +957,26 @@ void V_CalcRefdef (void)
 // set up the refresh position
 	VectorAdd (r_refdef.viewangles, cl.punchangle, r_refdef.viewangles);
 
-// smooth out stair step ups
-if (cl.onground && ent->origin[2] - oldz > 0)
-{
-	float steptime;
-	
-	steptime = cl.time - cl.oldtime;
-	if (steptime < 0)
-//FIXME		I_Error ("steptime < 0");
-		steptime = 0;
+	// smooth out stair step ups
+	if (cl.onground && ent->origin[2] - oldz > 0)
+	{
+		float steptime;
 
-	oldz += steptime * 80;
-	if (oldz > ent->origin[2])
+		steptime = cl.time - cl.oldtime;
+		if (steptime < 0)
+	//FIXME		I_Error ("steptime < 0");
+			steptime = 0;
+
+		oldz += steptime * 80;
+		if (oldz > ent->origin[2])
+			oldz = ent->origin[2];
+		if (ent->origin[2] - oldz > 12)
+			oldz = ent->origin[2] - 12;
+		r_refdef.vieworg[2] += oldz - ent->origin[2];
+		view->origin[2] += oldz - ent->origin[2];
+	}
+	else
 		oldz = ent->origin[2];
-	if (ent->origin[2] - oldz > 12)
-		oldz = ent->origin[2] - 12;
-	r_refdef.vieworg[2] += oldz - ent->origin[2];
-	view->origin[2] += oldz - ent->origin[2];
-}
-else
-	oldz = ent->origin[2];
 
 	if (chase_active.value)
 		Chase_Update ();
@@ -1109,5 +1109,4 @@ void V_Init (void)
 	BuildGammaTable (1.0);	// no gamma yet
 	Cvar_RegisterVariable (&v_gamma);
 }
-
 

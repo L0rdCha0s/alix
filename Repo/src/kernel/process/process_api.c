@@ -347,6 +347,7 @@ void process_destroy_marked(process_t *process)
 
     user_atk_on_process_destroy(process);
     shell_service_cleanup_process(process);
+    procfs_unregister_process(process);
 
     if (process->first_child)
     {

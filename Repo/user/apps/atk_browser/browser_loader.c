@@ -2,110 +2,388 @@
 
 #include "atk/util/gif.h"
 #include "atk/util/png.h"
+#include "ctype.h"
 #include "string.h"
 
-void browser_ui_event_free_payload(browser_ui_event_t *ev)
+static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev);
+
+
+static bool browser_span_equals_ci(const char *a, size_t a_len, const char *b)
 {
-    if (!ev)
+    if (!a || !b)
+    {
+        return false;
+    }
+    size_t b_len = strlen(b);
+    if (a_len != b_len)
+    {
+        return false;
+    }
+    return strncasecmp(a, b, a_len) == 0;
+}
+
+static void browser_trim_span(const char **start, size_t *len)
+{
+    if (!start || !*start || !len)
     {
         return;
     }
-
-    switch (ev->type)
+    const char *s = *start;
+    size_t n = *len;
+    while (n > 0 && isspace((unsigned char)*s))
     {
-        case BROWSER_UI_EVENT_DOC_READY:
-            if (ev->u.doc_ready.doc)
+        s++;
+        n--;
+    }
+    while (n > 0 && isspace((unsigned char)s[n - 1]))
+    {
+        n--;
+    }
+    *start = s;
+    *len = n;
+}
+
+static const char *browser_find_char(const char *start, size_t len, char needle)
+{
+    if (!start)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (start[i] == needle)
+        {
+            return start + i;
+        }
+    }
+    return NULL;
+}
+
+static bool browser_data_url_parse_base64(const char *url,
+                                          const char **out_payload,
+                                          size_t *out_payload_len,
+                                          bool *out_has_type,
+                                          bool *out_is_png)
+{
+    if (!url || strncasecmp(url, "data:", 5) != 0)
+    {
+        return false;
+    }
+
+    const char *meta = url + 5;
+    const char *comma = strchr(meta, ',');
+    if (!comma)
+    {
+        return false;
+    }
+
+    size_t meta_len = (size_t)(comma - meta);
+    const char *payload = comma + 1;
+    if (!payload || payload[0] == '\0')
+    {
+        return false;
+    }
+
+    bool base64 = false;
+    bool has_type = false;
+    bool is_png = false;
+
+    const char *cursor = meta;
+    size_t remaining = meta_len;
+    const char *semi = browser_find_char(cursor, remaining, ';');
+    size_t token_len = semi ? (size_t)(semi - cursor) : remaining;
+    const char *token = cursor;
+    browser_trim_span(&token, &token_len);
+    if (token_len > 0)
+    {
+        has_type = true;
+        if (browser_span_equals_ci(token, token_len, "image/png"))
+        {
+            is_png = true;
+        }
+    }
+
+    if (semi)
+    {
+        cursor = semi + 1;
+        while (cursor < meta + meta_len)
+        {
+            const char *next = browser_find_char(cursor, (size_t)((meta + meta_len) - cursor), ';');
+            size_t len = next ? (size_t)(next - cursor) : (size_t)((meta + meta_len) - cursor);
+            const char *tok = cursor;
+            browser_trim_span(&tok, &len);
+            if (len > 0 && browser_span_equals_ci(tok, len, "base64"))
             {
-                html_document_destroy(ev->u.doc_ready.doc);
-                ev->u.doc_ready.doc = NULL;
+                base64 = true;
             }
-            free(ev->u.doc_ready.final_url);
-            ev->u.doc_ready.final_url = NULL;
-            break;
-        case BROWSER_UI_EVENT_ERROR:
-            free(ev->u.error.message);
-            ev->u.error.message = NULL;
-            break;
-        case BROWSER_UI_EVENT_CSS_APPEND:
-            free(ev->u.css_append.css);
-            ev->u.css_append.css = NULL;
-            ev->u.css_append.len = 0;
-            break;
-        case BROWSER_UI_EVENT_SCRIPT_APPEND:
-            free(ev->u.script_append.src);
-            ev->u.script_append.src = NULL;
-            free(ev->u.script_append.script);
-            ev->u.script_append.script = NULL;
-            ev->u.script_append.len = 0;
-            break;
-        case BROWSER_UI_EVENT_IMAGE_PNG:
-            free(ev->u.image_png.src);
-            ev->u.image_png.src = NULL;
-            free(ev->u.image_png.data);
-            ev->u.image_png.data = NULL;
-            ev->u.image_png.len = 0;
-            break;
-        case BROWSER_UI_EVENT_IMAGE_GIF:
-            free(ev->u.image_gif.src);
-            ev->u.image_gif.src = NULL;
-            free(ev->u.image_gif.data);
-            ev->u.image_gif.data = NULL;
-            ev->u.image_gif.len = 0;
-            break;
-        case BROWSER_UI_EVENT_IMAGE_RGBA:
-            free(ev->u.image_rgba.src);
-            ev->u.image_rgba.src = NULL;
-            free(ev->u.image_rgba.pixels);
-            ev->u.image_rgba.pixels = NULL;
-            ev->u.image_rgba.width = 0;
-            ev->u.image_rgba.height = 0;
-            ev->u.image_rgba.stride_bytes = 0;
-            break;
-        case BROWSER_UI_EVENT_THREAD_DONE:
-            break;
-        default:
-            break;
+            if (!next)
+            {
+                break;
+            }
+            cursor = next + 1;
+        }
     }
-}
 
-bool browser_ui_event_enqueue(browser_app_t *app, const browser_ui_event_t *ev)
-{
-    if (!app || !ev)
+    if (!base64)
     {
         return false;
     }
 
-    bool ok = false;
-    alix_mutex_lock(&app->lock);
-    if (app->ui_event_count < BROWSER_UI_EVENT_QUEUE_CAP)
+    if (out_payload)
     {
-        size_t idx = (app->ui_event_head + app->ui_event_count) % BROWSER_UI_EVENT_QUEUE_CAP;
-        app->ui_events[idx] = *ev;
-        app->ui_event_count++;
-        ok = true;
+        *out_payload = payload;
     }
-    alix_mutex_unlock(&app->lock);
-    return ok;
+    if (out_payload_len)
+    {
+        *out_payload_len = strlen(payload);
+    }
+    if (out_has_type)
+    {
+        *out_has_type = has_type;
+    }
+    if (out_is_png)
+    {
+        *out_is_png = is_png;
+    }
+    return true;
 }
 
-bool browser_ui_event_dequeue(browser_app_t *app, browser_ui_event_t *out)
+static int browser_base64_value(char ch)
 {
-    if (!app || !out)
+    if (ch >= 'A' && ch <= 'Z')
+    {
+        return ch - 'A';
+    }
+    if (ch >= 'a' && ch <= 'z')
+    {
+        return ch - 'a' + 26;
+    }
+    if (ch >= '0' && ch <= '9')
+    {
+        return ch - '0' + 52;
+    }
+    if (ch == '+')
+    {
+        return 62;
+    }
+    if (ch == '/')
+    {
+        return 63;
+    }
+    return -1;
+}
+
+static uint8_t *browser_decode_base64(const char *input, size_t len, size_t *out_len)
+{
+    if (!input || len == 0 || !out_len)
+    {
+        return NULL;
+    }
+    *out_len = 0;
+
+    size_t valid = 0;
+    size_t padding = 0;
+    bool seen_pad = false;
+    for (size_t i = 0; i < len; ++i)
+    {
+        unsigned char ch = (unsigned char)input[i];
+        if (isspace(ch))
+        {
+            continue;
+        }
+        if (ch == '=')
+        {
+            padding++;
+            seen_pad = true;
+            continue;
+        }
+        if (seen_pad)
+        {
+            return NULL;
+        }
+        if (browser_base64_value((char)ch) < 0)
+        {
+            return NULL;
+        }
+        valid++;
+    }
+
+    size_t total = valid + padding;
+    if (total == 0 || (total % 4) != 0 || padding > 2)
+    {
+        return NULL;
+    }
+
+    size_t decoded_len = (total / 4) * 3;
+    if (padding > 0)
+    {
+        decoded_len -= padding;
+    }
+    if (decoded_len == 0 || decoded_len > BROWSER_MAX_BYTES)
+    {
+        return NULL;
+    }
+
+    uint8_t *out = (uint8_t *)malloc(decoded_len);
+    if (!out)
+    {
+        return NULL;
+    }
+
+    size_t out_pos = 0;
+    int quartet[4] = {0, 0, 0, 0};
+    int q = 0;
+
+    for (size_t i = 0; i < len; ++i)
+    {
+        unsigned char ch = (unsigned char)input[i];
+        if (isspace(ch))
+        {
+            continue;
+        }
+
+        int val = 0;
+        if (ch == '=')
+        {
+            val = 64;
+        }
+        else
+        {
+            val = browser_base64_value((char)ch);
+            if (val < 0)
+            {
+                free(out);
+                return NULL;
+            }
+        }
+        quartet[q++] = val;
+        if (q != 4)
+        {
+            continue;
+        }
+
+        if (quartet[0] == 64 || quartet[1] == 64)
+        {
+            free(out);
+            return NULL;
+        }
+        out[out_pos++] = (uint8_t)((quartet[0] << 2) | (quartet[1] >> 4));
+        if (quartet[2] != 64)
+        {
+            out[out_pos++] = (uint8_t)(((quartet[1] & 0x0Fu) << 4) | (quartet[2] >> 2));
+            if (quartet[3] != 64)
+            {
+                out[out_pos++] = (uint8_t)(((quartet[2] & 0x03u) << 6) | quartet[3]);
+            }
+        }
+        else if (quartet[3] != 64)
+        {
+            free(out);
+            return NULL;
+        }
+
+        q = 0;
+    }
+
+    if (q != 0 || out_pos != decoded_len)
+    {
+        free(out);
+        return NULL;
+    }
+
+    *out_len = decoded_len;
+    return out;
+}
+
+static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, const char *url)
+{
+    if (!app || !url)
+    {
+        return false;
+    }
+    if (strncasecmp(url, "data:", 5) != 0)
     {
         return false;
     }
 
-    bool ok = false;
-    alix_mutex_lock(&app->lock);
-    if (app->ui_event_count > 0)
+    const char *payload = NULL;
+    size_t payload_len = 0;
+    bool has_type = false;
+    bool is_png = false;
+    if (!browser_data_url_parse_base64(url, &payload, &payload_len, &has_type, &is_png))
     {
-        *out = app->ui_events[app->ui_event_head];
-        app->ui_event_head = (app->ui_event_head + 1) % BROWSER_UI_EVENT_QUEUE_CAP;
-        app->ui_event_count--;
-        ok = true;
+        browser_debug_logf(app, "[img] data url unsupported");
+        return true;
     }
-    alix_mutex_unlock(&app->lock);
-    return ok;
+    if (has_type && !is_png)
+    {
+        browser_debug_logf(app, "[img] data url skipped (type not png)");
+        return true;
+    }
+
+    size_t decoded_len = 0;
+    uint8_t *decoded = browser_decode_base64(payload, payload_len, &decoded_len);
+    if (!decoded)
+    {
+        browser_debug_logf(app, "[img] data url base64 decode failed len=%u", (unsigned)payload_len);
+        return true;
+    }
+    if (!browser_is_png_bytes(decoded, decoded_len))
+    {
+        browser_debug_logf(app, "[img] data url skipped (not png)");
+        free(decoded);
+        return true;
+    }
+    if (!browser_load_is_active(app, load_id))
+    {
+        free(decoded);
+        return true;
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0;
+    int h = 0;
+    int stride_bytes = 0;
+    int rc = -1;
+    browser_lock_enter(app, &app->decode_lock, "decode_lock");
+    rc = png_decode_rgba32(decoded, decoded_len, &pixels, &w, &h, &stride_bytes);
+    browser_lock_exit(app, &app->decode_lock, "decode_lock");
+    free(decoded);
+
+    if (rc != 0 || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
+    {
+        const char *err = png_last_error();
+        browser_debug_logf(app,
+                           "[img] data url decode failed err=%s",
+                           err ? err : "(unknown)");
+        free(pixels);
+        return true;
+    }
+
+    if (!browser_load_is_active(app, load_id))
+    {
+        free(pixels);
+        return true;
+    }
+
+    browser_ui_event_t img_ev = {0};
+    img_ev.type = BROWSER_UI_EVENT_IMAGE_RGBA;
+    img_ev.load_id = load_id;
+    img_ev.u.image_rgba.src = browser_strdup(url);
+    img_ev.u.image_rgba.pixels = pixels;
+    img_ev.u.image_rgba.width = w;
+    img_ev.u.image_rgba.height = h;
+    img_ev.u.image_rgba.stride_bytes = stride_bytes;
+    if (!img_ev.u.image_rgba.src)
+    {
+        browser_ui_event_free_payload(&img_ev);
+        browser_debug_logf(app, "[img] data url out of memory");
+        return true;
+    }
+
+    browser_loader_emit_event(app, &img_ev);
+    browser_debug_logf(app, "[img] data url ok bytes=%u", (unsigned)decoded_len);
+    return true;
 }
 
 bool browser_load_is_active(browser_app_t *app, uint64_t load_id)
@@ -116,9 +394,9 @@ bool browser_load_is_active(browser_app_t *app, uint64_t load_id)
     }
 
     bool active = false;
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     active = (app->active_load_id == load_id);
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
     return active;
 }
 
@@ -129,12 +407,12 @@ void browser_track_load_thread(browser_app_t *app, alix_thread_t thread)
         return;
     }
 
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     if (app->load_thread_count < BROWSER_MAX_LOAD_THREADS)
     {
         app->load_threads[app->load_thread_count++] = thread;
     }
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
 }
 
 void browser_untrack_load_thread(browser_app_t *app, alix_thread_t thread)
@@ -144,7 +422,7 @@ void browser_untrack_load_thread(browser_app_t *app, alix_thread_t thread)
         return;
     }
 
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     for (size_t i = 0; i < app->load_thread_count; ++i)
     {
         if (app->load_threads[i] == thread)
@@ -154,7 +432,7 @@ void browser_untrack_load_thread(browser_app_t *app, alix_thread_t thread)
             break;
         }
     }
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
 }
 
 void browser_app_css_reset(browser_app_t *app)
@@ -167,6 +445,8 @@ void browser_app_css_reset(browser_app_t *app)
     app->external_css = NULL;
     app->external_css_len = 0;
     app->external_css_cap = 0;
+    app->css_dirty = false;
+    app->css_dirty_since_ms = 0;
 }
 
 bool browser_app_css_append(browser_app_t *app, const char *data, size_t len)
@@ -191,16 +471,8 @@ typedef struct
     browser_app_t *app;
     uint64_t load_id;
     char *url_text;
+    browser_resource_set_t requested;
 } browser_load_job_t;
-
-static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev);
-
-typedef enum
-{
-    BROWSER_RESOURCE_CSS = 0,
-    BROWSER_RESOURCE_SCRIPT,
-    BROWSER_RESOURCE_IMAGE
-} browser_resource_kind_t;
 
 typedef struct
 {
@@ -217,9 +489,9 @@ static bool browser_can_spawn_load_thread(browser_app_t *app)
         return false;
     }
     bool ok = false;
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     ok = app->load_thread_count < BROWSER_MAX_LOAD_THREADS;
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
     return ok;
 }
 
@@ -241,6 +513,15 @@ static void browser_resource_fetch(browser_app_t *app,
     {
         free(abs);
         return;
+    }
+
+    if (kind == BROWSER_RESOURCE_IMAGE)
+    {
+        if (browser_handle_data_url_image(app, load_id, abs))
+        {
+            free(abs);
+            return;
+        }
     }
 
     if (kind == BROWSER_RESOURCE_CSS)
@@ -313,7 +594,7 @@ static void browser_resource_fetch(browser_app_t *app,
                 int stride_bytes = 0;
                 int rc = -1;
 
-                alix_mutex_lock(&app->decode_lock);
+                browser_lock_enter(app, &app->decode_lock, "decode_lock");
                 if (is_gif)
                 {
                     rc = gif_decode_rgba32((const uint8_t *)res_body,
@@ -332,7 +613,7 @@ static void browser_resource_fetch(browser_app_t *app,
                                            &h,
                                            &stride_bytes);
                 }
-                alix_mutex_unlock(&app->decode_lock);
+                browser_lock_exit(app, &app->decode_lock, "decode_lock");
 
                 if (rc == 0 && pixels && w > 0 && h > 0 && stride_bytes > 0)
                 {
@@ -490,17 +771,18 @@ static void browser_load_thread(void *arg)
     {
         return;
     }
-
+    (void)browser_resource_set_init(&job->requested);
     browser_app_t *app = job->app;
     uint64_t load_id = job->load_id;
     char *url_text = job->url_text;
     job->app = NULL;
     job->url_text = NULL;
-    free(job);
 
     if (!app)
     {
         free(url_text);
+        browser_resource_set_destroy(&job->requested);
+        free(job);
         return;
     }
 
@@ -607,6 +889,17 @@ static void browser_load_thread(void *arg)
         {
             continue;
         }
+        browser_resource_track_t track = browser_resource_set_track(&job->requested, BROWSER_RESOURCE_CSS, abs);
+        if (track == BROWSER_RESOURCE_TRACK_DUP)
+        {
+            browser_debug_logf(app, "[css] skip duplicate url=%s", abs);
+            free(abs);
+            continue;
+        }
+        if (track == BROWSER_RESOURCE_TRACK_ERROR)
+        {
+            browser_debug_logf(app, "[css] track failed url=%s", abs);
+        }
         if (browser_spawn_resource_thread(app, load_id, BROWSER_RESOURCE_CSS, abs))
         {
             abs = NULL;
@@ -629,6 +922,17 @@ static void browser_load_thread(void *arg)
         {
             continue;
         }
+        browser_resource_track_t track = browser_resource_set_track(&job->requested, BROWSER_RESOURCE_SCRIPT, abs);
+        if (track == BROWSER_RESOURCE_TRACK_DUP)
+        {
+            browser_debug_logf(app, "[js] skip duplicate url=%s", abs);
+            free(abs);
+            continue;
+        }
+        if (track == BROWSER_RESOURCE_TRACK_ERROR)
+        {
+            browser_debug_logf(app, "[js] track failed url=%s", abs);
+        }
         if (browser_spawn_resource_thread(app, load_id, BROWSER_RESOURCE_SCRIPT, abs))
         {
             abs = NULL;
@@ -650,6 +954,17 @@ static void browser_load_thread(void *arg)
         if (!abs)
         {
             continue;
+        }
+        browser_resource_track_t track = browser_resource_set_track(&job->requested, BROWSER_RESOURCE_IMAGE, abs);
+        if (track == BROWSER_RESOURCE_TRACK_DUP)
+        {
+            browser_debug_logf(app, "[img] skip duplicate url=%s", abs);
+            free(abs);
+            continue;
+        }
+        if (track == BROWSER_RESOURCE_TRACK_ERROR)
+        {
+            browser_debug_logf(app, "[img] track failed url=%s", abs);
         }
         if (browser_spawn_resource_thread(app, load_id, BROWSER_RESOURCE_IMAGE, abs))
         {
@@ -685,6 +1000,8 @@ done_fetch:
 
 done:
     free(url_text);
+    browser_resource_set_destroy(&job->requested);
+    free(job);
     browser_ui_event_t done_ev = {0};
     done_ev.type = BROWSER_UI_EVENT_THREAD_DONE;
     done_ev.load_id = load_id;
@@ -711,10 +1028,10 @@ bool browser_loader_start(browser_app_t *app, const char *url_text)
     }
 
     uint64_t load_id = 0;
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     load_id = ++app->next_load_id;
     app->active_load_id = load_id;
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
     browser_app_css_reset(app);
 
     (void)atk_html_view_set_html(app->viewer,

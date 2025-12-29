@@ -668,7 +668,10 @@ static atk_mouse_response_t tree_view_mouse_cb(atk_widget_t *widget,
     {
         atk_tree_view_set_node_expanded(widget, node, !node->expanded);
     }
-    tree_view_select_node(widget, priv, node);
+    else
+    {
+        tree_view_select_node(widget, priv, node);
+    }
     return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_REDRAW;
 }
 

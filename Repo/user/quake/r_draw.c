@@ -443,7 +443,7 @@ void R_RenderFace (msurface_t *fa, int clipflags)
 				if (r_pedge->cachededgeoffset & FULLY_CLIPPED_CACHED)
 				{
 					if ((r_pedge->cachededgeoffset & FRAMECOUNT_MASK) ==
-						r_framecount)
+						(unsigned int)r_framecount)
 					{
 						r_lastvertvalid = false;
 						continue;
@@ -487,7 +487,7 @@ void R_RenderFace (msurface_t *fa, int clipflags)
 				if (r_pedge->cachededgeoffset & FULLY_CLIPPED_CACHED)
 				{
 					if ((r_pedge->cachededgeoffset & FRAMECOUNT_MASK) ==
-						r_framecount)
+						(unsigned int)r_framecount)
 					{
 						r_lastvertvalid = false;
 						continue;
@@ -588,7 +588,7 @@ void R_RenderBmodelFace (bedge_t *pedges, msurface_t *psurf)
 	mplane_t	*pplane;
 	float		distinv;
 	vec3_t		p_normal;
-	medge_t		tedge;
+	static medge_t	tedge;
 	clipplane_t	*pclip;
 
 // skip out if no more surfs
@@ -905,4 +905,3 @@ void R_ZDrawSubmodelPolys (model_t *pmodel)
 		}
 	}
 }
-

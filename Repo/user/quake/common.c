@@ -29,8 +29,8 @@ static char     *argvdummy = " ";
 static char     *safeargvs[NUM_SAFE_ARGVS] =
 	{"-stdvid", "-nolan", "-nosound", "-nocdaudio", "-nojoy", "-nomouse", "-dibonly"};
 
-cvar_t  registered = {"registered","0"};
-cvar_t  cmdline = {"cmdline","0", false, true};
+cvar_t  registered = CVAR_INIT("registered", "0");
+cvar_t  cmdline = CVAR_INIT_SERVER("cmdline", "0");
 
 qboolean        com_modified;   // set true if using non-id files
 
@@ -694,10 +694,11 @@ float MSG_ReadFloat (void)
 	return dat.f;   
 }
 
-char *MSG_ReadString (void)
-{
-	static char     string[2048];
-	int             l,c;
+	char *MSG_ReadString (void)
+	{
+		static char     string[2048];
+		size_t          l;
+		int             c;
 	
 	l = 0;
 	do
@@ -1125,6 +1126,7 @@ COM_Init
 void COM_Init (char *basedir)
 {
 	byte    swaptest[2] = {1,0};
+	(void)basedir;
 
 // set the byte swapping variables in a portable manner 
 	if ( *(short *)swaptest == 1)
@@ -1341,10 +1343,10 @@ void COM_CopyFile (char *netpath, char *cachepath)
 	
 	while (remaining)
 	{
-		if (remaining < sizeof(buf))
+		if (remaining < (int)sizeof(buf))
 			count = remaining;
 		else
-			count = sizeof(buf);
+			count = (int)sizeof(buf);
 		Sys_FileRead (in, buf, count);
 		Sys_FileWrite (out, buf, count);
 		remaining -= count;

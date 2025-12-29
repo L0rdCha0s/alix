@@ -51,8 +51,8 @@ static int		slistLastShown;
 
 static void Slist_Send(void);
 static void Slist_Poll(void);
-PollProcedure	slistSendProcedure = {NULL, 0.0, Slist_Send};
-PollProcedure	slistPollProcedure = {NULL, 0.0, Slist_Poll};
+PollProcedure	slistSendProcedure = { .next = NULL, .nextTime = 0.0, .procedure = Slist_Send, .arg = NULL };
+PollProcedure	slistPollProcedure = { .next = NULL, .nextTime = 0.0, .procedure = Slist_Poll, .arg = NULL };
 
 
 sizebuf_t		net_message;
@@ -63,21 +63,21 @@ int messagesReceived = 0;
 int unreliableMessagesSent = 0;
 int unreliableMessagesReceived = 0;
 
-cvar_t	net_messagetimeout = {"net_messagetimeout","300"};
-cvar_t	hostname = {"hostname", "UNNAMED"};
+cvar_t	net_messagetimeout = CVAR_INIT("net_messagetimeout", "300");
+cvar_t	hostname = CVAR_INIT("hostname", "UNNAMED");
 
 qboolean	configRestored = false;
-cvar_t	config_com_port = {"_config_com_port", "0x3f8", true};
-cvar_t	config_com_irq = {"_config_com_irq", "4", true};
-cvar_t	config_com_baud = {"_config_com_baud", "57600", true};
-cvar_t	config_com_modem = {"_config_com_modem", "1", true};
-cvar_t	config_modem_dialtype = {"_config_modem_dialtype", "T", true};
-cvar_t	config_modem_clear = {"_config_modem_clear", "ATZ", true};
-cvar_t	config_modem_init = {"_config_modem_init", "", true};
-cvar_t	config_modem_hangup = {"_config_modem_hangup", "AT H", true};
+cvar_t	config_com_port = CVAR_INIT_ARCHIVE("_config_com_port", "0x3f8");
+cvar_t	config_com_irq = CVAR_INIT_ARCHIVE("_config_com_irq", "4");
+cvar_t	config_com_baud = CVAR_INIT_ARCHIVE("_config_com_baud", "57600");
+cvar_t	config_com_modem = CVAR_INIT_ARCHIVE("_config_com_modem", "1");
+cvar_t	config_modem_dialtype = CVAR_INIT_ARCHIVE("_config_modem_dialtype", "T");
+cvar_t	config_modem_clear = CVAR_INIT_ARCHIVE("_config_modem_clear", "ATZ");
+cvar_t	config_modem_init = CVAR_INIT_ARCHIVE("_config_modem_init", "");
+cvar_t	config_modem_hangup = CVAR_INIT_ARCHIVE("_config_modem_hangup", "AT H");
 
 #ifdef IDGODS
-cvar_t	idgods = {"idgods", "0"};
+cvar_t	idgods = CVAR_INIT("idgods", "0");
 #endif
 
 int	vcrFile = -1;

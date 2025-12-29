@@ -115,27 +115,27 @@ float	se_time1, se_time2, de_time1, de_time2, dv_time1, dv_time2;
 
 void R_MarkLeaves (void);
 
-cvar_t	r_draworder = {"r_draworder","0"};
-cvar_t	r_speeds = {"r_speeds","0"};
-cvar_t	r_timegraph = {"r_timegraph","0"};
-cvar_t	r_graphheight = {"r_graphheight","10"};
-cvar_t	r_clearcolor = {"r_clearcolor","2"};
-cvar_t	r_waterwarp = {"r_waterwarp","1"};
-cvar_t	r_fullbright = {"r_fullbright","0"};
-cvar_t	r_drawentities = {"r_drawentities","1"};
-cvar_t	r_drawviewmodel = {"r_drawviewmodel","1"};
-cvar_t	r_aliasstats = {"r_polymodelstats","0"};
-cvar_t	r_dspeeds = {"r_dspeeds","0"};
-cvar_t	r_drawflat = {"r_drawflat", "0"};
-cvar_t	r_ambient = {"r_ambient", "0"};
-cvar_t	r_reportsurfout = {"r_reportsurfout", "0"};
-cvar_t	r_maxsurfs = {"r_maxsurfs", "0"};
-cvar_t	r_numsurfs = {"r_numsurfs", "0"};
-cvar_t	r_reportedgeout = {"r_reportedgeout", "0"};
-cvar_t	r_maxedges = {"r_maxedges", "0"};
-cvar_t	r_numedges = {"r_numedges", "0"};
-cvar_t	r_aliastransbase = {"r_aliastransbase", "200"};
-cvar_t	r_aliastransadj = {"r_aliastransadj", "100"};
+cvar_t	r_draworder = CVAR_INIT("r_draworder", "0");
+cvar_t	r_speeds = CVAR_INIT("r_speeds", "0");
+cvar_t	r_timegraph = CVAR_INIT("r_timegraph", "0");
+cvar_t	r_graphheight = CVAR_INIT("r_graphheight", "10");
+cvar_t	r_clearcolor = CVAR_INIT("r_clearcolor", "2");
+cvar_t	r_waterwarp = CVAR_INIT("r_waterwarp", "1");
+cvar_t	r_fullbright = CVAR_INIT("r_fullbright", "0");
+cvar_t	r_drawentities = CVAR_INIT("r_drawentities", "1");
+cvar_t	r_drawviewmodel = CVAR_INIT("r_drawviewmodel", "1");
+cvar_t	r_aliasstats = CVAR_INIT("r_polymodelstats", "0");
+cvar_t	r_dspeeds = CVAR_INIT("r_dspeeds", "0");
+cvar_t	r_drawflat = CVAR_INIT("r_drawflat", "0");
+cvar_t	r_ambient = CVAR_INIT("r_ambient", "0");
+cvar_t	r_reportsurfout = CVAR_INIT("r_reportsurfout", "0");
+cvar_t	r_maxsurfs = CVAR_INIT("r_maxsurfs", "0");
+cvar_t	r_numsurfs = CVAR_INIT("r_numsurfs", "0");
+cvar_t	r_reportedgeout = CVAR_INIT("r_reportedgeout", "0");
+cvar_t	r_maxedges = CVAR_INIT("r_maxedges", "0");
+cvar_t	r_numedges = CVAR_INIT("r_numedges", "0");
+cvar_t	r_aliastransbase = CVAR_INIT("r_aliastransbase", "200");
+cvar_t	r_aliastransadj = CVAR_INIT("r_aliastransadj", "100");
 
 extern cvar_t	scr_fov;
 

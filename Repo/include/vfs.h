@@ -59,6 +59,7 @@ const char *vfs_name(const vfs_node_t *node);
 vfs_node_t *vfs_parent(const vfs_node_t *node);
 size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity);
 bool vfs_remove_file(vfs_node_t *cwd, const char *path);
+bool vfs_remove_tree(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_first_child(vfs_node_t *dir);
 vfs_node_t *vfs_next_sibling(vfs_node_t *node);
 void vfs_node_get_owner(const vfs_node_t *node, uint32_t *uid_out, uint32_t *gid_out);

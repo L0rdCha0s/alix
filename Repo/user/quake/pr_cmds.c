@@ -1329,7 +1329,7 @@ Pick a vector for the player to shoot along
 vector aim(entity, missilespeed)
 =============
 */
-cvar_t	sv_aim = {"sv_aim", "0.93"};
+cvar_t	sv_aim = CVAR_INIT("sv_aim", "0.93");
 void PF_aim (void)
 {
 	edict_t	*ent, *check, *bestent;
@@ -1341,6 +1341,7 @@ void PF_aim (void)
 	
 	ent = G_EDICT(OFS_PARM0);
 	speed = G_FLOAT(OFS_PARM1);
+	(void)speed;
 
 	VectorCopy (ent->v.origin, start);
 	start[2] += 20;
@@ -1931,4 +1932,3 @@ PF_setspawnparms
 
 builtin_t *pr_builtins = pr_builtin;
 int pr_numbuiltins = sizeof(pr_builtin)/sizeof(pr_builtin[0]);
-

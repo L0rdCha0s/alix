@@ -63,6 +63,15 @@ typedef struct cvar_s
 	struct cvar_s *next;
 } cvar_t;
 
+#define CVAR_INIT(name_value, string_value) \
+	{ .name = (name_value), .string = (string_value) }
+#define CVAR_INIT_ARCHIVE(name_value, string_value) \
+	{ .name = (name_value), .string = (string_value), .archive = true }
+#define CVAR_INIT_SERVER(name_value, string_value) \
+	{ .name = (name_value), .string = (string_value), .server = true }
+#define CVAR_INIT_ARCHIVE_SERVER(name_value, string_value) \
+	{ .name = (name_value), .string = (string_value), .archive = true, .server = true }
+
 void 	Cvar_RegisterVariable (cvar_t *variable);
 // registers a cvar that allready has the name, string, and optionally the
 // archive elements set.

@@ -35,6 +35,7 @@
 #define HTML_VIEW_FONT_SIZE_CACHE_SLOTS 8
 #define HTML_VIEW_FONT_MAX_ROW_PIXELS 256
 #define HTML_VIEW_FONT_TEXT_GUARD 2048
+#define HTML_VIEW_FONT_MAX_PX 512
 
 typedef struct html_view_js_script
 {
@@ -201,6 +202,16 @@ typedef struct
     void *link_context;
     const char *pressed_href;
     alix_mutex_t dom_lock;
+    alix_mutex_t render_lock;
+    alix_thread_t render_thread;
+    volatile uint32_t render_stop;
+    volatile uint32_t render_seq;
+    volatile uint32_t render_done_seq;
+    volatile uint32_t render_redraw_pending;
+    volatile uint64_t render_request_ms;
+    volatile uint32_t render_cache_dirty;
+    volatile uint32_t stylesheet_dirty;
+    bool render_async;
     alix_thread_t js_thread;
     volatile uint32_t js_stop;
     volatile uint32_t js_dirty;
@@ -423,10 +434,17 @@ void html_view_font_scope_pop(html_view_ctx_t *ctx, const html_view_font_scope_t
 void html_view_controls_build(atk_widget_t *view, atk_html_view_priv_t *priv);
 html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *src);
 void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv);
+void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv);
+void html_view_stylesheet_rebuild_if_needed(atk_html_view_priv_t *priv);
 const html_node_t *html_view_find_first_element(const html_node_t *root, const char *tag);
 
 void html_view_dom_lock(atk_html_view_priv_t *priv);
+bool html_view_dom_try_lock(atk_html_view_priv_t *priv);
 void html_view_dom_unlock(atk_html_view_priv_t *priv);
+bool html_view_render_try_lock(atk_html_view_priv_t *priv);
+void html_view_render_unlock(atk_html_view_priv_t *priv);
+void html_view_render_cache_invalidate(atk_html_view_priv_t *priv);
+void html_view_render_cache_invalidate_locked(atk_html_view_priv_t *priv);
 void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
 void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv);
 void html_view_js_init(atk_html_view_priv_t *priv);
@@ -436,7 +454,13 @@ bool html_view_js_queue_external(atk_widget_t *view,
                                  atk_html_view_priv_t *priv,
                                  const char *script_text,
                                  size_t len);
+bool html_view_js_queue_external_try(atk_widget_t *view,
+                                     atk_html_view_priv_t *priv,
+                                     const char *script_text,
+                                     size_t len);
 void html_view_js_shutdown(atk_widget_t *view, atk_html_view_priv_t *priv);
+
+void html_view_render_request(atk_html_view_priv_t *priv);
 
 void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
 void html_view_render_table(html_view_ctx_t *ctx,

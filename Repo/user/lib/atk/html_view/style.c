@@ -870,16 +870,25 @@ int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_
 
 int html_view_font_px_for_style(const html_view_ctx_t *ctx, const css_style_t *style, int parent_font_px)
 {
+    int clamped_parent = parent_font_px;
+    if (clamped_parent > HTML_VIEW_FONT_MAX_PX)
+    {
+        clamped_parent = HTML_VIEW_FONT_MAX_PX;
+    }
     if (!ctx || !style || !style->has_font_size || !style->font_size.valid || style->font_size.is_auto)
     {
-        return parent_font_px;
+        return clamped_parent;
     }
 
     if (style->font_size.unit == CSS_UNIT_PERCENT)
     {
-        int64_t scaled = (int64_t)parent_font_px * (int64_t)style->font_size.value_milli;
+        int64_t scaled = (int64_t)clamped_parent * (int64_t)style->font_size.value_milli;
         int px = (int)((scaled + 50000LL) / 100000LL);
-        return px > 0 ? px : parent_font_px;
+        if (px > HTML_VIEW_FONT_MAX_PX)
+        {
+            px = HTML_VIEW_FONT_MAX_PX;
+        }
+        return px > 0 ? px : clamped_parent;
     }
 
     int px = html_view_length_to_px(&style->font_size,
@@ -887,9 +896,13 @@ int html_view_font_px_for_style(const html_view_ctx_t *ctx, const css_style_t *s
                                     ctx->viewport_h,
                                     ctx->viewport_w,
                                     ctx->viewport_h,
-                                    parent_font_px,
+                                    clamped_parent,
                                     true);
-    return px > 0 ? px : parent_font_px;
+    if (px > HTML_VIEW_FONT_MAX_PX)
+    {
+        px = HTML_VIEW_FONT_MAX_PX;
+    }
+    return px > 0 ? px : clamped_parent;
 }
 
 void html_view_font_scope_push(html_view_ctx_t *ctx, const css_style_t *style, bool block, html_view_font_scope_t *saved)

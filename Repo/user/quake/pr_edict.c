@@ -38,17 +38,17 @@ int		type_size[8] = {1,sizeof(string_t)/4,1,3,1,1,sizeof(func_t)/4,sizeof(void *
 ddef_t *ED_FieldAtOfs (int ofs);
 qboolean	ED_ParseEpair (void *base, ddef_t *key, char *s);
 
-cvar_t	nomonsters = {"nomonsters", "0"};
-cvar_t	gamecfg = {"gamecfg", "0"};
-cvar_t	scratch1 = {"scratch1", "0"};
-cvar_t	scratch2 = {"scratch2", "0"};
-cvar_t	scratch3 = {"scratch3", "0"};
-cvar_t	scratch4 = {"scratch4", "0"};
-cvar_t	savedgamecfg = {"savedgamecfg", "0", true};
-cvar_t	saved1 = {"saved1", "0", true};
-cvar_t	saved2 = {"saved2", "0", true};
-cvar_t	saved3 = {"saved3", "0", true};
-cvar_t	saved4 = {"saved4", "0", true};
+cvar_t	nomonsters = CVAR_INIT("nomonsters", "0");
+cvar_t	gamecfg = CVAR_INIT("gamecfg", "0");
+cvar_t	scratch1 = CVAR_INIT("scratch1", "0");
+cvar_t	scratch2 = CVAR_INIT("scratch2", "0");
+cvar_t	scratch3 = CVAR_INIT("scratch3", "0");
+cvar_t	scratch4 = CVAR_INIT("scratch4", "0");
+cvar_t	savedgamecfg = CVAR_INIT_ARCHIVE("savedgamecfg", "0");
+cvar_t	saved1 = CVAR_INIT_ARCHIVE("saved1", "0");
+cvar_t	saved2 = CVAR_INIT_ARCHIVE("saved2", "0");
+cvar_t	saved3 = CVAR_INIT_ARCHIVE("saved3", "0");
+cvar_t	saved4 = CVAR_INIT_ARCHIVE("saved4", "0");
 
 #define	MAX_FIELD_LEN	64
 #define GEFV_CACHESIZE	2
@@ -399,7 +399,7 @@ char *PR_GlobalString (int ofs)
 	val = (void *)&pr_globals[ofs];
 	def = ED_GlobalAtOfs(ofs);
 	if (!def)
-		sprintf (line,"%i(???)", ofs);
+		sprintf (line,"%i(??" "?)", ofs);
 	else
 	{
 		s = PR_ValueString (def->type, val);
@@ -422,7 +422,7 @@ char *PR_GlobalStringNoContents (int ofs)
 	
 	def = ED_GlobalAtOfs(ofs);
 	if (!def)
-		sprintf (line,"%i(???)", ofs);
+		sprintf (line,"%i(??" "?)", ofs);
 	else
 		sprintf (line,"%i(%s)", ofs, pr_strings + def->s_name);
 	
@@ -1014,7 +1014,7 @@ void PR_LoadProgs (void)
 		CRC_ProcessByte (&pr_crc, ((byte *)progs)[i]);
 
 // byte swap the header
-	for (i=0 ; i<sizeof(*progs)/4 ; i++)
+	for (i=0 ; i<(int)(sizeof(*progs)/4) ; i++)
 		((int *)progs)[i] = LittleLong ( ((int *)progs)[i] );		
 
 	if (progs->version != PROG_VERSION)

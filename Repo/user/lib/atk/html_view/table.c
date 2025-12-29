@@ -535,7 +535,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     int border_box_y = place_y + margin_top;
     int draw_y = border_box_y - ctx->priv->scroll_y;
 
-    if (ctx->draw)
+    if (ctx->draw || ctx->record)
     {
         if (style->has_background)
         {

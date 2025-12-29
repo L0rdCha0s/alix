@@ -54,20 +54,27 @@ atk_mouse_response_t html_view_mouse_cb(atk_widget_t *widget,
     {
         return ATK_MOUSE_RESPONSE_NONE;
     }
+    if (!html_view_render_try_lock(priv))
+    {
+        return ATK_MOUSE_RESPONSE_NONE;
+    }
     if (__atomic_load_n(&priv->js_dirty, __ATOMIC_ACQUIRE) & HTML_VIEW_JS_DIRTY_RENDER)
     {
+        html_view_render_unlock(priv);
         return ATK_MOUSE_RESPONSE_NONE;
     }
 
     const html_view_render_cache_t *cache = &priv->render_cache;
     if (!cache->valid || !cache->tiles || cache->tile_used == 0 || cache->op_count == 0)
     {
+        html_view_render_unlock(priv);
         return ATK_MOUSE_RESPONSE_NONE;
     }
 
     int tile_h = cache->tile_h > 0 ? cache->tile_h : ATK_HTML_VIEW_RENDER_TILE_H;
     if (tile_h <= 0)
     {
+        html_view_render_unlock(priv);
         return ATK_MOUSE_RESPONSE_NONE;
     }
 
@@ -131,9 +138,11 @@ atk_mouse_response_t html_view_mouse_cb(atk_widget_t *widget,
         if (hit_href && priv->link_handler)
         {
             priv->pressed_href = hit_href;
+            html_view_render_unlock(priv);
             return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_CAPTURE;
         }
         priv->pressed_href = NULL;
+        html_view_render_unlock(priv);
         return ATK_MOUSE_RESPONSE_NONE;
     }
 
@@ -147,9 +156,11 @@ atk_mouse_response_t html_view_mouse_cb(atk_widget_t *widget,
             priv->link_handler(widget, hit_href, priv->link_context);
         }
 
+        html_view_render_unlock(priv);
         return ATK_MOUSE_RESPONSE_HANDLED | ATK_MOUSE_RESPONSE_RELEASE;
     }
 
+    html_view_render_unlock(priv);
     return ATK_MOUSE_RESPONSE_NONE;
 }
 

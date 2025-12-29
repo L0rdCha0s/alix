@@ -329,6 +329,41 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
 
     uint64_t start = tls_time_ticks();
     size_t remaining = len;
+#ifdef KERNEL_BUILD
+    if (session->socket)
+    {
+        while (remaining > 0)
+        {
+            if (net_tcp_socket_has_error(session->socket))
+            {
+                tls_log("TLS: socket read detected tcp error");
+                return false;
+            }
+            size_t got = net_tcp_socket_read(session->socket, out, remaining);
+            if (got == 0)
+            {
+                if (net_tcp_socket_remote_closed(session->socket) &&
+                    net_tcp_socket_available(session->socket) == 0)
+                {
+                    tls_log("TLS: socket read saw remote close");
+                    return false;
+                }
+                if (tls_time_ticks() - start >= timeout_ticks)
+                {
+                    tls_log("TLS: socket read timeout waiting for data");
+                    return false;
+                }
+                tls_thread_yield();
+                continue;
+            }
+            out += got;
+            remaining -= got;
+            start = tls_time_ticks();
+            tls_thread_yield();
+        }
+        return true;
+    }
+#endif
     while (remaining > 0)
     {
 #ifdef KERNEL_BUILD

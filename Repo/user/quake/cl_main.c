@@ -25,20 +25,20 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 // references them even when on a unix system.
 
 // these two are not intended to be set directly
-cvar_t	cl_name = {"_cl_name", "player", true};
-cvar_t	cl_color = {"_cl_color", "0", true};
+cvar_t	cl_name = CVAR_INIT_ARCHIVE("_cl_name", "player");
+cvar_t	cl_color = CVAR_INIT_ARCHIVE("_cl_color", "0");
 
-cvar_t	cl_shownet = {"cl_shownet","0"};	// can be 0, 1, or 2
-cvar_t	cl_nolerp = {"cl_nolerp","0"};
+cvar_t	cl_shownet = CVAR_INIT("cl_shownet", "0");	// can be 0, 1, or 2
+cvar_t	cl_nolerp = CVAR_INIT("cl_nolerp", "0");
 
-cvar_t	lookspring = {"lookspring","0", true};
-cvar_t	lookstrafe = {"lookstrafe","0", true};
-cvar_t	sensitivity = {"sensitivity","3", true};
+cvar_t	lookspring = CVAR_INIT_ARCHIVE("lookspring", "0");
+cvar_t	lookstrafe = CVAR_INIT_ARCHIVE("lookstrafe", "0");
+cvar_t	sensitivity = CVAR_INIT_ARCHIVE("sensitivity", "3");
 
-cvar_t	m_pitch = {"m_pitch","0.022", true};
-cvar_t	m_yaw = {"m_yaw","0.022", true};
-cvar_t	m_forward = {"m_forward","1", true};
-cvar_t	m_side = {"m_side","0.8", true};
+cvar_t	m_pitch = CVAR_INIT_ARCHIVE("m_pitch", "0.022");
+cvar_t	m_yaw = CVAR_INIT_ARCHIVE("m_yaw", "0.022");
+cvar_t	m_forward = CVAR_INIT_ARCHIVE("m_forward", "1");
+cvar_t	m_side = CVAR_INIT_ARCHIVE("m_side", "0.8");
 
 
 client_static_t	cls;
@@ -274,6 +274,7 @@ Debugging tool, just flashes the screen
 */
 void SetPal (int i)
 {
+	(void)i;
 #if 0
 	static int old;
 	byte	pal[768];
@@ -754,4 +755,3 @@ void CL_Init (void)
 	Cmd_AddCommand ("playdemo", CL_PlayDemo_f);
 	Cmd_AddCommand ("timedemo", CL_TimeDemo_f);
 }
-

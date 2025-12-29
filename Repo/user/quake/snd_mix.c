@@ -347,7 +347,7 @@ void SND_PaintChannelFrom8 (channel_t *ch, sfxcache_t *sc, int count)
 {
 	int 	data;
 	int		*lscale, *rscale;
-	unsigned char *sfx;
+	signed char *sfx;
 	int		i;
 
 	if (ch->leftvol > 255)
@@ -395,4 +395,3 @@ void SND_PaintChannelFrom16 (channel_t *ch, sfxcache_t *sc, int count)
 
 	ch->pos += count;
 }
-

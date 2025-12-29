@@ -48,10 +48,10 @@ void D_FillRect (vrect_t *rect, int color)
 		rheight += ry;
 		ry = 0;
 	}
-	if (rx+rwidth > vid.width)
-		rwidth = vid.width - rx;
-	if (ry+rheight > vid.height)
-		rheight = vid.height - rx;
+	if (rx+rwidth > (int)vid.width)
+		rwidth = (int)vid.width - rx;
+	if (ry+rheight > (int)vid.height)
+		rheight = (int)vid.height - rx;
 		
 	if (rwidth < 1 || rheight < 1)
 		return;
@@ -85,4 +85,3 @@ void D_FillRect (vrect_t *rect, int color)
 		}
 	}
 }
-

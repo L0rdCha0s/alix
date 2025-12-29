@@ -32,12 +32,32 @@ bool shell_cmd_cat(shell_state_t *shell, shell_output_t *out, const char *path)
         return shell_output_error(out, "out of memory");
     }
 
+    size_t snapshot_size = 0;
+    bool limit_read = vfs_stat(node, &snapshot_size, NULL) && snapshot_size > 0;
+
     size_t offset = 0;
     bool saw_data = false;
     char last_char = '\0';
     while (1)
     {
-        ssize_t read = vfs_read_at(node, offset, buffer, CAT_CHUNK_SIZE);
+        if (limit_read && offset >= snapshot_size)
+        {
+            break;
+        }
+        size_t to_read = CAT_CHUNK_SIZE;
+        if (limit_read)
+        {
+            size_t remaining = snapshot_size - offset;
+            if (remaining < to_read)
+            {
+                to_read = remaining;
+            }
+        }
+        if (to_read == 0)
+        {
+            break;
+        }
+        ssize_t read = vfs_read_at(node, offset, buffer, to_read);
         if (read < 0)
         {
             free(buffer);

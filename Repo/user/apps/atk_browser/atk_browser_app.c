@@ -25,6 +25,7 @@ int main(void)
         return 1;
     }
     alix_mutex_init(&app->lock);
+    alix_mutex_init(&app->debug_lock);
     alix_mutex_init(&app->decode_lock);
 
     if (!atk_user_window_open_with_flags(&app->remote,
@@ -47,6 +48,12 @@ int main(void)
         return 1;
     }
 
+    app->ui_event_head = 0;
+    app->ui_event_count = 0;
+    memset(app->ui_events, 0, sizeof(app->ui_events));
+    app->debug_open_requested = false;
+    app->debug_clear_requested = false;
+
     atk_render();
     atk_user_present_force(&app->remote);
 
@@ -62,13 +69,13 @@ int main(void)
     atk_main_register_close_handler(browser_on_close_event, app);
     atk_main(&main_cfg);
 
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     app->active_load_id = 0;
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
 
     alix_thread_t join_threads[BROWSER_MAX_LOAD_THREADS];
     size_t join_count = 0;
-    alix_mutex_lock(&app->lock);
+    browser_lock_enter(app, &app->lock, "app_lock");
     join_count = app->load_thread_count;
     if (join_count > BROWSER_MAX_LOAD_THREADS)
     {
@@ -79,7 +86,7 @@ int main(void)
         join_threads[i] = app->load_threads[i];
     }
     app->load_thread_count = 0;
-    alix_mutex_unlock(&app->lock);
+    browser_lock_exit(app, &app->lock, "app_lock");
 
     for (size_t i = 0; i < join_count; ++i)
     {

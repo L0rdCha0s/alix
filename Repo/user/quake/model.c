@@ -81,7 +81,7 @@ void *Mod_Extradata (model_t *mod)
 Mod_PointInLeaf
 ===============
 */
-mleaf_t *Mod_PointInLeaf (vec3_t p, model_t *model)
+mleaf_t *Mod_PointInLeaf (float *p, model_t *model)
 {
 	mnode_t		*node;
 	float		d;
@@ -647,7 +647,7 @@ void Mod_LoadTexinfo (lump_t *l)
 {
 	texinfo_t *in;
 	mtexinfo_t *out;
-	int 	i, j, count;
+	int 	i, j, k, count;
 	int		miptex;
 	float	len1, len2;
 
@@ -662,8 +662,9 @@ void Mod_LoadTexinfo (lump_t *l)
 
 	for ( i=0 ; i<count ; i++, in++, out++)
 	{
-		for (j=0 ; j<8 ; j++)
-			out->vecs[0][j] = LittleFloat (in->vecs[0][j]);
+		for (j=0 ; j<2 ; j++)
+			for (k=0 ; k<4 ; k++)
+				out->vecs[j][k] = LittleFloat (in->vecs[j][k]);
 		len1 = Length (out->vecs[0]);
 		len2 = Length (out->vecs[1]);
 		len1 = (len1 + len2)/2;
@@ -1157,7 +1158,7 @@ void Mod_LoadBrushModel (model_t *mod, void *buffer)
 // swap all the lumps
 	mod_base = (byte *)header;
 
-	for (i=0 ; i<sizeof(dheader_t)/4 ; i++)
+	for (i=0 ; i<(int)(sizeof(dheader_t)/4) ; i++)
 		((int *)header)[i] = LittleLong ( ((int *)header)[i]);
 
 // load into heap
@@ -1870,5 +1871,4 @@ void Mod_Print (void)
 		Con_Printf ("\n");
 	}
 }
-
 

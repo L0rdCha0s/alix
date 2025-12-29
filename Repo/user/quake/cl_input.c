@@ -179,25 +179,33 @@ float CL_KeyState (kbutton_t *key)
 	val = 0;
 	
 	if (impulsedown && !impulseup)
+	{
 		if (down)
 			val = 0.5;	// pressed and held this frame
 		else
 			val = 0;	//	I_Error ();
+	}
 	if (impulseup && !impulsedown)
+	{
 		if (down)
 			val = 0;	//	I_Error ();
 		else
 			val = 0;	// released this frame
+	}
 	if (!impulsedown && !impulseup)
+	{
 		if (down)
 			val = 1.0;	// held the entire frame
 		else
 			val = 0;	// up the entire frame
+	}
 	if (impulsedown && impulseup)
+	{
 		if (down)
 			val = 0.75;	// released and re-pressed this frame
 		else
 			val = 0.25;	// pressed and released this frame
+	}
 
 	key->state &= 1;		// clear impulses
 	
@@ -209,17 +217,17 @@ float CL_KeyState (kbutton_t *key)
 
 //==========================================================================
 
-cvar_t	cl_upspeed = {"cl_upspeed","200"};
-cvar_t	cl_forwardspeed = {"cl_forwardspeed","200", true};
-cvar_t	cl_backspeed = {"cl_backspeed","200", true};
-cvar_t	cl_sidespeed = {"cl_sidespeed","350"};
+cvar_t	cl_upspeed = CVAR_INIT("cl_upspeed", "200");
+cvar_t	cl_forwardspeed = CVAR_INIT_ARCHIVE("cl_forwardspeed", "200");
+cvar_t	cl_backspeed = CVAR_INIT_ARCHIVE("cl_backspeed", "200");
+cvar_t	cl_sidespeed = CVAR_INIT("cl_sidespeed", "350");
 
-cvar_t	cl_movespeedkey = {"cl_movespeedkey","2.0"};
+cvar_t	cl_movespeedkey = CVAR_INIT("cl_movespeedkey", "2.0");
 
-cvar_t	cl_yawspeed = {"cl_yawspeed","140"};
-cvar_t	cl_pitchspeed = {"cl_pitchspeed","150"};
+cvar_t	cl_yawspeed = CVAR_INIT("cl_yawspeed", "140");
+cvar_t	cl_pitchspeed = CVAR_INIT("cl_pitchspeed", "150");
 
-cvar_t	cl_anglespeedkey = {"cl_anglespeedkey","1.5"};
+cvar_t	cl_anglespeedkey = CVAR_INIT("cl_anglespeedkey", "1.5");
 
 
 /*
@@ -445,4 +453,3 @@ void CL_InitInput (void)
 	Cmd_AddCommand ("-mlook", IN_MLookUp);
 
 }
-

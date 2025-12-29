@@ -54,32 +54,32 @@ jmp_buf 	host_abortserver;
 byte		*host_basepal;
 byte		*host_colormap;
 
-cvar_t	host_framerate = {"host_framerate","0"};	// set for slow motion
-cvar_t	host_speeds = {"host_speeds","0"};			// set for running times
+cvar_t	host_framerate = CVAR_INIT("host_framerate", "0");	// set for slow motion
+cvar_t	host_speeds = CVAR_INIT("host_speeds", "0");			// set for running times
 
-cvar_t	sys_ticrate = {"sys_ticrate","0.05"};
-cvar_t	serverprofile = {"serverprofile","0"};
+cvar_t	sys_ticrate = CVAR_INIT("sys_ticrate", "0.05");
+cvar_t	serverprofile = CVAR_INIT("serverprofile", "0");
 
-cvar_t	fraglimit = {"fraglimit","0",false,true};
-cvar_t	timelimit = {"timelimit","0",false,true};
-cvar_t	teamplay = {"teamplay","0",false,true};
+cvar_t	fraglimit = CVAR_INIT_SERVER("fraglimit", "0");
+cvar_t	timelimit = CVAR_INIT_SERVER("timelimit", "0");
+cvar_t	teamplay = CVAR_INIT_SERVER("teamplay", "0");
 
-cvar_t	samelevel = {"samelevel","0"};
-cvar_t	noexit = {"noexit","0",false,true};
+cvar_t	samelevel = CVAR_INIT("samelevel", "0");
+cvar_t	noexit = CVAR_INIT_SERVER("noexit", "0");
 
 #ifdef QUAKE2
-cvar_t	developer = {"developer","1"};	// should be 0 for release!
+	cvar_t	developer = CVAR_INIT("developer", "1");	// should be 0 for release!
 #else
-cvar_t	developer = {"developer","0"};
+	cvar_t	developer = CVAR_INIT("developer", "0");
 #endif
 
-cvar_t	skill = {"skill","1"};						// 0 - 3
-cvar_t	deathmatch = {"deathmatch","0"};			// 0, 1, or 2
-cvar_t	coop = {"coop","0"};			// 0 or 1
+cvar_t	skill = CVAR_INIT("skill", "1");						// 0 - 3
+cvar_t	deathmatch = CVAR_INIT("deathmatch", "0");			// 0, 1, or 2
+cvar_t	coop = CVAR_INIT("coop", "0");			// 0 or 1
 
-cvar_t	pausable = {"pausable","1"};
+cvar_t	pausable = CVAR_INIT("pausable", "1");
 
-cvar_t	temp1 = {"temp1","0"};
+cvar_t	temp1 = CVAR_INIT("temp1", "0");
 
 
 /*
@@ -446,7 +446,7 @@ void Host_ShutdownServer(qboolean crash)
 	while (count);
 
 // make sure all the clients know we're disconnecting
-	buf.data = message;
+	buf.data = (byte *)message;
 	buf.maxsize = 4;
 	buf.cursize = 0;
 	MSG_WriteByte(&buf, svc_disconnect);
