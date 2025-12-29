@@ -1,5 +1,27 @@
 #include "atk/html_view/render/render_internal.h"
 
+static void html_view_record_anchor(html_view_ctx_t *ctx, const html_node_t *node)
+{
+    if (!ctx || !ctx->record || !ctx->priv || !node || node->type != HTML_NODE_ELEMENT)
+    {
+        return;
+    }
+
+    const char *id = html_attr_get(node, "id");
+    if (id && id[0] != '\0')
+    {
+        int doc_y = ctx->y - ctx->doc_origin_y;
+        (void)html_view_render_cache_add_anchor(&ctx->priv->render_cache, id, doc_y);
+    }
+
+    const char *name = html_attr_get(node, "name");
+    if (name && name[0] != '\0' && (!id || strcmp(id, name) != 0))
+    {
+        int doc_y = ctx->y - ctx->doc_origin_y;
+        (void)html_view_render_cache_add_anchor(&ctx->priv->render_cache, name, doc_y);
+    }
+}
+
 void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style)
 {
     if (!ctx || !node)
@@ -58,6 +80,7 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
     {
         return;
     }
+    html_view_record_anchor(ctx, node);
     bool block = html_view_is_block_tag(tag);
     if (style->has_display)
     {

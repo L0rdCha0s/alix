@@ -170,6 +170,7 @@ typedef struct
     size_t external_css_cap;
     bool css_dirty;
     uint64_t css_dirty_since_ms;
+    char *pending_fragment;
 
     browser_ui_event_t ui_events[BROWSER_UI_EVENT_QUEUE_CAP];
     size_t ui_event_head;

@@ -157,6 +157,12 @@ typedef struct
 
 typedef struct
 {
+    const char *id;
+    int y;
+} html_view_anchor_t;
+
+typedef struct
+{
     bool valid;
     const html_document_t *doc;
     const css_stylesheet_t *sheet;
@@ -176,6 +182,9 @@ typedef struct
     html_view_op_t *ops;
     size_t op_count;
     size_t op_cap;
+    html_view_anchor_t *anchors;
+    size_t anchor_count;
+    size_t anchor_cap;
     html_view_tile_t *tiles;
     size_t tile_count;
     size_t tile_used;
@@ -324,6 +333,7 @@ bool html_view_buf_append(char **buf, size_t *len, size_t *cap, const char *data
 char *html_view_strdup(const char *src);
 void html_view_render_cache_clear(html_view_render_cache_t *cache);
 char *html_view_render_cache_strdup(html_view_render_cache_t *cache, const char *text);
+bool html_view_render_cache_add_anchor(html_view_render_cache_t *cache, const char *id, int y);
 bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_view_op_t *op, int tile_h);
 void html_view_render_cache_draw_visible(html_view_ctx_t *ctx);
 html_view_control_t *html_view_control_find(atk_html_view_priv_t *priv, const html_node_t *node);

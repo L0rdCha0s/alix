@@ -1137,6 +1137,75 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     html_view_js_start(view, priv);
 }
 
+bool atk_html_view_scroll_to_id(atk_widget_t *view, const char *id)
+{
+    if (!view)
+    {
+        return false;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return false;
+    }
+
+    if (!id || id[0] == '\0')
+    {
+        priv->scroll_y = 0;
+        html_view_update_scrollbar(view, priv);
+        html_view_invalidate(view);
+        return true;
+    }
+
+    if (!html_view_render_try_lock(priv))
+    {
+        if (priv->render_async)
+        {
+            html_view_render_request(priv);
+        }
+        return false;
+    }
+
+    const html_view_render_cache_t *cache = &priv->render_cache;
+    if (!cache->valid || cache->anchor_count == 0)
+    {
+        html_view_render_unlock(priv);
+        if (priv->render_async)
+        {
+            html_view_render_request(priv);
+        }
+        return false;
+    }
+
+    int target_y = -1;
+    int content_height = cache->content_height;
+    for (size_t i = 0; i < cache->anchor_count; ++i)
+    {
+        const html_view_anchor_t *anchor = &cache->anchors[i];
+        if (anchor->id && strcmp(anchor->id, id) == 0)
+        {
+            target_y = anchor->y;
+            break;
+        }
+    }
+
+    html_view_render_unlock(priv);
+
+    if (target_y < 0)
+    {
+        return false;
+    }
+
+    priv->scroll_y = target_y;
+    if (content_height > 0)
+    {
+        priv->content_height = content_height;
+    }
+    html_view_update_scrollbar(view, priv);
+    html_view_invalidate(view);
+    return true;
+}
+
 bool atk_html_view_set_html(atk_widget_t *view, const char *html, html_parse_error_t *error_out)
 {
     html_parse_error_t tmp = {0};

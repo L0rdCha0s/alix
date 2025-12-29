@@ -37,8 +37,23 @@ bool browser_parse_url(const char *input, browser_url_t *out)
     }
 
     const char *host_start = s;
-    const char *path_start = strchr(s, '/');
-    const char *host_end = path_start ? path_start : (s + strlen(s));
+    const char *url_end = strchr(s, '#');
+    if (!url_end)
+    {
+        url_end = s + strlen(s);
+    }
+
+    const char *path_start = NULL;
+    for (const char *p = s; p < url_end; ++p)
+    {
+        if (*p == '/')
+        {
+            path_start = p;
+            break;
+        }
+    }
+
+    const char *host_end = path_start ? path_start : url_end;
     while (host_end > host_start && (host_end[-1] == ' ' || host_end[-1] == '\t'))
     {
         host_end--;
@@ -93,7 +108,8 @@ bool browser_parse_url(const char *input, browser_url_t *out)
     out->host[host_len] = '\0';
 
     const char *path = (path_start && path_start[0] != '\0') ? path_start : "/";
-    out->path = browser_strdup(path);
+    size_t path_len = (path_start && path_start[0] != '\0') ? (size_t)(url_end - path_start) : 1;
+    out->path = browser_strdup_len(path, path_len);
     if (!out->path)
     {
         free(out->host);

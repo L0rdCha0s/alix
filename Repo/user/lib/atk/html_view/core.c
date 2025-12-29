@@ -269,6 +269,11 @@ void html_view_render_cache_clear(html_view_render_cache_t *cache)
         cache->tiles[i].cap = 0;
     }
 
+    free(cache->anchors);
+    cache->anchors = NULL;
+    cache->anchor_count = 0;
+    cache->anchor_cap = 0;
+
     free(cache->tiles);
     free(cache->ops);
     memset(cache, 0, sizeof(*cache));
@@ -361,6 +366,51 @@ char *html_view_render_cache_strdup(html_view_render_cache_t *cache, const char 
 
     cache->owned_text[cache->owned_text_count++] = dup;
     return dup;
+}
+
+bool html_view_render_cache_add_anchor(html_view_render_cache_t *cache, const char *id, int y)
+{
+    if (!cache || !id || id[0] == '\0')
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < cache->anchor_count; ++i)
+    {
+        const html_view_anchor_t *anchor = &cache->anchors[i];
+        if (anchor->id && strcmp(anchor->id, id) == 0)
+        {
+            return true;
+        }
+    }
+
+    if (cache->anchor_count == cache->anchor_cap)
+    {
+        size_t new_cap = cache->anchor_cap ? (cache->anchor_cap * 2) : 32;
+        html_view_anchor_t *new_anchors = (html_view_anchor_t *)realloc(cache->anchors, new_cap * sizeof(*new_anchors));
+        if (!new_anchors)
+        {
+            return false;
+        }
+        cache->anchors = new_anchors;
+        cache->anchor_cap = new_cap;
+    }
+
+    const char *owned = html_view_render_cache_strdup(cache, id);
+    if (!owned)
+    {
+        return false;
+    }
+
+    if (y < 0)
+    {
+        y = 0;
+    }
+    cache->anchors[cache->anchor_count++] = (html_view_anchor_t){
+        .id = owned,
+        .y = y,
+    };
+    return true;
 }
 
 bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_view_op_t *op, int tile_h)

@@ -1,6 +1,7 @@
 #include "browser_internal.h"
 
 #include "atk_menu_bar.h"
+#include "ctype.h"
 #include "stdio.h"
 #include "string.h"
 #include "usyscall.h"
@@ -14,6 +15,9 @@ static void on_url_submit(atk_widget_t *input, void *context);
 static void browser_html_link_clicked(atk_widget_t *view, const char *href, void *context);
 static bool browser_requeue_event(browser_app_t *app, browser_ui_event_t *ev);
 static void browser_cancel_active_load(browser_app_t *app);
+static void browser_clear_pending_fragment(browser_app_t *app);
+static void browser_set_pending_fragment(browser_app_t *app, const char *fragment);
+static void browser_try_apply_pending_fragment(browser_app_t *app);
 
 static void apply_theme(atk_state_t *state)
 {
@@ -262,6 +266,117 @@ static void browser_open_url(browser_app_t *app, const char *url)
     on_url_submit(app->url_input, app);
 }
 
+static int browser_hex_value(int ch)
+{
+    if (ch >= '0' && ch <= '9')
+    {
+        return ch - '0';
+    }
+    ch = tolower((unsigned char)ch);
+    if (ch >= 'a' && ch <= 'f')
+    {
+        return ch - 'a' + 10;
+    }
+    return -1;
+}
+
+static void browser_decode_fragment(char *fragment)
+{
+    if (!fragment)
+    {
+        return;
+    }
+
+    char *dst = fragment;
+    const char *src = fragment;
+    while (*src)
+    {
+        if (src[0] == '%' && src[1] && src[2])
+        {
+            int hi = browser_hex_value(src[1]);
+            int lo = browser_hex_value(src[2]);
+            if (hi >= 0 && lo >= 0)
+            {
+                *dst++ = (char)((hi << 4) | lo);
+                src += 3;
+                continue;
+            }
+        }
+        *dst++ = *src++;
+    }
+    *dst = '\0';
+}
+
+static void browser_clear_pending_fragment(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+    free(app->pending_fragment);
+    app->pending_fragment = NULL;
+}
+
+static void browser_set_pending_fragment(browser_app_t *app, const char *fragment)
+{
+    if (!app)
+    {
+        return;
+    }
+    browser_clear_pending_fragment(app);
+    if (!fragment)
+    {
+        return;
+    }
+    app->pending_fragment = browser_strdup(fragment);
+    if (app->pending_fragment)
+    {
+        browser_decode_fragment(app->pending_fragment);
+    }
+}
+
+static void browser_try_apply_pending_fragment(browser_app_t *app)
+{
+    if (!app || !app->pending_fragment || !app->viewer)
+    {
+        return;
+    }
+    if (atk_html_view_scroll_to_id(app->viewer, app->pending_fragment))
+    {
+        browser_clear_pending_fragment(app);
+        if (app->window)
+        {
+            atk_window_mark_dirty(app->window);
+        }
+    }
+}
+
+static char *browser_split_fragment(const char *url, char **fragment_out)
+{
+    if (fragment_out)
+    {
+        *fragment_out = NULL;
+    }
+    if (!url)
+    {
+        return NULL;
+    }
+
+    const char *hash = strchr(url, '#');
+    if (!hash)
+    {
+        return browser_strdup(url);
+    }
+
+    size_t base_len = (size_t)(hash - url);
+    char *base = browser_strdup_len(url, base_len);
+    if (fragment_out)
+    {
+        *fragment_out = browser_strdup(hash + 1);
+    }
+    return base;
+}
+
 static bool browser_href_supported(const char *href)
 {
     if (!href || href[0] == '\0')
@@ -308,6 +423,13 @@ static void browser_html_link_clicked(atk_widget_t *view, const char *href, void
         return;
     }
 
+    if (href[0] == '#')
+    {
+        browser_set_pending_fragment(app, href + 1);
+        browser_try_apply_pending_fragment(app);
+        return;
+    }
+
     const char *base_text = app->url_input ? atk_text_input_text(app->url_input) : NULL;
     if (!base_text || base_text[0] == '\0')
     {
@@ -328,8 +450,33 @@ static void browser_html_link_clicked(atk_widget_t *view, const char *href, void
         return;
     }
 
-    browser_debug_logf(app, "[ui] link click url=%s", abs);
-    browser_open_url(app, abs);
+    char *fragment = NULL;
+    char *base = browser_split_fragment(abs, &fragment);
+    if (!base)
+    {
+        free(fragment);
+        free(abs);
+        return;
+    }
+
+    char *current_base = browser_split_fragment(base_text, NULL);
+    if (fragment && current_base && strcmp(current_base, base) == 0)
+    {
+        browser_set_pending_fragment(app, fragment);
+        browser_try_apply_pending_fragment(app);
+        free(current_base);
+        free(fragment);
+        free(base);
+        free(abs);
+        return;
+    }
+
+    browser_set_pending_fragment(app, fragment);
+    browser_debug_logf(app, "[ui] link click url=%s", base);
+    browser_open_url(app, base);
+    free(current_base);
+    free(fragment);
+    free(base);
     free(abs);
 }
 
@@ -356,6 +503,7 @@ static void browser_cancel_active_load(browser_app_t *app)
         memset(&ev, 0, sizeof(ev));
     }
     browser_app_css_reset(app);
+    browser_clear_pending_fragment(app);
 }
 
 static bool browser_requeue_event(browser_app_t *app, browser_ui_event_t *ev)
@@ -390,7 +538,22 @@ static void on_url_submit(atk_widget_t *input, void *context)
     browser_debug_logf(app, "[ui] submit url=%s", text);
 
     browser_menus_close(app);
-    (void)browser_loader_start(app, text);
+    browser_clear_pending_fragment(app);
+
+    char *fragment = NULL;
+    char *base = browser_split_fragment(text, &fragment);
+    if (!base)
+    {
+        free(fragment);
+        return;
+    }
+    if (fragment)
+    {
+        browser_set_pending_fragment(app, fragment);
+    }
+    (void)browser_loader_start(app, base);
+    free(fragment);
+    free(base);
 }
 
 bool browser_tick(void *context)
@@ -477,6 +640,7 @@ bool browser_tick(void *context)
                     ev.u.doc_ready.doc = NULL;
                     atk_html_view_set_document(app->viewer, doc);
                     browser_debug_logf(app, "[render] set document ok");
+                    browser_try_apply_pending_fragment(app);
                     atk_window_mark_dirty(app->window);
                     redraw = true;
                 }
@@ -677,6 +841,7 @@ bool browser_tick(void *context)
     {
         redraw = true;
     }
+    browser_try_apply_pending_fragment(app);
 
     uint64_t tick_elapsed_ms = sys_time_millis() - tick_start_ms;
     if (tick_elapsed_ms >= BROWSER_TICK_SLOW_MS)

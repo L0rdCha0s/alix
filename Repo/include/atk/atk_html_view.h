@@ -37,6 +37,13 @@ void atk_html_view_set_link_handler(atk_widget_t *view, atk_html_view_link_t han
 void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc);
 
 /*
+ * Scroll the view to the element matching `id` (or to top when empty).
+ *
+ * Returns false if the anchor is unavailable.
+ */
+bool atk_html_view_scroll_to_id(atk_widget_t *view, const char *id);
+
+/*
  * Convenience: parse `html` and install the resulting document.
  *
  * Returns false if parsing fails.
