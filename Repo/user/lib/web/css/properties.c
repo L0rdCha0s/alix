@@ -30,11 +30,149 @@ static bool css_next_token(const char **p, const char *end, const char **tok_sta
     return true;
 }
 
+static bool css_parse_border_width_token(const char *start,
+                                         const char *end,
+                                         css_length_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+
+    css_trim_range(&start, &end);
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+
+    size_t len = (size_t)(end - start);
+    if (len == 4 && strncasecmp(start, "thin", 4) == 0)
+    {
+        out->valid = true;
+        out->is_auto = false;
+        out->unit = CSS_UNIT_PX;
+        out->value_milli = 1000;
+        return true;
+    }
+    if (len == 6 && strncasecmp(start, "medium", 6) == 0)
+    {
+        out->valid = true;
+        out->is_auto = false;
+        out->unit = CSS_UNIT_PX;
+        out->value_milli = 3000;
+        return true;
+    }
+    if (len == 5 && strncasecmp(start, "thick", 5) == 0)
+    {
+        out->valid = true;
+        out->is_auto = false;
+        out->unit = CSS_UNIT_PX;
+        out->value_milli = 5000;
+        return true;
+    }
+
+    if (!css_parse_length_token(start, end, out))
+    {
+        return false;
+    }
+    if (out->is_auto)
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool css_parse_border_width_value(const char *start, const char *end, css_box_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+
+    css_trim_range(&start, &end);
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+
+    const char *tokens[4] = {0};
+    size_t token_lens[4] = {0};
+    size_t count = 0;
+
+    const char *p = start;
+    while (p < end && count < 4)
+    {
+        while (p < end && isspace((unsigned char)*p))
+        {
+            p++;
+        }
+        if (p >= end)
+        {
+            break;
+        }
+        const char *tstart = p;
+        while (p < end && !isspace((unsigned char)*p))
+        {
+            p++;
+        }
+        tokens[count] = tstart;
+        token_lens[count] = (size_t)(p - tstart);
+        count++;
+    }
+
+    if (count == 0)
+    {
+        return false;
+    }
+
+    css_length_t parsed[4] = {0};
+    for (size_t i = 0; i < count; ++i)
+    {
+        const char *tstart = tokens[i];
+        const char *tend = tstart + token_lens[i];
+        if (!css_parse_border_width_token(tstart, tend, &parsed[i]))
+        {
+            return false;
+        }
+    }
+
+    if (count == 1)
+    {
+        out->top = parsed[0];
+        out->right = parsed[0];
+        out->bottom = parsed[0];
+        out->left = parsed[0];
+        return true;
+    }
+    if (count == 2)
+    {
+        out->top = parsed[0];
+        out->bottom = parsed[0];
+        out->left = parsed[1];
+        out->right = parsed[1];
+        return true;
+    }
+    if (count == 3)
+    {
+        out->top = parsed[0];
+        out->left = parsed[1];
+        out->right = parsed[1];
+        out->bottom = parsed[2];
+        return true;
+    }
+    out->top = parsed[0];
+    out->right = parsed[1];
+    out->bottom = parsed[2];
+    out->left = parsed[3];
+    return true;
+}
+
 static bool css_parse_border_value(const char *start,
-                                  const char *end,
-                                  css_length_t *out_width,
-                                  video_color_t *out_color,
-                                  bool *out_has_color)
+                                   const char *end,
+                                   css_length_t *out_width,
+                                   video_color_t *out_color,
+                                   bool *out_has_color)
 {
     if (!out_width || !out_color || !out_has_color)
     {
@@ -60,7 +198,7 @@ static bool css_parse_border_value(const char *start,
         if (!have_width)
         {
             css_length_t len;
-            if (css_parse_length_token(tok_s, tok_e, &len) && !len.is_auto)
+            if (css_parse_border_width_token(tok_s, tok_e, &len))
             {
                 *out_width = len;
                 have_width = true;
@@ -796,7 +934,7 @@ void css_style_apply_property(css_style_t *style,
     if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "border-width", 12) == 0)
     {
         css_box_t box;
-        if (css_parse_margin_value(val_start, val_end, &box))
+        if (css_parse_border_width_value(val_start, val_end, &box))
         {
             style->has_border = true;
             style->border_width = box;

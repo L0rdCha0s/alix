@@ -60,6 +60,20 @@ static void browser_menu_clear_debug(void *context)
     app->debug_clear_requested = true;
 }
 
+static void browser_menu_dump_dom(void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+    browser_menus_close(app);
+    if (app->viewer)
+    {
+        atk_html_view_dump_dom(app->viewer);
+    }
+}
+
 static void browser_menu_bookmark_example(void *context)
 {
     browser_app_t *app = (browser_app_t *)context;
@@ -69,6 +83,17 @@ static void browser_menu_bookmark_example(void *context)
     }
     browser_menus_close(app);
     browser_open_url(app, "https://www.example.com");
+}
+
+static void browser_menu_bookmark_acid2(void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+    browser_menus_close(app);
+    browser_open_url(app, "http://acid2.acidtests.org/");
 }
 
 static void browser_menu_bookmark_httpbin_form(void *context)
@@ -995,6 +1020,7 @@ bool browser_build_ui(browser_app_t *app)
     }
 
     if (!atk_menu_add_item(app->menu_bookmarks, "https://www.example.com", browser_menu_bookmark_example, app) ||
+        !atk_menu_add_item(app->menu_bookmarks, "http://acid2.acidtests.org/", browser_menu_bookmark_acid2, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "https://httpbin.org/form/post", browser_menu_bookmark_httpbin_form, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "https://mdn.github.io/beginner-html-site-styled/", browser_menu_bookmark_mdn_beginner, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "https://www.w3.org/Style/CSS/Test/CSS1/current/test5526c.htm", browser_menu_bookmark_css1_acid1, app))
@@ -1003,7 +1029,8 @@ bool browser_build_ui(browser_app_t *app)
     }
 
     if (!atk_menu_add_item(app->menu_debug, "Open Debug Window", browser_menu_open_debug, app) ||
-        !atk_menu_add_item(app->menu_debug, "Clear Debug Log", browser_menu_clear_debug, app))
+        !atk_menu_add_item(app->menu_debug, "Clear Debug Log", browser_menu_clear_debug, app) ||
+        !atk_menu_add_item(app->menu_debug, "Dump DOM + Styles", browser_menu_dump_dom, app))
     {
         return false;
     }

@@ -1,5 +1,10 @@
 #include "atk/html_view/html_view_internal.h"
 
+#include "ctype.h"
+#include "serial.h"
+#include "stdarg.h"
+#include "stdio.h"
+
 #define HTML_VIEW_RENDER_DEBOUNCE_MS 32u
 
 static void html_view_position_scrollbar(atk_widget_t *view, atk_html_view_priv_t *priv)
@@ -1647,4 +1652,552 @@ bool atk_html_view_try_add_image_rgba(atk_widget_t *view,
                                       int stride_bytes)
 {
     return html_view_add_image_rgba_impl(view, src, pixels, width, height, stride_bytes, true);
+}
+
+static void html_view_dump_append(char *buf, size_t cap, size_t *offset, const char *fmt, ...)
+{
+    if (!buf || cap == 0 || !offset || *offset >= cap)
+    {
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buf + *offset, cap - *offset, fmt, args);
+    va_end(args);
+    if (written <= 0)
+    {
+        return;
+    }
+    size_t add = (size_t)written;
+    if (add >= cap - *offset)
+    {
+        *offset = cap - 1;
+    }
+    else
+    {
+        *offset += add;
+    }
+}
+
+static void html_view_dump_indent(char *buf, size_t cap, int depth)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    int count = depth * 2;
+    if (count < 0) count = 0;
+    if ((size_t)count >= cap)
+    {
+        count = (int)cap - 1;
+    }
+    memset(buf, ' ', (size_t)count);
+    buf[count] = '\0';
+}
+
+static void html_view_dump_color(char *buf, size_t cap, video_color_t color)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    uint8_t r = (uint8_t)((color >> 16) & 0xFF);
+    uint8_t g = (uint8_t)((color >> 8) & 0xFF);
+    uint8_t b = (uint8_t)(color & 0xFF);
+    (void)snprintf(buf, cap, "#%02X%02X%02X", r, g, b);
+}
+
+static const char *html_view_dump_display(css_display_t display)
+{
+    switch (display)
+    {
+        case CSS_DISPLAY_INLINE: return "inline";
+        case CSS_DISPLAY_BLOCK: return "block";
+        case CSS_DISPLAY_LIST_ITEM: return "list-item";
+        case CSS_DISPLAY_FLEX: return "flex";
+        case CSS_DISPLAY_INLINE_FLEX: return "inline-flex";
+        case CSS_DISPLAY_NONE: return "none";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_float(css_float_t value)
+{
+    switch (value)
+    {
+        case CSS_FLOAT_LEFT: return "left";
+        case CSS_FLOAT_RIGHT: return "right";
+        case CSS_FLOAT_NONE: return "none";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_text_align(css_text_align_t align)
+{
+    switch (align)
+    {
+        case CSS_TEXT_ALIGN_CENTER: return "center";
+        case CSS_TEXT_ALIGN_RIGHT: return "right";
+        case CSS_TEXT_ALIGN_LEFT: return "left";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_text_decoration(css_text_decoration_t value)
+{
+    switch (value)
+    {
+        case CSS_TEXT_DECORATION_UNDERLINE: return "underline";
+        case CSS_TEXT_DECORATION_NONE: return "none";
+        default: return "unknown";
+    }
+}
+
+static void html_view_dump_length(char *buf, size_t cap, const css_length_t *len)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    if (!len || !len->valid)
+    {
+        (void)snprintf(buf, cap, "unset");
+        return;
+    }
+    if (len->is_auto)
+    {
+        (void)snprintf(buf, cap, "auto");
+        return;
+    }
+    int32_t v = len->value_milli;
+    int32_t whole = v / 1000;
+    int32_t frac = v % 1000;
+    if (frac < 0) frac = -frac;
+
+    const char *unit = "";
+    switch (len->unit)
+    {
+        case CSS_UNIT_PX: unit = "px"; break;
+        case CSS_UNIT_EM: unit = "em"; break;
+        case CSS_UNIT_VW: unit = "vw"; break;
+        case CSS_UNIT_VH: unit = "vh"; break;
+        case CSS_UNIT_PERCENT: unit = "%"; break;
+        case CSS_UNIT_NONE: default: unit = ""; break;
+    }
+
+    if (frac == 0)
+    {
+        (void)snprintf(buf, cap, "%d%s", whole, unit);
+    }
+    else
+    {
+        (void)snprintf(buf, cap, "%d.%03d%s", whole, frac, unit);
+    }
+}
+
+static void html_view_dump_box(char *buf, size_t cap, size_t *offset, const char *name, const css_box_t *box)
+{
+    if (!buf || !offset || !name || !box)
+    {
+        return;
+    }
+    char len_buf[32];
+    if (name[0] != '\0')
+    {
+        html_view_dump_append(buf, cap, offset, "%s=", name);
+    }
+    html_view_dump_length(len_buf, sizeof(len_buf), &box->top);
+    html_view_dump_append(buf, cap, offset, "%s", len_buf);
+    html_view_dump_length(len_buf, sizeof(len_buf), &box->right);
+    html_view_dump_append(buf, cap, offset, " %s", len_buf);
+    html_view_dump_length(len_buf, sizeof(len_buf), &box->bottom);
+    html_view_dump_append(buf, cap, offset, " %s", len_buf);
+    html_view_dump_length(len_buf, sizeof(len_buf), &box->left);
+    html_view_dump_append(buf, cap, offset, " %s", len_buf);
+}
+
+static void html_view_dump_style_summary(const css_style_t *style, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    if (!style)
+    {
+        (void)snprintf(buf, cap, "(none)");
+        return;
+    }
+    size_t off = 0;
+    bool any = false;
+    char tmp[32];
+
+    if (style->has_display)
+    {
+        html_view_dump_append(buf, cap, &off, "display=%s", html_view_dump_display(style->display));
+        any = true;
+    }
+    if (style->has_color)
+    {
+        html_view_dump_color(tmp, sizeof(tmp), style->color);
+        html_view_dump_append(buf, cap, &off, "%scolor=%s", any ? " " : "", tmp);
+        any = true;
+    }
+    if (style->has_background)
+    {
+        html_view_dump_color(tmp, sizeof(tmp), style->background);
+        html_view_dump_append(buf, cap, &off, "%sbackground=%s", any ? " " : "", tmp);
+        any = true;
+    }
+    if (style->has_font_size)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->font_size);
+        html_view_dump_append(buf, cap, &off, "%sfont-size=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_line_height)
+    {
+        if (style->line_height_is_length)
+        {
+            char len_buf[32];
+            html_view_dump_length(len_buf, sizeof(len_buf), &style->line_height);
+            html_view_dump_append(buf, cap, &off, "%sline-height=%s", any ? " " : "", len_buf);
+        }
+        else
+        {
+            int32_t v = style->line_height_milli;
+            int32_t whole = v / 1000;
+            int32_t frac = v % 1000;
+            if (frac < 0) frac = -frac;
+            if (frac == 0)
+            {
+                html_view_dump_append(buf, cap, &off, "%sline-height=%d", any ? " " : "", whole);
+            }
+            else
+            {
+                html_view_dump_append(buf, cap, &off, "%sline-height=%d.%03d", any ? " " : "", whole, frac);
+            }
+        }
+        any = true;
+    }
+    if (style->has_text_align)
+    {
+        html_view_dump_append(buf, cap, &off, "%stext-align=%s", any ? " " : "", html_view_dump_text_align(style->text_align));
+        any = true;
+    }
+    if (style->has_text_decoration)
+    {
+        html_view_dump_append(buf, cap, &off, "%stext-decoration=%s", any ? " " : "", html_view_dump_text_decoration(style->text_decoration));
+        any = true;
+    }
+    if (style->has_float)
+    {
+        html_view_dump_append(buf, cap, &off, "%sfloat=%s", any ? " " : "", html_view_dump_float(style->float_mode));
+        any = true;
+    }
+    if (style->has_width)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->width);
+        html_view_dump_append(buf, cap, &off, "%swidth=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_height)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->height);
+        html_view_dump_append(buf, cap, &off, "%sheight=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_margin)
+    {
+        html_view_dump_append(buf, cap, &off, "%s", any ? " " : "");
+        html_view_dump_box(buf, cap, &off, "margin", &style->margin);
+        any = true;
+    }
+    if (style->has_padding)
+    {
+        html_view_dump_append(buf, cap, &off, "%s", any ? " " : "");
+        html_view_dump_box(buf, cap, &off, "padding", &style->padding);
+        any = true;
+    }
+    if (style->has_border)
+    {
+        html_view_dump_append(buf, cap, &off, "%s", any ? " " : "");
+        html_view_dump_box(buf, cap, &off, "border-width", &style->border_width);
+        any = true;
+    }
+    if (style->has_border_color)
+    {
+        html_view_dump_color(tmp, sizeof(tmp), style->border_color);
+        html_view_dump_append(buf, cap, &off, "%sborder-color=%s", any ? " " : "", tmp);
+        any = true;
+    }
+
+    if (!any)
+    {
+        (void)snprintf(buf, cap, "(none)");
+    }
+}
+
+static void html_view_dump_sanitize(const char *src, char *dst, size_t cap, size_t max_len)
+{
+    if (!dst || cap == 0)
+    {
+        return;
+    }
+    if (!src)
+    {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t out = 0;
+    size_t seen = 0;
+    bool last_space = false;
+    while (*src && out + 1 < cap && seen < max_len)
+    {
+        unsigned char ch = (unsigned char)*src++;
+        seen++;
+        if (ch < 0x20 || ch == 0x7F)
+        {
+            if (!last_space)
+            {
+                dst[out++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        if (ch >= 0x80)
+        {
+            ch = '?';
+        }
+        if (isspace(ch))
+        {
+            if (!last_space)
+            {
+                dst[out++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        dst[out++] = (char)ch;
+        last_space = false;
+    }
+    if ((*src || seen >= max_len) && out + 4 < cap)
+    {
+        dst[out++] = '.';
+        dst[out++] = '.';
+        dst[out++] = '.';
+    }
+    dst[out] = '\0';
+}
+
+static void html_view_dump_attrs(const html_node_t *node, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    buf[0] = '\0';
+    if (!node || !node->attrs)
+    {
+        return;
+    }
+
+    size_t off = 0;
+    for (const html_attr_t *attr = node->attrs; attr; attr = attr->next)
+    {
+        if (!attr->name || !attr->value)
+        {
+            continue;
+        }
+        char value_buf[64];
+        html_view_dump_sanitize(attr->value, value_buf, sizeof(value_buf), 48);
+        html_view_dump_append(buf, cap, &off, " %s=\"%s\"", attr->name, value_buf);
+        if (off + 4 >= cap)
+        {
+            html_view_dump_append(buf, cap, &off, " ...");
+            break;
+        }
+    }
+}
+
+typedef struct
+{
+    const html_node_t *node;
+    css_style_t style;
+    int depth;
+    bool has_style;
+} html_view_dump_frame_t;
+
+static void html_view_dump_node_line(const html_node_t *node,
+                                     const css_style_t *style,
+                                     bool has_style,
+                                     int depth)
+{
+    char indent[64];
+    html_view_dump_indent(indent, sizeof(indent), depth);
+
+    if (!node)
+    {
+        serial_printf("[html_view][dom] %s(null)", indent);
+        return;
+    }
+
+    if (node->type == HTML_NODE_DOCUMENT)
+    {
+        serial_printf("[html_view][dom] %s#document", indent);
+        return;
+    }
+
+    if (node->type == HTML_NODE_DOCTYPE)
+    {
+        char text_buf[96];
+        html_view_dump_sanitize(node->name ? node->name : "", text_buf, sizeof(text_buf), 64);
+        serial_printf("[html_view][dom] %s<!doctype %s>", indent, text_buf);
+        return;
+    }
+
+    if (node->type == HTML_NODE_COMMENT)
+    {
+        char text_buf[96];
+        html_view_dump_sanitize(node->text ? node->text : "", text_buf, sizeof(text_buf), 64);
+        serial_printf("[html_view][dom] %s<!-- %s -->", indent, text_buf);
+        return;
+    }
+
+    if (node->type == HTML_NODE_TEXT)
+    {
+        char text_buf[128];
+        html_view_dump_sanitize(node->text ? node->text : "", text_buf, sizeof(text_buf), 80);
+        serial_printf("[html_view][dom] %s#text \"%s\"", indent, text_buf);
+        if (has_style && style && style->has_color)
+        {
+            char color_buf[16];
+            html_view_dump_color(color_buf, sizeof(color_buf), style->color);
+            serial_printf("[html_view][dom] %s  style color=%s", indent, color_buf);
+        }
+        return;
+    }
+
+    if (node->type == HTML_NODE_ELEMENT)
+    {
+        char attrs[256];
+        html_view_dump_attrs(node, attrs, sizeof(attrs));
+        serial_printf("[html_view][dom] %s<%s%s>", indent, node->name ? node->name : "?", attrs);
+        if (has_style && style)
+        {
+            char style_buf[512];
+            html_view_dump_style_summary(style, style_buf, sizeof(style_buf));
+            serial_printf("[html_view][dom] %s  style %s", indent, style_buf);
+        }
+        return;
+    }
+
+    serial_printf("[html_view][dom] %s#node type=%d", indent, (int)node->type);
+}
+
+static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t *sheet)
+{
+    if (!root)
+    {
+        serial_printf("[html_view][dom] (empty)");
+        return;
+    }
+
+    size_t cap = 64;
+    size_t count = 0;
+    html_view_dump_frame_t *stack = (html_view_dump_frame_t *)calloc(cap, sizeof(*stack));
+    if (!stack)
+    {
+        return;
+    }
+
+    html_view_dump_frame_t root_frame = {0};
+    root_frame.node = root;
+    root_frame.depth = 0;
+    if (root->type == HTML_NODE_ELEMENT)
+    {
+        html_view_style_for_node(&root_frame.style, sheet, NULL, root);
+        root_frame.has_style = true;
+    }
+    stack[count++] = root_frame;
+
+    while (count > 0)
+    {
+        html_view_dump_frame_t frame = stack[--count];
+        const html_node_t *node = frame.node;
+        const css_style_t *parent_style = frame.has_style ? &frame.style : NULL;
+
+        html_view_dump_node_line(node, parent_style, frame.has_style, frame.depth);
+
+        if (!node || !node->first_child)
+        {
+            continue;
+        }
+
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (count >= cap)
+            {
+                size_t next_cap = cap * 2;
+                html_view_dump_frame_t *next = (html_view_dump_frame_t *)realloc(stack, next_cap * sizeof(*next));
+                if (!next)
+                {
+                    free(stack);
+                    return;
+                }
+                memset(next + cap, 0, (next_cap - cap) * sizeof(*next));
+                stack = next;
+                cap = next_cap;
+            }
+
+            html_view_dump_frame_t child_frame = {0};
+            child_frame.node = child;
+            child_frame.depth = frame.depth + 1;
+            child_frame.has_style = false;
+            if (child && child->type == HTML_NODE_ELEMENT)
+            {
+                html_view_style_for_node(&child_frame.style, sheet, parent_style, child);
+                child_frame.has_style = true;
+            }
+            else if (parent_style)
+            {
+                child_frame.style = *parent_style;
+                child_frame.has_style = true;
+            }
+            stack[count++] = child_frame;
+        }
+    }
+
+    free(stack);
+}
+
+void atk_html_view_dump_dom(atk_widget_t *view)
+{
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        serial_printf("[html_view] dump: missing view");
+        return;
+    }
+    if (!html_view_dom_try_lock(priv))
+    {
+        serial_printf("[html_view] dump: dom busy");
+        return;
+    }
+
+    html_view_stylesheet_rebuild_if_needed(priv);
+    if (!priv->doc || !priv->doc->root)
+    {
+        serial_printf("[html_view] dump: no document");
+        html_view_dom_unlock(priv);
+        return;
+    }
+
+    serial_printf("[html_view] dump begin view=%p", (void *)view);
+    html_view_dump_tree(priv->doc->root, priv->sheet);
+    serial_printf("[html_view] dump end view=%p", (void *)view);
+    html_view_dom_unlock(priv);
 }

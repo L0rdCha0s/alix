@@ -485,6 +485,11 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
         }
         else
         {
+            if (underline && ctx->space_w > 0)
+            {
+                int underline_y = (ctx->y - ctx->priv->scroll_y) + ctx->line_height - 3;
+                html_view_draw_rect_clipped(ctx, ctx->x, underline_y, ctx->space_w, 1, color, &ctx->clip);
+            }
             ctx->x += ctx->space_w;
         }
     }

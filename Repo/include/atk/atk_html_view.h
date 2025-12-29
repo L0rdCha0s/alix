@@ -98,6 +98,11 @@ void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled);
 bool atk_html_view_poll_js(atk_widget_t *view);
 
 /*
+ * Dump the current DOM tree with computed styles to serial output.
+ */
+void atk_html_view_dump_dom(atk_widget_t *view);
+
+/*
  * Add a PNG image resource that can be referenced by `<img src="...">`.
  *
  * `src` should match the `src` attribute value used in the DOM (often an
