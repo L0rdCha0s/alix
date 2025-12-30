@@ -590,6 +590,45 @@ static uint8_t png_paeth(uint8_t a, uint8_t b, uint8_t c)
     return c;
 }
 
+static bool png_unfilter_row(uint8_t filter,
+                             const uint8_t *row,
+                             uint8_t *recon,
+                             const uint8_t *prev,
+                             size_t row_bytes,
+                             int bpp)
+{
+    for (size_t i = 0; i < row_bytes; ++i)
+    {
+        uint8_t left = (i >= (size_t)bpp) ? recon[i - bpp] : 0;
+        uint8_t up = prev ? prev[i] : 0;
+        uint8_t up_left = (prev && i >= (size_t)bpp) ? prev[i - bpp] : 0;
+        uint8_t raw = row[i];
+
+        switch (filter)
+        {
+            case 0: /* None */
+                recon[i] = raw;
+                break;
+            case 1: /* Sub */
+                recon[i] = (uint8_t)(raw + left);
+                break;
+            case 2: /* Up */
+                recon[i] = (uint8_t)(raw + up);
+                break;
+            case 3: /* Average */
+                recon[i] = (uint8_t)(raw + (uint8_t)((left + up) / 2));
+                break;
+            case 4: /* Paeth */
+                recon[i] = (uint8_t)(raw + png_paeth(left, up, up_left));
+                break;
+            default:
+                return false;
+        }
+    }
+
+    return true;
+}
+
 static bool png_apply_filters(const uint8_t *scanlines,
                               uint32_t width,
                               uint32_t height,
@@ -605,34 +644,9 @@ static bool png_apply_filters(const uint8_t *scanlines,
         uint8_t filter = *cursor++;
         const uint8_t *row = cursor;
         uint8_t *recon = (uint8_t *)cursor;
-
-        for (size_t i = 0; i < row_bytes; ++i)
+        if (!png_unfilter_row(filter, row, recon, prev, row_bytes, bpp))
         {
-            uint8_t left = (i >= (size_t)bpp) ? recon[i - bpp] : 0;
-            uint8_t up = prev ? prev[i] : 0;
-            uint8_t up_left = (prev && i >= (size_t)bpp) ? prev[i - bpp] : 0;
-            uint8_t raw = row[i];
-
-            switch (filter)
-            {
-                case 0: /* None */
-                    recon[i] = raw;
-                    break;
-                case 1: /* Sub */
-                    recon[i] = (uint8_t)(raw + left);
-                    break;
-                case 2: /* Up */
-                    recon[i] = (uint8_t)(raw + up);
-                    break;
-                case 3: /* Average */
-                    recon[i] = (uint8_t)(raw + (uint8_t)((left + up) / 2));
-                    break;
-                case 4: /* Paeth */
-                    recon[i] = (uint8_t)(raw + png_paeth(left, up, up_left));
-                    break;
-                default:
-                    return false;
-            }
+            return false;
         }
 
         for (uint32_t x = 0; x < width; ++x)
@@ -651,6 +665,122 @@ static bool png_apply_filters(const uint8_t *scanlines,
 
         prev = recon;
         cursor += row_bytes;
+    }
+
+    return true;
+}
+
+static uint32_t png_adam7_pass_len(uint32_t size, int start, int step)
+{
+    if (size <= (uint32_t)start)
+    {
+        return 0;
+    }
+    return (uint32_t)((size - (uint32_t)start + (uint32_t)step - 1) / (uint32_t)step);
+}
+
+static bool png_adam7_expected_bytes(uint32_t width, uint32_t height, int bpp, size_t *out_bytes)
+{
+    if (!out_bytes || bpp <= 0)
+    {
+        return false;
+    }
+
+    static const int x_start[7] = { 0, 4, 0, 2, 0, 1, 0 };
+    static const int y_start[7] = { 0, 0, 4, 0, 2, 0, 1 };
+    static const int x_step[7] = { 8, 8, 4, 4, 2, 2, 1 };
+    static const int y_step[7] = { 8, 8, 8, 4, 4, 2, 2 };
+
+    size_t total = 0;
+    for (int pass = 0; pass < 7; ++pass)
+    {
+        uint32_t pw = png_adam7_pass_len(width, x_start[pass], x_step[pass]);
+        uint32_t ph = png_adam7_pass_len(height, y_start[pass], y_step[pass]);
+        if (pw == 0 || ph == 0)
+        {
+            continue;
+        }
+        size_t row_bytes = (size_t)pw * (size_t)bpp;
+        if (row_bytes / (size_t)bpp != (size_t)pw)
+        {
+            return false;
+        }
+        if (row_bytes + 1 < row_bytes)
+        {
+            return false;
+        }
+        size_t pass_bytes = (row_bytes + 1) * (size_t)ph;
+        if (ph != 0 && pass_bytes / (size_t)ph != row_bytes + 1)
+        {
+            return false;
+        }
+        if (total > (size_t)-1 - pass_bytes)
+        {
+            return false;
+        }
+        total += pass_bytes;
+    }
+
+    *out_bytes = total;
+    return true;
+}
+
+static bool png_apply_filters_interlaced(const uint8_t *scanlines,
+                                         uint32_t width,
+                                         uint32_t height,
+                                         int bpp,
+                                         video_color_t *out_pixels)
+{
+    static const int x_start[7] = { 0, 4, 0, 2, 0, 1, 0 };
+    static const int y_start[7] = { 0, 0, 4, 0, 2, 0, 1 };
+    static const int x_step[7] = { 8, 8, 4, 4, 2, 2, 1 };
+    static const int y_step[7] = { 8, 8, 8, 4, 4, 2, 2 };
+
+    const uint8_t *cursor = scanlines;
+    for (int pass = 0; pass < 7; ++pass)
+    {
+        uint32_t pass_w = png_adam7_pass_len(width, x_start[pass], x_step[pass]);
+        uint32_t pass_h = png_adam7_pass_len(height, y_start[pass], y_step[pass]);
+        if (pass_w == 0 || pass_h == 0)
+        {
+            continue;
+        }
+
+        size_t row_bytes = (size_t)pass_w * (size_t)bpp;
+        const uint8_t *prev = NULL;
+
+        for (uint32_t y = 0; y < pass_h; ++y)
+        {
+            uint8_t filter = *cursor++;
+            const uint8_t *row = cursor;
+            uint8_t *recon = (uint8_t *)cursor;
+            if (!png_unfilter_row(filter, row, recon, prev, row_bytes, bpp))
+            {
+                return false;
+            }
+
+            for (uint32_t x = 0; x < pass_w; ++x)
+            {
+                size_t offset = (size_t)x * (size_t)bpp;
+                uint8_t r = recon[offset];
+                uint8_t g = recon[offset + 1];
+                uint8_t b = recon[offset + 2];
+                uint8_t a = (bpp == 4) ? recon[offset + 3] : 0xFF;
+                uint32_t out_x = (uint32_t)x_start[pass] + x * (uint32_t)x_step[pass];
+                uint32_t out_y = (uint32_t)y_start[pass] + y * (uint32_t)y_step[pass];
+                if (out_x < width && out_y < height)
+                {
+                    out_pixels[(size_t)out_y * width + out_x] =
+                        ((video_color_t)a << 24) |
+                        ((video_color_t)r << 16) |
+                        ((video_color_t)g << 8) |
+                        (video_color_t)b;
+                }
+            }
+
+            prev = recon;
+            cursor += row_bytes;
+        }
     }
 
     return true;
@@ -680,6 +810,7 @@ int png_decode_rgba32(const uint8_t *png,
     bool have_ihdr = false;
     uint32_t width = 0, height = 0;
     int bit_depth = 0, color_type = 0;
+    int interlace = 0;
     uint8_t *idat = NULL;
     size_t idat_size = 0;
 
@@ -719,9 +850,10 @@ int png_decode_rgba32(const uint8_t *png,
                     free(idat);
                     return -1;
                 }
-                if (chunk_data[12] != 0) /* interlace */
+                interlace = chunk_data[12];
+                if (interlace != 0 && interlace != 1)
                 {
-                    png_set_error("interlaced PNG not supported");
+                    png_set_error("unsupported interlace");
                     free(idat);
                     return -1;
                 }
@@ -785,12 +917,25 @@ int png_decode_rgba32(const uint8_t *png,
         return -1;
     }
 
-    size_t expected_bytes = ((size_t)height * (row_bytes + 1));
-    if (row_bytes + 1 == 0 || expected_bytes / (row_bytes + 1) != height)
+    size_t expected_bytes = 0;
+    if (interlace == 0)
     {
-        free(idat);
-        png_set_error("size overflow");
-        return -1;
+        expected_bytes = ((size_t)height * (row_bytes + 1));
+        if (row_bytes + 1 == 0 || expected_bytes / (row_bytes + 1) != height)
+        {
+            free(idat);
+            png_set_error("size overflow");
+            return -1;
+        }
+    }
+    else
+    {
+        if (!png_adam7_expected_bytes(width, height, bpp, &expected_bytes))
+        {
+            free(idat);
+            png_set_error("size overflow");
+            return -1;
+        }
     }
 
     uint8_t *scanlines = (uint8_t *)malloc(expected_bytes);
@@ -820,7 +965,17 @@ int png_decode_rgba32(const uint8_t *png,
         return -1;
     }
 
-    if (!png_apply_filters(scanlines, width, height, bpp, pixels))
+    bool filters_ok = false;
+    if (interlace == 0)
+    {
+        filters_ok = png_apply_filters(scanlines, width, height, bpp, pixels);
+    }
+    else
+    {
+        filters_ok = png_apply_filters_interlaced(scanlines, width, height, bpp, pixels);
+    }
+
+    if (!filters_ok)
     {
         free(pixels);
         free(scanlines);
