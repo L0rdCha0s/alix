@@ -73,6 +73,13 @@ typedef enum
     HTML_VIEW_CONTROL_RADIO
 } html_view_control_kind_t;
 
+typedef enum
+{
+    HTML_VIEW_PSEUDO_NONE = 0,
+    HTML_VIEW_PSEUDO_BEFORE,
+    HTML_VIEW_PSEUDO_AFTER
+} html_view_pseudo_t;
+
 typedef struct html_view_control
 {
     const html_node_t *node;
@@ -438,7 +445,7 @@ void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
                                          int right,
                                          int bottom,
                                          int left,
-                                         video_color_t color,
+                                         const css_style_t *style,
                                          const atk_rect_t *clip);
 void html_view_draw_background_image(html_view_ctx_t *ctx,
                                      const css_style_t *style,
@@ -477,6 +484,11 @@ void html_view_style_for_node(css_style_t *out,
                               const css_stylesheet_t *sheet,
                               const css_style_t *parent,
                               const html_node_t *node);
+bool html_view_style_for_pseudo(css_style_t *out,
+                                const css_stylesheet_t *sheet,
+                                const css_style_t *parent,
+                                const html_node_t *node,
+                                html_view_pseudo_t pseudo);
 void html_view_style_stack_destroy(html_view_ctx_t *ctx);
 const css_style_t *html_view_style_push(html_view_ctx_t *ctx,
                                         const css_style_t *parent,
@@ -499,6 +511,34 @@ int html_view_length_to_px_signed(const css_length_t *len,
 bool html_view_length_to_px_height(const html_view_ctx_t *ctx,
                                    const css_length_t *len,
                                    int *out_px);
+
+static inline void html_view_apply_border_style_none(const css_style_t *style,
+                                                     int *top,
+                                                     int *right,
+                                                     int *bottom,
+                                                     int *left)
+{
+    if (!style || !style->has_border_style)
+    {
+        return;
+    }
+    if (top && style->border_style_none[CSS_BORDER_SIDE_TOP])
+    {
+        *top = 0;
+    }
+    if (right && style->border_style_none[CSS_BORDER_SIDE_RIGHT])
+    {
+        *right = 0;
+    }
+    if (bottom && style->border_style_none[CSS_BORDER_SIDE_BOTTOM])
+    {
+        *bottom = 0;
+    }
+    if (left && style->border_style_none[CSS_BORDER_SIDE_LEFT])
+    {
+        *left = 0;
+    }
+}
 int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_t *style);
 int html_view_font_px_for_style(const html_view_ctx_t *ctx, const css_style_t *style, int parent_font_px);
 void html_view_font_scope_push(html_view_ctx_t *ctx,

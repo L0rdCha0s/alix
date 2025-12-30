@@ -19,6 +19,58 @@ static void html_view_trim_range(const char **start, const char **end)
     }
 }
 
+static void html_view_style_inherit_from_parent(css_style_t *out, const css_style_t *parent, bool inherit_text_align)
+{
+    if (!out || !parent)
+    {
+        return;
+    }
+    if (parent->has_color)
+    {
+        out->has_color = true;
+        out->color = parent->color;
+    }
+    if (parent->has_font_size)
+    {
+        out->has_font_size = true;
+        out->font_size = parent->font_size;
+    }
+    if (parent->has_line_height)
+    {
+        out->has_line_height = true;
+        out->line_height_milli = parent->line_height_milli;
+        out->line_height_is_length = parent->line_height_is_length;
+        out->line_height = parent->line_height;
+    }
+    if (inherit_text_align && parent->has_text_align)
+    {
+        out->has_text_align = true;
+        out->text_align = parent->text_align;
+    }
+    if (parent->has_letter_spacing)
+    {
+        out->has_letter_spacing = true;
+        out->letter_spacing = parent->letter_spacing;
+    }
+}
+
+static void html_view_resolve_float_inherit(css_style_t *style, const css_style_t *parent)
+{
+    if (!style || !style->has_float || !style->float_inherit)
+    {
+        return;
+    }
+    if (parent && parent->has_float)
+    {
+        style->float_mode = parent->float_mode;
+    }
+    else
+    {
+        style->float_mode = CSS_FLOAT_NONE;
+    }
+    style->float_inherit = false;
+}
+
 static const html_node_t *html_view_prev_element_sibling(const html_node_t *node)
 {
     if (!node)
@@ -304,9 +356,10 @@ static bool html_view_parse_attr_selector(const char **p,
     return match;
 }
 
-static bool html_view_simple_selector_matches_range(const char *sel_start,
-                                                    const char *sel_end,
-                                                    const html_node_t *node)
+static bool html_view_simple_selector_matches_range_internal(const char *sel_start,
+                                                             const char *sel_end,
+                                                             const html_node_t *node,
+                                                             html_view_pseudo_t pseudo)
 {
     if (!sel_start || !sel_end || sel_end <= sel_start || !node || node->type != HTML_NODE_ELEMENT || !node->name)
     {
@@ -323,12 +376,13 @@ static bool html_view_simple_selector_matches_range(const char *sel_start,
     bool have_tag = false;
     bool match = true;
     bool require_link = false;
+    bool pseudo_seen = false;
 
     if (*p == '*')
     {
         ++p;
     }
-    else if (*p != '#' && *p != '.')
+    else if (*p != '#' && *p != '.' && *p != '[' && *p != ':')
     {
         const char *tag_end = p;
         while (tag_end < sel_end && *tag_end != ':' && *tag_end != '.' && *tag_end != '#' && *tag_end != '[' && !isspace((unsigned char)*tag_end))
@@ -435,13 +489,27 @@ static bool html_view_simple_selector_matches_range(const char *sel_start,
             }
             else if (name_len == 6 && strncasecmp(name, "before", 6) == 0)
             {
-                match = false;
-                break;
+                if (pseudo == HTML_VIEW_PSEUDO_BEFORE)
+                {
+                    pseudo_seen = true;
+                }
+                else
+                {
+                    match = false;
+                    break;
+                }
             }
             else if (name_len == 5 && strncasecmp(name, "after", 5) == 0)
             {
-                match = false;
-                break;
+                if (pseudo == HTML_VIEW_PSEUDO_AFTER)
+                {
+                    pseudo_seen = true;
+                }
+                else
+                {
+                    match = false;
+                    break;
+                }
             }
             else
             {
@@ -474,6 +542,11 @@ static bool html_view_simple_selector_matches_range(const char *sel_start,
                 match = false;
             }
         }
+    }
+
+    if (match && pseudo != HTML_VIEW_PSEUDO_NONE && !pseudo_seen)
+    {
+        match = false;
     }
 
     return match;
@@ -611,7 +684,9 @@ static size_t html_view_selector_parse_parts(const char *start,
     return count;
 }
 
-static bool html_view_selector_matches(const char *selector, const html_node_t *node)
+static bool html_view_selector_matches_internal(const char *selector,
+                                                const html_node_t *node,
+                                                html_view_pseudo_t pseudo)
 {
     if (!selector || !node || node->type != HTML_NODE_ELEMENT)
     {
@@ -634,9 +709,10 @@ static bool html_view_selector_matches(const char *selector, const html_node_t *
     }
 
     const html_node_t *cur = node;
-    if (!html_view_simple_selector_matches_range(parts[part_count - 1].start,
-                                                 parts[part_count - 1].end,
-                                                 cur))
+    if (!html_view_simple_selector_matches_range_internal(parts[part_count - 1].start,
+                                                          parts[part_count - 1].end,
+                                                          cur,
+                                                          pseudo))
     {
         return false;
     }
@@ -650,7 +726,10 @@ static bool html_view_selector_matches(const char *selector, const html_node_t *
             bool found = false;
             for (const html_node_t *p = cur->parent; p; p = p->parent)
             {
-                if (html_view_simple_selector_matches_range(left->start, left->end, p))
+                if (html_view_simple_selector_matches_range_internal(left->start,
+                                                                     left->end,
+                                                                     p,
+                                                                     HTML_VIEW_PSEUDO_NONE))
                 {
                     cur = p;
                     found = true;
@@ -665,7 +744,10 @@ static bool html_view_selector_matches(const char *selector, const html_node_t *
         else if (comb == '>')
         {
             cur = cur->parent;
-            if (!cur || !html_view_simple_selector_matches_range(left->start, left->end, cur))
+            if (!cur || !html_view_simple_selector_matches_range_internal(left->start,
+                                                                          left->end,
+                                                                          cur,
+                                                                          HTML_VIEW_PSEUDO_NONE))
             {
                 return false;
             }
@@ -673,7 +755,10 @@ static bool html_view_selector_matches(const char *selector, const html_node_t *
         else if (comb == '+')
         {
             cur = html_view_prev_element_sibling(cur);
-            if (!cur || !html_view_simple_selector_matches_range(left->start, left->end, cur))
+            if (!cur || !html_view_simple_selector_matches_range_internal(left->start,
+                                                                          left->end,
+                                                                          cur,
+                                                                          HTML_VIEW_PSEUDO_NONE))
             {
                 return false;
             }
@@ -683,7 +768,10 @@ static bool html_view_selector_matches(const char *selector, const html_node_t *
             bool found = false;
             for (const html_node_t *p = html_view_prev_element_sibling(cur); p; p = html_view_prev_element_sibling(p))
             {
-                if (html_view_simple_selector_matches_range(left->start, left->end, p))
+                if (html_view_simple_selector_matches_range_internal(left->start,
+                                                                     left->end,
+                                                                     p,
+                                                                     HTML_VIEW_PSEUDO_NONE))
                 {
                     cur = p;
                     found = true;
@@ -702,6 +790,16 @@ static bool html_view_selector_matches(const char *selector, const html_node_t *
     }
 
     return true;
+}
+
+static bool html_view_selector_matches(const char *selector, const html_node_t *node)
+{
+    return html_view_selector_matches_internal(selector, node, HTML_VIEW_PSEUDO_NONE);
+}
+
+static bool html_view_selector_matches_pseudo(const char *selector, const html_node_t *node, html_view_pseudo_t pseudo)
+{
+    return html_view_selector_matches_internal(selector, node, pseudo);
 }
 
 static bool html_view_parse_color(const char *s, video_color_t *out)
@@ -1148,6 +1246,26 @@ static void html_view_apply_inline_style(css_style_t *style, const char *inline_
                 }
             }
         }
+        if (sheet->rules->style.has_content)
+        {
+            if (style->content_owned && style->content)
+            {
+                free((void *)style->content);
+                style->content = NULL;
+            }
+            style->content_owned = false;
+            style->has_content = true;
+            style->content = NULL;
+            if (sheet->rules->style.content)
+            {
+                char *dup = html_view_strdup(sheet->rules->style.content);
+                if (dup)
+                {
+                    style->content = dup;
+                    style->content_owned = true;
+                }
+            }
+        }
     }
     css_stylesheet_destroy(sheet);
 }
@@ -1171,36 +1289,7 @@ void html_view_style_for_node(css_style_t *out,
         is_table_header = (strcmp(node->name, "th") == 0);
     }
 
-    if (parent)
-    {
-        if (parent->has_color)
-        {
-            out->has_color = true;
-            out->color = parent->color;
-        }
-        if (parent->has_font_size)
-        {
-            out->has_font_size = true;
-            out->font_size = parent->font_size;
-        }
-        if (parent->has_line_height)
-        {
-            out->has_line_height = true;
-            out->line_height_milli = parent->line_height_milli;
-            out->line_height_is_length = parent->line_height_is_length;
-            out->line_height = parent->line_height;
-        }
-        if (parent->has_text_align && !is_table_cell)
-        {
-            out->has_text_align = true;
-            out->text_align = parent->text_align;
-        }
-        if (parent->has_letter_spacing)
-        {
-            out->has_letter_spacing = true;
-            out->letter_spacing = parent->letter_spacing;
-        }
-    }
+    html_view_style_inherit_from_parent(out, parent, !is_table_cell);
 
     if (sheet && node && node->type == HTML_NODE_ELEMENT)
     {
@@ -1221,11 +1310,43 @@ void html_view_style_for_node(css_style_t *out,
         html_view_apply_inline_style(out, inline_style);
     }
 
+    html_view_resolve_float_inherit(out, parent);
+
     if (is_table_cell && !out->has_text_align)
     {
         out->has_text_align = true;
         out->text_align = is_table_header ? CSS_TEXT_ALIGN_CENTER : CSS_TEXT_ALIGN_LEFT;
     }
+}
+
+bool html_view_style_for_pseudo(css_style_t *out,
+                                const css_stylesheet_t *sheet,
+                                const css_style_t *parent,
+                                const html_node_t *node,
+                                html_view_pseudo_t pseudo)
+{
+    if (!out)
+    {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+
+    html_view_style_inherit_from_parent(out, parent, true);
+
+    if (sheet && node && node->type == HTML_NODE_ELEMENT)
+    {
+        for (const css_rule_t *rule = sheet->rules; rule; rule = rule->next)
+        {
+            if (rule->selector && html_view_selector_matches_pseudo(rule->selector, node, pseudo))
+            {
+                css_style_merge(out, &rule->style);
+            }
+        }
+    }
+
+    html_view_resolve_float_inherit(out, parent);
+
+    return out->has_content;
 }
 
 void html_view_style_stack_destroy(html_view_ctx_t *ctx)

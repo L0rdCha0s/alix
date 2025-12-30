@@ -41,8 +41,15 @@ void css_style_release(css_style_t *style)
         free((void *)style->background_image);
         style->background_image = NULL;
     }
+    if (style->content_owned && style->content)
+    {
+        free((void *)style->content);
+        style->content = NULL;
+    }
     style->background_image_owned = false;
     style->has_background_image = false;
+    style->content_owned = false;
+    style->has_content = false;
 }
 
 static bool css_value_is_keyword(const char *start, const char *end, const char *keyword)
@@ -560,6 +567,161 @@ static bool css_parse_border_style_value(const char *start, const char *end, boo
     out_none[2] = none_flags[2];
     out_none[3] = none_flags[3];
     return true;
+}
+
+static bool css_parse_border_color_value(const char *start,
+                                         const char *end,
+                                         video_color_t out_colors[4],
+                                         bool out_transparent[4])
+{
+    if (!out_colors || !out_transparent)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < 4; ++i)
+    {
+        out_colors[i] = video_make_color(0x00, 0x00, 0x00);
+        out_transparent[i] = false;
+    }
+
+    css_trim_range(&start, &end);
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+
+    const char *tokens[4] = {0};
+    size_t token_lens[4] = {0};
+    size_t count = 0;
+
+    const char *p = start;
+    while (p < end && count < 4)
+    {
+        while (p < end && isspace((unsigned char)*p))
+        {
+            p++;
+        }
+        if (p >= end)
+        {
+            break;
+        }
+        const char *tstart = p;
+        while (p < end && !isspace((unsigned char)*p))
+        {
+            p++;
+        }
+        tokens[count] = tstart;
+        token_lens[count] = (size_t)(p - tstart);
+        count++;
+    }
+
+    if (count == 0)
+    {
+        return false;
+    }
+
+    video_color_t parsed[4] = {0};
+    bool transparent[4] = {false, false, false, false};
+    for (size_t i = 0; i < count; ++i)
+    {
+        const char *tstart = tokens[i];
+        const char *tend = tstart + token_lens[i];
+        css_trim_range(&tstart, &tend);
+        if (css_value_is_keyword(tstart, tend, "transparent"))
+        {
+            parsed[i] = video_make_color(0x00, 0x00, 0x00);
+            transparent[i] = true;
+            continue;
+        }
+        video_color_t c;
+        if (!css_parse_color(tstart, tend, &c))
+        {
+            return false;
+        }
+        parsed[i] = c;
+        transparent[i] = false;
+    }
+
+    if (count == 1)
+    {
+        out_colors[0] = parsed[0];
+        out_colors[1] = parsed[0];
+        out_colors[2] = parsed[0];
+        out_colors[3] = parsed[0];
+        out_transparent[0] = transparent[0];
+        out_transparent[1] = transparent[0];
+        out_transparent[2] = transparent[0];
+        out_transparent[3] = transparent[0];
+        return true;
+    }
+    if (count == 2)
+    {
+        out_colors[0] = parsed[0];
+        out_colors[2] = parsed[0];
+        out_colors[1] = parsed[1];
+        out_colors[3] = parsed[1];
+        out_transparent[0] = transparent[0];
+        out_transparent[2] = transparent[0];
+        out_transparent[1] = transparent[1];
+        out_transparent[3] = transparent[1];
+        return true;
+    }
+    if (count == 3)
+    {
+        out_colors[0] = parsed[0];
+        out_colors[1] = parsed[1];
+        out_colors[3] = parsed[1];
+        out_colors[2] = parsed[2];
+        out_transparent[0] = transparent[0];
+        out_transparent[1] = transparent[1];
+        out_transparent[3] = transparent[1];
+        out_transparent[2] = transparent[2];
+        return true;
+    }
+    out_colors[0] = parsed[0];
+    out_colors[1] = parsed[1];
+    out_colors[2] = parsed[2];
+    out_colors[3] = parsed[3];
+    out_transparent[0] = transparent[0];
+    out_transparent[1] = transparent[1];
+    out_transparent[2] = transparent[2];
+    out_transparent[3] = transparent[3];
+    return true;
+}
+
+static bool css_parse_content_value(const char *start, const char *end, char **out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    *out = NULL;
+    css_trim_range(&start, &end);
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+    if (css_value_is_keyword(start, end, "none") || css_value_is_keyword(start, end, "normal"))
+    {
+        return true;
+    }
+    if ((*start == '\'' || *start == '"') && end > start + 1 && end[-1] == *start)
+    {
+        if (end == start + 2)
+        {
+            char *empty = (char *)malloc(1);
+            if (!empty)
+            {
+                return false;
+            }
+            empty[0] = '\0';
+            *out = empty;
+            return true;
+        }
+        *out = css_strdup_unescape(start + 1, end - 1);
+        return *out != NULL;
+    }
+    return false;
 }
 
 static bool css_parse_border_value(const char *start,
@@ -1401,8 +1563,14 @@ void css_style_apply_property(css_style_t *style,
         css_trim_range(&s, &e);
         size_t len = (size_t)(e - s);
         style->has_float = true;
+        style->float_inherit = false;
         style->float_mode = CSS_FLOAT_NONE;
-        if (len == 4 && strncasecmp(s, "left", 4) == 0)
+        if (len == 7 && strncasecmp(s, "inherit", 7) == 0)
+        {
+            style->float_inherit = true;
+            style->float_mode = CSS_FLOAT_NONE;
+        }
+        else if (len == 4 && strncasecmp(s, "left", 4) == 0)
         {
             style->float_mode = CSS_FLOAT_LEFT;
         }
@@ -1506,6 +1674,12 @@ void css_style_apply_property(css_style_t *style,
                 style->has_border_color = true;
                 style->border_color = color;
                 style->border_transparent = transparent;
+                for (size_t i = 0; i < 4; ++i)
+                {
+                    style->border_color_side_set[i] = true;
+                    style->border_color_side[i] = color;
+                    style->border_color_side_transparent[i] = transparent;
+                }
             }
         }
         return;
@@ -1526,6 +1700,9 @@ void css_style_apply_property(css_style_t *style,
                 style->has_border_color = true;
                 style->border_color = color;
                 style->border_transparent = transparent;
+                style->border_color_side_set[CSS_BORDER_SIDE_TOP] = true;
+                style->border_color_side[CSS_BORDER_SIDE_TOP] = color;
+                style->border_color_side_transparent[CSS_BORDER_SIDE_TOP] = transparent;
             }
         }
         return;
@@ -1546,6 +1723,9 @@ void css_style_apply_property(css_style_t *style,
                 style->has_border_color = true;
                 style->border_color = color;
                 style->border_transparent = transparent;
+                style->border_color_side_set[CSS_BORDER_SIDE_RIGHT] = true;
+                style->border_color_side[CSS_BORDER_SIDE_RIGHT] = color;
+                style->border_color_side_transparent[CSS_BORDER_SIDE_RIGHT] = transparent;
             }
         }
         return;
@@ -1566,6 +1746,9 @@ void css_style_apply_property(css_style_t *style,
                 style->has_border_color = true;
                 style->border_color = color;
                 style->border_transparent = transparent;
+                style->border_color_side_set[CSS_BORDER_SIDE_BOTTOM] = true;
+                style->border_color_side[CSS_BORDER_SIDE_BOTTOM] = color;
+                style->border_color_side_transparent[CSS_BORDER_SIDE_BOTTOM] = transparent;
             }
         }
         return;
@@ -1586,6 +1769,9 @@ void css_style_apply_property(css_style_t *style,
                 style->has_border_color = true;
                 style->border_color = color;
                 style->border_transparent = transparent;
+                style->border_color_side_set[CSS_BORDER_SIDE_LEFT] = true;
+                style->border_color_side[CSS_BORDER_SIDE_LEFT] = color;
+                style->border_color_side_transparent[CSS_BORDER_SIDE_LEFT] = transparent;
             }
         }
         return;
@@ -1648,17 +1834,19 @@ void css_style_apply_property(css_style_t *style,
 
     if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "border-color", 12) == 0)
     {
-        video_color_t c;
-        if (css_value_is_keyword(val_start, val_end, "transparent"))
+        video_color_t colors[4] = {0};
+        bool transparent[4] = {false, false, false, false};
+        if (css_parse_border_color_value(val_start, val_end, colors, transparent))
         {
             style->has_border_color = true;
-            style->border_transparent = true;
-        }
-        else if (css_parse_color(val_start, val_end, &c))
-        {
-            style->has_border_color = true;
-            style->border_color = c;
-            style->border_transparent = false;
+            style->border_color = colors[0];
+            style->border_transparent = transparent[0];
+            for (size_t i = 0; i < 4; ++i)
+            {
+                style->border_color_side_set[i] = true;
+                style->border_color_side[i] = colors[i];
+                style->border_color_side_transparent[i] = transparent[i];
+            }
         }
         return;
     }
@@ -1669,6 +1857,11 @@ void css_style_apply_property(css_style_t *style,
         if (css_parse_border_style_value(val_start, val_end, none_flags))
         {
             css_length_t zero = { .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_PX };
+            style->has_border_style = true;
+            style->border_style_none[CSS_BORDER_SIDE_TOP] = none_flags[0];
+            style->border_style_none[CSS_BORDER_SIDE_RIGHT] = none_flags[1];
+            style->border_style_none[CSS_BORDER_SIDE_BOTTOM] = none_flags[2];
+            style->border_style_none[CSS_BORDER_SIDE_LEFT] = none_flags[3];
             style->has_border = true;
             if (none_flags[0]) style->border_width.top = zero;
             if (none_flags[1]) style->border_width.right = zero;
@@ -1846,6 +2039,22 @@ void css_style_apply_property(css_style_t *style,
                 style->has_text_shadow_color = true;
                 style->text_shadow_color = color;
             }
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 7 && strncasecmp(prop_start, "content", 7) == 0)
+    {
+        char *content = NULL;
+        if (css_parse_content_value(val_start, val_end, &content))
+        {
+            if (style->content_owned && style->content)
+            {
+                free((void *)style->content);
+            }
+            style->content = content;
+            style->content_owned = (content != NULL);
+            style->has_content = (content != NULL);
         }
         return;
     }

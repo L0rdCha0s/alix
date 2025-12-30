@@ -611,6 +611,200 @@ int html_view_float_max_bottom(const html_view_float_ctx_t *floats, css_clear_t 
     return max_bottom;
 }
 
+static void html_view_border_side_color(const css_style_t *style,
+                                        css_border_side_t side,
+                                        video_color_t *out_color,
+                                        bool *out_transparent)
+{
+    if (out_color)
+    {
+        *out_color = video_make_color(0x00, 0x00, 0x00);
+    }
+    if (out_transparent)
+    {
+        *out_transparent = false;
+    }
+    if (!style)
+    {
+        return;
+    }
+    if (side < CSS_BORDER_SIDE_COUNT && style->border_color_side_set[side])
+    {
+        if (out_color)
+        {
+            *out_color = style->border_color_side[side];
+        }
+        if (out_transparent)
+        {
+            *out_transparent = style->border_color_side_transparent[side];
+        }
+        return;
+    }
+    if (style->has_border_color)
+    {
+        if (out_color)
+        {
+            *out_color = style->border_color;
+        }
+        if (out_transparent)
+        {
+            *out_transparent = style->border_transparent;
+        }
+    }
+}
+
+static void html_view_draw_flat_bottom_triangle(html_view_ctx_t *ctx,
+                                                int x0,
+                                                int y0,
+                                                int x1,
+                                                int y1,
+                                                int x2,
+                                                int y2,
+                                                video_color_t color,
+                                                const atk_rect_t *clip)
+{
+    int dy1 = y1 - y0;
+    int dy2 = y2 - y0;
+    if (dy1 <= 0 || dy2 <= 0)
+    {
+        return;
+    }
+    int32_t inv1 = ((x1 - x0) << 16) / dy1;
+    int32_t inv2 = ((x2 - x0) << 16) / dy2;
+    int32_t cur1 = x0 << 16;
+    int32_t cur2 = x0 << 16;
+    for (int y = y0; y <= y1; ++y)
+    {
+        int xa = cur1 >> 16;
+        int xb = cur2 >> 16;
+        if (xa > xb)
+        {
+            int tmp = xa;
+            xa = xb;
+            xb = tmp;
+        }
+        int w = xb - xa + 1;
+        if (w > 0)
+        {
+            html_view_draw_rect_clipped(ctx, xa, y, w, 1, color, clip);
+        }
+        cur1 += inv1;
+        cur2 += inv2;
+    }
+}
+
+static void html_view_draw_flat_top_triangle(html_view_ctx_t *ctx,
+                                             int x0,
+                                             int y0,
+                                             int x1,
+                                             int y1,
+                                             int x2,
+                                             int y2,
+                                             video_color_t color,
+                                             const atk_rect_t *clip)
+{
+    int dy1 = y2 - y0;
+    int dy2 = y2 - y1;
+    if (dy1 <= 0 || dy2 <= 0)
+    {
+        return;
+    }
+    int32_t inv1 = ((x2 - x0) << 16) / dy1;
+    int32_t inv2 = ((x2 - x1) << 16) / dy2;
+    int32_t cur1 = x2 << 16;
+    int32_t cur2 = x2 << 16;
+    for (int y = y2; y >= y0; --y)
+    {
+        int xa = cur1 >> 16;
+        int xb = cur2 >> 16;
+        if (xa > xb)
+        {
+            int tmp = xa;
+            xa = xb;
+            xb = tmp;
+        }
+        int w = xb - xa + 1;
+        if (w > 0)
+        {
+            html_view_draw_rect_clipped(ctx, xa, y, w, 1, color, clip);
+        }
+        cur1 -= inv1;
+        cur2 -= inv2;
+    }
+}
+
+static void html_view_draw_triangle_clipped(html_view_ctx_t *ctx,
+                                            int x0,
+                                            int y0,
+                                            int x1,
+                                            int y1,
+                                            int x2,
+                                            int y2,
+                                            video_color_t color,
+                                            const atk_rect_t *clip)
+{
+    if (y0 > y1)
+    {
+        int tx = x0;
+        int ty = y0;
+        x0 = x1;
+        y0 = y1;
+        x1 = tx;
+        y1 = ty;
+    }
+    if (y1 > y2)
+    {
+        int tx = x1;
+        int ty = y1;
+        x1 = x2;
+        y1 = y2;
+        x2 = tx;
+        y2 = ty;
+    }
+    if (y0 > y1)
+    {
+        int tx = x0;
+        int ty = y0;
+        x0 = x1;
+        y0 = y1;
+        x1 = tx;
+        y1 = ty;
+    }
+
+    if (y0 == y2)
+    {
+        int xa = x0;
+        int xb = x0;
+        if (x1 < xa) xa = x1;
+        if (x2 < xa) xa = x2;
+        if (x1 > xb) xb = x1;
+        if (x2 > xb) xb = x2;
+        int w = xb - xa + 1;
+        if (w > 0)
+        {
+            html_view_draw_rect_clipped(ctx, xa, y0, w, 1, color, clip);
+        }
+        return;
+    }
+
+    if (y1 == y2)
+    {
+        html_view_draw_flat_bottom_triangle(ctx, x0, y0, x1, y1, x2, y2, color, clip);
+        return;
+    }
+    if (y0 == y1)
+    {
+        html_view_draw_flat_top_triangle(ctx, x0, y0, x1, y1, x2, y2, color, clip);
+        return;
+    }
+
+    int32_t x3 = x0 + (int32_t)((int64_t)(x2 - x0) * (y1 - y0) / (y2 - y0));
+    int y3 = y1;
+
+    html_view_draw_flat_bottom_triangle(ctx, x0, y0, x1, y1, (int)x3, y3, color, clip);
+    html_view_draw_flat_top_triangle(ctx, x1, y1, (int)x3, y3, x2, y2, color, clip);
+}
+
 void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
                                          int x,
                                          int y,
@@ -620,7 +814,7 @@ void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
                                          int right,
                                          int bottom,
                                          int left,
-                                         video_color_t color,
+                                         const css_style_t *style,
                                          const atk_rect_t *clip)
 {
     if (w <= 0 || h <= 0)
@@ -628,28 +822,120 @@ void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
         return;
     }
 
+    int inner_w = w - left - right;
+    int inner_h = h - top - bottom;
+    if (inner_w <= 0 && inner_h <= 0)
+    {
+        video_color_t side_color = video_make_color(0x00, 0x00, 0x00);
+        bool transparent = false;
+        if (left > 0)
+        {
+            html_view_border_side_color(style, CSS_BORDER_SIDE_LEFT, &side_color, &transparent);
+            if (!transparent)
+            {
+                html_view_draw_triangle_clipped(ctx,
+                                                x,
+                                                y,
+                                                x,
+                                                y + h,
+                                                x + left,
+                                                y + top,
+                                                side_color,
+                                                clip);
+            }
+        }
+        if (right > 0)
+        {
+            html_view_border_side_color(style, CSS_BORDER_SIDE_RIGHT, &side_color, &transparent);
+            if (!transparent)
+            {
+                html_view_draw_triangle_clipped(ctx,
+                                                x + w,
+                                                y,
+                                                x + w,
+                                                y + h,
+                                                x + left,
+                                                y + top,
+                                                side_color,
+                                                clip);
+            }
+        }
+        if (top > 0)
+        {
+            html_view_border_side_color(style, CSS_BORDER_SIDE_TOP, &side_color, &transparent);
+            if (!transparent)
+            {
+                html_view_draw_triangle_clipped(ctx,
+                                                x,
+                                                y,
+                                                x + w,
+                                                y,
+                                                x + left,
+                                                y + top,
+                                                side_color,
+                                                clip);
+            }
+        }
+        if (bottom > 0)
+        {
+            html_view_border_side_color(style, CSS_BORDER_SIDE_BOTTOM, &side_color, &transparent);
+            if (!transparent)
+            {
+                html_view_draw_triangle_clipped(ctx,
+                                                x,
+                                                y + h,
+                                                x + w,
+                                                y + h,
+                                                x + left,
+                                                y + top,
+                                                side_color,
+                                                clip);
+            }
+        }
+        return;
+    }
+
+    video_color_t side_color = video_make_color(0x00, 0x00, 0x00);
+    bool transparent = false;
+
     if (top > 0)
     {
-        html_view_draw_rect_clipped(ctx, x, y, w, top, color, clip);
+        html_view_border_side_color(style, CSS_BORDER_SIDE_TOP, &side_color, &transparent);
+        if (!transparent)
+        {
+            html_view_draw_rect_clipped(ctx, x, y, w, top, side_color, clip);
+        }
     }
     if (bottom > 0)
     {
-        html_view_draw_rect_clipped(ctx, x, y + h - bottom, w, bottom, color, clip);
+        html_view_border_side_color(style, CSS_BORDER_SIDE_BOTTOM, &side_color, &transparent);
+        if (!transparent)
+        {
+            html_view_draw_rect_clipped(ctx, x, y + h - bottom, w, bottom, side_color, clip);
+        }
     }
 
     int inner_y = y + top;
-    int inner_h = h - top - bottom;
-    if (inner_h <= 0)
+    int avail_h = h - top - bottom;
+    if (avail_h <= 0)
     {
         return;
     }
     if (left > 0)
     {
-        html_view_draw_rect_clipped(ctx, x, inner_y, left, inner_h, color, clip);
+        html_view_border_side_color(style, CSS_BORDER_SIDE_LEFT, &side_color, &transparent);
+        if (!transparent)
+        {
+            html_view_draw_rect_clipped(ctx, x, inner_y, left, avail_h, side_color, clip);
+        }
     }
     if (right > 0)
     {
-        html_view_draw_rect_clipped(ctx, x + w - right, inner_y, right, inner_h, color, clip);
+        html_view_border_side_color(style, CSS_BORDER_SIDE_RIGHT, &side_color, &transparent);
+        if (!transparent)
+        {
+            html_view_draw_rect_clipped(ctx, x + w - right, inner_y, right, avail_h, side_color, clip);
+        }
     }
 }
 

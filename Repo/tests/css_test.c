@@ -122,6 +122,71 @@ static bool test_background_position_property(void)
     return ok;
 }
 
+static bool test_border_style_none(void)
+{
+    css_stylesheet_t *sheet = css_parse("div { border-style: none solid; }");
+    if (!sheet || !sheet->rules)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    const css_style_t *style = &sheet->rules->style;
+    bool ok = style->has_border_style &&
+              style->border_style_none[CSS_BORDER_SIDE_TOP] &&
+              style->border_style_none[CSS_BORDER_SIDE_BOTTOM] &&
+              !style->border_style_none[CSS_BORDER_SIDE_LEFT] &&
+              !style->border_style_none[CSS_BORDER_SIDE_RIGHT];
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
+static bool test_border_color_sides(void)
+{
+    css_stylesheet_t *sheet = css_parse("div { border-color: red green blue yellow; }");
+    if (!sheet || !sheet->rules)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    const css_style_t *style = &sheet->rules->style;
+    bool ok = style->has_border_color &&
+              style->border_color_side_set[CSS_BORDER_SIDE_TOP] &&
+              style->border_color_side_set[CSS_BORDER_SIDE_RIGHT] &&
+              style->border_color_side_set[CSS_BORDER_SIDE_BOTTOM] &&
+              style->border_color_side_set[CSS_BORDER_SIDE_LEFT];
+    ok = ok && style->border_color_side[CSS_BORDER_SIDE_TOP] == video_make_color(0xFF, 0x00, 0x00);
+    ok = ok && style->border_color_side[CSS_BORDER_SIDE_RIGHT] == video_make_color(0x00, 0x80, 0x00);
+    ok = ok && style->border_color_side[CSS_BORDER_SIDE_BOTTOM] == video_make_color(0x00, 0x00, 0xFF);
+    ok = ok && style->border_color_side[CSS_BORDER_SIDE_LEFT] == video_make_color(0xFF, 0xFF, 0x00);
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
+static bool test_border_top_color_sets_side(void)
+{
+    css_stylesheet_t *sheet = css_parse("div { border-top: 2px solid red; }");
+    if (!sheet || !sheet->rules)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    const css_style_t *style = &sheet->rules->style;
+    bool ok = style->has_border_color &&
+              style->border_color_side_set[CSS_BORDER_SIDE_TOP] &&
+              style->border_color_side[CSS_BORDER_SIDE_TOP] == video_make_color(0xFF, 0x00, 0x00);
+    ok = ok && !style->border_color_side_set[CSS_BORDER_SIDE_RIGHT] &&
+              !style->border_color_side_set[CSS_BORDER_SIDE_BOTTOM] &&
+              !style->border_color_side_set[CSS_BORDER_SIDE_LEFT];
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
 int main(void)
 {
     css_case_t cases[] = {
@@ -130,6 +195,9 @@ int main(void)
         { "background-shorthand", test_background_shorthand },
         { "background-image-none", test_background_image_none },
         { "background-position", test_background_position_property },
+        { "border-style-none", test_border_style_none },
+        { "border-color-sides", test_border_color_sides },
+        { "border-top-color-sides", test_border_top_color_sets_side },
     };
 
     size_t pass = 0;

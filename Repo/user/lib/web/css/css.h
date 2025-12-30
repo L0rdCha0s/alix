@@ -138,6 +138,15 @@ typedef enum
     CSS_ALIGN_BASELINE
 } css_align_t;
 
+typedef enum
+{
+    CSS_BORDER_SIDE_TOP = 0,
+    CSS_BORDER_SIDE_RIGHT,
+    CSS_BORDER_SIDE_BOTTOM,
+    CSS_BORDER_SIDE_LEFT,
+    CSS_BORDER_SIDE_COUNT
+} css_border_side_t;
+
 typedef struct
 {
     bool has_background;
@@ -175,9 +184,14 @@ typedef struct
     css_box_t padding;
     bool has_border;
     css_box_t border_width;
+    bool has_border_style;
+    bool border_style_none[CSS_BORDER_SIDE_COUNT];
     bool has_border_color;
     video_color_t border_color;
     bool border_transparent;
+    bool border_color_side_set[CSS_BORDER_SIDE_COUNT];
+    video_color_t border_color_side[CSS_BORDER_SIDE_COUNT];
+    bool border_color_side_transparent[CSS_BORDER_SIDE_COUNT];
     bool has_position;
     css_position_t position;
     bool has_z_index;
@@ -192,6 +206,7 @@ typedef struct
     css_length_t left;
     bool has_float;
     css_float_t float_mode;
+    bool float_inherit;
     bool has_clear;
     css_clear_t clear_mode;
     bool has_overflow;
@@ -208,6 +223,9 @@ typedef struct
     video_color_t text_shadow_color;
     bool has_display;
     css_display_t display;
+    bool has_content;
+    const char *content;
+    bool content_owned;
     bool has_flex_direction;
     css_flex_direction_t flex_direction;
     bool has_flex_wrap;

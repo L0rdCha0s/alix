@@ -469,6 +469,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     if (border_right < 0) border_right = 0;
     if (border_bottom < 0) border_bottom = 0;
     if (border_left < 0) border_left = 0;
+    html_view_apply_border_style_none(style, &border_top, &border_right, &border_bottom, &border_left);
 
     int content_w = 0;
     bool explicit_w = style->has_width && style->width.valid && !style->width.is_auto;
@@ -668,21 +669,17 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
 
         if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
         {
-            if (!(style->has_border_color && style->border_transparent))
-            {
-                video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
-                html_view_draw_border_sides_clipped(ctx,
-                                                    border_box_x,
-                                                    draw_y,
-                                                    border_box_w,
-                                                    border_box_h,
-                                                    border_top,
-                                                    border_right,
-                                                    border_bottom,
-                                                    border_left,
-                                                    border_color,
-                                                    &ctx->clip);
-            }
+            html_view_draw_border_sides_clipped(ctx,
+                                                border_box_x,
+                                                draw_y,
+                                                border_box_w,
+                                                border_box_h,
+                                                border_top,
+                                                border_right,
+                                                border_bottom,
+                                                border_left,
+                                                style,
+                                                &ctx->clip);
         }
     }
 
@@ -889,6 +886,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
     if (layout.border_right < 0) layout.border_right = 0;
     if (layout.border_bottom < 0) layout.border_bottom = 0;
     if (layout.border_left < 0) layout.border_left = 0;
+    html_view_apply_border_style_none(style, &layout.border_top, &layout.border_right, &layout.border_bottom, &layout.border_left);
 
     layout.content_w = ctx->body_w;
     if (style->has_width && style->width.valid && !style->width.is_auto)
@@ -1227,6 +1225,11 @@ void html_view_render_table(html_view_ctx_t *ctx,
                 if (cell->border_right < 0) cell->border_right = 0;
                 if (cell->border_bottom < 0) cell->border_bottom = 0;
                 if (cell->border_left < 0) cell->border_left = 0;
+                html_view_apply_border_style_none(&cell->style,
+                                                  &cell->border_top,
+                                                  &cell->border_right,
+                                                  &cell->border_bottom,
+                                                  &cell->border_left);
             }
 
             cell->content_x = cell->x + cell->border_left + cell->pad_left;
@@ -1312,22 +1315,18 @@ void html_view_render_table(html_view_ctx_t *ctx,
 
         if (style->has_border && (layout.border_top > 0 || layout.border_right > 0 || layout.border_bottom > 0 || layout.border_left > 0))
         {
-            if (!(style->has_border_color && style->border_transparent))
-            {
-                video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
-                int draw_y = html_view_draw_y(ctx, layout.table_y);
-                html_view_draw_border_sides_clipped(ctx,
-                                                    layout.table_x,
-                                                    draw_y,
-                                                    table_box_w,
-                                                    layout.table_h,
-                                                    layout.border_top,
-                                                    layout.border_right,
-                                                    layout.border_bottom,
-                                                    layout.border_left,
-                                                    border_color,
-                                                    &ctx->clip);
-            }
+            int draw_y = html_view_draw_y(ctx, layout.table_y);
+            html_view_draw_border_sides_clipped(ctx,
+                                                layout.table_x,
+                                                draw_y,
+                                                table_box_w,
+                                                layout.table_h,
+                                                layout.border_top,
+                                                layout.border_right,
+                                                layout.border_bottom,
+                                                layout.border_left,
+                                                style,
+                                                &ctx->clip);
         }
 
         for (size_t r = 0; r < layout.row_count; ++r)
@@ -1348,21 +1347,17 @@ void html_view_render_table(html_view_ctx_t *ctx,
                 }
                 if (cell->style.has_border && (cell->border_top > 0 || cell->border_right > 0 || cell->border_bottom > 0 || cell->border_left > 0))
                 {
-                    if (!(cell->style.has_border_color && cell->style.border_transparent))
-                    {
-                        video_color_t border_color = cell->style.has_border_color ? cell->style.border_color : video_make_color(0x00, 0x00, 0x00);
-                        html_view_draw_border_sides_clipped(ctx,
-                                                            cell->x,
-                                                            cell_draw_y,
-                                                            cell->w,
-                                                            cell->h,
-                                                            cell->border_top,
-                                                            cell->border_right,
-                                                            cell->border_bottom,
-                                                            cell->border_left,
-                                                            border_color,
-                                                            &ctx->clip);
-                    }
+                    html_view_draw_border_sides_clipped(ctx,
+                                                        cell->x,
+                                                        cell_draw_y,
+                                                        cell->w,
+                                                        cell->h,
+                                                        cell->border_top,
+                                                        cell->border_right,
+                                                        cell->border_bottom,
+                                                        cell->border_left,
+                                                        &cell->style,
+                                                        &ctx->clip);
                 }
 
                 html_view_ctx_t inner = *ctx;

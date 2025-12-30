@@ -197,6 +197,60 @@ static bool test_line_height_length_px(void)
     return lh == 18;
 }
 
+static bool test_border_style_none_zeroes_width(void)
+{
+    html_view_ctx_t ctx = {0};
+    ctx.viewport_w = 800;
+    ctx.viewport_h = 600;
+    ctx.body_w = 800;
+    ctx.base_font_px = 16;
+
+    css_style_t style = {0};
+    style.has_border = true;
+    style.has_border_style = true;
+    style.border_style_none[CSS_BORDER_SIDE_TOP] = true;
+    style.border_style_none[CSS_BORDER_SIDE_BOTTOM] = true;
+    style.border_style_none[CSS_BORDER_SIDE_LEFT] = false;
+    style.border_style_none[CSS_BORDER_SIDE_RIGHT] = false;
+    style.border_width.top = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 2000, .unit = CSS_UNIT_PX };
+    style.border_width.right = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 2000, .unit = CSS_UNIT_PX };
+    style.border_width.bottom = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 2000, .unit = CSS_UNIT_PX };
+    style.border_width.left = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 2000, .unit = CSS_UNIT_PX };
+
+    int top = html_view_length_to_px(&style.border_width.top,
+                                     ctx.viewport_w,
+                                     ctx.viewport_h,
+                                     ctx.body_w,
+                                     ctx.viewport_h,
+                                     ctx.base_font_px,
+                                     false);
+    int right = html_view_length_to_px(&style.border_width.right,
+                                       ctx.viewport_w,
+                                       ctx.viewport_h,
+                                       ctx.body_w,
+                                       ctx.viewport_h,
+                                       ctx.base_font_px,
+                                       true);
+    int bottom = html_view_length_to_px(&style.border_width.bottom,
+                                        ctx.viewport_w,
+                                        ctx.viewport_h,
+                                        ctx.body_w,
+                                        ctx.viewport_h,
+                                        ctx.base_font_px,
+                                        false);
+    int left = html_view_length_to_px(&style.border_width.left,
+                                      ctx.viewport_w,
+                                      ctx.viewport_h,
+                                      ctx.body_w,
+                                      ctx.viewport_h,
+                                      ctx.base_font_px,
+                                      true);
+
+    html_view_apply_border_style_none(&style, &top, &right, &bottom, &left);
+
+    return top == 0 && bottom == 0 && right == 2 && left == 2;
+}
+
 static bool test_height_percent_requires_basis(void)
 {
     html_view_ctx_t ctx = {0};
@@ -415,7 +469,7 @@ static bool test_link_pseudo_class(void)
     return out.has_color && out.color == video_make_color(0x00, 0x00, 0xFF);
 }
 
-static bool test_pseudo_element_ignored(void)
+static bool test_pseudo_element_style(void)
 {
     html_parse_error_t err = {0};
     html_document_t *doc = html_parse("<div class=\"nose\"><div id=\"child\"></div></div>", &err);
@@ -431,7 +485,7 @@ static bool test_pseudo_element_ignored(void)
         return false;
     }
 
-    const char *css = ".nose div:before { background: yellow; }";
+    const char *css = ".nose div:before { background: yellow; content: ''; border-top: 1px solid red; }";
     css_stylesheet_t *sheet = css_parse(css);
     if (!sheet)
     {
@@ -440,12 +494,21 @@ static bool test_pseudo_element_ignored(void)
     }
 
     css_style_t parent = {0};
+    css_style_t base = {0};
+    html_view_style_for_node(&base, sheet, &parent, child);
+
     css_style_t out = {0};
-    html_view_style_for_node(&out, sheet, &parent, child);
+    bool has_pseudo = html_view_style_for_pseudo(&out, sheet, &base, child, HTML_VIEW_PSEUDO_BEFORE);
 
     css_stylesheet_destroy(sheet);
     html_document_destroy(doc);
-    return !out.has_background;
+    bool ok = has_pseudo &&
+              out.has_background &&
+              out.background == video_make_color(0xFF, 0xFF, 0x00) &&
+              out.has_content &&
+              out.border_color_side_set[CSS_BORDER_SIDE_TOP] &&
+              out.border_color_side[CSS_BORDER_SIDE_TOP] == video_make_color(0xFF, 0x00, 0x00);
+    return ok;
 }
 
 static bool test_inline_background_style(void)
@@ -490,6 +553,47 @@ static bool test_inline_background_style(void)
     return ok;
 }
 
+static bool test_float_inherit(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse("<span id=\"parent\"><em id=\"child\"></em></span>", &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *parent_node = find_node_by_id(doc->root, "parent");
+    const html_node_t *child_node = find_node_by_id(doc->root, "child");
+    if (!parent_node || !child_node)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    const char *css = "span { float: right; } em { float: inherit; }";
+    css_stylesheet_t *sheet = css_parse(css);
+    if (!sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_style_t root = {0};
+    css_style_t parent_style = {0};
+    html_view_style_for_node(&parent_style, sheet, &root, parent_node);
+
+    css_style_t child_style = {0};
+    html_view_style_for_node(&child_style, sheet, &parent_style, child_node);
+
+    bool ok = parent_style.has_float && parent_style.float_mode == CSS_FLOAT_RIGHT;
+    ok = ok && child_style.has_float && child_style.float_mode == CSS_FLOAT_RIGHT;
+    ok = ok && !child_style.float_inherit;
+
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+    return ok;
+}
+
 typedef struct
 {
     const char *name;
@@ -502,6 +606,7 @@ int main(void)
         { "table-cell-align-left", test_table_cell_alignment },
         { "table-header-align-center", test_table_header_alignment },
         { "line-height-length-px", test_line_height_length_px },
+        { "border-style-none-zeroes", test_border_style_none_zeroes_width },
         { "height-percent-requires-basis", test_height_percent_requires_basis },
         { "height-percent-with-basis", test_height_percent_with_basis },
         { "height-px-without-basis", test_height_px_without_basis },
@@ -509,8 +614,9 @@ int main(void)
         { "adjacent-sibling-selector", test_adjacent_sibling_selector },
         { "child-descendant-selector", test_child_and_descendant_selectors },
         { "link-pseudo-class", test_link_pseudo_class },
-        { "pseudo-element-ignored", test_pseudo_element_ignored },
+        { "pseudo-element-style", test_pseudo_element_style },
         { "inline-background-style", test_inline_background_style },
+        { "float-inherit", test_float_inherit },
     };
 
     size_t pass = 0;

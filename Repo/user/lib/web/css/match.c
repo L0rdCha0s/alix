@@ -92,11 +92,25 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
         dst->has_border = true;
         dst->border_width = src->border_width;
     }
+    if (src->has_border_style)
+    {
+        dst->has_border_style = true;
+        memcpy(dst->border_style_none, src->border_style_none, sizeof(dst->border_style_none));
+    }
     if (src->has_border_color)
     {
         dst->has_border_color = true;
         dst->border_color = src->border_color;
         dst->border_transparent = src->border_transparent;
+    }
+    for (size_t i = 0; i < sizeof(dst->border_color_side_set) / sizeof(dst->border_color_side_set[0]); ++i)
+    {
+        if (src->border_color_side_set[i])
+        {
+            dst->border_color_side_set[i] = true;
+            dst->border_color_side[i] = src->border_color_side[i];
+            dst->border_color_side_transparent[i] = src->border_color_side_transparent[i];
+        }
     }
     if (src->has_position)
     {
@@ -132,6 +146,7 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_float = true;
         dst->float_mode = src->float_mode;
+        dst->float_inherit = src->float_inherit;
     }
     if (src->has_clear)
     {
@@ -169,6 +184,12 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_display = true;
         dst->display = src->display;
+    }
+    if (src->has_content)
+    {
+        dst->has_content = true;
+        dst->content = src->content;
+        dst->content_owned = false;
     }
     if (src->has_flex_direction)
     {

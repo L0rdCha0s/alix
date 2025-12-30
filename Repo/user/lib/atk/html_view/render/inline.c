@@ -190,6 +190,7 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
         if (border_right < 0) border_right = 0;
         if (border_bottom < 0) border_bottom = 0;
         if (border_left < 0) border_left = 0;
+        html_view_apply_border_style_none(style, &border_top, &border_right, &border_bottom, &border_left);
 
         int content_w = img->width;
         int content_h = img->height;
@@ -243,21 +244,17 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
 
         if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
         {
-            if (!(style->has_border_color && style->border_transparent))
-            {
-                video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
-                html_view_draw_border_sides_clipped(ctx,
-                                                    draw_x,
-                                                    draw_y,
-                                                    box_w,
-                                                    box_h,
-                                                    border_top,
-                                                    border_right,
-                                                    border_bottom,
-                                                    border_left,
-                                                    border_color,
-                                                    &ctx->clip);
-            }
+            html_view_draw_border_sides_clipped(ctx,
+                                                draw_x,
+                                                draw_y,
+                                                box_w,
+                                                box_h,
+                                                border_top,
+                                                border_right,
+                                                border_bottom,
+                                                border_left,
+                                                style,
+                                                &ctx->clip);
         }
 
         int content_x = draw_x + border_left + pad_left;
