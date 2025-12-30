@@ -81,7 +81,7 @@ void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
             op.w = w;
             op.h = h;
             op.color = color;
-            op.z_index = ctx->z_index;
+            op.z_index = html_view_effective_z_index(ctx);
             op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
@@ -315,7 +315,7 @@ void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
             op.pixels = pixels;
             op.stride_bytes = stride_bytes;
             op.href = ctx->active_href;
-            op.z_index = ctx->z_index;
+            op.z_index = html_view_effective_z_index(ctx);
             op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
@@ -1036,7 +1036,7 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
             op.text_len = (uint32_t)len;
             op.text_owned = false;
             op.href = ctx->active_href;
-            op.z_index = ctx->z_index;
+            op.z_index = html_view_effective_z_index(ctx);
             op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
@@ -1184,7 +1184,7 @@ void html_view_place_inline_control(html_view_ctx_t *ctx,
                 op.w = width;
                 op.h = height;
                 op.widget = child;
-                op.z_index = ctx->z_index;
+                op.z_index = html_view_effective_z_index(ctx);
                 op.fixed = ctx->fixed_mode;
                 if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
                 {
@@ -1248,7 +1248,7 @@ void html_view_place_block_control(html_view_ctx_t *ctx,
                 op.w = width;
                 op.h = height;
                 op.widget = child;
-                op.z_index = ctx->z_index;
+                op.z_index = html_view_effective_z_index(ctx);
                 op.fixed = ctx->fixed_mode;
                 if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
                 {

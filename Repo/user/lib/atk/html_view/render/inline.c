@@ -54,15 +54,26 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
     const char *tag = node->name;
     if (strcmp(tag, "b") == 0 || strcmp(tag, "strong") == 0)
     {
+        html_view_paint_layer_t saved_layer = ctx->paint_layer;
+        if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
+        {
+            ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
+        }
         bool saved_bold = ctx->text_bold;
         ctx->text_bold = true;
         html_view_render_children(ctx, node, style);
         ctx->text_bold = saved_bold;
+        ctx->paint_layer = saved_layer;
         return true;
     }
 
     if (strcmp(tag, "a") == 0)
     {
+        html_view_paint_layer_t saved_layer = ctx->paint_layer;
+        if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
+        {
+            ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
+        }
         bool saved_underline = ctx->text_underline;
         const char *saved_href = ctx->active_href;
         const char *href = html_attr_get(node, "href");
@@ -85,6 +96,7 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
         }
         ctx->text_underline = saved_underline;
         ctx->active_href = saved_href;
+        ctx->paint_layer = saved_layer;
         return true;
     }
 
@@ -232,6 +244,12 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
             html_view_new_line(ctx);
         }
 
+        html_view_paint_layer_t saved_layer = ctx->paint_layer;
+        if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
+        {
+            ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
+        }
+
         int draw_x = ctx->x;
         int doc_y = ctx->y + ctx->line_height - box_h;
         int draw_y = html_view_draw_y(ctx, doc_y);
@@ -275,6 +293,7 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
         }
         ctx->pending_space = true;
         html_view_ensure_line_visible(ctx);
+        ctx->paint_layer = saved_layer;
         return true;
     }
 

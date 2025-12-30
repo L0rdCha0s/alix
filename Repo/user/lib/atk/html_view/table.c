@@ -107,11 +107,12 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
         return 0;
     }
 
+    html_view_float_ctx_t floats = {0};
     html_view_ctx_t measure = *ctx;
     measure.draw = false;
     measure.record = false;
     measure.record_failed = false;
-    measure.floats = NULL;
+    measure.floats = &floats;
     measure.style_block = NULL;
     measure.style_depth = 0;
     measure.body_x = 0;
@@ -332,6 +333,9 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     {
         return;
     }
+
+    html_view_paint_layer_t saved_layer = ctx->paint_layer;
+    ctx->paint_layer = HTML_VIEW_PAINT_LAYER_FLOAT;
 
     if (ctx->x != ctx->body_x)
     {
@@ -659,6 +663,12 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     int border_box_y = place_y + margin_top;
     int draw_y = html_view_draw_y(ctx, border_box_y);
 
+    int measure_edge = (ctx->draw || ctx->record) ? (border_box_x + border_box_w) : (ctx->body_x + outer_w);
+    if (measure_edge > ctx->measure_max_x)
+    {
+        ctx->measure_max_x = measure_edge;
+    }
+
     if (ctx->draw || ctx->record)
     {
         if (style->has_background && !style->background_transparent)
@@ -737,6 +747,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     ctx->line_start_y = saved_line_start_y;
     ctx->height_basis = saved_height_basis;
     ctx->height_basis_valid = saved_height_basis_valid;
+    ctx->paint_layer = saved_layer;
 }
 
 void html_view_render_table(html_view_ctx_t *ctx,

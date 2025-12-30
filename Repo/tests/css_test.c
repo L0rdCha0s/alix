@@ -88,6 +88,29 @@ static bool test_background_shorthand(void)
     return ok;
 }
 
+static bool test_background_shorthand_fixed_first(void)
+{
+    css_stylesheet_t *sheet = css_parse("div { background: fixed url(foo.png) 1px 0; }");
+    if (!sheet || !sheet->rules)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    const css_style_t *style = &sheet->rules->style;
+    bool ok = style->has_background_image &&
+              style->background_image &&
+              strcmp(style->background_image, "foo.png") == 0;
+    ok = ok && style->has_background_attachment &&
+         style->background_attachment == CSS_BACKGROUND_ATTACHMENT_FIXED;
+    ok = ok && style->has_background_position &&
+         css_length_is(&style->background_pos_x, 1000, CSS_UNIT_PX) &&
+         css_length_is(&style->background_pos_y, 0, CSS_UNIT_NONE);
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
 static bool test_background_image_none(void)
 {
     css_stylesheet_t *sheet = css_parse("div { background-image: none; }");
@@ -193,6 +216,7 @@ int main(void)
         { "display-table", test_display_table },
         { "z-index", test_z_index },
         { "background-shorthand", test_background_shorthand },
+        { "background-shorthand-fixed-first", test_background_shorthand_fixed_first },
         { "background-image-none", test_background_image_none },
         { "background-position", test_background_position_property },
         { "border-style-none", test_border_style_none },

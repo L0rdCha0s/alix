@@ -643,6 +643,11 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
 
             int draw_top = html_view_draw_y(ctx, ctx->y);
             int baseline = html_view_baseline_for_rect(ctx, draw_top, ctx->line_height);
+            html_view_paint_layer_t saved_layer = ctx->paint_layer;
+            if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
+            {
+                ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
+            }
 
             if (ctx->record)
             {
@@ -689,7 +694,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                             shadow_op.text_len = (uint32_t)owned_len;
                             shadow_op.text_owned = false;
                             shadow_op.fixed = ctx->fixed_mode;
-                            shadow_op.z_index = ctx->z_index;
+                            shadow_op.z_index = html_view_effective_z_index(ctx);
                             if (!html_view_render_cache_push_op(cache, &shadow_op, cache->tile_h))
                             {
                                 ctx->record_failed = true;
@@ -717,7 +722,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                             main_op.text_len = (uint32_t)owned_len;
                             main_op.text_owned = false;
                             main_op.fixed = ctx->fixed_mode;
-                            main_op.z_index = ctx->z_index;
+                            main_op.z_index = html_view_effective_z_index(ctx);
                             if (!html_view_render_cache_push_op(cache, &main_op, cache->tile_h))
                             {
                                 ctx->record_failed = true;
@@ -760,6 +765,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                 html_view_draw_string_clipped(ctx, draw_x + 1, baseline, text, color, &ctx->clip);
             }
 
+            ctx->paint_layer = saved_layer;
             ctx->x = ctx->body_x;
             ctx->pending_space = false;
             html_view_ensure_line_visible(ctx);

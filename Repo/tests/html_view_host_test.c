@@ -594,6 +594,37 @@ static bool test_float_inherit(void)
     return ok;
 }
 
+static bool test_float_measure_width(void)
+{
+    html_view_ctx_t ctx = {0};
+    ctx.viewport_w = 200;
+    ctx.viewport_h = 200;
+    ctx.body_w = 200;
+    ctx.max_x = 200;
+    ctx.actual_font_px = 16;
+    ctx.base_font_px = 16;
+    ctx.base_line_height = 16;
+    ctx.line_height = 16;
+    ctx.paint_layer = HTML_VIEW_PAINT_LAYER_BLOCK;
+
+    css_style_t style = {0};
+    style.has_float = true;
+    style.float_mode = CSS_FLOAT_RIGHT;
+    style.has_width = true;
+    style.width.valid = true;
+    style.width.is_auto = false;
+    style.width.value_milli = 40000;
+    style.width.unit = CSS_UNIT_PX;
+
+    html_node_t node = {0};
+    node.type = HTML_NODE_ELEMENT;
+    node.name = (char *)"div";
+
+    html_view_render_float_box(&ctx, &node, &style, CSS_FLOAT_RIGHT);
+
+    return ctx.measure_max_x >= 40;
+}
+
 typedef struct
 {
     const char *name;
@@ -617,6 +648,7 @@ int main(void)
         { "pseudo-element-style", test_pseudo_element_style },
         { "inline-background-style", test_inline_background_style },
         { "float-inherit", test_float_inherit },
+        { "float-measure-width", test_float_measure_width },
     };
 
     size_t pass = 0;

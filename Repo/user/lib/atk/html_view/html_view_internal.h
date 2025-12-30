@@ -265,6 +265,18 @@ typedef struct
     size_t count;
 } html_view_float_ctx_t;
 
+typedef enum
+{
+    HTML_VIEW_PAINT_LAYER_BLOCK = 0,
+    HTML_VIEW_PAINT_LAYER_FLOAT = 1,
+    HTML_VIEW_PAINT_LAYER_INLINE = 2,
+} html_view_paint_layer_t;
+
+enum
+{
+    HTML_VIEW_Z_INDEX_STRIDE = 4
+};
+
 typedef struct html_view_style_block
 {
     css_style_t styles[64];
@@ -318,6 +330,7 @@ typedef struct
     const char *active_href;
     bool pending_space;
     int32_t z_index;
+    html_view_paint_layer_t paint_layer;
     bool draw;
     bool record;
     bool record_failed;
@@ -336,6 +349,15 @@ typedef struct
     int line_height;
     int space_w;
 } html_view_font_scope_t;
+
+static inline int32_t html_view_effective_z_index(const html_view_ctx_t *ctx)
+{
+    if (!ctx)
+    {
+        return 0;
+    }
+    return ctx->z_index * HTML_VIEW_Z_INDEX_STRIDE + (int32_t)ctx->paint_layer;
+}
 
 static inline int html_view_draw_y(const html_view_ctx_t *ctx, int doc_y)
 {

@@ -198,7 +198,13 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
             return;
         }
         video_color_t color = parent_style->has_color ? parent_style->color : video_make_color(0x00, 0x00, 0x00);
+        html_view_paint_layer_t saved_layer = ctx->paint_layer;
+        if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
+        {
+            ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
+        }
         html_view_draw_text(ctx, node->text, color, ctx->text_underline, ctx->text_bold);
+        ctx->paint_layer = saved_layer;
         return;
     }
 
