@@ -533,10 +533,23 @@ static bool css_serialize_style(sb_t *sb, const css_style_t *style, int depth)
     }
     if (style->has_border_color)
     {
-        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "border-color: ") ||
-            !css_append_color(sb, style->border_color) || !sb_append_char(sb, '\n'))
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "border-color: "))
         {
             return false;
+        }
+        if (style->border_transparent)
+        {
+            if (!sb_append_cstr(sb, "transparent") || !sb_append_char(sb, '\n'))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (!css_append_color(sb, style->border_color) || !sb_append_char(sb, '\n'))
+            {
+                return false;
+            }
         }
     }
     if (style->has_float)
@@ -2018,6 +2031,10 @@ static const parse_case_t css_cases[] = {
              "p { color: grey; }",
              "selector: p\n"
              "  color: #808080\n"),
+    CSS_CASE("css/current", "color-yellow", true,
+             "p { color: yellow; }",
+             "selector: p\n"
+             "  color: #FFFF00\n"),
     CSS_CASE("css/current", "color-hex3", true,
              "p { color: #abc; }",
              "selector: p\n"
@@ -2038,6 +2055,26 @@ static const parse_case_t css_cases[] = {
              "p { color: rgb(50%,0%,0%); }",
              "selector: p\n"
              "  color: #7F0000\n"),
+    CSS_CASE("css/current", "color-navy", true,
+             "p { color: navy; }",
+             "selector: p\n"
+             "  color: #000080\n"),
+    CSS_CASE("css/current", "color-maroon", true,
+             "p { color: maroon; }",
+             "selector: p\n"
+             "  color: #800000\n"),
+    CSS_CASE("css/current", "color-purple", true,
+             "p { color: purple; }",
+             "selector: p\n"
+             "  color: #800080\n"),
+    CSS_CASE("css/current", "color-orange", true,
+             "p { color: orange; }",
+             "selector: p\n"
+             "  color: #FFA500\n"),
+    CSS_CASE("css/current", "color-pink", true,
+             "p { color: pink; }",
+             "selector: p\n"
+             "  color: #FFC0CB\n"),
     CSS_CASE("css/current", "background-color-alias", true,
              "p { background-color: blue; }",
              "selector: p\n"
@@ -2095,6 +2132,15 @@ static const parse_case_t css_cases[] = {
              "selector: p\n"
              "  border-width: 2px 2px 2px 2px\n"
              "  border-color: #0000FF\n"),
+    CSS_CASE("css/current", "border-color-transparent", true,
+             "p { border-color: transparent; }",
+             "selector: p\n"
+             "  border-color: transparent\n"),
+    CSS_CASE("css/current", "border-shorthand-transparent", true,
+             "p { border: 2px solid transparent; }",
+             "selector: p\n"
+             "  border-width: 2px 2px 2px 2px\n"
+             "  border-color: transparent\n"),
     CSS_CASE("css/current", "border-shorthand-width-only", true,
              "p { border: 2px; }",
              "selector: p\n"
@@ -2163,7 +2209,7 @@ static const parse_case_t css_cases[] = {
              "p { foo: bar; }",
              "selector: p\n"),
     CSS_CASE("css/current", "unknown-color-ignored", true,
-             "p { color: purple; }",
+             "p { color: magenta; }",
              "selector: p\n"),
     CSS_CASE("css/current", "missing-semicolon-ok", true,
              "p { color: red }",

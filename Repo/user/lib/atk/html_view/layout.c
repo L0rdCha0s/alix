@@ -22,11 +22,12 @@ void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
             html_view_render_cache_t *cache = &ctx->priv->render_cache;
             html_view_op_t op = {0};
             op.kind = HTML_VIEW_OP_RECT;
-            op.x = x - ctx->doc_origin_x;
-            op.y = (y + ctx->priv->scroll_y) - ctx->doc_origin_y;
+            op.x = html_view_record_x(ctx, x);
+            op.y = html_view_record_y(ctx, y);
             op.w = w;
             op.h = h;
             op.color = color;
+            op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
                 ctx->record_failed = true;
@@ -117,13 +118,14 @@ void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
             html_view_render_cache_t *cache = &ctx->priv->render_cache;
             html_view_op_t op = {0};
             op.kind = HTML_VIEW_OP_IMAGE;
-            op.x = dst_x - ctx->doc_origin_x;
-            op.y = (dst_y + ctx->priv->scroll_y) - ctx->doc_origin_y;
+            op.x = html_view_record_x(ctx, dst_x);
+            op.y = html_view_record_y(ctx, dst_y);
             op.w = width;
             op.h = height;
             op.pixels = pixels;
             op.stride_bytes = stride_bytes;
             op.href = ctx->active_href;
+            op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
                 ctx->record_failed = true;
@@ -238,6 +240,23 @@ void html_view_align_current_line(html_view_ctx_t *ctx)
     ctx->line_op_start = end;
 }
 
+void html_view_flush_underline_run(html_view_ctx_t *ctx)
+{
+    if (!ctx || !ctx->underline_run_active)
+    {
+        return;
+    }
+
+    int start_x = ctx->underline_run_start_x;
+    int end_x = ctx->x;
+    if (end_x > start_x)
+    {
+        int underline_y = html_view_draw_y(ctx, ctx->y) + ctx->line_height - 3;
+        html_view_draw_rect_clipped(ctx, start_x, underline_y, end_x - start_x, 1, ctx->underline_run_color, &ctx->clip);
+    }
+    ctx->underline_run_active = false;
+}
+
 void html_view_new_line(html_view_ctx_t *ctx)
 {
     if (!ctx)
@@ -245,6 +264,7 @@ void html_view_new_line(html_view_ctx_t *ctx)
         return;
     }
 
+    html_view_flush_underline_run(ctx);
     html_view_align_current_line(ctx);
 
     ctx->x = ctx->body_x;
@@ -287,7 +307,7 @@ bool html_view_line_visible(const html_view_ctx_t *ctx)
     {
         return false;
     }
-    int draw_top = ctx->y - ctx->priv->scroll_y;
+    int draw_top = html_view_draw_y(ctx, ctx->y);
     int draw_bottom = draw_top + ctx->line_height;
     int clip_y0 = ctx->clip.y;
     int clip_y1 = ctx->clip.y + ctx->clip.height;
@@ -477,6 +497,14 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
 
     int w = html_view_text_width(ctx, text);
 
+    if (!underline && ctx->underline_run_active)
+    {
+        html_view_flush_underline_run(ctx);
+    }
+
+    int space_w = 0;
+    bool placed_space = false;
+
     if (ctx->pending_space && ctx->x != ctx->body_x)
     {
         if (ctx->x + ctx->space_w + w > ctx->max_x)
@@ -485,12 +513,9 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
         }
         else
         {
-            if (underline && ctx->space_w > 0)
-            {
-                int underline_y = (ctx->y - ctx->priv->scroll_y) + ctx->line_height - 3;
-                html_view_draw_rect_clipped(ctx, ctx->x, underline_y, ctx->space_w, 1, color, &ctx->clip);
-            }
-            ctx->x += ctx->space_w;
+            space_w = ctx->space_w;
+            ctx->x += space_w;
+            placed_space = true;
         }
     }
     else if (ctx->x != ctx->body_x && ctx->x + w > ctx->max_x)
@@ -499,8 +524,22 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
     }
 
     int draw_x = ctx->x;
-    int draw_top = ctx->y - ctx->priv->scroll_y;
+    int draw_top = html_view_draw_y(ctx, ctx->y);
     int baseline = html_view_baseline_for_rect(ctx, draw_top, ctx->line_height);
+
+    if (underline)
+    {
+        if (ctx->underline_run_active && ctx->underline_run_color != color)
+        {
+            html_view_flush_underline_run(ctx);
+        }
+        if (!ctx->underline_run_active)
+        {
+            ctx->underline_run_active = true;
+            ctx->underline_run_color = color;
+            ctx->underline_run_start_x = placed_space ? (draw_x - space_w) : draw_x;
+        }
+    }
 
     if (ctx->record)
     {
@@ -509,8 +548,8 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
             html_view_render_cache_t *cache = &ctx->priv->render_cache;
             html_view_op_t op = {0};
             op.kind = HTML_VIEW_OP_TEXT;
-            op.x = draw_x - ctx->doc_origin_x;
-            op.y = (draw_top + ctx->priv->scroll_y) - ctx->doc_origin_y;
+            op.x = html_view_record_x(ctx, draw_x);
+            op.y = html_view_record_y(ctx, draw_top);
             op.w = w;
             op.h = ctx->line_height;
             op.baseline_off = (int16_t)(baseline - draw_top);
@@ -520,6 +559,7 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
             op.text_len = (uint32_t)len;
             op.text_owned = false;
             op.href = ctx->active_href;
+            op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
                 ctx->record_failed = true;
@@ -531,11 +571,6 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
                 (void)html_view_render_cache_push_op(cache, &bold_op, cache->tile_h);
             }
         }
-        if (underline)
-        {
-            int underline_y = draw_top + ctx->line_height - 3;
-            html_view_draw_rect_clipped(ctx, draw_x, underline_y, w, 1, color, &ctx->clip);
-        }
     }
     else if (ctx->draw && html_view_line_visible(ctx))
     {
@@ -543,16 +578,6 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
         if (bold)
         {
             html_view_draw_string_clipped(ctx, draw_x + 1, baseline, text, color, &ctx->clip);
-        }
-        if (underline)
-        {
-            int underline_y = draw_top + ctx->line_height - 3;
-            int clip_y0 = ctx->clip.y;
-            int clip_y1 = ctx->clip.y + ctx->clip.height;
-            if (underline_y >= clip_y0 && underline_y < clip_y1)
-            {
-                html_view_draw_rect_clipped(ctx, draw_x, underline_y, w, 1, color, &ctx->clip);
-            }
         }
     }
 
@@ -666,7 +691,7 @@ void html_view_place_inline_control(html_view_ctx_t *ctx,
     }
 
     int abs_x = ctx->x;
-    int abs_y = ctx->y - ctx->priv->scroll_y;
+    int abs_y = html_view_draw_y(ctx, ctx->y);
     if (child)
     {
         if (ctx->record)
@@ -676,11 +701,12 @@ void html_view_place_inline_control(html_view_ctx_t *ctx,
                 html_view_render_cache_t *cache = &ctx->priv->render_cache;
                 html_view_op_t op = {0};
                 op.kind = HTML_VIEW_OP_CONTROL;
-                op.x = abs_x - ctx->doc_origin_x;
-                op.y = (abs_y + ctx->priv->scroll_y) - ctx->doc_origin_y;
+                op.x = html_view_record_x(ctx, abs_x);
+                op.y = html_view_record_y(ctx, abs_y);
                 op.w = width;
                 op.h = height;
                 op.widget = child;
+                op.fixed = ctx->fixed_mode;
                 if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
                 {
                     ctx->record_failed = true;
@@ -728,7 +754,7 @@ void html_view_place_block_control(html_view_ctx_t *ctx,
     }
 
     int abs_x = ctx->body_x;
-    int abs_y = ctx->y - ctx->priv->scroll_y;
+    int abs_y = html_view_draw_y(ctx, ctx->y);
     if (child)
     {
         if (ctx->record)
@@ -738,11 +764,12 @@ void html_view_place_block_control(html_view_ctx_t *ctx,
                 html_view_render_cache_t *cache = &ctx->priv->render_cache;
                 html_view_op_t op = {0};
                 op.kind = HTML_VIEW_OP_CONTROL;
-                op.x = abs_x - ctx->doc_origin_x;
-                op.y = (abs_y + ctx->priv->scroll_y) - ctx->doc_origin_y;
+                op.x = html_view_record_x(ctx, abs_x);
+                op.y = html_view_record_y(ctx, abs_y);
                 op.w = width;
                 op.h = height;
                 op.widget = child;
+                op.fixed = ctx->fixed_mode;
                 if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
                 {
                     ctx->record_failed = true;

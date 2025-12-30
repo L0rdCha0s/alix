@@ -145,6 +145,7 @@ typedef struct
     int16_t font_px;
     const video_color_t *pixels;
     int stride_bytes;
+    bool fixed;
     atk_widget_t *widget;
 } html_view_op_t;
 
@@ -182,6 +183,9 @@ typedef struct
     html_view_op_t *ops;
     size_t op_count;
     size_t op_cap;
+    size_t *fixed_ops;
+    size_t fixed_count;
+    size_t fixed_cap;
     html_view_anchor_t *anchors;
     size_t anchor_count;
     size_t anchor_cap;
@@ -195,6 +199,7 @@ typedef struct
     atk_list_node_t *child_node;
     atk_widget_t *scrollbar;
     int scrollbar_width;
+    bool scrollbar_hidden;
     int scroll_y;
     int content_height;
     int last_width;
@@ -275,6 +280,10 @@ typedef struct
     int window_y;
     int body_x;
     int body_w;
+    int pos_x;
+    int pos_y;
+    int pos_w;
+    int pos_h;
     html_view_float_ctx_t *floats;
     int actual_font_px;
     int base_font_px;
@@ -293,11 +302,15 @@ typedef struct
     int line_start_y;
     bool text_underline;
     bool text_bold;
+    bool underline_run_active;
+    int underline_run_start_x;
+    video_color_t underline_run_color;
     const char *active_href;
     bool pending_space;
     bool draw;
     bool record;
     bool record_failed;
+    bool fixed_mode;
     int doc_origin_x;
     int doc_origin_y;
     html_view_style_block_t *style_block;
@@ -311,6 +324,37 @@ typedef struct
     int line_height;
     int space_w;
 } html_view_font_scope_t;
+
+static inline int html_view_draw_y(const html_view_ctx_t *ctx, int doc_y)
+{
+    if (!ctx)
+    {
+        return doc_y;
+    }
+    if (ctx->fixed_mode || !ctx->priv)
+    {
+        return doc_y;
+    }
+    return doc_y - ctx->priv->scroll_y;
+}
+
+static inline int html_view_record_x(const html_view_ctx_t *ctx, int draw_x)
+{
+    if (!ctx || ctx->fixed_mode)
+    {
+        return draw_x;
+    }
+    return draw_x - ctx->doc_origin_x;
+}
+
+static inline int html_view_record_y(const html_view_ctx_t *ctx, int draw_y)
+{
+    if (!ctx || ctx->fixed_mode || !ctx->priv)
+    {
+        return draw_y;
+    }
+    return (draw_y + ctx->priv->scroll_y) - ctx->doc_origin_y;
+}
 
 atk_html_view_priv_t *html_view_priv_mut(atk_widget_t *view);
 void html_view_invalidate(const atk_widget_t *view);
@@ -368,6 +412,7 @@ void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
                                    int stride_bytes,
                                    const atk_rect_t *clip);
 void html_view_align_current_line(html_view_ctx_t *ctx);
+void html_view_flush_underline_run(html_view_ctx_t *ctx);
 void html_view_new_line(html_view_ctx_t *ctx);
 void html_view_ensure_line_visible(html_view_ctx_t *ctx);
 bool html_view_line_visible(const html_view_ctx_t *ctx);
@@ -433,6 +478,13 @@ int html_view_length_to_px(const css_length_t *len,
                            int ref_h,
                            int font_px,
                            bool horizontal);
+int html_view_length_to_px_signed(const css_length_t *len,
+                                  int viewport_w,
+                                  int viewport_h,
+                                  int ref_w,
+                                  int ref_h,
+                                  int font_px,
+                                  bool horizontal);
 int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_t *style);
 int html_view_font_px_for_style(const html_view_ctx_t *ctx, const css_style_t *style, int parent_font_px);
 void html_view_font_scope_push(html_view_ctx_t *ctx,

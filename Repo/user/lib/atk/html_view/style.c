@@ -819,6 +819,60 @@ int html_view_length_to_px(const css_length_t *len,
     }
 }
 
+int html_view_length_to_px_signed(const css_length_t *len,
+                                  int viewport_w,
+                                  int viewport_h,
+                                  int ref_w,
+                                  int ref_h,
+                                  int font_px,
+                                  bool horizontal)
+{
+    if (!len || !len->valid || len->is_auto)
+    {
+        return 0;
+    }
+
+    int32_t v = len->value_milli;
+    if (v == 0)
+    {
+        return 0;
+    }
+
+    int sign = 1;
+    if (v < 0)
+    {
+        sign = -1;
+        v = -v;
+    }
+
+    int px = 0;
+    switch (len->unit)
+    {
+        case CSS_UNIT_VW:
+            px = (int)(((int64_t)viewport_w * (int64_t)v + 50000LL) / 100000LL);
+            break;
+        case CSS_UNIT_VH:
+            px = (int)(((int64_t)viewport_h * (int64_t)v + 50000LL) / 100000LL);
+            break;
+        case CSS_UNIT_PERCENT:
+        {
+            int ref = horizontal ? ref_w : ref_h;
+            px = (int)(((int64_t)ref * (int64_t)v + 50000LL) / 100000LL);
+            break;
+        }
+        case CSS_UNIT_EM:
+            px = (int)(((int64_t)font_px * (int64_t)v + 500LL) / 1000LL);
+            break;
+        case CSS_UNIT_PX:
+        case CSS_UNIT_NONE:
+        default:
+            px = (int)((v + 500) / 1000);
+            break;
+    }
+
+    return sign * px;
+}
+
 int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_t *style)
 {
     if (!ctx)

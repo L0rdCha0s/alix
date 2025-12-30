@@ -295,6 +295,63 @@ static uint8_t *browser_decode_base64(const char *input, size_t len, size_t *out
     return out;
 }
 
+static int browser_hex_value(char ch)
+{
+    if (ch >= '0' && ch <= '9')
+    {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f')
+    {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F')
+    {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static char *browser_decode_percent(const char *input, size_t len, size_t *out_len)
+{
+    if (!input || len == 0 || !out_len)
+    {
+        return NULL;
+    }
+    if (len > BROWSER_MAX_BYTES)
+    {
+        return NULL;
+    }
+
+    char *out = (char *)malloc(len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+
+    size_t w = 0;
+    for (size_t i = 0; i < len; ++i)
+    {
+        char ch = input[i];
+        if (ch == '%' && (i + 2) < len)
+        {
+            int hi = browser_hex_value(input[i + 1]);
+            int lo = browser_hex_value(input[i + 2]);
+            if (hi >= 0 && lo >= 0)
+            {
+                out[w++] = (char)((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        out[w++] = ch;
+    }
+
+    out[w] = '\0';
+    *out_len = w;
+    return out;
+}
+
 static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, const char *url)
 {
     if (!app || !url)
@@ -383,6 +440,134 @@ static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, 
 
     browser_loader_emit_event(app, &img_ev);
     browser_debug_logf(app, "[img] data url ok bytes=%u", (unsigned)decoded_len);
+    return true;
+}
+
+static bool browser_handle_data_url_css(browser_app_t *app, uint64_t load_id, const char *url)
+{
+    if (!app || !url)
+    {
+        return false;
+    }
+    if (strncasecmp(url, "data:", 5) != 0)
+    {
+        return false;
+    }
+
+    const char *meta = url + 5;
+    const char *comma = strchr(meta, ',');
+    if (!comma)
+    {
+        browser_debug_logf(app, "[css] data url missing comma");
+        return true;
+    }
+
+    size_t meta_len = (size_t)(comma - meta);
+    const char *payload = comma + 1;
+    size_t payload_len = payload ? strlen(payload) : 0;
+
+    bool base64 = false;
+    bool is_css = false;
+
+    if (meta_len == 0)
+    {
+        is_css = true;
+    }
+    else
+    {
+        const char *cursor = meta;
+        const char *semi = browser_find_char(cursor, meta_len, ';');
+        size_t type_len = semi ? (size_t)(semi - cursor) : meta_len;
+        const char *type_start = cursor;
+        browser_trim_span(&type_start, &type_len);
+        if (type_len == 0 || browser_span_equals_ci(type_start, type_len, "text/css"))
+        {
+            is_css = true;
+        }
+
+        if (semi)
+        {
+            cursor = semi + 1;
+            while (cursor < meta + meta_len)
+            {
+                const char *next = browser_find_char(cursor, (size_t)((meta + meta_len) - cursor), ';');
+                size_t len = next ? (size_t)(next - cursor) : (size_t)((meta + meta_len) - cursor);
+                const char *tok = cursor;
+                browser_trim_span(&tok, &len);
+                if (len > 0 && browser_span_equals_ci(tok, len, "base64"))
+                {
+                    base64 = true;
+                }
+                if (!next)
+                {
+                    break;
+                }
+                cursor = next + 1;
+            }
+        }
+    }
+
+    if (!is_css)
+    {
+        browser_debug_logf(app, "[css] data url skipped (not text/css)");
+        return true;
+    }
+
+    if (!browser_load_is_active(app, load_id))
+    {
+        return true;
+    }
+
+    char *decoded = NULL;
+    size_t decoded_len = 0;
+    if (base64)
+    {
+        uint8_t *bytes = browser_decode_base64(payload, payload_len, &decoded_len);
+        if (!bytes)
+        {
+            browser_debug_logf(app, "[css] data url base64 decode failed len=%u", (unsigned)payload_len);
+            return true;
+        }
+        if (decoded_len > BROWSER_MAX_BYTES)
+        {
+            free(bytes);
+            browser_debug_logf(app, "[css] data url skipped (too large)");
+            return true;
+        }
+        decoded = (char *)malloc(decoded_len + 1);
+        if (!decoded)
+        {
+            free(bytes);
+            browser_debug_logf(app, "[css] data url out of memory");
+            return true;
+        }
+        memcpy(decoded, bytes, decoded_len);
+        decoded[decoded_len] = '\0';
+        free(bytes);
+    }
+    else
+    {
+        decoded = browser_decode_percent(payload, payload_len, &decoded_len);
+        if (!decoded)
+        {
+            browser_debug_logf(app, "[css] data url decode failed len=%u", (unsigned)payload_len);
+            return true;
+        }
+    }
+
+    if (!browser_load_is_active(app, load_id))
+    {
+        free(decoded);
+        return true;
+    }
+
+    browser_ui_event_t css_ev = {0};
+    css_ev.type = BROWSER_UI_EVENT_CSS_APPEND;
+    css_ev.load_id = load_id;
+    css_ev.u.css_append.css = decoded;
+    css_ev.u.css_append.len = decoded_len;
+    browser_loader_emit_event(app, &css_ev);
+    browser_debug_logf(app, "[css] data url ok bytes=%u", (unsigned)decoded_len);
     return true;
 }
 
@@ -518,6 +703,14 @@ static void browser_resource_fetch(browser_app_t *app,
     if (kind == BROWSER_RESOURCE_IMAGE)
     {
         if (browser_handle_data_url_image(app, load_id, abs))
+        {
+            free(abs);
+            return;
+        }
+    }
+    if (kind == BROWSER_RESOURCE_CSS)
+    {
+        if (browser_handle_data_url_css(app, load_id, abs))
         {
             free(abs);
             return;

@@ -59,10 +59,26 @@ typedef enum
 
 typedef enum
 {
+    CSS_POSITION_STATIC = 0,
+    CSS_POSITION_RELATIVE,
+    CSS_POSITION_ABSOLUTE,
+    CSS_POSITION_FIXED
+} css_position_t;
+
+typedef enum
+{
     CSS_FLOAT_NONE = 0,
     CSS_FLOAT_LEFT,
     CSS_FLOAT_RIGHT
 } css_float_t;
+
+typedef enum
+{
+    CSS_OVERFLOW_VISIBLE = 0,
+    CSS_OVERFLOW_HIDDEN,
+    CSS_OVERFLOW_SCROLL,
+    CSS_OVERFLOW_AUTO
+} css_overflow_t;
 
 typedef enum
 {
@@ -110,14 +126,23 @@ typedef struct
 {
     bool has_background;
     video_color_t background;
+    bool background_transparent;
     bool has_color;
     video_color_t color;
     bool has_font_size;
     css_length_t font_size;
     bool has_width;
     css_length_t width;
+    bool has_min_width;
+    css_length_t min_width;
+    bool has_max_width;
+    css_length_t max_width;
     bool has_height;
     css_length_t height;
+    bool has_min_height;
+    css_length_t min_height;
+    bool has_max_height;
+    css_length_t max_height;
     bool has_margin;
     css_box_t margin;
     bool has_padding;
@@ -126,10 +151,23 @@ typedef struct
     css_box_t border_width;
     bool has_border_color;
     video_color_t border_color;
+    bool border_transparent;
+    bool has_position;
+    css_position_t position;
+    bool has_top;
+    css_length_t top;
+    bool has_right;
+    css_length_t right;
+    bool has_bottom;
+    css_length_t bottom;
+    bool has_left;
+    css_length_t left;
     bool has_float;
     css_float_t float_mode;
     bool has_clear;
     css_clear_t clear_mode;
+    bool has_overflow;
+    css_overflow_t overflow;
     bool has_text_align;
     css_text_align_t text_align;
     bool has_text_decoration;

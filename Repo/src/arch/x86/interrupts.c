@@ -660,7 +660,8 @@ void interrupts_init(void)
     idt_set_gate(47, (void *)irq15_handler);
     idt_set_gate(SMP_SCHEDULE_IPI_VECTOR, (void *)smp_schedule_ipi_handler);
     idt_set_gate(SMP_TLB_FLUSH_IPI_VECTOR, (void *)smp_tlb_flush_ipi_handler);
-    idt_set_gate_dpl(0x80, syscall_entry, 3);
+    /* Syscalls should not mask interrupts; use a trap gate. */
+    idt_set_trap_gate_dpl(0x80, syscall_entry, 3);
     idt_load();
     pic_remap();
     pic_set_masks();

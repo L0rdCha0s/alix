@@ -177,14 +177,44 @@ bool css_parse_color(const char *start, const char *end, video_color_t *out)
             *out = video_make_color(0xFF, 0x00, 0x00);
             return true;
         }
+        if (name_len == 6 && strncasecmp(start, "yellow", 6) == 0)
+        {
+            *out = video_make_color(0xFF, 0xFF, 0x00);
+            return true;
+        }
         if (name_len == 4 && strncasecmp(start, "blue", 4) == 0)
         {
             *out = video_make_color(0x00, 0x00, 0xFF);
             return true;
         }
+        if (name_len == 4 && strncasecmp(start, "navy", 4) == 0)
+        {
+            *out = video_make_color(0x00, 0x00, 0x80);
+            return true;
+        }
         if (name_len == 5 && strncasecmp(start, "green", 5) == 0)
         {
             *out = video_make_color(0x00, 0x80, 0x00);
+            return true;
+        }
+        if (name_len == 6 && strncasecmp(start, "maroon", 6) == 0)
+        {
+            *out = video_make_color(0x80, 0x00, 0x00);
+            return true;
+        }
+        if (name_len == 6 && strncasecmp(start, "purple", 6) == 0)
+        {
+            *out = video_make_color(0x80, 0x00, 0x80);
+            return true;
+        }
+        if (name_len == 6 && strncasecmp(start, "orange", 6) == 0)
+        {
+            *out = video_make_color(0xFF, 0xA5, 0x00);
+            return true;
+        }
+        if (name_len == 4 && strncasecmp(start, "pink", 4) == 0)
+        {
+            *out = video_make_color(0xFF, 0xC0, 0xCB);
             return true;
         }
         if ((name_len == 4 && strncasecmp(start, "gray", 4) == 0) ||
@@ -246,6 +276,12 @@ bool css_parse_number_milli(const char *start, const char *end, int32_t *out_mil
     bool saw_digit = false;
 
     const char *p = start;
+    bool negative = false;
+    if (p < end && (*p == '-' || *p == '+'))
+    {
+        negative = (*p == '-');
+        p++;
+    }
     while (p < end && isdigit((unsigned char)*p))
     {
         saw_digit = true;
@@ -281,7 +317,12 @@ bool css_parse_number_milli(const char *start, const char *end, int32_t *out_mil
         return false;
     }
 
-    *out_milli = integer * 1000 + frac;
+    int32_t value = integer * 1000 + frac;
+    if (negative)
+    {
+        value = -value;
+    }
+    *out_milli = value;
     return true;
 }
 
@@ -314,6 +355,10 @@ bool css_parse_length_token(const char *start, const char *end, css_length_t *ou
 
     const char *num_start = start;
     const char *p = num_start;
+    if (p < end && (*p == '-' || *p == '+'))
+    {
+        p++;
+    }
     while (p < end && (isdigit((unsigned char)*p) || *p == '.'))
     {
         p++;

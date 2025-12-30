@@ -274,6 +274,11 @@ void html_view_render_cache_clear(html_view_render_cache_t *cache)
     cache->anchor_count = 0;
     cache->anchor_cap = 0;
 
+    free(cache->fixed_ops);
+    cache->fixed_ops = NULL;
+    cache->fixed_count = 0;
+    cache->fixed_cap = 0;
+
     free(cache->tiles);
     free(cache->ops);
     memset(cache, 0, sizeof(*cache));
@@ -377,9 +382,14 @@ bool html_view_render_cache_add_anchor(html_view_render_cache_t *cache, const ch
 
     for (size_t i = 0; i < cache->anchor_count; ++i)
     {
-        const html_view_anchor_t *anchor = &cache->anchors[i];
+        html_view_anchor_t *anchor = &cache->anchors[i];
         if (anchor->id && strcmp(anchor->id, id) == 0)
         {
+            if (y < 0)
+            {
+                y = 0;
+            }
+            anchor->y = y;
             return true;
         }
     }
@@ -434,6 +444,23 @@ bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_
 
     size_t index = cache->op_count++;
     cache->ops[index] = *op;
+
+    if (op->fixed)
+    {
+        if (cache->fixed_count == cache->fixed_cap)
+        {
+            size_t new_cap = cache->fixed_cap ? (cache->fixed_cap * 2) : 64;
+            size_t *new_ops = (size_t *)realloc(cache->fixed_ops, new_cap * sizeof(*new_ops));
+            if (!new_ops)
+            {
+                return false;
+            }
+            cache->fixed_ops = new_ops;
+            cache->fixed_cap = new_cap;
+        }
+        cache->fixed_ops[cache->fixed_count++] = index;
+        return true;
+    }
 
     int32_t y0 = op->y;
     int32_t y1 = op->y;
@@ -513,7 +540,11 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
     }
 
     const html_view_render_cache_t *cache = &ctx->priv->render_cache;
-    if (!cache->valid || !cache->tiles || cache->tile_used == 0)
+    if (!cache->valid)
+    {
+        return;
+    }
+    if (cache->tile_used == 0 && cache->fixed_count == 0)
     {
         return;
     }
@@ -542,59 +573,88 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
     int tile_count = (end_tile - start_tile) + 1;
     if (tile_count <= 0)
     {
+        tile_count = 0;
+    }
+
+    bool has_fixed = cache->fixed_count > 0;
+    int stream_count = tile_count + (has_fixed ? 1 : 0);
+    if (stream_count <= 0)
+    {
         return;
     }
 
-    size_t tile_pos_stack[32];
-    size_t *tile_pos = tile_pos_stack;
-    if (tile_count > (int)(sizeof(tile_pos_stack) / sizeof(tile_pos_stack[0])))
+    typedef struct
     {
-        tile_pos = (size_t *)calloc((size_t)tile_count, sizeof(*tile_pos));
-        if (!tile_pos)
+        const size_t *ops;
+        size_t count;
+        size_t pos;
+        bool fixed;
+    } html_view_op_stream_t;
+
+    html_view_op_stream_t stream_stack[32];
+    html_view_op_stream_t *streams = stream_stack;
+    if (stream_count > (int)(sizeof(stream_stack) / sizeof(stream_stack[0])))
+    {
+        streams = (html_view_op_stream_t *)calloc((size_t)stream_count, sizeof(*streams));
+        if (!streams)
         {
             return;
         }
     }
-    else
+
+    int stream_index = 0;
+    for (int i = 0; i < tile_count; ++i)
     {
-        memset(tile_pos, 0, (size_t)tile_count * sizeof(*tile_pos));
+        int t = start_tile + i;
+        if (t < 0 || (size_t)t >= cache->tile_count)
+        {
+            continue;
+        }
+        const html_view_tile_t *tile = &cache->tiles[t];
+        streams[stream_index++] = (html_view_op_stream_t){
+            .ops = tile->ops,
+            .count = tile->count,
+            .pos = 0,
+            .fixed = false,
+        };
+    }
+    if (has_fixed)
+    {
+        streams[stream_index++] = (html_view_op_stream_t){
+            .ops = cache->fixed_ops,
+            .count = cache->fixed_count,
+            .pos = 0,
+            .fixed = true,
+        };
     }
 
     size_t last_op_index = (size_t)-1;
     for (;;)
     {
         size_t min_op_index = (size_t)-1;
-        int min_tile_slot = -1;
+        int min_stream = -1;
 
-        for (int i = 0; i < tile_count; ++i)
+        for (int i = 0; i < stream_index; ++i)
         {
-            int t = start_tile + i;
-            if (t < 0 || (size_t)t >= cache->tile_count)
+            html_view_op_stream_t *stream = &streams[i];
+            if (!stream->ops || stream->pos >= stream->count)
             {
                 continue;
             }
-
-            const html_view_tile_t *tile = &cache->tiles[t];
-            size_t pos = tile_pos[i];
-            if (pos >= tile->count)
-            {
-                continue;
-            }
-
-            size_t op_index = tile->ops[pos];
+            size_t op_index = stream->ops[stream->pos];
             if (op_index < min_op_index)
             {
                 min_op_index = op_index;
-                min_tile_slot = i;
+                min_stream = i;
             }
         }
 
-        if (min_tile_slot < 0)
+        if (min_stream < 0)
         {
             break;
         }
 
-        tile_pos[min_tile_slot] += 1;
+        streams[min_stream].pos += 1;
         if (min_op_index == last_op_index)
         {
             continue;
@@ -606,16 +666,31 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
             continue;
         }
         const html_view_op_t *op = &cache->ops[min_op_index];
+        bool fixed = op->fixed;
 
-        int op_y0 = (int)op->y;
-        int op_y1 = (int)op->y + (int)op->h;
-        if (op_y1 <= visible_y0 || op_y0 >= visible_y1)
+        int abs_x = 0;
+        int abs_y = 0;
+        if (!fixed)
         {
-            continue;
+            int op_y0 = (int)op->y;
+            int op_y1 = (int)op->y + (int)op->h;
+            if (op_y1 <= visible_y0 || op_y0 >= visible_y1)
+            {
+                continue;
+            }
+            abs_x = ctx->doc_origin_x + (int)op->x;
+            abs_y = ctx->doc_origin_y + (int)op->y - scroll_y;
         }
-
-        int abs_x = ctx->doc_origin_x + (int)op->x;
-        int abs_y = ctx->doc_origin_y + (int)op->y - scroll_y;
+        else
+        {
+            abs_x = (int)op->x;
+            abs_y = (int)op->y;
+            int fixed_bottom = abs_y + (int)op->h;
+            if (fixed_bottom <= ctx->viewport_y || abs_y >= (ctx->viewport_y + ctx->viewport_h))
+            {
+                continue;
+            }
+        }
 
         switch (op->kind)
         {
@@ -652,9 +727,9 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
         }
     }
 
-    if (tile_pos != tile_pos_stack)
+    if (streams != stream_stack)
     {
-        free(tile_pos);
+        free(streams);
     }
 }
 

@@ -10,6 +10,11 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                      const html_node_t *node,
                                      const css_style_t *style,
                                      bool inline_container);
+bool html_view_render_positioned_element(html_view_ctx_t *ctx,
+                                         const html_node_t *node,
+                                         const css_style_t *style,
+                                         const css_style_t *parent_style);
+void html_view_record_anchor(html_view_ctx_t *ctx, const html_node_t *node);
 
 bool html_view_render_break_element(html_view_ctx_t *ctx, const html_node_t *node);
 bool html_view_render_table_element(html_view_ctx_t *ctx,

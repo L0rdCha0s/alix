@@ -2,6 +2,66 @@
 
 #include "libc.h"
 
+static const char *css_scan_value_end(const char *p)
+{
+    if (!p)
+    {
+        return NULL;
+    }
+    char quote = 0;
+    int paren_depth = 0;
+    bool escape = false;
+    while (*p)
+    {
+        char c = *p;
+        if (escape)
+        {
+            escape = false;
+            ++p;
+            continue;
+        }
+        if (c == '\\')
+        {
+            escape = true;
+            ++p;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            ++p;
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            ++p;
+            continue;
+        }
+        if (c == '(')
+        {
+            ++paren_depth;
+            ++p;
+            continue;
+        }
+        if (c == ')' && paren_depth > 0)
+        {
+            --paren_depth;
+            ++p;
+            continue;
+        }
+        if ((c == ';' || c == '}') && paren_depth == 0)
+        {
+            break;
+        }
+        ++p;
+    }
+    return p;
+}
+
 static bool css_append_rule(css_stylesheet_t *sheet, const char *selector_start, const char *selector_end, const css_style_t *style)
 {
     if (!sheet || !selector_start || !selector_end || selector_end <= selector_start || !style)
@@ -102,10 +162,12 @@ css_stylesheet_t *css_parse(const char *css_text)
             p++;
 
             const char *val_start = p;
-            while (*p && *p != ';' && *p != '}')
+            const char *val_end_scan = css_scan_value_end(p);
+            if (!val_end_scan)
             {
-                p++;
+                val_end_scan = p;
             }
+            p = val_end_scan;
             const char *val_end = p;
 
             css_style_apply_property(&style, prop_start, prop_end, val_start, val_end);

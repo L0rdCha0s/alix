@@ -79,6 +79,10 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
         ctx->text_underline = underline;
         ctx->active_href = href;
         html_view_render_children(ctx, node, style);
+        if (underline && !saved_underline)
+        {
+            html_view_flush_underline_run(ctx);
+        }
         ctx->text_underline = saved_underline;
         ctx->active_href = saved_href;
         return true;

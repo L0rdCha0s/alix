@@ -121,6 +121,8 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
     measure.y = 0;
     measure.content_bottom = measure.y;
     measure.pending_space = false;
+    measure.underline_run_active = false;
+    measure.underline_run_start_x = 0;
     measure.list_level = 0;
     measure.measure_max_x = measure.x;
     measure.space_w = html_view_text_width(&measure, " ");
@@ -299,43 +301,43 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     {
         if (style->margin.top.valid && !style->margin.top.is_auto)
         {
-            margin_top = html_view_length_to_px(&style->margin.top,
-                                                ctx->viewport_w,
-                                                ctx->viewport_h,
-                                                ctx->body_w,
-                                                ctx->viewport_h,
-                                                ctx->base_font_px,
-                                                false);
+            margin_top = html_view_length_to_px_signed(&style->margin.top,
+                                                       ctx->viewport_w,
+                                                       ctx->viewport_h,
+                                                       ctx->body_w,
+                                                       ctx->viewport_h,
+                                                       ctx->base_font_px,
+                                                       false);
         }
         if (style->margin.right.valid && !style->margin.right.is_auto)
         {
-            margin_right = html_view_length_to_px(&style->margin.right,
-                                                  ctx->viewport_w,
-                                                  ctx->viewport_h,
-                                                  ctx->body_w,
-                                                  ctx->viewport_h,
-                                                  ctx->base_font_px,
-                                                  true);
+            margin_right = html_view_length_to_px_signed(&style->margin.right,
+                                                         ctx->viewport_w,
+                                                         ctx->viewport_h,
+                                                         ctx->body_w,
+                                                         ctx->viewport_h,
+                                                         ctx->base_font_px,
+                                                         true);
         }
         if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
         {
-            margin_bottom = html_view_length_to_px(&style->margin.bottom,
-                                                   ctx->viewport_w,
-                                                   ctx->viewport_h,
-                                                   ctx->body_w,
-                                                   ctx->viewport_h,
-                                                   ctx->base_font_px,
-                                                   false);
+            margin_bottom = html_view_length_to_px_signed(&style->margin.bottom,
+                                                          ctx->viewport_w,
+                                                          ctx->viewport_h,
+                                                          ctx->body_w,
+                                                          ctx->viewport_h,
+                                                          ctx->base_font_px,
+                                                          false);
         }
         if (style->margin.left.valid && !style->margin.left.is_auto)
         {
-            margin_left = html_view_length_to_px(&style->margin.left,
-                                                 ctx->viewport_w,
-                                                 ctx->viewport_h,
-                                                 ctx->body_w,
-                                                 ctx->viewport_h,
-                                                 ctx->base_font_px,
-                                                 true);
+            margin_left = html_view_length_to_px_signed(&style->margin.left,
+                                                        ctx->viewport_w,
+                                                        ctx->viewport_h,
+                                                        ctx->body_w,
+                                                        ctx->viewport_h,
+                                                        ctx->base_font_px,
+                                                        true);
         }
     }
 
@@ -411,10 +413,6 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
                                              true);
     }
 
-    if (margin_top < 0) margin_top = 0;
-    if (margin_right < 0) margin_right = 0;
-    if (margin_bottom < 0) margin_bottom = 0;
-    if (margin_left < 0) margin_left = 0;
     if (pad_top < 0) pad_top = 0;
     if (pad_right < 0) pad_right = 0;
     if (pad_bottom < 0) pad_bottom = 0;
@@ -483,6 +481,80 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
         if (content_h < 0) content_h = 0;
     }
 
+    int min_w = -1;
+    int max_w = -1;
+    if (style->has_min_width && style->min_width.valid && !style->min_width.is_auto)
+    {
+        min_w = html_view_length_to_px(&style->min_width,
+                                       ctx->viewport_w,
+                                       ctx->viewport_h,
+                                       ctx->body_w,
+                                       ctx->viewport_h,
+                                       ctx->base_font_px,
+                                       true);
+        if (min_w < 0) min_w = 0;
+    }
+    if (style->has_max_width && style->max_width.valid && !style->max_width.is_auto)
+    {
+        max_w = html_view_length_to_px(&style->max_width,
+                                       ctx->viewport_w,
+                                       ctx->viewport_h,
+                                       ctx->body_w,
+                                       ctx->viewport_h,
+                                       ctx->base_font_px,
+                                       true);
+        if (max_w < 0) max_w = 0;
+    }
+    if (max_w >= 0 && content_w > max_w)
+    {
+        content_w = max_w;
+    }
+    if (min_w >= 0 && content_w < min_w)
+    {
+        content_w = min_w;
+    }
+    if (max_w >= 0 && min_w > max_w)
+    {
+        content_w = min_w;
+    }
+
+    int min_h = -1;
+    int max_h = -1;
+    if (style->has_min_height && style->min_height.valid && !style->min_height.is_auto)
+    {
+        min_h = html_view_length_to_px(&style->min_height,
+                                       ctx->viewport_w,
+                                       ctx->viewport_h,
+                                       ctx->body_w,
+                                       ctx->viewport_h,
+                                       ctx->base_font_px,
+                                       false);
+        if (min_h < 0) min_h = 0;
+    }
+    if (style->has_max_height && style->max_height.valid && !style->max_height.is_auto)
+    {
+        max_h = html_view_length_to_px(&style->max_height,
+                                       ctx->viewport_w,
+                                       ctx->viewport_h,
+                                       ctx->body_w,
+                                       ctx->viewport_h,
+                                       ctx->base_font_px,
+                                       false);
+        if (max_h < 0) max_h = 0;
+    }
+    if (max_h >= 0 && content_h > max_h)
+    {
+        content_h = max_h;
+    }
+    if (min_h >= 0 && content_h < min_h)
+    {
+        content_h = min_h;
+    }
+    if (max_h >= 0 && min_h > max_h)
+    {
+        content_h = min_h;
+    }
+
     int border_box_w = content_w + pad_left + pad_right + border_left + border_right;
     int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
     int outer_w = border_box_w + margin_left + margin_right;
@@ -533,29 +605,32 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
 
     int border_box_x = place_x + margin_left;
     int border_box_y = place_y + margin_top;
-    int draw_y = border_box_y - ctx->priv->scroll_y;
+    int draw_y = html_view_draw_y(ctx, border_box_y);
 
     if (ctx->draw || ctx->record)
     {
-        if (style->has_background)
+        if (style->has_background && !style->background_transparent)
         {
             html_view_draw_rect_clipped(ctx, border_box_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
         }
 
         if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
         {
-            video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
-            html_view_draw_border_sides_clipped(ctx,
-                                                border_box_x,
-                                                draw_y,
-                                                border_box_w,
-                                                border_box_h,
-                                                border_top,
-                                                border_right,
-                                                border_bottom,
-                                                border_left,
-                                                border_color,
-                                                &ctx->clip);
+            if (!(style->has_border_color && style->border_transparent))
+            {
+                video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
+                html_view_draw_border_sides_clipped(ctx,
+                                                    border_box_x,
+                                                    draw_y,
+                                                    border_box_w,
+                                                    border_box_h,
+                                                    border_top,
+                                                    border_right,
+                                                    border_bottom,
+                                                    border_left,
+                                                    border_color,
+                                                    &ctx->clip);
+            }
         }
     }
 
@@ -581,7 +656,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     ctx->x = ctx->body_x;
     ctx->y = border_box_y + border_top + pad_top;
     ctx->pending_space = false;
-    if (style->has_background)
+    if (style->has_background && !style->background_transparent)
     {
         ctx->bg = style->background;
     }
@@ -638,50 +713,45 @@ void html_view_render_table(html_view_ctx_t *ctx,
     {
         if (style->margin.top.valid && !style->margin.top.is_auto)
         {
-            layout.margin_top = html_view_length_to_px(&style->margin.top,
-                                                       ctx->viewport_w,
-                                                       ctx->viewport_h,
-                                                       ctx->body_w,
-                                                       ctx->viewport_h,
-                                                       ctx->base_font_px,
-                                                       false);
+            layout.margin_top = html_view_length_to_px_signed(&style->margin.top,
+                                                              ctx->viewport_w,
+                                                              ctx->viewport_h,
+                                                              ctx->body_w,
+                                                              ctx->viewport_h,
+                                                              ctx->base_font_px,
+                                                              false);
         }
         if (style->margin.right.valid && !style->margin.right.is_auto)
         {
-            layout.margin_right = html_view_length_to_px(&style->margin.right,
-                                                         ctx->viewport_w,
-                                                         ctx->viewport_h,
-                                                         ctx->body_w,
-                                                         ctx->viewport_h,
-                                                         ctx->base_font_px,
-                                                         true);
+            layout.margin_right = html_view_length_to_px_signed(&style->margin.right,
+                                                                ctx->viewport_w,
+                                                                ctx->viewport_h,
+                                                                ctx->body_w,
+                                                                ctx->viewport_h,
+                                                                ctx->base_font_px,
+                                                                true);
         }
         if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
         {
-            layout.margin_bottom = html_view_length_to_px(&style->margin.bottom,
-                                                          ctx->viewport_w,
-                                                          ctx->viewport_h,
-                                                          ctx->body_w,
-                                                          ctx->viewport_h,
-                                                          ctx->base_font_px,
-                                                          false);
+            layout.margin_bottom = html_view_length_to_px_signed(&style->margin.bottom,
+                                                                 ctx->viewport_w,
+                                                                 ctx->viewport_h,
+                                                                 ctx->body_w,
+                                                                 ctx->viewport_h,
+                                                                 ctx->base_font_px,
+                                                                 false);
         }
         if (style->margin.left.valid && !style->margin.left.is_auto)
         {
-            layout.margin_left = html_view_length_to_px(&style->margin.left,
-                                                        ctx->viewport_w,
-                                                        ctx->viewport_h,
-                                                        ctx->body_w,
-                                                        ctx->viewport_h,
-                                                        ctx->base_font_px,
-                                                        true);
+            layout.margin_left = html_view_length_to_px_signed(&style->margin.left,
+                                                               ctx->viewport_w,
+                                                               ctx->viewport_h,
+                                                               ctx->body_w,
+                                                               ctx->viewport_h,
+                                                               ctx->base_font_px,
+                                                               true);
         }
     }
-    if (layout.margin_top < 0) layout.margin_top = 0;
-    if (layout.margin_right < 0) layout.margin_right = 0;
-    if (layout.margin_bottom < 0) layout.margin_bottom = 0;
-    if (layout.margin_left < 0) layout.margin_left = 0;
-
     layout.pad_top = 0;
     layout.pad_right = 0;
     layout.pad_bottom = 0;
@@ -904,6 +974,8 @@ void html_view_render_table(html_view_ctx_t *ctx,
                 measure_cell_ctx.actual_font_px = cell_font_px;
                 measure_cell_ctx.line_height = html_view_line_height_for_style(&measure_cell_ctx, &cell->style);
                 measure_cell_ctx.space_w = html_view_text_width(&measure_cell_ctx, " ");
+                measure_cell_ctx.underline_run_active = false;
+                measure_cell_ctx.underline_run_start_x = 0;
                 desired_content_w = html_view_measure_rendered_width(&measure_cell_ctx, cell->node, &cell->style, layout.content_w, NULL);
             }
             if (desired_content_w < 0) desired_content_w = 0;
@@ -1118,6 +1190,8 @@ void html_view_render_table(html_view_ctx_t *ctx,
             measure.y = cell->content_y;
             measure.content_bottom = measure.y;
             measure.pending_space = false;
+            measure.underline_run_active = false;
+            measure.underline_run_start_x = 0;
             measure.list_level = 0;
             measure.base_font_px = cell_font_px;
             measure.actual_font_px = cell_font_px;
@@ -1171,27 +1245,30 @@ void html_view_render_table(html_view_ctx_t *ctx,
 
     if (ctx->draw || ctx->record)
     {
-        if (style->has_background && table_box_w > 0 && layout.table_h > 0)
+        if (style->has_background && !style->background_transparent && table_box_w > 0 && layout.table_h > 0)
         {
-            int draw_y = layout.table_y - ctx->priv->scroll_y;
+            int draw_y = html_view_draw_y(ctx, layout.table_y);
             html_view_draw_rect_clipped(ctx, layout.table_x, draw_y, table_box_w, layout.table_h, style->background, &ctx->clip);
         }
 
         if (style->has_border && (layout.border_top > 0 || layout.border_right > 0 || layout.border_bottom > 0 || layout.border_left > 0))
         {
-            video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
-            int draw_y = layout.table_y - ctx->priv->scroll_y;
-            html_view_draw_border_sides_clipped(ctx,
-                                                layout.table_x,
-                                                draw_y,
-                                                table_box_w,
-                                                layout.table_h,
-                                                layout.border_top,
-                                                layout.border_right,
-                                                layout.border_bottom,
-                                                layout.border_left,
-                                                border_color,
-                                                &ctx->clip);
+            if (!(style->has_border_color && style->border_transparent))
+            {
+                video_color_t border_color = style->has_border_color ? style->border_color : video_make_color(0x00, 0x00, 0x00);
+                int draw_y = html_view_draw_y(ctx, layout.table_y);
+                html_view_draw_border_sides_clipped(ctx,
+                                                    layout.table_x,
+                                                    draw_y,
+                                                    table_box_w,
+                                                    layout.table_h,
+                                                    layout.border_top,
+                                                    layout.border_right,
+                                                    layout.border_bottom,
+                                                    layout.border_left,
+                                                    border_color,
+                                                    &ctx->clip);
+            }
         }
 
         for (size_t r = 0; r < layout.row_count; ++r)
@@ -1205,28 +1282,33 @@ void html_view_render_table(html_view_ctx_t *ctx,
                     continue;
                 }
 
-                int cell_draw_y = cell->y - ctx->priv->scroll_y;
-                if (cell->style.has_background)
+                int cell_draw_y = html_view_draw_y(ctx, cell->y);
+                if (cell->style.has_background && !cell->style.background_transparent)
                 {
                     html_view_draw_rect_clipped(ctx, cell->x, cell_draw_y, cell->w, cell->h, cell->style.background, &ctx->clip);
                 }
                 if (cell->style.has_border && (cell->border_top > 0 || cell->border_right > 0 || cell->border_bottom > 0 || cell->border_left > 0))
                 {
-                    video_color_t border_color = cell->style.has_border_color ? cell->style.border_color : video_make_color(0x00, 0x00, 0x00);
-                    html_view_draw_border_sides_clipped(ctx,
-                                                        cell->x,
-                                                        cell_draw_y,
-                                                        cell->w,
-                                                        cell->h,
-                                                        cell->border_top,
-                                                        cell->border_right,
-                                                        cell->border_bottom,
-                                                        cell->border_left,
-                                                        border_color,
-                                                        &ctx->clip);
+                    if (!(cell->style.has_border_color && cell->style.border_transparent))
+                    {
+                        video_color_t border_color = cell->style.has_border_color ? cell->style.border_color : video_make_color(0x00, 0x00, 0x00);
+                        html_view_draw_border_sides_clipped(ctx,
+                                                            cell->x,
+                                                            cell_draw_y,
+                                                            cell->w,
+                                                            cell->h,
+                                                            cell->border_top,
+                                                            cell->border_right,
+                                                            cell->border_bottom,
+                                                            cell->border_left,
+                                                            border_color,
+                                                            &ctx->clip);
+                    }
                 }
 
                 html_view_ctx_t inner = *ctx;
+                inner.underline_run_active = false;
+                inner.underline_run_start_x = 0;
                 inner.floats = NULL;
                 inner.style_block = NULL;
                 inner.style_depth = 0;
@@ -1238,7 +1320,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                 inner.content_bottom = inner.y;
                 inner.pending_space = false;
                 inner.list_level = 0;
-                inner.bg = cell->style.has_background ? cell->style.background : ctx->bg;
+                inner.bg = (cell->style.has_background && !cell->style.background_transparent) ? cell->style.background : ctx->bg;
                 inner.measure_max_x = inner.x;
                 inner.text_align_mode = cell->style.has_text_align ? cell->style.text_align : ctx->text_align_mode;
                 inner.line_start_x = inner.x;

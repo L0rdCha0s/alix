@@ -53,6 +53,22 @@ void idt_set_gate_dpl(uint8_t vector, void (*handler)(void), uint8_t dpl)
     idt_set_gate_ist(vector, handler, dpl, 0);
 }
 
+void idt_set_trap_gate_dpl(uint8_t vector, void (*handler)(void), uint8_t dpl)
+{
+    uint64_t addr = (uint64_t)handler;
+    struct idt_entry *entry = &idt[vector];
+    entry->offset_low = (uint16_t)(addr & 0xFFFF);
+    entry->selector = 0x18;  /* 64-bit code segment */
+    entry->ist = 0;
+    uint8_t attr = 0x8F;
+    attr &= (uint8_t)~0x60;
+    attr |= (uint8_t)((dpl & 0x3u) << 5);
+    entry->type_attr = attr;
+    entry->offset_mid = (uint16_t)((addr >> 16) & 0xFFFF);
+    entry->offset_high = (uint32_t)((addr >> 32) & 0xFFFFFFFF);
+    entry->zero = 0;
+}
+
 void idt_set_gate_ist(uint8_t vector, void (*handler)(void), uint8_t dpl, uint8_t ist)
 {
     uint64_t addr = (uint64_t)handler;

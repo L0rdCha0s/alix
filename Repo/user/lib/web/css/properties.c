@@ -30,6 +30,46 @@ static bool css_next_token(const char **p, const char *end, const char **tok_sta
     return true;
 }
 
+static bool css_parse_background_color_value(const char *start, const char *end, video_color_t *out)
+{
+    if (!start || !end || !out)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return false;
+    }
+    const char *p = start;
+    const char *tok_s = NULL;
+    const char *tok_e = NULL;
+    while (css_next_token(&p, end, &tok_s, &tok_e))
+    {
+        if (css_parse_color(tok_s, tok_e, out))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool css_value_is_keyword(const char *start, const char *end, const char *keyword)
+{
+    if (!start || !end || !keyword)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    size_t len = (size_t)(end - start);
+    size_t klen = strlen(keyword);
+    if (len != klen)
+    {
+        return false;
+    }
+    return strncasecmp(start, keyword, len) == 0;
+}
+
 static bool css_parse_border_width_token(const char *start,
                                          const char *end,
                                          css_length_t *out)
@@ -168,11 +208,103 @@ static bool css_parse_border_width_value(const char *start, const char *end, css
     return true;
 }
 
+static bool css_parse_border_style_value(const char *start, const char *end, bool out_none[4])
+{
+    if (!out_none)
+    {
+        return false;
+    }
+    out_none[0] = false;
+    out_none[1] = false;
+    out_none[2] = false;
+    out_none[3] = false;
+
+    css_trim_range(&start, &end);
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+
+    const char *tokens[4] = {0};
+    size_t token_lens[4] = {0};
+    size_t count = 0;
+
+    const char *p = start;
+    while (p < end && count < 4)
+    {
+        while (p < end && isspace((unsigned char)*p))
+        {
+            p++;
+        }
+        if (p >= end)
+        {
+            break;
+        }
+        const char *tstart = p;
+        while (p < end && !isspace((unsigned char)*p))
+        {
+            p++;
+        }
+        tokens[count] = tstart;
+        token_lens[count] = (size_t)(p - tstart);
+        count++;
+    }
+
+    if (count == 0)
+    {
+        return false;
+    }
+
+    bool none_flags[4] = {false, false, false, false};
+    for (size_t i = 0; i < count; ++i)
+    {
+        const char *tstart = tokens[i];
+        const char *tend = tstart + token_lens[i];
+        css_trim_range(&tstart, &tend);
+        size_t len = (size_t)(tend - tstart);
+        if (len == 4 && strncasecmp(tstart, "none", 4) == 0)
+        {
+            none_flags[i] = true;
+        }
+    }
+
+    if (count == 1)
+    {
+        out_none[0] = none_flags[0];
+        out_none[1] = none_flags[0];
+        out_none[2] = none_flags[0];
+        out_none[3] = none_flags[0];
+        return true;
+    }
+    if (count == 2)
+    {
+        out_none[0] = none_flags[0];
+        out_none[2] = none_flags[0];
+        out_none[1] = none_flags[1];
+        out_none[3] = none_flags[1];
+        return true;
+    }
+    if (count == 3)
+    {
+        out_none[0] = none_flags[0];
+        out_none[1] = none_flags[1];
+        out_none[3] = none_flags[1];
+        out_none[2] = none_flags[2];
+        return true;
+    }
+    out_none[0] = none_flags[0];
+    out_none[1] = none_flags[1];
+    out_none[2] = none_flags[2];
+    out_none[3] = none_flags[3];
+    return true;
+}
+
 static bool css_parse_border_value(const char *start,
                                    const char *end,
                                    css_length_t *out_width,
                                    video_color_t *out_color,
-                                   bool *out_has_color)
+                                   bool *out_has_color,
+                                   bool *out_transparent)
 {
     if (!out_width || !out_color || !out_has_color)
     {
@@ -181,6 +313,10 @@ static bool css_parse_border_value(const char *start,
     memset(out_width, 0, sizeof(*out_width));
     *out_color = video_make_color(0x00, 0x00, 0x00);
     *out_has_color = false;
+    if (out_transparent)
+    {
+        *out_transparent = false;
+    }
 
     css_trim_range(&start, &end);
     if (!start || !end || end <= start)
@@ -208,6 +344,15 @@ static bool css_parse_border_value(const char *start,
 
         if (!*out_has_color)
         {
+            if (css_value_is_keyword(tok_s, tok_e, "transparent"))
+            {
+                *out_has_color = true;
+                if (out_transparent)
+                {
+                    *out_transparent = true;
+                }
+                continue;
+            }
             video_color_t c;
             if (css_parse_color(tok_s, tok_e, &c))
             {
@@ -621,9 +766,17 @@ void css_style_apply_property(css_style_t *style,
     if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "background", 10) == 0)
     {
         video_color_t c;
-        if (css_parse_color(val_start, val_end, &c))
+        if (css_value_is_keyword(val_start, val_end, "none") ||
+            css_value_is_keyword(val_start, val_end, "transparent"))
         {
             style->has_background = true;
+            style->background_transparent = true;
+            return;
+        }
+        if (css_parse_background_color_value(val_start, val_end, &c))
+        {
+            style->has_background = true;
+            style->background_transparent = false;
             style->background = c;
         }
         return;
@@ -632,9 +785,16 @@ void css_style_apply_property(css_style_t *style,
     if ((size_t)(prop_end - prop_start) == 16 && strncasecmp(prop_start, "background-color", 16) == 0)
     {
         video_color_t c;
+        if (css_value_is_keyword(val_start, val_end, "transparent"))
+        {
+            style->has_background = true;
+            style->background_transparent = true;
+            return;
+        }
         if (css_parse_color(val_start, val_end, &c))
         {
             style->has_background = true;
+            style->background_transparent = false;
             style->background = c;
         }
         return;
@@ -750,6 +910,28 @@ void css_style_apply_property(css_style_t *style,
         return;
     }
 
+    if ((size_t)(prop_end - prop_start) == 9 && strncasecmp(prop_start, "min-width", 9) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_min_width = true;
+            style->min_width = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 9 && strncasecmp(prop_start, "max-width", 9) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_max_width = true;
+            style->max_width = len;
+        }
+        return;
+    }
+
     if ((size_t)(prop_end - prop_start) == 6 && strncasecmp(prop_start, "height", 6) == 0)
     {
         css_length_t len;
@@ -760,6 +942,29 @@ void css_style_apply_property(css_style_t *style,
         }
         return;
     }
+
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "min-height", 10) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_min_height = true;
+            style->min_height = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "max-height", 10) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_max_height = true;
+            style->max_height = len;
+        }
+        return;
+    }
+
 
     if ((size_t)(prop_end - prop_start) == 6 && strncasecmp(prop_start, "margin", 6) == 0)
     {
@@ -918,7 +1123,8 @@ void css_style_apply_property(css_style_t *style,
         css_length_t width;
         video_color_t color;
         bool has_color = false;
-        if (css_parse_border_value(val_start, val_end, &width, &color, &has_color))
+        bool transparent = false;
+        if (css_parse_border_value(val_start, val_end, &width, &color, &has_color, &transparent))
         {
             style->has_border = true;
             style->border_width = css_box_from_length(width);
@@ -926,6 +1132,87 @@ void css_style_apply_property(css_style_t *style,
             {
                 style->has_border_color = true;
                 style->border_color = color;
+                style->border_transparent = transparent;
+            }
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "border-top", 10) == 0)
+    {
+        css_length_t width;
+        video_color_t color;
+        bool has_color = false;
+        bool transparent = false;
+        if (css_parse_border_value(val_start, val_end, &width, &color, &has_color, &transparent))
+        {
+            style->has_border = true;
+            style->border_width.top = width;
+            if (has_color)
+            {
+                style->has_border_color = true;
+                style->border_color = color;
+                style->border_transparent = transparent;
+            }
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "border-right", 12) == 0)
+    {
+        css_length_t width;
+        video_color_t color;
+        bool has_color = false;
+        bool transparent = false;
+        if (css_parse_border_value(val_start, val_end, &width, &color, &has_color, &transparent))
+        {
+            style->has_border = true;
+            style->border_width.right = width;
+            if (has_color)
+            {
+                style->has_border_color = true;
+                style->border_color = color;
+                style->border_transparent = transparent;
+            }
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 13 && strncasecmp(prop_start, "border-bottom", 13) == 0)
+    {
+        css_length_t width;
+        video_color_t color;
+        bool has_color = false;
+        bool transparent = false;
+        if (css_parse_border_value(val_start, val_end, &width, &color, &has_color, &transparent))
+        {
+            style->has_border = true;
+            style->border_width.bottom = width;
+            if (has_color)
+            {
+                style->has_border_color = true;
+                style->border_color = color;
+                style->border_transparent = transparent;
+            }
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 11 && strncasecmp(prop_start, "border-left", 11) == 0)
+    {
+        css_length_t width;
+        video_color_t color;
+        bool has_color = false;
+        bool transparent = false;
+        if (css_parse_border_value(val_start, val_end, &width, &color, &has_color, &transparent))
+        {
+            style->has_border = true;
+            style->border_width.left = width;
+            if (has_color)
+            {
+                style->has_border_color = true;
+                style->border_color = color;
+                style->border_transparent = transparent;
             }
         }
         return;
@@ -942,13 +1229,176 @@ void css_style_apply_property(css_style_t *style,
         return;
     }
 
+    if ((size_t)(prop_end - prop_start) == 15 && strncasecmp(prop_start, "border-top-width", 15) == 0)
+    {
+        css_length_t len;
+        if (css_parse_border_width_token(val_start, val_end, &len))
+        {
+            style->has_border = true;
+            style->border_width.top = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 17 && strncasecmp(prop_start, "border-right-width", 17) == 0)
+    {
+        css_length_t len;
+        if (css_parse_border_width_token(val_start, val_end, &len))
+        {
+            style->has_border = true;
+            style->border_width.right = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 18 && strncasecmp(prop_start, "border-bottom-width", 18) == 0)
+    {
+        css_length_t len;
+        if (css_parse_border_width_token(val_start, val_end, &len))
+        {
+            style->has_border = true;
+            style->border_width.bottom = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 16 && strncasecmp(prop_start, "border-left-width", 16) == 0)
+    {
+        css_length_t len;
+        if (css_parse_border_width_token(val_start, val_end, &len))
+        {
+            style->has_border = true;
+            style->border_width.left = len;
+        }
+        return;
+    }
+
     if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "border-color", 12) == 0)
     {
         video_color_t c;
-        if (css_parse_color(val_start, val_end, &c))
+        if (css_value_is_keyword(val_start, val_end, "transparent"))
+        {
+            style->has_border_color = true;
+            style->border_transparent = true;
+        }
+        else if (css_parse_color(val_start, val_end, &c))
         {
             style->has_border_color = true;
             style->border_color = c;
+            style->border_transparent = false;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 12 && strncasecmp(prop_start, "border-style", 12) == 0)
+    {
+        bool none_flags[4] = {false, false, false, false};
+        if (css_parse_border_style_value(val_start, val_end, none_flags))
+        {
+            css_length_t zero = { .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_PX };
+            style->has_border = true;
+            if (none_flags[0]) style->border_width.top = zero;
+            if (none_flags[1]) style->border_width.right = zero;
+            if (none_flags[2]) style->border_width.bottom = zero;
+            if (none_flags[3]) style->border_width.left = zero;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 8 && strncasecmp(prop_start, "position", 8) == 0)
+    {
+        const char *s = val_start;
+        const char *e = val_end;
+        css_trim_range(&s, &e);
+        size_t len = (size_t)(e - s);
+        style->has_position = true;
+        style->position = CSS_POSITION_STATIC;
+        if (len == 6 && strncasecmp(s, "static", 6) == 0)
+        {
+            style->position = CSS_POSITION_STATIC;
+        }
+        else if (len == 8 && strncasecmp(s, "relative", 8) == 0)
+        {
+            style->position = CSS_POSITION_RELATIVE;
+        }
+        else if (len == 8 && strncasecmp(s, "absolute", 8) == 0)
+        {
+            style->position = CSS_POSITION_ABSOLUTE;
+        }
+        else if (len == 5 && strncasecmp(s, "fixed", 5) == 0)
+        {
+            style->position = CSS_POSITION_FIXED;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 3 && strncasecmp(prop_start, "top", 3) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_top = true;
+            style->top = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 5 && strncasecmp(prop_start, "right", 5) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_right = true;
+            style->right = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 6 && strncasecmp(prop_start, "bottom", 6) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_bottom = true;
+            style->bottom = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 4 && strncasecmp(prop_start, "left", 4) == 0)
+    {
+        css_length_t len;
+        if (css_parse_length_token(val_start, val_end, &len))
+        {
+            style->has_left = true;
+            style->left = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 8 && strncasecmp(prop_start, "overflow", 8) == 0)
+    {
+        const char *s = val_start;
+        const char *e = val_end;
+        css_trim_range(&s, &e);
+        size_t len = (size_t)(e - s);
+        style->has_overflow = true;
+        style->overflow = CSS_OVERFLOW_VISIBLE;
+        if (len == 7 && strncasecmp(s, "visible", 7) == 0)
+        {
+            style->overflow = CSS_OVERFLOW_VISIBLE;
+        }
+        else if (len == 6 && strncasecmp(s, "hidden", 6) == 0)
+        {
+            style->overflow = CSS_OVERFLOW_HIDDEN;
+        }
+        else if (len == 6 && strncasecmp(s, "scroll", 6) == 0)
+        {
+            style->overflow = CSS_OVERFLOW_SCROLL;
+        }
+        else if (len == 4 && strncasecmp(s, "auto", 4) == 0)
+        {
+            style->overflow = CSS_OVERFLOW_AUTO;
         }
         return;
     }

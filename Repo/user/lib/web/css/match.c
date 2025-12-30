@@ -13,6 +13,7 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_background = true;
         dst->background = src->background;
+        dst->background_transparent = src->background_transparent;
     }
     if (src->has_color)
     {
@@ -29,10 +30,30 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
         dst->has_width = true;
         dst->width = src->width;
     }
+    if (src->has_min_width)
+    {
+        dst->has_min_width = true;
+        dst->min_width = src->min_width;
+    }
+    if (src->has_max_width)
+    {
+        dst->has_max_width = true;
+        dst->max_width = src->max_width;
+    }
     if (src->has_height)
     {
         dst->has_height = true;
         dst->height = src->height;
+    }
+    if (src->has_min_height)
+    {
+        dst->has_min_height = true;
+        dst->min_height = src->min_height;
+    }
+    if (src->has_max_height)
+    {
+        dst->has_max_height = true;
+        dst->max_height = src->max_height;
     }
     if (src->has_margin)
     {
@@ -53,6 +74,32 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_border_color = true;
         dst->border_color = src->border_color;
+        dst->border_transparent = src->border_transparent;
+    }
+    if (src->has_position)
+    {
+        dst->has_position = true;
+        dst->position = src->position;
+    }
+    if (src->has_top)
+    {
+        dst->has_top = true;
+        dst->top = src->top;
+    }
+    if (src->has_right)
+    {
+        dst->has_right = true;
+        dst->right = src->right;
+    }
+    if (src->has_bottom)
+    {
+        dst->has_bottom = true;
+        dst->bottom = src->bottom;
+    }
+    if (src->has_left)
+    {
+        dst->has_left = true;
+        dst->left = src->left;
     }
     if (src->has_float)
     {
@@ -63,6 +110,11 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_clear = true;
         dst->clear_mode = src->clear_mode;
+    }
+    if (src->has_overflow)
+    {
+        dst->has_overflow = true;
+        dst->overflow = src->overflow;
     }
     if (src->has_text_align)
     {

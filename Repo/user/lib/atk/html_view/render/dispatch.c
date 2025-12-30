@@ -1,6 +1,6 @@
 #include "atk/html_view/render/render_internal.h"
 
-static void html_view_record_anchor(html_view_ctx_t *ctx, const html_node_t *node)
+void html_view_record_anchor(html_view_ctx_t *ctx, const html_node_t *node)
 {
     if (!ctx || !ctx->record || !ctx->priv || !node || node->type != HTML_NODE_ELEMENT)
     {
@@ -111,6 +111,11 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
 
     html_view_font_scope_push(ctx, style, block, &font_scope);
     font_pushed = true;
+
+    if (html_view_render_positioned_element(ctx, node, style, parent_style))
+    {
+        goto out;
+    }
 
     if (style->has_display &&
         (style->display == CSS_DISPLAY_FLEX || style->display == CSS_DISPLAY_INLINE_FLEX))
