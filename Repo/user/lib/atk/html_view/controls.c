@@ -1,5 +1,7 @@
 #include "atk/html_view/html_view_internal.h"
 #include "atk/atk_dropdown.h"
+#include "ctype.h"
+#include "string.h"
 
 typedef struct html_view_radio_group
 {
@@ -436,6 +438,331 @@ html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *
         }
     }
     return NULL;
+}
+
+static const char *html_view_find_char(const char *start, size_t len, char needle)
+{
+    if (!start)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (start[i] == needle)
+        {
+            return start + i;
+        }
+    }
+    return NULL;
+}
+
+static bool html_view_data_url_parse_base64(const char *url,
+                                            const char **out_payload,
+                                            size_t *out_payload_len,
+                                            bool *out_has_type,
+                                            bool *out_is_png)
+{
+    if (!url || strncasecmp(url, "data:", 5) != 0)
+    {
+        return false;
+    }
+
+    const char *meta = url + 5;
+    const char *comma = strchr(meta, ',');
+    if (!comma)
+    {
+        return false;
+    }
+
+    size_t meta_len = (size_t)(comma - meta);
+    const char *payload = comma + 1;
+    if (!payload || payload[0] == '\0')
+    {
+        return false;
+    }
+
+    bool base64 = false;
+    bool has_type = false;
+    bool is_png = false;
+
+    const char *cursor = meta;
+    const char *semi = html_view_find_char(cursor, meta_len, ';');
+    size_t token_len = semi ? (size_t)(semi - cursor) : meta_len;
+    if (token_len > 0)
+    {
+        has_type = true;
+        if (token_len == 9 && strncasecmp(cursor, "image/png", 9) == 0)
+        {
+            is_png = true;
+        }
+    }
+
+    if (semi)
+    {
+        cursor = semi + 1;
+        while (cursor < meta + meta_len)
+        {
+            const char *next = html_view_find_char(cursor, (size_t)((meta + meta_len) - cursor), ';');
+            size_t len = next ? (size_t)(next - cursor) : (size_t)((meta + meta_len) - cursor);
+            const char *tok = cursor;
+            while (len > 0 && isspace((unsigned char)*tok))
+            {
+                tok++;
+                len--;
+            }
+            while (len > 0 && isspace((unsigned char)tok[len - 1]))
+            {
+                len--;
+            }
+            if (len == 6 && strncasecmp(tok, "base64", 6) == 0)
+            {
+                base64 = true;
+            }
+            if (!next)
+            {
+                break;
+            }
+            cursor = next + 1;
+        }
+    }
+
+    if (!base64)
+    {
+        return false;
+    }
+
+    if (out_payload)
+    {
+        *out_payload = payload;
+    }
+    if (out_payload_len)
+    {
+        *out_payload_len = strlen(payload);
+    }
+    if (out_has_type)
+    {
+        *out_has_type = has_type;
+    }
+    if (out_is_png)
+    {
+        *out_is_png = is_png;
+    }
+    return true;
+}
+
+static int html_view_hex_value(char ch)
+{
+    if (ch >= '0' && ch <= '9')
+    {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f')
+    {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F')
+    {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static char *html_view_decode_percent(const char *input, size_t len, size_t *out_len)
+{
+    if (!input || len == 0 || !out_len)
+    {
+        return NULL;
+    }
+
+    char *out = (char *)malloc(len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+
+    size_t w = 0;
+    for (size_t i = 0; i < len; ++i)
+    {
+        char ch = input[i];
+        if (ch == '%' && i + 2 < len)
+        {
+            int h = html_view_hex_value(input[i + 1]);
+            int l = html_view_hex_value(input[i + 2]);
+            if (h >= 0 && l >= 0)
+            {
+                out[w++] = (char)((h << 4) | l);
+                i += 2;
+                continue;
+            }
+        }
+        out[w++] = ch;
+    }
+
+    out[w] = '\0';
+    *out_len = w;
+    return out;
+}
+
+static int html_view_base64_value(char ch)
+{
+    if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+    if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
+    if (ch >= '0' && ch <= '9') return ch - '0' + 52;
+    if (ch == '+') return 62;
+    if (ch == '/') return 63;
+    return -1;
+}
+
+static uint8_t *html_view_decode_base64(const char *input, size_t len, size_t *out_len)
+{
+    if (!input || len == 0 || !out_len)
+    {
+        return NULL;
+    }
+
+    size_t max_out = (len / 4 + 1) * 3;
+    uint8_t *out = (uint8_t *)malloc(max_out);
+    if (!out)
+    {
+        return NULL;
+    }
+
+    size_t out_pos = 0;
+    int vals[4];
+    size_t i = 0;
+    while (i < len)
+    {
+        size_t got = 0;
+        while (i < len && got < 4)
+        {
+            unsigned char ch = (unsigned char)input[i++];
+            if (ch == '=')
+            {
+                vals[got++] = -2;
+            }
+            else
+            {
+                int v = html_view_base64_value((char)ch);
+                if (v < 0)
+                {
+                    continue;
+                }
+                vals[got++] = v;
+            }
+        }
+        if (got < 2)
+        {
+            break;
+        }
+        if (vals[0] < 0 || vals[1] < 0)
+        {
+            break;
+        }
+        out[out_pos++] = (uint8_t)((vals[0] << 2) | (vals[1] >> 4));
+        if (got > 2 && vals[2] >= 0)
+        {
+            out[out_pos++] = (uint8_t)((vals[1] << 4) | (vals[2] >> 2));
+            if (got > 3 && vals[3] >= 0)
+            {
+                out[out_pos++] = (uint8_t)((vals[2] << 6) | vals[3]);
+            }
+        }
+    }
+
+    *out_len = out_pos;
+    return out;
+}
+
+static bool html_view_is_png_bytes(const uint8_t *data, size_t len)
+{
+    static const uint8_t signature[8] = {0x89u, 0x50u, 0x4Eu, 0x47u, 0x0Du, 0x0Au, 0x1Au, 0x0Au};
+    if (!data || len < sizeof(signature))
+    {
+        return false;
+    }
+    return memcmp(data, signature, sizeof(signature)) == 0;
+}
+
+bool html_view_try_load_data_image_locked(atk_html_view_priv_t *priv, const char *src)
+{
+    if (!priv || !src)
+    {
+        return false;
+    }
+    if (strncasecmp(src, "data:", 5) != 0)
+    {
+        return false;
+    }
+    if (html_view_image_find(priv, src))
+    {
+        return true;
+    }
+
+    const char *payload = NULL;
+    size_t payload_len = 0;
+    bool has_type = false;
+    bool is_png = false;
+    if (!html_view_data_url_parse_base64(src, &payload, &payload_len, &has_type, &is_png))
+    {
+        return false;
+    }
+    if (has_type && !is_png)
+    {
+        return false;
+    }
+
+    size_t decoded_len = 0;
+    char *decoded_payload = html_view_decode_percent(payload, payload_len, &decoded_len);
+    if (!decoded_payload)
+    {
+        return false;
+    }
+
+    size_t png_len = 0;
+    uint8_t *png_bytes = html_view_decode_base64(decoded_payload, decoded_len, &png_len);
+    free(decoded_payload);
+    if (!png_bytes)
+    {
+        return false;
+    }
+    if (!html_view_is_png_bytes(png_bytes, png_len))
+    {
+        free(png_bytes);
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0;
+    int h = 0;
+    int stride_bytes = 0;
+    int rc = png_decode_rgba32(png_bytes, png_len, &pixels, &w, &h, &stride_bytes);
+    free(png_bytes);
+    if (rc != 0 || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
+    {
+        free(pixels);
+        return false;
+    }
+
+    html_view_image_t *img = (html_view_image_t *)calloc(1, sizeof(*img));
+    if (!img)
+    {
+        free(pixels);
+        return false;
+    }
+    img->src = html_view_strdup(src);
+    if (!img->src)
+    {
+        free(pixels);
+        free(img);
+        return false;
+    }
+    img->pixels = pixels;
+    img->width = w;
+    img->height = h;
+    img->stride_bytes = stride_bytes;
+    img->next = priv->images;
+    priv->images = img;
+    return true;
 }
 
 static void html_view_collect_style_text(const html_node_t *node, char **buf, size_t *len, size_t *cap)

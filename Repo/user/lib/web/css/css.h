@@ -49,9 +49,25 @@ typedef enum
 
 typedef enum
 {
+    CSS_BACKGROUND_REPEAT_REPEAT = 0,
+    CSS_BACKGROUND_REPEAT_NO_REPEAT,
+    CSS_BACKGROUND_REPEAT_REPEAT_X,
+    CSS_BACKGROUND_REPEAT_REPEAT_Y
+} css_background_repeat_t;
+
+typedef enum
+{
+    CSS_BACKGROUND_ATTACHMENT_SCROLL = 0,
+    CSS_BACKGROUND_ATTACHMENT_FIXED
+} css_background_attachment_t;
+
+typedef enum
+{
     CSS_DISPLAY_INLINE = 0,
     CSS_DISPLAY_BLOCK,
     CSS_DISPLAY_LIST_ITEM,
+    CSS_DISPLAY_TABLE,
+    CSS_DISPLAY_TABLE_CELL,
     CSS_DISPLAY_FLEX,
     CSS_DISPLAY_INLINE_FLEX,
     CSS_DISPLAY_NONE
@@ -127,6 +143,16 @@ typedef struct
     bool has_background;
     video_color_t background;
     bool background_transparent;
+    bool has_background_image;
+    const char *background_image;
+    bool background_image_owned;
+    bool has_background_repeat;
+    css_background_repeat_t background_repeat;
+    bool has_background_attachment;
+    css_background_attachment_t background_attachment;
+    bool has_background_position;
+    css_length_t background_pos_x;
+    css_length_t background_pos_y;
     bool has_color;
     video_color_t color;
     bool has_font_size;
@@ -154,6 +180,8 @@ typedef struct
     bool border_transparent;
     bool has_position;
     css_position_t position;
+    bool has_z_index;
+    int32_t z_index;
     bool has_top;
     css_length_t top;
     bool has_right;

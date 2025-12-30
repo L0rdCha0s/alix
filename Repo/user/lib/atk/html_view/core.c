@@ -532,6 +532,12 @@ static void html_view_render_cache_draw_text_span(html_view_ctx_t *ctx,
     free(heap);
 }
 
+typedef struct
+{
+    size_t op_index;
+    int32_t z_index;
+} html_view_draw_item_t;
+
 void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
 {
     if (!ctx || !ctx->priv)
@@ -628,6 +634,12 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
         };
     }
 
+    html_view_draw_item_t draw_stack[256];
+    html_view_draw_item_t *draw_items = draw_stack;
+    size_t draw_count = 0;
+    size_t draw_cap = sizeof(draw_stack) / sizeof(draw_stack[0]);
+    bool has_z = false;
+
     size_t last_op_index = (size_t)-1;
     for (;;)
     {
@@ -668,8 +680,6 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
         const html_view_op_t *op = &cache->ops[min_op_index];
         bool fixed = op->fixed;
 
-        int abs_x = 0;
-        int abs_y = 0;
         if (!fixed)
         {
             int op_y0 = (int)op->y;
@@ -678,6 +688,79 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
             {
                 continue;
             }
+        }
+        else
+        {
+            int abs_y = (int)op->y;
+            int fixed_bottom = abs_y + (int)op->h;
+            if (fixed_bottom <= ctx->viewport_y || abs_y >= (ctx->viewport_y + ctx->viewport_h))
+            {
+                continue;
+            }
+        }
+
+        if (draw_count == draw_cap)
+        {
+            size_t new_cap = draw_cap * 2;
+            html_view_draw_item_t *new_items = (html_view_draw_item_t *)realloc(draw_items == draw_stack ? NULL : draw_items,
+                                                                                new_cap * sizeof(*new_items));
+            if (!new_items)
+            {
+                break;
+            }
+            if (draw_items == draw_stack)
+            {
+                memcpy(new_items, draw_stack, draw_cap * sizeof(*new_items));
+            }
+            draw_items = new_items;
+            draw_cap = new_cap;
+        }
+
+        draw_items[draw_count++] = (html_view_draw_item_t){
+            .op_index = min_op_index,
+            .z_index = op->z_index,
+        };
+        if (op->z_index != 0)
+        {
+            has_z = true;
+        }
+    }
+
+    if (draw_count > 1 && has_z)
+    {
+        for (size_t i = 1; i < draw_count; ++i)
+        {
+            html_view_draw_item_t key = draw_items[i];
+            size_t j = i;
+            while (j > 0)
+            {
+                html_view_draw_item_t *prev = &draw_items[j - 1];
+                if (prev->z_index < key.z_index ||
+                    (prev->z_index == key.z_index && prev->op_index <= key.op_index))
+                {
+                    break;
+                }
+                draw_items[j] = *prev;
+                --j;
+            }
+            draw_items[j] = key;
+        }
+    }
+
+    for (size_t i = 0; i < draw_count; ++i)
+    {
+        size_t op_index = draw_items[i].op_index;
+        if (op_index >= cache->op_count)
+        {
+            continue;
+        }
+        const html_view_op_t *op = &cache->ops[op_index];
+        bool fixed = op->fixed;
+
+        int abs_x = 0;
+        int abs_y = 0;
+        if (!fixed)
+        {
             abs_x = ctx->doc_origin_x + (int)op->x;
             abs_y = ctx->doc_origin_y + (int)op->y - scroll_y;
         }
@@ -685,11 +768,6 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
         {
             abs_x = (int)op->x;
             abs_y = (int)op->y;
-            int fixed_bottom = abs_y + (int)op->h;
-            if (fixed_bottom <= ctx->viewport_y || abs_y >= (ctx->viewport_y + ctx->viewport_h))
-            {
-                continue;
-            }
         }
 
         switch (op->kind)
@@ -730,6 +808,10 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
     if (streams != stream_stack)
     {
         free(streams);
+    }
+    if (draw_items != draw_stack)
+    {
+        free(draw_items);
     }
 }
 

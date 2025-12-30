@@ -145,6 +145,7 @@ typedef struct
     int16_t font_px;
     const video_color_t *pixels;
     int stride_bytes;
+    int32_t z_index;
     bool fixed;
     atk_widget_t *widget;
 } html_view_op_t;
@@ -284,6 +285,8 @@ typedef struct
     int pos_y;
     int pos_w;
     int pos_h;
+    int height_basis;
+    bool height_basis_valid;
     html_view_float_ctx_t *floats;
     int actual_font_px;
     int base_font_px;
@@ -307,10 +310,12 @@ typedef struct
     video_color_t underline_run_color;
     const char *active_href;
     bool pending_space;
+    int32_t z_index;
     bool draw;
     bool record;
     bool record_failed;
     bool fixed_mode;
+    bool table_mode;
     int doc_origin_x;
     int doc_origin_y;
     html_view_style_block_t *style_block;
@@ -435,6 +440,12 @@ void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
                                          int left,
                                          video_color_t color,
                                          const atk_rect_t *clip);
+void html_view_draw_background_image(html_view_ctx_t *ctx,
+                                     const css_style_t *style,
+                                     int border_x,
+                                     int border_y,
+                                     int border_w,
+                                     int border_h);
 void html_view_draw_text(html_view_ctx_t *ctx,
                          const char *text,
                          video_color_t color,
@@ -485,6 +496,9 @@ int html_view_length_to_px_signed(const css_length_t *len,
                                   int ref_h,
                                   int font_px,
                                   bool horizontal);
+bool html_view_length_to_px_height(const html_view_ctx_t *ctx,
+                                   const css_length_t *len,
+                                   int *out_px);
 int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_t *style);
 int html_view_font_px_for_style(const html_view_ctx_t *ctx, const css_style_t *style, int parent_font_px);
 void html_view_font_scope_push(html_view_ctx_t *ctx,
@@ -495,6 +509,7 @@ void html_view_font_scope_pop(html_view_ctx_t *ctx, const html_view_font_scope_t
 
 void html_view_controls_build(atk_widget_t *view, atk_html_view_priv_t *priv);
 html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *src);
+bool html_view_try_load_data_image_locked(atk_html_view_priv_t *priv, const char *src);
 void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv);
 void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_stylesheet_rebuild_if_needed(atk_html_view_priv_t *priv);

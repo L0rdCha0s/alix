@@ -2,6 +2,60 @@
 
 #include "ctype.h"
 
+static bool html_view_is_space_byte(unsigned char ch)
+{
+    return ch < 0x80u && isspace(ch);
+}
+
+static bool html_view_intersect_rect(const atk_rect_t *a, const atk_rect_t *b, atk_rect_t *out)
+{
+    if (!a || !b || !out)
+    {
+        return false;
+    }
+    int x0 = a->x > b->x ? a->x : b->x;
+    int y0 = a->y > b->y ? a->y : b->y;
+    int x1 = (a->x + a->width) < (b->x + b->width) ? (a->x + a->width) : (b->x + b->width);
+    int y1 = (a->y + a->height) < (b->y + b->height) ? (a->y + a->height) : (b->y + b->height);
+    int w = x1 - x0;
+    int h = y1 - y0;
+    if (w <= 0 || h <= 0)
+    {
+        return false;
+    }
+    out->x = x0;
+    out->y = y0;
+    out->width = w;
+    out->height = h;
+    return true;
+}
+
+static int html_view_repeat_start(int origin, int step, int clip_start)
+{
+    if (step <= 0)
+    {
+        return origin;
+    }
+    int start = origin;
+    if (start > clip_start)
+    {
+        int delta = start - clip_start;
+        int steps = (delta + step - 1) / step;
+        start -= steps * step;
+    }
+    else if (start + step <= clip_start)
+    {
+        int delta = clip_start - start;
+        int steps = delta / step;
+        start += steps * step;
+        if (start + step <= clip_start)
+        {
+            start += step;
+        }
+    }
+    return start;
+}
+
 void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
                                         int x,
                                         int y,
@@ -27,6 +81,7 @@ void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
             op.w = w;
             op.h = h;
             op.color = color;
+            op.z_index = ctx->z_index;
             op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
@@ -62,6 +117,141 @@ void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
         return;
     }
     video_draw_rect(x0, y0, x1 - x0, y1 - y0, color);
+}
+
+void html_view_draw_background_image(html_view_ctx_t *ctx,
+                                     const css_style_t *style,
+                                     int border_x,
+                                     int border_y,
+                                     int border_w,
+                                     int border_h)
+{
+    if (!ctx || !style || !style->has_background_image || !style->background_image)
+    {
+        return;
+    }
+    if (!ctx->priv || border_w <= 0 || border_h <= 0)
+    {
+        return;
+    }
+
+    html_view_image_t *img = html_view_image_find(ctx->priv, style->background_image);
+    if (!img && ctx->priv)
+    {
+        (void)html_view_try_load_data_image_locked(ctx->priv, style->background_image);
+        img = html_view_image_find(ctx->priv, style->background_image);
+    }
+    if (!img || !img->pixels || img->width <= 0 || img->height <= 0 || img->stride_bytes <= 0)
+    {
+        return;
+    }
+
+    css_background_repeat_t repeat = CSS_BACKGROUND_REPEAT_REPEAT;
+    if (style->has_background_repeat)
+    {
+        repeat = style->background_repeat;
+    }
+    bool repeat_x = (repeat == CSS_BACKGROUND_REPEAT_REPEAT || repeat == CSS_BACKGROUND_REPEAT_REPEAT_X);
+    bool repeat_y = (repeat == CSS_BACKGROUND_REPEAT_REPEAT || repeat == CSS_BACKGROUND_REPEAT_REPEAT_Y);
+
+    bool fixed = style->has_background_attachment &&
+                 style->background_attachment == CSS_BACKGROUND_ATTACHMENT_FIXED;
+
+    int pos_x = 0;
+    int pos_y = 0;
+    if (style->has_background_position)
+    {
+        pos_x = html_view_length_to_px_signed(&style->background_pos_x,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              border_w,
+                                              border_h,
+                                              ctx->base_font_px,
+                                              true);
+        pos_y = html_view_length_to_px_signed(&style->background_pos_y,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              border_w,
+                                              border_h,
+                                              ctx->base_font_px,
+                                              false);
+    }
+
+    int draw_border_y = html_view_draw_y(ctx, border_y);
+    atk_rect_t border_clip = { border_x, draw_border_y, border_w, border_h };
+    atk_rect_t clip = {0};
+    if (!html_view_intersect_rect(&border_clip, &ctx->clip, &clip))
+    {
+        return;
+    }
+
+    int origin_x = fixed ? (ctx->viewport_x + pos_x) : (border_x + pos_x);
+    int origin_y = fixed ? (ctx->viewport_y + pos_y) : (draw_border_y + pos_y);
+
+    int img_w = img->width;
+    int img_h = img->height;
+
+    if (!repeat_x || !repeat_y)
+    {
+        int x0 = origin_x;
+        int y0 = origin_y;
+        int x1 = x0 + img_w;
+        int y1 = y0 + img_h;
+        int clip_x1 = clip.x + clip.width;
+        int clip_y1 = clip.y + clip.height;
+        if (x1 <= clip.x || y1 <= clip.y || x0 >= clip_x1 || y0 >= clip_y1)
+        {
+            return;
+        }
+    }
+
+    int start_x = repeat_x ? html_view_repeat_start(origin_x, img_w, clip.x) : origin_x;
+    int start_y = repeat_y ? html_view_repeat_start(origin_y, img_h, clip.y) : origin_y;
+
+    bool saved_fixed = ctx->fixed_mode;
+    if (fixed)
+    {
+        ctx->fixed_mode = true;
+    }
+
+    for (int y = start_y;; y += img_h)
+    {
+        if (repeat_y)
+        {
+            if (y >= clip.y + clip.height)
+            {
+                break;
+            }
+        }
+        else if (y != start_y)
+        {
+            break;
+        }
+
+        for (int x = start_x;; x += img_w)
+        {
+            if (repeat_x)
+            {
+                if (x >= clip.x + clip.width)
+                {
+                    break;
+                }
+            }
+            else if (x != start_x)
+            {
+                break;
+            }
+
+            html_view_blit_rgba32_clipped(ctx, x, y, img_w, img_h, img->pixels, img->stride_bytes, &clip);
+        }
+
+        if (!repeat_y)
+        {
+            break;
+        }
+    }
+
+    ctx->fixed_mode = saved_fixed;
 }
 
 void html_view_draw_border_clipped(html_view_ctx_t *ctx,
@@ -125,6 +315,7 @@ void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
             op.pixels = pixels;
             op.stride_bytes = stride_bytes;
             op.href = ctx->active_href;
+            op.z_index = ctx->z_index;
             op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
@@ -559,6 +750,7 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
             op.text_len = (uint32_t)len;
             op.text_owned = false;
             op.href = ctx->active_href;
+            op.z_index = ctx->z_index;
             op.fixed = ctx->fixed_mode;
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
@@ -606,7 +798,7 @@ void html_view_draw_text(html_view_ctx_t *ctx,
     const char *p = text;
     while (*p)
     {
-        while (*p && isspace((unsigned char)*p))
+        while (*p && html_view_is_space_byte((unsigned char)*p))
         {
             ctx->pending_space = true;
             p++;
@@ -617,7 +809,7 @@ void html_view_draw_text(html_view_ctx_t *ctx,
         }
 
         const char *wstart = p;
-        while (*p && !isspace((unsigned char)*p))
+        while (*p && !html_view_is_space_byte((unsigned char)*p))
         {
             p++;
         }
@@ -706,6 +898,7 @@ void html_view_place_inline_control(html_view_ctx_t *ctx,
                 op.w = width;
                 op.h = height;
                 op.widget = child;
+                op.z_index = ctx->z_index;
                 op.fixed = ctx->fixed_mode;
                 if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
                 {
@@ -769,6 +962,7 @@ void html_view_place_block_control(html_view_ctx_t *ctx,
                 op.w = width;
                 op.h = height;
                 op.widget = child;
+                op.z_index = ctx->z_index;
                 op.fixed = ctx->fixed_mode;
                 if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
                 {

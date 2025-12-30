@@ -20,6 +20,7 @@ void css_style_apply_property(css_style_t *style,
                               const char *prop_end,
                               const char *val_start,
                               const char *val_end);
+void css_style_release(css_style_t *style);
 
 #ifdef __cplusplus
 }

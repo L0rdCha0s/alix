@@ -5,8 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include <sys/types.h>
-#include <sys/stat.h>
+#include "sys/types.h"
 #else
 #include "types.h"
 #endif
@@ -39,7 +38,11 @@ int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
 char *getenv(const char *name);
 uint32_t getuid(void);
+#ifdef TTF_HOST_BUILD
+int mkdir(const char *path, mode_t mode);
+#else
 int mkdir(const char *path, uint32_t mode);
+#endif
 char *alix_home_dir(void);
 bool alix_ensure_dir_path(const char *path);
 

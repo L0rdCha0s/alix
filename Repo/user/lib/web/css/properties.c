@@ -30,28 +30,19 @@ static bool css_next_token(const char **p, const char *end, const char **tok_sta
     return true;
 }
 
-static bool css_parse_background_color_value(const char *start, const char *end, video_color_t *out)
+void css_style_release(css_style_t *style)
 {
-    if (!start || !end || !out)
+    if (!style)
     {
-        return false;
+        return;
     }
-    css_trim_range(&start, &end);
-    if (end <= start)
+    if (style->background_image_owned && style->background_image)
     {
-        return false;
+        free((void *)style->background_image);
+        style->background_image = NULL;
     }
-    const char *p = start;
-    const char *tok_s = NULL;
-    const char *tok_e = NULL;
-    while (css_next_token(&p, end, &tok_s, &tok_e))
-    {
-        if (css_parse_color(tok_s, tok_e, out))
-        {
-            return true;
-        }
-    }
-    return false;
+    style->background_image_owned = false;
+    style->has_background_image = false;
 }
 
 static bool css_value_is_keyword(const char *start, const char *end, const char *keyword)
@@ -68,6 +59,278 @@ static bool css_value_is_keyword(const char *start, const char *end, const char 
         return false;
     }
     return strncasecmp(start, keyword, len) == 0;
+}
+
+static char *css_strdup_unescape(const char *start, const char *end)
+{
+    if (!start || !end || end <= start)
+    {
+        return NULL;
+    }
+    size_t cap = (size_t)(end - start) + 1;
+    char *out = (char *)malloc(cap);
+    if (!out)
+    {
+        return NULL;
+    }
+    size_t len = 0;
+    for (const char *p = start; p < end; ++p)
+    {
+        if (*p == '\\' && (p + 1) < end)
+        {
+            ++p;
+        }
+        out[len++] = *p;
+    }
+    out[len] = '\0';
+    return out;
+}
+
+static bool css_parse_url_token(const char *start, const char *end, char **out_url)
+{
+    if (!out_url)
+    {
+        return false;
+    }
+    *out_url = NULL;
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    if ((size_t)(end - start) < 5)
+    {
+        return false;
+    }
+    if (strncasecmp(start, "url(", 4) != 0)
+    {
+        return false;
+    }
+    const char *p = start + 4;
+    const char *p_end = end;
+    if (p_end <= p || p_end[-1] != ')')
+    {
+        return false;
+    }
+    --p_end;
+    css_trim_range(&p, &p_end);
+    if (p_end <= p)
+    {
+        return false;
+    }
+    if (*p == '"' || *p == '\'')
+    {
+        char quote = *p++;
+        if (p_end <= p || p_end[-1] != quote)
+        {
+            return false;
+        }
+        --p_end;
+    }
+    if (p_end < p)
+    {
+        return false;
+    }
+    *out_url = css_strdup_unescape(p, p_end);
+    return *out_url != NULL;
+}
+
+static void css_style_set_background_image(css_style_t *style, char *url, bool owned)
+{
+    if (!style)
+    {
+        return;
+    }
+    css_style_release(style);
+    style->has_background_image = true;
+    style->background_image = url;
+    style->background_image_owned = owned;
+}
+
+static bool css_parse_background_position_tokens(const char *start,
+                                                 const char *end,
+                                                 css_length_t *out_x,
+                                                 css_length_t *out_y,
+                                                 bool *out_has_pos)
+{
+    if (!out_x || !out_y || !out_has_pos)
+    {
+        return false;
+    }
+    *out_has_pos = false;
+    css_trim_range(&start, &end);
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+
+    const char *p = start;
+    const char *tok_s = NULL;
+    const char *tok_e = NULL;
+    css_length_t vals[2] = {0};
+    size_t count = 0;
+    while (css_next_token(&p, end, &tok_s, &tok_e) && count < 2)
+    {
+        css_length_t len = {0};
+        if (!css_parse_length_token(tok_s, tok_e, &len))
+        {
+            return false;
+        }
+        vals[count++] = len;
+    }
+
+    if (count == 0)
+    {
+        return false;
+    }
+    *out_x = vals[0];
+    if (count > 1)
+    {
+        *out_y = vals[1];
+    }
+    else
+    {
+        *out_y = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_NONE };
+    }
+    *out_has_pos = true;
+    return true;
+}
+
+static void css_style_apply_background_shorthand(css_style_t *style, const char *start, const char *end)
+{
+    if (!style || !start || !end)
+    {
+        return;
+    }
+
+    css_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return;
+    }
+
+    css_style_release(style);
+    style->has_background = true;
+    style->background_transparent = true;
+    style->has_background_image = true;
+    style->background_image = NULL;
+    style->background_image_owned = false;
+    style->has_background_repeat = true;
+    style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT;
+    style->has_background_attachment = true;
+    style->background_attachment = CSS_BACKGROUND_ATTACHMENT_SCROLL;
+    style->has_background_position = true;
+    style->background_pos_x = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_NONE };
+    style->background_pos_y = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_NONE };
+
+    const char *p = start;
+    const char *tok_s = NULL;
+    const char *tok_e = NULL;
+    css_length_t pos_x = {0};
+    css_length_t pos_y = {0};
+    size_t pos_count = 0;
+
+    while (css_next_token(&p, end, &tok_s, &tok_e))
+    {
+        if (css_value_is_keyword(tok_s, tok_e, "none"))
+        {
+            style->background_transparent = true;
+            css_style_set_background_image(style, NULL, false);
+            continue;
+        }
+
+        if (css_value_is_keyword(tok_s, tok_e, "repeat"))
+        {
+            style->has_background_repeat = true;
+            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT;
+            continue;
+        }
+        if (css_value_is_keyword(tok_s, tok_e, "no-repeat"))
+        {
+            style->has_background_repeat = true;
+            style->background_repeat = CSS_BACKGROUND_REPEAT_NO_REPEAT;
+            continue;
+        }
+        if (css_value_is_keyword(tok_s, tok_e, "repeat-x"))
+        {
+            style->has_background_repeat = true;
+            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT_X;
+            continue;
+        }
+        if (css_value_is_keyword(tok_s, tok_e, "repeat-y"))
+        {
+            style->has_background_repeat = true;
+            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT_Y;
+            continue;
+        }
+        if (css_value_is_keyword(tok_s, tok_e, "fixed"))
+        {
+            style->has_background_attachment = true;
+            style->background_attachment = CSS_BACKGROUND_ATTACHMENT_FIXED;
+            continue;
+        }
+        if (css_value_is_keyword(tok_s, tok_e, "scroll"))
+        {
+            style->has_background_attachment = true;
+            style->background_attachment = CSS_BACKGROUND_ATTACHMENT_SCROLL;
+            continue;
+        }
+
+        char *url = NULL;
+        if (css_parse_url_token(tok_s, tok_e, &url))
+        {
+            css_style_set_background_image(style, url, true);
+            continue;
+        }
+
+        if (css_value_is_keyword(tok_s, tok_e, "transparent"))
+        {
+            style->has_background = true;
+            style->background_transparent = true;
+            continue;
+        }
+
+        video_color_t c = 0;
+        if (css_parse_color(tok_s, tok_e, &c))
+        {
+            style->has_background = true;
+            style->background_transparent = false;
+            style->background = c;
+            continue;
+        }
+
+        if (pos_count < 2)
+        {
+            css_length_t len = {0};
+            if (css_parse_length_token(tok_s, tok_e, &len))
+            {
+                if (pos_count == 0)
+                {
+                    pos_x = len;
+                }
+                else
+                {
+                    pos_y = len;
+                }
+                pos_count++;
+                continue;
+            }
+        }
+    }
+
+    if (pos_count > 0)
+    {
+        style->has_background_position = true;
+        style->background_pos_x = pos_x;
+        if (pos_count > 1)
+        {
+            style->background_pos_y = pos_y;
+        }
+        else
+        {
+            style->background_pos_y = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_NONE };
+        }
+    }
 }
 
 static bool css_parse_border_width_token(const char *start,
@@ -364,6 +627,54 @@ static bool css_parse_border_value(const char *start,
     }
 
     return have_width;
+}
+
+static bool css_parse_int_value(const char *start, const char *end, int32_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+
+    int sign = 1;
+    const char *p = start;
+    if (*p == '-' || *p == '+')
+    {
+        if (*p == '-')
+        {
+            sign = -1;
+        }
+        ++p;
+    }
+    if (p >= end || !isdigit((unsigned char)*p))
+    {
+        return false;
+    }
+
+    int64_t value = 0;
+    const int64_t limit = 2147483647;
+    while (p < end && isdigit((unsigned char)*p))
+    {
+        value = value * 10 + (*p - '0');
+        if (value > limit)
+        {
+            value = limit;
+            break;
+        }
+        ++p;
+    }
+    if (p != end)
+    {
+        return false;
+    }
+
+    *out = (int32_t)(sign * value);
+    return true;
 }
 
 static bool css_parse_text_shadow_value(const char *start,
@@ -765,20 +1076,7 @@ void css_style_apply_property(css_style_t *style,
 
     if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "background", 10) == 0)
     {
-        video_color_t c;
-        if (css_value_is_keyword(val_start, val_end, "none") ||
-            css_value_is_keyword(val_start, val_end, "transparent"))
-        {
-            style->has_background = true;
-            style->background_transparent = true;
-            return;
-        }
-        if (css_parse_background_color_value(val_start, val_end, &c))
-        {
-            style->has_background = true;
-            style->background_transparent = false;
-            style->background = c;
-        }
+        css_style_apply_background_shorthand(style, val_start, val_end);
         return;
     }
 
@@ -796,6 +1094,81 @@ void css_style_apply_property(css_style_t *style,
             style->has_background = true;
             style->background_transparent = false;
             style->background = c;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 16 && strncasecmp(prop_start, "background-image", 16) == 0)
+    {
+        if (css_value_is_keyword(val_start, val_end, "none"))
+        {
+            css_style_set_background_image(style, NULL, false);
+            return;
+        }
+        char *url = NULL;
+        if (css_parse_url_token(val_start, val_end, &url))
+        {
+            css_style_set_background_image(style, url, true);
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 17 && strncasecmp(prop_start, "background-repeat", 17) == 0)
+    {
+        if (css_value_is_keyword(val_start, val_end, "repeat"))
+        {
+            style->has_background_repeat = true;
+            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT;
+            return;
+        }
+        if (css_value_is_keyword(val_start, val_end, "no-repeat"))
+        {
+            style->has_background_repeat = true;
+            style->background_repeat = CSS_BACKGROUND_REPEAT_NO_REPEAT;
+            return;
+        }
+        if (css_value_is_keyword(val_start, val_end, "repeat-x"))
+        {
+            style->has_background_repeat = true;
+            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT_X;
+            return;
+        }
+        if (css_value_is_keyword(val_start, val_end, "repeat-y"))
+        {
+            style->has_background_repeat = true;
+            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT_Y;
+            return;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 21 && strncasecmp(prop_start, "background-attachment", 21) == 0)
+    {
+        if (css_value_is_keyword(val_start, val_end, "fixed"))
+        {
+            style->has_background_attachment = true;
+            style->background_attachment = CSS_BACKGROUND_ATTACHMENT_FIXED;
+            return;
+        }
+        if (css_value_is_keyword(val_start, val_end, "scroll"))
+        {
+            style->has_background_attachment = true;
+            style->background_attachment = CSS_BACKGROUND_ATTACHMENT_SCROLL;
+            return;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 19 && strncasecmp(prop_start, "background-position", 19) == 0)
+    {
+        css_length_t pos_x = {0};
+        css_length_t pos_y = {0};
+        bool has_pos = false;
+        if (css_parse_background_position_tokens(val_start, val_end, &pos_x, &pos_y, &has_pos) && has_pos)
+        {
+            style->has_background_position = true;
+            style->background_pos_x = pos_x;
+            style->background_pos_y = pos_y;
         }
         return;
     }
@@ -1332,6 +1705,17 @@ void css_style_apply_property(css_style_t *style,
         return;
     }
 
+    if ((size_t)(prop_end - prop_start) == 7 && strncasecmp(prop_start, "z-index", 7) == 0)
+    {
+        int32_t z = 0;
+        if (css_parse_int_value(val_start, val_end, &z))
+        {
+            style->has_z_index = true;
+            style->z_index = z;
+        }
+        return;
+    }
+
     if ((size_t)(prop_end - prop_start) == 3 && strncasecmp(prop_start, "top", 3) == 0)
     {
         css_length_t len;
@@ -1512,6 +1896,16 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_display = true;
             style->display = CSS_DISPLAY_LIST_ITEM;
+        }
+        else if (len == 5 && strncasecmp(s, "table", 5) == 0)
+        {
+            style->has_display = true;
+            style->display = CSS_DISPLAY_TABLE;
+        }
+        else if (len == 10 && strncasecmp(s, "table-cell", 10) == 0)
+        {
+            style->has_display = true;
+            style->display = CSS_DISPLAY_TABLE_CELL;
         }
         else if (len == 4 && strncasecmp(s, "none", 4) == 0)
         {

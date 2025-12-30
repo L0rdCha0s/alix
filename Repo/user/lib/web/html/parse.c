@@ -113,6 +113,40 @@ static bool html_is_void_element(const char *tag)
            strcmp(tag, "wbr") == 0;
 }
 
+static bool html_closes_p_on_tag(const char *tag)
+{
+    if (!tag)
+    {
+        return false;
+    }
+    return strcmp(tag, "address") == 0 ||
+           strcmp(tag, "article") == 0 ||
+           strcmp(tag, "aside") == 0 ||
+           strcmp(tag, "blockquote") == 0 ||
+           strcmp(tag, "div") == 0 ||
+           strcmp(tag, "dl") == 0 ||
+           strcmp(tag, "dt") == 0 ||
+           strcmp(tag, "dd") == 0 ||
+           strcmp(tag, "fieldset") == 0 ||
+           strcmp(tag, "footer") == 0 ||
+           strcmp(tag, "form") == 0 ||
+           strcmp(tag, "h1") == 0 ||
+           strcmp(tag, "h2") == 0 ||
+           strcmp(tag, "h3") == 0 ||
+           strcmp(tag, "h4") == 0 ||
+           strcmp(tag, "h5") == 0 ||
+           strcmp(tag, "h6") == 0 ||
+           strcmp(tag, "header") == 0 ||
+           strcmp(tag, "menu") == 0 ||
+           strcmp(tag, "nav") == 0 ||
+           strcmp(tag, "ol") == 0 ||
+           strcmp(tag, "p") == 0 ||
+           strcmp(tag, "pre") == 0 ||
+           strcmp(tag, "section") == 0 ||
+           strcmp(tag, "table") == 0 ||
+           strcmp(tag, "ul") == 0;
+}
+
 static void html_apply_implicit_closures(html_node_stack_t *stack, const char *new_tag)
 {
     if (!stack || !new_tag)
@@ -133,6 +167,12 @@ static void html_apply_implicit_closures(html_node_stack_t *stack, const char *n
     }
 
     if (strcmp(new_tag, "p") == 0 && strcmp(top->name, "p") == 0)
+    {
+        (void)html_stack_pop(stack);
+        return;
+    }
+
+    if (strcmp(top->name, "p") == 0 && html_closes_p_on_tag(new_tag))
     {
         (void)html_stack_pop(stack);
         return;

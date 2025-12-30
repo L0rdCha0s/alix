@@ -15,6 +15,28 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
         dst->background = src->background;
         dst->background_transparent = src->background_transparent;
     }
+    if (src->has_background_image)
+    {
+        dst->has_background_image = true;
+        dst->background_image = src->background_image;
+        dst->background_image_owned = false;
+    }
+    if (src->has_background_repeat)
+    {
+        dst->has_background_repeat = true;
+        dst->background_repeat = src->background_repeat;
+    }
+    if (src->has_background_attachment)
+    {
+        dst->has_background_attachment = true;
+        dst->background_attachment = src->background_attachment;
+    }
+    if (src->has_background_position)
+    {
+        dst->has_background_position = true;
+        dst->background_pos_x = src->background_pos_x;
+        dst->background_pos_y = src->background_pos_y;
+    }
     if (src->has_color)
     {
         dst->has_color = true;
@@ -80,6 +102,11 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_position = true;
         dst->position = src->position;
+    }
+    if (src->has_z_index)
+    {
+        dst->has_z_index = true;
+        dst->z_index = src->z_index;
     }
     if (src->has_top)
     {

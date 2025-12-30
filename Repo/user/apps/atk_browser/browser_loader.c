@@ -378,8 +378,17 @@ static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, 
         return true;
     }
 
+    size_t decoded_payload_len = 0;
+    char *decoded_payload = browser_decode_percent(payload, payload_len, &decoded_payload_len);
+    if (!decoded_payload)
+    {
+        browser_debug_logf(app, "[img] data url decode failed len=%u", (unsigned)payload_len);
+        return true;
+    }
+
     size_t decoded_len = 0;
-    uint8_t *decoded = browser_decode_base64(payload, payload_len, &decoded_len);
+    uint8_t *decoded = browser_decode_base64(decoded_payload, decoded_payload_len, &decoded_len);
+    free(decoded_payload);
     if (!decoded)
     {
         browser_debug_logf(app, "[img] data url base64 decode failed len=%u", (unsigned)payload_len);

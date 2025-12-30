@@ -350,6 +350,24 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     int body_content_y0 = body_box_y0 + border_px + pad_top;
     const html_node_t *body = body_node;
 
+    int body_height_basis = 0;
+    bool body_height_valid = false;
+    if (body_style.has_height && body_style.height.valid && !body_style.height.is_auto)
+    {
+        body_height_basis = html_view_length_to_px(&body_style.height,
+                                                   viewport_w,
+                                                   viewport_h,
+                                                   viewport_w,
+                                                   viewport_h,
+                                                   base_font_px,
+                                                   false);
+        if (body_height_basis < 0)
+        {
+            body_height_basis = 0;
+        }
+        body_height_valid = true;
+    }
+
     int effective_font_px = base_font_px;
     if (effective_font_px <= 0)
     {
@@ -421,6 +439,8 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         .pos_y = viewport_y,
         .pos_w = viewport_w,
         .pos_h = viewport_h,
+        .height_basis = body_height_basis,
+        .height_basis_valid = body_height_valid,
         .floats = &floats_record,
         .actual_font_px = effective_font_px,
         .base_font_px = base_font_px,
@@ -438,10 +458,12 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         .line_start_x = body_content_x,
         .line_start_y = body_content_y0,
         .pending_space = false,
+        .z_index = 0,
         .draw = false,
         .record = true,
         .record_failed = false,
         .fixed_mode = false,
+        .table_mode = false,
         .doc_origin_x = body_content_x,
         .doc_origin_y = body_content_y0
     };
@@ -860,6 +882,24 @@ static void html_view_draw_cb(const atk_state_t *state,
     int body_content_x = body_box_x + border_px + pad_left;
     int body_content_y0 = body_box_y0 + border_px + pad_top;
 
+    int body_height_basis = 0;
+    bool body_height_valid = false;
+    if (body_style.has_height && body_style.height.valid && !body_style.height.is_auto)
+    {
+        body_height_basis = html_view_length_to_px(&body_style.height,
+                                                   viewport_w,
+                                                   viewport_h,
+                                                   viewport_w,
+                                                   viewport_h,
+                                                   base_font_px,
+                                                   false);
+        if (body_height_basis < 0)
+        {
+            body_height_basis = 0;
+        }
+        body_height_valid = true;
+    }
+
     int effective_font_px = base_font_px;
     if (effective_font_px <= 0)
     {
@@ -974,6 +1014,8 @@ static void html_view_draw_cb(const atk_state_t *state,
         .pos_y = viewport_y,
         .pos_w = viewport_w,
         .pos_h = viewport_h,
+        .height_basis = body_height_basis,
+        .height_basis_valid = body_height_valid,
         .floats = NULL,
         .actual_font_px = effective_font_px,
         .base_font_px = base_font_px,
@@ -991,10 +1033,12 @@ static void html_view_draw_cb(const atk_state_t *state,
         .line_start_x = body_content_x,
         .line_start_y = body_content_y0,
         .pending_space = false,
+        .z_index = 0,
         .draw = true,
         .record = false,
         .record_failed = false,
         .fixed_mode = false,
+        .table_mode = false,
         .doc_origin_x = body_content_x,
         .doc_origin_y = body_content_y0
     };
@@ -1755,6 +1799,8 @@ static const char *html_view_dump_display(css_display_t display)
         case CSS_DISPLAY_INLINE: return "inline";
         case CSS_DISPLAY_BLOCK: return "block";
         case CSS_DISPLAY_LIST_ITEM: return "list-item";
+        case CSS_DISPLAY_TABLE: return "table";
+        case CSS_DISPLAY_TABLE_CELL: return "table-cell";
         case CSS_DISPLAY_FLEX: return "flex";
         case CSS_DISPLAY_INLINE_FLEX: return "inline-flex";
         case CSS_DISPLAY_NONE: return "none";

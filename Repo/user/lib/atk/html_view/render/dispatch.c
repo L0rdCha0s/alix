@@ -81,6 +81,11 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
         return;
     }
     html_view_record_anchor(ctx, node);
+    int32_t saved_z = ctx->z_index;
+    if (style->has_position && style->position != CSS_POSITION_STATIC && style->has_z_index)
+    {
+        ctx->z_index = style->z_index;
+    }
     bool block = html_view_is_block_tag(tag);
     if (style->has_display)
     {
@@ -88,8 +93,13 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
         {
             block = false;
         }
+        else if (style->display == CSS_DISPLAY_TABLE_CELL)
+        {
+            block = false;
+        }
         else if (style->display == CSS_DISPLAY_BLOCK ||
                  style->display == CSS_DISPLAY_LIST_ITEM ||
+                 style->display == CSS_DISPLAY_TABLE ||
                  style->display == CSS_DISPLAY_FLEX)
         {
             block = true;
@@ -121,6 +131,12 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
         (style->display == CSS_DISPLAY_FLEX || style->display == CSS_DISPLAY_INLINE_FLEX))
     {
         html_view_render_flex_container(ctx, node, style, style->display == CSS_DISPLAY_INLINE_FLEX);
+        goto out;
+    }
+
+    if (ctx->table_mode && style->has_display && style->display == CSS_DISPLAY_TABLE_CELL)
+    {
+        html_view_render_float_box(ctx, node, style, CSS_FLOAT_LEFT);
         goto out;
     }
 
@@ -168,6 +184,7 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
     }
 
 out:
+    ctx->z_index = saved_z;
     ctx->text_align_mode = saved_align;
     if (font_pushed)
     {

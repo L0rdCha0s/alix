@@ -2,6 +2,7 @@
 
 #include "ctype.h"
 #include "libc.h"
+#include "utf8.h"
 
 char *html_strdup_range(const char *start, const char *end, bool to_lower)
 {
@@ -24,7 +25,7 @@ char *html_strdup_range(const char *start, const char *end, bool to_lower)
     return out;
 }
 
-static char html_decode_named_entity(const char *name, size_t len)
+static uint32_t html_decode_named_entity(const char *name, size_t len)
 {
     if (!name || len == 0)
     {
@@ -52,14 +53,14 @@ static char html_decode_named_entity(const char *name, size_t len)
     }
     if (len == 4 && strncasecmp(name, "nbsp", 4) == 0)
     {
-        return ' ';
+        return 160u;
     }
-    return '\0';
+    return 0u;
 }
 
-static bool html_decode_entity_one(const char *s, const char *end, size_t *consumed, char *out_ch)
+static bool html_decode_entity_one(const char *s, const char *end, size_t *consumed, uint32_t *out_codepoint)
 {
-    if (!s || !end || s >= end || !consumed || !out_ch)
+    if (!s || !end || s >= end || !consumed || !out_codepoint)
     {
         return false;
     }
@@ -145,28 +146,28 @@ static bool html_decode_entity_one(const char *s, const char *end, size_t *consu
             return false;
         }
 
-        char out = '?';
+        uint32_t out = '?';
         if (value == 160u)
         {
-            out = ' ';
+            out = 160u;
         }
         else if (value < 128u)
         {
-            out = (char)value;
+            out = value;
         }
 
-        *out_ch = out;
+        *out_codepoint = out;
         *consumed = (size_t)(semi - s) + 1;
         return true;
     }
 
-    char named = html_decode_named_entity(inner, inner_len);
-    if (!named)
+    uint32_t named = html_decode_named_entity(inner, inner_len);
+    if (named == 0u)
     {
         return false;
     }
 
-    *out_ch = named;
+    *out_codepoint = named;
     *consumed = (size_t)(semi - s) + 1;
     return true;
 }
@@ -192,10 +193,20 @@ char *html_strdup_decoded_range(const char *start, const char *end)
         if (*p == '&')
         {
             size_t consumed = 0;
-            char decoded = '\0';
+            uint32_t decoded = 0;
             if (html_decode_entity_one(p, end, &consumed, &decoded) && consumed > 0)
             {
-                out[w++] = decoded;
+                char utf8[4];
+                size_t bytes = utf8_encode_one(decoded, utf8);
+                if (bytes == 0)
+                {
+                    bytes = utf8_encode_one('?', utf8);
+                }
+                if (bytes > 0 && w + bytes < len + 1)
+                {
+                    memcpy(out + w, utf8, bytes);
+                    w += bytes;
+                }
                 p += consumed;
                 continue;
             }

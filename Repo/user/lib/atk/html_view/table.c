@@ -127,6 +127,54 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
     measure.measure_max_x = measure.x;
     measure.space_w = html_view_text_width(&measure, " ");
 
+    int height_basis = 0;
+    bool height_basis_valid = html_view_length_to_px_height(ctx, &parent_style->height, &height_basis);
+    if (height_basis_valid && height_basis < 0)
+    {
+        height_basis = 0;
+    }
+    int min_h = -1;
+    if (html_view_length_to_px_height(ctx, &parent_style->min_height, &min_h))
+    {
+        if (min_h < 0)
+        {
+            min_h = 0;
+        }
+    }
+    else
+    {
+        min_h = -1;
+    }
+    int max_h = -1;
+    if (html_view_length_to_px_height(ctx, &parent_style->max_height, &max_h))
+    {
+        if (max_h < 0)
+        {
+            max_h = 0;
+        }
+    }
+    else
+    {
+        max_h = -1;
+    }
+    if (height_basis_valid)
+    {
+        if (max_h >= 0 && height_basis > max_h)
+        {
+            height_basis = max_h;
+        }
+        if (min_h >= 0 && height_basis < min_h)
+        {
+            height_basis = min_h;
+        }
+        if (max_h >= 0 && min_h > max_h)
+        {
+            height_basis = min_h;
+        }
+    }
+    measure.height_basis_valid = height_basis_valid;
+    measure.height_basis = height_basis_valid ? height_basis : 0;
+
     html_view_render_children(&measure, node, parent_style);
 
     int used_w = measure.measure_max_x - measure.body_x;
@@ -440,21 +488,12 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     }
 
     int content_h = 0;
-    bool explicit_h = style->has_height && style->height.valid && !style->height.is_auto;
-    if (explicit_h)
-    {
-        content_h = html_view_length_to_px(&style->height,
-                                           ctx->viewport_w,
-                                           ctx->viewport_h,
-                                           ctx->viewport_w,
-                                           ctx->viewport_h,
-                                           ctx->base_font_px,
-                                           false);
-    }
-    if (content_h < 0)
+    bool explicit_h = html_view_length_to_px_height(ctx, &style->height, &content_h);
+    if (explicit_h && content_h < 0)
     {
         content_h = 0;
     }
+    int explicit_h_px = explicit_h ? content_h : 0;
 
     if (!explicit_w || !explicit_h)
     {
@@ -519,28 +558,22 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     }
 
     int min_h = -1;
-    int max_h = -1;
-    if (style->has_min_height && style->min_height.valid && !style->min_height.is_auto)
+    if (html_view_length_to_px_height(ctx, &style->min_height, &min_h))
     {
-        min_h = html_view_length_to_px(&style->min_height,
-                                       ctx->viewport_w,
-                                       ctx->viewport_h,
-                                       ctx->body_w,
-                                       ctx->viewport_h,
-                                       ctx->base_font_px,
-                                       false);
         if (min_h < 0) min_h = 0;
     }
-    if (style->has_max_height && style->max_height.valid && !style->max_height.is_auto)
+    else
     {
-        max_h = html_view_length_to_px(&style->max_height,
-                                       ctx->viewport_w,
-                                       ctx->viewport_h,
-                                       ctx->body_w,
-                                       ctx->viewport_h,
-                                       ctx->base_font_px,
-                                       false);
+        min_h = -1;
+    }
+    int max_h = -1;
+    if (html_view_length_to_px_height(ctx, &style->max_height, &max_h))
+    {
         if (max_h < 0) max_h = 0;
+    }
+    else
+    {
+        max_h = -1;
     }
     if (max_h >= 0 && content_h > max_h)
     {
@@ -553,6 +586,24 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     if (max_h >= 0 && min_h > max_h)
     {
         content_h = min_h;
+    }
+
+    int height_basis = explicit_h_px;
+    bool height_basis_valid = explicit_h;
+    if (height_basis_valid)
+    {
+        if (max_h >= 0 && height_basis > max_h)
+        {
+            height_basis = max_h;
+        }
+        if (min_h >= 0 && height_basis < min_h)
+        {
+            height_basis = min_h;
+        }
+        if (max_h >= 0 && min_h > max_h)
+        {
+            height_basis = min_h;
+        }
     }
 
     int border_box_w = content_w + pad_left + pad_right + border_left + border_right;
@@ -613,6 +664,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
         {
             html_view_draw_rect_clipped(ctx, border_box_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
         }
+        html_view_draw_background_image(ctx, style, border_box_x, border_box_y, border_box_w, border_box_h);
 
         if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
         {
@@ -646,6 +698,8 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     size_t saved_line_op_start = ctx->line_op_start;
     int saved_line_start_x = ctx->line_start_x;
     int saved_line_start_y = ctx->line_start_y;
+    int saved_height_basis = ctx->height_basis;
+    bool saved_height_basis_valid = ctx->height_basis_valid;
 
     html_view_float_ctx_t *inner_floats = (html_view_float_ctx_t *)calloc(1, sizeof(*inner_floats));
     ctx->floats = inner_floats ? inner_floats : saved_floats;
@@ -653,6 +707,8 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     ctx->body_x = border_box_x + border_left + pad_left;
     ctx->body_w = content_w;
     ctx->max_x = ctx->body_x + content_w;
+    ctx->height_basis_valid = height_basis_valid;
+    ctx->height_basis = height_basis_valid ? height_basis : 0;
     ctx->x = ctx->body_x;
     ctx->y = border_box_y + border_top + pad_top;
     ctx->pending_space = false;
@@ -682,6 +738,8 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     ctx->line_op_start = saved_line_op_start;
     ctx->line_start_x = saved_line_start_x;
     ctx->line_start_y = saved_line_start_y;
+    ctx->height_basis = saved_height_basis;
+    ctx->height_basis_valid = saved_height_basis_valid;
 }
 
 void html_view_render_table(html_view_ctx_t *ctx,
@@ -1250,6 +1308,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
             int draw_y = html_view_draw_y(ctx, layout.table_y);
             html_view_draw_rect_clipped(ctx, layout.table_x, draw_y, table_box_w, layout.table_h, style->background, &ctx->clip);
         }
+        html_view_draw_background_image(ctx, style, layout.table_x, layout.table_y, table_box_w, layout.table_h);
 
         if (style->has_border && (layout.border_top > 0 || layout.border_right > 0 || layout.border_bottom > 0 || layout.border_left > 0))
         {

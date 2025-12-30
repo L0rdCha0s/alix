@@ -47,6 +47,54 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
         measure.line_height = atk_font_line_height() + 8;
     }
 
+    int height_basis = 0;
+    bool height_basis_valid = html_view_length_to_px_height(ctx, &style->height, &height_basis);
+    if (height_basis_valid && height_basis < 0)
+    {
+        height_basis = 0;
+    }
+    int min_h = -1;
+    if (html_view_length_to_px_height(ctx, &style->min_height, &min_h))
+    {
+        if (min_h < 0)
+        {
+            min_h = 0;
+        }
+    }
+    else
+    {
+        min_h = -1;
+    }
+    int max_h = -1;
+    if (html_view_length_to_px_height(ctx, &style->max_height, &max_h))
+    {
+        if (max_h < 0)
+        {
+            max_h = 0;
+        }
+    }
+    else
+    {
+        max_h = -1;
+    }
+    if (height_basis_valid)
+    {
+        if (max_h >= 0 && height_basis > max_h)
+        {
+            height_basis = max_h;
+        }
+        if (min_h >= 0 && height_basis < min_h)
+        {
+            height_basis = min_h;
+        }
+        if (max_h >= 0 && min_h > max_h)
+        {
+            height_basis = min_h;
+        }
+    }
+    measure.height_basis_valid = height_basis_valid;
+    measure.height_basis = height_basis_valid ? height_basis : 0;
+
     html_view_render_children(&measure, node, style);
     if (measure.x != measure.body_x)
     {
@@ -453,6 +501,7 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     {
         html_view_draw_rect_clipped(&inner, border_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
     }
+    html_view_draw_background_image(&inner, style, border_x, border_y, border_box_w, border_box_h);
     if (style->has_border && border_box_w > 0 && border_box_h > 0)
     {
         if (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0)
@@ -492,6 +541,9 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     inner.measure_max_x = inner.x;
     inner.content_bottom = inner.y;
     inner.list_level = 0;
+    bool inner_height_valid = height_specified || (have_top && have_bottom);
+    inner.height_basis_valid = inner_height_valid;
+    inner.height_basis = inner_height_valid ? content_h : 0;
 
     int pad_box_w = border_box_w - border_left - border_right;
     int pad_box_h = border_box_h - border_top - border_bottom;
@@ -639,6 +691,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                             shadow_op.text_len = (uint32_t)owned_len;
                             shadow_op.text_owned = false;
                             shadow_op.fixed = ctx->fixed_mode;
+                            shadow_op.z_index = ctx->z_index;
                             if (!html_view_render_cache_push_op(cache, &shadow_op, cache->tile_h))
                             {
                                 ctx->record_failed = true;
@@ -666,6 +719,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                             main_op.text_len = (uint32_t)owned_len;
                             main_op.text_owned = false;
                             main_op.fixed = ctx->fixed_mode;
+                            main_op.z_index = ctx->z_index;
                             if (!html_view_render_cache_push_op(cache, &main_op, cache->tile_h))
                             {
                                 ctx->record_failed = true;
@@ -792,6 +846,12 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
 
     if (strcmp(tag, "ul") == 0)
     {
+        if (style->has_display && style->display == CSS_DISPLAY_TABLE)
+        {
+            /* Let the generic block renderer handle display: table. */
+        }
+        else
+        {
         bool styled = style->has_margin ||
                       style->has_padding ||
                       style->has_border ||
@@ -838,6 +898,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         }
         ctx->pending_space = false;
         return true;
+        }
     }
 
     if (strcmp(tag, "dl") == 0)
@@ -1008,6 +1069,11 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
 
         const char *src = html_attr_get(node, "src");
         html_view_image_t *img = src ? html_view_image_find(ctx->priv, src) : NULL;
+        if (!img && ctx->record && ctx->priv && src)
+        {
+            (void)html_view_try_load_data_image_locked(ctx->priv, src);
+            img = html_view_image_find(ctx->priv, src);
+        }
         int img_w = img ? img->width : 0;
         int img_h = img ? img->height : 0;
 
@@ -1201,7 +1267,8 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                   style->has_border ||
                   style->has_background ||
                   style->has_width ||
-                  style->has_height;
+                  style->has_height ||
+                  (style->has_display && style->display == CSS_DISPLAY_TABLE);
     if (!styled)
     {
         return false;
@@ -1499,49 +1566,63 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     int draw_content_y = content_doc_y + rel_y;
 
     int specified_h = 0;
-    if (style->has_height && style->height.valid && !style->height.is_auto)
+    bool height_specified = html_view_length_to_px_height(ctx, &style->height, &specified_h);
+    if (height_specified && specified_h < 0)
     {
-        specified_h = html_view_length_to_px(&style->height,
-                                             ctx->viewport_w,
-                                             ctx->viewport_h,
-                                             ctx->body_w,
-                                             ctx->viewport_h,
-                                             ctx->base_font_px,
-                                             false);
-        if (specified_h < 0) specified_h = 0;
+        specified_h = 0;
     }
     int min_h = -1;
-    int max_h = -1;
-    if (style->has_min_height && style->min_height.valid && !style->min_height.is_auto)
+    if (html_view_length_to_px_height(ctx, &style->min_height, &min_h))
     {
-        min_h = html_view_length_to_px(&style->min_height,
-                                       ctx->viewport_w,
-                                       ctx->viewport_h,
-                                       ctx->body_w,
-                                       ctx->viewport_h,
-                                       ctx->base_font_px,
-                                       false);
-        if (min_h < 0) min_h = 0;
+        if (min_h < 0)
+        {
+            min_h = 0;
+        }
     }
-    if (style->has_max_height && style->max_height.valid && !style->max_height.is_auto)
+    else
     {
-        max_h = html_view_length_to_px(&style->max_height,
-                                       ctx->viewport_w,
-                                       ctx->viewport_h,
-                                       ctx->body_w,
-                                       ctx->viewport_h,
-                                       ctx->base_font_px,
-                                       false);
-        if (max_h < 0) max_h = 0;
+        min_h = -1;
+    }
+    int max_h = -1;
+    if (html_view_length_to_px_height(ctx, &style->max_height, &max_h))
+    {
+        if (max_h < 0)
+        {
+            max_h = 0;
+        }
+    }
+    else
+    {
+        max_h = -1;
+    }
+
+    int height_basis = specified_h;
+    if (height_specified)
+    {
+        if (max_h >= 0 && height_basis > max_h)
+        {
+            height_basis = max_h;
+        }
+        if (min_h >= 0 && height_basis < min_h)
+        {
+            height_basis = min_h;
+        }
+        if (max_h >= 0 && min_h > max_h)
+        {
+            height_basis = min_h;
+        }
     }
 
     if (style->has_background || style->has_border)
     {
         int content_h = 0;
-        html_view_measure_block_children(ctx, node, style, content_w, NULL, &content_h);
-        if (content_h < specified_h)
+        if (height_specified)
         {
-            content_h = specified_h;
+            content_h = height_basis;
+        }
+        else
+        {
+            html_view_measure_block_children(ctx, node, style, content_w, NULL, &content_h);
         }
         if (max_h >= 0 && content_h > max_h)
         {
@@ -1563,6 +1644,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         {
             html_view_draw_rect_clipped(ctx, draw_border_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
         }
+        html_view_draw_background_image(ctx, style, draw_border_x, draw_border_y, border_box_w, border_box_h);
         if (style->has_border && border_box_w > 0 && border_box_h > 0)
         {
             if (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0)
@@ -1594,11 +1676,13 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     int saved_pos_y = ctx->pos_y;
     int saved_pos_w = ctx->pos_w;
     int saved_pos_h = ctx->pos_h;
+    int saved_height_basis = ctx->height_basis;
+    bool saved_height_basis_valid = ctx->height_basis_valid;
 
     if (style->has_position && style->position != CSS_POSITION_STATIC)
     {
         int pad_box_w = border_box_w - border_left - border_right;
-        int pad_box_h = (specified_h > 0 ? specified_h : 0) + pad_top + pad_bottom;
+        int pad_box_h = (height_specified ? height_basis : 0) + pad_top + pad_bottom;
         if (pad_box_w < 0) pad_box_w = 0;
         if (pad_box_h < 0) pad_box_h = 0;
         ctx->pos_x = draw_border_x + border_left;
@@ -1618,6 +1702,8 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     ctx->body_x = draw_content_x;
     ctx->body_w = content_w;
     if (ctx->body_w < 0) ctx->body_w = 0;
+    ctx->height_basis_valid = height_specified;
+    ctx->height_basis = height_specified ? height_basis : 0;
     ctx->max_x = ctx->body_x + ctx->body_w;
     ctx->x = ctx->body_x;
     ctx->y = draw_content_y;
@@ -1638,29 +1724,54 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         ctx->bg = style->background;
     }
 
+    bool table_layout = style->has_display && style->display == CSS_DISPLAY_TABLE;
+    html_view_float_ctx_t table_floats = {0};
+    html_view_float_ctx_t *saved_floats = ctx->floats;
+    bool saved_table_mode = ctx->table_mode;
+    if (table_layout)
+    {
+        ctx->floats = &table_floats;
+        ctx->table_mode = true;
+    }
+
     html_view_render_children(ctx, node, style);
     if (ctx->x != ctx->body_x)
     {
         html_view_new_line(ctx);
     }
 
+    if (table_layout)
+    {
+        int float_bottom = html_view_float_max_bottom(ctx->floats, CSS_CLEAR_BOTH);
+        if (float_bottom > ctx->y)
+        {
+            ctx->y = float_bottom;
+        }
+        if (float_bottom > ctx->content_bottom)
+        {
+            ctx->content_bottom = float_bottom;
+        }
+        ctx->floats = saved_floats;
+        ctx->table_mode = saved_table_mode;
+    }
+
     int content_end_y = ctx->y - rel_y;
-    int content_h = content_end_y - content_doc_y;
-    if (specified_h > content_h)
+    int flow_content_h = content_end_y - content_doc_y;
+    int content_h = height_specified ? height_basis : flow_content_h;
+    if (!height_specified)
     {
-        content_h = specified_h;
-    }
-    if (max_h >= 0 && content_h > max_h)
-    {
-        content_h = max_h;
-    }
-    if (min_h >= 0 && content_h < min_h)
-    {
-        content_h = min_h;
-    }
-    if (max_h >= 0 && min_h > max_h)
-    {
-        content_h = min_h;
+        if (max_h >= 0 && content_h > max_h)
+        {
+            content_h = max_h;
+        }
+        if (min_h >= 0 && content_h < min_h)
+        {
+            content_h = min_h;
+        }
+        if (max_h >= 0 && min_h > max_h)
+        {
+            content_h = min_h;
+        }
     }
     content_end_y = content_doc_y + content_h;
 
@@ -1674,6 +1785,8 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     ctx->pos_y = saved_pos_y;
     ctx->pos_w = saved_pos_w;
     ctx->pos_h = saved_pos_h;
+    ctx->height_basis = saved_height_basis;
+    ctx->height_basis_valid = saved_height_basis_valid;
     ctx->pending_space = false;
     ctx->line_start_x = ctx->x;
     ctx->line_start_y = ctx->y;

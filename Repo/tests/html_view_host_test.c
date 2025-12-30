@@ -2,7 +2,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 
 #include "atk/html_view/html_view_internal.h"
 #include "libc.h"
@@ -25,9 +24,41 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
     return (int)strlen(text) * 8;
 }
 
+html_view_font_size_cache_t *html_view_font_state_get_cache(html_view_font_state_t *state, int pixel_height)
+{
+    (void)state;
+    (void)pixel_height;
+    return NULL;
+}
+
+char *html_view_strdup(const char *src)
+{
+    if (!src)
+    {
+        return NULL;
+    }
+    size_t len = strlen(src);
+    char *copy = (char *)malloc(len + 1);
+    if (!copy)
+    {
+        return NULL;
+    }
+    memcpy(copy, src, len + 1);
+    return copy;
+}
+
 video_color_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
 {
     return 0xFF000000U | ((video_color_t)r << 16) | ((video_color_t)g << 8) | (video_color_t)b;
+}
+
+static bool css_length_is(const css_length_t *len, int32_t milli, css_unit_t unit)
+{
+    if (!len)
+    {
+        return false;
+    }
+    return len->valid && !len->is_auto && len->value_milli == milli && len->unit == unit;
 }
 
 static const html_node_t *find_first_tag(const html_node_t *root, const char *tag)
@@ -47,6 +78,39 @@ static const html_node_t *find_first_tag(const html_node_t *root, const char *ta
         if (node->type == HTML_NODE_ELEMENT && node->name && strcmp(node->name, tag) == 0)
         {
             return node;
+        }
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (sp < sizeof(stack) / sizeof(stack[0]))
+            {
+                stack[sp++] = child;
+            }
+        }
+    }
+    return NULL;
+}
+
+static const html_node_t *find_node_by_id(const html_node_t *root, const char *id)
+{
+    if (!root || !id || id[0] == '\0')
+    {
+        return NULL;
+    }
+
+    const html_node_t *stack[64];
+    size_t sp = 0;
+    stack[sp++] = root;
+
+    while (sp > 0)
+    {
+        const html_node_t *node = stack[--sp];
+        if (node->type == HTML_NODE_ELEMENT)
+        {
+            const char *node_id = html_attr_get(node, "id");
+            if (node_id && strcmp(node_id, id) == 0)
+            {
+                return node;
+            }
         }
         for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
         {
@@ -133,6 +197,299 @@ static bool test_line_height_length_px(void)
     return lh == 18;
 }
 
+static bool test_height_percent_requires_basis(void)
+{
+    html_view_ctx_t ctx = {0};
+    ctx.viewport_w = 800;
+    ctx.viewport_h = 600;
+    ctx.body_w = 800;
+    ctx.base_font_px = 16;
+
+    css_length_t len = {
+        .valid = true,
+        .is_auto = false,
+        .value_milli = 50000,
+        .unit = CSS_UNIT_PERCENT,
+    };
+    int px = 123;
+    bool ok = !html_view_length_to_px_height(&ctx, &len, &px);
+    return ok && px == 0;
+}
+
+static bool test_height_percent_with_basis(void)
+{
+    html_view_ctx_t ctx = {0};
+    ctx.viewport_w = 800;
+    ctx.viewport_h = 600;
+    ctx.body_w = 800;
+    ctx.base_font_px = 16;
+    ctx.height_basis_valid = true;
+    ctx.height_basis = 200;
+
+    css_length_t len = {
+        .valid = true,
+        .is_auto = false,
+        .value_milli = 50000,
+        .unit = CSS_UNIT_PERCENT,
+    };
+    int px = 0;
+    bool ok = html_view_length_to_px_height(&ctx, &len, &px);
+    return ok && px == 100;
+}
+
+static bool test_height_px_without_basis(void)
+{
+    html_view_ctx_t ctx = {0};
+    ctx.viewport_w = 800;
+    ctx.viewport_h = 600;
+    ctx.body_w = 800;
+    ctx.base_font_px = 16;
+
+    css_length_t len = {
+        .valid = true,
+        .is_auto = false,
+        .value_milli = 24000,
+        .unit = CSS_UNIT_PX,
+    };
+    int px = 0;
+    bool ok = html_view_length_to_px_height(&ctx, &len, &px);
+    return ok && px == 24;
+}
+
+static bool test_attribute_selectors_with_escapes(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse("<div class=\"first one\"><span class=\"second two\"></span></div>", &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *div = find_first_tag(doc->root, "div");
+    const html_node_t *span = find_first_tag(doc->root, "span");
+    if (!div || !span)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    const char *css =
+        "[class~=one].first.one { position: absolute; }\n"
+        "[class=second\\ two][class=\"second two\"] { float: right; }\n";
+    css_stylesheet_t *sheet = css_parse(css);
+    if (!sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_style_t parent = {0};
+    css_style_t out_div = {0};
+    html_view_style_for_node(&out_div, sheet, &parent, div);
+    bool ok_div = out_div.has_position && out_div.position == CSS_POSITION_ABSOLUTE;
+
+    css_style_t out_span = {0};
+    html_view_style_for_node(&out_span, sheet, &parent, span);
+    bool ok_span = out_span.has_float && out_span.float_mode == CSS_FLOAT_RIGHT;
+
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+    return ok_div && ok_span;
+}
+
+static bool test_adjacent_sibling_selector(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse("<div class=\"picture\"><p id=\"first\"></p><table></table><p id=\"second\"></p></div>", &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *first = find_node_by_id(doc->root, "first");
+    const html_node_t *second = find_node_by_id(doc->root, "second");
+    if (!first || !second)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    const char *css = ".picture p + table + p { background: yellow; }";
+    css_stylesheet_t *sheet = css_parse(css);
+    if (!sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_style_t parent = {0};
+    css_style_t out_first = {0};
+    html_view_style_for_node(&out_first, sheet, &parent, first);
+    css_style_t out_second = {0};
+    html_view_style_for_node(&out_second, sheet, &parent, second);
+
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+
+    return !out_first.has_background && out_second.has_background;
+}
+
+static bool test_child_and_descendant_selectors(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse("<div class=\"nose\"><div id=\"child\"><div id=\"grand\"></div></div></div>", &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *nose = find_first_tag(doc->root, "div");
+    const html_node_t *child = find_node_by_id(doc->root, "child");
+    const html_node_t *grand = find_node_by_id(doc->root, "grand");
+    if (!nose || !child || !grand)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    const char *css =
+        ".nose > div { background: yellow; }\n"
+        ".nose div div { background: red; }\n";
+    css_stylesheet_t *sheet = css_parse(css);
+    if (!sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_style_t parent = {0};
+    css_style_t out_nose = {0};
+    css_style_t out_child = {0};
+    css_style_t out_grand = {0};
+    html_view_style_for_node(&out_nose, sheet, &parent, nose);
+    html_view_style_for_node(&out_child, sheet, &parent, child);
+    html_view_style_for_node(&out_grand, sheet, &parent, grand);
+
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+
+    bool nose_ok = !out_nose.has_background;
+    bool child_ok = out_child.has_background && out_child.background == video_make_color(0xFF, 0xFF, 0x00);
+    bool grand_ok = out_grand.has_background && out_grand.background == video_make_color(0xFF, 0x00, 0x00);
+    return nose_ok && child_ok && grand_ok;
+}
+
+static bool test_link_pseudo_class(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse("<a href=\"x\" id=\"link\">link</a>", &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *link = find_node_by_id(doc->root, "link");
+    if (!link)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    const char *css =
+        "a:link { color: blue; }\n"
+        "a:visited { color: purple; }\n";
+    css_stylesheet_t *sheet = css_parse(css);
+    if (!sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_style_t parent = {0};
+    css_style_t out = {0};
+    html_view_style_for_node(&out, sheet, &parent, link);
+
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+
+    return out.has_color && out.color == video_make_color(0x00, 0x00, 0xFF);
+}
+
+static bool test_pseudo_element_ignored(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse("<div class=\"nose\"><div id=\"child\"></div></div>", &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *child = find_node_by_id(doc->root, "child");
+    if (!child)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    const char *css = ".nose div:before { background: yellow; }";
+    css_stylesheet_t *sheet = css_parse(css);
+    if (!sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_style_t parent = {0};
+    css_style_t out = {0};
+    html_view_style_for_node(&out, sheet, &parent, child);
+
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+    return !out.has_background;
+}
+
+static bool test_inline_background_style(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse("<div id=\"box\" style=\"background: red url(foo.png) no-repeat fixed 1px 2px;\"></div>", &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *node = find_node_by_id(doc->root, "box");
+    if (!node)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_style_t parent = {0};
+    css_style_t out = {0};
+    html_view_style_for_node(&out, NULL, &parent, node);
+
+    bool ok = out.has_background &&
+              !out.background_transparent &&
+              out.background == video_make_color(0xFF, 0x00, 0x00);
+    ok = ok && out.has_background_image &&
+         out.background_image &&
+         strcmp(out.background_image, "foo.png") == 0;
+    ok = ok && out.has_background_repeat &&
+         out.background_repeat == CSS_BACKGROUND_REPEAT_NO_REPEAT;
+    ok = ok && out.has_background_attachment &&
+         out.background_attachment == CSS_BACKGROUND_ATTACHMENT_FIXED;
+    ok = ok && out.has_background_position &&
+         css_length_is(&out.background_pos_x, 1000, CSS_UNIT_PX) &&
+         css_length_is(&out.background_pos_y, 2000, CSS_UNIT_PX);
+
+    if (out.background_image_owned && out.background_image)
+    {
+        free((void *)out.background_image);
+    }
+    html_document_destroy(doc);
+    return ok;
+}
+
 typedef struct
 {
     const char *name;
@@ -145,6 +502,15 @@ int main(void)
         { "table-cell-align-left", test_table_cell_alignment },
         { "table-header-align-center", test_table_header_alignment },
         { "line-height-length-px", test_line_height_length_px },
+        { "height-percent-requires-basis", test_height_percent_requires_basis },
+        { "height-percent-with-basis", test_height_percent_with_basis },
+        { "height-px-without-basis", test_height_px_without_basis },
+        { "attribute-selectors-escapes", test_attribute_selectors_with_escapes },
+        { "adjacent-sibling-selector", test_adjacent_sibling_selector },
+        { "child-descendant-selector", test_child_and_descendant_selectors },
+        { "link-pseudo-class", test_link_pseudo_class },
+        { "pseudo-element-ignored", test_pseudo_element_ignored },
+        { "inline-background-style", test_inline_background_style },
     };
 
     size_t pass = 0;

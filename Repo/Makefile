@@ -209,6 +209,7 @@ HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
 PNG_TEST_BIN := $(HOST_TEST_DIR)/png_host_test
 WEB_TEST_BIN := $(HOST_TEST_DIR)/web_host_test
+CSS_TEST_BIN := $(HOST_TEST_DIR)/css_test
 HTML_VIEW_TEST_BIN := $(HOST_TEST_DIR)/html_view_host_test
 BROWSER_EVENT_TEST_BIN := $(HOST_TEST_DIR)/browser_event_host_test
 HTML_JS_TEST_BIN := $(HOST_TEST_DIR)/html_js_host_test
@@ -496,23 +497,35 @@ $(PNG_TEST_BIN): tests/png_host_test.c src/atk/util/png.c
 
 $(WEB_TEST_BIN): tests/web_host_test.c \
                  user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                 src/kernel/utf8.c \
                  user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
                  user/lib/web/url.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
 	    tests/web_host_test.c \
 	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
 	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
 	    user/lib/web/url.c -o $@
 
+$(CSS_TEST_BIN): tests/css_test.c \
+                 user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/css_test.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    -o $@
+
 $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
                        user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                       src/kernel/utf8.c \
                        user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
                        user/lib/web/url.c user/lib/atk/html_view/style.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(ATK_DIR) \
 	    tests/html_view_host_test.c \
 	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
 	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
 	    user/lib/web/url.c user/lib/atk/html_view/style.c -o $@
 
@@ -523,6 +536,7 @@ $(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c user/apps/atk_browser
 
 $(HTML_JS_TEST_BIN): tests/html_js_host_test.c \
                      user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                     src/kernel/utf8.c \
                      user/lib/web/js/internal.c user/lib/web/js/lexer.c user/lib/web/js/parser.c \
                      user/lib/web/js/runtime/value.c user/lib/web/js/runtime/array.c user/lib/web/js/runtime/object.c \
                      user/lib/web/js/runtime/env.c user/lib/web/js/runtime/function.c user/lib/web/js/runtime/core.c \
@@ -532,6 +546,7 @@ $(HTML_JS_TEST_BIN): tests/html_js_host_test.c \
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
 	    tests/html_js_host_test.c \
 	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
 	    user/lib/web/js/internal.c \
 	    user/lib/web/js/lexer.c \
 	    user/lib/web/js/parser.c \
@@ -792,6 +807,9 @@ sha256-test: $(SHA256_TEST_BIN)
 web-test: $(WEB_TEST_BIN)
 	$(WEB_TEST_BIN)
 
+css-test: $(CSS_TEST_BIN)
+	$(CSS_TEST_BIN)
+
 browser-event-test: $(BROWSER_EVENT_TEST_BIN)
 	$(BROWSER_EVENT_TEST_BIN)
 
@@ -815,6 +833,7 @@ test:
 	$(MAKE) test-dhcp
 	$(MAKE) sha256-test
 	$(MAKE) web-test
+	$(MAKE) css-test
 	$(MAKE) browser-event-test
 	$(MAKE) png-test
 	$(MAKE) ttf-test
@@ -822,7 +841,7 @@ test:
 	$(MAKE) js-test
 	$(MAKE) html-js-test
 
-.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test browser-event-test png-test tls-test js-test html-js-test test262-test
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test css-test browser-event-test png-test tls-test js-test html-js-test test262-test
 
 -include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) \
          $(USER_OBJDIR)/*.d $(USER_OBJDIR)/atk/*.d $(USER_OBJDIR)/atk/util/*.d \

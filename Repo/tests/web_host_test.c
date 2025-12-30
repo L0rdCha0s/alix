@@ -575,6 +575,14 @@ static bool css_serialize_style(sb_t *sb, const css_style_t *style, int depth)
             return false;
         }
     }
+    if (style->has_z_index)
+    {
+        if (!sb_append_cstr(sb, indent) || !sb_append_cstr(sb, "z-index: ") ||
+            !sb_appendf(sb, "%d\n", (int)style->z_index))
+        {
+            return false;
+        }
+    }
     if (style->has_text_align)
     {
         const char *v = "left";
@@ -623,6 +631,8 @@ static bool css_serialize_style(sb_t *sb, const css_style_t *style, int depth)
         const char *v = "inline";
         if (style->display == CSS_DISPLAY_BLOCK) v = "block";
         else if (style->display == CSS_DISPLAY_LIST_ITEM) v = "list-item";
+        else if (style->display == CSS_DISPLAY_TABLE) v = "table";
+        else if (style->display == CSS_DISPLAY_TABLE_CELL) v = "table-cell";
         else if (style->display == CSS_DISPLAY_FLEX) v = "flex";
         else if (style->display == CSS_DISPLAY_INLINE_FLEX) v = "inline-flex";
         else if (style->display == CSS_DISPLAY_NONE) v = "none";
@@ -1017,6 +1027,21 @@ static const parse_case_t html_cases[] = {
     },
     {
         .suite = "html/current",
+        .name = "implicit-close-p-on-table",
+        .expect_pass = true,
+        .input = "<p>one<table><tr><td>two</td></tr></table>three",
+        .expected =
+            "#document\n"
+            "  <p>\n"
+            "    \"one\"\n"
+            "  <table>\n"
+            "    <tr>\n"
+            "      <td>\n"
+            "        \"two\"\n"
+            "  \"three\"\n",
+    },
+    {
+        .suite = "html/current",
         .name = "head-closed-on-body",
         .expect_pass = true,
         .input = "<head><title>T</title><body>Hi",
@@ -1278,23 +1303,23 @@ static const parse_case_t html_cases[] = {
     },
     {
         .suite = "html/current",
-        .name = "nbsp-decoding-to-space",
+        .name = "nbsp-decoding-to-nbsp",
         .expect_pass = true,
         .input = "<p>a&nbsp;b</p>",
         .expected =
             "#document\n"
             "  <p>\n"
-            "    \"a b\"\n",
+            "    \"a\xC2\xA0""b\"\n",
     },
     {
         .suite = "html/current",
-        .name = "numeric-entity-160-to-space",
+        .name = "numeric-entity-160-to-nbsp",
         .expect_pass = true,
         .input = "<p>a&#160;b</p>",
         .expected =
             "#document\n"
             "  <p>\n"
-            "    \"a b\"\n",
+            "    \"a\xC2\xA0""b\"\n",
     },
     {
         .suite = "html/current",
@@ -2176,6 +2201,16 @@ static const parse_case_t css_cases[] = {
              "p { display: none; }",
              "selector: p\n"
              "  display: none\n"),
+    CSS_CASE("css/current", "display-table", true,
+             "ul { display: table; } li { display: table-cell; }",
+             "selector: ul\n"
+             "  display: table\n"
+             "selector: li\n"
+             "  display: table-cell\n"),
+    CSS_CASE("css/current", "z-index", true,
+             "p { position: relative; z-index: 2; }",
+             "selector: p\n"
+             "  z-index: 2\n"),
     CSS_CASE("css/current", "line-height-percent", true,
              "p { line-height: 120%; }",
              "selector: p\n"
