@@ -28,6 +28,16 @@ static const uint8_t g_png_sample_1x1_rgba[] = {
     0x00,0x00,0x00,0x00
 };
 
+static const uint8_t g_png_sample_2x2_trns[] = {
+    0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0x00,0x00,0x00,0x0D,0x49,0x48,0x44,0x52,
+    0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x02,0x08,0x02,0x00,0x00,0x00,0xFD,0xD4,0x9A,
+    0x73,0x00,0x00,0x00,0x06,0x74,0x52,0x4E,0x53,0x00,0x00,0x00,0x00,0x00,0x00,0x6E,
+    0xA6,0x07,0x91,0x00,0x00,0x00,0x06,0x62,0x4B,0x47,0x44,0x00,0xFF,0x00,0xFF,0x00,
+    0xFF,0xA0,0xBD,0xA7,0x93,0x00,0x00,0x00,0x11,0x49,0x44,0x41,0x54,0x78,0xDA,0x63,
+    0xF8,0xFF,0x9F,0x01,0x0A,0xFE,0xFF,0x67,0x00,0x00,0x1D,0xF0,0x03,0xFD,0xA6,0xF0,
+    0x3E,0x3E,0x00,0x00,0x00,0x00,0x49,0x45,0x4E,0x44,0xAE,0x42,0x60,0x82,
+};
+
 static bool read_entire_file(const char *path, uint8_t **out_data, size_t *out_size)
 {
     if (!path || !out_data || !out_size)
@@ -130,5 +140,57 @@ int main(int argc, char **argv)
                path, w, h, stride, pixels[0]);
     }
     free(pixels);
+
+    if (!path)
+    {
+        pixels = NULL;
+        w = 0;
+        h = 0;
+        stride = 0;
+        rc = png_decode_rgba32(g_png_sample_2x2_trns,
+                               sizeof(g_png_sample_2x2_trns),
+                               &pixels,
+                               &w,
+                               &h,
+                               &stride);
+        if (rc != 0 || !pixels)
+        {
+            fprintf(stderr, "png_host_test: tRNS decode failed (%s)\n", png_last_error());
+            free(pixels);
+            return 5;
+        }
+        if (w != 2 || h != 2)
+        {
+            fprintf(stderr, "png_host_test: tRNS sample dimensions %dx%d\n", w, h);
+            free(pixels);
+            return 6;
+        }
+
+        int transparent = 0;
+        int yellow = 0;
+        for (int i = 0; i < w * h; ++i)
+        {
+            uint8_t a = (uint8_t)(pixels[i] >> 24);
+            if (a == 0)
+            {
+                transparent++;
+            }
+            if (pixels[i] == 0xFFFFFF00U)
+            {
+                yellow++;
+            }
+        }
+        if (transparent == 0 || yellow == 0)
+        {
+            fprintf(stderr, "png_host_test: tRNS sample alpha/yellow mismatch (transparent=%d yellow=%d)\n",
+                    transparent, yellow);
+            free(pixels);
+            return 7;
+        }
+        printf("png_host_test: decoded tRNS sample -> %dx%d transparent=%d yellow=%d\n",
+               w, h, transparent, yellow);
+        free(pixels);
+    }
+
     return 0;
 }

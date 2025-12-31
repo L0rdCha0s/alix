@@ -1,5 +1,28 @@
 #include "atk/html_view/render/render_internal.h"
 
+static bool html_view_intersect_rect_local(const atk_rect_t *a, const atk_rect_t *b, atk_rect_t *out)
+{
+    if (!a || !b || !out)
+    {
+        return false;
+    }
+    int x0 = a->x > b->x ? a->x : b->x;
+    int y0 = a->y > b->y ? a->y : b->y;
+    int x1 = (a->x + a->width) < (b->x + b->width) ? (a->x + a->width) : (b->x + b->width);
+    int y1 = (a->y + a->height) < (b->y + b->height) ? (a->y + a->height) : (b->y + b->height);
+    int w = x1 - x0;
+    int h = y1 - y0;
+    if (w <= 0 || h <= 0)
+    {
+        return false;
+    }
+    out->x = x0;
+    out->y = y0;
+    out->width = w;
+    out->height = h;
+    return true;
+}
+
 static void html_view_measure_block_children(const html_view_ctx_t *ctx,
                                              const html_node_t *node,
                                              const css_style_t *style,
@@ -555,6 +578,26 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     if (style->has_background && !style->background_transparent)
     {
         inner.bg = style->background;
+    }
+
+    if (style->has_overflow && style->overflow == CSS_OVERFLOW_HIDDEN)
+    {
+        atk_rect_t overflow_clip = {
+            .x = inner.pos_x,
+            .y = html_view_draw_y(&inner, inner.pos_y),
+            .width = inner.pos_w,
+            .height = inner.pos_h,
+        };
+        atk_rect_t clipped = {0};
+        if (overflow_clip.width > 0 && overflow_clip.height > 0 &&
+            html_view_intersect_rect_local(&overflow_clip, &inner.clip, &clipped))
+        {
+            inner.clip = clipped;
+        }
+        else
+        {
+            inner.clip = (atk_rect_t){0};
+        }
     }
 
     html_view_render_children(&inner, node, style);
@@ -1522,10 +1565,36 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     if (border_box_w < 0) border_box_w = 0;
 
     int border_doc_x = ctx->body_x + margin_left;
-    int content_doc_x = border_doc_x + border_left + pad_left;
-
     ctx->y += margin_top;
     int border_doc_y = ctx->y;
+
+    int outer_w = border_box_w + margin_left + margin_right;
+    if (ctx->floats && ctx->floats->count > 0 && outer_w > 0)
+    {
+        int place_y = border_doc_y;
+        for (int it = 0; it < 256; ++it)
+        {
+            int left = ctx->body_x;
+            int right = ctx->body_x + ctx->body_w;
+            html_view_float_bounds_at_y(ctx->floats, place_y, ctx->body_x, ctx->body_w, &left, &right);
+            int avail = right - left;
+            if (outer_w <= avail)
+            {
+                border_doc_x = left + margin_left;
+                border_doc_y = place_y;
+                ctx->y = place_y;
+                break;
+            }
+            int next_y = html_view_float_next_y(ctx->floats, place_y);
+            if (next_y <= place_y)
+            {
+                next_y = place_y + 1;
+            }
+            place_y = next_y;
+        }
+    }
+
+    int content_doc_x = border_doc_x + border_left + pad_left;
     int content_doc_y = border_doc_y + border_top + pad_top;
     int rel_x = 0;
     int rel_y = 0;

@@ -824,7 +824,7 @@ void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
 
     int inner_w = w - left - right;
     int inner_h = h - top - bottom;
-    if (inner_w <= 0 && inner_h <= 0)
+    if (inner_w <= 0 || inner_h <= 0)
     {
         video_color_t side_color = video_make_color(0x00, 0x00, 0x00);
         bool transparent = false;

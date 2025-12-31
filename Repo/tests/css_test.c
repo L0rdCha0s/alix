@@ -210,6 +210,75 @@ static bool test_border_top_color_sets_side(void)
     return ok;
 }
 
+static bool test_style_merge_margin_sides(void)
+{
+    css_stylesheet_t *sheet = css_parse(".a { margin: 1px 2px 3px 4px; } .a { margin-top: 5px; }");
+    if (!sheet || !sheet->rules || !sheet->rules->next)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    css_style_t merged = {0};
+    css_style_merge(&merged, &sheet->rules->style);
+    css_style_merge(&merged, &sheet->rules->next->style);
+
+    bool ok = merged.has_margin &&
+              css_length_is(&merged.margin.top, 5000, CSS_UNIT_PX) &&
+              css_length_is(&merged.margin.right, 2000, CSS_UNIT_PX) &&
+              css_length_is(&merged.margin.bottom, 3000, CSS_UNIT_PX) &&
+              css_length_is(&merged.margin.left, 4000, CSS_UNIT_PX);
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
+static bool test_style_merge_padding_sides(void)
+{
+    css_stylesheet_t *sheet = css_parse(".a { padding: 1px 2px; } .a { padding-left: 5px; }");
+    if (!sheet || !sheet->rules || !sheet->rules->next)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    css_style_t merged = {0};
+    css_style_merge(&merged, &sheet->rules->style);
+    css_style_merge(&merged, &sheet->rules->next->style);
+
+    bool ok = merged.has_padding &&
+              css_length_is(&merged.padding.top, 1000, CSS_UNIT_PX) &&
+              css_length_is(&merged.padding.right, 2000, CSS_UNIT_PX) &&
+              css_length_is(&merged.padding.bottom, 1000, CSS_UNIT_PX) &&
+              css_length_is(&merged.padding.left, 5000, CSS_UNIT_PX);
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
+static bool test_style_merge_border_width_sides(void)
+{
+    css_stylesheet_t *sheet = css_parse(".a { border: 2px solid black; } .a { border-left-width: 4px; }");
+    if (!sheet || !sheet->rules || !sheet->rules->next)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    css_style_t merged = {0};
+    css_style_merge(&merged, &sheet->rules->style);
+    css_style_merge(&merged, &sheet->rules->next->style);
+
+    bool ok = merged.has_border &&
+              css_length_is(&merged.border_width.top, 2000, CSS_UNIT_PX) &&
+              css_length_is(&merged.border_width.right, 2000, CSS_UNIT_PX) &&
+              css_length_is(&merged.border_width.bottom, 2000, CSS_UNIT_PX) &&
+              css_length_is(&merged.border_width.left, 4000, CSS_UNIT_PX);
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
 int main(void)
 {
     css_case_t cases[] = {
@@ -222,6 +291,9 @@ int main(void)
         { "border-style-none", test_border_style_none },
         { "border-color-sides", test_border_color_sides },
         { "border-top-color-sides", test_border_top_color_sets_side },
+        { "style-merge-margin-sides", test_style_merge_margin_sides },
+        { "style-merge-padding-sides", test_style_merge_padding_sides },
+        { "style-merge-border-width-sides", test_style_merge_border_width_sides },
     };
 
     size_t pass = 0;

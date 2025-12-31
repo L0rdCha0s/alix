@@ -553,6 +553,87 @@ static bool test_inline_background_style(void)
     return ok;
 }
 
+static bool test_link_stylesheet_data_url(void)
+{
+    html_parse_error_t err = {0};
+    const char *html =
+        "<html><head>"
+        "<style>div{background:red;}</style>"
+        "<link rel=\"appendix stylesheet\" href=\"data:text/css,div%7Bbackground%3Ablue%3B%7D\">"
+        "</head><body><div id=\"box\"></div></body></html>";
+    html_document_t *doc = html_parse(html, &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *box = find_node_by_id(doc->root, "box");
+    if (!box)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    atk_html_view_priv_t priv = {0};
+    priv.doc = doc;
+    html_view_rebuild_stylesheet(&priv);
+    if (!priv.sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_style_t parent = {0};
+    css_style_t out = {0};
+    html_view_style_for_node(&out, priv.sheet, &parent, box);
+
+    bool ok = out.has_background &&
+              !out.background_transparent &&
+              out.background == video_make_color(0x00, 0x00, 0xFF);
+
+    css_stylesheet_destroy(priv.sheet);
+    priv.sheet = NULL;
+    html_document_destroy(doc);
+    return ok;
+}
+
+static bool test_object_fallback_text(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse("<object data=\"data:application/x-unknown,ERROR\">OK</object>", &err);
+    if (!doc)
+    {
+        return false;
+    }
+
+    const html_node_t *obj = find_first_tag(doc->root, "object");
+    if (!obj)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    html_view_ctx_t ctx = {0};
+    ctx.viewport_w = 200;
+    ctx.viewport_h = 200;
+    ctx.body_w = 200;
+    ctx.max_x = 200;
+    ctx.actual_font_px = 16;
+    ctx.base_font_px = 16;
+    ctx.base_line_height = 16;
+    ctx.line_height = 16;
+    ctx.space_w = html_view_text_width(&ctx, " ");
+    ctx.paint_layer = HTML_VIEW_PAINT_LAYER_BLOCK;
+
+    css_style_t parent = {0};
+    css_style_t style = {0};
+    html_view_style_for_node(&style, NULL, &parent, obj);
+
+    bool rendered = html_view_render_inline_element(&ctx, obj, &style);
+    html_document_destroy(doc);
+    return rendered && ctx.x == 16;
+}
+
 static bool test_float_inherit(void)
 {
     html_parse_error_t err = {0};
@@ -647,6 +728,8 @@ int main(void)
         { "link-pseudo-class", test_link_pseudo_class },
         { "pseudo-element-style", test_pseudo_element_style },
         { "inline-background-style", test_inline_background_style },
+        { "link-stylesheet-data-url", test_link_stylesheet_data_url },
+        { "object-fallback-text", test_object_fallback_text },
         { "float-inherit", test_float_inherit },
         { "float-measure-width", test_float_measure_width },
     };

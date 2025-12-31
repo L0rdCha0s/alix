@@ -633,6 +633,10 @@ static bool png_apply_filters(const uint8_t *scanlines,
                               uint32_t width,
                               uint32_t height,
                               int bpp,
+                              bool has_trns,
+                              uint8_t trns_r,
+                              uint8_t trns_g,
+                              uint8_t trns_b,
                               video_color_t *out_pixels)
 {
     size_t row_bytes = (size_t)width * (size_t)bpp;
@@ -656,6 +660,10 @@ static bool png_apply_filters(const uint8_t *scanlines,
             uint8_t g = recon[offset + 1];
             uint8_t b = recon[offset + 2];
             uint8_t a = (bpp == 4) ? recon[offset + 3] : 0xFF;
+            if (bpp == 3 && has_trns && r == trns_r && g == trns_g && b == trns_b)
+            {
+                a = 0;
+            }
             out_pixels[(size_t)y * width + x] =
                 ((video_color_t)a << 24) |
                 ((video_color_t)r << 16) |
@@ -729,6 +737,10 @@ static bool png_apply_filters_interlaced(const uint8_t *scanlines,
                                          uint32_t width,
                                          uint32_t height,
                                          int bpp,
+                                         bool has_trns,
+                                         uint8_t trns_r,
+                                         uint8_t trns_g,
+                                         uint8_t trns_b,
                                          video_color_t *out_pixels)
 {
     static const int x_start[7] = { 0, 4, 0, 2, 0, 1, 0 };
@@ -766,6 +778,10 @@ static bool png_apply_filters_interlaced(const uint8_t *scanlines,
                 uint8_t g = recon[offset + 1];
                 uint8_t b = recon[offset + 2];
                 uint8_t a = (bpp == 4) ? recon[offset + 3] : 0xFF;
+                if (bpp == 3 && has_trns && r == trns_r && g == trns_g && b == trns_b)
+                {
+                    a = 0;
+                }
                 uint32_t out_x = (uint32_t)x_start[pass] + x * (uint32_t)x_step[pass];
                 uint32_t out_y = (uint32_t)y_start[pass] + y * (uint32_t)y_step[pass];
                 if (out_x < width && out_y < height)
@@ -813,6 +829,10 @@ int png_decode_rgba32(const uint8_t *png,
     int interlace = 0;
     uint8_t *idat = NULL;
     size_t idat_size = 0;
+    bool have_trns = false;
+    uint8_t trns_r = 0;
+    uint8_t trns_g = 0;
+    uint8_t trns_b = 0;
 
     while (pos + PNG_CHUNK_HEADER <= len)
     {
@@ -878,6 +898,15 @@ int png_decode_rgba32(const uint8_t *png,
             case 0x49454E44: /* IEND */
                 pos = len; /* force exit */
                 break;
+            case 0x74524E53: /* tRNS */
+                if (chunk_len == 6)
+                {
+                    trns_r = chunk_data[1];
+                    trns_g = chunk_data[3];
+                    trns_b = chunk_data[5];
+                    have_trns = true;
+                }
+                break;
 
             default:
                 break;
@@ -909,6 +938,7 @@ int png_decode_rgba32(const uint8_t *png,
     }
 
     int bpp = (color_type == 6) ? 4 : 3;
+    bool apply_trns = (color_type == 2 && have_trns);
     size_t row_bytes = (size_t)width * (size_t)bpp;
     if (row_bytes / (size_t)bpp != width)
     {
@@ -968,11 +998,27 @@ int png_decode_rgba32(const uint8_t *png,
     bool filters_ok = false;
     if (interlace == 0)
     {
-        filters_ok = png_apply_filters(scanlines, width, height, bpp, pixels);
+        filters_ok = png_apply_filters(scanlines,
+                                        width,
+                                        height,
+                                        bpp,
+                                        apply_trns,
+                                        trns_r,
+                                        trns_g,
+                                        trns_b,
+                                        pixels);
     }
     else
     {
-        filters_ok = png_apply_filters_interlaced(scanlines, width, height, bpp, pixels);
+        filters_ok = png_apply_filters_interlaced(scanlines,
+                                                  width,
+                                                  height,
+                                                  bpp,
+                                                  apply_trns,
+                                                  trns_r,
+                                                  trns_g,
+                                                  trns_b,
+                                                  pixels);
     }
 
     if (!filters_ok)

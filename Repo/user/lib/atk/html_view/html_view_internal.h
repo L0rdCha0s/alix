@@ -602,6 +602,7 @@ void html_view_js_shutdown(atk_widget_t *view, atk_html_view_priv_t *priv);
 void html_view_render_request(atk_html_view_priv_t *priv);
 
 void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
+bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
 void html_view_render_table(html_view_ctx_t *ctx,
                             const html_node_t *node,
                             const css_style_t *style,

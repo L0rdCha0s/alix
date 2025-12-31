@@ -456,6 +456,39 @@ static const char *html_view_find_char(const char *start, size_t len, char needl
     return NULL;
 }
 
+static bool html_view_attr_value_has_token_ci(const char *value, const char *token)
+{
+    if (!value || !token || token[0] == '\0')
+    {
+        return false;
+    }
+
+    size_t token_len = strlen(token);
+    const char *p = value;
+    while (*p)
+    {
+        while (*p && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == token_len && strncasecmp(start, token, len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool html_view_data_url_parse_base64(const char *url,
                                             const char **out_payload,
                                             size_t *out_payload_len,
@@ -673,6 +706,119 @@ static uint8_t *html_view_decode_base64(const char *input, size_t len, size_t *o
     return out;
 }
 
+static char *html_view_data_url_decode_text_css(const char *url, size_t *out_len)
+{
+    if (!out_len)
+    {
+        return NULL;
+    }
+    *out_len = 0;
+    if (!url || strncasecmp(url, "data:", 5) != 0)
+    {
+        return NULL;
+    }
+
+    const char *meta = url + 5;
+    const char *comma = strchr(meta, ',');
+    if (!comma)
+    {
+        return NULL;
+    }
+
+    size_t meta_len = (size_t)(comma - meta);
+    const char *payload = comma + 1;
+    if (!payload || payload[0] == '\0')
+    {
+        return NULL;
+    }
+
+    bool base64 = false;
+    bool has_type = false;
+    bool is_css = false;
+
+    const char *cursor = meta;
+    const char *semi = html_view_find_char(cursor, meta_len, ';');
+    size_t token_len = semi ? (size_t)(semi - cursor) : meta_len;
+    if (token_len > 0)
+    {
+        has_type = true;
+        if (token_len == 8 && strncasecmp(cursor, "text/css", 8) == 0)
+        {
+            is_css = true;
+        }
+    }
+
+    if (has_type && !is_css)
+    {
+        return NULL;
+    }
+
+    if (semi)
+    {
+        cursor = semi + 1;
+        while (cursor < meta + meta_len)
+        {
+            const char *next = html_view_find_char(cursor, (size_t)((meta + meta_len) - cursor), ';');
+            size_t len = next ? (size_t)(next - cursor) : (size_t)((meta + meta_len) - cursor);
+            const char *tok = cursor;
+            while (len > 0 && isspace((unsigned char)*tok))
+            {
+                tok++;
+                len--;
+            }
+            while (len > 0 && isspace((unsigned char)tok[len - 1]))
+            {
+                len--;
+            }
+            if (len == 6 && strncasecmp(tok, "base64", 6) == 0)
+            {
+                base64 = true;
+            }
+            if (!next)
+            {
+                break;
+            }
+            cursor = next + 1;
+        }
+    }
+
+    size_t payload_len = strlen(payload);
+    size_t decoded_len = 0;
+    char *decoded_payload = html_view_decode_percent(payload, payload_len, &decoded_len);
+    if (!decoded_payload)
+    {
+        return NULL;
+    }
+
+    if (!base64)
+    {
+        *out_len = decoded_len;
+        return decoded_payload;
+    }
+
+    size_t raw_len = 0;
+    uint8_t *raw = html_view_decode_base64(decoded_payload, decoded_len, &raw_len);
+    free(decoded_payload);
+    if (!raw)
+    {
+        return NULL;
+    }
+    char *text = (char *)malloc(raw_len + 1);
+    if (!text)
+    {
+        free(raw);
+        return NULL;
+    }
+    if (raw_len)
+    {
+        memcpy(text, raw, raw_len);
+    }
+    text[raw_len] = '\0';
+    free(raw);
+    *out_len = raw_len;
+    return text;
+}
+
 static bool html_view_is_png_bytes(const uint8_t *data, size_t len)
 {
     static const uint8_t signature[8] = {0x89u, 0x50u, 0x4Eu, 0x47u, 0x0Du, 0x0Au, 0x1Au, 0x0Au};
@@ -788,6 +934,35 @@ static void html_view_collect_style_text(const html_node_t *node, char **buf, si
                 {
                     (void)html_view_buf_append(buf, len, cap, txt->text, strlen(txt->text));
                     (void)html_view_buf_append(buf, len, cap, "\n", 1);
+                }
+            }
+            descend = false;
+        }
+        else if (cur->type == HTML_NODE_ELEMENT && cur->name && strcmp(cur->name, "link") == 0)
+        {
+            const char *rel = html_attr_get(cur, "rel");
+            if (rel && html_view_attr_value_has_token_ci(rel, "stylesheet"))
+            {
+                const char *type = html_attr_get(cur, "type");
+                bool type_ok = true;
+                if (type && type[0] != '\0' && strcasecmp(type, "text/css") != 0)
+                {
+                    type_ok = false;
+                }
+                if (type_ok)
+                {
+                    const char *href = html_attr_get(cur, "href");
+                    if (href && href[0] != '\0')
+                    {
+                        size_t css_len = 0;
+                        char *css_text = html_view_data_url_decode_text_css(href, &css_len);
+                        if (css_text && css_len > 0)
+                        {
+                            (void)html_view_buf_append(buf, len, cap, css_text, css_len);
+                            (void)html_view_buf_append(buf, len, cap, "\n", 1);
+                        }
+                        free(css_text);
+                    }
                 }
             }
             descend = false;

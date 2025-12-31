@@ -104,7 +104,7 @@ static void browser_menu_bookmark_httpbin_form(void *context)
         return;
     }
     browser_menus_close(app);
-    browser_open_url(app, "https://httpbin.org/form/post");
+    browser_open_url(app, "https://httpbin.org/forms/post");
 }
 
 static void browser_menu_bookmark_mdn_beginner(void *context)
@@ -1021,7 +1021,7 @@ bool browser_build_ui(browser_app_t *app)
 
     if (!atk_menu_add_item(app->menu_bookmarks, "https://www.example.com", browser_menu_bookmark_example, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "http://acid2.acidtests.org/", browser_menu_bookmark_acid2, app) ||
-        !atk_menu_add_item(app->menu_bookmarks, "https://httpbin.org/form/post", browser_menu_bookmark_httpbin_form, app) ||
+        !atk_menu_add_item(app->menu_bookmarks, "https://httpbin.org/forms/post", browser_menu_bookmark_httpbin_form, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "https://mdn.github.io/beginner-html-site-styled/", browser_menu_bookmark_mdn_beginner, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "https://www.w3.org/Style/CSS/Test/CSS1/current/test5526c.htm", browser_menu_bookmark_css1_acid1, app))
     {

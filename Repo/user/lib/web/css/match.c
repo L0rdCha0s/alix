@@ -3,6 +3,15 @@
 #include "ctype.h"
 #include "libc.h"
 
+static bool css_length_is_set(const css_length_t *len)
+{
+    if (!len)
+    {
+        return false;
+    }
+    return len->valid;
+}
+
 void css_style_merge(css_style_t *dst, const css_style_t *src)
 {
     if (!dst || !src)
@@ -80,17 +89,62 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     if (src->has_margin)
     {
         dst->has_margin = true;
-        dst->margin = src->margin;
+        if (css_length_is_set(&src->margin.top))
+        {
+            dst->margin.top = src->margin.top;
+        }
+        if (css_length_is_set(&src->margin.right))
+        {
+            dst->margin.right = src->margin.right;
+        }
+        if (css_length_is_set(&src->margin.bottom))
+        {
+            dst->margin.bottom = src->margin.bottom;
+        }
+        if (css_length_is_set(&src->margin.left))
+        {
+            dst->margin.left = src->margin.left;
+        }
     }
     if (src->has_padding)
     {
         dst->has_padding = true;
-        dst->padding = src->padding;
+        if (css_length_is_set(&src->padding.top))
+        {
+            dst->padding.top = src->padding.top;
+        }
+        if (css_length_is_set(&src->padding.right))
+        {
+            dst->padding.right = src->padding.right;
+        }
+        if (css_length_is_set(&src->padding.bottom))
+        {
+            dst->padding.bottom = src->padding.bottom;
+        }
+        if (css_length_is_set(&src->padding.left))
+        {
+            dst->padding.left = src->padding.left;
+        }
     }
     if (src->has_border)
     {
         dst->has_border = true;
-        dst->border_width = src->border_width;
+        if (css_length_is_set(&src->border_width.top))
+        {
+            dst->border_width.top = src->border_width.top;
+        }
+        if (css_length_is_set(&src->border_width.right))
+        {
+            dst->border_width.right = src->border_width.right;
+        }
+        if (css_length_is_set(&src->border_width.bottom))
+        {
+            dst->border_width.bottom = src->border_width.bottom;
+        }
+        if (css_length_is_set(&src->border_width.left))
+        {
+            dst->border_width.left = src->border_width.left;
+        }
     }
     if (src->has_border_style)
     {
