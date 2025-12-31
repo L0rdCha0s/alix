@@ -183,6 +183,8 @@ static void html_view_measure_node_size(const html_view_ctx_t *ctx,
     measure.y = 0;
     measure.content_bottom = 0;
     measure.pending_space = false;
+    measure.pending_margin = 0;
+    measure.pending_margin_valid = false;
     measure.underline_run_active = false;
     measure.underline_run_start_x = 0;
     measure.list_level = 0;
@@ -1181,6 +1183,8 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             inner.x = inner.body_x;
             inner.y = border_y + item->border_top + item->pad_top;
             inner.pending_space = false;
+            inner.pending_margin = 0;
+            inner.pending_margin_valid = false;
             inner.list_level = 0;
             inner.floats = NULL;
             inner.style_block = NULL;

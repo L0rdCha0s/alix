@@ -495,12 +495,36 @@ bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_
     return true;
 }
 
+static bool html_view_intersect_rect(const atk_rect_t *a, const atk_rect_t *b, atk_rect_t *out)
+{
+    if (!a || !b || !out)
+    {
+        return false;
+    }
+    int x0 = a->x > b->x ? a->x : b->x;
+    int y0 = a->y > b->y ? a->y : b->y;
+    int x1 = (a->x + a->width) < (b->x + b->width) ? (a->x + a->width) : (b->x + b->width);
+    int y1 = (a->y + a->height) < (b->y + b->height) ? (a->y + a->height) : (b->y + b->height);
+    int w = x1 - x0;
+    int h = y1 - y0;
+    if (w <= 0 || h <= 0)
+    {
+        return false;
+    }
+    out->x = x0;
+    out->y = y0;
+    out->width = w;
+    out->height = h;
+    return true;
+}
+
 static void html_view_render_cache_draw_text_span(html_view_ctx_t *ctx,
                                                   int x,
                                                   int baseline_y,
                                                   const char *text,
                                                   uint32_t len,
-                                                  video_color_t color)
+                                                  video_color_t color,
+                                                  const atk_rect_t *clip)
 {
     if (!ctx || !text || len == 0)
     {
@@ -528,7 +552,7 @@ static void html_view_render_cache_draw_text_span(html_view_ctx_t *ctx,
         tmp = heap;
     }
 
-    html_view_draw_string_clipped(ctx, x, baseline_y, tmp, color, &ctx->clip);
+    html_view_draw_string_clipped(ctx, x, baseline_y, tmp, color, clip ? clip : &ctx->clip);
     free(heap);
 }
 
@@ -770,10 +794,25 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
             abs_y = (int)op->y;
         }
 
+        atk_rect_t draw_clip = ctx->clip;
+        if (op->has_clip)
+        {
+            atk_rect_t op_clip = {
+                .x = fixed ? (int)op->clip_x : (ctx->doc_origin_x + (int)op->clip_x),
+                .y = fixed ? (int)op->clip_y : (ctx->doc_origin_y + (int)op->clip_y - scroll_y),
+                .width = (int)op->clip_w,
+                .height = (int)op->clip_h,
+            };
+            if (!html_view_intersect_rect(&draw_clip, &op_clip, &draw_clip))
+            {
+                continue;
+            }
+        }
+
         switch (op->kind)
         {
             case HTML_VIEW_OP_RECT:
-                html_view_draw_rect_clipped(ctx, abs_x, abs_y, (int)op->w, (int)op->h, op->color, &ctx->clip);
+                html_view_draw_rect_clipped(ctx, abs_x, abs_y, (int)op->w, (int)op->h, op->color, &draw_clip);
                 break;
             case HTML_VIEW_OP_TEXT:
             {
@@ -783,7 +822,13 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
                 {
                     ctx->actual_font_px = op->font_px;
                 }
-                html_view_render_cache_draw_text_span(ctx, abs_x, baseline_y, op->text, op->text_len, op->color);
+                html_view_render_cache_draw_text_span(ctx,
+                                                      abs_x,
+                                                      baseline_y,
+                                                      op->text,
+                                                      op->text_len,
+                                                      op->color,
+                                                      &draw_clip);
                 ctx->actual_font_px = saved_font_px;
                 break;
             }
@@ -795,11 +840,23 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
                                              (int)op->h,
                                              op->pixels,
                                              op->stride_bytes,
-                                             &ctx->clip);
+                                             &draw_clip);
                 break;
             case HTML_VIEW_OP_CONTROL:
-                html_view_place_control_widget(ctx, op->widget, abs_x, abs_y, (int)op->w, (int)op->h);
+            {
+                atk_rect_t control_rect = {
+                    .x = abs_x,
+                    .y = abs_y,
+                    .width = (int)op->w,
+                    .height = (int)op->h,
+                };
+                atk_rect_t clipped = {0};
+                if (html_view_intersect_rect(&control_rect, &draw_clip, &clipped))
+                {
+                    html_view_place_control_widget(ctx, op->widget, abs_x, abs_y, (int)op->w, (int)op->h);
+                }
                 break;
+            }
             default:
                 break;
         }

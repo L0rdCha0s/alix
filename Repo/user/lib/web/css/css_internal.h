@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 void css_skip_ws_and_comments(const char **p);
+void css_skip_ws_and_comments_range(const char **p, const char *end);
 void css_trim_range(const char **start, const char **end);
 char *css_strdup_lower(const char *start, const char *end);
 bool css_parse_color(const char *start, const char *end, video_color_t *out);

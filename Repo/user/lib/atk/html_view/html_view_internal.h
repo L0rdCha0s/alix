@@ -154,6 +154,11 @@ typedef struct
     int stride_bytes;
     int32_t z_index;
     bool fixed;
+    bool has_clip;
+    int32_t clip_x;
+    int32_t clip_y;
+    int32_t clip_w;
+    int32_t clip_h;
     atk_widget_t *widget;
 } html_view_op_t;
 
@@ -306,6 +311,7 @@ typedef struct
     int pos_h;
     int height_basis;
     bool height_basis_valid;
+    bool height_basis_explicit;
     html_view_float_ctx_t *floats;
     int actual_font_px;
     int base_font_px;
@@ -317,6 +323,8 @@ typedef struct
     int max_x;
     int measure_max_x;
     int content_bottom;
+    int pending_margin;
+    bool pending_margin_valid;
     int list_level;
     css_text_align_t text_align_mode;
     size_t line_op_start;

@@ -1,6 +1,114 @@
 #include "web/css/css_internal.h"
 
+#include "ctype.h"
 #include "libc.h"
+
+static bool css_strip_priority(const char *start, const char *end, const char **out_end)
+{
+    if (out_end)
+    {
+        *out_end = end;
+    }
+    if (!start || !end || end <= start)
+    {
+        return true;
+    }
+
+    const char *p = start;
+    const char *bang = NULL;
+    char quote = 0;
+    int paren_depth = 0;
+    bool escape = false;
+    while (p < end)
+    {
+        char c = *p;
+        if (escape)
+        {
+            escape = false;
+            ++p;
+            continue;
+        }
+        if (c == '\\')
+        {
+            escape = true;
+            ++p;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            ++p;
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            ++p;
+            continue;
+        }
+        if (c == '/' && p + 1 < end && p[1] == '*')
+        {
+            p += 2;
+            while (p + 1 < end && !(p[0] == '*' && p[1] == '/'))
+            {
+                ++p;
+            }
+            if (p + 1 < end)
+            {
+                p += 2;
+            }
+            continue;
+        }
+        if (c == '(')
+        {
+            ++paren_depth;
+            ++p;
+            continue;
+        }
+        if (c == ')' && paren_depth > 0)
+        {
+            --paren_depth;
+            ++p;
+            continue;
+        }
+        if (c == '!' && paren_depth == 0)
+        {
+            bang = p;
+            break;
+        }
+        ++p;
+    }
+
+    if (!bang)
+    {
+        return true;
+    }
+
+    const char *q = bang + 1;
+    css_skip_ws_and_comments_range(&q, end);
+    const char *kw_start = q;
+    while (q < end && isalpha((unsigned char)*q))
+    {
+        ++q;
+    }
+    if ((size_t)(q - kw_start) != 9 || strncasecmp(kw_start, "important", 9) != 0)
+    {
+        return false;
+    }
+    css_skip_ws_and_comments_range(&q, end);
+    if (q < end)
+    {
+        return false;
+    }
+    if (out_end)
+    {
+        *out_end = bang;
+    }
+    return true;
+}
 
 static const char *css_scan_value_end(const char *p)
 {
@@ -39,6 +147,19 @@ static const char *css_scan_value_end(const char *p)
         {
             quote = c;
             ++p;
+            continue;
+        }
+        if (c == '/' && p[1] == '*')
+        {
+            p += 2;
+            while (*p && !(p[0] == '*' && p[1] == '/'))
+            {
+                ++p;
+            }
+            if (*p)
+            {
+                p += 2;
+            }
             continue;
         }
         if (c == '(')
@@ -169,6 +290,14 @@ css_stylesheet_t *css_parse(const char *css_text)
             }
             p = val_end_scan;
             const char *val_end = p;
+            if (!css_strip_priority(val_start, val_end, &val_end))
+            {
+                if (*p == ';')
+                {
+                    p++;
+                }
+                continue;
+            }
 
             css_style_apply_property(&style, prop_start, prop_end, val_start, val_end);
 

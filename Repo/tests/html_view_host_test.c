@@ -278,6 +278,7 @@ static bool test_height_percent_with_basis(void)
     ctx.body_w = 800;
     ctx.base_font_px = 16;
     ctx.height_basis_valid = true;
+    ctx.height_basis_explicit = true;
     ctx.height_basis = 200;
 
     css_length_t len = {
@@ -308,6 +309,94 @@ static bool test_height_px_without_basis(void)
     int px = 0;
     bool ok = html_view_length_to_px_height(&ctx, &len, &px);
     return ok && px == 24;
+}
+
+static bool test_margin_collapse_siblings(void)
+{
+    html_view_ctx_t ctx = {0};
+    ctx.viewport_w = 200;
+    ctx.viewport_h = 200;
+    ctx.body_w = 200;
+    ctx.max_x = 200;
+    ctx.base_font_px = 16;
+    ctx.base_line_height = 16;
+    ctx.line_height = 16;
+    ctx.paint_layer = HTML_VIEW_PAINT_LAYER_BLOCK;
+    ctx.body_x = 0;
+    ctx.x = 0;
+    ctx.y = 0;
+
+    html_node_t node1 = {0};
+    node1.type = HTML_NODE_ELEMENT;
+    node1.name = (char *)"div";
+
+    css_style_t style1 = {0};
+    style1.has_margin = true;
+    style1.margin.bottom.valid = true;
+    style1.margin.bottom.value_milli = 20000;
+    style1.margin.bottom.unit = CSS_UNIT_PX;
+    style1.margin.bottom.is_auto = false;
+    style1.has_height = true;
+    style1.height.valid = true;
+    style1.height.is_auto = false;
+    style1.height.value_milli = 10000;
+    style1.height.unit = CSS_UNIT_PX;
+
+    html_node_t node2 = {0};
+    node2.type = HTML_NODE_ELEMENT;
+    node2.name = (char *)"div";
+
+    css_style_t style2 = {0};
+    style2.has_margin = true;
+    style2.margin.top.valid = true;
+    style2.margin.top.value_milli = 10000;
+    style2.margin.top.unit = CSS_UNIT_PX;
+    style2.margin.top.is_auto = false;
+    style2.has_height = true;
+    style2.height.valid = true;
+    style2.height.is_auto = false;
+    style2.height.value_milli = 10000;
+    style2.height.unit = CSS_UNIT_PX;
+
+    bool ok1 = html_view_render_block_element(&ctx, &node1, &style1);
+    int after_first = ctx.y;
+    bool ok2 = html_view_render_block_element(&ctx, &node2, &style2);
+
+    return ok1 && ok2 && after_first == 10 && ctx.y == 40;
+}
+
+static bool test_margin_collapse_empty_block(void)
+{
+    html_view_ctx_t ctx = {0};
+    ctx.viewport_w = 200;
+    ctx.viewport_h = 200;
+    ctx.body_w = 200;
+    ctx.max_x = 200;
+    ctx.base_font_px = 16;
+    ctx.base_line_height = 16;
+    ctx.line_height = 16;
+    ctx.paint_layer = HTML_VIEW_PAINT_LAYER_BLOCK;
+    ctx.body_x = 0;
+    ctx.x = 0;
+    ctx.y = 0;
+
+    html_node_t node = {0};
+    node.type = HTML_NODE_ELEMENT;
+    node.name = (char *)"div";
+
+    css_style_t style = {0};
+    style.has_margin = true;
+    style.margin.top.valid = true;
+    style.margin.top.value_milli = 10000;
+    style.margin.top.unit = CSS_UNIT_PX;
+    style.margin.top.is_auto = false;
+    style.margin.bottom.valid = true;
+    style.margin.bottom.value_milli = 20000;
+    style.margin.bottom.unit = CSS_UNIT_PX;
+    style.margin.bottom.is_auto = false;
+
+    bool ok = html_view_render_block_element(&ctx, &node, &style);
+    return ok && ctx.y == 0 && ctx.pending_margin_valid && ctx.pending_margin == 20;
 }
 
 static bool test_attribute_selectors_with_escapes(void)
@@ -722,6 +811,8 @@ int main(void)
         { "height-percent-requires-basis", test_height_percent_requires_basis },
         { "height-percent-with-basis", test_height_percent_with_basis },
         { "height-px-without-basis", test_height_px_without_basis },
+        { "margin-collapse-siblings", test_margin_collapse_siblings },
+        { "margin-collapse-empty-block", test_margin_collapse_empty_block },
         { "attribute-selectors-escapes", test_attribute_selectors_with_escapes },
         { "adjacent-sibling-selector", test_adjacent_sibling_selector },
         { "child-descendant-selector", test_child_and_descendant_selectors },

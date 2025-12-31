@@ -1525,7 +1525,8 @@ bool html_view_length_to_px_height(const html_view_ctx_t *ctx,
     {
         return false;
     }
-    if (len->unit == CSS_UNIT_PERCENT && !ctx->height_basis_valid)
+    if (len->unit == CSS_UNIT_PERCENT &&
+        (!ctx->height_basis_valid || !ctx->height_basis_explicit))
     {
         return false;
     }

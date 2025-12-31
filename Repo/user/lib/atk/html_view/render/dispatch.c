@@ -290,10 +290,30 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
         goto out;
     }
 
-    if (ctx->table_mode && style->has_display && style->display == CSS_DISPLAY_TABLE_CELL)
+    if (ctx->table_mode &&
+        parent_style &&
+        parent_style->has_display &&
+        parent_style->display == CSS_DISPLAY_TABLE)
     {
-        html_view_render_float_box(ctx, node, style, CSS_FLOAT_LEFT);
-        goto out;
+        bool as_cell = false;
+        if (style->has_display)
+        {
+            if (style->display == CSS_DISPLAY_TABLE_CELL ||
+                style->display == CSS_DISPLAY_TABLE ||
+                style->display == CSS_DISPLAY_LIST_ITEM)
+            {
+                as_cell = true;
+            }
+        }
+        else if (strcmp(tag, "li") == 0)
+        {
+            as_cell = true;
+        }
+        if (as_cell)
+        {
+            html_view_render_float_box(ctx, node, style, CSS_FLOAT_LEFT);
+            goto out;
+        }
     }
 
     if (style->has_float && style->float_mode != CSS_FLOAT_NONE &&

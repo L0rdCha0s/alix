@@ -10,18 +10,23 @@ static bool css_next_token(const char **p, const char *end, const char **tok_sta
         return false;
     }
     const char *s = *p;
-    while (s < end && isspace((unsigned char)*s))
-    {
-        ++s;
-    }
+    css_skip_ws_and_comments_range(&s, end);
     if (s >= end)
     {
         *p = end;
         return false;
     }
     const char *start = s;
-    while (s < end && !isspace((unsigned char)*s))
+    while (s < end)
     {
+        if (isspace((unsigned char)*s))
+        {
+            break;
+        }
+        if (s + 1 < end && s[0] == '/' && s[1] == '*')
+        {
+            break;
+        }
         ++s;
     }
     *tok_start = start;
@@ -216,19 +221,19 @@ static void css_style_apply_background_shorthand(css_style_t *style, const char 
         return;
     }
 
-    css_style_release(style);
-    style->has_background = true;
-    style->background_transparent = true;
-    style->has_background_image = true;
-    style->background_image = NULL;
-    style->background_image_owned = false;
-    style->has_background_repeat = true;
-    style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT;
-    style->has_background_attachment = true;
-    style->background_attachment = CSS_BACKGROUND_ATTACHMENT_SCROLL;
-    style->has_background_position = true;
-    style->background_pos_x = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_NONE };
-    style->background_pos_y = (css_length_t){ .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_NONE };
+    bool valid = true;
+    bool have_color = false;
+    bool have_image = false;
+    bool have_repeat = false;
+    bool have_attachment = false;
+    bool background_transparent = true;
+    video_color_t background = 0;
+    char *background_image = NULL;
+    bool background_image_owned = false;
+    css_background_repeat_t background_repeat = CSS_BACKGROUND_REPEAT_REPEAT;
+    css_background_attachment_t background_attachment = CSS_BACKGROUND_ATTACHMENT_SCROLL;
+    css_length_t background_pos_x = { .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_NONE };
+    css_length_t background_pos_y = { .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_NONE };
 
     const char *p = start;
     const char *tok_s = NULL;
@@ -241,68 +246,120 @@ static void css_style_apply_background_shorthand(css_style_t *style, const char 
     {
         if (css_value_is_keyword(tok_s, tok_e, "none"))
         {
-            style->background_transparent = true;
-            css_style_set_background_image(style, NULL, false);
+            if (have_image)
+            {
+                valid = false;
+                break;
+            }
+            have_image = true;
             continue;
         }
 
         if (css_value_is_keyword(tok_s, tok_e, "repeat"))
         {
-            style->has_background_repeat = true;
-            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT;
+            if (have_repeat)
+            {
+                valid = false;
+                break;
+            }
+            have_repeat = true;
+            background_repeat = CSS_BACKGROUND_REPEAT_REPEAT;
             continue;
         }
         if (css_value_is_keyword(tok_s, tok_e, "no-repeat"))
         {
-            style->has_background_repeat = true;
-            style->background_repeat = CSS_BACKGROUND_REPEAT_NO_REPEAT;
+            if (have_repeat)
+            {
+                valid = false;
+                break;
+            }
+            have_repeat = true;
+            background_repeat = CSS_BACKGROUND_REPEAT_NO_REPEAT;
             continue;
         }
         if (css_value_is_keyword(tok_s, tok_e, "repeat-x"))
         {
-            style->has_background_repeat = true;
-            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT_X;
+            if (have_repeat)
+            {
+                valid = false;
+                break;
+            }
+            have_repeat = true;
+            background_repeat = CSS_BACKGROUND_REPEAT_REPEAT_X;
             continue;
         }
         if (css_value_is_keyword(tok_s, tok_e, "repeat-y"))
         {
-            style->has_background_repeat = true;
-            style->background_repeat = CSS_BACKGROUND_REPEAT_REPEAT_Y;
+            if (have_repeat)
+            {
+                valid = false;
+                break;
+            }
+            have_repeat = true;
+            background_repeat = CSS_BACKGROUND_REPEAT_REPEAT_Y;
             continue;
         }
         if (css_value_is_keyword(tok_s, tok_e, "fixed"))
         {
-            style->has_background_attachment = true;
-            style->background_attachment = CSS_BACKGROUND_ATTACHMENT_FIXED;
+            if (have_attachment)
+            {
+                valid = false;
+                break;
+            }
+            have_attachment = true;
+            background_attachment = CSS_BACKGROUND_ATTACHMENT_FIXED;
             continue;
         }
         if (css_value_is_keyword(tok_s, tok_e, "scroll"))
         {
-            style->has_background_attachment = true;
-            style->background_attachment = CSS_BACKGROUND_ATTACHMENT_SCROLL;
+            if (have_attachment)
+            {
+                valid = false;
+                break;
+            }
+            have_attachment = true;
+            background_attachment = CSS_BACKGROUND_ATTACHMENT_SCROLL;
             continue;
         }
 
         char *url = NULL;
         if (css_parse_url_token(tok_s, tok_e, &url))
         {
-            css_style_set_background_image(style, url, true);
+            if (have_image)
+            {
+                free(url);
+                valid = false;
+                break;
+            }
+            have_image = true;
+            background_image = url;
+            background_image_owned = true;
             continue;
         }
 
         if (css_value_is_keyword(tok_s, tok_e, "transparent"))
         {
-            style->has_background = true;
-            style->background_transparent = true;
+            if (have_color)
+            {
+                valid = false;
+                break;
+            }
+            have_color = true;
+            background_transparent = true;
             continue;
         }
 
         video_color_t c = 0;
         if (css_parse_color(tok_s, tok_e, &c))
         {
-            style->has_background = true;
-            style->background_transparent = false;
-            style->background = c;
+            if (have_color)
+            {
+                valid = false;
+                break;
+            }
+            have_color = true;
+            background_transparent = false;
+            background = c;
             continue;
         }
 
@@ -323,7 +380,36 @@ static void css_style_apply_background_shorthand(css_style_t *style, const char 
                 continue;
             }
         }
+        valid = false;
+        break;
     }
+
+    if (!valid)
+    {
+        if (background_image_owned && background_image)
+        {
+            free(background_image);
+        }
+        return;
+    }
+
+    css_style_release(style);
+    style->has_background = true;
+    style->background_transparent = background_transparent;
+    if (!background_transparent)
+    {
+        style->background = background;
+    }
+    style->has_background_image = true;
+    style->background_image = background_image;
+    style->background_image_owned = background_image_owned;
+    style->has_background_repeat = true;
+    style->background_repeat = background_repeat;
+    style->has_background_attachment = true;
+    style->background_attachment = background_attachment;
+    style->has_background_position = true;
+    style->background_pos_x = background_pos_x;
+    style->background_pos_y = background_pos_y;
 
     if (pos_count > 0)
     {
@@ -750,6 +836,8 @@ static bool css_parse_border_value(const char *start,
     }
 
     bool have_width = false;
+    bool have_style = false;
+    bool style_none = false;
     const char *p = start;
     const char *tok_s = NULL;
     const char *tok_e = NULL;
@@ -764,6 +852,51 @@ static bool css_parse_border_value(const char *start,
                 *out_width = len;
                 have_width = true;
                 continue;
+            }
+        }
+        else
+        {
+            css_length_t len;
+            if (css_parse_border_width_token(tok_s, tok_e, &len))
+            {
+                return false;
+            }
+        }
+
+        if (!have_style)
+        {
+            if (css_value_is_keyword(tok_s, tok_e, "none"))
+            {
+                have_style = true;
+                style_none = true;
+                continue;
+            }
+            if (css_value_is_keyword(tok_s, tok_e, "solid") ||
+                css_value_is_keyword(tok_s, tok_e, "dotted") ||
+                css_value_is_keyword(tok_s, tok_e, "dashed") ||
+                css_value_is_keyword(tok_s, tok_e, "double") ||
+                css_value_is_keyword(tok_s, tok_e, "groove") ||
+                css_value_is_keyword(tok_s, tok_e, "ridge") ||
+                css_value_is_keyword(tok_s, tok_e, "inset") ||
+                css_value_is_keyword(tok_s, tok_e, "outset"))
+            {
+                have_style = true;
+                continue;
+            }
+        }
+        else
+        {
+            if (css_value_is_keyword(tok_s, tok_e, "none") ||
+                css_value_is_keyword(tok_s, tok_e, "solid") ||
+                css_value_is_keyword(tok_s, tok_e, "dotted") ||
+                css_value_is_keyword(tok_s, tok_e, "dashed") ||
+                css_value_is_keyword(tok_s, tok_e, "double") ||
+                css_value_is_keyword(tok_s, tok_e, "groove") ||
+                css_value_is_keyword(tok_s, tok_e, "ridge") ||
+                css_value_is_keyword(tok_s, tok_e, "inset") ||
+                css_value_is_keyword(tok_s, tok_e, "outset"))
+            {
+                return false;
             }
         }
 
@@ -786,9 +919,43 @@ static bool css_parse_border_value(const char *start,
                 continue;
             }
         }
+        else
+        {
+            if (css_value_is_keyword(tok_s, tok_e, "transparent"))
+            {
+                return false;
+            }
+            video_color_t c;
+            if (css_parse_color(tok_s, tok_e, &c))
+            {
+                return false;
+            }
+        }
+
+        return false;
     }
 
-    return have_width;
+    if (!have_width && !have_style && !*out_has_color)
+    {
+        return false;
+    }
+    if (style_none)
+    {
+        out_width->valid = true;
+        out_width->is_auto = false;
+        out_width->unit = CSS_UNIT_PX;
+        out_width->value_milli = 0;
+        have_width = true;
+    }
+    if (!have_width)
+    {
+        out_width->valid = true;
+        out_width->is_auto = false;
+        out_width->unit = CSS_UNIT_PX;
+        out_width->value_milli = 3000;
+        have_width = true;
+    }
+    return true;
 }
 
 static bool css_parse_int_value(const char *start, const char *end, int32_t *out)

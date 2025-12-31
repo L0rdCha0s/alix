@@ -88,6 +88,47 @@ static bool test_background_shorthand(void)
     return ok;
 }
 
+static bool test_background_shorthand_comment(void)
+{
+    css_stylesheet_t *sheet = css_parse("div { background: yellow url(foo.png) /* red square */ no-repeat fixed; }");
+    if (!sheet || !sheet->rules)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    const css_style_t *style = &sheet->rules->style;
+    bool ok = style->has_background &&
+              !style->background_transparent &&
+              style->background == video_make_color(0xFF, 0xFF, 0x00);
+    ok = ok && style->has_background_image &&
+         style->background_image &&
+         strcmp(style->background_image, "foo.png") == 0;
+    ok = ok && style->has_background_repeat &&
+         style->background_repeat == CSS_BACKGROUND_REPEAT_NO_REPEAT;
+    ok = ok && style->has_background_attachment &&
+         style->background_attachment == CSS_BACKGROUND_ATTACHMENT_FIXED;
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
+static bool test_background_shorthand_invalid_double_color(void)
+{
+    css_stylesheet_t *sheet = css_parse("div { background: red pink; }");
+    if (!sheet || !sheet->rules)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    const css_style_t *style = &sheet->rules->style;
+    bool ok = !style->has_background && !style->has_background_image;
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
 static bool test_background_shorthand_fixed_first(void)
 {
     css_stylesheet_t *sheet = css_parse("div { background: fixed url(foo.png) 1px 0; }");
@@ -279,21 +320,57 @@ static bool test_style_merge_border_width_sides(void)
     return ok;
 }
 
+static bool test_border_invalid_priority(void)
+{
+    css_stylesheet_t *sheet = css_parse("div { border: 5em solid red ! error; }");
+    if (!sheet || !sheet->rules)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    const css_style_t *style = &sheet->rules->style;
+    bool ok = !style->has_border && !style->has_border_color && !style->has_border_style;
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
+static bool test_unitless_width_invalid(void)
+{
+    css_stylesheet_t *sheet = css_parse("div { width: 200; height: 0; }");
+    if (!sheet || !sheet->rules)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    const css_style_t *style = &sheet->rules->style;
+    bool ok = !style->has_width && style->has_height;
+
+    css_stylesheet_destroy(sheet);
+    return ok;
+}
+
 int main(void)
 {
     css_case_t cases[] = {
         { "display-table", test_display_table },
         { "z-index", test_z_index },
         { "background-shorthand", test_background_shorthand },
+        { "background-shorthand-comment", test_background_shorthand_comment },
+        { "background-shorthand-invalid-double-color", test_background_shorthand_invalid_double_color },
         { "background-shorthand-fixed-first", test_background_shorthand_fixed_first },
         { "background-image-none", test_background_image_none },
         { "background-position", test_background_position_property },
+        { "border-invalid-priority", test_border_invalid_priority },
         { "border-style-none", test_border_style_none },
         { "border-color-sides", test_border_color_sides },
         { "border-top-color-sides", test_border_top_color_sets_side },
         { "style-merge-margin-sides", test_style_merge_margin_sides },
         { "style-merge-padding-sides", test_style_merge_padding_sides },
         { "style-merge-border-width-sides", test_style_merge_border_width_sides },
+        { "unitless-width-invalid", test_unitless_width_invalid },
     };
 
     size_t pass = 0;

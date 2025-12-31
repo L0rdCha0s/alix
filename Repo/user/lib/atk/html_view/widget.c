@@ -419,6 +419,15 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     cache->base_font_px = base_font_px;
     cache->base_line_height = base_line_height;
 
+    /* Record with a wide clip so cached ops include off-viewport content. */
+    const int clip_pad = 10000000;
+    atk_rect_t record_clip = {
+        .x = viewport_x - clip_pad,
+        .y = viewport_y - clip_pad,
+        .width = viewport_w + clip_pad * 2,
+        .height = viewport_h + clip_pad * 2
+    };
+
     html_view_float_ctx_t floats_record = {0};
     html_view_ctx_t record = {
         .state = NULL,
@@ -426,7 +435,7 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         .priv = priv,
         .sheet = priv->sheet,
         .bg = body_bg,
-        .clip = { viewport_x, viewport_y, viewport_w, viewport_h },
+        .clip = record_clip,
         .viewport_x = viewport_x,
         .viewport_y = viewport_y,
         .viewport_w = viewport_w,
@@ -441,6 +450,7 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         .pos_h = viewport_h,
         .height_basis = body_height_basis,
         .height_basis_valid = body_height_valid,
+        .height_basis_explicit = body_height_valid,
         .floats = &floats_record,
         .actual_font_px = effective_font_px,
         .base_font_px = base_font_px,
@@ -452,6 +462,8 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         .max_x = body_content_x + body_content_w,
         .measure_max_x = body_content_x,
         .content_bottom = body_content_y0,
+        .pending_margin = 0,
+        .pending_margin_valid = false,
         .list_level = 0,
         .text_align_mode = body_style.has_text_align ? body_style.text_align : CSS_TEXT_ALIGN_LEFT,
         .line_op_start = 0,
@@ -1017,6 +1029,7 @@ static void html_view_draw_cb(const atk_state_t *state,
         .pos_h = viewport_h,
         .height_basis = body_height_basis,
         .height_basis_valid = body_height_valid,
+        .height_basis_explicit = body_height_valid,
         .floats = NULL,
         .actual_font_px = effective_font_px,
         .base_font_px = base_font_px,
@@ -1028,6 +1041,8 @@ static void html_view_draw_cb(const atk_state_t *state,
         .max_x = body_content_x + body_content_w,
         .measure_max_x = body_content_x,
         .content_bottom = body_content_y0,
+        .pending_margin = 0,
+        .pending_margin_valid = false,
         .list_level = 0,
         .text_align_mode = body_style.has_text_align ? body_style.text_align : CSS_TEXT_ALIGN_LEFT,
         .line_op_start = 0,

@@ -30,6 +30,19 @@ static bool html_view_intersect_rect(const atk_rect_t *a, const atk_rect_t *b, a
     return true;
 }
 
+static void html_view_record_op_clip(const html_view_ctx_t *ctx, html_view_op_t *op, const atk_rect_t *clip)
+{
+    if (!ctx || !op || !clip)
+    {
+        return;
+    }
+    op->has_clip = true;
+    op->clip_x = html_view_record_x(ctx, clip->x);
+    op->clip_y = html_view_record_y(ctx, clip->y);
+    op->clip_w = clip->width;
+    op->clip_h = clip->height;
+}
+
 static int html_view_repeat_start(int origin, int step, int clip_start)
 {
     if (step <= 0)
@@ -83,6 +96,10 @@ void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
             op.color = color;
             op.z_index = html_view_effective_z_index(ctx);
             op.fixed = ctx->fixed_mode;
+            if (clip)
+            {
+                html_view_record_op_clip(ctx, &op, clip);
+            }
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
                 ctx->record_failed = true;
@@ -317,6 +334,10 @@ void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
             op.href = ctx->active_href;
             op.z_index = html_view_effective_z_index(ctx);
             op.fixed = ctx->fixed_mode;
+            if (clip)
+            {
+                html_view_record_op_clip(ctx, &op, clip);
+            }
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
                 ctx->record_failed = true;
@@ -1038,6 +1059,7 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
             op.href = ctx->active_href;
             op.z_index = html_view_effective_z_index(ctx);
             op.fixed = ctx->fixed_mode;
+            html_view_record_op_clip(ctx, &op, &ctx->clip);
             if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
             {
                 ctx->record_failed = true;
@@ -1079,6 +1101,23 @@ void html_view_draw_text(html_view_ctx_t *ctx,
     if (!ctx || !text)
     {
         return;
+    }
+    if (ctx->pending_margin_valid && ctx->x == ctx->body_x)
+    {
+        ctx->y += ctx->pending_margin;
+        ctx->pending_margin = 0;
+        ctx->pending_margin_valid = false;
+        ctx->pending_space = false;
+        ctx->line_start_x = ctx->x;
+        ctx->line_start_y = ctx->y;
+        if (ctx->record && ctx->priv)
+        {
+            ctx->line_op_start = ctx->priv->render_cache.op_count;
+        }
+        else
+        {
+            ctx->line_op_start = 0;
+        }
     }
 
     const char *p = text;
@@ -1186,6 +1225,7 @@ void html_view_place_inline_control(html_view_ctx_t *ctx,
                 op.widget = child;
                 op.z_index = html_view_effective_z_index(ctx);
                 op.fixed = ctx->fixed_mode;
+                html_view_record_op_clip(ctx, &op, &ctx->clip);
                 if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
                 {
                     ctx->record_failed = true;
@@ -1250,6 +1290,7 @@ void html_view_place_block_control(html_view_ctx_t *ctx,
                 op.widget = child;
                 op.z_index = html_view_effective_z_index(ctx);
                 op.fixed = ctx->fixed_mode;
+                html_view_record_op_clip(ctx, &op, &ctx->clip);
                 if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
                 {
                     ctx->record_failed = true;

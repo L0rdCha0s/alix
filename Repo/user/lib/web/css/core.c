@@ -31,6 +31,35 @@ void css_skip_ws_and_comments(const char **p)
     }
 }
 
+void css_skip_ws_and_comments_range(const char **p, const char *end)
+{
+    if (!p || !*p || !end)
+    {
+        return;
+    }
+    while (*p < end)
+    {
+        while (*p < end && isspace((unsigned char)**p))
+        {
+            (*p)++;
+        }
+        if (*p + 1 < end && (*p)[0] == '/' && (*p)[1] == '*')
+        {
+            *p += 2;
+            while (*p + 1 < end && !((*p)[0] == '*' && (*p)[1] == '/'))
+            {
+                (*p)++;
+            }
+            if (*p + 1 < end)
+            {
+                *p += 2;
+            }
+            continue;
+        }
+        break;
+    }
+}
+
 void css_trim_range(const char **start, const char **end)
 {
     if (!start || !end || !*start || !*end)
@@ -405,6 +434,10 @@ bool css_parse_length_token(const char *start, const char *end, css_length_t *ou
         {
             unit = CSS_UNIT_PERCENT;
         }
+    }
+    else if (number_milli != 0)
+    {
+        return false;
     }
 
     out->valid = true;

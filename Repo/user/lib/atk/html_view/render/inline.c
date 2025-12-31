@@ -68,6 +68,23 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
     {
         return false;
     }
+    if (ctx->pending_margin_valid && ctx->x == ctx->body_x)
+    {
+        ctx->y += ctx->pending_margin;
+        ctx->pending_margin = 0;
+        ctx->pending_margin_valid = false;
+        ctx->pending_space = false;
+        ctx->line_start_x = ctx->x;
+        ctx->line_start_y = ctx->y;
+        if (ctx->record && ctx->priv)
+        {
+            ctx->line_op_start = ctx->priv->render_cache.op_count;
+        }
+        else
+        {
+            ctx->line_op_start = 0;
+        }
+    }
 
     const char *tag = node->name;
     if (strcmp(tag, "b") == 0 || strcmp(tag, "strong") == 0)
