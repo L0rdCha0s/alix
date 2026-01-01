@@ -1,5 +1,9 @@
 #include "atk/html_view/html_view_internal.h"
 
+#include "ctype.h"
+#include "serial.h"
+#include "string.h"
+
 typedef struct
 {
     const html_node_t *node;
@@ -60,6 +64,56 @@ typedef struct
     int margin_left;
     int table_h;
 } html_view_table_layout_t;
+
+static bool html_view_attr_has_class(const html_node_t *node, const char *token)
+{
+    if (!node || !token || !*token)
+    {
+        return false;
+    }
+    const char *classes = html_attr_get(node, "class");
+    if (!classes || !*classes)
+    {
+        return false;
+    }
+    size_t token_len = strlen(token);
+    const char *p = classes;
+    while (*p)
+    {
+        while (*p && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == token_len && strncmp(start, token, len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *html_view_debug_float_label(const html_node_t *node)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT)
+    {
+        return NULL;
+    }
+    if (html_view_attr_has_class(node, "nose"))
+    {
+        return "nose";
+    }
+    return NULL;
+}
 
 static void html_view_table_layout_destroy(html_view_table_layout_t *layout)
 {
@@ -353,31 +407,14 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     html_view_paint_layer_t saved_layer = ctx->paint_layer;
     ctx->paint_layer = HTML_VIEW_PAINT_LAYER_FLOAT;
 
+    int saved_pending_margin = ctx->pending_margin;
+    bool saved_pending_margin_valid = ctx->pending_margin_valid;
+    int saved_line_height = ctx->line_height;
+
     if (ctx->x != ctx->body_x)
     {
         html_view_new_line(ctx);
     }
-    if (ctx->pending_margin_valid)
-    {
-        ctx->y += ctx->pending_margin;
-        ctx->pending_margin = 0;
-        ctx->pending_margin_valid = false;
-        ctx->pending_space = false;
-        ctx->line_start_x = ctx->x;
-        ctx->line_start_y = ctx->y;
-        if (ctx->record && ctx->priv)
-        {
-            ctx->line_op_start = ctx->priv->render_cache.op_count;
-        }
-        else
-        {
-            ctx->line_op_start = 0;
-        }
-    }
-
-    int saved_pending_margin = ctx->pending_margin;
-    bool saved_pending_margin_valid = ctx->pending_margin_valid;
-    int saved_line_height = ctx->line_height;
     ctx->line_height = html_view_line_height_for_style(ctx, style);
 
     int margin_top = 0;
@@ -509,6 +546,28 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     if (border_bottom < 0) border_bottom = 0;
     if (border_left < 0) border_left = 0;
     html_view_apply_border_style_none(style, &border_top, &border_right, &border_bottom, &border_left);
+
+    int float_start_y = ctx->y;
+    if (ctx->pending_margin_valid)
+    {
+        float_start_y += ctx->pending_margin;
+    }
+
+    const char *debug_label = html_view_debug_float_label(node);
+    if (debug_label)
+    {
+        int scroll_y = (ctx->priv ? ctx->priv->scroll_y : 0);
+        serial_printf("[html_view][layout] floatnode=%s start_y=%d margin_t=%d margin_b=%d body_x=%d body_w=%d scroll_y=%d doc_origin_y=%d record=%d",
+                      debug_label,
+                      float_start_y,
+                      margin_top,
+                      margin_bottom,
+                      ctx->body_x,
+                      ctx->body_w,
+                      scroll_y,
+                      ctx->doc_origin_y,
+                      ctx->record ? 1 : 0);
+    }
 
     int content_w = 0;
     bool explicit_w = style->has_width && style->width.valid && !style->width.is_auto;
@@ -651,7 +710,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     int outer_w = border_box_w + margin_left + margin_right;
     int outer_h = border_box_h + margin_top + margin_bottom;
 
-    int place_y = ctx->y;
+    int place_y = float_start_y;
     int place_x = ctx->body_x;
     int container_w = ctx->body_w;
     if (container_w < 0) container_w = 0;

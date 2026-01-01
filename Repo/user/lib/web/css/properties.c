@@ -655,6 +655,43 @@ static bool css_parse_border_style_value(const char *start, const char *end, boo
     return true;
 }
 
+static void css_set_length_zero(css_length_t *len)
+{
+    if (!len)
+    {
+        return;
+    }
+    len->valid = true;
+    len->is_auto = false;
+    len->value_milli = 0;
+    len->unit = CSS_UNIT_PX;
+}
+
+static void css_apply_border_style_none_mask(css_style_t *style)
+{
+    if (!style || !style->has_border_style)
+    {
+        return;
+    }
+
+    if (style->border_style_none[CSS_BORDER_SIDE_TOP])
+    {
+        css_set_length_zero(&style->border_width.top);
+    }
+    if (style->border_style_none[CSS_BORDER_SIDE_RIGHT])
+    {
+        css_set_length_zero(&style->border_width.right);
+    }
+    if (style->border_style_none[CSS_BORDER_SIDE_BOTTOM])
+    {
+        css_set_length_zero(&style->border_width.bottom);
+    }
+    if (style->border_style_none[CSS_BORDER_SIDE_LEFT])
+    {
+        css_set_length_zero(&style->border_width.left);
+    }
+}
+
 static bool css_parse_border_color_value(const char *start,
                                          const char *end,
                                          video_color_t out_colors[4],
@@ -1836,6 +1873,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width = css_box_from_length(width);
+            css_apply_border_style_none_mask(style);
             if (has_color)
             {
                 style->has_border_color = true;
@@ -1862,6 +1900,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width.top = width;
+            css_apply_border_style_none_mask(style);
             if (has_color)
             {
                 style->has_border_color = true;
@@ -1885,6 +1924,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width.right = width;
+            css_apply_border_style_none_mask(style);
             if (has_color)
             {
                 style->has_border_color = true;
@@ -1908,6 +1948,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width.bottom = width;
+            css_apply_border_style_none_mask(style);
             if (has_color)
             {
                 style->has_border_color = true;
@@ -1931,6 +1972,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width.left = width;
+            css_apply_border_style_none_mask(style);
             if (has_color)
             {
                 style->has_border_color = true;
@@ -1951,6 +1993,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width = box;
+            css_apply_border_style_none_mask(style);
         }
         return;
     }
@@ -1962,6 +2005,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width.top = len;
+            css_apply_border_style_none_mask(style);
         }
         return;
     }
@@ -1973,6 +2017,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width.right = len;
+            css_apply_border_style_none_mask(style);
         }
         return;
     }
@@ -1984,6 +2029,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width.bottom = len;
+            css_apply_border_style_none_mask(style);
         }
         return;
     }
@@ -1995,6 +2041,7 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_border = true;
             style->border_width.left = len;
+            css_apply_border_style_none_mask(style);
         }
         return;
     }
@@ -2023,17 +2070,13 @@ void css_style_apply_property(css_style_t *style,
         bool none_flags[4] = {false, false, false, false};
         if (css_parse_border_style_value(val_start, val_end, none_flags))
         {
-            css_length_t zero = { .valid = true, .is_auto = false, .value_milli = 0, .unit = CSS_UNIT_PX };
             style->has_border_style = true;
             style->border_style_none[CSS_BORDER_SIDE_TOP] = none_flags[0];
             style->border_style_none[CSS_BORDER_SIDE_RIGHT] = none_flags[1];
             style->border_style_none[CSS_BORDER_SIDE_BOTTOM] = none_flags[2];
             style->border_style_none[CSS_BORDER_SIDE_LEFT] = none_flags[3];
             style->has_border = true;
-            if (none_flags[0]) style->border_width.top = zero;
-            if (none_flags[1]) style->border_width.right = zero;
-            if (none_flags[2]) style->border_width.bottom = zero;
-            if (none_flags[3]) style->border_width.left = zero;
+            css_apply_border_style_none_mask(style);
         }
         return;
     }

@@ -1857,6 +1857,79 @@ static const char *html_view_dump_text_decoration(css_text_decoration_t value)
     }
 }
 
+static const char *html_view_dump_position(css_position_t value)
+{
+    switch (value)
+    {
+        case CSS_POSITION_STATIC: return "static";
+        case CSS_POSITION_RELATIVE: return "relative";
+        case CSS_POSITION_ABSOLUTE: return "absolute";
+        case CSS_POSITION_FIXED: return "fixed";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_clear(css_clear_t value)
+{
+    switch (value)
+    {
+        case CSS_CLEAR_NONE: return "none";
+        case CSS_CLEAR_LEFT: return "left";
+        case CSS_CLEAR_RIGHT: return "right";
+        case CSS_CLEAR_BOTH: return "both";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_overflow(css_overflow_t value)
+{
+    switch (value)
+    {
+        case CSS_OVERFLOW_VISIBLE: return "visible";
+        case CSS_OVERFLOW_HIDDEN: return "hidden";
+        case CSS_OVERFLOW_SCROLL: return "scroll";
+        case CSS_OVERFLOW_AUTO: return "auto";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_background_repeat(css_background_repeat_t value)
+{
+    switch (value)
+    {
+        case CSS_BACKGROUND_REPEAT_REPEAT: return "repeat";
+        case CSS_BACKGROUND_REPEAT_NO_REPEAT: return "no-repeat";
+        case CSS_BACKGROUND_REPEAT_REPEAT_X: return "repeat-x";
+        case CSS_BACKGROUND_REPEAT_REPEAT_Y: return "repeat-y";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_background_attachment(css_background_attachment_t value)
+{
+    switch (value)
+    {
+        case CSS_BACKGROUND_ATTACHMENT_SCROLL: return "scroll";
+        case CSS_BACKGROUND_ATTACHMENT_FIXED: return "fixed";
+        default: return "unknown";
+    }
+}
+
+static void html_view_dump_border_style(char *buf, size_t cap, const bool none_sides[CSS_BORDER_SIDE_COUNT])
+{
+    if (!buf || cap == 0 || !none_sides)
+    {
+        return;
+    }
+    const char *top = none_sides[CSS_BORDER_SIDE_TOP] ? "none" : "solid";
+    const char *right = none_sides[CSS_BORDER_SIDE_RIGHT] ? "none" : "solid";
+    const char *bottom = none_sides[CSS_BORDER_SIDE_BOTTOM] ? "none" : "solid";
+    const char *left = none_sides[CSS_BORDER_SIDE_LEFT] ? "none" : "solid";
+    (void)snprintf(buf, cap, "%s %s %s %s", top, right, bottom, left);
+}
+
+static void html_view_dump_sanitize(const char *src, char *dst, size_t cap, size_t max_len);
+
 static void html_view_dump_length(char *buf, size_t cap, const css_length_t *len)
 {
     if (!buf || cap == 0)
@@ -1920,6 +1993,22 @@ static void html_view_dump_box(char *buf, size_t cap, size_t *offset, const char
     html_view_dump_append(buf, cap, offset, " %s", len_buf);
 }
 
+static bool html_view_dump_text_is_ws(const char *text)
+{
+    if (!text || !*text)
+    {
+        return true;
+    }
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p)
+    {
+        if (!isspace(*p))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void html_view_dump_style_summary(const css_style_t *style, char *buf, size_t cap)
 {
     if (!buf || cap == 0)
@@ -1957,6 +2046,41 @@ static void html_view_dump_style_summary(const css_style_t *style, char *buf, si
             html_view_dump_color(tmp, sizeof(tmp), style->background);
             html_view_dump_append(buf, cap, &off, "%sbackground=%s", any ? " " : "", tmp);
         }
+        any = true;
+    }
+    if (style->has_background_image)
+    {
+        char img_buf[96];
+        if (style->background_image)
+        {
+            html_view_dump_sanitize(style->background_image, img_buf, sizeof(img_buf), 72);
+        }
+        else
+        {
+            (void)snprintf(img_buf, sizeof(img_buf), "(null)");
+        }
+        html_view_dump_append(buf, cap, &off, "%sbg-image=%s", any ? " " : "", img_buf);
+        any = true;
+    }
+    if (style->has_background_repeat)
+    {
+        html_view_dump_append(buf, cap, &off, "%sbg-repeat=%s", any ? " " : "",
+                              html_view_dump_background_repeat(style->background_repeat));
+        any = true;
+    }
+    if (style->has_background_attachment)
+    {
+        html_view_dump_append(buf, cap, &off, "%sbg-attach=%s", any ? " " : "",
+                              html_view_dump_background_attachment(style->background_attachment));
+        any = true;
+    }
+    if (style->has_background_position)
+    {
+        char x_buf[32];
+        char y_buf[32];
+        html_view_dump_length(x_buf, sizeof(x_buf), &style->background_pos_x);
+        html_view_dump_length(y_buf, sizeof(y_buf), &style->background_pos_y);
+        html_view_dump_append(buf, cap, &off, "%sbg-pos=%s %s", any ? " " : "", x_buf, y_buf);
         any = true;
     }
     if (style->has_font_size)
@@ -2001,9 +2125,57 @@ static void html_view_dump_style_summary(const css_style_t *style, char *buf, si
         html_view_dump_append(buf, cap, &off, "%stext-decoration=%s", any ? " " : "", html_view_dump_text_decoration(style->text_decoration));
         any = true;
     }
+    if (style->has_position)
+    {
+        html_view_dump_append(buf, cap, &off, "%sposition=%s", any ? " " : "", html_view_dump_position(style->position));
+        any = true;
+    }
+    if (style->has_top)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->top);
+        html_view_dump_append(buf, cap, &off, "%stop=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_right)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->right);
+        html_view_dump_append(buf, cap, &off, "%sright=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_bottom)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->bottom);
+        html_view_dump_append(buf, cap, &off, "%sbottom=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_left)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->left);
+        html_view_dump_append(buf, cap, &off, "%sleft=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_z_index)
+    {
+        html_view_dump_append(buf, cap, &off, "%sz-index=%d", any ? " " : "", (int)style->z_index);
+        any = true;
+    }
     if (style->has_float)
     {
         html_view_dump_append(buf, cap, &off, "%sfloat=%s", any ? " " : "", html_view_dump_float(style->float_mode));
+        any = true;
+    }
+    if (style->has_clear)
+    {
+        html_view_dump_append(buf, cap, &off, "%sclear=%s", any ? " " : "", html_view_dump_clear(style->clear_mode));
+        any = true;
+    }
+    if (style->has_overflow)
+    {
+        html_view_dump_append(buf, cap, &off, "%soverflow=%s", any ? " " : "", html_view_dump_overflow(style->overflow));
         any = true;
     }
     if (style->has_width)
@@ -2013,11 +2185,39 @@ static void html_view_dump_style_summary(const css_style_t *style, char *buf, si
         html_view_dump_append(buf, cap, &off, "%swidth=%s", any ? " " : "", len_buf);
         any = true;
     }
+    if (style->has_min_width)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->min_width);
+        html_view_dump_append(buf, cap, &off, "%smin-width=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_max_width)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->max_width);
+        html_view_dump_append(buf, cap, &off, "%smax-width=%s", any ? " " : "", len_buf);
+        any = true;
+    }
     if (style->has_height)
     {
         char len_buf[32];
         html_view_dump_length(len_buf, sizeof(len_buf), &style->height);
         html_view_dump_append(buf, cap, &off, "%sheight=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_min_height)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->min_height);
+        html_view_dump_append(buf, cap, &off, "%smin-height=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_max_height)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->max_height);
+        html_view_dump_append(buf, cap, &off, "%smax-height=%s", any ? " " : "", len_buf);
         any = true;
     }
     if (style->has_margin)
@@ -2038,6 +2238,13 @@ static void html_view_dump_style_summary(const css_style_t *style, char *buf, si
         html_view_dump_box(buf, cap, &off, "border-width", &style->border_width);
         any = true;
     }
+    if (style->has_border_style)
+    {
+        char style_buf[48];
+        html_view_dump_border_style(style_buf, sizeof(style_buf), style->border_style_none);
+        html_view_dump_append(buf, cap, &off, "%sborder-style=%s", any ? " " : "", style_buf);
+        any = true;
+    }
     if (style->has_border_color)
     {
         if (style->border_transparent)
@@ -2049,6 +2256,20 @@ static void html_view_dump_style_summary(const css_style_t *style, char *buf, si
             html_view_dump_color(tmp, sizeof(tmp), style->border_color);
             html_view_dump_append(buf, cap, &off, "%sborder-color=%s", any ? " " : "", tmp);
         }
+        any = true;
+    }
+    if (style->has_content)
+    {
+        char content_buf[96];
+        if (style->content)
+        {
+            html_view_dump_sanitize(style->content, content_buf, sizeof(content_buf), 64);
+        }
+        else
+        {
+            (void)snprintf(content_buf, sizeof(content_buf), "(null)");
+        }
+        html_view_dump_append(buf, cap, &off, "%scontent=\"%s\"", any ? " " : "", content_buf);
         any = true;
     }
 
@@ -2189,7 +2410,15 @@ static void html_view_dump_node_line(const html_node_t *node,
     {
         char text_buf[128];
         html_view_dump_sanitize(node->text ? node->text : "", text_buf, sizeof(text_buf), 80);
-        serial_printf("[html_view][dom] %s#text \"%s\"", indent, text_buf);
+        if (html_view_dump_text_is_ws(node->text))
+        {
+            size_t raw_len = node->text ? strlen(node->text) : 0;
+            serial_printf("[html_view][dom] %s#text \"%s\" ws len=%zu", indent, text_buf, raw_len);
+        }
+        else
+        {
+            serial_printf("[html_view][dom] %s#text \"%s\"", indent, text_buf);
+        }
         if (has_style && style && style->has_color)
         {
             char color_buf[16];
@@ -2206,7 +2435,7 @@ static void html_view_dump_node_line(const html_node_t *node,
         serial_printf("[html_view][dom] %s<%s%s>", indent, node->name ? node->name : "?", attrs);
         if (has_style && style)
         {
-            char style_buf[512];
+            char style_buf[1024];
             html_view_dump_style_summary(style, style_buf, sizeof(style_buf));
             serial_printf("[html_view][dom] %s  style %s", indent, style_buf);
         }

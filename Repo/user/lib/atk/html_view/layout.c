@@ -7,6 +7,22 @@ static bool html_view_is_space_byte(unsigned char ch)
     return ch < 0x80u && isspace(ch);
 }
 
+static bool html_view_text_has_non_ws(const char *text)
+{
+    if (!text)
+    {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p)
+    {
+        if (!html_view_is_space_byte(*p))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool html_view_intersect_rect(const atk_rect_t *a, const atk_rect_t *b, atk_rect_t *out)
 {
     if (!a || !b || !out)
@@ -1102,6 +1118,14 @@ void html_view_draw_text(html_view_ctx_t *ctx,
     {
         return;
     }
+    if (!html_view_text_has_non_ws(text))
+    {
+        if (ctx->x != ctx->body_x)
+        {
+            ctx->pending_space = true;
+        }
+        return;
+    }
     if (ctx->pending_margin_valid && ctx->x == ctx->body_x)
     {
         ctx->y += ctx->pending_margin;
@@ -1358,8 +1382,7 @@ bool html_view_is_block_tag(const char *tag)
            strcmp(tag, "tfoot") == 0 ||
            strcmp(tag, "tr") == 0 ||
            strcmp(tag, "td") == 0 ||
-           strcmp(tag, "th") == 0 ||
-           strcmp(tag, "img") == 0;
+           strcmp(tag, "th") == 0;
 }
 
 bool html_view_is_form_control_tag(const char *tag)

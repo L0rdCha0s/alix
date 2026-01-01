@@ -1,6 +1,9 @@
 #include "atk/html_view/render/render_internal.h"
 
 #include "web/css/css_internal.h"
+#include "ctype.h"
+#include "serial.h"
+#include "string.h"
 
 static bool html_view_intersect_rect_local(const atk_rect_t *a, const atk_rect_t *b, atk_rect_t *out)
 {
@@ -38,6 +41,123 @@ static int html_view_collapse_margins(int a, int b)
     return a + b;
 }
 
+static const char *html_view_dump_clear_mode(css_clear_t value)
+{
+    switch (value)
+    {
+        case CSS_CLEAR_LEFT: return "left";
+        case CSS_CLEAR_RIGHT: return "right";
+        case CSS_CLEAR_BOTH: return "both";
+        case CSS_CLEAR_NONE: default: return "none";
+    }
+}
+
+static bool html_view_attr_has_class(const html_node_t *node, const char *token)
+{
+    if (!node || !token || !*token)
+    {
+        return false;
+    }
+    const char *classes = html_attr_get(node, "class");
+    if (!classes || !*classes)
+    {
+        return false;
+    }
+    size_t token_len = strlen(token);
+    const char *p = classes;
+    while (*p)
+    {
+        while (*p && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == token_len && strncmp(start, token, len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *html_view_debug_block_label(const html_node_t *node)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT)
+    {
+        return NULL;
+    }
+    if (node->name && strcmp(node->name, "h2") == 0)
+    {
+        const char *id = html_attr_get(node, "id");
+        if (id && strcmp(id, "top") == 0)
+        {
+            return "h2#top";
+        }
+    }
+    if (node->name && strcmp(node->name, "ul") == 0)
+    {
+        return "ul";
+    }
+    if (html_view_attr_has_class(node, "picture"))
+    {
+        return "picture";
+    }
+    if (html_view_attr_has_class(node, "forehead"))
+    {
+        return "forehead";
+    }
+    if (html_view_attr_has_class(node, "eyes"))
+    {
+        return "eyes";
+    }
+    if (html_view_attr_has_class(node, "nose"))
+    {
+        return "nose";
+    }
+    if (html_view_attr_has_class(node, "empty"))
+    {
+        return "empty";
+    }
+    if (html_view_attr_has_class(node, "smile"))
+    {
+        return "smile";
+    }
+    if (html_view_attr_has_class(node, "chin"))
+    {
+        return "chin";
+    }
+    if (html_view_attr_has_class(node, "parser"))
+    {
+        return "parser";
+    }
+    if (html_view_attr_has_class(node, "image-height-test"))
+    {
+        return "image-height-test";
+    }
+    if (node->name && strcmp(node->name, "div") == 0)
+    {
+        const html_node_t *parent = node->parent;
+        if (parent && html_view_attr_has_class(parent, "smile"))
+        {
+            return "smile-box";
+        }
+        if (parent && parent->parent && html_view_attr_has_class(parent->parent, "smile"))
+        {
+            return "smile-abs";
+        }
+    }
+    return NULL;
+}
+
 static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
                                             int margin_top,
                                             css_clear_t clear_mode,
@@ -67,35 +187,41 @@ static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
     bool prev_pending_valid = ctx->pending_margin_valid;
     ctx->pending_margin_valid = false;
 
-    int used_top = margin_top;
+    int collapsed = margin_top;
     if (prev_pending_valid)
     {
-        used_top = html_view_collapse_margins(prev_pending, margin_top);
+        collapsed = html_view_collapse_margins(prev_pending, margin_top);
     }
 
+    int used_top = collapsed;
+    int clear_y = 0;
     bool clearance_applied = false;
     if (clear_mode != CSS_CLEAR_NONE)
     {
         int top_border_y = start_y + used_top;
-        int clear_y = html_view_float_max_bottom(ctx->floats, clear_mode);
+        clear_y = html_view_float_max_bottom(ctx->floats, clear_mode);
         if (clear_y > top_border_y)
         {
             clearance_applied = true;
-            int without_collapse = margin_top;
-            if (prev_pending_valid)
-            {
-                without_collapse += prev_pending;
-            }
-            int top_no_collapse = start_y + without_collapse;
-            if (clear_y > top_no_collapse)
-            {
-                without_collapse += clear_y - top_no_collapse;
-            }
-            used_top = without_collapse;
+            used_top = clear_y - start_y;
         }
     }
 
     ctx->y = start_y + used_top;
+
+    if (clear_mode != CSS_CLEAR_NONE)
+    {
+        serial_printf("[html_view][layout] clear=%s start_y=%d prev_pending=%d prev_valid=%d margin_top=%d collapsed=%d clear_y=%d used_top=%d y=%d",
+                      html_view_dump_clear_mode(clear_mode),
+                      start_y,
+                      prev_pending,
+                      prev_pending_valid ? 1 : 0,
+                      margin_top,
+                      collapsed,
+                      clear_y,
+                      used_top,
+                      ctx->y);
+    }
 
     if (out_clearance)
     {
@@ -623,7 +749,12 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     if (available_w < 0) available_w = 0;
 
     bool width_specified = style->has_width && style->width.valid && !style->width.is_auto;
-    bool height_specified = style->has_height && style->height.valid && !style->height.is_auto;
+    int specified_h = 0;
+    bool height_specified = html_view_length_to_px_height(ctx, &style->height, &specified_h);
+    if (height_specified && specified_h < 0)
+    {
+        specified_h = 0;
+    }
 
     int measured_w = 0;
     int measured_h = 0;
@@ -711,13 +842,7 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     int content_h = 0;
     if (height_specified)
     {
-        content_h = html_view_length_to_px(&style->height,
-                                           ctx->viewport_w,
-                                           ctx->viewport_h,
-                                           cont_w,
-                                           cont_h,
-                                           ctx->base_font_px,
-                                           false);
+        content_h = specified_h;
     }
     else if (have_top && have_bottom)
     {
@@ -731,27 +856,27 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
 
     int min_h = -1;
     int max_h = -1;
-    if (style->has_min_height && style->min_height.valid && !style->min_height.is_auto)
+    if (html_view_length_to_px_height(ctx, &style->min_height, &min_h))
     {
-        min_h = html_view_length_to_px(&style->min_height,
-                                       ctx->viewport_w,
-                                       ctx->viewport_h,
-                                       cont_w,
-                                       cont_h,
-                                       ctx->base_font_px,
-                                       false);
-        if (min_h < 0) min_h = 0;
+        if (min_h < 0)
+        {
+            min_h = 0;
+        }
     }
-    if (style->has_max_height && style->max_height.valid && !style->max_height.is_auto)
+    else
     {
-        max_h = html_view_length_to_px(&style->max_height,
-                                       ctx->viewport_w,
-                                       ctx->viewport_h,
-                                       cont_w,
-                                       cont_h,
-                                       ctx->base_font_px,
-                                       false);
-        if (max_h < 0) max_h = 0;
+        min_h = -1;
+    }
+    if (html_view_length_to_px_height(ctx, &style->max_height, &max_h))
+    {
+        if (max_h < 0)
+        {
+            max_h = 0;
+        }
+    }
+    else
+    {
+        max_h = -1;
     }
     if (max_h >= 0 && content_h > max_h)
     {
@@ -792,6 +917,24 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     }
 
     int draw_y = fixed ? border_y : html_view_draw_y(ctx, border_y);
+    const char *debug_label = html_view_debug_block_label(node);
+    if (debug_label)
+    {
+        int scroll_y = (ctx->priv ? ctx->priv->scroll_y : 0);
+        serial_printf("[html_view][layout] posnode=%s border_y=%d draw_y=%d cont_y=%d cont_h=%d box_h=%d margin_t=%d margin_b=%d fixed=%d scroll_y=%d doc_origin_y=%d record=%d",
+                      debug_label,
+                      border_y,
+                      draw_y,
+                      cont_y,
+                      cont_h,
+                      border_box_h,
+                      margin_top,
+                      margin_bottom,
+                      fixed ? 1 : 0,
+                      scroll_y,
+                      ctx->doc_origin_y,
+                      ctx->record ? 1 : 0);
+    }
     html_view_ctx_t inner = *ctx;
     inner.fixed_mode = fixed;
     inner.underline_run_active = false;
@@ -1528,6 +1671,13 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
 
     if (strcmp(tag, "img") == 0)
     {
+        bool img_block = style->has_display &&
+                         (style->display == CSS_DISPLAY_BLOCK ||
+                          style->display == CSS_DISPLAY_LIST_ITEM);
+        if (!img_block)
+        {
+            return false;
+        }
         if (ctx->x != ctx->body_x)
         {
             html_view_new_line(ctx);
@@ -2027,12 +2177,23 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                            &clearance_applied,
                                            &prev_pending,
                                            &prev_pending_valid);
+    const char *debug_label = html_view_debug_block_label(node);
 
     int border_doc_x = ctx->body_x + margin_left;
     int border_doc_y = ctx->y;
 
     int outer_w = border_box_w + margin_left + margin_right;
-    if (ctx->floats && ctx->floats->count > 0 && outer_w > 0)
+    bool avoid_floats = false;
+    if (style->has_overflow && style->overflow != CSS_OVERFLOW_VISIBLE)
+    {
+        avoid_floats = true;
+    }
+    if (style->has_display && style->display == CSS_DISPLAY_TABLE)
+    {
+        avoid_floats = true;
+    }
+
+    if (avoid_floats && ctx->floats && ctx->floats->count > 0 && outer_w > 0)
     {
         int place_y = border_doc_y;
         for (int it = 0; it < 256; ++it)
@@ -2441,6 +2602,37 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     {
         ctx->pending_margin = outgoing_margin;
         ctx->pending_margin_valid = true;
+    }
+    if (debug_label)
+    {
+        int scroll_y = (ctx->priv ? ctx->priv->scroll_y : 0);
+        int draw_border_y = html_view_draw_y(ctx, border_doc_y);
+        int draw_content_y = html_view_draw_y(ctx, content_doc_y);
+        serial_printf("[html_view][layout] node=%s start_y=%d border_y=%d draw_border_y=%d content_y=%d draw_content_y=%d end_y=%d flow_h=%d height_spec=%d min_h=%d max_h=%d margin_t=%d margin_b=%d prev_pending=%d prev_valid=%d child_pending=%d child_valid=%d empty=%d clearance=%d pending_out=%d y=%d scroll_y=%d doc_origin_y=%d record=%d",
+                      debug_label,
+                      start_y,
+                      border_doc_y,
+                      draw_border_y,
+                      content_doc_y,
+                      draw_content_y,
+                      content_end_y,
+                      flow_content_h,
+                      height_specified ? 1 : 0,
+                      min_h,
+                      max_h,
+                      margin_top,
+                      margin_bottom,
+                      prev_pending,
+                      prev_pending_valid ? 1 : 0,
+                      child_pending,
+                      child_pending_valid ? 1 : 0,
+                      empty_block ? 1 : 0,
+                      clearance_applied ? 1 : 0,
+                      ctx->pending_margin,
+                      ctx->y,
+                      scroll_y,
+                      ctx->doc_origin_y,
+                      ctx->record ? 1 : 0);
     }
     ctx->line_start_x = ctx->x;
     ctx->line_start_y = ctx->y;
