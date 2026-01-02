@@ -1,7 +1,6 @@
 #include "atk/html_view/html_view_internal.h"
 
 #include "ctype.h"
-
 static bool html_view_is_space_byte(unsigned char ch)
 {
     return ch < 0x80u && isspace(ch);
@@ -1126,11 +1125,10 @@ void html_view_draw_text(html_view_ctx_t *ctx,
         }
         return;
     }
-    if (ctx->pending_margin_valid && ctx->x == ctx->body_x)
+    if (ctx->pending_margin.valid && ctx->x == ctx->body_x)
     {
-        ctx->y += ctx->pending_margin;
-        ctx->pending_margin = 0;
-        ctx->pending_margin_valid = false;
+        ctx->y += html_view_margin_state_value(&ctx->pending_margin);
+        html_view_margin_state_reset(&ctx->pending_margin);
         ctx->pending_space = false;
         ctx->line_start_x = ctx->x;
         ctx->line_start_y = ctx->y;

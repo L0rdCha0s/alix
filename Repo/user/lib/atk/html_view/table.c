@@ -148,19 +148,6 @@ static int html_view_attr_to_int(const html_node_t *node, const char *name, int 
     return n >= 0 ? n : fallback;
 }
 
-static int html_view_collapse_margins(int a, int b)
-{
-    if (a >= 0 && b >= 0)
-    {
-        return a > b ? a : b;
-    }
-    if (a <= 0 && b <= 0)
-    {
-        return a < b ? a : b;
-    }
-    return a + b;
-}
-
 void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
 
 static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *parent_style, int max_w, int *out_h)
@@ -189,8 +176,7 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
     measure.y = 0;
     measure.content_bottom = measure.y;
     measure.pending_space = false;
-    measure.pending_margin = 0;
-    measure.pending_margin_valid = false;
+    html_view_margin_state_reset(&measure.pending_margin);
     measure.underline_run_active = false;
     measure.underline_run_start_x = 0;
     measure.list_level = 0;
@@ -407,8 +393,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     html_view_paint_layer_t saved_layer = ctx->paint_layer;
     ctx->paint_layer = HTML_VIEW_PAINT_LAYER_FLOAT;
 
-    int saved_pending_margin = ctx->pending_margin;
-    bool saved_pending_margin_valid = ctx->pending_margin_valid;
+    html_view_margin_state_t saved_pending_margin = ctx->pending_margin;
     int saved_line_height = ctx->line_height;
 
     if (ctx->x != ctx->body_x)
@@ -548,9 +533,9 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     html_view_apply_border_style_none(style, &border_top, &border_right, &border_bottom, &border_left);
 
     int float_start_y = ctx->y;
-    if (ctx->pending_margin_valid)
+    if (ctx->pending_margin.valid)
     {
-        float_start_y += ctx->pending_margin;
+        float_start_y += html_view_margin_state_value(&ctx->pending_margin);
     }
 
     const char *debug_label = html_view_debug_float_label(node);
@@ -828,8 +813,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     ctx->x = ctx->body_x;
     ctx->y = border_box_y + border_top + pad_top;
     ctx->pending_space = false;
-    ctx->pending_margin = 0;
-    ctx->pending_margin_valid = false;
+    html_view_margin_state_reset(&ctx->pending_margin);
     if (style->has_background && !style->background_transparent)
     {
         ctx->bg = style->background;
@@ -860,7 +844,6 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     ctx->height_basis_valid = saved_height_basis_valid;
     ctx->height_basis_explicit = saved_height_basis_explicit;
     ctx->pending_margin = saved_pending_margin;
-    ctx->pending_margin_valid = saved_pending_margin_valid;
     ctx->paint_layer = saved_layer;
 }
 
@@ -1061,11 +1044,12 @@ void html_view_render_table(html_view_ctx_t *ctx,
 
     layout.table_x = base_x;
     int used_top = layout.margin_top;
-    if (ctx->pending_margin_valid)
+    if (ctx->pending_margin.valid)
     {
-        used_top = html_view_collapse_margins(ctx->pending_margin, layout.margin_top);
-        ctx->pending_margin_valid = false;
-        ctx->pending_margin = 0;
+        html_view_margin_state_t collapsed = html_view_margin_state_from_value(layout.margin_top);
+        html_view_margin_state_merge(&collapsed, &ctx->pending_margin);
+        used_top = html_view_margin_state_value(&collapsed);
+        html_view_margin_state_reset(&ctx->pending_margin);
     }
     ctx->y += used_top;
     layout.table_y = ctx->y;
@@ -1165,8 +1149,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                 measure_cell_ctx.space_w = html_view_text_width(&measure_cell_ctx, " ");
                 measure_cell_ctx.underline_run_active = false;
                 measure_cell_ctx.underline_run_start_x = 0;
-                measure_cell_ctx.pending_margin = 0;
-                measure_cell_ctx.pending_margin_valid = false;
+                html_view_margin_state_reset(&measure_cell_ctx.pending_margin);
                 desired_content_w = html_view_measure_rendered_width(&measure_cell_ctx, cell->node, &cell->style, layout.content_w, NULL);
             }
             if (desired_content_w < 0) desired_content_w = 0;
@@ -1386,8 +1369,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
             measure.y = cell->content_y;
             measure.content_bottom = measure.y;
             measure.pending_space = false;
-            measure.pending_margin = 0;
-            measure.pending_margin_valid = false;
+            html_view_margin_state_reset(&measure.pending_margin);
             measure.underline_run_active = false;
             measure.underline_run_start_x = 0;
             measure.list_level = 0;
@@ -1510,8 +1492,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                 inner.y = cell->content_y;
                 inner.content_bottom = inner.y;
                 inner.pending_space = false;
-                inner.pending_margin = 0;
-                inner.pending_margin_valid = false;
+                html_view_margin_state_reset(&inner.pending_margin);
                 inner.list_level = 0;
                 inner.bg = (cell->style.has_background && !cell->style.background_transparent) ? cell->style.background : ctx->bg;
                 inner.measure_max_x = inner.x;
@@ -1554,8 +1535,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
     }
     ctx->x = ctx->body_x;
     ctx->pending_space = false;
-    ctx->pending_margin = layout.margin_bottom;
-    ctx->pending_margin_valid = true;
+    ctx->pending_margin = html_view_margin_state_from_value(layout.margin_bottom);
     ctx->line_start_x = ctx->x;
     ctx->line_start_y = ctx->y;
     ctx->line_op_start = (ctx->record && ctx->priv) ? ctx->priv->render_cache.op_count : 0;

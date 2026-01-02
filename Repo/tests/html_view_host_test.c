@@ -396,7 +396,7 @@ static bool test_margin_collapse_empty_block(void)
     style.margin.bottom.is_auto = false;
 
     bool ok = html_view_render_block_element(&ctx, &node, &style);
-    return ok && ctx.y == 0 && ctx.pending_margin_valid && ctx.pending_margin == 20;
+    return ok && ctx.y == 0 && ctx.pending_margin.valid && html_view_margin_state_value(&ctx.pending_margin) == 20;
 }
 
 static bool test_attribute_selectors_with_escapes(void)

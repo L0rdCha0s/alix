@@ -28,19 +28,6 @@ static bool html_view_intersect_rect_local(const atk_rect_t *a, const atk_rect_t
     return true;
 }
 
-static int html_view_collapse_margins(int a, int b)
-{
-    if (a >= 0 && b >= 0)
-    {
-        return a > b ? a : b;
-    }
-    if (a <= 0 && b <= 0)
-    {
-        return a < b ? a : b;
-    }
-    return a + b;
-}
-
 static const char *html_view_dump_clear_mode(css_clear_t value)
 {
     switch (value)
@@ -162,8 +149,7 @@ static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
                                             int margin_top,
                                             css_clear_t clear_mode,
                                             bool *out_clearance,
-                                            int *out_prev_pending,
-                                            bool *out_prev_pending_valid)
+                                            html_view_margin_state_t *out_prev_pending)
 {
     if (!ctx)
     {
@@ -173,25 +159,22 @@ static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
         }
         if (out_prev_pending)
         {
-            *out_prev_pending = 0;
-        }
-        if (out_prev_pending_valid)
-        {
-            *out_prev_pending_valid = false;
+            html_view_margin_state_reset(out_prev_pending);
         }
         return 0;
     }
 
     int start_y = ctx->y;
-    int prev_pending = ctx->pending_margin;
-    bool prev_pending_valid = ctx->pending_margin_valid;
-    ctx->pending_margin_valid = false;
+    html_view_margin_state_t prev_pending = ctx->pending_margin;
+    bool prev_pending_valid = prev_pending.valid;
+    html_view_margin_state_reset(&ctx->pending_margin);
 
-    int collapsed = margin_top;
+    html_view_margin_state_t collapsed_state = html_view_margin_state_from_value(margin_top);
     if (prev_pending_valid)
     {
-        collapsed = html_view_collapse_margins(prev_pending, margin_top);
+        html_view_margin_state_merge(&collapsed_state, &prev_pending);
     }
+    int collapsed = html_view_margin_state_value(&collapsed_state);
 
     int used_top = collapsed;
     int clear_y = 0;
@@ -211,10 +194,11 @@ static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
 
     if (clear_mode != CSS_CLEAR_NONE)
     {
+        int prev_pending_value = html_view_margin_state_value(&prev_pending);
         serial_printf("[html_view][layout] clear=%s start_y=%d prev_pending=%d prev_valid=%d margin_top=%d collapsed=%d clear_y=%d used_top=%d y=%d",
                       html_view_dump_clear_mode(clear_mode),
                       start_y,
-                      prev_pending,
+                      prev_pending_value,
                       prev_pending_valid ? 1 : 0,
                       margin_top,
                       collapsed,
@@ -229,11 +213,11 @@ static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
     }
     if (out_prev_pending)
     {
+        if (!prev_pending_valid || clearance_applied)
+        {
+            html_view_margin_state_reset(&prev_pending);
+        }
         *out_prev_pending = prev_pending;
-    }
-    if (out_prev_pending_valid)
-    {
-        *out_prev_pending_valid = prev_pending_valid && !clearance_applied;
     }
 
     return used_top;
@@ -275,8 +259,7 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     measure.y = 0;
     measure.content_bottom = 0;
     measure.pending_space = false;
-    measure.pending_margin = 0;
-    measure.pending_margin_valid = false;
+    html_view_margin_state_reset(&measure.pending_margin);
     measure.underline_run_active = false;
     measure.underline_run_start_x = 0;
     measure.list_level = 0;
@@ -943,8 +926,7 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     inner.fixed_mode = (ctx->fixed_mode || fixed);
     inner.underline_run_active = false;
     inner.underline_run_start_x = 0;
-    inner.pending_margin = 0;
-    inner.pending_margin_valid = false;
+    html_view_margin_state_reset(&inner.pending_margin);
     if (style->has_background && !style->background_transparent && border_box_w > 0 && border_box_h > 0)
     {
         html_view_draw_rect_clipped(&inner, border_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
@@ -1101,7 +1083,6 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         (void)html_view_apply_block_margin_top(ctx,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
-                                               NULL,
                                                NULL,
                                                NULL);
         ctx->y += pad_top;
@@ -1273,8 +1254,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
 
         html_view_new_line(ctx);
         ctx->y += pad_bottom;
-        ctx->pending_margin = margin_bottom;
-        ctx->pending_margin_valid = true;
+        ctx->pending_margin = html_view_margin_state_from_value(margin_bottom);
         ctx->pending_space = false;
         return true;
     }
@@ -1330,14 +1310,12 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
-                                               NULL,
                                                NULL);
         ctx->pending_space = false;
         html_view_record_anchor(ctx, node);
         html_view_render_children(ctx, node, style);
         html_view_new_line(ctx);
-        ctx->pending_margin = margin_bottom;
-        ctx->pending_margin_valid = true;
+        ctx->pending_margin = html_view_margin_state_from_value(margin_bottom);
         html_view_ensure_line_visible(ctx);
         ctx->line_height = saved_line_height;
         ctx->pending_space = false;
@@ -1404,7 +1382,6 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
-                                               NULL,
                                                NULL);
         ctx->pending_space = false;
 
@@ -1415,8 +1392,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
             {
                 html_view_new_line(ctx);
             }
-            ctx->pending_margin = margin_bottom;
-            ctx->pending_margin_valid = true;
+            ctx->pending_margin = html_view_margin_state_from_value(margin_bottom);
             ctx->pending_space = false;
             return true;
         }
@@ -1431,8 +1407,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         {
             html_view_new_line(ctx);
         }
-        ctx->pending_margin = margin_bottom;
-        ctx->pending_margin_valid = true;
+        ctx->pending_margin = html_view_margin_state_from_value(margin_bottom);
         ctx->pending_space = false;
         return true;
         }
@@ -1474,7 +1449,6 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         (void)html_view_apply_block_margin_top(ctx,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
-                                               NULL,
                                                NULL,
                                                NULL);
 
@@ -1542,8 +1516,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         ctx->y = new_y;
         ctx->pending_space = false;
         html_view_ensure_line_visible(ctx);
-        ctx->pending_margin = margin_bottom;
-        ctx->pending_margin_valid = true;
+        ctx->pending_margin = html_view_margin_state_from_value(margin_bottom);
         return true;
     }
 
@@ -1587,7 +1560,6 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                    margin_top,
                                                    (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                    NULL,
-                                                   NULL,
                                                    NULL);
 
             html_view_render_children(ctx, node, style);
@@ -1595,8 +1567,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
             {
                 html_view_new_line(ctx);
             }
-            ctx->pending_margin = margin_bottom;
-            ctx->pending_margin_valid = true;
+            ctx->pending_margin = html_view_margin_state_from_value(margin_bottom);
             ctx->pending_space = false;
             return true;
         }
@@ -1635,7 +1606,6 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
-                                               NULL,
                                                NULL);
 
         int saved_body_x = ctx->body_x;
@@ -1667,8 +1637,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         ctx->x = ctx->body_x;
         ctx->max_x = saved_max_x;
         ctx->line_height = saved_line_height;
-        ctx->pending_margin = margin_bottom;
-        ctx->pending_margin_valid = true;
+        ctx->pending_margin = html_view_margin_state_from_value(margin_bottom);
         ctx->pending_space = false;
         return true;
     }
@@ -1715,7 +1684,6 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         (void)html_view_apply_block_margin_top(ctx,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
-                                               NULL,
                                                NULL,
                                                NULL);
         ctx->pending_space = false;
@@ -1896,8 +1864,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         }
 
         ctx->x = ctx->body_x;
-        ctx->pending_margin = margin_bottom;
-        ctx->pending_margin_valid = true;
+        ctx->pending_margin = html_view_margin_state_from_value(margin_bottom);
         ctx->pending_space = false;
         ctx->line_start_x = ctx->x;
         ctx->line_start_y = ctx->y;
@@ -2084,6 +2051,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     if (border_right < 0) border_right = 0;
     if (border_bottom < 0) border_bottom = 0;
     if (border_left < 0) border_left = 0;
+    html_view_apply_border_style_none(style, &border_top, &border_right, &border_bottom, &border_left);
 
     int available_w = ctx->body_w;
     if (available_w < 0) available_w = 0;
@@ -2172,15 +2140,15 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     if (border_box_w < 0) border_box_w = 0;
 
     int start_y = ctx->y;
-    int prev_pending = 0;
+    html_view_margin_state_t prev_pending = {0};
     bool prev_pending_valid = false;
     bool clearance_applied = false;
     (void)html_view_apply_block_margin_top(ctx,
                                            margin_top,
                                            (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                            &clearance_applied,
-                                           &prev_pending,
-                                           &prev_pending_valid);
+                                           &prev_pending);
+    prev_pending_valid = prev_pending.valid;
     const char *debug_label = html_view_debug_block_label(node);
 
     int border_doc_x = ctx->body_x + margin_left;
@@ -2482,8 +2450,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         ctx->table_mode = true;
     }
 
-    ctx->pending_margin = 0;
-    ctx->pending_margin_valid = false;
+    html_view_margin_state_reset(&ctx->pending_margin);
     html_view_render_children(ctx, node, style);
     if (ctx->x != ctx->body_x)
     {
@@ -2509,14 +2476,9 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         ctx->clip = saved_clip;
     }
 
-    int child_pending = 0;
-    bool child_pending_valid = ctx->pending_margin_valid;
-    if (child_pending_valid)
-    {
-        child_pending = ctx->pending_margin;
-    }
-    ctx->pending_margin = 0;
-    ctx->pending_margin_valid = false;
+    html_view_margin_state_t child_pending = ctx->pending_margin;
+    bool child_pending_valid = child_pending.valid;
+    html_view_margin_state_reset(&ctx->pending_margin);
 
     bool can_collapse_bottom = (border_bottom == 0 &&
                                 pad_bottom == 0 &&
@@ -2524,7 +2486,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                 min_h <= 0);
     if (!can_collapse_bottom && child_pending_valid)
     {
-        ctx->y += child_pending;
+        ctx->y += html_view_margin_state_value(&child_pending);
         child_pending_valid = false;
     }
 
@@ -2556,24 +2518,25 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                         pad_bottom == 0 &&
                         flow_content_h == 0 &&
                         !clearance_applied);
-    int merged_margin = 0;
+    html_view_margin_state_t merged_margin = {0};
     if (empty_block)
     {
-        merged_margin = html_view_collapse_margins(margin_top, margin_bottom);
+        merged_margin = html_view_margin_state_from_value(margin_top);
+        html_view_margin_state_add(&merged_margin, margin_bottom);
         if (child_pending_valid)
         {
-            merged_margin = html_view_collapse_margins(merged_margin, child_pending);
+            html_view_margin_state_merge(&merged_margin, &child_pending);
         }
         if (prev_pending_valid)
         {
-            merged_margin = html_view_collapse_margins(prev_pending, merged_margin);
+            html_view_margin_state_merge(&merged_margin, &prev_pending);
         }
     }
 
-    int outgoing_margin = margin_bottom;
+    html_view_margin_state_t outgoing_margin = html_view_margin_state_from_value(margin_bottom);
     if (can_collapse_bottom && child_pending_valid)
     {
-        outgoing_margin = html_view_collapse_margins(outgoing_margin, child_pending);
+        html_view_margin_state_merge(&outgoing_margin, &child_pending);
     }
 
     ctx->body_x = saved_body_x;
@@ -2600,15 +2563,16 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     if (empty_block)
     {
         ctx->pending_margin = merged_margin;
-        ctx->pending_margin_valid = true;
     }
     else
     {
         ctx->pending_margin = outgoing_margin;
-        ctx->pending_margin_valid = true;
     }
     if (debug_label)
     {
+        int prev_pending_value = html_view_margin_state_value(&prev_pending);
+        int child_pending_value = html_view_margin_state_value(&child_pending);
+        int pending_out_value = html_view_margin_state_value(&ctx->pending_margin);
         int scroll_y = (ctx->priv ? ctx->priv->scroll_y : 0);
         int draw_border_y = html_view_draw_y(ctx, border_doc_y);
         int draw_content_y = html_view_draw_y(ctx, content_doc_y);
@@ -2626,13 +2590,13 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                       max_h,
                       margin_top,
                       margin_bottom,
-                      prev_pending,
+                      prev_pending_value,
                       prev_pending_valid ? 1 : 0,
-                      child_pending,
+                      child_pending_value,
                       child_pending_valid ? 1 : 0,
                       empty_block ? 1 : 0,
                       clearance_applied ? 1 : 0,
-                      ctx->pending_margin,
+                      pending_out_value,
                       ctx->y,
                       scroll_y,
                       ctx->doc_origin_y,

@@ -585,7 +585,7 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
         return;
     }
 
-    int scroll_y = ctx->priv->scroll_y;
+    int scroll_y = ctx->scroll_y;
     int visible_y0 = scroll_y - tile_h;
     int visible_y1 = scroll_y + ctx->viewport_h + tile_h;
     if (visible_y0 < 0) visible_y0 = 0;

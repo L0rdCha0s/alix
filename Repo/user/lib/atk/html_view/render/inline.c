@@ -298,8 +298,7 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
     inner.line_start_x = inner.x;
     inner.line_start_y = inner.y;
     inner.pending_space = false;
-    inner.pending_margin = 0;
-    inner.pending_margin_valid = false;
+    html_view_margin_state_reset(&inner.pending_margin);
     inner.measure_max_x = inner.x;
     inner.content_bottom = inner.y;
     inner.line_height = html_view_line_height_for_style(&inner, style);
@@ -380,11 +379,10 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
     {
         return false;
     }
-    if (ctx->pending_margin_valid && ctx->x == ctx->body_x)
+    if (ctx->pending_margin.valid && ctx->x == ctx->body_x)
     {
-        ctx->y += ctx->pending_margin;
-        ctx->pending_margin = 0;
-        ctx->pending_margin_valid = false;
+        ctx->y += html_view_margin_state_value(&ctx->pending_margin);
+        html_view_margin_state_reset(&ctx->pending_margin);
         ctx->pending_space = false;
         ctx->line_start_x = ctx->x;
         ctx->line_start_y = ctx->y;

@@ -270,6 +270,13 @@ typedef struct
     size_t count;
 } html_view_float_ctx_t;
 
+typedef struct
+{
+    int max_pos;
+    int min_neg;
+    bool valid;
+} html_view_margin_state_t;
+
 typedef enum
 {
     HTML_VIEW_PAINT_LAYER_BLOCK = 0,
@@ -301,6 +308,7 @@ typedef struct
     int viewport_y;
     int viewport_w;
     int viewport_h;
+    int scroll_y;
     int window_x;
     int window_y;
     int body_x;
@@ -323,8 +331,7 @@ typedef struct
     int max_x;
     int measure_max_x;
     int content_bottom;
-    int pending_margin;
-    bool pending_margin_valid;
+    html_view_margin_state_t pending_margin;
     int list_level;
     css_text_align_t text_align_mode;
     size_t line_op_start;
@@ -367,17 +374,96 @@ static inline int32_t html_view_effective_z_index(const html_view_ctx_t *ctx)
     return ctx->z_index * HTML_VIEW_Z_INDEX_STRIDE + (int32_t)ctx->paint_layer;
 }
 
+static inline void html_view_margin_state_reset(html_view_margin_state_t *state)
+{
+    if (!state)
+    {
+        return;
+    }
+    state->max_pos = 0;
+    state->min_neg = 0;
+    state->valid = false;
+}
+
+static inline html_view_margin_state_t html_view_margin_state_from_value(int margin)
+{
+    html_view_margin_state_t state = {0};
+    if (margin > 0)
+    {
+        state.max_pos = margin;
+        state.valid = true;
+    }
+    else if (margin < 0)
+    {
+        state.min_neg = margin;
+        state.valid = true;
+    }
+    return state;
+}
+
+static inline int html_view_margin_state_value(const html_view_margin_state_t *state)
+{
+    if (!state || !state->valid)
+    {
+        return 0;
+    }
+    return state->max_pos + state->min_neg;
+}
+
+static inline void html_view_margin_state_add(html_view_margin_state_t *state, int margin)
+{
+    if (!state || margin == 0)
+    {
+        return;
+    }
+    if (!state->valid)
+    {
+        *state = html_view_margin_state_from_value(margin);
+        return;
+    }
+    if (margin > state->max_pos)
+    {
+        state->max_pos = margin;
+    }
+    if (margin < state->min_neg)
+    {
+        state->min_neg = margin;
+    }
+}
+
+static inline void html_view_margin_state_merge(html_view_margin_state_t *state,
+                                                const html_view_margin_state_t *other)
+{
+    if (!state || !other || !other->valid)
+    {
+        return;
+    }
+    if (!state->valid)
+    {
+        *state = *other;
+        return;
+    }
+    if (other->max_pos > state->max_pos)
+    {
+        state->max_pos = other->max_pos;
+    }
+    if (other->min_neg < state->min_neg)
+    {
+        state->min_neg = other->min_neg;
+    }
+}
+
 static inline int html_view_draw_y(const html_view_ctx_t *ctx, int doc_y)
 {
     if (!ctx)
     {
         return doc_y;
     }
-    if (ctx->fixed_mode || !ctx->priv)
+    if (ctx->fixed_mode)
     {
         return doc_y;
     }
-    return doc_y - ctx->priv->scroll_y;
+    return doc_y - ctx->scroll_y;
 }
 
 static inline int html_view_record_x(const html_view_ctx_t *ctx, int draw_x)
@@ -391,11 +477,11 @@ static inline int html_view_record_x(const html_view_ctx_t *ctx, int draw_x)
 
 static inline int html_view_record_y(const html_view_ctx_t *ctx, int draw_y)
 {
-    if (!ctx || ctx->fixed_mode || !ctx->priv)
+    if (!ctx || ctx->fixed_mode)
     {
         return draw_y;
     }
-    return (draw_y + ctx->priv->scroll_y) - ctx->doc_origin_y;
+    return (draw_y + ctx->scroll_y) - ctx->doc_origin_y;
 }
 
 atk_html_view_priv_t *html_view_priv_mut(atk_widget_t *view);
