@@ -519,15 +519,39 @@ $(CSS_TEST_BIN): tests/css_test.c \
 $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
                        user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
                        src/kernel/utf8.c \
+                       src/kernel/ttf.c \
                        user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
-                       user/lib/web/url.c user/lib/atk/html_view/style.c
+                       user/lib/web/url.c \
+                       src/atk/util/png.c \
+                       src/atk/atk_font.c \
+                       user/lib/atk/html_view/font.c \
+                       user/lib/atk/html_view/style.c \
+                       user/lib/atk/html_view/layout.c \
+                       user/lib/atk/html_view/table.c \
+                       user/lib/atk/html_view/render/dispatch.c \
+                       user/lib/atk/html_view/render/blocks.c \
+                       user/lib/atk/html_view/render/inline.c \
+                       user/lib/atk/html_view/render/flex.c \
+                       user/lib/atk/html_view/render/forms.c
 	@mkdir -p $(HOST_TEST_DIR)
-	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD -DATK_NO_DESKTOP_APPS -I$(USER_DIR)/lib -I$(ATK_DIR) \
 	    tests/html_view_host_test.c \
 	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
 	    src/kernel/utf8.c \
+	    src/kernel/ttf.c \
 	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
-	    user/lib/web/url.c user/lib/atk/html_view/style.c -o $@
+	    user/lib/web/url.c \
+	    src/atk/util/png.c \
+	    src/atk/atk_font.c \
+	    user/lib/atk/html_view/font.c \
+	    user/lib/atk/html_view/style.c \
+	    user/lib/atk/html_view/layout.c \
+	    user/lib/atk/html_view/table.c \
+	    user/lib/atk/html_view/render/dispatch.c \
+	    user/lib/atk/html_view/render/blocks.c \
+	    user/lib/atk/html_view/render/inline.c \
+	    user/lib/atk/html_view/render/flex.c \
+	    user/lib/atk/html_view/render/forms.c -o $@
 
 $(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c
 	@mkdir -p $(HOST_TEST_DIR)

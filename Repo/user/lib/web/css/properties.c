@@ -972,7 +972,7 @@ static bool css_parse_border_value(const char *start,
         return false;
     }
 
-    if (!have_width && !have_style && !*out_has_color)
+    if (!have_width && !have_style)
     {
         return false;
     }
@@ -1998,7 +1998,7 @@ void css_style_apply_property(css_style_t *style,
         return;
     }
 
-    if ((size_t)(prop_end - prop_start) == 15 && strncasecmp(prop_start, "border-top-width", 15) == 0)
+    if ((size_t)(prop_end - prop_start) == 16 && strncasecmp(prop_start, "border-top-width", 16) == 0)
     {
         css_length_t len;
         if (css_parse_border_width_token(val_start, val_end, &len))
@@ -2010,7 +2010,7 @@ void css_style_apply_property(css_style_t *style,
         return;
     }
 
-    if ((size_t)(prop_end - prop_start) == 17 && strncasecmp(prop_start, "border-right-width", 17) == 0)
+    if ((size_t)(prop_end - prop_start) == 18 && strncasecmp(prop_start, "border-right-width", 18) == 0)
     {
         css_length_t len;
         if (css_parse_border_width_token(val_start, val_end, &len))
@@ -2022,7 +2022,7 @@ void css_style_apply_property(css_style_t *style,
         return;
     }
 
-    if ((size_t)(prop_end - prop_start) == 18 && strncasecmp(prop_start, "border-bottom-width", 18) == 0)
+    if ((size_t)(prop_end - prop_start) == 19 && strncasecmp(prop_start, "border-bottom-width", 19) == 0)
     {
         css_length_t len;
         if (css_parse_border_width_token(val_start, val_end, &len))
@@ -2034,7 +2034,7 @@ void css_style_apply_property(css_style_t *style,
         return;
     }
 
-    if ((size_t)(prop_end - prop_start) == 16 && strncasecmp(prop_start, "border-left-width", 16) == 0)
+    if ((size_t)(prop_end - prop_start) == 17 && strncasecmp(prop_start, "border-left-width", 17) == 0)
     {
         css_length_t len;
         if (css_parse_border_width_token(val_start, val_end, &len))
