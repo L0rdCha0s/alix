@@ -452,14 +452,14 @@ static void html_view_measure_css_table_cells(const html_view_ctx_t *ctx,
                                              ref_w,
                                              ref_h,
                                              ctx->base_font_px,
-                                             false);
+                                             true);
             pad_bottom = html_view_length_to_px(&child_style.padding.bottom,
                                                 ctx->viewport_w,
                                                 ctx->viewport_h,
                                                 ref_w,
                                                 ref_h,
                                                 ctx->base_font_px,
-                                                false);
+                                                true);
         }
 
         int border_left = 0;
@@ -589,7 +589,7 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                                                        cont_w,
                                                        cont_h,
                                                        ctx->base_font_px,
-                                                       false);
+                                                       true);
         }
         if (style->margin.right.valid && !style->margin.right.is_auto)
         {
@@ -609,7 +609,7 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                                                           cont_w,
                                                           cont_h,
                                                           ctx->base_font_px,
-                                                          false);
+                                                          true);
         }
         if (style->margin.left.valid && !style->margin.left.is_auto)
         {
@@ -634,7 +634,7 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                                          cont_w,
                                          cont_h,
                                          ctx->base_font_px,
-                                         false);
+                                         true);
         pad_right = html_view_length_to_px(&style->padding.right,
                                            ctx->viewport_w,
                                            ctx->viewport_h,
@@ -648,7 +648,7 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                                             cont_w,
                                             cont_h,
                                             ctx->base_font_px,
-                                            false);
+                                            true);
         pad_left = html_view_length_to_px(&style->padding.left,
                                           ctx->viewport_w,
                                           ctx->viewport_h,
@@ -701,7 +701,6 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     if (border_right < 0) border_right = 0;
     if (border_bottom < 0) border_bottom = 0;
     if (border_left < 0) border_left = 0;
-    html_view_apply_border_style_none(style, &border_top, &border_right, &border_bottom, &border_left);
     html_view_apply_border_style_none(style, &border_top, &border_right, &border_bottom, &border_left);
 
     bool have_left = style->has_left && style->left.valid && !style->left.is_auto;
@@ -921,22 +920,27 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     if (debug_label)
     {
         int scroll_y = (ctx->priv ? ctx->priv->scroll_y : 0);
-        serial_printf("[html_view][layout] posnode=%s border_y=%d draw_y=%d cont_y=%d cont_h=%d box_h=%d margin_t=%d margin_b=%d fixed=%d scroll_y=%d doc_origin_y=%d record=%d",
+        serial_printf("[html_view][layout] posnode=%s border_y=%d draw_y=%d cont_y=%d cont_h=%d pos_x=%d pos_y=%d pos_w=%d pos_h=%d box_h=%d margin_t=%d margin_b=%d fixed=%d fixed_mode=%d scroll_y=%d doc_origin_y=%d record=%d",
                       debug_label,
                       border_y,
                       draw_y,
                       cont_y,
                       cont_h,
+                      ctx->pos_x,
+                      ctx->pos_y,
+                      ctx->pos_w,
+                      ctx->pos_h,
                       border_box_h,
                       margin_top,
                       margin_bottom,
                       fixed ? 1 : 0,
+                      ctx->fixed_mode ? 1 : 0,
                       scroll_y,
                       ctx->doc_origin_y,
                       ctx->record ? 1 : 0);
     }
     html_view_ctx_t inner = *ctx;
-    inner.fixed_mode = fixed;
+    inner.fixed_mode = (ctx->fixed_mode || fixed);
     inner.underline_run_active = false;
     inner.underline_run_start_x = 0;
     inner.pending_margin = 0;
@@ -1060,7 +1064,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                            ctx->body_w,
                                                            ctx->viewport_h,
                                                            ctx->base_font_px,
-                                                           false);
+                                                           true);
             }
             if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
             {
@@ -1070,7 +1074,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                               ctx->body_w,
                                                               ctx->viewport_h,
                                                               ctx->base_font_px,
-                                                              false);
+                                                              true);
             }
         }
 
@@ -1084,14 +1088,14 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                              ctx->viewport_w,
                                              ctx->viewport_h,
                                              ctx->base_font_px,
-                                             false);
+                                             true);
             pad_bottom = html_view_length_to_px(&style->padding.bottom,
                                                 ctx->viewport_w,
                                                 ctx->viewport_h,
                                                 ctx->viewport_w,
                                                 ctx->viewport_h,
                                                 ctx->base_font_px,
-                                                false);
+                                                true);
         }
 
         (void)html_view_apply_block_margin_top(ctx,
@@ -1301,7 +1305,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                            ctx->body_w,
                                                            ctx->viewport_h,
                                                            ctx->base_font_px,
-                                                           false);
+                                                           true);
             }
             if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
             {
@@ -1311,7 +1315,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                               ctx->body_w,
                                                               ctx->viewport_h,
                                                               ctx->base_font_px,
-                                                              false);
+                                                              true);
             }
         }
         else
@@ -1374,7 +1378,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                            ctx->body_w,
                                                            ctx->viewport_h,
                                                            ctx->base_font_px,
-                                                           false);
+                                                           true);
             }
             if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
             {
@@ -1384,7 +1388,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                               ctx->body_w,
                                                               ctx->viewport_h,
                                                               ctx->base_font_px,
-                                                              false);
+                                                              true);
             }
         }
         else
@@ -1453,7 +1457,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                            ctx->body_w,
                                                            ctx->viewport_h,
                                                            ctx->base_font_px,
-                                                           false);
+                                                           true);
             }
             if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
             {
@@ -1463,7 +1467,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                               ctx->body_w,
                                                               ctx->viewport_h,
                                                               ctx->base_font_px,
-                                                              false);
+                                                              true);
             }
         }
 
@@ -1486,7 +1490,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                              ctx->body_w,
                                              ctx->viewport_h,
                                              ctx->base_font_px,
-                                             false);
+                                             true);
             pad_right = html_view_length_to_px(&style->padding.right,
                                                ctx->viewport_w,
                                                ctx->viewport_h,
@@ -1500,7 +1504,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                 ctx->body_w,
                                                 ctx->viewport_h,
                                                 ctx->base_font_px,
-                                                false);
+                                                true);
             pad_left = html_view_length_to_px(&style->padding.left,
                                               ctx->viewport_w,
                                               ctx->viewport_h,
@@ -1566,7 +1570,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                                ctx->body_w,
                                                                ctx->viewport_h,
                                                                ctx->base_font_px,
-                                                               false);
+                                                               true);
                 }
                 if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
                 {
@@ -1576,7 +1580,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                                   ctx->body_w,
                                                                   ctx->viewport_h,
                                                                   ctx->base_font_px,
-                                                                  false);
+                                                                  true);
                 }
             }
             (void)html_view_apply_block_margin_top(ctx,
@@ -1614,7 +1618,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                            ctx->body_w,
                                                            ctx->viewport_h,
                                                            ctx->base_font_px,
-                                                           false);
+                                                           true);
             }
             if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
             {
@@ -1624,7 +1628,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                               ctx->body_w,
                                                               ctx->viewport_h,
                                                               ctx->base_font_px,
-                                                              false);
+                                                              true);
             }
         }
         (void)html_view_apply_block_margin_top(ctx,
@@ -1695,7 +1699,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                            ctx->viewport_w,
                                                            ctx->viewport_h,
                                                            ctx->base_font_px,
-                                                           false);
+                                                           true);
             }
             if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
             {
@@ -1705,7 +1709,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                              ctx->viewport_w,
                                                              ctx->viewport_h,
                                                              ctx->base_font_px,
-                                                             false);
+                                                             true);
             }
         }
         (void)html_view_apply_block_margin_top(ctx,
@@ -1966,7 +1970,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                        ctx->body_w,
                                                        ctx->viewport_h,
                                                        ctx->base_font_px,
-                                                       false);
+                                                       true);
         }
         if (style->margin.right.valid && !style->margin.right.is_auto)
         {
@@ -1986,7 +1990,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                           ctx->body_w,
                                                           ctx->viewport_h,
                                                           ctx->base_font_px,
-                                                          false);
+                                                          true);
         }
         if (style->margin.left.valid && !style->margin.left.is_auto)
         {
@@ -2007,13 +2011,13 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     int pad_left = 0;
     if (style->has_padding)
     {
-        pad_top = html_view_length_to_px(&style->padding.top,
-                                         ctx->viewport_w,
-                                         ctx->viewport_h,
-                                         ctx->body_w,
-                                         ctx->viewport_h,
-                                         ctx->base_font_px,
-                                         false);
+            pad_top = html_view_length_to_px(&style->padding.top,
+                                             ctx->viewport_w,
+                                             ctx->viewport_h,
+                                             ctx->body_w,
+                                             ctx->viewport_h,
+                                             ctx->base_font_px,
+                                             true);
         pad_right = html_view_length_to_px(&style->padding.right,
                                            ctx->viewport_w,
                                            ctx->viewport_h,
@@ -2021,13 +2025,13 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                            ctx->viewport_h,
                                            ctx->base_font_px,
                                            true);
-        pad_bottom = html_view_length_to_px(&style->padding.bottom,
-                                            ctx->viewport_w,
-                                            ctx->viewport_h,
-                                            ctx->body_w,
-                                            ctx->viewport_h,
-                                            ctx->base_font_px,
-                                            false);
+            pad_bottom = html_view_length_to_px(&style->padding.bottom,
+                                                ctx->viewport_w,
+                                                ctx->viewport_h,
+                                                ctx->body_w,
+                                                ctx->viewport_h,
+                                                ctx->base_font_px,
+                                                true);
         pad_left = html_view_length_to_px(&style->padding.left,
                                           ctx->viewport_w,
                                           ctx->viewport_h,

@@ -431,7 +431,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
                                                        ctx->body_w,
                                                        ctx->viewport_h,
                                                        ctx->base_font_px,
-                                                       false);
+                                                       true);
         }
         if (style->margin.right.valid && !style->margin.right.is_auto)
         {
@@ -451,7 +451,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
                                                           ctx->body_w,
                                                           ctx->viewport_h,
                                                           ctx->base_font_px,
-                                                          false);
+                                                          true);
         }
         if (style->margin.left.valid && !style->margin.left.is_auto)
         {
@@ -477,7 +477,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
                                          ctx->body_w,
                                          ctx->viewport_h,
                                          ctx->base_font_px,
-                                         false);
+                                         true);
         pad_right = html_view_length_to_px(&style->padding.right,
                                            ctx->viewport_w,
                                            ctx->viewport_h,
@@ -491,7 +491,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
                                             ctx->body_w,
                                             ctx->viewport_h,
                                             ctx->base_font_px,
-                                            false);
+                                            true);
         pad_left = html_view_length_to_px(&style->padding.left,
                                           ctx->viewport_w,
                                           ctx->viewport_h,
@@ -554,20 +554,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     }
 
     const char *debug_label = html_view_debug_float_label(node);
-    if (debug_label)
-    {
-        int scroll_y = (ctx->priv ? ctx->priv->scroll_y : 0);
-        serial_printf("[html_view][layout] floatnode=%s start_y=%d margin_t=%d margin_b=%d body_x=%d body_w=%d scroll_y=%d doc_origin_y=%d record=%d",
-                      debug_label,
-                      float_start_y,
-                      margin_top,
-                      margin_bottom,
-                      ctx->body_x,
-                      ctx->body_w,
-                      scroll_y,
-                      ctx->doc_origin_y,
-                      ctx->record ? 1 : 0);
-    }
+    int debug_scroll_y = (ctx->priv ? ctx->priv->scroll_y : 0);
 
     int content_w = 0;
     bool explicit_w = style->has_width && style->width.valid && !style->width.is_auto;
@@ -709,6 +696,32 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
     int outer_w = border_box_w + margin_left + margin_right;
     int outer_h = border_box_h + margin_top + margin_bottom;
+
+    if (debug_label)
+    {
+        serial_printf("[html_view][layout] floatnode=%s start_y=%d margin_t=%d margin_b=%d body_x=%d body_w=%d explicit_h=%d explicit_h_px=%d min_h=%d max_h=%d content_h=%d border_box_h=%d hb_valid=%d hb_explicit=%d hb=%d ctx_hb_valid=%d ctx_hb_explicit=%d ctx_hb=%d scroll_y=%d doc_origin_y=%d record=%d",
+                      debug_label,
+                      float_start_y,
+                      margin_top,
+                      margin_bottom,
+                      ctx->body_x,
+                      ctx->body_w,
+                      explicit_h ? 1 : 0,
+                      explicit_h_px,
+                      min_h,
+                      max_h,
+                      content_h,
+                      border_box_h,
+                      height_basis_valid ? 1 : 0,
+                      height_basis_valid ? 1 : 0,
+                      height_basis,
+                      ctx->height_basis_valid ? 1 : 0,
+                      ctx->height_basis_explicit ? 1 : 0,
+                      ctx->height_basis,
+                      debug_scroll_y,
+                      ctx->doc_origin_y,
+                      ctx->record ? 1 : 0);
+    }
 
     int place_y = float_start_y;
     int place_x = ctx->body_x;
@@ -886,7 +899,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                                                               ctx->body_w,
                                                               ctx->viewport_h,
                                                               ctx->base_font_px,
-                                                              false);
+                                                              true);
         }
         if (style->margin.right.valid && !style->margin.right.is_auto)
         {
@@ -906,7 +919,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                                                                  ctx->body_w,
                                                                  ctx->viewport_h,
                                                                  ctx->base_font_px,
-                                                                 false);
+                                                                 true);
         }
         if (style->margin.left.valid && !style->margin.left.is_auto)
         {
@@ -931,7 +944,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                                                 ctx->body_w,
                                                 ctx->viewport_h,
                                                 ctx->base_font_px,
-                                                false);
+                                                true);
         layout.pad_right = html_view_length_to_px(&style->padding.right,
                                                   ctx->viewport_w,
                                                   ctx->viewport_h,
@@ -945,7 +958,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                                                    ctx->body_w,
                                                    ctx->viewport_h,
                                                    ctx->base_font_px,
-                                                   false);
+                                                   true);
         layout.pad_left = html_view_length_to_px(&style->padding.left,
                                                  ctx->viewport_w,
                                                  ctx->viewport_h,
@@ -1281,7 +1294,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                                                         cell_w,
                                                         ctx->viewport_h,
                                                         cell_font_px,
-                                                        false);
+                                                        true);
                 cell->pad_right += html_view_length_to_px(&cell->style.padding.right,
                                                           ctx->viewport_w,
                                                           ctx->viewport_h,
@@ -1295,7 +1308,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
                                                            cell_w,
                                                            ctx->viewport_h,
                                                            cell_font_px,
-                                                           false);
+                                                           true);
                 cell->pad_left += html_view_length_to_px(&cell->style.padding.left,
                                                          ctx->viewport_w,
                                                          ctx->viewport_h,

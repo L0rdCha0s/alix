@@ -129,7 +129,7 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
                                          ctx->body_w,
                                          ctx->viewport_h,
                                          ctx->base_font_px,
-                                         false);
+                                         true);
         pad_right = html_view_length_to_px(&style->padding.right,
                                            ctx->viewport_w,
                                            ctx->viewport_h,
@@ -143,7 +143,7 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
                                             ctx->body_w,
                                             ctx->viewport_h,
                                             ctx->base_font_px,
-                                            false);
+                                            true);
         pad_left = html_view_length_to_px(&style->padding.left,
                                           ctx->viewport_w,
                                           ctx->viewport_h,
@@ -504,7 +504,7 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
                                              ctx->body_w,
                                              ctx->viewport_h,
                                              ctx->base_font_px,
-                                             false);
+                                             true);
             pad_right = html_view_length_to_px(&style->padding.right,
                                                ctx->viewport_w,
                                                ctx->viewport_h,
@@ -518,7 +518,7 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
                                                 ctx->body_w,
                                                 ctx->viewport_h,
                                                 ctx->base_font_px,
-                                                false);
+                                                true);
             pad_left = html_view_length_to_px(&style->padding.left,
                                               ctx->viewport_w,
                                               ctx->viewport_h,
@@ -698,7 +698,7 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
                                                      ctx->body_w,
                                                      ctx->viewport_h,
                                                      ctx->base_font_px,
-                                                     false);
+                                                     true);
                     pad_right = html_view_length_to_px(&style->padding.right,
                                                        ctx->viewport_w,
                                                        ctx->viewport_h,
@@ -712,7 +712,7 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
                                                         ctx->body_w,
                                                         ctx->viewport_h,
                                                         ctx->base_font_px,
-                                                        false);
+                                                        true);
                     pad_left = html_view_length_to_px(&style->padding.left,
                                                       ctx->viewport_w,
                                                       ctx->viewport_h,

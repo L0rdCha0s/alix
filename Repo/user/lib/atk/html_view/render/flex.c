@@ -85,7 +85,7 @@ static void html_view_calc_box_edges(const html_view_ctx_t *ctx,
     {
         if (margin_top && style->margin.top.valid && !style->margin.top.is_auto)
         {
-            *margin_top = html_view_length_to_px_signed(&style->margin.top, vw, vh, ref_w, vh, font_px, false);
+            *margin_top = html_view_length_to_px_signed(&style->margin.top, vw, vh, ref_w, vh, font_px, true);
         }
         if (margin_right && style->margin.right.valid && !style->margin.right.is_auto)
         {
@@ -93,7 +93,7 @@ static void html_view_calc_box_edges(const html_view_ctx_t *ctx,
         }
         if (margin_bottom && style->margin.bottom.valid && !style->margin.bottom.is_auto)
         {
-            *margin_bottom = html_view_length_to_px_signed(&style->margin.bottom, vw, vh, ref_w, vh, font_px, false);
+            *margin_bottom = html_view_length_to_px_signed(&style->margin.bottom, vw, vh, ref_w, vh, font_px, true);
         }
         if (margin_left && style->margin.left.valid && !style->margin.left.is_auto)
         {
@@ -105,7 +105,7 @@ static void html_view_calc_box_edges(const html_view_ctx_t *ctx,
     {
         if (pad_top)
         {
-            *pad_top = html_view_length_to_px(&style->padding.top, vw, vh, ref_w, vh, font_px, false);
+            *pad_top = html_view_length_to_px(&style->padding.top, vw, vh, ref_w, vh, font_px, true);
         }
         if (pad_right)
         {
@@ -113,7 +113,7 @@ static void html_view_calc_box_edges(const html_view_ctx_t *ctx,
         }
         if (pad_bottom)
         {
-            *pad_bottom = html_view_length_to_px(&style->padding.bottom, vw, vh, ref_w, vh, font_px, false);
+            *pad_bottom = html_view_length_to_px(&style->padding.bottom, vw, vh, ref_w, vh, font_px, true);
         }
         if (pad_left)
         {
