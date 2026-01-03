@@ -967,6 +967,11 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     inner.measure_max_x = inner.x;
     inner.content_bottom = inner.y;
     inner.list_level = 0;
+    inner.line_height = html_view_line_height_for_style(&inner, style);
+    if (html_view_subtree_has_form_control(node) && inner.line_height < atk_font_line_height() + 8)
+    {
+        inner.line_height = atk_font_line_height() + 8;
+    }
     bool inner_height_valid = height_specified || (have_top && have_bottom);
     inner.height_basis_valid = inner_height_valid;
     inner.height_basis = inner_height_valid ? content_h : 0;

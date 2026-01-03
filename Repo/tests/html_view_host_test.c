@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -883,6 +884,83 @@ static void host_html_view_dump_dom(const html_node_t *root, const css_styleshee
     serial_printf("[html_view] dump begin view=%p", tag);
     html_view_dump_tree(root, sheet);
     serial_printf("[html_view] dump end view=%p", tag);
+}
+
+static void host_debug_dump_op_ranges(const html_view_render_cache_t *cache)
+{
+    if (!cache)
+    {
+        return;
+    }
+    int black_min = INT_MAX;
+    int black_max = INT_MIN;
+    int yellow_min = INT_MAX;
+    int yellow_max = INT_MIN;
+    int black_count = 0;
+    int yellow_count = 0;
+    for (size_t i = 0; i < cache->op_count; ++i)
+    {
+        const html_view_op_t *op = &cache->ops[i];
+        if (op->kind != HTML_VIEW_OP_RECT)
+        {
+            continue;
+        }
+        int y0 = op->y;
+        int y1 = op->y + op->h;
+        if (op->color == 0xFF000000u)
+        {
+            if (y0 < black_min) black_min = y0;
+            if (y1 > black_max) black_max = y1;
+            black_count++;
+        }
+        if (op->color == 0xFFFFFF00u)
+        {
+            if (y0 < yellow_min) yellow_min = y0;
+            if (y1 > yellow_max) yellow_max = y1;
+            yellow_count++;
+        }
+    }
+
+    if (black_count > 0)
+    {
+        serial_printf("[html_view][ops] black rects=%d y=[%d..%d]", black_count, black_min, black_max);
+    }
+    if (yellow_count > 0)
+    {
+        serial_printf("[html_view][ops] yellow rects=%d y=[%d..%d]", yellow_count, yellow_min, yellow_max);
+    }
+}
+
+static void host_debug_dump_rect_ops(const html_view_render_cache_t *cache, int y0, int y1)
+{
+    if (!cache)
+    {
+        return;
+    }
+    for (size_t i = 0; i < cache->op_count; ++i)
+    {
+        const html_view_op_t *op = &cache->ops[i];
+        if (op->kind != HTML_VIEW_OP_RECT)
+        {
+            continue;
+        }
+        int op_y0 = op->y;
+        int op_y1 = op->y + op->h;
+        if (op_y1 < y0 || op_y0 > y1)
+        {
+            continue;
+        }
+        if (op->color == 0xFF000000u || op->color == 0xFFFFFF00u)
+        {
+            serial_printf("[html_view][ops] rect color=0x%08X x=%d y=%d w=%d h=%d fixed=%d",
+                          op->color,
+                          op->x,
+                          op->y,
+                          op->w,
+                          op->h,
+                          op->fixed ? 1 : 0);
+        }
+    }
 }
 
 ssize_t sys_font_cache(void *buffer, size_t capacity)
@@ -3502,6 +3580,9 @@ static bool test_acid2_render_snapshot(void)
     html_view_align_current_line(&record);
     html_view_style_stack_destroy(&record);
     host_html_view_dump_dom(doc->root, sheet, doc);
+    host_debug_dump_op_ranges(&priv.render_cache);
+    host_debug_dump_rect_ops(&priv.render_cache, 2680, 2900);
+    host_debug_dump_rect_ops(&priv.render_cache, 3000, 3120);
 
     if (surface_init(viewport_w, viewport_h, body_bg))
     {
@@ -3518,10 +3599,12 @@ static bool test_acid2_render_snapshot(void)
                 anchor_y = 0;
             }
             draw_ctx.scroll_y = anchor_y;
+            serial_printf("[html_view][ops] anchor top y=%d", anchor_y);
         }
         else
         {
-        draw_ctx.scroll_y = 0;
+            draw_ctx.scroll_y = 0;
+            serial_printf("[html_view][ops] anchor top not found");
         }
 
         html_view_render_cache_draw_visible(&draw_ctx);

@@ -102,6 +102,18 @@ static bool html_view_attr_has_class(const html_node_t *node, const char *token)
     return false;
 }
 
+static bool html_view_node_in_smile(const html_node_t *node)
+{
+    for (const html_node_t *cur = node; cur; cur = cur->parent)
+    {
+        if (html_view_attr_has_class(cur, "smile"))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static const char *html_view_debug_float_label(const html_node_t *node)
 {
     if (!node || node->type != HTML_NODE_ELEMENT)
@@ -538,6 +550,20 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
         float_start_y += html_view_margin_state_value(&ctx->pending_margin);
     }
 
+    if (ctx->record && html_view_node_in_smile(node))
+    {
+        serial_printf("[html_view][smile-float] tag=%s y=%d line_h=%d base_lh=%d font_px=%d base_font=%d body_x=%d body_w=%d start_y=%d",
+                      node->name ? node->name : "(null)",
+                      ctx->y,
+                      ctx->line_height,
+                      ctx->base_line_height,
+                      ctx->actual_font_px,
+                      ctx->base_font_px,
+                      ctx->body_x,
+                      ctx->body_w,
+                      float_start_y);
+    }
+
     const char *debug_label = html_view_debug_float_label(node);
     int debug_scroll_y = (ctx->priv ? ctx->priv->scroll_y : 0);
 
@@ -626,6 +652,16 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     if (max_w >= 0 && min_w > max_w)
     {
         content_w = min_w;
+    }
+
+    int max_content = ctx->body_w - margin_left - margin_right - pad_left - pad_right - border_left - border_right;
+    if (max_content < 0)
+    {
+        max_content = 0;
+    }
+    if (content_w > max_content)
+    {
+        content_w = max_content;
     }
 
     int min_h = -1;
