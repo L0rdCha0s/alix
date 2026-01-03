@@ -40,6 +40,7 @@ video_color_t video_make_color(uint8_t r, uint8_t g, uint8_t b)
 static video_color_t *g_surface = NULL;
 static int g_surface_width = 0;
 static int g_surface_height = 0;
+static FILE *g_serial_log = NULL;
 
 static bool surface_init(int width, int height, video_color_t bg)
 {
@@ -90,8 +91,798 @@ static void surface_clear(video_color_t color)
 
 int serial_printf(const char *format, ...)
 {
-    (void)format;
-    return 0;
+    if (!g_serial_log || !format)
+    {
+        return 0;
+    }
+    va_list args;
+    va_start(args, format);
+    int written = vfprintf(g_serial_log, format, args);
+    va_end(args);
+    fputc('\n', g_serial_log);
+    fflush(g_serial_log);
+    if (written < 0)
+    {
+        return written;
+    }
+    return written + 1;
+}
+
+static void html_view_dump_append(char *buf, size_t cap, size_t *offset, const char *fmt, ...)
+{
+    if (!buf || cap == 0 || !offset || *offset >= cap)
+    {
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buf + *offset, cap - *offset, fmt, args);
+    va_end(args);
+    if (written <= 0)
+    {
+        return;
+    }
+    size_t add = (size_t)written;
+    if (add >= cap - *offset)
+    {
+        *offset = cap - 1;
+    }
+    else
+    {
+        *offset += add;
+    }
+}
+
+static void html_view_dump_indent(char *buf, size_t cap, int depth)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    int count = depth * 2;
+    if (count < 0) count = 0;
+    if ((size_t)count >= cap)
+    {
+        count = (int)cap - 1;
+    }
+    memset(buf, ' ', (size_t)count);
+    buf[count] = '\0';
+}
+
+static void html_view_dump_color(char *buf, size_t cap, video_color_t color)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    uint8_t r = (uint8_t)((color >> 16) & 0xFF);
+    uint8_t g = (uint8_t)((color >> 8) & 0xFF);
+    uint8_t b = (uint8_t)(color & 0xFF);
+    (void)snprintf(buf, cap, "#%02X%02X%02X", r, g, b);
+}
+
+static const char *html_view_dump_display(css_display_t display)
+{
+    switch (display)
+    {
+        case CSS_DISPLAY_INLINE: return "inline";
+        case CSS_DISPLAY_BLOCK: return "block";
+        case CSS_DISPLAY_LIST_ITEM: return "list-item";
+        case CSS_DISPLAY_TABLE: return "table";
+        case CSS_DISPLAY_TABLE_CELL: return "table-cell";
+        case CSS_DISPLAY_FLEX: return "flex";
+        case CSS_DISPLAY_INLINE_FLEX: return "inline-flex";
+        case CSS_DISPLAY_NONE: return "none";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_float(css_float_t value)
+{
+    switch (value)
+    {
+        case CSS_FLOAT_LEFT: return "left";
+        case CSS_FLOAT_RIGHT: return "right";
+        case CSS_FLOAT_NONE: return "none";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_text_align(css_text_align_t align)
+{
+    switch (align)
+    {
+        case CSS_TEXT_ALIGN_CENTER: return "center";
+        case CSS_TEXT_ALIGN_RIGHT: return "right";
+        case CSS_TEXT_ALIGN_LEFT: return "left";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_text_decoration(css_text_decoration_t value)
+{
+    switch (value)
+    {
+        case CSS_TEXT_DECORATION_UNDERLINE: return "underline";
+        case CSS_TEXT_DECORATION_NONE: return "none";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_position(css_position_t value)
+{
+    switch (value)
+    {
+        case CSS_POSITION_STATIC: return "static";
+        case CSS_POSITION_RELATIVE: return "relative";
+        case CSS_POSITION_ABSOLUTE: return "absolute";
+        case CSS_POSITION_FIXED: return "fixed";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_clear(css_clear_t value)
+{
+    switch (value)
+    {
+        case CSS_CLEAR_NONE: return "none";
+        case CSS_CLEAR_LEFT: return "left";
+        case CSS_CLEAR_RIGHT: return "right";
+        case CSS_CLEAR_BOTH: return "both";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_overflow(css_overflow_t value)
+{
+    switch (value)
+    {
+        case CSS_OVERFLOW_VISIBLE: return "visible";
+        case CSS_OVERFLOW_HIDDEN: return "hidden";
+        case CSS_OVERFLOW_SCROLL: return "scroll";
+        case CSS_OVERFLOW_AUTO: return "auto";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_background_repeat(css_background_repeat_t value)
+{
+    switch (value)
+    {
+        case CSS_BACKGROUND_REPEAT_REPEAT: return "repeat";
+        case CSS_BACKGROUND_REPEAT_NO_REPEAT: return "no-repeat";
+        case CSS_BACKGROUND_REPEAT_REPEAT_X: return "repeat-x";
+        case CSS_BACKGROUND_REPEAT_REPEAT_Y: return "repeat-y";
+        default: return "unknown";
+    }
+}
+
+static const char *html_view_dump_background_attachment(css_background_attachment_t value)
+{
+    switch (value)
+    {
+        case CSS_BACKGROUND_ATTACHMENT_SCROLL: return "scroll";
+        case CSS_BACKGROUND_ATTACHMENT_FIXED: return "fixed";
+        default: return "unknown";
+    }
+}
+
+static void html_view_dump_border_style(char *buf, size_t cap, const bool none_sides[CSS_BORDER_SIDE_COUNT])
+{
+    if (!buf || cap == 0 || !none_sides)
+    {
+        return;
+    }
+    const char *top = none_sides[CSS_BORDER_SIDE_TOP] ? "none" : "solid";
+    const char *right = none_sides[CSS_BORDER_SIDE_RIGHT] ? "none" : "solid";
+    const char *bottom = none_sides[CSS_BORDER_SIDE_BOTTOM] ? "none" : "solid";
+    const char *left = none_sides[CSS_BORDER_SIDE_LEFT] ? "none" : "solid";
+    (void)snprintf(buf, cap, "%s %s %s %s", top, right, bottom, left);
+}
+
+static void html_view_dump_sanitize(const char *src, char *dst, size_t cap, size_t max_len);
+
+static void html_view_dump_length(char *buf, size_t cap, const css_length_t *len)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    if (!len || !len->valid)
+    {
+        (void)snprintf(buf, cap, "unset");
+        return;
+    }
+    if (len->is_auto)
+    {
+        (void)snprintf(buf, cap, "auto");
+        return;
+    }
+    int32_t v = len->value_milli;
+    int32_t whole = v / 1000;
+    int32_t frac = v % 1000;
+    if (frac < 0) frac = -frac;
+
+    const char *unit = "";
+    switch (len->unit)
+    {
+        case CSS_UNIT_PX: unit = "px"; break;
+        case CSS_UNIT_EM: unit = "em"; break;
+        case CSS_UNIT_VW: unit = "vw"; break;
+        case CSS_UNIT_VH: unit = "vh"; break;
+        case CSS_UNIT_PERCENT: unit = "%"; break;
+        case CSS_UNIT_NONE: default: unit = ""; break;
+    }
+
+    if (frac == 0)
+    {
+        (void)snprintf(buf, cap, "%d%s", whole, unit);
+    }
+    else
+    {
+        (void)snprintf(buf, cap, "%d.%03d%s", whole, frac, unit);
+    }
+}
+
+static void html_view_dump_box(char *buf, size_t cap, size_t *offset, const char *name, const css_box_t *box)
+{
+    if (!buf || !offset || !name || !box)
+    {
+        return;
+    }
+    char len_buf[32];
+    if (name[0] != '\0')
+    {
+        html_view_dump_append(buf, cap, offset, "%s=", name);
+    }
+    html_view_dump_length(len_buf, sizeof(len_buf), &box->top);
+    html_view_dump_append(buf, cap, offset, "%s", len_buf);
+    html_view_dump_length(len_buf, sizeof(len_buf), &box->right);
+    html_view_dump_append(buf, cap, offset, " %s", len_buf);
+    html_view_dump_length(len_buf, sizeof(len_buf), &box->bottom);
+    html_view_dump_append(buf, cap, offset, " %s", len_buf);
+    html_view_dump_length(len_buf, sizeof(len_buf), &box->left);
+    html_view_dump_append(buf, cap, offset, " %s", len_buf);
+}
+
+static bool html_view_dump_text_is_ws(const char *text)
+{
+    if (!text || !*text)
+    {
+        return true;
+    }
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p)
+    {
+        if (!isspace(*p))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void html_view_dump_style_summary(const css_style_t *style, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    if (!style)
+    {
+        (void)snprintf(buf, cap, "(none)");
+        return;
+    }
+    size_t off = 0;
+    bool any = false;
+    char tmp[32];
+
+    if (style->has_display)
+    {
+        html_view_dump_append(buf, cap, &off, "display=%s", html_view_dump_display(style->display));
+        any = true;
+    }
+    if (style->has_color)
+    {
+        html_view_dump_color(tmp, sizeof(tmp), style->color);
+        html_view_dump_append(buf, cap, &off, "%scolor=%s", any ? " " : "", tmp);
+        any = true;
+    }
+    if (style->has_background)
+    {
+        if (style->background_transparent)
+        {
+            html_view_dump_append(buf, cap, &off, "%sbackground=none", any ? " " : "");
+        }
+        else
+        {
+            html_view_dump_color(tmp, sizeof(tmp), style->background);
+            html_view_dump_append(buf, cap, &off, "%sbackground=%s", any ? " " : "", tmp);
+        }
+        any = true;
+    }
+    if (style->has_background_image)
+    {
+        char img_buf[96];
+        if (style->background_image)
+        {
+            html_view_dump_sanitize(style->background_image, img_buf, sizeof(img_buf), 72);
+        }
+        else
+        {
+            (void)snprintf(img_buf, sizeof(img_buf), "(null)");
+        }
+        html_view_dump_append(buf, cap, &off, "%sbg-image=%s", any ? " " : "", img_buf);
+        any = true;
+    }
+    if (style->has_background_repeat)
+    {
+        html_view_dump_append(buf, cap, &off, "%sbg-repeat=%s", any ? " " : "",
+                              html_view_dump_background_repeat(style->background_repeat));
+        any = true;
+    }
+    if (style->has_background_attachment)
+    {
+        html_view_dump_append(buf, cap, &off, "%sbg-attach=%s", any ? " " : "",
+                              html_view_dump_background_attachment(style->background_attachment));
+        any = true;
+    }
+    if (style->has_background_position)
+    {
+        char x_buf[32];
+        char y_buf[32];
+        html_view_dump_length(x_buf, sizeof(x_buf), &style->background_pos_x);
+        html_view_dump_length(y_buf, sizeof(y_buf), &style->background_pos_y);
+        html_view_dump_append(buf, cap, &off, "%sbg-pos=%s %s", any ? " " : "", x_buf, y_buf);
+        any = true;
+    }
+    if (style->has_font_size)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->font_size);
+        html_view_dump_append(buf, cap, &off, "%sfont-size=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_line_height)
+    {
+        if (style->line_height_is_length)
+        {
+            char len_buf[32];
+            html_view_dump_length(len_buf, sizeof(len_buf), &style->line_height);
+            html_view_dump_append(buf, cap, &off, "%sline-height=%s", any ? " " : "", len_buf);
+        }
+        else
+        {
+            int32_t v = style->line_height_milli;
+            int32_t whole = v / 1000;
+            int32_t frac = v % 1000;
+            if (frac < 0) frac = -frac;
+            if (frac == 0)
+            {
+                html_view_dump_append(buf, cap, &off, "%sline-height=%d", any ? " " : "", whole);
+            }
+            else
+            {
+                html_view_dump_append(buf, cap, &off, "%sline-height=%d.%03d", any ? " " : "", whole, frac);
+            }
+        }
+        any = true;
+    }
+    if (style->has_text_align)
+    {
+        html_view_dump_append(buf, cap, &off, "%stext-align=%s", any ? " " : "", html_view_dump_text_align(style->text_align));
+        any = true;
+    }
+    if (style->has_text_decoration)
+    {
+        html_view_dump_append(buf, cap, &off, "%stext-decoration=%s", any ? " " : "", html_view_dump_text_decoration(style->text_decoration));
+        any = true;
+    }
+    if (style->has_position)
+    {
+        html_view_dump_append(buf, cap, &off, "%sposition=%s", any ? " " : "", html_view_dump_position(style->position));
+        any = true;
+    }
+    if (style->has_top)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->top);
+        html_view_dump_append(buf, cap, &off, "%stop=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_right)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->right);
+        html_view_dump_append(buf, cap, &off, "%sright=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_bottom)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->bottom);
+        html_view_dump_append(buf, cap, &off, "%sbottom=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_left)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->left);
+        html_view_dump_append(buf, cap, &off, "%sleft=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_z_index)
+    {
+        html_view_dump_append(buf, cap, &off, "%sz-index=%d", any ? " " : "", (int)style->z_index);
+        any = true;
+    }
+    if (style->has_float)
+    {
+        html_view_dump_append(buf, cap, &off, "%sfloat=%s", any ? " " : "", html_view_dump_float(style->float_mode));
+        any = true;
+    }
+    if (style->has_clear)
+    {
+        html_view_dump_append(buf, cap, &off, "%sclear=%s", any ? " " : "", html_view_dump_clear(style->clear_mode));
+        any = true;
+    }
+    if (style->has_overflow)
+    {
+        html_view_dump_append(buf, cap, &off, "%soverflow=%s", any ? " " : "", html_view_dump_overflow(style->overflow));
+        any = true;
+    }
+    if (style->has_width)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->width);
+        html_view_dump_append(buf, cap, &off, "%swidth=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_min_width)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->min_width);
+        html_view_dump_append(buf, cap, &off, "%smin-width=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_max_width)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->max_width);
+        html_view_dump_append(buf, cap, &off, "%smax-width=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_height)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->height);
+        html_view_dump_append(buf, cap, &off, "%sheight=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_min_height)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->min_height);
+        html_view_dump_append(buf, cap, &off, "%smin-height=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_max_height)
+    {
+        char len_buf[32];
+        html_view_dump_length(len_buf, sizeof(len_buf), &style->max_height);
+        html_view_dump_append(buf, cap, &off, "%smax-height=%s", any ? " " : "", len_buf);
+        any = true;
+    }
+    if (style->has_margin)
+    {
+        html_view_dump_append(buf, cap, &off, "%s", any ? " " : "");
+        html_view_dump_box(buf, cap, &off, "margin", &style->margin);
+        any = true;
+    }
+    if (style->has_padding)
+    {
+        html_view_dump_append(buf, cap, &off, "%s", any ? " " : "");
+        html_view_dump_box(buf, cap, &off, "padding", &style->padding);
+        any = true;
+    }
+    if (style->has_border)
+    {
+        html_view_dump_append(buf, cap, &off, "%s", any ? " " : "");
+        html_view_dump_box(buf, cap, &off, "border-width", &style->border_width);
+        any = true;
+    }
+    if (style->has_border_style)
+    {
+        char style_buf[48];
+        html_view_dump_border_style(style_buf, sizeof(style_buf), style->border_style_none);
+        html_view_dump_append(buf, cap, &off, "%sborder-style=%s", any ? " " : "", style_buf);
+        any = true;
+    }
+    if (style->has_border_color)
+    {
+        if (style->border_transparent)
+        {
+            html_view_dump_append(buf, cap, &off, "%sborder-color=transparent", any ? " " : "");
+        }
+        else
+        {
+            html_view_dump_color(tmp, sizeof(tmp), style->border_color);
+            html_view_dump_append(buf, cap, &off, "%sborder-color=%s", any ? " " : "", tmp);
+        }
+        any = true;
+    }
+    if (style->has_content)
+    {
+        char content_buf[96];
+        if (style->content)
+        {
+            html_view_dump_sanitize(style->content, content_buf, sizeof(content_buf), 64);
+        }
+        else
+        {
+            (void)snprintf(content_buf, sizeof(content_buf), "(null)");
+        }
+        html_view_dump_append(buf, cap, &off, "%scontent=\"%s\"", any ? " " : "", content_buf);
+        any = true;
+    }
+
+    if (!any)
+    {
+        (void)snprintf(buf, cap, "(none)");
+    }
+}
+
+static void html_view_dump_sanitize(const char *src, char *dst, size_t cap, size_t max_len)
+{
+    if (!dst || cap == 0)
+    {
+        return;
+    }
+    if (!src)
+    {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t out = 0;
+    size_t seen = 0;
+    bool last_space = false;
+    while (*src && out + 1 < cap && seen < max_len)
+    {
+        unsigned char ch = (unsigned char)*src++;
+        seen++;
+        if (ch < 0x20 || ch == 0x7F)
+        {
+            if (!last_space)
+            {
+                dst[out++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        if (ch >= 0x80)
+        {
+            ch = '?';
+        }
+        if (isspace(ch))
+        {
+            if (!last_space)
+            {
+                dst[out++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        dst[out++] = (char)ch;
+        last_space = false;
+    }
+    if ((*src || seen >= max_len) && out + 4 < cap)
+    {
+        dst[out++] = '.';
+        dst[out++] = '.';
+        dst[out++] = '.';
+    }
+    dst[out] = '\0';
+}
+
+static void html_view_dump_attrs(const html_node_t *node, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    buf[0] = '\0';
+    if (!node || !node->attrs)
+    {
+        return;
+    }
+
+    size_t off = 0;
+    for (const html_attr_t *attr = node->attrs; attr; attr = attr->next)
+    {
+        if (!attr->name || !attr->value)
+        {
+            continue;
+        }
+        char value_buf[64];
+        html_view_dump_sanitize(attr->value, value_buf, sizeof(value_buf), 48);
+        html_view_dump_append(buf, cap, &off, " %s=\"%s\"", attr->name, value_buf);
+        if (off + 4 >= cap)
+        {
+            html_view_dump_append(buf, cap, &off, " ...");
+            break;
+        }
+    }
+}
+
+typedef struct
+{
+    const html_node_t *node;
+    css_style_t style;
+    int depth;
+    bool has_style;
+} html_view_dump_frame_t;
+
+static void html_view_dump_node_line(const html_node_t *node,
+                                     const css_style_t *style,
+                                     bool has_style,
+                                     int depth)
+{
+    char indent[64];
+    html_view_dump_indent(indent, sizeof(indent), depth);
+
+    if (!node)
+    {
+        serial_printf("[html_view][dom] %s(null)", indent);
+        return;
+    }
+
+    if (node->type == HTML_NODE_DOCUMENT)
+    {
+        serial_printf("[html_view][dom] %s#document", indent);
+        return;
+    }
+
+    if (node->type == HTML_NODE_DOCTYPE)
+    {
+        char text_buf[96];
+        html_view_dump_sanitize(node->name ? node->name : "", text_buf, sizeof(text_buf), 64);
+        serial_printf("[html_view][dom] %s<!doctype %s>", indent, text_buf);
+        return;
+    }
+
+    if (node->type == HTML_NODE_COMMENT)
+    {
+        char text_buf[96];
+        html_view_dump_sanitize(node->text ? node->text : "", text_buf, sizeof(text_buf), 64);
+        serial_printf("[html_view][dom] %s<!-- %s -->", indent, text_buf);
+        return;
+    }
+
+    if (node->type == HTML_NODE_TEXT)
+    {
+        char text_buf[128];
+        html_view_dump_sanitize(node->text ? node->text : "", text_buf, sizeof(text_buf), 80);
+        if (html_view_dump_text_is_ws(node->text))
+        {
+            size_t raw_len = node->text ? strlen(node->text) : 0;
+            serial_printf("[html_view][dom] %s#text \"%s\" ws len=%zu", indent, text_buf, raw_len);
+        }
+        else
+        {
+            serial_printf("[html_view][dom] %s#text \"%s\"", indent, text_buf);
+        }
+        if (has_style && style && style->has_color)
+        {
+            char color_buf[16];
+            html_view_dump_color(color_buf, sizeof(color_buf), style->color);
+            serial_printf("[html_view][dom] %s  style color=%s", indent, color_buf);
+        }
+        return;
+    }
+
+    if (node->type == HTML_NODE_ELEMENT)
+    {
+        char attrs[256];
+        html_view_dump_attrs(node, attrs, sizeof(attrs));
+        serial_printf("[html_view][dom] %s<%s%s>", indent, node->name ? node->name : "?", attrs);
+        if (has_style && style)
+        {
+            char style_buf[1024];
+            html_view_dump_style_summary(style, style_buf, sizeof(style_buf));
+            serial_printf("[html_view][dom] %s  style %s", indent, style_buf);
+        }
+        return;
+    }
+
+    serial_printf("[html_view][dom] %s#node type=%d", indent, (int)node->type);
+}
+
+static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t *sheet)
+{
+    if (!root)
+    {
+        serial_printf("[html_view][dom] (empty)");
+        return;
+    }
+
+    size_t cap = 64;
+    size_t count = 0;
+    html_view_dump_frame_t *stack = (html_view_dump_frame_t *)calloc(cap, sizeof(*stack));
+    if (!stack)
+    {
+        return;
+    }
+
+    html_view_dump_frame_t root_frame = {0};
+    root_frame.node = root;
+    root_frame.depth = 0;
+    if (root->type == HTML_NODE_ELEMENT)
+    {
+        html_view_style_for_node(&root_frame.style, sheet, NULL, root);
+        root_frame.has_style = true;
+    }
+    stack[count++] = root_frame;
+
+    while (count > 0)
+    {
+        html_view_dump_frame_t frame = stack[--count];
+        const html_node_t *node = frame.node;
+        const css_style_t *parent_style = frame.has_style ? &frame.style : NULL;
+
+        html_view_dump_node_line(node, parent_style, frame.has_style, frame.depth);
+
+        if (!node || !node->first_child)
+        {
+            continue;
+        }
+
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (count >= cap)
+            {
+                size_t next_cap = cap * 2;
+                html_view_dump_frame_t *next = (html_view_dump_frame_t *)realloc(stack, next_cap * sizeof(*next));
+                if (!next)
+                {
+                    free(stack);
+                    return;
+                }
+                memset(next + cap, 0, (next_cap - cap) * sizeof(*next));
+                stack = next;
+                cap = next_cap;
+            }
+
+            html_view_dump_frame_t child_frame = {0};
+            child_frame.node = child;
+            child_frame.depth = frame.depth + 1;
+            child_frame.has_style = false;
+            if (child && child->type == HTML_NODE_ELEMENT)
+            {
+                html_view_style_for_node(&child_frame.style, sheet, parent_style, child);
+                child_frame.has_style = true;
+            }
+            else if (parent_style)
+            {
+                child_frame.style = *parent_style;
+                child_frame.has_style = true;
+            }
+            stack[count++] = child_frame;
+        }
+    }
+
+    free(stack);
+}
+
+static void host_html_view_dump_dom(const html_node_t *root, const css_stylesheet_t *sheet, const void *tag)
+{
+    if (!root)
+    {
+        serial_printf("[html_view] dump: no document");
+        return;
+    }
+    serial_printf("[html_view] dump begin view=%p", tag);
+    html_view_dump_tree(root, sheet);
+    serial_printf("[html_view] dump end view=%p", tag);
 }
 
 ssize_t sys_font_cache(void *buffer, size_t capacity)
@@ -2379,6 +3170,25 @@ static bool test_acid2_render_snapshot(void)
         return false;
     }
 
+    time_t run_ts = time(NULL);
+    bool have_test_out = ensure_test_out_dir();
+    FILE *log_fp = NULL;
+    if (have_test_out)
+    {
+        char log_path[128];
+        snprintf(log_path, sizeof(log_path), "test-out/acid2-debug-%lld.log", (long long)run_ts);
+        log_fp = fopen(log_path, "w");
+        if (!log_fp)
+        {
+            printf("html_view_host_test: acid2 snapshot failed to open %s\n", log_path);
+        }
+    }
+    else
+    {
+        printf("html_view_host_test: acid2 snapshot failed to create test-out\n");
+    }
+    g_serial_log = log_fp;
+
     atk_html_view_priv_t priv = {0};
     priv.doc = doc;
     priv.sheet = sheet;
@@ -2691,6 +3501,7 @@ static bool test_acid2_render_snapshot(void)
     }
     html_view_align_current_line(&record);
     html_view_style_stack_destroy(&record);
+    host_html_view_dump_dom(doc->root, sheet, doc);
 
     if (surface_init(viewport_w, viewport_h, body_bg))
     {
@@ -2710,16 +3521,15 @@ static bool test_acid2_render_snapshot(void)
         }
         else
         {
-            draw_ctx.scroll_y = 0;
+        draw_ctx.scroll_y = 0;
         }
 
         html_view_render_cache_draw_visible(&draw_ctx);
 
-        if (ensure_test_out_dir())
+        if (have_test_out)
         {
-            time_t now = time(NULL);
             char path[128];
-            snprintf(path, sizeof(path), "test-out/acid2-run-%lld.png", (long long)now);
+            snprintf(path, sizeof(path), "test-out/acid2-run-%lld.png", (long long)run_ts);
             if (!host_write_png_rgba32(path,
                                        g_surface,
                                        g_surface_width,
@@ -2732,10 +3542,6 @@ static bool test_acid2_render_snapshot(void)
             {
                 printf("html_view_host_test: acid2 snapshot wrote %s\n", path);
             }
-        }
-        else
-        {
-            printf("html_view_host_test: acid2 snapshot failed to create test-out\n");
         }
 
         surface_destroy();
@@ -2760,6 +3566,11 @@ static bool test_acid2_render_snapshot(void)
     html_document_destroy(doc);
     free(css);
     free(html);
+    if (g_serial_log)
+    {
+        fclose(g_serial_log);
+        g_serial_log = NULL;
+    }
     return ok;
 }
 
