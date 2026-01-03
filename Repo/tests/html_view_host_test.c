@@ -2123,7 +2123,100 @@ static char *decode_data_css(const char *href)
     return out;
 }
 
-static void collect_style_text(const html_node_t *node, char **css, size_t *len, size_t *cap)
+static bool host_is_remote_url(const char *href)
+{
+    if (!href || href[0] == '\0')
+    {
+        return false;
+    }
+    if (strncasecmp(href, "http://", 7) == 0 || strncasecmp(href, "https://", 8) == 0)
+    {
+        return true;
+    }
+    if (strncasecmp(href, "mailto:", 7) == 0 || strncasecmp(href, "javascript:", 11) == 0)
+    {
+        return true;
+    }
+    if (strncasecmp(href, "data:", 5) == 0)
+    {
+        return true;
+    }
+    if (href[0] == '/' && href[1] == '/')
+    {
+        return true;
+    }
+    return false;
+}
+
+static char *host_resolve_local_url(const char *base_dir, const char *href)
+{
+    if (!href || href[0] == '\0')
+    {
+        return NULL;
+    }
+    if (host_is_remote_url(href))
+    {
+        return NULL;
+    }
+
+    const char *path = href;
+    if (strncasecmp(path, "file://", 7) == 0)
+    {
+        path += 7;
+    }
+
+    const char *path_end = path;
+    while (*path_end && *path_end != '?' && *path_end != '#')
+    {
+        ++path_end;
+    }
+    if (path_end <= path)
+    {
+        return NULL;
+    }
+
+    size_t decoded_len = 0;
+    char *decoded = host_decode_percent(path, (size_t)(path_end - path), &decoded_len);
+    if (!decoded)
+    {
+        return NULL;
+    }
+
+    if (decoded[0] == '/' || !base_dir || base_dir[0] == '\0')
+    {
+        return decoded;
+    }
+
+    size_t base_len = strlen(base_dir);
+    bool need_sep = base_len > 0 && base_dir[base_len - 1] != '/';
+    size_t out_len = base_len + (need_sep ? 1 : 0) + decoded_len + 1;
+    char *joined = (char *)malloc(out_len);
+    if (!joined)
+    {
+        free(decoded);
+        return NULL;
+    }
+    memcpy(joined, base_dir, base_len);
+    size_t pos = base_len;
+    if (need_sep)
+    {
+        joined[pos++] = '/';
+    }
+    if (decoded_len > 0)
+    {
+        memcpy(joined + pos, decoded, decoded_len);
+        pos += decoded_len;
+    }
+    joined[pos] = '\0';
+    free(decoded);
+    return joined;
+}
+
+static void collect_style_text_with_base(const html_node_t *node,
+                                         char **css,
+                                         size_t *len,
+                                         size_t *cap,
+                                         const char *base_dir)
 {
     if (!node)
     {
@@ -2150,6 +2243,11 @@ static void collect_style_text(const html_node_t *node, char **css, size_t *len,
             const char *rel = html_attr_get(node, "rel");
             if (attr_has_token(rel, "stylesheet"))
             {
+                const char *type = html_attr_get(node, "type");
+                if (type && type[0] != '\0' && strcasecmp(type, "text/css") != 0)
+                {
+                    goto next_node;
+                }
                 const char *href = html_attr_get(node, "href");
                 char *decoded = decode_data_css(href);
                 if (decoded)
@@ -2158,14 +2256,36 @@ static void collect_style_text(const html_node_t *node, char **css, size_t *len,
                     (void)html_view_buf_append(css, len, cap, "\n", 1);
                     free(decoded);
                 }
+                else if (href && href[0] != '\0')
+                {
+                    char *path = host_resolve_local_url(base_dir, href);
+                    if (path)
+                    {
+                        size_t file_len = 0;
+                        char *file = read_file(path, &file_len);
+                        if (file && file_len > 0)
+                        {
+                            (void)html_view_buf_append(css, len, cap, file, file_len);
+                            (void)html_view_buf_append(css, len, cap, "\n", 1);
+                        }
+                        free(file);
+                        free(path);
+                    }
+                }
             }
         }
     }
 
+next_node:
     for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
     {
-        collect_style_text(child, css, len, cap);
+        collect_style_text_with_base(child, css, len, cap, base_dir);
     }
+}
+
+static void collect_style_text(const html_node_t *node, char **css, size_t *len, size_t *cap)
+{
+    collect_style_text_with_base(node, css, len, cap, NULL);
 }
 
 void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
@@ -3659,6 +3779,410 @@ static bool test_acid2_render_snapshot(void)
     return ok;
 }
 
+static bool test_hacker_news_render(void)
+{
+    const char *html_path = "tests/yctest/Hacker News.html";
+    size_t html_len = 0;
+    char *html = read_file(html_path, &html_len);
+    if (!html)
+    {
+        printf("html_view_host_test: hacker_news failed to read %s\n", html_path);
+        return false;
+    }
+
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse(html, &err);
+    if (!doc)
+    {
+        printf("html_view_host_test: hacker_news parse failed at %zu: %s\n",
+               err.offset,
+               err.message ? err.message : "unknown");
+        free(html);
+        return false;
+    }
+
+    char *css = NULL;
+    size_t css_len = 0;
+    size_t css_cap = 0;
+    collect_style_text_with_base(doc->root, &css, &css_len, &css_cap, "tests/yctest");
+    css_stylesheet_t *sheet = css_parse(css ? css : "");
+    if (!sheet)
+    {
+        printf("html_view_host_test: hacker_news css parse failed\n");
+        html_document_destroy(doc);
+        free(html);
+        free(css);
+        return false;
+    }
+
+    printf("html_view_host_test: hacker_news html=%zu css=%zu\n", html_len, css_len);
+
+    time_t run_ts = time(NULL);
+    bool have_test_out = ensure_test_out_dir();
+
+    atk_html_view_priv_t priv = {0};
+    priv.doc = doc;
+    priv.sheet = sheet;
+    html_view_render_cache_clear(&priv.render_cache);
+    priv.render_cache.tile_h = ATK_HTML_VIEW_RENDER_TILE_H;
+
+    const html_node_t *html_node = find_first_tag(doc->root, "html");
+    const html_node_t *body_node = find_first_tag(doc->root, "body");
+
+    const int viewport_x = 0;
+    const int viewport_y = 0;
+    const int viewport_w = 1000;
+    const int viewport_h = 800;
+
+    video_color_t default_page_bg = video_make_color(0xFF, 0xFF, 0xFF);
+    video_color_t default_text = video_make_color(0x00, 0x00, 0x00);
+
+    css_style_t base_style = {0};
+    base_style.has_color = true;
+    base_style.color = default_text;
+    base_style.has_font_size = true;
+    base_style.font_size = (css_length_t){
+        .valid = true,
+        .is_auto = false,
+        .value_milli = atk_font_line_height() * 1000,
+        .unit = CSS_UNIT_PX,
+    };
+    base_style.has_line_height = true;
+    base_style.line_height_milli = 1000;
+
+    css_style_t html_style = {0};
+    if (html_node)
+    {
+        html_view_style_for_node(&html_style, sheet, &base_style, html_node);
+    }
+    else
+    {
+        html_style = base_style;
+    }
+
+    css_style_t body_style = {0};
+    if (body_node)
+    {
+        html_view_style_for_node(&body_style, sheet, &html_style, body_node);
+    }
+    else
+    {
+        body_style = html_style;
+    }
+
+    bool body_has_bg = body_style.has_background && !body_style.background_transparent;
+    video_color_t body_bg = body_has_bg ? body_style.background : default_page_bg;
+
+    int actual_font_px = atk_font_line_height();
+    int css_font_px = actual_font_px;
+    const css_style_t *font_src = &html_style;
+    if (!(html_style.has_font_size && html_style.font_size.valid && !html_style.font_size.is_auto) &&
+        (body_style.has_font_size && body_style.font_size.valid && !body_style.font_size.is_auto))
+    {
+        font_src = &body_style;
+    }
+    if (font_src->has_font_size && font_src->font_size.valid && !font_src->font_size.is_auto)
+    {
+        int computed = html_view_length_to_px(&font_src->font_size,
+                                              viewport_w,
+                                              viewport_h,
+                                              viewport_w,
+                                              viewport_h,
+                                              actual_font_px,
+                                              true);
+        if (computed > 0)
+        {
+            css_font_px = computed;
+        }
+    }
+    if (css_font_px > HTML_VIEW_FONT_MAX_PX)
+    {
+        css_font_px = HTML_VIEW_FONT_MAX_PX;
+    }
+
+    int base_font_px = css_font_px;
+    int base_line_height = base_font_px + 4;
+    if (base_line_height < 8)
+    {
+        base_line_height = 8;
+    }
+
+    int border_px = 0;
+    if (body_style.has_border)
+    {
+        border_px = html_view_length_to_px(&body_style.border_width.left,
+                                           viewport_w,
+                                           viewport_h,
+                                           viewport_w,
+                                           viewport_h,
+                                           base_font_px,
+                                           true);
+        if (border_px < 0)
+        {
+            border_px = 0;
+        }
+    }
+
+    int pad_top = 0;
+    int pad_right = 0;
+    int pad_bottom = 0;
+    int pad_left = 0;
+    if (body_style.has_padding)
+    {
+        pad_top = html_view_length_to_px(&body_style.padding.top,
+                                         viewport_w,
+                                         viewport_h,
+                                         viewport_w,
+                                         viewport_h,
+                                         base_font_px,
+                                         false);
+        pad_right = html_view_length_to_px(&body_style.padding.right,
+                                           viewport_w,
+                                           viewport_h,
+                                           viewport_w,
+                                           viewport_h,
+                                           base_font_px,
+                                           true);
+        pad_bottom = html_view_length_to_px(&body_style.padding.bottom,
+                                            viewport_w,
+                                            viewport_h,
+                                            viewport_w,
+                                            viewport_h,
+                                            base_font_px,
+                                            false);
+        pad_left = html_view_length_to_px(&body_style.padding.left,
+                                          viewport_w,
+                                          viewport_h,
+                                          viewport_w,
+                                          viewport_h,
+                                          base_font_px,
+                                          true);
+        if (pad_top < 0) pad_top = 0;
+        if (pad_right < 0) pad_right = 0;
+        if (pad_bottom < 0) pad_bottom = 0;
+        if (pad_left < 0) pad_left = 0;
+    }
+
+    int body_content_w = viewport_w;
+    if (body_style.has_width)
+    {
+        int computed = html_view_length_to_px(&body_style.width,
+                                              viewport_w,
+                                              viewport_h,
+                                              viewport_w,
+                                              viewport_h,
+                                              base_font_px,
+                                              true);
+        if (computed > 0)
+        {
+            body_content_w = computed;
+        }
+    }
+    if (body_content_w < 0)
+    {
+        body_content_w = 0;
+    }
+
+    int body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    if (body_box_w > viewport_w)
+    {
+        int max_content = viewport_w - pad_left - pad_right - border_px * 2;
+        if (max_content < 0)
+        {
+            max_content = 0;
+        }
+        body_content_w = max_content;
+        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    }
+
+    int body_box_x = viewport_x;
+    if (body_style.has_margin)
+    {
+        bool auto_left = body_style.margin.left.valid && body_style.margin.left.is_auto;
+        bool auto_right = body_style.margin.right.valid && body_style.margin.right.is_auto;
+        if (auto_left && auto_right)
+        {
+            body_box_x = viewport_x + (viewport_w - body_box_w) / 2;
+        }
+        else if (body_style.margin.left.valid && !body_style.margin.left.is_auto)
+        {
+            body_box_x = viewport_x + html_view_length_to_px_signed(&body_style.margin.left,
+                                                                    viewport_w,
+                                                                    viewport_h,
+                                                                    viewport_w,
+                                                                    viewport_h,
+                                                                    base_font_px,
+                                                                    true);
+        }
+    }
+
+    int margin_top = 0;
+    if (body_style.has_margin && body_style.margin.top.valid && !body_style.margin.top.is_auto)
+    {
+        margin_top = html_view_length_to_px_signed(&body_style.margin.top,
+                                                   viewport_w,
+                                                   viewport_h,
+                                                   viewport_w,
+                                                   viewport_h,
+                                                   base_font_px,
+                                                   false);
+    }
+
+    int body_box_y0 = viewport_y + margin_top;
+    int body_content_x = body_box_x + border_px + pad_left;
+    int body_content_y0 = body_box_y0 + border_px + pad_top;
+
+    int body_height_basis = 0;
+    bool body_height_valid = false;
+    if (body_style.has_height && body_style.height.valid && !body_style.height.is_auto)
+    {
+        body_height_basis = html_view_length_to_px(&body_style.height,
+                                                   viewport_w,
+                                                   viewport_h,
+                                                   viewport_w,
+                                                   viewport_h,
+                                                   base_font_px,
+                                                   false);
+        if (body_height_basis < 0)
+        {
+            body_height_basis = 0;
+        }
+        body_height_valid = true;
+    }
+
+    priv.render_cache.doc = doc;
+    priv.render_cache.sheet = sheet;
+    priv.render_cache.viewport_w = viewport_w;
+    priv.render_cache.viewport_h = viewport_h;
+    priv.render_cache.doc_origin_local_x = body_content_x - viewport_x;
+    priv.render_cache.doc_origin_local_y = body_content_y0 - viewport_y;
+    priv.render_cache.body_w = body_content_w;
+    priv.render_cache.base_font_px = base_font_px;
+    priv.render_cache.base_line_height = base_line_height;
+
+    const int clip_pad = 10000000;
+    atk_rect_t record_clip = {
+        .x = viewport_x - clip_pad,
+        .y = viewport_y - clip_pad,
+        .width = viewport_w + clip_pad * 2,
+        .height = viewport_h + clip_pad * 2
+    };
+
+    html_view_float_ctx_t floats_record = {0};
+    html_view_ctx_t record = {
+        .state = NULL,
+        .widget = NULL,
+        .priv = &priv,
+        .sheet = sheet,
+        .bg = body_bg,
+        .clip = record_clip,
+        .viewport_x = viewport_x,
+        .viewport_y = viewport_y,
+        .viewport_w = viewport_w,
+        .viewport_h = viewport_h,
+        .scroll_y = 0,
+        .window_x = 0,
+        .window_y = 0,
+        .body_x = body_content_x,
+        .body_w = body_content_w,
+        .pos_x = viewport_x,
+        .pos_y = viewport_y,
+        .pos_w = viewport_w,
+        .pos_h = viewport_h,
+        .height_basis = body_height_basis,
+        .height_basis_valid = body_height_valid,
+        .height_basis_explicit = body_height_valid,
+        .floats = &floats_record,
+        .actual_font_px = base_font_px,
+        .base_font_px = base_font_px,
+        .base_line_height = base_line_height,
+        .line_height = base_line_height,
+        .space_w = 0,
+        .x = body_content_x,
+        .y = body_content_y0,
+        .max_x = body_content_x + body_content_w,
+        .measure_max_x = body_content_x,
+        .content_bottom = body_content_y0,
+        .pending_margin = {0},
+        .list_level = 0,
+        .text_align_mode = body_style.has_text_align ? body_style.text_align : CSS_TEXT_ALIGN_LEFT,
+        .line_op_start = 0,
+        .line_start_x = body_content_x,
+        .line_start_y = body_content_y0,
+        .pending_space = false,
+        .z_index = 0,
+        .paint_layer = HTML_VIEW_PAINT_LAYER_BLOCK,
+        .draw = false,
+        .record = true,
+        .record_failed = false,
+        .fixed_mode = false,
+        .table_mode = false,
+        .doc_origin_x = body_content_x,
+        .doc_origin_y = body_content_y0
+    };
+
+    printf("html_view_host_test: hacker_news render record begin\n");
+    record.space_w = html_view_text_width(&record, " ");
+    if (body_node)
+    {
+        html_view_render_children(&record, body_node, &body_style);
+    }
+    else if (doc->root)
+    {
+        html_view_render_children(&record, doc->root, &body_style);
+    }
+    html_view_align_current_line(&record);
+    html_view_style_stack_destroy(&record);
+    printf("html_view_host_test: hacker_news render record end ops=%zu\n", priv.render_cache.op_count);
+
+    if (surface_init(viewport_w, viewport_h, body_bg))
+    {
+        surface_clear(body_bg);
+        html_view_ctx_t draw_ctx = record;
+        draw_ctx.draw = true;
+        draw_ctx.record = false;
+        draw_ctx.clip = (atk_rect_t){ viewport_x, viewport_y, viewport_w, viewport_h };
+        draw_ctx.scroll_y = 0;
+
+        html_view_render_cache_draw_visible(&draw_ctx);
+
+        if (have_test_out)
+        {
+            char path[128];
+            snprintf(path, sizeof(path), "test-out/hacker-news-run-%lld.png", (long long)run_ts);
+            if (!host_write_png_rgba32(path,
+                                       g_surface,
+                                       g_surface_width,
+                                       g_surface_height,
+                                       g_surface_width * (int)sizeof(video_color_t)))
+            {
+                printf("html_view_host_test: hacker_news failed to write %s\n", path);
+            }
+            else
+            {
+                printf("html_view_host_test: hacker_news wrote %s\n", path);
+            }
+        }
+
+        surface_destroy();
+    }
+    else
+    {
+        printf("html_view_host_test: hacker_news failed to allocate surface\n");
+    }
+
+    uint64_t hash = hash_render_ops(&priv.render_cache);
+    printf("html_view_host_test: hacker_news hash=0x%016llX\n", (unsigned long long)hash);
+
+    html_view_images_clear(&priv);
+    html_view_render_cache_clear(&priv.render_cache);
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+    free(css);
+    free(html);
+    return true;
+}
+
 typedef struct
 {
     const char *name;
@@ -3688,6 +4212,7 @@ int main(void)
         { "float-inherit", test_float_inherit },
         { "float-measure-width", test_float_measure_width },
         { "acid2-snapshot", test_acid2_render_snapshot },
+        { "hacker-news-render", test_hacker_news_render },
     };
 
     size_t pass = 0;

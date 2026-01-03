@@ -1575,6 +1575,7 @@ int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_
     int actual_font_px = ctx->actual_font_px > 0 ? ctx->actual_font_px : atk_font_line_height();
     int base_font_px = ctx->base_font_px > 0 ? ctx->base_font_px : actual_font_px;
     int line_height = ctx->base_line_height > 0 ? ctx->base_line_height : (base_font_px + 4);
+    bool explicit_line_height = false;
 
     if (style && style->has_line_height)
     {
@@ -1590,30 +1591,34 @@ int html_view_line_height_for_style(const html_view_ctx_t *ctx, const css_style_
             if (px > 0)
             {
                 line_height = px;
+                explicit_line_height = true;
             }
         }
         else if (style->line_height_milli > 0)
         {
             line_height = (int)(((int64_t)base_font_px * (int64_t)style->line_height_milli + 500LL) / 1000LL);
-            if (line_height < base_font_px)
-            {
-                line_height = base_font_px;
-            }
+            explicit_line_height = true;
         }
     }
 
-    if (line_height < actual_font_px)
+    if (!explicit_line_height)
     {
-        line_height = actual_font_px;
+        if (line_height < actual_font_px)
+        {
+            line_height = actual_font_px;
+        }
+        if (metrics_total > line_height)
+        {
+            line_height = metrics_total;
+        }
+        if (line_height < 8)
+        {
+            line_height = 8;
+        }
     }
-    if (metrics_total > line_height)
+    else if (line_height < 1)
     {
-        line_height = metrics_total;
-    }
-
-    if (line_height < 8)
-    {
-        line_height = 8;
+        line_height = 1;
     }
     return line_height;
 }
