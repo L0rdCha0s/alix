@@ -1,6 +1,58 @@
 #include "atk/html_view/render/render_internal.h"
+#include "serial.h"
+
+#include <ctype.h>
+#include <string.h>
 
 void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
+
+static bool html_view_attr_has_class_local(const html_node_t *node, const char *token)
+{
+    if (!node || !token || !*token)
+    {
+        return false;
+    }
+    const char *classes = html_attr_get(node, "class");
+    if (!classes || classes[0] == '\0')
+    {
+        return false;
+    }
+    const char *p = classes;
+    while (*p)
+    {
+        while (*p && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == strlen(token) && strncasecmp(start, token, len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool html_view_node_has_ancestor_class_local(const html_node_t *node, const char *token)
+{
+    for (const html_node_t *cur = node; cur; cur = cur->parent)
+    {
+        if (html_view_attr_has_class_local(cur, token))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 void html_view_record_anchor(html_view_ctx_t *ctx, const html_node_t *node)
 {
@@ -120,20 +172,57 @@ static void html_view_render_pseudo_element(html_view_ctx_t *ctx,
                                             const css_style_t *parent_style,
                                             html_view_pseudo_t pseudo)
 {
+    const char *pseudo_name = (pseudo == HTML_VIEW_PSEUDO_BEFORE) ? "before" : "after";
+
     if (!ctx || !node || !parent_style || !ctx->priv)
     {
         return;
     }
 
+    bool trace_acid2 = html_view_node_has_ancestor_class_local(node, "nose") ||
+                       html_view_node_has_ancestor_class_local(node, "smile") ||
+                       html_view_node_has_ancestor_class_local(node, "eyes");
+
     css_style_t style = {0};
     if (!html_view_style_for_pseudo(&style, ctx->priv->sheet, parent_style, node, pseudo))
     {
+        if (ctx->record && trace_acid2)
+        {
+            const char *cls = html_attr_get(node, "class");
+            serial_printf("[html_view][acid2] pseudo=%s tag=%s class=%s has_content=0",
+                          pseudo_name,
+                          node->name ? node->name : "(null)",
+                          cls ? cls : "(null)");
+        }
         return;
     }
 
     if (style.has_display && style.display == CSS_DISPLAY_NONE)
     {
         return;
+    }
+
+    if (ctx->record && trace_acid2)
+    {
+        const char *cls = html_attr_get(node, "class");
+        int display = style.has_display ? (int)style.display : -1;
+        serial_printf("[html_view][acid2] pseudo=%s tag=%s class=%s has_content=%d display=%d border=%d,%d,%d,%d border_none=%d,%d,%d,%d bg=%08X font_px=%d base_font=%d",
+                      pseudo_name,
+                      node->name ? node->name : "(null)",
+                      cls ? cls : "(null)",
+                      style.has_content ? 1 : 0,
+                      display,
+                      style.has_border ? (int)style.border_width.top.value_milli / 1000 : 0,
+                      style.has_border ? (int)style.border_width.right.value_milli / 1000 : 0,
+                      style.has_border ? (int)style.border_width.bottom.value_milli / 1000 : 0,
+                      style.has_border ? (int)style.border_width.left.value_milli / 1000 : 0,
+                      style.border_style_none[CSS_BORDER_SIDE_TOP] ? 1 : 0,
+                      style.border_style_none[CSS_BORDER_SIDE_RIGHT] ? 1 : 0,
+                      style.border_style_none[CSS_BORDER_SIDE_BOTTOM] ? 1 : 0,
+                      style.border_style_none[CSS_BORDER_SIDE_LEFT] ? 1 : 0,
+                      style.has_background ? style.background : 0,
+                      ctx->actual_font_px,
+                      ctx->base_font_px);
     }
 
     html_node_t *pseudo_node = (html_node_t *)calloc(1, sizeof(*pseudo_node));

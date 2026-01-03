@@ -1,5 +1,9 @@
 #include "atk/html_view/render/render_internal.h"
 
+#include "ctype.h"
+#include "serial.h"
+#include "string.h"
+
 static bool html_view_object_type_is_image(const char *type)
 {
     if (!type || type[0] == '\0')
@@ -16,6 +20,118 @@ static bool html_view_object_data_is_image(const char *data)
         return false;
     }
     return strncasecmp(data, "data:image/", 11) == 0;
+}
+
+static bool html_view_attr_has_class(const html_node_t *node, const char *token)
+{
+    if (!node || !token || !*token)
+    {
+        return false;
+    }
+    const char *classes = html_attr_get(node, "class");
+    if (!classes || !*classes)
+    {
+        return false;
+    }
+    size_t token_len = strlen(token);
+    const char *p = classes;
+    while (*p)
+    {
+        while (*p && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == token_len && strncmp(start, token, len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool html_view_attr_has_id(const html_node_t *node, const char *token)
+{
+    if (!node || !token || !*token)
+    {
+        return false;
+    }
+    const char *id = html_attr_get(node, "id");
+    if (!id || !*id)
+    {
+        return false;
+    }
+    return strcmp(id, token) == 0;
+}
+
+static bool html_view_node_has_ancestor_class(const html_node_t *node, const char *token)
+{
+    for (const html_node_t *cur = node; cur; cur = cur->parent)
+    {
+        if (html_view_attr_has_class(cur, token))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool html_view_node_has_ancestor_id(const html_node_t *node, const char *token)
+{
+    for (const html_node_t *cur = node; cur; cur = cur->parent)
+    {
+        if (html_view_attr_has_id(cur, token))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *html_view_debug_inline_label(const html_node_t *node)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT)
+    {
+        return NULL;
+    }
+    if (html_view_node_has_ancestor_id(node, "eyes-a"))
+    {
+        return "eyes-a-object";
+    }
+    if (html_view_node_has_ancestor_id(node, "eyes-b"))
+    {
+        return "eyes-b-object";
+    }
+    if (html_view_node_has_ancestor_class(node, "eyes"))
+    {
+        return "eyes-object";
+    }
+    return NULL;
+}
+
+static uint32_t html_view_debug_hash_string(const char *text)
+{
+    if (!text)
+    {
+        return 0;
+    }
+    uint32_t hash = 2166136261u;
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p)
+    {
+        hash ^= *p++;
+        hash *= 16777619u;
+    }
+    return hash;
 }
 
 static bool html_view_measure_inline_children(const html_view_ctx_t *ctx,
@@ -771,6 +887,75 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
                 int box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
                 if (box_w > 0 && box_h > 0)
                 {
+                    const char *debug_label = html_view_debug_inline_label(node);
+                    if (debug_label && ctx->record)
+                    {
+                        int bg_repeat = style->has_background_repeat ? (int)style->background_repeat : -1;
+                        int bg_attach = style->has_background_attachment ? (int)style->background_attachment : -1;
+                        int bg_pos_x = 0;
+                        int bg_pos_y = 0;
+                        if (style->has_background_position)
+                        {
+                            bg_pos_x = html_view_length_to_px_signed(&style->background_pos_x,
+                                                                     ctx->viewport_w,
+                                                                     ctx->viewport_h,
+                                                                     box_w,
+                                                                     box_h,
+                                                                     ctx->base_font_px,
+                                                                     true);
+                            bg_pos_y = html_view_length_to_px_signed(&style->background_pos_y,
+                                                                     ctx->viewport_w,
+                                                                     ctx->viewport_h,
+                                                                     box_w,
+                                                                     box_h,
+                                                                     ctx->base_font_px,
+                                                                     false);
+                        }
+                        bool bg_has_img = style->has_background_image && style->background_image;
+                        uint32_t bg_hash = bg_has_img ? html_view_debug_hash_string(style->background_image) : 0;
+                        int bg_w = 0;
+                        int bg_h = 0;
+                        if (bg_has_img && ctx->priv)
+                        {
+                            html_view_image_t *bg = html_view_image_find(ctx->priv, style->background_image);
+                            if (!bg)
+                            {
+                                (void)html_view_try_load_data_image_locked(ctx->priv, style->background_image);
+                                bg = html_view_image_find(ctx->priv, style->background_image);
+                            }
+                            if (bg)
+                            {
+                                bg_w = bg->width;
+                                bg_h = bg->height;
+                            }
+                        }
+                        video_color_t bg_color = style->has_background ? style->background : 0;
+                        int bg_trans = (!style->has_background || style->background_transparent) ? 1 : 0;
+                        serial_printf("[html_view][acid2] object=%s img=%dx%d box=%dx%d padding=%d,%d,%d,%d border=%d,%d,%d,%d bg=%08X bg_trans=%d bg_img=%d bg_hash=%08X bg_size=%dx%d bg_attach=%d bg_repeat=%d bg_pos=%d,%d",
+                                      debug_label,
+                                      content_w,
+                                      content_h,
+                                      box_w,
+                                      box_h,
+                                      pad_top,
+                                      pad_right,
+                                      pad_bottom,
+                                      pad_left,
+                                      border_top,
+                                      border_right,
+                                      border_bottom,
+                                      border_left,
+                                      bg_color,
+                                      bg_trans,
+                                      bg_has_img ? 1 : 0,
+                                      bg_hash,
+                                      bg_w,
+                                      bg_h,
+                                      bg_attach,
+                                      bg_repeat,
+                                      bg_pos_x,
+                                      bg_pos_y);
+                    }
                     if (box_h > ctx->line_height)
                     {
                         ctx->line_height = box_h;

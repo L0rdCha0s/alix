@@ -155,6 +155,7 @@ typedef struct
     int32_t z_index;
     bool fixed;
     bool has_clip;
+    bool clip_scroll;
     int32_t clip_x;
     int32_t clip_y;
     int32_t clip_w;
@@ -350,6 +351,7 @@ typedef struct
     bool record;
     bool record_failed;
     bool fixed_mode;
+    bool clip_scroll;
     bool table_mode;
     bool measure_shrink;
     int doc_origin_x;

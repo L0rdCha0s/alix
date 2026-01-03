@@ -678,6 +678,106 @@ static bool png_apply_filters(const uint8_t *scanlines,
     return true;
 }
 
+static bool png_calc_row_bytes(uint32_t width,
+                               int color_type,
+                               int bit_depth,
+                               int bpp,
+                               size_t *out_row_bytes)
+{
+    if (!out_row_bytes || bpp <= 0)
+    {
+        return false;
+    }
+    if (color_type == 3 && bit_depth < 8)
+    {
+        uint64_t bits = (uint64_t)width * (uint64_t)bit_depth;
+        uint64_t row = (bits + 7u) / 8u;
+        if (row > (uint64_t)((size_t)-1))
+        {
+            return false;
+        }
+        *out_row_bytes = (size_t)row;
+        return true;
+    }
+    size_t row = (size_t)width * (size_t)bpp;
+    if (width != 0 && row / (size_t)bpp != (size_t)width)
+    {
+        return false;
+    }
+    *out_row_bytes = row;
+    return true;
+}
+
+static uint8_t png_palette_index(const uint8_t *row, uint32_t x, int bit_depth)
+{
+    if (bit_depth == 8)
+    {
+        return row[x];
+    }
+
+    int pixels_per_byte = 8 / bit_depth;
+    uint32_t byte_index = x / (uint32_t)pixels_per_byte;
+    int shift = (pixels_per_byte - 1 - (int)(x % (uint32_t)pixels_per_byte)) * bit_depth;
+    uint8_t mask = (uint8_t)((1u << bit_depth) - 1u);
+    return (uint8_t)((row[byte_index] >> shift) & mask);
+}
+
+static bool png_apply_filters_palette(const uint8_t *scanlines,
+                                      uint32_t width,
+                                      uint32_t height,
+                                      int bpp,
+                                      int bit_depth,
+                                      const uint8_t palette[256][3],
+                                      size_t palette_len,
+                                      const uint8_t *palette_alpha,
+                                      video_color_t *out_pixels)
+{
+    size_t row_bytes = 0;
+    if (!png_calc_row_bytes(width, 3, bit_depth, bpp, &row_bytes))
+    {
+        return false;
+    }
+    const uint8_t *prev = NULL;
+    const uint8_t *cursor = scanlines;
+
+    for (uint32_t y = 0; y < height; ++y)
+    {
+        uint8_t filter = *cursor++;
+        const uint8_t *row = cursor;
+        uint8_t *recon = (uint8_t *)cursor;
+        if (!png_unfilter_row(filter, row, recon, prev, row_bytes, bpp))
+        {
+            return false;
+        }
+
+        for (uint32_t x = 0; x < width; ++x)
+        {
+            uint8_t idx = png_palette_index(recon, x, bit_depth);
+            uint8_t r = 0;
+            uint8_t g = 0;
+            uint8_t b = 0;
+            uint8_t a = 0xFF;
+            if (idx < palette_len)
+            {
+                r = palette[idx][0];
+                g = palette[idx][1];
+                b = palette[idx][2];
+                a = palette_alpha ? palette_alpha[idx] : 0xFF;
+            }
+            out_pixels[(size_t)y * width + x] =
+                ((video_color_t)a << 24) |
+                ((video_color_t)r << 16) |
+                ((video_color_t)g << 8) |
+                (video_color_t)b;
+        }
+
+        prev = recon;
+        cursor += row_bytes;
+    }
+
+    return true;
+}
+
 static uint32_t png_adam7_pass_len(uint32_t size, int start, int step)
 {
     if (size <= (uint32_t)start)
@@ -687,7 +787,12 @@ static uint32_t png_adam7_pass_len(uint32_t size, int start, int step)
     return (uint32_t)((size - (uint32_t)start + (uint32_t)step - 1) / (uint32_t)step);
 }
 
-static bool png_adam7_expected_bytes(uint32_t width, uint32_t height, int bpp, size_t *out_bytes)
+static bool png_adam7_expected_bytes(uint32_t width,
+                                     uint32_t height,
+                                     int bpp,
+                                     int color_type,
+                                     int bit_depth,
+                                     size_t *out_bytes)
 {
     if (!out_bytes || bpp <= 0)
     {
@@ -708,8 +813,8 @@ static bool png_adam7_expected_bytes(uint32_t width, uint32_t height, int bpp, s
         {
             continue;
         }
-        size_t row_bytes = (size_t)pw * (size_t)bpp;
-        if (row_bytes / (size_t)bpp != (size_t)pw)
+        size_t row_bytes = 0;
+        if (!png_calc_row_bytes(pw, color_type, bit_depth, bpp, &row_bytes))
         {
             return false;
         }
@@ -802,6 +907,82 @@ static bool png_apply_filters_interlaced(const uint8_t *scanlines,
     return true;
 }
 
+static bool png_apply_filters_palette_interlaced(const uint8_t *scanlines,
+                                                 uint32_t width,
+                                                 uint32_t height,
+                                                 int bpp,
+                                                 int bit_depth,
+                                                 const uint8_t palette[256][3],
+                                                 size_t palette_len,
+                                                 const uint8_t *palette_alpha,
+                                                 video_color_t *out_pixels)
+{
+    static const int x_start[7] = { 0, 4, 0, 2, 0, 1, 0 };
+    static const int y_start[7] = { 0, 0, 4, 0, 2, 0, 1 };
+    static const int x_step[7] = { 8, 8, 4, 4, 2, 2, 1 };
+    static const int y_step[7] = { 8, 8, 8, 4, 4, 2, 2 };
+
+    const uint8_t *cursor = scanlines;
+    for (int pass = 0; pass < 7; ++pass)
+    {
+        uint32_t pass_w = png_adam7_pass_len(width, x_start[pass], x_step[pass]);
+        uint32_t pass_h = png_adam7_pass_len(height, y_start[pass], y_step[pass]);
+        if (pass_w == 0 || pass_h == 0)
+        {
+            continue;
+        }
+
+        size_t row_bytes = 0;
+        if (!png_calc_row_bytes(pass_w, 3, bit_depth, bpp, &row_bytes))
+        {
+            return false;
+        }
+        const uint8_t *prev = NULL;
+
+        for (uint32_t y = 0; y < pass_h; ++y)
+        {
+            uint8_t filter = *cursor++;
+            const uint8_t *row = cursor;
+            uint8_t *recon = (uint8_t *)cursor;
+            if (!png_unfilter_row(filter, row, recon, prev, row_bytes, bpp))
+            {
+                return false;
+            }
+
+            for (uint32_t x = 0; x < pass_w; ++x)
+            {
+                uint8_t idx = png_palette_index(recon, x, bit_depth);
+                uint8_t r = 0;
+                uint8_t g = 0;
+                uint8_t b = 0;
+                uint8_t a = 0xFF;
+                if (idx < palette_len)
+                {
+                    r = palette[idx][0];
+                    g = palette[idx][1];
+                    b = palette[idx][2];
+                    a = palette_alpha ? palette_alpha[idx] : 0xFF;
+                }
+                uint32_t out_x = (uint32_t)x_start[pass] + x * (uint32_t)x_step[pass];
+                uint32_t out_y = (uint32_t)y_start[pass] + y * (uint32_t)y_step[pass];
+                if (out_x < width && out_y < height)
+                {
+                    out_pixels[(size_t)out_y * width + out_x] =
+                        ((video_color_t)a << 24) |
+                        ((video_color_t)r << 16) |
+                        ((video_color_t)g << 8) |
+                        (video_color_t)b;
+                }
+            }
+
+            prev = recon;
+            cursor += row_bytes;
+        }
+    }
+
+    return true;
+}
+
 int png_decode_rgba32(const uint8_t *png,
                       size_t len,
                       video_color_t **out_pixels,
@@ -833,6 +1014,12 @@ int png_decode_rgba32(const uint8_t *png,
     uint8_t trns_r = 0;
     uint8_t trns_g = 0;
     uint8_t trns_b = 0;
+    uint8_t palette[256][3];
+    size_t palette_len = 0;
+    uint8_t trns_alpha[256];
+    size_t trns_alpha_len = 0;
+    bool have_plte = false;
+    memset(trns_alpha, 0xFF, sizeof(trns_alpha));
 
     while (pos + PNG_CHUNK_HEADER <= len)
     {
@@ -895,11 +1082,36 @@ int png_decode_rgba32(const uint8_t *png,
                 break;
             }
 
+            case 0x504C5445: /* PLTE */
+                if (chunk_len % 3 != 0 || chunk_len > (256 * 3))
+                {
+                    png_set_error("bad PLTE length");
+                    free(idat);
+                    return -1;
+                }
+                palette_len = chunk_len / 3;
+                for (size_t i = 0; i < palette_len; ++i)
+                {
+                    palette[i][0] = chunk_data[i * 3 + 0];
+                    palette[i][1] = chunk_data[i * 3 + 1];
+                    palette[i][2] = chunk_data[i * 3 + 2];
+                }
+                have_plte = true;
+                break;
+
             case 0x49454E44: /* IEND */
                 pos = len; /* force exit */
                 break;
             case 0x74524E53: /* tRNS */
-                if (chunk_len == 6)
+                if (color_type == 3)
+                {
+                    trns_alpha_len = chunk_len > 256 ? 256 : chunk_len;
+                    for (size_t i = 0; i < trns_alpha_len; ++i)
+                    {
+                        trns_alpha[i] = chunk_data[i];
+                    }
+                }
+                else if (chunk_len == 6)
                 {
                     trns_r = chunk_data[1];
                     trns_g = chunk_data[3];
@@ -919,16 +1131,31 @@ int png_decode_rgba32(const uint8_t *png,
         png_set_error("missing IHDR");
         return -1;
     }
-    if (bit_depth != 8)
+    if (color_type == 3)
+    {
+        if (bit_depth != 1 && bit_depth != 2 && bit_depth != 4 && bit_depth != 8)
+        {
+            free(idat);
+            png_set_error("unsupported bit depth");
+            return -1;
+        }
+    }
+    else if (bit_depth != 8)
     {
         free(idat);
         png_set_error("only 8-bit depth supported");
         return -1;
     }
-    if (color_type != 6 && color_type != 2)
+    if (color_type != 6 && color_type != 2 && color_type != 3)
     {
         free(idat);
         png_set_error("unsupported color type");
+        return -1;
+    }
+    if (color_type == 3 && !have_plte)
+    {
+        free(idat);
+        png_set_error("missing PLTE");
         return -1;
     }
     if (idat_size == 0)
@@ -937,10 +1164,10 @@ int png_decode_rgba32(const uint8_t *png,
         return -1;
     }
 
-    int bpp = (color_type == 6) ? 4 : 3;
+    int bpp = (color_type == 6) ? 4 : (color_type == 2 ? 3 : 1);
     bool apply_trns = (color_type == 2 && have_trns);
-    size_t row_bytes = (size_t)width * (size_t)bpp;
-    if (row_bytes / (size_t)bpp != width)
+    size_t row_bytes = 0;
+    if (!png_calc_row_bytes(width, color_type, bit_depth, bpp, &row_bytes))
     {
         free(idat);
         png_set_error("dimension overflow");
@@ -960,7 +1187,7 @@ int png_decode_rgba32(const uint8_t *png,
     }
     else
     {
-        if (!png_adam7_expected_bytes(width, height, bpp, &expected_bytes))
+        if (!png_adam7_expected_bytes(width, height, bpp, color_type, bit_depth, &expected_bytes))
         {
             free(idat);
             png_set_error("size overflow");
@@ -998,27 +1225,57 @@ int png_decode_rgba32(const uint8_t *png,
     bool filters_ok = false;
     if (interlace == 0)
     {
-        filters_ok = png_apply_filters(scanlines,
-                                        width,
-                                        height,
-                                        bpp,
-                                        apply_trns,
-                                        trns_r,
-                                        trns_g,
-                                        trns_b,
-                                        pixels);
+        if (color_type == 3)
+        {
+            filters_ok = png_apply_filters_palette(scanlines,
+                                                   width,
+                                                   height,
+                                                   bpp,
+                                                   bit_depth,
+                                                   palette,
+                                                   palette_len,
+                                                   trns_alpha,
+                                                   pixels);
+        }
+        else
+        {
+            filters_ok = png_apply_filters(scanlines,
+                                           width,
+                                           height,
+                                           bpp,
+                                           apply_trns,
+                                           trns_r,
+                                           trns_g,
+                                           trns_b,
+                                           pixels);
+        }
     }
     else
     {
-        filters_ok = png_apply_filters_interlaced(scanlines,
-                                                  width,
-                                                  height,
-                                                  bpp,
-                                                  apply_trns,
-                                                  trns_r,
-                                                  trns_g,
-                                                  trns_b,
-                                                  pixels);
+        if (color_type == 3)
+        {
+            filters_ok = png_apply_filters_palette_interlaced(scanlines,
+                                                              width,
+                                                              height,
+                                                              bpp,
+                                                              bit_depth,
+                                                              palette,
+                                                              palette_len,
+                                                              trns_alpha,
+                                                              pixels);
+        }
+        else
+        {
+            filters_ok = png_apply_filters_interlaced(scanlines,
+                                                      width,
+                                                      height,
+                                                      bpp,
+                                                      apply_trns,
+                                                      trns_r,
+                                                      trns_g,
+                                                      trns_b,
+                                                      pixels);
+        }
     }
 
     if (!filters_ok)

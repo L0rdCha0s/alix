@@ -52,6 +52,7 @@ static void html_view_record_op_clip(const html_view_ctx_t *ctx, html_view_op_t 
         return;
     }
     op->has_clip = true;
+    op->clip_scroll = ctx->clip_scroll;
     op->clip_x = html_view_record_x(ctx, clip->x);
     op->clip_y = html_view_record_y(ctx, clip->y);
     op->clip_w = clip->width;
@@ -188,6 +189,8 @@ void html_view_draw_background_image(html_view_ctx_t *ctx,
 
     bool fixed = style->has_background_attachment &&
                  style->background_attachment == CSS_BACKGROUND_ATTACHMENT_FIXED;
+    bool element_fixed = style->has_position &&
+                         style->position == CSS_POSITION_FIXED;
 
     int pos_x = 0;
     int pos_y = 0;
@@ -241,9 +244,11 @@ void html_view_draw_background_image(html_view_ctx_t *ctx,
     int start_y = repeat_y ? html_view_repeat_start(origin_y, img_h, clip.y) : origin_y;
 
     bool saved_fixed = ctx->fixed_mode;
+    bool saved_clip_scroll = ctx->clip_scroll;
     if (fixed)
     {
         ctx->fixed_mode = true;
+        ctx->clip_scroll = !element_fixed;
     }
 
     for (int y = start_y;; y += img_h)
@@ -284,6 +289,7 @@ void html_view_draw_background_image(html_view_ctx_t *ctx,
     }
 
     ctx->fixed_mode = saved_fixed;
+    ctx->clip_scroll = saved_clip_scroll;
 }
 
 void html_view_draw_border_clipped(html_view_ctx_t *ctx,

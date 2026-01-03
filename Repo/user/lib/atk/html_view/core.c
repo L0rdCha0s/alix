@@ -797,9 +797,20 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
         atk_rect_t draw_clip = ctx->clip;
         if (op->has_clip)
         {
+            int clip_x = (int)op->clip_x;
+            int clip_y = (int)op->clip_y;
+            if (!fixed)
+            {
+                clip_x = ctx->doc_origin_x + clip_x;
+                clip_y = ctx->doc_origin_y + clip_y - scroll_y;
+            }
+            else if (op->clip_scroll)
+            {
+                clip_y -= scroll_y;
+            }
             atk_rect_t op_clip = {
-                .x = fixed ? (int)op->clip_x : (ctx->doc_origin_x + (int)op->clip_x),
-                .y = fixed ? (int)op->clip_y : (ctx->doc_origin_y + (int)op->clip_y - scroll_y),
+                .x = clip_x,
+                .y = clip_y,
                 .width = (int)op->clip_w,
                 .height = (int)op->clip_h,
             };

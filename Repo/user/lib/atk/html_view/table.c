@@ -102,6 +102,36 @@ static bool html_view_attr_has_class(const html_node_t *node, const char *token)
     return false;
 }
 
+static bool html_view_attr_has_id(const html_node_t *node, const char *token)
+{
+    if (!node || !token || !*token)
+    {
+        return false;
+    }
+    const char *id = html_attr_get(node, "id");
+    if (!id || !*id)
+    {
+        return false;
+    }
+    return strcmp(id, token) == 0;
+}
+
+static uint32_t html_view_debug_hash_string(const char *text)
+{
+    if (!text)
+    {
+        return 0;
+    }
+    uint32_t hash = 2166136261u;
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p)
+    {
+        hash ^= *p++;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 static bool html_view_node_in_smile(const html_node_t *node)
 {
     for (const html_node_t *cur = node; cur; cur = cur->parent)
@@ -119,6 +149,14 @@ static const char *html_view_debug_float_label(const html_node_t *node)
     if (!node || node->type != HTML_NODE_ELEMENT)
     {
         return NULL;
+    }
+    if (html_view_attr_has_id(node, "eyes-b"))
+    {
+        return "eyes-b";
+    }
+    if (node->name && strcmp(node->name, "address") == 0)
+    {
+        return "address";
     }
     if (html_view_attr_has_class(node, "nose"))
     {
@@ -261,6 +299,10 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
     }
 
     int used_h = measure.content_bottom;
+    if (measure.y > used_h)
+    {
+        used_h = measure.y;
+    }
     if (used_h < 0)
     {
         used_h = 0;
@@ -378,57 +420,6 @@ bool html_view_subtree_has_form_control(const html_node_t *root)
         if (node->type == HTML_NODE_ELEMENT && node->name && html_view_is_form_control_tag(node->name))
         {
             return true;
-        }
-        for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
-        {
-            if (sp < (sizeof(stack) / sizeof(stack[0])))
-            {
-                stack[sp++] = child;
-            }
-        }
-    }
-
-    return false;
-}
-
-static bool html_view_subtree_has_rendered_content(const html_node_t *root)
-{
-    if (!root)
-    {
-        return false;
-    }
-
-    const html_node_t *stack[64];
-    size_t sp = 0;
-    stack[sp++] = root;
-
-    while (sp > 0)
-    {
-        const html_node_t *node = stack[--sp];
-        if (node->type == HTML_NODE_TEXT && node->text)
-        {
-            for (const char *p = node->text; *p; ++p)
-            {
-                if (!isspace((unsigned char)*p))
-                {
-                    return true;
-                }
-            }
-        }
-        if (node->type == HTML_NODE_ELEMENT && node->name)
-        {
-            if (strcmp(node->name, "br") == 0 ||
-                strcmp(node->name, "img") == 0 ||
-                strcmp(node->name, "hr") == 0 ||
-                strcmp(node->name, "input") == 0 ||
-                strcmp(node->name, "textarea") == 0 ||
-                strcmp(node->name, "select") == 0 ||
-                strcmp(node->name, "object") == 0 ||
-                strcmp(node->name, "embed") == 0 ||
-                strcmp(node->name, "iframe") == 0)
-            {
-                return true;
-            }
         }
         for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
         {
@@ -647,10 +638,11 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     }
     int explicit_h_px = explicit_h ? content_h : 0;
 
+    int measured_w = 0;
+    int measured_h = 0;
     if (!explicit_w || !explicit_h)
     {
-        int measured_h = 0;
-        int measured_w = html_view_measure_rendered_width(ctx, node, style, ctx->body_w, &measured_h);
+        measured_w = html_view_measure_rendered_width(ctx, node, style, ctx->body_w, &measured_h);
         if (!explicit_w && measured_w > 0)
         {
             content_w = measured_w;
@@ -661,9 +653,22 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
         }
     }
 
-    if (!explicit_h && !html_view_subtree_has_rendered_content(node))
+    if (ctx->record && html_view_node_in_smile(node))
     {
-        content_h = 0;
+        serial_printf("[html_view][smile-float] tag=%s measured_w=%d measured_h=%d content_w=%d content_h=%d",
+                      node->name ? node->name : "(null)",
+                      measured_w,
+                      measured_h,
+                      content_w,
+                      content_h);
+    }
+    if (ctx->record && html_view_attr_has_class(node, "nose"))
+    {
+        serial_printf("[html_view][acid2] float=nose measured_w=%d measured_h=%d content_w=%d content_h=%d",
+                      measured_w,
+                      measured_h,
+                      content_w,
+                      content_h);
     }
 
     if (content_w < 0)
@@ -775,6 +780,7 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
     int outer_w = border_box_w + margin_left + margin_right;
     int outer_h = border_box_h + margin_top + margin_bottom;
+    bool measuring = (!ctx->draw && !ctx->record);
 
     if (ctx->record && html_view_node_in_smile(node))
     {
@@ -814,6 +820,88 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
                       debug_scroll_y,
                       ctx->doc_origin_y,
                       ctx->record ? 1 : 0);
+    }
+    if (debug_label && ctx->record)
+    {
+        int display = style->has_display ? (int)style->display : -1;
+        int position = style->has_position ? (int)style->position : -1;
+        int float_mode = style->has_float ? (int)style->float_mode : -1;
+        int clear_mode = style->has_clear ? (int)style->clear_mode : -1;
+        int bg_repeat = style->has_background_repeat ? (int)style->background_repeat : -1;
+        int bg_attach = style->has_background_attachment ? (int)style->background_attachment : -1;
+        int bg_pos_x = 0;
+        int bg_pos_y = 0;
+        if (style->has_background_position)
+        {
+            bg_pos_x = html_view_length_to_px_signed(&style->background_pos_x,
+                                                     ctx->viewport_w,
+                                                     ctx->viewport_h,
+                                                     border_box_w,
+                                                     border_box_h,
+                                                     ctx->base_font_px,
+                                                     true);
+            bg_pos_y = html_view_length_to_px_signed(&style->background_pos_y,
+                                                     ctx->viewport_w,
+                                                     ctx->viewport_h,
+                                                     border_box_w,
+                                                     border_box_h,
+                                                     ctx->base_font_px,
+                                                     false);
+        }
+        bool bg_has_img = style->has_background_image && style->background_image;
+        uint32_t bg_hash = bg_has_img ? html_view_debug_hash_string(style->background_image) : 0;
+        int bg_w = 0;
+        int bg_h = 0;
+        if (bg_has_img && ctx->priv)
+        {
+            html_view_image_t *img = html_view_image_find(ctx->priv, style->background_image);
+            if (!img)
+            {
+                (void)html_view_try_load_data_image_locked(ctx->priv, style->background_image);
+                img = html_view_image_find(ctx->priv, style->background_image);
+            }
+            if (img)
+            {
+                bg_w = img->width;
+                bg_h = img->height;
+            }
+        }
+        video_color_t bg_color = style->has_background ? style->background : 0;
+        int bg_trans = (!style->has_background || style->background_transparent) ? 1 : 0;
+        serial_printf("[html_view][acid2] float=%s display=%d position=%d float=%d clear=%d content=%dx%d border_box=%dx%d margin=%d,%d,%d,%d padding=%d,%d,%d,%d border=%d,%d,%d,%d bg=%08X bg_trans=%d bg_img=%d bg_hash=%08X bg_size=%dx%d bg_attach=%d bg_repeat=%d bg_pos=%d,%d side=%d z=%d",
+                      debug_label,
+                      display,
+                      position,
+                      float_mode,
+                      clear_mode,
+                      content_w,
+                      content_h,
+                      border_box_w,
+                      border_box_h,
+                      margin_top,
+                      margin_right,
+                      margin_bottom,
+                      margin_left,
+                      pad_top,
+                      pad_right,
+                      pad_bottom,
+                      pad_left,
+                      border_top,
+                      border_right,
+                      border_bottom,
+                      border_left,
+                      bg_color,
+                      bg_trans,
+                      bg_has_img ? 1 : 0,
+                      bg_hash,
+                      bg_w,
+                      bg_h,
+                      bg_attach,
+                      bg_repeat,
+                      bg_pos_x,
+                      bg_pos_y,
+                      (int)side,
+                      ctx->z_index);
     }
 
     int place_y = float_start_y;
@@ -861,6 +949,11 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
 
     int border_box_x = place_x + margin_left;
     int border_box_y = place_y + margin_top;
+    if (measuring)
+    {
+        border_box_x = ctx->body_x + margin_left;
+        border_box_y = ctx->y + margin_top;
+    }
     int draw_y = html_view_draw_y(ctx, border_box_y);
 
     int measure_edge = (ctx->draw || ctx->record) ? (border_box_x + border_box_w) : (ctx->body_x + outer_w);

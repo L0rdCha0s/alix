@@ -2256,6 +2256,7 @@ static uint64_t hash_render_ops(const html_view_render_cache_t *cache)
         hash_u32(&hash, (uint32_t)op->z_index);
         hash_u32(&hash, op->fixed ? 1u : 0u);
         hash_u32(&hash, op->has_clip ? 1u : 0u);
+        hash_u32(&hash, op->clip_scroll ? 1u : 0u);
         if (op->has_clip)
         {
             hash_u32(&hash, (uint32_t)op->clip_x);

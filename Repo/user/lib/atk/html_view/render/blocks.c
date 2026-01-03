@@ -76,11 +76,65 @@ static bool html_view_attr_has_class(const html_node_t *node, const char *token)
     return false;
 }
 
+static bool html_view_attr_has_id(const html_node_t *node, const char *token)
+{
+    if (!node || !token || !*token)
+    {
+        return false;
+    }
+    const char *id = html_attr_get(node, "id");
+    if (!id || !*id)
+    {
+        return false;
+    }
+    return strcmp(id, token) == 0;
+}
+
+static bool html_view_node_has_ancestor_class(const html_node_t *node, const char *token)
+{
+    for (const html_node_t *cur = node; cur; cur = cur->parent)
+    {
+        if (html_view_attr_has_class(cur, token))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint32_t html_view_debug_hash_string(const char *text)
+{
+    if (!text)
+    {
+        return 0;
+    }
+    uint32_t hash = 2166136261u;
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p)
+    {
+        hash ^= *p++;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 static const char *html_view_debug_block_label(const html_node_t *node)
 {
     if (!node || node->type != HTML_NODE_ELEMENT)
     {
         return NULL;
+    }
+    if (html_view_attr_has_id(node, "eyes-a"))
+    {
+        return "eyes-a";
+    }
+    if (html_view_attr_has_id(node, "eyes-b"))
+    {
+        return "eyes-b";
+    }
+    if (html_view_attr_has_id(node, "eyes-c"))
+    {
+        return "eyes-c";
     }
     if (node->name && strcmp(node->name, "h2") == 0)
     {
@@ -90,9 +144,48 @@ static const char *html_view_debug_block_label(const html_node_t *node)
             return "h2#top";
         }
     }
+    if (node->name && strcmp(node->name, "blockquote") == 0)
+    {
+        return "blockquote";
+    }
+    if (node->name && strcmp(node->name, "address") == 0)
+    {
+        return "address";
+    }
+    if (node->name && strcmp(node->name, "p") == 0 && html_view_node_has_ancestor_class(node, "picture"))
+    {
+        if (html_view_attr_has_class(node, "bad"))
+        {
+            return "p.bad";
+        }
+        return "p";
+    }
     if (node->name && strcmp(node->name, "ul") == 0)
     {
         return "ul";
+    }
+    if (node->name && strcmp(node->name, "li") == 0)
+    {
+        if (html_view_attr_has_class(node, "first-part"))
+        {
+            return "li.first-part";
+        }
+        if (html_view_attr_has_class(node, "second-part"))
+        {
+            return "li.second-part";
+        }
+        if (html_view_attr_has_class(node, "third-part"))
+        {
+            return "li.third-part";
+        }
+        if (html_view_attr_has_class(node, "fourth-part"))
+        {
+            return "li.fourth-part";
+        }
+    }
+    if (html_view_attr_has_class(node, "intro"))
+    {
+        return "intro";
     }
     if (html_view_attr_has_class(node, "picture"))
     {
@@ -126,13 +219,30 @@ static const char *html_view_debug_block_label(const html_node_t *node)
     {
         return "parser";
     }
+    if (html_view_attr_has_class(node, "parser-container"))
+    {
+        return "parser-container";
+    }
     if (html_view_attr_has_class(node, "image-height-test"))
     {
         return "image-height-test";
     }
+    if (node->name && strcmp(node->name, "strong") == 0 &&
+        html_view_node_has_ancestor_class(node, "smile"))
+    {
+        return "smile-strong";
+    }
     if (node->name && strcmp(node->name, "div") == 0)
     {
         const html_node_t *parent = node->parent;
+        if (parent && html_view_attr_has_class(parent, "nose"))
+        {
+            return "nose-box";
+        }
+        if (parent && parent->parent && html_view_attr_has_class(parent->parent, "nose"))
+        {
+            return "nose-core";
+        }
         if (parent && html_view_attr_has_class(parent, "smile"))
         {
             return "smile-box";
@@ -335,6 +445,10 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
         used_w = 0;
     }
     int used_h = measure.content_bottom;
+    if (measure.y > used_h)
+    {
+        used_h = measure.y;
+    }
     if (used_h < 0)
     {
         used_h = 0;
@@ -938,6 +1052,92 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                       scroll_y,
                       ctx->doc_origin_y,
                       ctx->record ? 1 : 0);
+    }
+    if (debug_label && ctx->record)
+    {
+        int display = style->has_display ? (int)style->display : -1;
+        int position = style->has_position ? (int)style->position : -1;
+        int float_mode = style->has_float ? (int)style->float_mode : -1;
+        int clear_mode = style->has_clear ? (int)style->clear_mode : -1;
+        int bg_repeat = style->has_background_repeat ? (int)style->background_repeat : -1;
+        int bg_attach = style->has_background_attachment ? (int)style->background_attachment : -1;
+        int debug_border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
+        if (debug_border_box_h < 0)
+        {
+            debug_border_box_h = 0;
+        }
+        int bg_pos_x = 0;
+        int bg_pos_y = 0;
+        if (style->has_background_position)
+        {
+            bg_pos_x = html_view_length_to_px_signed(&style->background_pos_x,
+                                                     ctx->viewport_w,
+                                                     ctx->viewport_h,
+                                                     border_box_w,
+                                                     debug_border_box_h,
+                                                     ctx->base_font_px,
+                                                     true);
+            bg_pos_y = html_view_length_to_px_signed(&style->background_pos_y,
+                                                     ctx->viewport_w,
+                                                     ctx->viewport_h,
+                                                     border_box_w,
+                                                     debug_border_box_h,
+                                                     ctx->base_font_px,
+                                                     false);
+        }
+        bool bg_has_img = style->has_background_image && style->background_image;
+        uint32_t bg_hash = bg_has_img ? html_view_debug_hash_string(style->background_image) : 0;
+        int bg_w = 0;
+        int bg_h = 0;
+        if (bg_has_img && ctx->priv)
+        {
+            html_view_image_t *img = html_view_image_find(ctx->priv, style->background_image);
+            if (!img)
+            {
+                (void)html_view_try_load_data_image_locked(ctx->priv, style->background_image);
+                img = html_view_image_find(ctx->priv, style->background_image);
+            }
+            if (img)
+            {
+                bg_w = img->width;
+                bg_h = img->height;
+            }
+        }
+        video_color_t bg_color = style->has_background ? style->background : 0;
+        int bg_trans = (!style->has_background || style->background_transparent) ? 1 : 0;
+        serial_printf("[html_view][acid2] posnode=%s display=%d position=%d float=%d clear=%d content=%dx%d border_box=%dx%d margin=%d,%d,%d,%d padding=%d,%d,%d,%d border=%d,%d,%d,%d bg=%08X bg_trans=%d bg_img=%d bg_hash=%08X bg_size=%dx%d bg_attach=%d bg_repeat=%d bg_pos=%d,%d z=%d",
+                      debug_label,
+                      display,
+                      position,
+                      float_mode,
+                      clear_mode,
+                      content_w,
+                      content_h,
+                      border_box_w,
+                      border_box_h,
+                      margin_top,
+                      margin_right,
+                      margin_bottom,
+                      margin_left,
+                      pad_top,
+                      pad_right,
+                      pad_bottom,
+                      pad_left,
+                      border_top,
+                      border_right,
+                      border_bottom,
+                      border_left,
+                      bg_color,
+                      bg_trans,
+                      bg_has_img ? 1 : 0,
+                      bg_hash,
+                      bg_w,
+                      bg_h,
+                      bg_attach,
+                      bg_repeat,
+                      bg_pos_x,
+                      bg_pos_y,
+                      ctx->z_index);
     }
     html_view_ctx_t inner = *ctx;
     inner.fixed_mode = (ctx->fixed_mode || fixed);
@@ -2267,7 +2467,8 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
 
     if (!ctx->measure_shrink || width_specified)
     {
-        int measure_edge = (ctx->draw || ctx->record) ? (draw_border_x + border_box_w) : (ctx->body_x + border_box_w);
+        int measure_edge = (ctx->draw || ctx->record) ? (draw_border_x + border_box_w)
+                                                      : (ctx->body_x + border_box_w);
         if (measure_edge > ctx->measure_max_x)
         {
             ctx->measure_max_x = measure_edge;
@@ -2488,6 +2689,19 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         html_view_new_line(ctx);
     }
 
+    if (ctx->floats && ctx->floats->count > 0)
+    {
+        int float_bottom = html_view_float_max_bottom(ctx->floats, CSS_CLEAR_BOTH);
+        if (float_bottom > ctx->y)
+        {
+            ctx->y = float_bottom;
+        }
+        if (float_bottom > ctx->content_bottom)
+        {
+            ctx->content_bottom = float_bottom;
+        }
+    }
+
     if (table_layout)
     {
         int float_bottom = html_view_float_max_bottom(ctx->floats, CSS_CLEAR_BOTH);
@@ -2632,6 +2846,92 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                       scroll_y,
                       ctx->doc_origin_y,
                       ctx->record ? 1 : 0);
+    }
+    if (debug_label && ctx->record)
+    {
+        int display = style->has_display ? (int)style->display : -1;
+        int position = style->has_position ? (int)style->position : -1;
+        int float_mode = style->has_float ? (int)style->float_mode : -1;
+        int clear_mode = style->has_clear ? (int)style->clear_mode : -1;
+        int bg_repeat = style->has_background_repeat ? (int)style->background_repeat : -1;
+        int bg_attach = style->has_background_attachment ? (int)style->background_attachment : -1;
+        int debug_border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
+        if (debug_border_box_h < 0)
+        {
+            debug_border_box_h = 0;
+        }
+        int bg_pos_x = 0;
+        int bg_pos_y = 0;
+        if (style->has_background_position)
+        {
+            bg_pos_x = html_view_length_to_px_signed(&style->background_pos_x,
+                                                     ctx->viewport_w,
+                                                     ctx->viewport_h,
+                                                     border_box_w,
+                                                     debug_border_box_h,
+                                                     ctx->base_font_px,
+                                                     true);
+            bg_pos_y = html_view_length_to_px_signed(&style->background_pos_y,
+                                                     ctx->viewport_w,
+                                                     ctx->viewport_h,
+                                                     border_box_w,
+                                                     debug_border_box_h,
+                                                     ctx->base_font_px,
+                                                     false);
+        }
+        bool bg_has_img = style->has_background_image && style->background_image;
+        uint32_t bg_hash = bg_has_img ? html_view_debug_hash_string(style->background_image) : 0;
+        int bg_w = 0;
+        int bg_h = 0;
+        if (bg_has_img && ctx->priv)
+        {
+            html_view_image_t *img = html_view_image_find(ctx->priv, style->background_image);
+            if (!img)
+            {
+                (void)html_view_try_load_data_image_locked(ctx->priv, style->background_image);
+                img = html_view_image_find(ctx->priv, style->background_image);
+            }
+            if (img)
+            {
+                bg_w = img->width;
+                bg_h = img->height;
+            }
+        }
+        video_color_t bg_color = style->has_background ? style->background : 0;
+        int bg_trans = (!style->has_background || style->background_transparent) ? 1 : 0;
+        serial_printf("[html_view][acid2] node=%s display=%d position=%d float=%d clear=%d content=%dx%d border_box=%dx%d margin=%d,%d,%d,%d padding=%d,%d,%d,%d border=%d,%d,%d,%d bg=%08X bg_trans=%d bg_img=%d bg_hash=%08X bg_size=%dx%d bg_attach=%d bg_repeat=%d bg_pos=%d,%d z=%d",
+                      debug_label,
+                      display,
+                      position,
+                      float_mode,
+                      clear_mode,
+                      content_w,
+                      content_h,
+                      border_box_w,
+                      debug_border_box_h,
+                      margin_top,
+                      margin_right,
+                      margin_bottom,
+                      margin_left,
+                      pad_top,
+                      pad_right,
+                      pad_bottom,
+                      pad_left,
+                      border_top,
+                      border_right,
+                      border_bottom,
+                      border_left,
+                      bg_color,
+                      bg_trans,
+                      bg_has_img ? 1 : 0,
+                      bg_hash,
+                      bg_w,
+                      bg_h,
+                      bg_attach,
+                      bg_repeat,
+                      bg_pos_x,
+                      bg_pos_y,
+                      ctx->z_index);
     }
     ctx->line_start_x = ctx->x;
     ctx->line_start_y = ctx->y;
