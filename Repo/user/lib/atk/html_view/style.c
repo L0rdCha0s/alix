@@ -1698,6 +1698,11 @@ void html_view_font_scope_push(html_view_ctx_t *ctx, const css_style_t *style, b
     ctx->space_w = html_view_text_width(ctx, " ");
 
     int candidate_line_height = html_view_line_height_for_style(ctx, style);
+    if (!block)
+    {
+        ctx->line_height = candidate_line_height;
+        return;
+    }
     if (block)
     {
         ctx->line_height = candidate_line_height;
@@ -1705,6 +1710,14 @@ void html_view_font_scope_push(html_view_ctx_t *ctx, const css_style_t *style, b
     else if (candidate_line_height > ctx->line_height)
     {
         ctx->line_height = candidate_line_height;
+    }
+    else if (candidate_line_height < ctx->line_height)
+    {
+        bool line_empty = (ctx->x == ctx->line_start_x) && !ctx->pending_space;
+        if (line_empty)
+        {
+            ctx->line_height = candidate_line_height;
+        }
     }
 }
 

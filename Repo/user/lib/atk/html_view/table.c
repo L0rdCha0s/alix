@@ -1470,6 +1470,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
             else
             {
                 html_view_ctx_t measure_cell_ctx = *ctx;
+                measure_cell_ctx.measure_shrink = true;
                 measure_cell_ctx.base_font_px = cell_font_px;
                 measure_cell_ctx.actual_font_px = cell_font_px;
                 measure_cell_ctx.line_height = html_view_line_height_for_style(&measure_cell_ctx, &cell->style);
