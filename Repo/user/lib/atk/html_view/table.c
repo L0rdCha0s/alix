@@ -245,6 +245,10 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
     measure.height_basis_explicit = height_basis_valid;
 
     html_view_render_children(&measure, node, parent_style);
+    if (measure.x != measure.body_x)
+    {
+        html_view_new_line(&measure);
+    }
 
     int used_w = measure.measure_max_x - measure.body_x;
     if (used_w < 0)
@@ -374,6 +378,57 @@ bool html_view_subtree_has_form_control(const html_node_t *root)
         if (node->type == HTML_NODE_ELEMENT && node->name && html_view_is_form_control_tag(node->name))
         {
             return true;
+        }
+        for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+        {
+            if (sp < (sizeof(stack) / sizeof(stack[0])))
+            {
+                stack[sp++] = child;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool html_view_subtree_has_rendered_content(const html_node_t *root)
+{
+    if (!root)
+    {
+        return false;
+    }
+
+    const html_node_t *stack[64];
+    size_t sp = 0;
+    stack[sp++] = root;
+
+    while (sp > 0)
+    {
+        const html_node_t *node = stack[--sp];
+        if (node->type == HTML_NODE_TEXT && node->text)
+        {
+            for (const char *p = node->text; *p; ++p)
+            {
+                if (!isspace((unsigned char)*p))
+                {
+                    return true;
+                }
+            }
+        }
+        if (node->type == HTML_NODE_ELEMENT && node->name)
+        {
+            if (strcmp(node->name, "br") == 0 ||
+                strcmp(node->name, "img") == 0 ||
+                strcmp(node->name, "hr") == 0 ||
+                strcmp(node->name, "input") == 0 ||
+                strcmp(node->name, "textarea") == 0 ||
+                strcmp(node->name, "select") == 0 ||
+                strcmp(node->name, "object") == 0 ||
+                strcmp(node->name, "embed") == 0 ||
+                strcmp(node->name, "iframe") == 0)
+            {
+                return true;
+            }
         }
         for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
         {
@@ -606,15 +661,18 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
         }
     }
 
-    if (content_w <= 0)
+    if (!explicit_h && !html_view_subtree_has_rendered_content(node))
     {
-        content_w = ctx->body_w;
-        if (content_w < 0) content_w = 0;
+        content_h = 0;
     }
-    if (content_h <= 0)
+
+    if (content_w < 0)
     {
-        content_h = ctx->line_height;
-        if (content_h < 0) content_h = 0;
+        content_w = 0;
+    }
+    if (content_h < 0)
+    {
+        content_h = 0;
     }
 
     int min_w = -1;
@@ -717,6 +775,20 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
     int outer_w = border_box_w + margin_left + margin_right;
     int outer_h = border_box_h + margin_top + margin_bottom;
+
+    if (ctx->record && html_view_node_in_smile(node))
+    {
+        serial_printf("[html_view][smile-float] tag=%s content_w=%d border_box_w=%d content_h=%d border_box_h=%d border_top=%d border_bottom=%d margin_top=%d margin_bottom=%d",
+                      node->name ? node->name : "(null)",
+                      content_w,
+                      border_box_w,
+                      content_h,
+                      border_box_h,
+                      border_top,
+                      border_bottom,
+                      margin_top,
+                      margin_bottom);
+    }
 
     if (debug_label)
     {

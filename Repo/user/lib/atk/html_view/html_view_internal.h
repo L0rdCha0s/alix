@@ -351,6 +351,7 @@ typedef struct
     bool record_failed;
     bool fixed_mode;
     bool table_mode;
+    bool measure_shrink;
     int doc_origin_x;
     int doc_origin_y;
     html_view_style_block_t *style_block;

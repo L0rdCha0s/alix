@@ -227,6 +227,7 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
                                              const html_node_t *node,
                                              const css_style_t *style,
                                              int content_w,
+                                             bool shrink_to_fit,
                                              int *out_w,
                                              int *out_h)
 {
@@ -251,6 +252,7 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     measure.floats = &floats;
     measure.style_block = NULL;
     measure.style_depth = 0;
+    measure.measure_shrink = shrink_to_fit;
     measure.body_x = 0;
     measure.body_w = content_w;
     if (measure.body_w < 0) measure.body_w = 0;
@@ -742,7 +744,8 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     int measured_h = 0;
     if (!width_specified || !height_specified)
     {
-        html_view_measure_block_children(ctx, node, style, available_w, &measured_w, &measured_h);
+        bool shrink_to_fit = (!width_specified && !(have_left && have_right));
+        html_view_measure_block_children(ctx, node, style, available_w, shrink_to_fit, &measured_w, &measured_h);
     }
     if (style->has_display && style->display == CSS_DISPLAY_TABLE)
     {
@@ -779,6 +782,20 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
         content_w = measured_w;
     }
     if (content_w < 0) content_w = 0;
+    if (!width_specified && ctx->measure_shrink &&
+        !(style->has_display && style->display == CSS_DISPLAY_TABLE))
+    {
+        int shrink_w = 0;
+        html_view_measure_block_children(ctx, node, style, available_w, true, &shrink_w, NULL);
+        if (shrink_w > 0)
+        {
+            content_w = shrink_w;
+        }
+        else
+        {
+            content_w = 0;
+        }
+    }
     if (available_w > 0 && content_w > available_w)
     {
         content_w = available_w;
@@ -2248,6 +2265,15 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     int draw_content_x = content_doc_x + rel_x;
     int draw_content_y = content_doc_y + rel_y;
 
+    if (!ctx->measure_shrink || width_specified)
+    {
+        int measure_edge = (ctx->draw || ctx->record) ? (draw_border_x + border_box_w) : (ctx->body_x + border_box_w);
+        if (measure_edge > ctx->measure_max_x)
+        {
+            ctx->measure_max_x = measure_edge;
+        }
+    }
+
     int specified_h = 0;
     bool height_specified = html_view_length_to_px_height(ctx, &style->height, &specified_h);
     if (height_specified && specified_h < 0)
@@ -2305,7 +2331,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         }
         else
         {
-            html_view_measure_block_children(ctx, node, style, content_w, NULL, &content_h);
+            html_view_measure_block_children(ctx, node, style, content_w, ctx->measure_shrink, NULL, &content_h);
             if (style->has_display && style->display == CSS_DISPLAY_TABLE)
             {
                 int table_w = 0;

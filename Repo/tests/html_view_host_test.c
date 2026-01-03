@@ -952,13 +952,14 @@ static void host_debug_dump_rect_ops(const html_view_render_cache_t *cache, int 
         }
         if (op->color == 0xFF000000u || op->color == 0xFFFFFF00u)
         {
-            serial_printf("[html_view][ops] rect color=0x%08X x=%d y=%d w=%d h=%d fixed=%d",
+            serial_printf("[html_view][ops] rect color=0x%08X x=%d y=%d w=%d h=%d fixed=%d z=%d",
                           op->color,
                           op->x,
                           op->y,
                           op->w,
                           op->h,
-                          op->fixed ? 1 : 0);
+                          op->fixed ? 1 : 0,
+                          (int)op->z_index);
         }
     }
 }

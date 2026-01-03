@@ -864,52 +864,82 @@ void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
     {
         video_color_t side_color = video_make_color(0x00, 0x00, 0x00);
         bool transparent = false;
-        if (left > 0)
+
+        if (inner_w <= 0 && inner_h <= 0)
         {
-            html_view_border_side_color(style, CSS_BORDER_SIDE_LEFT, &side_color, &transparent);
-            if (!transparent)
+            if (left > 0)
             {
-                html_view_draw_triangle_clipped(ctx,
-                                                x,
-                                                y,
-                                                x,
-                                                y + h,
-                                                x + left,
-                                                y + top,
-                                                side_color,
-                                                clip);
+                html_view_border_side_color(style, CSS_BORDER_SIDE_LEFT, &side_color, &transparent);
+                if (!transparent)
+                {
+                    html_view_draw_triangle_clipped(ctx,
+                                                    x,
+                                                    y,
+                                                    x,
+                                                    y + h,
+                                                    x + left,
+                                                    y + top,
+                                                    side_color,
+                                                    clip);
+                }
             }
-        }
-        if (right > 0)
-        {
-            html_view_border_side_color(style, CSS_BORDER_SIDE_RIGHT, &side_color, &transparent);
-            if (!transparent)
+            if (right > 0)
             {
-                html_view_draw_triangle_clipped(ctx,
-                                                x + w,
-                                                y,
-                                                x + w,
-                                                y + h,
-                                                x + left,
-                                                y + top,
-                                                side_color,
-                                                clip);
+                html_view_border_side_color(style, CSS_BORDER_SIDE_RIGHT, &side_color, &transparent);
+                if (!transparent)
+                {
+                    html_view_draw_triangle_clipped(ctx,
+                                                    x + w,
+                                                    y,
+                                                    x + w,
+                                                    y + h,
+                                                    x + left,
+                                                    y + top,
+                                                    side_color,
+                                                    clip);
+                }
             }
+            if (top > 0)
+            {
+                html_view_border_side_color(style, CSS_BORDER_SIDE_TOP, &side_color, &transparent);
+                if (!transparent)
+                {
+                    html_view_draw_triangle_clipped(ctx,
+                                                    x,
+                                                    y,
+                                                    x + w,
+                                                    y,
+                                                    x + left,
+                                                    y + top,
+                                                    side_color,
+                                                    clip);
+                }
+            }
+            if (bottom > 0)
+            {
+                html_view_border_side_color(style, CSS_BORDER_SIDE_BOTTOM, &side_color, &transparent);
+                if (!transparent)
+                {
+                    html_view_draw_triangle_clipped(ctx,
+                                                    x,
+                                                    y + h,
+                                                    x + w,
+                                                    y + h,
+                                                    x + left,
+                                                    y + top,
+                                                    side_color,
+                                                    clip);
+                }
+            }
+            return;
         }
+
         if (top > 0)
         {
             html_view_border_side_color(style, CSS_BORDER_SIDE_TOP, &side_color, &transparent);
             if (!transparent)
             {
-                html_view_draw_triangle_clipped(ctx,
-                                                x,
-                                                y,
-                                                x + w,
-                                                y,
-                                                x + left,
-                                                y + top,
-                                                side_color,
-                                                clip);
+                html_view_draw_rect_clipped(ctx, x, y, w, top, side_color, clip);
             }
         }
         if (bottom > 0)
@@ -917,15 +947,23 @@ void html_view_draw_border_sides_clipped(html_view_ctx_t *ctx,
             html_view_border_side_color(style, CSS_BORDER_SIDE_BOTTOM, &side_color, &transparent);
             if (!transparent)
             {
-                html_view_draw_triangle_clipped(ctx,
-                                                x,
-                                                y + h,
-                                                x + w,
-                                                y + h,
-                                                x + left,
-                                                y + top,
-                                                side_color,
-                                                clip);
+                html_view_draw_rect_clipped(ctx, x, y + h - bottom, w, bottom, side_color, clip);
+            }
+        }
+        if (left > 0)
+        {
+            html_view_border_side_color(style, CSS_BORDER_SIDE_LEFT, &side_color, &transparent);
+            if (!transparent)
+            {
+                html_view_draw_rect_clipped(ctx, x, y, left, h, side_color, clip);
+            }
+        }
+        if (right > 0)
+        {
+            html_view_border_side_color(style, CSS_BORDER_SIDE_RIGHT, &side_color, &transparent);
+            if (!transparent)
+            {
+                html_view_draw_rect_clipped(ctx, x + w - right, y, right, h, side_color, clip);
             }
         }
         return;
