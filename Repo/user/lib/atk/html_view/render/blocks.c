@@ -256,6 +256,7 @@ static const char *html_view_debug_block_label(const html_node_t *node)
 }
 
 static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
+                                            const html_node_t *node,
                                             int margin_top,
                                             css_clear_t clear_mode,
                                             bool *out_clearance,
@@ -272,6 +273,12 @@ static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
             html_view_margin_state_reset(out_prev_pending);
         }
         return 0;
+    }
+
+    if (ctx->suppress_margin_top_node == node)
+    {
+        margin_top = 0;
+        ctx->suppress_margin_top_node = NULL;
     }
 
     int start_y = ctx->y;
@@ -1331,7 +1338,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                 true);
         }
 
-        (void)html_view_apply_block_margin_top(ctx,
+        (void)html_view_apply_block_margin_top(ctx, node,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
@@ -1557,7 +1564,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
             }
             margin_bottom = ctx->line_height / 3;
         }
-        (void)html_view_apply_block_margin_top(ctx,
+        (void)html_view_apply_block_margin_top(ctx, node,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
@@ -1629,7 +1636,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
             margin_bottom = ctx->line_height / 3;
         }
 
-        (void)html_view_apply_block_margin_top(ctx,
+        (void)html_view_apply_block_margin_top(ctx, node,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
@@ -1697,7 +1704,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
             }
         }
 
-        (void)html_view_apply_block_margin_top(ctx,
+        (void)html_view_apply_block_margin_top(ctx, node,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
@@ -1807,7 +1814,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                                   true);
                 }
             }
-            (void)html_view_apply_block_margin_top(ctx,
+            (void)html_view_apply_block_margin_top(ctx, node,
                                                    margin_top,
                                                    (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                    NULL,
@@ -1853,7 +1860,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                               true);
             }
         }
-        (void)html_view_apply_block_margin_top(ctx,
+        (void)html_view_apply_block_margin_top(ctx, node,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
@@ -1932,7 +1939,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                              true);
             }
         }
-        (void)html_view_apply_block_margin_top(ctx,
+        (void)html_view_apply_block_margin_top(ctx, node,
                                                margin_top,
                                                (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                                NULL,
@@ -2390,11 +2397,92 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     int border_box_w = content_w + pad_left + pad_right + border_left + border_right;
     if (border_box_w < 0) border_box_w = 0;
 
+    if (border_top == 0 &&
+        pad_top == 0 &&
+        !(style->has_overflow && style->overflow != CSS_OVERFLOW_VISIBLE) &&
+        !(style->has_display && style->display == CSS_DISPLAY_TABLE))
+    {
+        const html_node_t *collapse_child = NULL;
+        int child_margin_top = 0;
+        for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+        {
+            if (child->type != HTML_NODE_ELEMENT || !child->name)
+            {
+                continue;
+            }
+
+            css_style_t child_style = {0};
+            html_view_style_for_node(&child_style, ctx->sheet, style, child);
+            if (child_style.has_display && child_style.display == CSS_DISPLAY_NONE)
+            {
+                css_style_release(&child_style);
+                continue;
+            }
+
+            bool block_child = html_view_is_block_tag(child->name);
+            if (child_style.has_display)
+            {
+                if (child_style.display == CSS_DISPLAY_INLINE ||
+                    child_style.display == CSS_DISPLAY_INLINE_FLEX ||
+                    child_style.display == CSS_DISPLAY_TABLE_CELL)
+                {
+                    block_child = false;
+                }
+                else if (child_style.display == CSS_DISPLAY_BLOCK ||
+                         child_style.display == CSS_DISPLAY_LIST_ITEM ||
+                         child_style.display == CSS_DISPLAY_TABLE ||
+                         child_style.display == CSS_DISPLAY_FLEX)
+                {
+                    block_child = true;
+                }
+            }
+
+            bool positioned = child_style.has_position &&
+                              (child_style.position == CSS_POSITION_ABSOLUTE ||
+                               child_style.position == CSS_POSITION_FIXED);
+            bool floated = child_style.has_float && child_style.float_mode != CSS_FLOAT_NONE;
+            if (!block_child || positioned || floated)
+            {
+                css_style_release(&child_style);
+                continue;
+            }
+
+            if (child_style.has_margin && child_style.margin.top.valid && !child_style.margin.top.is_auto)
+            {
+                int child_font_px = html_view_font_px_for_style(ctx, &child_style, ctx->base_font_px);
+                if (child_font_px <= 0)
+                {
+                    child_font_px = ctx->base_font_px;
+                }
+                child_margin_top = html_view_length_to_px_signed(&child_style.margin.top,
+                                                                 ctx->viewport_w,
+                                                                 ctx->viewport_h,
+                                                                 content_w,
+                                                                 ctx->viewport_h,
+                                                                 child_font_px,
+                                                                 true);
+            }
+
+            collapse_child = child;
+            css_style_release(&child_style);
+            break;
+        }
+
+        if (collapse_child)
+        {
+            html_view_margin_state_t collapsed = html_view_margin_state_from_value(margin_top);
+            html_view_margin_state_t child_state = html_view_margin_state_from_value(child_margin_top);
+            html_view_margin_state_merge(&collapsed, &child_state);
+            margin_top = html_view_margin_state_value(&collapsed);
+            ctx->suppress_margin_top_node = collapse_child;
+        }
+    }
+
     int start_y = ctx->y;
     html_view_margin_state_t prev_pending = {0};
     bool prev_pending_valid = false;
     bool clearance_applied = false;
-    (void)html_view_apply_block_margin_top(ctx,
+    (void)html_view_apply_block_margin_top(ctx, node,
                                            margin_top,
                                            (style->has_clear ? style->clear_mode : CSS_CLEAR_NONE),
                                            &clearance_applied,
@@ -2705,8 +2793,15 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     html_view_float_ctx_t table_floats = {0};
     html_view_float_ctx_t *saved_floats = ctx->floats;
     bool saved_table_mode = ctx->table_mode;
+    int saved_table_row_height = ctx->table_row_height;
+    bool saved_table_row_height_valid = ctx->table_row_height_valid;
     if (table_layout)
     {
+        int table_w = 0;
+        int table_h = 0;
+        html_view_measure_css_table_cells(ctx, node, style, content_w, ctx->viewport_h, &table_w, &table_h);
+        ctx->table_row_height = table_h;
+        ctx->table_row_height_valid = table_h > 0;
         ctx->floats = &table_floats;
         ctx->table_mode = true;
     }
@@ -2744,6 +2839,8 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         }
         ctx->floats = saved_floats;
         ctx->table_mode = saved_table_mode;
+        ctx->table_row_height = saved_table_row_height;
+        ctx->table_row_height_valid = saved_table_row_height_valid;
     }
     if (clip_applied)
     {

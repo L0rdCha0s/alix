@@ -353,6 +353,9 @@ typedef struct
     bool fixed_mode;
     bool clip_scroll;
     bool table_mode;
+    const html_node_t *suppress_margin_top_node;
+    int table_row_height;
+    bool table_row_height_valid;
     bool measure_shrink;
     int doc_origin_x;
     int doc_origin_y;

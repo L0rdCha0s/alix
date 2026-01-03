@@ -144,6 +144,28 @@ static bool html_view_node_in_smile(const html_node_t *node)
     return false;
 }
 
+static bool html_view_table_mode_is_cell(const html_node_t *node, const css_style_t *style)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT)
+    {
+        return false;
+    }
+    if (style && style->has_display)
+    {
+        if (style->display == CSS_DISPLAY_TABLE_CELL ||
+            style->display == CSS_DISPLAY_TABLE ||
+            style->display == CSS_DISPLAY_LIST_ITEM)
+        {
+            return true;
+        }
+    }
+    else if (node->name && strcmp(node->name, "li") == 0)
+    {
+        return true;
+    }
+    return false;
+}
+
 static const char *html_view_debug_float_label(const html_node_t *node)
 {
     if (!node || node->type != HTML_NODE_ELEMENT)
@@ -789,6 +811,15 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
 
     int border_box_w = content_w + pad_left + pad_right + border_left + border_right;
     int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
+    if (ctx->table_mode &&
+        ctx->table_row_height_valid &&
+        html_view_table_mode_is_cell(node, style) &&
+        ctx->table_row_height > border_box_h)
+    {
+        int extra = ctx->table_row_height - border_box_h;
+        content_h += extra;
+        border_box_h = ctx->table_row_height;
+    }
     int outer_w = border_box_w + margin_left + margin_right;
     int outer_h = border_box_h + margin_top + margin_bottom;
     bool measuring = (!ctx->draw && !ctx->record);
