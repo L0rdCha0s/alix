@@ -115,6 +115,26 @@ static const char *html_view_debug_inline_label(const html_node_t *node)
     {
         return "eyes-object";
     }
+    if (node->name && strcmp(node->name, "span") == 0 &&
+        html_view_node_has_ancestor_class(node, "smile"))
+    {
+        return "smile-span";
+    }
+    if (node->name && strcmp(node->name, "em") == 0 &&
+        html_view_node_has_ancestor_class(node, "smile"))
+    {
+        return "smile-em";
+    }
+    if (node->name && strcmp(node->name, "strong") == 0 &&
+        html_view_node_has_ancestor_class(node, "smile"))
+    {
+        return "smile-strong";
+    }
+    if (node->name && strcmp(node->name, "div") == 0 &&
+        html_view_node_has_ancestor_class(node, "chin"))
+    {
+        return "chin-inline";
+    }
     return NULL;
 }
 
@@ -194,6 +214,22 @@ static bool html_view_measure_inline_children(const html_view_ctx_t *ctx,
         height = measure.line_height;
     }
     bool wrapped = (measure.y != start_y) || (measure.line_start_y != start_line_y);
+    const char *debug_label = html_view_debug_inline_label(node);
+    if (debug_label && ctx->record)
+    {
+        serial_printf("[html_view][acid2] inline-measure=%s start=%d,%d end=%d,%d width=%d height=%d line_h=%d wrapped=%d body_x=%d body_w=%d",
+                      debug_label,
+                      start_x,
+                      start_y,
+                      measure.x,
+                      measure.y,
+                      width,
+                      height,
+                      measure.line_height,
+                      wrapped ? 1 : 0,
+                      measure.body_x,
+                      measure.body_w);
+    }
 
     html_view_style_stack_destroy(&measure);
 
@@ -314,6 +350,54 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
     if (border_left < 0) border_left = 0;
     html_view_apply_border_style_none(style, &border_top, &border_right, &border_bottom, &border_left);
 
+    int margin_top = 0;
+    int margin_right = 0;
+    int margin_bottom = 0;
+    int margin_left = 0;
+    if (style->has_margin)
+    {
+        if (style->margin.top.valid && !style->margin.top.is_auto)
+        {
+            margin_top = html_view_length_to_px_signed(&style->margin.top,
+                                                       ctx->viewport_w,
+                                                       ctx->viewport_h,
+                                                       ctx->body_w,
+                                                       ctx->viewport_h,
+                                                       ctx->base_font_px,
+                                                       true);
+        }
+        if (style->margin.right.valid && !style->margin.right.is_auto)
+        {
+            margin_right = html_view_length_to_px_signed(&style->margin.right,
+                                                         ctx->viewport_w,
+                                                         ctx->viewport_h,
+                                                         ctx->body_w,
+                                                         ctx->viewport_h,
+                                                         ctx->base_font_px,
+                                                         true);
+        }
+        if (style->margin.bottom.valid && !style->margin.bottom.is_auto)
+        {
+            margin_bottom = html_view_length_to_px_signed(&style->margin.bottom,
+                                                          ctx->viewport_w,
+                                                          ctx->viewport_h,
+                                                          ctx->body_w,
+                                                          ctx->viewport_h,
+                                                          ctx->base_font_px,
+                                                          true);
+        }
+        if (style->margin.left.valid && !style->margin.left.is_auto)
+        {
+            margin_left = html_view_length_to_px_signed(&style->margin.left,
+                                                        ctx->viewport_w,
+                                                        ctx->viewport_h,
+                                                        ctx->body_w,
+                                                        ctx->viewport_h,
+                                                        ctx->base_font_px,
+                                                        true);
+        }
+    }
+
     int box_w = content_w + pad_left + pad_right + border_left + border_right;
     int box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
     if (box_w <= 0 || box_h <= 0)
@@ -370,6 +454,47 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
     int draw_x = ctx->x;
     int doc_y = ctx->y + ctx->line_height - box_h;
     int draw_y = html_view_draw_y(ctx, doc_y);
+
+    const char *debug_label = html_view_debug_inline_label(node);
+    if (debug_label && ctx->record)
+    {
+        int display = style->has_display ? (int)style->display : -1;
+        int position = style->has_position ? (int)style->position : -1;
+        int float_mode = style->has_float ? (int)style->float_mode : -1;
+        int clear_mode = style->has_clear ? (int)style->clear_mode : -1;
+        serial_printf("[html_view][acid2] inline-box=%s display=%d position=%d float=%d clear=%d content=%dx%d box=%dx%d margin=%d,%d,%d,%d padding=%d,%d,%d,%d border=%d,%d,%d,%d line_h=%d base_lh=%d font_px=%d base_font=%d draw=%d,%d doc_y=%d wrapped=%d paint=%d z=%d",
+                      debug_label,
+                      display,
+                      position,
+                      float_mode,
+                      clear_mode,
+                      content_w,
+                      content_h,
+                      box_w,
+                      box_h,
+                      margin_top,
+                      margin_right,
+                      margin_bottom,
+                      margin_left,
+                      pad_top,
+                      pad_right,
+                      pad_bottom,
+                      pad_left,
+                      border_top,
+                      border_right,
+                      border_bottom,
+                      border_left,
+                      ctx->line_height,
+                      ctx->base_line_height,
+                      ctx->actual_font_px,
+                      ctx->base_font_px,
+                      draw_x,
+                      draw_y,
+                      doc_y,
+                      wrapped ? 1 : 0,
+                      ctx->paint_layer,
+                      ctx->z_index);
+    }
 
     if (style->has_background && !style->background_transparent)
     {

@@ -1138,6 +1138,35 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                       bg_pos_x,
                       bg_pos_y,
                       ctx->z_index);
+        if (bg_has_img && bg_w > 0 && bg_h > 0)
+        {
+            bool bg_fixed = style->has_background_attachment &&
+                            style->background_attachment == CSS_BACKGROUND_ATTACHMENT_FIXED;
+            bool element_fixed = style->has_position &&
+                                 style->position == CSS_POSITION_FIXED;
+            int origin_x = bg_fixed ? (ctx->viewport_x + bg_pos_x) : (border_x + bg_pos_x);
+            int origin_y = bg_fixed ? (ctx->viewport_y + bg_pos_y) : (draw_y + bg_pos_y);
+            serial_printf("[html_view][acid2-bg] posnode=%s border=%d,%d %dx%d draw_y=%d pos=%d,%d origin=%d,%d fixed=%d element_fixed=%d repeat=%d clip=%d,%d %dx%d img=%dx%d",
+                          debug_label,
+                          border_x,
+                          border_y,
+                          border_box_w,
+                          border_box_h,
+                          draw_y,
+                          bg_pos_x,
+                          bg_pos_y,
+                          origin_x,
+                          origin_y,
+                          bg_fixed ? 1 : 0,
+                          element_fixed ? 1 : 0,
+                          bg_repeat,
+                          ctx->clip.x,
+                          ctx->clip.y,
+                          ctx->clip.width,
+                          ctx->clip.height,
+                          bg_w,
+                          bg_h);
+        }
     }
     html_view_ctx_t inner = *ctx;
     inner.fixed_mode = (ctx->fixed_mode || fixed);
@@ -2932,6 +2961,36 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                       bg_pos_x,
                       bg_pos_y,
                       ctx->z_index);
+        if (bg_has_img && bg_w > 0 && bg_h > 0)
+        {
+            int draw_border_y = html_view_draw_y(ctx, border_doc_y);
+            bool bg_fixed = style->has_background_attachment &&
+                            style->background_attachment == CSS_BACKGROUND_ATTACHMENT_FIXED;
+            bool element_fixed = style->has_position &&
+                                 style->position == CSS_POSITION_FIXED;
+            int origin_x = bg_fixed ? (ctx->viewport_x + bg_pos_x) : (border_doc_x + bg_pos_x);
+            int origin_y = bg_fixed ? (ctx->viewport_y + bg_pos_y) : (draw_border_y + bg_pos_y);
+            serial_printf("[html_view][acid2-bg] node=%s border=%d,%d %dx%d draw_y=%d pos=%d,%d origin=%d,%d fixed=%d element_fixed=%d repeat=%d clip=%d,%d %dx%d img=%dx%d",
+                          debug_label,
+                          border_doc_x,
+                          border_doc_y,
+                          border_box_w,
+                          debug_border_box_h,
+                          draw_border_y,
+                          bg_pos_x,
+                          bg_pos_y,
+                          origin_x,
+                          origin_y,
+                          bg_fixed ? 1 : 0,
+                          element_fixed ? 1 : 0,
+                          bg_repeat,
+                          ctx->clip.x,
+                          ctx->clip.y,
+                          ctx->clip.width,
+                          ctx->clip.height,
+                          bg_w,
+                          bg_h);
+        }
     }
     ctx->line_start_x = ctx->x;
     ctx->line_start_y = ctx->y;
@@ -2943,7 +3002,10 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     {
         ctx->line_op_start = 0;
     }
-    html_view_ensure_line_visible(ctx);
+    if (!empty_block)
+    {
+        html_view_ensure_line_visible(ctx);
+    }
     ctx->line_height = saved_line_height;
     return true;
 

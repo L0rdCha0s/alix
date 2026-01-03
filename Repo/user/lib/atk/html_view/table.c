@@ -162,6 +162,17 @@ static const char *html_view_debug_float_label(const html_node_t *node)
     {
         return "nose";
     }
+    if (node->name && html_view_node_in_smile(node))
+    {
+        if (strcmp(node->name, "span") == 0)
+        {
+            return "smile-span";
+        }
+        if (strcmp(node->name, "em") == 0)
+        {
+            return "smile-em";
+        }
+    }
     return NULL;
 }
 
@@ -930,6 +941,25 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
         place_y = html_view_float_next_y(ctx->floats, place_y);
     }
 
+    if (debug_label && ctx->record)
+    {
+        serial_printf("[html_view][layout] floatplace=%s x=%d y=%d outer=%dx%d border_box=%dx%d margin=%d,%d,%d,%d side=%d body_x=%d body_w=%d",
+                      debug_label,
+                      place_x,
+                      place_y,
+                      outer_w,
+                      outer_h,
+                      border_box_w,
+                      border_box_h,
+                      margin_top,
+                      margin_right,
+                      margin_bottom,
+                      margin_left,
+                      (int)side,
+                      ctx->body_x,
+                      ctx->body_w);
+    }
+
     if (ctx->floats && ctx->floats->count < (sizeof(ctx->floats->items) / sizeof(ctx->floats->items[0])))
     {
         ctx->floats->items[ctx->floats->count++] = (html_view_float_t){
@@ -967,6 +997,71 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
         if (style->has_background && !style->background_transparent)
         {
             html_view_draw_rect_clipped(ctx, border_box_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
+        }
+        if (debug_label && ctx->record && style->has_background_image && style->background_image)
+        {
+            int bg_pos_x = 0;
+            int bg_pos_y = 0;
+            if (style->has_background_position)
+            {
+                bg_pos_x = html_view_length_to_px_signed(&style->background_pos_x,
+                                                         ctx->viewport_w,
+                                                         ctx->viewport_h,
+                                                         border_box_w,
+                                                         border_box_h,
+                                                         ctx->base_font_px,
+                                                         true);
+                bg_pos_y = html_view_length_to_px_signed(&style->background_pos_y,
+                                                         ctx->viewport_w,
+                                                         ctx->viewport_h,
+                                                         border_box_w,
+                                                         border_box_h,
+                                                         ctx->base_font_px,
+                                                         false);
+            }
+            int bg_repeat = style->has_background_repeat ? (int)style->background_repeat : -1;
+            bool fixed = style->has_background_attachment &&
+                         style->background_attachment == CSS_BACKGROUND_ATTACHMENT_FIXED;
+            bool element_fixed = style->has_position &&
+                                 style->position == CSS_POSITION_FIXED;
+            int origin_x = fixed ? (ctx->viewport_x + bg_pos_x) : (border_box_x + bg_pos_x);
+            int origin_y = fixed ? (ctx->viewport_y + bg_pos_y) : (draw_y + bg_pos_y);
+            int bg_w = 0;
+            int bg_h = 0;
+            if (ctx->priv)
+            {
+                html_view_image_t *img = html_view_image_find(ctx->priv, style->background_image);
+                if (!img)
+                {
+                    (void)html_view_try_load_data_image_locked(ctx->priv, style->background_image);
+                    img = html_view_image_find(ctx->priv, style->background_image);
+                }
+                if (img)
+                {
+                    bg_w = img->width;
+                    bg_h = img->height;
+                }
+            }
+            serial_printf("[html_view][acid2-bg] float=%s border=%d,%d %dx%d draw_y=%d pos=%d,%d origin=%d,%d fixed=%d element_fixed=%d repeat=%d clip=%d,%d %dx%d img=%dx%d",
+                          debug_label,
+                          border_box_x,
+                          border_box_y,
+                          border_box_w,
+                          border_box_h,
+                          draw_y,
+                          bg_pos_x,
+                          bg_pos_y,
+                          origin_x,
+                          origin_y,
+                          fixed ? 1 : 0,
+                          element_fixed ? 1 : 0,
+                          bg_repeat,
+                          ctx->clip.x,
+                          ctx->clip.y,
+                          ctx->clip.width,
+                          ctx->clip.height,
+                          bg_w,
+                          bg_h);
         }
         html_view_draw_background_image(ctx, style, border_box_x, border_box_y, border_box_w, border_box_h);
 
