@@ -4,6 +4,7 @@
 #include "atk/util/png.h"
 #include "atk/util/svg.h"
 #include "ctype.h"
+#include "stdio.h"
 #include "string.h"
 
 static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev);
@@ -58,6 +59,279 @@ static const char *browser_find_char(const char *start, size_t len, char needle)
         }
     }
     return NULL;
+}
+
+static bool browser_svg_append(char **buf, size_t *len, size_t *cap, const char *text)
+{
+    if (!text)
+    {
+        return true;
+    }
+    return browser_buf_append(buf, len, cap, (const uint8_t *)text, strlen(text));
+}
+
+typedef struct
+{
+    const html_node_t *node;
+    bool closing;
+} browser_svg_stack_entry_t;
+
+static char *browser_svg_serialize_node(const html_node_t *root, size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!root || !out_len)
+    {
+        return NULL;
+    }
+
+    size_t stack_cap = 32;
+    size_t stack_len = 0;
+    browser_svg_stack_entry_t *stack = (browser_svg_stack_entry_t *)malloc(stack_cap * sizeof(*stack));
+    if (!stack)
+    {
+        return NULL;
+    }
+    stack[stack_len++] = (browser_svg_stack_entry_t){ .node = root, .closing = false };
+
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    bool ok = true;
+
+    while (stack_len > 0 && ok)
+    {
+        browser_svg_stack_entry_t entry = stack[--stack_len];
+        const html_node_t *node = entry.node;
+        if (!node)
+        {
+            continue;
+        }
+
+        if (entry.closing)
+        {
+            if (node->type == HTML_NODE_ELEMENT && node->name)
+            {
+                ok = browser_svg_append(&buf, &len, &cap, "</") &&
+                     browser_svg_append(&buf, &len, &cap, node->name) &&
+                     browser_svg_append(&buf, &len, &cap, ">");
+            }
+            continue;
+        }
+
+        if (node->type == HTML_NODE_TEXT)
+        {
+            if (node->text && node->text[0] != '\0')
+            {
+                ok = browser_svg_append(&buf, &len, &cap, node->text);
+            }
+            continue;
+        }
+
+        if (node->type != HTML_NODE_ELEMENT || !node->name)
+        {
+            continue;
+        }
+
+        ok = browser_svg_append(&buf, &len, &cap, "<") &&
+             browser_svg_append(&buf, &len, &cap, node->name);
+
+        if (ok)
+        {
+            for (const html_attr_t *attr = node->attrs; attr; attr = attr->next)
+            {
+                if (!attr->name)
+                {
+                    continue;
+                }
+                ok = browser_svg_append(&buf, &len, &cap, " ") &&
+                     browser_svg_append(&buf, &len, &cap, attr->name) &&
+                     browser_svg_append(&buf, &len, &cap, "=\"") &&
+                     browser_svg_append(&buf, &len, &cap, attr->value ? attr->value : "") &&
+                     browser_svg_append(&buf, &len, &cap, "\"");
+                if (!ok)
+                {
+                    break;
+                }
+            }
+        }
+        if (ok)
+        {
+            ok = browser_svg_append(&buf, &len, &cap, ">");
+        }
+        if (!ok)
+        {
+            break;
+        }
+
+        if (stack_len + 1 >= stack_cap)
+        {
+            size_t new_cap = stack_cap * 2u;
+            browser_svg_stack_entry_t *next = (browser_svg_stack_entry_t *)realloc(stack, new_cap * sizeof(*next));
+            if (!next)
+            {
+                ok = false;
+                break;
+            }
+            stack = next;
+            stack_cap = new_cap;
+        }
+        stack[stack_len++] = (browser_svg_stack_entry_t){ .node = node, .closing = true };
+
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (stack_len + 1 >= stack_cap)
+            {
+                size_t new_cap = stack_cap * 2u;
+                browser_svg_stack_entry_t *next = (browser_svg_stack_entry_t *)realloc(stack, new_cap * sizeof(*next));
+                if (!next)
+                {
+                    ok = false;
+                    break;
+                }
+                stack = next;
+                stack_cap = new_cap;
+            }
+            stack[stack_len++] = (browser_svg_stack_entry_t){ .node = child, .closing = false };
+        }
+    }
+
+    free(stack);
+
+    if (!ok)
+    {
+        free(buf);
+        return NULL;
+    }
+
+    *out_len = len;
+    return buf;
+}
+
+static void browser_inline_svg_process(browser_app_t *app, uint64_t load_id, html_node_t *root)
+{
+    if (!app || !root)
+    {
+        return;
+    }
+
+    size_t stack_cap = 64;
+    size_t stack_len = 0;
+    html_node_t **stack = (html_node_t **)malloc(stack_cap * sizeof(*stack));
+    if (!stack)
+    {
+        return;
+    }
+    stack[stack_len++] = root;
+
+    unsigned svg_index = 0;
+
+    while (stack_len > 0)
+    {
+        html_node_t *node = stack[--stack_len];
+        if (!node)
+        {
+            continue;
+        }
+
+        if (node->type == HTML_NODE_ELEMENT && node->name && strcasecmp(node->name, "svg") == 0)
+        {
+            if (!browser_load_is_active(app, load_id))
+            {
+                break;
+            }
+
+            size_t svg_len = 0;
+            char *svg_text = browser_svg_serialize_node(node, &svg_len);
+            if (!svg_text || svg_len == 0)
+            {
+                free(svg_text);
+                continue;
+            }
+
+            video_color_t *pixels = NULL;
+            int w = 0;
+            int h = 0;
+            int stride_bytes = 0;
+            int rc = -1;
+
+            browser_lock_enter(app, &app->decode_lock, "decode_lock");
+            rc = svg_decode_rgba32((const uint8_t *)svg_text, svg_len, &pixels, &w, &h, &stride_bytes);
+            browser_lock_exit(app, &app->decode_lock, "decode_lock");
+
+            free(svg_text);
+
+            if (rc != 0 || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
+            {
+                free(pixels);
+                continue;
+            }
+
+            if (!browser_load_is_active(app, load_id))
+            {
+                free(pixels);
+                break;
+            }
+
+            char src_buf[64];
+            int written = snprintf(src_buf, sizeof(src_buf), "inline-svg:%llu:%u",
+                                   (unsigned long long)load_id,
+                                   svg_index++);
+            if (written < 0 || written >= (int)sizeof(src_buf))
+            {
+                free(pixels);
+                continue;
+            }
+
+            char *img_name = browser_strdup("img");
+            if (!img_name)
+            {
+                free(pixels);
+                continue;
+            }
+
+            browser_dom_set_attr(node, "src", src_buf);
+            free(node->name);
+            node->name = img_name;
+
+            browser_ui_event_t img_ev = {0};
+            img_ev.type = BROWSER_UI_EVENT_IMAGE_RGBA;
+            img_ev.load_id = load_id;
+            img_ev.u.image_rgba.src = browser_strdup(src_buf);
+            img_ev.u.image_rgba.pixels = pixels;
+            img_ev.u.image_rgba.width = w;
+            img_ev.u.image_rgba.height = h;
+            img_ev.u.image_rgba.stride_bytes = stride_bytes;
+            if (!img_ev.u.image_rgba.src)
+            {
+                browser_ui_event_free_payload(&img_ev);
+                continue;
+            }
+            browser_loader_emit_event(app, &img_ev);
+            continue;
+        }
+
+        for (html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (stack_len + 1 >= stack_cap)
+            {
+                size_t new_cap = stack_cap * 2u;
+                html_node_t **next = (html_node_t **)realloc(stack, new_cap * sizeof(*next));
+                if (!next)
+                {
+                    stack_len = 0;
+                    break;
+                }
+                stack = next;
+                stack_cap = new_cap;
+            }
+            stack[stack_len++] = child;
+        }
+    }
+
+    free(stack);
 }
 
 static bool browser_data_url_parse_base64(const char *url,
@@ -1094,6 +1368,10 @@ static void browser_load_thread(void *arg)
         const char *detail = parse_err.message ? parse_err.message : "parse failed";
         browser_loader_emit_error(app, load_id, detail);
         goto done_fetch;
+    }
+    if (doc->root)
+    {
+        browser_inline_svg_process(app, load_id, doc->root);
     }
 
     char *css_urls[BROWSER_MAX_STYLESHEETS] = {0};

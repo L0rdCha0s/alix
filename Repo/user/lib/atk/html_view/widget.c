@@ -1104,6 +1104,7 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
         html_view_images_clear(priv);
         html_view_inline_style_cache_clear(priv);
         html_view_measure_cache_clear(priv);
+        html_view_rule_index_clear(priv);
         if (priv->external_css)
         {
             free(priv->external_css);
@@ -1266,6 +1267,7 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     html_view_images_clear(priv);
     html_view_inline_style_cache_clear(priv);
     html_view_measure_cache_clear(priv);
+    html_view_rule_index_clear(priv);
     if (priv->external_css)
     {
         free(priv->external_css);

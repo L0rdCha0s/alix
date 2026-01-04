@@ -219,6 +219,26 @@ typedef struct
 
 typedef struct
 {
+    char *tag;
+    size_t tag_len;
+    css_rule_t **rules;
+    size_t count;
+    size_t cap;
+} html_view_rule_bucket_t;
+
+typedef struct
+{
+    const css_stylesheet_t *sheet;
+    css_rule_t **global_rules;
+    size_t global_count;
+    size_t global_cap;
+    html_view_rule_bucket_t *buckets;
+    size_t bucket_count;
+    size_t bucket_cap;
+} html_view_rule_index_t;
+
+typedef struct
+{
     const html_node_t *node;
     int content_w;
     int font_px;
@@ -249,6 +269,7 @@ typedef struct
     html_view_inline_style_cache_t *inline_cache;
     size_t inline_cache_count;
     size_t inline_cache_cap;
+    html_view_rule_index_t *rule_index;
     html_view_measure_cache_entry_t *measure_cache;
     size_t measure_cache_count;
     size_t measure_cache_cap;
@@ -715,6 +736,7 @@ void html_view_inline_style_cache_clear(atk_html_view_priv_t *priv);
 const css_style_t *html_view_inline_style_cached(atk_html_view_priv_t *priv,
                                                  const html_node_t *node,
                                                  const char *inline_style);
+void html_view_rule_index_clear(atk_html_view_priv_t *priv);
 bool html_view_measure_cache_lookup(atk_html_view_priv_t *priv,
                                     const html_node_t *node,
                                     int content_w,

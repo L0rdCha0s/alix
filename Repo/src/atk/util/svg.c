@@ -1922,8 +1922,8 @@ int svg_decode_rgba32(const uint8_t *svg,
         .scale_y = 0
     };
 
-    view.scale_x = (svg_fixed_t)(((int64_t)out_width << SVG_FIXED_SHIFT) / view.view_w);
-    view.scale_y = (svg_fixed_t)(((int64_t)out_height << SVG_FIXED_SHIFT) / view.view_h);
+    view.scale_x = (svg_fixed_t)(((int64_t)out_width << (SVG_FIXED_SHIFT * 2)) / view.view_w);
+    view.scale_y = (svg_fixed_t)(((int64_t)out_height << (SVG_FIXED_SHIFT * 2)) / view.view_h);
 
     if (out_width <= 0 || out_height <= 0)
     {

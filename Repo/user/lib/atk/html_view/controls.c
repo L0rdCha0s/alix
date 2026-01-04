@@ -1011,6 +1011,7 @@ void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
     {
         return;
     }
+    html_view_rule_index_clear(priv);
     if (priv->sheet)
     {
         css_stylesheet_destroy(priv->sheet);

@@ -1012,6 +1012,237 @@ static bool html_view_selector_matches_cached(css_rule_t *rule,
     return html_view_selector_matches_parts(cache->parts, cache->count, rule->selector, node, pseudo);
 }
 
+static void html_view_rule_index_free(html_view_rule_index_t *index)
+{
+    if (!index)
+    {
+        return;
+    }
+    for (size_t i = 0; i < index->bucket_count; ++i)
+    {
+        html_view_rule_bucket_t *bucket = &index->buckets[i];
+        free(bucket->tag);
+        free(bucket->rules);
+    }
+    free(index->buckets);
+    free(index->global_rules);
+    free(index);
+}
+
+void html_view_rule_index_clear(atk_html_view_priv_t *priv)
+{
+    if (!priv || !priv->rule_index)
+    {
+        return;
+    }
+    html_view_rule_index_free(priv->rule_index);
+    priv->rule_index = NULL;
+}
+
+static bool html_view_rule_index_list_push(css_rule_t ***list,
+                                           size_t *count,
+                                           size_t *cap,
+                                           css_rule_t *rule)
+{
+    if (!list || !count || !cap || !rule)
+    {
+        return false;
+    }
+    if (*count == *cap)
+    {
+        size_t new_cap = *cap ? (*cap * 2u) : 16u;
+        css_rule_t **next = (css_rule_t **)realloc(*list, new_cap * sizeof(*next));
+        if (!next)
+        {
+            return false;
+        }
+        *list = next;
+        *cap = new_cap;
+    }
+    (*list)[(*count)++] = rule;
+    return true;
+}
+
+static char *html_view_strdup_lower_range(const char *start, size_t len)
+{
+    if (!start || len == 0)
+    {
+        return NULL;
+    }
+    char *out = (char *)malloc(len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < len; ++i)
+    {
+        out[i] = (char)tolower((unsigned char)start[i]);
+    }
+    out[len] = '\0';
+    return out;
+}
+
+static html_view_rule_bucket_t *html_view_rule_index_find_bucket(html_view_rule_index_t *index,
+                                                                  const char *tag,
+                                                                  size_t len)
+{
+    if (!index || !tag || len == 0)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < index->bucket_count; ++i)
+    {
+        html_view_rule_bucket_t *bucket = &index->buckets[i];
+        if (bucket->tag_len == len && strncmp(bucket->tag, tag, len) == 0)
+        {
+            return bucket;
+        }
+    }
+    return NULL;
+}
+
+static html_view_rule_bucket_t *html_view_rule_index_get_bucket(html_view_rule_index_t *index,
+                                                                 const char *tag,
+                                                                 size_t len)
+{
+    if (!index || !tag || len == 0)
+    {
+        return NULL;
+    }
+
+    html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket(index, tag, len);
+    if (bucket)
+    {
+        return bucket;
+    }
+
+    if (index->bucket_count == index->bucket_cap)
+    {
+        size_t new_cap = index->bucket_cap ? (index->bucket_cap * 2u) : 8u;
+        html_view_rule_bucket_t *next = (html_view_rule_bucket_t *)realloc(index->buckets,
+                                                                           new_cap * sizeof(*next));
+        if (!next)
+        {
+            return NULL;
+        }
+        index->buckets = next;
+        index->bucket_cap = new_cap;
+    }
+
+    char *tag_copy = html_view_strdup_lower_range(tag, len);
+    if (!tag_copy)
+    {
+        return NULL;
+    }
+
+    bucket = &index->buckets[index->bucket_count++];
+    memset(bucket, 0, sizeof(*bucket));
+    bucket->tag = tag_copy;
+    bucket->tag_len = len;
+    return bucket;
+}
+
+static bool html_view_rule_index_add_rule(html_view_rule_index_t *index, css_rule_t *rule)
+{
+    if (!index || !rule || !rule->selector)
+    {
+        return false;
+    }
+
+    css_selector_cache_t *cache = rule->selector_cache;
+    if (!cache)
+    {
+        cache = (css_selector_cache_t *)calloc(1, sizeof(*cache));
+        if (cache)
+        {
+            rule->selector_cache = cache;
+        }
+    }
+    if (cache && !cache->parsed && !cache->parse_failed)
+    {
+        (void)html_view_selector_cache_parse(cache, rule->selector);
+    }
+
+    if (cache && cache->parsed && cache->tag_hint_valid && !cache->tag_hint_any)
+    {
+        const char *tag_start = rule->selector + cache->tag_hint_start;
+        size_t tag_len = cache->tag_hint_len;
+        html_view_rule_bucket_t *bucket = html_view_rule_index_get_bucket(index, tag_start, tag_len);
+        if (!bucket)
+        {
+            return false;
+        }
+        return html_view_rule_index_list_push(&bucket->rules, &bucket->count, &bucket->cap, rule);
+    }
+
+    return html_view_rule_index_list_push(&index->global_rules,
+                                          &index->global_count,
+                                          &index->global_cap,
+                                          rule);
+}
+
+static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t *sheet)
+{
+    if (!sheet)
+    {
+        return NULL;
+    }
+    html_view_rule_index_t *index = (html_view_rule_index_t *)calloc(1, sizeof(*index));
+    if (!index)
+    {
+        return NULL;
+    }
+    index->sheet = sheet;
+
+    for (css_rule_t *rule = sheet->rules; rule; rule = rule->next)
+    {
+        if (!html_view_rule_index_add_rule(index, rule))
+        {
+            html_view_rule_index_free(index);
+            return NULL;
+        }
+    }
+
+    return index;
+}
+
+static const html_view_rule_index_t *html_view_rule_index_get(atk_html_view_priv_t *priv,
+                                                              const css_stylesheet_t *sheet)
+{
+    if (!priv || !sheet)
+    {
+        return NULL;
+    }
+    if (priv->rule_index && priv->rule_index->sheet == sheet)
+    {
+        return priv->rule_index;
+    }
+
+    html_view_rule_index_clear(priv);
+    priv->rule_index = html_view_rule_index_build(sheet);
+    return priv->rule_index;
+}
+
+static void html_view_apply_rule_list(css_style_t *out,
+                                      const html_node_t *node,
+                                      html_view_pseudo_t pseudo,
+                                      css_rule_t *const *rules,
+                                      size_t rule_count)
+{
+    if (!out || !node || !rules)
+    {
+        return;
+    }
+    for (size_t i = 0; i < rule_count; ++i)
+    {
+        css_rule_t *rule = rules[i];
+        if (rule && rule->selector && html_view_selector_matches_cached(rule, node, pseudo))
+        {
+            css_style_merge(out, &rule->style);
+        }
+    }
+}
+
 static bool html_view_parse_color(const char *s, video_color_t *out)
 {
     if (!s || !out || s[0] == '\0')
@@ -1595,11 +1826,31 @@ void html_view_style_for_node(css_style_t *out,
 
     if (sheet && node && node->type == HTML_NODE_ELEMENT)
     {
-        for (css_rule_t *rule = sheet->rules; rule; rule = rule->next)
+        const html_view_rule_index_t *index = html_view_rule_index_get(priv, sheet);
+        if (index)
         {
-            if (rule->selector && html_view_selector_matches_cached(rule, node, HTML_VIEW_PSEUDO_NONE))
+            html_view_apply_rule_list(out, node, HTML_VIEW_PSEUDO_NONE,
+                                      index->global_rules, index->global_count);
+            if (node->name)
             {
-                css_style_merge(out, &rule->style);
+                html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket((html_view_rule_index_t *)index,
+                                                                                   node->name,
+                                                                                   strlen(node->name));
+                if (bucket)
+                {
+                    html_view_apply_rule_list(out, node, HTML_VIEW_PSEUDO_NONE,
+                                              bucket->rules, bucket->count);
+                }
+            }
+        }
+        else
+        {
+            for (css_rule_t *rule = sheet->rules; rule; rule = rule->next)
+            {
+                if (rule->selector && html_view_selector_matches_cached(rule, node, HTML_VIEW_PSEUDO_NONE))
+                {
+                    css_style_merge(out, &rule->style);
+                }
             }
         }
     }
@@ -1647,11 +1898,31 @@ bool html_view_style_for_pseudo(css_style_t *out,
 
     if (sheet && node && node->type == HTML_NODE_ELEMENT)
     {
-        for (css_rule_t *rule = sheet->rules; rule; rule = rule->next)
+        const html_view_rule_index_t *index = html_view_rule_index_get(priv, sheet);
+        if (index)
         {
-            if (rule->selector && html_view_selector_matches_cached(rule, node, pseudo))
+            html_view_apply_rule_list(out, node, pseudo,
+                                      index->global_rules, index->global_count);
+            if (node->name)
             {
-                css_style_merge(out, &rule->style);
+                html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket((html_view_rule_index_t *)index,
+                                                                                   node->name,
+                                                                                   strlen(node->name));
+                if (bucket)
+                {
+                    html_view_apply_rule_list(out, node, pseudo,
+                                              bucket->rules, bucket->count);
+                }
+            }
+        }
+        else
+        {
+            for (css_rule_t *rule = sheet->rules; rule; rule = rule->next)
+            {
+                if (rule->selector && html_view_selector_matches_cached(rule, node, pseudo))
+                {
+                    css_style_merge(out, &rule->style);
+                }
             }
         }
     }

@@ -42,6 +42,7 @@ static video_color_t *g_surface = NULL;
 static int g_surface_width = 0;
 static int g_surface_height = 0;
 static FILE *g_serial_log = NULL;
+static bool ensure_test_out_dir(void);
 
 static bool surface_init(int width, int height, video_color_t bg)
 {
@@ -819,7 +820,7 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
     root_frame.depth = 0;
     if (root->type == HTML_NODE_ELEMENT)
     {
-        html_view_style_for_node(&root_frame.style, sheet, NULL, root);
+        html_view_style_for_node(&root_frame.style, sheet, NULL, root, NULL);
         root_frame.has_style = true;
     }
     stack[count++] = root_frame;
@@ -859,7 +860,7 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
             child_frame.has_style = false;
             if (child && child->type == HTML_NODE_ELEMENT)
             {
-                html_view_style_for_node(&child_frame.style, sheet, parent_style, child);
+                html_view_style_for_node(&child_frame.style, sheet, parent_style, child, NULL);
                 child_frame.has_style = true;
             }
             else if (parent_style)
@@ -2041,6 +2042,381 @@ static char *read_file(const char *path, size_t *out_len)
     return buf;
 }
 
+#define HOST_FETCH_MAX_BYTES (16u * 1024u * 1024u)
+#define HOST_FETCH_CACHE_DEFAULT_TTL 300
+
+static double host_now_ms(void)
+{
+    struct timespec ts = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+    {
+        return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+    }
+    return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
+}
+
+static char *host_shell_escape(const char *src)
+{
+    if (!src)
+    {
+        return NULL;
+    }
+    size_t extra = 0;
+    for (const char *p = src; *p; ++p)
+    {
+        if (*p == '\'')
+        {
+            extra += 3;
+        }
+    }
+    size_t len = strlen(src);
+    size_t out_len = len + extra + 3;
+    char *out = (char *)malloc(out_len);
+    if (!out)
+    {
+        return NULL;
+    }
+    size_t pos = 0;
+    out[pos++] = '\'';
+    for (const char *p = src; *p; ++p)
+    {
+        if (*p == '\'')
+        {
+            out[pos++] = '\'';
+            out[pos++] = '\\';
+            out[pos++] = '\'';
+            out[pos++] = '\'';
+            continue;
+        }
+        out[pos++] = *p;
+    }
+    out[pos++] = '\'';
+    out[pos] = '\0';
+    return out;
+}
+
+static uint64_t host_hash_fnv1a64(const char *s)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    if (!s)
+    {
+        return hash;
+    }
+    for (const unsigned char *p = (const unsigned char *)s; *p; ++p)
+    {
+        hash ^= (uint64_t)(*p);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static bool host_fetch_cache_enabled(void)
+{
+    const char *env = getenv("ALIX_HOST_FETCH_CACHE");
+    if (!env || env[0] == '\0')
+    {
+        return true;
+    }
+    return !(strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0);
+}
+
+static int host_fetch_cache_ttl(void)
+{
+    const char *env = getenv("ALIX_HOST_FETCH_CACHE_TTL");
+    if (!env || env[0] == '\0')
+    {
+        return HOST_FETCH_CACHE_DEFAULT_TTL;
+    }
+    int ttl = atoi(env);
+    return ttl < 0 ? 0 : ttl;
+}
+
+static bool host_fetch_cache_dir(char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+    {
+        return false;
+    }
+    const char *env = getenv("ALIX_HOST_FETCH_CACHE_DIR");
+    const char *path = (env && env[0] != '\0') ? env : "test-out/host-cache";
+    if (snprintf(buf, cap, "%s", path) < 0)
+    {
+        return false;
+    }
+    if (strcmp(path, "test-out/host-cache") == 0)
+    {
+        if (!ensure_test_out_dir())
+        {
+            return false;
+        }
+    }
+    if (mkdir(path, 0755) != 0 && errno != EEXIST)
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool host_fetch_cache_path(const char *url, char *path, size_t cap)
+{
+    if (!url || !path || cap == 0)
+    {
+        return false;
+    }
+    char dir[256];
+    if (!host_fetch_cache_dir(dir, sizeof(dir)))
+    {
+        return false;
+    }
+    uint64_t hash = host_hash_fnv1a64(url);
+    int written = snprintf(path, cap, "%s/%016llx.cache",
+                           dir,
+                           (unsigned long long)hash);
+    return written > 0 && (size_t)written < cap;
+}
+
+static char *host_read_file_limited(const char *path, size_t max_bytes, size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!path || path[0] == '\0')
+    {
+        return NULL;
+    }
+    struct stat st;
+    if (stat(path, &st) != 0)
+    {
+        return NULL;
+    }
+    if (max_bytes > 0 && (size_t)st.st_size > max_bytes)
+    {
+        return NULL;
+    }
+    return read_file(path, out_len);
+}
+
+static char *host_fetch_url_from_cache(const char *url, size_t *out_len)
+{
+    if (!host_fetch_cache_enabled())
+    {
+        return NULL;
+    }
+    char path[512];
+    if (!host_fetch_cache_path(url, path, sizeof(path)))
+    {
+        return NULL;
+    }
+
+    struct stat st;
+    if (stat(path, &st) != 0)
+    {
+        return NULL;
+    }
+
+    int ttl = host_fetch_cache_ttl();
+    if (ttl > 0)
+    {
+        time_t now = time(NULL);
+        if (now - st.st_mtime > (time_t)ttl)
+        {
+            return NULL;
+        }
+    }
+
+    char *data = host_read_file_limited(path, HOST_FETCH_MAX_BYTES, out_len);
+    if (data)
+    {
+        printf("html_view_host_test: fetch cache hit %s bytes=%zu\n", url, *out_len);
+    }
+    return data;
+}
+
+static void host_fetch_url_store_cache(const char *url, const char *data, size_t len)
+{
+    if (!host_fetch_cache_enabled() || !url || !data || len == 0)
+    {
+        return;
+    }
+    char path[512];
+    if (!host_fetch_cache_path(url, path, sizeof(path)))
+    {
+        return;
+    }
+    FILE *fp = fopen(path, "wb");
+    if (!fp)
+    {
+        return;
+    }
+    (void)fwrite(data, 1, len, fp);
+    fclose(fp);
+}
+
+static char *host_read_stream(FILE *fp, size_t *out_len, size_t max_bytes)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!fp)
+    {
+        return NULL;
+    }
+
+    size_t cap = 0;
+    size_t len = 0;
+    char *buf = NULL;
+    size_t chunk_size = 4096;
+    char *chunk = (char *)malloc(chunk_size);
+    if (!chunk)
+    {
+        return NULL;
+    }
+
+    while (true)
+    {
+        size_t n = fread(chunk, 1, chunk_size, fp);
+        if (n == 0)
+        {
+            break;
+        }
+        if (max_bytes > 0 && len + n > max_bytes)
+        {
+            free(buf);
+            buf = NULL;
+            break;
+        }
+        if (len + n + 1 > cap)
+        {
+            size_t new_cap = cap ? (cap * 2u) : 8192u;
+            while (new_cap < len + n + 1)
+            {
+                new_cap *= 2u;
+            }
+            if (max_bytes > 0 && new_cap > max_bytes + 1)
+            {
+                new_cap = max_bytes + 1;
+            }
+            char *next = (char *)realloc(buf, new_cap);
+            if (!next)
+            {
+                free(buf);
+                buf = NULL;
+                break;
+            }
+            buf = next;
+            cap = new_cap;
+        }
+        memcpy(buf + len, chunk, n);
+        len += n;
+    }
+
+    free(chunk);
+
+    if (!buf || ferror(fp))
+    {
+        free(buf);
+        return NULL;
+    }
+
+    buf[len] = '\0';
+    if (out_len)
+    {
+        *out_len = len;
+    }
+    return buf;
+}
+
+static char *host_fetch_url_with_cmd(const char *cmd, size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!cmd || cmd[0] == '\0')
+    {
+        return NULL;
+    }
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp)
+    {
+        return NULL;
+    }
+
+    char *data = host_read_stream(fp, out_len, HOST_FETCH_MAX_BYTES);
+    int status = pclose(fp);
+    if (!data || status != 0)
+    {
+        free(data);
+        if (out_len)
+        {
+            *out_len = 0;
+        }
+        return NULL;
+    }
+    return data;
+}
+
+static char *host_fetch_url(const char *url, size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!url || url[0] == '\0')
+    {
+        return NULL;
+    }
+
+    char *cached = host_fetch_url_from_cache(url, out_len);
+    if (cached)
+    {
+        return cached;
+    }
+
+    char *escaped_url = host_shell_escape(url);
+    char *escaped_ua = host_shell_escape("AlixHostTest/1.0");
+    if (!escaped_url || !escaped_ua)
+    {
+        free(escaped_url);
+        free(escaped_ua);
+        return NULL;
+    }
+
+    const char *cmd_fmts[] = {
+        "curl -fsSL --max-time 30 --retry 2 --retry-delay 1 --user-agent %s --url %s",
+        "wget -qO- --timeout=30 --tries=2 --user-agent %s %s"
+    };
+
+    char *data = NULL;
+    for (size_t i = 0; i < sizeof(cmd_fmts) / sizeof(cmd_fmts[0]); ++i)
+    {
+        size_t cmd_len = (size_t)snprintf(NULL, 0, cmd_fmts[i], escaped_ua, escaped_url) + 1;
+        char *cmd = (char *)malloc(cmd_len);
+        if (!cmd)
+        {
+            break;
+        }
+        snprintf(cmd, cmd_len, cmd_fmts[i], escaped_ua, escaped_url);
+        data = host_fetch_url_with_cmd(cmd, out_len);
+        free(cmd);
+        if (data)
+        {
+            break;
+        }
+    }
+
+    free(escaped_url);
+    free(escaped_ua);
+    if (data && out_len && *out_len > 0)
+    {
+        host_fetch_url_store_cache(url, data, *out_len);
+    }
+    return data;
+}
+
 static bool attr_has_token(const char *value, const char *token)
 {
     if (!value || !token || token[0] == '\0')
@@ -2120,6 +2496,115 @@ static char *decode_data_css(const char *href)
         out[len++] = (*p == '+') ? ' ' : *p;
     }
     out[len] = '\0';
+    return out;
+}
+
+static bool host_is_http_url(const char *href)
+{
+    if (!href || href[0] == '\0')
+    {
+        return false;
+    }
+    return strncasecmp(href, "http://", 7) == 0 || strncasecmp(href, "https://", 8) == 0;
+}
+
+static char *host_make_absolute_url(const char *base_url, const char *href)
+{
+    if (!href || href[0] == '\0')
+    {
+        return NULL;
+    }
+    if (strncasecmp(href, "data:", 5) == 0 ||
+        strncasecmp(href, "mailto:", 7) == 0 ||
+        strncasecmp(href, "javascript:", 11) == 0)
+    {
+        return NULL;
+    }
+    if (host_is_http_url(href))
+    {
+        return html_view_strdup(href);
+    }
+    if (href[0] == '/' && href[1] == '/')
+    {
+        if (!base_url)
+        {
+            return NULL;
+        }
+        const char *scheme_end = strstr(base_url, "://");
+        if (!scheme_end)
+        {
+            return NULL;
+        }
+        size_t scheme_len = (size_t)(scheme_end - base_url);
+        size_t href_len = strlen(href);
+        char *out = (char *)malloc(scheme_len + 1 + href_len + 1);
+        if (!out)
+        {
+            return NULL;
+        }
+        memcpy(out, base_url, scheme_len);
+        out[scheme_len] = ':';
+        memcpy(out + scheme_len + 1, href, href_len);
+        out[scheme_len + 1 + href_len] = '\0';
+        return out;
+    }
+    if (!base_url || !host_is_http_url(base_url))
+    {
+        return NULL;
+    }
+
+    const char *scheme_end = strstr(base_url, "://");
+    if (!scheme_end)
+    {
+        return NULL;
+    }
+    const char *host_start = scheme_end + 3;
+    const char *path_start = strchr(host_start, '/');
+    size_t origin_len = path_start ? (size_t)(path_start - base_url) : strlen(base_url);
+
+    const char *path = path_start ? path_start : "/";
+    const char *path_end = path;
+    while (*path_end && *path_end != '?' && *path_end != '#')
+    {
+        ++path_end;
+    }
+    const char *last_slash = NULL;
+    for (const char *p = path; p < path_end; ++p)
+    {
+        if (*p == '/')
+        {
+            last_slash = p;
+        }
+    }
+    size_t base_dir_len = 1;
+    if (last_slash)
+    {
+        base_dir_len = (size_t)(last_slash - path + 1);
+    }
+
+    size_t href_len = strlen(href);
+    if (href[0] == '/')
+    {
+        char *out = (char *)malloc(origin_len + href_len + 1);
+        if (!out)
+        {
+            return NULL;
+        }
+        memcpy(out, base_url, origin_len);
+        memcpy(out + origin_len, href, href_len);
+        out[origin_len + href_len] = '\0';
+        return out;
+    }
+
+    char *out = (char *)malloc(origin_len + base_dir_len + href_len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    memcpy(out, base_url, origin_len);
+    memcpy(out + origin_len, path, base_dir_len);
+    memcpy(out + origin_len + base_dir_len, href, href_len);
+    out[origin_len + base_dir_len + href_len] = '\0';
     return out;
 }
 
@@ -2280,6 +2765,94 @@ next_node:
     for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
     {
         collect_style_text_with_base(child, css, len, cap, base_dir);
+    }
+}
+
+static void collect_style_text_with_url_base(const html_node_t *node,
+                                             char **css,
+                                             size_t *len,
+                                             size_t *cap,
+                                             const char *base_url,
+                                             size_t *fetch_count)
+{
+    if (!node)
+    {
+        return;
+    }
+
+    if (node->type == HTML_NODE_ELEMENT && node->name)
+    {
+        if (strcmp(node->name, "style") == 0)
+        {
+            char *text = NULL;
+            size_t text_len = 0;
+            size_t text_cap = 0;
+            html_view_collect_text(node, &text, &text_len, &text_cap);
+            if (text && text_len > 0)
+            {
+                (void)html_view_buf_append(css, len, cap, text, text_len);
+                (void)html_view_buf_append(css, len, cap, "\n", 1);
+            }
+            free(text);
+        }
+        else if (strcmp(node->name, "link") == 0)
+        {
+            const char *rel = html_attr_get(node, "rel");
+            if (attr_has_token(rel, "stylesheet"))
+            {
+                const char *type = html_attr_get(node, "type");
+                if (type && type[0] != '\0' && strcasecmp(type, "text/css") != 0)
+                {
+                    goto next_node;
+                }
+                const char *href = html_attr_get(node, "href");
+                char *decoded = decode_data_css(href);
+                if (decoded)
+                {
+                    (void)html_view_buf_append(css, len, cap, decoded, strlen(decoded));
+                    (void)html_view_buf_append(css, len, cap, "\n", 1);
+                    free(decoded);
+                }
+                else if (href && href[0] != '\0')
+                {
+                    char *url = host_make_absolute_url(base_url, href);
+                    if (url)
+                    {
+                        size_t css_len = 0;
+                        double t0 = host_now_ms();
+                        char *remote = host_fetch_url(url, &css_len);
+                        double t1 = host_now_ms();
+                        if (remote && css_len > 0)
+                        {
+                            (void)html_view_buf_append(css, len, cap, remote, css_len);
+                            (void)html_view_buf_append(css, len, cap, "\n", 1);
+                            if (fetch_count)
+                            {
+                                (*fetch_count)++;
+                            }
+                            printf("html_view_host_test: css fetch %s bytes=%zu time=%.1fms\n",
+                                   url,
+                                   css_len,
+                                   t1 - t0);
+                        }
+                        else
+                        {
+                            printf("html_view_host_test: css fetch failed %s time=%.1fms\n",
+                                   url,
+                                   t1 - t0);
+                        }
+                        free(remote);
+                        free(url);
+                    }
+                }
+            }
+        }
+    }
+
+next_node:
+    for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+    {
+        collect_style_text_with_url_base(child, css, len, cap, base_url, fetch_count);
     }
 }
 
@@ -2678,7 +3251,7 @@ static bool test_table_cell_alignment(void)
     parent.text_align = CSS_TEXT_ALIGN_CENTER;
 
     css_style_t out = {0};
-    html_view_style_for_node(&out, NULL, &parent, td);
+    html_view_style_for_node(&out, NULL, &parent, td, NULL);
 
     html_document_destroy(doc);
     return out.has_text_align && out.text_align == CSS_TEXT_ALIGN_LEFT;
@@ -2705,7 +3278,7 @@ static bool test_table_header_alignment(void)
     parent.text_align = CSS_TEXT_ALIGN_LEFT;
 
     css_style_t out = {0};
-    html_view_style_for_node(&out, NULL, &parent, th);
+    html_view_style_for_node(&out, NULL, &parent, th, NULL);
 
     html_document_destroy(doc);
     return out.has_text_align && out.text_align == CSS_TEXT_ALIGN_CENTER;
@@ -2962,11 +3535,11 @@ static bool test_attribute_selectors_with_escapes(void)
 
     css_style_t parent = {0};
     css_style_t out_div = {0};
-    html_view_style_for_node(&out_div, sheet, &parent, div);
+    html_view_style_for_node(&out_div, sheet, &parent, div, NULL);
     bool ok_div = out_div.has_position && out_div.position == CSS_POSITION_ABSOLUTE;
 
     css_style_t out_span = {0};
-    html_view_style_for_node(&out_span, sheet, &parent, span);
+    html_view_style_for_node(&out_span, sheet, &parent, span, NULL);
     bool ok_span = out_span.has_float && out_span.float_mode == CSS_FLOAT_RIGHT;
 
     css_stylesheet_destroy(sheet);
@@ -3001,9 +3574,9 @@ static bool test_adjacent_sibling_selector(void)
 
     css_style_t parent = {0};
     css_style_t out_first = {0};
-    html_view_style_for_node(&out_first, sheet, &parent, first);
+    html_view_style_for_node(&out_first, sheet, &parent, first, NULL);
     css_style_t out_second = {0};
-    html_view_style_for_node(&out_second, sheet, &parent, second);
+    html_view_style_for_node(&out_second, sheet, &parent, second, NULL);
 
     css_stylesheet_destroy(sheet);
     html_document_destroy(doc);
@@ -3043,9 +3616,9 @@ static bool test_child_and_descendant_selectors(void)
     css_style_t out_nose = {0};
     css_style_t out_child = {0};
     css_style_t out_grand = {0};
-    html_view_style_for_node(&out_nose, sheet, &parent, nose);
-    html_view_style_for_node(&out_child, sheet, &parent, child);
-    html_view_style_for_node(&out_grand, sheet, &parent, grand);
+    html_view_style_for_node(&out_nose, sheet, &parent, nose, NULL);
+    html_view_style_for_node(&out_child, sheet, &parent, child, NULL);
+    html_view_style_for_node(&out_grand, sheet, &parent, grand, NULL);
 
     css_stylesheet_destroy(sheet);
     html_document_destroy(doc);
@@ -3084,7 +3657,7 @@ static bool test_link_pseudo_class(void)
 
     css_style_t parent = {0};
     css_style_t out = {0};
-    html_view_style_for_node(&out, sheet, &parent, link);
+    html_view_style_for_node(&out, sheet, &parent, link, NULL);
 
     css_stylesheet_destroy(sheet);
     html_document_destroy(doc);
@@ -3118,10 +3691,10 @@ static bool test_pseudo_element_style(void)
 
     css_style_t parent = {0};
     css_style_t base = {0};
-    html_view_style_for_node(&base, sheet, &parent, child);
+    html_view_style_for_node(&base, sheet, &parent, child, NULL);
 
     css_style_t out = {0};
-    bool has_pseudo = html_view_style_for_pseudo(&out, sheet, &base, child, HTML_VIEW_PSEUDO_BEFORE);
+    bool has_pseudo = html_view_style_for_pseudo(&out, sheet, &base, child, NULL, HTML_VIEW_PSEUDO_BEFORE);
 
     css_stylesheet_destroy(sheet);
     html_document_destroy(doc);
@@ -3152,7 +3725,7 @@ static bool test_inline_background_style(void)
 
     css_style_t parent = {0};
     css_style_t out = {0};
-    html_view_style_for_node(&out, NULL, &parent, node);
+    html_view_style_for_node(&out, NULL, &parent, node, NULL);
 
     bool ok = out.has_background &&
               !out.background_transparent &&
@@ -3208,7 +3781,7 @@ static bool test_link_stylesheet_data_url(void)
 
     css_style_t parent = {0};
     css_style_t out = {0};
-    html_view_style_for_node(&out, priv.sheet, &parent, box);
+    html_view_style_for_node(&out, priv.sheet, &parent, box, NULL);
 
     bool ok = out.has_background &&
               !out.background_transparent &&
@@ -3252,7 +3825,7 @@ static bool test_object_fallback_text(void)
 
     css_style_t parent = {0};
     css_style_t style = {0};
-    html_view_style_for_node(&style, NULL, &parent, obj);
+    html_view_style_for_node(&style, NULL, &parent, obj, NULL);
 
     bool rendered = html_view_render_inline_element(&ctx, obj, &style);
     int expected = html_view_text_width(&ctx, "OK");
@@ -3288,10 +3861,10 @@ static bool test_float_inherit(void)
 
     css_style_t root = {0};
     css_style_t parent_style = {0};
-    html_view_style_for_node(&parent_style, sheet, &root, parent_node);
+    html_view_style_for_node(&parent_style, sheet, &root, parent_node, NULL);
 
     css_style_t child_style = {0};
-    html_view_style_for_node(&child_style, sheet, &parent_style, child_node);
+    html_view_style_for_node(&child_style, sheet, &parent_style, child_node, NULL);
 
     bool ok = parent_style.has_float && parent_style.float_mode == CSS_FLOAT_RIGHT;
     ok = ok && child_style.has_float && child_style.float_mode == CSS_FLOAT_RIGHT;
@@ -3422,7 +3995,7 @@ static bool test_acid2_render_snapshot(void)
     css_style_t html_style = {0};
     if (html_node)
     {
-        html_view_style_for_node(&html_style, sheet, &base_style, html_node);
+        html_view_style_for_node(&html_style, sheet, &base_style, html_node, NULL);
     }
     else
     {
@@ -3432,7 +4005,7 @@ static bool test_acid2_render_snapshot(void)
     css_style_t body_style = {0};
     if (body_node)
     {
-        html_view_style_for_node(&body_style, sheet, &html_style, body_node);
+        html_view_style_for_node(&body_style, sheet, &html_style, body_node, NULL);
     }
     else
     {
@@ -3766,6 +4339,9 @@ static bool test_acid2_render_snapshot(void)
     }
 
     html_view_images_clear(&priv);
+    html_view_inline_style_cache_clear(&priv);
+    html_view_measure_cache_clear(&priv);
+    html_view_rule_index_clear(&priv);
     html_view_render_cache_clear(&priv.render_cache);
     css_stylesheet_destroy(sheet);
     html_document_destroy(doc);
@@ -3779,46 +4355,41 @@ static bool test_acid2_render_snapshot(void)
     return ok;
 }
 
-static bool test_hacker_news_render(void)
+typedef struct
 {
-    const char *html_path = "tests/yctest/Hacker News.html";
-    size_t html_len = 0;
-    char *html = read_file(html_path, &html_len);
-    if (!html)
+    size_t op_count;
+    uint64_t hash;
+} html_view_render_stats_t;
+
+static bool render_doc_case(const char *case_name,
+                            const char *png_tag,
+                            const html_document_t *doc,
+                            const css_stylesheet_t *sheet,
+                            bool draw,
+                            html_view_render_stats_t *out_stats,
+                            double *out_record_ms,
+                            double *out_draw_ms)
+{
+    if (out_stats)
     {
-        printf("html_view_host_test: hacker_news failed to read %s\n", html_path);
+        out_stats->op_count = 0;
+        out_stats->hash = 0;
+    }
+    if (out_record_ms)
+    {
+        *out_record_ms = 0.0;
+    }
+    if (out_draw_ms)
+    {
+        *out_draw_ms = 0.0;
+    }
+    if (!doc || !doc->root || !sheet)
+    {
         return false;
     }
-
-    html_parse_error_t err = {0};
-    html_document_t *doc = html_parse(html, &err);
-    if (!doc)
-    {
-        printf("html_view_host_test: hacker_news parse failed at %zu: %s\n",
-               err.offset,
-               err.message ? err.message : "unknown");
-        free(html);
-        return false;
-    }
-
-    char *css = NULL;
-    size_t css_len = 0;
-    size_t css_cap = 0;
-    collect_style_text_with_base(doc->root, &css, &css_len, &css_cap, "tests/yctest");
-    css_stylesheet_t *sheet = css_parse(css ? css : "");
-    if (!sheet)
-    {
-        printf("html_view_host_test: hacker_news css parse failed\n");
-        html_document_destroy(doc);
-        free(html);
-        free(css);
-        return false;
-    }
-
-    printf("html_view_host_test: hacker_news html=%zu css=%zu\n", html_len, css_len);
 
     time_t run_ts = time(NULL);
-    bool have_test_out = ensure_test_out_dir();
+    bool have_test_out = draw ? ensure_test_out_dir() : false;
 
     atk_html_view_priv_t priv = {0};
     priv.doc = doc;
@@ -3853,7 +4424,7 @@ static bool test_hacker_news_render(void)
     css_style_t html_style = {0};
     if (html_node)
     {
-        html_view_style_for_node(&html_style, sheet, &base_style, html_node);
+        html_view_style_for_node(&html_style, sheet, &base_style, html_node, &priv);
     }
     else
     {
@@ -3863,7 +4434,7 @@ static bool test_hacker_news_render(void)
     css_style_t body_style = {0};
     if (body_node)
     {
-        html_view_style_for_node(&body_style, sheet, &html_style, body_node);
+        html_view_style_for_node(&body_style, sheet, &html_style, body_node, &priv);
     }
     else
     {
@@ -4121,7 +4692,8 @@ static bool test_hacker_news_render(void)
         .doc_origin_y = body_content_y0
     };
 
-    printf("html_view_host_test: hacker_news render record begin\n");
+    printf("html_view_host_test: %s render record begin\n", case_name);
+    double record_start = host_now_ms();
     record.space_w = html_view_text_width(&record, " ");
     if (body_node)
     {
@@ -4133,54 +4705,230 @@ static bool test_hacker_news_render(void)
     }
     html_view_align_current_line(&record);
     html_view_style_stack_destroy(&record);
-    printf("html_view_host_test: hacker_news render record end ops=%zu\n", priv.render_cache.op_count);
-
-    if (surface_init(viewport_w, viewport_h, body_bg))
+    double record_end = host_now_ms();
+    if (out_record_ms)
     {
-        surface_clear(body_bg);
-        html_view_ctx_t draw_ctx = record;
-        draw_ctx.draw = true;
-        draw_ctx.record = false;
-        draw_ctx.clip = (atk_rect_t){ viewport_x, viewport_y, viewport_w, viewport_h };
-        draw_ctx.scroll_y = 0;
-
-        html_view_render_cache_draw_visible(&draw_ctx);
-
-        if (have_test_out)
-        {
-            char path[128];
-            snprintf(path, sizeof(path), "test-out/hacker-news-run-%lld.png", (long long)run_ts);
-            if (!host_write_png_rgba32(path,
-                                       g_surface,
-                                       g_surface_width,
-                                       g_surface_height,
-                                       g_surface_width * (int)sizeof(video_color_t)))
-            {
-                printf("html_view_host_test: hacker_news failed to write %s\n", path);
-            }
-            else
-            {
-                printf("html_view_host_test: hacker_news wrote %s\n", path);
-            }
-        }
-
-        surface_destroy();
+        *out_record_ms = record_end - record_start;
     }
-    else
+    printf("html_view_host_test: %s render record end ops=%zu\n", case_name, priv.render_cache.op_count);
+
+    if (draw)
     {
-        printf("html_view_host_test: hacker_news failed to allocate surface\n");
+        if (surface_init(viewport_w, viewport_h, body_bg))
+        {
+            surface_clear(body_bg);
+            html_view_ctx_t draw_ctx = record;
+            draw_ctx.draw = true;
+            draw_ctx.record = false;
+            draw_ctx.clip = (atk_rect_t){ viewport_x, viewport_y, viewport_w, viewport_h };
+            draw_ctx.scroll_y = 0;
+
+            double draw_start = host_now_ms();
+            html_view_render_cache_draw_visible(&draw_ctx);
+            double draw_end = host_now_ms();
+            if (out_draw_ms)
+            {
+                *out_draw_ms = draw_end - draw_start;
+            }
+
+            if (have_test_out && png_tag && png_tag[0] != '\0')
+            {
+                char path[128];
+                snprintf(path, sizeof(path), "test-out/%s-run-%lld.png", png_tag, (long long)run_ts);
+                if (!host_write_png_rgba32(path,
+                                           g_surface,
+                                           g_surface_width,
+                                           g_surface_height,
+                                           g_surface_width * (int)sizeof(video_color_t)))
+                {
+                    printf("html_view_host_test: %s failed to write %s\n", case_name, path);
+                }
+                else
+                {
+                    printf("html_view_host_test: %s wrote %s\n", case_name, path);
+                }
+            }
+
+            surface_destroy();
+        }
+        else
+        {
+            printf("html_view_host_test: %s failed to allocate surface\n", case_name);
+        }
     }
 
     uint64_t hash = hash_render_ops(&priv.render_cache);
-    printf("html_view_host_test: hacker_news hash=0x%016llX\n", (unsigned long long)hash);
+    printf("html_view_host_test: %s hash=0x%016llX\n", case_name, (unsigned long long)hash);
+
+    if (out_stats)
+    {
+        out_stats->op_count = priv.render_cache.op_count;
+        out_stats->hash = hash;
+    }
 
     html_view_images_clear(&priv);
+    html_view_inline_style_cache_clear(&priv);
+    html_view_measure_cache_clear(&priv);
+    html_view_rule_index_clear(&priv);
     html_view_render_cache_clear(&priv.render_cache);
+    return true;
+}
+
+static bool test_hacker_news_render(void)
+{
+    const char *html_path = "tests/yctest/Hacker News.html";
+    size_t html_len = 0;
+    char *html = read_file(html_path, &html_len);
+    if (!html)
+    {
+        printf("html_view_host_test: hacker_news failed to read %s\n", html_path);
+        return false;
+    }
+
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse(html, &err);
+    if (!doc)
+    {
+        printf("html_view_host_test: hacker_news parse failed at %zu: %s\n",
+               err.offset,
+               err.message ? err.message : "unknown");
+        free(html);
+        return false;
+    }
+
+    char *css = NULL;
+    size_t css_len = 0;
+    size_t css_cap = 0;
+    collect_style_text_with_base(doc->root, &css, &css_len, &css_cap, "tests/yctest");
+    css_stylesheet_t *sheet = css_parse(css ? css : "");
+    if (!sheet)
+    {
+        printf("html_view_host_test: hacker_news css parse failed\n");
+        html_document_destroy(doc);
+        free(html);
+        free(css);
+        return false;
+    }
+
+    printf("html_view_host_test: hacker_news html=%zu css=%zu\n", html_len, css_len);
+
+    html_view_render_stats_t stats = {0};
+    bool ok = render_doc_case("hacker_news",
+                              "hacker-news",
+                              doc,
+                              sheet,
+                              true,
+                              &stats,
+                              NULL,
+                              NULL);
+
     css_stylesheet_destroy(sheet);
     html_document_destroy(doc);
     free(css);
     free(html);
-    return true;
+    return ok;
+}
+
+static bool test_hacker_news_live_render(void)
+{
+    const char *enable = getenv("ALIX_HOST_FETCH");
+    if (!enable || enable[0] == '\0' || strcmp(enable, "0") == 0)
+    {
+        printf("html_view_host_test: hacker_news_live skipped (set ALIX_HOST_FETCH=1)\n");
+        return true;
+    }
+
+    const char *url = getenv("ALIX_HOST_FETCH_URL");
+    if (!url || url[0] == '\0')
+    {
+        url = "https://news.ycombinator.com/item?id=46482345";
+    }
+
+    size_t html_len = 0;
+    double fetch_start = host_now_ms();
+    char *html = host_fetch_url(url, &html_len);
+    double fetch_end = host_now_ms();
+    if (!html)
+    {
+        printf("html_view_host_test: hacker_news_live fetch failed url=%s\n", url);
+        return false;
+    }
+
+    html_parse_error_t err = {0};
+    double parse_start = host_now_ms();
+    html_document_t *doc = html_parse(html, &err);
+    double parse_end = host_now_ms();
+    if (!doc)
+    {
+        printf("html_view_host_test: hacker_news_live parse failed at %zu: %s\n",
+               err.offset,
+               err.message ? err.message : "unknown");
+        free(html);
+        return false;
+    }
+
+    char *css = NULL;
+    size_t css_len = 0;
+    size_t css_cap = 0;
+    size_t css_fetches = 0;
+    double css_collect_start = host_now_ms();
+    collect_style_text_with_url_base(doc->root, &css, &css_len, &css_cap, url, &css_fetches);
+    double css_collect_end = host_now_ms();
+
+    double css_parse_start = host_now_ms();
+    css_stylesheet_t *sheet = css_parse(css ? css : "");
+    double css_parse_end = host_now_ms();
+    if (!sheet)
+    {
+        printf("html_view_host_test: hacker_news_live css parse failed\n");
+        html_document_destroy(doc);
+        free(html);
+        free(css);
+        return false;
+    }
+
+    bool draw = false;
+    const char *draw_env = getenv("ALIX_HOST_FETCH_DRAW");
+    if (draw_env && draw_env[0] != '\0' && strcmp(draw_env, "0") != 0)
+    {
+        draw = true;
+    }
+
+    html_view_render_stats_t stats = {0};
+    double render_ms = 0.0;
+    double draw_ms = 0.0;
+    bool ok = render_doc_case("hacker_news_live",
+                              "hacker-news-live",
+                              doc,
+                              sheet,
+                              draw,
+                              &stats,
+                              &render_ms,
+                              &draw_ms);
+
+    printf("html_view_host_test: hacker_news_live url=%s html=%zu css=%zu css_fetches=%zu\n",
+           url,
+           html_len,
+           css_len,
+           css_fetches);
+    printf("html_view_host_test: hacker_news_live timings fetch=%.1fms html_parse=%.1fms css_collect=%.1fms css_parse=%.1fms render=%.1fms ops=%zu%s\n",
+           fetch_end - fetch_start,
+           parse_end - parse_start,
+           css_collect_end - css_collect_start,
+           css_parse_end - css_parse_start,
+           render_ms,
+           stats.op_count,
+           draw ? "" : " (draw skipped)");
+    if (draw)
+    {
+        printf("html_view_host_test: hacker_news_live draw=%.1fms\n", draw_ms);
+    }
+
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+    free(css);
+    free(html);
+    return ok;
 }
 
 typedef struct
@@ -4213,6 +4961,7 @@ int main(void)
         { "float-measure-width", test_float_measure_width },
         { "acid2-snapshot", test_acid2_render_snapshot },
         { "hacker-news-render", test_hacker_news_render },
+        { "hacker-news-live", test_hacker_news_live_render },
     };
 
     size_t pass = 0;
