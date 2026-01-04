@@ -183,6 +183,22 @@ static const char *css_scan_value_end(const char *p)
     return p;
 }
 
+static char *css_strdup(const char *s)
+{
+    if (!s)
+    {
+        return NULL;
+    }
+    size_t len = strlen(s);
+    char *out = (char *)malloc(len + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    memcpy(out, s, len + 1);
+    return out;
+}
+
 static bool css_append_rule(css_stylesheet_t *sheet, const char *selector_start, const char *selector_end, const css_style_t *style)
 {
     if (!sheet || !selector_start || !selector_end || selector_end <= selector_start || !style)
@@ -207,6 +223,29 @@ static bool css_append_rule(css_stylesheet_t *sheet, const char *selector_start,
         return false;
     }
     rule->style = *style;
+    if (rule->style.background_image_owned && rule->style.background_image)
+    {
+        char *dup = css_strdup(rule->style.background_image);
+        if (!dup)
+        {
+            free(rule->selector);
+            free(rule);
+            return false;
+        }
+        rule->style.background_image = dup;
+    }
+    if (rule->style.content_owned && rule->style.content)
+    {
+        char *dup = css_strdup(rule->style.content);
+        if (!dup)
+        {
+            css_style_release(&rule->style);
+            free(rule->selector);
+            free(rule);
+            return false;
+        }
+        rule->style.content = dup;
+    }
     rule->next = NULL;
 
     if (!sheet->rules)
@@ -321,11 +360,13 @@ css_stylesheet_t *css_parse(const char *css_text)
             }
             if (!css_append_rule(sheet, cur, comma, &style))
             {
+                css_style_release(&style);
                 css_stylesheet_destroy(sheet);
                 return NULL;
             }
             cur = (comma < sel_end) ? comma + 1 : sel_end;
         }
+        css_style_release(&style);
     }
 
     return sheet;

@@ -42,6 +42,9 @@ static video_color_t *g_surface = NULL;
 static int g_surface_width = 0;
 static int g_surface_height = 0;
 static FILE *g_serial_log = NULL;
+static bool g_html_trace_enabled = false;
+static uint32_t g_html_trace_rule_stride = 0;
+static uint32_t g_html_trace_node_stride = 0;
 static bool ensure_test_out_dir(void);
 
 static bool surface_init(int width, int height, video_color_t bg)
@@ -109,6 +112,45 @@ int serial_printf(const char *format, ...)
     }
     return written + 1;
 }
+
+static bool host_env_enabled(const char *name)
+{
+    const char *value = getenv(name);
+    return value && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
+static uint32_t host_env_u32(const char *name, uint32_t fallback)
+{
+    const char *value = getenv(name);
+    if (!value || value[0] == '\0')
+    {
+        return fallback;
+    }
+    int parsed = atoi(value);
+    if (parsed <= 0)
+    {
+        return fallback;
+    }
+    return (uint32_t)parsed;
+}
+
+#ifdef HTML_VIEW_HOST_TRACE
+static void html_view_host_trace_init(void)
+{
+    g_html_trace_enabled = host_env_enabled("ALIX_HTML_TRACE");
+    if (!g_html_trace_enabled)
+    {
+        html_view_trace_configure(false, 0, 0);
+        return;
+    }
+    g_html_trace_rule_stride = host_env_u32("ALIX_HTML_TRACE_RULE_EVERY", 200000u);
+    g_html_trace_node_stride = host_env_u32("ALIX_HTML_TRACE_NODE_EVERY", 5000u);
+    html_view_trace_configure(true, g_html_trace_rule_stride, g_html_trace_node_stride);
+    printf("html_view_host_test: trace enabled rule_stride=%u node_stride=%u\n",
+           g_html_trace_rule_stride,
+           g_html_trace_node_stride);
+}
+#endif
 
 static void html_view_dump_append(char *buf, size_t cap, size_t *offset, const char *fmt, ...)
 {
@@ -3965,6 +4007,7 @@ static bool test_acid2_render_snapshot(void)
     atk_html_view_priv_t priv = {0};
     priv.doc = doc;
     priv.sheet = sheet;
+    html_view_dom_bloom_mark_dirty(&priv);
     html_view_render_cache_clear(&priv.render_cache);
     priv.render_cache.tile_h = ATK_HTML_VIEW_RENDER_TILE_H;
 
@@ -4361,6 +4404,59 @@ typedef struct
     uint64_t hash;
 } html_view_render_stats_t;
 
+static size_t html_view_count_nodes(const html_node_t *root)
+{
+    if (!root)
+    {
+        return 0;
+    }
+
+    size_t count = 0;
+    size_t cap = 256;
+    size_t sp = 0;
+    const html_node_t **stack = (const html_node_t **)malloc(cap * sizeof(*stack));
+    if (!stack)
+    {
+        return 0;
+    }
+    stack[sp++] = root;
+
+    while (sp > 0)
+    {
+        const html_node_t *node = stack[--sp];
+        count++;
+        for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+        {
+            if (sp == cap)
+            {
+                size_t new_cap = cap * 2u;
+                const html_node_t **next = (const html_node_t **)realloc(stack, new_cap * sizeof(*next));
+                if (!next)
+                {
+                    free(stack);
+                    return count;
+                }
+                stack = next;
+                cap = new_cap;
+            }
+            stack[sp++] = child;
+        }
+    }
+
+    free(stack);
+    return count;
+}
+
+static size_t html_view_count_rules(const css_stylesheet_t *sheet)
+{
+    size_t count = 0;
+    for (const css_rule_t *rule = sheet ? sheet->rules : NULL; rule; rule = rule->next)
+    {
+        count++;
+    }
+    return count;
+}
+
 static bool render_doc_case(const char *case_name,
                             const char *png_tag,
                             const html_document_t *doc,
@@ -4387,6 +4483,17 @@ static bool render_doc_case(const char *case_name,
     {
         return false;
     }
+#ifdef HTML_VIEW_HOST_TRACE
+    if (g_html_trace_enabled)
+    {
+        size_t node_count = html_view_count_nodes(doc->root);
+        size_t rule_count = html_view_count_rules(sheet);
+        printf("html_view_host_test: %s trace nodes=%zu rules=%zu\n",
+               case_name,
+               node_count,
+               rule_count);
+    }
+#endif
 
     time_t run_ts = time(NULL);
     bool have_test_out = draw ? ensure_test_out_dir() : false;
@@ -4924,10 +5031,40 @@ static bool test_hacker_news_live_render(void)
         printf("html_view_host_test: hacker_news_live draw=%.1fms\n", draw_ms);
     }
 
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: hacker_news_live cleanup begin\n");
+        fflush(stdout);
+    }
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: hacker_news_live cleanup destroy sheet\n");
+        fflush(stdout);
+    }
     css_stylesheet_destroy(sheet);
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: hacker_news_live cleanup destroy doc\n");
+        fflush(stdout);
+    }
     html_document_destroy(doc);
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: hacker_news_live cleanup free css\n");
+        fflush(stdout);
+    }
     free(css);
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: hacker_news_live cleanup free html\n");
+        fflush(stdout);
+    }
     free(html);
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: hacker_news_live cleanup end\n");
+        fflush(stdout);
+    }
     return ok;
 }
 
@@ -4939,6 +5076,10 @@ typedef struct
 
 int main(void)
 {
+#ifdef HTML_VIEW_HOST_TRACE
+    html_view_host_trace_init();
+#endif
+
     hv_case_t cases[] = {
         { "table-cell-align-left", test_table_cell_alignment },
         { "table-header-align-center", test_table_header_alignment },

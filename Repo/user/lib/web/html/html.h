@@ -2,6 +2,7 @@
 #define WEB_HTML_PUBLIC_H
 
 #include "types.h"
+#include "web/common/bloom.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,6 +46,8 @@ typedef struct html_node
     html_class_token_t *class_tokens;
     size_t class_token_count;
     size_t class_token_cap;
+    web_bloom_t self_bloom;
+    web_bloom_t ancestor_bloom;
 } html_node_t;
 
 typedef struct html_document

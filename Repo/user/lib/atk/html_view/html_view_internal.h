@@ -217,13 +217,17 @@ typedef struct
     const css_style_t *style;
 } html_view_inline_style_cache_t;
 
-typedef struct
+typedef struct html_view_rule_bucket
 {
     char *tag;
     size_t tag_len;
     css_rule_t **rules;
     size_t count;
     size_t cap;
+    uint8_t pseudo_mask;
+    struct html_view_rule_bucket *parent_buckets;
+    size_t parent_count;
+    size_t parent_cap;
 } html_view_rule_bucket_t;
 
 typedef struct
@@ -232,9 +236,22 @@ typedef struct
     css_rule_t **global_rules;
     size_t global_count;
     size_t global_cap;
-    html_view_rule_bucket_t *buckets;
-    size_t bucket_count;
-    size_t bucket_cap;
+    uint8_t global_pseudo_mask;
+    html_view_rule_bucket_t *tag_buckets;
+    size_t tag_bucket_count;
+    size_t tag_bucket_cap;
+    html_view_rule_bucket_t *class_buckets;
+    size_t class_bucket_count;
+    size_t class_bucket_cap;
+    html_view_rule_bucket_t *scope_class_buckets;
+    size_t scope_class_bucket_count;
+    size_t scope_class_bucket_cap;
+    html_view_rule_bucket_t *id_buckets;
+    size_t id_bucket_count;
+    size_t id_bucket_cap;
+    html_view_rule_bucket_t *attr_buckets;
+    size_t attr_bucket_count;
+    size_t attr_bucket_cap;
 } html_view_rule_index_t;
 
 typedef struct
@@ -301,7 +318,11 @@ typedef struct
     html_node_t **js_handles;
     size_t js_handle_count;
     size_t js_handle_cap;
+    uint32_t dom_bloom_dirty;
 } atk_html_view_priv_t;
+
+void html_view_dom_bloom_mark_dirty(atk_html_view_priv_t *priv);
+void html_view_dom_bloom_rebuild_if_needed(atk_html_view_priv_t *priv);
 
 typedef struct
 {
@@ -568,6 +589,11 @@ void html_view_controls_clear(atk_widget_t *view, atk_html_view_priv_t *priv);
 void html_view_controls_hide_all(atk_html_view_priv_t *priv);
 void html_view_collect_text(const html_node_t *node, char **buf, size_t *len, size_t *cap);
 void html_view_trim_collapse_ws(char *text);
+#ifdef HTML_VIEW_HOST_TRACE
+void html_view_trace_configure(bool enabled, uint32_t rule_stride, uint32_t node_stride);
+void html_view_trace_note_rule(const html_node_t *node, const char *selector, const char *phase);
+void html_view_trace_note_node(const html_node_t *node, const char *phase);
+#endif
 
 void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
                                  int x,

@@ -2,6 +2,7 @@
 #define WEB_CSS_PUBLIC_H
 
 #include "types.h"
+#include "web/common/bloom.h"
 #include "video.h"
 
 #ifdef __cplusplus
@@ -272,10 +273,34 @@ typedef struct css_selector_cache
     size_t cap;
     bool parsed;
     bool parse_failed;
+    bool never_match;
     bool tag_hint_valid;
     bool tag_hint_any;
     uint32_t tag_hint_start;
     uint32_t tag_hint_len;
+    bool class_hint_valid;
+    uint32_t class_hint_start;
+    uint32_t class_hint_len;
+    bool scope_class_hint_valid;
+    uint32_t scope_class_hint_start;
+    uint32_t scope_class_hint_len;
+    bool parent_class_hint_valid;
+    uint32_t parent_class_hint_start;
+    uint32_t parent_class_hint_len;
+    bool id_hint_valid;
+    uint32_t id_hint_start;
+    uint32_t id_hint_len;
+    bool attr_hint_valid;
+    uint32_t attr_hint_name_start;
+    uint32_t attr_hint_name_len;
+    bool attr_hint_value_valid;
+    uint32_t attr_hint_value_start;
+    uint32_t attr_hint_value_len;
+    char attr_hint_op;
+    uint8_t pseudo_mask;
+    web_bloom_t self_bloom_mask;
+    web_bloom_t ancestor_bloom_mask;
+    uint32_t order;
 } css_selector_cache_t;
 
 typedef struct css_rule

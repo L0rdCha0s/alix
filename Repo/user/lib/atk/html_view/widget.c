@@ -124,6 +124,8 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         return false;
     }
 
+    html_view_dom_bloom_rebuild_if_needed(priv);
+
     int abs_x = 0;
     int abs_y = 0;
     atk_widget_absolute_position(view, &abs_x, &abs_y);
@@ -1280,6 +1282,7 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
         priv->sheet = NULL;
     }
     priv->doc = doc;
+    html_view_dom_bloom_mark_dirty(priv);
     priv->scroll_y = 0;
     html_view_stylesheet_mark_dirty(priv);
     html_view_stylesheet_rebuild_if_needed(priv);

@@ -797,6 +797,7 @@ static void html_view_js_note_dom_change(atk_html_view_priv_t *priv, bool styles
     {
         flags |= HTML_VIEW_JS_DIRTY_CONTROLS;
     }
+    html_view_dom_bloom_mark_dirty(priv);
     html_view_js_mark_dirty(priv, flags);
 }
 

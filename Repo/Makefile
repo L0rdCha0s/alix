@@ -536,7 +536,7 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
                        user/lib/atk/html_view/render/flex.c \
                        user/lib/atk/html_view/render/forms.c
 	@mkdir -p $(HOST_TEST_DIR)
-	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD -DATK_NO_DESKTOP_APPS -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
 	    tests/html_view_host_test.c \
 	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
 	    src/kernel/utf8.c \

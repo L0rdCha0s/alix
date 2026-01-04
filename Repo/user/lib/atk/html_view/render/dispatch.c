@@ -279,6 +279,9 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
     {
         return;
     }
+#ifdef HTML_VIEW_HOST_TRACE
+    html_view_trace_note_node(node, "render");
+#endif
 
     if (node->type == HTML_NODE_TEXT)
     {
