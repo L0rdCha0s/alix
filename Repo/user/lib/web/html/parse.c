@@ -71,6 +71,35 @@ static void html_error(html_parse_error_t *err, size_t offset, const char *messa
     err->message = message;
 }
 
+static bool html_text_has_non_ws(const char *text)
+{
+    if (!text)
+    {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p)
+    {
+        if (*p >= 0x80u || !isspace(*p))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool html_parent_preserves_ws(const html_node_stack_t *stack)
+{
+    html_node_t *parent = html_stack_top(stack);
+    if (!parent || parent->type != HTML_NODE_ELEMENT || !parent->name)
+    {
+        return false;
+    }
+    return strcmp(parent->name, "pre") == 0 ||
+           strcmp(parent->name, "code") == 0 ||
+           strcmp(parent->name, "textarea") == 0 ||
+           strcmp(parent->name, "script") == 0 ||
+           strcmp(parent->name, "style") == 0;
+}
 
 static inline bool html_is_name_char(char c)
 {
@@ -576,6 +605,7 @@ static void html_append_text_node(html_node_stack_t *stack, const char *start, c
     {
         return;
     }
+    bool preserve_ws = html_parent_preserves_ws(stack);
     html_node_t *text = html_node_create(HTML_NODE_TEXT);
     if (!text)
     {
@@ -586,6 +616,31 @@ static void html_append_text_node(html_node_stack_t *stack, const char *start, c
     {
         free(text);
         return;
+    }
+    if (!preserve_ws && !html_text_has_non_ws(text->text))
+    {
+        free(text->text);
+        free(text);
+        return;
+    }
+    if (parent->last_child && parent->last_child->type == HTML_NODE_TEXT &&
+        parent->last_child->text)
+    {
+        size_t left_len = strlen(parent->last_child->text);
+        size_t right_len = strlen(text->text);
+        size_t merged_len = left_len + right_len;
+        char *merged = (char *)malloc(merged_len + 1);
+        if (merged)
+        {
+            memcpy(merged, parent->last_child->text, left_len);
+            memcpy(merged + left_len, text->text, right_len);
+            merged[merged_len] = '\0';
+            free(parent->last_child->text);
+            parent->last_child->text = merged;
+            free(text->text);
+            free(text);
+            return;
+        }
     }
     html_node_append_child(parent, text);
 }

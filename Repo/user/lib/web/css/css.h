@@ -258,10 +258,31 @@ typedef struct
     int32_t opacity_milli;
 } css_style_t;
 
+typedef struct css_selector_part
+{
+    uint32_t start;
+    uint32_t end;
+    char combinator;
+} css_selector_part_t;
+
+typedef struct css_selector_cache
+{
+    css_selector_part_t *parts;
+    size_t count;
+    size_t cap;
+    bool parsed;
+    bool parse_failed;
+    bool tag_hint_valid;
+    bool tag_hint_any;
+    uint32_t tag_hint_start;
+    uint32_t tag_hint_len;
+} css_selector_cache_t;
+
 typedef struct css_rule
 {
     char *selector;
     css_style_t style;
+    css_selector_cache_t *selector_cache;
     struct css_rule *next;
 } css_rule_t;
 

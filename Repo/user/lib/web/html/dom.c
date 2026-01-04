@@ -122,6 +122,7 @@ void html_document_destroy(html_document_t *doc)
         html_attr_free_list(node->attrs);
         free(node->name);
         free(node->text);
+        free(node->class_tokens);
         free(node);
     }
 
@@ -135,6 +136,11 @@ const char *html_attr_get(const html_node_t *node, const char *name)
     {
         return NULL;
     }
+    if (node->attr_cache && node->attr_cache->name &&
+        strcasecmp(node->attr_cache->name, name) == 0)
+    {
+        return node->attr_cache->value ? node->attr_cache->value : "";
+    }
     for (html_attr_t *attr = node->attrs; attr; attr = attr->next)
     {
         if (!attr->name)
@@ -143,6 +149,7 @@ const char *html_attr_get(const html_node_t *node, const char *name)
         }
         if (strcasecmp(attr->name, name) == 0)
         {
+            ((html_node_t *)node)->attr_cache = attr;
             return attr->value ? attr->value : "";
         }
     }

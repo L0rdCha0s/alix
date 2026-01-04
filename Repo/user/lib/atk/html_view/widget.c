@@ -163,7 +163,7 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     css_style_t html_style = {0};
     if (html_node)
     {
-        html_view_style_for_node(&html_style, priv->sheet, &base_style, html_node);
+        html_view_style_for_node(&html_style, priv->sheet, &base_style, html_node, priv);
     }
     else
     {
@@ -173,7 +173,7 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     css_style_t body_style = {0};
     if (body_node)
     {
-        html_view_style_for_node(&body_style, priv->sheet, &html_style, body_node);
+        html_view_style_for_node(&body_style, priv->sheet, &html_style, body_node, priv);
     }
     else
     {
@@ -705,7 +705,7 @@ static void html_view_draw_cb(const atk_state_t *state,
     css_style_t html_style = {0};
     if (html_node)
     {
-        html_view_style_for_node(&html_style, priv->sheet, &base_style, html_node);
+        html_view_style_for_node(&html_style, priv->sheet, &base_style, html_node, priv);
     }
     else
     {
@@ -715,7 +715,7 @@ static void html_view_draw_cb(const atk_state_t *state,
     css_style_t body_style = {0};
     if (body_node)
     {
-        html_view_style_for_node(&body_style, priv->sheet, &html_style, body_node);
+        html_view_style_for_node(&body_style, priv->sheet, &html_style, body_node, priv);
     }
     else
     {
@@ -1102,6 +1102,8 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
         }
         priv->controls = NULL;
         html_view_images_clear(priv);
+        html_view_inline_style_cache_clear(priv);
+        html_view_measure_cache_clear(priv);
         if (priv->external_css)
         {
             free(priv->external_css);
@@ -1262,6 +1264,8 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     }
     html_view_controls_clear(view, priv);
     html_view_images_clear(priv);
+    html_view_inline_style_cache_clear(priv);
+    html_view_measure_cache_clear(priv);
     if (priv->external_css)
     {
         free(priv->external_css);
@@ -2466,7 +2470,7 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
     root_frame.depth = 0;
     if (root->type == HTML_NODE_ELEMENT)
     {
-        html_view_style_for_node(&root_frame.style, sheet, NULL, root);
+        html_view_style_for_node(&root_frame.style, sheet, NULL, root, NULL);
         root_frame.has_style = true;
     }
     stack[count++] = root_frame;
@@ -2506,7 +2510,7 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
             child_frame.has_style = false;
             if (child && child->type == HTML_NODE_ELEMENT)
             {
-                html_view_style_for_node(&child_frame.style, sheet, parent_style, child);
+                html_view_style_for_node(&child_frame.style, sheet, parent_style, child, NULL);
                 child_frame.has_style = true;
             }
             else if (parent_style)

@@ -23,6 +23,12 @@ typedef struct html_attr
     struct html_attr *next;
 } html_attr_t;
 
+typedef struct html_class_token
+{
+    const char *start;
+    size_t len;
+} html_class_token_t;
+
 typedef struct html_node
 {
     html_node_type_t type;
@@ -34,6 +40,11 @@ typedef struct html_node
     struct html_node *last_child;
     struct html_node *prev_sibling;
     struct html_node *next_sibling;
+    html_attr_t *attr_cache;
+    const char *class_cache_value;
+    html_class_token_t *class_tokens;
+    size_t class_token_count;
+    size_t class_token_cap;
 } html_node_t;
 
 typedef struct html_document

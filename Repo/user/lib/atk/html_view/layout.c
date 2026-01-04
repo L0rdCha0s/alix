@@ -1031,28 +1031,7 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
         return;
     }
 
-    char scratch[128];
-    const char *text = NULL;
-    char *heap = NULL;
-    if (len < sizeof(scratch))
-    {
-        memcpy(scratch, word, len);
-        scratch[len] = '\0';
-        text = scratch;
-    }
-    else
-    {
-        heap = (char *)malloc(len + 1);
-        if (!heap)
-        {
-            return;
-        }
-        memcpy(heap, word, len);
-        heap[len] = '\0';
-        text = heap;
-    }
-
-    int w = html_view_text_width(ctx, text);
+    int w = html_view_text_width_len(ctx, word, len);
 
     if (!underline && ctx->underline_run_active)
     {
@@ -1133,10 +1112,10 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
     }
     else if (ctx->draw && html_view_line_visible(ctx))
     {
-        html_view_draw_string_clipped(ctx, draw_x, baseline, text, color, &ctx->clip);
+        html_view_draw_string_clipped_len(ctx, draw_x, baseline, word, len, color, &ctx->clip);
         if (bold)
         {
-            html_view_draw_string_clipped(ctx, draw_x + 1, baseline, text, color, &ctx->clip);
+            html_view_draw_string_clipped_len(ctx, draw_x + 1, baseline, word, len, color, &ctx->clip);
         }
     }
 
@@ -1148,7 +1127,6 @@ static void html_view_draw_word(html_view_ctx_t *ctx,
     ctx->pending_space = true;
     html_view_ensure_line_visible(ctx);
 
-    free(heap);
 }
 
 void html_view_draw_text(html_view_ctx_t *ctx,

@@ -98,6 +98,48 @@ bool browser_is_gif_bytes(const uint8_t *data, size_t len)
     return (memcmp(data, "GIF87a", 6) == 0) || (memcmp(data, "GIF89a", 6) == 0);
 }
 
+bool browser_is_svg_bytes(const uint8_t *data, size_t len)
+{
+    if (!data || len < 4)
+    {
+        return false;
+    }
+
+    size_t limit = len < 512 ? len : 512;
+    for (size_t i = 0; i + 4 <= limit; ++i)
+    {
+        if (data[i] != '<')
+        {
+            continue;
+        }
+        size_t j = i + 1;
+        while (j < limit)
+        {
+            char ch = (char)data[j];
+            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r')
+            {
+                ++j;
+                continue;
+            }
+            break;
+        }
+        if (j + 3 <= limit)
+        {
+            char c1 = (char)data[j];
+            char c2 = (char)data[j + 1];
+            char c3 = (char)data[j + 2];
+            if (c1 >= 'A' && c1 <= 'Z') c1 = (char)(c1 + 32);
+            if (c2 >= 'A' && c2 <= 'Z') c2 = (char)(c2 + 32);
+            if (c3 >= 'A' && c3 <= 'Z') c3 = (char)(c3 + 32);
+            if (c1 == 's' && c2 == 'v' && c3 == 'g')
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static bool browser_url_list_contains(char *const *list, size_t count, const char *url)
 {
     if (!list || !url || url[0] == '\0')
@@ -218,21 +260,13 @@ void browser_collect_resource_urls(browser_app_t *app,
                     if (abs)
                     {
                         browser_dom_set_attr(node, "src", abs);
-                        if (!web_url_is_svg(abs))
+                        if (!browser_url_list_contains(img_urls, img_count, abs))
                         {
-                            if (!browser_url_list_contains(img_urls, img_count, abs))
-                            {
-                                img_urls[img_count++] = abs;
-                                browser_debug_logf(app, "[img] discovered %s", abs);
-                            }
-                            else
-                            {
-                                free(abs);
-                            }
+                            img_urls[img_count++] = abs;
+                            browser_debug_logf(app, "[img] discovered %s", abs);
                         }
                         else
                         {
-                            browser_debug_logf(app, "[img] skipped svg %s", abs);
                             free(abs);
                         }
                     }

@@ -36,6 +36,7 @@
 #define HTML_VIEW_FONT_MAX_ROW_PIXELS 256
 #define HTML_VIEW_FONT_TEXT_GUARD 2048
 #define HTML_VIEW_FONT_MAX_PX 512
+#define HTML_VIEW_MEASURE_CACHE_MAX 2048
 
 typedef struct html_view_js_script
 {
@@ -210,6 +211,25 @@ typedef struct
 
 typedef struct
 {
+    const html_node_t *node;
+    const char *style_attr;
+    css_stylesheet_t *sheet;
+    const css_style_t *style;
+} html_view_inline_style_cache_t;
+
+typedef struct
+{
+    const html_node_t *node;
+    int content_w;
+    int font_px;
+    int line_height;
+    bool shrink;
+    int out_w;
+    int out_h;
+} html_view_measure_cache_entry_t;
+
+typedef struct
+{
     atk_list_node_t *child_node;
     atk_widget_t *scrollbar;
     int scrollbar_width;
@@ -226,6 +246,12 @@ typedef struct
     html_view_control_t *controls;
     html_view_font_state_t font;
     html_view_render_cache_t render_cache;
+    html_view_inline_style_cache_t *inline_cache;
+    size_t inline_cache_count;
+    size_t inline_cache_cap;
+    html_view_measure_cache_entry_t *measure_cache;
+    size_t measure_cache_count;
+    size_t measure_cache_cap;
     atk_html_view_link_t link_handler;
     void *link_context;
     const char *pressed_href;
@@ -592,6 +618,7 @@ bool html_view_is_block_tag(const char *tag);
 bool html_view_is_form_control_tag(const char *tag);
 
 int html_view_text_width(const html_view_ctx_t *ctx, const char *text);
+int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_t len);
 int html_view_baseline_for_rect(const html_view_ctx_t *ctx, int top, int height);
 void html_view_draw_string_clipped(const html_view_ctx_t *ctx,
                                    int x,
@@ -599,17 +626,26 @@ void html_view_draw_string_clipped(const html_view_ctx_t *ctx,
                                    const char *text,
                                    video_color_t fg,
                                    const atk_rect_t *clip);
+void html_view_draw_string_clipped_len(const html_view_ctx_t *ctx,
+                                       int x,
+                                       int baseline_y,
+                                       const char *text,
+                                       size_t len,
+                                       video_color_t fg,
+                                       const atk_rect_t *clip);
 void html_view_font_state_reset(html_view_font_state_t *state);
 html_view_font_size_cache_t *html_view_font_state_get_cache(html_view_font_state_t *state, int pixel_height);
 
 void html_view_style_for_node(css_style_t *out,
                               const css_stylesheet_t *sheet,
                               const css_style_t *parent,
-                              const html_node_t *node);
+                              const html_node_t *node,
+                              atk_html_view_priv_t *priv);
 bool html_view_style_for_pseudo(css_style_t *out,
                                 const css_stylesheet_t *sheet,
                                 const css_style_t *parent,
                                 const html_node_t *node,
+                                atk_html_view_priv_t *priv,
                                 html_view_pseudo_t pseudo);
 void html_view_style_stack_destroy(html_view_ctx_t *ctx);
 const css_style_t *html_view_style_push(html_view_ctx_t *ctx,
@@ -675,6 +711,27 @@ bool html_view_try_load_data_image_locked(atk_html_view_priv_t *priv, const char
 void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv);
 void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_stylesheet_rebuild_if_needed(atk_html_view_priv_t *priv);
+void html_view_inline_style_cache_clear(atk_html_view_priv_t *priv);
+const css_style_t *html_view_inline_style_cached(atk_html_view_priv_t *priv,
+                                                 const html_node_t *node,
+                                                 const char *inline_style);
+bool html_view_measure_cache_lookup(atk_html_view_priv_t *priv,
+                                    const html_node_t *node,
+                                    int content_w,
+                                    int font_px,
+                                    int line_height,
+                                    bool shrink,
+                                    int *out_w,
+                                    int *out_h);
+void html_view_measure_cache_store(atk_html_view_priv_t *priv,
+                                   const html_node_t *node,
+                                   int content_w,
+                                   int font_px,
+                                   int line_height,
+                                   bool shrink,
+                                   int out_w,
+                                   int out_h);
+void html_view_measure_cache_clear(atk_html_view_priv_t *priv);
 const html_node_t *html_view_find_first_element(const html_node_t *root, const char *tag);
 
 void html_view_dom_lock(atk_html_view_priv_t *priv);

@@ -361,6 +361,36 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
         return;
     }
 
+    int cache_line_height = html_view_line_height_for_style(ctx, style);
+    if (html_view_subtree_has_form_control(node) && cache_line_height < atk_font_line_height() + 8)
+    {
+        cache_line_height = atk_font_line_height() + 8;
+    }
+    if (ctx->priv)
+    {
+        int cached_w = 0;
+        int cached_h = 0;
+        if (html_view_measure_cache_lookup(ctx->priv,
+                                           node,
+                                           content_w,
+                                           ctx->actual_font_px,
+                                           cache_line_height,
+                                           shrink_to_fit,
+                                           &cached_w,
+                                           &cached_h))
+        {
+            if (out_w)
+            {
+                *out_w = cached_w;
+            }
+            if (out_h)
+            {
+                *out_h = cached_h;
+            }
+            return;
+        }
+    }
+
     html_view_ctx_t measure = *ctx;
     html_view_float_ctx_t floats = {0};
     measure.draw = false;
@@ -384,11 +414,7 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     measure.list_level = 0;
     measure.measure_max_x = measure.x;
     measure.space_w = html_view_text_width(&measure, " ");
-    measure.line_height = html_view_line_height_for_style(&measure, style);
-    if (html_view_subtree_has_form_control(node) && measure.line_height < atk_font_line_height() + 8)
-    {
-        measure.line_height = atk_font_line_height() + 8;
-    }
+    measure.line_height = cache_line_height;
 
     int height_basis = 0;
     bool height_basis_valid = html_view_length_to_px_height(ctx, &style->height, &height_basis);
@@ -476,6 +502,17 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     {
         *out_h = used_h;
     }
+    if (ctx->priv)
+    {
+        html_view_measure_cache_store(ctx->priv,
+                                      node,
+                                      content_w,
+                                      ctx->actual_font_px,
+                                      cache_line_height,
+                                      shrink_to_fit,
+                                      used_w,
+                                      used_h);
+    }
     if (ctx->record && html_view_attr_has_class(node, "chin"))
     {
         serial_printf("[html_view][acid2-measure] node=chin used_h=%d content_bottom=%d y=%d line_h=%d",
@@ -517,7 +554,7 @@ static void html_view_measure_css_table_cells(const html_view_ctx_t *ctx,
         }
 
         css_style_t child_style = {0};
-        html_view_style_for_node(&child_style, ctx->sheet, style, child);
+        html_view_style_for_node(&child_style, ctx->sheet, style, child, ctx->priv);
         if (child_style.has_display && child_style.display == CSS_DISPLAY_NONE)
         {
             css_style_release(&child_style);
@@ -2435,7 +2472,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
             }
 
             css_style_t child_style = {0};
-            html_view_style_for_node(&child_style, ctx->sheet, style, child);
+            html_view_style_for_node(&child_style, ctx->sheet, style, child, ctx->priv);
             if (child_style.has_display && child_style.display == CSS_DISPLAY_NONE)
             {
                 css_style_release(&child_style);

@@ -1057,6 +1057,7 @@ void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv)
     }
     __atomic_store_n(&priv->stylesheet_dirty, 1u, __ATOMIC_RELEASE);
     __atomic_store_n(&priv->render_cache_dirty, 1u, __ATOMIC_RELEASE);
+    html_view_measure_cache_clear(priv);
     html_view_render_request(priv);
 }
 

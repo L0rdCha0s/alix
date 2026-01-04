@@ -269,6 +269,25 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
         return 0;
     }
 
+    int cached_w = 0;
+    int cached_h = 0;
+    if (ctx->priv &&
+        html_view_measure_cache_lookup(ctx->priv,
+                                       node,
+                                       max_w,
+                                       ctx->actual_font_px,
+                                       ctx->line_height,
+                                       ctx->measure_shrink,
+                                       &cached_w,
+                                       &cached_h))
+    {
+        if (out_h)
+        {
+            *out_h = cached_h;
+        }
+        return cached_w;
+    }
+
     html_view_float_ctx_t floats = {0};
     html_view_ctx_t measure = *ctx;
     measure.draw = false;
@@ -370,6 +389,18 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
         *out_h = used_h;
     }
 
+    if (ctx->priv)
+    {
+        html_view_measure_cache_store(ctx->priv,
+                                      node,
+                                      max_w,
+                                      ctx->actual_font_px,
+                                      ctx->line_height,
+                                      ctx->measure_shrink,
+                                      used_w,
+                                      used_h);
+    }
+
     html_view_style_stack_destroy(&measure);
     return used_w;
 }
@@ -416,7 +447,7 @@ static bool html_view_table_layout_add_row(html_view_table_layout_t *layout, con
     html_view_table_row_layout_t *row = &layout->rows[layout->row_count++];
     memset(row, 0, sizeof(*row));
     row->node = tr;
-    html_view_style_for_node(&row->style, ctx->sheet, parent_style, tr);
+    html_view_style_for_node(&row->style, ctx->sheet, parent_style, tr, ctx->priv);
 
     if (row->style.has_height && row->style.height.valid && !row->style.height.is_auto)
     {
@@ -446,7 +477,7 @@ static bool html_view_table_layout_add_row(html_view_table_layout_t *layout, con
 
         html_view_table_cell_layout_t cell = {0};
         cell.node = child;
-        html_view_style_for_node(&cell.style, ctx->sheet, &row->style, child);
+        html_view_style_for_node(&cell.style, ctx->sheet, &row->style, child, ctx->priv);
         cell.colspan = html_view_attr_to_int(child, "colspan", 1);
         if (cell.colspan < 1)
         {

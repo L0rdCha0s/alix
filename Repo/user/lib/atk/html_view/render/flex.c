@@ -431,7 +431,7 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             }
 
             css_style_t child_style;
-            html_view_style_for_node(&child_style, ctx->sheet, style, child);
+            html_view_style_for_node(&child_style, ctx->sheet, style, child, ctx->priv);
             if (child_style.has_display && child_style.display == CSS_DISPLAY_NONE)
             {
                 continue;

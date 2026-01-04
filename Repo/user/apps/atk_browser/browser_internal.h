@@ -227,6 +227,7 @@ const char *browser_dom_first_text_child(const html_node_t *node);
 size_t browser_dom_count_nodes(const html_node_t *root, size_t limit);
 bool browser_is_png_bytes(const uint8_t *data, size_t len);
 bool browser_is_gif_bytes(const uint8_t *data, size_t len);
+bool browser_is_svg_bytes(const uint8_t *data, size_t len);
 void browser_dom_set_attr(html_node_t *node, const char *name, const char *value);
 void browser_collect_resource_urls(browser_app_t *app,
                                   html_node_t *root,

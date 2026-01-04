@@ -331,6 +331,53 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
     return width;
 }
 
+int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_t len)
+{
+    if (!ctx || !text || len == 0)
+    {
+        return 0;
+    }
+
+    html_view_font_size_cache_t *cache = html_view_font_cache_for_ctx(ctx);
+    if (!cache)
+    {
+        char *copy = (char *)malloc(len + 1);
+        if (!copy)
+        {
+            return 0;
+        }
+        memcpy(copy, text, len);
+        copy[len] = '\0';
+        int width = atk_font_text_width(copy);
+        free(copy);
+        return width;
+    }
+
+    html_view_font_state_t *font_state = &ctx->priv->font;
+    int width = 0;
+    size_t guard = 0;
+    size_t offset = 0;
+    while (offset < len && guard < HTML_VIEW_FONT_TEXT_GUARD)
+    {
+        utf8_decode_result_t dec = utf8_decode_one_len(text + offset, len - offset);
+        if (dec.consumed == 0)
+        {
+            break;
+        }
+        guard += (size_t)dec.consumed;
+        offset += dec.consumed;
+
+        html_view_font_glyph_t *glyph = html_view_font_cache_get_glyph(font_state, cache, dec.codepoint);
+        if (!glyph || !glyph->ready)
+        {
+            width += ctx->actual_font_px / 2;
+            continue;
+        }
+        width += glyph->advance;
+    }
+    return width;
+}
+
 int html_view_baseline_for_rect(const html_view_ctx_t *ctx, int top, int height)
 {
     if (!ctx)
@@ -403,6 +450,164 @@ void html_view_draw_string_clipped(const html_view_ctx_t *ctx,
         }
         guard += (size_t)dec.consumed;
         cursor += dec.consumed;
+
+        html_view_font_glyph_t *glyph = html_view_font_cache_get_glyph(font_state, cache, dec.codepoint);
+        if (!glyph || !glyph->ready)
+        {
+            pen_x += ctx->actual_font_px / 2;
+            continue;
+        }
+
+        const uint8_t *glyph_alpha = glyph->alpha;
+        int glyph_width = glyph->width;
+        int glyph_height = glyph->height;
+        int glyph_stride = glyph->stride;
+        int glyph_advance = glyph->advance;
+        int glyph_bearing_x = glyph->bearing_x;
+        int glyph_bearing_y = glyph->bearing_y;
+
+        if (glyph_width <= 0 || glyph_height <= 0 || !glyph_alpha || glyph_stride <= 0)
+        {
+            pen_x += glyph_advance;
+            continue;
+        }
+
+        if (glyph_width > HTML_VIEW_FONT_MAX_ROW_PIXELS)
+        {
+            pen_x += glyph_advance;
+            continue;
+        }
+
+        int dst_x = pen_x + glyph_bearing_x;
+        int dst_y = baseline_y - glyph_bearing_y;
+
+        int glyph_x0 = dst_x;
+        int glyph_y0 = dst_y;
+        int glyph_x1 = glyph_x0 + glyph_width;
+        int glyph_y1 = glyph_y0 + glyph_height;
+
+        if (glyph_x1 <= clip_x0 || glyph_x0 >= clip_x1 ||
+            glyph_y1 <= clip_y0 || glyph_y0 >= clip_y1)
+        {
+            pen_x += glyph_advance;
+            continue;
+        }
+
+        int visible_x0 = (glyph_x0 < clip_x0) ? clip_x0 : glyph_x0;
+        int visible_x1 = (glyph_x1 > clip_x1) ? clip_x1 : glyph_x1;
+        int visible_y0 = (glyph_y0 < clip_y0) ? clip_y0 : glyph_y0;
+        int visible_y1 = (glyph_y1 > clip_y1) ? clip_y1 : glyph_y1;
+
+        int start_col = visible_x0 - glyph_x0;
+        int width = visible_x1 - visible_x0;
+        int start_row = visible_y0 - glyph_y0;
+        int rows = visible_y1 - visible_y0;
+
+        if (width <= 0 || rows <= 0)
+        {
+            pen_x += glyph_advance;
+            continue;
+        }
+
+        if (start_col >= glyph_stride)
+        {
+            pen_x += glyph_advance;
+            continue;
+        }
+        if (width > glyph_stride - start_col)
+        {
+            width = glyph_stride - start_col;
+            if (width <= 0)
+            {
+                pen_x += glyph_advance;
+                continue;
+            }
+        }
+
+        if (start_row >= glyph_height)
+        {
+            pen_x += glyph_advance;
+            continue;
+        }
+        if (rows > glyph_height - start_row)
+        {
+            rows = glyph_height - start_row;
+        }
+
+        for (int row = 0; row < rows; ++row)
+        {
+            const uint8_t *src = glyph_alpha + (start_row + row) * glyph_stride + start_col;
+            for (int col = 0; col < width; ++col)
+            {
+                uint8_t alpha = src[col];
+                row_pixels[col] = ((video_color_t)alpha << 24) | (fg & 0x00FFFFFFU);
+            }
+            video_blit_rgba32_untracked(visible_x0,
+                                        visible_y0 + row,
+                                        width,
+                                        1,
+                                        row_pixels,
+                                        width * (int)sizeof(video_color_t),
+                                        true);
+        }
+
+        pen_x += glyph_advance;
+    }
+}
+
+void html_view_draw_string_clipped_len(const html_view_ctx_t *ctx,
+                                       int x,
+                                       int baseline_y,
+                                       const char *text,
+                                       size_t len,
+                                       video_color_t fg,
+                                       const atk_rect_t *clip)
+{
+    if (!ctx || !text || len == 0)
+    {
+        return;
+    }
+
+    html_view_font_size_cache_t *cache = html_view_font_cache_for_ctx(ctx);
+    if (!cache)
+    {
+        char *copy = (char *)malloc(len + 1);
+        if (!copy)
+        {
+            return;
+        }
+        memcpy(copy, text, len);
+        copy[len] = '\0';
+        atk_font_draw_string_clipped(x, baseline_y, copy, fg, ctx->bg, clip);
+        free(copy);
+        return;
+    }
+
+    html_view_font_state_t *font_state = &ctx->priv->font;
+
+    int clip_x0 = clip ? clip->x : 0;
+    int clip_y0 = clip ? clip->y : 0;
+    int clip_x1 = clip ? (clip->x + clip->width) : video_screen_width();
+    int clip_y1 = clip ? (clip->y + clip->height) : video_screen_height();
+    if (clip && (clip_x1 <= clip_x0 || clip_y1 <= clip_y0))
+    {
+        return;
+    }
+
+    video_color_t row_pixels[HTML_VIEW_FONT_MAX_ROW_PIXELS];
+    int pen_x = x;
+
+    size_t guard = 0;
+    size_t offset = 0;
+    while (offset < len && guard < HTML_VIEW_FONT_TEXT_GUARD)
+    {
+        utf8_decode_result_t dec = utf8_decode_one_len(text + offset, len - offset);
+        if (dec.consumed == 0)
+        {
+            break;
+        }
+        guard += (size_t)dec.consumed;
+        offset += dec.consumed;
 
         html_view_font_glyph_t *glyph = html_view_font_cache_get_glyph(font_state, cache, dec.codepoint);
         if (!glyph || !glyph->ready)

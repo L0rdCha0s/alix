@@ -107,6 +107,7 @@ USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c \
                           $(USER_DIR)/lib/atk/html_view/controls.c \
                           $(USER_DIR)/lib/atk/html_view/script.c \
                           $(USER_DIR)/lib/atk/html_view/style.c \
+                          $(USER_DIR)/lib/atk/html_view/measure_cache.c \
                           $(USER_DIR)/lib/atk/html_view/layout.c \
                           $(USER_DIR)/lib/atk/html_view/table.c \
                           $(USER_DIR)/lib/atk/html_view/render/dispatch.c \
@@ -526,6 +527,7 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
                        src/atk/atk_font.c \
                        user/lib/atk/html_view/font.c \
                        user/lib/atk/html_view/style.c \
+                       user/lib/atk/html_view/measure_cache.c \
                        user/lib/atk/html_view/layout.c \
                        user/lib/atk/html_view/table.c \
                        user/lib/atk/html_view/render/dispatch.c \
@@ -545,6 +547,7 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
 	    src/atk/atk_font.c \
 	    user/lib/atk/html_view/font.c \
 	    user/lib/atk/html_view/style.c \
+	    user/lib/atk/html_view/measure_cache.c \
 	    user/lib/atk/html_view/layout.c \
 	    user/lib/atk/html_view/table.c \
 	    user/lib/atk/html_view/render/dispatch.c \

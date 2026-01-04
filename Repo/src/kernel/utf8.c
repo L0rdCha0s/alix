@@ -145,6 +145,132 @@ utf8_decode_result_t utf8_decode_one(const char *s)
     return res;
 }
 
+utf8_decode_result_t utf8_decode_one_len(const char *s, size_t len)
+{
+    utf8_decode_result_t res = { 0 };
+    if (!s || len == 0)
+    {
+        return res;
+    }
+
+    uint8_t b0 = (uint8_t)(unsigned char)s[0];
+    if (b0 < 0x80u)
+    {
+        res.codepoint = (uint32_t)b0;
+        res.consumed = 1;
+        res.valid = true;
+        return res;
+    }
+
+    uint32_t codepoint = UTF8_REPLACEMENT_CHAR;
+    uint8_t needed = 0;
+
+    if (b0 >= 0xC2u && b0 <= 0xDFu)
+    {
+        needed = 2;
+    }
+    else if (b0 >= 0xE0u && b0 <= 0xEFu)
+    {
+        needed = 3;
+    }
+    else if (b0 >= 0xF0u && b0 <= 0xF4u)
+    {
+        needed = 4;
+    }
+    else
+    {
+        res.codepoint = UTF8_REPLACEMENT_CHAR;
+        res.consumed = 1;
+        res.valid = false;
+        return res;
+    }
+
+    if (len < (size_t)needed)
+    {
+        res.codepoint = UTF8_REPLACEMENT_CHAR;
+        res.consumed = 1;
+        res.valid = false;
+        return res;
+    }
+
+    for (uint8_t i = 1; i < needed; ++i)
+    {
+        uint8_t bi = (uint8_t)(unsigned char)s[i];
+        if (!utf8_is_cont(bi))
+        {
+            res.codepoint = UTF8_REPLACEMENT_CHAR;
+            res.consumed = 1;
+            res.valid = false;
+            return res;
+        }
+    }
+
+    uint8_t b1 = (uint8_t)(unsigned char)s[1];
+    if (needed == 2)
+    {
+        codepoint = ((uint32_t)(b0 & 0x1Fu) << 6) | (uint32_t)(b1 & 0x3Fu);
+    }
+    else
+    {
+        uint8_t b2 = (uint8_t)(unsigned char)s[2];
+        if (needed == 3)
+        {
+            if (b0 == 0xE0u && b1 < 0xA0u)
+            {
+                res.codepoint = UTF8_REPLACEMENT_CHAR;
+                res.consumed = 1;
+                res.valid = false;
+                return res;
+            }
+            if (b0 == 0xEDu && b1 >= 0xA0u)
+            {
+                res.codepoint = UTF8_REPLACEMENT_CHAR;
+                res.consumed = 1;
+                res.valid = false;
+                return res;
+            }
+            codepoint = ((uint32_t)(b0 & 0x0Fu) << 12) |
+                        ((uint32_t)(b1 & 0x3Fu) << 6) |
+                        (uint32_t)(b2 & 0x3Fu);
+        }
+        else
+        {
+            uint8_t b3 = (uint8_t)(unsigned char)s[3];
+            if (b0 == 0xF0u && b1 < 0x90u)
+            {
+                res.codepoint = UTF8_REPLACEMENT_CHAR;
+                res.consumed = 1;
+                res.valid = false;
+                return res;
+            }
+            if (b0 == 0xF4u && b1 > 0x8Fu)
+            {
+                res.codepoint = UTF8_REPLACEMENT_CHAR;
+                res.consumed = 1;
+                res.valid = false;
+                return res;
+            }
+            codepoint = ((uint32_t)(b0 & 0x07u) << 18) |
+                        ((uint32_t)(b1 & 0x3Fu) << 12) |
+                        ((uint32_t)(b2 & 0x3Fu) << 6) |
+                        (uint32_t)(b3 & 0x3Fu);
+        }
+    }
+
+    if (!utf8_codepoint_valid(codepoint))
+    {
+        res.codepoint = UTF8_REPLACEMENT_CHAR;
+        res.consumed = 1;
+        res.valid = false;
+        return res;
+    }
+
+    res.codepoint = codepoint;
+    res.consumed = needed;
+    res.valid = true;
+    return res;
+}
+
 size_t utf8_encode_one(uint32_t codepoint, char out[4])
 {
     if (!out)
@@ -205,4 +331,3 @@ size_t utf8_prev_char_start(const char *s, size_t len)
 
     return len - 1;
 }
-

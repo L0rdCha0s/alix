@@ -184,7 +184,7 @@ static void html_view_render_pseudo_element(html_view_ctx_t *ctx,
                        html_view_node_has_ancestor_class_local(node, "eyes");
 
     css_style_t style = {0};
-    if (!html_view_style_for_pseudo(&style, ctx->priv->sheet, parent_style, node, pseudo))
+    if (!html_view_style_for_pseudo(&style, ctx->priv->sheet, parent_style, node, ctx->priv, pseudo))
     {
         if (ctx->record && trace_acid2)
         {

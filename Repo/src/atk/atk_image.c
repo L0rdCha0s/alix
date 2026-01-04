@@ -4,6 +4,7 @@
 #include "atk/util/jpeg.h"
 #include "atk/util/png.h"
 #include "atk/util/gif.h"
+#include "atk/util/svg.h"
 #include "video.h"
 #include "libc.h"
 #include "heap.h"
@@ -27,6 +28,35 @@ static bool atk_image_is_gif(const uint8_t *data, size_t size)
 static bool atk_image_is_jpeg(const uint8_t *data, size_t size)
 {
     return data && size >= 3 && data[0] == 0xFF && data[1] == 0xD8;
+}
+
+static bool atk_image_is_svg(const uint8_t *data, size_t size)
+{
+    if (!data || size < 4)
+    {
+        return false;
+    }
+
+    size_t limit = size < 256 ? size : 256;
+    for (size_t i = 0; i + 4 <= limit; ++i)
+    {
+        if (data[i] != '<')
+        {
+            continue;
+        }
+        char c1 = (char)data[i + 1];
+        char c2 = (char)data[i + 2];
+        char c3 = (char)data[i + 3];
+        if (c1 >= 'A' && c1 <= 'Z') c1 = (char)(c1 + 32);
+        if (c2 >= 'A' && c2 <= 'Z') c2 = (char)(c2 + 32);
+        if (c3 >= 'A' && c3 <= 'Z') c3 = (char)(c3 + 32);
+        if (c1 == 's' && c2 == 'v' && c3 == 'g')
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 typedef struct
@@ -230,6 +260,32 @@ bool atk_image_load_gif(atk_widget_t *image, const uint8_t *data, size_t size)
     return atk_image_set_pixels(image, pixels, width, height, stride_bytes, true);
 }
 
+bool atk_image_load_svg(atk_widget_t *image, const uint8_t *data, size_t size)
+{
+    if (!image || !data || size == 0)
+    {
+        return false;
+    }
+
+    atk_image_priv_t *priv = (atk_image_priv_t *)atk_widget_priv(image, &ATK_IMAGE_CLASS);
+    if (!priv)
+    {
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int width = 0;
+    int height = 0;
+    int stride_bytes = 0;
+    int rc = svg_decode_rgba32(data, size, &pixels, &width, &height, &stride_bytes);
+    if (rc != 0 || !pixels)
+    {
+        return false;
+    }
+
+    return atk_image_set_pixels(image, pixels, width, height, stride_bytes, true);
+}
+
 bool atk_image_load_image(atk_widget_t *image, const uint8_t *data, size_t size)
 {
     if (atk_image_is_gif(data, size))
@@ -244,12 +300,20 @@ bool atk_image_load_image(atk_widget_t *image, const uint8_t *data, size_t size)
     {
         return atk_image_load_jpeg(image, data, size);
     }
+    if (atk_image_is_svg(data, size))
+    {
+        return atk_image_load_svg(image, data, size);
+    }
 
     if (atk_image_load_gif(image, data, size))
     {
         return true;
     }
     if (atk_image_load_png(image, data, size))
+    {
+        return true;
+    }
+    if (atk_image_load_svg(image, data, size))
     {
         return true;
     }

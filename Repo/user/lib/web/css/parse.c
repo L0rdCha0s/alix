@@ -342,6 +342,11 @@ void css_stylesheet_destroy(css_stylesheet_t *sheet)
     {
         css_rule_t *next = rule->next;
         css_style_release(&rule->style);
+        if (rule->selector_cache)
+        {
+            free(rule->selector_cache->parts);
+            free(rule->selector_cache);
+        }
         free(rule->selector);
         free(rule);
         rule = next;

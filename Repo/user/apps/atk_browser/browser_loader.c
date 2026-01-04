@@ -2,6 +2,7 @@
 
 #include "atk/util/gif.h"
 #include "atk/util/png.h"
+#include "atk/util/svg.h"
 #include "ctype.h"
 #include "string.h"
 
@@ -63,7 +64,8 @@ static bool browser_data_url_parse_base64(const char *url,
                                           const char **out_payload,
                                           size_t *out_payload_len,
                                           bool *out_has_type,
-                                          bool *out_is_png)
+                                          bool *out_is_png,
+                                          bool *out_is_svg)
 {
     if (!url || strncasecmp(url, "data:", 5) != 0)
     {
@@ -87,6 +89,7 @@ static bool browser_data_url_parse_base64(const char *url,
     bool base64 = false;
     bool has_type = false;
     bool is_png = false;
+    bool is_svg = false;
 
     const char *cursor = meta;
     size_t remaining = meta_len;
@@ -100,6 +103,11 @@ static bool browser_data_url_parse_base64(const char *url,
         if (browser_span_equals_ci(token, token_len, "image/png"))
         {
             is_png = true;
+        }
+        else if (browser_span_equals_ci(token, token_len, "image/svg+xml") ||
+                 browser_span_equals_ci(token, token_len, "image/svg"))
+        {
+            is_svg = true;
         }
     }
 
@@ -144,6 +152,10 @@ static bool browser_data_url_parse_base64(const char *url,
     if (out_is_png)
     {
         *out_is_png = is_png;
+    }
+    if (out_is_svg)
+    {
+        *out_is_svg = is_svg;
     }
     return true;
 }
@@ -367,14 +379,15 @@ static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, 
     size_t payload_len = 0;
     bool has_type = false;
     bool is_png = false;
-    if (!browser_data_url_parse_base64(url, &payload, &payload_len, &has_type, &is_png))
+    bool is_svg = false;
+    if (!browser_data_url_parse_base64(url, &payload, &payload_len, &has_type, &is_png, &is_svg))
     {
         browser_debug_logf(app, "[img] data url unsupported");
         return true;
     }
-    if (has_type && !is_png)
+    if (has_type && !is_png && !is_svg)
     {
-        browser_debug_logf(app, "[img] data url skipped (type not png)");
+        browser_debug_logf(app, "[img] data url skipped (type not png/svg)");
         return true;
     }
 
@@ -394,9 +407,31 @@ static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, 
         browser_debug_logf(app, "[img] data url base64 decode failed len=%u", (unsigned)payload_len);
         return true;
     }
-    if (!browser_is_png_bytes(decoded, decoded_len))
+    bool is_png_bytes = browser_is_png_bytes(decoded, decoded_len);
+    bool is_svg_bytes = browser_is_svg_bytes(decoded, decoded_len);
+    if (has_type)
     {
-        browser_debug_logf(app, "[img] data url skipped (not png)");
+        if (is_png && !is_png_bytes)
+        {
+            browser_debug_logf(app, "[img] data url skipped (not png)");
+            free(decoded);
+            return true;
+        }
+        if (is_svg && !is_svg_bytes)
+        {
+            browser_debug_logf(app, "[img] data url skipped (not svg)");
+            free(decoded);
+            return true;
+        }
+    }
+    else
+    {
+        is_png = is_png_bytes;
+        is_svg = is_svg_bytes;
+    }
+    if (!is_png && !is_svg)
+    {
+        browser_debug_logf(app, "[img] data url skipped (not png/svg)");
         free(decoded);
         return true;
     }
@@ -412,13 +447,20 @@ static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, 
     int stride_bytes = 0;
     int rc = -1;
     browser_lock_enter(app, &app->decode_lock, "decode_lock");
-    rc = png_decode_rgba32(decoded, decoded_len, &pixels, &w, &h, &stride_bytes);
+    if (is_svg)
+    {
+        rc = svg_decode_rgba32(decoded, decoded_len, &pixels, &w, &h, &stride_bytes);
+    }
+    else
+    {
+        rc = png_decode_rgba32(decoded, decoded_len, &pixels, &w, &h, &stride_bytes);
+    }
     browser_lock_exit(app, &app->decode_lock, "decode_lock");
     free(decoded);
 
     if (rc != 0 || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
     {
-        const char *err = png_last_error();
+        const char *err = is_svg ? svg_last_error() : png_last_error();
         browser_debug_logf(app,
                            "[img] data url decode failed err=%s",
                            err ? err : "(unknown)");
@@ -788,7 +830,8 @@ static void browser_resource_fetch(browser_app_t *app,
         {
             bool is_gif = browser_is_gif_bytes((const uint8_t *)res_body, res_len);
             bool is_png = (!is_gif && browser_is_png_bytes((const uint8_t *)res_body, res_len));
-            if (is_gif || is_png)
+            bool is_svg = (!is_gif && !is_png && browser_is_svg_bytes((const uint8_t *)res_body, res_len));
+            if (is_gif || is_png || is_svg)
             {
                 video_color_t *pixels = NULL;
                 int w = 0;
@@ -806,9 +849,18 @@ static void browser_resource_fetch(browser_app_t *app,
                                            &h,
                                            &stride_bytes);
                 }
-                else
+                else if (is_png)
                 {
                     rc = png_decode_rgba32((const uint8_t *)res_body,
+                                           res_len,
+                                           &pixels,
+                                           &w,
+                                           &h,
+                                           &stride_bytes);
+                }
+                else
+                {
+                    rc = svg_decode_rgba32((const uint8_t *)res_body,
                                            res_len,
                                            &pixels,
                                            &w,
@@ -840,7 +892,7 @@ static void browser_resource_fetch(browser_app_t *app,
                 }
                 else
                 {
-                    const char *err = is_gif ? gif_last_error() : png_last_error();
+                    const char *err = is_gif ? gif_last_error() : (is_png ? png_last_error() : svg_last_error());
                     browser_debug_logf(app,
                                        "[img] decode failed url=%s err=%s",
                                        abs ? abs : "(null)",
@@ -850,7 +902,7 @@ static void browser_resource_fetch(browser_app_t *app,
             }
             else
             {
-                browser_debug_logf(app, "[img] skipped (not png/gif) url=%s", abs);
+                browser_debug_logf(app, "[img] skipped (not png/gif/svg) url=%s", abs);
             }
         }
     }
