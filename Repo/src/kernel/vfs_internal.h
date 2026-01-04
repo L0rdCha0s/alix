@@ -25,6 +25,9 @@ struct vfs_node
     bool allow_mutation;
     uint32_t uid;
     uint32_t gid;
+    uint64_t atime;
+    uint64_t mtime;
+    uint64_t ctime;
 
     size_t refcount;
     size_t size;
@@ -54,6 +57,7 @@ struct vfs_mount
     struct vfs_mount *next;
     bool dirty;
     bool needs_full_sync;
+    bool supports_times;
     size_t dirty_bytes;
     size_t dirty_bytes_limit;
     uint64_t dirty_seq;

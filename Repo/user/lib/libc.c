@@ -2517,6 +2517,9 @@ int fstat(int fd, struct stat *st)
     st->st_size = tmp.size_bytes;
     st->st_mode = 0;
     st->st_type = tmp.type;
+    st->st_atime = tmp.atime;
+    st->st_mtime = tmp.mtime;
+    st->st_ctime = tmp.ctime;
     return 0;
 }
 

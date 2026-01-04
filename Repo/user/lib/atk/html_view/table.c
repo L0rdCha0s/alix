@@ -198,6 +198,31 @@ static const char *html_view_debug_float_label(const html_node_t *node)
     return NULL;
 }
 
+static const char *html_view_debug_table_cell_label(const html_node_t *node)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT)
+    {
+        return NULL;
+    }
+    if (html_view_attr_has_class(node, "first-part"))
+    {
+        return "first-part";
+    }
+    if (html_view_attr_has_class(node, "second-part"))
+    {
+        return "second-part";
+    }
+    if (html_view_attr_has_class(node, "third-part"))
+    {
+        return "third-part";
+    }
+    if (html_view_attr_has_class(node, "fourth-part"))
+    {
+        return "fourth-part";
+    }
+    return NULL;
+}
+
 static void html_view_table_layout_destroy(html_view_table_layout_t *layout)
 {
     if (!layout)
@@ -819,6 +844,25 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
         int extra = ctx->table_row_height - border_box_h;
         content_h += extra;
         border_box_h = ctx->table_row_height;
+    }
+    if (ctx->record && ctx->table_mode)
+    {
+        const char *cell_label = html_view_debug_table_cell_label(node);
+        if (cell_label)
+        {
+            serial_printf("[html_view][acid2-table] cell=%s content=%dx%d border_box=%dx%d margin=%d,%d,%d,%d row_h=%d row_valid=%d",
+                          cell_label,
+                          content_w,
+                          content_h,
+                          border_box_w,
+                          border_box_h,
+                          margin_top,
+                          margin_right,
+                          margin_bottom,
+                          margin_left,
+                          ctx->table_row_height,
+                          ctx->table_row_height_valid ? 1 : 0);
+        }
     }
     int outer_w = border_box_w + margin_left + margin_right;
     int outer_h = border_box_h + margin_top + margin_bottom;

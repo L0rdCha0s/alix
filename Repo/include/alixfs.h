@@ -54,4 +54,7 @@ bool alixfs_mount_format(block_device_t *device);
 /* Snapshot lightweight backend state for mount status reporting. */
 void alixfs_mount_snapshot(const alixfs_mount_t *fs, bool *header_dirty);
 
+/* True when the on-disk format supports atime/mtime/ctime. */
+bool alixfs_mount_supports_times(const alixfs_mount_t *fs);
+
 #endif /* ALIXFS_H */

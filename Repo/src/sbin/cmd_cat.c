@@ -33,7 +33,7 @@ bool shell_cmd_cat(shell_state_t *shell, shell_output_t *out, const char *path)
     }
 
     size_t snapshot_size = 0;
-    bool limit_read = vfs_stat(node, &snapshot_size, NULL) && snapshot_size > 0;
+    bool limit_read = vfs_stat(node, &snapshot_size, NULL, NULL, NULL, NULL) && snapshot_size > 0;
 
     size_t offset = 0;
     bool saw_data = false;

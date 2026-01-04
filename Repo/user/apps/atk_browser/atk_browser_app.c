@@ -109,6 +109,11 @@ int main(void)
         browser_debug_close_window(app);
     }
     atk_user_close(&app->remote);
+    for (size_t i = 0; i < BROWSER_HISTORY_MAX; ++i)
+    {
+        free(app->history_urls[i]);
+        app->history_urls[i] = NULL;
+    }
     free(app->debug_log);
     free(app->cache_dir);
     free(app->pending_fragment);

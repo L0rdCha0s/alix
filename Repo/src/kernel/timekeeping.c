@@ -993,6 +993,44 @@ bool timekeeping_local_time(timekeeping_time_of_day_t *out)
     return true;
 }
 
+static void timekeeping_write_two_digits(char *buffer, int value)
+{
+    if (!buffer)
+    {
+        return;
+    }
+    if (value < 0)
+    {
+        value = 0;
+    }
+    if (value > 99)
+    {
+        value = 99;
+    }
+    buffer[0] = (char)('0' + ((value / 10) % 10));
+    buffer[1] = (char)('0' + (value % 10));
+}
+
+static void timekeeping_write_four_digits(char *buffer, int value)
+{
+    if (!buffer)
+    {
+        return;
+    }
+    if (value < 0)
+    {
+        value = 0;
+    }
+    if (value > 9999)
+    {
+        value = 9999;
+    }
+    buffer[0] = (char)('0' + ((value / 1000) % 10));
+    buffer[1] = (char)('0' + ((value / 100) % 10));
+    buffer[2] = (char)('0' + ((value / 10) % 10));
+    buffer[3] = (char)('0' + (value % 10));
+}
+
 void timekeeping_format_time(char *buffer, size_t length)
 {
     if (!buffer || length == 0)
@@ -1024,6 +1062,45 @@ void timekeeping_format_time(char *buffer, size_t length)
     buffer[3] = (char)('0' + (minute / 10));
     buffer[4] = (char)('0' + (minute % 10));
     buffer[5] = '\0';
+}
+
+void timekeeping_format_timestamp(uint64_t utc_seconds, char *buffer, size_t length)
+{
+    if (!buffer || length == 0)
+    {
+        return;
+    }
+    if (length < 17)
+    {
+        buffer[0] = '\0';
+        return;
+    }
+    if (utc_seconds == 0)
+    {
+        buffer[0] = '\0';
+        return;
+    }
+    int offset = timekeeping_effective_offset_minutes(utc_seconds);
+    int64_t local_seconds = (int64_t)utc_seconds + (int64_t)offset * 60;
+    if (local_seconds < 0)
+    {
+        buffer[0] = '\0';
+        return;
+    }
+
+    timekeeping_calendar_t cal;
+    timekeeping_breakdown_utc((uint64_t)local_seconds, &cal);
+
+    timekeeping_write_four_digits(buffer, cal.year);
+    buffer[4] = '-';
+    timekeeping_write_two_digits(buffer + 5, cal.month);
+    buffer[7] = '-';
+    timekeeping_write_two_digits(buffer + 8, cal.day);
+    buffer[10] = ' ';
+    timekeeping_write_two_digits(buffer + 11, cal.hour);
+    buffer[13] = ':';
+    timekeeping_write_two_digits(buffer + 14, cal.minute);
+    buffer[16] = '\0';
 }
 
 bool timekeeping_is_valid_timezone_offset(int offset_minutes)

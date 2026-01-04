@@ -3,6 +3,7 @@
 #include "shell_commands.h"
 
 #include "libc.h"
+#include "timekeeping.h"
 #include "vfs.h"
 
 static size_t ls_write_number(char *buffer, size_t capacity, size_t value)
@@ -157,7 +158,8 @@ bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *args)
         {
             size_t size = 0;
             vfs_node_type_t type = vfs_node_type(child);
-            if (vfs_stat(child, &size, &type))
+            uint64_t ctime = 0;
+            if (vfs_stat(child, &size, &type, NULL, NULL, &ctime))
             {
                 char size_buf[32];
                 ls_format_size(size, human, size_buf, sizeof(size_buf));
@@ -166,6 +168,17 @@ bool shell_cmd_ls(shell_state_t *shell, shell_output_t *out, const char *args)
                 if (!human)
                 {
                     shell_output_write(out, " bytes");
+                }
+                char time_buf[32];
+                timekeeping_format_timestamp(ctime, time_buf, sizeof(time_buf));
+                shell_output_write(out, "  ");
+                if (time_buf[0] != '\0')
+                {
+                    shell_output_write(out, time_buf);
+                }
+                else
+                {
+                    shell_output_write(out, "-");
                 }
             }
             uint32_t uid = 0;

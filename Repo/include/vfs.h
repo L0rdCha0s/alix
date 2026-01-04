@@ -54,7 +54,12 @@ bool vfs_set_file_callbacks(vfs_node_t *file,
                             vfs_write_cb_t write_cb,
                             void *context);
 char *vfs_data(vfs_node_t *file, size_t *size);
-bool vfs_stat(const vfs_node_t *node, size_t *size_out, vfs_node_type_t *type_out);
+bool vfs_stat(const vfs_node_t *node,
+              size_t *size_out,
+              vfs_node_type_t *type_out,
+              uint64_t *atime_out,
+              uint64_t *mtime_out,
+              uint64_t *ctime_out);
 const char *vfs_name(const vfs_node_t *node);
 vfs_node_t *vfs_parent(const vfs_node_t *node);
 size_t vfs_build_path(const vfs_node_t *node, char *buffer, size_t capacity);

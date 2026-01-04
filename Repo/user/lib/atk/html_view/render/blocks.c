@@ -444,6 +444,18 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     {
         html_view_new_line(&measure);
     }
+    if (measure.floats && measure.floats->count > 0)
+    {
+        int float_bottom = html_view_float_max_bottom(measure.floats, CSS_CLEAR_BOTH);
+        if (float_bottom > measure.y)
+        {
+            measure.y = float_bottom;
+        }
+        if (float_bottom > measure.content_bottom)
+        {
+            measure.content_bottom = float_bottom;
+        }
+    }
     html_view_style_stack_destroy(&measure);
 
     int used_w = measure.measure_max_x - measure.body_x;
@@ -451,11 +463,7 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     {
         used_w = 0;
     }
-    int used_h = measure.content_bottom;
-    if (measure.y > used_h)
-    {
-        used_h = measure.y;
-    }
+    int used_h = measure.y;
     if (used_h < 0)
     {
         used_h = 0;
@@ -467,6 +475,14 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     if (out_h)
     {
         *out_h = used_h;
+    }
+    if (ctx->record && html_view_attr_has_class(node, "chin"))
+    {
+        serial_printf("[html_view][acid2-measure] node=chin used_h=%d content_bottom=%d y=%d line_h=%d",
+                      used_h,
+                      measure.content_bottom,
+                      measure.y,
+                      measure.line_height);
     }
 }
 
@@ -1280,6 +1296,13 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
 bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style)
 {
     if (!ctx || !node || !style || node->type != HTML_NODE_ELEMENT || !node->name)
+    {
+        return false;
+    }
+
+    if (style->has_display &&
+        (style->display == CSS_DISPLAY_INLINE ||
+         style->display == CSS_DISPLAY_INLINE_FLEX))
     {
         return false;
     }
@@ -2677,6 +2700,17 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
         if (border_box_h < 0) border_box_h = 0;
         int draw_y = html_view_draw_y(ctx, draw_border_y);
+        if (ctx->record && html_view_attr_has_class(node, "chin"))
+        {
+            serial_printf("[html_view][acid2-bg] node=chin content_h=%d border_box_h=%d draw_border_y=%d draw_y=%d font_px=%d base_font=%d line_h=%d",
+                          content_h,
+                          border_box_h,
+                          draw_border_y,
+                          draw_y,
+                          ctx->actual_font_px,
+                          ctx->base_font_px,
+                          ctx->line_height);
+        }
         if (style->has_background && !style->background_transparent && border_box_w > 0 && border_box_h > 0)
         {
             html_view_draw_rect_clipped(ctx, draw_border_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);

@@ -46,6 +46,7 @@ bool timekeeping_timezone_has_zone(void);
 const char *timekeeping_timezone_zone(void);
 bool timekeeping_local_time(timekeeping_time_of_day_t *out);
 void timekeeping_format_time(char *buffer, size_t length);
+void timekeeping_format_timestamp(uint64_t utc_seconds, char *buffer, size_t length);
 bool timekeeping_is_valid_timezone_offset(int offset_minutes);
 
 #endif

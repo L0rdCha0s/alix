@@ -13,6 +13,9 @@ typedef struct stat
     uint64_t st_size;
     uint32_t st_mode;
     uint32_t st_type;
+    uint64_t st_atime;
+    uint64_t st_mtime;
+    uint64_t st_ctime;
 } stat_t;
 
 #ifndef KERNEL_BUILD

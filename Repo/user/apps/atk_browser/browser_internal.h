@@ -37,6 +37,17 @@
 #define BROWSER_UI_EVENTS_PER_TICK 8
 #define BROWSER_UI_EVENT_BUDGET_MS 4
 #define BROWSER_CSS_APPLY_DEBOUNCE_MS 64
+#define BROWSER_HISTORY_MAX 64
+#define BROWSER_BACK_MENU_MAX_ITEMS 12
+#define BROWSER_BACK_LONG_PRESS_MS 500u
+
+typedef struct browser_app browser_app_t;
+
+typedef struct
+{
+    browser_app_t *app;
+    size_t index;
+} browser_history_menu_ctx_t;
 
 typedef struct
 {
@@ -139,13 +150,15 @@ typedef enum
     BROWSER_RESOURCE_TRACK_ERROR
 } browser_resource_track_t;
 
-typedef struct
+typedef struct browser_app
 {
     atk_user_window_t remote;
     atk_user_window_t debug_remote;
     atk_widget_t *window;
+    atk_widget_t *menu_back_button;
     atk_widget_t *menu_bookmarks_button;
     atk_widget_t *menu_debug_button;
+    atk_widget_t *menu_back;
     atk_widget_t *menu_bookmarks;
     atk_widget_t *menu_debug;
     atk_widget_t *menu_open;
@@ -171,6 +184,13 @@ typedef struct
     bool css_dirty;
     uint64_t css_dirty_since_ms;
     char *pending_fragment;
+    char *history_urls[BROWSER_HISTORY_MAX];
+    size_t history_count;
+    size_t history_index;
+    bool history_inhibit_push;
+    browser_history_menu_ctx_t history_menu_ctx[BROWSER_HISTORY_MAX];
+    uint64_t back_press_start_ms;
+    bool back_press_active;
 
     browser_ui_event_t ui_events[BROWSER_UI_EVENT_QUEUE_CAP];
     size_t ui_event_head;

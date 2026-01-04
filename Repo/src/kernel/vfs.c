@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include "timer.h"
+#include "timekeeping.h"
 #include "build_features.h"
 #include "procfs.h"
 #include "smp.h"
@@ -39,6 +40,11 @@ static vfs_mount_t *mounts = NULL;
 static spinlock_t g_vfs_tree_lock;
 static const uint64_t VFS_SYNC_LOG_MS_THRESHOLD = 100ULL;
 static uint32_t g_vfs_log_enable = 0;
+
+static uint64_t vfs_now_seconds(void)
+{
+    return timekeeping_now_seconds();
+}
 
 static inline bool vfs_logs_enabled(void)
 {
@@ -581,6 +587,18 @@ static char *vfs_combine_symlink_path(const char *target, const char *remainder)
     return joined;
 }
 
+static void vfs_init_times(vfs_node_t *node)
+{
+    if (!node)
+    {
+        return;
+    }
+    uint64_t now = vfs_now_seconds();
+    node->atime = now;
+    node->mtime = now;
+    node->ctime = now;
+}
+
 static vfs_node_t *vfs_alloc_node(vfs_node_type_t type)
 {
     vfs_node_t *n = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
@@ -594,6 +612,7 @@ static vfs_node_t *vfs_alloc_node(vfs_node_type_t type)
         n->refcount = 1;
         n->pending_dirty_bytes = 0;
         spinlock_init(&n->data_lock);
+        vfs_init_times(n);
     }
     return n;
 }
@@ -833,6 +852,35 @@ static void vfs_mark_mount_dirty(vfs_mount_t *mount)
     spinlock_unlock(&mount->dirty_lock);
 }
 
+static void vfs_touch_atime(vfs_node_t *node)
+{
+    if (!node)
+    {
+        return;
+    }
+    uint64_t now = vfs_now_seconds();
+    vfs_mount_t *mount = NULL;
+    bool mark_dirty = false;
+    vfs_lock_node_data(node);
+    if (node->atime != now)
+    {
+        node->atime = now;
+        if (node->mount && node->mount->supports_times)
+        {
+            node->dirty = true;
+            node->disk_meta_dirty = true;
+            node->dirty_seq++;
+            mount = node->mount;
+            mark_dirty = true;
+        }
+    }
+    vfs_unlock_node_data(node);
+    if (mark_dirty && mount)
+    {
+        vfs_mark_mount_dirty(mount);
+    }
+}
+
 static void vfs_mark_meta_dirty(vfs_node_t *node)
 {
     if (!node)
@@ -840,9 +888,15 @@ static void vfs_mark_meta_dirty(vfs_node_t *node)
         return;
     }
     vfs_lock_node_data(node);
+    uint64_t now = vfs_now_seconds();
     node->dirty = true;
     node->disk_meta_dirty = true;
     node->dirty_seq++;
+    node->ctime = now;
+    if (node->type == VFS_NODE_DIR)
+    {
+        node->mtime = now;
+    }
     vfs_unlock_node_data(node);
     vfs_mark_mount_dirty(node->mount);
 }
@@ -856,8 +910,11 @@ static void vfs_mark_data_dirty(vfs_node_t *node, size_t len)
     bool mounted = false;
     vfs_mount_t *mount = NULL;
     vfs_lock_node_data(node);
+    uint64_t now = vfs_now_seconds();
     node->dirty = true;
     node->disk_data_dirty = true;
+    node->mtime = now;
+    node->ctime = now;
     if (node->mount)
     {
         node->pending_dirty_bytes += len;
@@ -1724,7 +1781,12 @@ ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
 
     if (file->read_cb)
     {
-        return file->read_cb(file, offset, buffer, count, file->callback_context);
+        ssize_t read_bytes = file->read_cb(file, offset, buffer, count, file->callback_context);
+        if (read_bytes > 0)
+        {
+            vfs_touch_atime(file);
+        }
+        return read_bytes;
     }
 
     vfs_lock_node_data(file);
@@ -1743,6 +1805,10 @@ ssize_t vfs_read_at(vfs_node_t *file, size_t offset, void *buffer, size_t count)
     vfs_unlock_node_data(file);
     vfs_log("read dst=", (uint64_t)(uintptr_t)buffer);
     vfs_log("read bytes=", count);
+    if (count > 0)
+    {
+        vfs_touch_atime(file);
+    }
     return (ssize_t)count;
 }
 
@@ -1854,26 +1920,47 @@ char *vfs_data(vfs_node_t *file, size_t *size)
     if (size) *size = file->size;
     char *data = file->data;
     vfs_unlock_node_data(file);
+    vfs_touch_atime(file);
     return data;
 }
 
 /*
  * Fetch basic node metadata (size and type).
  */
-bool vfs_stat(const vfs_node_t *node, size_t *size_out, vfs_node_type_t *type_out)
+bool vfs_stat(const vfs_node_t *node,
+              size_t *size_out,
+              vfs_node_type_t *type_out,
+              uint64_t *atime_out,
+              uint64_t *mtime_out,
+              uint64_t *ctime_out)
 {
     if (!node)
     {
         return false;
     }
+    vfs_node_t *mutable_node = (vfs_node_t *)node;
+    vfs_lock_node_data(mutable_node);
     if (size_out)
     {
-        *size_out = node->size;
+        *size_out = mutable_node->size;
     }
     if (type_out)
     {
-        *type_out = node->type;
+        *type_out = mutable_node->type;
     }
+    if (atime_out)
+    {
+        *atime_out = mutable_node->atime;
+    }
+    if (mtime_out)
+    {
+        *mtime_out = mutable_node->mtime;
+    }
+    if (ctime_out)
+    {
+        *ctime_out = mutable_node->ctime;
+    }
+    vfs_unlock_node_data(mutable_node);
     return true;
 }
 
@@ -2461,6 +2548,7 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
         spinlock_unlock(&g_vfs_tree_lock);
         return false;
     }
+    mount->supports_times = alixfs_mount_supports_times(mount->backend);
 
     mount->next = mounts;
     mounts = mount;

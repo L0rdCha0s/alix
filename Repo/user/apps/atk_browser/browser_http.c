@@ -8,6 +8,7 @@
 #include "string.h"
 
 #define BROWSER_MAX_PASSWD_BYTES (64u * 1024u)
+#define BROWSER_CACHE_MAX_AGE_SECONDS 7200u
 
 static bool browser_parse_u32_range(const char *start, const char *end, uint32_t *out)
 {
@@ -34,11 +35,37 @@ static bool browser_parse_u32_range(const char *start, const char *end, uint32_t
     return true;
 }
 
-static char *browser_read_file_all(const char *path, size_t *len_out, size_t max_bytes)
+static bool browser_cache_expired(uint64_t mtime_seconds)
+{
+    if (BROWSER_CACHE_MAX_AGE_SECONDS == 0)
+    {
+        return false;
+    }
+    uint64_t now_seconds = sys_time_millis() / 1000ULL;
+    if (now_seconds == 0)
+    {
+        return false;
+    }
+    if (mtime_seconds == 0)
+    {
+        return true;
+    }
+    if (now_seconds <= mtime_seconds)
+    {
+        return false;
+    }
+    return (now_seconds - mtime_seconds) >= (uint64_t)BROWSER_CACHE_MAX_AGE_SECONDS;
+}
+
+static char *browser_read_file_all(const char *path, size_t *len_out, size_t max_bytes, uint64_t *mtime_out)
 {
     if (len_out)
     {
         *len_out = 0;
+    }
+    if (mtime_out)
+    {
+        *mtime_out = 0;
     }
     if (!path || path[0] == '\0')
     {
@@ -56,6 +83,10 @@ static char *browser_read_file_all(const char *path, size_t *len_out, size_t max
     {
         close(fd);
         return NULL;
+    }
+    if (mtime_out)
+    {
+        *mtime_out = st.st_mtime;
     }
 
     if (st.st_size == 0)
@@ -169,7 +200,7 @@ static bool browser_passwd_line_home(const char *line,
 static char *browser_home_from_passwd(uint32_t uid)
 {
     size_t data_len = 0;
-    char *data = browser_read_file_all("/etc/passwd", &data_len, BROWSER_MAX_PASSWD_BYTES);
+    char *data = browser_read_file_all("/etc/passwd", &data_len, BROWSER_MAX_PASSWD_BYTES, NULL);
     if (!data || data_len == 0)
     {
         free(data);
@@ -451,10 +482,23 @@ static char *browser_cache_read(browser_app_t *app, const char *uri, size_t *bod
         return NULL;
     }
 
-    char *data = browser_read_file_all(path, body_len_out, BROWSER_MAX_BYTES);
+    uint64_t mtime_seconds = 0;
+    char *data = browser_read_file_all(path, body_len_out, BROWSER_MAX_BYTES, &mtime_seconds);
     if (data)
     {
-        browser_debug_logf(app, "[cache] hit url=%s", uri);
+        if (browser_cache_expired(mtime_seconds))
+        {
+            free(data);
+            if (body_len_out)
+            {
+                *body_len_out = 0;
+            }
+            data = NULL;
+        }
+        else
+        {
+            browser_debug_logf(app, "[cache] hit url=%s", uri);
+        }
     }
     free(path);
     return data;

@@ -130,6 +130,9 @@ typedef struct
     uint64_t size_bytes;
     uint32_t type; /* vfs_node_type_t */
     uint32_t reserved;
+    uint64_t atime;
+    uint64_t mtime;
+    uint64_t ctime;
 } syscall_stat_t;
 
 typedef enum

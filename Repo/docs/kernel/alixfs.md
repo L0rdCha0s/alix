@@ -47,7 +47,7 @@ Defined in `src/kernel/alixfs.c` as a packed struct.
 Key fields:
 
 - `magic[8]`: `"ALIXFS2"`
-- `version`: currently `3` (version `2` is accepted for legacy mounts without ownership metadata)
+- `version`: currently `4` (version `2` is accepted for legacy mounts without ownership metadata; version `3` omits timestamps)
 - `node_capacity`: fixed number of chunk table entries (default `4096` at format time)
 - `node_count`: count of allocated node IDs (best-effort bookkeeping)
 - `root_id`: chunk table ID for the mount root
@@ -86,6 +86,9 @@ Each allocated node ID points to a payload chunk containing:
    - `data_len`: bytes of file data / symlink target
    - `uid`: owner user ID (version `3+`)
    - `gid`: owner group ID (version `3+`)
+   - `atime`: access time in UTC seconds (version `4+`)
+   - `mtime`: modification time in UTC seconds (version `4+`)
+   - `ctime`: status change time in UTC seconds (version `4+`)
 2. `name[name_len]`
 3. `data[data_len]` (only meaningful for file/symlink)
 

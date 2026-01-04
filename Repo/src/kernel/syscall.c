@@ -126,7 +126,7 @@ static bool syscall_dir_collect(const vfs_node_t *child, void *context)
     syscall_dirent_t *dst = &ctx->entries[ctx->count];
     size_t size_bytes = 0;
     vfs_node_type_t node_type = VFS_NODE_FILE;
-    if (!vfs_stat(child, &size_bytes, &node_type))
+    if (!vfs_stat(child, &size_bytes, &node_type, NULL, NULL, NULL))
     {
         return false;
     }
@@ -665,7 +665,7 @@ static int64_t syscall_file_lseek(void *ctx, int64_t offset, int whence)
 
     size_t size = 0;
     vfs_node_type_t type = VFS_NODE_FILE;
-    vfs_stat(handle->node, &size, &type);
+    vfs_stat(handle->node, &size, &type, NULL, NULL, NULL);
 
     int64_t base = 0;
     switch (whence)
@@ -696,13 +696,19 @@ static int syscall_file_fstat(void *ctx, syscall_stat_t *out)
 
     size_t size = 0;
     vfs_node_type_t type = VFS_NODE_FILE;
-    if (!vfs_stat(handle->node, &size, &type))
+    uint64_t atime = 0;
+    uint64_t mtime = 0;
+    uint64_t ctime = 0;
+    if (!vfs_stat(handle->node, &size, &type, &atime, &mtime, &ctime))
     {
         return -1;
     }
     out->size_bytes = size;
     out->type = (uint32_t)type;
     out->reserved = 0;
+    out->atime = atime;
+    out->mtime = mtime;
+    out->ctime = ctime;
     return 0;
 }
 

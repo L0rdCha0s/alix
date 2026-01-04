@@ -10,6 +10,7 @@
 #define BROWSER_TICK_LOG_RATE_MS 250u
 
 static void browser_menus_close(browser_app_t *app);
+static void browser_menu_toggle(browser_app_t *app, atk_widget_t *menu, atk_widget_t *button);
 static void browser_open_url(browser_app_t *app, const char *url);
 static void on_url_submit(atk_widget_t *input, void *context);
 static void browser_html_link_clicked(atk_widget_t *view, const char *href, void *context);
@@ -18,6 +19,228 @@ static void browser_cancel_active_load(browser_app_t *app);
 static void browser_clear_pending_fragment(browser_app_t *app);
 static void browser_set_pending_fragment(browser_app_t *app, const char *fragment);
 static void browser_try_apply_pending_fragment(browser_app_t *app);
+static bool browser_button_hit_test(const atk_widget_t *button, int px, int py);
+static void browser_history_init(browser_app_t *app);
+static void browser_history_push(browser_app_t *app, const char *url);
+static void browser_history_update_current(browser_app_t *app, const char *url);
+static bool browser_history_can_go_back(const browser_app_t *app);
+static void browser_history_jump_to(browser_app_t *app, size_t index);
+static void browser_back_menu_show(browser_app_t *app);
+static void browser_menu_back_item(void *context);
+static void browser_back_button_action(atk_widget_t *button, void *context);
+
+static bool browser_button_hit_test(const atk_widget_t *button, int px, int py)
+{
+    if (!button || !button->used)
+    {
+        return false;
+    }
+
+    int origin_x = 0;
+    int origin_y = 0;
+    if (button->parent)
+    {
+        atk_widget_absolute_position(button->parent, &origin_x, &origin_y);
+    }
+    return atk_button_hit_test(button, origin_x, origin_y, px, py);
+}
+
+static void browser_history_init(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < BROWSER_HISTORY_MAX; ++i)
+    {
+        app->history_urls[i] = NULL;
+        app->history_menu_ctx[i].app = app;
+        app->history_menu_ctx[i].index = i;
+    }
+    app->history_count = 0;
+    app->history_index = 0;
+    app->history_inhibit_push = false;
+    app->back_press_start_ms = 0;
+    app->back_press_active = false;
+}
+
+static void browser_history_clear_forward(browser_app_t *app)
+{
+    if (!app || app->history_count == 0 || app->history_index + 1 >= app->history_count)
+    {
+        return;
+    }
+
+    for (size_t i = app->history_index + 1; i < app->history_count; ++i)
+    {
+        free(app->history_urls[i]);
+        app->history_urls[i] = NULL;
+    }
+    app->history_count = app->history_index + 1;
+}
+
+static void browser_history_push(browser_app_t *app, const char *url)
+{
+    if (!app || !url || url[0] == '\0')
+    {
+        return;
+    }
+
+    browser_history_clear_forward(app);
+
+    if (app->history_count >= BROWSER_HISTORY_MAX)
+    {
+        free(app->history_urls[0]);
+        for (size_t i = 1; i < app->history_count; ++i)
+        {
+            app->history_urls[i - 1] = app->history_urls[i];
+        }
+        app->history_urls[app->history_count - 1] = NULL;
+        if (app->history_index > 0)
+        {
+            app->history_index--;
+        }
+        app->history_count--;
+    }
+
+    char *copy = browser_strdup(url);
+    if (!copy)
+    {
+        return;
+    }
+    app->history_urls[app->history_count++] = copy;
+    app->history_index = app->history_count - 1;
+}
+
+static void browser_history_update_current(browser_app_t *app, const char *url)
+{
+    if (!app || !url || url[0] == '\0' || app->history_count == 0 || app->history_index >= app->history_count)
+    {
+        return;
+    }
+
+    char *copy = browser_strdup(url);
+    if (!copy)
+    {
+        return;
+    }
+    free(app->history_urls[app->history_index]);
+    app->history_urls[app->history_index] = copy;
+}
+
+static bool browser_history_can_go_back(const browser_app_t *app)
+{
+    return app && app->history_count > 0 && app->history_index > 0;
+}
+
+static void browser_history_jump_to(browser_app_t *app, size_t index)
+{
+    if (!app || !app->url_input || index >= app->history_count)
+    {
+        return;
+    }
+
+    const char *url = app->history_urls[index];
+    if (!url || url[0] == '\0')
+    {
+        return;
+    }
+
+    browser_menus_close(app);
+    app->history_index = index;
+    app->history_inhibit_push = true;
+    browser_open_url(app, url);
+}
+
+static bool browser_back_menu_build(browser_app_t *app)
+{
+    if (!app || !app->menu_back)
+    {
+        return false;
+    }
+
+    atk_menu_clear(app->menu_back);
+    if (!browser_history_can_go_back(app))
+    {
+        return false;
+    }
+
+    size_t idx = app->history_index;
+    size_t added = 0;
+    while (idx > 0 && added < BROWSER_BACK_MENU_MAX_ITEMS)
+    {
+        idx--;
+        const char *url = app->history_urls[idx];
+        if (!url || url[0] == '\0')
+        {
+            continue;
+        }
+        browser_history_menu_ctx_t *ctx = &app->history_menu_ctx[idx];
+        ctx->app = app;
+        ctx->index = idx;
+        if (!atk_menu_add_item(app->menu_back, url, browser_menu_back_item, ctx))
+        {
+            return false;
+        }
+        added++;
+    }
+
+    return added > 0;
+}
+
+static void browser_back_menu_show(browser_app_t *app)
+{
+    if (!app || !app->menu_back || !app->menu_back_button)
+    {
+        return;
+    }
+    if (!browser_back_menu_build(app))
+    {
+        return;
+    }
+    browser_menu_toggle(app, app->menu_back, app->menu_back_button);
+}
+
+static void browser_menu_back_item(void *context)
+{
+    browser_history_menu_ctx_t *ctx = (browser_history_menu_ctx_t *)context;
+    if (!ctx || !ctx->app)
+    {
+        return;
+    }
+    browser_history_jump_to(ctx->app, ctx->index);
+}
+
+static void browser_back_button_action(atk_widget_t *button, void *context)
+{
+    (void)button;
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+
+    bool long_press = false;
+    if (app->back_press_active && app->back_press_start_ms > 0)
+    {
+        uint64_t now_ms = sys_time_millis();
+        long_press = (now_ms - app->back_press_start_ms) >= BROWSER_BACK_LONG_PRESS_MS;
+    }
+    app->back_press_active = false;
+    app->back_press_start_ms = 0;
+
+    if (long_press)
+    {
+        browser_back_menu_show(app);
+        return;
+    }
+
+    if (browser_history_can_go_back(app))
+    {
+        browser_history_jump_to(app, app->history_index - 1);
+    }
+}
 
 static void apply_theme(atk_state_t *state)
 {
@@ -149,22 +372,6 @@ void browser_on_close_event(void *context)
     atk_main_request_exit();
 }
 
-static bool browser_menu_button_hit_test(const atk_widget_t *button, int px, int py)
-{
-    if (!button || !button->used)
-    {
-        return false;
-    }
-
-    int origin_x = 0;
-    int origin_y = 0;
-    if (button->parent)
-    {
-        atk_widget_absolute_position(button->parent, &origin_x, &origin_y);
-    }
-    return atk_button_hit_test(button, origin_x, origin_y, px, py);
-}
-
 static void browser_menus_close(browser_app_t *app)
 {
     if (!app)
@@ -179,6 +386,10 @@ static void browser_menus_close(browser_app_t *app)
     if (app->menu_debug)
     {
         atk_menu_hide(app->menu_debug);
+    }
+    if (app->menu_back)
+    {
+        atk_menu_hide(app->menu_back);
     }
     app->menu_open = NULL;
     if (app->window)
@@ -265,13 +476,26 @@ bool browser_on_mouse_event(const user_atk_event_t *event, void *context)
 
     bool left = (event->flags & USER_ATK_MOUSE_FLAG_LEFT) != 0;
     bool press = (event->flags & USER_ATK_MOUSE_FLAG_PRESS) != 0;
+    bool release = (event->flags & USER_ATK_MOUSE_FLAG_RELEASE) != 0;
+    int px = event->x;
+    int py = event->y;
+    if (left && press && browser_button_hit_test(app->menu_back_button, px, py))
+    {
+        app->back_press_active = true;
+        app->back_press_start_ms = sys_time_millis();
+    }
+    if (release && app->back_press_active)
+    {
+        app->back_press_active = false;
+        app->back_press_start_ms = 0;
+    }
+
     if (left && press && app->menu_open && atk_menu_is_visible(app->menu_open))
     {
-        int px = event->x;
-        int py = event->y;
         bool inside_menu = atk_menu_contains(app->menu_open, px, py);
-        bool inside_menu_button = browser_menu_button_hit_test(app->menu_bookmarks_button, px, py) ||
-                                  browser_menu_button_hit_test(app->menu_debug_button, px, py);
+        bool inside_menu_button = browser_button_hit_test(app->menu_back_button, px, py) ||
+                                  browser_button_hit_test(app->menu_bookmarks_button, px, py) ||
+                                  browser_button_hit_test(app->menu_debug_button, px, py);
         if (!inside_menu && !inside_menu_button)
         {
             browser_menus_close(app);
@@ -564,6 +788,12 @@ static void on_url_submit(atk_widget_t *input, void *context)
 
     browser_menus_close(app);
     browser_clear_pending_fragment(app);
+    bool suppress_history = app->history_inhibit_push;
+    app->history_inhibit_push = false;
+    if (!suppress_history)
+    {
+        browser_history_push(app, text);
+    }
 
     char *fragment = NULL;
     char *base = browser_split_fragment(text, &fragment);
@@ -635,6 +865,7 @@ bool browser_tick(void *context)
                     if (ev.u.doc_ready.final_url && ev.u.doc_ready.final_url[0] != '\0' && app->url_input)
                     {
                         atk_text_input_set_text(app->url_input, ev.u.doc_ready.final_url);
+                        browser_history_update_current(app, ev.u.doc_ready.final_url);
                     }
 
                     html_document_t *doc = ev.u.doc_ready.doc;
@@ -928,6 +1159,28 @@ bool browser_build_ui(browser_app_t *app)
     int menu_y = content_y;
     int menu_h = BROWSER_MENU_HEIGHT;
 
+    int menu_w_back = atk_font_text_width("Back") + 32;
+    if (menu_w_back < 72)
+    {
+        menu_w_back = 72;
+    }
+    app->menu_back_button = atk_window_add_button(app->window,
+                                                  "Back",
+                                                  menu_x,
+                                                  menu_y,
+                                                  menu_w_back,
+                                                  menu_h,
+                                                  ATK_BUTTON_STYLE_TITLE_INSIDE,
+                                                  false,
+                                                  browser_back_button_action,
+                                                  app);
+    if (!app->menu_back_button)
+    {
+        return false;
+    }
+    atk_widget_set_layout(app->menu_back_button, ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_LEFT);
+
+    menu_x += menu_w_back + 8;
     int menu_w_bookmarks = atk_font_text_width("Bookmarks") + 32;
     if (menu_w_bookmarks < 104)
     {
@@ -990,10 +1243,15 @@ bool browser_build_ui(browser_app_t *app)
         return false;
     }
 
+    app->menu_back = atk_menu_create();
     app->menu_bookmarks = atk_menu_create();
     app->menu_debug = atk_menu_create();
-    if (!app->menu_bookmarks || !app->menu_debug)
+    if (!app->menu_back || !app->menu_bookmarks || !app->menu_debug)
     {
+        if (app->menu_back)
+        {
+            atk_menu_destroy(app->menu_back);
+        }
         if (app->menu_bookmarks)
         {
             atk_menu_destroy(app->menu_bookmarks);
@@ -1002,18 +1260,23 @@ bool browser_build_ui(browser_app_t *app)
         {
             atk_menu_destroy(app->menu_debug);
         }
+        app->menu_back = NULL;
         app->menu_bookmarks = NULL;
         app->menu_debug = NULL;
         return false;
     }
 
+    app->menu_back->parent = app->window;
     app->menu_bookmarks->parent = app->window;
     app->menu_debug->parent = app->window;
-    if (!atk_list_push_back(&wpriv->children, app->menu_bookmarks) ||
+    if (!atk_list_push_back(&wpriv->children, app->menu_back) ||
+        !atk_list_push_back(&wpriv->children, app->menu_bookmarks) ||
         !atk_list_push_back(&wpriv->children, app->menu_debug))
     {
+        atk_menu_destroy(app->menu_back);
         atk_menu_destroy(app->menu_bookmarks);
         atk_menu_destroy(app->menu_debug);
+        app->menu_back = NULL;
         app->menu_bookmarks = NULL;
         app->menu_debug = NULL;
         return false;
@@ -1060,5 +1323,6 @@ bool browser_build_ui(browser_app_t *app)
     (void)atk_html_view_set_html(app->viewer,
                                  "<!doctype html><html><body><p>Enter a URL above and press Enter.</p></body></html>",
                                  NULL);
+    browser_history_init(app);
     return true;
 }

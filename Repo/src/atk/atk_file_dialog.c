@@ -78,7 +78,7 @@ static bool file_dialog_collect_kernel(const vfs_node_t *node, void *context)
     syscall_dirent_t *dst = &ctx->entries[ctx->count];
     size_t size_bytes = 0;
     vfs_node_type_t type = VFS_NODE_FILE;
-    if (!vfs_stat(node, &size_bytes, &type))
+    if (!vfs_stat(node, &size_bytes, &type, NULL, NULL, NULL))
     {
         return false;
     }

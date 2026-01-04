@@ -20,7 +20,8 @@
  */
 
 #define ALIXFS2_MAGIC   "ALIXFS2"
-#define ALIXFS2_VERSION 3u
+#define ALIXFS2_VERSION 4u
+#define ALIXFS2_VERSION_OWNERSHIP 3u
 #define ALIXFS2_VERSION_LEGACY 2u
 #define ALIXFS2_MAX_FREE_CHUNKS 128u
 #define ALIXFS2_DEFAULT_NODE_CAPACITY 4096u
@@ -85,6 +86,20 @@ typedef struct __attribute__((packed))
     uint32_t gid;
 } alixfs_node_disk_v3_t;
 
+typedef struct __attribute__((packed))
+{
+    uint32_t id;
+    uint32_t parent_id;
+    uint32_t type;
+    uint32_t name_len;
+    uint32_t data_len;
+    uint32_t uid;
+    uint32_t gid;
+    uint64_t atime;
+    uint64_t mtime;
+    uint64_t ctime;
+} alixfs_node_disk_v4_t;
+
 struct alixfs_mount
 {
     block_device_t *device;
@@ -122,14 +137,20 @@ static uint64_t alixfs_align_u64(uint64_t value, uint64_t align)
 
 static bool alixfs_version_has_ownership(uint32_t version)
 {
-    return version >= ALIXFS2_VERSION;
+    return version >= ALIXFS2_VERSION_OWNERSHIP;
 }
 
 static size_t alixfs_node_disk_header_size(uint32_t version)
 {
-    return alixfs_version_has_ownership(version)
-               ? sizeof(alixfs_node_disk_v3_t)
-               : sizeof(alixfs_node_disk_v2_t);
+    if (version >= ALIXFS2_VERSION)
+    {
+        return sizeof(alixfs_node_disk_v4_t);
+    }
+    if (alixfs_version_has_ownership(version))
+    {
+        return sizeof(alixfs_node_disk_v3_t);
+    }
+    return sizeof(alixfs_node_disk_v2_t);
 }
 
 static bool alixfs_device_io(block_device_t *device,
@@ -517,7 +538,24 @@ static bool alixfs_serialize_node(vfs_node_t *node,
         return false;
     }
     size_t offset = 0;
-    if (alixfs_version_has_ownership(version))
+    if (version >= ALIXFS2_VERSION)
+    {
+        alixfs_node_disk_v4_t disk = {
+            .id = node->disk_id,
+            .parent_id = node->parent ? node->parent->disk_id : 0xFFFFFFFFu,
+            .type = node->type,
+            .name_len = (uint32_t)name_len,
+            .data_len = (uint32_t)data_len,
+            .uid = node->uid,
+            .gid = node->gid,
+            .atime = node->atime,
+            .mtime = node->mtime,
+            .ctime = node->ctime
+        };
+        memcpy(buffer, &disk, sizeof(disk));
+        offset = sizeof(disk);
+    }
+    else if (alixfs_version_has_ownership(version))
     {
         alixfs_node_disk_v3_t disk = {
             .id = node->disk_id,
@@ -880,12 +918,15 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
     }
     uint32_t version = fs->header.version;
     if (memcmp(fs->header.magic, ALIXFS2_MAGIC, sizeof(fs->header.magic)) != 0 ||
-        (version != ALIXFS2_VERSION && version != ALIXFS2_VERSION_LEGACY) ||
+        (version != ALIXFS2_VERSION &&
+         version != ALIXFS2_VERSION_OWNERSHIP &&
+         version != ALIXFS2_VERSION_LEGACY) ||
         fs->header.node_capacity == 0)
     {
         return false;
     }
     bool has_ownership = alixfs_version_has_ownership(version);
+    bool has_times = (version >= ALIXFS2_VERSION);
     size_t node_header_size = alixfs_node_disk_header_size(version);
     fs->node_table_offset = fs->header_span;
     if (!alixfs_load_chunk_table(fs))
@@ -905,6 +946,9 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
     mount_root->allow_mutation = true;
     mount_root->uid = VFS_UID_ROOT;
     mount_root->gid = VFS_GID_ROOT;
+    mount_root->atime = 0;
+    mount_root->mtime = 0;
+    mount_root->ctime = 0;
     mount_root->first_child = NULL;
     mount_root->dirty = false;
     mount_root->disk_meta_dirty = false;
@@ -939,7 +983,25 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         alixfs_node_disk_v2_t disk_common;
         uint32_t node_uid = VFS_UID_ROOT;
         uint32_t node_gid = VFS_GID_ROOT;
-        if (has_ownership)
+        uint64_t node_atime = 0;
+        uint64_t node_mtime = 0;
+        uint64_t node_ctime = 0;
+        if (has_times)
+        {
+            alixfs_node_disk_v4_t disk;
+            memcpy(&disk, buffer, sizeof(disk));
+            disk_common.id = disk.id;
+            disk_common.parent_id = disk.parent_id;
+            disk_common.type = disk.type;
+            disk_common.name_len = disk.name_len;
+            disk_common.data_len = disk.data_len;
+            node_uid = disk.uid;
+            node_gid = disk.gid;
+            node_atime = disk.atime;
+            node_mtime = disk.mtime;
+            node_ctime = disk.ctime;
+        }
+        else if (has_ownership)
         {
             alixfs_node_disk_v3_t disk;
             memcpy(&disk, buffer, sizeof(disk));
@@ -978,6 +1040,9 @@ bool alixfs_mount_load(alixfs_mount_t *fs, vfs_mount_t *mount)
         node->allow_mutation = true;
         node->uid = node_uid;
         node->gid = node_gid;
+        node->atime = node_atime;
+        node->mtime = node_mtime;
+        node->ctime = node_ctime;
         size_t offset = node_header_size;
         if (disk_common.name_len > 0)
         {
@@ -1262,4 +1327,13 @@ void alixfs_mount_snapshot(const alixfs_mount_t *fs, bool *header_dirty)
         return;
     }
     *header_dirty = fs->header_dirty;
+}
+
+bool alixfs_mount_supports_times(const alixfs_mount_t *fs)
+{
+    if (!fs)
+    {
+        return false;
+    }
+    return fs->header.version >= ALIXFS2_VERSION;
 }
