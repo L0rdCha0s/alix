@@ -1458,7 +1458,20 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
         }
     }
 
-    html_view_render_children(&inner, node, style);
+    if (style->has_display &&
+        (style->display == CSS_DISPLAY_FLEX || style->display == CSS_DISPLAY_INLINE_FLEX))
+    {
+        html_view_render_flex_container(&inner, node, style, style->display == CSS_DISPLAY_INLINE_FLEX);
+    }
+    else if (style->has_display &&
+             (style->display == CSS_DISPLAY_GRID || style->display == CSS_DISPLAY_INLINE_GRID))
+    {
+        html_view_render_grid_container(&inner, node, style, style->display == CSS_DISPLAY_INLINE_GRID);
+    }
+    else
+    {
+        html_view_render_children(&inner, node, style);
+    }
     if (inner.x != inner.body_x)
     {
         html_view_new_line(&inner);
@@ -2763,7 +2776,8 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     int content_doc_y = border_doc_y + border_top + pad_top;
     int rel_x = 0;
     int rel_y = 0;
-    if (style->has_position && style->position == CSS_POSITION_RELATIVE)
+    if (style->has_position &&
+        (style->position == CSS_POSITION_RELATIVE || style->position == CSS_POSITION_STICKY))
     {
         if (style->has_left && style->left.valid && !style->left.is_auto)
         {

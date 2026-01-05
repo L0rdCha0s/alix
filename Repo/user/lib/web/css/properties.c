@@ -17,15 +17,74 @@ static bool css_next_token(const char **p, const char *end, const char **tok_sta
         return false;
     }
     const char *start = s;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    char quote = 0;
+    bool escape = false;
     while (s < end)
     {
-        if (isspace((unsigned char)*s))
+        char c = *s;
+        if (escape)
         {
-            break;
+            escape = false;
+            ++s;
+            continue;
         }
-        if (s + 1 < end && s[0] == '/' && s[1] == '*')
+        if (c == '\\')
         {
-            break;
+            escape = true;
+            ++s;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            ++s;
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            ++s;
+            continue;
+        }
+        if (c == '(')
+        {
+            ++paren_depth;
+            ++s;
+            continue;
+        }
+        if (c == ')' && paren_depth > 0)
+        {
+            --paren_depth;
+            ++s;
+            continue;
+        }
+        if (c == '[')
+        {
+            ++bracket_depth;
+            ++s;
+            continue;
+        }
+        if (c == ']' && bracket_depth > 0)
+        {
+            --bracket_depth;
+            ++s;
+            continue;
+        }
+        if (paren_depth == 0 && bracket_depth == 0)
+        {
+            if (isspace((unsigned char)c))
+            {
+                break;
+            }
+            if (s + 1 < end && s[0] == '/' && s[1] == '*')
+            {
+                break;
+            }
         }
         ++s;
     }
@@ -2408,6 +2467,10 @@ void css_style_apply_property(css_style_t *style,
         {
             style->position = CSS_POSITION_ABSOLUTE;
         }
+        else if (len == 6 && strncasecmp(s, "sticky", 6) == 0)
+        {
+            style->position = CSS_POSITION_STICKY;
+        }
         else if (len == 5 && strncasecmp(s, "fixed", 5) == 0)
         {
             style->position = CSS_POSITION_FIXED;
@@ -2433,6 +2496,23 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_top = true;
             style->top = len;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 5 && strncasecmp(prop_start, "inset", 5) == 0)
+    {
+        css_box_t box;
+        if (css_parse_margin_value(val_start, val_end, &box))
+        {
+            style->has_top = true;
+            style->top = box.top;
+            style->has_right = true;
+            style->right = box.right;
+            style->has_bottom = true;
+            style->bottom = box.bottom;
+            style->has_left = true;
+            style->left = box.left;
         }
         return;
     }

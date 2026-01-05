@@ -101,6 +101,7 @@ typedef enum
 {
     CSS_POSITION_STATIC = 0,
     CSS_POSITION_RELATIVE,
+    CSS_POSITION_STICKY,
     CSS_POSITION_ABSOLUTE,
     CSS_POSITION_FIXED
 } css_position_t;
@@ -384,6 +385,7 @@ typedef struct css_selector_cache
     size_t compiled_count;
     bool compiled;
     bool compiled_failed;
+    uint32_t specificity;
     uint32_t order;
 } css_selector_cache_t;
 
@@ -391,6 +393,8 @@ typedef struct css_rule
 {
     char *selector;
     css_style_t style;
+    css_style_t important_style;
+    bool has_important;
     css_selector_cache_t *selector_cache;
     struct css_rule *next;
 } css_rule_t;

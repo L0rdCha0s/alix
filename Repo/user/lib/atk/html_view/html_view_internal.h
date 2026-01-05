@@ -216,6 +216,8 @@ typedef struct
     const char *style_attr;
     css_stylesheet_t *sheet;
     const css_style_t *style;
+    const css_style_t *important_style;
+    bool has_important;
 } html_view_inline_style_cache_t;
 
 typedef struct html_view_rule_bucket
@@ -774,9 +776,9 @@ void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv);
 void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_stylesheet_rebuild_if_needed(atk_html_view_priv_t *priv);
 void html_view_inline_style_cache_clear(atk_html_view_priv_t *priv);
-const css_style_t *html_view_inline_style_cached(atk_html_view_priv_t *priv,
-                                                 const html_node_t *node,
-                                                 const char *inline_style);
+const html_view_inline_style_cache_t *html_view_inline_style_cached(atk_html_view_priv_t *priv,
+                                                                    const html_node_t *node,
+                                                                    const char *inline_style);
 void html_view_rule_index_clear(atk_html_view_priv_t *priv);
 void html_view_style_cache_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_style_cache_clear(atk_html_view_priv_t *priv);

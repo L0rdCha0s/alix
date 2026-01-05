@@ -749,6 +749,10 @@ static void html_view_draw_cb(const atk_state_t *state,
     bool body_has_bg = body_style.has_background && !body_style.background_transparent;
     video_color_t page_bg = page_has_bg ? html_style.background : default_page_bg;
     video_color_t body_bg = body_has_bg ? body_style.background : default_page_bg;
+    if (!page_has_bg && body_has_bg)
+    {
+        page_bg = body_bg;
+    }
 
     video_draw_rect(abs_x, abs_y, widget->width, widget->height, page_bg);
     video_draw_rect_outline(abs_x, abs_y, widget->width, widget->height, state->theme.window_border);
@@ -1910,6 +1914,7 @@ static const char *html_view_dump_position(css_position_t value)
     {
         case CSS_POSITION_STATIC: return "static";
         case CSS_POSITION_RELATIVE: return "relative";
+        case CSS_POSITION_STICKY: return "sticky";
         case CSS_POSITION_ABSOLUTE: return "absolute";
         case CSS_POSITION_FIXED: return "fixed";
         default: return "unknown";

@@ -259,6 +259,7 @@ static const char *html_view_dump_position(css_position_t value)
     {
         case CSS_POSITION_STATIC: return "static";
         case CSS_POSITION_RELATIVE: return "relative";
+        case CSS_POSITION_STICKY: return "sticky";
         case CSS_POSITION_ABSOLUTE: return "absolute";
         case CSS_POSITION_FIXED: return "fixed";
         default: return "unknown";

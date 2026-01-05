@@ -277,6 +277,114 @@ static const char *css_calc_find_paren_end(const char *start, const char *end)
     return NULL;
 }
 
+static bool css_calc_coerce_units(css_calc_value_t *a, css_calc_value_t *b)
+{
+    if (!a || !b)
+    {
+        return false;
+    }
+    if (a->unit == b->unit)
+    {
+        return true;
+    }
+    if (a->unit == CSS_UNIT_NONE && a->value_milli == 0)
+    {
+        a->unit = b->unit;
+        return true;
+    }
+    if (b->unit == CSS_UNIT_NONE && b->value_milli == 0)
+    {
+        b->unit = a->unit;
+        return true;
+    }
+    return false;
+}
+
+static size_t css_calc_split_args(const char *start, const char *end, const char **out_starts, const char **out_ends, size_t max_args)
+{
+    if (!start || !end || end < start)
+    {
+        return 0;
+    }
+    size_t count = 0;
+    const char *arg_start = start;
+    const char *p = start;
+    int depth = 0;
+    char quote = '\0';
+
+    while (p < end)
+    {
+        char c = *p;
+        if (quote)
+        {
+            if (c == '\\' && p + 1 < end)
+            {
+                p += 2;
+                continue;
+            }
+            if (c == quote)
+            {
+                quote = '\0';
+            }
+            ++p;
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            ++p;
+            continue;
+        }
+        if (c == '/' && p + 1 < end && p[1] == '*')
+        {
+            p += 2;
+            while (p + 1 < end && !(p[0] == '*' && p[1] == '/'))
+            {
+                ++p;
+            }
+            if (p + 1 < end)
+            {
+                p += 2;
+            }
+            continue;
+        }
+        if (c == '(')
+        {
+            ++depth;
+            ++p;
+            continue;
+        }
+        if (c == ')')
+        {
+            if (depth > 0)
+            {
+                --depth;
+            }
+            ++p;
+            continue;
+        }
+        if (c == ',' && depth == 0)
+        {
+            if (count < max_args)
+            {
+                out_starts[count] = arg_start;
+                out_ends[count] = p;
+                ++count;
+            }
+            arg_start = p + 1;
+        }
+        ++p;
+    }
+
+    if (count < max_args)
+    {
+        out_starts[count] = arg_start;
+        out_ends[count] = end;
+        ++count;
+    }
+    return count;
+}
+
 static bool css_calc_combine_add(css_calc_value_t *acc, const css_calc_value_t *rhs, int sign)
 {
     if (!acc || !rhs)
@@ -341,6 +449,163 @@ static bool css_calc_combine_mul(css_calc_value_t *acc, const css_calc_value_t *
 }
 
 static bool css_calc_parse_expr(const char **p, const char *end, css_calc_value_t *out);
+static bool css_parse_calc_value(const char *start, const char *end, css_calc_value_t *out);
+
+static bool css_calc_parse_function(const char **p, const char *end, css_calc_value_t *out)
+{
+    if (!p || !*p || !out)
+    {
+        return false;
+    }
+    const char *start = *p;
+    if (end <= start)
+    {
+        return false;
+    }
+
+    struct
+    {
+        const char *name;
+        size_t len;
+    } names[] = {
+        {"calc", 4},
+        {"min", 3},
+        {"max", 3},
+        {"clamp", 5},
+    };
+
+    size_t name_index = 0;
+    size_t name_len = 0;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+    {
+        if ((size_t)(end - start) >= names[i].len + 1 &&
+            strncasecmp(start, names[i].name, names[i].len) == 0 &&
+            start[names[i].len] == '(')
+        {
+            name_index = i;
+            name_len = names[i].len;
+            break;
+        }
+    }
+    if (name_len == 0)
+    {
+        return false;
+    }
+
+    const char *sub_start = start + name_len + 1;
+    const char *sub_end = css_calc_find_paren_end(sub_start, end);
+    if (!sub_end)
+    {
+        return false;
+    }
+
+    if (strcmp(names[name_index].name, "calc") == 0)
+    {
+        const char *scan = sub_start;
+        css_calc_value_t inner = {0};
+        if (!css_calc_parse_expr(&scan, sub_end, &inner))
+        {
+            return false;
+        }
+        css_calc_skip_ws(&scan, sub_end);
+        if (scan != sub_end)
+        {
+            return false;
+        }
+        *p = sub_end + 1;
+        *out = inner;
+        return true;
+    }
+
+    const char *arg_starts[4];
+    const char *arg_ends[4];
+    size_t arg_count = css_calc_split_args(sub_start, sub_end, arg_starts, arg_ends, 4);
+    if (arg_count == 0)
+    {
+        return false;
+    }
+
+    if (strcmp(names[name_index].name, "clamp") == 0)
+    {
+        if (arg_count != 3)
+        {
+            return false;
+        }
+        css_calc_value_t parts[3] = {0};
+        for (size_t i = 0; i < 3; ++i)
+        {
+            const char *a = arg_starts[i];
+            const char *b = arg_ends[i];
+            css_trim_range(&a, &b);
+            if (!css_parse_calc_value(a, b, &parts[i]))
+            {
+                return false;
+            }
+        }
+        if (!css_calc_coerce_units(&parts[0], &parts[1]) || !css_calc_coerce_units(&parts[1], &parts[2]))
+        {
+            *p = sub_end + 1;
+            *out = parts[1];
+            return true;
+        }
+        if (parts[1].value_milli < parts[0].value_milli)
+        {
+            parts[1].value_milli = parts[0].value_milli;
+        }
+        if (parts[1].value_milli > parts[2].value_milli)
+        {
+            parts[1].value_milli = parts[2].value_milli;
+        }
+        *p = sub_end + 1;
+        *out = parts[1];
+        return true;
+    }
+
+    if (arg_count < 2)
+    {
+        return false;
+    }
+    css_calc_value_t best = {0};
+    for (size_t i = 0; i < arg_count; ++i)
+    {
+        const char *a = arg_starts[i];
+        const char *b = arg_ends[i];
+        css_trim_range(&a, &b);
+        css_calc_value_t value = {0};
+        if (!css_parse_calc_value(a, b, &value))
+        {
+            return false;
+        }
+        if (i == 0)
+        {
+            best = value;
+            continue;
+        }
+        css_calc_value_t lhs = best;
+        css_calc_value_t rhs = value;
+        if (!css_calc_coerce_units(&lhs, &rhs))
+        {
+            continue;
+        }
+        if (strcmp(names[name_index].name, "min") == 0)
+        {
+            if (rhs.value_milli < lhs.value_milli)
+            {
+                best = value;
+            }
+        }
+        else
+        {
+            if (rhs.value_milli > lhs.value_milli)
+            {
+                best = value;
+            }
+        }
+    }
+    *p = sub_end + 1;
+    *out = best;
+    return true;
+}
 
 static bool css_calc_parse_factor(const char **p, const char *end, css_calc_value_t *out)
 {
@@ -364,6 +629,17 @@ static bool css_calc_parse_factor(const char **p, const char *end, css_calc_valu
     if (*p >= end)
     {
         return false;
+    }
+
+    css_calc_value_t func = {0};
+    if (css_calc_parse_function(p, end, &func))
+    {
+        if (negate)
+        {
+            func.value_milli = -func.value_milli;
+        }
+        *out = func;
+        return true;
     }
 
     if (**p == '(')

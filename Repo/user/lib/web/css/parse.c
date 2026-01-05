@@ -27,11 +27,18 @@ void css_media_env_set(int width_px, int height_px, css_media_color_scheme_t sch
     g_css_media_env.color_scheme = scheme;
 }
 
-static bool css_strip_priority(const char *start, const char *end, const char **out_end)
+static bool css_strip_priority(const char *start,
+                               const char *end,
+                               const char **out_end,
+                               bool *out_important)
 {
     if (out_end)
     {
         *out_end = end;
+    }
+    if (out_important)
+    {
+        *out_important = false;
     }
     if (!start || !end || end <= start)
     {
@@ -130,6 +137,10 @@ static bool css_strip_priority(const char *start, const char *end, const char **
     if (out_end)
     {
         *out_end = bang;
+    }
+    if (out_important)
+    {
+        *out_important = true;
     }
     return true;
 }
@@ -233,6 +244,7 @@ typedef struct css_decl
     const char *prop_end;
     const char *val_start;
     const char *val_end;
+    bool important;
 } css_decl_t;
 
 typedef struct css_decl_list
@@ -266,7 +278,8 @@ static bool css_decl_list_push(css_decl_list_t *list,
                                const char *prop_start,
                                const char *prop_end,
                                const char *val_start,
-                               const char *val_end)
+                               const char *val_end,
+                               bool important)
 {
     if (!list || !prop_start || !prop_end || prop_end <= prop_start || !val_start || !val_end)
     {
@@ -288,6 +301,7 @@ static bool css_decl_list_push(css_decl_list_t *list,
         .prop_end = prop_end,
         .val_start = val_start,
         .val_end = val_end,
+        .important = important,
     };
     return true;
 }
@@ -746,9 +760,14 @@ static bool css_var_name_is_local(const char *name_start, const char *name_end)
     return (name_start[0] == '-' && name_start[1] == '-' && name_start[2] == '_');
 }
 
-static bool css_append_rule(css_stylesheet_t *sheet, const char *selector_start, const char *selector_end, const css_style_t *style)
+static bool css_append_rule(css_stylesheet_t *sheet,
+                            const char *selector_start,
+                            const char *selector_end,
+                            const css_style_t *style,
+                            const css_style_t *important_style,
+                            bool has_important)
 {
-    if (!sheet || !selector_start || !selector_end || selector_end <= selector_start || !style)
+    if (!sheet || !selector_start || !selector_end || selector_end <= selector_start)
     {
         return false;
     }
@@ -769,7 +788,10 @@ static bool css_append_rule(css_stylesheet_t *sheet, const char *selector_start,
         free(rule);
         return false;
     }
-    rule->style = *style;
+    if (style)
+    {
+        rule->style = *style;
+    }
     if (rule->style.background_image_owned && rule->style.background_image)
     {
         char *dup = css_strdup(rule->style.background_image);
@@ -792,6 +814,37 @@ static bool css_append_rule(css_stylesheet_t *sheet, const char *selector_start,
             return false;
         }
         rule->style.content = dup;
+    }
+    if (important_style)
+    {
+        rule->important_style = *important_style;
+        rule->has_important = has_important;
+        if (rule->important_style.background_image_owned && rule->important_style.background_image)
+        {
+            char *dup = css_strdup(rule->important_style.background_image);
+            if (!dup)
+            {
+                css_style_release(&rule->important_style);
+                css_style_release(&rule->style);
+                free(rule->selector);
+                free(rule);
+                return false;
+            }
+            rule->important_style.background_image = dup;
+        }
+        if (rule->important_style.content_owned && rule->important_style.content)
+        {
+            char *dup = css_strdup(rule->important_style.content);
+            if (!dup)
+            {
+                css_style_release(&rule->important_style);
+                css_style_release(&rule->style);
+                free(rule->selector);
+                free(rule);
+                return false;
+            }
+            rule->important_style.content = dup;
+        }
     }
     rule->next = NULL;
 
@@ -1413,7 +1466,8 @@ static bool css_parse_declarations(const char **p,
             val_end_scan = *p;
         }
         const char *val_end = val_end_scan;
-        if (!css_strip_priority(val_start, val_end, &val_end))
+        bool important = false;
+        if (!css_strip_priority(val_start, val_end, &val_end, &important))
         {
             *p = val_end_scan;
             if (*p < end && **p == ';')
@@ -1423,7 +1477,7 @@ static bool css_parse_declarations(const char **p,
             continue;
         }
 
-        if (!css_decl_list_push(decls, prop_start, prop_end, val_start, val_end))
+        if (!css_decl_list_push(decls, prop_start, prop_end, val_start, val_end, important))
         {
             return false;
         }
@@ -1475,12 +1529,60 @@ static bool css_selector_has_theme_override(const char *start, const char *end)
     {
         return false;
     }
-    return css_range_contains_ci(start, end, "theme-dark") ||
-           css_range_contains_ci(start, end, "theme-dark__forced") ||
-           css_range_contains_ci(start, end, "theme-highcontrast") ||
-           css_range_contains_ci(start, end, "theme-system") ||
-           css_range_contains_ci(start, end, "theme-light") ||
-           css_range_contains_ci(start, end, "theme-light__forced");
+    static const char *tokens[] = {
+        "theme-dark__forced",
+        "theme-dark",
+        "theme-highcontrast",
+        "theme-system",
+        "theme-light__forced",
+        "theme-light",
+    };
+    bool in_not = false;
+    int not_depth = 0;
+    for (const char *p = start; p < end; ++p)
+    {
+        if (!in_not && *p == ':' && (end - p) >= 4 && strncasecmp(p, ":not", 4) == 0)
+        {
+            const char *q = p + 4;
+            while (q < end && isspace((unsigned char)*q))
+            {
+                ++q;
+            }
+            if (q < end && *q == '(')
+            {
+                in_not = true;
+                not_depth = 1;
+                p = q;
+                continue;
+            }
+        }
+        if (in_not)
+        {
+            if (*p == '(')
+            {
+                ++not_depth;
+            }
+            else if (*p == ')')
+            {
+                --not_depth;
+                if (not_depth <= 0)
+                {
+                    in_not = false;
+                    not_depth = 0;
+                }
+            }
+            continue;
+        }
+        for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); ++i)
+        {
+            size_t len = strlen(tokens[i]);
+            if ((size_t)(end - p) >= len && strncasecmp(p, tokens[i], len) == 0)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 static bool css_selector_is_rootish(const char *start, const char *end)
@@ -1491,51 +1593,178 @@ static bool css_selector_is_rootish(const char *start, const char *end)
     }
     const char *p = start;
     css_trim_range(&p, &end);
-    while (p < end)
+    if (p >= end)
     {
-        while (p < end && isspace((unsigned char)*p))
+        return false;
+    }
+
+    bool escape = false;
+    char quote = 0;
+    int bracket_depth = 0;
+    int paren_depth = 0;
+    const char *compound_end = end;
+    for (const char *q = p; q < end; ++q)
+    {
+        char c = *q;
+        if (escape)
         {
-            ++p;
-        }
-        if (p >= end)
-        {
-            break;
-        }
-        if (*p == '>' || *p == '+' || *p == '~')
-        {
-            ++p;
+            escape = false;
             continue;
         }
-        if (*p == ':')
+        if (c == '\\')
         {
-            if ((end - p) >= 5 && strncasecmp(p, ":root", 5) == 0)
+            escape = true;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            continue;
+        }
+        if (c == '[')
+        {
+            ++bracket_depth;
+            continue;
+        }
+        if (c == ']' && bracket_depth > 0)
+        {
+            --bracket_depth;
+            continue;
+        }
+        if (c == '(')
+        {
+            ++paren_depth;
+            continue;
+        }
+        if (c == ')' && paren_depth > 0)
+        {
+            --paren_depth;
+            continue;
+        }
+        if (bracket_depth == 0 && paren_depth == 0)
+        {
+            if (c == '>' || c == '+' || c == '~' || isspace((unsigned char)c))
+            {
+                compound_end = q;
+                break;
+            }
+        }
+    }
+
+    const char *tail = compound_end;
+    while (tail < end && isspace((unsigned char)*tail))
+    {
+        ++tail;
+    }
+    if (tail < end)
+    {
+        return false;
+    }
+
+    bool rootish = false;
+    const char *q = p;
+    if (q < compound_end && *q == '*')
+    {
+        ++q;
+    }
+    else if (q < compound_end && isalpha((unsigned char)*q))
+    {
+        const char *ident_start = q;
+        while (q < compound_end &&
+               (isalnum((unsigned char)*q) || *q == '-' || *q == '_'))
+        {
+            ++q;
+        }
+        if (css_ident_is(ident_start, q, "html") ||
+            css_ident_is(ident_start, q, "body"))
+        {
+            rootish = true;
+        }
+    }
+
+    escape = false;
+    quote = 0;
+    bracket_depth = 0;
+    paren_depth = 0;
+    for (const char *r = p; r < compound_end; ++r)
+    {
+        char c = *r;
+        if (escape)
+        {
+            escape = false;
+            continue;
+        }
+        if (c == '\\')
+        {
+            escape = true;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            continue;
+        }
+        if (c == '[')
+        {
+            ++bracket_depth;
+            continue;
+        }
+        if (c == ']' && bracket_depth > 0)
+        {
+            --bracket_depth;
+            continue;
+        }
+        if (c == '(')
+        {
+            ++paren_depth;
+            continue;
+        }
+        if (c == ')' && paren_depth > 0)
+        {
+            --paren_depth;
+            continue;
+        }
+        if (bracket_depth > 0 || paren_depth > 0)
+        {
+            continue;
+        }
+        if (c == ':')
+        {
+            const char *name = r + 1;
+            if (name < compound_end && *name == ':')
+            {
+                ++name;
+            }
+            const char *name_end = name;
+            while (name_end < compound_end &&
+                   (isalnum((unsigned char)*name_end) || *name_end == '-' || *name_end == '_'))
+            {
+                ++name_end;
+            }
+            if (name_end > name && css_ident_is(name, name_end, "root"))
             {
                 return true;
             }
-            return false;
         }
-        if (*p == '*')
-        {
-            return false;
-        }
-        if (*p == '.' || *p == '#' || *p == '[')
-        {
-            return false;
-        }
-        if (isalpha((unsigned char)*p))
-        {
-            const char *ident_start = p;
-            while (p < end &&
-                   (isalnum((unsigned char)*p) || *p == '-' || *p == '_'))
-            {
-                ++p;
-            }
-            return css_ident_is(ident_start, p, "html") ||
-                   css_ident_is(ident_start, p, "body");
-        }
-        return false;
     }
-    return false;
+
+    return rootish;
 }
 
 static bool css_selectors_allow_global_vars(const char *sel_start, const char *sel_end)
@@ -1558,15 +1787,11 @@ static bool css_selectors_allow_global_vars(const char *sel_start, const char *s
         css_trim_range(&seg_start, &seg_end);
         if (seg_end > seg_start)
         {
-            if (css_selector_has_theme_override(seg_start, seg_end))
+            if (!css_selector_has_theme_override(seg_start, seg_end) &&
+                css_selector_is_rootish(seg_start, seg_end))
             {
-                return false;
+                any = true;
             }
-            if (!css_selector_is_rootish(seg_start, seg_end))
-            {
-                return false;
-            }
-            any = true;
         }
         cur = (comma < sel_end) ? (comma + 1) : sel_end;
     }
@@ -1624,8 +1849,10 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
     }
 
     css_style_t style = {0};
+    css_style_t important_style = {0};
     css_var_map_t local_vars = {0};
     bool has_style = false;
+    bool has_important = false;
 
     for (size_t i = 0; i < decls->count; ++i)
     {
@@ -1669,6 +1896,7 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
         const css_decl_t *decl = &decls->items[i];
         const char *prop_start = decl->prop_start;
         const char *prop_end = decl->prop_end;
+        bool decl_important = decl->important;
         css_trim_range(&prop_start, &prop_end);
         if (prop_end <= prop_start)
         {
@@ -1700,14 +1928,22 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
             }
         }
 
-        css_style_apply_property(&style, prop_start, prop_end, apply_start, apply_end);
-        has_style = true;
+        if (decl_important)
+        {
+            css_style_apply_property(&important_style, prop_start, prop_end, apply_start, apply_end);
+            has_important = true;
+        }
+        else
+        {
+            css_style_apply_property(&style, prop_start, prop_end, apply_start, apply_end);
+            has_style = true;
+        }
 
         free(expanded);
     }
 
     bool ok = true;
-    if (has_style)
+    if (has_style || has_important)
     {
         const char *cur = sel_start;
         while (cur < sel_end)
@@ -1717,7 +1953,9 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
             {
                 ++comma;
             }
-            if (!css_append_rule(sheet, cur, comma, &style))
+            if (!css_append_rule(sheet, cur, comma, has_style ? &style : NULL,
+                                 has_important ? &important_style : NULL,
+                                 has_important))
             {
                 ok = false;
                 break;
@@ -1728,6 +1966,7 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
 
     css_var_map_free(&local_vars);
     css_style_release(&style);
+    css_style_release(&important_style);
     return ok;
 }
 
@@ -1908,6 +2147,7 @@ void css_stylesheet_destroy(css_stylesheet_t *sheet)
     {
         css_rule_t *next = rule->next;
         css_style_release(&rule->style);
+        css_style_release(&rule->important_style);
         if (rule->selector_cache)
         {
             if (rule->selector_cache->compiled_parts)
