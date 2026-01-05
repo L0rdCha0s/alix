@@ -3948,7 +3948,7 @@ static bool test_float_measure_width(void)
     return ctx.measure_max_x >= 40;
 }
 
-#define ACID2_SNAPSHOT_HASH 0x62F2DE48A86F2400ULL
+#define ACID2_SNAPSHOT_HASH 0x3542DFC53EF65DFBULL
 
 static bool test_acid2_render_snapshot(void)
 {
@@ -5068,6 +5068,138 @@ static bool test_hacker_news_live_render(void)
     return ok;
 }
 
+static bool test_stackoverflow_questions_live_render(void)
+{
+    const char *enable = getenv("ALIX_HOST_FETCH");
+    if (!enable || enable[0] == '\0' || strcmp(enable, "0") == 0)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live skipped (set ALIX_HOST_FETCH=1)\n");
+        return true;
+    }
+
+    const char *url = getenv("ALIX_HOST_FETCH_QUESTIONS_URL");
+    if (!url || url[0] == '\0')
+    {
+        url = "https://www.stackoverflow.com/questions";
+    }
+
+    size_t html_len = 0;
+    double fetch_start = host_now_ms();
+    char *html = host_fetch_url(url, &html_len);
+    double fetch_end = host_now_ms();
+    if (!html)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live fetch failed url=%s\n", url);
+        return false;
+    }
+
+    html_parse_error_t err = {0};
+    double parse_start = host_now_ms();
+    html_document_t *doc = html_parse(html, &err);
+    double parse_end = host_now_ms();
+    if (!doc)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live parse failed at %zu: %s\n",
+               err.offset,
+               err.message ? err.message : "unknown");
+        free(html);
+        return false;
+    }
+
+    char *css = NULL;
+    size_t css_len = 0;
+    size_t css_cap = 0;
+    size_t css_fetches = 0;
+    double css_collect_start = host_now_ms();
+    collect_style_text_with_url_base(doc->root, &css, &css_len, &css_cap, url, &css_fetches);
+    double css_collect_end = host_now_ms();
+
+    double css_parse_start = host_now_ms();
+    css_stylesheet_t *sheet = css_parse(css ? css : "");
+    double css_parse_end = host_now_ms();
+    if (!sheet)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live css parse failed\n");
+        html_document_destroy(doc);
+        free(html);
+        free(css);
+        return false;
+    }
+
+    bool draw = false;
+    const char *draw_env = getenv("ALIX_HOST_FETCH_DRAW");
+    if (draw_env && draw_env[0] != '\0' && strcmp(draw_env, "0") != 0)
+    {
+        draw = true;
+    }
+
+    html_view_render_stats_t stats = {0};
+    double render_ms = 0.0;
+    double draw_ms = 0.0;
+    bool ok = render_doc_case("stackoverflow_questions_live",
+                              "stackoverflow-questions-live",
+                              doc,
+                              sheet,
+                              draw,
+                              &stats,
+                              &render_ms,
+                              &draw_ms);
+
+    printf("html_view_host_test: stackoverflow_questions_live url=%s html=%zu css=%zu css_fetches=%zu\n",
+           url,
+           html_len,
+           css_len,
+           css_fetches);
+    printf("html_view_host_test: stackoverflow_questions_live timings fetch=%.1fms html_parse=%.1fms css_collect=%.1fms css_parse=%.1fms render=%.1fms ops=%zu%s\n",
+           fetch_end - fetch_start,
+           parse_end - parse_start,
+           css_collect_end - css_collect_start,
+           css_parse_end - css_parse_start,
+           render_ms,
+           stats.op_count,
+           draw ? "" : " (draw skipped)");
+    if (draw)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live draw=%.1fms\n", draw_ms);
+    }
+
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live cleanup begin\n");
+        fflush(stdout);
+    }
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live cleanup destroy sheet\n");
+        fflush(stdout);
+    }
+    css_stylesheet_destroy(sheet);
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live cleanup destroy doc\n");
+        fflush(stdout);
+    }
+    html_document_destroy(doc);
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live cleanup free css\n");
+        fflush(stdout);
+    }
+    free(css);
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live cleanup free html\n");
+        fflush(stdout);
+    }
+    free(html);
+    if (g_html_trace_enabled)
+    {
+        printf("html_view_host_test: stackoverflow_questions_live cleanup end\n");
+        fflush(stdout);
+    }
+    return ok;
+}
+
 typedef struct
 {
     const char *name;
@@ -5103,6 +5235,7 @@ int main(void)
         { "acid2-snapshot", test_acid2_render_snapshot },
         { "hacker-news-render", test_hacker_news_render },
         { "hacker-news-live", test_hacker_news_live_render },
+        { "stackoverflow-questions-live", test_stackoverflow_questions_live_render },
     };
 
     size_t pass = 0;

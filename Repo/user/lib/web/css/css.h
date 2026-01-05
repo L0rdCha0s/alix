@@ -266,6 +266,40 @@ typedef struct css_selector_part
     char combinator;
 } css_selector_part_t;
 
+typedef struct css_selector_atom
+{
+    uint32_t start;
+    uint32_t len;
+} css_selector_atom_t;
+
+typedef struct css_selector_attr_req
+{
+    uint32_t name_start;
+    uint32_t name_len;
+    uint32_t value_start;
+    uint32_t value_len;
+    char op;
+    bool has_value;
+} css_selector_attr_req_t;
+
+typedef struct css_selector_compiled_part
+{
+    uint32_t tag_start;
+    uint32_t tag_len;
+    bool tag_any;
+    bool id_valid;
+    uint32_t id_start;
+    uint32_t id_len;
+    bool require_link;
+    uint8_t pseudo_required;
+    uint16_t class_count;
+    uint16_t class_cap;
+    css_selector_atom_t *classes;
+    uint16_t attr_count;
+    uint16_t attr_cap;
+    css_selector_attr_req_t *attrs;
+} css_selector_compiled_part_t;
+
 typedef struct css_selector_cache
 {
     css_selector_part_t *parts;
@@ -300,6 +334,19 @@ typedef struct css_selector_cache
     uint8_t pseudo_mask;
     web_bloom_t self_bloom_mask;
     web_bloom_t ancestor_bloom_mask;
+    uint8_t self_class_count;
+    uint8_t self_attr_count;
+    bool self_class_truncated;
+    bool self_attr_truncated;
+    bool self_simple;
+    uint32_t self_class_start[4];
+    uint32_t self_class_len[4];
+    uint32_t self_attr_start[2];
+    uint32_t self_attr_len[2];
+    css_selector_compiled_part_t *compiled_parts;
+    size_t compiled_count;
+    bool compiled;
+    bool compiled_failed;
     uint32_t order;
 } css_selector_cache_t;
 

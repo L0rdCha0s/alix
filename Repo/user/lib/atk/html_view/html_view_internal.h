@@ -37,6 +37,7 @@
 #define HTML_VIEW_FONT_TEXT_GUARD 2048
 #define HTML_VIEW_FONT_MAX_PX 512
 #define HTML_VIEW_MEASURE_CACHE_MAX 2048
+#define HTML_VIEW_STYLE_CACHE_MAX 8192
 
 typedef struct html_view_js_script
 {
@@ -225,6 +226,7 @@ typedef struct html_view_rule_bucket
     size_t count;
     size_t cap;
     uint8_t pseudo_mask;
+    struct html_view_rule_trie *trie;
     struct html_view_rule_bucket *parent_buckets;
     size_t parent_count;
     size_t parent_cap;
@@ -237,6 +239,7 @@ typedef struct
     size_t global_count;
     size_t global_cap;
     uint8_t global_pseudo_mask;
+    struct html_view_rule_trie *global_trie;
     html_view_rule_bucket_t *tag_buckets;
     size_t tag_bucket_count;
     size_t tag_bucket_cap;
@@ -267,6 +270,14 @@ typedef struct
 
 typedef struct
 {
+    const html_node_t *node;
+    html_view_pseudo_t pseudo;
+    css_style_t style;
+    bool valid;
+} html_view_style_cache_entry_t;
+
+typedef struct
+{
     atk_list_node_t *child_node;
     atk_widget_t *scrollbar;
     int scrollbar_width;
@@ -290,6 +301,10 @@ typedef struct
     html_view_measure_cache_entry_t *measure_cache;
     size_t measure_cache_count;
     size_t measure_cache_cap;
+    html_view_style_cache_entry_t *style_cache;
+    size_t style_cache_cap;
+    size_t style_cache_mask;
+    volatile uint32_t style_cache_dirty;
     atk_html_view_link_t link_handler;
     void *link_context;
     const char *pressed_href;
@@ -763,6 +778,8 @@ const css_style_t *html_view_inline_style_cached(atk_html_view_priv_t *priv,
                                                  const html_node_t *node,
                                                  const char *inline_style);
 void html_view_rule_index_clear(atk_html_view_priv_t *priv);
+void html_view_style_cache_mark_dirty(atk_html_view_priv_t *priv);
+void html_view_style_cache_clear(atk_html_view_priv_t *priv);
 bool html_view_measure_cache_lookup(atk_html_view_priv_t *priv,
                                     const html_node_t *node,
                                     int content_w,

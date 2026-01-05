@@ -1106,6 +1106,11 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
         html_view_images_clear(priv);
         html_view_inline_style_cache_clear(priv);
         html_view_measure_cache_clear(priv);
+        html_view_style_cache_clear(priv);
+        free(priv->style_cache);
+        priv->style_cache = NULL;
+        priv->style_cache_cap = 0;
+        priv->style_cache_mask = 0;
         html_view_rule_index_clear(priv);
         if (priv->external_css)
         {

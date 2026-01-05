@@ -385,6 +385,16 @@ void css_stylesheet_destroy(css_stylesheet_t *sheet)
         css_style_release(&rule->style);
         if (rule->selector_cache)
         {
+            if (rule->selector_cache->compiled_parts)
+            {
+                for (size_t i = 0; i < rule->selector_cache->compiled_count; ++i)
+                {
+                    css_selector_compiled_part_t *part = &rule->selector_cache->compiled_parts[i];
+                    free(part->classes);
+                    free(part->attrs);
+                }
+                free(rule->selector_cache->compiled_parts);
+            }
             free(rule->selector_cache->parts);
             free(rule->selector_cache);
         }

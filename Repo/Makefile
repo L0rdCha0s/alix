@@ -236,7 +236,7 @@ TCG_CPU_TYPE ?= qemu64
 SMP_CORES ?= 8
 QEMU_SMP_OPTS := -smp $(SMP_CORES),sockets=1,cores=$(SMP_CORES),threads=1
 
-all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS) $(USER_BINS)
+all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS) $(USER_BINS) $(HTML_VIEW_TEST_BIN)
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -853,6 +853,9 @@ js-test: $(JS_TEST_BIN)
 html-js-test: $(HTML_JS_TEST_BIN)
 	$(HTML_JS_TEST_BIN)
 
+html-view-test: $(HTML_VIEW_TEST_BIN)
+	$(HTML_VIEW_TEST_BIN)
+
 test262-test: $(TEST262_TEST_BIN)
 	$(TEST262_TEST_BIN)
 
@@ -867,8 +870,9 @@ test:
 	$(MAKE) tls-test
 	$(MAKE) js-test
 	$(MAKE) html-js-test
+	$(MAKE) html-view-test
 
-.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test css-test browser-event-test png-test tls-test js-test html-js-test test262-test
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test css-test browser-event-test png-test tls-test js-test html-js-test html-view-test test262-test
 
 -include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) \
          $(USER_OBJDIR)/*.d $(USER_OBJDIR)/atk/*.d $(USER_OBJDIR)/atk/util/*.d \
