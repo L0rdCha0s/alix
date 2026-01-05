@@ -43,6 +43,47 @@ typedef struct
     int64_t shrink_weight_sum;
 } html_view_flex_line_t;
 
+static bool html_view_style_uses_border_box(const css_style_t *style)
+{
+    return style && style->has_box_sizing && style->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
+}
+
+static int html_view_box_sizing_content_width(const css_style_t *style,
+                                              int width,
+                                              int pad_left,
+                                              int pad_right,
+                                              int border_left,
+                                              int border_right)
+{
+    if (html_view_style_uses_border_box(style))
+    {
+        width -= pad_left + pad_right + border_left + border_right;
+        if (width < 0)
+        {
+            width = 0;
+        }
+    }
+    return width;
+}
+
+static int html_view_box_sizing_content_height(const css_style_t *style,
+                                               int height,
+                                               int pad_top,
+                                               int pad_bottom,
+                                               int border_top,
+                                               int border_bottom)
+{
+    if (html_view_style_uses_border_box(style))
+    {
+        height -= pad_top + pad_bottom + border_top + border_bottom;
+        if (height < 0)
+        {
+            height = 0;
+        }
+    }
+    return height;
+}
+
 static void html_view_calc_box_edges(const html_view_ctx_t *ctx,
                                      const css_style_t *style,
                                      int ref_w,
@@ -292,6 +333,12 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                   ctx->viewport_h,
                                                   ctx->base_font_px,
                                                   true);
+            content_main = html_view_box_sizing_content_width(style,
+                                                             content_main,
+                                                             pad_left,
+                                                             pad_right,
+                                                             border_left,
+                                                             border_right);
             main_explicit = true;
         }
         if (style->has_height && style->height.valid && !style->height.is_auto)
@@ -303,6 +350,12 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                    ctx->viewport_h,
                                                    ctx->base_font_px,
                                                    false);
+            content_cross = html_view_box_sizing_content_height(style,
+                                                                content_cross,
+                                                                pad_top,
+                                                                pad_bottom,
+                                                                border_top,
+                                                                border_bottom);
             cross_explicit = true;
         }
     }
@@ -317,6 +370,12 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                   ctx->viewport_h,
                                                   ctx->base_font_px,
                                                   false);
+            content_main = html_view_box_sizing_content_height(style,
+                                                               content_main,
+                                                               pad_top,
+                                                               pad_bottom,
+                                                               border_top,
+                                                               border_bottom);
             main_explicit = true;
         }
         if (style->has_width && style->width.valid && !style->width.is_auto)
@@ -328,6 +387,12 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                    ctx->viewport_h,
                                                    ctx->base_font_px,
                                                    true);
+            content_cross = html_view_box_sizing_content_width(style,
+                                                               content_cross,
+                                                               pad_left,
+                                                               pad_right,
+                                                               border_left,
+                                                               border_right);
             cross_explicit = true;
         }
     }
@@ -340,7 +405,7 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     {
         if (row)
         {
-            layout_main = ctx->body_w - margin_left - margin_right;
+            layout_main = ctx->body_w - margin_left - margin_right - pad_left - pad_right - border_left - border_right;
             if (layout_main < 0) layout_main = 0;
         }
         else
@@ -499,6 +564,12 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                        ctx->viewport_h,
                                                        ctx->base_font_px,
                                                        true);
+                    content_w = html_view_box_sizing_content_width(&child_style,
+                                                                   content_w,
+                                                                   item->pad_left,
+                                                                   item->pad_right,
+                                                                   item->border_left,
+                                                                   item->border_right);
                     main_explicit_item = true;
                 }
                 else
@@ -515,6 +586,12 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                        ctx->viewport_h,
                                                        ctx->base_font_px,
                                                        false);
+                    content_h = html_view_box_sizing_content_height(&child_style,
+                                                                    content_h,
+                                                                    item->pad_top,
+                                                                    item->pad_bottom,
+                                                                    item->border_top,
+                                                                    item->border_bottom);
                     cross_explicit_item = true;
                 }
                 else
@@ -538,6 +615,12 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                        ctx->viewport_h,
                                                        ctx->base_font_px,
                                                        false);
+                    content_h = html_view_box_sizing_content_height(&child_style,
+                                                                    content_h,
+                                                                    item->pad_top,
+                                                                    item->pad_bottom,
+                                                                    item->border_top,
+                                                                    item->border_bottom);
                     main_explicit_item = true;
                 }
                 else
@@ -554,6 +637,12 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                        ctx->viewport_h,
                                                        ctx->base_font_px,
                                                        true);
+                    content_w = html_view_box_sizing_content_width(&child_style,
+                                                                   content_w,
+                                                                   item->pad_left,
+                                                                   item->pad_right,
+                                                                   item->border_left,
+                                                                   item->border_right);
                     cross_explicit_item = true;
                 }
                 else

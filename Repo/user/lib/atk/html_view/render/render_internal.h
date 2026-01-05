@@ -10,6 +10,10 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                      const html_node_t *node,
                                      const css_style_t *style,
                                      bool inline_container);
+void html_view_render_grid_container(html_view_ctx_t *ctx,
+                                     const html_node_t *node,
+                                     const css_style_t *style,
+                                     bool inline_container);
 bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                                          const html_node_t *node,
                                          const css_style_t *style,

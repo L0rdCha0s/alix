@@ -145,6 +145,11 @@ static void html_view_style_inherit_from_parent(css_style_t *out, const css_styl
         out->has_letter_spacing = true;
         out->letter_spacing = parent->letter_spacing;
     }
+    if (parent->has_list_style_type)
+    {
+        out->has_list_style_type = true;
+        out->list_style_type = parent->list_style_type;
+    }
 }
 
 static void html_view_resolve_float_inherit(css_style_t *style, const css_style_t *parent)
@@ -164,6 +169,24 @@ static void html_view_resolve_float_inherit(css_style_t *style, const css_style_
     style->float_inherit = false;
 }
 
+static void html_view_resolve_box_sizing_inherit(css_style_t *style, const css_style_t *parent)
+{
+    if (!style || !style->has_box_sizing || !style->box_sizing_inherit)
+    {
+        return;
+    }
+
+    if (parent && parent->has_box_sizing)
+    {
+        style->box_sizing = parent->box_sizing;
+    }
+    else
+    {
+        style->has_box_sizing = false;
+    }
+    style->box_sizing_inherit = false;
+}
+
 static const html_node_t *html_view_prev_element_sibling(const html_node_t *node)
 {
     if (!node)
@@ -181,6 +204,7 @@ static const html_node_t *html_view_prev_element_sibling(const html_node_t *node
 }
 
 static char *html_view_unescape_selector_value(const char *start, const char *end);
+static const char *html_view_selector_token_end(const char *p, const char *end);
 
 static uint64_t html_view_bloom_hash_range_ci(const char *start, const char *end, bool unescape)
 {
@@ -754,6 +778,130 @@ static bool html_view_selector_range_eq_ci_ranges(const char *a_start,
     return a == a_end && b == b_end;
 }
 
+static size_t html_view_selector_range_unescaped_len(const char *sel_start, size_t sel_len)
+{
+    if (!sel_start || sel_len == 0)
+    {
+        return 0;
+    }
+    const char *p = sel_start;
+    const char *end = sel_start + sel_len;
+    size_t len = 0;
+    while (p < end)
+    {
+        if (*p == '\\' && (p + 1) < end)
+        {
+            ++p;
+        }
+        ++len;
+        ++p;
+    }
+    return len;
+}
+
+static bool html_view_selector_range_startswith_ci_value(const char *value,
+                                                         const char *sel_start,
+                                                         size_t sel_len)
+{
+    if (!value || !sel_start || sel_len == 0)
+    {
+        return false;
+    }
+    size_t value_len = strlen(value);
+    const char *p = sel_start;
+    const char *end = sel_start + sel_len;
+    size_t vi = 0;
+    while (p < end)
+    {
+        char sc = *p;
+        if (sc == '\\' && (p + 1) < end)
+        {
+            ++p;
+            sc = *p;
+        }
+        if (vi >= value_len)
+        {
+            return false;
+        }
+        if (tolower((unsigned char)sc) != tolower((unsigned char)value[vi]))
+        {
+            return false;
+        }
+        ++vi;
+        ++p;
+    }
+    return true;
+}
+
+static bool html_view_selector_range_endswith_ci_value(const char *value,
+                                                       const char *sel_start,
+                                                       size_t sel_len)
+{
+    if (!value || !sel_start || sel_len == 0)
+    {
+        return false;
+    }
+    size_t value_len = strlen(value);
+    size_t pat_len = html_view_selector_range_unescaped_len(sel_start, sel_len);
+    if (pat_len == 0 || value_len < pat_len)
+    {
+        return false;
+    }
+    return html_view_selector_range_eq_ci_token(value + (value_len - pat_len),
+                                                pat_len,
+                                                sel_start,
+                                                sel_len);
+}
+
+static bool html_view_selector_range_contains_ci_value(const char *value,
+                                                       const char *sel_start,
+                                                       size_t sel_len)
+{
+    if (!value || !sel_start || sel_len == 0)
+    {
+        return false;
+    }
+    size_t value_len = strlen(value);
+    size_t pat_len = html_view_selector_range_unescaped_len(sel_start, sel_len);
+    if (pat_len == 0 || value_len < pat_len)
+    {
+        return false;
+    }
+    for (size_t i = 0; i + pat_len <= value_len; ++i)
+    {
+        if (html_view_selector_range_eq_ci_token(value + i, pat_len, sel_start, sel_len))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool html_view_selector_range_dashmatch_ci_value(const char *value,
+                                                        const char *sel_start,
+                                                        size_t sel_len)
+{
+    if (!value || !sel_start || sel_len == 0)
+    {
+        return false;
+    }
+    size_t value_len = strlen(value);
+    size_t pat_len = html_view_selector_range_unescaped_len(sel_start, sel_len);
+    if (pat_len == 0 || value_len < pat_len)
+    {
+        return false;
+    }
+    if (!html_view_selector_range_eq_ci_token(value, pat_len, sel_start, sel_len))
+    {
+        return false;
+    }
+    if (value_len == pat_len)
+    {
+        return true;
+    }
+    return value[pat_len] == '-';
+}
+
 static bool html_view_selector_range_has_space(const char *sel_start, const char *sel_end)
 {
     if (!sel_start || !sel_end || sel_end <= sel_start)
@@ -838,6 +986,85 @@ static char *html_view_unescape_selector_value(const char *start, const char *en
     return out;
 }
 
+static const char *html_view_selector_skip_parens(const char *p, const char *end)
+{
+    if (!p || !end || p >= end || *p != '(')
+    {
+        return p;
+    }
+    int depth = 0;
+    char quote = 0;
+    bool escape = false;
+    while (p < end)
+    {
+        char c = *p;
+        if (escape)
+        {
+            escape = false;
+            ++p;
+            continue;
+        }
+        if (c == '\\')
+        {
+            escape = true;
+            ++p;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            ++p;
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            ++p;
+            continue;
+        }
+        if (c == '(')
+        {
+            ++depth;
+            ++p;
+            continue;
+        }
+        if (c == ')')
+        {
+            --depth;
+            ++p;
+            if (depth <= 0)
+            {
+                return p;
+            }
+            continue;
+        }
+        ++p;
+    }
+    return end;
+}
+
+static bool html_view_pseudo_class_is_dynamic(const char *name, size_t len)
+{
+    if (!name || len == 0)
+    {
+        return false;
+    }
+    return (len == 7 && strncasecmp(name, "visited", 7) == 0) ||
+           (len == 5 && strncasecmp(name, "hover", 5) == 0) ||
+           (len == 6 && strncasecmp(name, "active", 6) == 0) ||
+           (len == 5 && strncasecmp(name, "focus", 5) == 0) ||
+           (len == 12 && strncasecmp(name, "focus-within", 12) == 0) ||
+           (len == 13 && strncasecmp(name, "focus-visible", 13) == 0) ||
+           (len == 6 && strncasecmp(name, "target", 6) == 0) ||
+           (len == 8 && strncasecmp(name, "disabled", 8) == 0) ||
+           (len == 7 && strncasecmp(name, "enabled", 7) == 0) ||
+           (len == 7 && strncasecmp(name, "checked", 7) == 0) ||
+           (len == 8 && strncasecmp(name, "selected", 8) == 0);
+}
+
 static bool html_view_parse_attr_selector_meta(const char **p,
                                                const char *sel_end,
                                                const char **name_start,
@@ -917,25 +1144,21 @@ static bool html_view_parse_attr_selector_meta(const char **p,
     else if (s + 1 < sel_end && s[0] == '^' && s[1] == '=')
     {
         op = '^';
-        unsupported = true;
         s += 2;
     }
     else if (s + 1 < sel_end && s[0] == '$' && s[1] == '=')
     {
         op = '$';
-        unsupported = true;
         s += 2;
     }
     else if (s + 1 < sel_end && s[0] == '*' && s[1] == '=')
     {
         op = '*';
-        unsupported = true;
         s += 2;
     }
     else if (s + 1 < sel_end && s[0] == '|' && s[1] == '=')
     {
         op = '|';
-        unsupported = true;
         s += 2;
     }
     else if (s < sel_end && *s == '=')
@@ -1107,6 +1330,26 @@ static bool html_view_parse_attr_selector(const char **p,
         op = '~';
         s += 2;
     }
+    else if (s + 1 < sel_end && s[0] == '^' && s[1] == '=')
+    {
+        op = '^';
+        s += 2;
+    }
+    else if (s + 1 < sel_end && s[0] == '$' && s[1] == '=')
+    {
+        op = '$';
+        s += 2;
+    }
+    else if (s + 1 < sel_end && s[0] == '*' && s[1] == '=')
+    {
+        op = '*';
+        s += 2;
+    }
+    else if (s + 1 < sel_end && s[0] == '|' && s[1] == '=')
+    {
+        op = '|';
+        s += 2;
+    }
     else if (s < sel_end && *s == '=')
     {
         op = '=';
@@ -1228,6 +1471,22 @@ static bool html_view_parse_attr_selector(const char **p,
             }
         }
     }
+    else if (op == '^')
+    {
+        match = html_view_selector_range_startswith_ci_value(attr_value, value, strlen(value));
+    }
+    else if (op == '$')
+    {
+        match = html_view_selector_range_endswith_ci_value(attr_value, value, strlen(value));
+    }
+    else if (op == '*')
+    {
+        match = html_view_selector_range_contains_ci_value(attr_value, value, strlen(value));
+    }
+    else if (op == '|')
+    {
+        match = html_view_selector_range_dashmatch_ci_value(attr_value, value, strlen(value));
+    }
 
     free(name);
     free(value);
@@ -1235,27 +1494,481 @@ static bool html_view_parse_attr_selector(const char **p,
     return match;
 }
 
-static bool html_view_simple_selector_matches_range_internal(const char *sel_start,
-                                                             const char *sel_end,
-                                                             const html_node_t *node,
-                                                             html_view_pseudo_t pseudo)
+typedef enum
+{
+    HTML_VIEW_SELECTOR_MATCH_NO = 0,
+    HTML_VIEW_SELECTOR_MATCH_YES,
+    HTML_VIEW_SELECTOR_MATCH_UNSUPPORTED
+} html_view_selector_match_t;
+
+static size_t html_view_node_element_index(const html_node_t *node, size_t *out_total)
+{
+    if (out_total)
+    {
+        *out_total = 0;
+    }
+    if (!node || !node->parent)
+    {
+        return 0;
+    }
+    size_t total = 0;
+    size_t index = 0;
+    for (const html_node_t *child = node->parent->first_child; child; child = child->next_sibling)
+    {
+        if (child->type != HTML_NODE_ELEMENT)
+        {
+            continue;
+        }
+        ++total;
+        if (child == node)
+        {
+            index = total;
+        }
+    }
+    if (out_total)
+    {
+        *out_total = total;
+    }
+    return index;
+}
+
+static size_t html_view_node_element_type_index(const html_node_t *node, size_t *out_total)
+{
+    if (out_total)
+    {
+        *out_total = 0;
+    }
+    if (!node || !node->parent || !node->name)
+    {
+        return 0;
+    }
+    size_t total = 0;
+    size_t index = 0;
+    for (const html_node_t *child = node->parent->first_child; child; child = child->next_sibling)
+    {
+        if (child->type != HTML_NODE_ELEMENT || !child->name)
+        {
+            continue;
+        }
+        if (strcasecmp(child->name, node->name) != 0)
+        {
+            continue;
+        }
+        ++total;
+        if (child == node)
+        {
+            index = total;
+        }
+    }
+    if (out_total)
+    {
+        *out_total = total;
+    }
+    return index;
+}
+
+static bool html_view_nth_matches(int32_t a, int32_t b, size_t index)
+{
+    if (index == 0)
+    {
+        return false;
+    }
+    int32_t idx = (int32_t)index;
+    if (a == 0)
+    {
+        return idx == b;
+    }
+    int32_t diff = idx - b;
+    if ((a > 0 && diff < 0) || (a < 0 && diff > 0))
+    {
+        return false;
+    }
+    return (diff % a) == 0;
+}
+
+static bool html_view_parse_nth_expression(const char *start,
+                                           const char *end,
+                                           int32_t *out_a,
+                                           int32_t *out_b)
+{
+    if (!out_a || !out_b)
+    {
+        return false;
+    }
+    *out_a = 0;
+    *out_b = 0;
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+    html_view_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return false;
+    }
+
+    size_t len = (size_t)(end - start);
+    if (len == 3 && strncasecmp(start, "odd", 3) == 0)
+    {
+        *out_a = 2;
+        *out_b = 1;
+        return true;
+    }
+    if (len == 4 && strncasecmp(start, "even", 4) == 0)
+    {
+        *out_a = 2;
+        *out_b = 0;
+        return true;
+    }
+
+    const char *p = start;
+    int sign = 1;
+    if (*p == '+' || *p == '-')
+    {
+        sign = (*p == '-') ? -1 : 1;
+        ++p;
+    }
+    while (p < end && isspace((unsigned char)*p))
+    {
+        ++p;
+    }
+
+    int32_t value = 0;
+    bool have_digits = false;
+    while (p < end && isdigit((unsigned char)*p))
+    {
+        have_digits = true;
+        value = (int32_t)(value * 10 + (*p - '0'));
+        ++p;
+    }
+
+    if (p < end && (*p == 'n' || *p == 'N'))
+    {
+        int32_t a = have_digits ? value : 1;
+        a *= sign;
+        ++p;
+        while (p < end && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (p >= end)
+        {
+            *out_a = a;
+            *out_b = 0;
+            return true;
+        }
+        int bsign = 1;
+        if (*p == '+' || *p == '-')
+        {
+            bsign = (*p == '-') ? -1 : 1;
+            ++p;
+        }
+        while (p < end && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        int32_t bval = 0;
+        bool have_b = false;
+        while (p < end && isdigit((unsigned char)*p))
+        {
+            have_b = true;
+            bval = (int32_t)(bval * 10 + (*p - '0'));
+            ++p;
+        }
+        while (p < end && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!have_b || p != end)
+        {
+            return false;
+        }
+        *out_a = a;
+        *out_b = bsign * bval;
+        return true;
+    }
+
+    if (!have_digits)
+    {
+        return false;
+    }
+    while (p < end && isspace((unsigned char)*p))
+    {
+        ++p;
+    }
+    if (p != end)
+    {
+        return false;
+    }
+    *out_a = 0;
+    *out_b = sign * value;
+    return true;
+}
+
+static bool html_view_selector_range_has_combinator(const char *start, const char *end)
+{
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+    bool escape = false;
+    char quote = 0;
+    int bracket_depth = 0;
+    int paren_depth = 0;
+    bool seen_token = false;
+    for (const char *p = start; p < end; ++p)
+    {
+        char c = *p;
+        if (escape)
+        {
+            escape = false;
+            continue;
+        }
+        if (c == '\\')
+        {
+            escape = true;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            continue;
+        }
+        if (c == '[')
+        {
+            ++bracket_depth;
+            continue;
+        }
+        if (c == ']' && bracket_depth > 0)
+        {
+            --bracket_depth;
+            continue;
+        }
+        if (bracket_depth > 0)
+        {
+            continue;
+        }
+        if (c == '(')
+        {
+            ++paren_depth;
+            continue;
+        }
+        if (c == ')' && paren_depth > 0)
+        {
+            --paren_depth;
+            continue;
+        }
+        if (paren_depth > 0)
+        {
+            continue;
+        }
+        if (c == '>' || c == '+' || c == '~')
+        {
+            return true;
+        }
+        if (isspace((unsigned char)c))
+        {
+            if (!seen_token)
+            {
+                continue;
+            }
+            const char *q = p + 1;
+            while (q < end && isspace((unsigned char)*q))
+            {
+                ++q;
+            }
+            if (q < end && *q != ',' && *q != ')')
+            {
+                return true;
+            }
+            p = q - 1;
+            continue;
+        }
+        seen_token = true;
+    }
+    return false;
+}
+
+static html_view_selector_match_t html_view_simple_selector_matches_range_ex(const char *sel_start,
+                                                                             const char *sel_end,
+                                                                             const html_node_t *node,
+                                                                             html_view_pseudo_t pseudo);
+
+static html_view_selector_match_t html_view_selector_list_matches(const char *sel_start,
+                                                                  const char *sel_end,
+                                                                  const html_node_t *node,
+                                                                  html_view_pseudo_t pseudo,
+                                                                  bool negate)
+{
+    if (!sel_start || !sel_end || sel_end <= sel_start)
+    {
+        return HTML_VIEW_SELECTOR_MATCH_UNSUPPORTED;
+    }
+    const char *item_start = sel_start;
+    bool escape = false;
+    char quote = 0;
+    int bracket_depth = 0;
+    int paren_depth = 0;
+    bool any_match = false;
+    bool any_supported = false;
+    bool any_unsupported = false;
+
+    for (const char *p = sel_start; p <= sel_end; ++p)
+    {
+        bool at_end = (p == sel_end);
+        char c = at_end ? ',' : *p;
+        if (!at_end)
+        {
+            if (escape)
+            {
+                escape = false;
+                continue;
+            }
+            if (c == '\\')
+            {
+                escape = true;
+                continue;
+            }
+            if (quote)
+            {
+                if (c == quote)
+                {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'')
+            {
+                quote = c;
+                continue;
+            }
+            if (c == '[')
+            {
+                ++bracket_depth;
+                continue;
+            }
+            if (c == ']' && bracket_depth > 0)
+            {
+                --bracket_depth;
+                continue;
+            }
+            if (bracket_depth > 0)
+            {
+                continue;
+            }
+            if (c == '(')
+            {
+                ++paren_depth;
+                continue;
+            }
+            if (c == ')' && paren_depth > 0)
+            {
+                --paren_depth;
+                continue;
+            }
+            if (paren_depth > 0)
+            {
+                continue;
+            }
+            if (c != ',')
+            {
+                continue;
+            }
+        }
+
+        const char *item_end = p;
+        html_view_trim_range(&item_start, &item_end);
+        if (item_end <= item_start)
+        {
+            any_unsupported = true;
+        }
+        else if (html_view_selector_range_has_combinator(item_start, item_end))
+        {
+            any_unsupported = true;
+        }
+        else
+        {
+            html_view_selector_match_t item_match = html_view_simple_selector_matches_range_ex(item_start,
+                                                                                               item_end,
+                                                                                               node,
+                                                                                               pseudo);
+            if (item_match == HTML_VIEW_SELECTOR_MATCH_UNSUPPORTED)
+            {
+                any_unsupported = true;
+            }
+            else
+            {
+                any_supported = true;
+                if (item_match == HTML_VIEW_SELECTOR_MATCH_YES)
+                {
+                    any_match = true;
+                }
+            }
+        }
+
+        if (negate)
+        {
+            if (any_match)
+            {
+                return HTML_VIEW_SELECTOR_MATCH_NO;
+            }
+        }
+        else
+        {
+            if (any_match)
+            {
+                return HTML_VIEW_SELECTOR_MATCH_YES;
+            }
+        }
+
+        item_start = p + 1;
+    }
+
+    if (negate)
+    {
+        if (any_unsupported)
+        {
+            return HTML_VIEW_SELECTOR_MATCH_UNSUPPORTED;
+        }
+        return HTML_VIEW_SELECTOR_MATCH_YES;
+    }
+    if (any_supported)
+    {
+        return HTML_VIEW_SELECTOR_MATCH_NO;
+    }
+    return any_unsupported ? HTML_VIEW_SELECTOR_MATCH_UNSUPPORTED : HTML_VIEW_SELECTOR_MATCH_NO;
+}
+
+static html_view_selector_match_t html_view_simple_selector_matches_range_ex(const char *sel_start,
+                                                                             const char *sel_end,
+                                                                             const html_node_t *node,
+                                                                             html_view_pseudo_t pseudo)
 {
     if (!sel_start || !sel_end || sel_end <= sel_start || !node || node->type != HTML_NODE_ELEMENT || !node->name)
     {
-        return false;
+        return HTML_VIEW_SELECTOR_MATCH_NO;
     }
 
     html_view_trim_range(&sel_start, &sel_end);
     if (sel_end <= sel_start)
     {
-        return false;
+        return HTML_VIEW_SELECTOR_MATCH_NO;
     }
 
     const char *p = sel_start;
-    bool have_tag = false;
     bool match = true;
     bool require_link = false;
+    bool require_root = false;
     bool pseudo_seen = false;
+    bool unsupported = false;
 
     if (*p == '*')
     {
@@ -1273,22 +1986,15 @@ static bool html_view_simple_selector_matches_range_internal(const char *sel_sta
         {
             match = false;
         }
-        have_tag = true;
         p = tag_end;
     }
-
-    (void)have_tag;
 
     while (match && p < sel_end)
     {
         if (*p == '.')
         {
             ++p;
-            const char *cls_end = p;
-            while (cls_end < sel_end && *cls_end != ':' && *cls_end != '.' && *cls_end != '#' && *cls_end != '[' && !isspace((unsigned char)*cls_end))
-            {
-                cls_end++;
-            }
+            const char *cls_end = html_view_selector_token_end(p, sel_end);
             size_t cls_len = (size_t)(cls_end - p);
             if (cls_len == 0 || !html_view_node_has_class(node, p, cls_len))
             {
@@ -1302,11 +2008,7 @@ static bool html_view_simple_selector_matches_range_internal(const char *sel_sta
         if (*p == '#')
         {
             ++p;
-            const char *id_end = p;
-            while (id_end < sel_end && *id_end != ':' && *id_end != '.' && *id_end != '#' && *id_end != '[' && !isspace((unsigned char)*id_end))
-            {
-                id_end++;
-            }
+            const char *id_end = html_view_selector_token_end(p, sel_end);
             size_t id_len = (size_t)(id_end - p);
             const char *id = (id_len > 0) ? html_attr_get(node, "id") : NULL;
             if (!id || strlen(id) != id_len || strncasecmp(id, p, id_len) != 0)
@@ -1346,25 +2048,135 @@ static bool html_view_simple_selector_matches_range_internal(const char *sel_sta
                 match = false;
                 break;
             }
+            size_t name_len = (size_t)(name_end - name);
             if (name_end < sel_end && *name_end == '(')
+            {
+                const char *next = html_view_selector_skip_parens(name_end, sel_end);
+                if (!next || next <= name_end)
+                {
+                    match = false;
+                    break;
+                }
+                const char *args_start = name_end + 1;
+                const char *args_end = next - 1;
+                html_view_trim_range(&args_start, &args_end);
+                if (name_len == 3 && strncasecmp(name, "not", 3) == 0)
+                {
+                    html_view_selector_match_t res = html_view_selector_list_matches(args_start,
+                                                                                      args_end,
+                                                                                      node,
+                                                                                      pseudo,
+                                                                                      true);
+                    if (res == HTML_VIEW_SELECTOR_MATCH_UNSUPPORTED)
+                    {
+                        unsupported = true;
+                        match = false;
+                        break;
+                    }
+                    match = (res == HTML_VIEW_SELECTOR_MATCH_YES);
+                }
+                else if ((name_len == 2 && strncasecmp(name, "is", 2) == 0) ||
+                         (name_len == 5 && strncasecmp(name, "where", 5) == 0))
+                {
+                    html_view_selector_match_t res = html_view_selector_list_matches(args_start,
+                                                                                      args_end,
+                                                                                      node,
+                                                                                      pseudo,
+                                                                                      false);
+                    if (res == HTML_VIEW_SELECTOR_MATCH_UNSUPPORTED)
+                    {
+                        unsupported = true;
+                        match = false;
+                        break;
+                    }
+                    match = (res == HTML_VIEW_SELECTOR_MATCH_YES);
+                }
+                else if (name_len == 9 && strncasecmp(name, "nth-child", 9) == 0)
+                {
+                    int32_t a = 0;
+                    int32_t b = 0;
+                    if (!html_view_parse_nth_expression(args_start, args_end, &a, &b))
+                    {
+                        unsupported = true;
+                        match = false;
+                        break;
+                    }
+                    size_t total = 0;
+                    size_t index = html_view_node_element_index(node, &total);
+                    match = html_view_nth_matches(a, b, index);
+                }
+                else if (name_len == 14 && strncasecmp(name, "nth-last-child", 14) == 0)
+                {
+                    int32_t a = 0;
+                    int32_t b = 0;
+                    if (!html_view_parse_nth_expression(args_start, args_end, &a, &b))
+                    {
+                        unsupported = true;
+                        match = false;
+                        break;
+                    }
+                    size_t total = 0;
+                    size_t index = html_view_node_element_index(node, &total);
+                    size_t from_end = (total >= index && index > 0) ? (total - index + 1) : 0;
+                    match = html_view_nth_matches(a, b, from_end);
+                }
+                else if (name_len == 11 && strncasecmp(name, "nth-of-type", 11) == 0)
+                {
+                    int32_t a = 0;
+                    int32_t b = 0;
+                    if (!html_view_parse_nth_expression(args_start, args_end, &a, &b))
+                    {
+                        unsupported = true;
+                        match = false;
+                        break;
+                    }
+                    size_t total = 0;
+                    size_t index = html_view_node_element_type_index(node, &total);
+                    match = html_view_nth_matches(a, b, index);
+                }
+                else if (name_len == 16 && strncasecmp(name, "nth-last-of-type", 16) == 0)
+                {
+                    int32_t a = 0;
+                    int32_t b = 0;
+                    if (!html_view_parse_nth_expression(args_start, args_end, &a, &b))
+                    {
+                        unsupported = true;
+                        match = false;
+                        break;
+                    }
+                    size_t total = 0;
+                    size_t index = html_view_node_element_type_index(node, &total);
+                    size_t from_end = (total >= index && index > 0) ? (total - index + 1) : 0;
+                    match = html_view_nth_matches(a, b, from_end);
+                }
+                else if (name_len == 3 && strncasecmp(name, "has", 3) == 0)
+                {
+                    unsupported = true;
+                    match = false;
+                    break;
+                }
+                else
+                {
+                    unsupported = true;
+                    match = false;
+                    break;
+                }
+                p = next;
+                continue;
+            }
+
+            if (html_view_pseudo_class_is_dynamic(name, name_len))
             {
                 match = false;
                 break;
             }
-            size_t name_len = (size_t)(name_end - name);
             if (name_len == 4 && strncasecmp(name, "link", 4) == 0)
             {
                 require_link = true;
             }
-            else if (name_len == 7 && strncasecmp(name, "visited", 7) == 0)
+            else if (name_len == 4 && strncasecmp(name, "root", 4) == 0)
             {
-                match = false;
-                break;
-            }
-            else if (name_len == 5 && strncasecmp(name, "hover", 5) == 0)
-            {
-                match = false;
-                break;
+                require_root = true;
             }
             else if (name_len == 6 && strncasecmp(name, "before", 6) == 0)
             {
@@ -1390,8 +2202,63 @@ static bool html_view_simple_selector_matches_range_internal(const char *sel_sta
                     break;
                 }
             }
+            else if (name_len == 11 && strncasecmp(name, "first-child", 11) == 0)
+            {
+                size_t total = 0;
+                size_t index = html_view_node_element_index(node, &total);
+                match = (index == 1);
+            }
+            else if (name_len == 10 && strncasecmp(name, "last-child", 10) == 0)
+            {
+                size_t total = 0;
+                size_t index = html_view_node_element_index(node, &total);
+                match = (index != 0 && index == total);
+            }
+            else if (name_len == 10 && strncasecmp(name, "only-child", 10) == 0)
+            {
+                size_t total = 0;
+                size_t index = html_view_node_element_index(node, &total);
+                match = (index == 1 && total == 1);
+            }
+            else if (name_len == 13 && strncasecmp(name, "first-of-type", 13) == 0)
+            {
+                size_t total = 0;
+                size_t index = html_view_node_element_type_index(node, &total);
+                match = (index == 1);
+            }
+            else if (name_len == 12 && strncasecmp(name, "last-of-type", 12) == 0)
+            {
+                size_t total = 0;
+                size_t index = html_view_node_element_type_index(node, &total);
+                match = (index != 0 && index == total);
+            }
+            else if (name_len == 12 && strncasecmp(name, "only-of-type", 12) == 0)
+            {
+                size_t total = 0;
+                size_t index = html_view_node_element_type_index(node, &total);
+                match = (index == 1 && total == 1);
+            }
+            else if (name_len == 5 && strncasecmp(name, "empty", 5) == 0)
+            {
+                bool has_child = false;
+                for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+                {
+                    if (child->type == HTML_NODE_ELEMENT)
+                    {
+                        has_child = true;
+                        break;
+                    }
+                    if (child->type == HTML_NODE_TEXT && child->text && child->text[0] != '\0')
+                    {
+                        has_child = true;
+                        break;
+                    }
+                }
+                match = !has_child;
+            }
             else
             {
+                unsupported = true;
                 match = false;
                 break;
             }
@@ -1423,12 +2290,34 @@ static bool html_view_simple_selector_matches_range_internal(const char *sel_sta
         }
     }
 
+    if (match && require_root)
+    {
+        const html_node_t *parent = node->parent;
+        if (!parent || parent->type != HTML_NODE_DOCUMENT)
+        {
+            match = false;
+        }
+    }
+
     if (match && pseudo != HTML_VIEW_PSEUDO_NONE && !pseudo_seen)
     {
         match = false;
     }
 
-    return match;
+    if (unsupported)
+    {
+        return HTML_VIEW_SELECTOR_MATCH_UNSUPPORTED;
+    }
+    return match ? HTML_VIEW_SELECTOR_MATCH_YES : HTML_VIEW_SELECTOR_MATCH_NO;
+}
+
+static bool html_view_simple_selector_matches_range_internal(const char *sel_start,
+                                                             const char *sel_end,
+                                                             const html_node_t *node,
+                                                             html_view_pseudo_t pseudo)
+{
+    return html_view_simple_selector_matches_range_ex(sel_start, sel_end, node, pseudo) ==
+           HTML_VIEW_SELECTOR_MATCH_YES;
 }
 
 static bool html_view_selector_cache_push(css_selector_cache_t *cache,
@@ -1569,7 +2458,6 @@ static void html_view_selector_cache_set_hints(css_selector_cache_t *cache, cons
             const char *value_start = NULL;
             const char *value_end = NULL;
             char op = 0;
-            bool unsupported = false;
             const char *scan = p;
             if (html_view_parse_attr_selector_meta(&scan,
                                                    part_end,
@@ -1578,7 +2466,7 @@ static void html_view_selector_cache_set_hints(css_selector_cache_t *cache, cons
                                                    &op,
                                                    &value_start,
                                                    &value_end,
-                                                   &unsupported))
+                                                   NULL))
             {
                 if (name_start && name_end && name_end > name_start)
                 {
@@ -2113,10 +3001,21 @@ static void html_view_selector_cache_set_pseudo_flags(css_selector_cache_t *cach
                 }
                 if (name_end < part_end && *name_end == '(')
                 {
+                    const char *next = html_view_selector_skip_parens(name_end, part_end);
+                    if (!next || next <= name_end)
+                    {
+                        cache->never_match = true;
+                        return;
+                    }
+                    p = next;
+                    continue;
+                }
+                size_t name_len = (size_t)(name_end - name);
+                if (html_view_pseudo_class_is_dynamic(name, name_len))
+                {
                     cache->never_match = true;
                     return;
                 }
-                size_t name_len = (size_t)(name_end - name);
                 if (name_len == 6 && strncasecmp(name, "before", 6) == 0)
                 {
                     has_before = true;
@@ -2129,10 +3028,9 @@ static void html_view_selector_cache_set_pseudo_flags(css_selector_cache_t *cach
                 {
                     /* supported pseudo-class */
                 }
-                else
+                else if (name_len == 4 && strncasecmp(name, "root", 4) == 0)
                 {
-                    cache->never_match = true;
-                    return;
+                    /* supported pseudo-class */
                 }
                 p = name_end;
                 continue;
@@ -2233,7 +3131,6 @@ static void html_view_selector_cache_set_attr_flags(css_selector_cache_t *cache,
             const char *value_start = NULL;
             const char *value_end = NULL;
             char op = 0;
-            bool unsupported = false;
             const char *scan = p;
             if (!html_view_parse_attr_selector_meta(&scan,
                                                     part_end,
@@ -2242,15 +3139,10 @@ static void html_view_selector_cache_set_attr_flags(css_selector_cache_t *cache,
                                                     &op,
                                                     &value_start,
                                                     &value_end,
-                                                    &unsupported))
+                                                    NULL))
             {
-                cache->never_match = true;
-                return;
-            }
-            if (unsupported)
-            {
-                cache->never_match = true;
-                return;
+                ++p;
+                continue;
             }
 
             if (i == cache->count - 1 && name_start && name_end && name_end > name_start)
@@ -2857,14 +3749,12 @@ static bool html_view_selector_cache_compile_parts(css_selector_cache_t *cache, 
                                                         &value_end,
                                                         &unsupported))
                 {
-                    cache->never_match = true;
                     cache->compiled_failed = true;
                     html_view_selector_cache_free_compiled(cache);
                     return false;
                 }
                 if (unsupported)
                 {
-                    cache->never_match = true;
                     cache->compiled_failed = true;
                     html_view_selector_cache_free_compiled(cache);
                     return false;
@@ -2903,29 +3793,36 @@ static bool html_view_selector_cache_compile_parts(css_selector_cache_t *cache, 
                 }
                 if (name_end == name)
                 {
-                    cache->never_match = true;
                     cache->compiled_failed = true;
                     html_view_selector_cache_free_compiled(cache);
                     return false;
                 }
                 if (name_end < part_end && *name_end == '(')
                 {
-                    cache->never_match = true;
-                    cache->compiled_failed = true;
-                    html_view_selector_cache_free_compiled(cache);
-                    return false;
+                    const char *next = html_view_selector_skip_parens(name_end, part_end);
+                    if (!next || next <= name_end)
+                    {
+                        cache->compiled_failed = true;
+                        html_view_selector_cache_free_compiled(cache);
+                        return false;
+                    }
+                    p = next;
+                    continue;
                 }
                 size_t name_len = (size_t)(name_end - name);
                 if (name_len == 4 && strncasecmp(name, "link", 4) == 0)
                 {
                     out->require_link = true;
                 }
+                else if (name_len == 4 && strncasecmp(name, "root", 4) == 0)
+                {
+                    out->require_root = true;
+                }
                 else if (name_len == 6 && strncasecmp(name, "before", 6) == 0)
                 {
                     if (out->pseudo_required != HTML_VIEW_SELECTOR_PSEUDO_REQ_NONE &&
                         out->pseudo_required != HTML_VIEW_SELECTOR_PSEUDO_REQ_BEFORE)
                     {
-                        cache->never_match = true;
                         cache->compiled_failed = true;
                         html_view_selector_cache_free_compiled(cache);
                         return false;
@@ -2937,19 +3834,11 @@ static bool html_view_selector_cache_compile_parts(css_selector_cache_t *cache, 
                     if (out->pseudo_required != HTML_VIEW_SELECTOR_PSEUDO_REQ_NONE &&
                         out->pseudo_required != HTML_VIEW_SELECTOR_PSEUDO_REQ_AFTER)
                     {
-                        cache->never_match = true;
                         cache->compiled_failed = true;
                         html_view_selector_cache_free_compiled(cache);
                         return false;
                     }
                     out->pseudo_required = HTML_VIEW_SELECTOR_PSEUDO_REQ_AFTER;
-                }
-                else
-                {
-                    cache->never_match = true;
-                    cache->compiled_failed = true;
-                    html_view_selector_cache_free_compiled(cache);
-                    return false;
                 }
                 p = name_end;
                 continue;
@@ -3119,7 +4008,80 @@ static bool html_view_selector_cache_parse(css_selector_cache_t *cache, const ch
     return true;
 }
 
+static bool html_view_selector_part_has_pseudo(const char *start, const char *end)
+{
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+    bool escape = false;
+    char quote = 0;
+    int bracket_depth = 0;
+    int paren_depth = 0;
+    for (const char *p = start; p < end; ++p)
+    {
+        char c = *p;
+        if (escape)
+        {
+            escape = false;
+            continue;
+        }
+        if (c == '\\')
+        {
+            escape = true;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            continue;
+        }
+        if (c == '[')
+        {
+            ++bracket_depth;
+            continue;
+        }
+        if (c == ']' && bracket_depth > 0)
+        {
+            --bracket_depth;
+            continue;
+        }
+        if (bracket_depth > 0)
+        {
+            continue;
+        }
+        if (c == '(')
+        {
+            ++paren_depth;
+            continue;
+        }
+        if (c == ')' && paren_depth > 0)
+        {
+            --paren_depth;
+            continue;
+        }
+        if (paren_depth > 0)
+        {
+            continue;
+        }
+        if (c == ':')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool html_view_selector_part_matches_compiled(const css_selector_compiled_part_t *part,
+                                                     const css_selector_part_t *raw_part,
                                                      const char *selector,
                                                      const html_node_t *node,
                                                      html_view_pseudo_t pseudo)
@@ -3200,6 +4162,42 @@ static bool html_view_selector_part_matches_compiled(const css_selector_compiled
                 return false;
             }
         }
+        else if (attr->op == '^')
+        {
+            if (!html_view_selector_range_startswith_ci_value(attr_value,
+                                                              selector + attr->value_start,
+                                                              attr->value_len))
+            {
+                return false;
+            }
+        }
+        else if (attr->op == '$')
+        {
+            if (!html_view_selector_range_endswith_ci_value(attr_value,
+                                                            selector + attr->value_start,
+                                                            attr->value_len))
+            {
+                return false;
+            }
+        }
+        else if (attr->op == '*')
+        {
+            if (!html_view_selector_range_contains_ci_value(attr_value,
+                                                            selector + attr->value_start,
+                                                            attr->value_len))
+            {
+                return false;
+            }
+        }
+        else if (attr->op == '|')
+        {
+            if (!html_view_selector_range_dashmatch_ci_value(attr_value,
+                                                             selector + attr->value_start,
+                                                             attr->value_len))
+            {
+                return false;
+            }
+        }
         else
         {
             return false;
@@ -3214,6 +4212,15 @@ static bool html_view_selector_part_matches_compiled(const css_selector_compiled
         }
         const char *href = html_attr_get(node, "href");
         if (!href || href[0] == '\0')
+        {
+            return false;
+        }
+    }
+
+    if (part->require_root)
+    {
+        const html_node_t *parent = node->parent;
+        if (!parent || parent->type != HTML_NODE_DOCUMENT)
         {
             return false;
         }
@@ -3241,6 +4248,19 @@ static bool html_view_selector_part_matches_compiled(const css_selector_compiled
         return false;
     }
 
+    if (raw_part)
+    {
+        const char *raw_start = selector + raw_part->start;
+        const char *raw_end = selector + raw_part->end;
+        if (html_view_selector_part_has_pseudo(raw_start, raw_end))
+        {
+            if (!html_view_simple_selector_matches_range_internal(raw_start, raw_end, node, pseudo))
+            {
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -3258,7 +4278,8 @@ static bool html_view_selector_matches_compiled(const css_selector_cache_t *cach
 
     const html_node_t *cur = node;
     const css_selector_compiled_part_t *right = &cache->compiled_parts[cache->compiled_count - 1];
-    if (!html_view_selector_part_matches_compiled(right, selector, cur, pseudo))
+    const css_selector_part_t *right_part = &cache->parts[cache->compiled_count - 1];
+    if (!html_view_selector_part_matches_compiled(right, right_part, selector, cur, pseudo))
     {
         return false;
     }
@@ -3273,7 +4294,7 @@ static bool html_view_selector_matches_compiled(const css_selector_cache_t *cach
             bool found = false;
             for (const html_node_t *p = cur->parent; p; p = p->parent)
             {
-                if (html_view_selector_part_matches_compiled(left, selector, p, HTML_VIEW_PSEUDO_NONE))
+                if (html_view_selector_part_matches_compiled(left, left_part, selector, p, HTML_VIEW_PSEUDO_NONE))
                 {
                     cur = p;
                     found = true;
@@ -3288,7 +4309,7 @@ static bool html_view_selector_matches_compiled(const css_selector_cache_t *cach
         else if (comb == '>')
         {
             cur = cur->parent;
-            if (!cur || !html_view_selector_part_matches_compiled(left, selector, cur, HTML_VIEW_PSEUDO_NONE))
+            if (!cur || !html_view_selector_part_matches_compiled(left, left_part, selector, cur, HTML_VIEW_PSEUDO_NONE))
             {
                 return false;
             }
@@ -3296,7 +4317,7 @@ static bool html_view_selector_matches_compiled(const css_selector_cache_t *cach
         else if (comb == '+')
         {
             cur = html_view_prev_element_sibling(cur);
-            if (!cur || !html_view_selector_part_matches_compiled(left, selector, cur, HTML_VIEW_PSEUDO_NONE))
+            if (!cur || !html_view_selector_part_matches_compiled(left, left_part, selector, cur, HTML_VIEW_PSEUDO_NONE))
             {
                 return false;
             }
@@ -3306,7 +4327,7 @@ static bool html_view_selector_matches_compiled(const css_selector_cache_t *cach
             bool found = false;
             for (const html_node_t *p = html_view_prev_element_sibling(cur); p; p = html_view_prev_element_sibling(p))
             {
-                if (html_view_selector_part_matches_compiled(left, selector, p, HTML_VIEW_PSEUDO_NONE))
+                if (html_view_selector_part_matches_compiled(left, left_part, selector, p, HTML_VIEW_PSEUDO_NONE))
                 {
                     cur = p;
                     found = true;
@@ -3608,6 +4629,42 @@ static bool html_view_selector_cache_precheck(css_rule_t *rule,
             const char *val_start = rule->selector + cache->attr_hint_value_start;
             if (!cache->attr_hint_value_valid ||
                 !html_view_attr_value_has_token_range(attr_value, val_start, cache->attr_hint_value_len))
+            {
+                return false;
+            }
+        }
+        else if (cache->attr_hint_op == '^')
+        {
+            const char *val_start = rule->selector + cache->attr_hint_value_start;
+            if (!cache->attr_hint_value_valid ||
+                !html_view_selector_range_startswith_ci_value(attr_value, val_start, cache->attr_hint_value_len))
+            {
+                return false;
+            }
+        }
+        else if (cache->attr_hint_op == '$')
+        {
+            const char *val_start = rule->selector + cache->attr_hint_value_start;
+            if (!cache->attr_hint_value_valid ||
+                !html_view_selector_range_endswith_ci_value(attr_value, val_start, cache->attr_hint_value_len))
+            {
+                return false;
+            }
+        }
+        else if (cache->attr_hint_op == '*')
+        {
+            const char *val_start = rule->selector + cache->attr_hint_value_start;
+            if (!cache->attr_hint_value_valid ||
+                !html_view_selector_range_contains_ci_value(attr_value, val_start, cache->attr_hint_value_len))
+            {
+                return false;
+            }
+        }
+        else if (cache->attr_hint_op == '|')
+        {
+            const char *val_start = rule->selector + cache->attr_hint_value_start;
+            if (!cache->attr_hint_value_valid ||
+                !html_view_selector_range_dashmatch_ci_value(attr_value, val_start, cache->attr_hint_value_len))
             {
                 return false;
             }
@@ -5125,7 +6182,11 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
         {
             continue;
         }
-        if (html_view_selector_part_matches_compiled(root->part, root->selector, node, pseudo))
+        if (html_view_selector_part_matches_compiled(root->part,
+                                                     root->raw_part,
+                                                     root->selector,
+                                                     node,
+                                                     pseudo))
         {
             if (!html_view_rule_trie_stack_push(&stack, &stack_count, &stack_cap, root, node))
             {
@@ -5176,6 +6237,7 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
             {
                 const html_node_t *p = cur_node->parent;
                 if (p && html_view_selector_part_matches_compiled(child->part,
+                                                                  child->raw_part,
                                                                   child->selector,
                                                                   p,
                                                                   HTML_VIEW_PSEUDO_NONE))
@@ -5193,6 +6255,7 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
             {
                 const html_node_t *p = html_view_prev_element_sibling(cur_node);
                 if (p && html_view_selector_part_matches_compiled(child->part,
+                                                                  child->raw_part,
                                                                   child->selector,
                                                                   p,
                                                                   HTML_VIEW_PSEUDO_NONE))
@@ -5213,6 +6276,7 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
                      p = html_view_prev_element_sibling(p))
                 {
                     if (html_view_selector_part_matches_compiled(child->part,
+                                                                  child->raw_part,
                                                                   child->selector,
                                                                   p,
                                                                   HTML_VIEW_PSEUDO_NONE))
@@ -5244,6 +6308,7 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
             for (const html_node_t *p = ancestor_start; p; p = p->parent)
             {
                 if (html_view_selector_part_matches_compiled(child->part,
+                                                              child->raw_part,
                                                               child->selector,
                                                               p,
                                                               HTML_VIEW_PSEUDO_NONE))
@@ -8144,6 +9209,7 @@ void html_view_style_for_node(css_style_t *out,
     }
 
     html_view_resolve_float_inherit(out, parent);
+    html_view_resolve_box_sizing_inherit(out, parent);
 
     if (is_table_cell && !out->has_text_align)
     {
@@ -8206,6 +9272,7 @@ bool html_view_style_for_pseudo(css_style_t *out,
     }
 
     html_view_resolve_float_inherit(out, parent);
+    html_view_resolve_box_sizing_inherit(out, parent);
 
     if (priv && node && node->type == HTML_NODE_ELEMENT)
     {

@@ -239,6 +239,17 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
         dst->has_display = true;
         dst->display = src->display;
     }
+    if (src->has_box_sizing)
+    {
+        dst->has_box_sizing = true;
+        dst->box_sizing = src->box_sizing;
+        dst->box_sizing_inherit = src->box_sizing_inherit;
+    }
+    if (src->has_list_style_type)
+    {
+        dst->has_list_style_type = true;
+        dst->list_style_type = src->list_style_type;
+    }
     if (src->has_content)
     {
         dst->has_content = true;
@@ -284,6 +295,26 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         dst->has_column_gap = true;
         dst->column_gap = src->column_gap;
+    }
+    if (src->has_grid_template_columns)
+    {
+        dst->has_grid_template_columns = true;
+        dst->grid_template_columns = src->grid_template_columns;
+    }
+    if (src->has_grid_column_span)
+    {
+        dst->has_grid_column_span = true;
+        dst->grid_column_span = src->grid_column_span;
+    }
+    if (src->has_grid_column_start)
+    {
+        dst->has_grid_column_start = true;
+        dst->grid_column_start = src->grid_column_start;
+    }
+    if (src->has_grid_column_end)
+    {
+        dst->has_grid_column_end = true;
+        dst->grid_column_end = src->grid_column_end;
     }
     if (src->has_flex_grow)
     {

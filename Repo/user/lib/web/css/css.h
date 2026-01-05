@@ -27,6 +27,13 @@ typedef struct
     css_unit_t unit;
 } css_length_t;
 
+typedef enum
+{
+    CSS_MEDIA_COLOR_SCHEME_ANY = 0,
+    CSS_MEDIA_COLOR_SCHEME_LIGHT,
+    CSS_MEDIA_COLOR_SCHEME_DARK
+} css_media_color_scheme_t;
+
 typedef struct
 {
     css_length_t top;
@@ -65,14 +72,30 @@ typedef enum
 typedef enum
 {
     CSS_DISPLAY_INLINE = 0,
+    CSS_DISPLAY_INLINE_BLOCK,
     CSS_DISPLAY_BLOCK,
     CSS_DISPLAY_LIST_ITEM,
     CSS_DISPLAY_TABLE,
     CSS_DISPLAY_TABLE_CELL,
     CSS_DISPLAY_FLEX,
     CSS_DISPLAY_INLINE_FLEX,
+    CSS_DISPLAY_GRID,
+    CSS_DISPLAY_INLINE_GRID,
     CSS_DISPLAY_NONE
 } css_display_t;
+
+typedef enum
+{
+    CSS_BOX_SIZING_CONTENT_BOX = 0,
+    CSS_BOX_SIZING_BORDER_BOX
+} css_box_sizing_t;
+
+typedef enum
+{
+    CSS_LIST_STYLE_DISC = 0,
+    CSS_LIST_STYLE_DECIMAL,
+    CSS_LIST_STYLE_NONE
+} css_list_style_type_t;
 
 typedef enum
 {
@@ -224,6 +247,11 @@ typedef struct
     video_color_t text_shadow_color;
     bool has_display;
     css_display_t display;
+    bool has_box_sizing;
+    css_box_sizing_t box_sizing;
+    bool box_sizing_inherit;
+    bool has_list_style_type;
+    css_list_style_type_t list_style_type;
     bool has_content;
     const char *content;
     bool content_owned;
@@ -243,6 +271,14 @@ typedef struct
     css_length_t row_gap;
     bool has_column_gap;
     css_length_t column_gap;
+    bool has_grid_template_columns;
+    int32_t grid_template_columns;
+    bool has_grid_column_span;
+    int32_t grid_column_span;
+    bool has_grid_column_start;
+    int32_t grid_column_start;
+    bool has_grid_column_end;
+    int32_t grid_column_end;
     bool has_flex_grow;
     int32_t flex_grow_milli;
     bool has_flex_shrink;
@@ -291,6 +327,7 @@ typedef struct css_selector_compiled_part
     uint32_t id_start;
     uint32_t id_len;
     bool require_link;
+    bool require_root;
     uint8_t pseudo_required;
     uint16_t class_count;
     uint16_t class_cap;
@@ -363,6 +400,7 @@ typedef struct
     css_rule_t *rules;
 } css_stylesheet_t;
 
+void css_media_env_set(int width_px, int height_px, css_media_color_scheme_t scheme);
 css_stylesheet_t *css_parse(const char *css_text);
 void css_stylesheet_destroy(css_stylesheet_t *sheet);
 

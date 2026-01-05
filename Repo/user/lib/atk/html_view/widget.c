@@ -285,7 +285,9 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         if (pad_left < 0) pad_left = 0;
     }
 
+    bool border_box = body_style.has_box_sizing && body_style.box_sizing == CSS_BOX_SIZING_BORDER_BOX;
     int body_content_w = viewport_w;
+    int body_box_w = 0;
     if (body_style.has_width)
     {
         int computed = html_view_length_to_px(&body_style.width,
@@ -297,21 +299,34 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                                               true);
         if (computed > 0)
         {
-            body_content_w = computed;
+            if (border_box)
+            {
+                body_box_w = computed;
+            }
+            else
+            {
+                body_content_w = computed;
+            }
         }
     }
+    if (border_box)
+    {
+        if (body_box_w <= 0)
+        {
+            body_box_w = viewport_w;
+        }
+        body_content_w = body_box_w - pad_left - pad_right - border_px * 2;
+    }
     if (body_content_w < 0) body_content_w = 0;
-
-    int body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    if (body_box_w <= 0)
+    {
+        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    }
     if (body_box_w > viewport_w)
     {
-        int max_content = viewport_w - pad_left - pad_right - border_px * 2;
-        if (max_content < 0)
-        {
-            max_content = 0;
-        }
-        body_content_w = max_content;
-        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+        body_box_w = viewport_w;
+        body_content_w = body_box_w - pad_left - pad_right - border_px * 2;
+        if (body_content_w < 0) body_content_w = 0;
     }
 
     int body_box_x = viewport_x;
@@ -831,7 +846,9 @@ static void html_view_draw_cb(const atk_state_t *state,
         if (pad_left < 0) pad_left = 0;
     }
 
+    bool border_box = body_style.has_box_sizing && body_style.box_sizing == CSS_BOX_SIZING_BORDER_BOX;
     int body_content_w = viewport_w;
+    int body_box_w = 0;
     if (body_style.has_width)
     {
         int computed = html_view_length_to_px(&body_style.width,
@@ -843,21 +860,34 @@ static void html_view_draw_cb(const atk_state_t *state,
                                               true);
         if (computed > 0)
         {
-            body_content_w = computed;
+            if (border_box)
+            {
+                body_box_w = computed;
+            }
+            else
+            {
+                body_content_w = computed;
+            }
         }
     }
+    if (border_box)
+    {
+        if (body_box_w <= 0)
+        {
+            body_box_w = viewport_w;
+        }
+        body_content_w = body_box_w - pad_left - pad_right - border_px * 2;
+    }
     if (body_content_w < 0) body_content_w = 0;
-
-    int body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    if (body_box_w <= 0)
+    {
+        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    }
     if (body_box_w > viewport_w)
     {
-        int max_content = viewport_w - pad_left - pad_right - border_px * 2;
-        if (max_content < 0)
-        {
-            max_content = 0;
-        }
-        body_content_w = max_content;
-        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+        body_box_w = viewport_w;
+        body_content_w = body_box_w - pad_left - pad_right - border_px * 2;
+        if (body_content_w < 0) body_content_w = 0;
     }
 
     int body_box_x = viewport_x;
@@ -1828,12 +1858,15 @@ static const char *html_view_dump_display(css_display_t display)
     switch (display)
     {
         case CSS_DISPLAY_INLINE: return "inline";
+        case CSS_DISPLAY_INLINE_BLOCK: return "inline-block";
         case CSS_DISPLAY_BLOCK: return "block";
         case CSS_DISPLAY_LIST_ITEM: return "list-item";
         case CSS_DISPLAY_TABLE: return "table";
         case CSS_DISPLAY_TABLE_CELL: return "table-cell";
         case CSS_DISPLAY_FLEX: return "flex";
         case CSS_DISPLAY_INLINE_FLEX: return "inline-flex";
+        case CSS_DISPLAY_GRID: return "grid";
+        case CSS_DISPLAY_INLINE_GRID: return "inline-grid";
         case CSS_DISPLAY_NONE: return "none";
         default: return "unknown";
     }

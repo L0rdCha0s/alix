@@ -98,7 +98,8 @@ static void html_view_render_node_with_style(html_view_ctx_t *ctx,
         if (style->display == CSS_DISPLAY_BLOCK ||
             style->display == CSS_DISPLAY_LIST_ITEM ||
             style->display == CSS_DISPLAY_TABLE ||
-            style->display == CSS_DISPLAY_FLEX)
+            style->display == CSS_DISPLAY_FLEX ||
+            style->display == CSS_DISPLAY_GRID)
         {
             block = true;
         }
@@ -129,6 +130,12 @@ static void html_view_render_node_with_style(html_view_ctx_t *ctx,
         (style->display == CSS_DISPLAY_FLEX || style->display == CSS_DISPLAY_INLINE_FLEX))
     {
         html_view_render_flex_container(ctx, node, style, style->display == CSS_DISPLAY_INLINE_FLEX);
+        goto out;
+    }
+    if (style->has_display &&
+        (style->display == CSS_DISPLAY_GRID || style->display == CSS_DISPLAY_INLINE_GRID))
+    {
+        html_view_render_grid_container(ctx, node, style, style->display == CSS_DISPLAY_INLINE_GRID);
         goto out;
     }
 
@@ -337,7 +344,13 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
     bool block = html_view_is_block_tag(tag);
     if (style->has_display)
     {
-        if (style->display == CSS_DISPLAY_INLINE || style->display == CSS_DISPLAY_INLINE_FLEX)
+        if (style->display == CSS_DISPLAY_INLINE ||
+            style->display == CSS_DISPLAY_INLINE_BLOCK ||
+            style->display == CSS_DISPLAY_INLINE_FLEX)
+        {
+            block = false;
+        }
+        else if (style->display == CSS_DISPLAY_INLINE_GRID)
         {
             block = false;
         }
@@ -348,7 +361,8 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
         else if (style->display == CSS_DISPLAY_BLOCK ||
                  style->display == CSS_DISPLAY_LIST_ITEM ||
                  style->display == CSS_DISPLAY_TABLE ||
-                 style->display == CSS_DISPLAY_FLEX)
+                 style->display == CSS_DISPLAY_FLEX ||
+                 style->display == CSS_DISPLAY_GRID)
         {
             block = true;
         }
@@ -379,6 +393,12 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
         (style->display == CSS_DISPLAY_FLEX || style->display == CSS_DISPLAY_INLINE_FLEX))
     {
         html_view_render_flex_container(ctx, node, style, style->display == CSS_DISPLAY_INLINE_FLEX);
+        goto out;
+    }
+    if (style->has_display &&
+        (style->display == CSS_DISPLAY_GRID || style->display == CSS_DISPLAY_INLINE_GRID))
+    {
+        html_view_render_grid_container(ctx, node, style, style->display == CSS_DISPLAY_INLINE_GRID);
         goto out;
     }
 

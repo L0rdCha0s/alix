@@ -2,6 +2,7 @@
 
 #include "ctype.h"
 #include "libc.h"
+#include "math.h"
 
 void css_skip_ws_and_comments(const char **p)
 {
@@ -120,6 +121,551 @@ static bool css_parse_hex_digit(char c, uint8_t *out)
     return false;
 }
 
+typedef struct css_calc_value
+{
+    int32_t value_milli;
+    css_unit_t unit;
+    bool valid;
+} css_calc_value_t;
+
+static void css_calc_skip_ws(const char **p, const char *end)
+{
+    if (!p || !*p || !end)
+    {
+        return;
+    }
+    css_skip_ws_and_comments_range(p, end);
+}
+
+static bool css_calc_parse_number(const char **p, const char *end, css_calc_value_t *out)
+{
+    if (!p || !*p || !out)
+    {
+        return false;
+    }
+
+    const char *s = *p;
+    bool negative = false;
+    if (s < end && (*s == '-' || *s == '+'))
+    {
+        negative = (*s == '-');
+        ++s;
+    }
+
+    bool saw_digit = false;
+    int64_t integer = 0;
+    int64_t frac = 0;
+    int64_t frac_scale = 1;
+    while (s < end && isdigit((unsigned char)*s))
+    {
+        saw_digit = true;
+        integer = integer * 10 + (int64_t)(*s - '0');
+        ++s;
+    }
+    if (s < end && *s == '.')
+    {
+        ++s;
+        while (s < end && isdigit((unsigned char)*s) && frac_scale < 1000000)
+        {
+            saw_digit = true;
+            frac = frac * 10 + (int64_t)(*s - '0');
+            frac_scale *= 10;
+            ++s;
+        }
+    }
+    if (!saw_digit)
+    {
+        return false;
+    }
+
+    int64_t milli = integer * 1000;
+    if (frac_scale > 1)
+    {
+        milli += (frac * 1000) / frac_scale;
+    }
+    if (negative)
+    {
+        milli = -milli;
+    }
+
+    css_unit_t unit = CSS_UNIT_NONE;
+    const char *u = s;
+    if (u < end && *u == '%')
+    {
+        unit = CSS_UNIT_PERCENT;
+        ++u;
+    }
+    else if (u < end && isalpha((unsigned char)*u))
+    {
+        size_t ulen = (size_t)(end - u);
+        if (ulen >= 2 && (u[0] == 'p' || u[0] == 'P') && (u[1] == 'x' || u[1] == 'X'))
+        {
+            unit = CSS_UNIT_PX;
+            u += 2;
+        }
+        else if (ulen >= 2 && (u[0] == 'p' || u[0] == 'P') && (u[1] == 't' || u[1] == 'T'))
+        {
+            unit = CSS_UNIT_PX;
+            milli = (milli * 4 + 1) / 3;
+            u += 2;
+        }
+        else if (ulen >= 2 && (u[0] == 'v' || u[0] == 'V') && (u[1] == 'w' || u[1] == 'W'))
+        {
+            unit = CSS_UNIT_VW;
+            u += 2;
+        }
+        else if (ulen >= 2 && (u[0] == 'v' || u[0] == 'V') && (u[1] == 'h' || u[1] == 'H'))
+        {
+            unit = CSS_UNIT_VH;
+            u += 2;
+        }
+        else if (ulen >= 2 && (u[0] == 'e' || u[0] == 'E') && (u[1] == 'm' || u[1] == 'M'))
+        {
+            unit = CSS_UNIT_EM;
+            u += 2;
+        }
+        else if (ulen >= 3 &&
+                 (u[0] == 'r' || u[0] == 'R') &&
+                 (u[1] == 'e' || u[1] == 'E') &&
+                 (u[2] == 'm' || u[2] == 'M'))
+        {
+            unit = CSS_UNIT_EM;
+            u += 3;
+        }
+        else if (ulen >= 3 &&
+                 (u[0] == 'd' || u[0] == 'D') &&
+                 (u[1] == 'e' || u[1] == 'E') &&
+                 (u[2] == 'g' || u[2] == 'G'))
+        {
+            unit = CSS_UNIT_NONE;
+            u += 3;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    *p = u;
+    out->value_milli = (int32_t)milli;
+    out->unit = unit;
+    out->valid = true;
+    return true;
+}
+
+static const char *css_calc_find_paren_end(const char *start, const char *end)
+{
+    int depth = 1;
+    const char *p = start;
+    while (p < end)
+    {
+        char c = *p;
+        if (c == '(')
+        {
+            ++depth;
+        }
+        else if (c == ')')
+        {
+            --depth;
+            if (depth == 0)
+            {
+                return p;
+            }
+        }
+        ++p;
+    }
+    return NULL;
+}
+
+static bool css_calc_combine_add(css_calc_value_t *acc, const css_calc_value_t *rhs, int sign)
+{
+    if (!acc || !rhs)
+    {
+        return false;
+    }
+    if (acc->unit == rhs->unit)
+    {
+        int64_t value = (int64_t)acc->value_milli + (int64_t)sign * rhs->value_milli;
+        acc->value_milli = (int32_t)value;
+        return true;
+    }
+    if (acc->unit == CSS_UNIT_NONE && acc->value_milli == 0)
+    {
+        acc->unit = rhs->unit;
+        acc->value_milli = sign * rhs->value_milli;
+        return true;
+    }
+    if (rhs->unit == CSS_UNIT_NONE && rhs->value_milli == 0)
+    {
+        return true;
+    }
+    return false;
+}
+
+static bool css_calc_combine_mul(css_calc_value_t *acc, const css_calc_value_t *rhs, bool divide)
+{
+    if (!acc || !rhs)
+    {
+        return false;
+    }
+    if (divide && rhs->value_milli == 0)
+    {
+        return false;
+    }
+
+    bool acc_unit = (acc->unit != CSS_UNIT_NONE);
+    bool rhs_unit = (rhs->unit != CSS_UNIT_NONE);
+    if (acc_unit && rhs_unit)
+    {
+        return false;
+    }
+
+    int64_t value = 0;
+    if (!divide)
+    {
+        value = (int64_t)acc->value_milli * (int64_t)rhs->value_milli;
+        value /= 1000;
+    }
+    else
+    {
+        value = (int64_t)acc->value_milli * 1000;
+        value /= rhs->value_milli;
+    }
+
+    if (!acc_unit && rhs_unit)
+    {
+        acc->unit = rhs->unit;
+    }
+    acc->value_milli = (int32_t)value;
+    return true;
+}
+
+static bool css_calc_parse_expr(const char **p, const char *end, css_calc_value_t *out);
+
+static bool css_calc_parse_factor(const char **p, const char *end, css_calc_value_t *out)
+{
+    if (!p || !*p || !out)
+    {
+        return false;
+    }
+    css_calc_skip_ws(p, end);
+
+    bool negate = false;
+    while (*p < end && (**p == '+' || **p == '-'))
+    {
+        if (**p == '-')
+        {
+            negate = !negate;
+        }
+        ++(*p);
+        css_calc_skip_ws(p, end);
+    }
+
+    if (*p >= end)
+    {
+        return false;
+    }
+
+    if (**p == '(')
+    {
+        const char *sub_start = *p + 1;
+        const char *sub_end = css_calc_find_paren_end(sub_start, end);
+        if (!sub_end)
+        {
+            return false;
+        }
+        const char *scan = sub_start;
+        css_calc_value_t inner = {0};
+        if (!css_calc_parse_expr(&scan, sub_end, &inner))
+        {
+            return false;
+        }
+        css_calc_skip_ws(&scan, sub_end);
+        if (scan != sub_end)
+        {
+            return false;
+        }
+        *p = sub_end + 1;
+        if (negate)
+        {
+            inner.value_milli = -inner.value_milli;
+        }
+        *out = inner;
+        return true;
+    }
+
+    css_calc_value_t value = {0};
+    if (!css_calc_parse_number(p, end, &value))
+    {
+        return false;
+    }
+    if (negate)
+    {
+        value.value_milli = -value.value_milli;
+    }
+    *out = value;
+    return true;
+}
+
+static bool css_calc_parse_term(const char **p, const char *end, css_calc_value_t *out)
+{
+    css_calc_value_t acc = {0};
+    if (!css_calc_parse_factor(p, end, &acc))
+    {
+        return false;
+    }
+
+    while (*p < end)
+    {
+        css_calc_skip_ws(p, end);
+        if (*p >= end)
+        {
+            break;
+        }
+        char op = **p;
+        if (op != '*' && op != '/')
+        {
+            break;
+        }
+        ++(*p);
+        css_calc_value_t rhs = {0};
+        if (!css_calc_parse_factor(p, end, &rhs))
+        {
+            return false;
+        }
+        if (!css_calc_combine_mul(&acc, &rhs, op == '/'))
+        {
+            return false;
+        }
+    }
+    *out = acc;
+    return true;
+}
+
+static bool css_calc_parse_expr(const char **p, const char *end, css_calc_value_t *out)
+{
+    css_calc_value_t acc = {0};
+    if (!css_calc_parse_term(p, end, &acc))
+    {
+        return false;
+    }
+    while (*p < end)
+    {
+        css_calc_skip_ws(p, end);
+        if (*p >= end)
+        {
+            break;
+        }
+        char op = **p;
+        if (op != '+' && op != '-')
+        {
+            break;
+        }
+        ++(*p);
+        css_calc_value_t rhs = {0};
+        if (!css_calc_parse_term(p, end, &rhs))
+        {
+            return false;
+        }
+        if (!css_calc_combine_add(&acc, &rhs, op == '+' ? 1 : -1))
+        {
+            return false;
+        }
+    }
+    *out = acc;
+    return true;
+}
+
+static bool css_parse_calc_value(const char *start, const char *end, css_calc_value_t *out)
+{
+    if (!start || !end || end <= start || !out)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return false;
+    }
+
+    size_t len = (size_t)(end - start);
+    const char *expr_start = start;
+    const char *expr_end = end;
+    if (len >= 6 && strncasecmp(start, "calc(", 5) == 0 && end[-1] == ')')
+    {
+        expr_start = start + 5;
+        expr_end = end - 1;
+    }
+
+    const char *p = expr_start;
+    css_calc_value_t value = {0};
+    if (!css_calc_parse_expr(&p, expr_end, &value))
+    {
+        return false;
+    }
+    css_calc_skip_ws(&p, expr_end);
+    if (p != expr_end)
+    {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+static bool css_parse_color_component(const char **p, const char *end, double *out_value, bool *out_percent)
+{
+    if (!p || !*p || !out_value || !out_percent)
+    {
+        return false;
+    }
+    css_calc_value_t value = {0};
+    if (!css_calc_parse_number(p, end, &value))
+    {
+        return false;
+    }
+    if (value.unit == CSS_UNIT_PERCENT)
+    {
+        *out_value = (double)value.value_milli / 1000.0;
+        *out_percent = true;
+        return true;
+    }
+    if (value.unit == CSS_UNIT_NONE)
+    {
+        *out_value = (double)value.value_milli / 1000.0;
+        *out_percent = false;
+        return true;
+    }
+    return false;
+}
+
+static double css_fmod(double x, double y)
+{
+    if (y == 0.0)
+    {
+        return 0.0;
+    }
+    double q = floor(x / y);
+    return x - q * y;
+}
+
+static void css_hsl_to_rgb(double h, double s, double l, uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
+{
+    if (!out_r || !out_g || !out_b)
+    {
+        return;
+    }
+    if (s < 0.0) s = 0.0;
+    if (s > 1.0) s = 1.0;
+    if (l < 0.0) l = 0.0;
+    if (l > 1.0) l = 1.0;
+
+    h = css_fmod(h, 360.0);
+    if (h < 0.0)
+    {
+        h += 360.0;
+    }
+
+    double c = (1.0 - fabs(2.0 * l - 1.0)) * s;
+    double hh = h / 60.0;
+    double x = c * (1.0 - fabs(css_fmod(hh, 2.0) - 1.0));
+    double r1 = 0.0;
+    double g1 = 0.0;
+    double b1 = 0.0;
+
+    if (hh >= 0.0 && hh < 1.0)
+    {
+        r1 = c;
+        g1 = x;
+    }
+    else if (hh >= 1.0 && hh < 2.0)
+    {
+        r1 = x;
+        g1 = c;
+    }
+    else if (hh >= 2.0 && hh < 3.0)
+    {
+        g1 = c;
+        b1 = x;
+    }
+    else if (hh >= 3.0 && hh < 4.0)
+    {
+        g1 = x;
+        b1 = c;
+    }
+    else if (hh >= 4.0 && hh < 5.0)
+    {
+        r1 = x;
+        b1 = c;
+    }
+    else
+    {
+        r1 = c;
+        b1 = x;
+    }
+
+    double m = l - c * 0.5;
+    int r = (int)((r1 + m) * 255.0 + 0.5);
+    int g = (int)((g1 + m) * 255.0 + 0.5);
+    int b = (int)((b1 + m) * 255.0 + 0.5);
+
+    if (r < 0) r = 0;
+    if (r > 255) r = 255;
+    if (g < 0) g = 0;
+    if (g > 255) g = 255;
+    if (b < 0) b = 0;
+    if (b > 255) b = 255;
+
+    *out_r = (uint8_t)r;
+    *out_g = (uint8_t)g;
+    *out_b = (uint8_t)b;
+}
+
+static bool css_parse_hsl_component(const char *start,
+                                    const char *end,
+                                    bool expect_percent,
+                                    double *out_value)
+{
+    if (!out_value)
+    {
+        return false;
+    }
+    css_calc_value_t value = {0};
+    if (!css_parse_calc_value(start, end, &value))
+    {
+        return false;
+    }
+    double v = (double)value.value_milli / 1000.0;
+    if (expect_percent)
+    {
+        if (value.unit == CSS_UNIT_PERCENT)
+        {
+            *out_value = v;
+            return true;
+        }
+        if (value.unit == CSS_UNIT_NONE)
+        {
+            if (v <= 1.0)
+            {
+                v *= 100.0;
+            }
+            *out_value = v;
+            return true;
+        }
+        return false;
+    }
+    if (value.unit == CSS_UNIT_PERCENT)
+    {
+        *out_value = v * 3.6;
+        return true;
+    }
+    if (value.unit == CSS_UNIT_NONE)
+    {
+        *out_value = v;
+        return true;
+    }
+    return false;
+}
+
 bool css_parse_color(const char *start, const char *end, video_color_t *out)
 {
     if (!start || !end || end <= start || !out)
@@ -133,59 +679,131 @@ bool css_parse_color(const char *start, const char *end, video_color_t *out)
     }
 
     size_t len = (size_t)(end - start);
-    if (len >= 5 && strncasecmp(start, "rgb(", 4) == 0 && end[-1] == ')')
+    bool is_rgb = (len >= 5 && strncasecmp(start, "rgb(", 4) == 0);
+    bool is_rgba = (len >= 6 && strncasecmp(start, "rgba(", 5) == 0);
+    if ((is_rgb || is_rgba) && end[-1] == ')')
     {
-        const char *p = start + 4;
-        int comps[3] = {0, 0, 0};
+        const char *p = start + (is_rgba ? 5 : 4);
+        const char *args_end = end - 1;
+        double comps[3] = {0.0, 0.0, 0.0};
+        bool perc[3] = {false, false, false};
+
         for (int i = 0; i < 3; ++i)
         {
-            while (p < end && isspace((unsigned char)*p))
-            {
-                ++p;
-            }
-            if (p >= end || !isdigit((unsigned char)*p))
+            css_calc_skip_ws(&p, args_end);
+            if (!css_parse_color_component(&p, args_end, &comps[i], &perc[i]))
             {
                 return false;
             }
-            int value = 0;
-            while (p < end && isdigit((unsigned char)*p))
-            {
-                value = value * 10 + (*p - '0');
-                ++p;
-            }
-            bool percent = false;
-            if (p < end && *p == '%')
-            {
-                percent = true;
-                ++p;
-            }
-            if (percent)
-            {
-                if (value < 0) value = 0;
-                if (value > 100) value = 100;
-                value = (value * 255) / 100;
-            }
-            else
-            {
-                if (value < 0) value = 0;
-                if (value > 255) value = 255;
-            }
-            comps[i] = value;
-            while (p < end && isspace((unsigned char)*p))
-            {
-                ++p;
-            }
+            css_calc_skip_ws(&p, args_end);
             if (i < 2)
             {
-                if (p >= end || *p != ',')
+                if (p < args_end && *p == ',')
                 {
-                    return false;
+                    ++p;
+                    continue;
                 }
-                ++p;
             }
         }
-        *out = video_make_color((uint8_t)comps[0], (uint8_t)comps[1], (uint8_t)comps[2]);
+
+        css_calc_skip_ws(&p, args_end);
+        if (p < args_end && (*p == '/' || *p == ','))
+        {
+            ++p;
+            css_calc_skip_ws(&p, args_end);
+            double alpha = 1.0;
+            bool alpha_percent = false;
+            (void)css_parse_color_component(&p, args_end, &alpha, &alpha_percent);
+        }
+        css_calc_skip_ws(&p, args_end);
+        if (p != args_end)
+        {
+            return false;
+        }
+
+        int rgb[3] = {0, 0, 0};
+        for (int i = 0; i < 3; ++i)
+        {
+            double v = comps[i];
+            if (perc[i])
+            {
+                if (v < 0.0) v = 0.0;
+                if (v > 100.0) v = 100.0;
+                v = v * 255.0 / 100.0;
+            }
+            if (v < 0.0) v = 0.0;
+            if (v > 255.0) v = 255.0;
+            rgb[i] = (int)(v + 0.5);
+        }
+        *out = video_make_color((uint8_t)rgb[0], (uint8_t)rgb[1], (uint8_t)rgb[2]);
         return true;
+    }
+
+    bool is_hsl = (len >= 5 && strncasecmp(start, "hsl(", 4) == 0);
+    bool is_hsla = (len >= 6 && strncasecmp(start, "hsla(", 5) == 0);
+    if ((is_hsl || is_hsla) && end[-1] == ')')
+    {
+        const char *args_start = start + (is_hsla ? 5 : 4);
+        const char *args_end = end - 1;
+        const char *parts[4] = {0};
+        const char *part_ends[4] = {0};
+        size_t count = 0;
+        const char *seg_start = args_start;
+        int depth = 0;
+        for (const char *scan = args_start; scan < args_end; ++scan)
+        {
+            char c = *scan;
+            if (c == '(')
+            {
+                ++depth;
+                continue;
+            }
+            if (c == ')' && depth > 0)
+            {
+                --depth;
+                continue;
+            }
+            if (c == ',' && depth == 0)
+            {
+                if (count < 4)
+                {
+                    parts[count] = seg_start;
+                    part_ends[count] = scan;
+                    ++count;
+                }
+                seg_start = scan + 1;
+            }
+        }
+        if (count < 4)
+        {
+            parts[count] = seg_start;
+            part_ends[count] = args_end;
+            ++count;
+        }
+        if (count >= 3)
+        {
+            double h = 0.0;
+            double s = 0.0;
+            double l = 0.0;
+            if (!css_parse_hsl_component(parts[0], part_ends[0], false, &h) ||
+                !css_parse_hsl_component(parts[1], part_ends[1], true, &s) ||
+                !css_parse_hsl_component(parts[2], part_ends[2], true, &l))
+            {
+                return false;
+            }
+            if (s < 0.0) s = 0.0;
+            if (s > 100.0) s = 100.0;
+            if (l < 0.0) l = 0.0;
+            if (l > 100.0) l = 100.0;
+            s /= 100.0;
+            l /= 100.0;
+            uint8_t r = 0;
+            uint8_t g = 0;
+            uint8_t b = 0;
+            css_hsl_to_rgb(h, s, l, &r, &g, &b);
+            *out = video_make_color(r, g, b);
+            return true;
+        }
     }
 
     size_t name_len = (size_t)(end - start);
@@ -382,68 +1000,20 @@ bool css_parse_length_token(const char *start, const char *end, css_length_t *ou
         return true;
     }
 
-    const char *num_start = start;
-    const char *p = num_start;
-    if (p < end && (*p == '-' || *p == '+'))
-    {
-        p++;
-    }
-    while (p < end && (isdigit((unsigned char)*p) || *p == '.'))
-    {
-        p++;
-    }
-    const char *num_end = p;
-    if (num_end == num_start)
+    css_calc_value_t calc = {0};
+    if (!css_parse_calc_value(start, end, &calc))
     {
         return false;
     }
-
-    int32_t number_milli = 0;
-    if (!css_parse_number_milli(num_start, num_end, &number_milli))
-    {
-        return false;
-    }
-
-    css_unit_t unit = CSS_UNIT_NONE;
-    if (p < end)
-    {
-        size_t ulen = (size_t)(end - p);
-        if (ulen == 2 && (p[0] == 'p' || p[0] == 'P') && (p[1] == 'x' || p[1] == 'X'))
-        {
-            unit = CSS_UNIT_PX;
-        }
-        else if (ulen == 2 && (p[0] == 'p' || p[0] == 'P') && (p[1] == 't' || p[1] == 'T'))
-        {
-            /* Approximate: 1pt = 4/3 px */
-            unit = CSS_UNIT_PX;
-            number_milli = (int32_t)(((int64_t)number_milli * 4 + 1) / 3);
-        }
-        else if (ulen == 2 && (p[0] == 'v' || p[0] == 'V') && (p[1] == 'w' || p[1] == 'W'))
-        {
-            unit = CSS_UNIT_VW;
-        }
-        else if (ulen == 2 && (p[0] == 'v' || p[0] == 'V') && (p[1] == 'h' || p[1] == 'H'))
-        {
-            unit = CSS_UNIT_VH;
-        }
-        else if (ulen == 2 && (p[0] == 'e' || p[0] == 'E') && (p[1] == 'm' || p[1] == 'M'))
-        {
-            unit = CSS_UNIT_EM;
-        }
-        else if (ulen == 1 && p[0] == '%')
-        {
-            unit = CSS_UNIT_PERCENT;
-        }
-    }
-    else if (number_milli != 0)
+    if (calc.unit == CSS_UNIT_NONE && calc.value_milli != 0)
     {
         return false;
     }
 
     out->valid = true;
     out->is_auto = false;
-    out->value_milli = number_milli;
-    out->unit = unit;
+    out->value_milli = calc.value_milli;
+    out->unit = calc.unit;
     return true;
 }
 

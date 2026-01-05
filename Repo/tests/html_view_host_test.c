@@ -4148,7 +4148,9 @@ static bool test_acid2_render_snapshot(void)
         if (pad_left < 0) pad_left = 0;
     }
 
+    bool border_box = body_style.has_box_sizing && body_style.box_sizing == CSS_BOX_SIZING_BORDER_BOX;
     int body_content_w = viewport_w;
+    int body_box_w = 0;
     if (body_style.has_width)
     {
         int computed = html_view_length_to_px(&body_style.width,
@@ -4160,24 +4162,40 @@ static bool test_acid2_render_snapshot(void)
                                               true);
         if (computed > 0)
         {
-            body_content_w = computed;
+            if (border_box)
+            {
+                body_box_w = computed;
+            }
+            else
+            {
+                body_content_w = computed;
+            }
         }
+    }
+    if (border_box)
+    {
+        if (body_box_w <= 0)
+        {
+            body_box_w = viewport_w;
+        }
+        body_content_w = body_box_w - pad_left - pad_right - border_px * 2;
     }
     if (body_content_w < 0)
     {
         body_content_w = 0;
     }
-
-    int body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    if (body_box_w <= 0)
+    {
+        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    }
     if (body_box_w > viewport_w)
     {
-        int max_content = viewport_w - pad_left - pad_right - border_px * 2;
-        if (max_content < 0)
+        body_box_w = viewport_w;
+        body_content_w = body_box_w - pad_left - pad_right - border_px * 2;
+        if (body_content_w < 0)
         {
-            max_content = 0;
+            body_content_w = 0;
         }
-        body_content_w = max_content;
-        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
     }
 
     int body_box_x = viewport_x;
@@ -4641,7 +4659,9 @@ static bool render_doc_case(const char *case_name,
         if (pad_left < 0) pad_left = 0;
     }
 
+    bool border_box = body_style.has_box_sizing && body_style.box_sizing == CSS_BOX_SIZING_BORDER_BOX;
     int body_content_w = viewport_w;
+    int body_box_w = 0;
     if (body_style.has_width)
     {
         int computed = html_view_length_to_px(&body_style.width,
@@ -4653,24 +4673,40 @@ static bool render_doc_case(const char *case_name,
                                               true);
         if (computed > 0)
         {
-            body_content_w = computed;
+            if (border_box)
+            {
+                body_box_w = computed;
+            }
+            else
+            {
+                body_content_w = computed;
+            }
         }
+    }
+    if (border_box)
+    {
+        if (body_box_w <= 0)
+        {
+            body_box_w = viewport_w;
+        }
+        body_content_w = body_box_w - pad_left - pad_right - border_px * 2;
     }
     if (body_content_w < 0)
     {
         body_content_w = 0;
     }
-
-    int body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    if (body_box_w <= 0)
+    {
+        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
+    }
     if (body_box_w > viewport_w)
     {
-        int max_content = viewport_w - pad_left - pad_right - border_px * 2;
-        if (max_content < 0)
+        body_box_w = viewport_w;
+        body_content_w = body_box_w - pad_left - pad_right - border_px * 2;
+        if (body_content_w < 0)
         {
-            max_content = 0;
+            body_content_w = 0;
         }
-        body_content_w = max_content;
-        body_box_w = body_content_w + pad_left + pad_right + border_px * 2;
     }
 
     int body_box_x = viewport_x;
@@ -5068,38 +5104,22 @@ static bool test_hacker_news_live_render(void)
     return ok;
 }
 
-static bool test_stackoverflow_questions_live_render(void)
+static bool test_stackoverflow_render(void)
 {
-    const char *enable = getenv("ALIX_HOST_FETCH");
-    if (!enable || enable[0] == '\0' || strcmp(enable, "0") == 0)
-    {
-        printf("html_view_host_test: stackoverflow_questions_live skipped (set ALIX_HOST_FETCH=1)\n");
-        return true;
-    }
-
-    const char *url = getenv("ALIX_HOST_FETCH_QUESTIONS_URL");
-    if (!url || url[0] == '\0')
-    {
-        url = "https://www.stackoverflow.com/questions";
-    }
-
+    const char *html_path = "tests/stackoverflow-test/stackoverflow.html";
     size_t html_len = 0;
-    double fetch_start = host_now_ms();
-    char *html = host_fetch_url(url, &html_len);
-    double fetch_end = host_now_ms();
+    char *html = read_file(html_path, &html_len);
     if (!html)
     {
-        printf("html_view_host_test: stackoverflow_questions_live fetch failed url=%s\n", url);
+        printf("html_view_host_test: stackoverflow failed to read %s\n", html_path);
         return false;
     }
 
     html_parse_error_t err = {0};
-    double parse_start = host_now_ms();
     html_document_t *doc = html_parse(html, &err);
-    double parse_end = host_now_ms();
     if (!doc)
     {
-        printf("html_view_host_test: stackoverflow_questions_live parse failed at %zu: %s\n",
+        printf("html_view_host_test: stackoverflow parse failed at %zu: %s\n",
                err.offset,
                err.message ? err.message : "unknown");
         free(html);
@@ -5109,92 +5129,60 @@ static bool test_stackoverflow_questions_live_render(void)
     char *css = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
-    size_t css_fetches = 0;
-    double css_collect_start = host_now_ms();
-    collect_style_text_with_url_base(doc->root, &css, &css_len, &css_cap, url, &css_fetches);
-    double css_collect_end = host_now_ms();
+    collect_style_text_with_base(doc->root, &css, &css_len, &css_cap, "tests/stackoverflow-test");
 
-    double css_parse_start = host_now_ms();
     css_stylesheet_t *sheet = css_parse(css ? css : "");
-    double css_parse_end = host_now_ms();
     if (!sheet)
     {
-        printf("html_view_host_test: stackoverflow_questions_live css parse failed\n");
+        printf("html_view_host_test: stackoverflow css parse failed\n");
         html_document_destroy(doc);
         free(html);
         free(css);
         return false;
     }
 
-    bool draw = false;
-    const char *draw_env = getenv("ALIX_HOST_FETCH_DRAW");
-    if (draw_env && draw_env[0] != '\0' && strcmp(draw_env, "0") != 0)
-    {
-        draw = true;
-    }
-
     html_view_render_stats_t stats = {0};
-    double render_ms = 0.0;
-    double draw_ms = 0.0;
-    bool ok = render_doc_case("stackoverflow_questions_live",
-                              "stackoverflow-questions-live",
+    bool ok = render_doc_case("stackoverflow",
+                              "stackoverflow",
                               doc,
                               sheet,
-                              draw,
+                              true,
                               &stats,
-                              &render_ms,
-                              &draw_ms);
-
-    printf("html_view_host_test: stackoverflow_questions_live url=%s html=%zu css=%zu css_fetches=%zu\n",
-           url,
-           html_len,
-           css_len,
-           css_fetches);
-    printf("html_view_host_test: stackoverflow_questions_live timings fetch=%.1fms html_parse=%.1fms css_collect=%.1fms css_parse=%.1fms render=%.1fms ops=%zu%s\n",
-           fetch_end - fetch_start,
-           parse_end - parse_start,
-           css_collect_end - css_collect_start,
-           css_parse_end - css_parse_start,
-           render_ms,
-           stats.op_count,
-           draw ? "" : " (draw skipped)");
-    if (draw)
-    {
-        printf("html_view_host_test: stackoverflow_questions_live draw=%.1fms\n", draw_ms);
-    }
+                              NULL,
+                              NULL);
 
     if (g_html_trace_enabled)
     {
-        printf("html_view_host_test: stackoverflow_questions_live cleanup begin\n");
+        printf("html_view_host_test: stackoverflow cleanup begin\n");
         fflush(stdout);
     }
     if (g_html_trace_enabled)
     {
-        printf("html_view_host_test: stackoverflow_questions_live cleanup destroy sheet\n");
+        printf("html_view_host_test: stackoverflow cleanup destroy sheet\n");
         fflush(stdout);
     }
     css_stylesheet_destroy(sheet);
     if (g_html_trace_enabled)
     {
-        printf("html_view_host_test: stackoverflow_questions_live cleanup destroy doc\n");
+        printf("html_view_host_test: stackoverflow cleanup destroy doc\n");
         fflush(stdout);
     }
     html_document_destroy(doc);
     if (g_html_trace_enabled)
     {
-        printf("html_view_host_test: stackoverflow_questions_live cleanup free css\n");
+        printf("html_view_host_test: stackoverflow cleanup free css\n");
         fflush(stdout);
     }
     free(css);
     if (g_html_trace_enabled)
     {
-        printf("html_view_host_test: stackoverflow_questions_live cleanup free html\n");
+        printf("html_view_host_test: stackoverflow cleanup free html\n");
         fflush(stdout);
     }
     free(html);
     if (g_html_trace_enabled)
     {
-        printf("html_view_host_test: stackoverflow_questions_live cleanup end\n");
+        printf("html_view_host_test: stackoverflow cleanup end\n");
         fflush(stdout);
     }
     return ok;
@@ -5211,6 +5199,7 @@ int main(void)
 #ifdef HTML_VIEW_HOST_TRACE
     html_view_host_trace_init();
 #endif
+    css_media_env_set(1000, 800, CSS_MEDIA_COLOR_SCHEME_LIGHT);
 
     hv_case_t cases[] = {
         { "table-cell-align-left", test_table_cell_alignment },
@@ -5235,7 +5224,7 @@ int main(void)
         { "acid2-snapshot", test_acid2_render_snapshot },
         { "hacker-news-render", test_hacker_news_render },
         { "hacker-news-live", test_hacker_news_live_render },
-        { "stackoverflow-questions-live", test_stackoverflow_questions_live_render },
+        { "stackoverflow-render", test_stackoverflow_render },
     };
 
     size_t pass = 0;

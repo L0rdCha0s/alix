@@ -73,6 +73,313 @@ static bool css_value_is_keyword(const char *start, const char *end, const char 
     return strncasecmp(start, keyword, len) == 0;
 }
 
+static bool css_parse_list_style_type_token(const char *start,
+                                            const char *end,
+                                            css_list_style_type_t *out_type)
+{
+    if (!out_type)
+    {
+        return false;
+    }
+    if (css_value_is_keyword(start, end, "none"))
+    {
+        *out_type = CSS_LIST_STYLE_NONE;
+        return true;
+    }
+    if (css_value_is_keyword(start, end, "disc"))
+    {
+        *out_type = CSS_LIST_STYLE_DISC;
+        return true;
+    }
+    if (css_value_is_keyword(start, end, "decimal"))
+    {
+        *out_type = CSS_LIST_STYLE_DECIMAL;
+        return true;
+    }
+    if (css_value_is_keyword(start, end, "circle") ||
+        css_value_is_keyword(start, end, "square"))
+    {
+        *out_type = CSS_LIST_STYLE_DISC;
+        return true;
+    }
+    return false;
+}
+
+static bool css_parse_grid_template_columns_count(const char *start, const char *end, int32_t *out_cols)
+{
+    if (!out_cols)
+    {
+        return false;
+    }
+    *out_cols = 0;
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return false;
+    }
+    if ((size_t)(end - start) >= 7 && strncasecmp(start, "repeat(", 7) == 0)
+    {
+        const char *p = start + 7;
+        while (p < end && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        int32_t value = 0;
+        bool any = false;
+        while (p < end && isdigit((unsigned char)*p))
+        {
+            any = true;
+            value = value * 10 + (*p - '0');
+            ++p;
+        }
+        if (any && value > 0)
+        {
+            *out_cols = value;
+            return true;
+        }
+    }
+
+    int depth = 0;
+    bool in_token = false;
+    int count = 0;
+    for (const char *p = start; p < end; ++p)
+    {
+        char c = *p;
+        if (c == '(')
+        {
+            depth++;
+            in_token = true;
+            continue;
+        }
+        if (c == ')')
+        {
+            if (depth > 0)
+            {
+                depth--;
+            }
+            continue;
+        }
+        if (depth == 0 && (isspace((unsigned char)c) || c == ','))
+        {
+            if (in_token)
+            {
+                count++;
+                in_token = false;
+            }
+            continue;
+        }
+        if (depth == 0 && !in_token && !isspace((unsigned char)c))
+        {
+            in_token = true;
+        }
+    }
+    if (in_token)
+    {
+        count++;
+    }
+    if (count <= 0)
+    {
+        return false;
+    }
+    *out_cols = count;
+    return true;
+}
+
+static bool css_parse_grid_span_value(const char *start, const char *end, int32_t *out_span)
+{
+    if (!out_span)
+    {
+        return false;
+    }
+    *out_span = 0;
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return false;
+    }
+
+    for (const char *p = start; p + 4 <= end; ++p)
+    {
+        if (strncasecmp(p, "span", 4) != 0)
+        {
+            continue;
+        }
+        if (p != start && isalnum((unsigned char)p[-1]))
+        {
+            continue;
+        }
+        const char *q = p + 4;
+        if (q < end && isalnum((unsigned char)*q))
+        {
+            continue;
+        }
+        while (q < end && (isspace((unsigned char)*q) || *q == '/' || *q == ':'))
+        {
+            ++q;
+        }
+        int32_t value = 0;
+        bool any = false;
+        while (q < end && isdigit((unsigned char)*q))
+        {
+            any = true;
+            value = value * 10 + (*q - '0');
+            ++q;
+        }
+        if (any && value > 0)
+        {
+            *out_span = value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool css_parse_grid_line_index(const char *start, const char *end, int32_t *out_line)
+{
+    if (!out_line)
+    {
+        return false;
+    }
+    *out_line = 0;
+    if (!start || !end || end <= start)
+    {
+        return false;
+    }
+    css_trim_range(&start, &end);
+    if (end <= start)
+    {
+        return false;
+    }
+    size_t len = (size_t)(end - start);
+    if (len == 4 && strncasecmp(start, "auto", 4) == 0)
+    {
+        return false;
+    }
+    if (len >= 4 && strncasecmp(start, "span", 4) == 0)
+    {
+        return false;
+    }
+
+    const char *p = start;
+    bool negative = false;
+    if (*p == '+' || *p == '-')
+    {
+        negative = (*p == '-');
+        ++p;
+    }
+    int32_t value = 0;
+    bool any = false;
+    while (p < end && isdigit((unsigned char)*p))
+    {
+        any = true;
+        value = value * 10 + (*p - '0');
+        ++p;
+    }
+    if (!any || negative || value <= 0)
+    {
+        return false;
+    }
+    *out_line = value;
+    return true;
+}
+
+static void css_parse_grid_column_value(const char *start,
+                                        const char *end,
+                                        int32_t *out_start,
+                                        bool *has_start,
+                                        int32_t *out_end,
+                                        bool *has_end,
+                                        int32_t *out_span,
+                                        bool *has_span)
+{
+    if (has_start) *has_start = false;
+    if (has_end) *has_end = false;
+    if (has_span) *has_span = false;
+    if (out_start) *out_start = 0;
+    if (out_end) *out_end = 0;
+    if (out_span) *out_span = 0;
+    if (!start || !end || end <= start)
+    {
+        return;
+    }
+
+    const char *sep = NULL;
+    int depth = 0;
+    for (const char *p = start; p < end; ++p)
+    {
+        if (*p == '(')
+        {
+            depth++;
+            continue;
+        }
+        if (*p == ')')
+        {
+            if (depth > 0)
+            {
+                depth--;
+            }
+            continue;
+        }
+        if (depth == 0 && *p == '/')
+        {
+            sep = p;
+            break;
+        }
+    }
+
+    const char *part1_start = start;
+    const char *part1_end = sep ? sep : end;
+    const char *part2_start = sep ? sep + 1 : NULL;
+    const char *part2_end = sep ? end : NULL;
+
+    int32_t span = 0;
+    if (css_parse_grid_span_value(part1_start, part1_end, &span) && has_span && out_span)
+    {
+        *has_span = true;
+        *out_span = span;
+    }
+
+    int32_t line = 0;
+    if (css_parse_grid_line_index(part1_start, part1_end, &line) && has_start && out_start)
+    {
+        *has_start = true;
+        *out_start = line;
+    }
+
+    if (sep && part2_start && part2_end)
+    {
+        if (css_parse_grid_span_value(part2_start, part2_end, &span) && has_span && out_span)
+        {
+            *has_span = true;
+            *out_span = span;
+        }
+        if (css_parse_grid_line_index(part2_start, part2_end, &line))
+        {
+            if ((has_start && *has_start) || (has_span && *has_span))
+            {
+                if (has_end && out_end)
+                {
+                    *has_end = true;
+                    *out_end = line;
+                }
+            }
+            else if (has_start && out_start)
+            {
+                *has_start = true;
+                *out_start = line;
+            }
+        }
+    }
+}
+
 static char *css_strdup_unescape(const char *start, const char *end)
 {
     if (!start || !end || end <= start)
@@ -2287,9 +2594,8 @@ void css_style_apply_property(css_style_t *style,
         }
         else if (len == 11 && strncasecmp(s, "inline-block", 11) == 0)
         {
-            /* Closest supported fallback. */
             style->has_display = true;
-            style->display = CSS_DISPLAY_INLINE;
+            style->display = CSS_DISPLAY_INLINE_BLOCK;
         }
         else if (len == 4 && strncasecmp(s, "flex", 4) == 0)
         {
@@ -2300,6 +2606,16 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_display = true;
             style->display = CSS_DISPLAY_INLINE_FLEX;
+        }
+        else if (len == 4 && strncasecmp(s, "grid", 4) == 0)
+        {
+            style->has_display = true;
+            style->display = CSS_DISPLAY_GRID;
+        }
+        else if (len == 11 && strncasecmp(s, "inline-grid", 11) == 0)
+        {
+            style->has_display = true;
+            style->display = CSS_DISPLAY_INLINE_GRID;
         }
         else if (len == 11 && strncasecmp(s, "-webkit-box", 11) == 0)
         {
@@ -2330,6 +2646,125 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_display = true;
             style->display = CSS_DISPLAY_NONE;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "box-sizing", 10) == 0)
+    {
+        const char *s = val_start;
+        const char *e = val_end;
+        css_trim_range(&s, &e);
+        size_t len = (size_t)(e - s);
+        style->has_box_sizing = true;
+        style->box_sizing_inherit = false;
+        style->box_sizing = CSS_BOX_SIZING_CONTENT_BOX;
+        if (len == 7 && strncasecmp(s, "inherit", 7) == 0)
+        {
+            style->box_sizing_inherit = true;
+        }
+        else if (len == 10 && strncasecmp(s, "border-box", 10) == 0)
+        {
+            style->box_sizing = CSS_BOX_SIZING_BORDER_BOX;
+        }
+        else if (len == 11 && strncasecmp(s, "content-box", 11) == 0)
+        {
+            style->box_sizing = CSS_BOX_SIZING_CONTENT_BOX;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 15 && strncasecmp(prop_start, "list-style-type", 15) == 0)
+    {
+        css_list_style_type_t type;
+        if (css_parse_list_style_type_token(val_start, val_end, &type))
+        {
+            style->has_list_style_type = true;
+            style->list_style_type = type;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 10 && strncasecmp(prop_start, "list-style", 10) == 0)
+    {
+        const char *p = val_start;
+        const char *tok_s = NULL;
+        const char *tok_e = NULL;
+        while (css_next_token(&p, val_end, &tok_s, &tok_e))
+        {
+            css_list_style_type_t type;
+            if (css_parse_list_style_type_token(tok_s, tok_e, &type))
+            {
+                style->has_list_style_type = true;
+                style->list_style_type = type;
+            }
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 21 && strncasecmp(prop_start, "grid-template-columns", 21) == 0)
+    {
+        int32_t cols = 0;
+        if (css_parse_grid_template_columns_count(val_start, val_end, &cols))
+        {
+            style->has_grid_template_columns = true;
+            style->grid_template_columns = cols;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 17 && strncasecmp(prop_start, "grid-column-start", 17) == 0)
+    {
+        int32_t line = 0;
+        if (css_parse_grid_line_index(val_start, val_end, &line))
+        {
+            style->has_grid_column_start = true;
+            style->grid_column_start = line;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 15 && strncasecmp(prop_start, "grid-column-end", 15) == 0)
+    {
+        int32_t line = 0;
+        if (css_parse_grid_line_index(val_start, val_end, &line))
+        {
+            style->has_grid_column_end = true;
+            style->grid_column_end = line;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 11 && strncasecmp(prop_start, "grid-column", 11) == 0)
+    {
+        int32_t start = 0;
+        int32_t end = 0;
+        int32_t span = 0;
+        bool has_start = false;
+        bool has_end = false;
+        bool has_span = false;
+        css_parse_grid_column_value(val_start,
+                                    val_end,
+                                    &start,
+                                    &has_start,
+                                    &end,
+                                    &has_end,
+                                    &span,
+                                    &has_span);
+        if (has_span)
+        {
+            style->has_grid_column_span = true;
+            style->grid_column_span = span;
+        }
+        if (has_start)
+        {
+            style->has_grid_column_start = true;
+            style->grid_column_start = start;
+        }
+        if (has_end)
+        {
+            style->has_grid_column_end = true;
+            style->grid_column_end = end;
         }
         return;
     }

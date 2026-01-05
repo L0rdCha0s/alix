@@ -5,6 +5,47 @@
 #include "serial.h"
 #include "string.h"
 
+static bool html_view_style_uses_border_box(const css_style_t *style)
+{
+    return style && style->has_box_sizing && style->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
+}
+
+static int html_view_box_sizing_content_width(const css_style_t *style,
+                                              int width,
+                                              int pad_left,
+                                              int pad_right,
+                                              int border_left,
+                                              int border_right)
+{
+    if (html_view_style_uses_border_box(style))
+    {
+        width -= pad_left + pad_right + border_left + border_right;
+        if (width < 0)
+        {
+            width = 0;
+        }
+    }
+    return width;
+}
+
+static int html_view_box_sizing_content_height(const css_style_t *style,
+                                               int height,
+                                               int pad_top,
+                                               int pad_bottom,
+                                               int border_top,
+                                               int border_bottom)
+{
+    if (html_view_style_uses_border_box(style))
+    {
+        height -= pad_top + pad_bottom + border_top + border_bottom;
+        if (height < 0)
+        {
+            height = 0;
+        }
+    }
+    return height;
+}
+
 static bool html_view_intersect_rect_local(const atk_rect_t *a, const atk_rect_t *b, atk_rect_t *out)
 {
     if (!a || !b || !out)
@@ -391,6 +432,50 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
         }
     }
 
+    int pad_top = 0;
+    int pad_bottom = 0;
+    int border_top = 0;
+    int border_bottom = 0;
+    if (style->has_padding)
+    {
+        pad_top = html_view_length_to_px(&style->padding.top,
+                                         ctx->viewport_w,
+                                         ctx->viewport_h,
+                                         content_w,
+                                         ctx->viewport_h,
+                                         ctx->base_font_px,
+                                         true);
+        pad_bottom = html_view_length_to_px(&style->padding.bottom,
+                                            ctx->viewport_w,
+                                            ctx->viewport_h,
+                                            content_w,
+                                            ctx->viewport_h,
+                                            ctx->base_font_px,
+                                            true);
+    }
+    if (style->has_border)
+    {
+        border_top = html_view_length_to_px(&style->border_width.top,
+                                            ctx->viewport_w,
+                                            ctx->viewport_h,
+                                            content_w,
+                                            ctx->viewport_h,
+                                            ctx->base_font_px,
+                                            false);
+        border_bottom = html_view_length_to_px(&style->border_width.bottom,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               content_w,
+                                               ctx->viewport_h,
+                                               ctx->base_font_px,
+                                               false);
+    }
+    if (pad_top < 0) pad_top = 0;
+    if (pad_bottom < 0) pad_bottom = 0;
+    if (border_top < 0) border_top = 0;
+    if (border_bottom < 0) border_bottom = 0;
+    html_view_apply_border_style_none(style, &border_top, NULL, &border_bottom, NULL);
+
     html_view_ctx_t measure = *ctx;
     html_view_float_ctx_t floats = {0};
     measure.draw = false;
@@ -425,6 +510,12 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     int min_h = -1;
     if (html_view_length_to_px_height(ctx, &style->min_height, &min_h))
     {
+        min_h = html_view_box_sizing_content_height(style,
+                                                    min_h,
+                                                    pad_top,
+                                                    pad_bottom,
+                                                    border_top,
+                                                    border_bottom);
         if (min_h < 0)
         {
             min_h = 0;
@@ -437,6 +528,12 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     int max_h = -1;
     if (html_view_length_to_px_height(ctx, &style->max_height, &max_h))
     {
+        max_h = html_view_box_sizing_content_height(style,
+                                                    max_h,
+                                                    pad_top,
+                                                    pad_bottom,
+                                                    border_top,
+                                                    border_bottom);
         if (max_h < 0)
         {
             max_h = 0;
@@ -913,6 +1010,15 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     {
         specified_h = 0;
     }
+    if (height_specified)
+    {
+        specified_h = html_view_box_sizing_content_height(style,
+                                                          specified_h,
+                                                          pad_top,
+                                                          pad_bottom,
+                                                          border_top,
+                                                          border_bottom);
+    }
 
     int measured_w = 0;
     int measured_h = 0;
@@ -946,6 +1052,12 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                                            cont_h,
                                            ctx->base_font_px,
                                            true);
+        content_w = html_view_box_sizing_content_width(style,
+                                                       content_w,
+                                                       pad_left,
+                                                       pad_right,
+                                                       border_left,
+                                                       border_right);
     }
     else if (have_left && have_right)
     {
@@ -986,6 +1098,12 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                                        cont_h,
                                        ctx->base_font_px,
                                        true);
+        min_w = html_view_box_sizing_content_width(style,
+                                                   min_w,
+                                                   pad_left,
+                                                   pad_right,
+                                                   border_left,
+                                                   border_right);
         if (min_w < 0) min_w = 0;
     }
     if (style->has_max_width && style->max_width.valid && !style->max_width.is_auto)
@@ -997,6 +1115,12 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
                                        cont_h,
                                        ctx->base_font_px,
                                        true);
+        max_w = html_view_box_sizing_content_width(style,
+                                                   max_w,
+                                                   pad_left,
+                                                   pad_right,
+                                                   border_left,
+                                                   border_right);
         if (max_w < 0) max_w = 0;
     }
     if (max_w >= 0 && content_w > max_w)
@@ -1015,7 +1139,12 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     int content_h = 0;
     if (height_specified)
     {
-        content_h = specified_h;
+        content_h = html_view_box_sizing_content_height(style,
+                                                        specified_h,
+                                                        pad_top,
+                                                        pad_bottom,
+                                                        border_top,
+                                                        border_bottom);
     }
     else if (have_top && have_bottom)
     {
@@ -1031,6 +1160,12 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     int max_h = -1;
     if (html_view_length_to_px_height(ctx, &style->min_height, &min_h))
     {
+        min_h = html_view_box_sizing_content_height(style,
+                                                    min_h,
+                                                    pad_top,
+                                                    pad_bottom,
+                                                    border_top,
+                                                    border_bottom);
         if (min_h < 0)
         {
             min_h = 0;
@@ -1042,6 +1177,12 @@ bool html_view_render_positioned_element(html_view_ctx_t *ctx,
     }
     if (html_view_length_to_px_height(ctx, &style->max_height, &max_h))
     {
+        max_h = html_view_box_sizing_content_height(style,
+                                                    max_h,
+                                                    pad_top,
+                                                    pad_bottom,
+                                                    border_top,
+                                                    border_bottom);
         if (max_h < 0)
         {
             max_h = 0;
@@ -1339,7 +1480,9 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
 
     if (style->has_display &&
         (style->display == CSS_DISPLAY_INLINE ||
-         style->display == CSS_DISPLAY_INLINE_FLEX))
+         style->display == CSS_DISPLAY_INLINE_BLOCK ||
+         style->display == CSS_DISPLAY_INLINE_FLEX ||
+         style->display == CSS_DISPLAY_INLINE_GRID))
     {
         return false;
     }
@@ -1932,15 +2075,20 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         ctx->line_height = html_view_line_height_for_style(ctx, style);
 
         int level = ctx->list_level > 0 ? ctx->list_level : 1;
-        int indent = level * 32;
-        int bullet_size = 4;
-        int bullet_x = saved_body_x + indent - 16;
-        int bullet_draw_y = html_view_draw_y(ctx, ctx->y) + ctx->line_height / 2 - bullet_size / 2;
-        video_color_t bullet_color = style->has_color ? style->color : video_make_color(0x00, 0x00, 0x00);
-
-        if (ctx->record || (ctx->draw && html_view_line_visible(ctx)))
+        bool draw_marker = !(style->has_list_style_type &&
+                             style->list_style_type == CSS_LIST_STYLE_NONE);
+        int indent = draw_marker ? (level * 32) : 0;
+        if (draw_marker)
         {
-            html_view_draw_rect_clipped(ctx, bullet_x, bullet_draw_y, bullet_size, bullet_size, bullet_color, &ctx->clip);
+            int bullet_size = 4;
+            int bullet_x = saved_body_x + indent - 16;
+            int bullet_draw_y = html_view_draw_y(ctx, ctx->y) + ctx->line_height / 2 - bullet_size / 2;
+            video_color_t bullet_color = style->has_color ? style->color : video_make_color(0x00, 0x00, 0x00);
+
+            if (ctx->record || (ctx->draw && html_view_line_visible(ctx)))
+            {
+                html_view_draw_rect_clipped(ctx, bullet_x, bullet_draw_y, bullet_size, bullet_size, bullet_color, &ctx->clip);
+            }
         }
 
         ctx->body_x = saved_body_x + indent;
@@ -2216,7 +2364,8 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         if (style->display == CSS_DISPLAY_BLOCK ||
             style->display == CSS_DISPLAY_LIST_ITEM ||
             style->display == CSS_DISPLAY_TABLE ||
-            style->display == CSS_DISPLAY_FLEX)
+            style->display == CSS_DISPLAY_FLEX ||
+            style->display == CSS_DISPLAY_GRID)
         {
             force_block = true;
         }
@@ -2384,6 +2533,12 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                            ctx->viewport_h,
                                            ctx->base_font_px,
                                            true);
+        content_w = html_view_box_sizing_content_width(style,
+                                                       content_w,
+                                                       pad_left,
+                                                       pad_right,
+                                                       border_left,
+                                                       border_right);
     }
     else if (style->has_display && style->display == CSS_DISPLAY_TABLE)
     {
@@ -2408,6 +2563,12 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                        ctx->viewport_h,
                                        ctx->base_font_px,
                                        true);
+        min_w = html_view_box_sizing_content_width(style,
+                                                   min_w,
+                                                   pad_left,
+                                                   pad_right,
+                                                   border_left,
+                                                   border_right);
         if (min_w < 0) min_w = 0;
     }
     if (style->has_max_width && style->max_width.valid && !style->max_width.is_auto)
@@ -2419,6 +2580,12 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                        ctx->viewport_h,
                                        ctx->base_font_px,
                                        true);
+        max_w = html_view_box_sizing_content_width(style,
+                                                   max_w,
+                                                   pad_left,
+                                                   pad_right,
+                                                   border_left,
+                                                   border_right);
         if (max_w < 0) max_w = 0;
     }
     if (max_w >= 0 && content_w > max_w)
@@ -2482,19 +2649,22 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
             bool block_child = html_view_is_block_tag(child->name);
             if (child_style.has_display)
             {
-                if (child_style.display == CSS_DISPLAY_INLINE ||
-                    child_style.display == CSS_DISPLAY_INLINE_FLEX ||
-                    child_style.display == CSS_DISPLAY_TABLE_CELL)
-                {
-                    block_child = false;
-                }
-                else if (child_style.display == CSS_DISPLAY_BLOCK ||
-                         child_style.display == CSS_DISPLAY_LIST_ITEM ||
-                         child_style.display == CSS_DISPLAY_TABLE ||
-                         child_style.display == CSS_DISPLAY_FLEX)
-                {
-                    block_child = true;
-                }
+            if (child_style.display == CSS_DISPLAY_INLINE ||
+                child_style.display == CSS_DISPLAY_INLINE_BLOCK ||
+                child_style.display == CSS_DISPLAY_INLINE_FLEX ||
+                child_style.display == CSS_DISPLAY_INLINE_GRID ||
+                child_style.display == CSS_DISPLAY_TABLE_CELL)
+            {
+                block_child = false;
+            }
+            else if (child_style.display == CSS_DISPLAY_BLOCK ||
+                     child_style.display == CSS_DISPLAY_LIST_ITEM ||
+                     child_style.display == CSS_DISPLAY_TABLE ||
+                     child_style.display == CSS_DISPLAY_FLEX ||
+                     child_style.display == CSS_DISPLAY_GRID)
+            {
+                block_child = true;
+            }
             }
 
             bool positioned = child_style.has_position &&

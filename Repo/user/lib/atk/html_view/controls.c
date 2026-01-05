@@ -1046,6 +1046,7 @@ void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
         return;
     }
 
+    css_media_env_set(priv->last_width, priv->last_height, CSS_MEDIA_COLOR_SCHEME_LIGHT);
     priv->sheet = css_parse(css_text);
     free(css_text);
 }

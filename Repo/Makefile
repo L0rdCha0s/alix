@@ -112,6 +112,7 @@ USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c \
                           $(USER_DIR)/lib/atk/html_view/table.c \
                           $(USER_DIR)/lib/atk/html_view/render/dispatch.c \
                           $(USER_DIR)/lib/atk/html_view/render/flex.c \
+                          $(USER_DIR)/lib/atk/html_view/render/grid.c \
                           $(USER_DIR)/lib/atk/html_view/render/forms.c \
                           $(USER_DIR)/lib/atk/html_view/render/blocks.c \
                           $(USER_DIR)/lib/atk/html_view/render/inline.c \
@@ -534,6 +535,7 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
                        user/lib/atk/html_view/render/blocks.c \
                        user/lib/atk/html_view/render/inline.c \
                        user/lib/atk/html_view/render/flex.c \
+                       user/lib/atk/html_view/render/grid.c \
                        user/lib/atk/html_view/render/forms.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
@@ -554,6 +556,7 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
 	    user/lib/atk/html_view/render/blocks.c \
 	    user/lib/atk/html_view/render/inline.c \
 	    user/lib/atk/html_view/render/flex.c \
+	    user/lib/atk/html_view/render/grid.c \
 	    user/lib/atk/html_view/render/forms.c -o $@
 
 $(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c
