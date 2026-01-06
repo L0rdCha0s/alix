@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -767,6 +768,318 @@ typedef struct
     bool has_style;
 } html_view_dump_frame_t;
 
+typedef struct
+{
+    char *key;
+    size_t count;
+} html_view_dump_count_t;
+
+static char *html_view_dump_strdup_range(const char *start, size_t len)
+{
+    if (!start || len == 0)
+    {
+        return NULL;
+    }
+    const size_t cap = 96;
+    if (len > cap)
+    {
+        len = cap;
+    }
+    char *copy = (char *)malloc(len + 1);
+    if (!copy)
+    {
+        return NULL;
+    }
+    memcpy(copy, start, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+static char *html_view_dump_strdup_lower_range(const char *start, size_t len)
+{
+    if (!start || len == 0)
+    {
+        return NULL;
+    }
+    const size_t cap = 96;
+    if (len > cap)
+    {
+        len = cap;
+    }
+    char *copy = (char *)malloc(len + 1);
+    if (!copy)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < len; ++i)
+    {
+        unsigned char ch = (unsigned char)start[i];
+        copy[i] = (char)tolower(ch);
+    }
+    copy[len] = '\0';
+    return copy;
+}
+
+static bool html_view_dump_count_add(html_view_dump_count_t **items,
+                                     size_t *count,
+                                     size_t *cap,
+                                     const char *key,
+                                     size_t len,
+                                     bool lowercase)
+{
+    if (!items || !count || !cap || !key || len == 0)
+    {
+        return false;
+    }
+    char *norm = lowercase ? html_view_dump_strdup_lower_range(key, len)
+                           : html_view_dump_strdup_range(key, len);
+    if (!norm)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < *count; ++i)
+    {
+        if (strcmp((*items)[i].key, norm) == 0)
+        {
+            (*items)[i].count++;
+            free(norm);
+            return true;
+        }
+    }
+    if (*count == *cap)
+    {
+        size_t new_cap = *cap ? (*cap * 2u) : 32u;
+        html_view_dump_count_t *next = (html_view_dump_count_t *)realloc(*items,
+                                                                         new_cap * sizeof(*next));
+        if (!next)
+        {
+            free(norm);
+            return false;
+        }
+        *items = next;
+        *cap = new_cap;
+    }
+    (*items)[*count].key = norm;
+    (*items)[*count].count = 1;
+    (*count)++;
+    return true;
+}
+
+static void html_view_dump_count_free(html_view_dump_count_t *items, size_t count)
+{
+    if (!items)
+    {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        free(items[i].key);
+    }
+    free(items);
+}
+
+static int html_view_dump_count_cmp_desc(const void *a, const void *b)
+{
+    const html_view_dump_count_t *lhs = (const html_view_dump_count_t *)a;
+    const html_view_dump_count_t *rhs = (const html_view_dump_count_t *)b;
+    if (lhs->count != rhs->count)
+    {
+        return (rhs->count > lhs->count) - (rhs->count < lhs->count);
+    }
+    return strcmp(lhs->key ? lhs->key : "", rhs->key ? rhs->key : "");
+}
+
+static bool html_view_dump_attr_name_is(const char *name, const char *expected)
+{
+    if (!name || !expected)
+    {
+        return false;
+    }
+    while (*name && *expected)
+    {
+        if (tolower((unsigned char)*name) != tolower((unsigned char)*expected))
+        {
+            return false;
+        }
+        ++name;
+        ++expected;
+    }
+    return *name == '\0' && *expected == '\0';
+}
+
+static void html_view_dump_dom_summary(const html_node_t *root)
+{
+    if (!root)
+    {
+        serial_printf("[html_view][summary] empty document");
+        return;
+    }
+
+    size_t cap = 256;
+    size_t count = 0;
+    const html_node_t **stack = (const html_node_t **)malloc(cap * sizeof(*stack));
+    if (!stack)
+    {
+        return;
+    }
+    stack[count++] = root;
+
+    size_t total_nodes = 0;
+    size_t element_nodes = 0;
+    size_t text_nodes = 0;
+    size_t other_nodes = 0;
+
+    html_view_dump_count_t *tag_counts = NULL;
+    size_t tag_count = 0;
+    size_t tag_cap = 0;
+    html_view_dump_count_t *class_counts = NULL;
+    size_t class_count = 0;
+    size_t class_cap = 0;
+    html_view_dump_count_t *id_counts = NULL;
+    size_t id_count = 0;
+    size_t id_cap = 0;
+
+    while (count > 0)
+    {
+        const html_node_t *node = stack[--count];
+        if (!node)
+        {
+            continue;
+        }
+        total_nodes++;
+        if (node->type == HTML_NODE_ELEMENT)
+        {
+            element_nodes++;
+            if (node->name && node->name[0] != '\0')
+            {
+                html_view_dump_count_add(&tag_counts,
+                                         &tag_count,
+                                         &tag_cap,
+                                         node->name,
+                                         strlen(node->name),
+                                         true);
+            }
+
+            for (const html_attr_t *attr = node->attrs; attr; attr = attr->next)
+            {
+                if (!attr->name || !attr->value)
+                {
+                    continue;
+                }
+                if (html_view_dump_attr_name_is(attr->name, "id"))
+                {
+                    size_t len = strlen(attr->value);
+                    if (len > 0)
+                    {
+                        html_view_dump_count_add(&id_counts,
+                                                 &id_count,
+                                                 &id_cap,
+                                                 attr->value,
+                                                 len,
+                                                 false);
+                    }
+                }
+                else if (html_view_dump_attr_name_is(attr->name, "class"))
+                {
+                    const char *p = attr->value;
+                    while (*p)
+                    {
+                        while (*p && isspace((unsigned char)*p))
+                        {
+                            ++p;
+                        }
+                        const char *start = p;
+                        while (*p && !isspace((unsigned char)*p))
+                        {
+                            ++p;
+                        }
+                        size_t len = (size_t)(p - start);
+                        if (len > 0)
+                        {
+                            html_view_dump_count_add(&class_counts,
+                                                     &class_count,
+                                                     &class_cap,
+                                                     start,
+                                                     len,
+                                                     false);
+                        }
+                    }
+                }
+            }
+        }
+        else if (node->type == HTML_NODE_TEXT)
+        {
+            text_nodes++;
+        }
+        else
+        {
+            other_nodes++;
+        }
+
+        if (!node->first_child)
+        {
+            continue;
+        }
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (count >= cap)
+            {
+                size_t next_cap = cap * 2;
+                const html_node_t **next = (const html_node_t **)realloc(stack,
+                                                                         next_cap * sizeof(*next));
+                if (!next)
+                {
+                    free(stack);
+                    html_view_dump_count_free(tag_counts, tag_count);
+                    html_view_dump_count_free(class_counts, class_count);
+                    html_view_dump_count_free(id_counts, id_count);
+                    return;
+                }
+                stack = next;
+                cap = next_cap;
+            }
+            stack[count++] = child;
+        }
+    }
+
+    qsort(tag_counts, tag_count, sizeof(*tag_counts), html_view_dump_count_cmp_desc);
+    qsort(class_counts, class_count, sizeof(*class_counts), html_view_dump_count_cmp_desc);
+    qsort(id_counts, id_count, sizeof(*id_counts), html_view_dump_count_cmp_desc);
+
+    serial_printf("[html_view][summary] nodes=%zu elements=%zu text=%zu other=%zu",
+                  total_nodes,
+                  element_nodes,
+                  text_nodes,
+                  other_nodes);
+    serial_printf("[html_view][summary] unique tags=%zu classes=%zu ids=%zu",
+                  tag_count,
+                  class_count,
+                  id_count);
+
+    size_t tag_limit = tag_count < 20 ? tag_count : 20;
+    for (size_t i = 0; i < tag_limit; ++i)
+    {
+        serial_printf("[html_view][summary] tag %s=%zu", tag_counts[i].key, tag_counts[i].count);
+    }
+
+    size_t class_limit = class_count < 50 ? class_count : 50;
+    for (size_t i = 0; i < class_limit; ++i)
+    {
+        serial_printf("[html_view][summary] class %s=%zu", class_counts[i].key, class_counts[i].count);
+    }
+
+    size_t id_limit = id_count < 20 ? id_count : 20;
+    for (size_t i = 0; i < id_limit; ++i)
+    {
+        serial_printf("[html_view][summary] id %s=%zu", id_counts[i].key, id_counts[i].count);
+    }
+
+    free(stack);
+    html_view_dump_count_free(tag_counts, tag_count);
+    html_view_dump_count_free(class_counts, class_count);
+    html_view_dump_count_free(id_counts, id_count);
+}
+
 static void html_view_dump_node_line(const html_node_t *node,
                                      const css_style_t *style,
                                      bool has_style,
@@ -927,6 +1240,7 @@ static void host_html_view_dump_dom(const html_node_t *root, const css_styleshee
     }
     serial_printf("[html_view] dump begin view=%p", tag);
     html_view_dump_tree(root, sheet);
+    html_view_dump_dom_summary(root);
     serial_printf("[html_view] dump end view=%p", tag);
 }
 
@@ -5127,6 +5441,34 @@ static bool test_stackoverflow_render(void)
         return false;
     }
 
+    time_t run_ts = time(NULL);
+    bool have_test_out = ensure_test_out_dir();
+    FILE *log_fp = NULL;
+    bool close_log = false;
+    if (have_test_out)
+    {
+        char log_path[128];
+        snprintf(log_path, sizeof(log_path), "test-out/stackoverflow-debug-%lld.log", (long long)run_ts);
+        log_fp = fopen(log_path, "w");
+        if (!log_fp)
+        {
+            printf("html_view_host_test: stackoverflow failed to open %s\n", log_path);
+        }
+    }
+    else
+    {
+        printf("html_view_host_test: stackoverflow failed to create test-out\n");
+    }
+    if (log_fp)
+    {
+        g_serial_log = log_fp;
+        close_log = true;
+    }
+    else
+    {
+        g_serial_log = stdout;
+    }
+
     char *css = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
@@ -5151,6 +5493,8 @@ static bool test_stackoverflow_render(void)
                               &stats,
                               NULL,
                               NULL);
+
+    host_html_view_dump_dom(doc->root, sheet, doc);
 
     if (g_html_trace_enabled)
     {
@@ -5185,6 +5529,14 @@ static bool test_stackoverflow_render(void)
     {
         printf("html_view_host_test: stackoverflow cleanup end\n");
         fflush(stdout);
+    }
+    if (g_serial_log)
+    {
+        if (close_log)
+        {
+            fclose(g_serial_log);
+        }
+        g_serial_log = NULL;
     }
     return ok;
 }

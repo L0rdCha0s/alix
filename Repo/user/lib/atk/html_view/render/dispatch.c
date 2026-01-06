@@ -113,9 +113,18 @@ static void html_view_render_node_with_style(html_view_ctx_t *ctx,
         ctx->text_align_mode = style->text_align;
     }
 
+    bool saved_draw = ctx->draw;
+    bool saved_record = ctx->record;
+
     if (style->has_display && style->display == CSS_DISPLAY_NONE)
     {
         goto out;
+    }
+
+    if (style->has_opacity && style->opacity_milli <= 0)
+    {
+        ctx->draw = false;
+        ctx->record = false;
     }
 
     html_view_font_scope_push(ctx, style, block, &font_scope);
@@ -168,6 +177,8 @@ static void html_view_render_node_with_style(html_view_ctx_t *ctx,
 out:
     ctx->z_index = saved_z;
     ctx->text_align_mode = saved_align;
+    ctx->draw = saved_draw;
+    ctx->record = saved_record;
     if (font_pushed)
     {
         html_view_font_scope_pop(ctx, &font_scope);
@@ -376,9 +387,18 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
         ctx->text_align_mode = style->text_align;
     }
 
+    bool saved_draw = ctx->draw;
+    bool saved_record = ctx->record;
+
     if (style->has_display && style->display == CSS_DISPLAY_NONE)
     {
         goto out;
+    }
+
+    if (style->has_opacity && style->opacity_milli <= 0)
+    {
+        ctx->draw = false;
+        ctx->record = false;
     }
 
     html_view_font_scope_push(ctx, style, block, &font_scope);
@@ -474,6 +494,8 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
 out:
     ctx->z_index = saved_z;
     ctx->text_align_mode = saved_align;
+    ctx->draw = saved_draw;
+    ctx->record = saved_record;
     if (font_pushed)
     {
         html_view_font_scope_pop(ctx, &font_scope);

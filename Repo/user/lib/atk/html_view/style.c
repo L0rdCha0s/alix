@@ -7571,9 +7571,27 @@ static html_view_rule_bucket_t *html_view_rule_index_get_bucket_list(html_view_r
         return NULL;
     }
 
-    html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(*buckets, *bucket_count, key, len);
+    char *norm_key = NULL;
+    const char *lookup_key = key;
+    size_t lookup_len = len;
+    if (unescape)
+    {
+        norm_key = html_view_strdup_lower_unescaped_range(key, len);
+        if (!norm_key)
+        {
+            return NULL;
+        }
+        lookup_key = norm_key;
+        lookup_len = strlen(norm_key);
+    }
+
+    html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(*buckets,
+                                                                            *bucket_count,
+                                                                            lookup_key,
+                                                                            lookup_len);
     if (bucket)
     {
+        free(norm_key);
         return bucket;
     }
 
@@ -7590,11 +7608,19 @@ static html_view_rule_bucket_t *html_view_rule_index_get_bucket_list(html_view_r
         *bucket_cap = new_cap;
     }
 
-    char *key_copy = unescape
-        ? html_view_strdup_lower_unescaped_range(key, len)
-        : html_view_strdup_lower_range(key, len);
+    char *key_copy = NULL;
+    if (unescape)
+    {
+        key_copy = norm_key;
+        norm_key = NULL;
+    }
+    else
+    {
+        key_copy = html_view_strdup_lower_range(key, len);
+    }
     if (!key_copy)
     {
+        free(norm_key);
         return NULL;
     }
 
@@ -7602,6 +7628,7 @@ static html_view_rule_bucket_t *html_view_rule_index_get_bucket_list(html_view_r
     memset(bucket, 0, sizeof(*bucket));
     bucket->tag = key_copy;
     bucket->tag_len = strlen(key_copy);
+    free(norm_key);
     return bucket;
 }
 
