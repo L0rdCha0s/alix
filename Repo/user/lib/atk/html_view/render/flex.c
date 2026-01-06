@@ -1,5 +1,9 @@
 #include "atk/html_view/render/render_internal.h"
 
+#include "ctype.h"
+#include "serial.h"
+#include "string.h"
+
 typedef struct
 {
     const html_node_t *node;
@@ -201,6 +205,7 @@ static void html_view_measure_node_size(const html_view_ctx_t *ctx,
                                         const html_node_t *node,
                                         const css_style_t *parent_style,
                                         int max_w,
+                                        bool shrink_to_fit,
                                         int *out_w,
                                         int *out_h)
 {
@@ -228,6 +233,7 @@ static void html_view_measure_node_size(const html_view_ctx_t *ctx,
     measure.underline_run_active = false;
     measure.underline_run_start_x = 0;
     measure.list_level = 0;
+    measure.measure_shrink = shrink_to_fit;
     measure.measure_max_x = measure.x;
     measure.space_w = html_view_text_width(&measure, " ");
     if (parent_style)
@@ -268,6 +274,43 @@ static void html_view_flex_update_sizes(html_view_flex_item_t *item, bool row)
     item->main_border = row ? item->border_box_w : item->border_box_h;
     item->main_outer = row ? item->outer_w : item->outer_h;
     item->cross_outer = row ? item->outer_h : item->outer_w;
+}
+
+static bool html_view_attr_has_class(const html_node_t *node, const char *token)
+{
+    if (!node || !token || !*token)
+    {
+        return false;
+    }
+    const char *classes = html_attr_get(node, "class");
+    if (!classes || !*classes)
+    {
+        return false;
+    }
+    size_t token_len = strlen(token);
+    const char *p = classes;
+    while (*p)
+    {
+        while (*p && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == token_len && strncmp(start, token, len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void html_view_render_flex_container(html_view_ctx_t *ctx,
@@ -654,7 +697,8 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             if (need_measure)
             {
                 int max_w = layout_main > 0 ? layout_main : ctx->body_w;
-                html_view_measure_node_size(ctx, child, style, max_w, &measured_w, &measured_h);
+                bool shrink_to_fit = row && !main_explicit_item;
+                html_view_measure_node_size(ctx, child, style, max_w, shrink_to_fit, &measured_w, &measured_h);
             }
 
             if (row)
@@ -889,12 +933,23 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     {
         if (row)
         {
-            flex_main = inline_container ? max_line_main : layout_main;
+            if (inline_container || ctx->measure_shrink)
+            {
+                flex_main = max_line_main;
+            }
+            else
+            {
+                flex_main = layout_main;
+            }
         }
         else
         {
             flex_main = max_line_main;
         }
+    }
+    if (ctx->measure_shrink && layout_main > 0 && flex_main > layout_main)
+    {
+        flex_main = layout_main;
     }
 
     for (size_t li = 0; li < line_count; ++li)
@@ -1133,6 +1188,43 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                 cross_offset = free_cross / 2;
             }
             item->pos_cross = cross_offset + (row ? item->margin_top : item->margin_left);
+        }
+    }
+
+    static bool logged_summary = false;
+    if (!logged_summary && html_view_attr_has_class(node, "s-post-summary"))
+    {
+        logged_summary = true;
+        serial_printf("[html_view][so-flex] layout_main=%d flex_main=%d content_main=%d body_w=%d items=%zu lines=%zu",
+                      layout_main,
+                      flex_main,
+                      content_main,
+                      ctx->body_w,
+                      item_count,
+                      line_count);
+        for (size_t i = 0; i < item_count; ++i)
+        {
+            const html_view_flex_item_t *item = &items[i];
+            const char *label = NULL;
+            if (html_view_attr_has_class(item->node, "s-post-summary--stats"))
+            {
+                label = "stats";
+            }
+            else if (html_view_attr_has_class(item->node, "s-post-summary--content"))
+            {
+                label = "content";
+            }
+            if (!label)
+            {
+                continue;
+            }
+            serial_printf("[html_view][so-flex] item=%s pos_main=%d main_outer=%d content_w=%d margin_l=%d margin_r=%d",
+                          label,
+                          item->pos_main,
+                          item->main_outer,
+                          item->content_w,
+                          item->margin_left,
+                          item->margin_right);
         }
     }
 
