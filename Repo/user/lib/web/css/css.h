@@ -192,6 +192,9 @@ typedef struct css_var_entry
 {
     char *name;
     char *value;
+    uint32_t name_hash;
+    uint32_t name_len;
+    uint32_t value_len;
 } css_var_entry_t;
 
 typedef struct css_var_map
@@ -199,6 +202,9 @@ typedef struct css_var_map
     css_var_entry_t *items;
     size_t count;
     size_t cap;
+    uint32_t *slots;
+    size_t slot_cap;
+    bool shared;
 } css_var_map_t;
 
 typedef struct

@@ -354,9 +354,9 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
         {
             css_var_map_set(&dst->custom_props,
                             src->custom_props.items[i].name,
-                            src->custom_props.items[i].name + strlen(src->custom_props.items[i].name),
+                            src->custom_props.items[i].name + src->custom_props.items[i].name_len,
                             src->custom_props.items[i].value,
-                            src->custom_props.items[i].value + strlen(src->custom_props.items[i].value),
+                            src->custom_props.items[i].value + src->custom_props.items[i].value_len,
                             true);
         }
     }

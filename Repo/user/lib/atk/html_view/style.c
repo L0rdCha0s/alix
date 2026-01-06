@@ -152,15 +152,8 @@ static void html_view_style_inherit_from_parent(css_style_t *out, const css_styl
     }
     if (parent->custom_props.count > 0)
     {
-        for (size_t i = 0; i < parent->custom_props.count; ++i)
-        {
-            css_var_map_set(&out->custom_props,
-                            parent->custom_props.items[i].name,
-                            parent->custom_props.items[i].name + strlen(parent->custom_props.items[i].name),
-                            parent->custom_props.items[i].value,
-                            parent->custom_props.items[i].value + strlen(parent->custom_props.items[i].value),
-                            true);
-        }
+        out->custom_props = parent->custom_props;
+        out->custom_props.shared = true;
     }
 }
 

@@ -308,32 +308,146 @@ static char *css_strdup_range(const char *start, const char *end)
     return out;
 }
 
+static uint32_t css_var_hash_range(const char *start, const char *end)
+{
+    uint32_t hash = 2166136261u;
+    if (!start || !end || end <= start)
+    {
+        return hash;
+    }
+    for (const char *p = start; p < end; ++p)
+    {
+        hash ^= (uint8_t)(*p);
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static void css_var_map_slots_free(css_var_map_t *map)
+{
+    if (!map || !map->slots)
+    {
+        return;
+    }
+    free(map->slots);
+    map->slots = NULL;
+    map->slot_cap = 0;
+}
+
+static bool css_var_map_rebuild_index(css_var_map_t *map)
+{
+    if (!map || map->shared)
+    {
+        return false;
+    }
+    if (map->count < 8)
+    {
+        css_var_map_slots_free(map);
+        return true;
+    }
+
+    size_t cap = 16;
+    while (cap < map->count * 2u)
+    {
+        cap <<= 1;
+    }
+
+    uint32_t *slots = (uint32_t *)calloc(cap, sizeof(*slots));
+    if (!slots)
+    {
+        return false;
+    }
+
+    size_t mask = cap - 1u;
+    for (size_t i = 0; i < map->count; ++i)
+    {
+        const css_var_entry_t *entry = &map->items[i];
+        if (!entry->name || entry->name_len == 0)
+        {
+            continue;
+        }
+        size_t idx = (size_t)entry->name_hash & mask;
+        while (slots[idx] != 0u)
+        {
+            idx = (idx + 1u) & mask;
+        }
+        slots[idx] = (uint32_t)(i + 1u);
+    }
+
+    css_var_map_slots_free(map);
+    map->slots = slots;
+    map->slot_cap = cap;
+    return true;
+}
+
+static void css_var_map_slot_insert(css_var_map_t *map, size_t entry_index)
+{
+    if (!map || !map->slots || map->slot_cap == 0 || map->shared)
+    {
+        return;
+    }
+    size_t mask = map->slot_cap - 1u;
+    size_t idx = (size_t)map->items[entry_index].name_hash & mask;
+    while (map->slots[idx] != 0u)
+    {
+        idx = (idx + 1u) & mask;
+    }
+    map->slots[idx] = (uint32_t)(entry_index + 1u);
+}
+
 void css_var_map_free(css_var_map_t *map)
 {
     if (!map)
     {
         return;
     }
-    for (size_t i = 0; i < map->count; ++i)
+    if (!map->shared)
     {
-        free(map->items[i].name);
-        free(map->items[i].value);
+        for (size_t i = 0; i < map->count; ++i)
+        {
+            free(map->items[i].name);
+            free(map->items[i].value);
+        }
+        free(map->items);
+        css_var_map_slots_free(map);
     }
-    free(map->items);
     map->items = NULL;
     map->count = 0;
     map->cap = 0;
+    map->slots = NULL;
+    map->slot_cap = 0;
+    map->shared = false;
 }
 
-static const css_var_entry_t *css_var_map_find(const css_var_map_t *map,
-                                               const char *name_start,
-                                               const char *name_end)
+static const css_var_entry_t *css_var_map_find_hash(const css_var_map_t *map,
+                                                    const char *name_start,
+                                                    size_t name_len,
+                                                    uint32_t name_hash)
 {
-    if (!map || !name_start || !name_end || name_end <= name_start)
+    if (!map || !name_start || name_len == 0)
     {
         return NULL;
     }
-    size_t name_len = (size_t)(name_end - name_start);
+    if (map->slots && map->slot_cap > 0)
+    {
+        size_t mask = map->slot_cap - 1u;
+        size_t idx = (size_t)name_hash & mask;
+        while (true)
+        {
+            uint32_t slot = map->slots[idx];
+            if (slot == 0u)
+            {
+                return NULL;
+            }
+            const css_var_entry_t *entry = &map->items[slot - 1u];
+            if (entry->name_hash == name_hash && entry->name_len == name_len &&
+                entry->name && memcmp(entry->name, name_start, name_len) == 0)
+            {
+                return entry;
+            }
+            idx = (idx + 1u) & mask;
+        }
+    }
     for (size_t i = 0; i < map->count; ++i)
     {
         const css_var_entry_t *entry = &map->items[i];
@@ -341,13 +455,85 @@ static const css_var_entry_t *css_var_map_find(const css_var_map_t *map,
         {
             continue;
         }
-        if (strlen(entry->name) == name_len &&
-            strncmp(entry->name, name_start, name_len) == 0)
+        if (entry->name_hash == name_hash && entry->name_len == name_len &&
+            memcmp(entry->name, name_start, name_len) == 0)
         {
             return entry;
         }
     }
     return NULL;
+}
+
+static bool css_var_map_detach(css_var_map_t *map)
+{
+    if (!map || !map->shared)
+    {
+        return true;
+    }
+    if (map->count == 0)
+    {
+        map->items = NULL;
+        map->cap = 0;
+        map->slots = NULL;
+        map->slot_cap = 0;
+        map->shared = false;
+        return true;
+    }
+
+    css_var_entry_t *items = (css_var_entry_t *)calloc(map->count, sizeof(*items));
+    if (!items)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < map->count; ++i)
+    {
+        const css_var_entry_t *src = &map->items[i];
+        if (src->name)
+        {
+            items[i].name = css_strdup_range(src->name, src->name + src->name_len);
+            if (!items[i].name)
+            {
+                css_var_map_t cleanup = {
+                    .items = items,
+                    .count = i,
+                    .cap = map->count,
+                    .slots = NULL,
+                    .slot_cap = 0,
+                    .shared = false,
+                };
+                css_var_map_free(&cleanup);
+                return false;
+            }
+        }
+        if (src->value)
+        {
+            items[i].value = css_strdup_range(src->value, src->value + src->value_len);
+            if (!items[i].value)
+            {
+                css_var_map_t cleanup = {
+                    .items = items,
+                    .count = i + 1,
+                    .cap = map->count,
+                    .slots = NULL,
+                    .slot_cap = 0,
+                    .shared = false,
+                };
+                css_var_map_free(&cleanup);
+                return false;
+            }
+        }
+        items[i].name_hash = src->name_hash;
+        items[i].name_len = src->name_len;
+        items[i].value_len = src->value_len;
+    }
+
+    map->items = items;
+    map->cap = map->count;
+    map->slots = NULL;
+    map->slot_cap = 0;
+    map->shared = false;
+    return true;
 }
 
 bool css_var_map_set(css_var_map_t *map,
@@ -368,10 +554,28 @@ bool css_var_map_set(css_var_map_t *map,
         return false;
     }
 
-    const css_var_entry_t *existing = css_var_map_find(map, name_start, name_end);
+    size_t name_len = (size_t)(name_end - name_start);
+    size_t value_len = 0;
+    if (value_start && value_end && value_end > value_start)
+    {
+        value_len = (size_t)(value_end - value_start);
+    }
+    uint32_t name_hash = css_var_hash_range(name_start, name_end);
+    const css_var_entry_t *existing = css_var_map_find_hash(map, name_start, name_len, name_hash);
     if (existing && !allow_override)
     {
         return true;
+    }
+
+    bool detached = false;
+    if (map->shared)
+    {
+        if (!css_var_map_detach(map))
+        {
+            return false;
+        }
+        detached = true;
+        existing = css_var_map_find_hash(map, name_start, name_len, name_hash);
     }
 
     if (existing)
@@ -383,8 +587,8 @@ bool css_var_map_set(css_var_map_t *map,
             {
                 continue;
             }
-            if ((size_t)(name_end - name_start) == strlen(entry->name) &&
-                strncmp(entry->name, name_start, (size_t)(name_end - name_start)) == 0)
+            if (entry->name_len == name_len &&
+                memcmp(entry->name, name_start, name_len) == 0)
             {
                 char *value_dup = css_strdup_range(value_start, value_end);
                 if (!value_dup && value_start && value_end && value_end > value_start)
@@ -393,6 +597,11 @@ bool css_var_map_set(css_var_map_t *map,
                 }
                 free(entry->value);
                 entry->value = value_dup;
+                entry->value_len = (uint32_t)value_len;
+                if (detached && map->count >= 8)
+                {
+                    (void)css_var_map_rebuild_index(map);
+                }
                 return true;
             }
         }
@@ -425,7 +634,24 @@ bool css_var_map_set(css_var_map_t *map,
     map->items[map->count++] = (css_var_entry_t){
         .name = name_dup,
         .value = value_dup,
+        .name_hash = name_hash,
+        .name_len = (uint32_t)name_len,
+        .value_len = (uint32_t)value_len,
     };
+    if (map->count >= 8)
+    {
+        if (!map->slots || map->count * 2u >= map->slot_cap)
+        {
+            if (!css_var_map_rebuild_index(map))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            css_var_map_slot_insert(map, map->count - 1u);
+        }
+    }
     return true;
 }
 
@@ -435,10 +661,16 @@ const char *css_var_map_lookup(const css_var_map_t *map,
                                       const char *name_end,
                                       size_t *out_len)
 {
-    const css_var_entry_t *entry = css_var_map_find(map, name_start, name_end);
+    size_t name_len = 0;
+    if (name_start && name_end && name_end > name_start)
+    {
+        name_len = (size_t)(name_end - name_start);
+    }
+    uint32_t name_hash = css_var_hash_range(name_start, name_end);
+    const css_var_entry_t *entry = css_var_map_find_hash(map, name_start, name_len, name_hash);
     if (!entry)
     {
-        entry = css_var_map_find(fallback_map, name_start, name_end);
+        entry = css_var_map_find_hash(fallback_map, name_start, name_len, name_hash);
     }
     if (!entry || !entry->value)
     {
@@ -446,7 +678,7 @@ const char *css_var_map_lookup(const css_var_map_t *map,
     }
     if (out_len)
     {
-        *out_len = strlen(entry->value);
+        *out_len = entry->value_len;
     }
     return entry->value;
 }
@@ -773,15 +1005,15 @@ static bool css_append_rule(css_stylesheet_t *sheet,
         {
             css_var_map_set(&rule->custom_props,
                             custom_props->items[i].name,
-                            custom_props->items[i].name + strlen(custom_props->items[i].name),
+                            custom_props->items[i].name + custom_props->items[i].name_len,
                             custom_props->items[i].value,
-                            custom_props->items[i].value + strlen(custom_props->items[i].value),
+                            custom_props->items[i].value + custom_props->items[i].value_len,
                             true);
             css_var_map_set(&rule->style.custom_props,
                             custom_props->items[i].name,
-                            custom_props->items[i].name + strlen(custom_props->items[i].name),
+                            custom_props->items[i].name + custom_props->items[i].name_len,
                             custom_props->items[i].value,
-                            custom_props->items[i].value + strlen(custom_props->items[i].value),
+                            custom_props->items[i].value + custom_props->items[i].value_len,
                             true);
         }
     }
@@ -848,15 +1080,15 @@ static bool css_append_rule(css_stylesheet_t *sheet,
         {
             css_var_map_set(&rule->important_custom_props,
                             important_custom_props->items[i].name,
-                            important_custom_props->items[i].name + strlen(important_custom_props->items[i].name),
+                            important_custom_props->items[i].name + important_custom_props->items[i].name_len,
                             important_custom_props->items[i].value,
-                            important_custom_props->items[i].value + strlen(important_custom_props->items[i].value),
+                            important_custom_props->items[i].value + important_custom_props->items[i].value_len,
                             true);
             css_var_map_set(&rule->important_style.custom_props,
                             important_custom_props->items[i].name,
-                            important_custom_props->items[i].name + strlen(important_custom_props->items[i].name),
+                            important_custom_props->items[i].name + important_custom_props->items[i].name_len,
                             important_custom_props->items[i].value,
-                            important_custom_props->items[i].value + strlen(important_custom_props->items[i].value),
+                            important_custom_props->items[i].value + important_custom_props->items[i].value_len,
                             true);
         }
     }
