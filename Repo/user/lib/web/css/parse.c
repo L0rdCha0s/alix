@@ -1228,7 +1228,10 @@ static bool css_media_query_list_matches(const char *start,
     return false;
 }
 
-static const char *css_scan_to_block_or_semicolon(const char *p, const char *end, bool *out_block)
+static const char *css_scan_to_block_internal(const char *p,
+                                              const char *end,
+                                              bool *out_block,
+                                              bool stop_at_semicolon)
 {
     if (out_block)
     {
@@ -1319,7 +1322,7 @@ static const char *css_scan_to_block_or_semicolon(const char *p, const char *end
                 }
                 return p;
             }
-            if (c == ';')
+            if (stop_at_semicolon && c == ';')
             {
                 if (out_block)
                 {
@@ -1331,6 +1334,16 @@ static const char *css_scan_to_block_or_semicolon(const char *p, const char *end
         ++p;
     }
     return p;
+}
+
+static const char *css_scan_to_block_or_semicolon(const char *p, const char *end, bool *out_block)
+{
+    return css_scan_to_block_internal(p, end, out_block, true);
+}
+
+static const char *css_scan_to_block(const char *p, const char *end, bool *out_block)
+{
+    return css_scan_to_block_internal(p, end, out_block, false);
 }
 
 static void css_skip_block_range(const char **p, const char *end)
@@ -2057,7 +2070,7 @@ static bool css_parse_rules(css_stylesheet_t *sheet,
 
         const char *sel_start = *p;
         bool has_block = false;
-        const char *mark = css_scan_to_block_or_semicolon(sel_start, end, &has_block);
+        const char *mark = css_scan_to_block(sel_start, end, &has_block);
         if (!has_block)
         {
             if (mark < end && *mark == ';')
