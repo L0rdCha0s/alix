@@ -238,34 +238,7 @@ static char *css_strdup(const char *s)
     return out;
 }
 
-typedef struct css_decl
-{
-    const char *prop_start;
-    const char *prop_end;
-    const char *val_start;
-    const char *val_end;
-    bool important;
-} css_decl_t;
 
-typedef struct css_decl_list
-{
-    css_decl_t *items;
-    size_t count;
-    size_t cap;
-} css_decl_list_t;
-
-typedef struct css_var_entry
-{
-    char *name;
-    char *value;
-} css_var_entry_t;
-
-typedef struct css_var_map
-{
-    css_var_entry_t *items;
-    size_t count;
-    size_t cap;
-} css_var_map_t;
 
 typedef struct css_dynstr
 {
@@ -274,10 +247,10 @@ typedef struct css_dynstr
     size_t cap;
 } css_dynstr_t;
 
-static bool css_decl_list_push(css_decl_list_t *list,
-                               const char *prop_start,
-                               const char *prop_end,
-                               const char *val_start,
+bool css_decl_list_push(css_decl_list_t *list,
+                        const char *prop_start,
+                        const char *prop_end,
+                        const char *val_start,
                                const char *val_end,
                                bool important)
 {
@@ -306,7 +279,7 @@ static bool css_decl_list_push(css_decl_list_t *list,
     return true;
 }
 
-static void css_decl_list_free(css_decl_list_t *list)
+void css_decl_list_free(css_decl_list_t *list)
 {
     if (!list)
     {
@@ -335,7 +308,7 @@ static char *css_strdup_range(const char *start, const char *end)
     return out;
 }
 
-static void css_var_map_free(css_var_map_t *map)
+void css_var_map_free(css_var_map_t *map)
 {
     if (!map)
     {
@@ -377,7 +350,7 @@ static const css_var_entry_t *css_var_map_find(const css_var_map_t *map,
     return NULL;
 }
 
-static bool css_var_map_set(css_var_map_t *map,
+bool css_var_map_set(css_var_map_t *map,
                             const char *name_start,
                             const char *name_end,
                             const char *value_start,
@@ -456,16 +429,16 @@ static bool css_var_map_set(css_var_map_t *map,
     return true;
 }
 
-static const char *css_var_map_lookup(const css_var_map_t *local,
-                                      const css_var_map_t *global,
+const char *css_var_map_lookup(const css_var_map_t *map,
+                                      const css_var_map_t *fallback_map,
                                       const char *name_start,
                                       const char *name_end,
                                       size_t *out_len)
 {
-    const css_var_entry_t *entry = css_var_map_find(local, name_start, name_end);
+    const css_var_entry_t *entry = css_var_map_find(map, name_start, name_end);
     if (!entry)
     {
-        entry = css_var_map_find(global, name_start, name_end);
+        entry = css_var_map_find(fallback_map, name_start, name_end);
     }
     if (!entry || !entry->value)
     {
@@ -505,7 +478,7 @@ static bool css_dynstr_append(css_dynstr_t *out, const char *data, size_t len)
     return true;
 }
 
-static bool css_value_has_var(const char *start, const char *end)
+bool css_value_has_var(const char *start, const char *end)
 {
     if (!start || !end || end <= start)
     {
@@ -568,27 +541,27 @@ static bool css_value_has_var(const char *start, const char *end)
     return false;
 }
 
-static char *css_expand_vars_range(const char *start,
-                                   const char *end,
-                                   const css_var_map_t *global,
-                                   const css_var_map_t *local,
-                                   int depth)
+char *css_expand_vars_range(const char *val_start,
+                            const char *val_end,
+                            const css_var_map_t *global_vars,
+                            const css_var_map_t *local_vars,
+                            int depth)
 {
-    if (!start || !end || end <= start)
+    if (!val_start || !val_end || val_end <= val_start)
     {
         return NULL;
     }
     if (depth > 8)
     {
-        return css_strdup_range(start, end);
+        return css_strdup_range(val_start, val_end);
     }
 
     css_dynstr_t out = {0};
-    const char *p = start;
-    while (p < end)
+    const char *p = val_start;
+    while (p < val_end)
     {
         char c = *p;
-        if ((end - p) >= 4 && (c == 'v' || c == 'V') &&
+        if ((val_end - p) >= 4 && (c == 'v' || c == 'V') &&
             (p[1] == 'a' || p[1] == 'A') &&
             (p[2] == 'r' || p[2] == 'R') && p[3] == '(')
         {
@@ -599,7 +572,7 @@ static char *css_expand_vars_range(const char *start,
             bool escape = false;
             int paren_depth = 1;
             const char *comma = NULL;
-            while (scan < end)
+            while (scan < val_end)
             {
                 char sc = *scan;
                 if (escape)
@@ -654,14 +627,14 @@ static char *css_expand_vars_range(const char *start,
                 ++scan;
             }
 
-            if (scan >= end || *scan != ')')
+            if (scan >= val_end || *scan != ')')
             {
-                if (!css_dynstr_append(&out, func_start, (size_t)(end - func_start)))
+                if (!css_dynstr_append(&out, func_start, (size_t)(val_end - func_start)))
                 {
                     free(out.data);
                     return NULL;
                 }
-                return out.data ? out.data : css_strdup_range(start, end);
+                return out.data ? out.data : css_strdup_range(val_start, val_end);
             }
 
             const char *args_end = scan;
@@ -678,10 +651,10 @@ static char *css_expand_vars_range(const char *start,
             }
 
             size_t value_len = 0;
-            const char *value = css_var_map_lookup(local, global, name_start, name_end, &value_len);
+            const char *value = css_var_map_lookup(local_vars, global_vars, name_start, name_end, &value_len);
             if (value)
             {
-                char *expanded = css_expand_vars_range(value, value + value_len, global, local, depth + 1);
+                char *expanded = css_expand_vars_range(value, value + value_len, global_vars, local_vars, depth + 1);
                 if (expanded)
                 {
                     bool ok = css_dynstr_append(&out, expanded, strlen(expanded));
@@ -703,7 +676,7 @@ static char *css_expand_vars_range(const char *start,
             }
             else if (fallback_start && fallback_end && fallback_end > fallback_start)
             {
-                char *expanded = css_expand_vars_range(fallback_start, fallback_end, global, local, depth + 1);
+                char *expanded = css_expand_vars_range(fallback_start, fallback_end, global_vars, local_vars, depth + 1);
                 if (expanded)
                 {
                     bool ok = css_dynstr_append(&out, expanded, strlen(expanded));
@@ -744,7 +717,7 @@ static char *css_expand_vars_range(const char *start,
         ++p;
     }
 
-    return out.data ? out.data : css_strdup_range(start, end);
+    return out.data ? out.data : css_strdup_range(val_start, val_end);
 }
 
 static bool css_var_name_is_local(const char *name_start, const char *name_end)
@@ -753,11 +726,10 @@ static bool css_var_name_is_local(const char *name_start, const char *name_end)
     {
         return false;
     }
-    if ((name_end - name_start) < 3)
-    {
-        return false;
-    }
-    return (name_start[0] == '-' && name_start[1] == '-' && name_start[2] == '_');
+    /* Treat all custom properties as potentially global/inherited.
+       The previous heuristic of treating --_ as local is removed to support
+       Stack Overflow's Stacks CSS which uses --_ for component-scoped but inherited variables. */
+    return false;
 }
 
 static bool css_append_rule(css_stylesheet_t *sheet,
@@ -765,6 +737,9 @@ static bool css_append_rule(css_stylesheet_t *sheet,
                             const char *selector_end,
                             const css_style_t *style,
                             const css_style_t *important_style,
+                            const css_var_map_t *custom_props,
+                            const css_var_map_t *important_custom_props,
+                            const css_decl_list_t *deferred_decls,
                             bool has_important)
 {
     if (!sheet || !selector_start || !selector_end || selector_end <= selector_start)
@@ -792,6 +767,54 @@ static bool css_append_rule(css_stylesheet_t *sheet,
     {
         rule->style = *style;
     }
+    if (custom_props)
+    {
+        for (size_t i = 0; i < custom_props->count; ++i)
+        {
+            css_var_map_set(&rule->custom_props,
+                            custom_props->items[i].name,
+                            custom_props->items[i].name + strlen(custom_props->items[i].name),
+                            custom_props->items[i].value,
+                            custom_props->items[i].value + strlen(custom_props->items[i].value),
+                            true);
+            css_var_map_set(&rule->style.custom_props,
+                            custom_props->items[i].name,
+                            custom_props->items[i].name + strlen(custom_props->items[i].name),
+                            custom_props->items[i].value,
+                            custom_props->items[i].value + strlen(custom_props->items[i].value),
+                            true);
+        }
+    }
+    if (deferred_decls)
+    {
+        for (size_t i = 0; i < deferred_decls->count; ++i)
+        {
+            css_decl_list_push(&rule->deferred_decls,
+                               deferred_decls->items[i].prop_start,
+                               deferred_decls->items[i].prop_end,
+                               deferred_decls->items[i].val_start,
+                               deferred_decls->items[i].val_end,
+                               deferred_decls->items[i].important);
+            if (deferred_decls->items[i].important)
+            {
+                css_decl_list_push(&rule->important_style.deferred_decls,
+                                   deferred_decls->items[i].prop_start,
+                                   deferred_decls->items[i].prop_end,
+                                   deferred_decls->items[i].val_start,
+                                   deferred_decls->items[i].val_end,
+                                   true);
+            }
+            else
+            {
+                css_decl_list_push(&rule->style.deferred_decls,
+                                   deferred_decls->items[i].prop_start,
+                                   deferred_decls->items[i].prop_end,
+                                   deferred_decls->items[i].val_start,
+                                   deferred_decls->items[i].val_end,
+                                   false);
+            }
+        }
+    }
     if (rule->style.background_image_owned && rule->style.background_image)
     {
         char *dup = css_strdup(rule->style.background_image);
@@ -818,6 +841,27 @@ static bool css_append_rule(css_stylesheet_t *sheet,
     if (important_style)
     {
         rule->important_style = *important_style;
+    }
+    if (important_custom_props)
+    {
+        for (size_t i = 0; i < important_custom_props->count; ++i)
+        {
+            css_var_map_set(&rule->important_custom_props,
+                            important_custom_props->items[i].name,
+                            important_custom_props->items[i].name + strlen(important_custom_props->items[i].name),
+                            important_custom_props->items[i].value,
+                            important_custom_props->items[i].value + strlen(important_custom_props->items[i].value),
+                            true);
+            css_var_map_set(&rule->important_style.custom_props,
+                            important_custom_props->items[i].name,
+                            important_custom_props->items[i].name + strlen(important_custom_props->items[i].name),
+                            important_custom_props->items[i].value,
+                            important_custom_props->items[i].value + strlen(important_custom_props->items[i].value),
+                            true);
+        }
+    }
+    if (important_style) // This block was originally part of the `if (important_style)` above.
+    {
         rule->has_important = has_important;
         if (rule->important_style.background_image_owned && rule->important_style.background_image)
         {
@@ -1864,6 +1908,9 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
     css_style_t style = {0};
     css_style_t important_style = {0};
     css_var_map_t local_vars = {0};
+    css_var_map_t custom_props = {0};
+    css_var_map_t important_custom_props = {0};
+    css_decl_list_t deferred_decls = {0};
     bool has_style = false;
     bool has_important = false;
 
@@ -1889,14 +1936,29 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
             if (!css_var_map_set(&local_vars, prop_start, prop_end, val_start, val_end, true))
             {
                 css_var_map_free(&local_vars);
+                css_var_map_free(&custom_props);
+                css_var_map_free(&important_custom_props);
+                css_decl_list_free(&deferred_decls);
                 css_style_release(&style);
                 return false;
             }
+            if (decl->important)
+            {
+                css_var_map_set(&important_custom_props, prop_start, prop_end, val_start, val_end, true);
+            }
+            else
+            {
+                css_var_map_set(&custom_props, prop_start, prop_end, val_start, val_end, true);
+            }
+
             if (allow_global_vars && global_vars && !css_var_name_is_local(prop_start, prop_end))
             {
                 if (!css_var_map_set(global_vars, prop_start, prop_end, val_start, val_end, false))
                 {
                     css_var_map_free(&local_vars);
+                    css_var_map_free(&custom_props);
+                    css_var_map_free(&important_custom_props);
+                    css_decl_list_free(&deferred_decls);
                     css_style_release(&style);
                     return false;
                 }
@@ -1931,7 +1993,8 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
         char *expanded = NULL;
         const char *apply_start = val_start;
         const char *apply_end = val_end;
-        if (css_value_has_var(val_start, val_end))
+        bool has_var = css_value_has_var(val_start, val_end);
+        if (has_var)
         {
             expanded = css_expand_vars_range(val_start, val_end, global_vars, &local_vars, 0);
             if (expanded)
@@ -1939,6 +2002,11 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
                 apply_start = expanded;
                 apply_end = expanded + strlen(expanded);
             }
+        }
+
+        if (css_value_has_var(apply_start, apply_end))
+        {
+            css_decl_list_push(&deferred_decls, prop_start, prop_end, val_start, val_end, decl_important);
         }
 
         if (decl_important)
@@ -1956,7 +2024,7 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
     }
 
     bool ok = true;
-    if (has_style || has_important)
+    if (has_style || has_important || custom_props.count > 0 || important_custom_props.count > 0 || deferred_decls.count > 0)
     {
         const char *cur = sel_start;
         while (cur < sel_end)
@@ -1968,6 +2036,7 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
             }
             if (!css_append_rule(sheet, cur, comma, has_style ? &style : NULL,
                                  has_important ? &important_style : NULL,
+                                 &custom_props, &important_custom_props, &deferred_decls,
                                  has_important))
             {
                 ok = false;
@@ -1978,6 +2047,9 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
     }
 
     css_var_map_free(&local_vars);
+    css_var_map_free(&custom_props);
+    css_var_map_free(&important_custom_props);
+    css_decl_list_free(&deferred_decls);
     css_style_release(&style);
     css_style_release(&important_style);
     return ok;

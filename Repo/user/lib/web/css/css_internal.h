@@ -23,6 +23,34 @@ void css_style_apply_property(css_style_t *style,
                               const char *val_end);
 void css_style_release(css_style_t *style);
 
+bool css_value_has_var(const char *start, const char *end);
+char *css_expand_vars_range(const char *val_start,
+                            const char *val_end,
+                            const css_var_map_t *global_vars,
+                            const css_var_map_t *local_vars,
+                            int depth);
+
+bool css_decl_list_push(css_decl_list_t *list,
+                        const char *prop_start,
+                        const char *prop_end,
+                        const char *val_start,
+                        const char *val_end,
+                        bool important);
+void css_decl_list_free(css_decl_list_t *list);
+
+bool css_var_map_set(css_var_map_t *map,
+                     const char *name_start,
+                     const char *name_end,
+                     const char *value_start,
+                     const char *value_end,
+                     bool allow_override);
+void css_var_map_free(css_var_map_t *map);
+const char *css_var_map_lookup(const css_var_map_t *map,
+                               const css_var_map_t *fallback_map,
+                               const char *name_start,
+                               const char *name_end,
+                               size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

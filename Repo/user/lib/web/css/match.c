@@ -348,6 +348,30 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
         dst->has_opacity = true;
         dst->opacity_milli = src->opacity_milli;
     }
+    if (src->custom_props.count > 0)
+    {
+        for (size_t i = 0; i < src->custom_props.count; ++i)
+        {
+            css_var_map_set(&dst->custom_props,
+                            src->custom_props.items[i].name,
+                            src->custom_props.items[i].name + strlen(src->custom_props.items[i].name),
+                            src->custom_props.items[i].value,
+                            src->custom_props.items[i].value + strlen(src->custom_props.items[i].value),
+                            true);
+        }
+    }
+    if (src->deferred_decls.count > 0)
+    {
+        for (size_t i = 0; i < src->deferred_decls.count; ++i)
+        {
+            css_decl_list_push(&dst->deferred_decls,
+                               src->deferred_decls.items[i].prop_start,
+                               src->deferred_decls.items[i].prop_end,
+                               src->deferred_decls.items[i].val_start,
+                               src->deferred_decls.items[i].val_end,
+                               src->deferred_decls.items[i].important);
+        }
+    }
 }
 
 bool css_rule_matches_tag(const css_rule_t *rule, const char *tag_name)

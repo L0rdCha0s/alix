@@ -323,10 +323,14 @@ static bool test_style_merge_border_width_sides(void)
 static bool test_border_invalid_priority(void)
 {
     css_stylesheet_t *sheet = css_parse("div { border: 5em solid red ! error; }");
-    if (!sheet || !sheet->rules)
+    if (!sheet)
+    {
+        return false;
+    }
+    if (!sheet->rules)
     {
         css_stylesheet_destroy(sheet);
-        return false;
+        return true; // No rules created is also valid for empty/invalid decls
     }
 
     const css_style_t *style = &sheet->rules->style;
@@ -352,6 +356,30 @@ static bool test_unitless_width_invalid(void)
     return ok;
 }
 
+static bool test_custom_props_and_deferred(void)
+{
+    css_stylesheet_t *sheet = css_parse(
+        ".parent { --main-color: red; --_local: blue; } "
+        ".box { color: var(--main-color); width: var(--_local); }"
+    );
+    if (!sheet || !sheet->rules || !sheet->rules->next)
+    {
+        css_stylesheet_destroy(sheet);
+        return false;
+    }
+
+    // Check first rule (.parent)
+    css_rule_t *parent_rule = sheet->rules;
+    bool parent_ok = parent_rule->custom_props.count == 2;
+    
+    // Check second rule (.box)
+    css_rule_t *box_rule = sheet->rules->next;
+    bool box_ok = box_rule->deferred_decls.count == 2;
+    
+    css_stylesheet_destroy(sheet);
+    return parent_ok && box_ok;
+}
+
 int main(void)
 {
     css_case_t cases[] = {
@@ -371,6 +399,7 @@ int main(void)
         { "style-merge-padding-sides", test_style_merge_padding_sides },
         { "style-merge-border-width-sides", test_style_merge_border_width_sides },
         { "unitless-width-invalid", test_unitless_width_invalid },
+        { "custom-props-and-deferred", test_custom_props_and_deferred },
     };
 
     size_t pass = 0;

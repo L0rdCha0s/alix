@@ -172,6 +172,35 @@ typedef enum
     CSS_BORDER_SIDE_COUNT
 } css_border_side_t;
 
+typedef struct css_decl
+{
+    const char *prop_start;
+    const char *prop_end;
+    const char *val_start;
+    const char *val_end;
+    bool important;
+} css_decl_t;
+
+typedef struct css_decl_list
+{
+    css_decl_t *items;
+    size_t count;
+    size_t cap;
+} css_decl_list_t;
+
+typedef struct css_var_entry
+{
+    char *name;
+    char *value;
+} css_var_entry_t;
+
+typedef struct css_var_map
+{
+    css_var_entry_t *items;
+    size_t count;
+    size_t cap;
+} css_var_map_t;
+
 typedef struct
 {
     bool has_background;
@@ -294,6 +323,8 @@ typedef struct
     css_length_t letter_spacing;
     bool has_opacity;
     int32_t opacity_milli;
+    css_var_map_t custom_props;
+    css_decl_list_t deferred_decls;
 } css_style_t;
 
 typedef struct css_selector_part
@@ -394,6 +425,9 @@ typedef struct css_rule
     char *selector;
     css_style_t style;
     css_style_t important_style;
+    css_var_map_t custom_props;
+    css_var_map_t important_custom_props;
+    css_decl_list_t deferred_decls;
     bool has_important;
     css_selector_cache_t *selector_cache;
     struct css_rule *next;

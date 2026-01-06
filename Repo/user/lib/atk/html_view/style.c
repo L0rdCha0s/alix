@@ -150,6 +150,18 @@ static void html_view_style_inherit_from_parent(css_style_t *out, const css_styl
         out->has_list_style_type = true;
         out->list_style_type = parent->list_style_type;
     }
+    if (parent->custom_props.count > 0)
+    {
+        for (size_t i = 0; i < parent->custom_props.count; ++i)
+        {
+            css_var_map_set(&out->custom_props,
+                            parent->custom_props.items[i].name,
+                            parent->custom_props.items[i].name + strlen(parent->custom_props.items[i].name),
+                            parent->custom_props.items[i].value,
+                            parent->custom_props.items[i].value + strlen(parent->custom_props.items[i].value),
+                            true);
+        }
+    }
 }
 
 static void html_view_resolve_float_inherit(css_style_t *style, const css_style_t *parent)
@@ -5205,36 +5217,6 @@ static bool html_view_selector_cache_precheck(css_rule_t *rule,
     return true;
 }
 
-static bool html_view_selector_matches_cached(css_rule_t *rule,
-                                              const html_node_t *node,
-                                              html_view_pseudo_t pseudo)
-{
-    if (!rule || !rule->selector || !node || node->type != HTML_NODE_ELEMENT)
-    {
-        return false;
-    }
-
-    css_selector_cache_t *cache = NULL;
-    bool fallback = false;
-    if (!html_view_selector_cache_precheck(rule, node, pseudo, &cache, &fallback))
-    {
-        return false;
-    }
-    if (fallback || !cache)
-    {
-        return html_view_selector_matches_internal(rule->selector, node, pseudo);
-    }
-    if (cache->self_simple)
-    {
-        return true;
-    }
-    if (cache->compiled)
-    {
-        return html_view_selector_matches_compiled(cache, rule->selector, node, pseudo);
-    }
-    return html_view_selector_matches_parts(cache->parts, cache->count, rule->selector, node, pseudo);
-}
-
 typedef struct html_view_rule_trie_node
 {
     const css_selector_compiled_part_t *part;
@@ -6200,7 +6182,7 @@ static const html_view_rule_trie_cache_entry_t *html_view_rule_trie_cache_lookup
     return entry;
 }
 
-static bool html_view_rule_trie_cache_store(html_view_rule_trie_t *trie,
+static bool html_view_rule_trie_cache_store(const html_view_rule_trie_t *trie,
                                             const html_node_t *node,
                                             html_view_pseudo_t pseudo,
                                             uint64_t hash,
@@ -8093,20 +8075,7 @@ static void html_view_style_merge_rule(css_style_t *out, const css_style_t *src)
     css_style_merge(out, src);
 }
 
-static void html_view_apply_rule(css_style_t *out,
-                                 const html_node_t *node,
-                                 html_view_pseudo_t pseudo,
-                                 css_rule_t *rule)
-{
-    if (!out || !node || !rule)
-    {
-        return;
-    }
-    if (html_view_rule_matches(rule, node, pseudo))
-    {
-        html_view_style_merge_rule(out, &rule->style);
-    }
-}
+
 
 static void html_view_apply_rule_list(css_style_t *out,
                                       const html_node_t *node,
@@ -10036,6 +10005,34 @@ void html_view_style_for_node(css_style_t *out,
     }
 }
 
+static void html_view_resolve_deferred_properties(css_style_t *style)
+{
+    if (!style || style->deferred_decls.count == 0)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < style->deferred_decls.count; ++i)
+    {
+        const css_decl_t *decl = &style->deferred_decls.items[i];
+        
+        char *expanded = css_expand_vars_range(decl->val_start,
+                                               decl->val_end,
+                                               NULL, // global_vars
+                                               &style->custom_props,
+                                               0);
+        if (expanded)
+        {
+            css_style_apply_property(style,
+                                     decl->prop_start,
+                                     decl->prop_end,
+                                     expanded,
+                                     expanded + strlen(expanded));
+            free(expanded);
+        }
+    }
+}
+
 bool html_view_style_for_pseudo(css_style_t *out,
                                 const css_stylesheet_t *sheet,
                                 const css_style_t *parent,
@@ -10089,6 +10086,8 @@ bool html_view_style_for_pseudo(css_style_t *out,
 
     html_view_resolve_float_inherit(out, parent);
     html_view_resolve_box_sizing_inherit(out, parent);
+
+    html_view_resolve_deferred_properties(out);
 
     if (priv && node && node->type == HTML_NODE_ELEMENT)
     {
