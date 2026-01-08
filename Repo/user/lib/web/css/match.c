@@ -352,25 +352,14 @@ void css_style_merge(css_style_t *dst, const css_style_t *src)
     {
         for (size_t i = 0; i < src->custom_props.count; ++i)
         {
-            css_var_map_set(&dst->custom_props,
-                            src->custom_props.items[i].name,
-                            src->custom_props.items[i].name + src->custom_props.items[i].name_len,
-                            src->custom_props.items[i].value,
-                            src->custom_props.items[i].value + src->custom_props.items[i].value_len,
-                            true);
+            css_var_map_set_entry(&dst->custom_props,
+                                  &src->custom_props.items[i],
+                                  true);
         }
     }
-    if (src->deferred_decls.count > 0)
+    if (src->deferred_props.count > 0)
     {
-        for (size_t i = 0; i < src->deferred_decls.count; ++i)
-        {
-            css_decl_list_push(&dst->deferred_decls,
-                               src->deferred_decls.items[i].prop_start,
-                               src->deferred_decls.items[i].prop_end,
-                               src->deferred_decls.items[i].val_start,
-                               src->deferred_decls.items[i].val_end,
-                               src->deferred_decls.items[i].important);
-        }
+        css_deferred_map_merge(&dst->deferred_props, &src->deferred_props);
     }
 }
 

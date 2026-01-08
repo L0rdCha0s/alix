@@ -114,6 +114,148 @@ void css_style_release(css_style_t *style)
     style->has_background_image = false;
     style->content_owned = false;
     style->has_content = false;
+    if (style->custom_env)
+    {
+        css_var_env_release(style->custom_env);
+        style->custom_env = NULL;
+    }
+    style->custom_env_local = false;
+    css_var_map_free(&style->custom_props);
+    css_deferred_map_free(&style->deferred_props);
+}
+
+static char *css_style_strdup(const char *value)
+{
+    if (!value)
+    {
+        return NULL;
+    }
+    size_t len = strlen(value);
+    char *dup = (char *)malloc(len + 1);
+    if (!dup)
+    {
+        return NULL;
+    }
+    memcpy(dup, value, len);
+    dup[len] = '\0';
+    return dup;
+}
+
+bool css_style_dup_owned_strings(css_style_t *style)
+{
+    if (!style)
+    {
+        return false;
+    }
+    if (style->background_image_owned && style->background_image)
+    {
+        char *dup = css_style_strdup(style->background_image);
+        if (!dup)
+        {
+            return false;
+        }
+        style->background_image = dup;
+    }
+    if (style->content_owned && style->content)
+    {
+        char *dup = css_style_strdup(style->content);
+        if (!dup)
+        {
+            return false;
+        }
+        style->content = dup;
+    }
+    return true;
+}
+
+bool css_style_copy(css_style_t *dst, const css_style_t *src)
+{
+    if (!dst || !src)
+    {
+        return false;
+    }
+
+    css_style_t tmp = *src;
+
+    tmp.custom_props.items = NULL;
+    tmp.custom_props.count = 0;
+    tmp.custom_props.cap = 0;
+    tmp.custom_props.slots = NULL;
+    tmp.custom_props.slot_cap = 0;
+
+    tmp.deferred_props.items = NULL;
+    tmp.deferred_props.count = 0;
+    tmp.deferred_props.cap = 0;
+    tmp.deferred_props.slots = NULL;
+    tmp.deferred_props.slot_cap = 0;
+
+    if (tmp.custom_env)
+    {
+        tmp.custom_env = css_var_env_ref(tmp.custom_env);
+    }
+
+    if (tmp.background_image_owned && tmp.background_image)
+    {
+        char *dup = css_style_strdup(tmp.background_image);
+        if (!dup)
+        {
+            css_var_env_release(tmp.custom_env);
+            return false;
+        }
+        tmp.background_image = dup;
+    }
+    if (tmp.content_owned && tmp.content)
+    {
+        char *dup = css_style_strdup(tmp.content);
+        if (!dup)
+        {
+            if (tmp.background_image_owned && tmp.background_image)
+            {
+                free((void *)tmp.background_image);
+            }
+            css_var_env_release(tmp.custom_env);
+            return false;
+        }
+        tmp.content = dup;
+    }
+
+    if (src->custom_props.count > 0)
+    {
+        if (!css_var_map_clone(&tmp.custom_props, &src->custom_props))
+        {
+            if (tmp.background_image_owned && tmp.background_image)
+            {
+                free((void *)tmp.background_image);
+            }
+            if (tmp.content_owned && tmp.content)
+            {
+                free((void *)tmp.content);
+            }
+            css_var_env_release(tmp.custom_env);
+            return false;
+        }
+    }
+
+    if (src->deferred_props.count > 0)
+    {
+        if (!css_deferred_map_clone(&tmp.deferred_props, &src->deferred_props))
+        {
+            css_var_map_free(&tmp.custom_props);
+            if (tmp.background_image_owned && tmp.background_image)
+            {
+                free((void *)tmp.background_image);
+            }
+            if (tmp.content_owned && tmp.content)
+            {
+                free((void *)tmp.content);
+            }
+            css_var_env_release(tmp.custom_env);
+            return false;
+        }
+    }
+
+    *dst = tmp;
+    return true;
 }
 
 static bool css_value_is_keyword(const char *start, const char *end, const char *keyword)

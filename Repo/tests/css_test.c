@@ -370,11 +370,11 @@ static bool test_custom_props_and_deferred(void)
 
     // Check first rule (.parent)
     css_rule_t *parent_rule = sheet->rules;
-    bool parent_ok = parent_rule->custom_props.count == 2;
+    bool parent_ok = parent_rule->style.custom_props.count == 2;
     
     // Check second rule (.box)
     css_rule_t *box_rule = sheet->rules->next;
-    bool box_ok = box_rule->deferred_decls.count == 2;
+    bool box_ok = box_rule->style.deferred_props.count == 2;
     
     css_stylesheet_destroy(sheet);
     return parent_ok && box_ok;

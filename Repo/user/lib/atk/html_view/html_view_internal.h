@@ -36,7 +36,7 @@
 #define HTML_VIEW_FONT_MAX_ROW_PIXELS 256
 #define HTML_VIEW_FONT_TEXT_GUARD 2048
 #define HTML_VIEW_FONT_MAX_PX 512
-#define HTML_VIEW_MEASURE_CACHE_MAX 2048
+#define HTML_VIEW_MEASURE_CACHE_MAX 8192
 #define HTML_VIEW_STYLE_CACHE_MAX 8192
 
 typedef struct html_view_js_script
@@ -265,9 +265,13 @@ typedef struct
     int content_w;
     int font_px;
     int line_height;
+    int origin_x;
     bool shrink;
     int out_w;
     int out_h;
+    uint32_t hash;
+    uint8_t kind;
+    bool valid;
 } html_view_measure_cache_entry_t;
 
 typedef struct
@@ -303,6 +307,7 @@ typedef struct
     html_view_measure_cache_entry_t *measure_cache;
     size_t measure_cache_count;
     size_t measure_cache_cap;
+    size_t measure_cache_mask;
     html_view_style_cache_entry_t *style_cache;
     size_t style_cache_cap;
     size_t style_cache_mask;
@@ -374,6 +379,14 @@ enum
 {
     HTML_VIEW_Z_INDEX_STRIDE = 4
 };
+
+typedef enum
+{
+    HTML_VIEW_MEASURE_KIND_BLOCK = 0,
+    HTML_VIEW_MEASURE_KIND_TABLE = 1,
+    HTML_VIEW_MEASURE_KIND_INLINE = 2,
+    HTML_VIEW_MEASURE_KIND_INLINE_BLOCK = 3,
+} html_view_measure_kind_t;
 
 typedef struct html_view_style_block
 {
@@ -788,6 +801,8 @@ bool html_view_measure_cache_lookup(atk_html_view_priv_t *priv,
                                     int font_px,
                                     int line_height,
                                     bool shrink,
+                                    int origin_x,
+                                    uint8_t kind,
                                     int *out_w,
                                     int *out_h);
 void html_view_measure_cache_store(atk_html_view_priv_t *priv,
@@ -796,6 +811,8 @@ void html_view_measure_cache_store(atk_html_view_priv_t *priv,
                                    int font_px,
                                    int line_height,
                                    bool shrink,
+                                    int origin_x,
+                                    uint8_t kind,
                                    int out_w,
                                    int out_h);
 void html_view_measure_cache_clear(atk_html_view_priv_t *priv);

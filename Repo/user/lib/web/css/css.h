@@ -9,6 +9,10 @@
 extern "C" {
 #endif
 
+typedef struct css_var_tokens css_var_tokens_t;
+typedef struct css_var_env css_var_env_t;
+struct css_alloc_node;
+
 typedef enum
 {
     CSS_UNIT_NONE = 0,
@@ -190,11 +194,12 @@ typedef struct css_decl_list
 
 typedef struct css_var_entry
 {
-    char *name;
-    char *value;
+    const char *name;
+    const char *value;
     uint32_t name_hash;
     uint32_t name_len;
     uint32_t value_len;
+    const css_var_tokens_t *tokens;
 } css_var_entry_t;
 
 typedef struct css_var_map
@@ -204,8 +209,24 @@ typedef struct css_var_map
     size_t cap;
     uint32_t *slots;
     size_t slot_cap;
-    bool shared;
 } css_var_map_t;
+
+typedef struct css_deferred_prop
+{
+    const char *prop_start;
+    uint32_t prop_len;
+    uint32_t prop_hash;
+    const css_var_tokens_t *tokens;
+} css_deferred_prop_t;
+
+typedef struct css_deferred_map
+{
+    css_deferred_prop_t *items;
+    size_t count;
+    size_t cap;
+    uint32_t *slots;
+    size_t slot_cap;
+} css_deferred_map_t;
 
 typedef struct
 {
@@ -330,7 +351,9 @@ typedef struct
     bool has_opacity;
     int32_t opacity_milli;
     css_var_map_t custom_props;
-    css_decl_list_t deferred_decls;
+    css_var_env_t *custom_env;
+    bool custom_env_local;
+    css_deferred_map_t deferred_props;
 } css_style_t;
 
 typedef struct css_selector_part
@@ -431,9 +454,6 @@ typedef struct css_rule
     char *selector;
     css_style_t style;
     css_style_t important_style;
-    css_var_map_t custom_props;
-    css_var_map_t important_custom_props;
-    css_decl_list_t deferred_decls;
     bool has_important;
     css_selector_cache_t *selector_cache;
     struct css_rule *next;
@@ -442,6 +462,11 @@ typedef struct css_rule
 typedef struct
 {
     css_rule_t *rules;
+    css_var_env_t *global_env;
+    css_var_map_t var_refs;
+    char *source;
+    size_t source_len;
+    struct css_alloc_node *allocations;
 } css_stylesheet_t;
 
 void css_media_env_set(int width_px, int height_px, css_media_color_scheme_t scheme);

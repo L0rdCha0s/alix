@@ -69,6 +69,45 @@ static bool html_view_intersect_rect_local(const atk_rect_t *a, const atk_rect_t
     return true;
 }
 
+static size_t html_view_record_rect_placeholder(html_view_ctx_t *ctx,
+                                                int x,
+                                                int y,
+                                                int w,
+                                                int h,
+                                                video_color_t color,
+                                                const atk_rect_t *clip)
+{
+    if (!ctx || !ctx->record || ctx->record_failed || !ctx->priv)
+    {
+        return (size_t)-1;
+    }
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    html_view_op_t op = {0};
+    op.kind = HTML_VIEW_OP_RECT;
+    op.x = html_view_record_x(ctx, x);
+    op.y = html_view_record_y(ctx, y);
+    op.w = w;
+    op.h = h;
+    op.color = color;
+    op.z_index = html_view_effective_z_index(ctx);
+    op.fixed = ctx->fixed_mode;
+    if (clip)
+    {
+        op.has_clip = true;
+        op.clip_scroll = ctx->clip_scroll;
+        op.clip_x = html_view_record_x(ctx, clip->x);
+        op.clip_y = html_view_record_y(ctx, clip->y);
+        op.clip_w = clip->width;
+        op.clip_h = clip->height;
+    }
+    if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
+    {
+        ctx->record_failed = true;
+        return (size_t)-1;
+    }
+    return cache->op_count - 1u;
+}
+
 static const char *html_view_dump_clear_mode(css_clear_t value)
 {
     switch (value)
@@ -417,6 +456,8 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
                                            ctx->actual_font_px,
                                            cache_line_height,
                                            shrink_to_fit,
+                                           0,
+                                           HTML_VIEW_MEASURE_KIND_BLOCK,
                                            &cached_w,
                                            &cached_h))
         {
@@ -607,6 +648,8 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
                                       ctx->actual_font_px,
                                       cache_line_height,
                                       shrink_to_fit,
+                                      0,
+                                      HTML_VIEW_MEASURE_KIND_BLOCK,
                                       used_w,
                                       used_h);
     }
@@ -2884,74 +2927,102 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         }
     }
 
+    bool defer_box = false;
+    bool defer_bg = false;
+    bool defer_border = false;
+    size_t deferred_bg_op = (size_t)-1;
+    if (ctx->record &&
+        !height_specified &&
+        (style->has_background || style->has_border) &&
+        !(style->has_background_image && style->background_image))
+    {
+        defer_border = style->has_border;
+        defer_bg = style->has_background && !style->background_transparent;
+        defer_box = defer_border || defer_bg;
+        if (defer_bg && border_box_w > 0)
+        {
+            int draw_y = html_view_draw_y(ctx, draw_border_y);
+            deferred_bg_op = html_view_record_rect_placeholder(ctx,
+                                                               draw_border_x,
+                                                               draw_y,
+                                                               border_box_w,
+                                                               0,
+                                                               style->background,
+                                                               &ctx->clip);
+        }
+    }
+
     if (style->has_background || style->has_border)
     {
-        int content_h = 0;
-        if (height_specified)
+        if (!defer_box)
         {
-            content_h = height_basis;
-        }
-        else
-        {
-            html_view_measure_block_children(ctx, node, style, content_w, ctx->measure_shrink, NULL, &content_h);
-            if (style->has_display && style->display == CSS_DISPLAY_TABLE)
+            int content_h = 0;
+            if (height_specified)
             {
-                int table_w = 0;
-                int table_h = 0;
-                html_view_measure_css_table_cells(ctx, node, style, content_w, ctx->viewport_h, &table_w, &table_h);
-                if (table_h > 0)
+                content_h = height_basis;
+            }
+            else
+            {
+                html_view_measure_block_children(ctx, node, style, content_w, ctx->measure_shrink, NULL, &content_h);
+                if (style->has_display && style->display == CSS_DISPLAY_TABLE)
                 {
-                    content_h = table_h;
+                    int table_w = 0;
+                    int table_h = 0;
+                    html_view_measure_css_table_cells(ctx, node, style, content_w, ctx->viewport_h, &table_w, &table_h);
+                    if (table_h > 0)
+                    {
+                        content_h = table_h;
+                    }
                 }
             }
-        }
-        if (max_h >= 0 && content_h > max_h)
-        {
-            content_h = max_h;
-        }
-        if (min_h >= 0 && content_h < min_h)
-        {
-            content_h = min_h;
-        }
-        if (max_h >= 0 && min_h > max_h)
-        {
-            content_h = min_h;
-        }
-
-        int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
-        if (border_box_h < 0) border_box_h = 0;
-        int draw_y = html_view_draw_y(ctx, draw_border_y);
-        if (ctx->record && html_view_attr_has_class(node, "chin"))
-        {
-            serial_printf("[html_view][acid2-bg] node=chin content_h=%d border_box_h=%d draw_border_y=%d draw_y=%d font_px=%d base_font=%d line_h=%d",
-                          content_h,
-                          border_box_h,
-                          draw_border_y,
-                          draw_y,
-                          ctx->actual_font_px,
-                          ctx->base_font_px,
-                          ctx->line_height);
-        }
-        if (style->has_background && !style->background_transparent && border_box_w > 0 && border_box_h > 0)
-        {
-            html_view_draw_rect_clipped(ctx, draw_border_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
-        }
-        html_view_draw_background_image(ctx, style, draw_border_x, draw_border_y, border_box_w, border_box_h);
-        if (style->has_border && border_box_w > 0 && border_box_h > 0)
-        {
-            if (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0)
+            if (max_h >= 0 && content_h > max_h)
             {
-                html_view_draw_border_sides_clipped(ctx,
-                                                    draw_border_x,
-                                                    draw_y,
-                                                    border_box_w,
-                                                    border_box_h,
-                                                    border_top,
-                                                    border_right,
-                                                    border_bottom,
-                                                    border_left,
-                                                    style,
-                                                    &ctx->clip);
+                content_h = max_h;
+            }
+            if (min_h >= 0 && content_h < min_h)
+            {
+                content_h = min_h;
+            }
+            if (max_h >= 0 && min_h > max_h)
+            {
+                content_h = min_h;
+            }
+
+            int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
+            if (border_box_h < 0) border_box_h = 0;
+            int draw_y = html_view_draw_y(ctx, draw_border_y);
+            if (ctx->record && html_view_attr_has_class(node, "chin"))
+            {
+                serial_printf("[html_view][acid2-bg] node=chin content_h=%d border_box_h=%d draw_border_y=%d draw_y=%d font_px=%d base_font=%d line_h=%d",
+                              content_h,
+                              border_box_h,
+                              draw_border_y,
+                              draw_y,
+                              ctx->actual_font_px,
+                              ctx->base_font_px,
+                              ctx->line_height);
+            }
+            if (style->has_background && !style->background_transparent && border_box_w > 0 && border_box_h > 0)
+            {
+                html_view_draw_rect_clipped(ctx, draw_border_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
+            }
+            html_view_draw_background_image(ctx, style, draw_border_x, draw_border_y, border_box_w, border_box_h);
+            if (style->has_border && border_box_w > 0 && border_box_h > 0)
+            {
+                if (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0)
+                {
+                    html_view_draw_border_sides_clipped(ctx,
+                                                        draw_border_x,
+                                                        draw_y,
+                                                        border_box_w,
+                                                        border_box_h,
+                                                        border_top,
+                                                        border_right,
+                                                        border_bottom,
+                                                        border_left,
+                                                        style,
+                                                        &ctx->clip);
+                }
             }
         }
     }
@@ -3135,6 +3206,40 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
         }
     }
     content_end_y = content_doc_y + content_h;
+
+    if (defer_box)
+    {
+        int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
+        if (border_box_h < 0) border_box_h = 0;
+        int draw_y = html_view_draw_y(ctx, draw_border_y);
+        if (defer_bg &&
+            deferred_bg_op != (size_t)-1 &&
+            ctx->priv &&
+            deferred_bg_op < ctx->priv->render_cache.op_count)
+        {
+            html_view_op_t *op = &ctx->priv->render_cache.ops[deferred_bg_op];
+            op->w = border_box_w;
+            op->h = border_box_h;
+            op->y = html_view_record_y(ctx, draw_y);
+        }
+        if (defer_border && border_box_w > 0 && border_box_h > 0)
+        {
+            if (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0)
+            {
+                html_view_draw_border_sides_clipped(ctx,
+                                                    draw_border_x,
+                                                    draw_y,
+                                                    border_box_w,
+                                                    border_box_h,
+                                                    border_top,
+                                                    border_right,
+                                                    border_bottom,
+                                                    border_left,
+                                                    style,
+                                                    &ctx->clip);
+            }
+        }
+    }
 
     bool empty_block = (!height_specified &&
                         min_h <= 0 &&

@@ -163,6 +163,10 @@ void html_view_draw_background_image(html_view_ctx_t *ctx,
     {
         return;
     }
+    if (!ctx->draw && !ctx->record)
+    {
+        return;
+    }
     if (!ctx->priv || border_w <= 0 || border_h <= 0)
     {
         return;

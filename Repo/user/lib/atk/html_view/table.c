@@ -278,6 +278,8 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
                                        ctx->actual_font_px,
                                        ctx->line_height,
                                        ctx->measure_shrink,
+                                       0,
+                                       HTML_VIEW_MEASURE_KIND_TABLE,
                                        &cached_w,
                                        &cached_h))
     {
@@ -397,6 +399,8 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
                                       ctx->actual_font_px,
                                       ctx->line_height,
                                       ctx->measure_shrink,
+                                      0,
+                                      HTML_VIEW_MEASURE_KIND_TABLE,
                                       used_w,
                                       used_h);
     }

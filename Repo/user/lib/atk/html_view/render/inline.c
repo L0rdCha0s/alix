@@ -65,6 +65,38 @@ static void html_view_measure_inline_block_children(const html_view_ctx_t *ctx,
         return;
     }
 
+    int cache_line_height = html_view_line_height_for_style(ctx, style);
+    if (html_view_subtree_has_form_control(node) && cache_line_height < atk_font_line_height() + 8)
+    {
+        cache_line_height = atk_font_line_height() + 8;
+    }
+    if (ctx->priv)
+    {
+        int cached_w = 0;
+        int cached_h = 0;
+        if (html_view_measure_cache_lookup(ctx->priv,
+                                           node,
+                                           content_w,
+                                           ctx->actual_font_px,
+                                           cache_line_height,
+                                           true,
+                                           0,
+                                           HTML_VIEW_MEASURE_KIND_INLINE_BLOCK,
+                                           &cached_w,
+                                           &cached_h))
+        {
+            if (out_w)
+            {
+                *out_w = cached_w;
+            }
+            if (out_h)
+            {
+                *out_h = cached_h;
+            }
+            return;
+        }
+    }
+
     html_view_ctx_t measure = *ctx;
     html_view_float_ctx_t floats = {0};
     measure.draw = false;
@@ -88,7 +120,7 @@ static void html_view_measure_inline_block_children(const html_view_ctx_t *ctx,
     measure.list_level = 0;
     measure.measure_max_x = measure.x;
     measure.space_w = html_view_text_width(&measure, " ");
-    measure.line_height = html_view_line_height_for_style(&measure, style);
+    measure.line_height = cache_line_height;
     if (html_view_subtree_has_form_control(node) && measure.line_height < atk_font_line_height() + 8)
     {
         measure.line_height = atk_font_line_height() + 8;
@@ -115,6 +147,24 @@ static void html_view_measure_inline_block_children(const html_view_ctx_t *ctx,
         int measured_h = measure.content_bottom;
         if (measured_h < 0) measured_h = 0;
         *out_h = measured_h;
+    }
+
+    if (ctx->priv)
+    {
+        int measured_w = measure.measure_max_x - measure.body_x;
+        int measured_h = measure.content_bottom;
+        if (measured_w < 0) measured_w = 0;
+        if (measured_h < 0) measured_h = 0;
+        html_view_measure_cache_store(ctx->priv,
+                                      node,
+                                      content_w,
+                                      ctx->actual_font_px,
+                                      cache_line_height,
+                                      true,
+                                      0,
+                                      HTML_VIEW_MEASURE_KIND_INLINE_BLOCK,
+                                      measured_w,
+                                      measured_h);
     }
 }
 
@@ -292,6 +342,39 @@ static bool html_view_measure_inline_children(const html_view_ctx_t *ctx,
         return false;
     }
 
+    int cache_w = ctx->body_w;
+    int cache_origin_x = ctx->x - ctx->body_x;
+    if (ctx->priv)
+    {
+        int cached_w = 0;
+        int cached_h = 0;
+        if (html_view_measure_cache_lookup(ctx->priv,
+                                           node,
+                                           cache_w,
+                                           ctx->actual_font_px,
+                                           ctx->line_height,
+                                           ctx->measure_shrink,
+                                           cache_origin_x,
+                                           HTML_VIEW_MEASURE_KIND_INLINE,
+                                           &cached_w,
+                                           &cached_h))
+        {
+            if (out_w)
+            {
+                *out_w = cached_w;
+            }
+            if (out_h)
+            {
+                *out_h = cached_h;
+            }
+            if (out_wrapped)
+            {
+                *out_wrapped = false;
+            }
+            return true;
+        }
+    }
+
     html_view_ctx_t measure = *ctx;
     html_view_float_ctx_t floats = {0};
     if (ctx->floats)
@@ -363,6 +446,19 @@ static bool html_view_measure_inline_children(const html_view_ctx_t *ctx,
     if (out_h)
     {
         *out_h = height;
+    }
+    if (!wrapped && ctx->priv)
+    {
+        html_view_measure_cache_store(ctx->priv,
+                                      node,
+                                      cache_w,
+                                      ctx->actual_font_px,
+                                      ctx->line_height,
+                                      ctx->measure_shrink,
+                                      cache_origin_x,
+                                      HTML_VIEW_MEASURE_KIND_INLINE,
+                                      width,
+                                      height);
     }
     return true;
 }
@@ -565,6 +661,7 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
         ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
     }
 
+    bool measure_only = (!ctx->draw && !ctx->record);
     int draw_x = ctx->x;
     int doc_y = ctx->y + ctx->line_height - box_h;
     int draw_y = html_view_draw_y(ctx, doc_y);
@@ -629,6 +726,19 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
                                             border_left,
                                             style,
                                             &ctx->clip);
+    }
+
+    if (measure_only)
+    {
+        ctx->x = draw_x + box_w;
+        if (ctx->x > ctx->measure_max_x)
+        {
+            ctx->measure_max_x = ctx->x;
+        }
+        ctx->pending_space = true;
+        html_view_ensure_line_visible(ctx);
+        ctx->paint_layer = saved_layer;
+        return true;
     }
 
     html_view_ctx_t inner = *ctx;
@@ -1026,6 +1136,7 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
         ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
     }
 
+    bool measure_only = (!ctx->draw && !ctx->record);
     int outer_x = ctx->x;
     int border_box_x = outer_x + margin_left;
     int doc_y = ctx->y + ctx->line_height - outer_h + margin_top;
@@ -1050,6 +1161,19 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
                                             border_left,
                                             style,
                                             &ctx->clip);
+    }
+
+    if (measure_only)
+    {
+        ctx->x = outer_x + outer_w;
+        if (ctx->x > ctx->measure_max_x)
+        {
+            ctx->measure_max_x = ctx->x;
+        }
+        ctx->pending_space = true;
+        html_view_ensure_line_visible(ctx);
+        ctx->paint_layer = saved_layer;
+        return true;
     }
 
     html_view_ctx_t inner = *ctx;

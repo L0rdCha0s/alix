@@ -150,10 +150,10 @@ static void html_view_style_inherit_from_parent(css_style_t *out, const css_styl
         out->has_list_style_type = true;
         out->list_style_type = parent->list_style_type;
     }
-    if (parent->custom_props.count > 0)
+    if (parent->custom_env)
     {
-        out->custom_props = parent->custom_props;
-        out->custom_props.shared = true;
+        out->custom_env = css_var_env_ref(parent->custom_env);
+        out->custom_env_local = false;
     }
 }
 
@@ -9727,11 +9727,6 @@ static bool html_view_style_cache_store(atk_html_view_priv_t *priv,
     {
         return false;
     }
-    if ((style->background_image_owned && style->background_image) ||
-        (style->content_owned && style->content))
-    {
-        return false;
-    }
     if (!html_view_style_cache_init(priv))
     {
         return false;
@@ -9742,9 +9737,14 @@ static bool html_view_style_cache_store(atk_html_view_priv_t *priv,
     {
         css_style_release(&entry->style);
     }
+    if (!css_style_copy(&entry->style, style))
+    {
+        entry->valid = false;
+        entry->node = NULL;
+        return false;
+    }
     entry->node = node;
     entry->pseudo = pseudo;
-    entry->style = *style;
     entry->valid = true;
     return true;
 }
@@ -9755,9 +9755,10 @@ static void html_view_style_cache_copy_out(css_style_t *out, const css_style_t *
     {
         return;
     }
-    *out = *cached;
-    out->background_image_owned = false;
-    out->content_owned = false;
+    if (!css_style_copy(out, cached))
+    {
+        memset(out, 0, sizeof(*out));
+    }
 }
 
 void html_view_inline_style_cache_clear(atk_html_view_priv_t *priv)
@@ -9867,6 +9868,11 @@ void html_view_style_for_node(css_style_t *out,
     }
 
     html_view_style_inherit_from_parent(out, parent, !is_table_cell);
+    if (sheet && sheet->global_env && !out->custom_env)
+    {
+        out->custom_env = css_var_env_ref(sheet->global_env);
+        out->custom_env_local = false;
+    }
 
     html_view_rule_list_t *rule_lists = NULL;
     size_t rule_list_count = 0;
@@ -9992,37 +9998,12 @@ void html_view_style_for_node(css_style_t *out,
         out->text_align = is_table_header ? CSS_TEXT_ALIGN_CENTER : CSS_TEXT_ALIGN_LEFT;
     }
 
+    (void)css_style_apply_custom_props(out, &out->custom_props);
+    css_style_resolve_deferred(out);
+
     if (priv && node && node->type == HTML_NODE_ELEMENT)
     {
         (void)html_view_style_cache_store(priv, node, HTML_VIEW_PSEUDO_NONE, out);
-    }
-}
-
-static void html_view_resolve_deferred_properties(css_style_t *style)
-{
-    if (!style || style->deferred_decls.count == 0)
-    {
-        return;
-    }
-
-    for (size_t i = 0; i < style->deferred_decls.count; ++i)
-    {
-        const css_decl_t *decl = &style->deferred_decls.items[i];
-        
-        char *expanded = css_expand_vars_range(decl->val_start,
-                                               decl->val_end,
-                                               NULL, // global_vars
-                                               &style->custom_props,
-                                               0);
-        if (expanded)
-        {
-            css_style_apply_property(style,
-                                     decl->prop_start,
-                                     decl->prop_end,
-                                     expanded,
-                                     expanded + strlen(expanded));
-            free(expanded);
-        }
     }
 }
 
@@ -10054,6 +10035,11 @@ bool html_view_style_for_pseudo(css_style_t *out,
     memset(out, 0, sizeof(*out));
 
     html_view_style_inherit_from_parent(out, parent, true);
+    if (sheet && sheet->global_env && !out->custom_env)
+    {
+        out->custom_env = css_var_env_ref(sheet->global_env);
+        out->custom_env_local = false;
+    }
 
     if (sheet && node && node->type == HTML_NODE_ELEMENT)
     {
@@ -10080,7 +10066,8 @@ bool html_view_style_for_pseudo(css_style_t *out,
     html_view_resolve_float_inherit(out, parent);
     html_view_resolve_box_sizing_inherit(out, parent);
 
-    html_view_resolve_deferred_properties(out);
+    (void)css_style_apply_custom_props(out, &out->custom_props);
+    css_style_resolve_deferred(out);
 
     if (priv && node && node->type == HTML_NODE_ELEMENT)
     {
