@@ -48,6 +48,7 @@ typedef struct html_node
     size_t class_token_cap;
     web_bloom_t self_bloom;
     web_bloom_t ancestor_bloom;
+    uint8_t subtree_flags;
 } html_node_t;
 
 typedef struct html_document

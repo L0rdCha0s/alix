@@ -503,6 +503,10 @@ bool html_view_subtree_has_form_control(const html_node_t *root)
     {
         return false;
     }
+    if (root->subtree_flags & HTML_NODE_SUBTREE_FLAGS_VALID)
+    {
+        return (root->subtree_flags & HTML_NODE_SUBTREE_FORM_CONTROL) != 0;
+    }
 
     const html_node_t *stack[64];
     size_t sp = 0;

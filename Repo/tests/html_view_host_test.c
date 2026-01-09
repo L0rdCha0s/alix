@@ -1155,7 +1155,9 @@ static void html_view_dump_node_line(const html_node_t *node,
     serial_printf("[html_view][dom] %s#node type=%d", indent, (int)node->type);
 }
 
-static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t *sheet)
+static void html_view_dump_tree(const html_node_t *root,
+                                const css_stylesheet_t *sheet,
+                                atk_html_view_priv_t *priv)
 {
     if (!root)
     {
@@ -1176,7 +1178,7 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
     root_frame.depth = 0;
     if (root->type == HTML_NODE_ELEMENT)
     {
-        html_view_style_for_node(&root_frame.style, sheet, NULL, root, NULL);
+        html_view_style_for_node(&root_frame.style, sheet, NULL, root, priv);
         root_frame.has_style = true;
     }
     stack[count++] = root_frame;
@@ -1216,7 +1218,7 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
             child_frame.has_style = false;
             if (child && child->type == HTML_NODE_ELEMENT)
             {
-                html_view_style_for_node(&child_frame.style, sheet, parent_style, child, NULL);
+                html_view_style_for_node(&child_frame.style, sheet, parent_style, child, priv);
                 child_frame.has_style = true;
             }
             else if (parent_style)
@@ -1231,7 +1233,10 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
     free(stack);
 }
 
-static void host_html_view_dump_dom(const html_node_t *root, const css_stylesheet_t *sheet, const void *tag)
+static void host_html_view_dump_dom(const html_node_t *root,
+                                    const css_stylesheet_t *sheet,
+                                    atk_html_view_priv_t *priv,
+                                    const void *tag)
 {
     if (!root)
     {
@@ -1239,7 +1244,7 @@ static void host_html_view_dump_dom(const html_node_t *root, const css_styleshee
         return;
     }
     serial_printf("[html_view] dump begin view=%p", tag);
-    html_view_dump_tree(root, sheet);
+    html_view_dump_tree(root, sheet, priv);
     html_view_dump_dom_summary(root);
     serial_printf("[html_view] dump end view=%p", tag);
 }
@@ -4656,7 +4661,7 @@ static bool test_acid2_render_snapshot(void)
     }
     html_view_align_current_line(&record);
     html_view_style_stack_destroy(&record);
-    host_html_view_dump_dom(doc->root, sheet, doc);
+    host_html_view_dump_dom(doc->root, sheet, &priv, doc);
     host_debug_dump_op_ranges(&priv.render_cache);
     host_debug_dump_rect_ops(&priv.render_cache, 2680, 2900);
     host_debug_dump_rect_ops(&priv.render_cache, 3000, 3120);
@@ -4798,12 +4803,13 @@ static size_t html_view_count_rules(const css_stylesheet_t *sheet)
 
 static bool render_doc_case(const char *case_name,
                             const char *png_tag,
-                            const html_document_t *doc,
-                            const css_stylesheet_t *sheet,
+                            html_document_t *doc,
+                            css_stylesheet_t *sheet,
                             bool draw,
                             html_view_render_stats_t *out_stats,
                             double *out_record_ms,
-                            double *out_draw_ms)
+                            double *out_draw_ms,
+                            atk_html_view_priv_t *priv_override)
 {
     if (out_stats)
     {
@@ -4837,11 +4843,16 @@ static bool render_doc_case(const char *case_name,
     time_t run_ts = time(NULL);
     bool have_test_out = draw ? ensure_test_out_dir() : false;
 
-    atk_html_view_priv_t priv = {0};
-    priv.doc = doc;
-    priv.sheet = sheet;
-    html_view_render_cache_clear(&priv.render_cache);
-    priv.render_cache.tile_h = ATK_HTML_VIEW_RENDER_TILE_H;
+    atk_html_view_priv_t local_priv = {0};
+    atk_html_view_priv_t *priv = priv_override ? priv_override : &local_priv;
+    if (priv_override)
+    {
+        memset(priv_override, 0, sizeof(*priv_override));
+    }
+    priv->doc = doc;
+    priv->sheet = sheet;
+    html_view_render_cache_clear(&priv->render_cache);
+    priv->render_cache.tile_h = ATK_HTML_VIEW_RENDER_TILE_H;
 
     const html_node_t *html_node = find_first_tag(doc->root, "html");
     const html_node_t *body_node = find_first_tag(doc->root, "body");
@@ -4870,7 +4881,7 @@ static bool render_doc_case(const char *case_name,
     css_style_t html_style = {0};
     if (html_node)
     {
-        html_view_style_for_node(&html_style, sheet, &base_style, html_node, &priv);
+        html_view_style_for_node(&html_style, sheet, &base_style, html_node, priv);
     }
     else
     {
@@ -4880,7 +4891,7 @@ static bool render_doc_case(const char *case_name,
     css_style_t body_style = {0};
     if (body_node)
     {
-        html_view_style_for_node(&body_style, sheet, &html_style, body_node, &priv);
+        html_view_style_for_node(&body_style, sheet, &html_style, body_node, priv);
     }
     else
     {
@@ -5085,15 +5096,15 @@ static bool render_doc_case(const char *case_name,
         body_height_valid = true;
     }
 
-    priv.render_cache.doc = doc;
-    priv.render_cache.sheet = sheet;
-    priv.render_cache.viewport_w = viewport_w;
-    priv.render_cache.viewport_h = viewport_h;
-    priv.render_cache.doc_origin_local_x = body_content_x - viewport_x;
-    priv.render_cache.doc_origin_local_y = body_content_y0 - viewport_y;
-    priv.render_cache.body_w = body_content_w;
-    priv.render_cache.base_font_px = base_font_px;
-    priv.render_cache.base_line_height = base_line_height;
+    priv->render_cache.doc = doc;
+    priv->render_cache.sheet = sheet;
+    priv->render_cache.viewport_w = viewport_w;
+    priv->render_cache.viewport_h = viewport_h;
+    priv->render_cache.doc_origin_local_x = body_content_x - viewport_x;
+    priv->render_cache.doc_origin_local_y = body_content_y0 - viewport_y;
+    priv->render_cache.body_w = body_content_w;
+    priv->render_cache.base_font_px = base_font_px;
+    priv->render_cache.base_line_height = base_line_height;
 
     const int clip_pad = 10000000;
     atk_rect_t record_clip = {
@@ -5107,7 +5118,7 @@ static bool render_doc_case(const char *case_name,
     html_view_ctx_t record = {
         .state = NULL,
         .widget = NULL,
-        .priv = &priv,
+        .priv = priv,
         .sheet = sheet,
         .bg = body_bg,
         .clip = record_clip,
@@ -5186,7 +5197,7 @@ static bool render_doc_case(const char *case_name,
     {
         *out_record_ms = record_end - record_start;
     }
-    printf("html_view_host_test: %s render record end ops=%zu\n", case_name, priv.render_cache.op_count);
+    printf("html_view_host_test: %s render record end ops=%zu\n", case_name, priv->render_cache.op_count);
 
     if (draw)
     {
@@ -5233,20 +5244,23 @@ static bool render_doc_case(const char *case_name,
         }
     }
 
-    uint64_t hash = hash_render_ops(&priv.render_cache);
+    uint64_t hash = hash_render_ops(&priv->render_cache);
     printf("html_view_host_test: %s hash=0x%016llX\n", case_name, (unsigned long long)hash);
 
     if (out_stats)
     {
-        out_stats->op_count = priv.render_cache.op_count;
+        out_stats->op_count = priv->render_cache.op_count;
         out_stats->hash = hash;
     }
 
-    html_view_images_clear(&priv);
-    html_view_inline_style_cache_clear(&priv);
-    html_view_measure_cache_clear(&priv);
-    html_view_rule_index_clear(&priv);
-    html_view_render_cache_clear(&priv.render_cache);
+    if (!priv_override)
+    {
+        html_view_images_clear(priv);
+        html_view_inline_style_cache_clear(priv);
+        html_view_measure_cache_clear(priv);
+        html_view_rule_index_clear(priv);
+        html_view_render_cache_clear(&priv->render_cache);
+    }
     return true;
 }
 
@@ -5295,6 +5309,7 @@ static bool test_hacker_news_render(void)
                               sheet,
                               true,
                               &stats,
+                              NULL,
                               NULL,
                               NULL);
 
@@ -5380,7 +5395,8 @@ static bool test_hacker_news_live_render(void)
                               draw,
                               &stats,
                               &render_ms,
-                              &draw_ms);
+                              &draw_ms,
+                              NULL);
 
     printf("html_view_host_test: hacker_news_live url=%s html=%zu css=%zu css_fetches=%zu\n",
            url,
@@ -5502,6 +5518,7 @@ static bool test_stackoverflow_render(void)
         return false;
     }
 
+    atk_html_view_priv_t priv = {0};
     html_view_render_stats_t stats = {0};
     bool ok = render_doc_case("stackoverflow",
                               "stackoverflow",
@@ -5510,9 +5527,21 @@ static bool test_stackoverflow_render(void)
                               true,
                               &stats,
                               NULL,
-                              NULL);
+                              NULL,
+                              &priv);
 
-    host_html_view_dump_dom(doc->root, sheet, doc);
+    host_html_view_dump_dom(doc->root, sheet, &priv, doc);
+    html_view_images_clear(&priv);
+    html_view_inline_style_cache_clear(&priv);
+    html_view_measure_cache_clear(&priv);
+    html_view_rule_index_clear(&priv);
+    html_view_render_cache_clear(&priv.render_cache);
+    html_view_style_cache_clear(&priv);
+    html_view_style_block_pool_clear(&priv);
+    free(priv.style_cache);
+    priv.style_cache = NULL;
+    priv.style_cache_cap = 0;
+    priv.style_cache_mask = 0;
 
     if (g_html_trace_enabled)
     {

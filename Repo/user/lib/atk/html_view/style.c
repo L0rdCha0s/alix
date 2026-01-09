@@ -575,6 +575,7 @@ void html_view_dom_bloom_rebuild_if_needed(atk_html_view_priv_t *priv)
     {
         html_node_t *node;
         web_bloom_t parent_bloom;
+        bool post;
     } html_view_bloom_entry_t;
 
     size_t cap = 128;
@@ -589,6 +590,7 @@ void html_view_dom_bloom_rebuild_if_needed(atk_html_view_priv_t *priv)
     stack[count++] = (html_view_bloom_entry_t){
         .node = priv->doc->root,
         .parent_bloom = {{0}},
+        .post = false,
     };
 
     while (count > 0)
@@ -600,16 +602,16 @@ void html_view_dom_bloom_rebuild_if_needed(atk_html_view_priv_t *priv)
             continue;
         }
 
-        web_bloom_t self_bloom = html_view_node_self_bloom(node);
-        node->self_bloom = self_bloom;
-        for (size_t i = 0; i < WEB_BLOOM_WORDS; ++i)
+        if (!entry.post)
         {
-            node->ancestor_bloom.bits[i] = entry.parent_bloom.bits[i] | self_bloom.bits[i];
-        }
+            web_bloom_t self_bloom = html_view_node_self_bloom(node);
+            node->self_bloom = self_bloom;
+            for (size_t i = 0; i < WEB_BLOOM_WORDS; ++i)
+            {
+                node->ancestor_bloom.bits[i] = entry.parent_bloom.bits[i] | self_bloom.bits[i];
+            }
 
-        web_bloom_t next_parent = node->ancestor_bloom;
-        for (html_node_t *child = node->first_child; child; child = child->next_sibling)
-        {
+            web_bloom_t next_parent = node->ancestor_bloom;
             if (count == cap)
             {
                 size_t new_cap = cap ? (cap * 2u) : 128u;
@@ -623,10 +625,48 @@ void html_view_dom_bloom_rebuild_if_needed(atk_html_view_priv_t *priv)
                 cap = new_cap;
             }
             stack[count++] = (html_view_bloom_entry_t){
-                .node = child,
+                .node = node,
                 .parent_bloom = next_parent,
+                .post = true,
             };
+
+            for (html_node_t *child = node->first_child; child; child = child->next_sibling)
+            {
+                if (count == cap)
+                {
+                    size_t new_cap = cap ? (cap * 2u) : 128u;
+                    html_view_bloom_entry_t *next = (html_view_bloom_entry_t *)realloc(stack,
+                                                                                       new_cap * sizeof(*next));
+                    if (!next)
+                    {
+                        break;
+                    }
+                    stack = next;
+                    cap = new_cap;
+                }
+                stack[count++] = (html_view_bloom_entry_t){
+                    .node = child,
+                    .parent_bloom = next_parent,
+                    .post = false,
+                };
+            }
+            continue;
         }
+
+        uint8_t flags = HTML_NODE_SUBTREE_FLAGS_VALID;
+        if (node->type == HTML_NODE_ELEMENT && node->name && html_view_is_form_control_tag(node->name))
+        {
+            flags |= HTML_NODE_SUBTREE_FORM_CONTROL;
+        }
+        for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
+        {
+            if (child->subtree_flags & HTML_NODE_SUBTREE_FORM_CONTROL)
+            {
+                flags |= HTML_NODE_SUBTREE_FORM_CONTROL;
+                break;
+            }
+        }
+        node->subtree_flags = flags;
     }
 
     free(stack);
@@ -10118,6 +10158,62 @@ bool html_view_style_for_pseudo(css_style_t *out,
     return out->has_content;
 }
 
+#define HTML_VIEW_STYLE_BLOCK_POOL_MAX 512u
+
+static html_view_style_block_t *html_view_style_block_acquire(atk_html_view_priv_t *priv)
+{
+    html_view_style_block_t *blk = NULL;
+    if (priv && priv->style_block_free)
+    {
+        blk = priv->style_block_free;
+        priv->style_block_free = blk->prev;
+        if (priv->style_block_free_count > 0)
+        {
+            priv->style_block_free_count--;
+        }
+    }
+    if (!blk)
+    {
+        blk = (html_view_style_block_t *)calloc(1, sizeof(*blk));
+        return blk;
+    }
+    memset(blk, 0, sizeof(*blk));
+    return blk;
+}
+
+static void html_view_style_block_release(atk_html_view_priv_t *priv, html_view_style_block_t *blk)
+{
+    if (!blk)
+    {
+        return;
+    }
+    if (priv && priv->style_block_free_count < HTML_VIEW_STYLE_BLOCK_POOL_MAX)
+    {
+        blk->prev = priv->style_block_free;
+        priv->style_block_free = blk;
+        priv->style_block_free_count++;
+        return;
+    }
+    free(blk);
+}
+
+void html_view_style_block_pool_clear(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    html_view_style_block_t *blk = priv->style_block_free;
+    while (blk)
+    {
+        html_view_style_block_t *next = blk->prev;
+        free(blk);
+        blk = next;
+    }
+    priv->style_block_free = NULL;
+    priv->style_block_free_count = 0;
+}
+
 void html_view_style_stack_destroy(html_view_ctx_t *ctx)
 {
     if (!ctx)
@@ -10125,6 +10221,7 @@ void html_view_style_stack_destroy(html_view_ctx_t *ctx)
         return;
     }
 
+    atk_html_view_priv_t *priv = ctx->priv;
     html_view_style_block_t *blk = ctx->style_block;
     while (blk)
     {
@@ -10133,7 +10230,7 @@ void html_view_style_stack_destroy(html_view_ctx_t *ctx)
             css_style_release(&blk->styles[i]);
         }
         html_view_style_block_t *prev = blk->prev;
-        free(blk);
+        html_view_style_block_release(priv, blk);
         blk = prev;
     }
     ctx->style_block = NULL;
@@ -10149,7 +10246,7 @@ const css_style_t *html_view_style_push(html_view_ctx_t *ctx, const css_style_t 
 
     if (!ctx->style_block || ctx->style_block->used >= (sizeof(ctx->style_block->styles) / sizeof(ctx->style_block->styles[0])))
     {
-        html_view_style_block_t *blk = (html_view_style_block_t *)calloc(1, sizeof(*blk));
+        html_view_style_block_t *blk = html_view_style_block_acquire(ctx->priv);
         if (!blk)
         {
             return NULL;
@@ -10186,7 +10283,7 @@ void html_view_style_pop(html_view_ctx_t *ctx)
     if (blk->used == 0 && blk->prev)
     {
         ctx->style_block = blk->prev;
-        free(blk);
+        html_view_style_block_release(ctx->priv, blk);
     }
 }
 

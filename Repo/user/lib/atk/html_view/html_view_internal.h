@@ -282,6 +282,8 @@ typedef struct
     bool valid;
 } html_view_style_cache_entry_t;
 
+typedef struct html_view_style_block html_view_style_block_t;
+
 typedef struct
 {
     atk_list_node_t *child_node;
@@ -312,6 +314,8 @@ typedef struct
     size_t style_cache_cap;
     size_t style_cache_mask;
     volatile uint32_t style_cache_dirty;
+    html_view_style_block_t *style_block_free;
+    size_t style_block_free_count;
     atk_html_view_link_t link_handler;
     void *link_context;
     const char *pressed_href;
@@ -345,6 +349,12 @@ typedef struct
 
 void html_view_dom_bloom_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_dom_bloom_rebuild_if_needed(atk_html_view_priv_t *priv);
+
+enum
+{
+    HTML_NODE_SUBTREE_FORM_CONTROL = 1u << 0,
+    HTML_NODE_SUBTREE_FLAGS_VALID = 1u << 1,
+};
 
 typedef struct
 {
@@ -822,6 +832,7 @@ const html_view_inline_style_cache_t *html_view_inline_style_cached(atk_html_vie
 void html_view_rule_index_clear(atk_html_view_priv_t *priv);
 void html_view_style_cache_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_style_cache_clear(atk_html_view_priv_t *priv);
+void html_view_style_block_pool_clear(atk_html_view_priv_t *priv);
 bool html_view_measure_cache_lookup(atk_html_view_priv_t *priv,
                                     const html_node_t *node,
                                     int content_w,

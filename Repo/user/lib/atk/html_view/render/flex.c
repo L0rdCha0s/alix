@@ -34,6 +34,13 @@ typedef struct
     bool cross_explicit;
     int pos_main;
     int pos_cross;
+    bool record_children;
+    size_t record_op_start;
+    size_t record_op_end;
+    size_t record_anchor_start;
+    size_t record_anchor_end;
+    int record_start_x;
+    int record_start_y;
 } html_view_flex_item_t;
 
 typedef struct
@@ -46,6 +53,59 @@ typedef struct
     int grow_sum;
     int64_t shrink_weight_sum;
 } html_view_flex_line_t;
+
+static void html_view_shift_recorded_ops(html_view_ctx_t *ctx,
+                                         size_t op_start,
+                                         size_t op_end,
+                                         int dx,
+                                         int dy)
+{
+    if (!ctx || !ctx->priv || (dx == 0 && dy == 0))
+    {
+        return;
+    }
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    if (op_end > cache->op_count)
+    {
+        op_end = cache->op_count;
+    }
+    for (size_t i = op_start; i < op_end; ++i)
+    {
+        html_view_op_t *op = &cache->ops[i];
+        if (op->fixed)
+        {
+            continue;
+        }
+        op->x += dx;
+        op->y += dy;
+        html_view_render_cache_reindex_op(cache, i);
+    }
+}
+
+static void html_view_shift_recorded_anchors(html_view_ctx_t *ctx,
+                                             size_t anchor_start,
+                                             size_t anchor_end,
+                                             int dy)
+{
+    if (!ctx || !ctx->priv || dy == 0)
+    {
+        return;
+    }
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    if (anchor_end > cache->anchor_count)
+    {
+        anchor_end = cache->anchor_count;
+    }
+    for (size_t i = anchor_start; i < anchor_end; ++i)
+    {
+        int updated = cache->anchors[i].y + dy;
+        if (updated < 0)
+        {
+            updated = 0;
+        }
+        cache->anchors[i].y = updated;
+    }
+}
 
 static bool html_view_style_uses_border_box(const css_style_t *style)
 {
@@ -201,17 +261,62 @@ static void html_view_calc_box_edges(const html_view_ctx_t *ctx,
     }
 }
 
-static void html_view_measure_node_size(const html_view_ctx_t *ctx,
+static void html_view_measure_node_size(html_view_ctx_t *ctx,
                                         const html_node_t *node,
                                         const css_style_t *parent_style,
                                         int max_w,
                                         bool shrink_to_fit,
+                                        html_view_flex_item_t *record_item,
                                         int *out_w,
                                         int *out_h)
 {
     if (!ctx || !node || !out_w || !out_h)
     {
         return;
+    }
+
+    int cache_line_height = parent_style ? html_view_line_height_for_style(ctx, parent_style) : ctx->line_height;
+    if (html_view_subtree_has_form_control(node) && cache_line_height < atk_font_line_height() + 8)
+    {
+        cache_line_height = atk_font_line_height() + 8;
+    }
+
+    bool record_only = false;
+    size_t record_op_start = 0;
+    size_t record_anchor_start = 0;
+    int record_start_x = 0;
+    int record_start_y = 0;
+    if (record_item)
+    {
+        record_item->record_children = false;
+    }
+    if (record_item && ctx->record && !ctx->draw && ctx->priv && !ctx->record_failed)
+    {
+        record_only = true;
+        html_view_render_cache_t *cache = &ctx->priv->render_cache;
+        record_op_start = cache->op_count;
+        record_anchor_start = cache->anchor_count;
+    }
+
+    if (!record_only && ctx->priv)
+    {
+        int cached_w = 0;
+        int cached_h = 0;
+        if (html_view_measure_cache_lookup(ctx->priv,
+                                           node,
+                                           max_w,
+                                           ctx->actual_font_px,
+                                           cache_line_height,
+                                           shrink_to_fit,
+                                           0,
+                                           HTML_VIEW_MEASURE_KIND_FLEX_ITEM,
+                                           &cached_w,
+                                           &cached_h))
+        {
+            *out_w = cached_w;
+            *out_h = cached_h;
+            return;
+        }
     }
 
     html_view_ctx_t measure = *ctx;
@@ -236,14 +341,25 @@ static void html_view_measure_node_size(const html_view_ctx_t *ctx,
     measure.measure_shrink = shrink_to_fit;
     measure.measure_max_x = measure.x;
     measure.space_w = html_view_text_width(&measure, " ");
-    if (parent_style)
+    measure.line_height = cache_line_height;
+    if (record_only)
     {
-        measure.line_height = html_view_line_height_for_style(&measure, parent_style);
+        measure.record = true;
+        measure.record_failed = false;
+        measure.line_start_x = measure.x;
+        measure.line_start_y = measure.y;
+        measure.line_op_start = record_op_start;
+        record_start_x = measure.x;
+        record_start_y = measure.y;
     }
 
     html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_FLEX);
     html_view_render_node_internal(&measure, node, parent_style);
     html_view_style_stack_destroy(&measure);
+    if (record_only && measure.record_failed)
+    {
+        ctx->record_failed = true;
+    }
 
     int used_w = measure.measure_max_x - measure.body_x;
     if (used_w < 0) used_w = 0;
@@ -251,6 +367,31 @@ static void html_view_measure_node_size(const html_view_ctx_t *ctx,
     if (used_h < 0) used_h = 0;
     *out_w = used_w;
     *out_h = used_h;
+
+    if (record_only && record_item && !measure.record_failed)
+    {
+        html_view_render_cache_t *cache = &ctx->priv->render_cache;
+        record_item->record_children = true;
+        record_item->record_op_start = record_op_start;
+        record_item->record_op_end = cache->op_count;
+        record_item->record_anchor_start = record_anchor_start;
+        record_item->record_anchor_end = cache->anchor_count;
+        record_item->record_start_x = record_start_x;
+        record_item->record_start_y = record_start_y;
+    }
+    if (ctx->priv)
+    {
+        html_view_measure_cache_store(ctx->priv,
+                                      node,
+                                      max_w,
+                                      ctx->actual_font_px,
+                                      cache_line_height,
+                                      shrink_to_fit,
+                                      0,
+                                      HTML_VIEW_MEASURE_KIND_FLEX_ITEM,
+                                      used_w,
+                                      used_h);
+    }
 }
 
 static void html_view_flex_update_sizes(html_view_flex_item_t *item, bool row)
@@ -699,7 +840,7 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             {
                 int max_w = layout_main > 0 ? layout_main : ctx->body_w;
                 bool shrink_to_fit = row && !main_explicit_item;
-                html_view_measure_node_size(ctx, child, style, max_w, shrink_to_fit, &measured_w, &measured_h);
+                html_view_measure_node_size(ctx, child, style, max_w, shrink_to_fit, item, &measured_w, &measured_h);
             }
 
             if (row)
@@ -1325,8 +1466,11 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             html_view_flex_item_t *item = &items[line->start + i];
             int border_x = row ? (content_x + item->pos_main) : (content_x + item->pos_cross);
             int border_y = row ? (content_y + line_pos + item->pos_cross) : (content_y + line_pos + item->pos_main);
+            int content_box_x = border_x + item->border_left + item->pad_left;
+            int content_box_y = border_y + item->border_top + item->pad_top;
+            bool reuse_recorded = item->record_children && ctx->record && !ctx->draw && ctx->priv;
 
-            if (item->style.has_background && !item->style.background_transparent)
+            if (!reuse_recorded && item->style.has_background && !item->style.background_transparent)
             {
                 int draw_y = html_view_draw_y(ctx, border_y);
                 html_view_draw_rect_clipped(ctx,
@@ -1337,7 +1481,7 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                             item->style.background,
                                             &ctx->clip);
             }
-            if (item->style.has_border &&
+            if (!reuse_recorded && item->style.has_border &&
                 (item->border_top > 0 || item->border_right > 0 || item->border_bottom > 0 || item->border_left > 0))
             {
                 int draw_y = html_view_draw_y(ctx, border_y);
@@ -1354,15 +1498,31 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                                     &ctx->clip);
             }
 
+            if (reuse_recorded)
+            {
+                int dx = content_box_x - item->record_start_x;
+                int dy = content_box_y - item->record_start_y;
+                html_view_shift_recorded_ops(ctx,
+                                             item->record_op_start,
+                                             item->record_op_end,
+                                             dx,
+                                             dy);
+                html_view_shift_recorded_anchors(ctx,
+                                                 item->record_anchor_start,
+                                                 item->record_anchor_end,
+                                                 dy);
+                continue;
+            }
+
             html_view_ctx_t inner = *ctx;
             inner.underline_run_active = false;
             inner.underline_run_start_x = 0;
-            inner.body_x = border_x + item->border_left + item->pad_left;
+            inner.body_x = content_box_x;
             inner.body_w = item->content_w;
             if (inner.body_w < 0) inner.body_w = 0;
             inner.max_x = inner.body_x + inner.body_w;
             inner.x = inner.body_x;
-            inner.y = border_y + item->border_top + item->pad_top;
+            inner.y = content_box_y;
             inner.pending_space = false;
             html_view_margin_state_reset(&inner.pending_margin);
             inner.list_level = 0;
