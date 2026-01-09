@@ -1667,6 +1667,12 @@ bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_
     return true;
 }
 
+void html_view_render_cache_reindex_op(html_view_render_cache_t *cache, size_t op_index)
+{
+    (void)cache;
+    (void)op_index;
+}
+
 static bool host_intersect_rect(const atk_rect_t *a, const atk_rect_t *b, atk_rect_t *out)
 {
     if (!a || !b || !out)
@@ -5151,6 +5157,12 @@ static bool render_doc_case(const char *case_name,
     };
 
     printf("html_view_host_test: %s render record begin\n", case_name);
+#ifdef HTML_VIEW_HOST_TRACE
+    if (g_html_trace_enabled)
+    {
+        html_view_trace_reset_measure();
+    }
+#endif
     double record_start = host_now_ms();
     record.space_w = html_view_text_width(&record, " ");
     if (body_node)
@@ -5164,6 +5176,12 @@ static bool render_doc_case(const char *case_name,
     html_view_align_current_line(&record);
     html_view_style_stack_destroy(&record);
     double record_end = host_now_ms();
+#ifdef HTML_VIEW_HOST_TRACE
+    if (g_html_trace_enabled)
+    {
+        html_view_trace_dump_measure(case_name);
+    }
+#endif
     if (out_record_ms)
     {
         *out_record_ms = record_end - record_start;

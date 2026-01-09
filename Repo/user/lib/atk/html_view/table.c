@@ -361,6 +361,7 @@ static int html_view_measure_rendered_width(html_view_ctx_t *ctx, const html_nod
     measure.height_basis = height_basis_valid ? height_basis : 0;
     measure.height_basis_explicit = height_basis_valid;
 
+    html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_TABLE);
     html_view_render_children(&measure, node, parent_style);
     if (measure.x != measure.body_x)
     {
@@ -1784,6 +1785,7 @@ void html_view_render_table(html_view_ctx_t *ctx,
             measure.actual_font_px = cell_font_px;
             measure.line_height = html_view_line_height_for_style(&measure, &cell->style);
             measure.space_w = html_view_text_width(&measure, " ");
+            html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_TABLE);
             html_view_render_children(&measure, cell->node, &cell->style);
             html_view_style_stack_destroy(&measure);
 

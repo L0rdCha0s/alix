@@ -343,6 +343,60 @@ static bool html_view_render_cache_add_op_to_tile(html_view_render_cache_t *cach
     return true;
 }
 
+static bool html_view_render_cache_insert_op_sorted(html_view_render_cache_t *cache, size_t tile_index, size_t op_index)
+{
+    if (!cache)
+    {
+        return false;
+    }
+    if (!html_view_render_cache_ensure_tiles(cache, tile_index + 1))
+    {
+        return false;
+    }
+    if (tile_index + 1 > cache->tile_used)
+    {
+        cache->tile_used = tile_index + 1;
+    }
+
+    html_view_tile_t *tile = &cache->tiles[tile_index];
+    size_t lo = 0;
+    size_t hi = tile->count;
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+        if (tile->ops[mid] < op_index)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+    if (lo < tile->count && tile->ops[lo] == op_index)
+    {
+        return true;
+    }
+    if (tile->count == tile->cap)
+    {
+        size_t new_cap = tile->cap ? (tile->cap * 2) : 64;
+        size_t *new_ops = (size_t *)realloc(tile->ops, new_cap * sizeof(*new_ops));
+        if (!new_ops)
+        {
+            return false;
+        }
+        tile->ops = new_ops;
+        tile->cap = new_cap;
+    }
+    if (lo < tile->count)
+    {
+        memmove(&tile->ops[lo + 1], &tile->ops[lo], (tile->count - lo) * sizeof(*tile->ops));
+    }
+    tile->ops[lo] = op_index;
+    tile->count++;
+    return true;
+}
+
 char *html_view_render_cache_strdup(html_view_render_cache_t *cache, const char *text)
 {
     if (!cache || !text)
@@ -493,6 +547,55 @@ bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_
     }
 
     return true;
+}
+
+void html_view_render_cache_reindex_op(html_view_render_cache_t *cache, size_t op_index)
+{
+    if (!cache || op_index >= cache->op_count)
+    {
+        return;
+    }
+
+    html_view_op_t *op = &cache->ops[op_index];
+    if (op->fixed)
+    {
+        return;
+    }
+
+    int tile_h = cache->tile_h > 0 ? cache->tile_h : ATK_HTML_VIEW_RENDER_TILE_H;
+    if (tile_h <= 0)
+    {
+        return;
+    }
+
+    int32_t y0 = op->y;
+    int32_t y1 = op->y;
+    if (op->kind == HTML_VIEW_OP_TEXT ||
+        op->kind == HTML_VIEW_OP_RECT ||
+        op->kind == HTML_VIEW_OP_IMAGE ||
+        op->kind == HTML_VIEW_OP_CONTROL)
+    {
+        y1 = y0 + op->h;
+    }
+
+    if (y0 < 0)
+    {
+        y0 = 0;
+    }
+    if (y1 < y0)
+    {
+        y1 = y0;
+    }
+
+    size_t tile0 = (size_t)((uint32_t)y0 / (uint32_t)tile_h);
+    size_t tile1 = (y1 > 0) ? (size_t)((uint32_t)(y1 - 1) / (uint32_t)tile_h) : tile0;
+    for (size_t t = tile0; t <= tile1; ++t)
+    {
+        if (!html_view_render_cache_insert_op_sorted(cache, t, op_index))
+        {
+            return;
+        }
+    }
 }
 
 static bool html_view_intersect_rect(const atk_rect_t *a, const atk_rect_t *b, atk_rect_t *out)

@@ -603,6 +603,7 @@ static void html_view_measure_block_children(const html_view_ctx_t *ctx,
     measure.height_basis = height_basis_valid ? height_basis : 0;
     measure.height_basis_explicit = height_basis_valid;
 
+    html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_BLOCK);
     html_view_render_children(&measure, node, style);
     if (measure.x != measure.body_x)
     {

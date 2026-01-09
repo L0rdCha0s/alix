@@ -45,6 +45,199 @@ static int html_view_box_sizing_content_height(const css_style_t *style,
     return height;
 }
 
+static size_t html_view_record_rect_placeholder(html_view_ctx_t *ctx,
+                                                int x,
+                                                int y,
+                                                int w,
+                                                int h,
+                                                video_color_t color,
+                                                const atk_rect_t *clip)
+{
+    if (!ctx || !ctx->record || ctx->record_failed || !ctx->priv)
+    {
+        return (size_t)-1;
+    }
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    html_view_op_t op = {0};
+    op.kind = HTML_VIEW_OP_RECT;
+    op.x = html_view_record_x(ctx, x);
+    op.y = html_view_record_y(ctx, y);
+    op.w = w;
+    op.h = h;
+    op.color = color;
+    op.z_index = html_view_effective_z_index(ctx);
+    op.fixed = ctx->fixed_mode;
+    if (clip)
+    {
+        op.has_clip = true;
+        op.clip_scroll = ctx->clip_scroll;
+        op.clip_x = html_view_record_x(ctx, clip->x);
+        op.clip_y = html_view_record_y(ctx, clip->y);
+        op.clip_w = clip->width;
+        op.clip_h = clip->height;
+    }
+    if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
+    {
+        ctx->record_failed = true;
+        return (size_t)-1;
+    }
+    return cache->op_count - 1u;
+}
+
+static void html_view_align_line_partial(html_view_ctx_t *ctx, size_t end_ops)
+{
+    if (!ctx || !ctx->record || ctx->record_failed || !ctx->priv)
+    {
+        return;
+    }
+    if (ctx->text_align_mode == CSS_TEXT_ALIGN_LEFT)
+    {
+        ctx->line_op_start = end_ops;
+        return;
+    }
+
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    if (end_ops > cache->op_count)
+    {
+        end_ops = cache->op_count;
+    }
+    size_t start = ctx->line_op_start;
+    size_t end = end_ops;
+    if (start >= end)
+    {
+        ctx->line_op_start = end_ops;
+        return;
+    }
+
+    int line_left = ctx->line_start_x;
+    int avail = ctx->max_x - line_left;
+    int line_w = ctx->x - line_left;
+    if (avail <= 0 || line_w <= 0 || line_w >= avail)
+    {
+        ctx->line_op_start = end_ops;
+        return;
+    }
+
+    int delta = 0;
+    if (ctx->text_align_mode == CSS_TEXT_ALIGN_CENTER)
+    {
+        delta = (avail - line_w) / 2;
+    }
+    else if (ctx->text_align_mode == CSS_TEXT_ALIGN_RIGHT)
+    {
+        delta = (avail - line_w);
+    }
+
+    if (delta <= 0)
+    {
+        ctx->line_op_start = end_ops;
+        return;
+    }
+
+    int max_shift_h = ctx->line_height + 2;
+    for (size_t i = start; i < end; ++i)
+    {
+        html_view_op_t *op = &cache->ops[i];
+        bool shift = false;
+        if (op->kind == HTML_VIEW_OP_TEXT || op->kind == HTML_VIEW_OP_CONTROL)
+        {
+            shift = true;
+        }
+        else if (op->kind == HTML_VIEW_OP_RECT)
+        {
+            shift = (op->h > 0 && op->h <= max_shift_h);
+        }
+        else if (op->kind == HTML_VIEW_OP_IMAGE)
+        {
+            shift = (op->h > 0 && op->h <= max_shift_h);
+        }
+
+        if (shift)
+        {
+            op->x += delta;
+        }
+    }
+
+    ctx->line_op_start = end_ops;
+}
+
+static void html_view_advance_line_no_align(html_view_ctx_t *ctx, int line_height, size_t line_op_start)
+{
+    if (!ctx)
+    {
+        return;
+    }
+    ctx->x = ctx->body_x;
+    ctx->y += line_height;
+    ctx->pending_space = false;
+    int bottom = ctx->y + ctx->line_height;
+    if (bottom > ctx->content_bottom)
+    {
+        ctx->content_bottom = bottom;
+    }
+    ctx->line_start_x = ctx->x;
+    ctx->line_start_y = ctx->y;
+    ctx->line_op_start = line_op_start;
+}
+
+static void html_view_shift_recorded_ops(html_view_ctx_t *ctx,
+                                         size_t op_start,
+                                         size_t op_end,
+                                         int dx,
+                                         int dy,
+                                         size_t skip_op)
+{
+    if (!ctx || !ctx->priv || (dx == 0 && dy == 0))
+    {
+        return;
+    }
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    if (op_end > cache->op_count)
+    {
+        op_end = cache->op_count;
+    }
+    for (size_t i = op_start; i < op_end; ++i)
+    {
+        if (i == skip_op)
+        {
+            continue;
+        }
+        html_view_op_t *op = &cache->ops[i];
+        if (op->fixed)
+        {
+            continue;
+        }
+        op->x += dx;
+        op->y += dy;
+        html_view_render_cache_reindex_op(cache, i);
+    }
+}
+
+static void html_view_shift_recorded_anchors(html_view_ctx_t *ctx,
+                                             size_t anchor_start,
+                                             size_t anchor_end,
+                                             int dy)
+{
+    if (!ctx || !ctx->priv || dy == 0)
+    {
+        return;
+    }
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    if (anchor_end > cache->anchor_count)
+    {
+        anchor_end = cache->anchor_count;
+    }
+    for (size_t i = anchor_start; i < anchor_end; ++i)
+    {
+        int updated = cache->anchors[i].y + dy;
+        if (updated < 0)
+        {
+            updated = 0;
+        }
+        cache->anchors[i].y = updated;
+    }
+}
+
 static void html_view_measure_inline_block_children(const html_view_ctx_t *ctx,
                                                     const html_node_t *node,
                                                     const css_style_t *style,
@@ -129,6 +322,8 @@ static void html_view_measure_inline_block_children(const html_view_ctx_t *ctx,
     measure.height_basis = 0;
     measure.height_basis_explicit = false;
 
+    html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK);
+    html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_INLINE);
     html_view_render_children(&measure, node, style);
     if (measure.x != measure.body_x)
     {
@@ -470,13 +665,115 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
     int content_w = 0;
     int content_h = 0;
     bool wrapped = false;
-    if (!html_view_measure_inline_children(ctx, node, style, &content_w, &content_h, &wrapped))
+    bool record_only = false;
+    size_t record_op_start = 0;
+    size_t record_op_end = 0;
+    size_t anchor_start = 0;
+    size_t bg_op = (size_t)-1;
+    int start_x = 0;
+    int start_y = 0;
+    html_view_paint_layer_t saved_layer = ctx ? ctx->paint_layer : HTML_VIEW_PAINT_LAYER_BLOCK;
+
+    if (ctx && ctx->record && !ctx->draw && ctx->priv && !ctx->record_failed &&
+        !(style->has_background_image && style->background_image))
     {
-        return false;
+        record_only = true;
+        html_view_render_cache_t *cache = &ctx->priv->render_cache;
+        record_op_start = cache->op_count;
+        anchor_start = cache->anchor_count;
+
+        if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
+        {
+            ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
+        }
+
+        if (style->has_background && !style->background_transparent)
+        {
+            bg_op = html_view_record_rect_placeholder(ctx, 0, 0, 0, 0, style->background, &ctx->clip);
+        }
+
+        html_view_ctx_t inner = *ctx;
+        html_view_float_ctx_t inner_floats = {0};
+        if (ctx->floats)
+        {
+            inner_floats = *ctx->floats;
+            inner.floats = &inner_floats;
+        }
+        else
+        {
+            inner.floats = NULL;
+        }
+        inner.style_block = NULL;
+        inner.style_depth = 0;
+        inner.pending_space = false;
+        html_view_margin_state_reset(&inner.pending_margin);
+        inner.measure_max_x = inner.x;
+        inner.content_bottom = inner.y;
+        inner.line_height = html_view_line_height_for_style(&inner, style);
+        if (html_view_subtree_has_form_control(node) && inner.line_height < atk_font_line_height() + 8)
+        {
+            inner.line_height = atk_font_line_height() + 8;
+        }
+
+        start_x = inner.x;
+        start_y = inner.y;
+        int start_line_y = inner.line_start_y;
+
+        html_view_render_children(&inner, node, style);
+        if (inner.x != inner.body_x)
+        {
+            html_view_ensure_line_visible(&inner);
+        }
+        html_view_style_stack_destroy(&inner);
+        if (inner.record_failed)
+        {
+            ctx->record_failed = true;
+        }
+
+        record_op_end = cache->op_count;
+        content_w = inner.x - start_x;
+        content_h = inner.content_bottom - start_y;
+        if (content_h <= 0)
+        {
+            content_h = inner.line_height;
+        }
+        wrapped = (inner.y != start_y) || (inner.line_start_y != start_line_y);
+        if (wrapped)
+        {
+            if (bg_op != (size_t)-1 && bg_op < cache->op_count)
+            {
+                cache->ops[bg_op].w = 0;
+                cache->ops[bg_op].h = 0;
+            }
+            ctx->x = inner.x;
+            ctx->y = inner.y;
+            ctx->line_height = inner.line_height;
+            ctx->line_start_x = inner.line_start_x;
+            ctx->line_start_y = inner.line_start_y;
+            ctx->line_op_start = inner.line_op_start;
+            ctx->measure_max_x = inner.measure_max_x;
+            ctx->content_bottom = inner.content_bottom;
+            ctx->pending_space = inner.pending_space;
+            ctx->pending_margin = inner.pending_margin;
+            ctx->underline_run_active = inner.underline_run_active;
+            ctx->underline_run_start_x = inner.underline_run_start_x;
+            ctx->underline_run_color = inner.underline_run_color;
+            ctx->list_level = inner.list_level;
+            ctx->active_href = inner.active_href;
+            ctx->paint_layer = saved_layer;
+            return true;
+        }
     }
-    if (wrapped)
+    else
     {
-        return false;
+        if (!html_view_measure_inline_children(ctx, node, style, &content_w, &content_h, &wrapped))
+        {
+            return false;
+        }
+        if (wrapped)
+        {
+            return false;
+        }
     }
 
     int pad_top = 0;
@@ -639,11 +936,12 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
         content_w = 0;
     }
 
+    bool break_line = false;
     if (ctx->pending_space && ctx->x != ctx->body_x)
     {
         if (ctx->x + ctx->space_w + box_w > ctx->max_x)
         {
-            html_view_new_line(ctx);
+            break_line = true;
         }
         else
         {
@@ -652,10 +950,23 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
     }
     else if (ctx->x != ctx->body_x && ctx->x + box_w > ctx->max_x)
     {
-        html_view_new_line(ctx);
+        break_line = true;
     }
 
-    html_view_paint_layer_t saved_layer = ctx->paint_layer;
+    if (break_line)
+    {
+        if (record_only)
+        {
+            html_view_flush_underline_run(ctx);
+            html_view_align_line_partial(ctx, record_op_start);
+            html_view_advance_line_no_align(ctx, ctx->line_height, record_op_start);
+        }
+        else
+        {
+            html_view_new_line(ctx);
+        }
+    }
+
     if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
     {
         ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
@@ -707,29 +1018,80 @@ static bool html_view_render_inline_background_box(html_view_ctx_t *ctx,
                       ctx->z_index);
     }
 
-    if (style->has_background && !style->background_transparent)
+    if (!record_only)
     {
-        html_view_draw_rect_clipped(ctx, draw_x, draw_y, box_w, box_h, style->background, &ctx->clip);
-    }
-    html_view_draw_background_image(ctx, style, draw_x, doc_y, box_w, box_h);
+        if (style->has_background && !style->background_transparent)
+        {
+            html_view_draw_rect_clipped(ctx, draw_x, draw_y, box_w, box_h, style->background, &ctx->clip);
+        }
+        html_view_draw_background_image(ctx, style, draw_x, doc_y, box_w, box_h);
 
-    if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
+        if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
+        {
+            html_view_draw_border_sides_clipped(ctx,
+                                                draw_x,
+                                                draw_y,
+                                                box_w,
+                                                box_h,
+                                                border_top,
+                                                border_right,
+                                                border_bottom,
+                                                border_left,
+                                                style,
+                                                &ctx->clip);
+        }
+    }
+    else if (ctx->priv && bg_op != (size_t)-1 && bg_op < ctx->priv->render_cache.op_count)
     {
-        html_view_draw_border_sides_clipped(ctx,
-                                            draw_x,
-                                            draw_y,
-                                            box_w,
-                                            box_h,
-                                            border_top,
-                                            border_right,
-                                            border_bottom,
-                                            border_left,
-                                            style,
-                                            &ctx->clip);
+        html_view_render_cache_t *cache = &ctx->priv->render_cache;
+        html_view_op_t *op = &cache->ops[bg_op];
+        op->x = html_view_record_x(ctx, draw_x);
+        op->y = html_view_record_y(ctx, draw_y);
+        op->w = box_w;
+        op->h = box_h;
+        html_view_render_cache_reindex_op(cache, bg_op);
     }
 
     if (measure_only)
     {
+        ctx->x = draw_x + box_w;
+        if (ctx->x > ctx->measure_max_x)
+        {
+            ctx->measure_max_x = ctx->x;
+        }
+        ctx->pending_space = true;
+        html_view_ensure_line_visible(ctx);
+        ctx->paint_layer = saved_layer;
+        return true;
+    }
+
+    if (record_only)
+    {
+        int content_x = draw_x + border_left + pad_left;
+        int content_y = doc_y + border_top + pad_top;
+        int dx = content_x - start_x;
+        int dy = content_y - start_y;
+        html_view_shift_recorded_ops(ctx, record_op_start, record_op_end, dx, dy, bg_op);
+        if (ctx->priv)
+        {
+            html_view_shift_recorded_anchors(ctx, anchor_start, ctx->priv->render_cache.anchor_count, dy);
+        }
+
+        if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
+        {
+            html_view_draw_border_sides_clipped(ctx,
+                                                draw_x,
+                                                draw_y,
+                                                box_w,
+                                                box_h,
+                                                border_top,
+                                                border_right,
+                                                border_bottom,
+                                                border_left,
+                                                style,
+                                                &ctx->clip);
+        }
+
         ctx->x = draw_x + box_w;
         if (ctx->x > ctx->measure_max_x)
         {
@@ -806,6 +1168,8 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
     {
         return false;
     }
+
+    html_view_paint_layer_t saved_layer = ctx->paint_layer;
 
     int pad_top = 0;
     int pad_right = 0;
@@ -936,6 +1300,15 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
         }
     }
 
+    bool record_only = false;
+    bool record_children = false;
+    size_t record_op_start = 0;
+    size_t record_op_end = 0;
+    size_t anchor_start = 0;
+    size_t bg_op = (size_t)-1;
+    int record_start_x = 0;
+    int record_start_y = 0;
+
     int line_w = ctx->max_x - ctx->body_x;
     if (line_w < 0)
     {
@@ -964,9 +1337,116 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
                                                           border_bottom);
     }
 
+    int specified_content_w = 0;
+    if (width_specified)
+    {
+        specified_content_w = html_view_length_to_px(&style->width,
+                                                     ctx->viewport_w,
+                                                     ctx->viewport_h,
+                                                     ctx->body_w,
+                                                     ctx->viewport_h,
+                                                     ctx->base_font_px,
+                                                     true);
+        specified_content_w = html_view_box_sizing_content_width(style,
+                                                                 specified_content_w,
+                                                                 pad_left,
+                                                                 pad_right,
+                                                                 border_left,
+                                                                 border_right);
+        if (specified_content_w < 0)
+        {
+            specified_content_w = 0;
+        }
+    }
+
     int measured_w = 0;
     int measured_h = 0;
-    if (!width_specified || !height_specified)
+    if (ctx->record && !ctx->draw && ctx->priv && !ctx->record_failed &&
+        !(style->has_background_image && style->background_image) &&
+        (!width_specified || !height_specified))
+    {
+        record_only = true;
+        html_view_render_cache_t *cache = &ctx->priv->render_cache;
+        record_op_start = cache->op_count;
+        anchor_start = cache->anchor_count;
+
+        if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
+        {
+            ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
+        }
+
+        if (style->has_background && !style->background_transparent)
+        {
+            bg_op = html_view_record_rect_placeholder(ctx, 0, 0, 0, 0, style->background, &ctx->clip);
+        }
+
+        html_view_ctx_t inner = *ctx;
+        html_view_float_ctx_t inner_floats = {0};
+        if (ctx->floats)
+        {
+            inner_floats = *ctx->floats;
+            inner.floats = &inner_floats;
+        }
+        else
+        {
+            inner.floats = NULL;
+        }
+        inner.draw = false;
+        inner.record = true;
+        inner.record_failed = false;
+        inner.style_block = NULL;
+        inner.style_depth = 0;
+        inner.measure_shrink = true;
+        inner.body_x = 0;
+        int render_body_w = width_specified ? specified_content_w : available_content_w;
+        if (width_specified && available_content_w > 0 && render_body_w > available_content_w)
+        {
+            render_body_w = available_content_w;
+        }
+        inner.body_w = render_body_w;
+        if (inner.body_w < 0) inner.body_w = 0;
+        inner.max_x = inner.body_x + inner.body_w;
+        inner.x = inner.body_x;
+        inner.y = 0;
+        inner.line_start_x = inner.x;
+        inner.line_start_y = inner.y;
+        inner.pending_space = false;
+        html_view_margin_state_reset(&inner.pending_margin);
+        inner.measure_max_x = inner.x;
+        inner.content_bottom = inner.y;
+        inner.line_op_start = record_op_start;
+        inner.space_w = html_view_text_width(&inner, " ");
+        inner.line_height = html_view_line_height_for_style(&inner, style);
+        if (html_view_subtree_has_form_control(node) && inner.line_height < atk_font_line_height() + 8)
+        {
+            inner.line_height = atk_font_line_height() + 8;
+        }
+        inner.height_basis_valid = false;
+        inner.height_basis = 0;
+        inner.height_basis_explicit = false;
+        record_start_x = inner.x;
+        record_start_y = inner.y;
+
+        html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK);
+        html_view_render_children(&inner, node, style);
+        if (inner.x != inner.body_x)
+        {
+            html_view_new_line(&inner);
+        }
+        html_view_style_stack_destroy(&inner);
+        if (inner.record_failed)
+        {
+            ctx->record_failed = true;
+        }
+
+        record_op_end = cache->op_count;
+        measured_w = inner.measure_max_x - inner.body_x;
+        if (measured_w < 0) measured_w = 0;
+        measured_h = inner.content_bottom;
+        if (measured_h < 0) measured_h = 0;
+        record_children = true;
+    }
+    if (!record_children && (!width_specified || !height_specified))
     {
         html_view_measure_inline_block_children(ctx, node, style, available_content_w, &measured_w, &measured_h);
     }
@@ -974,19 +1454,7 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
     int content_w = 0;
     if (width_specified)
     {
-        content_w = html_view_length_to_px(&style->width,
-                                           ctx->viewport_w,
-                                           ctx->viewport_h,
-                                           ctx->body_w,
-                                           ctx->viewport_h,
-                                           ctx->base_font_px,
-                                           true);
-        content_w = html_view_box_sizing_content_width(style,
-                                                       content_w,
-                                                       pad_left,
-                                                       pad_right,
-                                                       border_left,
-                                                       border_right);
+        content_w = specified_content_w;
     }
     else
     {
@@ -1106,6 +1574,7 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
     int outer_h = box_h + margin_top + margin_bottom;
     if (box_w <= 0 || box_h <= 0)
     {
+        ctx->paint_layer = saved_layer;
         return false;
     }
 
@@ -1118,7 +1587,16 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
     {
         if (ctx->x + ctx->space_w + outer_w > ctx->max_x)
         {
-            html_view_new_line(ctx);
+            if (record_only)
+            {
+                html_view_flush_underline_run(ctx);
+                html_view_align_line_partial(ctx, record_op_start);
+                html_view_advance_line_no_align(ctx, ctx->line_height, record_op_start);
+            }
+            else
+            {
+                html_view_new_line(ctx);
+            }
         }
         else
         {
@@ -1127,10 +1605,18 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
     }
     else if (ctx->x != ctx->body_x && ctx->x + outer_w > ctx->max_x)
     {
-        html_view_new_line(ctx);
+        if (record_only)
+        {
+            html_view_flush_underline_run(ctx);
+            html_view_align_line_partial(ctx, record_op_start);
+            html_view_advance_line_no_align(ctx, ctx->line_height, record_op_start);
+        }
+        else
+        {
+            html_view_new_line(ctx);
+        }
     }
 
-    html_view_paint_layer_t saved_layer = ctx->paint_layer;
     if (ctx->paint_layer == HTML_VIEW_PAINT_LAYER_BLOCK)
     {
         ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
@@ -1142,29 +1628,80 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
     int doc_y = ctx->y + ctx->line_height - outer_h + margin_top;
     int draw_y = html_view_draw_y(ctx, doc_y);
 
-    if (style->has_background && !style->background_transparent)
+    if (!record_only)
     {
-        html_view_draw_rect_clipped(ctx, border_box_x, draw_y, box_w, box_h, style->background, &ctx->clip);
-    }
-    html_view_draw_background_image(ctx, style, border_box_x, doc_y, box_w, box_h);
+        if (style->has_background && !style->background_transparent)
+        {
+            html_view_draw_rect_clipped(ctx, border_box_x, draw_y, box_w, box_h, style->background, &ctx->clip);
+        }
+        html_view_draw_background_image(ctx, style, border_box_x, doc_y, box_w, box_h);
 
-    if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
+        if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
+        {
+            html_view_draw_border_sides_clipped(ctx,
+                                                border_box_x,
+                                                draw_y,
+                                                box_w,
+                                                box_h,
+                                                border_top,
+                                                border_right,
+                                                border_bottom,
+                                                border_left,
+                                                style,
+                                                &ctx->clip);
+        }
+    }
+    else if (ctx->priv && bg_op != (size_t)-1 && bg_op < ctx->priv->render_cache.op_count)
     {
-        html_view_draw_border_sides_clipped(ctx,
-                                            border_box_x,
-                                            draw_y,
-                                            box_w,
-                                            box_h,
-                                            border_top,
-                                            border_right,
-                                            border_bottom,
-                                            border_left,
-                                            style,
-                                            &ctx->clip);
+        html_view_render_cache_t *cache = &ctx->priv->render_cache;
+        html_view_op_t *op = &cache->ops[bg_op];
+        op->x = html_view_record_x(ctx, border_box_x);
+        op->y = html_view_record_y(ctx, draw_y);
+        op->w = box_w;
+        op->h = box_h;
+        html_view_render_cache_reindex_op(cache, bg_op);
     }
 
     if (measure_only)
     {
+        ctx->x = outer_x + outer_w;
+        if (ctx->x > ctx->measure_max_x)
+        {
+            ctx->measure_max_x = ctx->x;
+        }
+        ctx->pending_space = true;
+        html_view_ensure_line_visible(ctx);
+        ctx->paint_layer = saved_layer;
+        return true;
+    }
+
+    if (record_only)
+    {
+        int content_x = border_box_x + border_left + pad_left;
+        int content_y = doc_y + border_top + pad_top;
+        int dx = content_x - record_start_x;
+        int dy = content_y - record_start_y;
+        html_view_shift_recorded_ops(ctx, record_op_start, record_op_end, dx, dy, bg_op);
+        if (ctx->priv)
+        {
+            html_view_shift_recorded_anchors(ctx, anchor_start, ctx->priv->render_cache.anchor_count, dy);
+        }
+
+        if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
+        {
+            html_view_draw_border_sides_clipped(ctx,
+                                                border_box_x,
+                                                draw_y,
+                                                box_w,
+                                                box_h,
+                                                border_top,
+                                                border_right,
+                                                border_bottom,
+                                                border_left,
+                                                style,
+                                                &ctx->clip);
+        }
+
         ctx->x = outer_x + outer_w;
         if (ctx->x > ctx->measure_max_x)
         {

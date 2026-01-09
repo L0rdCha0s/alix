@@ -386,6 +386,7 @@ typedef enum
     HTML_VIEW_MEASURE_KIND_TABLE = 1,
     HTML_VIEW_MEASURE_KIND_INLINE = 2,
     HTML_VIEW_MEASURE_KIND_INLINE_BLOCK = 3,
+    HTML_VIEW_MEASURE_KIND_FLEX_ITEM = 4,
 } html_view_measure_kind_t;
 
 typedef struct html_view_style_block
@@ -611,6 +612,7 @@ void html_view_render_cache_clear(html_view_render_cache_t *cache);
 char *html_view_render_cache_strdup(html_view_render_cache_t *cache, const char *text);
 bool html_view_render_cache_add_anchor(html_view_render_cache_t *cache, const char *id, int y);
 bool html_view_render_cache_push_op(html_view_render_cache_t *cache, const html_view_op_t *op, int tile_h);
+void html_view_render_cache_reindex_op(html_view_render_cache_t *cache, size_t op_index);
 void html_view_render_cache_draw_visible(html_view_ctx_t *ctx);
 html_view_control_t *html_view_control_find(atk_html_view_priv_t *priv, const html_node_t *node);
 void html_view_images_clear(atk_html_view_priv_t *priv);
@@ -619,10 +621,35 @@ void html_view_controls_clear(atk_widget_t *view, atk_html_view_priv_t *priv);
 void html_view_controls_hide_all(atk_html_view_priv_t *priv);
 void html_view_collect_text(const html_node_t *node, char **buf, size_t *len, size_t *cap);
 void html_view_trim_collapse_ws(char *text);
+typedef enum
+{
+    HTML_VIEW_TRACE_MEASURE_INLINE = 0,
+    HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK,
+    HTML_VIEW_TRACE_MEASURE_BLOCK,
+    HTML_VIEW_TRACE_MEASURE_TABLE,
+    HTML_VIEW_TRACE_MEASURE_FLEX,
+    HTML_VIEW_TRACE_MEASURE_GRID,
+    HTML_VIEW_TRACE_MEASURE_KIND_COUNT
+} html_view_trace_measure_kind_t;
 #ifdef HTML_VIEW_HOST_TRACE
 void html_view_trace_configure(bool enabled, uint32_t rule_stride, uint32_t node_stride);
 void html_view_trace_note_rule(const html_node_t *node, const char *selector, const char *phase);
 void html_view_trace_note_node(const html_node_t *node, const char *phase);
+void html_view_trace_note_measure(html_view_trace_measure_kind_t kind);
+void html_view_trace_reset_measure(void);
+void html_view_trace_dump_measure(const char *label);
+#else
+static inline void html_view_trace_note_measure(html_view_trace_measure_kind_t kind)
+{
+    (void)kind;
+}
+static inline void html_view_trace_reset_measure(void)
+{
+}
+static inline void html_view_trace_dump_measure(const char *label)
+{
+    (void)label;
+}
 #endif
 
 void html_view_draw_rect_clipped(html_view_ctx_t *ctx,

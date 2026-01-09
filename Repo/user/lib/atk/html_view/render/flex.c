@@ -241,6 +241,7 @@ static void html_view_measure_node_size(const html_view_ctx_t *ctx,
         measure.line_height = html_view_line_height_for_style(&measure, parent_style);
     }
 
+    html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_FLEX);
     html_view_render_node_internal(&measure, node, parent_style);
     html_view_style_stack_destroy(&measure);
 

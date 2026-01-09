@@ -1,6 +1,7 @@
 #include "atk/html_view/html_view_internal.h"
 
 #include "ctype.h"
+#include "string.h"
 #include "web/css/css_internal.h"
 
 #ifdef HTML_VIEW_HOST_TRACE
@@ -11,6 +12,7 @@ typedef struct
     uint32_t node_stride;
     uint64_t rule_checks;
     uint64_t node_visits;
+    uint64_t measure_counts[HTML_VIEW_TRACE_MEASURE_KIND_COUNT];
 } html_view_trace_state_t;
 
 static html_view_trace_state_t g_html_view_trace_state = {0};
@@ -22,6 +24,7 @@ void html_view_trace_configure(bool enabled, uint32_t rule_stride, uint32_t node
     g_html_view_trace_state.node_stride = node_stride ? node_stride : 5000u;
     g_html_view_trace_state.rule_checks = 0;
     g_html_view_trace_state.node_visits = 0;
+    memset(g_html_view_trace_state.measure_counts, 0, sizeof(g_html_view_trace_state.measure_counts));
 }
 
 void html_view_trace_note_rule(const html_node_t *node, const char *selector, const char *phase)
@@ -67,6 +70,44 @@ void html_view_trace_note_node(const html_node_t *node, const char *phase)
            tag,
            id ? id : "(null)",
            cls ? cls : "(null)");
+}
+
+void html_view_trace_note_measure(html_view_trace_measure_kind_t kind)
+{
+    if (!g_html_view_trace_state.enabled)
+    {
+        return;
+    }
+    if ((unsigned int)kind >= (unsigned int)HTML_VIEW_TRACE_MEASURE_KIND_COUNT)
+    {
+        return;
+    }
+    g_html_view_trace_state.measure_counts[kind]++;
+}
+
+void html_view_trace_reset_measure(void)
+{
+    if (!g_html_view_trace_state.enabled)
+    {
+        return;
+    }
+    memset(g_html_view_trace_state.measure_counts, 0, sizeof(g_html_view_trace_state.measure_counts));
+}
+
+void html_view_trace_dump_measure(const char *label)
+{
+    if (!g_html_view_trace_state.enabled)
+    {
+        return;
+    }
+    printf("html_view_trace: measure label=%s inline=%llu inline_block=%llu block=%llu table=%llu flex=%llu grid=%llu\n",
+           label ? label : "(null)",
+           (unsigned long long)g_html_view_trace_state.measure_counts[HTML_VIEW_TRACE_MEASURE_INLINE],
+           (unsigned long long)g_html_view_trace_state.measure_counts[HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK],
+           (unsigned long long)g_html_view_trace_state.measure_counts[HTML_VIEW_TRACE_MEASURE_BLOCK],
+           (unsigned long long)g_html_view_trace_state.measure_counts[HTML_VIEW_TRACE_MEASURE_TABLE],
+           (unsigned long long)g_html_view_trace_state.measure_counts[HTML_VIEW_TRACE_MEASURE_FLEX],
+           (unsigned long long)g_html_view_trace_state.measure_counts[HTML_VIEW_TRACE_MEASURE_GRID]);
 }
 #endif
 
