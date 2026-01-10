@@ -30,7 +30,11 @@
 #include <stddef.h>
 
 #ifndef TLS_DEBUG_SIG
-#define TLS_DEBUG_SIG 1
+#define TLS_DEBUG_SIG 0
+#endif
+
+#ifndef TLS_DEBUG_LOG
+#define TLS_DEBUG_LOG 0
 #endif
 
 #define TLS_VERSION_MAJOR 0x03
@@ -191,9 +195,29 @@ static void tls_log(const char *msg)
     serial_printf("%s\n", msg ? msg : "");
 }
 
+static void tls_log_debug(const char *msg)
+{
+#if TLS_DEBUG_LOG
+    serial_printf("%s\n", msg ? msg : "");
+#else
+    (void)msg;
+#endif
+}
+
 static void tls_log_hex(const char *prefix, uint64_t value)
 {
+#if TLS_DEBUG_LOG
     serial_printf("%s%016llX\n", prefix ? prefix : "", (unsigned long long)value);
+#else
+    (void)prefix;
+    (void)value;
+#endif
+}
+
+static void tls_log_alert_error(uint8_t level, uint8_t description)
+{
+    serial_printf("TLS: alert level 0x%02X description 0x%02X\n",
+                  (unsigned)level, (unsigned)description);
 }
 
 #if TLS_DEBUG_SIG
@@ -371,6 +395,23 @@ static bool tls_socket_read_exact(tls_session_t *session, uint8_t *out, size_t l
         {
             tls_log("TLS: socket read detected tcp error");
             return false;
+        }
+#elif !defined(TTF_HOST_BUILD)
+        ssize_t available = socket_available(session->socket_fd);
+        if (available < 0)
+        {
+            tls_log("TLS: socket read detected tcp error");
+            return false;
+        }
+        if (available == 0)
+        {
+            if (tls_time_ticks() - start >= timeout_ticks)
+            {
+                tls_log("TLS: socket read timeout waiting for data");
+                return false;
+            }
+            tls_thread_yield();
+            continue;
         }
 #endif
 
@@ -2009,7 +2050,7 @@ static bool tls_send_client_hello(tls_session_t *session, const char *hostname)
     tls_serialize_uint24(handshake + 1, body_len);
     memcpy(handshake + 4, body, body_len);
 
-    tls_log("TLS: sending ClientHello");
+    tls_log_debug("TLS: sending ClientHello");
     tls_handshake_hash_update(session, handshake, 4 + body_len);
     return tls_write_record_plain(session, TLS_CONTENT_HANDSHAKE, handshake, 4 + body_len);
 }
@@ -2333,7 +2374,7 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
         return false;
     }
 
-    tls_log("TLS: handshake start");
+    tls_log_debug("TLS: handshake start");
 
     if (!tls_send_client_hello(session, hostname))
     {
@@ -2381,27 +2422,17 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
         {
             if (type == TLS_CONTENT_ALERT)
             {
-                if (len >= 2)
-                {
-                    tls_log_hex("TLS: alert level 0x", session->record_buffer[0]);
-                    tls_log_hex("TLS: alert description 0x", session->record_buffer[1]);
-                }
-                else
-                {
-                    tls_log("TLS: alert message too short");
-                }
                 if (len < 2)
                 {
+                    tls_log("TLS: alert message too short");
                     return false;
                 }
                 uint8_t level = session->record_buffer[0];
                 uint8_t description = session->record_buffer[1];
-                if (level == TLS_ALERT_LEVEL_FATAL)
+                if (level == TLS_ALERT_LEVEL_FATAL ||
+                    description == TLS_ALERT_CLOSE_NOTIFY)
                 {
-                    return false;
-                }
-                if (description == TLS_ALERT_CLOSE_NOTIFY)
-                {
+                    tls_log_alert_error(level, description);
                     return false;
                 }
                 continue;
@@ -2424,7 +2455,7 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
             }
             else if (type == TLS_CONTENT_CHANGE_CIPHER_SPEC)
             {
-                tls_log("TLS: server sent ChangeCipherSpec");
+                tls_log_debug("TLS: server sent ChangeCipherSpec");
                 waiting_encrypted = true;
                 continue;
             }
@@ -2549,12 +2580,12 @@ bool tls_session_handshake(tls_session_t *session, const char *hostname)
                 tls_log("TLS: failed to send Finished");
                 return false;
             }
-            tls_log("TLS: sent ClientKeyExchange/Finished");
+            tls_log_debug("TLS: sent ClientKeyExchange/Finished");
             client_key_sent = true;
         }
     }
 
-    tls_log("TLS: handshake complete");
+    tls_log_debug("TLS: handshake complete");
     return session->handshake_complete;
 }
 

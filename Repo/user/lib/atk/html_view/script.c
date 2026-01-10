@@ -7,6 +7,20 @@
 
 #define HTML_VIEW_DOM_LOCK_LOG_MIN_MS 2u
 #define HTML_VIEW_DOM_LOCK_LOG_RATE_MS 250u
+#define HTML_VIEW_DOM_LOCK_HOLD_LOG_MIN_MS 50u
+#define HTML_VIEW_DOM_LOCK_HOLD_LOG_RATE_MS 250u
+#define HTML_VIEW_JS_LOG_THROTTLE_MS 250u
+
+static bool html_view_js_log_throttle(uint64_t *last_ms, uint64_t interval_ms)
+{
+    uint64_t now_ms = sys_time_millis();
+    if (now_ms - *last_ms < interval_ms)
+    {
+        return false;
+    }
+    *last_ms = now_ms;
+    return true;
+}
 
 typedef struct
 {
@@ -19,6 +33,31 @@ void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
 static bool html_view_js_should_stop(const atk_html_view_priv_t *priv);
 static bool html_view_js_queue_source_locked(atk_html_view_priv_t *priv, const char *source, size_t len);
 static bool html_view_js_queue_program_locked(atk_html_view_priv_t *priv, js_program_t *program);
+
+static void html_view_dom_lock_record(atk_html_view_priv_t *priv, void *caller)
+{
+    if (!priv)
+    {
+        return;
+    }
+    __atomic_store_n(&priv->dom_lock_owner, alix_thread_self(), __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->dom_lock_hold_start_ms, sys_time_millis(), __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->dom_lock_hold_caller, (uintptr_t)caller, __ATOMIC_RELAXED);
+}
+
+static bool html_view_dom_try_lock_with_caller(atk_html_view_priv_t *priv, void *caller)
+{
+    if (!priv)
+    {
+        return false;
+    }
+    if (__sync_lock_test_and_set(&priv->dom_lock.state, 1u) == 0u)
+    {
+        html_view_dom_lock_record(priv, caller);
+        return true;
+    }
+    return false;
+}
 
 static char *html_view_js_strdup_len(const char *src, size_t len)
 {
@@ -46,13 +85,18 @@ void html_view_dom_lock(atk_html_view_priv_t *priv)
     {
         return;
     }
-    if (html_view_dom_try_lock(priv))
+    void *caller = __builtin_return_address(0);
+    if (html_view_dom_try_lock_with_caller(priv, caller))
     {
         return;
     }
 
+    alix_thread_t owner = __atomic_load_n(&priv->dom_lock_owner, __ATOMIC_RELAXED);
+    uint64_t hold_start_ms = __atomic_load_n(&priv->dom_lock_hold_start_ms, __ATOMIC_RELAXED);
+    uintptr_t hold_caller = __atomic_load_n(&priv->dom_lock_hold_caller, __ATOMIC_RELAXED);
     uint64_t start_ms = sys_time_millis();
     alix_mutex_lock(&priv->dom_lock);
+    html_view_dom_lock_record(priv, caller);
     uint64_t waited_ms = sys_time_millis() - start_ms;
     if (waited_ms >= HTML_VIEW_DOM_LOCK_LOG_MIN_MS)
     {
@@ -62,18 +106,20 @@ void html_view_dom_lock(atk_html_view_priv_t *priv)
         if (now_ms - last >= HTML_VIEW_DOM_LOCK_LOG_RATE_MS)
         {
             __atomic_store_n(&last_log_ms, now_ms, __ATOMIC_RELAXED);
-            serial_printf("[html_view] dom_lock wait=%u ms", (unsigned)waited_ms);
+            uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
+            serial_printf("[html_view] dom_lock wait=%u ms owner=%llu hold_ms=%llu caller=0x%016llX",
+                          (unsigned)waited_ms,
+                          (unsigned long long)owner,
+                          (unsigned long long)hold_ms,
+                          (unsigned long long)hold_caller);
         }
     }
 }
 
 bool html_view_dom_try_lock(atk_html_view_priv_t *priv)
 {
-    if (!priv)
-    {
-        return false;
-    }
-    return __sync_lock_test_and_set(&priv->dom_lock.state, 1u) == 0u;
+    void *caller = __builtin_return_address(0);
+    return html_view_dom_try_lock_with_caller(priv, caller);
 }
 
 void html_view_dom_unlock(atk_html_view_priv_t *priv)
@@ -82,7 +128,31 @@ void html_view_dom_unlock(atk_html_view_priv_t *priv)
     {
         return;
     }
+    uint64_t hold_start_ms = __atomic_load_n(&priv->dom_lock_hold_start_ms, __ATOMIC_RELAXED);
+    alix_thread_t owner = __atomic_load_n(&priv->dom_lock_owner, __ATOMIC_RELAXED);
+    uintptr_t hold_caller = __atomic_load_n(&priv->dom_lock_hold_caller, __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->dom_lock_owner, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->dom_lock_hold_start_ms, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->dom_lock_hold_caller, 0, __ATOMIC_RELAXED);
     alix_mutex_unlock(&priv->dom_lock);
+    if (hold_start_ms)
+    {
+        uint64_t now_ms = sys_time_millis();
+        uint64_t hold_ms = now_ms - hold_start_ms;
+        if (hold_ms >= HTML_VIEW_DOM_LOCK_HOLD_LOG_MIN_MS)
+        {
+            static uint64_t last_hold_log_ms = 0;
+            uint64_t last = __atomic_load_n(&last_hold_log_ms, __ATOMIC_RELAXED);
+            if (now_ms - last >= HTML_VIEW_DOM_LOCK_HOLD_LOG_RATE_MS)
+            {
+                __atomic_store_n(&last_hold_log_ms, now_ms, __ATOMIC_RELAXED);
+                serial_printf("[html_view] dom_lock held=%llu ms owner=%llu caller=0x%016llX",
+                              (unsigned long long)hold_ms,
+                              (unsigned long long)owner,
+                              (unsigned long long)hold_caller);
+            }
+        }
+    }
 }
 
 static void html_view_js_handles_reset(atk_html_view_priv_t *priv)
@@ -2694,6 +2764,16 @@ void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
     {
         return;
     }
+    static uint64_t last_js_log_ms = 0;
+    if (html_view_js_log_throttle(&last_js_log_ms, HTML_VIEW_JS_LOG_THROTTLE_MS))
+    {
+        serial_printf("[html_view] js_dirty view=%p dirty=0x%08X styles=%u controls=%u render=%u",
+                      (void *)view,
+                      dirty,
+                      (dirty & HTML_VIEW_JS_DIRTY_STYLES) ? 1u : 0u,
+                      (dirty & HTML_VIEW_JS_DIRTY_CONTROLS) ? 1u : 0u,
+                      (dirty & HTML_VIEW_JS_DIRTY_RENDER) ? 1u : 0u);
+    }
 
     if (dirty & HTML_VIEW_JS_DIRTY_STYLES)
     {
@@ -2710,7 +2790,7 @@ void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
     }
     if (dirty & HTML_VIEW_JS_DIRTY_RENDER)
     {
-        html_view_render_cache_invalidate_locked(priv);
+        html_view_render_cache_mark_dirty(priv);
         priv->pressed_href = NULL;
     }
     if (dirty != 0u)
@@ -2726,6 +2806,9 @@ void html_view_js_init(atk_html_view_priv_t *priv)
         return;
     }
     alix_mutex_init(&priv->dom_lock);
+    priv->dom_lock_hold_start_ms = 0;
+    priv->dom_lock_owner = 0;
+    priv->dom_lock_hold_caller = 0;
     priv->js_thread = 0;
     priv->js_stop = 0;
     priv->js_dirty = 0;
@@ -2831,6 +2914,10 @@ void html_view_js_start(atk_widget_t *view, atk_html_view_priv_t *priv)
     {
         return;
     }
+    if (!priv->js_enabled)
+    {
+        return;
+    }
 
     html_view_dom_lock(priv);
     html_view_js_script_t *scripts = html_view_js_collect_scripts(priv->doc->root);
@@ -2856,6 +2943,10 @@ static bool html_view_js_queue_external_impl(atk_widget_t *view,
                                              bool try_only)
 {
     if (!view || !priv || !script_text || len == 0)
+    {
+        return false;
+    }
+    if (!priv->js_enabled)
     {
         return false;
     }

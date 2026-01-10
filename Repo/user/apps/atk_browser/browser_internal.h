@@ -32,7 +32,7 @@
 #define BROWSER_MAX_STYLESHEETS 8
 #define BROWSER_MAX_IMAGES 16
 #define BROWSER_MAX_SCRIPTS 16
-#define BROWSER_UI_EVENT_QUEUE_CAP 64
+#define BROWSER_UI_EVENT_QUEUE_CAP 256
 #define BROWSER_MAX_LOAD_THREADS 8
 #define BROWSER_UI_EVENTS_PER_TICK 8
 #define BROWSER_UI_EVENT_BUDGET_MS 4
@@ -143,6 +143,21 @@ typedef struct
     size_t count;
 } browser_resource_set_t;
 
+typedef struct browser_resource_job
+{
+    uint64_t load_id;
+    browser_resource_kind_t kind;
+    char *url;
+    struct browser_resource_job *next;
+} browser_resource_job_t;
+
+typedef struct
+{
+    browser_resource_job_t *head;
+    browser_resource_job_t *tail;
+    size_t count;
+} browser_resource_queue_t;
+
 typedef enum
 {
     BROWSER_RESOURCE_TRACK_NEW = 0,
@@ -158,21 +173,27 @@ typedef struct browser_app
     atk_widget_t *menu_back_button;
     atk_widget_t *menu_bookmarks_button;
     atk_widget_t *menu_debug_button;
+    atk_widget_t *menu_js_button;
     atk_widget_t *menu_back;
     atk_widget_t *menu_bookmarks;
     atk_widget_t *menu_debug;
     atk_widget_t *menu_open;
     atk_widget_t *url_input;
     atk_widget_t *viewer;
+    bool js_enabled;
 
     alix_mutex_t lock;
     alix_mutex_t debug_lock;
     alix_mutex_t decode_lock;
+    alix_mutex_t resource_lock;
     uint64_t next_load_id;
     uint64_t active_load_id;
 
     alix_thread_t load_threads[BROWSER_MAX_LOAD_THREADS];
     size_t load_thread_count;
+    alix_thread_t resource_thread;
+    uint32_t resource_thread_stop;
+    browser_resource_queue_t resource_queue;
 
     char *cache_dir;
     bool cache_ready;
@@ -229,15 +250,13 @@ bool browser_is_png_bytes(const uint8_t *data, size_t len);
 bool browser_is_gif_bytes(const uint8_t *data, size_t len);
 bool browser_is_svg_bytes(const uint8_t *data, size_t len);
 void browser_dom_set_attr(html_node_t *node, const char *name, const char *value);
-void browser_collect_resource_urls(browser_app_t *app,
-                                  html_node_t *root,
-                                  const browser_url_t *base_url,
-                                  char **css_urls,
-                                  size_t *css_count_io,
-                                  char **img_urls,
-                                  size_t *img_count_io,
-                                  char **script_urls,
-                                  size_t *script_count_io);
+size_t browser_collect_resource_urls(browser_app_t *app,
+                                     html_node_t *root,
+                                     const browser_url_t *base_url,
+                                     browser_resource_set_t *requested,
+                                     browser_resource_kind_t kind,
+                                     uint64_t load_id,
+                                     browser_resource_queue_t *queue);
 
 /* http */
 char *browser_fetch_http(browser_app_t *app,
@@ -265,6 +284,15 @@ void browser_resource_set_destroy(browser_resource_set_t *set);
 browser_resource_track_t browser_resource_set_track(browser_resource_set_t *set,
                                                     browser_resource_kind_t kind,
                                                     const char *url);
+bool browser_resource_queue_push(browser_app_t *app,
+                                 browser_resource_kind_t kind,
+                                 uint64_t load_id,
+                                 char *url);
+browser_resource_job_t *browser_resource_queue_pop(browser_app_t *app);
+void browser_resource_queue_clear(browser_app_t *app);
+bool browser_resource_queue_append(browser_app_t *app, browser_resource_queue_t *queue);
+bool browser_resource_worker_start(browser_app_t *app);
+void browser_resource_worker_stop(browser_app_t *app);
 
 /* debug */
 void browser_debug_logf(browser_app_t *app, const char *fmt, ...);
@@ -332,6 +360,19 @@ static inline void browser_lock_exit(browser_app_t *app, alix_mutex_t *mutex, co
         //                    (unsigned long long)tid);
     }
     alix_mutex_unlock(mutex);
+}
+
+static inline bool browser_js_enabled(browser_app_t *app)
+{
+    if (!app)
+    {
+        return true;
+    }
+    bool enabled = true;
+    browser_lock_enter(app, &app->lock, "app_lock");
+    enabled = app->js_enabled;
+    browser_lock_exit(app, &app->lock, "app_lock");
+    return enabled;
 }
 
 /* ui */

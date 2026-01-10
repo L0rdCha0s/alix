@@ -192,6 +192,15 @@ typedef struct
     int base_line_height;
     int body_box_h;
     int content_height;
+    int body_box_x_local;
+    int body_box_y_local;
+    int body_box_w;
+    video_color_t page_bg;
+    video_color_t body_bg;
+    video_color_t border_color;
+    int border_px;
+    bool border_visible;
+    bool scrollbar_hidden;
     int tile_h;
     char **owned_text;
     size_t owned_text_count;
@@ -298,6 +307,9 @@ typedef struct
     css_stylesheet_t *sheet;
     char *external_css;
     size_t external_css_len;
+    char *external_css_pending;
+    volatile uint64_t external_css_pending_len;
+    volatile uint64_t external_css_pending_since_ms;
     html_view_image_t *images;
     html_view_control_t *controls;
     html_view_font_state_t font;
@@ -320,6 +332,9 @@ typedef struct
     void *link_context;
     const char *pressed_href;
     alix_mutex_t dom_lock;
+    volatile uint64_t dom_lock_hold_start_ms;
+    volatile alix_thread_t dom_lock_owner;
+    volatile uintptr_t dom_lock_hold_caller;
     alix_mutex_t render_lock;
     alix_thread_t render_thread;
     volatile uint32_t render_stop;
@@ -822,6 +837,12 @@ void html_view_font_scope_pop(html_view_ctx_t *ctx, const html_view_font_scope_t
 void html_view_controls_build(atk_widget_t *view, atk_html_view_priv_t *priv);
 html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *src);
 bool html_view_try_load_data_image_locked(atk_html_view_priv_t *priv, const char *src);
+void html_view_apply_pending_external_css_locked(atk_html_view_priv_t *priv);
+bool html_view_build_stylesheet_text_locked(atk_html_view_priv_t *priv,
+                                            char **out_text,
+                                            size_t *out_len,
+                                            size_t *out_inline_len,
+                                            size_t *out_external_len);
 void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv);
 void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_stylesheet_rebuild_if_needed(atk_html_view_priv_t *priv);
@@ -863,6 +884,7 @@ bool html_view_render_try_lock(atk_html_view_priv_t *priv);
 void html_view_render_unlock(atk_html_view_priv_t *priv);
 void html_view_render_cache_invalidate(atk_html_view_priv_t *priv);
 void html_view_render_cache_invalidate_locked(atk_html_view_priv_t *priv);
+void html_view_render_cache_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
 void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv);
 void html_view_js_init(atk_html_view_priv_t *priv);

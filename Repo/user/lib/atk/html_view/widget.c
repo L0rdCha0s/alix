@@ -4,8 +4,70 @@
 #include "serial.h"
 #include "stdarg.h"
 #include "stdio.h"
+#include "string.h"
 
 #define HTML_VIEW_RENDER_DEBOUNCE_MS 32u
+#define HTML_VIEW_LOG_THROTTLE_MS 500u
+
+static bool html_view_log_throttle(uint64_t *last_ms, uint64_t interval_ms)
+{
+    uint64_t now_ms = sys_time_millis();
+    if (now_ms - *last_ms < interval_ms)
+    {
+        return false;
+    }
+    *last_ms = now_ms;
+    return true;
+}
+
+static bool html_view_text_has_non_ws_inline(const char *text)
+{
+    if (!text)
+    {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p)
+    {
+        if (*p >= 0x80u || !isspace(*p))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool html_view_body_has_renderable_child(const html_node_t *body)
+{
+    if (!body)
+    {
+        return false;
+    }
+    for (const html_node_t *child = body->first_child; child; child = child->next_sibling)
+    {
+        if (child->type == HTML_NODE_TEXT)
+        {
+            if (html_view_text_has_non_ws_inline(child->text))
+            {
+                return true;
+            }
+            continue;
+        }
+        if (child->type == HTML_NODE_ELEMENT && child->name)
+        {
+            if (strcmp(child->name, "head") == 0 ||
+                strcmp(child->name, "style") == 0 ||
+                strcmp(child->name, "meta") == 0 ||
+                strcmp(child->name, "title") == 0 ||
+                strcmp(child->name, "link") == 0 ||
+                strcmp(child->name, "script") == 0)
+            {
+                continue;
+            }
+            return true;
+        }
+    }
+    return false;
+}
 
 static void html_view_position_scrollbar(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
@@ -99,6 +161,14 @@ void html_view_render_cache_invalidate_locked(atk_html_view_priv_t *priv)
     {
         return;
     }
+    static uint64_t last_log_ms = 0;
+    if (html_view_log_throttle(&last_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        void *caller = __builtin_return_address(0);
+        serial_printf("[html_view] render_cache_invalidate_locked priv=%p caller=0x%016llX",
+                      (void *)priv,
+                      (unsigned long long)(uintptr_t)caller);
+    }
     html_view_render_cache_clear(&priv->render_cache);
     __atomic_store_n(&priv->render_cache_dirty, 1u, __ATOMIC_RELEASE);
 }
@@ -109,6 +179,14 @@ void html_view_render_cache_invalidate(atk_html_view_priv_t *priv)
     {
         return;
     }
+    static uint64_t last_log_ms = 0;
+    if (html_view_log_throttle(&last_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        void *caller = __builtin_return_address(0);
+        serial_printf("[html_view] render_cache_invalidate priv=%p caller=0x%016llX",
+                      (void *)priv,
+                      (unsigned long long)(uintptr_t)caller);
+    }
     __atomic_store_n(&priv->render_cache_dirty, 1u, __ATOMIC_RELEASE);
     if (html_view_render_try_lock(priv))
     {
@@ -117,12 +195,30 @@ void html_view_render_cache_invalidate(atk_html_view_priv_t *priv)
     }
 }
 
+void html_view_render_cache_mark_dirty(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    static uint64_t last_log_ms = 0;
+    if (html_view_log_throttle(&last_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        void *caller = __builtin_return_address(0);
+        serial_printf("[html_view] render_cache_mark_dirty priv=%p caller=0x%016llX",
+                      (void *)priv,
+                      (unsigned long long)(uintptr_t)caller);
+    }
+    __atomic_store_n(&priv->render_cache_dirty, 1u, __ATOMIC_RELEASE);
+}
+
 static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
     if (!view || !priv)
     {
         return false;
     }
+    uint64_t build_start_ms = sys_time_millis();
 
     html_view_dom_bloom_rebuild_if_needed(priv);
 
@@ -191,8 +287,14 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         if (viewport_w < 0) viewport_w = 0;
     }
 
+    bool page_has_bg = html_style.has_background && !html_style.background_transparent;
     bool body_has_bg = body_style.has_background && !body_style.background_transparent;
+    video_color_t page_bg = page_has_bg ? html_style.background : default_page_bg;
     video_color_t body_bg = body_has_bg ? body_style.background : default_page_bg;
+    if (!page_has_bg && body_has_bg)
+    {
+        page_bg = body_bg;
+    }
 
     int actual_font_px = atk_font_line_height();
     int css_font_px = actual_font_px;
@@ -243,6 +345,14 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         {
             border_px = 0;
         }
+    }
+
+    bool border_visible = border_px > 0 &&
+                          !(body_style.has_border_color && body_style.border_transparent);
+    video_color_t border_color = video_make_color(0x00, 0x00, 0x00);
+    if (border_visible && body_style.has_border_color)
+    {
+        border_color = body_style.border_color;
     }
 
     int pad_top = 0;
@@ -329,6 +439,26 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         if (body_content_w < 0) body_content_w = 0;
     }
 
+    static uint64_t last_build_start_log_ms = 0;
+    if (html_view_log_throttle(&last_build_start_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        uint32_t css_dirty = __atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE);
+        uint64_t pending_len = __atomic_load_n(&priv->external_css_pending_len, __ATOMIC_RELAXED);
+        serial_printf("[html_view] render_build_start view=%p doc=%p sheet=%p html=%p body=%p viewport=%dx%d body_w=%d dirty=%u css_dirty=%u ext_len=%llu pending_len=%llu",
+                      (void *)view,
+                      (void *)priv->doc,
+                      (void *)priv->sheet,
+                      (void *)html_node,
+                      (void *)body_node,
+                      viewport_w,
+                      viewport_h,
+                      body_content_w,
+                      __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE),
+                      css_dirty,
+                      (unsigned long long)priv->external_css_len,
+                      (unsigned long long)pending_len);
+    }
+
     int body_box_x = viewport_x;
     if (body_style.has_margin)
     {
@@ -360,6 +490,24 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                                                    viewport_h,
                                                    base_font_px,
                                                    false);
+    }
+
+    static uint64_t last_style_log_ms = 0;
+    if (html_view_log_throttle(&last_style_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        video_color_t body_text = body_style.has_color ? body_style.color : html_style.color;
+        serial_printf("[html_view] render_style view=%p sheet=%p ext_len=%llu bg=0x%08X color=0x%08X font_px=%d margin_top=%d pad=%d,%d,%d,%d",
+                      (void *)view,
+                      (void *)priv->sheet,
+                      (unsigned long long)priv->external_css_len,
+                      (unsigned)body_bg,
+                      (unsigned)body_text,
+                      base_font_px,
+                      margin_top,
+                      pad_top,
+                      pad_right,
+                      pad_bottom,
+                      pad_left);
     }
 
     int body_box_y0 = viewport_y + margin_top;
@@ -435,6 +583,15 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     cache->body_w = body_content_w;
     cache->base_font_px = base_font_px;
     cache->base_line_height = base_line_height;
+    cache->body_box_x_local = body_box_x - abs_x;
+    cache->body_box_y_local = body_box_y0 - abs_y;
+    cache->body_box_w = body_box_w;
+    cache->page_bg = page_bg;
+    cache->body_bg = body_bg;
+    cache->border_color = border_color;
+    cache->border_px = border_px;
+    cache->border_visible = border_visible;
+    cache->scrollbar_hidden = overflow_hidden;
 
     /* Record with a wide clip so cached ops include off-viewport content. */
     const int clip_pad = 10000000;
@@ -535,11 +692,148 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
 
         cache->valid = true;
         __atomic_store_n(&priv->render_cache_dirty, 0u, __ATOMIC_RELEASE);
+        static uint64_t last_build_done_log_ms = 0;
+        if (html_view_log_throttle(&last_build_done_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            uint64_t build_ms = sys_time_millis() - build_start_ms;
+            serial_printf("[html_view] render_build_done view=%p ok=1 ops=%llu tiles=%llu fixed=%llu content_h=%d body_h=%d ms=%llu",
+                          (void *)view,
+                          (unsigned long long)cache->op_count,
+                          (unsigned long long)cache->tile_used,
+                          (unsigned long long)cache->fixed_count,
+                          cache->content_height,
+                          cache->body_box_h,
+                          (unsigned long long)build_ms);
+        }
         return true;
     }
 
+    static uint64_t last_build_fail_log_ms = 0;
+    if (html_view_log_throttle(&last_build_fail_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        uint64_t build_ms = sys_time_millis() - build_start_ms;
+        serial_printf("[html_view] render_build_done view=%p ok=0 record_failed=%u ops=%llu tiles=%llu fixed=%llu ms=%llu",
+                      (void *)view,
+                      record.record_failed ? 1u : 0u,
+                      (unsigned long long)cache->op_count,
+                      (unsigned long long)cache->tile_used,
+                      (unsigned long long)cache->fixed_count,
+                      (unsigned long long)build_ms);
+    }
     html_view_render_cache_clear(cache);
     return false;
+}
+
+static void html_view_stylesheet_rebuild_async_locked(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+
+    html_view_apply_pending_external_css_locked(priv);
+    if (__atomic_exchange_n(&priv->stylesheet_dirty, 0u, __ATOMIC_ACQ_REL) == 0u)
+    {
+        return;
+    }
+
+    if (!priv->doc || !priv->doc->root)
+    {
+        html_view_rule_index_clear(priv);
+        if (priv->sheet)
+        {
+            css_stylesheet_destroy(priv->sheet);
+            priv->sheet = NULL;
+        }
+        return;
+    }
+
+    size_t external_len = 0;
+    size_t inline_len = 0;
+    size_t css_len = 0;
+    char *css_text = NULL;
+    if (!html_view_build_stylesheet_text_locked(priv,
+                                                &css_text,
+                                                &css_len,
+                                                &inline_len,
+                                                &external_len))
+    {
+        static uint64_t last_empty_log_ms = 0;
+        if (html_view_log_throttle(&last_empty_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] stylesheet_empty priv=%p ext_len=%llu",
+                          (void *)priv,
+                          (unsigned long long)priv->external_css_len);
+        }
+        html_view_rule_index_clear(priv);
+        if (priv->sheet)
+        {
+            css_stylesheet_destroy(priv->sheet);
+            priv->sheet = NULL;
+        }
+        return;
+    }
+
+    html_document_t *snapshot_doc = priv->doc;
+    html_view_dom_unlock(priv);
+
+    uint64_t parse_start_ms = sys_time_millis();
+    css_stylesheet_t *new_sheet = css_parse(css_text);
+    uint64_t parse_ms = sys_time_millis() - parse_start_ms;
+    size_t rule_count = 0;
+    if (new_sheet)
+    {
+        for (css_rule_t *rule = new_sheet->rules; rule; rule = rule->next)
+        {
+            ++rule_count;
+        }
+    }
+    free(css_text);
+
+    html_view_dom_lock(priv);
+    if (priv->doc != snapshot_doc ||
+        __atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE) != 0u ||
+        priv->external_css_len != external_len)
+    {
+        if (new_sheet)
+        {
+            css_stylesheet_destroy(new_sheet);
+        }
+        return;
+    }
+
+    static uint64_t last_rebuild_log_ms = 0;
+    if (html_view_log_throttle(&last_rebuild_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        serial_printf("[html_view] stylesheet_rebuild priv=%p css_len=%llu inline_len=%llu ext_len=%llu rules=%llu parse_ms=%llu sheet=%p",
+                      (void *)priv,
+                      (unsigned long long)css_len,
+                      (unsigned long long)inline_len,
+                      (unsigned long long)external_len,
+                      (unsigned long long)rule_count,
+                      (unsigned long long)parse_ms,
+                      (void *)new_sheet);
+    }
+    if (!new_sheet)
+    {
+        static uint64_t last_fail_log_ms = 0;
+        if (html_view_log_throttle(&last_fail_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] stylesheet_parse_failed priv=%p css_len=%llu ext_len=%llu parse_ms=%llu",
+                          (void *)priv,
+                          (unsigned long long)css_len,
+                          (unsigned long long)external_len,
+                          (unsigned long long)parse_ms);
+        }
+        return;
+    }
+
+    html_view_rule_index_clear(priv);
+    if (priv->sheet)
+    {
+        css_stylesheet_destroy(priv->sheet);
+    }
+    priv->sheet = new_sheet;
 }
 
 static void html_view_render_thread(void *arg)
@@ -575,18 +869,57 @@ static void html_view_render_thread(void *arg)
 
         if (!html_view_dom_try_lock(priv))
         {
+            static uint64_t last_dom_lock_log_ms = 0;
+            if (html_view_log_throttle(&last_dom_lock_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+            {
+                uint64_t now_ms = sys_time_millis();
+                uint64_t hold_start_ms = __atomic_load_n(&priv->dom_lock_hold_start_ms, __ATOMIC_RELAXED);
+                alix_thread_t owner = __atomic_load_n(&priv->dom_lock_owner, __ATOMIC_RELAXED);
+                uintptr_t hold_caller = __atomic_load_n(&priv->dom_lock_hold_caller, __ATOMIC_RELAXED);
+                uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
+                serial_printf("[html_view] render_lock_busy view=%p lock=dom target=%u done=%u dirty=%u owner=%llu hold_ms=%llu caller=0x%016llX js_thread=%llu",
+                              (void *)view,
+                              target,
+                              last_done,
+                              __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE),
+                              (unsigned long long)owner,
+                              (unsigned long long)hold_ms,
+                              (unsigned long long)hold_caller,
+                              (unsigned long long)priv->js_thread);
+            }
             (void)sys_sleep_ms(1);
             continue;
         }
+        html_view_stylesheet_rebuild_async_locked(priv);
         if (!html_view_render_try_lock(priv))
         {
             html_view_dom_unlock(priv);
+            static uint64_t last_render_lock_log_ms = 0;
+            if (html_view_log_throttle(&last_render_lock_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+            {
+                serial_printf("[html_view] render_lock_busy view=%p lock=render target=%u done=%u dirty=%u",
+                              (void *)view,
+                              target,
+                              last_done,
+                              __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE));
+            }
             (void)sys_sleep_ms(1);
             continue;
         }
 
-        html_view_stylesheet_rebuild_if_needed(priv);
-        (void)html_view_render_cache_rebuild_locked(view, priv);
+        bool ok = html_view_render_cache_rebuild_locked(view, priv);
+        if (!ok)
+        {
+            static uint64_t last_fail_log_ms = 0;
+            if (html_view_log_throttle(&last_fail_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+            {
+                serial_printf("[html_view] render_build_failed view=%p target=%u done=%u dirty=%u",
+                              (void *)view,
+                              target,
+                              last_done,
+                              __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE));
+            }
+        }
 
         html_view_render_unlock(priv);
         html_view_dom_unlock(priv);
@@ -638,14 +971,248 @@ void html_view_render_request(atk_html_view_priv_t *priv)
     {
         return;
     }
-    uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
-    uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
-    if (seq != done)
+    void *caller = __builtin_return_address(0);
+    uint32_t seq = __atomic_fetch_add(&priv->render_seq, 1u, __ATOMIC_ACQ_REL) + 1u;
+    uint64_t now_ms = sys_time_millis();
+    __atomic_store_n(&priv->render_request_ms, now_ms, __ATOMIC_RELEASE);
+    static uint64_t last_log_ms = 0;
+    if (html_view_log_throttle(&last_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+        serial_printf("[html_view] render_request priv=%p seq=%u done=%u caller=0x%016llX",
+                      (void *)priv,
+                      seq,
+                      done,
+                      (unsigned long long)(uintptr_t)caller);
+    }
+}
+
+static void html_view_draw_loading(const atk_state_t *state,
+                                   const atk_widget_t *widget,
+                                   int origin_x,
+                                   int origin_y,
+                                   atk_html_view_priv_t *priv)
+{
+    if (!state || !widget || !priv)
     {
         return;
     }
-    (void)__atomic_fetch_add(&priv->render_seq, 1u, __ATOMIC_ACQ_REL);
-    __atomic_store_n(&priv->render_request_ms, sys_time_millis(), __ATOMIC_RELEASE);
+
+    int abs_x = origin_x + widget->x;
+    int abs_y = origin_y + widget->y;
+    int sb_w = (priv->scrollbar && !priv->scrollbar_hidden) ? priv->scrollbar_width : 0;
+    int viewport_x = abs_x + ATK_HTML_VIEW_PADDING;
+    int viewport_y = abs_y + ATK_HTML_VIEW_PADDING;
+    int viewport_w = widget->width - ATK_HTML_VIEW_PADDING * 2 - sb_w;
+    int viewport_h = widget->height - ATK_HTML_VIEW_PADDING * 2;
+    if (viewport_w < 0) viewport_w = 0;
+    if (viewport_h < 0) viewport_h = 0;
+
+    video_color_t default_page_bg = video_make_color(0xFF, 0xFF, 0xFF);
+    video_color_t default_text = video_make_color(0x00, 0x00, 0x00);
+
+    video_draw_rect(abs_x, abs_y, widget->width, widget->height, default_page_bg);
+    video_draw_rect_outline(abs_x, abs_y, widget->width, widget->height, state->theme.window_border);
+
+    atk_rect_t clip = { viewport_x, viewport_y, viewport_w, viewport_h };
+
+    int base_font_px = atk_font_line_height();
+    int base_line_height = base_font_px + 4;
+    if (base_line_height < 8)
+    {
+        base_line_height = 8;
+    }
+
+    html_view_ctx_t ctx = {
+        .state = state,
+        .widget = widget,
+        .priv = priv,
+        .sheet = priv->sheet,
+        .bg = default_page_bg,
+        .clip = clip,
+        .viewport_x = viewport_x,
+        .viewport_y = viewport_y,
+        .viewport_w = viewport_w,
+        .viewport_h = viewport_h,
+        .scroll_y = priv->scroll_y,
+        .window_x = origin_x,
+        .window_y = origin_y,
+        .body_x = viewport_x,
+        .body_w = viewport_w,
+        .pos_x = viewport_x,
+        .pos_y = viewport_y,
+        .pos_w = viewport_w,
+        .pos_h = viewport_h,
+        .height_basis = 0,
+        .height_basis_valid = false,
+        .height_basis_explicit = false,
+        .floats = NULL,
+        .actual_font_px = base_font_px,
+        .base_font_px = base_font_px,
+        .base_line_height = base_line_height,
+        .line_height = base_line_height,
+        .space_w = 0,
+        .x = viewport_x,
+        .y = viewport_y,
+        .max_x = viewport_x + viewport_w,
+        .measure_max_x = viewport_x,
+        .content_bottom = viewport_y,
+        .pending_margin = {0},
+        .list_level = 0,
+        .text_align_mode = CSS_TEXT_ALIGN_LEFT,
+        .line_op_start = 0,
+        .line_start_x = viewport_x,
+        .line_start_y = viewport_y,
+        .pending_space = false,
+        .z_index = 0,
+        .paint_layer = HTML_VIEW_PAINT_LAYER_BLOCK,
+        .draw = true,
+        .record = false,
+        .record_failed = false,
+        .fixed_mode = false,
+        .table_mode = false,
+        .doc_origin_x = viewport_x,
+        .doc_origin_y = viewport_y
+    };
+
+    ctx.space_w = html_view_text_width(&ctx, " ");
+    html_view_draw_text(&ctx, "Rendering...\n", default_text, false, false);
+}
+
+static bool html_view_draw_cache_fallback(const atk_state_t *state,
+                                          const atk_widget_t *widget,
+                                          int origin_x,
+                                          int origin_y,
+                                          atk_html_view_priv_t *priv)
+{
+    if (!state || !widget || !priv)
+    {
+        return false;
+    }
+
+    html_view_render_cache_t *cache = &priv->render_cache;
+    if (!cache->valid)
+    {
+        return false;
+    }
+
+    bool scrollbar_hidden = cache->scrollbar_hidden;
+    int sb_w = (priv->scrollbar && !scrollbar_hidden) ? priv->scrollbar_width : 0;
+    int viewport_w = widget->width - ATK_HTML_VIEW_PADDING * 2 - sb_w;
+    int viewport_h = widget->height - ATK_HTML_VIEW_PADDING * 2;
+    if (viewport_w < 0) viewport_w = 0;
+    if (viewport_h < 0) viewport_h = 0;
+    if (cache->viewport_w != viewport_w || cache->viewport_h != viewport_h)
+    {
+        return false;
+    }
+    if (cache->doc != priv->doc || cache->sheet != priv->sheet)
+    {
+        return false;
+    }
+
+    int abs_x = origin_x + widget->x;
+    int abs_y = origin_y + widget->y;
+    int viewport_x = abs_x + ATK_HTML_VIEW_PADDING;
+    int viewport_y = abs_y + ATK_HTML_VIEW_PADDING;
+
+    video_draw_rect(abs_x, abs_y, widget->width, widget->height, cache->page_bg);
+    video_draw_rect_outline(abs_x, abs_y, widget->width, widget->height, state->theme.window_border);
+
+    atk_rect_t clip = { viewport_x, viewport_y, viewport_w, viewport_h };
+
+    int base_font_px = cache->base_font_px;
+    if (base_font_px <= 0)
+    {
+        base_font_px = atk_font_line_height();
+    }
+    int base_line_height = cache->base_line_height;
+    if (base_line_height <= 0)
+    {
+        base_line_height = base_font_px + 4;
+    }
+    if (base_line_height < 8)
+    {
+        base_line_height = 8;
+    }
+
+    priv->scrollbar_hidden = scrollbar_hidden;
+    priv->content_height = cache->content_height;
+    if (priv->content_height < 0)
+    {
+        priv->content_height = 0;
+    }
+    html_view_position_scrollbar((atk_widget_t *)widget, priv);
+    if (priv->scrollbar)
+    {
+        html_view_update_scrollbar((atk_widget_t *)widget, priv);
+    }
+
+    int doc_origin_x = abs_x + cache->doc_origin_local_x;
+    int doc_origin_y = abs_y + cache->doc_origin_local_y;
+    int body_box_x = abs_x + cache->body_box_x_local;
+    int body_box_y = abs_y + cache->body_box_y_local - priv->scroll_y;
+
+    html_view_ctx_t ctx = {
+        .state = state,
+        .widget = widget,
+        .priv = priv,
+        .sheet = cache->sheet,
+        .bg = cache->body_bg,
+        .clip = clip,
+        .viewport_x = viewport_x,
+        .viewport_y = viewport_y,
+        .viewport_w = viewport_w,
+        .viewport_h = viewport_h,
+        .scroll_y = priv->scroll_y,
+        .window_x = origin_x,
+        .window_y = origin_y,
+        .body_x = doc_origin_x,
+        .body_w = cache->body_w,
+        .pos_x = viewport_x,
+        .pos_y = viewport_y,
+        .pos_w = viewport_w,
+        .pos_h = viewport_h,
+        .height_basis = 0,
+        .height_basis_valid = false,
+        .height_basis_explicit = false,
+        .floats = NULL,
+        .actual_font_px = base_font_px,
+        .base_font_px = base_font_px,
+        .base_line_height = base_line_height,
+        .line_height = base_line_height,
+        .space_w = 0,
+        .x = doc_origin_x,
+        .y = doc_origin_y,
+        .max_x = doc_origin_x + cache->body_w,
+        .measure_max_x = doc_origin_x,
+        .content_bottom = doc_origin_y,
+        .pending_margin = {0},
+        .list_level = 0,
+        .text_align_mode = CSS_TEXT_ALIGN_LEFT,
+        .line_op_start = 0,
+        .line_start_x = doc_origin_x,
+        .line_start_y = doc_origin_y,
+        .pending_space = false,
+        .z_index = 0,
+        .paint_layer = HTML_VIEW_PAINT_LAYER_BLOCK,
+        .draw = true,
+        .record = false,
+        .record_failed = false,
+        .fixed_mode = false,
+        .table_mode = false,
+        .doc_origin_x = doc_origin_x,
+        .doc_origin_y = doc_origin_y
+    };
+
+    html_view_draw_rect_clipped(&ctx, body_box_x, body_box_y, cache->body_box_w, cache->body_box_h, cache->body_bg, &clip);
+    if (cache->border_visible && cache->border_px > 0)
+    {
+        html_view_draw_border_clipped(&ctx, body_box_x, body_box_y, cache->body_box_w, cache->body_box_h, cache->border_px, cache->border_color, &clip);
+    }
+
+    html_view_render_cache_draw_visible(&ctx);
+    return true;
 }
 
 static void html_view_draw_cb(const atk_state_t *state,
@@ -668,14 +1235,98 @@ static void html_view_draw_cb(const atk_state_t *state,
 
     if (!html_view_dom_try_lock(priv))
     {
-        html_view_invalidate(widget);
+        static uint64_t last_dom_try_log_ms = 0;
+        if (html_view_log_throttle(&last_dom_try_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            uint64_t now_ms = sys_time_millis();
+            uint64_t hold_start_ms = __atomic_load_n(&priv->dom_lock_hold_start_ms, __ATOMIC_RELAXED);
+            alix_thread_t owner = __atomic_load_n(&priv->dom_lock_owner, __ATOMIC_RELAXED);
+            uintptr_t hold_caller = __atomic_load_n(&priv->dom_lock_hold_caller, __ATOMIC_RELAXED);
+            uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
+            serial_printf("[html_view] draw_lock_busy view=%p lock=dom owner=%llu hold_ms=%llu caller=0x%016llX js_thread=%llu render_thread=%llu",
+                          (void *)widget,
+                          (unsigned long long)owner,
+                          (unsigned long long)hold_ms,
+                          (unsigned long long)hold_caller,
+                          (unsigned long long)priv->js_thread,
+                          (unsigned long long)priv->render_thread);
+        }
+        bool drew = false;
+        if (html_view_render_try_lock(priv))
+        {
+            drew = html_view_draw_cache_fallback(state, widget, origin_x, origin_y, priv);
+            html_view_render_unlock(priv);
+        }
+        if (!drew)
+        {
+            html_view_invalidate(widget);
+            html_view_draw_loading(state, widget, origin_x, origin_y, priv);
+        }
         return;
     }
     if (!html_view_render_try_lock(priv))
     {
+        static uint64_t last_render_try_log_ms = 0;
+        if (html_view_log_throttle(&last_render_try_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+            uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+            uint32_t dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE);
+            serial_printf("[html_view] draw_lock_busy view=%p lock=render seq=%u done=%u dirty=%u",
+                          (void *)widget,
+                          seq,
+                          done,
+                          dirty);
+        }
         html_view_dom_unlock(priv);
         html_view_invalidate(widget);
         return;
+    }
+    if (priv->render_async)
+    {
+        html_view_render_cache_t *cache = &priv->render_cache;
+        bool cache_dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE) != 0u;
+        bool cache_ready = cache->valid &&
+                           cache->doc == priv->doc &&
+                           cache->sheet == priv->sheet;
+        if (!cache_ready)
+        {
+            html_view_render_request(priv);
+            static uint64_t last_cache_log_ms = 0;
+            if (html_view_log_throttle(&last_cache_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+            {
+                uint64_t now_ms = sys_time_millis();
+                uint64_t request_ms = __atomic_load_n(&priv->render_request_ms, __ATOMIC_ACQUIRE);
+                uint64_t req_age = request_ms ? (now_ms - request_ms) : 0u;
+                uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+                uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+                uint32_t css_dirty = __atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE);
+                uint64_t pending_len = __atomic_load_n(&priv->external_css_pending_len, __ATOMIC_RELAXED);
+                serial_printf("[html_view] draw_cache_wait view=%p cache_valid=%u cache_doc=%p cache_sheet=%p doc=%p sheet=%p dirty=%u css_dirty=%u seq=%u done=%u req_age=%llu ops=%llu tiles=%llu fixed=%llu js_thread=%llu render_thread=%llu ext_len=%llu pending_len=%llu",
+                              (void *)widget,
+                              cache->valid ? 1u : 0u,
+                              (void *)cache->doc,
+                              (void *)cache->sheet,
+                              (void *)priv->doc,
+                              (void *)priv->sheet,
+                              cache_dirty ? 1u : 0u,
+                              css_dirty,
+                              seq,
+                              done,
+                              (unsigned long long)req_age,
+                              (unsigned long long)cache->op_count,
+                              (unsigned long long)cache->tile_used,
+                              (unsigned long long)cache->fixed_count,
+                              (unsigned long long)priv->js_thread,
+                              (unsigned long long)priv->render_thread,
+                              (unsigned long long)priv->external_css_len,
+                              (unsigned long long)pending_len);
+            }
+            html_view_dom_unlock(priv);
+            html_view_render_unlock(priv);
+            html_view_draw_loading(state, widget, origin_x, origin_y, priv);
+            return;
+        }
     }
     if (!priv->render_async)
     {
@@ -753,6 +1404,7 @@ static void html_view_draw_cb(const atk_state_t *state,
     {
         page_bg = body_bg;
     }
+    bool body_has_renderable = html_view_body_has_renderable_child(body_node);
 
     video_draw_rect(abs_x, abs_y, widget->width, widget->height, page_bg);
     video_draw_rect_outline(abs_x, abs_y, widget->width, widget->height, state->theme.window_border);
@@ -999,7 +1651,7 @@ static void html_view_draw_cb(const atk_state_t *state,
                          cache->base_font_px == base_font_px &&
                          cache->base_line_height == base_line_height;
 
-    if (!cache_matches)
+    if (!cache_matches || cache_dirty)
     {
         if (priv->render_async)
         {
@@ -1017,12 +1669,22 @@ static void html_view_draw_cb(const atk_state_t *state,
                         cache->body_w == body_content_w &&
                         cache->base_font_px == base_font_px &&
                         cache->base_line_height == base_line_height;
+        cache_dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE) != 0u;
     }
 
     cache->doc_origin_local_x = doc_origin_local_x;
     cache->doc_origin_local_y = doc_origin_local_y;
 
-    bool cache_valid = cache_matches && cache->valid && !cache_dirty;
+    bool cache_valid = cache_matches && cache->valid;
+    bool cache_empty = cache_valid && cache->op_count == 0 && cache->fixed_count == 0;
+    if (cache_empty && body_has_renderable)
+    {
+        cache_valid = false;
+        if (priv->render_async && !cache_dirty)
+        {
+            html_view_render_request(priv);
+        }
+    }
     int cache_body_box_h = cache->body_box_h;
     int cache_content_height = cache->content_height;
     bool has_scrollbar = (priv->scrollbar != NULL);
@@ -1100,6 +1762,24 @@ static void html_view_draw_cb(const atk_state_t *state,
 
     if (!cache_valid)
     {
+        static uint64_t last_wait_log_ms = 0;
+        if (html_view_log_throttle(&last_wait_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] render_wait view=%p cache_valid=%u cache_matches=%u cache_dirty=%u cache_ok=%u ops=%llu tiles=%llu fixed=%llu doc=%p sheet=%p body_renderable=%u seq=%u done=%u",
+                          (void *)widget,
+                          cache_valid ? 1u : 0u,
+                          cache_matches ? 1u : 0u,
+                          cache_dirty ? 1u : 0u,
+                          cache->valid ? 1u : 0u,
+                          (unsigned long long)cache->op_count,
+                          (unsigned long long)cache->tile_used,
+                          (unsigned long long)cache->fixed_count,
+                          (void *)cache->doc,
+                          (void *)cache->sheet,
+                          body_has_renderable ? 1u : 0u,
+                          __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE),
+                          __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE));
+        }
         const char *msg = priv->render_async ? "Rendering...\n" : "Render cache unavailable.\n";
         html_view_draw_text(&ctx, msg, default_text, false, false);
         html_view_render_unlock(priv);
@@ -1153,6 +1833,10 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
             priv->external_css = NULL;
             priv->external_css_len = 0;
         }
+        char *pending = __atomic_exchange_n(&priv->external_css_pending, NULL, __ATOMIC_ACQ_REL);
+        free(pending);
+        __atomic_store_n(&priv->external_css_pending_len, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&priv->external_css_pending_since_ms, 0u, __ATOMIC_RELAXED);
         if (priv->doc)
         {
             html_document_destroy(priv->doc);
@@ -1226,6 +1910,9 @@ atk_widget_t *atk_window_add_html_view(atk_widget_t *window, int x, int y, int w
     priv->sheet = NULL;
     priv->external_css = NULL;
     priv->external_css_len = 0;
+    priv->external_css_pending = NULL;
+    priv->external_css_pending_len = 0;
+    priv->external_css_pending_since_ms = 0;
     priv->images = NULL;
     priv->controls = NULL;
     priv->render_cache.tile_h = ATK_HTML_VIEW_RENDER_TILE_H;
@@ -1298,7 +1985,7 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     html_view_js_stop(priv);
 
     html_view_dom_lock(priv);
-    html_view_render_cache_invalidate(priv);
+    html_view_render_cache_mark_dirty(priv);
     priv->pressed_href = NULL;
 
     if (priv->doc)
@@ -1316,6 +2003,10 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
         priv->external_css = NULL;
         priv->external_css_len = 0;
     }
+    char *pending = __atomic_exchange_n(&priv->external_css_pending, NULL, __ATOMIC_ACQ_REL);
+    free(pending);
+    __atomic_store_n(&priv->external_css_pending_len, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->external_css_pending_since_ms, 0u, __ATOMIC_RELAXED);
     if (priv->sheet)
     {
         css_stylesheet_destroy(priv->sheet);
@@ -1418,6 +2109,44 @@ bool atk_html_view_set_html(atk_widget_t *view, const char *html, html_parse_err
     return true;
 }
 
+static bool html_view_queue_external_css(atk_html_view_priv_t *priv, const char *css_text)
+{
+    if (!priv)
+    {
+        return false;
+    }
+    if (!css_text)
+    {
+        css_text = "";
+    }
+    char *copy = html_view_strdup(css_text);
+    if (!copy)
+    {
+        static uint64_t last_fail_log_ms = 0;
+        if (html_view_log_throttle(&last_fail_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] external_css_queue_failed priv=%p",
+                          (void *)priv);
+        }
+        return false;
+    }
+    size_t copy_len = strlen(copy);
+    uint64_t now_ms = sys_time_millis();
+    __atomic_store_n(&priv->external_css_pending_len, (uint64_t)copy_len, __ATOMIC_RELEASE);
+    __atomic_store_n(&priv->external_css_pending_since_ms, now_ms, __ATOMIC_RELEASE);
+    char *old = __atomic_exchange_n(&priv->external_css_pending, copy, __ATOMIC_ACQ_REL);
+    static uint64_t last_queue_log_ms = 0;
+    if (html_view_log_throttle(&last_queue_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        serial_printf("[html_view] external_css_queue priv=%p len=%llu replaced=%u",
+                      (void *)priv,
+                      (unsigned long long)copy_len,
+                      old ? 1u : 0u);
+    }
+    free(old);
+    return true;
+}
+
 static bool html_view_set_external_stylesheet_impl(atk_widget_t *view, const char *css_text, bool try_only)
 {
     atk_html_view_priv_t *priv = html_view_priv_mut(view);
@@ -1430,14 +2159,34 @@ static bool html_view_set_external_stylesheet_impl(atk_widget_t *view, const cha
     {
         if (!html_view_dom_try_lock(priv))
         {
-            return false;
+            if (!priv->render_async)
+            {
+                static uint64_t last_log_ms = 0;
+                if (html_view_log_throttle(&last_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+                {
+                    serial_printf("[html_view] external_css_try_lock_busy view=%p render_async=0",
+                                  (void *)view);
+                }
+                return false;
+            }
+            if (!html_view_queue_external_css(priv, css_text))
+            {
+                return false;
+            }
+            html_view_render_request(priv);
+            html_view_invalidate(view);
+            return true;
         }
     }
     else
     {
         html_view_dom_lock(priv);
     }
-    html_view_render_cache_invalidate(priv);
+    char *pending = __atomic_exchange_n(&priv->external_css_pending, NULL, __ATOMIC_ACQ_REL);
+    free(pending);
+    __atomic_store_n(&priv->external_css_pending_len, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->external_css_pending_since_ms, 0u, __ATOMIC_RELAXED);
+    html_view_render_cache_mark_dirty(priv);
     priv->pressed_href = NULL;
 
     if (priv->external_css)
@@ -1517,6 +2266,30 @@ void atk_html_view_stop_js(atk_widget_t *view)
         return;
     }
     html_view_js_stop(priv);
+}
+
+void atk_html_view_set_js_enabled(atk_widget_t *view, bool enabled)
+{
+    if (!view)
+    {
+        return;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->js_enabled == enabled)
+    {
+        return;
+    }
+    priv->js_enabled = enabled;
+    if (!enabled)
+    {
+        html_view_js_stop(priv);
+        return;
+    }
+    html_view_js_start(view, priv);
 }
 
 void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled)
@@ -1635,7 +2408,7 @@ bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint
     img->next = priv->images;
     priv->images = img;
 
-    html_view_render_cache_invalidate(priv);
+    html_view_render_cache_mark_dirty(priv);
     html_view_dom_unlock(priv);
     html_view_render_request(priv);
     html_view_invalidate(view);
@@ -1706,7 +2479,7 @@ bool atk_html_view_add_image_gif(atk_widget_t *view, const char *src, const uint
     img->next = priv->images;
     priv->images = img;
 
-    html_view_render_cache_invalidate(priv);
+    html_view_render_cache_mark_dirty(priv);
     html_view_dom_unlock(priv);
     html_view_render_request(priv);
     html_view_invalidate(view);

@@ -1,8 +1,37 @@
 #include "atk/html_view/html_view_internal.h"
 
 #include "ctype.h"
+#include "serial.h"
 #include "string.h"
 #include "web/css/css_internal.h"
+
+#ifdef TTF_HOST_BUILD
+#include <time.h>
+#endif
+
+#define HTML_VIEW_STYLE_LOG_THROTTLE_MS 500u
+
+static uint64_t html_view_style_now_ms(void)
+{
+#ifdef TTF_HOST_BUILD
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+#else
+    return sys_time_millis();
+#endif
+}
+
+static bool html_view_style_log_throttle(uint64_t *last_ms, uint64_t interval_ms)
+{
+    uint64_t now_ms = html_view_style_now_ms();
+    if (now_ms - *last_ms < interval_ms)
+    {
+        return false;
+    }
+    *last_ms = now_ms;
+    return true;
+}
 
 #ifdef HTML_VIEW_HOST_TRACE
 typedef struct
@@ -3567,8 +3596,10 @@ static void html_view_selector_cache_set_pseudo_flags(css_selector_cache_t *cach
             if (c == ':')
             {
                 const char *name = p + 1;
+                bool double_colon = false;
                 if (name < part_end && *name == ':')
                 {
+                    double_colon = true;
                     ++name;
                 }
                 const char *name_end = name;
@@ -3584,6 +3615,11 @@ static void html_view_selector_cache_set_pseudo_flags(css_selector_cache_t *cach
                 }
                 if (name_end < part_end && *name_end == '(')
                 {
+                    if (double_colon)
+                    {
+                        cache->never_match = true;
+                        return;
+                    }
                     const char *next = html_view_selector_skip_parens(name_end, part_end);
                     if (!next || next <= name_end)
                     {
@@ -3599,13 +3635,21 @@ static void html_view_selector_cache_set_pseudo_flags(css_selector_cache_t *cach
                     cache->never_match = true;
                     return;
                 }
-                if (name_len == 6 && strncasecmp(name, "before", 6) == 0)
+                if (html_view_selector_is_pseudo_element(name, name_len, double_colon))
                 {
-                    has_before = true;
-                }
-                else if (name_len == 5 && strncasecmp(name, "after", 5) == 0)
-                {
-                    has_after = true;
+                    if (name_len == 6 && strncasecmp(name, "before", 6) == 0)
+                    {
+                        has_before = true;
+                    }
+                    else if (name_len == 5 && strncasecmp(name, "after", 5) == 0)
+                    {
+                        has_after = true;
+                    }
+                    else
+                    {
+                        cache->never_match = true;
+                        return;
+                    }
                 }
                 else if (name_len == 4 && strncasecmp(name, "link", 4) == 0)
                 {
@@ -7936,10 +7980,22 @@ static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t
     index->sheet = sheet;
 
     html_view_key_count_map_t class_freq = {0};
+    size_t rule_total = 0;
+    size_t selector_missing = 0;
+    size_t parse_failed = 0;
+    size_t never_match = 0;
+    size_t compiled_failed = 0;
+    size_t empty_parts = 0;
+    size_t parsed_ok = 0;
+    const char *sample_parse_failed = NULL;
+    const char *sample_never_match = NULL;
+    const char *sample_compiled_failed = NULL;
     for (css_rule_t *rule = sheet->rules; rule; rule = rule->next)
     {
+        ++rule_total;
         if (!rule->selector)
         {
+            ++selector_missing;
             continue;
         }
         css_selector_cache_t *cache = rule->selector_cache;
@@ -7956,10 +8012,42 @@ static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t
         {
             (void)html_view_selector_cache_parse(cache, rule->selector);
         }
-        if (!cache->parsed || cache->parse_failed || cache->never_match || cache->count == 0)
+        if (cache->parse_failed)
+        {
+            ++parse_failed;
+            if (!sample_parse_failed)
+            {
+                sample_parse_failed = rule->selector;
+            }
+            continue;
+        }
+        if (cache->never_match)
+        {
+            ++never_match;
+            if (!sample_never_match)
+            {
+                sample_never_match = rule->selector;
+            }
+            continue;
+        }
+        if (cache->compiled_failed)
+        {
+            ++compiled_failed;
+            if (!sample_compiled_failed)
+            {
+                sample_compiled_failed = rule->selector;
+            }
+        }
+        if (cache->count == 0)
+        {
+            ++empty_parts;
+            continue;
+        }
+        if (!cache->parsed)
         {
             continue;
         }
+        ++parsed_ok;
 
         for (size_t part_idx = 0; part_idx < cache->count; ++part_idx)
         {
@@ -7996,6 +8084,37 @@ static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t
 
     html_view_key_count_map_free(&class_freq);
     html_view_rule_index_build_tries(index);
+    static uint64_t last_rule_log_ms = 0;
+    if (html_view_style_log_throttle(&last_rule_log_ms, HTML_VIEW_STYLE_LOG_THROTTLE_MS))
+    {
+        serial_printf("[html_view] rule_index_build sheet=%p rules=%llu parsed_ok=%llu parse_failed=%llu never_match=%llu compiled_failed=%llu empty_parts=%llu selector_missing=%llu global=%llu tags=%llu classes=%llu ids=%llu attrs=%llu scope_classes=%llu",
+                      (void *)sheet,
+                      (unsigned long long)rule_total,
+                      (unsigned long long)parsed_ok,
+                      (unsigned long long)parse_failed,
+                      (unsigned long long)never_match,
+                      (unsigned long long)compiled_failed,
+                      (unsigned long long)empty_parts,
+                      (unsigned long long)selector_missing,
+                      (unsigned long long)index->global_count,
+                      (unsigned long long)index->tag_bucket_count,
+                      (unsigned long long)index->class_bucket_count,
+                      (unsigned long long)index->id_bucket_count,
+                      (unsigned long long)index->attr_bucket_count,
+                      (unsigned long long)index->scope_class_bucket_count);
+        if (sample_parse_failed)
+        {
+            serial_printf("[html_view] rule_parse_failed sel=%.96s", sample_parse_failed);
+        }
+        if (sample_never_match)
+        {
+            serial_printf("[html_view] rule_never_match sel=%.96s", sample_never_match);
+        }
+        if (sample_compiled_failed)
+        {
+            serial_printf("[html_view] rule_compile_failed sel=%.96s", sample_compiled_failed);
+        }
+    }
     return index;
 }
 
@@ -8013,6 +8132,14 @@ static const html_view_rule_index_t *html_view_rule_index_get(atk_html_view_priv
 
     html_view_rule_index_clear(priv);
     priv->rule_index = html_view_rule_index_build(sheet);
+    if (!priv->rule_index)
+    {
+        static uint64_t last_fail_log_ms = 0;
+        if (html_view_style_log_throttle(&last_fail_log_ms, HTML_VIEW_STYLE_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] rule_index_build_failed sheet=%p", (void *)sheet);
+        }
+    }
     return priv->rule_index;
 }
 
@@ -9959,10 +10086,11 @@ void html_view_style_for_node(css_style_t *out,
     size_t rule_list_count = 0;
     bool use_rule_lists = false;
     bool use_fallback = false;
+    const html_view_rule_index_t *index = NULL;
 
     if (sheet && node && node->type == HTML_NODE_ELEMENT)
     {
-        const html_view_rule_index_t *index = html_view_rule_index_get(priv, sheet);
+        index = html_view_rule_index_get(priv, sheet);
         if (index)
         {
             if (html_view_collect_indexed_rule_lists(node,
@@ -10085,6 +10213,30 @@ void html_view_style_for_node(css_style_t *out,
     if (priv && node && node->type == HTML_NODE_ELEMENT)
     {
         (void)html_view_style_cache_store(priv, node, HTML_VIEW_PSEUDO_NONE, out);
+    }
+
+    if (node && node->type == HTML_NODE_ELEMENT && node->name &&
+        (strcmp(node->name, "body") == 0 || strcmp(node->name, "html") == 0))
+    {
+        static uint64_t last_style_log_ms = 0;
+        if (html_view_style_log_throttle(&last_style_log_ms, HTML_VIEW_STYLE_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] style_summary tag=%s sheet=%p index=%p lists=%llu fallback=%u bg=%u bgc=0x%08X color=%u color=0x%08X font=%u font_unit=%u font_val=%d display=%u display_val=%u",
+                          node->name,
+                          (void *)sheet,
+                          (void *)index,
+                          (unsigned long long)rule_list_count,
+                          use_fallback ? 1u : 0u,
+                          out->has_background ? 1u : 0u,
+                          (unsigned)out->background,
+                          out->has_color ? 1u : 0u,
+                          (unsigned)out->color,
+                          out->has_font_size ? 1u : 0u,
+                          out->has_font_size ? (unsigned)out->font_size.unit : 0u,
+                          out->has_font_size ? (int)out->font_size.value_milli : 0,
+                          out->has_display ? 1u : 0u,
+                          out->has_display ? (unsigned)out->display : 0u);
+        }
     }
 }
 

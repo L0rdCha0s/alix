@@ -140,22 +140,6 @@ bool browser_is_svg_bytes(const uint8_t *data, size_t len)
     return false;
 }
 
-static bool browser_url_list_contains(char *const *list, size_t count, const char *url)
-{
-    if (!list || !url || url[0] == '\0')
-    {
-        return false;
-    }
-    for (size_t i = 0; i < count; ++i)
-    {
-        if (list[i] && strcmp(list[i], url) == 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 void browser_dom_set_attr(html_node_t *node, const char *name, const char *value)
 {
     if (!node || node->type != HTML_NODE_ELEMENT || !name || name[0] == '\0' || !value)
@@ -202,48 +186,110 @@ void browser_dom_set_attr(html_node_t *node, const char *name, const char *value
     node->attrs = attr;
 }
 
-void browser_collect_resource_urls(browser_app_t *app,
-                                  html_node_t *root,
-                                  const browser_url_t *base_url,
-                                  char **css_urls,
-                                  size_t *css_count_io,
-                                  char **img_urls,
-                                  size_t *img_count_io,
-                                  char **script_urls,
-                                  size_t *script_count_io)
+size_t browser_collect_resource_urls(browser_app_t *app,
+                                     html_node_t *root,
+                                     const browser_url_t *base_url,
+                                     browser_resource_set_t *requested,
+                                     browser_resource_kind_t kind,
+                                     uint64_t load_id,
+                                     browser_resource_queue_t *queue)
 {
-    if (!app || !root || !base_url || !base_url->host || !css_urls || !css_count_io ||
-        !img_urls || !img_count_io || !script_urls || !script_count_io)
+    if (!app || !root || !base_url || !base_url->host || !requested)
     {
-        return;
+        return 0;
     }
 
-    size_t css_count = 0;
-    size_t img_count = 0;
-    size_t script_count = 0;
+    const char *tag = NULL;
+    const char *attr = NULL;
+    const char *log_label = NULL;
+    bool check_stylesheet = false;
+
+    switch (kind)
+    {
+        case BROWSER_RESOURCE_CSS:
+            tag = "link";
+            attr = "href";
+            log_label = "css";
+            check_stylesheet = true;
+            break;
+        case BROWSER_RESOURCE_SCRIPT:
+            tag = "script";
+            attr = "src";
+            log_label = "js";
+            break;
+        case BROWSER_RESOURCE_IMAGE:
+            tag = "img";
+            attr = "src";
+            log_label = "img";
+            break;
+        default:
+            return 0;
+    }
+
+    size_t count = 0;
 
     for (html_node_t *node = root; node;)
     {
         if (node->type == HTML_NODE_ELEMENT && node->name)
         {
-            if (css_count < BROWSER_MAX_STYLESHEETS && strcmp(node->name, "link") == 0)
+            if (strcmp(node->name, tag) == 0)
             {
-                const char *rel = html_attr_get(node, "rel");
-                if (rel && browser_has_token_ci(rel, strlen(rel), "stylesheet"))
+                if (check_stylesheet)
                 {
-                    const char *href = html_attr_get(node, "href");
-                    if (href && href[0] != '\0')
+                    const char *rel = html_attr_get(node, "rel");
+                    if (!rel || !browser_has_token_ci(rel, strlen(rel), "stylesheet"))
                     {
-                        char *abs = browser_build_absolute_url(base_url, href, strlen(href));
-                        if (abs)
+                        goto next_node;
+                    }
+                }
+
+                const char *value = html_attr_get(node, attr);
+                if (value && value[0] != '\0')
+                {
+                    char *abs = browser_build_absolute_url(base_url, value, strlen(value));
+                    if (abs)
+                    {
+                        browser_dom_set_attr(node, attr, abs);
+                        browser_resource_track_t track = browser_resource_set_track(requested, kind, abs);
+                        if (track == BROWSER_RESOURCE_TRACK_DUP)
                         {
-                            browser_dom_set_attr(node, "href", abs);
-                            if (!browser_url_list_contains(css_urls, css_count, abs))
+                            browser_debug_logf(app, "[%s] skip duplicate url=%s", log_label, abs);
+                            free(abs);
+                        }
+                        else
+                        {
+                            if (track == BROWSER_RESOURCE_TRACK_ERROR)
                             {
-                                css_urls[css_count++] = abs;
-                                browser_debug_logf(app, "[css] discovered %s", abs);
+                                browser_debug_logf(app, "[%s] track failed url=%s", log_label, abs);
                             }
-                            else
+                            browser_debug_logf(app, "[%s] discovered %s", log_label, abs);
+                            if (queue)
+                            {
+                                browser_resource_job_t *job = (browser_resource_job_t *)calloc(1, sizeof(*job));
+                                if (!job)
+                                {
+                                    browser_debug_logf(app, "[%s] queue failed url=%s", log_label, abs);
+                                }
+                                else
+                                {
+                                    job->kind = kind;
+                                    job->load_id = load_id;
+                                    job->url = abs;
+                                    if (queue->tail)
+                                    {
+                                        queue->tail->next = job;
+                                    }
+                                    else
+                                    {
+                                        queue->head = job;
+                                    }
+                                    queue->tail = job;
+                                    queue->count++;
+                                    abs = NULL;
+                                }
+                            }
+                            count++;
+                            if (abs)
                             {
                                 free(abs);
                             }
@@ -251,50 +297,9 @@ void browser_collect_resource_urls(browser_app_t *app,
                     }
                 }
             }
-            else if (img_count < BROWSER_MAX_IMAGES && strcmp(node->name, "img") == 0)
-            {
-                const char *src = html_attr_get(node, "src");
-                if (src && src[0] != '\0')
-                {
-                    char *abs = browser_build_absolute_url(base_url, src, strlen(src));
-                    if (abs)
-                    {
-                        browser_dom_set_attr(node, "src", abs);
-                        if (!browser_url_list_contains(img_urls, img_count, abs))
-                        {
-                            img_urls[img_count++] = abs;
-                            browser_debug_logf(app, "[img] discovered %s", abs);
-                        }
-                        else
-                        {
-                            free(abs);
-                        }
-                    }
-                }
-            }
-            else if (script_count < BROWSER_MAX_SCRIPTS && strcmp(node->name, "script") == 0)
-            {
-                const char *src = html_attr_get(node, "src");
-                if (src && src[0] != '\0')
-                {
-                    char *abs = browser_build_absolute_url(base_url, src, strlen(src));
-                    if (abs)
-                    {
-                        browser_dom_set_attr(node, "src", abs);
-                        if (!browser_url_list_contains(script_urls, script_count, abs))
-                        {
-                            script_urls[script_count++] = abs;
-                            browser_debug_logf(app, "[js] discovered %s", abs);
-                        }
-                        else
-                        {
-                            free(abs);
-                        }
-                    }
-                }
-            }
         }
 
+next_node:
         if (node->first_child)
         {
             node = node->first_child;
@@ -310,19 +315,5 @@ void browser_collect_resource_urls(browser_app_t *app,
         }
     }
 
-    *css_count_io = css_count;
-    *img_count_io = img_count;
-    *script_count_io = script_count;
-    if (css_count > 0)
-    {
-        browser_debug_logf(app, "[css] total stylesheets=%u", (unsigned)css_count);
-    }
-    if (img_count > 0)
-    {
-        browser_debug_logf(app, "[img] total images=%u", (unsigned)img_count);
-    }
-    if (script_count > 0)
-    {
-        browser_debug_logf(app, "[js] total scripts=%u", (unsigned)script_count);
-    }
+    return count;
 }

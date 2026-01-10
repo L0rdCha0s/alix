@@ -1,7 +1,21 @@
 #include "atk/html_view/html_view_internal.h"
 #include "atk/atk_dropdown.h"
 #include "ctype.h"
+#include "serial.h"
 #include "string.h"
+
+#define HTML_VIEW_CSS_LOG_THROTTLE_MS 500u
+
+static bool html_view_css_log_throttle(uint64_t *last_ms, uint64_t interval_ms)
+{
+    uint64_t now_ms = sys_time_millis();
+    if (now_ms - *last_ms < interval_ms)
+    {
+        return false;
+    }
+    *last_ms = now_ms;
+    return true;
+}
 
 typedef struct html_view_radio_group
 {
@@ -1005,27 +1019,31 @@ static void html_view_collect_style_text(const html_node_t *node, char **buf, si
     free(stack);
 }
 
-void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
+bool html_view_build_stylesheet_text_locked(atk_html_view_priv_t *priv,
+                                            char **out_text,
+                                            size_t *out_len,
+                                            size_t *out_inline_len,
+                                            size_t *out_external_len)
 {
-    if (!priv)
+    if (!out_text || !out_len || !out_inline_len || !out_external_len)
     {
-        return;
+        return false;
     }
-    html_view_rule_index_clear(priv);
-    if (priv->sheet)
+    *out_text = NULL;
+    *out_len = 0;
+    *out_inline_len = 0;
+    *out_external_len = priv ? priv->external_css_len : 0;
+
+    if (!priv || !priv->doc || !priv->doc->root)
     {
-        css_stylesheet_destroy(priv->sheet);
-        priv->sheet = NULL;
-    }
-    if (!priv->doc || !priv->doc->root)
-    {
-        return;
+        return false;
     }
 
     char *css_text = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
     html_view_collect_style_text(priv->doc->root, &css_text, &css_len, &css_cap);
+    size_t inline_len = css_len;
 
     if (priv->external_css && priv->external_css_len > 0)
     {
@@ -1043,12 +1061,153 @@ void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
     if (!css_text || css_len == 0)
     {
         free(css_text);
+        return false;
+    }
+
+    *out_text = css_text;
+    *out_len = css_len;
+    *out_inline_len = inline_len;
+    *out_external_len = priv->external_css_len;
+    return true;
+}
+
+void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    html_view_rule_index_clear(priv);
+    if (priv->sheet)
+    {
+        css_stylesheet_destroy(priv->sheet);
+        priv->sheet = NULL;
+    }
+    if (!priv->doc || !priv->doc->root)
+    {
+        return;
+    }
+
+    size_t external_len = priv->external_css_len;
+    size_t inline_len = 0;
+    size_t css_len = 0;
+    char *css_text = NULL;
+    if (!html_view_build_stylesheet_text_locked(priv,
+                                                &css_text,
+                                                &css_len,
+                                                &inline_len,
+                                                &external_len))
+    {
+        static uint64_t last_empty_log_ms = 0;
+        if (html_view_css_log_throttle(&last_empty_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] stylesheet_empty priv=%p ext_len=%llu",
+                          (void *)priv,
+                          (unsigned long long)external_len);
+        }
         return;
     }
 
     css_media_env_set(priv->last_width, priv->last_height, CSS_MEDIA_COLOR_SCHEME_LIGHT);
+    uint64_t parse_start_ms = sys_time_millis();
     priv->sheet = css_parse(css_text);
+    uint64_t parse_ms = sys_time_millis() - parse_start_ms;
+    size_t rule_count = 0;
+    if (priv->sheet)
+    {
+        for (css_rule_t *rule = priv->sheet->rules; rule; rule = rule->next)
+        {
+            ++rule_count;
+        }
+    }
+    static uint64_t last_rebuild_log_ms = 0;
+    if (html_view_css_log_throttle(&last_rebuild_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
+    {
+        serial_printf("[html_view] stylesheet_rebuild priv=%p css_len=%llu inline_len=%llu ext_len=%llu rules=%llu parse_ms=%llu sheet=%p",
+                      (void *)priv,
+                      (unsigned long long)css_len,
+                      (unsigned long long)inline_len,
+                      (unsigned long long)external_len,
+                      (unsigned long long)rule_count,
+                      (unsigned long long)parse_ms,
+                      (void *)priv->sheet);
+    }
+    if (!priv->sheet)
+    {
+        static uint64_t last_fail_log_ms = 0;
+        if (html_view_css_log_throttle(&last_fail_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] stylesheet_parse_failed priv=%p css_len=%llu ext_len=%llu parse_ms=%llu",
+                          (void *)priv,
+                          (unsigned long long)css_len,
+                          (unsigned long long)external_len,
+                          (unsigned long long)parse_ms);
+        }
+        free(css_text);
+        return;
+    }
     free(css_text);
+}
+
+void html_view_apply_pending_external_css_locked(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    uint64_t pending_len = __atomic_load_n(&priv->external_css_pending_len, __ATOMIC_RELAXED);
+    uint64_t pending_since_ms = __atomic_load_n(&priv->external_css_pending_since_ms, __ATOMIC_RELAXED);
+    char *pending = __atomic_exchange_n(&priv->external_css_pending, NULL, __ATOMIC_ACQ_REL);
+    if (!pending)
+    {
+        if (pending_len != 0 || pending_since_ms != 0)
+        {
+            static uint64_t last_miss_log_ms = 0;
+            if (html_view_css_log_throttle(&last_miss_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
+            {
+                serial_printf("[html_view] external_css_pending_miss priv=%p pending_len=%llu pending_ms=%llu",
+                              (void *)priv,
+                              (unsigned long long)pending_len,
+                              (unsigned long long)pending_since_ms);
+            }
+            __atomic_store_n(&priv->external_css_pending_len, 0u, __ATOMIC_RELAXED);
+            __atomic_store_n(&priv->external_css_pending_since_ms, 0u, __ATOMIC_RELAXED);
+        }
+        return;
+    }
+    if (pending[0] == '\0')
+    {
+        free(pending);
+        pending = NULL;
+    }
+    bool replaced = (priv->external_css != NULL);
+    if (priv->external_css)
+    {
+        free(priv->external_css);
+    }
+    if (pending && pending_len == 0)
+    {
+        pending_len = strlen(pending);
+    }
+    priv->external_css = pending;
+    priv->external_css_len = pending ? (size_t)pending_len : 0;
+    static uint64_t last_apply_log_ms = 0;
+    if (html_view_css_log_throttle(&last_apply_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
+    {
+        uint64_t now_ms = sys_time_millis();
+        uint64_t age_ms = pending_since_ms ? (now_ms - pending_since_ms) : 0u;
+        serial_printf("[html_view] external_css_apply priv=%p len=%llu age_ms=%llu replaced=%u",
+                      (void *)priv,
+                      (unsigned long long)priv->external_css_len,
+                      (unsigned long long)age_ms,
+                      replaced ? 1u : 0u);
+    }
+    __atomic_store_n(&priv->external_css_pending_len, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->external_css_pending_since_ms, 0u, __ATOMIC_RELAXED);
+    html_view_style_cache_mark_dirty(priv);
+    __atomic_store_n(&priv->stylesheet_dirty, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&priv->render_cache_dirty, 1u, __ATOMIC_RELEASE);
+    html_view_measure_cache_clear(priv);
 }
 
 void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv)
@@ -1056,6 +1215,15 @@ void html_view_stylesheet_mark_dirty(atk_html_view_priv_t *priv)
     if (!priv)
     {
         return;
+    }
+    static uint64_t last_dirty_log_ms = 0;
+    if (html_view_css_log_throttle(&last_dirty_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
+    {
+        void *caller = __builtin_return_address(0);
+        serial_printf("[html_view] stylesheet_mark_dirty priv=%p caller=0x%016llX ext_len=%llu",
+                      (void *)priv,
+                      (unsigned long long)(uintptr_t)caller,
+                      (unsigned long long)priv->external_css_len);
     }
     html_view_style_cache_mark_dirty(priv);
     __atomic_store_n(&priv->stylesheet_dirty, 1u, __ATOMIC_RELEASE);
@@ -1070,6 +1238,7 @@ void html_view_stylesheet_rebuild_if_needed(atk_html_view_priv_t *priv)
     {
         return;
     }
+    html_view_apply_pending_external_css_locked(priv);
     if (__atomic_exchange_n(&priv->stylesheet_dirty, 0u, __ATOMIC_ACQ_REL) == 0u)
     {
         return;

@@ -9,6 +9,17 @@
 #define BROWSER_TICK_SLOW_MS 16u
 #define BROWSER_TICK_LOG_RATE_MS 250u
 
+static bool browser_log_throttle(uint64_t *last_ms, uint64_t interval_ms)
+{
+    uint64_t now_ms = sys_time_millis();
+    if (now_ms - *last_ms < interval_ms)
+    {
+        return false;
+    }
+    *last_ms = now_ms;
+    return true;
+}
+
 static void browser_menus_close(browser_app_t *app);
 static void browser_menu_toggle(browser_app_t *app, atk_widget_t *menu, atk_widget_t *button);
 static void browser_open_url(browser_app_t *app, const char *url);
@@ -28,6 +39,8 @@ static void browser_history_jump_to(browser_app_t *app, size_t index);
 static void browser_back_menu_show(browser_app_t *app);
 static void browser_menu_back_item(void *context);
 static void browser_back_button_action(atk_widget_t *button, void *context);
+static void browser_js_toggle_action(atk_widget_t *button, void *context);
+static void browser_js_update_button(browser_app_t *app, bool enabled);
 
 static bool browser_button_hit_test(const atk_widget_t *button, int px, int py)
 {
@@ -259,6 +272,44 @@ static void apply_theme(atk_state_t *state)
     state->theme.desktop_icon_face = video_make_color(0x3A, 0x78, 0xB0);
     state->theme.desktop_icon_text = state->theme.window_title_text;
     atk_state_theme_commit(state);
+}
+
+static void browser_js_update_button(browser_app_t *app, bool enabled)
+{
+    if (!app || !app->menu_js_button)
+    {
+        return;
+    }
+    const char *title = enabled ? "JS: On" : "JS: Off";
+    atk_button_set_title(app->menu_js_button, title);
+    if (app->window)
+    {
+        atk_window_mark_dirty(app->window);
+    }
+}
+
+static void browser_js_toggle_action(atk_widget_t *button, void *context)
+{
+    (void)button;
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+    browser_menus_close(app);
+
+    bool enabled = false;
+    browser_lock_enter(app, &app->lock, "app_lock");
+    app->js_enabled = !app->js_enabled;
+    enabled = app->js_enabled;
+    browser_lock_exit(app, &app->lock, "app_lock");
+
+    if (app->viewer)
+    {
+        atk_html_view_set_js_enabled(app->viewer, enabled);
+    }
+    browser_js_update_button(app, enabled);
+    browser_debug_logf(app, "[js] %s", enabled ? "enabled" : "disabled");
 }
 
 static void browser_menu_open_debug(void *context)
@@ -752,6 +803,7 @@ static void browser_cancel_active_load(browser_app_t *app)
         memset(&ev, 0, sizeof(ev));
     }
     browser_app_css_reset(app);
+    browser_resource_queue_clear(app);
     browser_clear_pending_fragment(app);
 }
 
@@ -932,6 +984,10 @@ bool browser_tick(void *context)
                             app->css_dirty = true;
                             app->css_dirty_since_ms = sys_time_millis();
                         }
+                        browser_debug_logf(app,
+                                           "[css] append bytes=%u total=%u",
+                                           (unsigned)ev.u.css_append.len,
+                                           (unsigned)app->external_css_len);
                     }
                     else
                     {
@@ -944,6 +1000,13 @@ bool browser_tick(void *context)
             {
                 if (browser_load_is_active(app, ev.load_id))
                 {
+                    if (!browser_js_enabled(app))
+                    {
+                        browser_debug_logf(app,
+                                           "[js] drop script (disabled) src=%s",
+                                           ev.u.script_append.src ? ev.u.script_append.src : "(null)");
+                        break;
+                    }
                     bool ok = atk_html_view_try_add_script(app->viewer,
                                                            ev.u.script_append.script,
                                                            ev.u.script_append.len);
@@ -1070,23 +1133,31 @@ bool browser_tick(void *context)
     if (app->css_dirty && app->viewer && app->window)
     {
         uint64_t now_ms = sys_time_millis();
-        bool budget_ok = true;
-        if (BROWSER_UI_EVENT_BUDGET_MS > 0 &&
-            (now_ms - start_ms) >= BROWSER_UI_EVENT_BUDGET_MS)
-        {
-            budget_ok = false;
-        }
-        if (budget_ok && (now_ms - app->css_dirty_since_ms) >= BROWSER_CSS_APPLY_DEBOUNCE_MS)
+        if ((now_ms - app->css_dirty_since_ms) >= BROWSER_CSS_APPLY_DEBOUNCE_MS)
         {
             if (atk_html_view_try_set_external_stylesheet(app->viewer, app->external_css))
             {
                 app->css_dirty = false;
                 app->css_dirty_since_ms = 0;
+                static uint64_t last_css_apply_log_ms = 0;
+                if (browser_log_throttle(&last_css_apply_log_ms, 250))
+                {
+                    browser_debug_logf(app,
+                                       "[css] apply ok len=%u",
+                                       (unsigned)app->external_css_len);
+                }
                 atk_window_mark_dirty(app->window);
                 redraw = true;
             }
             else
             {
+                static uint64_t last_css_defer_log_ms = 0;
+                if (browser_log_throttle(&last_css_defer_log_ms, 250))
+                {
+                    browser_debug_logf(app,
+                                       "[css] apply defer len=%u",
+                                       (unsigned)app->external_css_len);
+                }
                 app->css_dirty_since_ms = now_ms;
             }
         }
@@ -1134,6 +1205,7 @@ bool browser_build_ui(browser_app_t *app)
     atk_state_t *state = atk_state_get();
     atk_menu_bar_set_enabled(state, false);
     apply_theme(state);
+    app->js_enabled = true;
 
     app->window = atk_window_create_at(state, BROWSER_WIDTH / 2, BROWSER_HEIGHT / 2);
     if (!app->window)
@@ -1223,6 +1295,35 @@ bool browser_build_ui(browser_app_t *app)
         return false;
     }
     atk_widget_set_layout(app->menu_debug_button, ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_LEFT);
+
+    menu_x += menu_w_debug + 8;
+    int menu_w_js = atk_font_text_width("JS: Off");
+    int menu_w_js_on = atk_font_text_width("JS: On");
+    if (menu_w_js_on > menu_w_js)
+    {
+        menu_w_js = menu_w_js_on;
+    }
+    menu_w_js += 32;
+    if (menu_w_js < 72)
+    {
+        menu_w_js = 72;
+    }
+    const char *js_label = app->js_enabled ? "JS: On" : "JS: Off";
+    app->menu_js_button = atk_window_add_button(app->window,
+                                                js_label,
+                                                menu_x,
+                                                menu_y,
+                                                menu_w_js,
+                                                menu_h,
+                                                ATK_BUTTON_STYLE_TITLE_INSIDE,
+                                                false,
+                                                browser_js_toggle_action,
+                                                app);
+    if (!app->menu_js_button)
+    {
+        return false;
+    }
+    atk_widget_set_layout(app->menu_js_button, ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_LEFT);
 
     int url_y = menu_y + menu_h + BROWSER_GAP;
     app->url_input = atk_window_add_text_input(app->window, content_x, url_y, content_w);
@@ -1315,6 +1416,7 @@ bool browser_build_ui(browser_app_t *app)
     {
         return false;
     }
+    atk_html_view_set_js_enabled(app->viewer, app->js_enabled);
     atk_html_view_enable_async_render(app->viewer, true);
     atk_html_view_set_link_handler(app->viewer, browser_html_link_clicked, app);
     atk_widget_set_layout(app->viewer,

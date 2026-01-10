@@ -655,13 +655,28 @@ static bool css_parse_url_token(const char *start, const char *end, char **out_u
     return *out_url != NULL;
 }
 
+static void css_style_clear_background_image(css_style_t *style)
+{
+    if (!style)
+    {
+        return;
+    }
+    if (style->background_image_owned && style->background_image)
+    {
+        free((void *)style->background_image);
+    }
+    style->background_image = NULL;
+    style->background_image_owned = false;
+    style->has_background_image = false;
+}
+
 static void css_style_set_background_image(css_style_t *style, char *url, bool owned)
 {
     if (!style)
     {
         return;
     }
-    css_style_release(style);
+    css_style_clear_background_image(style);
     style->has_background_image = true;
     style->background_image = url;
     style->background_image_owned = owned;
@@ -901,7 +916,7 @@ static void css_style_apply_background_shorthand(css_style_t *style, const char 
         return;
     }
 
-    css_style_release(style);
+    css_style_clear_background_image(style);
     style->has_background = true;
     style->background_transparent = background_transparent;
     if (!background_transparent)

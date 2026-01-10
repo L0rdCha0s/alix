@@ -165,11 +165,14 @@ static bool css_calc_parse_number(const char **p, const char *end, css_calc_valu
     if (s < end && *s == '.')
     {
         ++s;
-        while (s < end && isdigit((unsigned char)*s) && frac_scale < 1000000)
+        while (s < end && isdigit((unsigned char)*s))
         {
             saw_digit = true;
-            frac = frac * 10 + (int64_t)(*s - '0');
-            frac_scale *= 10;
+            if (frac_scale < 1000000)
+            {
+                frac = frac * 10 + (int64_t)(*s - '0');
+                frac_scale *= 10;
+            }
             ++s;
         }
     }
@@ -1215,11 +1218,14 @@ bool css_parse_number_milli(const char *start, const char *end, int32_t *out_mil
     if (p < end && *p == '.')
     {
         p++;
-        while (p < end && isdigit((unsigned char)*p) && frac_scale < 1000)
+        while (p < end && isdigit((unsigned char)*p))
         {
             saw_digit = true;
-            frac = frac * 10 + (int32_t)(*p - '0');
-            frac_scale *= 10;
+            if (frac_scale < 1000)
+            {
+                frac = frac * 10 + (int32_t)(*p - '0');
+                frac_scale *= 10;
+            }
             p++;
         }
         while (frac_scale < 1000)

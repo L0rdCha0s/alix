@@ -82,6 +82,11 @@ bool atk_html_view_try_add_script(atk_widget_t *view, const char *script_text, s
 void atk_html_view_stop_js(atk_widget_t *view);
 
 /*
+ * Enable or disable JS execution for the view.
+ */
+void atk_html_view_set_js_enabled(atk_widget_t *view, bool enabled);
+
+/*
  * Enable or disable asynchronous render cache builds.
  *
  * When enabled, the view rebuilds its render cache on a worker thread and

@@ -12,6 +12,10 @@ typedef struct
     int margin_right;
     int margin_bottom;
     int margin_left;
+    bool auto_margin_top;
+    bool auto_margin_right;
+    bool auto_margin_bottom;
+    bool auto_margin_left;
     int pad_top;
     int pad_right;
     int pad_bottom;
@@ -485,6 +489,8 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     int border_right = 0;
     int border_bottom = 0;
     int border_left = 0;
+    bool auto_margin_right = false;
+    bool auto_margin_left = false;
 
     html_view_calc_box_edges(ctx,
                              style,
@@ -501,11 +507,20 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                              &border_right,
                              &border_bottom,
                              &border_left);
+    if (style->has_margin)
+    {
+        auto_margin_right = style->margin.right.valid && style->margin.right.is_auto;
+        auto_margin_left = style->margin.left.valid && style->margin.left.is_auto;
+    }
 
     int content_main = 0;
     int content_cross = 0;
     bool main_explicit = false;
     bool cross_explicit = false;
+    int min_main = -1;
+    int max_main = -1;
+    int min_cross = -1;
+    int max_cross = -1;
 
     if (row)
     {
@@ -582,6 +597,180 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
         }
     }
 
+    if (row)
+    {
+        if (style->has_min_width && style->min_width.valid && !style->min_width.is_auto)
+        {
+            min_main = html_view_length_to_px(&style->min_width,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              ctx->body_w,
+                                              ctx->viewport_h,
+                                              ctx->base_font_px,
+                                              true);
+            min_main = html_view_box_sizing_content_width(style,
+                                                         min_main,
+                                                         pad_left,
+                                                         pad_right,
+                                                         border_left,
+                                                         border_right);
+            if (min_main < 0) min_main = 0;
+        }
+        if (style->has_max_width && style->max_width.valid && !style->max_width.is_auto)
+        {
+            max_main = html_view_length_to_px(&style->max_width,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              ctx->body_w,
+                                              ctx->viewport_h,
+                                              ctx->base_font_px,
+                                              true);
+            max_main = html_view_box_sizing_content_width(style,
+                                                         max_main,
+                                                         pad_left,
+                                                         pad_right,
+                                                         border_left,
+                                                         border_right);
+            if (max_main < 0) max_main = 0;
+        }
+        if (style->has_min_height && style->min_height.valid && !style->min_height.is_auto)
+        {
+            min_cross = html_view_length_to_px(&style->min_height,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               ctx->base_font_px,
+                                               false);
+            min_cross = html_view_box_sizing_content_height(style,
+                                                            min_cross,
+                                                            pad_top,
+                                                            pad_bottom,
+                                                            border_top,
+                                                            border_bottom);
+            if (min_cross < 0) min_cross = 0;
+        }
+        if (style->has_max_height && style->max_height.valid && !style->max_height.is_auto)
+        {
+            max_cross = html_view_length_to_px(&style->max_height,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               ctx->base_font_px,
+                                               false);
+            max_cross = html_view_box_sizing_content_height(style,
+                                                            max_cross,
+                                                            pad_top,
+                                                            pad_bottom,
+                                                            border_top,
+                                                            border_bottom);
+            if (max_cross < 0) max_cross = 0;
+        }
+    }
+    else
+    {
+        if (style->has_min_height && style->min_height.valid && !style->min_height.is_auto)
+        {
+            min_main = html_view_length_to_px(&style->min_height,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              ctx->base_font_px,
+                                              false);
+            min_main = html_view_box_sizing_content_height(style,
+                                                           min_main,
+                                                           pad_top,
+                                                           pad_bottom,
+                                                           border_top,
+                                                           border_bottom);
+            if (min_main < 0) min_main = 0;
+        }
+        if (style->has_max_height && style->max_height.valid && !style->max_height.is_auto)
+        {
+            max_main = html_view_length_to_px(&style->max_height,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              ctx->viewport_w,
+                                              ctx->viewport_h,
+                                              ctx->base_font_px,
+                                              false);
+            max_main = html_view_box_sizing_content_height(style,
+                                                           max_main,
+                                                           pad_top,
+                                                           pad_bottom,
+                                                           border_top,
+                                                           border_bottom);
+            if (max_main < 0) max_main = 0;
+        }
+        if (style->has_min_width && style->min_width.valid && !style->min_width.is_auto)
+        {
+            min_cross = html_view_length_to_px(&style->min_width,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               ctx->body_w,
+                                               ctx->viewport_h,
+                                               ctx->base_font_px,
+                                               true);
+            min_cross = html_view_box_sizing_content_width(style,
+                                                           min_cross,
+                                                           pad_left,
+                                                           pad_right,
+                                                           border_left,
+                                                           border_right);
+            if (min_cross < 0) min_cross = 0;
+        }
+        if (style->has_max_width && style->max_width.valid && !style->max_width.is_auto)
+        {
+            max_cross = html_view_length_to_px(&style->max_width,
+                                               ctx->viewport_w,
+                                               ctx->viewport_h,
+                                               ctx->body_w,
+                                               ctx->viewport_h,
+                                               ctx->base_font_px,
+                                               true);
+            max_cross = html_view_box_sizing_content_width(style,
+                                                           max_cross,
+                                                           pad_left,
+                                                           pad_right,
+                                                           border_left,
+                                                           border_right);
+            if (max_cross < 0) max_cross = 0;
+        }
+    }
+
+    if (main_explicit)
+    {
+        if (max_main >= 0 && content_main > max_main)
+        {
+            content_main = max_main;
+        }
+        if (min_main >= 0 && content_main < min_main)
+        {
+            content_main = min_main;
+        }
+        if (max_main >= 0 && min_main > max_main)
+        {
+            content_main = min_main;
+        }
+    }
+    if (cross_explicit)
+    {
+        if (max_cross >= 0 && content_cross > max_cross)
+        {
+            content_cross = max_cross;
+        }
+        if (min_cross >= 0 && content_cross < min_cross)
+        {
+            content_cross = min_cross;
+        }
+        if (max_cross >= 0 && min_cross > max_cross)
+        {
+            content_cross = min_cross;
+        }
+    }
+
     if (content_main < 0) content_main = 0;
     if (content_cross < 0) content_cross = 0;
 
@@ -597,6 +786,21 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
         {
             layout_main = 0;
             wrap = false;
+        }
+    }
+    if (!main_explicit && row)
+    {
+        if (max_main >= 0 && layout_main > max_main)
+        {
+            layout_main = max_main;
+        }
+        if (min_main >= 0 && layout_main < min_main)
+        {
+            layout_main = min_main;
+        }
+        if (max_main >= 0 && min_main > max_main)
+        {
+            layout_main = min_main;
         }
     }
 
@@ -710,6 +914,18 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                                      &item->border_right,
                                      &item->border_bottom,
                                      &item->border_left);
+            item->auto_margin_top = child_style.has_margin &&
+                                    child_style.margin.top.valid &&
+                                    child_style.margin.top.is_auto;
+            item->auto_margin_right = child_style.has_margin &&
+                                      child_style.margin.right.valid &&
+                                      child_style.margin.right.is_auto;
+            item->auto_margin_bottom = child_style.has_margin &&
+                                       child_style.margin.bottom.valid &&
+                                       child_style.margin.bottom.is_auto;
+            item->auto_margin_left = child_style.has_margin &&
+                                     child_style.margin.left.valid &&
+                                     child_style.margin.left.is_auto;
 
             bool has_basis = child_style.has_flex_basis && child_style.flex_basis.valid && !child_style.flex_basis.is_auto;
             int basis_px = 0;
@@ -967,6 +1183,24 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
         int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
         if (border_box_w < 0) border_box_w = 0;
         if (border_box_h < 0) border_box_h = 0;
+        if (!inline_container && (auto_margin_left || auto_margin_right))
+        {
+            int free_w = ctx->body_w - border_box_w;
+            if (free_w < 0) free_w = 0;
+            if (auto_margin_left && auto_margin_right)
+            {
+                margin_left = free_w / 2;
+                margin_right = free_w - margin_left;
+            }
+            else if (auto_margin_left)
+            {
+                margin_left = free_w;
+            }
+            else if (auto_margin_right)
+            {
+                margin_right = free_w;
+            }
+        }
         int outer_w = border_box_w + margin_left + margin_right;
 
         if (!inline_container && ctx->x != ctx->body_x)
@@ -1092,6 +1326,18 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     if (ctx->measure_shrink && layout_main > 0 && flex_main > layout_main)
     {
         flex_main = layout_main;
+    }
+    if (max_main >= 0 && flex_main > max_main)
+    {
+        flex_main = max_main;
+    }
+    if (min_main >= 0 && flex_main < min_main)
+    {
+        flex_main = min_main;
+    }
+    if (max_main >= 0 && min_main > max_main)
+    {
+        flex_main = min_main;
     }
 
     for (size_t li = 0; li < line_count; ++li)
@@ -1262,6 +1508,61 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
 
         int free_space = target_main - line->main_size;
         if (free_space < 0) free_space = 0;
+        if (free_space > 0)
+        {
+            int auto_margins = 0;
+            for (size_t i = 0; i < line->count; ++i)
+            {
+                html_view_flex_item_t *item = &items[line->start + i];
+                if (row)
+                {
+                    if (item->auto_margin_left) auto_margins++;
+                    if (item->auto_margin_right) auto_margins++;
+                }
+                else
+                {
+                    if (item->auto_margin_top) auto_margins++;
+                    if (item->auto_margin_bottom) auto_margins++;
+                }
+            }
+            if (auto_margins > 0)
+            {
+                int share = free_space / auto_margins;
+                int remainder = free_space - share * auto_margins;
+                for (size_t i = 0; i < line->count; ++i)
+                {
+                    html_view_flex_item_t *item = &items[line->start + i];
+                    if (row)
+                    {
+                        if (item->auto_margin_left)
+                        {
+                            item->margin_left = share + (remainder > 0 ? 1 : 0);
+                            if (remainder > 0) remainder--;
+                        }
+                        if (item->auto_margin_right)
+                        {
+                            item->margin_right = share + (remainder > 0 ? 1 : 0);
+                            if (remainder > 0) remainder--;
+                        }
+                    }
+                    else
+                    {
+                        if (item->auto_margin_top)
+                        {
+                            item->margin_top = share + (remainder > 0 ? 1 : 0);
+                            if (remainder > 0) remainder--;
+                        }
+                        if (item->auto_margin_bottom)
+                        {
+                            item->margin_bottom = share + (remainder > 0 ? 1 : 0);
+                            if (remainder > 0) remainder--;
+                        }
+                    }
+                    html_view_flex_update_sizes(item, row);
+                }
+                free_space = 0;
+            }
+        }
         int offset = 0;
         int extra_gap = 0;
         if (justify == CSS_JUSTIFY_FLEX_END)
@@ -1318,10 +1619,25 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             {
                 align = CSS_ALIGN_FLEX_START;
             }
+            int cross_margin_start = row ? item->margin_top : item->margin_left;
+            bool cross_auto_start = row ? item->auto_margin_top : item->auto_margin_left;
+            bool cross_auto_end = row ? item->auto_margin_bottom : item->auto_margin_right;
             int free_cross = line->cross_size - item->cross_outer;
             if (free_cross < 0) free_cross = 0;
             int cross_offset = 0;
-            if (align == CSS_ALIGN_FLEX_END)
+            if (cross_auto_start || cross_auto_end)
+            {
+                if (cross_auto_start && cross_auto_end)
+                {
+                    cross_margin_start = free_cross / 2;
+                }
+                else if (cross_auto_start)
+                {
+                    cross_margin_start = free_cross;
+                }
+                cross_offset = 0;
+            }
+            else if (align == CSS_ALIGN_FLEX_END)
             {
                 cross_offset = free_cross;
             }
@@ -1329,7 +1645,7 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             {
                 cross_offset = free_cross / 2;
             }
-            item->pos_cross = cross_offset + (row ? item->margin_top : item->margin_left);
+            item->pos_cross = cross_offset + cross_margin_start;
         }
     }
 
@@ -1384,6 +1700,18 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     {
         content_cross = total_cross;
     }
+    if (max_cross >= 0 && content_cross > max_cross)
+    {
+        content_cross = max_cross;
+    }
+    if (min_cross >= 0 && content_cross < min_cross)
+    {
+        content_cross = min_cross;
+    }
+    if (max_cross >= 0 && min_cross > max_cross)
+    {
+        content_cross = min_cross;
+    }
 
     int content_w = row ? flex_main : content_cross;
     int content_h = row ? content_cross : flex_main;
@@ -1394,6 +1722,24 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     int border_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
     if (border_box_w < 0) border_box_w = 0;
     if (border_box_h < 0) border_box_h = 0;
+    if (!inline_container && (auto_margin_left || auto_margin_right))
+    {
+        int free_w = ctx->body_w - border_box_w;
+        if (free_w < 0) free_w = 0;
+        if (auto_margin_left && auto_margin_right)
+        {
+            margin_left = free_w / 2;
+            margin_right = free_w - margin_left;
+        }
+        else if (auto_margin_left)
+        {
+            margin_left = free_w;
+        }
+        else if (auto_margin_right)
+        {
+            margin_right = free_w;
+        }
+    }
     int outer_w = border_box_w + margin_left + margin_right;
 
     if (!inline_container && ctx->x != ctx->body_x)

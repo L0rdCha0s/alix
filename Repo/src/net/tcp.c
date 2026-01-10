@@ -234,14 +234,60 @@ static spinlock_t g_tcp_lock;
 static uint64_t g_tcp_lock_hold_start = 0;
 static void *g_tcp_lock_hold_caller = NULL;
 static uint64_t g_tcp_lock_log_threshold_ticks = 0;
+static uint64_t g_tcp_lock_wait_log_threshold_ticks = 0;
+static uint64_t g_tcp_lock_wait_log_interval_ticks = 0;
 static uint32_t g_tcp_debug_enable = 0;
 
 static inline uint64_t tcp_lock(void)
 {
     uint64_t flags = tcp_irq_save();
-    spinlock_lock(&g_tcp_lock);
+    uint64_t wait_start = timer_ticks();
+    uint64_t next_log = 0;
+    void *wait_caller = __builtin_return_address(0);
+    if (g_tcp_lock_wait_log_threshold_ticks != 0)
+    {
+        next_log = wait_start + g_tcp_lock_wait_log_threshold_ticks;
+    }
+    while (__sync_lock_test_and_set(&g_tcp_lock.value, 1) != 0)
+    {
+        while (g_tcp_lock.value)
+        {
+            if (next_log != 0)
+            {
+                uint64_t now = timer_ticks();
+                if (now >= next_log)
+                {
+                    uint64_t waited_ms = tcp_ticks_to_ms(now - wait_start);
+                    uint64_t hold_start = g_tcp_lock_hold_start;
+                    void *hold_caller = g_tcp_lock_hold_caller;
+                    uint64_t hold_ms = hold_start ? tcp_ticks_to_ms(now - hold_start) : 0;
+                    thread_t *thread = thread_current();
+                    const char *thread_name = thread ? process_thread_name_const(thread) : NULL;
+                    if (!thread_name || thread_name[0] == '\0')
+                    {
+                        thread_name = "<thread>";
+                    }
+                    serial_printf("[tcp] lock wait ms=%llu caller=0x%016llX holder=0x%016llX hold_ms=%llu thread=%s",
+                                  (unsigned long long)waited_ms,
+                                  (unsigned long long)(uintptr_t)wait_caller,
+                                  (unsigned long long)(uintptr_t)hold_caller,
+                                  (unsigned long long)hold_ms,
+                                  thread_name);
+                    if (g_tcp_lock_wait_log_interval_ticks != 0)
+                    {
+                        next_log = now + g_tcp_lock_wait_log_interval_ticks;
+                    }
+                    else
+                    {
+                        next_log = 0;
+                    }
+                }
+            }
+            __asm__ volatile ("pause");
+        }
+    }
     g_tcp_lock_hold_start = timer_ticks();
-    g_tcp_lock_hold_caller = __builtin_return_address(0);
+    g_tcp_lock_hold_caller = wait_caller;
     return flags;
 }
 
@@ -256,20 +302,10 @@ static inline void tcp_unlock(uint64_t flags)
         uint64_t delta = timer_ticks() - hold_start;
         if (g_tcp_lock_log_threshold_ticks != 0 && delta >= g_tcp_lock_log_threshold_ticks)
         {
-            uint32_t freq = timer_frequency();
-            if (freq == 0)
-            {
-                freq = 1000;
-            }
-            uint64_t ms = (delta * 1000ULL) / (uint64_t)freq;
-            if (tcp_debug_enabled())
-            {
-                TCP_LOG("%s", "[tcp] lock held ");
-                TCP_LOG("%llu", (unsigned long long)ms);
-                TCP_LOG("%s", "ms caller=0x");
-                TCP_LOG("%016llX", (unsigned long long)(uintptr_t)g_tcp_lock_hold_caller);
-                TCP_LOG("%s", "\r\n");
-            }
+            uint64_t ms = tcp_ticks_to_ms(delta);
+            serial_printf("[tcp] lock held ms=%llu caller=0x%016llX",
+                          (unsigned long long)ms,
+                          (unsigned long long)(uintptr_t)g_tcp_lock_hold_caller);
         }
         g_tcp_lock_hold_caller = NULL;
     }
@@ -285,6 +321,8 @@ void net_tcp_init(void)
         freq = 100;
     }
     g_tcp_lock_log_threshold_ticks = (uint64_t)freq * 5ULL;
+    g_tcp_lock_wait_log_threshold_ticks = (uint64_t)freq;
+    g_tcp_lock_wait_log_interval_ticks = (uint64_t)freq * 2ULL;
     for (size_t i = 0; i < NET_TCP_MAX_SOCKETS; ++i)
     {
         tcp_reset_socket(&g_sockets[i]);

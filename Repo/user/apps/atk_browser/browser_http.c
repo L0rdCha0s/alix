@@ -1238,6 +1238,36 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                 }
 
                 if (browser_http_find_header_value(header_buf, header_block_len,
+                                                   "content-encoding",
+                                                   &value, &value_len))
+                {
+                    char enc_buf[64];
+                    size_t copy = value_len;
+                    if (copy >= sizeof(enc_buf))
+                    {
+                        copy = sizeof(enc_buf) - 1;
+                    }
+                    memcpy(enc_buf, value, copy);
+                    enc_buf[copy] = '\0';
+                    browser_debug_logf(app, "[http] content-encoding %s", enc_buf);
+                }
+
+                if (browser_http_find_header_value(header_buf, header_block_len,
+                                                   "content-encoding",
+                                                   &value, &value_len))
+                {
+                    char enc_buf[64];
+                    size_t copy = value_len;
+                    if (copy >= sizeof(enc_buf))
+                    {
+                        copy = sizeof(enc_buf) - 1;
+                    }
+                    memcpy(enc_buf, value, copy);
+                    enc_buf[copy] = '\0';
+                    browser_debug_logf(app, "[http] content-encoding %s", enc_buf);
+                }
+
+                if (browser_http_find_header_value(header_buf, header_block_len,
                                                    "location",
                                                    &value, &value_len))
                 {

@@ -122,3 +122,130 @@ bool browser_ui_event_dequeue(browser_app_t *app, browser_ui_event_t *out)
     browser_lock_exit(app, &app->lock, "app_lock");
     return ok;
 }
+
+bool browser_resource_queue_push(browser_app_t *app,
+                                 browser_resource_kind_t kind,
+                                 uint64_t load_id,
+                                 char *url)
+{
+    if (!app || !url)
+    {
+        return false;
+    }
+
+    browser_resource_job_t *job = (browser_resource_job_t *)calloc(1, sizeof(*job));
+    if (!job)
+    {
+        return false;
+    }
+    job->kind = kind;
+    job->load_id = load_id;
+    job->url = url;
+
+    browser_lock_enter(app, &app->resource_lock, "resource_lock");
+    if (__atomic_load_n(&app->resource_thread_stop, __ATOMIC_ACQUIRE) != 0u ||
+        app->resource_thread == 0)
+    {
+        browser_lock_exit(app, &app->resource_lock, "resource_lock");
+        free(job);
+        return false;
+    }
+    if (app->resource_queue.tail)
+    {
+        app->resource_queue.tail->next = job;
+    }
+    else
+    {
+        app->resource_queue.head = job;
+    }
+    app->resource_queue.tail = job;
+    app->resource_queue.count++;
+    browser_lock_exit(app, &app->resource_lock, "resource_lock");
+    return true;
+}
+
+browser_resource_job_t *browser_resource_queue_pop(browser_app_t *app)
+{
+    if (!app)
+    {
+        return NULL;
+    }
+
+    browser_resource_job_t *job = NULL;
+    browser_lock_enter(app, &app->resource_lock, "resource_lock");
+    job = app->resource_queue.head;
+    if (job)
+    {
+        app->resource_queue.head = job->next;
+        if (!app->resource_queue.head)
+        {
+            app->resource_queue.tail = NULL;
+        }
+        if (app->resource_queue.count > 0)
+        {
+            app->resource_queue.count--;
+        }
+    }
+    browser_lock_exit(app, &app->resource_lock, "resource_lock");
+
+    if (job)
+    {
+        job->next = NULL;
+    }
+    return job;
+}
+
+void browser_resource_queue_clear(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    browser_resource_job_t *job = NULL;
+    browser_lock_enter(app, &app->resource_lock, "resource_lock");
+    job = app->resource_queue.head;
+    app->resource_queue.head = NULL;
+    app->resource_queue.tail = NULL;
+    app->resource_queue.count = 0;
+    browser_lock_exit(app, &app->resource_lock, "resource_lock");
+
+    while (job)
+    {
+        browser_resource_job_t *next = job->next;
+        free(job->url);
+        free(job);
+        job = next;
+    }
+}
+
+bool browser_resource_queue_append(browser_app_t *app, browser_resource_queue_t *queue)
+{
+    if (!app || !queue || !queue->head)
+    {
+        return true;
+    }
+
+    bool appended = false;
+    browser_lock_enter(app, &app->resource_lock, "resource_lock");
+    if (__atomic_load_n(&app->resource_thread_stop, __ATOMIC_ACQUIRE) == 0u &&
+        app->resource_thread != 0)
+    {
+        if (app->resource_queue.tail)
+        {
+            app->resource_queue.tail->next = queue->head;
+        }
+        else
+        {
+            app->resource_queue.head = queue->head;
+        }
+        app->resource_queue.tail = queue->tail ? queue->tail : queue->head;
+        app->resource_queue.count += queue->count;
+        queue->head = NULL;
+        queue->tail = NULL;
+        queue->count = 0;
+        appended = true;
+    }
+    browser_lock_exit(app, &app->resource_lock, "resource_lock");
+    return appended;
+}

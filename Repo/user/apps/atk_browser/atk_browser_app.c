@@ -27,6 +27,7 @@ int main(void)
     alix_mutex_init(&app->lock);
     alix_mutex_init(&app->debug_lock);
     alix_mutex_init(&app->decode_lock);
+    alix_mutex_init(&app->resource_lock);
 
     if (!atk_user_window_open_with_flags(&app->remote,
                                          "atk_browser",
@@ -46,6 +47,10 @@ int main(void)
         atk_user_close(&app->remote);
         free(app);
         return 1;
+    }
+    if (!browser_resource_worker_start(app))
+    {
+        printf("atk_browser: failed to start resource worker\n");
     }
 
     app->ui_event_head = 0;
@@ -95,6 +100,8 @@ int main(void)
             (void)alix_thread_join(join_threads[i], NULL);
         }
     }
+
+    browser_resource_worker_stop(app);
 
     browser_ui_event_t ev = {0};
     while (browser_ui_event_dequeue(app, &ev))

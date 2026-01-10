@@ -878,9 +878,12 @@ static void shell_session_exec_task(void *arg)
                       success ? "true" : "false",
                       (void *)result);
     }
-    if (result && !session->state.stream_fn)
+    if (result)
     {
-        shell_session_append(session, result, strlen(result));
+        if (!session->state.stream_fn)
+        {
+            shell_session_append(session, result, strlen(result));
+        }
         free(result);
     }
     free(task->line);
