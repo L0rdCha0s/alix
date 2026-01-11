@@ -17,6 +17,9 @@ typedef enum
     HTML_NODE_COMMENT
 } html_node_type_t;
 
+struct html_arena_block;
+typedef struct html_document html_document_t;
+
 typedef struct html_attr
 {
     char *name;
@@ -33,6 +36,7 @@ typedef struct html_class_token
 typedef struct html_node
 {
     html_node_type_t type;
+    html_document_t *doc;
     char *name;
     char *text;
     html_attr_t *attrs;
@@ -51,10 +55,11 @@ typedef struct html_node
     uint8_t subtree_flags;
 } html_node_t;
 
-typedef struct html_document
+struct html_document
 {
     html_node_t *root;
-} html_document_t;
+    struct html_arena_block *arena_blocks;
+};
 
 typedef struct html_parse_error
 {

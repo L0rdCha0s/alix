@@ -9,54 +9,9 @@
 #include "web/html/html_internal.h"
 
 static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev);
+static void browser_load_thread(void *arg);
 
 #define BROWSER_RESOURCE_LOG_URL_MAX 160u
-
-static bool browser_doc_append_style(html_document_t *doc, const char *css, size_t len)
-{
-    if (!doc || !doc->root || !css || len == 0)
-    {
-        return false;
-    }
-
-    html_node_t *style = html_node_create(HTML_NODE_ELEMENT);
-    if (!style)
-    {
-        return false;
-    }
-    style->name = browser_strdup("style");
-    if (!style->name)
-    {
-        free(style);
-        return false;
-    }
-
-    html_node_t *text = html_node_create(HTML_NODE_TEXT);
-    if (!text)
-    {
-        free(style->name);
-        free(style);
-        return false;
-    }
-    text->text = browser_strdup_len(css, len);
-    if (!text->text)
-    {
-        free(text);
-        free(style->name);
-        free(style);
-        return false;
-    }
-    html_node_append_child(style, text);
-
-    html_node_t *head = (html_node_t *)browser_dom_find_first_element(doc->root, "head");
-    html_node_t *target = head ? head : (html_node_t *)browser_dom_find_first_element(doc->root, "html");
-    if (!target)
-    {
-        target = doc->root;
-    }
-    html_node_append_child(target, style);
-    return true;
-}
 
 static const char *browser_resource_kind_label(browser_resource_kind_t kind)
 {
@@ -859,7 +814,7 @@ static char *browser_decode_percent(const char *input, size_t len, size_t *out_l
     return out;
 }
 
-static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, const char *url)
+static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, const char *url, atk_widget_t *view)
 {
     if (!app || !url)
     {
@@ -969,6 +924,17 @@ static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, 
         return true;
     }
 
+    if (view)
+    {
+        bool ok = atk_html_view_add_image_rgba(view, url, pixels, w, h, stride_bytes);
+        if (!ok)
+        {
+            free(pixels);
+            browser_debug_logf(app, "[img] data url apply failed");
+        }
+        return true;
+    }
+
     browser_ui_event_t img_ev = {0};
     img_ev.type = BROWSER_UI_EVENT_IMAGE_RGBA;
     img_ev.load_id = load_id;
@@ -989,8 +955,20 @@ static bool browser_handle_data_url_image(browser_app_t *app, uint64_t load_id, 
     return true;
 }
 
-static bool browser_handle_data_url_css(browser_app_t *app, uint64_t load_id, const char *url)
+static bool browser_handle_data_url_css(browser_app_t *app,
+                                        uint64_t load_id,
+                                        const char *url,
+                                        char **out_css,
+                                        size_t *out_len)
 {
+    if (out_css)
+    {
+        *out_css = NULL;
+    }
+    if (out_len)
+    {
+        *out_len = 0;
+    }
     if (!app || !url)
     {
         return false;
@@ -1107,6 +1085,17 @@ static bool browser_handle_data_url_css(browser_app_t *app, uint64_t load_id, co
         return true;
     }
 
+    if (out_css)
+    {
+        *out_css = decoded;
+        if (out_len)
+        {
+            *out_len = decoded_len;
+        }
+        browser_debug_logf(app, "[css] data url ok bytes=%u", (unsigned)decoded_len);
+        return true;
+    }
+
     browser_ui_event_t css_ev = {0};
     css_ev.type = BROWSER_UI_EVENT_CSS_APPEND;
     css_ev.load_id = load_id;
@@ -1129,41 +1118,6 @@ bool browser_load_is_active(browser_app_t *app, uint64_t load_id)
     active = (app->active_load_id == load_id);
     browser_lock_exit(app, &app->lock, "app_lock");
     return active;
-}
-
-void browser_track_load_thread(browser_app_t *app, alix_thread_t thread)
-{
-    if (!app || thread == 0)
-    {
-        return;
-    }
-
-    browser_lock_enter(app, &app->lock, "app_lock");
-    if (app->load_thread_count < BROWSER_MAX_LOAD_THREADS)
-    {
-        app->load_threads[app->load_thread_count++] = thread;
-    }
-    browser_lock_exit(app, &app->lock, "app_lock");
-}
-
-void browser_untrack_load_thread(browser_app_t *app, alix_thread_t thread)
-{
-    if (!app || thread == 0)
-    {
-        return;
-    }
-
-    browser_lock_enter(app, &app->lock, "app_lock");
-    for (size_t i = 0; i < app->load_thread_count; ++i)
-    {
-        if (app->load_threads[i] == thread)
-        {
-            app->load_threads[i] = app->load_threads[app->load_thread_count - 1];
-            app->load_thread_count--;
-            break;
-        }
-    }
-    browser_lock_exit(app, &app->lock, "app_lock");
 }
 
 void browser_app_css_reset(browser_app_t *app)
@@ -1238,7 +1192,7 @@ static void browser_resource_fetch(browser_app_t *app,
 
     if (kind == BROWSER_RESOURCE_IMAGE)
     {
-        if (browser_handle_data_url_image(app, load_id, abs))
+        if (browser_handle_data_url_image(app, load_id, abs, NULL))
         {
             uint64_t elapsed_ms = sys_time_millis() - start_ms;
             browser_resource_log_done(app, load_id, kind, abs, "data", elapsed_ms, 0, NULL);
@@ -1248,7 +1202,7 @@ static void browser_resource_fetch(browser_app_t *app,
     }
     if (kind == BROWSER_RESOURCE_CSS)
     {
-        if (browser_handle_data_url_css(app, load_id, abs))
+        if (browser_handle_data_url_css(app, load_id, abs, NULL, NULL))
         {
             uint64_t elapsed_ms = sys_time_millis() - start_ms;
             browser_resource_log_done(app, load_id, kind, abs, "data", elapsed_ms, 0, NULL);
@@ -1539,6 +1493,106 @@ void browser_resource_worker_stop(browser_app_t *app)
     browser_resource_queue_clear(app);
 }
 
+static void browser_html_worker_thread(void *arg)
+{
+    browser_app_t *app = (browser_app_t *)arg;
+    if (!app)
+    {
+        return;
+    }
+
+    while (__atomic_load_n(&app->html_thread_stop, __ATOMIC_ACQUIRE) == 0u)
+    {
+        browser_load_request_t *req = browser_load_queue_pop(app);
+        if (!req)
+        {
+            if (app->viewer)
+            {
+                (void)atk_html_view_rebuild_cache_if_pending(app->viewer);
+            }
+            (void)sys_sleep_ms(1);
+            continue;
+        }
+
+        if (req->kind == BROWSER_LOAD_JOB_REBUILD)
+        {
+            if (app->viewer && browser_load_is_active(app, req->load_id))
+            {
+                (void)atk_html_view_rebuild_cache(app->viewer);
+            }
+            free(req);
+            continue;
+        }
+
+        browser_load_job_t *job = (browser_load_job_t *)calloc(1, sizeof(*job));
+        if (!job)
+        {
+            free(req->url_text);
+            free(req);
+            continue;
+        }
+        job->app = app;
+        job->load_id = req->load_id;
+        job->url_text = req->url_text;
+        req->url_text = NULL;
+        browser_load_thread(job);
+
+        free(req);
+    }
+}
+
+bool browser_html_worker_start(browser_app_t *app)
+{
+    if (!app)
+    {
+        return false;
+    }
+
+    browser_lock_enter(app, &app->load_lock, "load_lock");
+    if (app->html_thread != 0)
+    {
+        browser_lock_exit(app, &app->load_lock, "load_lock");
+        return true;
+    }
+    __atomic_store_n(&app->html_thread_stop, 0u, __ATOMIC_RELEASE);
+    browser_lock_exit(app, &app->load_lock, "load_lock");
+
+    alix_thread_t thread = 0;
+    if (alix_thread_create(&thread, "atk_browser_html", browser_html_worker_thread, app) != 0)
+    {
+        return false;
+    }
+
+    browser_lock_enter(app, &app->load_lock, "load_lock");
+    app->html_thread = thread;
+    browser_lock_exit(app, &app->load_lock, "load_lock");
+    return true;
+}
+
+void browser_html_worker_stop(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    alix_thread_t thread = 0;
+    browser_lock_enter(app, &app->load_lock, "load_lock");
+    thread = app->html_thread;
+    __atomic_store_n(&app->html_thread_stop, 1u, __ATOMIC_RELEASE);
+    browser_lock_exit(app, &app->load_lock, "load_lock");
+
+    if (thread != 0)
+    {
+        (void)alix_thread_join(thread, NULL);
+    }
+
+    browser_lock_enter(app, &app->load_lock, "load_lock");
+    app->html_thread = 0;
+    browser_lock_exit(app, &app->load_lock, "load_lock");
+    browser_load_queue_clear(app);
+}
+
 static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev)
 {
     if (!app || !ev)
@@ -1550,20 +1604,6 @@ static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev
         browser_debug_logf(app, "[load] event queue full (drop type=%u)", (unsigned)ev->type);
         browser_ui_event_free_payload(ev);
     }
-}
-
-static void browser_loader_emit_error(browser_app_t *app, uint64_t load_id, const char *message)
-{
-    browser_ui_event_t ev = {0};
-    ev.type = BROWSER_UI_EVENT_ERROR;
-    ev.load_id = load_id;
-    ev.u.error.message = browser_strdup(message ? message : "unknown error");
-    if (!ev.u.error.message)
-    {
-        browser_debug_logf(app, "[load] error alloc failed");
-        return;
-    }
-    browser_loader_emit_event(app, &ev);
 }
 
 static void browser_resource_queue_release(browser_resource_queue_t *queue)
@@ -1604,6 +1644,242 @@ static void browser_resource_queue_process_inline(browser_app_t *app, browser_re
     queue->head = NULL;
     queue->tail = NULL;
     queue->count = 0;
+}
+
+static bool browser_resource_fetch_image_inline(browser_app_t *app, uint64_t load_id, char *abs)
+{
+    if (!abs)
+    {
+        return false;
+    }
+    if (!app)
+    {
+        free(abs);
+        return false;
+    }
+    if (!browser_load_is_active(app, load_id))
+    {
+        free(abs);
+        return false;
+    }
+
+    uint64_t start_ms = sys_time_millis();
+    browser_resource_log_start(app, load_id, BROWSER_RESOURCE_IMAGE, abs);
+
+    if (browser_handle_data_url_image(app, load_id, abs, app->viewer))
+    {
+        uint64_t elapsed_ms = sys_time_millis() - start_ms;
+        browser_resource_log_done(app, load_id, BROWSER_RESOURCE_IMAGE, abs, "data", elapsed_ms, 0, NULL);
+        free(abs);
+        return true;
+    }
+
+    browser_debug_logf(app, "[img] fetch %s", abs);
+
+    browser_url_t res_url = {0};
+    browser_url_t res_final = {0};
+    size_t res_len = 0;
+    char *res_body = NULL;
+    const char *log_status = NULL;
+    const char *log_detail = NULL;
+    size_t log_bytes = 0;
+    int status_code = 0;
+    char *status_detail = NULL;
+    bool parsed = browser_parse_url(abs, &res_url);
+    if (parsed)
+    {
+        res_body = browser_fetch_http_with_status(app, &res_url, &res_len, &res_final, &status_code);
+        if (status_code >= 400)
+        {
+            log_status = "fail";
+            status_detail = (char *)malloc(32);
+            if (status_detail)
+            {
+                snprintf(status_detail, 32, "http %d", status_code);
+                log_detail = status_detail;
+            }
+            else
+            {
+                log_detail = "http error";
+            }
+        }
+    }
+    else
+    {
+        log_status = "fail";
+        log_detail = "invalid url";
+    }
+
+    if (!browser_load_is_active(app, load_id))
+    {
+        free(res_body);
+        browser_url_destroy(&res_url);
+        browser_url_destroy(&res_final);
+        free(abs);
+        free(status_detail);
+        return false;
+    }
+
+    bool added = false;
+    if (!log_status)
+    {
+        if (res_body && strncmp(res_body, "Error:\n", 6) != 0)
+        {
+            bool is_gif = browser_is_gif_bytes((const uint8_t *)res_body, res_len);
+            bool is_png = (!is_gif && browser_is_png_bytes((const uint8_t *)res_body, res_len));
+            bool is_svg = (!is_gif && !is_png && browser_is_svg_bytes((const uint8_t *)res_body, res_len));
+            if (is_gif || is_png || is_svg)
+            {
+                video_color_t *pixels = NULL;
+                int w = 0;
+                int h = 0;
+                int stride_bytes = 0;
+                int rc = -1;
+
+                browser_lock_enter(app, &app->decode_lock, "decode_lock");
+                if (is_gif)
+                {
+                    rc = gif_decode_rgba32((const uint8_t *)res_body,
+                                           res_len,
+                                           &pixels,
+                                           &w,
+                                           &h,
+                                           &stride_bytes);
+                }
+                else if (is_png)
+                {
+                    rc = png_decode_rgba32((const uint8_t *)res_body,
+                                           res_len,
+                                           &pixels,
+                                           &w,
+                                           &h,
+                                           &stride_bytes);
+                }
+                else
+                {
+                    rc = svg_decode_rgba32((const uint8_t *)res_body,
+                                           res_len,
+                                           &pixels,
+                                           &w,
+                                           &h,
+                                           &stride_bytes);
+                }
+                browser_lock_exit(app, &app->decode_lock, "decode_lock");
+
+                if (rc == 0 && pixels && w > 0 && h > 0 && stride_bytes > 0)
+                {
+                    if (!browser_load_is_active(app, load_id))
+                    {
+                        free(pixels);
+                        free(status_detail);
+                        free(res_body);
+                        browser_url_destroy(&res_url);
+                        browser_url_destroy(&res_final);
+                        free(abs);
+                        return false;
+                    }
+                    bool ok = app->viewer &&
+                              atk_html_view_add_image_rgba(app->viewer, abs, pixels, w, h, stride_bytes);
+                    if (ok)
+                    {
+                        added = true;
+                        log_status = "ok";
+                        log_bytes = res_len;
+                        browser_debug_logf(app, "[img] ok bytes=%u url=%s", (unsigned)res_len, abs);
+                    }
+                    else
+                    {
+                        free(pixels);
+                        log_status = "fail";
+                        log_detail = "apply failed";
+                    }
+                }
+                else
+                {
+                    const char *err = is_gif ? gif_last_error() : (is_png ? png_last_error() : svg_last_error());
+                    browser_debug_logf(app,
+                                       "[img] decode failed url=%s err=%s",
+                                       abs ? abs : "(null)",
+                                       err ? err : "(unknown)");
+                    log_status = "fail";
+                    log_detail = err ? err : "decode failed";
+                    free(pixels);
+                }
+            }
+            else
+            {
+                browser_debug_logf(app, "[img] skipped (not png/gif/svg) url=%s", abs);
+                log_status = "skip";
+                log_detail = "unsupported type";
+            }
+        }
+        else
+        {
+            const char *msg = res_body ? (res_body + 6) : "allocation failed";
+            log_status = "fail";
+            log_detail = msg;
+            browser_debug_logf(app, "[img] failed url=%s err=%s", abs ? abs : "(null)", msg);
+        }
+    }
+
+    {
+        uint64_t elapsed_ms = sys_time_millis() - start_ms;
+        browser_resource_log_done(app, load_id, BROWSER_RESOURCE_IMAGE, abs, log_status, elapsed_ms, log_bytes, log_detail);
+    }
+
+    free(res_body);
+    browser_url_destroy(&res_url);
+    browser_url_destroy(&res_final);
+    free(abs);
+    free(status_detail);
+    return added;
+}
+
+static void browser_resource_queue_process_images_inline(browser_app_t *app,
+                                                         uint64_t load_id,
+                                                         browser_resource_queue_t *queue)
+{
+    if (!app || !queue)
+    {
+        return;
+    }
+
+    browser_resource_job_t *job = queue->head;
+    queue->head = NULL;
+    queue->tail = NULL;
+    queue->count = 0;
+
+    while (job)
+    {
+        browser_resource_job_t *next = job->next;
+        char *abs = job->url;
+        job->url = NULL;
+        free(job);
+        job = next;
+
+        if (!abs)
+        {
+            continue;
+        }
+        if (!browser_load_is_active(app, load_id))
+        {
+            free(abs);
+            while (job)
+            {
+                browser_resource_job_t *drop = job;
+                job = job->next;
+                free(drop->url);
+                free(drop);
+            }
+            break;
+        }
+
+        bool added = browser_resource_fetch_image_inline(app, load_id, abs);
+        if (added)
+        {
+            (void)atk_html_view_rebuild_cache_if_pending(app->viewer);
+        }
+    }
 }
 
 static char *browser_resource_queue_fetch_css(browser_app_t *app,
@@ -1659,8 +1935,24 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
 
         if (abs && strncasecmp(abs, "data:", 5) == 0)
         {
+            char *decoded = NULL;
+            size_t decoded_len = 0;
+            (void)browser_handle_data_url_css(app, load_id, abs, &decoded, &decoded_len);
+            const char *log_status = "data";
+            const char *log_detail = NULL;
+            size_t log_bytes = decoded_len;
+            if (decoded && decoded_len > 0)
+            {
+                if (!browser_buf_append(&css_buf, &css_len, &css_cap, (const uint8_t *)decoded, decoded_len) ||
+                    !browser_buf_append(&css_buf, &css_len, &css_cap, (const uint8_t *)"\n", 1))
+                {
+                    log_status = "fail";
+                    log_detail = "css append failed";
+                }
+            }
             uint64_t elapsed_ms = sys_time_millis() - start_ms;
-            browser_resource_log_done(app, load_id, BROWSER_RESOURCE_CSS, abs, "data", elapsed_ms, 0, NULL);
+            browser_resource_log_done(app, load_id, BROWSER_RESOURCE_CSS, abs, log_status, elapsed_ms, log_bytes, log_detail);
+            free(decoded);
             free(abs);
             continue;
         }
@@ -1747,6 +2039,92 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
     return NULL;
 }
 
+static void browser_emit_nav_update(browser_app_t *app, uint64_t load_id, const browser_url_t *final_url)
+{
+    if (!app || !final_url)
+    {
+        return;
+    }
+
+    char *final_text = browser_url_to_string(final_url);
+    if (!final_text)
+    {
+        return;
+    }
+
+    browser_ui_event_t ev = {0};
+    ev.type = BROWSER_UI_EVENT_NAV_UPDATE;
+    ev.load_id = load_id;
+    ev.u.nav_update.final_url = final_text;
+    browser_loader_emit_event(app, &ev);
+}
+
+static void browser_apply_error_page(browser_app_t *app, uint64_t load_id, const char *message)
+{
+    if (!app || !app->viewer)
+    {
+        return;
+    }
+    if (!browser_load_is_active(app, load_id))
+    {
+        return;
+    }
+
+    const char *msg = message ? message : "unknown error";
+    char page_buf[512];
+    snprintf(page_buf,
+             sizeof(page_buf),
+             "<!doctype html><html><body><p>Fetch error:</p><p>%s</p></body></html>",
+             msg);
+    (void)atk_html_view_set_html(app->viewer, page_buf, NULL);
+    (void)atk_html_view_rebuild_cache(app->viewer);
+}
+
+static void browser_apply_loading_page(browser_app_t *app, uint64_t load_id)
+{
+    if (!app || !app->viewer)
+    {
+        return;
+    }
+    if (!browser_load_is_active(app, load_id))
+    {
+        return;
+    }
+
+    (void)atk_html_view_set_html(app->viewer,
+                                 "<!doctype html><html><head><style>"
+                                 "body{margin:0;padding:0;}"
+                                 "p{margin-top:40vh;text-align:center;font-size:16px;color:#444;}"
+                                 "</style></head><body><p>Loading...</p></body></html>",
+                                 NULL);
+    (void)atk_html_view_rebuild_cache(app->viewer);
+}
+
+static void browser_apply_document(browser_app_t *app,
+                                   uint64_t load_id,
+                                   html_document_t *doc,
+                                   const browser_url_t *final_url)
+{
+    if (!app || !doc || !app->viewer)
+    {
+        if (doc)
+        {
+            html_document_destroy(doc);
+        }
+        return;
+    }
+    if (!browser_load_is_active(app, load_id))
+    {
+        html_document_destroy(doc);
+        return;
+    }
+
+    atk_html_view_set_document(app->viewer, doc);
+    (void)atk_html_view_rebuild_cache(app->viewer);
+    browser_debug_logf(app, "[render] set document ok");
+    browser_emit_nav_update(app, load_id, final_url);
+}
+
 static void browser_load_thread(void *arg)
 {
     browser_load_job_t *job = (browser_load_job_t *)arg;
@@ -1775,9 +2153,11 @@ static void browser_load_thread(void *arg)
 
     if (!url_text || url_text[0] == '\0')
     {
-        browser_loader_emit_error(app, load_id, "missing url");
+        browser_apply_error_page(app, load_id, "missing url");
         goto done;
     }
+
+    browser_apply_loading_page(app, load_id);
 
     browser_url_t url = {0};
     browser_url_t final_url = {0};
@@ -1786,7 +2166,7 @@ static void browser_load_thread(void *arg)
 
     if (!browser_parse_url(url_text, &url))
     {
-        browser_loader_emit_error(app, load_id, "invalid url");
+        browser_apply_error_page(app, load_id, "invalid url");
         goto done_fetch;
     }
 
@@ -1800,12 +2180,12 @@ static void browser_load_thread(void *arg)
     html = browser_fetch_http(app, &url, &html_len, &final_url);
     if (!html)
     {
-        browser_loader_emit_error(app, load_id, "allocation failed");
+        browser_apply_error_page(app, load_id, "allocation failed");
         goto done_fetch;
     }
     if (strncmp(html, "Error:\n", 6) == 0)
     {
-        browser_loader_emit_error(app, load_id, html + 6);
+        browser_apply_error_page(app, load_id, html + 6);
         goto done_fetch;
     }
 
@@ -1821,7 +2201,7 @@ static void browser_load_thread(void *arg)
     if (!doc)
     {
         const char *detail = parse_err.message ? parse_err.message : "parse failed";
-        browser_loader_emit_error(app, load_id, detail);
+        browser_apply_error_page(app, load_id, detail);
         goto done_fetch;
     }
     if (doc->root)
@@ -1835,16 +2215,20 @@ static void browser_load_thread(void *arg)
     browser_resource_queue_t css_queue = {0};
     browser_resource_queue_t img_queue = {0};
     browser_resource_queue_t script_queue = {0};
+    bool use_css = true;
     bool js_enabled = browser_js_enabled(app);
     if (doc->root)
     {
-        css_count = browser_collect_resource_urls(app,
-                                                  doc->root,
-                                                  &final_url,
-                                                  &job->requested,
-                                                  BROWSER_RESOURCE_CSS,
-                                                  load_id,
-                                                  &css_queue);
+        if (use_css)
+        {
+            css_count = browser_collect_resource_urls(app,
+                                                      doc->root,
+                                                      &final_url,
+                                                      &job->requested,
+                                                      BROWSER_RESOURCE_CSS,
+                                                      load_id,
+                                                      &css_queue);
+        }
         script_count = browser_collect_resource_urls(app,
                                                      doc->root,
                                                      &final_url,
@@ -1891,33 +2275,48 @@ static void browser_load_thread(void *arg)
         goto done_resources;
     }
 
-    size_t css_len = 0;
-    char *css_buf = NULL;
-    if (css_count > 0)
+    if (doc && doc->root)
     {
-        css_buf = browser_resource_queue_fetch_css(app, load_id, &css_queue, &css_len);
-        if (css_buf && css_len > 0 && doc && doc->root)
+        size_t node_count = browser_dom_count_nodes(doc->root, 50000);
+        const html_node_t *body = browser_dom_find_first_element(doc->root, "body");
+        const html_node_t *title = browser_dom_find_first_element(doc->root, "title");
+        const char *title_text = browser_dom_first_text_child(title);
+        if (title_text && title_text[0] != '\0')
         {
-            if (browser_doc_append_style(doc, css_buf, css_len))
+            char title_preview[96];
+            size_t tlen = strlen(title_text);
+            size_t copy = tlen;
+            if (copy >= sizeof(title_preview))
             {
-                browser_debug_logf(app, "[css] inline bytes=%u", (unsigned)css_len);
+                copy = sizeof(title_preview) - 1;
             }
-            else
-            {
-                browser_debug_logf(app, "[css] inline failed bytes=%u", (unsigned)css_len);
-            }
+            memcpy(title_preview, title_text, copy);
+            title_preview[copy] = '\0';
+            browser_debug_logf(app, "[parse] title %s", title_preview);
         }
-        free(css_buf);
-        css_buf = NULL;
+        browser_debug_logf(app, "[parse] nodes=%u body=%s",
+                           (unsigned)node_count,
+                           body ? "yes" : "no");
     }
 
-    browser_ui_event_t doc_ev = {0};
-    doc_ev.type = BROWSER_UI_EVENT_DOC_READY;
-    doc_ev.load_id = load_id;
-    doc_ev.u.doc_ready.doc = doc;
-    doc_ev.u.doc_ready.final_url = browser_url_to_string(&final_url);
-    browser_loader_emit_event(app, &doc_ev);
+    browser_apply_document(app, load_id, doc, &final_url);
     doc = NULL;
+
+    if (use_css && css_count > 0)
+    {
+        size_t css_len = 0;
+        char *css_buf = browser_resource_queue_fetch_css(app, load_id, &css_queue, &css_len);
+        if (css_buf && css_len > 0 && browser_load_is_active(app, load_id))
+        {
+            bool ok = atk_html_view_try_set_external_stylesheet(app->viewer, css_buf);
+            if (!ok)
+            {
+                atk_html_view_set_external_stylesheet(app->viewer, css_buf);
+            }
+            browser_debug_logf(app, "[css] external bytes=%u", (unsigned)css_len);
+        }
+        free(css_buf);
+    }
 
     bool resource_stop = (__atomic_load_n(&app->resource_thread_stop, __ATOMIC_ACQUIRE) != 0u);
     if (!browser_resource_queue_append(app, &script_queue))
@@ -1931,17 +2330,7 @@ static void browser_load_thread(void *arg)
             browser_resource_queue_process_inline(app, &script_queue);
         }
     }
-    if (!browser_resource_queue_append(app, &img_queue))
-    {
-        if (resource_stop)
-        {
-            browser_resource_queue_release(&img_queue);
-        }
-        else
-        {
-            browser_resource_queue_process_inline(app, &img_queue);
-        }
-    }
+    browser_resource_queue_process_images_inline(app, load_id, &img_queue);
 
 done_resources:
     browser_resource_queue_release(&css_queue);
@@ -1957,11 +2346,6 @@ done:
     free(url_text);
     browser_resource_set_destroy(&job->requested);
     free(job);
-    browser_ui_event_t done_ev = {0};
-    done_ev.type = BROWSER_UI_EVENT_THREAD_DONE;
-    done_ev.load_id = load_id;
-    done_ev.u.thread_done.thread = alix_thread_self();
-    browser_loader_emit_event(app, &done_ev);
 }
 
 bool browser_loader_start(browser_app_t *app, const char *url_text)
@@ -1989,38 +2373,31 @@ bool browser_loader_start(browser_app_t *app, const char *url_text)
     browser_lock_exit(app, &app->lock, "app_lock");
     browser_app_css_reset(app);
     browser_resource_queue_clear(app);
+    browser_load_queue_clear(app);
 
-    (void)atk_html_view_set_html(app->viewer,
-                                 "<!doctype html><html><head><style>"
-                                 "body{margin:0;padding:0;}"
-                                 "p{margin-top:40vh;text-align:center;font-size:16px;color:#444;}"
-                                 "</style></head><body><p>Loading...</p></body></html>",
-                                 NULL);
-    atk_window_mark_dirty(app->window);
-
-    browser_load_job_t *job = (browser_load_job_t *)calloc(1, sizeof(*job));
-    if (!job)
+    if (!browser_html_worker_start(app))
     {
-        (void)atk_html_view_set_html(app->viewer,
-                                     "<!doctype html><html><body><p>Allocation failed.</p></body></html>",
-                                     NULL);
-        atk_window_mark_dirty(app->window);
+        browser_debug_logf(app, "[ui] failed to start html worker");
+        browser_lock_enter(app, &app->lock, "app_lock");
+        if (app->active_load_id == load_id)
+        {
+            app->active_load_id = 0;
+        }
+        browser_lock_exit(app, &app->lock, "app_lock");
         free(url_copy);
         return false;
     }
-    job->app = app;
-    job->load_id = load_id;
-    job->url_text = url_copy;
 
-    alix_thread_t thread = 0;
-    if (alix_thread_create(&thread, "atk_browser_load", browser_load_thread, job) != 0)
+    if (!browser_load_queue_push(app, BROWSER_LOAD_JOB_URL, load_id, url_copy))
     {
-        browser_debug_logf(app, "[ui] failed to start load thread");
-        browser_loader_emit_error(app, load_id, "failed to start load thread");
-        free(job->url_text);
-        free(job);
+        browser_debug_logf(app, "[ui] failed to queue load job");
+        browser_lock_enter(app, &app->lock, "app_lock");
+        if (app->active_load_id == load_id)
+        {
+            app->active_load_id = 0;
+        }
+        browser_lock_exit(app, &app->lock, "app_lock");
         return false;
     }
-    browser_track_load_thread(app, thread);
     return true;
 }

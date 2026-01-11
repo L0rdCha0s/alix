@@ -4,14 +4,14 @@
 #include "libc.h"
 #include "utf8.h"
 
-char *html_strdup_range(const char *start, const char *end, bool to_lower)
+char *html_doc_strdup_range(html_document_t *doc, const char *start, const char *end, bool to_lower)
 {
     if (!start || !end || end < start)
     {
         return NULL;
     }
     size_t len = (size_t)(end - start);
-    char *out = (char *)malloc(len + 1);
+    char *out = doc ? (char *)html_doc_alloc(doc, len + 1) : (char *)malloc(len + 1);
     if (!out)
     {
         return NULL;
@@ -172,7 +172,7 @@ static bool html_decode_entity_one(const char *s, const char *end, size_t *consu
     return true;
 }
 
-char *html_strdup_decoded_range(const char *start, const char *end)
+char *html_doc_strdup_decoded_range(html_document_t *doc, const char *start, const char *end)
 {
     if (!start || !end || end < start)
     {
@@ -180,7 +180,7 @@ char *html_strdup_decoded_range(const char *start, const char *end)
     }
 
     size_t len = (size_t)(end - start);
-    char *out = (char *)malloc(len + 1);
+    char *out = doc ? (char *)html_doc_alloc(doc, len + 1) : (char *)malloc(len + 1);
     if (!out)
     {
         return NULL;

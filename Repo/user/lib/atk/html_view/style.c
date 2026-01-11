@@ -4,6 +4,7 @@
 #include "serial.h"
 #include "string.h"
 #include "web/css/css_internal.h"
+#include "web/html/html_internal.h"
 
 #ifdef TTF_HOST_BUILD
 #include <time.h>
@@ -279,7 +280,10 @@ static const html_node_t *html_view_prev_element_sibling(const html_node_t *node
     return NULL;
 }
 
-static char *html_view_unescape_selector_value(const char *start, const char *end);
+static bool html_view_selector_range_eq_ci_token(const char *token,
+                                                 size_t token_len,
+                                                 const char *sel_start,
+                                                 size_t sel_len);
 static const char *html_view_selector_token_end(const char *p, const char *end);
 
 static uint64_t html_view_bloom_hash_range_ci(const char *start, const char *end, bool unescape)
@@ -453,12 +457,17 @@ static const html_class_token_t *html_view_node_class_tokens(const html_node_t *
     html_node_t *mut = (html_node_t *)node;
     if (mut->class_cache_value != classes)
     {
-        free(mut->class_tokens);
+        bool use_arena = mut->doc && mut->doc->arena_blocks;
+        if (mut->class_tokens && !use_arena)
+        {
+            free(mut->class_tokens);
+        }
         mut->class_tokens = NULL;
         mut->class_token_count = 0;
         mut->class_token_cap = 0;
         mut->class_cache_value = classes;
 
+        size_t token_cap = 0;
         const char *p = classes;
         while (*p)
         {
@@ -475,31 +484,53 @@ static const html_class_token_t *html_view_node_class_tokens(const html_node_t *
             {
                 ++p;
             }
-            size_t len = (size_t)(p - start);
-            if (len == 0)
+            if (p > start)
             {
-                continue;
+                ++token_cap;
             }
-            if (mut->class_token_count == mut->class_token_cap)
+        }
+
+        if (token_cap)
+        {
+            html_class_token_t *tokens = use_arena
+                ? (html_class_token_t *)html_doc_alloc(mut->doc, token_cap * sizeof(*tokens))
+                : (html_class_token_t *)malloc(token_cap * sizeof(*tokens));
+            if (tokens)
             {
-                size_t new_cap = mut->class_token_cap ? (mut->class_token_cap * 2) : 8;
-                html_class_token_t *next = (html_class_token_t *)realloc(mut->class_tokens,
-                                                                         new_cap * sizeof(*next));
-                if (!next)
+                size_t token_count = 0;
+                p = classes;
+                while (*p)
                 {
-                    free(mut->class_tokens);
-                    mut->class_tokens = NULL;
-                    mut->class_token_count = 0;
-                    mut->class_token_cap = 0;
-                    break;
+                    while (*p && isspace((unsigned char)*p))
+                    {
+                        ++p;
+                    }
+                    if (!*p)
+                    {
+                        break;
+                    }
+                    const char *start = p;
+                    while (*p && !isspace((unsigned char)*p))
+                    {
+                        ++p;
+                    }
+                    size_t len = (size_t)(p - start);
+                    if (len == 0)
+                    {
+                        continue;
+                    }
+                    if (token_count < token_cap)
+                    {
+                        tokens[token_count++] = (html_class_token_t){
+                            .start = start,
+                            .len = len,
+                        };
+                    }
                 }
-                mut->class_tokens = next;
-                mut->class_token_cap = new_cap;
+                mut->class_tokens = tokens;
+                mut->class_token_count = token_count;
+                mut->class_token_cap = token_cap;
             }
-            mut->class_tokens[mut->class_token_count++] = (html_class_token_t){
-                .start = start,
-                .len = len,
-            };
         }
     }
 
@@ -763,32 +794,43 @@ static bool html_view_node_has_class(const html_node_t *node, const char *cls_st
         return false;
     }
 
+    bool has_escape = false;
     for (size_t i = 0; i < cls_len; ++i)
     {
         if (cls_start[i] == '\\')
         {
-            char *unescaped = html_view_unescape_selector_value(cls_start, cls_start + cls_len);
-            if (!unescaped)
-            {
-                return false;
-            }
-            bool match = html_view_node_has_class_raw(node, unescaped, strlen(unescaped));
-            free(unescaped);
-            return match;
+            has_escape = true;
+            break;
         }
     }
 
-    return html_view_node_has_class_raw(node, cls_start, cls_len);
-}
+    if (!has_escape)
+    {
+        return html_view_node_has_class_raw(node, cls_start, cls_len);
+    }
 
-static bool html_view_attr_value_has_token(const char *value, const char *token)
-{
-    if (!value || !token || token[0] == '\0')
+    const char *classes = NULL;
+    size_t token_count = 0;
+    const html_class_token_t *tokens = html_view_node_class_tokens(node, &token_count, &classes);
+    if (tokens && token_count > 0)
+    {
+        for (size_t i = 0; i < token_count; ++i)
+        {
+            const html_class_token_t *tok = &tokens[i];
+            if (html_view_selector_range_eq_ci_token(tok->start, tok->len, cls_start, cls_len))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (!classes || classes[0] == '\0')
     {
         return false;
     }
 
-    const char *p = value;
+    const char *p = classes;
     while (*p)
     {
         while (*p && isspace((unsigned char)*p))
@@ -805,11 +847,12 @@ static bool html_view_attr_value_has_token(const char *value, const char *token)
             ++p;
         }
         size_t len = (size_t)(p - start);
-        if (len > 0 && strlen(token) == len && strncasecmp(start, token, len) == 0)
+        if (len > 0 && html_view_selector_range_eq_ci_token(start, len, cls_start, cls_len))
         {
             return true;
         }
     }
+
     return false;
 }
 
@@ -1075,31 +1118,6 @@ static bool html_view_attr_value_has_token_range(const char *value,
         }
     }
     return false;
-}
-
-static char *html_view_unescape_selector_value(const char *start, const char *end)
-{
-    if (!start || !end || end < start)
-    {
-        return NULL;
-    }
-    size_t cap = (size_t)(end - start) + 1;
-    char *out = (char *)malloc(cap);
-    if (!out)
-    {
-        return NULL;
-    }
-    size_t len = 0;
-    for (const char *p = start; p < end; ++p)
-    {
-        if (*p == '\\' && (p + 1) < end)
-        {
-            ++p;
-        }
-        out[len++] = *p;
-    }
-    out[len] = '\0';
-    return out;
 }
 
 static const char *html_view_selector_skip_parens(const char *p, const char *end)
@@ -1481,7 +1499,8 @@ static bool html_view_parse_attr_selector(const char **p,
         ++s;
     }
 
-    char *value = NULL;
+    const char *value_start = NULL;
+    const char *value_end = NULL;
     if (op != 0)
     {
         if (s >= sel_end)
@@ -1491,7 +1510,7 @@ static bool html_view_parse_attr_selector(const char **p,
         if (*s == '"' || *s == '\'')
         {
             char quote = *s++;
-            const char *vstart = s;
+            value_start = s;
             while (s < sel_end && *s != quote)
             {
                 if (*s == '\\' && (s + 1) < sel_end)
@@ -1501,16 +1520,15 @@ static bool html_view_parse_attr_selector(const char **p,
                 }
                 ++s;
             }
-            const char *vend = s;
+            value_end = s;
             if (s < sel_end && *s == quote)
             {
                 ++s;
             }
-            value = html_view_unescape_selector_value(vstart, vend);
         }
         else
         {
-            const char *vstart = s;
+            value_start = s;
             while (s < sel_end)
             {
                 if (*s == '\\' && (s + 1) < sel_end)
@@ -1524,9 +1542,9 @@ static bool html_view_parse_attr_selector(const char **p,
                 }
                 ++s;
             }
-            value = html_view_unescape_selector_value(vstart, s);
+            value_end = s;
         }
-        if (!value)
+        if (!value_start || !value_end || value_end <= value_start)
         {
             return false;
         }
@@ -1538,20 +1556,13 @@ static bool html_view_parse_attr_selector(const char **p,
     }
     if (s >= sel_end || *s != ']')
     {
-        free(value);
         return false;
     }
     ++s;
 
-    char *name = html_view_unescape_selector_value(name_start, name_end);
-    if (!name)
-    {
-        free(value);
-        return false;
-    }
-
     bool match = false;
-    const char *attr_value = html_attr_get(node, name);
+    size_t name_len = (size_t)(name_end - name_start);
+    const char *attr_value = html_view_attr_get_range(node, name_start, name_len);
     if (!attr_value)
     {
         match = false;
@@ -1562,50 +1573,45 @@ static bool html_view_parse_attr_selector(const char **p,
     }
     else if (op == '=')
     {
-        match = (strcasecmp(attr_value, value) == 0);
+        size_t value_len = (size_t)(value_end - value_start);
+        match = html_view_selector_range_eq_ci(attr_value, value_start, value_len);
     }
     else if (op == '~')
     {
-        bool has_ws = false;
-        for (const char *c = value; c && *c; ++c)
-        {
-            if (isspace((unsigned char)*c))
-            {
-                has_ws = true;
-                break;
-            }
-        }
+        bool has_ws = html_view_selector_range_has_space(value_start, value_end);
         if (!has_ws)
         {
-            if (strcasecmp(name, "class") == 0)
+            size_t value_len = (size_t)(value_end - value_start);
+            if (html_view_selector_range_eq_ci("class", name_start, name_len))
             {
-                match = html_view_node_has_class(node, value, strlen(value));
+                match = html_view_node_has_class(node, value_start, value_len);
             }
             else
             {
-                match = html_view_attr_value_has_token(attr_value, value);
+                match = html_view_attr_value_has_token_range(attr_value, value_start, value_len);
             }
         }
     }
     else if (op == '^')
     {
-        match = html_view_selector_range_startswith_ci_value(attr_value, value, strlen(value));
+        size_t value_len = (size_t)(value_end - value_start);
+        match = html_view_selector_range_startswith_ci_value(attr_value, value_start, value_len);
     }
     else if (op == '$')
     {
-        match = html_view_selector_range_endswith_ci_value(attr_value, value, strlen(value));
+        size_t value_len = (size_t)(value_end - value_start);
+        match = html_view_selector_range_endswith_ci_value(attr_value, value_start, value_len);
     }
     else if (op == '*')
     {
-        match = html_view_selector_range_contains_ci_value(attr_value, value, strlen(value));
+        size_t value_len = (size_t)(value_end - value_start);
+        match = html_view_selector_range_contains_ci_value(attr_value, value_start, value_len);
     }
     else if (op == '|')
     {
-        match = html_view_selector_range_dashmatch_ci_value(attr_value, value, strlen(value));
+        size_t value_len = (size_t)(value_end - value_start);
+        match = html_view_selector_range_dashmatch_ci_value(attr_value, value_start, value_len);
     }
-
-    free(name);
-    free(value);
     *p = s;
     return match;
 }
@@ -4162,6 +4168,127 @@ static const char *html_view_selector_token_end(const char *p, const char *end)
     return p;
 }
 
+static void html_view_selector_count_part_atoms(const char *part_start,
+                                                const char *part_end,
+                                                size_t *out_class_count,
+                                                size_t *out_attr_count)
+{
+    if (out_class_count)
+    {
+        *out_class_count = 0;
+    }
+    if (out_attr_count)
+    {
+        *out_attr_count = 0;
+    }
+    if (!part_start || !part_end || part_end <= part_start)
+    {
+        return;
+    }
+
+    bool escape = false;
+    char quote = 0;
+    int bracket_depth = 0;
+    int paren_depth = 0;
+    const char *p = part_start;
+    while (p < part_end)
+    {
+        char c = *p;
+        if (escape)
+        {
+            escape = false;
+            ++p;
+            continue;
+        }
+        if (c == '\\')
+        {
+            escape = true;
+            ++p;
+            continue;
+        }
+        if (quote)
+        {
+            if (c == quote)
+            {
+                quote = 0;
+            }
+            ++p;
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            ++p;
+            continue;
+        }
+        if (c == '[' && bracket_depth == 0 && paren_depth == 0)
+        {
+            const char *name_start = NULL;
+            const char *name_end = NULL;
+            const char *value_start = NULL;
+            const char *value_end = NULL;
+            char op = 0;
+            bool unsupported = false;
+            const char *scan = p;
+            if (html_view_parse_attr_selector_meta(&scan,
+                                                    part_end,
+                                                    &name_start,
+                                                    &name_end,
+                                                    &op,
+                                                    &value_start,
+                                                    &value_end,
+                                                    &unsupported))
+            {
+                if (!unsupported && out_attr_count)
+                {
+                    (*out_attr_count)++;
+                }
+                p = scan;
+                continue;
+            }
+        }
+        if (c == '[')
+        {
+            ++bracket_depth;
+            ++p;
+            continue;
+        }
+        if (c == ']' && bracket_depth > 0)
+        {
+            --bracket_depth;
+            ++p;
+            continue;
+        }
+        if (bracket_depth == 0)
+        {
+            if (c == '(')
+            {
+                ++paren_depth;
+                ++p;
+                continue;
+            }
+            if (c == ')' && paren_depth > 0)
+            {
+                --paren_depth;
+                ++p;
+                continue;
+            }
+        }
+        if (bracket_depth == 0 && paren_depth == 0 && c == '.')
+        {
+            const char *name_start = p + 1;
+            const char *name_end = html_view_selector_token_end(name_start, part_end);
+            if (name_end > name_start && out_class_count)
+            {
+                (*out_class_count)++;
+            }
+            p = name_end;
+            continue;
+        }
+        ++p;
+    }
+}
+
 static bool html_view_selector_compiled_part_add_class(css_selector_compiled_part_t *part,
                                                        uint32_t start,
                                                        uint32_t len)
@@ -4279,6 +4406,37 @@ static bool html_view_selector_cache_compile_parts(css_selector_cache_t *cache, 
         }
 
         css_selector_compiled_part_t *out = &cache->compiled_parts[i];
+        size_t class_cap = 0;
+        size_t attr_cap = 0;
+        html_view_selector_count_part_atoms(part_start, part_end, &class_cap, &attr_cap);
+        if (class_cap > 0xffffu || attr_cap > 0xffffu)
+        {
+            cache->compiled_failed = true;
+            html_view_selector_cache_free_compiled(cache);
+            return false;
+        }
+        if (class_cap)
+        {
+            out->classes = (css_selector_atom_t *)malloc(class_cap * sizeof(*out->classes));
+            if (!out->classes)
+            {
+                cache->compiled_failed = true;
+                html_view_selector_cache_free_compiled(cache);
+                return false;
+            }
+            out->class_cap = (uint16_t)class_cap;
+        }
+        if (attr_cap)
+        {
+            out->attrs = (css_selector_attr_req_t *)malloc(attr_cap * sizeof(*out->attrs));
+            if (!out->attrs)
+            {
+                cache->compiled_failed = true;
+                html_view_selector_cache_free_compiled(cache);
+                return false;
+            }
+            out->attr_cap = (uint16_t)attr_cap;
+        }
         const char *p = part_start;
         if (*p == '*')
         {
@@ -4483,6 +4641,116 @@ static bool html_view_selector_cache_compile_parts(css_selector_cache_t *cache, 
     return true;
 }
 
+static size_t html_view_selector_count_parts(const char *start, const char *end)
+{
+    if (!start || !end || end <= start)
+    {
+        return 0;
+    }
+
+    size_t count = 0;
+    const char *p = start;
+    while (p < end)
+    {
+        while (p < end && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (p >= end)
+        {
+            break;
+        }
+
+        const char *part_start = p;
+        char quote = 0;
+        bool escape = false;
+        int bracket_depth = 0;
+        while (p < end)
+        {
+            char c = *p;
+            if (escape)
+            {
+                escape = false;
+                ++p;
+                continue;
+            }
+            if (c == '\\')
+            {
+                escape = true;
+                ++p;
+                continue;
+            }
+            if (quote)
+            {
+                if (c == quote)
+                {
+                    quote = 0;
+                }
+                ++p;
+                continue;
+            }
+            if (c == '"' || c == '\'')
+            {
+                quote = c;
+                ++p;
+                continue;
+            }
+            if (c == '[')
+            {
+                ++bracket_depth;
+                ++p;
+                continue;
+            }
+            if (c == ']' && bracket_depth > 0)
+            {
+                --bracket_depth;
+                ++p;
+                continue;
+            }
+            if (bracket_depth == 0 && (c == '>' || c == '+' || c == '~' || isspace((unsigned char)c)))
+            {
+                break;
+            }
+            ++p;
+        }
+
+        const char *part_end = p;
+        html_view_trim_range(&part_start, &part_end);
+        if (part_end > part_start)
+        {
+            ++count;
+        }
+
+        bool had_space = false;
+        while (p < end && isspace((unsigned char)*p))
+        {
+            had_space = true;
+            ++p;
+        }
+
+        if (p < end)
+        {
+            if (*p == '>' || *p == '+' || *p == '~')
+            {
+                ++p;
+            }
+            else if (had_space)
+            {
+                /* descendant combinator */
+            }
+            else
+            {
+                /* default to descendant combinator */
+            }
+            while (p < end && isspace((unsigned char)*p))
+            {
+                ++p;
+            }
+        }
+    }
+    return count;
+}
+
 static bool html_view_selector_cache_parse(css_selector_cache_t *cache, const char *selector)
 {
     if (!cache || !selector)
@@ -4501,6 +4769,21 @@ static bool html_view_selector_cache_parse(css_selector_cache_t *cache, const ch
     {
         cache->parse_failed = true;
         return false;
+    }
+
+    if (!cache->parts)
+    {
+        size_t part_cap = html_view_selector_count_parts(start, end);
+        if (part_cap > 0)
+        {
+            cache->parts = (css_selector_part_t *)malloc(part_cap * sizeof(*cache->parts));
+            if (!cache->parts)
+            {
+                cache->parse_failed = true;
+                return false;
+            }
+            cache->cap = part_cap;
+        }
     }
 
     const char *p = start;
@@ -5387,6 +5670,24 @@ typedef struct html_view_rule_trie_cache
     size_t entry_count;
 } html_view_rule_trie_cache_t;
 
+enum
+{
+    HTML_VIEW_RULE_TRIE_POOL_BLOCK_SIZE = 16384u,
+};
+
+typedef struct html_view_rule_trie_pool_block
+{
+    struct html_view_rule_trie_pool_block *next;
+    size_t used;
+    size_t size;
+    unsigned char data[];
+} html_view_rule_trie_pool_block_t;
+
+typedef struct html_view_rule_trie_pool
+{
+    html_view_rule_trie_pool_block_t *head;
+} html_view_rule_trie_pool_t;
+
 typedef struct html_view_rule_trie
 {
     html_view_rule_trie_node_t **roots;
@@ -5398,8 +5699,111 @@ typedef struct html_view_rule_trie
     size_t rule_count;
     bool cache_enabled;
     bool cache_require_parent;
+    html_view_rule_trie_pool_t pool;
     html_view_rule_trie_cache_t cache;
 } html_view_rule_trie_t;
+
+static void html_view_rule_trie_pool_init(html_view_rule_trie_pool_t *pool)
+{
+    if (!pool)
+    {
+        return;
+    }
+    pool->head = NULL;
+}
+
+static void html_view_rule_trie_pool_release(html_view_rule_trie_pool_t *pool)
+{
+    if (!pool)
+    {
+        return;
+    }
+    html_view_rule_trie_pool_block_t *block = pool->head;
+    while (block)
+    {
+        html_view_rule_trie_pool_block_t *next = block->next;
+        free(block);
+        block = next;
+    }
+    pool->head = NULL;
+}
+
+static void *html_view_rule_trie_pool_alloc(html_view_rule_trie_pool_t *pool, size_t size)
+{
+    if (!pool || size == 0)
+    {
+        return NULL;
+    }
+    const size_t align = sizeof(void *);
+    size_t aligned_size = (size + align - 1u) & ~(align - 1u);
+    html_view_rule_trie_pool_block_t *block = pool->head;
+    size_t offset = 0;
+    if (block)
+    {
+        offset = (block->used + align - 1u) & ~(align - 1u);
+        if (offset + aligned_size > block->size)
+        {
+            block = NULL;
+        }
+    }
+    if (!block)
+    {
+        size_t block_size = HTML_VIEW_RULE_TRIE_POOL_BLOCK_SIZE;
+        if (block_size < aligned_size)
+        {
+            block_size = aligned_size;
+        }
+        block = (html_view_rule_trie_pool_block_t *)malloc(sizeof(*block) + block_size);
+        if (!block)
+        {
+            return NULL;
+        }
+        block->next = pool->head;
+        block->used = 0;
+        block->size = block_size;
+        pool->head = block;
+        offset = 0;
+    }
+    void *ptr = block->data + offset;
+    block->used = offset + aligned_size;
+    return ptr;
+}
+
+static void *html_view_rule_trie_pool_alloc_zero(html_view_rule_trie_pool_t *pool, size_t size)
+{
+    void *ptr = html_view_rule_trie_pool_alloc(pool, size);
+    if (ptr)
+    {
+        memset(ptr, 0, size);
+    }
+    return ptr;
+}
+
+static void *html_view_rule_trie_pool_grow(html_view_rule_trie_pool_t *pool,
+                                           void *ptr,
+                                           size_t count,
+                                           size_t new_cap,
+                                           size_t elem_size)
+{
+    if (!pool || new_cap == 0 || new_cap < count || elem_size == 0)
+    {
+        return NULL;
+    }
+    if (new_cap > (((size_t)-1) / elem_size))
+    {
+        return NULL;
+    }
+    void *next = html_view_rule_trie_pool_alloc(pool, new_cap * elem_size);
+    if (!next)
+    {
+        return NULL;
+    }
+    if (ptr && count > 0)
+    {
+        memcpy(next, ptr, count * elem_size);
+    }
+    return next;
+}
 
 static uint32_t html_view_rule_order(const css_rule_t *rule);
 static uint32_t html_view_rule_specificity(const css_rule_t *rule);
@@ -5514,16 +5918,18 @@ static bool html_view_rule_trie_node_equals(const html_view_rule_trie_node_t *no
     return html_view_rule_trie_part_equals(node->part, node->selector, part, selector);
 }
 
-static html_view_rule_trie_node_t *html_view_rule_trie_node_create(const css_selector_compiled_part_t *part,
+static html_view_rule_trie_node_t *html_view_rule_trie_node_create(html_view_rule_trie_t *trie,
+                                                                   const css_selector_compiled_part_t *part,
                                                                    const css_selector_part_t *raw_part,
                                                                    const char *selector,
                                                                    char combinator)
 {
-    if (!part || !raw_part || !selector)
+    if (!trie || !part || !raw_part || !selector)
     {
         return NULL;
     }
-    html_view_rule_trie_node_t *node = (html_view_rule_trie_node_t *)calloc(1, sizeof(*node));
+    html_view_rule_trie_node_t *node =
+        (html_view_rule_trie_node_t *)html_view_rule_trie_pool_alloc_zero(&trie->pool, sizeof(*node));
     if (!node)
     {
         return NULL;
@@ -5538,16 +5944,22 @@ static html_view_rule_trie_node_t *html_view_rule_trie_node_create(const css_sel
     return node;
 }
 
-static bool html_view_rule_trie_node_add_rule(html_view_rule_trie_node_t *node, css_rule_t *rule)
+static bool html_view_rule_trie_node_add_rule(html_view_rule_trie_t *trie,
+                                              html_view_rule_trie_node_t *node,
+                                              css_rule_t *rule)
 {
-    if (!node || !rule)
+    if (!trie || !node || !rule)
     {
         return false;
     }
     if (node->rule_count == node->rule_cap)
     {
         size_t new_cap = node->rule_cap ? node->rule_cap * 2u : 4u;
-        css_rule_t **next = (css_rule_t **)realloc(node->rules, new_cap * sizeof(*next));
+        css_rule_t **next = (css_rule_t **)html_view_rule_trie_pool_grow(&trie->pool,
+                                                                         node->rules,
+                                                                         node->rule_count,
+                                                                         new_cap,
+                                                                         sizeof(*next));
         if (!next)
         {
             return false;
@@ -5580,13 +5992,14 @@ static html_view_rule_trie_node_t *html_view_rule_trie_find_child(const html_vie
     return NULL;
 }
 
-static html_view_rule_trie_node_t *html_view_rule_trie_get_child(html_view_rule_trie_node_t *parent,
+static html_view_rule_trie_node_t *html_view_rule_trie_get_child(html_view_rule_trie_t *trie,
+                                                                 html_view_rule_trie_node_t *parent,
                                                                  const css_selector_compiled_part_t *part,
                                                                  const css_selector_part_t *raw_part,
                                                                  const char *selector,
                                                                  char combinator)
 {
-    if (!parent)
+    if (!trie || !parent)
     {
         return NULL;
     }
@@ -5599,7 +6012,7 @@ static html_view_rule_trie_node_t *html_view_rule_trie_get_child(html_view_rule_
     {
         return child;
     }
-    child = html_view_rule_trie_node_create(part, raw_part, selector, combinator);
+    child = html_view_rule_trie_node_create(trie, part, raw_part, selector, combinator);
     if (!child)
     {
         return NULL;
@@ -5607,11 +6020,14 @@ static html_view_rule_trie_node_t *html_view_rule_trie_get_child(html_view_rule_
     if (parent->child_count == parent->child_cap)
     {
         size_t new_cap = parent->child_cap ? parent->child_cap * 2u : 4u;
-        html_view_rule_trie_node_t **next = (html_view_rule_trie_node_t **)realloc(parent->children,
-                                                                                   new_cap * sizeof(*next));
+        html_view_rule_trie_node_t **next =
+            (html_view_rule_trie_node_t **)html_view_rule_trie_pool_grow(&trie->pool,
+                                                                         parent->children,
+                                                                         parent->child_count,
+                                                                         new_cap,
+                                                                         sizeof(*next));
         if (!next)
         {
-            free(child);
             return NULL;
         }
         parent->children = next;
@@ -5638,7 +6054,7 @@ static html_view_rule_trie_node_t *html_view_rule_trie_get_root(html_view_rule_t
             return root;
         }
     }
-    html_view_rule_trie_node_t *root = html_view_rule_trie_node_create(part, raw_part, selector, 0);
+    html_view_rule_trie_node_t *root = html_view_rule_trie_node_create(trie, part, raw_part, selector, 0);
     if (!root)
     {
         return NULL;
@@ -5646,11 +6062,14 @@ static html_view_rule_trie_node_t *html_view_rule_trie_get_root(html_view_rule_t
     if (trie->root_count == trie->root_cap)
     {
         size_t new_cap = trie->root_cap ? trie->root_cap * 2u : 8u;
-        html_view_rule_trie_node_t **next = (html_view_rule_trie_node_t **)realloc(trie->roots,
-                                                                                   new_cap * sizeof(*next));
+        html_view_rule_trie_node_t **next =
+            (html_view_rule_trie_node_t **)html_view_rule_trie_pool_grow(&trie->pool,
+                                                                         trie->roots,
+                                                                         trie->root_count,
+                                                                         new_cap,
+                                                                         sizeof(*next));
         if (!next)
         {
-            free(root);
             return NULL;
         }
         trie->roots = next;
@@ -5669,7 +6088,11 @@ static bool html_view_rule_trie_fallback_push(html_view_rule_trie_t *trie, css_r
     if (trie->fallback_count == trie->fallback_cap)
     {
         size_t new_cap = trie->fallback_cap ? trie->fallback_cap * 2u : 8u;
-        css_rule_t **next = (css_rule_t **)realloc(trie->fallback_rules, new_cap * sizeof(*next));
+        css_rule_t **next = (css_rule_t **)html_view_rule_trie_pool_grow(&trie->pool,
+                                                                         trie->fallback_rules,
+                                                                         trie->fallback_count,
+                                                                         new_cap,
+                                                                         sizeof(*next));
         if (!next)
         {
             return false;
@@ -6470,62 +6893,6 @@ static void html_view_rule_trie_free(html_view_rule_trie_t *trie)
     {
         return;
     }
-    html_view_rule_trie_node_t **stack = NULL;
-    size_t stack_count = 0;
-    size_t stack_cap = 0;
-    for (size_t i = 0; i < trie->root_count; ++i)
-    {
-        if (!trie->roots[i])
-        {
-            continue;
-        }
-        if (stack_count == stack_cap)
-        {
-            size_t new_cap = stack_cap ? stack_cap * 2u : 32u;
-            html_view_rule_trie_node_t **next = (html_view_rule_trie_node_t **)realloc(stack,
-                                                                                       new_cap * sizeof(*next));
-            if (!next)
-            {
-                break;
-            }
-            stack = next;
-            stack_cap = new_cap;
-        }
-        stack[stack_count++] = trie->roots[i];
-    }
-    while (stack_count > 0)
-    {
-        html_view_rule_trie_node_t *node = stack[--stack_count];
-        if (node->children && node->child_count > 0)
-        {
-            for (size_t i = 0; i < node->child_count; ++i)
-            {
-                if (node->children[i])
-                {
-                    if (stack_count == stack_cap)
-                    {
-                        size_t new_cap = stack_cap ? stack_cap * 2u : 32u;
-                        html_view_rule_trie_node_t **next = (html_view_rule_trie_node_t **)realloc(stack,
-                                                                                                   new_cap * sizeof(*next));
-                        if (!next)
-                        {
-                            break;
-                        }
-                        stack = next;
-                        stack_cap = new_cap;
-                    }
-                    if (stack_count < stack_cap)
-                    {
-                        stack[stack_count++] = node->children[i];
-                    }
-                }
-            }
-        }
-        free(node->children);
-        free(node->rules);
-        free(node);
-    }
-    free(stack);
     if (trie->cache.entries)
     {
         for (size_t i = 0; i < trie->cache.entry_count; ++i)
@@ -6534,8 +6901,7 @@ static void html_view_rule_trie_free(html_view_rule_trie_t *trie)
         }
         free(trie->cache.entries);
     }
-    free(trie->roots);
-    free(trie->fallback_rules);
+    html_view_rule_trie_pool_release(&trie->pool);
     free(trie);
 }
 
@@ -6562,13 +6928,13 @@ static bool html_view_rule_trie_add_rule(html_view_rule_trie_t *trie,
         const css_selector_compiled_part_t *left = &cache->compiled_parts[idx - 1];
         const css_selector_part_t *left_raw = &cache->parts[idx - 1];
         char comb = left_raw->combinator;
-        node = html_view_rule_trie_get_child(node, left, left_raw, rule->selector, comb);
+        node = html_view_rule_trie_get_child(trie, node, left, left_raw, rule->selector, comb);
         if (!node)
         {
             return false;
         }
     }
-    return html_view_rule_trie_node_add_rule(node, rule);
+    return html_view_rule_trie_node_add_rule(trie, node, rule);
 }
 
 static void html_view_rule_trie_update_cache_mode(html_view_rule_trie_t *trie,
@@ -6604,6 +6970,7 @@ static html_view_rule_trie_t *html_view_rule_trie_build(css_rule_t **rules, size
     {
         return NULL;
     }
+    html_view_rule_trie_pool_init(&trie->pool);
     trie->cache_enabled = true;
     size_t compiled_rules = 0;
     for (size_t i = 0; i < rule_count; ++i)
@@ -6973,11 +7340,9 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
         {
             html_view_rule_bucket_t *parent = &bucket->parent_buckets[j];
             html_view_rule_trie_free(parent->trie);
-            free(parent->tag);
             free(parent->rules);
         }
         free(bucket->parent_buckets);
-        free(bucket->tag);
         free(bucket->rules);
     }
     for (size_t i = 0; i < index->class_bucket_count; ++i)
@@ -6988,11 +7353,9 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
         {
             html_view_rule_bucket_t *parent = &bucket->parent_buckets[j];
             html_view_rule_trie_free(parent->trie);
-            free(parent->tag);
             free(parent->rules);
         }
         free(bucket->parent_buckets);
-        free(bucket->tag);
         free(bucket->rules);
     }
     for (size_t i = 0; i < index->scope_class_bucket_count; ++i)
@@ -7003,11 +7366,9 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
         {
             html_view_rule_bucket_t *parent = &bucket->parent_buckets[j];
             html_view_rule_trie_free(parent->trie);
-            free(parent->tag);
             free(parent->rules);
         }
         free(bucket->parent_buckets);
-        free(bucket->tag);
         free(bucket->rules);
     }
     for (size_t i = 0; i < index->id_bucket_count; ++i)
@@ -7018,11 +7379,9 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
         {
             html_view_rule_bucket_t *parent = &bucket->parent_buckets[j];
             html_view_rule_trie_free(parent->trie);
-            free(parent->tag);
             free(parent->rules);
         }
         free(bucket->parent_buckets);
-        free(bucket->tag);
         free(bucket->rules);
     }
     for (size_t i = 0; i < index->attr_bucket_count; ++i)
@@ -7033,11 +7392,9 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
         {
             html_view_rule_bucket_t *parent = &bucket->parent_buckets[j];
             html_view_rule_trie_free(parent->trie);
-            free(parent->tag);
             free(parent->rules);
         }
         free(bucket->parent_buckets);
-        free(bucket->tag);
         free(bucket->rules);
     }
     free(index->tag_buckets);
@@ -7084,48 +7441,12 @@ static bool html_view_rule_index_list_push(css_rule_t ***list,
     return true;
 }
 
-static char *html_view_strdup_lower_range(const char *start, size_t len)
-{
-    if (!start || len == 0)
-    {
-        return NULL;
-    }
-    char *out = (char *)malloc(len + 1);
-    if (!out)
-    {
-        return NULL;
-    }
-    for (size_t i = 0; i < len; ++i)
-    {
-        out[i] = (char)tolower((unsigned char)start[i]);
-    }
-    out[len] = '\0';
-    return out;
-}
-
-static char *html_view_strdup_lower_unescaped_range(const char *start, size_t len)
-{
-    if (!start || len == 0)
-    {
-        return NULL;
-    }
-    const char *end = start + len;
-    char *out = html_view_unescape_selector_value(start, end);
-    if (!out)
-    {
-        return NULL;
-    }
-    for (char *p = out; *p; ++p)
-    {
-        *p = (char)tolower((unsigned char)*p);
-    }
-    return out;
-}
-
 typedef struct
 {
-    char *key;
+    const char *start;
     size_t len;
+    size_t unescaped_len;
+    uint64_t hash;
     uint32_t count;
 } html_view_key_count_t;
 
@@ -7137,17 +7458,24 @@ typedef struct
 } html_view_key_count_map_t;
 
 static html_view_key_count_t *html_view_key_count_find(html_view_key_count_map_t *map,
-                                                       const char *key,
-                                                       size_t len)
+                                                       const char *start,
+                                                       const char *end,
+                                                       uint64_t hash,
+                                                       size_t unescaped_len)
 {
-    if (!map || !key || len == 0)
+    if (!map || !start || !end || end <= start)
     {
         return NULL;
     }
+    size_t len = (size_t)(end - start);
     for (size_t i = 0; i < map->count; ++i)
     {
         html_view_key_count_t *entry = &map->items[i];
-        if (entry->len == len && strncasecmp(entry->key, key, len) == 0)
+        if (entry->hash != hash || entry->unescaped_len != unescaped_len)
+        {
+            continue;
+        }
+        if (html_view_selector_range_eq_ci_ranges(entry->start, entry->len, start, len))
         {
             return entry;
         }
@@ -7164,17 +7492,12 @@ static bool html_view_key_count_inc(html_view_key_count_map_t *map,
         return false;
     }
     size_t len = (size_t)(end - start);
-    char *key = html_view_strdup_lower_unescaped_range(start, len);
-    if (!key)
-    {
-        return false;
-    }
-
-    html_view_key_count_t *entry = html_view_key_count_find(map, key, strlen(key));
+    size_t unescaped_len = html_view_selector_range_unescaped_len(start, len);
+    uint64_t hash = html_view_bloom_hash_range_ci(start, end, true);
+    html_view_key_count_t *entry = html_view_key_count_find(map, start, end, hash, unescaped_len);
     if (entry)
     {
         entry->count++;
-        free(key);
         return true;
     }
 
@@ -7185,7 +7508,6 @@ static bool html_view_key_count_inc(html_view_key_count_map_t *map,
                                                                        new_cap * sizeof(*next));
         if (!next)
         {
-            free(key);
             return false;
         }
         map->items = next;
@@ -7193,8 +7515,10 @@ static bool html_view_key_count_inc(html_view_key_count_map_t *map,
     }
 
     map->items[map->count++] = (html_view_key_count_t){
-        .key = key,
-        .len = strlen(key),
+        .start = start,
+        .len = len,
+        .unescaped_len = unescaped_len,
+        .hash = hash,
         .count = 1u,
     };
     return true;
@@ -7209,23 +7533,22 @@ static uint32_t html_view_key_count_get(const html_view_key_count_map_t *map,
         return 0xffffffffu;
     }
     size_t len = (size_t)(end - start);
-    char *key = html_view_strdup_lower_unescaped_range(start, len);
-    if (!key)
-    {
-        return 0xffffffffu;
-    }
-    size_t key_len = strlen(key);
+    size_t unescaped_len = html_view_selector_range_unescaped_len(start, len);
+    uint64_t hash = html_view_bloom_hash_range_ci(start, end, true);
     uint32_t out = 0xffffffffu;
     for (size_t i = 0; i < map->count; ++i)
     {
         const html_view_key_count_t *entry = &map->items[i];
-        if (entry->len == key_len && strncasecmp(entry->key, key, entry->len) == 0)
+        if (entry->hash != hash || entry->unescaped_len != unescaped_len)
+        {
+            continue;
+        }
+        if (html_view_selector_range_eq_ci_ranges(entry->start, entry->len, start, len))
         {
             out = entry->count;
             break;
         }
     }
-    free(key);
     return out;
 }
 
@@ -7234,10 +7557,6 @@ static void html_view_key_count_map_free(html_view_key_count_map_t *map)
     if (!map)
     {
         return;
-    }
-    for (size_t i = 0; i < map->count; ++i)
-    {
-        free(map->items[i].key);
     }
     free(map->items);
     map->items = NULL;
@@ -7652,7 +7971,10 @@ static html_view_rule_bucket_t *html_view_rule_index_find_bucket_list(html_view_
     for (size_t i = 0; i < bucket_count; ++i)
     {
         html_view_rule_bucket_t *bucket = &buckets[i];
-        if (bucket->tag_len == len && strncasecmp(bucket->tag, key, len) == 0)
+        if (bucket->tag && html_view_selector_range_eq_ci_ranges(bucket->tag,
+                                                                 bucket->tag_len,
+                                                                 key,
+                                                                 len))
         {
             return bucket;
         }
@@ -7664,35 +7986,19 @@ static html_view_rule_bucket_t *html_view_rule_index_get_bucket_list(html_view_r
                                                                      size_t *bucket_count,
                                                                      size_t *bucket_cap,
                                                                      const char *key,
-                                                                     size_t len,
-                                                                     bool unescape)
+                                                                     size_t len)
 {
     if (!buckets || !bucket_count || !bucket_cap || !key || len == 0)
     {
         return NULL;
     }
 
-    char *norm_key = NULL;
-    const char *lookup_key = key;
-    size_t lookup_len = len;
-    if (unescape)
-    {
-        norm_key = html_view_strdup_lower_unescaped_range(key, len);
-        if (!norm_key)
-        {
-            return NULL;
-        }
-        lookup_key = norm_key;
-        lookup_len = strlen(norm_key);
-    }
-
     html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(*buckets,
                                                                             *bucket_count,
-                                                                            lookup_key,
-                                                                            lookup_len);
+                                                                            key,
+                                                                            len);
     if (bucket)
     {
-        free(norm_key);
         return bucket;
     }
 
@@ -7709,27 +8015,10 @@ static html_view_rule_bucket_t *html_view_rule_index_get_bucket_list(html_view_r
         *bucket_cap = new_cap;
     }
 
-    char *key_copy = NULL;
-    if (unescape)
-    {
-        key_copy = norm_key;
-        norm_key = NULL;
-    }
-    else
-    {
-        key_copy = html_view_strdup_lower_range(key, len);
-    }
-    if (!key_copy)
-    {
-        free(norm_key);
-        return NULL;
-    }
-
     bucket = &(*buckets)[(*bucket_count)++];
     memset(bucket, 0, sizeof(*bucket));
-    bucket->tag = key_copy;
-    bucket->tag_len = strlen(key_copy);
-    free(norm_key);
+    bucket->tag = key;
+    bucket->tag_len = len;
     return bucket;
 }
 
@@ -7756,8 +8045,7 @@ static html_view_rule_bucket_t *html_view_rule_bucket_get_parent_bucket(html_vie
                                                 &bucket->parent_count,
                                                 &bucket->parent_cap,
                                                 key,
-                                                len,
-                                                true);
+                                                len);
 }
 
 static bool html_view_rule_index_add_rule(html_view_rule_index_t *index, css_rule_t *rule, uint32_t order)
@@ -7798,8 +8086,7 @@ static bool html_view_rule_index_add_rule(html_view_rule_index_t *index, css_rul
                                                                                    &index->id_bucket_count,
                                                                                    &index->id_bucket_cap,
                                                                                    id_start,
-                                                                                   id_len,
-                                                                                   true);
+                                                                                   id_len);
             if (!bucket)
             {
                 return false;
@@ -7820,8 +8107,7 @@ static bool html_view_rule_index_add_rule(html_view_rule_index_t *index, css_rul
                                                                                    &index->class_bucket_count,
                                                                                    &index->class_bucket_cap,
                                                                                    class_start,
-                                                                                   class_len,
-                                                                                   true);
+                                                                                   class_len);
             if (!bucket)
             {
                 return false;
@@ -7863,8 +8149,7 @@ static bool html_view_rule_index_add_rule(html_view_rule_index_t *index, css_rul
                                                                                    &index->attr_bucket_count,
                                                                                    &index->attr_bucket_cap,
                                                                                    attr_start,
-                                                                                   attr_len,
-                                                                                   true);
+                                                                                   attr_len);
             if (!bucket)
             {
                 return false;
@@ -7886,8 +8171,7 @@ static bool html_view_rule_index_add_rule(html_view_rule_index_t *index, css_rul
                                                                                    &index->scope_class_bucket_count,
                                                                                    &index->scope_class_bucket_cap,
                                                                                    scope_start,
-                                                                                   scope_len,
-                                                                                   true);
+                                                                                   scope_len);
             if (!bucket)
             {
                 return false;
@@ -7908,8 +8192,7 @@ static bool html_view_rule_index_add_rule(html_view_rule_index_t *index, css_rul
                                                                                    &index->tag_bucket_count,
                                                                                    &index->tag_bucket_cap,
                                                                                    tag_start,
-                                                                                   tag_len,
-                                                                                   false);
+                                                                                   tag_len);
             if (!bucket)
             {
                 return false;

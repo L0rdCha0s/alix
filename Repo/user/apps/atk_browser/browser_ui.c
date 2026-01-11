@@ -814,6 +814,7 @@ static void browser_cancel_active_load(browser_app_t *app)
         memset(&ev, 0, sizeof(ev));
     }
     browser_app_css_reset(app);
+    browser_load_queue_clear(app);
     browser_resource_queue_clear(app);
     browser_clear_pending_fragment(app);
 }
@@ -929,39 +930,25 @@ bool browser_tick(void *context)
                     {
                         atk_text_input_set_text(app->url_input, ev.u.doc_ready.final_url);
                         browser_history_update_current(app, ev.u.doc_ready.final_url);
+                        browser_try_apply_pending_fragment(app);
+                        atk_window_mark_dirty(app->window);
+                        redraw = true;
                     }
-
-                    html_document_t *doc = ev.u.doc_ready.doc;
-                    if (doc && doc->root)
+                }
+                break;
+            }
+            case BROWSER_UI_EVENT_NAV_UPDATE:
+            {
+                if (browser_load_is_active(app, ev.load_id))
+                {
+                    if (ev.u.nav_update.final_url && ev.u.nav_update.final_url[0] != '\0' && app->url_input)
                     {
-                        size_t node_count = browser_dom_count_nodes(doc->root, 50000);
-                        const html_node_t *body = browser_dom_find_first_element(doc->root, "body");
-                        const html_node_t *title = browser_dom_find_first_element(doc->root, "title");
-                        const char *title_text = browser_dom_first_text_child(title);
-                        if (title_text && title_text[0] != '\0')
-                        {
-                            char title_preview[96];
-                            size_t tlen = strlen(title_text);
-                            size_t copy = tlen;
-                            if (copy >= sizeof(title_preview))
-                            {
-                                copy = sizeof(title_preview) - 1;
-                            }
-                            memcpy(title_preview, title_text, copy);
-                            title_preview[copy] = '\0';
-                            browser_debug_logf(app, "[parse] title %s", title_preview);
-                        }
-                        browser_debug_logf(app, "[parse] nodes=%u body=%s",
-                                           (unsigned)node_count,
-                                           body ? "yes" : "no");
+                        atk_text_input_set_text(app->url_input, ev.u.nav_update.final_url);
+                        browser_history_update_current(app, ev.u.nav_update.final_url);
+                        browser_try_apply_pending_fragment(app);
+                        atk_window_mark_dirty(app->window);
+                        redraw = true;
                     }
-                    browser_app_css_reset(app);
-                    ev.u.doc_ready.doc = NULL;
-                    atk_html_view_set_document(app->viewer, doc);
-                    browser_debug_logf(app, "[render] set document ok");
-                    browser_try_apply_pending_fragment(app);
-                    atk_window_mark_dirty(app->window);
-                    redraw = true;
                 }
                 break;
             }
@@ -1122,8 +1109,6 @@ bool browser_tick(void *context)
             }
             case BROWSER_UI_EVENT_THREAD_DONE:
             {
-                (void)alix_thread_join(ev.u.thread_done.thread, NULL);
-                browser_untrack_load_thread(app, ev.u.thread_done.thread);
                 break;
             }
             default:
@@ -1429,7 +1414,8 @@ bool browser_build_ui(browser_app_t *app)
         return false;
     }
     atk_html_view_set_js_enabled(app->viewer, app->js_enabled);
-    atk_html_view_enable_async_render(app->viewer, true);
+    atk_html_view_enable_async_render(app->viewer, false);
+    atk_html_view_enable_external_render(app->viewer, true);
     atk_html_view_set_link_handler(app->viewer, browser_html_link_clicked, app);
     atk_widget_set_layout(app->viewer,
                           ATK_WIDGET_ANCHOR_LEFT | ATK_WIDGET_ANCHOR_RIGHT |

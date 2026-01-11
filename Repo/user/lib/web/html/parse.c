@@ -350,13 +350,14 @@ static bool html_parse_doctype(const char **p)
     return true;
 }
 
-static bool html_parse_attrs(const char **p,
+static bool html_parse_attrs(html_document_t *doc,
+                             const char **p,
                              html_attr_t **attrs_out,
                              bool *self_closed_out,
                              html_parse_error_t *error_out,
                              size_t input_offset)
 {
-    if (!p || !*p || !attrs_out || !self_closed_out)
+    if (!doc || !p || !*p || !attrs_out || !self_closed_out)
     {
         return false;
     }
@@ -400,11 +401,11 @@ static bool html_parse_attrs(const char **p,
             continue;
         }
 
-        char *name = html_strdup_range(name_start, name_end, true);
+        char *name = html_doc_strdup_range(doc, name_start, name_end, true);
         if (!name)
         {
             html_error(error_out, input_offset, "allocation failed");
-            html_attr_free_list(attrs_head);
+            html_attr_free_list(doc, attrs_head);
             return false;
         }
 
@@ -427,7 +428,7 @@ static bool html_parse_attrs(const char **p,
                 {
                     ++s;
                 }
-                value = html_strdup_decoded_range(vstart, vend);
+                value = html_doc_strdup_decoded_range(doc, vstart, vend);
             }
             else
             {
@@ -437,29 +438,26 @@ static bool html_parse_attrs(const char **p,
                     ++s;
                 }
                 const char *vend = s;
-                value = html_strdup_decoded_range(vstart, vend);
+                value = html_doc_strdup_decoded_range(doc, vstart, vend);
             }
         }
         else
         {
-            value = html_strdup_range("", "", false);
+            value = html_doc_strdup_range(doc, "", "", false);
         }
 
         if (!value)
         {
-            free(name);
             html_error(error_out, input_offset, "allocation failed");
-            html_attr_free_list(attrs_head);
+            html_attr_free_list(doc, attrs_head);
             return false;
         }
 
-        html_attr_t *attr = (html_attr_t *)calloc(1, sizeof(*attr));
+        html_attr_t *attr = (html_attr_t *)html_doc_alloc(doc, sizeof(*attr));
         if (!attr)
         {
-            free(name);
-            free(value);
             html_error(error_out, input_offset, "allocation failed");
-            html_attr_free_list(attrs_head);
+            html_attr_free_list(doc, attrs_head);
             return false;
         }
         attr->name = name;
@@ -482,12 +480,13 @@ static bool html_parse_attrs(const char **p,
     return true;
 }
 
-static bool html_parse_start_tag(const char **p,
+static bool html_parse_start_tag(html_document_t *doc,
+                                 const char **p,
                                  html_node_stack_t *stack,
                                  html_parse_error_t *error_out,
                                  const char *input_base)
 {
-    if (!p || !*p || !stack)
+    if (!doc || !p || !*p || !stack)
     {
         return false;
     }
@@ -510,7 +509,7 @@ static bool html_parse_start_tag(const char **p,
         return false;
     }
 
-    char *tag = html_strdup_range(name_start, name_end, true);
+    char *tag = html_doc_strdup_range(doc, name_start, name_end, true);
     if (!tag)
     {
         html_error(error_out, (size_t)(*p - input_base), "allocation failed");
@@ -521,20 +520,18 @@ static bool html_parse_start_tag(const char **p,
 
     html_attr_t *attrs = NULL;
     bool self_closed = false;
-    if (!html_parse_attrs(&s, &attrs, &self_closed, error_out, (size_t)(*p - input_base)))
+    if (!html_parse_attrs(doc, &s, &attrs, &self_closed, error_out, (size_t)(*p - input_base)))
     {
-        free(tag);
         return false;
     }
 
     bool is_void = html_is_void_element(tag);
     bool needs_push = (!self_closed && !is_void);
 
-    html_node_t *node = html_node_create(HTML_NODE_ELEMENT);
+    html_node_t *node = html_node_create(doc, HTML_NODE_ELEMENT);
     if (!node)
     {
-        free(tag);
-        html_attr_free_list(attrs);
+        html_attr_free_list(doc, attrs);
         html_error(error_out, (size_t)(*p - input_base), "allocation failed");
         return false;
     }
@@ -547,9 +544,7 @@ static bool html_parse_start_tag(const char **p,
         if (!html_stack_push(stack, node))
         {
             html_error(error_out, (size_t)(*p - input_base), "allocation failed");
-            html_attr_free_list(attrs);
-            free(tag);
-            free(node);
+            html_attr_free_list(doc, attrs);
             return false;
         }
     }
@@ -566,10 +561,10 @@ static bool html_parse_start_tag(const char **p,
         const char *content_end = end ? end : (s + strlen(s));
         if (content_end > s)
         {
-            html_node_t *text_node = html_node_create(HTML_NODE_TEXT);
+            html_node_t *text_node = html_node_create(doc, HTML_NODE_TEXT);
             if (text_node)
             {
-                text_node->text = html_strdup_range(s, content_end, false);
+                text_node->text = html_doc_strdup_range(doc, s, content_end, false);
                 html_node_append_child(node, text_node);
             }
         }
@@ -594,9 +589,12 @@ static bool html_parse_start_tag(const char **p,
     return true;
 }
 
-static void html_append_text_node(html_node_stack_t *stack, const char *start, const char *end)
+static void html_append_text_node(html_document_t *doc,
+                                  html_node_stack_t *stack,
+                                  const char *start,
+                                  const char *end)
 {
-    if (!stack || !start || !end || end <= start)
+    if (!doc || !stack || !start || !end || end <= start)
     {
         return;
     }
@@ -606,42 +604,55 @@ static void html_append_text_node(html_node_stack_t *stack, const char *start, c
         return;
     }
     bool preserve_ws = html_parent_preserves_ws(stack);
-    html_node_t *text = html_node_create(HTML_NODE_TEXT);
-    if (!text)
+    if (!preserve_ws)
+    {
+        bool has_non_ws = false;
+        for (const unsigned char *p = (const unsigned char *)start;
+             p < (const unsigned char *)end;
+             ++p)
+        {
+            if (*p == '&' || *p >= 0x80u || !isspace(*p))
+            {
+                has_non_ws = true;
+                break;
+            }
+        }
+        if (!has_non_ws)
+        {
+            return;
+        }
+    }
+    char *decoded = html_doc_strdup_decoded_range(doc, start, end);
+    if (!decoded)
     {
         return;
     }
-    text->text = html_strdup_decoded_range(start, end);
-    if (!text->text)
+    if (!preserve_ws && !html_text_has_non_ws(decoded))
     {
-        free(text);
-        return;
-    }
-    if (!preserve_ws && !html_text_has_non_ws(text->text))
-    {
-        free(text->text);
-        free(text);
         return;
     }
     if (parent->last_child && parent->last_child->type == HTML_NODE_TEXT &&
         parent->last_child->text)
     {
         size_t left_len = strlen(parent->last_child->text);
-        size_t right_len = strlen(text->text);
+        size_t right_len = strlen(decoded);
         size_t merged_len = left_len + right_len;
-        char *merged = (char *)malloc(merged_len + 1);
+        char *merged = (char *)html_doc_alloc(doc, merged_len + 1);
         if (merged)
         {
             memcpy(merged, parent->last_child->text, left_len);
-            memcpy(merged + left_len, text->text, right_len);
+            memcpy(merged + left_len, decoded, right_len);
             merged[merged_len] = '\0';
-            free(parent->last_child->text);
             parent->last_child->text = merged;
-            free(text->text);
-            free(text);
             return;
         }
     }
+    html_node_t *text = html_node_create(doc, HTML_NODE_TEXT);
+    if (!text)
+    {
+        return;
+    }
+    text->text = decoded;
     html_node_append_child(parent, text);
 }
 
@@ -667,7 +678,7 @@ html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
         return NULL;
     }
 
-    html_node_t *root = html_node_create(HTML_NODE_DOCUMENT);
+    html_node_t *root = html_node_create(doc, HTML_NODE_DOCUMENT);
     if (!root)
     {
         free(doc);
@@ -691,12 +702,12 @@ html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
         const char *lt = strchr(p, '<');
         if (!lt)
         {
-            html_append_text_node(&stack, p, p + strlen(p));
+            html_append_text_node(doc, &stack, p, p + strlen(p));
             break;
         }
         if (lt > p)
         {
-            html_append_text_node(&stack, p, lt);
+            html_append_text_node(doc, &stack, p, lt);
         }
         p = lt;
 
@@ -723,7 +734,7 @@ html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
         }
         if (p[0] == '<')
         {
-            if (html_parse_start_tag(&p, &stack, error_out, input))
+            if (html_parse_start_tag(doc, &p, &stack, error_out, input))
             {
                 continue;
             }
@@ -736,7 +747,7 @@ html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
         }
 
         /* fallback: treat '<' as text */
-        html_append_text_node(&stack, p, p + 1);
+        html_append_text_node(doc, &stack, p, p + 1);
         ++p;
     }
 

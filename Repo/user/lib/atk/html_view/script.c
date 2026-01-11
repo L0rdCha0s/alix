@@ -1245,11 +1245,11 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
         }
         return false;
     }
+    html_view_dom_unlock(priv);
 
     char *handler_name = html_view_js_strdup_len(name_buf, (size_t)name_len);
     if (!handler_name)
     {
-        html_view_dom_unlock(priv);
         if (error_message)
         {
             *error_message = html_view_strdup("allocation failed");
@@ -1259,7 +1259,6 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
 
     if (!js_runtime_set_global(rt, handler_name, &argv[1]))
     {
-        html_view_dom_unlock(priv);
         free(handler_name);
         if (error_message)
         {
@@ -1274,7 +1273,6 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
     {
         js_value_t undef = js_value_make_undefined();
         (void)js_runtime_set_global(rt, handler_name, &undef);
-        html_view_dom_unlock(priv);
         free(handler_name);
         if (error_message)
         {
@@ -1295,7 +1293,6 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
     {
         js_value_t undef = js_value_make_undefined();
         (void)js_runtime_set_global(rt, handler_name, &undef);
-        html_view_dom_unlock(priv);
         free(handler_name);
         if (error_message)
         {
@@ -1310,7 +1307,6 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
         js_program_destroy(call_program);
         js_value_t undef = js_value_make_undefined();
         (void)js_runtime_set_global(rt, handler_name, &undef);
-        html_view_dom_unlock(priv);
         free(handler_name);
         if (error_message)
         {
@@ -1321,6 +1317,7 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
     listener->handle = elem->handle;
     listener->handler_name = handler_name;
     listener->call_program = call_program;
+    html_view_dom_lock(priv);
     listener->next = priv->js_listeners;
     priv->js_listeners = listener;
     html_view_dom_unlock(priv);
@@ -2841,7 +2838,7 @@ void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv)
     if (dirty & HTML_VIEW_JS_DIRTY_STYLES)
     {
         html_view_stylesheet_mark_dirty(priv);
-        if (!priv->render_async)
+        if (!priv->render_async && !priv->render_external)
         {
             html_view_stylesheet_rebuild_if_needed(priv);
         }

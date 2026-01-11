@@ -243,17 +243,59 @@ void atk_state_lock_release(uint64_t flags)
     spinlock_unlock(&g_atk_lock);
 }
 #else
+#include "libc.h"
+
+static alix_mutex_t g_atk_lock;
+static bool g_atk_lock_ready = false;
+static alix_thread_t g_atk_lock_owner = 0;
+static uint32_t g_atk_lock_depth = 0;
+
+static inline void atk_global_lock_ensure(void)
+{
+    if (!g_atk_lock_ready)
+    {
+        alix_mutex_init(&g_atk_lock);
+        g_atk_lock_ready = true;
+    }
+}
+
 void atk_state_lock_init(void)
 {
+    atk_global_lock_ensure();
 }
 
 uint64_t atk_state_lock_acquire(void)
 {
+    atk_global_lock_ensure();
+    alix_thread_t self = alix_thread_self();
+    alix_thread_t owner = __atomic_load_n(&g_atk_lock_owner, __ATOMIC_RELAXED);
+    if (owner == self && self != 0)
+    {
+        g_atk_lock_depth++;
+        return 0;
+    }
+    alix_mutex_lock(&g_atk_lock);
+    __atomic_store_n(&g_atk_lock_owner, self, __ATOMIC_RELAXED);
+    g_atk_lock_depth = 1;
     return 0;
 }
 
 void atk_state_lock_release(uint64_t flags)
 {
     (void)flags;
+    alix_thread_t self = alix_thread_self();
+    alix_thread_t owner = __atomic_load_n(&g_atk_lock_owner, __ATOMIC_RELAXED);
+    if (owner != self || self == 0)
+    {
+        return;
+    }
+    if (g_atk_lock_depth > 1)
+    {
+        g_atk_lock_depth--;
+        return;
+    }
+    g_atk_lock_depth = 0;
+    __atomic_store_n(&g_atk_lock_owner, 0, __ATOMIC_RELAXED);
+    alix_mutex_unlock(&g_atk_lock);
 }
 #endif

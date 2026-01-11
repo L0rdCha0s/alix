@@ -2,25 +2,78 @@
 
 #include "libc.h"
 
-html_node_t *html_node_create(html_node_type_t type)
+typedef struct html_arena_block
 {
-    html_node_t *node = (html_node_t *)calloc(1, sizeof(*node));
+    struct html_arena_block *next;
+    size_t used;
+    size_t capacity;
+    unsigned char data[];
+} html_arena_block_t;
+
+enum
+{
+    HTML_ARENA_BLOCK_SIZE = 32768
+};
+
+void *html_doc_alloc(html_document_t *doc, size_t size)
+{
+    if (!doc || size == 0)
+    {
+        return NULL;
+    }
+    size_t align = sizeof(void *);
+    size_t padded = (size + align - 1u) & ~(align - 1u);
+
+    html_arena_block_t *block = (html_arena_block_t *)doc->arena_blocks;
+    if (!block || block->capacity - block->used < padded)
+    {
+        size_t capacity = HTML_ARENA_BLOCK_SIZE;
+        if (padded > capacity)
+        {
+            capacity = padded;
+        }
+        html_arena_block_t *next = (html_arena_block_t *)malloc(sizeof(*next) + capacity);
+        if (!next)
+        {
+            return NULL;
+        }
+        next->next = (html_arena_block_t *)doc->arena_blocks;
+        next->used = 0;
+        next->capacity = capacity;
+        doc->arena_blocks = (struct html_arena_block *)next;
+        block = next;
+    }
+
+    void *ptr = block->data + block->used;
+    block->used += padded;
+    memset(ptr, 0, size);
+    return ptr;
+}
+
+html_node_t *html_node_create(html_document_t *doc, html_node_type_t type)
+{
+    html_node_t *node = (html_node_t *)html_doc_alloc(doc, sizeof(*node));
     if (!node)
     {
         return NULL;
     }
+    node->doc = doc;
     node->type = type;
     return node;
 }
 
-void html_attr_free_list(html_attr_t *attr)
+void html_attr_free_list(html_document_t *doc, html_attr_t *attr)
 {
+    bool use_arena = doc && doc->arena_blocks;
     while (attr)
     {
         html_attr_t *next = attr->next;
-        free(attr->name);
-        free(attr->value);
-        free(attr);
+        if (!use_arena)
+        {
+            free(attr->name);
+            free(attr->value);
+            free(attr);
+        }
         attr = next;
     }
 }
@@ -55,6 +108,7 @@ void html_document_destroy(html_document_t *doc)
 
     html_node_t *root = doc->root;
     doc->root = NULL;
+    bool use_arena = doc->arena_blocks != NULL;
 
     typedef struct
     {
@@ -119,14 +173,35 @@ void html_document_destroy(html_document_t *doc)
             continue;
         }
 
-        html_attr_free_list(node->attrs);
-        free(node->name);
-        free(node->text);
-        free(node->class_tokens);
-        free(node);
+        html_attr_free_list(doc, node->attrs);
+        if (node->class_tokens)
+        {
+            if (!use_arena || node->doc == NULL)
+            {
+                free(node->class_tokens);
+            }
+            node->class_tokens = NULL;
+        }
+        if (!use_arena)
+        {
+            free(node->name);
+            free(node->text);
+            free(node);
+        }
     }
 
     free(stack);
+    if (use_arena)
+    {
+        html_arena_block_t *block = (html_arena_block_t *)doc->arena_blocks;
+        while (block)
+        {
+            html_arena_block_t *next = block->next;
+            free(block);
+            block = next;
+        }
+        doc->arena_blocks = NULL;
+    }
     free(doc);
 }
 

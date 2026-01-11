@@ -503,25 +503,8 @@ static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint)
             return glyph;
         }
 
-        size_t alpha_bytes = (size_t)bitmap.stride * (size_t)bitmap.height;
-        uint8_t *alpha = NULL;
-        if (alpha_bytes > 0)
-        {
-            alpha = (uint8_t *)malloc(alpha_bytes);
-            if (!alpha)
-            {
-                ttf_bitmap_destroy(&bitmap);
-                return NULL;
-            }
-            for (int row = 0; row < bitmap.height; ++row)
-            {
-                memcpy(alpha + (size_t)row * bitmap.stride,
-                       bitmap.pixels + (size_t)row * bitmap.stride,
-                       (size_t)bitmap.stride);
-            }
-        }
-
-        glyph->alpha = alpha;
+        glyph->alpha = bitmap.pixels;
+        bitmap.pixels = NULL;
         glyph->width = bitmap.width;
         glyph->height = bitmap.height;
         glyph->stride = bitmap.stride;
@@ -599,25 +582,8 @@ static atk_font_glyph_t *atk_font_get_glyph(uint32_t codepoint)
         return glyph;
     }
 
-    size_t alpha_bytes = (size_t)bitmap.stride * (size_t)bitmap.height;
-    uint8_t *alpha = NULL;
-    if (alpha_bytes > 0)
-    {
-        alpha = (uint8_t *)malloc(alpha_bytes);
-        if (!alpha)
-        {
-            ttf_bitmap_destroy(&bitmap);
-            return NULL;
-        }
-        for (int row = 0; row < bitmap.height; ++row)
-        {
-            memcpy(alpha + (size_t)row * bitmap.stride,
-                   bitmap.pixels + (size_t)row * bitmap.stride,
-                   (size_t)bitmap.stride);
-        }
-    }
-
-    glyph->alpha = alpha;
+    glyph->alpha = bitmap.pixels;
+    bitmap.pixels = NULL;
     glyph->width = bitmap.width;
     glyph->height = bitmap.height;
     glyph->stride = bitmap.stride;

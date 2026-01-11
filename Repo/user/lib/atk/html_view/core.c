@@ -240,14 +240,22 @@ void html_view_render_cache_clear(html_view_render_cache_t *cache)
         return;
     }
 
+    char **owned_text = cache->owned_text;
+    size_t owned_text_cap = cache->owned_text_cap;
+    html_view_op_t *ops = cache->ops;
+    size_t op_cap = cache->op_cap;
+    size_t *fixed_ops = cache->fixed_ops;
+    size_t fixed_cap = cache->fixed_cap;
+    html_view_anchor_t *anchors = cache->anchors;
+    size_t anchor_cap = cache->anchor_cap;
+    html_view_tile_t *tiles = cache->tiles;
+    size_t tile_count = cache->tile_count;
+    size_t tile_used = cache->tile_used;
+
     for (size_t i = 0; i < cache->owned_text_count; ++i)
     {
         free(cache->owned_text[i]);
     }
-    free(cache->owned_text);
-    cache->owned_text = NULL;
-    cache->owned_text_count = 0;
-    cache->owned_text_cap = 0;
 
     if (cache->ops)
     {
@@ -261,27 +269,22 @@ void html_view_render_cache_clear(html_view_render_cache_t *cache)
         }
     }
 
-    for (size_t i = 0; i < cache->tile_count; ++i)
+    for (size_t i = 0; i < tile_used; ++i)
     {
-        free(cache->tiles[i].ops);
-        cache->tiles[i].ops = NULL;
         cache->tiles[i].count = 0;
-        cache->tiles[i].cap = 0;
     }
 
-    free(cache->anchors);
-    cache->anchors = NULL;
-    cache->anchor_count = 0;
-    cache->anchor_cap = 0;
-
-    free(cache->fixed_ops);
-    cache->fixed_ops = NULL;
-    cache->fixed_count = 0;
-    cache->fixed_cap = 0;
-
-    free(cache->tiles);
-    free(cache->ops);
     memset(cache, 0, sizeof(*cache));
+    cache->owned_text = owned_text;
+    cache->owned_text_cap = owned_text_cap;
+    cache->ops = ops;
+    cache->op_cap = op_cap;
+    cache->fixed_ops = fixed_ops;
+    cache->fixed_cap = fixed_cap;
+    cache->anchors = anchors;
+    cache->anchor_cap = anchor_cap;
+    cache->tiles = tiles;
+    cache->tile_count = tile_count;
 }
 
 static bool html_view_render_cache_ensure_tiles(html_view_render_cache_t *cache, size_t needed)

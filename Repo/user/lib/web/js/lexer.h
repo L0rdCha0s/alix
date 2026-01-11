@@ -81,6 +81,7 @@ typedef struct
     char *text;
     size_t length;
     bool line_terminator;
+    bool text_owned;
 } js_token_t;
 
 typedef struct
@@ -88,11 +89,12 @@ typedef struct
     const char *source;
     const char *cur;
     size_t offset;
+    js_arena_t *arena;
 } js_lexer_t;
 
 void js_token_destroy(js_token_t *tok);
 char *js_token_take_text(js_token_t *tok);
-void js_lexer_init(js_lexer_t *lex, const char *source);
+void js_lexer_init(js_lexer_t *lex, const char *source, js_arena_t *arena);
 bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out);
 
 #endif /* WEB_JS_LEXER_H */

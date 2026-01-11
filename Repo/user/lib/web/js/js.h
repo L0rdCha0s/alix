@@ -190,6 +190,7 @@ typedef enum
 
 typedef struct js_expr js_expr_t;
 typedef struct js_stmt js_stmt_t;
+struct js_arena_block;
 
 typedef enum
 {
@@ -520,6 +521,7 @@ typedef struct
 {
     js_stmt_t **statements;
     size_t count;
+    struct js_arena_block *arena_blocks;
 } js_program_t;
 
 js_program_t *js_parse(const char *source, js_parse_error_t *error_out);

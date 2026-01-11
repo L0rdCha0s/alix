@@ -13,6 +13,17 @@ static bool browser_on_resize_event(uint32_t width, uint32_t height, void *conte
     app->window->width = (int)width;
     app->window->height = (int)height;
     atk_window_request_layout(app->window);
+    if (app->viewer)
+    {
+        uint64_t load_id = 0;
+        browser_lock_enter(app, &app->lock, "app_lock");
+        load_id = app->active_load_id;
+        browser_lock_exit(app, &app->lock, "app_lock");
+        if (load_id != 0)
+        {
+            (void)browser_load_queue_push(app, BROWSER_LOAD_JOB_REBUILD, load_id, NULL);
+        }
+    }
     return true;
 }
 
@@ -28,6 +39,7 @@ int main(void)
     alix_mutex_init(&app->debug_lock);
     alix_mutex_init(&app->decode_lock);
     alix_mutex_init(&app->resource_lock);
+    alix_mutex_init(&app->load_lock);
 
     if (!atk_user_window_open_with_flags(&app->remote,
                                          "atk_browser",
@@ -47,6 +59,10 @@ int main(void)
         atk_user_close(&app->remote);
         free(app);
         return 1;
+    }
+    if (!browser_html_worker_start(app))
+    {
+        printf("atk_browser: failed to start html worker\n");
     }
     if (!browser_resource_worker_start(app))
     {
@@ -78,29 +94,7 @@ int main(void)
     app->active_load_id = 0;
     browser_lock_exit(app, &app->lock, "app_lock");
 
-    alix_thread_t join_threads[BROWSER_MAX_LOAD_THREADS];
-    size_t join_count = 0;
-    browser_lock_enter(app, &app->lock, "app_lock");
-    join_count = app->load_thread_count;
-    if (join_count > BROWSER_MAX_LOAD_THREADS)
-    {
-        join_count = BROWSER_MAX_LOAD_THREADS;
-    }
-    for (size_t i = 0; i < join_count; ++i)
-    {
-        join_threads[i] = app->load_threads[i];
-    }
-    app->load_thread_count = 0;
-    browser_lock_exit(app, &app->lock, "app_lock");
-
-    for (size_t i = 0; i < join_count; ++i)
-    {
-        if (join_threads[i] != 0)
-        {
-            (void)alix_thread_join(join_threads[i], NULL);
-        }
-    }
-
+    browser_html_worker_stop(app);
     browser_resource_worker_stop(app);
 
     browser_ui_event_t ev = {0};

@@ -35,6 +35,10 @@ void browser_ui_event_free_payload(browser_ui_event_t *ev)
             free(ev->u.doc_ready.final_url);
             ev->u.doc_ready.final_url = NULL;
             break;
+        case BROWSER_UI_EVENT_NAV_UPDATE:
+            free(ev->u.nav_update.final_url);
+            ev->u.nav_update.final_url = NULL;
+            break;
         case BROWSER_UI_EVENT_ERROR:
             free(ev->u.error.message);
             ev->u.error.message = NULL;
@@ -100,6 +104,94 @@ bool browser_ui_event_enqueue(browser_app_t *app, const browser_ui_event_t *ev)
     }
     browser_lock_exit(app, &app->lock, "app_lock");
     return ok;
+}
+
+bool browser_load_queue_push(browser_app_t *app, browser_load_job_kind_t kind, uint64_t load_id, char *url_text)
+{
+    if (!app)
+    {
+        free(url_text);
+        return false;
+    }
+
+    browser_load_request_t *job = (browser_load_request_t *)calloc(1, sizeof(*job));
+    if (!job)
+    {
+        free(url_text);
+        return false;
+    }
+    job->kind = kind;
+    job->load_id = load_id;
+    job->url_text = url_text;
+
+    browser_lock_enter(app, &app->load_lock, "load_lock");
+    if (app->load_queue.tail)
+    {
+        app->load_queue.tail->next = job;
+    }
+    else
+    {
+        app->load_queue.head = job;
+    }
+    app->load_queue.tail = job;
+    app->load_queue.count++;
+    browser_lock_exit(app, &app->load_lock, "load_lock");
+    return true;
+}
+
+browser_load_request_t *browser_load_queue_pop(browser_app_t *app)
+{
+    if (!app)
+    {
+        return NULL;
+    }
+
+    browser_load_request_t *job = NULL;
+    browser_lock_enter(app, &app->load_lock, "load_lock");
+    job = app->load_queue.head;
+    if (job)
+    {
+        app->load_queue.head = job->next;
+        if (!app->load_queue.head)
+        {
+            app->load_queue.tail = NULL;
+        }
+        if (app->load_queue.count > 0)
+        {
+            app->load_queue.count--;
+        }
+    }
+    browser_lock_exit(app, &app->load_lock, "load_lock");
+
+    if (job)
+    {
+        job->next = NULL;
+    }
+    return job;
+}
+
+void browser_load_queue_clear(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+
+    browser_load_request_t *job = NULL;
+    browser_lock_enter(app, &app->load_lock, "load_lock");
+    job = app->load_queue.head;
+    app->load_queue.head = NULL;
+    app->load_queue.tail = NULL;
+    app->load_queue.count = 0;
+    browser_lock_exit(app, &app->load_lock, "load_lock");
+
+    while (job)
+    {
+        browser_load_request_t *next = job->next;
+        free(job->url_text);
+        free(job);
+        job = next;
+    }
 }
 
 bool browser_ui_event_dequeue(browser_app_t *app, browser_ui_event_t *out)

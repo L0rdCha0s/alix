@@ -60,6 +60,7 @@ typedef struct
 typedef enum
 {
     BROWSER_UI_EVENT_DOC_READY = 0,
+    BROWSER_UI_EVENT_NAV_UPDATE,
     BROWSER_UI_EVENT_ERROR,
     BROWSER_UI_EVENT_CSS_APPEND,
     BROWSER_UI_EVENT_SCRIPT_APPEND,
@@ -80,6 +81,10 @@ typedef struct
             html_document_t *doc;
             char *final_url;
         } doc_ready;
+        struct
+        {
+            char *final_url;
+        } nav_update;
         struct
         {
             char *message;
@@ -160,6 +165,27 @@ typedef struct
 
 typedef enum
 {
+    BROWSER_LOAD_JOB_URL = 0,
+    BROWSER_LOAD_JOB_REBUILD
+} browser_load_job_kind_t;
+
+typedef struct browser_load_request
+{
+    browser_load_job_kind_t kind;
+    uint64_t load_id;
+    char *url_text;
+    struct browser_load_request *next;
+} browser_load_request_t;
+
+typedef struct
+{
+    browser_load_request_t *head;
+    browser_load_request_t *tail;
+    size_t count;
+} browser_load_queue_t;
+
+typedef enum
+{
     BROWSER_RESOURCE_TRACK_NEW = 0,
     BROWSER_RESOURCE_TRACK_DUP,
     BROWSER_RESOURCE_TRACK_ERROR
@@ -189,8 +215,11 @@ typedef struct browser_app
     uint64_t next_load_id;
     uint64_t active_load_id;
 
-    alix_thread_t load_threads[BROWSER_MAX_LOAD_THREADS];
-    size_t load_thread_count;
+    alix_mutex_t load_lock;
+    alix_thread_t html_thread;
+    uint32_t html_thread_stop;
+    browser_load_queue_t load_queue;
+
     alix_thread_t resource_thread;
     uint32_t resource_thread_stop;
     browser_resource_queue_t resource_queue;
@@ -274,11 +303,14 @@ void browser_ui_event_free_payload(browser_ui_event_t *ev);
 bool browser_ui_event_enqueue(browser_app_t *app, const browser_ui_event_t *ev);
 bool browser_ui_event_dequeue(browser_app_t *app, browser_ui_event_t *out);
 bool browser_load_is_active(browser_app_t *app, uint64_t load_id);
-void browser_track_load_thread(browser_app_t *app, alix_thread_t thread);
-void browser_untrack_load_thread(browser_app_t *app, alix_thread_t thread);
+bool browser_load_queue_push(browser_app_t *app, browser_load_job_kind_t kind, uint64_t load_id, char *url_text);
+browser_load_request_t *browser_load_queue_pop(browser_app_t *app);
+void browser_load_queue_clear(browser_app_t *app);
 void browser_app_css_reset(browser_app_t *app);
 bool browser_app_css_append(browser_app_t *app, const char *data, size_t len);
 bool browser_loader_start(browser_app_t *app, const char *url_text);
+bool browser_html_worker_start(browser_app_t *app);
+void browser_html_worker_stop(browser_app_t *app);
 bool browser_script_event_init(browser_ui_event_t *ev,
                                uint64_t load_id,
                                const char *src,

@@ -9,10 +9,14 @@ void js_token_destroy(js_token_t *tok)
     {
         return;
     }
-    free(tok->text);
+    if (tok->text && tok->text_owned)
+    {
+        free(tok->text);
+    }
     tok->text = NULL;
     tok->length = 0;
     tok->line_terminator = false;
+    tok->text_owned = false;
 }
 
 char *js_token_take_text(js_token_t *tok)
@@ -24,10 +28,11 @@ char *js_token_take_text(js_token_t *tok)
     char *text = tok->text;
     tok->text = NULL;
     tok->length = 0;
+    tok->text_owned = false;
     return text;
 }
 
-void js_lexer_init(js_lexer_t *lex, const char *source)
+void js_lexer_init(js_lexer_t *lex, const char *source, js_arena_t *arena)
 {
     if (!lex)
     {
@@ -36,6 +41,24 @@ void js_lexer_init(js_lexer_t *lex, const char *source)
     lex->source = source ? source : "";
     lex->cur = lex->source;
     lex->offset = 0;
+    lex->arena = arena;
+}
+
+static char *js_lexer_strdup_len(js_lexer_t *lex, const char *src, size_t len, bool *out_owned)
+{
+    if (out_owned)
+    {
+        *out_owned = true;
+    }
+    if (lex && lex->arena)
+    {
+        if (out_owned)
+        {
+            *out_owned = false;
+        }
+        return js_arena_strdup_len(lex->arena, src, len);
+    }
+    return js_strdup_len(src, len);
 }
 
 static char js_lexer_peek(const js_lexer_t *lex)
@@ -254,9 +277,10 @@ static bool js_lexer_read_identifier(js_lexer_t *lex, js_token_t *out)
     out->number = 0.0;
     out->length = 0;
     out->text = NULL;
+    out->text_owned = false;
     if (kw == JS_TOKEN_IDENTIFIER)
     {
-        out->text = js_strdup_len(start, len);
+        out->text = js_lexer_strdup_len(lex, start, len, &out->text_owned);
         out->length = out->text ? len : 0;
         if (!out->text)
         {
@@ -313,11 +337,12 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
             out->number = value;
             out->length = 0;
             out->text = NULL;
+            out->text_owned = false;
             out->type = JS_TOKEN_NUMBER;
             if (is_bigint)
             {
                 size_t len = (size_t)((p - start) - 1);
-                out->text = js_strdup_len(start, len);
+                out->text = js_lexer_strdup_len(lex, start, len, &out->text_owned);
                 out->length = out->text ? len : 0;
                 out->type = JS_TOKEN_BIGINT;
             }
@@ -359,11 +384,12 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
             out->number = value;
             out->length = 0;
             out->text = NULL;
+            out->text_owned = false;
             out->type = JS_TOKEN_NUMBER;
             if (is_bigint)
             {
                 size_t len = (size_t)((p - start) - 1);
-                out->text = js_strdup_len(start, len);
+                out->text = js_lexer_strdup_len(lex, start, len, &out->text_owned);
                 out->length = out->text ? len : 0;
                 out->type = JS_TOKEN_BIGINT;
             }
@@ -405,11 +431,12 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
             out->number = value;
             out->length = 0;
             out->text = NULL;
+            out->text_owned = false;
             out->type = JS_TOKEN_NUMBER;
             if (is_bigint)
             {
                 size_t len = (size_t)((p - start) - 1);
-                out->text = js_strdup_len(start, len);
+                out->text = js_lexer_strdup_len(lex, start, len, &out->text_owned);
                 out->length = out->text ? len : 0;
                 out->type = JS_TOKEN_BIGINT;
             }
@@ -561,10 +588,11 @@ static bool js_lexer_read_number(js_lexer_t *lex, js_token_t *out, bool leading_
     out->number = value;
     out->text = NULL;
     out->length = 0;
+    out->text_owned = false;
     if (is_bigint)
     {
         size_t len = (size_t)((p - start) - 1);
-        out->text = js_strdup_len(start, len);
+        out->text = js_lexer_strdup_len(lex, start, len, &out->text_owned);
         out->length = out->text ? len : 0;
         out->type = JS_TOKEN_BIGINT;
         return out->text != NULL;
@@ -598,7 +626,8 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
 
     size_t raw_len = (size_t)(p - start);
     size_t cap = raw_len * 4 + 1;
-    char *buf = (char *)malloc(cap);
+    char *buf = lex && lex->arena ? (char *)js_arena_alloc(lex->arena, cap) : (char *)malloc(cap);
+    bool buf_owned = !(lex && lex->arena);
     if (!buf)
     {
         js_parse_error_set(error_out, start_offset, "allocation failed");
@@ -634,7 +663,10 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                     int lo = js_hex_value(s[1]);
                     if (hi < 0 || lo < 0)
                     {
-                        free(buf);
+                        if (buf_owned)
+                        {
+                            free(buf);
+                        }
                         js_parse_error_set(error_out, start_offset, "invalid hex escape");
                         return false;
                     }
@@ -654,7 +686,10 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                             int hv = js_hex_value(*s);
                             if (hv < 0)
                             {
-                                free(buf);
+                                if (buf_owned)
+                                {
+                                    free(buf);
+                                }
                                 js_parse_error_set(error_out, start_offset, "invalid unicode escape");
                                 return false;
                             }
@@ -664,14 +699,20 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                         }
                         if (s >= p || *s != '}' || digits == 0)
                         {
-                            free(buf);
+                            if (buf_owned)
+                            {
+                                free(buf);
+                            }
                             js_parse_error_set(error_out, start_offset, "invalid unicode escape");
                             return false;
                         }
                         s++;
                         if (!js_utf8_append(buf, cap, &out_len, value))
                         {
-                            free(buf);
+                            if (buf_owned)
+                            {
+                                free(buf);
+                            }
                             js_parse_error_set(error_out, start_offset, "allocation failed");
                             return false;
                         }
@@ -683,7 +724,10 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                     int v3 = js_hex_value(s[3]);
                     if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0)
                     {
-                        free(buf);
+                        if (buf_owned)
+                        {
+                            free(buf);
+                        }
                         js_parse_error_set(error_out, start_offset, "invalid unicode escape");
                         return false;
                     }
@@ -691,7 +735,10 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                     s += 4;
                     if (!js_utf8_append(buf, cap, &out_len, value))
                     {
-                        free(buf);
+                        if (buf_owned)
+                        {
+                            free(buf);
+                        }
                         js_parse_error_set(error_out, start_offset, "allocation failed");
                         return false;
                     }
@@ -702,7 +749,10 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
         }
         if (out_len + 1 > cap)
         {
-            free(buf);
+            if (buf_owned)
+            {
+                free(buf);
+            }
             js_parse_error_set(error_out, start_offset, "allocation failed");
             return false;
         }
@@ -718,6 +768,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
     out->number = 0.0;
     out->text = buf;
     out->length = out_len;
+    out->text_owned = buf_owned;
     return true;
 }
 
@@ -734,6 +785,7 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
     out->text = NULL;
     out->length = 0;
     out->line_terminator = false;
+    out->text_owned = false;
 
     bool saw_line_terminator = false;
     if (!js_lexer_skip_ws_and_comments(lex, error_out, &saw_line_terminator))

@@ -95,6 +95,23 @@ void atk_html_view_set_js_enabled(atk_widget_t *view, bool enabled);
 void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled);
 
 /*
+ * Enable or disable external render cache builds.
+ *
+ * When enabled, callers must rebuild the render cache explicitly.
+ */
+void atk_html_view_enable_external_render(atk_widget_t *view, bool enabled);
+
+/*
+ * Rebuild the render cache immediately on the caller thread.
+ */
+bool atk_html_view_rebuild_cache(atk_widget_t *view);
+
+/*
+ * Rebuild the render cache if a render request is pending and debounce has expired.
+ */
+bool atk_html_view_rebuild_cache_if_pending(atk_widget_t *view);
+
+/*
  * Poll for JS-driven DOM changes that require a redraw.
  *
  * Call this from the UI thread (e.g. your main loop tick) to propagate

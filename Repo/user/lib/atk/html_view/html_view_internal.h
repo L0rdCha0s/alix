@@ -232,7 +232,7 @@ typedef struct
 
 typedef struct html_view_rule_bucket
 {
-    char *tag;
+    const char *tag;
     size_t tag_len;
     css_rule_t **rules;
     size_t count;
@@ -349,6 +349,7 @@ typedef struct
     volatile uint32_t render_cache_dirty;
     volatile uint32_t stylesheet_dirty;
     bool render_async;
+    bool render_external;
     alix_thread_t js_thread;
     volatile uint32_t js_stop;
     volatile uint32_t js_dirty;

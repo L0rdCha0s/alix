@@ -12,6 +12,7 @@ int errno = 0;
 #define SIZE_MAX_VALUE ((size_t)-1)
 #define LIBC_MAX_PASSWD_BYTES (64u * 1024u)
 #define USER_HEAP_LARGE_THRESHOLD ((size_t)(64u * 1024u * 1024u))
+#define ENABLE_USER_MEM_DEBUG_LOGS 1
 
 typedef struct heap_block
 {
@@ -85,11 +86,26 @@ static void user_heap_log(const char *msg, uintptr_t value)
                   msg ? msg : "",
                   (unsigned long long)((uint64_t)value));
 }
+
+static void user_heap_log_caller(const char *msg, uintptr_t value, uintptr_t caller)
+{
+    serial_printf("[uheap] %s0x%016llX caller=0x%016llX\n",
+                  msg ? msg : "",
+                  (unsigned long long)((uint64_t)value),
+                  (unsigned long long)((uint64_t)caller));
+}
 #else
 static void user_heap_log(const char *msg, uintptr_t value)
 {
     (void)msg;
     (void)value;
+}
+
+static void user_heap_log_caller(const char *msg, uintptr_t value, uintptr_t caller)
+{
+    (void)msg;
+    (void)value;
+    (void)caller;
 }
 #endif
 
@@ -2133,7 +2149,8 @@ int snprintf(char *buf, size_t size, const char *format, ...)
 
 void *malloc(size_t size)
 {
-    user_heap_log("malloc req=", size);
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    user_heap_log_caller("malloc req=", size, caller);
     if (size >= USER_HEAP_LARGE_THRESHOLD)
     {
         serial_printf("[uheap] large malloc size=0x%016llX caller=0x%016llX",
@@ -2143,13 +2160,14 @@ void *malloc(size_t size)
     user_heap_lock_acquire();
     void *ptr = malloc_locked(size);
     user_heap_lock_release();
-    user_heap_log("malloc ptr=", (uintptr_t)ptr);
+    user_heap_log_caller("malloc ptr=", (uintptr_t)ptr, caller);
     return ptr;
 }
 
 void free(void *ptr)
 {
-    user_heap_log("free ptr=", (uintptr_t)ptr);
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    user_heap_log_caller("free ptr=", (uintptr_t)ptr, caller);
     user_heap_lock_acquire();
     free_locked(ptr);
     user_heap_lock_release();
@@ -2157,8 +2175,9 @@ void free(void *ptr)
 
 void *realloc(void *ptr, size_t size)
 {
-    user_heap_log("realloc ptr=", (uintptr_t)ptr);
-    user_heap_log("realloc size=", size);
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    user_heap_log_caller("realloc ptr=", (uintptr_t)ptr, caller);
+    user_heap_log_caller("realloc size=", size, caller);
     if (size >= USER_HEAP_LARGE_THRESHOLD)
     {
         serial_printf("[uheap] large realloc ptr=0x%016llX size=0x%016llX caller=0x%016llX",
@@ -2174,8 +2193,9 @@ void *realloc(void *ptr, size_t size)
 
 void *calloc(size_t count, size_t size)
 {
-    user_heap_log("calloc count=", count);
-    user_heap_log("calloc size=", size);
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    user_heap_log_caller("calloc count=", count, caller);
+    user_heap_log_caller("calloc size=", size, caller);
     if (count != 0 && size > SIZE_MAX_VALUE / count)
     {
         return NULL;

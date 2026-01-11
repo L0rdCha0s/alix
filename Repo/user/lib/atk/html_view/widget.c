@@ -1199,9 +1199,18 @@ static void html_view_render_stop(atk_html_view_priv_t *priv)
 
 void html_view_render_request(atk_html_view_priv_t *priv)
 {
-    if (!priv || !priv->render_async)
+    if (!priv || (!priv->render_async && !priv->render_external))
     {
         return;
+    }
+    if (priv->render_external)
+    {
+        uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+        uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+        if (seq != done)
+        {
+            return;
+        }
     }
     void *caller = __builtin_return_address(0);
     uint32_t seq = __atomic_fetch_add(&priv->render_seq, 1u, __ATOMIC_ACQ_REL) + 1u;
@@ -1522,7 +1531,7 @@ static void html_view_draw_cb(const atk_state_t *state,
         html_view_invalidate(widget);
         return;
     }
-    if (priv->render_async)
+    if (priv->render_async || priv->render_external)
     {
         html_view_render_cache_t *cache = &priv->render_cache;
         bool cache_dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE) != 0u;
@@ -1568,7 +1577,7 @@ static void html_view_draw_cb(const atk_state_t *state,
             return;
         }
     }
-    if (!priv->render_async)
+    if (!priv->render_async && !priv->render_external)
     {
         html_view_stylesheet_rebuild_if_needed(priv);
     }
@@ -1882,18 +1891,18 @@ static void html_view_draw_cb(const atk_state_t *state,
     int doc_origin_local_x = body_content_x - abs_x;
     int doc_origin_local_y = body_content_y0 - abs_y;
     bool cache_dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE) != 0u;
-    bool cache_matches = cache->valid &&
-                         cache->doc == priv->doc &&
-                         cache->sheet == priv->sheet &&
-                         cache->viewport_w == viewport_w &&
-                         cache->viewport_h == viewport_h &&
-                         cache->body_w == body_content_w &&
-                         cache->base_font_px == base_font_px &&
-                         cache->base_line_height == base_line_height;
+    bool cache_geom_matches = cache->valid &&
+                              cache->doc == priv->doc &&
+                              cache->viewport_w == viewport_w &&
+                              cache->viewport_h == viewport_h &&
+                              cache->body_w == body_content_w &&
+                              cache->base_font_px == base_font_px &&
+                              cache->base_line_height == base_line_height;
+    bool cache_matches = cache_geom_matches && cache->sheet == priv->sheet;
 
     if (!cache_matches || cache_dirty)
     {
-        if (priv->render_async)
+        if (priv->render_async || priv->render_external)
         {
             html_view_render_request(priv);
         }
@@ -1901,15 +1910,21 @@ static void html_view_draw_cb(const atk_state_t *state,
         {
             (void)html_view_render_cache_rebuild_locked((atk_widget_t *)widget, priv);
         }
-        cache_matches = cache->valid &&
-                        cache->doc == priv->doc &&
-                        cache->sheet == priv->sheet &&
-                        cache->viewport_w == viewport_w &&
-                        cache->viewport_h == viewport_h &&
-                        cache->body_w == body_content_w &&
-                        cache->base_font_px == base_font_px &&
-                        cache->base_line_height == base_line_height;
+        cache_geom_matches = cache->valid &&
+                             cache->doc == priv->doc &&
+                             cache->viewport_w == viewport_w &&
+                             cache->viewport_h == viewport_h &&
+                             cache->body_w == body_content_w &&
+                             cache->base_font_px == base_font_px &&
+                             cache->base_line_height == base_line_height;
+        cache_matches = cache_geom_matches && cache->sheet == priv->sheet;
         cache_dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE) != 0u;
+    }
+
+    if (priv->render_external && cache_geom_matches && cache->valid)
+    {
+        cache_dirty = false;
+        cache_matches = true;
     }
 
     cache->doc_origin_local_x = doc_origin_local_x;
@@ -1920,7 +1935,7 @@ static void html_view_draw_cb(const atk_state_t *state,
     if (cache_empty && body_has_renderable)
     {
         cache_valid = false;
-        if (priv->render_async && !cache_dirty)
+        if ((priv->render_async || priv->render_external) && !cache_dirty)
         {
             html_view_render_request(priv);
         }
@@ -2020,7 +2035,8 @@ static void html_view_draw_cb(const atk_state_t *state,
                           __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE),
                           __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE));
         }
-        const char *msg = priv->render_async ? "Rendering...\n" : "Render cache unavailable.\n";
+        const char *msg = (priv->render_async || priv->render_external) ? "Rendering...\n"
+                                                                        : "Render cache unavailable.\n";
         html_view_draw_text(&ctx, msg, default_text, false, false);
         html_view_render_unlock(priv);
         return;
@@ -2171,6 +2187,7 @@ atk_widget_t *atk_window_add_html_view(atk_widget_t *window, int x, int y, int w
     priv->render_cache_dirty = 0;
     priv->stylesheet_dirty = 0;
     priv->render_async = false;
+    priv->render_external = false;
     html_view_js_init(priv);
 
     atk_list_node_t *child_node = atk_list_push_back(&wpriv->children, view);
@@ -2227,6 +2244,7 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
 
     html_view_js_stop(priv);
 
+    uint64_t ui_lock = atk_state_lock_acquire();
     html_view_dom_lock(priv);
     html_view_render_cache_mark_dirty(priv);
     priv->pressed_href = NULL;
@@ -2259,8 +2277,16 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     html_view_dom_bloom_mark_dirty(priv);
     priv->scroll_y = 0;
     html_view_stylesheet_mark_dirty(priv);
-    html_view_stylesheet_rebuild_if_needed(priv);
     html_view_controls_build(view, priv);
+    atk_state_lock_release(ui_lock);
+    if (priv->render_external)
+    {
+        html_view_stylesheet_rebuild_async_locked(priv);
+    }
+    else
+    {
+        html_view_stylesheet_rebuild_if_needed(priv);
+    }
     html_view_dom_unlock(priv);
     html_view_render_request(priv);
     html_view_invalidate(view);
@@ -2289,7 +2315,7 @@ bool atk_html_view_scroll_to_id(atk_widget_t *view, const char *id)
 
     if (!html_view_render_try_lock(priv))
     {
-        if (priv->render_async)
+        if (priv->render_async || priv->render_external)
         {
             html_view_render_request(priv);
         }
@@ -2300,7 +2326,7 @@ bool atk_html_view_scroll_to_id(atk_widget_t *view, const char *id)
     if (!cache->valid || cache->anchor_count == 0)
     {
         html_view_render_unlock(priv);
-        if (priv->render_async)
+        if (priv->render_async || priv->render_external)
         {
             html_view_render_request(priv);
         }
@@ -2424,12 +2450,12 @@ static bool html_view_set_external_stylesheet_impl(atk_widget_t *view, const cha
     {
         if (!html_view_dom_try_lock(priv))
         {
-            if (!priv->render_async)
+            if (!priv->render_async && !priv->render_external)
             {
                 static uint64_t last_log_ms = 0;
                 if (html_view_log_throttle(&last_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
                 {
-                    serial_printf("[html_view] external_css_try_lock_busy view=%p render_async=0",
+                    serial_printf("[html_view] external_css_try_lock_busy view=%p render_async=0 render_external=0",
                                   (void *)view);
                 }
                 return false;
@@ -2482,7 +2508,7 @@ static bool html_view_set_external_stylesheet_impl(atk_widget_t *view, const cha
     }
 
     html_view_stylesheet_mark_dirty(priv);
-    if (!priv->render_async)
+    if (!priv->render_async && !priv->render_external)
     {
         html_view_stylesheet_rebuild_if_needed(priv);
     }
@@ -2582,6 +2608,10 @@ void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled)
     priv->render_async = enabled;
     if (enabled)
     {
+        priv->render_external = false;
+    }
+    if (enabled)
+    {
         html_view_render_start(view, priv);
         html_view_render_request(priv);
     }
@@ -2590,6 +2620,101 @@ void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled)
         html_view_render_stop(priv);
         __atomic_store_n(&priv->render_redraw_pending, 0u, __ATOMIC_RELEASE);
     }
+}
+
+void atk_html_view_enable_external_render(atk_widget_t *view, bool enabled)
+{
+    if (!view)
+    {
+        return;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->render_external == enabled)
+    {
+        return;
+    }
+    priv->render_external = enabled;
+    if (enabled && priv->render_async)
+    {
+        priv->render_async = false;
+        html_view_render_stop(priv);
+        __atomic_store_n(&priv->render_redraw_pending, 0u, __ATOMIC_RELEASE);
+    }
+}
+
+bool atk_html_view_rebuild_cache(atk_widget_t *view)
+{
+    if (!view)
+    {
+        return false;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return false;
+    }
+    html_view_dom_lock(priv);
+    if (priv->render_external)
+    {
+        html_view_stylesheet_rebuild_async_locked(priv);
+    }
+    else
+    {
+        html_view_stylesheet_rebuild_if_needed(priv);
+    }
+    if (!html_view_render_try_lock(priv))
+    {
+        html_view_dom_unlock(priv);
+        return false;
+    }
+
+    bool ok = html_view_render_cache_rebuild_locked(view, priv);
+    html_view_render_unlock(priv);
+    html_view_dom_unlock(priv);
+    if (ok)
+    {
+        uint32_t current = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+        __atomic_store_n(&priv->render_done_seq, current, __ATOMIC_RELEASE);
+        __atomic_store_n(&priv->render_redraw_pending, 1u, __ATOMIC_RELEASE);
+        html_view_invalidate(view);
+    }
+    return ok;
+}
+
+bool atk_html_view_rebuild_cache_if_pending(atk_widget_t *view)
+{
+    if (!view)
+    {
+        return false;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return false;
+    }
+
+    uint32_t target = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+    uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+    if (target == done)
+    {
+        return false;
+    }
+
+    uint64_t request_ms = __atomic_load_n(&priv->render_request_ms, __ATOMIC_ACQUIRE);
+    if (request_ms)
+    {
+        uint64_t now_ms = sys_time_millis();
+        if (now_ms - request_ms < HTML_VIEW_RENDER_DEBOUNCE_MS)
+        {
+            return false;
+        }
+    }
+
+    return atk_html_view_rebuild_cache(view);
 }
 
 bool atk_html_view_poll_js(atk_widget_t *view)

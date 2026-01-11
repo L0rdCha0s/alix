@@ -19,9 +19,16 @@ static css_media_env_t g_css_media_env = {0};
 
 typedef struct css_alloc_node
 {
-    void *ptr;
     struct css_alloc_node *next;
+    size_t used;
+    size_t capacity;
+    unsigned char data[];
 } css_alloc_node_t;
+
+enum
+{
+    CSS_SHEET_ARENA_BLOCK_SIZE = 32768
+};
 
 typedef enum
 {
@@ -178,39 +185,38 @@ void css_perf_dump(void)
            (unsigned long long)g_css_perf.deferred_resolve_ns);
 }
 
-static bool css_sheet_track_alloc(css_stylesheet_t *sheet, void *ptr)
-{
-    if (!sheet || !ptr)
-    {
-        return false;
-    }
-    css_alloc_node_t *node = (css_alloc_node_t *)malloc(sizeof(*node));
-    if (!node)
-    {
-        return false;
-    }
-    node->ptr = ptr;
-    node->next = sheet->allocations;
-    sheet->allocations = node;
-    return true;
-}
-
 static void *css_sheet_alloc(css_stylesheet_t *sheet, size_t size)
 {
     if (!sheet || size == 0)
     {
         return NULL;
     }
-    void *ptr = calloc(1, size);
-    if (!ptr)
+    size_t align = sizeof(void *);
+    size_t padded = (size + align - 1u) & ~(align - 1u);
+
+    css_alloc_node_t *block = sheet->allocations;
+    if (!block || block->capacity - block->used < padded)
     {
-        return NULL;
+        size_t capacity = CSS_SHEET_ARENA_BLOCK_SIZE;
+        if (padded > capacity)
+        {
+            capacity = padded;
+        }
+        css_alloc_node_t *next = (css_alloc_node_t *)malloc(sizeof(*next) + capacity);
+        if (!next)
+        {
+            return NULL;
+        }
+        next->next = sheet->allocations;
+        next->used = 0;
+        next->capacity = capacity;
+        sheet->allocations = next;
+        block = next;
     }
-    if (!css_sheet_track_alloc(sheet, ptr))
-    {
-        free(ptr);
-        return NULL;
-    }
+
+    void *ptr = block->data + block->used;
+    block->used += padded;
+    memset(ptr, 0, size);
     return ptr;
 }
 
@@ -409,22 +415,25 @@ static const char *css_scan_value_end_range(const char *p, const char *end)
     return p;
 }
 
-static char *css_strdup(const char *s)
+static char *css_sheet_strdup_lower(css_stylesheet_t *sheet, const char *start, const char *end)
 {
-    if (!s)
+    if (!sheet || !start || !end || end < start)
     {
         return NULL;
     }
-    size_t len = strlen(s);
-    char *out = (char *)malloc(len + 1);
+    size_t len = (size_t)(end - start);
+    char *out = (char *)css_sheet_alloc(sheet, len + 1);
     if (!out)
     {
         return NULL;
     }
-    memcpy(out, s, len + 1);
+    for (size_t i = 0; i < len; ++i)
+    {
+        out[i] = (char)tolower((unsigned char)start[i]);
+    }
+    out[len] = '\0';
     return out;
 }
-
 
 
 typedef struct css_dynstr
@@ -2496,23 +2505,20 @@ static bool css_append_rule(css_stylesheet_t *sheet,
         return true;
     }
 
-    css_rule_t *rule = (css_rule_t *)calloc(1, sizeof(*rule));
+    css_rule_t *rule = (css_rule_t *)css_sheet_alloc(sheet, sizeof(*rule));
     if (!rule)
     {
         return false;
     }
-    rule->selector = css_strdup_lower(selector_start, selector_end);
+    rule->selector = css_sheet_strdup_lower(sheet, selector_start, selector_end);
     if (!rule->selector)
     {
-        free(rule);
         return false;
     }
     if (style)
     {
         if (!css_style_copy(&rule->style, style))
         {
-            free(rule->selector);
-            free(rule);
             return false;
         }
     }
@@ -2521,8 +2527,6 @@ static bool css_append_rule(css_stylesheet_t *sheet,
         if (!css_style_copy(&rule->important_style, important_style))
         {
             css_style_release(&rule->style);
-            free(rule->selector);
-            free(rule);
             return false;
         }
     }
@@ -4097,8 +4101,6 @@ void css_stylesheet_destroy(css_stylesheet_t *sheet)
             free(rule->selector_cache->parts);
             free(rule->selector_cache);
         }
-        free(rule->selector);
-        free(rule);
         rule = next;
     }
     css_var_env_release(sheet->global_env);
@@ -4111,7 +4113,6 @@ void css_stylesheet_destroy(css_stylesheet_t *sheet)
     while (alloc)
     {
         css_alloc_node_t *next = alloc->next;
-        free(alloc->ptr);
         free(alloc);
         alloc = next;
     }

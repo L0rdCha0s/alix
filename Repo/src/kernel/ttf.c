@@ -37,26 +37,6 @@ typedef struct
     uint32_t group_count;
 } ttf_cmap12_t;
 
-typedef struct
-{
-    uint8_t *data;
-    size_t size;
-    uint16_t units_per_em;
-    int16_t ascent;
-    int16_t descent;
-    int16_t line_gap;
-    uint16_t num_glyphs;
-    uint16_t num_hmetrics;
-    int16_t index_to_loc_format;
-    const uint8_t *glyf_table;
-    uint32_t glyf_length;
-    const uint8_t *hmtx_table;
-    uint32_t hmtx_length;
-    uint32_t *glyph_offsets;
-    ttf_cmap4_t cmap4;
-    ttf_cmap12_t cmap12;
-} ttf_font_impl_t;
-
 static void ttf_log(const char *msg);
 static void ttf_log_tag(const char *prefix, uint32_t tag);
 static void ttf_log_u32(const char *prefix, uint32_t value);
@@ -92,6 +72,45 @@ typedef struct
     size_t count;
     size_t capacity;
 } ttf_edge_list_t;
+
+typedef struct
+{
+    ttf_edge_list_t edges;
+    ttf_point_t *work;
+    size_t work_cap;
+    ttf_point_t *processed;
+    size_t processed_cap;
+    uint16_t *end_points;
+    size_t end_points_cap;
+    uint8_t *flags;
+    size_t flags_cap;
+    ttf_point_t *points;
+    size_t points_cap;
+    ttf_edge_t *local_edges;
+    size_t local_edges_cap;
+    volatile uint8_t in_use;
+} ttf_glyph_scratch_t;
+
+typedef struct
+{
+    uint8_t *data;
+    size_t size;
+    uint16_t units_per_em;
+    int16_t ascent;
+    int16_t descent;
+    int16_t line_gap;
+    uint16_t num_glyphs;
+    uint16_t num_hmetrics;
+    int16_t index_to_loc_format;
+    const uint8_t *glyf_table;
+    uint32_t glyf_length;
+    const uint8_t *hmtx_table;
+    uint32_t hmtx_length;
+    uint32_t *glyph_offsets;
+    ttf_cmap4_t cmap4;
+    ttf_cmap12_t cmap12;
+    ttf_glyph_scratch_t scratch;
+} ttf_font_impl_t;
 
 static void ttf_tag_to_string(uint32_t tag, char out[5])
 {
@@ -277,6 +296,54 @@ static void ttf_edge_list_reset(ttf_edge_list_t *list)
     list->capacity = 0;
 }
 
+static void ttf_edge_list_clear(ttf_edge_list_t *list)
+{
+    if (!list)
+    {
+        return;
+    }
+    list->count = 0;
+}
+
+static bool ttf_scratch_reserve(void **ptr, size_t *cap, size_t needed, size_t elem_size)
+{
+    if (!ptr || !cap || elem_size == 0)
+    {
+        return false;
+    }
+    if (needed == 0)
+    {
+        return true;
+    }
+    if (needed > (((size_t)-1) / elem_size))
+    {
+        return false;
+    }
+    if (*cap >= needed)
+    {
+        return true;
+    }
+    size_t new_cap = *cap ? *cap : 16u;
+    while (new_cap < needed)
+    {
+        size_t next = new_cap * 2u;
+        if (next < new_cap)
+        {
+            new_cap = needed;
+            break;
+        }
+        new_cap = next;
+    }
+    void *next_ptr = realloc(*ptr, new_cap * elem_size);
+    if (!next_ptr)
+    {
+        return false;
+    }
+    *ptr = next_ptr;
+    *cap = new_cap;
+    return true;
+}
+
 static bool ttf_edge_list_add(ttf_edge_list_t *list,
                               int32_t x0,
                               int32_t y0,
@@ -326,6 +393,13 @@ static void ttf_font_impl_destroy(ttf_font_impl_t *impl)
     {
         free(impl->glyph_offsets);
     }
+    ttf_edge_list_reset(&impl->scratch.edges);
+    free(impl->scratch.work);
+    free(impl->scratch.processed);
+    free(impl->scratch.end_points);
+    free(impl->scratch.flags);
+    free(impl->scratch.points);
+    free(impl->scratch.local_edges);
     if (impl->data)
     {
         free(impl->data);
@@ -915,7 +989,8 @@ static bool ttf_emit_contour(const ttf_point_t *points,
                              int count,
                              ttf_edge_list_t *edges,
                              ttf_bounds_t *bounds,
-                             int32_t tolerance)
+                             int32_t tolerance,
+                             ttf_glyph_scratch_t *scratch)
 {
     if (count <= 0)
     {
@@ -923,10 +998,27 @@ static bool ttf_emit_contour(const ttf_point_t *points,
     }
 
     int max_points = count * 2 + 4;
-    ttf_point_t *work = (ttf_point_t *)malloc((size_t)max_points * sizeof(ttf_point_t));
-    if (!work)
+    ttf_point_t *work = NULL;
+    bool work_owned = false;
+    if (scratch)
     {
-        return false;
+        if (!ttf_scratch_reserve((void **)&scratch->work,
+                                 &scratch->work_cap,
+                                 (size_t)max_points,
+                                 sizeof(ttf_point_t)))
+        {
+            return false;
+        }
+        work = scratch->work;
+    }
+    else
+    {
+        work = (ttf_point_t *)malloc((size_t)max_points * sizeof(ttf_point_t));
+        if (!work)
+        {
+            return false;
+        }
+        work_owned = true;
     }
 
     int total = 0;
@@ -957,11 +1049,36 @@ static bool ttf_emit_contour(const ttf_point_t *points,
         work[total++] = insert;
     }
 
-    ttf_point_t *processed = (ttf_point_t *)malloc((size_t)(total * 2 + 2) * sizeof(ttf_point_t));
-    if (!processed)
+    ttf_point_t *processed = NULL;
+    bool processed_owned = false;
+    size_t processed_needed = (size_t)(total * 2 + 2);
+    if (scratch)
     {
-        free(work);
-        return false;
+        if (!ttf_scratch_reserve((void **)&scratch->processed,
+                                 &scratch->processed_cap,
+                                 processed_needed,
+                                 sizeof(ttf_point_t)))
+        {
+            if (work_owned)
+            {
+                free(work);
+            }
+            return false;
+        }
+        processed = scratch->processed;
+    }
+    else
+    {
+        processed = (ttf_point_t *)malloc(processed_needed * sizeof(ttf_point_t));
+        if (!processed)
+        {
+            if (work_owned)
+            {
+                free(work);
+            }
+            return false;
+        }
+        processed_owned = true;
     }
 
     int processed_count = 0;
@@ -989,8 +1106,14 @@ static bool ttf_emit_contour(const ttf_point_t *points,
         {
             if (!ttf_edge_list_add(edges, p0.x, p0.y, p1.x, p1.y, bounds))
             {
-                free(processed);
-                free(work);
+                if (processed_owned)
+                {
+                    free(processed);
+                }
+                if (work_owned)
+                {
+                    free(work);
+                }
                 return false;
             }
             idx += 1;
@@ -1000,16 +1123,28 @@ static bool ttf_emit_contour(const ttf_point_t *points,
             ttf_point_t p2 = processed[idx + 2];
             if (!ttf_flatten_quadratic(edges, bounds, &p0, &p1, &p2, tolerance, 0))
             {
-                free(processed);
-                free(work);
+                if (processed_owned)
+                {
+                    free(processed);
+                }
+                if (work_owned)
+                {
+                    free(work);
+                }
                 return false;
             }
             idx += 2;
         }
     }
 
-    free(processed);
-    free(work);
+    if (processed_owned)
+    {
+        free(processed);
+    }
+    if (work_owned)
+    {
+        free(work);
+    }
     return true;
 }
 
@@ -1018,7 +1153,8 @@ static bool ttf_build_segments(const ttf_point_t *points,
                                uint16_t contour_count,
                                ttf_edge_list_t *edges,
                                ttf_bounds_t *bounds,
-                               int32_t tolerance)
+                               int32_t tolerance,
+                               ttf_glyph_scratch_t *scratch)
 {
     int start = 0;
     for (uint16_t c = 0; c < contour_count; ++c)
@@ -1031,7 +1167,7 @@ static bool ttf_build_segments(const ttf_point_t *points,
         int count = (int)end - start + 1;
         if (count > 0)
         {
-            if (!ttf_emit_contour(points + start, count, edges, bounds, tolerance))
+            if (!ttf_emit_contour(points + start, count, edges, bounds, tolerance, scratch))
             {
                 return false;
             }
@@ -1159,11 +1295,54 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         return false;
     }
 
-    uint16_t *end_points = (uint16_t *)malloc((size_t)contour_count * sizeof(uint16_t));
-    if (!end_points)
+    ttf_glyph_scratch_t *scratch = NULL;
+    bool use_scratch = false;
+    uint8_t expected = 0;
+    if (__atomic_compare_exchange_n(&impl->scratch.in_use,
+                                    &expected,
+                                    1,
+                                    false,
+                                    __ATOMIC_ACQUIRE,
+                                    __ATOMIC_RELAXED))
     {
-        return false;
+        use_scratch = true;
+        scratch = &impl->scratch;
     }
+
+    ttf_edge_list_t local_edges = {0};
+    ttf_edge_list_t *edges = use_scratch ? &scratch->edges : &local_edges;
+    if (use_scratch)
+    {
+        ttf_edge_list_clear(edges);
+    }
+
+    uint16_t *end_points = NULL;
+    uint8_t *flags = NULL;
+    ttf_point_t *points = NULL;
+    ttf_edge_t *local_edges_buf = NULL;
+    uint8_t *pixels = NULL;
+    bool ok = false;
+
+    if (use_scratch)
+    {
+        if (!ttf_scratch_reserve((void **)&scratch->end_points,
+                                 &scratch->end_points_cap,
+                                 (size_t)contour_count,
+                                 sizeof(uint16_t)))
+        {
+            goto cleanup;
+        }
+        end_points = scratch->end_points;
+    }
+    else
+    {
+        end_points = (uint16_t *)malloc((size_t)contour_count * sizeof(uint16_t));
+        if (!end_points)
+        {
+            goto cleanup;
+        }
+    }
+
     for (int i = 0; i < contour_count; ++i)
     {
         end_points[i] = ttf_read_u16(cursor + i * 2);
@@ -1172,47 +1351,59 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
 
     if ((uint32_t)(cursor - glyph_data) + 2 > glyph_length)
     {
-        free(end_points);
-        return false;
+        goto cleanup;
     }
 
     uint16_t instruction_length = ttf_read_u16(cursor);
     cursor += 2;
     if ((uint32_t)(cursor - glyph_data) + instruction_length > glyph_length)
     {
-        free(end_points);
-        return false;
+        goto cleanup;
     }
     cursor += instruction_length;
 
     uint16_t point_count = end_points[contour_count - 1] + 1;
     if (point_count == 0)
     {
-        free(end_points);
-        return true;
+        ok = true;
+        goto cleanup;
     }
     /* Sanity-check outline size to avoid runaway allocations on corrupt fonts. */
     const uint32_t max_points = 32768;
     if (point_count > max_points)
     {
-        free(end_points);
-        return false;
+        goto cleanup;
     }
     size_t point_bytes = (size_t)point_count * sizeof(ttf_point_t);
     if (point_bytes / sizeof(ttf_point_t) != point_count)
     {
-        free(end_points);
-        return false;
+        goto cleanup;
     }
 
-    uint8_t *flags = (uint8_t *)malloc(point_count);
-    ttf_point_t *points = (ttf_point_t *)malloc(point_bytes);
-    if (!flags || !points)
+    if (use_scratch)
     {
-        free(flags);
-        free(points);
-        free(end_points);
-        return false;
+        if (!ttf_scratch_reserve((void **)&scratch->flags,
+                                 &scratch->flags_cap,
+                                 (size_t)point_count,
+                                 sizeof(uint8_t)) ||
+            !ttf_scratch_reserve((void **)&scratch->points,
+                                 &scratch->points_cap,
+                                 (size_t)point_count,
+                                 sizeof(ttf_point_t)))
+        {
+            goto cleanup;
+        }
+        flags = scratch->flags;
+        points = scratch->points;
+    }
+    else
+    {
+        flags = (uint8_t *)malloc(point_count);
+        points = (ttf_point_t *)malloc(point_bytes);
+        if (!flags || !points)
+        {
+            goto cleanup;
+        }
     }
 
     uint16_t filled = 0;
@@ -1220,10 +1411,7 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
     {
         if ((uint32_t)(cursor - glyph_data) >= glyph_length)
         {
-            free(flags);
-            free(points);
-            free(end_points);
-            return false;
+            goto cleanup;
         }
         uint8_t flag = *cursor++;
         flags[filled++] = flag;
@@ -1231,10 +1419,7 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         {
             if ((uint32_t)(cursor - glyph_data) >= glyph_length)
             {
-                free(flags);
-                free(points);
-                free(end_points);
-                return false;
+                goto cleanup;
             }
             uint8_t repeat = *cursor++;
             for (uint8_t r = 0; r < repeat && filled < point_count; ++r)
@@ -1253,10 +1438,7 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         {
             if ((uint32_t)(cursor - glyph_data) >= glyph_length)
             {
-                free(flags);
-                free(points);
-                free(end_points);
-                return false;
+                goto cleanup;
             }
             uint8_t value = *cursor++;
             delta = (flag & 0x10) ? (int32_t)value : -(int32_t)value;
@@ -1271,10 +1453,7 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
             {
                 if ((uint32_t)(cursor - glyph_data) + 2 > glyph_length)
                 {
-                    free(flags);
-                    free(points);
-                    free(end_points);
-                    return false;
+                    goto cleanup;
                 }
                 delta = ttf_read_i16(cursor);
                 cursor += 2;
@@ -1294,10 +1473,7 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         {
             if ((uint32_t)(cursor - glyph_data) >= glyph_length)
             {
-                free(flags);
-                free(points);
-                free(end_points);
-                return false;
+                goto cleanup;
             }
             uint8_t value = *cursor++;
             delta = (flag & 0x20) ? (int32_t)value : -(int32_t)value;
@@ -1312,10 +1488,7 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
             {
                 if ((uint32_t)(cursor - glyph_data) + 2 > glyph_length)
                 {
-                    free(flags);
-                    free(points);
-                    free(end_points);
-                    return false;
+                    goto cleanup;
                 }
                 delta = ttf_read_i16(cursor);
                 cursor += 2;
@@ -1325,7 +1498,6 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         points[i].y = ttf_scale_value(y, pixel_height, impl->units_per_em);
     }
 
-    ttf_edge_list_t edges = {0};
     ttf_bounds_t bounds = {0};
     int32_t tolerance = TTF_FP_ONE / 2;
     if (pixel_height <= TTF_SMOOTH_PIXEL_FINE_MAX)
@@ -1333,21 +1505,22 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         tolerance = TTF_FP_ONE / 4;
     }
 
-    bool built = ttf_build_segments(points, end_points, (uint16_t)contour_count, &edges, &bounds, tolerance);
-    free(flags);
-    free(points);
-    free(end_points);
-
+    bool built = ttf_build_segments(points,
+                                    end_points,
+                                    (uint16_t)contour_count,
+                                    edges,
+                                    &bounds,
+                                    tolerance,
+                                    use_scratch ? scratch : NULL);
     if (!built)
     {
-        ttf_edge_list_reset(&edges);
-        return false;
+        goto cleanup;
     }
 
-    if (edges.count == 0 || !bounds.initialized)
+    if (edges->count == 0 || !bounds.initialized)
     {
-        ttf_edge_list_reset(&edges);
-        return true;
+        ok = true;
+        goto cleanup;
     }
 
     int32_t min_x = bounds.min_x;
@@ -1359,15 +1532,14 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
     int height = ttf_ceil_fixed(max_y) - ttf_floor_fixed(min_y);
     if (width <= 0 || height <= 0)
     {
-        ttf_edge_list_reset(&edges);
-        return true;
+        ok = true;
+        goto cleanup;
     }
 
     if (width > TTF_GLYPH_MAX_DIM || height > TTF_GLYPH_MAX_DIM)
     {
         ttf_log_glyph_alloc_fail("oversize", codepoint, pixel_height, width, height);
-        ttf_edge_list_reset(&edges);
-        return false;
+        goto cleanup;
     }
 
     size_t pixel_count = 0;
@@ -1375,33 +1547,43 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
         pixel_count > TTF_GLYPH_MAX_PIXELS)
     {
         ttf_log_glyph_alloc_fail("pixels", codepoint, pixel_height, width, height);
-        ttf_edge_list_reset(&edges);
-        return false;
+        goto cleanup;
     }
-    uint8_t *pixels = (uint8_t *)malloc(pixel_count);
+    pixels = (uint8_t *)malloc(pixel_count);
     if (!pixels)
     {
-        ttf_edge_list_reset(&edges);
-        return false;
+        goto cleanup;
     }
     memset(pixels, 0, pixel_count);
 
-    ttf_edge_t *local_edges = (ttf_edge_t *)malloc(edges.count * sizeof(ttf_edge_t));
-    if (!local_edges)
+    if (use_scratch)
     {
-        free(pixels);
-        ttf_edge_list_reset(&edges);
-        return false;
+        if (!ttf_scratch_reserve((void **)&scratch->local_edges,
+                                 &scratch->local_edges_cap,
+                                 edges->count,
+                                 sizeof(ttf_edge_t)))
+        {
+            goto cleanup;
+        }
+        local_edges_buf = scratch->local_edges;
+    }
+    else
+    {
+        local_edges_buf = (ttf_edge_t *)malloc(edges->count * sizeof(ttf_edge_t));
+        if (!local_edges_buf)
+        {
+            goto cleanup;
+        }
     }
 
     int32_t shift_x = min_x;
     int32_t shift_y = max_y;
-    for (size_t i = 0; i < edges.count; ++i)
+    for (size_t i = 0; i < edges->count; ++i)
     {
-        local_edges[i].x0 = edges.edges[i].x0 - shift_x;
-        local_edges[i].x1 = edges.edges[i].x1 - shift_x;
-        local_edges[i].y0 = shift_y - edges.edges[i].y0;
-        local_edges[i].y1 = shift_y - edges.edges[i].y1;
+        local_edges_buf[i].x0 = edges->edges[i].x0 - shift_x;
+        local_edges_buf[i].x1 = edges->edges[i].x1 - shift_x;
+        local_edges_buf[i].y0 = shift_y - edges->edges[i].y0;
+        local_edges_buf[i].y1 = shift_y - edges->edges[i].y1;
     }
 
     static const int32_t sample_offsets_2[2] = { TTF_FP_ONE / 4, (TTF_FP_ONE * 3) / 4 };
@@ -1445,7 +1627,7 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
                 for (int sx = 0; sx < sample_dim; ++sx)
                 {
                     int32_t sample_x = base_x + sample_offsets[sx];
-                    if (ttf_point_in_winding(local_edges, edges.count, sample_x, sample_y))
+                    if (ttf_point_in_winding(local_edges_buf, edges->count, sample_x, sample_y))
                     {
                         coverage++;
                     }
@@ -1467,9 +1649,28 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
     out_bitmap->offset_y = ttf_ceil_fixed(max_y);
     out_bitmap->pixels = pixels;
 
-    free(local_edges);
-    ttf_edge_list_reset(&edges);
-    return true;
+    ok = true;
+
+cleanup:
+    if (!ok && pixels)
+    {
+        free(pixels);
+        pixels = NULL;
+    }
+    if (!use_scratch)
+    {
+        free(end_points);
+        free(flags);
+        free(points);
+        free(local_edges_buf);
+        ttf_edge_list_reset(edges);
+    }
+    else
+    {
+        ttf_edge_list_clear(edges);
+        __atomic_clear(&impl->scratch.in_use, __ATOMIC_RELEASE);
+    }
+    return ok;
 }
 
 void ttf_bitmap_destroy(ttf_bitmap_t *bitmap)

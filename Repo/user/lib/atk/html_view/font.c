@@ -182,25 +182,8 @@ static bool html_view_font_render_glyph(html_view_font_state_t *state,
         return false;
     }
 
-    size_t alpha_bytes = (size_t)bitmap.stride * (size_t)bitmap.height;
-    uint8_t *alpha = NULL;
-    if (alpha_bytes > 0)
-    {
-        alpha = (uint8_t *)malloc(alpha_bytes);
-        if (!alpha)
-        {
-            ttf_bitmap_destroy(&bitmap);
-            return false;
-        }
-        for (int row = 0; row < bitmap.height; ++row)
-        {
-            memcpy(alpha + (size_t)row * (size_t)bitmap.stride,
-                   bitmap.pixels + (size_t)row * (size_t)bitmap.stride,
-                   (size_t)bitmap.stride);
-        }
-    }
-
-    out->alpha = alpha;
+    out->alpha = bitmap.pixels;
+    bitmap.pixels = NULL;
     out->width = bitmap.width;
     out->height = bitmap.height;
     out->stride = bitmap.stride;
