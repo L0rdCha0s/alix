@@ -263,6 +263,11 @@ char *browser_fetch_http(browser_app_t *app,
                          const browser_url_t *url,
                          size_t *body_len_out,
                          browser_url_t *final_url_out);
+char *browser_fetch_http_with_status(browser_app_t *app,
+                                     const browser_url_t *url,
+                                     size_t *body_len_out,
+                                     browser_url_t *final_url_out,
+                                     int *status_out);
 
 /* loader/events */
 void browser_ui_event_free_payload(browser_ui_event_t *ev);

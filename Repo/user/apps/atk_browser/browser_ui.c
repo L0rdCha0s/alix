@@ -392,6 +392,17 @@ static void browser_menu_bookmark_mdn_beginner(void *context)
     browser_open_url(app, "https://mdn.github.io/beginner-html-site-styled/");
 }
 
+static void browser_menu_bookmark_stackoverflow_questions(void *context)
+{
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+    browser_menus_close(app);
+    browser_open_url(app, "https://www.stackoverflow.com/questions");
+}
+
 static void browser_menu_bookmark_css1_acid1(void *context)
 {
     browser_app_t *app = (browser_app_t *)context;
@@ -1387,6 +1398,7 @@ bool browser_build_ui(browser_app_t *app)
         !atk_menu_add_item(app->menu_bookmarks, "http://acid2.acidtests.org/", browser_menu_bookmark_acid2, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "https://httpbin.org/forms/post", browser_menu_bookmark_httpbin_form, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "https://mdn.github.io/beginner-html-site-styled/", browser_menu_bookmark_mdn_beginner, app) ||
+        !atk_menu_add_item(app->menu_bookmarks, "https://www.stackoverflow.com/questions", browser_menu_bookmark_stackoverflow_questions, app) ||
         !atk_menu_add_item(app->menu_bookmarks, "https://www.w3.org/Style/CSS/Test/CSS1/current/test5526c.htm", browser_menu_bookmark_css1_acid1, app))
     {
         return false;

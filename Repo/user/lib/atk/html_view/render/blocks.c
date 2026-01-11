@@ -5,6 +5,34 @@
 #include "serial.h"
 #include "string.h"
 
+#ifdef TTF_HOST_BUILD
+#include <time.h>
+#endif
+
+#define HTML_VIEW_LAYOUT_LOG_THROTTLE_MS 500u
+
+static uint64_t html_view_layout_now_ms(void)
+{
+#ifdef TTF_HOST_BUILD
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+#else
+    return sys_time_millis();
+#endif
+}
+
+static bool html_view_layout_log_throttle(uint64_t *last_ms, uint64_t interval_ms)
+{
+    uint64_t now_ms = html_view_layout_now_ms();
+    if (now_ms - *last_ms < interval_ms)
+    {
+        return false;
+    }
+    *last_ms = now_ms;
+    return true;
+}
+
 static bool html_view_style_uses_border_box(const css_style_t *style)
 {
     return style && style->has_box_sizing && style->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
@@ -391,17 +419,21 @@ static int html_view_apply_block_margin_top(html_view_ctx_t *ctx,
 
     if (clear_mode != CSS_CLEAR_NONE)
     {
-        int prev_pending_value = html_view_margin_state_value(&prev_pending);
-        serial_printf("[html_view][layout] clear=%s start_y=%d prev_pending=%d prev_valid=%d margin_top=%d collapsed=%d clear_y=%d used_top=%d y=%d",
-                      html_view_dump_clear_mode(clear_mode),
-                      start_y,
-                      prev_pending_value,
-                      prev_pending_valid ? 1 : 0,
-                      margin_top,
-                      collapsed,
-                      clear_y,
-                      used_top,
-                      ctx->y);
+        static uint64_t last_clear_log_ms = 0;
+        if (html_view_layout_log_throttle(&last_clear_log_ms, HTML_VIEW_LAYOUT_LOG_THROTTLE_MS))
+        {
+            int prev_pending_value = html_view_margin_state_value(&prev_pending);
+            serial_printf("[html_view][layout] clear=%s start_y=%d prev_pending=%d prev_valid=%d margin_top=%d collapsed=%d clear_y=%d used_top=%d y=%d",
+                          html_view_dump_clear_mode(clear_mode),
+                          start_y,
+                          prev_pending_value,
+                          prev_pending_valid ? 1 : 0,
+                          margin_top,
+                          collapsed,
+                          clear_y,
+                          used_top,
+                          ctx->y);
+        }
     }
 
     if (out_clearance)

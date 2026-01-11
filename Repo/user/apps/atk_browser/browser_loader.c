@@ -6,10 +6,57 @@
 #include "ctype.h"
 #include "stdio.h"
 #include "string.h"
+#include "web/html/html_internal.h"
 
 static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev);
 
 #define BROWSER_RESOURCE_LOG_URL_MAX 160u
+
+static bool browser_doc_append_style(html_document_t *doc, const char *css, size_t len)
+{
+    if (!doc || !doc->root || !css || len == 0)
+    {
+        return false;
+    }
+
+    html_node_t *style = html_node_create(HTML_NODE_ELEMENT);
+    if (!style)
+    {
+        return false;
+    }
+    style->name = browser_strdup("style");
+    if (!style->name)
+    {
+        free(style);
+        return false;
+    }
+
+    html_node_t *text = html_node_create(HTML_NODE_TEXT);
+    if (!text)
+    {
+        free(style->name);
+        free(style);
+        return false;
+    }
+    text->text = browser_strdup_len(css, len);
+    if (!text->text)
+    {
+        free(text);
+        free(style->name);
+        free(style);
+        return false;
+    }
+    html_node_append_child(style, text);
+
+    html_node_t *head = (html_node_t *)browser_dom_find_first_element(doc->root, "head");
+    html_node_t *target = head ? head : (html_node_t *)browser_dom_find_first_element(doc->root, "html");
+    if (!target)
+    {
+        target = doc->root;
+    }
+    html_node_append_child(target, style);
+    return true;
+}
 
 static const char *browser_resource_kind_label(browser_resource_kind_t kind)
 {
@@ -1230,10 +1277,26 @@ static void browser_resource_fetch(browser_app_t *app,
     const char *log_status = NULL;
     const char *log_detail = NULL;
     size_t log_bytes = 0;
+    int status_code = 0;
+    char *status_detail = NULL;
     bool parsed = browser_parse_url(abs, &res_url);
     if (parsed)
     {
-        res_body = browser_fetch_http(app, &res_url, &res_len, &res_final);
+        res_body = browser_fetch_http_with_status(app, &res_url, &res_len, &res_final, &status_code);
+        if (status_code >= 400)
+        {
+            log_status = "fail";
+            status_detail = (char *)malloc(32);
+            if (status_detail)
+            {
+                snprintf(status_detail, 32, "http %d", status_code);
+                log_detail = status_detail;
+            }
+            else
+            {
+                log_detail = "http error";
+            }
+        }
     }
     else
     {
@@ -1400,6 +1463,7 @@ static void browser_resource_fetch(browser_app_t *app,
     browser_url_destroy(&res_url);
     browser_url_destroy(&res_final);
     free(abs);
+    free(status_detail);
 }
 
 static void browser_resource_worker_thread(void *arg)
@@ -1542,6 +1606,147 @@ static void browser_resource_queue_process_inline(browser_app_t *app, browser_re
     queue->count = 0;
 }
 
+static char *browser_resource_queue_fetch_css(browser_app_t *app,
+                                              uint64_t load_id,
+                                              browser_resource_queue_t *queue,
+                                              size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!app || !queue || !queue->head)
+    {
+        return NULL;
+    }
+
+    char *css_buf = NULL;
+    size_t css_len = 0;
+    size_t css_cap = 0;
+
+    browser_resource_job_t *job = queue->head;
+    queue->head = NULL;
+    queue->tail = NULL;
+    queue->count = 0;
+
+    while (job)
+    {
+        browser_resource_job_t *next = job->next;
+        char *abs = job->url;
+        job->url = NULL;
+        free(job);
+        job = next;
+
+        if (!abs)
+        {
+            continue;
+        }
+        if (!browser_load_is_active(app, load_id))
+        {
+            free(abs);
+            while (job)
+            {
+                browser_resource_job_t *drop = job;
+                job = job->next;
+                free(drop->url);
+                free(drop);
+            }
+            break;
+        }
+
+        uint64_t start_ms = sys_time_millis();
+        browser_resource_log_start(app, load_id, BROWSER_RESOURCE_CSS, abs);
+
+        if (abs && strncasecmp(abs, "data:", 5) == 0)
+        {
+            uint64_t elapsed_ms = sys_time_millis() - start_ms;
+            browser_resource_log_done(app, load_id, BROWSER_RESOURCE_CSS, abs, "data", elapsed_ms, 0, NULL);
+            free(abs);
+            continue;
+        }
+
+        browser_url_t res_url = {0};
+        browser_url_t res_final = {0};
+        size_t res_len = 0;
+        char *res_body = NULL;
+        const char *log_status = NULL;
+        const char *log_detail = NULL;
+        size_t log_bytes = 0;
+        int status_code = 0;
+        char *status_detail = NULL;
+        bool parsed = browser_parse_url(abs, &res_url);
+        if (parsed)
+        {
+            res_body = browser_fetch_http_with_status(app, &res_url, &res_len, &res_final, &status_code);
+            if (status_code >= 400)
+            {
+                log_status = "fail";
+                status_detail = (char *)malloc(32);
+                if (status_detail)
+                {
+                    snprintf(status_detail, 32, "http %d", status_code);
+                    log_detail = status_detail;
+                }
+                else
+                {
+                    log_detail = "http error";
+                }
+            }
+        }
+        else
+        {
+            log_status = "fail";
+            log_detail = "invalid url";
+        }
+
+        if (!log_status)
+        {
+            if (res_body && strncmp(res_body, "Error:\n", 6) != 0)
+            {
+                if (browser_buf_append(&css_buf, &css_len, &css_cap, (const uint8_t *)res_body, res_len))
+                {
+                    (void)browser_buf_append(&css_buf, &css_len, &css_cap, (const uint8_t *)"\n", 1);
+                    log_status = "ok";
+                    log_bytes = res_len;
+                    browser_css_log_sniff(app, abs, (const uint8_t *)res_body, res_len);
+                }
+                else
+                {
+                    log_status = "fail";
+                    log_detail = "css append failed";
+                }
+            }
+        }
+
+        if (!log_status)
+        {
+            log_status = "fail";
+            log_detail = "fetch failed";
+        }
+
+        uint64_t elapsed_ms = sys_time_millis() - start_ms;
+        browser_resource_log_done(app, load_id, BROWSER_RESOURCE_CSS, abs, log_status, elapsed_ms, log_bytes, log_detail);
+
+        free(status_detail);
+        free(res_body);
+        browser_url_destroy(&res_url);
+        browser_url_destroy(&res_final);
+        free(abs);
+    }
+
+    if (css_buf && css_len > 0 && browser_load_is_active(app, load_id))
+    {
+        if (out_len)
+        {
+            *out_len = css_len;
+        }
+        return css_buf;
+    }
+
+    free(css_buf);
+    return NULL;
+}
+
 static void browser_load_thread(void *arg)
 {
     browser_load_job_t *job = (browser_load_job_t *)arg;
@@ -1664,14 +1869,6 @@ static void browser_load_thread(void *arg)
         goto done_resources;
     }
 
-    browser_ui_event_t doc_ev = {0};
-    doc_ev.type = BROWSER_UI_EVENT_DOC_READY;
-    doc_ev.load_id = load_id;
-    doc_ev.u.doc_ready.doc = doc;
-    doc_ev.u.doc_ready.final_url = browser_url_to_string(&final_url);
-    browser_loader_emit_event(app, &doc_ev);
-    doc = NULL;
-
     if (css_count > 0)
     {
         browser_debug_logf(app, "[css] total stylesheets=%u", (unsigned)css_count);
@@ -1694,18 +1891,35 @@ static void browser_load_thread(void *arg)
         goto done_resources;
     }
 
-    bool resource_stop = (__atomic_load_n(&app->resource_thread_stop, __ATOMIC_ACQUIRE) != 0u);
-    if (!browser_resource_queue_append(app, &css_queue))
+    size_t css_len = 0;
+    char *css_buf = NULL;
+    if (css_count > 0)
     {
-        if (resource_stop)
+        css_buf = browser_resource_queue_fetch_css(app, load_id, &css_queue, &css_len);
+        if (css_buf && css_len > 0 && doc && doc->root)
         {
-            browser_resource_queue_release(&css_queue);
+            if (browser_doc_append_style(doc, css_buf, css_len))
+            {
+                browser_debug_logf(app, "[css] inline bytes=%u", (unsigned)css_len);
+            }
+            else
+            {
+                browser_debug_logf(app, "[css] inline failed bytes=%u", (unsigned)css_len);
+            }
         }
-        else
-        {
-            browser_resource_queue_process_inline(app, &css_queue);
-        }
+        free(css_buf);
+        css_buf = NULL;
     }
+
+    browser_ui_event_t doc_ev = {0};
+    doc_ev.type = BROWSER_UI_EVENT_DOC_READY;
+    doc_ev.load_id = load_id;
+    doc_ev.u.doc_ready.doc = doc;
+    doc_ev.u.doc_ready.final_url = browser_url_to_string(&final_url);
+    browser_loader_emit_event(app, &doc_ev);
+    doc = NULL;
+
+    bool resource_stop = (__atomic_load_n(&app->resource_thread_stop, __ATOMIC_ACQUIRE) != 0u);
     if (!browser_resource_queue_append(app, &script_queue))
     {
         if (resource_stop)

@@ -5,9 +5,9 @@
 #include "stdio.h"
 #include "usyscall.h"
 
-#define HTML_VIEW_DOM_LOCK_LOG_MIN_MS 2u
+#define HTML_VIEW_DOM_LOCK_LOG_MIN_MS 1u
 #define HTML_VIEW_DOM_LOCK_LOG_RATE_MS 250u
-#define HTML_VIEW_DOM_LOCK_HOLD_LOG_MIN_MS 50u
+#define HTML_VIEW_DOM_LOCK_HOLD_LOG_MIN_MS 10u
 #define HTML_VIEW_DOM_LOCK_HOLD_LOG_RATE_MS 250u
 #define HTML_VIEW_JS_LOG_THROTTLE_MS 250u
 
@@ -94,6 +94,22 @@ void html_view_dom_lock(atk_html_view_priv_t *priv)
     alix_thread_t owner = __atomic_load_n(&priv->dom_lock_owner, __ATOMIC_RELAXED);
     uint64_t hold_start_ms = __atomic_load_n(&priv->dom_lock_hold_start_ms, __ATOMIC_RELAXED);
     uintptr_t hold_caller = __atomic_load_n(&priv->dom_lock_hold_caller, __ATOMIC_RELAXED);
+    alix_thread_t self = alix_thread_self();
+    if (owner != 0 && owner == self)
+    {
+        static uint64_t last_reentry_log_ms = 0;
+        uint64_t now_ms = sys_time_millis();
+        if (now_ms - last_reentry_log_ms >= HTML_VIEW_DOM_LOCK_LOG_RATE_MS)
+        {
+            last_reentry_log_ms = now_ms;
+            uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
+            serial_printf("[html_view] dom_lock reentry tid=%llu caller=0x%016llX hold_ms=%llu hold_caller=0x%016llX",
+                          (unsigned long long)self,
+                          (unsigned long long)(uintptr_t)caller,
+                          (unsigned long long)hold_ms,
+                          (unsigned long long)hold_caller);
+        }
+    }
     uint64_t start_ms = sys_time_millis();
     alix_mutex_lock(&priv->dom_lock);
     html_view_dom_lock_record(priv, caller);
@@ -107,8 +123,10 @@ void html_view_dom_lock(atk_html_view_priv_t *priv)
         {
             __atomic_store_n(&last_log_ms, now_ms, __ATOMIC_RELAXED);
             uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
-            serial_printf("[html_view] dom_lock wait=%u ms owner=%llu hold_ms=%llu caller=0x%016llX",
+            serial_printf("[html_view] dom_lock wait=%u ms tid=%llu caller=0x%016llX owner=%llu hold_ms=%llu hold_caller=0x%016llX",
                           (unsigned)waited_ms,
+                          (unsigned long long)self,
+                          (unsigned long long)(uintptr_t)caller,
                           (unsigned long long)owner,
                           (unsigned long long)hold_ms,
                           (unsigned long long)hold_caller);
@@ -119,7 +137,50 @@ void html_view_dom_lock(atk_html_view_priv_t *priv)
 bool html_view_dom_try_lock(atk_html_view_priv_t *priv)
 {
     void *caller = __builtin_return_address(0);
-    return html_view_dom_try_lock_with_caller(priv, caller);
+    if (html_view_dom_try_lock_with_caller(priv, caller))
+    {
+        return true;
+    }
+
+    alix_thread_t owner = __atomic_load_n(&priv->dom_lock_owner, __ATOMIC_RELAXED);
+    uint64_t hold_start_ms = __atomic_load_n(&priv->dom_lock_hold_start_ms, __ATOMIC_RELAXED);
+    uintptr_t hold_caller = __atomic_load_n(&priv->dom_lock_hold_caller, __ATOMIC_RELAXED);
+    alix_thread_t self = alix_thread_self();
+    if (owner != 0 && owner == self)
+    {
+        static uint64_t last_reentry_log_ms = 0;
+        uint64_t now_ms = sys_time_millis();
+        if (now_ms - last_reentry_log_ms >= HTML_VIEW_DOM_LOCK_LOG_RATE_MS)
+        {
+            last_reentry_log_ms = now_ms;
+            uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
+            serial_printf("[html_view] dom_lock try reentry tid=%llu caller=0x%016llX hold_ms=%llu hold_caller=0x%016llX",
+                          (unsigned long long)self,
+                          (unsigned long long)(uintptr_t)caller,
+                          (unsigned long long)hold_ms,
+                          (unsigned long long)hold_caller);
+        }
+        return false;
+    }
+
+    if (hold_start_ms)
+    {
+        static uint64_t last_try_log_ms = 0;
+        uint64_t now_ms = sys_time_millis();
+        uint64_t hold_ms = now_ms - hold_start_ms;
+        if (hold_ms >= HTML_VIEW_DOM_LOCK_HOLD_LOG_MIN_MS &&
+            now_ms - last_try_log_ms >= HTML_VIEW_DOM_LOCK_LOG_RATE_MS)
+        {
+            last_try_log_ms = now_ms;
+            serial_printf("[html_view] dom_lock try busy tid=%llu caller=0x%016llX owner=%llu hold_ms=%llu hold_caller=0x%016llX",
+                          (unsigned long long)self,
+                          (unsigned long long)(uintptr_t)caller,
+                          (unsigned long long)owner,
+                          (unsigned long long)hold_ms,
+                          (unsigned long long)hold_caller);
+        }
+    }
+    return false;
 }
 
 void html_view_dom_unlock(atk_html_view_priv_t *priv)
@@ -131,6 +192,7 @@ void html_view_dom_unlock(atk_html_view_priv_t *priv)
     uint64_t hold_start_ms = __atomic_load_n(&priv->dom_lock_hold_start_ms, __ATOMIC_RELAXED);
     alix_thread_t owner = __atomic_load_n(&priv->dom_lock_owner, __ATOMIC_RELAXED);
     uintptr_t hold_caller = __atomic_load_n(&priv->dom_lock_hold_caller, __ATOMIC_RELAXED);
+    void *release_caller = __builtin_return_address(0);
     __atomic_store_n(&priv->dom_lock_owner, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&priv->dom_lock_hold_start_ms, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&priv->dom_lock_hold_caller, 0, __ATOMIC_RELAXED);
@@ -146,10 +208,11 @@ void html_view_dom_unlock(atk_html_view_priv_t *priv)
             if (now_ms - last >= HTML_VIEW_DOM_LOCK_HOLD_LOG_RATE_MS)
             {
                 __atomic_store_n(&last_hold_log_ms, now_ms, __ATOMIC_RELAXED);
-                serial_printf("[html_view] dom_lock held=%llu ms owner=%llu caller=0x%016llX",
+                serial_printf("[html_view] dom_lock held=%llu ms owner=%llu caller=0x%016llX release=0x%016llX",
                               (unsigned long long)hold_ms,
                               (unsigned long long)owner,
-                              (unsigned long long)hold_caller);
+                              (unsigned long long)hold_caller,
+                              (unsigned long long)(uintptr_t)release_caller);
             }
         }
     }

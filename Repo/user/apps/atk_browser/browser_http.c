@@ -1027,7 +1027,8 @@ static char *browser_build_request(const char *host, const char *path)
         path = "/";
     }
     const char *fmt =
-        "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\nUser-Agent: atk_browser/0.1\r\n\r\n";
+        "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\nUser-Agent: atk_browser/0.1\r\n"
+        "Accept-Encoding: identity\r\n\r\n";
     size_t cap = strlen(fmt) + strlen(host) + strlen(path) + 32;
     char *req = (char *)malloc(cap);
     if (!req)
@@ -1042,11 +1043,16 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                                          const browser_url_t *url,
                                          int redirect_depth,
                                          size_t *body_len_out,
-                                         browser_url_t *final_url_out)
+                                         browser_url_t *final_url_out,
+                                         int *status_out)
 {
     if (body_len_out)
     {
         *body_len_out = 0;
+    }
+    if (status_out)
+    {
+        *status_out = 0;
     }
 
     if (!url || !url->host || !url->path)
@@ -1116,6 +1122,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
 
     char *redirect_target = NULL;
     int redirect_status = 0;
+    int status_code = 0;
 
     uint8_t *chunk = (uint8_t *)malloc(2048);
     if (!chunk)
@@ -1193,6 +1200,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                 char status_line[128];
                 browser_http_copy_status_line(header_buf, header_block_len, status_line, sizeof(status_line));
                 int status = browser_http_parse_status_code(header_buf, header_block_len);
+                status_code = status;
                 browser_debug_logf(app, "[http] status %s (code=%d)", status_line, status);
 
                 const char *value = NULL;
@@ -1483,6 +1491,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                 char status_line[128];
                 browser_http_copy_status_line(header_buf, header_block_len, status_line, sizeof(status_line));
                 int status = browser_http_parse_status_code(header_buf, header_block_len);
+                status_code = status;
                 browser_debug_logf(app, "[http] status %s (code=%d)", status_line, status);
 
                 const char *value = NULL;
@@ -1719,7 +1728,12 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                            redirect_depth + 1,
                            redirect_target);
         free(redirect_target);
-        char *res = browser_fetch_http_internal(app, &next, redirect_depth + 1, body_len_out, final_url_out);
+        char *res = browser_fetch_http_internal(app,
+                                                &next,
+                                                redirect_depth + 1,
+                                                body_len_out,
+                                                final_url_out,
+                                                status_out);
         browser_url_destroy(&next);
         return res;
     }
@@ -1747,13 +1761,18 @@ static char *browser_fetch_http_internal(browser_app_t *app,
     {
         (void)browser_url_clone(url, final_url_out);
     }
+    if (status_out)
+    {
+        *status_out = status_code;
+    }
     return body_buf;
 }
 
-char *browser_fetch_http(browser_app_t *app,
-                         const browser_url_t *url,
-                         size_t *body_len_out,
-                         browser_url_t *final_url_out)
+char *browser_fetch_http_with_status(browser_app_t *app,
+                                     const browser_url_t *url,
+                                     size_t *body_len_out,
+                                     browser_url_t *final_url_out,
+                                     int *status_out)
 {
     char *url_text = browser_url_to_string(url);
     if (url_text)
@@ -1765,17 +1784,35 @@ char *browser_fetch_http(browser_app_t *app,
             {
                 (void)browser_url_clone(url, final_url_out);
             }
+            if (status_out)
+            {
+                *status_out = 200;
+            }
             free(url_text);
             return cached;
         }
     }
 
-    char *body = browser_fetch_http_internal(app, url, 0, body_len_out, final_url_out);
+    int status_code = 0;
+    char *body = browser_fetch_http_internal(app, url, 0, body_len_out, final_url_out, &status_code);
+    if (status_out)
+    {
+        *status_out = status_code;
+    }
     if (body && url_text && body_len_out && *body_len_out > 0 &&
+        status_code > 0 && status_code < 400 &&
         strncmp(body, "Error:\n", 6) != 0)
     {
         browser_cache_write(app, url_text, (const uint8_t *)body, *body_len_out);
     }
     free(url_text);
     return body;
+}
+
+char *browser_fetch_http(browser_app_t *app,
+                         const browser_url_t *url,
+                         size_t *body_len_out,
+                         browser_url_t *final_url_out)
+{
+    return browser_fetch_http_with_status(app, url, body_len_out, final_url_out, NULL);
 }

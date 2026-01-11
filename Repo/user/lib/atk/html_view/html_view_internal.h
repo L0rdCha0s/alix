@@ -38,6 +38,7 @@
 #define HTML_VIEW_FONT_MAX_PX 512
 #define HTML_VIEW_MEASURE_CACHE_MAX 8192
 #define HTML_VIEW_STYLE_CACHE_MAX 8192
+#define HTML_VIEW_EXTERNAL_CSS_MAX (256u * 1024u)
 
 typedef struct html_view_js_script
 {
@@ -336,6 +337,9 @@ typedef struct
     volatile alix_thread_t dom_lock_owner;
     volatile uintptr_t dom_lock_hold_caller;
     alix_mutex_t render_lock;
+    volatile uint64_t render_lock_hold_start_ms;
+    volatile alix_thread_t render_lock_owner;
+    volatile uintptr_t render_lock_hold_caller;
     alix_thread_t render_thread;
     volatile uint32_t render_stop;
     volatile uint32_t render_seq;

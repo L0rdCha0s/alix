@@ -149,6 +149,7 @@ enum
 
 enum
 {
+    HTML_VIEW_RULE_TRIE_ENABLED = 1,
     HTML_VIEW_RULE_TRIE_MIN_RULES = 8,
     HTML_VIEW_RULE_TRIE_CACHE_MIN_RULES = 32,
 };
@@ -6594,7 +6595,7 @@ static void html_view_rule_trie_update_cache_mode(html_view_rule_trie_t *trie,
 
 static html_view_rule_trie_t *html_view_rule_trie_build(css_rule_t **rules, size_t rule_count)
 {
-    if (!rules || rule_count < HTML_VIEW_RULE_TRIE_MIN_RULES)
+    if (!HTML_VIEW_RULE_TRIE_ENABLED || !rules || rule_count < HTML_VIEW_RULE_TRIE_MIN_RULES)
     {
         return NULL;
     }

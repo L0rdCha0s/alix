@@ -8,6 +8,8 @@
 
 #define HTML_VIEW_RENDER_DEBOUNCE_MS 32u
 #define HTML_VIEW_LOG_THROTTLE_MS 500u
+#define HTML_VIEW_RENDER_LOCK_HOLD_LOG_MIN_MS 10u
+#define HTML_VIEW_RENDER_LOCK_HOLD_LOG_RATE_MS 250u
 
 static bool html_view_log_throttle(uint64_t *last_ms, uint64_t interval_ms)
 {
@@ -34,6 +36,78 @@ static bool html_view_text_has_non_ws_inline(const char *text)
         }
     }
     return false;
+}
+
+static char *html_view_external_css_clamp(const char *css_text, size_t *out_len, bool *out_truncated)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (out_truncated)
+    {
+        *out_truncated = false;
+    }
+    if (!css_text || css_text[0] == '\0')
+    {
+        return NULL;
+    }
+    size_t len = strlen(css_text);
+    if (len <= HTML_VIEW_EXTERNAL_CSS_MAX)
+    {
+        if (out_len)
+        {
+            *out_len = len;
+        }
+        return html_view_strdup(css_text);
+    }
+    size_t cut = HTML_VIEW_EXTERNAL_CSS_MAX;
+    while (cut > 0 && css_text[cut - 1] != '}')
+    {
+        --cut;
+    }
+    if (cut == 0)
+    {
+        cut = HTML_VIEW_EXTERNAL_CSS_MAX;
+    }
+    char *copy = (char *)malloc(cut + 1);
+    if (!copy)
+    {
+        return NULL;
+    }
+    memcpy(copy, css_text, cut);
+    copy[cut] = '\0';
+    if (out_len)
+    {
+        *out_len = cut;
+    }
+    if (out_truncated)
+    {
+        *out_truncated = true;
+    }
+    return copy;
+}
+
+static void html_view_render_lock_record(atk_html_view_priv_t *priv, void *caller)
+{
+    if (!priv)
+    {
+        return;
+    }
+    __atomic_store_n(&priv->render_lock_owner, alix_thread_self(), __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->render_lock_hold_start_ms, sys_time_millis(), __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->render_lock_hold_caller, (uintptr_t)caller, __ATOMIC_RELAXED);
+}
+
+static void html_view_render_lock(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    void *caller = __builtin_return_address(0);
+    alix_mutex_lock(&priv->render_lock);
+    html_view_render_lock_record(priv, caller);
 }
 
 static bool html_view_body_has_renderable_child(const html_node_t *body)
@@ -143,7 +217,52 @@ bool html_view_render_try_lock(atk_html_view_priv_t *priv)
     {
         return false;
     }
-    return __sync_lock_test_and_set(&priv->render_lock.state, 1u) == 0u;
+    void *caller = __builtin_return_address(0);
+    if (__sync_lock_test_and_set(&priv->render_lock.state, 1u) == 0u)
+    {
+        html_view_render_lock_record(priv, caller);
+        return true;
+    }
+
+    alix_thread_t owner = __atomic_load_n(&priv->render_lock_owner, __ATOMIC_RELAXED);
+    uint64_t hold_start_ms = __atomic_load_n(&priv->render_lock_hold_start_ms, __ATOMIC_RELAXED);
+    uintptr_t hold_caller = __atomic_load_n(&priv->render_lock_hold_caller, __ATOMIC_RELAXED);
+    alix_thread_t self = alix_thread_self();
+    if (owner != 0 && owner == self)
+    {
+        static uint64_t last_reentry_log_ms = 0;
+        uint64_t now_ms = sys_time_millis();
+        if (now_ms - last_reentry_log_ms >= HTML_VIEW_RENDER_LOCK_HOLD_LOG_RATE_MS)
+        {
+            last_reentry_log_ms = now_ms;
+            uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
+            serial_printf("[html_view] render_lock reentry tid=%llu caller=0x%016llX hold_ms=%llu hold_caller=0x%016llX",
+                          (unsigned long long)self,
+                          (unsigned long long)(uintptr_t)caller,
+                          (unsigned long long)hold_ms,
+                          (unsigned long long)hold_caller);
+        }
+        return false;
+    }
+
+    if (hold_start_ms)
+    {
+        static uint64_t last_try_log_ms = 0;
+        uint64_t now_ms = sys_time_millis();
+        uint64_t hold_ms = now_ms - hold_start_ms;
+        if (hold_ms >= HTML_VIEW_RENDER_LOCK_HOLD_LOG_MIN_MS &&
+            now_ms - last_try_log_ms >= HTML_VIEW_RENDER_LOCK_HOLD_LOG_RATE_MS)
+        {
+            last_try_log_ms = now_ms;
+            serial_printf("[html_view] render_lock try busy tid=%llu caller=0x%016llX owner=%llu hold_ms=%llu hold_caller=0x%016llX",
+                          (unsigned long long)self,
+                          (unsigned long long)(uintptr_t)caller,
+                          (unsigned long long)owner,
+                          (unsigned long long)hold_ms,
+                          (unsigned long long)hold_caller);
+        }
+    }
+    return false;
 }
 
 void html_view_render_unlock(atk_html_view_priv_t *priv)
@@ -152,7 +271,32 @@ void html_view_render_unlock(atk_html_view_priv_t *priv)
     {
         return;
     }
+    uint64_t hold_start_ms = __atomic_load_n(&priv->render_lock_hold_start_ms, __ATOMIC_RELAXED);
+    alix_thread_t owner = __atomic_load_n(&priv->render_lock_owner, __ATOMIC_RELAXED);
+    uintptr_t hold_caller = __atomic_load_n(&priv->render_lock_hold_caller, __ATOMIC_RELAXED);
+    void *release_caller = __builtin_return_address(0);
+    __atomic_store_n(&priv->render_lock_owner, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->render_lock_hold_start_ms, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&priv->render_lock_hold_caller, 0, __ATOMIC_RELAXED);
     alix_mutex_unlock(&priv->render_lock);
+    if (hold_start_ms)
+    {
+        uint64_t now_ms = sys_time_millis();
+        uint64_t hold_ms = now_ms - hold_start_ms;
+        if (hold_ms >= HTML_VIEW_RENDER_LOCK_HOLD_LOG_MIN_MS)
+        {
+            static uint64_t last_hold_log_ms = 0;
+            if (now_ms - last_hold_log_ms >= HTML_VIEW_RENDER_LOCK_HOLD_LOG_RATE_MS)
+            {
+                last_hold_log_ms = now_ms;
+                serial_printf("[html_view] render_lock held=%llu ms owner=%llu caller=0x%016llX release=0x%016llX",
+                              (unsigned long long)hold_ms,
+                              (unsigned long long)owner,
+                              (unsigned long long)hold_caller,
+                              (unsigned long long)(uintptr_t)release_caller);
+            }
+        }
+    }
 }
 
 void html_view_render_cache_invalidate_locked(atk_html_view_priv_t *priv)
@@ -219,8 +363,15 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         return false;
     }
     uint64_t build_start_ms = sys_time_millis();
+    uint64_t stage_start_ms = build_start_ms;
+    uint64_t bloom_ms = 0;
+    uint64_t style_ms = 0;
+    uint64_t layout_ms = 0;
 
     html_view_dom_bloom_rebuild_if_needed(priv);
+    uint64_t now_ms = sys_time_millis();
+    bloom_ms = now_ms - stage_start_ms;
+    stage_start_ms = now_ms;
 
     int abs_x = 0;
     int abs_y = 0;
@@ -277,6 +428,9 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     {
         body_style = html_style;
     }
+    now_ms = sys_time_millis();
+    style_ms = now_ms - stage_start_ms;
+    stage_start_ms = now_ms;
     bool overflow_hidden = (html_style.has_overflow && html_style.overflow == CSS_OVERFLOW_HIDDEN) ||
                            (body_style.has_overflow && body_style.overflow == CSS_OVERFLOW_HIDDEN);
     priv->scrollbar_hidden = overflow_hidden;
@@ -666,6 +820,9 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     }
     html_view_align_current_line(&record);
     html_view_style_stack_destroy(&record);
+    now_ms = sys_time_millis();
+    layout_ms = now_ms - stage_start_ms;
+    stage_start_ms = now_ms;
 
     if (!record.record_failed)
     {
@@ -692,10 +849,10 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
 
         cache->valid = true;
         __atomic_store_n(&priv->render_cache_dirty, 0u, __ATOMIC_RELEASE);
+        uint64_t build_ms = sys_time_millis() - build_start_ms;
         static uint64_t last_build_done_log_ms = 0;
         if (html_view_log_throttle(&last_build_done_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
         {
-            uint64_t build_ms = sys_time_millis() - build_start_ms;
             serial_printf("[html_view] render_build_done view=%p ok=1 ops=%llu tiles=%llu fixed=%llu content_h=%d body_h=%d ms=%llu",
                           (void *)view,
                           (unsigned long long)cache->op_count,
@@ -705,13 +862,26 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                           cache->body_box_h,
                           (unsigned long long)build_ms);
         }
+        if (build_ms >= HTML_VIEW_RENDER_LOCK_HOLD_LOG_MIN_MS)
+        {
+            static uint64_t last_stage_log_ms = 0;
+            if (html_view_log_throttle(&last_stage_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+            {
+                serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu",
+                              (void *)view,
+                              (unsigned long long)build_ms,
+                              (unsigned long long)bloom_ms,
+                              (unsigned long long)style_ms,
+                              (unsigned long long)layout_ms);
+            }
+        }
         return true;
     }
 
+    uint64_t build_ms = sys_time_millis() - build_start_ms;
     static uint64_t last_build_fail_log_ms = 0;
     if (html_view_log_throttle(&last_build_fail_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
     {
-        uint64_t build_ms = sys_time_millis() - build_start_ms;
         serial_printf("[html_view] render_build_done view=%p ok=0 record_failed=%u ops=%llu tiles=%llu fixed=%llu ms=%llu",
                       (void *)view,
                       record.record_failed ? 1u : 0u,
@@ -719,6 +889,19 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                       (unsigned long long)cache->tile_used,
                       (unsigned long long)cache->fixed_count,
                       (unsigned long long)build_ms);
+    }
+    if (build_ms >= HTML_VIEW_RENDER_LOCK_HOLD_LOG_MIN_MS)
+    {
+        static uint64_t last_stage_log_ms = 0;
+        if (html_view_log_throttle(&last_stage_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu",
+                          (void *)view,
+                          (unsigned long long)build_ms,
+                          (unsigned long long)bloom_ms,
+                          (unsigned long long)style_ms,
+                          (unsigned long long)layout_ms);
+        }
     }
     html_view_render_cache_clear(cache);
     return false;
@@ -732,8 +915,18 @@ static void html_view_stylesheet_rebuild_async_locked(atk_html_view_priv_t *priv
     }
 
     html_view_apply_pending_external_css_locked(priv);
-    if (__atomic_exchange_n(&priv->stylesheet_dirty, 0u, __ATOMIC_ACQ_REL) == 0u)
+    uint32_t dirty = __atomic_exchange_n(&priv->stylesheet_dirty, 0u, __ATOMIC_ACQ_REL);
+    if (dirty == 0u)
     {
+        static uint64_t last_skip_log_ms = 0;
+        if (html_view_log_throttle(&last_skip_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            uint64_t pending_len = __atomic_load_n(&priv->external_css_pending_len, __ATOMIC_RELAXED);
+            serial_printf("[html_view] stylesheet_rebuild_skip priv=%p ext_len=%llu pending_len=%llu",
+                          (void *)priv,
+                          (unsigned long long)priv->external_css_len,
+                          (unsigned long long)pending_len);
+        }
         return;
     }
 
@@ -775,8 +968,18 @@ static void html_view_stylesheet_rebuild_async_locked(atk_html_view_priv_t *priv
     }
 
     html_document_t *snapshot_doc = priv->doc;
+    static uint64_t last_parse_log_ms = 0;
+    if (html_view_log_throttle(&last_parse_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        serial_printf("[html_view] stylesheet_parse_start priv=%p css_len=%llu inline_len=%llu ext_len=%llu",
+                      (void *)priv,
+                      (unsigned long long)css_len,
+                      (unsigned long long)inline_len,
+                      (unsigned long long)external_len);
+    }
     html_view_dom_unlock(priv);
 
+    css_media_env_set(priv->last_width, priv->last_height, CSS_MEDIA_COLOR_SCHEME_LIGHT);
     uint64_t parse_start_ms = sys_time_millis();
     css_stylesheet_t *new_sheet = css_parse(css_text);
     uint64_t parse_ms = sys_time_millis() - parse_start_ms;
@@ -791,13 +994,29 @@ static void html_view_stylesheet_rebuild_async_locked(atk_html_view_priv_t *priv
     free(css_text);
 
     html_view_dom_lock(priv);
-    if (priv->doc != snapshot_doc ||
-        __atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE) != 0u ||
-        priv->external_css_len != external_len)
+    bool pending_dirty = (__atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE) != 0u);
+    bool doc_changed = (priv->doc != snapshot_doc);
+    bool ext_changed = (priv->external_css_len != external_len);
+    if (doc_changed || ext_changed)
     {
+        static uint64_t last_discard_log_ms = 0;
+        if (html_view_log_throttle(&last_discard_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] stylesheet_discard priv=%p doc_changed=%u ext_changed=%u pending_dirty=%u ext_len=%llu now_ext_len=%llu",
+                          (void *)priv,
+                          doc_changed ? 1u : 0u,
+                          ext_changed ? 1u : 0u,
+                          pending_dirty ? 1u : 0u,
+                          (unsigned long long)external_len,
+                          (unsigned long long)priv->external_css_len);
+        }
         if (new_sheet)
         {
             css_stylesheet_destroy(new_sheet);
+        }
+        if (!pending_dirty)
+        {
+            __atomic_store_n(&priv->stylesheet_dirty, 1u, __ATOMIC_RELEASE);
         }
         return;
     }
@@ -805,14 +1024,15 @@ static void html_view_stylesheet_rebuild_async_locked(atk_html_view_priv_t *priv
     static uint64_t last_rebuild_log_ms = 0;
     if (html_view_log_throttle(&last_rebuild_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
     {
-        serial_printf("[html_view] stylesheet_rebuild priv=%p css_len=%llu inline_len=%llu ext_len=%llu rules=%llu parse_ms=%llu sheet=%p",
+        serial_printf("[html_view] stylesheet_rebuild priv=%p css_len=%llu inline_len=%llu ext_len=%llu rules=%llu parse_ms=%llu sheet=%p pending_dirty=%u",
                       (void *)priv,
                       (unsigned long long)css_len,
                       (unsigned long long)inline_len,
                       (unsigned long long)external_len,
                       (unsigned long long)rule_count,
                       (unsigned long long)parse_ms,
-                      (void *)new_sheet);
+                      (void *)new_sheet,
+                      pending_dirty ? 1u : 0u);
     }
     if (!new_sheet)
     {
@@ -834,6 +1054,10 @@ static void html_view_stylesheet_rebuild_async_locked(atk_html_view_priv_t *priv
         css_stylesheet_destroy(priv->sheet);
     }
     priv->sheet = new_sheet;
+    if (pending_dirty)
+    {
+        __atomic_store_n(&priv->stylesheet_dirty, 1u, __ATOMIC_RELEASE);
+    }
 }
 
 static void html_view_render_thread(void *arg)
@@ -897,11 +1121,19 @@ static void html_view_render_thread(void *arg)
             static uint64_t last_render_lock_log_ms = 0;
             if (html_view_log_throttle(&last_render_lock_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
             {
-                serial_printf("[html_view] render_lock_busy view=%p lock=render target=%u done=%u dirty=%u",
+                uint64_t now_ms = sys_time_millis();
+                uint64_t hold_start_ms = __atomic_load_n(&priv->render_lock_hold_start_ms, __ATOMIC_RELAXED);
+                alix_thread_t owner = __atomic_load_n(&priv->render_lock_owner, __ATOMIC_RELAXED);
+                uintptr_t hold_caller = __atomic_load_n(&priv->render_lock_hold_caller, __ATOMIC_RELAXED);
+                uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
+                serial_printf("[html_view] render_lock_busy view=%p lock=render target=%u done=%u dirty=%u owner=%llu hold_ms=%llu caller=0x%016llX",
                               (void *)view,
                               target,
                               last_done,
-                              __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE));
+                              __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE),
+                              (unsigned long long)owner,
+                              (unsigned long long)hold_ms,
+                              (unsigned long long)hold_caller);
             }
             (void)sys_sleep_ms(1);
             continue;
@@ -1272,11 +1504,19 @@ static void html_view_draw_cb(const atk_state_t *state,
             uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
             uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
             uint32_t dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE);
-            serial_printf("[html_view] draw_lock_busy view=%p lock=render seq=%u done=%u dirty=%u",
+            uint64_t now_ms = sys_time_millis();
+            uint64_t hold_start_ms = __atomic_load_n(&priv->render_lock_hold_start_ms, __ATOMIC_RELAXED);
+            alix_thread_t owner = __atomic_load_n(&priv->render_lock_owner, __ATOMIC_RELAXED);
+            uintptr_t hold_caller = __atomic_load_n(&priv->render_lock_hold_caller, __ATOMIC_RELAXED);
+            uint64_t hold_ms = hold_start_ms ? (now_ms - hold_start_ms) : 0u;
+            serial_printf("[html_view] draw_lock_busy view=%p lock=render seq=%u done=%u dirty=%u owner=%llu hold_ms=%llu caller=0x%016llX",
                           (void *)widget,
                           seq,
                           done,
-                          dirty);
+                          dirty,
+                          (unsigned long long)owner,
+                          (unsigned long long)hold_ms,
+                          (unsigned long long)hold_caller);
         }
         html_view_dom_unlock(priv);
         html_view_invalidate(widget);
@@ -1806,9 +2046,9 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
     {
         html_view_render_stop(priv);
         html_view_js_shutdown(widget, priv);
-        alix_mutex_lock(&priv->render_lock);
+        html_view_render_lock(priv);
         html_view_render_cache_invalidate_locked(priv);
-        alix_mutex_unlock(&priv->render_lock);
+        html_view_render_unlock(priv);
         html_view_control_t *ctrl = priv->controls;
         while (ctrl)
         {
@@ -1919,6 +2159,9 @@ atk_widget_t *atk_window_add_html_view(atk_widget_t *window, int x, int y, int w
     priv->link_handler = NULL;
     priv->link_context = NULL;
     alix_mutex_init(&priv->render_lock);
+    priv->render_lock_hold_start_ms = 0;
+    priv->render_lock_owner = 0;
+    priv->render_lock_hold_caller = 0;
     priv->render_thread = 0;
     priv->render_stop = 0;
     priv->render_seq = 0;
@@ -2115,22 +2358,44 @@ static bool html_view_queue_external_css(atk_html_view_priv_t *priv, const char 
     {
         return false;
     }
-    if (!css_text)
-    {
-        css_text = "";
-    }
-    char *copy = html_view_strdup(css_text);
+    size_t copy_len = 0;
+    bool truncated = false;
+    char *copy = html_view_external_css_clamp(css_text, &copy_len, &truncated);
     if (!copy)
     {
-        static uint64_t last_fail_log_ms = 0;
-        if (html_view_log_throttle(&last_fail_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        if (css_text && css_text[0] != '\0')
         {
-            serial_printf("[html_view] external_css_queue_failed priv=%p",
-                          (void *)priv);
+            static uint64_t last_fail_log_ms = 0;
+            if (html_view_log_throttle(&last_fail_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+            {
+                serial_printf("[html_view] external_css_queue_failed priv=%p",
+                              (void *)priv);
+            }
+            return false;
         }
-        return false;
+        copy = html_view_strdup("");
+        if (!copy)
+        {
+            static uint64_t last_fail_log_ms = 0;
+            if (html_view_log_throttle(&last_fail_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+            {
+                serial_printf("[html_view] external_css_queue_failed priv=%p",
+                              (void *)priv);
+            }
+            return false;
+        }
     }
-    size_t copy_len = strlen(copy);
+    if (truncated)
+    {
+        static uint64_t last_truncate_log_ms = 0;
+        if (html_view_log_throttle(&last_truncate_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] external_css_truncate priv=%p from=%llu to=%llu",
+                          (void *)priv,
+                          (unsigned long long)strlen(css_text),
+                          (unsigned long long)copy_len);
+        }
+    }
     uint64_t now_ms = sys_time_millis();
     __atomic_store_n(&priv->external_css_pending_len, (uint64_t)copy_len, __ATOMIC_RELEASE);
     __atomic_store_n(&priv->external_css_pending_since_ms, now_ms, __ATOMIC_RELEASE);
@@ -2196,13 +2461,24 @@ static bool html_view_set_external_stylesheet_impl(atk_widget_t *view, const cha
         priv->external_css_len = 0;
     }
 
-    if (css_text && css_text[0] != '\0')
+    size_t copy_len = 0;
+    bool truncated = false;
+    char *copy = html_view_external_css_clamp(css_text, &copy_len, &truncated);
+    if (truncated)
     {
-        priv->external_css = html_view_strdup(css_text);
-        if (priv->external_css)
+        static uint64_t last_truncate_log_ms = 0;
+        if (html_view_log_throttle(&last_truncate_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
         {
-            priv->external_css_len = strlen(priv->external_css);
+            serial_printf("[html_view] external_css_truncate priv=%p from=%llu to=%llu",
+                          (void *)priv,
+                          (unsigned long long)strlen(css_text),
+                          (unsigned long long)copy_len);
         }
+    }
+    if (copy)
+    {
+        priv->external_css = copy;
+        priv->external_css_len = copy_len;
     }
 
     html_view_stylesheet_mark_dirty(priv);

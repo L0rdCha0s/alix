@@ -1180,14 +1180,37 @@ void html_view_apply_pending_external_css_locked(atk_html_view_priv_t *priv)
         free(pending);
         pending = NULL;
     }
+    if (pending && pending_len == 0)
+    {
+        pending_len = strlen(pending);
+    }
+    if (pending && pending_len > HTML_VIEW_EXTERNAL_CSS_MAX)
+    {
+        size_t limit = HTML_VIEW_EXTERNAL_CSS_MAX;
+        size_t cut = limit;
+        while (cut > 0 && pending[cut - 1] != '}')
+        {
+            --cut;
+        }
+        if (cut == 0)
+        {
+            cut = limit;
+        }
+        pending[cut] = '\0';
+        static uint64_t last_truncate_log_ms = 0;
+        if (html_view_css_log_throttle(&last_truncate_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] external_css_truncate priv=%p from=%llu to=%llu",
+                          (void *)priv,
+                          (unsigned long long)pending_len,
+                          (unsigned long long)cut);
+        }
+        pending_len = cut;
+    }
     bool replaced = (priv->external_css != NULL);
     if (priv->external_css)
     {
         free(priv->external_css);
-    }
-    if (pending && pending_len == 0)
-    {
-        pending_len = strlen(pending);
     }
     priv->external_css = pending;
     priv->external_css_len = pending ? (size_t)pending_len : 0;
