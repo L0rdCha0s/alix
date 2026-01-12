@@ -46,7 +46,7 @@ static bool js_array_index_key(size_t index, char *buf, size_t buf_len)
 
 js_array_t *js_array_create(void)
 {
-    js_array_t *array = (js_array_t *)calloc(1, sizeof(*array));
+    js_array_t *array = (js_array_t *)js_calloc(1, sizeof(*array));
     if (!array)
     {
         return NULL;
@@ -87,19 +87,19 @@ void js_array_release(js_array_t *array)
     {
         js_value_destroy(&array->items[i]);
     }
-    free(array->items);
+    js_free(array->items);
     js_property_t *prop = array->properties;
     while (prop)
     {
         js_property_t *next = prop->next;
-        free(prop->name);
+        js_free(prop->name);
         js_value_destroy(&prop->value);
         js_value_destroy(&prop->getter);
         js_value_destroy(&prop->setter);
-        free(prop);
+        js_free(prop);
         prop = next;
     }
-    free(array);
+    js_free(array);
 }
 
 static bool js_array_reserve(js_array_t *array, size_t needed)
@@ -122,7 +122,7 @@ static bool js_array_reserve(js_array_t *array, size_t needed)
         }
         new_cap *= 2u;
     }
-    js_value_t *new_items = (js_value_t *)realloc(array->items, new_cap * sizeof(*new_items));
+    js_value_t *new_items = (js_value_t *)js_realloc(array->items, new_cap * sizeof(*new_items));
     if (!new_items)
     {
         return false;
@@ -244,11 +244,11 @@ bool js_array_get_property(js_runtime_t *rt, js_array_t *array, const char *name
                 }
                 else
                 {
-                    free(err);
+                    js_free(err);
                 }
                 return false;
             }
-            free(err);
+            js_free(err);
             *out = value;
             return true;
         }
@@ -270,12 +270,12 @@ bool js_array_get_property(js_runtime_t *rt, js_array_t *array, const char *name
                 }
                 else
                 {
-                    free(err);
+                    js_free(err);
                 }
                 js_value_destroy(&result);
                 return false;
             }
-            free(err);
+            js_free(err);
             *out = result;
             return true;
         }
@@ -306,7 +306,7 @@ bool js_array_set_property(js_array_t *array, const char *name, const js_value_t
         js_value_destroy(&prop->value);
         return js_value_copy(&prop->value, value);
     }
-    js_property_t *new_prop = (js_property_t *)calloc(1, sizeof(*new_prop));
+    js_property_t *new_prop = (js_property_t *)js_calloc(1, sizeof(*new_prop));
     if (!new_prop)
     {
         return false;
@@ -314,7 +314,7 @@ bool js_array_set_property(js_array_t *array, const char *name, const js_value_t
     new_prop->name = js_strdup(name);
     if (!new_prop->name)
     {
-        free(new_prop);
+        js_free(new_prop);
         return false;
     }
     new_prop->value = js_value_make_undefined_internal();
@@ -326,8 +326,8 @@ bool js_array_set_property(js_array_t *array, const char *name, const js_value_t
     new_prop->is_accessor = false;
     if (!js_value_copy(&new_prop->value, value))
     {
-        free(new_prop->name);
-        free(new_prop);
+        js_free(new_prop->name);
+        js_free(new_prop);
         return false;
     }
     new_prop->next = array->properties;

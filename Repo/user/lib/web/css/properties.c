@@ -168,6 +168,40 @@ bool css_style_dup_owned_strings(css_style_t *style)
     return true;
 }
 
+static void css_style_fixup_inline_maps(css_style_t *style)
+{
+    if (!style)
+    {
+        return;
+    }
+    if (style->custom_props.items && style->custom_props.cap <= CSS_VAR_MAP_INLINE_CAP)
+    {
+        style->custom_props.items = style->custom_props.inline_items;
+    }
+    if (style->custom_props.slots && style->custom_props.slot_cap <= CSS_VAR_MAP_INLINE_SLOTS)
+    {
+        style->custom_props.slots = style->custom_props.inline_slots;
+    }
+    if (style->deferred_props.items && style->deferred_props.cap <= CSS_DEFERRED_MAP_INLINE_CAP)
+    {
+        style->deferred_props.items = style->deferred_props.inline_items;
+    }
+    if (style->deferred_props.slots && style->deferred_props.slot_cap <= CSS_DEFERRED_MAP_INLINE_SLOTS)
+    {
+        style->deferred_props.slots = style->deferred_props.inline_slots;
+    }
+}
+
+void css_style_copy_shallow(css_style_t *dst, const css_style_t *src)
+{
+    if (!dst || !src)
+    {
+        return;
+    }
+    *dst = *src;
+    css_style_fixup_inline_maps(dst);
+}
+
 bool css_style_copy(css_style_t *dst, const css_style_t *src)
 {
     if (!dst || !src)
@@ -255,6 +289,7 @@ bool css_style_copy(css_style_t *dst, const css_style_t *src)
     }
 
     *dst = tmp;
+    css_style_fixup_inline_maps(dst);
     return true;
 }
 

@@ -16,6 +16,7 @@
 #include "libc.h"
 #include "video.h"
 #include "web/css.h"
+#include "web/css/css_internal.h"
 #include "web/html.h"
 
 char *html_view_strdup(const char *src)
@@ -1165,7 +1166,29 @@ static void html_view_dump_tree(const html_node_t *root,
         return;
     }
 
-    size_t cap = 64;
+    size_t cap = 0;
+    const html_node_t *count_node = root;
+    while (count_node)
+    {
+        ++cap;
+        if (count_node->first_child)
+        {
+            count_node = count_node->first_child;
+            continue;
+        }
+        while (count_node && !count_node->next_sibling)
+        {
+            count_node = count_node->parent;
+        }
+        if (count_node)
+        {
+            count_node = count_node->next_sibling;
+        }
+    }
+    if (cap < 64)
+    {
+        cap = 64;
+    }
     size_t count = 0;
     html_view_dump_frame_t *stack = (html_view_dump_frame_t *)calloc(cap, sizeof(*stack));
     if (!stack)
@@ -1173,26 +1196,31 @@ static void html_view_dump_tree(const html_node_t *root,
         return;
     }
 
-    html_view_dump_frame_t root_frame = {0};
-    root_frame.node = root;
-    root_frame.depth = 0;
+    html_view_dump_frame_t *root_frame = &stack[count++];
+    root_frame->node = root;
+    root_frame->depth = 0;
+    root_frame->has_style = false;
     if (root->type == HTML_NODE_ELEMENT)
     {
-        html_view_style_for_node(&root_frame.style, sheet, NULL, root, priv);
-        root_frame.has_style = true;
+        html_view_style_for_node(&root_frame->style, sheet, NULL, root, priv);
+        root_frame->has_style = true;
     }
-    stack[count++] = root_frame;
 
     while (count > 0)
     {
-        html_view_dump_frame_t frame = stack[--count];
-        const html_node_t *node = frame.node;
-        const css_style_t *parent_style = frame.has_style ? &frame.style : NULL;
+        size_t frame_index = --count;
+        html_view_dump_frame_t *frame = &stack[frame_index];
+        const html_node_t *node = frame->node;
+        const css_style_t *parent_style = frame->has_style ? &frame->style : NULL;
 
-        html_view_dump_node_line(node, parent_style, frame.has_style, frame.depth);
+        html_view_dump_node_line(node, parent_style, frame->has_style, frame->depth);
 
         if (!node || !node->first_child)
         {
+            if (frame->has_style)
+            {
+                css_style_release(&frame->style);
+            }
             continue;
         }
 
@@ -1200,33 +1228,35 @@ static void html_view_dump_tree(const html_node_t *root,
         {
             if (count >= cap)
             {
-                size_t next_cap = cap * 2;
-                html_view_dump_frame_t *next = (html_view_dump_frame_t *)realloc(stack, next_cap * sizeof(*next));
-                if (!next)
+                if (frame->has_style)
                 {
-                    free(stack);
-                    return;
+                    css_style_release(&frame->style);
                 }
-                memset(next + cap, 0, (next_cap - cap) * sizeof(*next));
-                stack = next;
-                cap = next_cap;
+                free(stack);
+                return;
             }
-
-            html_view_dump_frame_t child_frame = {0};
-            child_frame.node = child;
-            child_frame.depth = frame.depth + 1;
-            child_frame.has_style = false;
+            html_view_dump_frame_t *child_frame = &stack[count++];
+            memset(child_frame, 0, sizeof(*child_frame));
+            child_frame->node = child;
+            child_frame->depth = frame->depth + 1;
+            child_frame->has_style = false;
             if (child && child->type == HTML_NODE_ELEMENT)
             {
-                html_view_style_for_node(&child_frame.style, sheet, parent_style, child, priv);
-                child_frame.has_style = true;
+                html_view_style_for_node(&child_frame->style, sheet, parent_style, child, priv);
+                child_frame->has_style = true;
             }
             else if (parent_style)
             {
-                child_frame.style = *parent_style;
-                child_frame.has_style = true;
+                if (css_style_copy(&child_frame->style, parent_style))
+                {
+                    child_frame->has_style = true;
+                }
             }
-            stack[count++] = child_frame;
+        }
+
+        if (frame->has_style)
+        {
+            css_style_release(&frame->style);
         }
     }
 
@@ -3235,6 +3265,8 @@ void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
     {
         return;
     }
+    html_view_style_cache_clear(priv);
+    html_view_rule_index_clear(priv);
     if (priv->sheet)
     {
         css_stylesheet_destroy(priv->sheet);

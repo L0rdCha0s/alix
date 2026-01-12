@@ -192,6 +192,9 @@ typedef struct css_decl_list
     size_t cap;
 } css_decl_list_t;
 
+#define CSS_VAR_MAP_INLINE_CAP 16u
+#define CSS_VAR_MAP_INLINE_SLOTS 32u
+
 typedef struct css_var_entry
 {
     const char *name;
@@ -209,7 +212,12 @@ typedef struct css_var_map
     size_t cap;
     uint32_t *slots;
     size_t slot_cap;
+    css_var_entry_t inline_items[CSS_VAR_MAP_INLINE_CAP];
+    uint32_t inline_slots[CSS_VAR_MAP_INLINE_SLOTS];
 } css_var_map_t;
+
+#define CSS_DEFERRED_MAP_INLINE_CAP 16u
+#define CSS_DEFERRED_MAP_INLINE_SLOTS 32u
 
 typedef struct css_deferred_prop
 {
@@ -226,6 +234,8 @@ typedef struct css_deferred_map
     size_t cap;
     uint32_t *slots;
     size_t slot_cap;
+    css_deferred_prop_t inline_items[CSS_DEFERRED_MAP_INLINE_CAP];
+    uint32_t inline_slots[CSS_DEFERRED_MAP_INLINE_SLOTS];
 } css_deferred_map_t;
 
 typedef struct

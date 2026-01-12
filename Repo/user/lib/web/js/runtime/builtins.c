@@ -916,7 +916,7 @@ static void js_date_finalize(void *user_data)
     {
         return;
     }
-    free(date);
+    js_free(date);
 }
 
 static void js_temporal_duration_finalize(void *user_data)
@@ -926,7 +926,7 @@ static void js_temporal_duration_finalize(void *user_data)
     {
         return;
     }
-    free(duration);
+    js_free(duration);
 }
 
 static void js_temporal_instant_finalize(void *user_data)
@@ -940,7 +940,7 @@ static void js_temporal_instant_finalize(void *user_data)
     {
         js_bigint_destroy(instant->epoch_nanoseconds);
     }
-    free(instant);
+    js_free(instant);
 }
 
 static bool js_object_define_data_property(js_object_t *obj,
@@ -1314,12 +1314,12 @@ static bool js_call_accessor_getter(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(err);
+                    js_free(err);
                 }
             }
             return false;
         }
-        free(err);
+        js_free(err);
     }
     return true;
 }
@@ -1360,9 +1360,9 @@ static bool js_regexp_has_duplicate_named_groups(const char *pattern, size_t len
         {
             for (size_t n = 0; n < count; ++n)
             {
-                free(names[n]);
+                js_free(names[n]);
             }
-            free(names);
+            js_free(names);
             names = NULL;
             count = 0;
             cap = 0;
@@ -1398,9 +1398,9 @@ static bool js_regexp_has_duplicate_named_groups(const char *pattern, size_t len
                 {
                     for (size_t k = 0; k < count; ++k)
                     {
-                        free(names[k]);
+                        js_free(names[k]);
                     }
-                    free(names);
+                    js_free(names);
                     *out_dup = true;
                     return true;
                 }
@@ -1408,14 +1408,14 @@ static bool js_regexp_has_duplicate_named_groups(const char *pattern, size_t len
             if (count == cap)
             {
                 size_t next_cap = cap ? cap * 2 : 4;
-                char **next = (char **)realloc(names, next_cap * sizeof(*next));
+                char **next = (char **)js_realloc(names, next_cap * sizeof(*next));
                 if (!next)
                 {
                     for (size_t k = 0; k < count; ++k)
                     {
-                        free(names[k]);
+                        js_free(names[k]);
                     }
-                    free(names);
+                    js_free(names);
                     return false;
                 }
                 names = next;
@@ -1426,9 +1426,9 @@ static bool js_regexp_has_duplicate_named_groups(const char *pattern, size_t len
             {
                 for (size_t k = 0; k < count; ++k)
                 {
-                    free(names[k]);
+                    js_free(names[k]);
                 }
-                free(names);
+                js_free(names);
                 return false;
             }
             names[count++] = copy;
@@ -1437,9 +1437,9 @@ static bool js_regexp_has_duplicate_named_groups(const char *pattern, size_t len
     }
     for (size_t n = 0; n < count; ++n)
     {
-        free(names[n]);
+        js_free(names[n]);
     }
-    free(names);
+    js_free(names);
     return true;
 }
 
@@ -1578,7 +1578,7 @@ static void js_realm_finalize(void *user_data)
     {
         return;
     }
-    free(realm);
+    js_free(realm);
 }
 
 static bool js_append_utf8(char *buf, size_t cap, size_t *len, unsigned int code)
@@ -1940,7 +1940,7 @@ static bool js_regexp_build_literal(const char *pattern,
     {
         return true;
     }
-    char *buf = (char *)malloc(pattern_len + 1);
+    char *buf = (char *)js_malloc(pattern_len + 1);
     if (!buf)
     {
         return false;
@@ -2302,7 +2302,7 @@ static bool js_iterator_close(js_runtime_t *rt, const js_value_t *iterator, char
         }
         else
         {
-            free(err);
+            js_free(err);
         }
         return false;
     }
@@ -2320,11 +2320,11 @@ static bool js_iterator_close(js_runtime_t *rt, const js_value_t *iterator, char
             }
             else
             {
-                free(err);
+                js_free(err);
             }
             return false;
         }
-        free(err);
+        js_free(err);
         return true;
     }
     js_value_destroy(&return_method);
@@ -2449,7 +2449,7 @@ static bool js_iterator_map_next(js_runtime_t *rt,
             }
             else
             {
-                free(err);
+                js_free(err);
             }
             state->executing = false;
             return false;
@@ -2475,7 +2475,7 @@ static bool js_iterator_map_next(js_runtime_t *rt,
             }
             else
             {
-                free(done_err);
+                js_free(done_err);
             }
             state->executing = false;
             return false;
@@ -2501,7 +2501,7 @@ static bool js_iterator_map_next(js_runtime_t *rt,
             }
             else
             {
-                free(value_err);
+                js_free(value_err);
             }
             state->executing = false;
             return false;
@@ -2514,7 +2514,7 @@ static bool js_iterator_map_next(js_runtime_t *rt,
     if (state->mapper.type == JS_VALUE_FUNCTION || state->mapper.type == JS_VALUE_NATIVE_FN)
     {
         js_value_t index_val = js_value_make_number((double)state->index);
-        js_value_t *call_args = (js_value_t *)calloc(2, sizeof(*call_args));
+        js_value_t *call_args = (js_value_t *)js_calloc(2, sizeof(*call_args));
         if (!call_args)
         {
             js_value_destroy(&value);
@@ -2531,7 +2531,7 @@ static bool js_iterator_map_next(js_runtime_t *rt,
         bool ok = js_call_value(rt, &state->mapper, 2, call_args, &mapped, &call_err);
         js_value_destroy(&call_args[0]);
         js_value_destroy(&call_args[1]);
-        free(call_args);
+        js_free(call_args);
         if (!ok)
         {
             char *close_err = NULL;
@@ -2544,9 +2544,9 @@ static bool js_iterator_map_next(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(close_err);
+                    js_free(close_err);
                 }
-                free(call_err);
+                js_free(call_err);
                 state->executing = false;
                 return false;
             }
@@ -2556,7 +2556,7 @@ static bool js_iterator_map_next(js_runtime_t *rt,
             }
             else
             {
-                free(call_err);
+                js_free(call_err);
             }
             state->executing = false;
             return false;
@@ -2626,11 +2626,11 @@ static bool js_iterator_map_return(js_runtime_t *rt,
             }
             else
             {
-                free(close_err);
+                js_free(close_err);
             }
             return false;
         }
-        free(close_err);
+        js_free(close_err);
     }
     const js_value_t *value = (argc > 0 && argv) ? &argv[0] : NULL;
     js_value_t undef = js_value_make_undefined_internal();
@@ -2659,7 +2659,7 @@ static void js_iterator_map_finalize(void *user_data)
     js_value_destroy(&state->iterator);
     js_value_destroy(&state->next_method);
     js_value_destroy(&state->mapper);
-    free(state);
+    js_free(state);
 }
 
 js_object_t *js_get_iterator_proto(js_runtime_t *rt)
@@ -4341,7 +4341,7 @@ bool js_builtin_iterator_map(js_runtime_t *rt,
             }
             else
             {
-                free(close_err);
+                js_free(close_err);
             }
             return false;
         }
@@ -4352,7 +4352,7 @@ bool js_builtin_iterator_map(js_runtime_t *rt,
         return false;
     }
 
-    js_iterator_map_state_t *state = (js_iterator_map_state_t *)calloc(1, sizeof(*state));
+    js_iterator_map_state_t *state = (js_iterator_map_state_t *)js_calloc(1, sizeof(*state));
     if (!state)
     {
         if (error_message)
@@ -4363,7 +4363,7 @@ bool js_builtin_iterator_map(js_runtime_t *rt,
     }
     if (!js_value_copy(&state->iterator, this_val))
     {
-        free(state);
+        js_free(state);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -4373,7 +4373,7 @@ bool js_builtin_iterator_map(js_runtime_t *rt,
     if (!js_value_copy(&state->mapper, mapper_val))
     {
         js_value_destroy(&state->iterator);
-        free(state);
+        js_free(state);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -4394,14 +4394,14 @@ bool js_builtin_iterator_map(js_runtime_t *rt,
         {
             js_value_destroy(&state->iterator);
             js_value_destroy(&state->mapper);
-            free(state);
+            js_free(state);
             if (error_message)
             {
                 *error_message = next_err ? next_err : js_strdup("iterator next failed");
             }
             else
             {
-                free(next_err);
+                js_free(next_err);
             }
             return false;
         }
@@ -4410,7 +4410,7 @@ bool js_builtin_iterator_map(js_runtime_t *rt,
             js_value_destroy(&state->iterator);
             js_value_destroy(&state->mapper);
             js_value_destroy(&next_method);
-            free(state);
+            js_free(state);
             if (error_message)
             {
                 *error_message = js_strdup("TypeError: iterator next is not callable");
@@ -4447,7 +4447,7 @@ static bool js_regexp_set_flags(js_regexp_t *re, const char *flags, size_t len)
     {
         return false;
     }
-    free(re->flags);
+    js_free(re->flags);
     re->flags = NULL;
     re->flags_len = 0;
     if (!flags || len == 0)
@@ -5516,10 +5516,10 @@ static bool js_name_list_add(js_name_list_t *list, const char *name)
         {
             new_cap = list->count + 1;
         }
-        char **next = (char **)realloc(list->items, new_cap * sizeof(*next));
+        char **next = (char **)js_realloc(list->items, new_cap * sizeof(*next));
         if (!next)
         {
-            free(copy);
+            js_free(copy);
             return false;
         }
         list->items = next;
@@ -5548,9 +5548,9 @@ static void js_name_list_destroy(js_name_list_t *list)
     }
     for (size_t i = 0; i < list->count; ++i)
     {
-        free(list->items[i]);
+        js_free(list->items[i]);
     }
-    free(list->items);
+    js_free(list->items);
     list->items = NULL;
     list->count = 0;
     list->cap = 0;
@@ -5879,7 +5879,7 @@ static bool js_try_object_method_number(js_runtime_t *rt,
         }
         else
         {
-            free(err);
+            js_free(err);
         }
         return false;
     }
@@ -5969,7 +5969,7 @@ static bool js_try_object_method_with_hint(js_runtime_t *rt,
         }
         else
         {
-            free(err);
+            js_free(err);
         }
         return false;
     }
@@ -6105,9 +6105,9 @@ static void js_regexp_finalize(void *user_data)
     {
         return;
     }
-    free(re->pattern);
-    free(re->flags);
-    free(re);
+    js_free(re->pattern);
+    js_free(re->flags);
+    js_free(re);
 }
 
 static char *js_str_to_lower_copy(const char *text, size_t len)
@@ -6117,7 +6117,7 @@ static char *js_str_to_lower_copy(const char *text, size_t len)
         text = "";
         len = 0;
     }
-    char *buf = (char *)malloc(len + 1);
+    char *buf = (char *)js_malloc(len + 1);
     if (!buf)
     {
         return NULL;
@@ -6191,8 +6191,8 @@ static bool js_regexp_test(js_runtime_t *rt,
         text_lower = js_str_to_lower_copy(text, text_len);
         if (!pattern_lower || !text_lower)
         {
-            free(pattern_lower);
-            free(text_lower);
+            js_free(pattern_lower);
+            js_free(text_lower);
             js_temp_string_release(&temp);
             if (error_message)
             {
@@ -6207,8 +6207,8 @@ static bool js_regexp_test(js_runtime_t *rt,
                                         pattern_len,
                                         text,
                                         text_len);
-    free(pattern_lower);
-    free(text_lower);
+    js_free(pattern_lower);
+    js_free(text_lower);
     js_temp_string_release(&temp);
     *out = js_value_make_bool(match);
     return true;
@@ -6370,7 +6370,7 @@ static bool js_regexp_to_string(js_runtime_t *rt,
     const char *flags = (re && re->flags) ? re->flags : "";
     size_t flags_len = (re && re->flags) ? re->flags_len : 0;
     size_t total = pattern_len + flags_len + 2;
-    char *buf = (char *)malloc(total + 1);
+    char *buf = (char *)js_malloc(total + 1);
     if (!buf)
     {
         if (error_message)
@@ -6473,7 +6473,7 @@ bool js_regexp_compile(js_runtime_t *rt,
             }
             return false;
         }
-        free(re->pattern);
+        js_free(re->pattern);
         re->pattern = pattern_copy;
         re->pattern_len = 0;
         bool ok = false;
@@ -6521,7 +6521,7 @@ bool js_regexp_compile(js_runtime_t *rt,
                 }
                 return false;
             }
-            free(re->pattern);
+            js_free(re->pattern);
             re->pattern = pattern_copy;
             re->pattern_len = src_len;
             const char *flags = (pattern_re && pattern_re->flags) ? pattern_re->flags : "";
@@ -6536,7 +6536,7 @@ bool js_regexp_compile(js_runtime_t *rt,
                 return false;
             }
             bool ok = js_regexp_set_flags(re, flags_copy ? flags_copy : "", flags_len);
-            free(flags_copy);
+            js_free(flags_copy);
             if (!ok)
             {
                 if (error_message)
@@ -6618,7 +6618,7 @@ bool js_regexp_compile(js_runtime_t *rt,
                 }
                 return false;
             }
-            free(re->pattern);
+            js_free(re->pattern);
             re->pattern = pattern_copy;
             re->pattern_len = pattern_temp.len;
             js_temp_string_release(&pattern_temp);
@@ -6761,12 +6761,12 @@ static bool js_regexp_split(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(getter_err);
+                    js_free(getter_err);
                 }
             }
             return false;
         }
-        free(getter_err);
+        js_free(getter_err);
     }
     const char *pattern = (re && re->pattern) ? re->pattern : "";
     size_t pattern_len = (re && re->pattern) ? re->pattern_len : 0;
@@ -6799,7 +6799,7 @@ static bool js_regexp_split(js_runtime_t *rt,
             {
                 js_value_destroy(out);
                 js_temp_string_release(&input_temp);
-                free(pattern_copy);
+                js_free(pattern_copy);
                 return false;
             }
             limit_val = &prim;
@@ -6830,7 +6830,7 @@ static bool js_regexp_split(js_runtime_t *rt,
     {
         js_value_destroy(out);
         js_temp_string_release(&input_temp);
-        free(pattern_copy);
+        js_free(pattern_copy);
         return js_value_make_array(out);
     }
     char *literal = NULL;
@@ -6850,8 +6850,8 @@ static bool js_regexp_split(js_runtime_t *rt,
             if (!js_value_make_string(&part, text + i, 1))
             {
                 js_value_destroy(out);
-                free(literal);
-                free(pattern_copy);
+                js_free(literal);
+                js_free(pattern_copy);
                 js_temp_string_release(&input_temp);
                 return false;
             }
@@ -6860,14 +6860,14 @@ static bool js_regexp_split(js_runtime_t *rt,
             if (!ok)
             {
                 js_value_destroy(out);
-                free(literal);
-                free(pattern_copy);
+                js_free(literal);
+                js_free(pattern_copy);
                 js_temp_string_release(&input_temp);
                 return false;
             }
         }
-        free(literal);
-        free(pattern_copy);
+        js_free(literal);
+        js_free(pattern_copy);
         js_temp_string_release(&input_temp);
         return true;
     }
@@ -6882,8 +6882,8 @@ static bool js_regexp_split(js_runtime_t *rt,
             if (!js_value_make_string(&part, text + start, i - start))
             {
                 js_value_destroy(out);
-                free(literal);
-                free(pattern_copy);
+                js_free(literal);
+                js_free(pattern_copy);
                 js_temp_string_release(&input_temp);
                 return false;
             }
@@ -6892,8 +6892,8 @@ static bool js_regexp_split(js_runtime_t *rt,
             if (!ok)
             {
                 js_value_destroy(out);
-                free(literal);
-                free(pattern_copy);
+                js_free(literal);
+                js_free(pattern_copy);
                 js_temp_string_release(&input_temp);
                 return false;
             }
@@ -6914,8 +6914,8 @@ static bool js_regexp_split(js_runtime_t *rt,
         if (!js_value_make_string(&tail, text + start, text_len - start))
         {
             js_value_destroy(out);
-            free(literal);
-            free(pattern_copy);
+            js_free(literal);
+            js_free(pattern_copy);
             js_temp_string_release(&input_temp);
             return false;
         }
@@ -6924,15 +6924,15 @@ static bool js_regexp_split(js_runtime_t *rt,
         if (!ok)
         {
             js_value_destroy(out);
-            free(literal);
-            free(pattern_copy);
+            js_free(literal);
+            js_free(pattern_copy);
             js_temp_string_release(&input_temp);
             return false;
         }
     }
 
-    free(literal);
-    free(pattern_copy);
+    js_free(literal);
+    js_free(pattern_copy);
     js_temp_string_release(&input_temp);
     return true;
 }
@@ -7144,7 +7144,7 @@ bool js_builtin_string_match(js_runtime_t *rt,
 
     if (literal)
     {
-        free(literal);
+        js_free(literal);
     }
     js_temp_string_release(&pattern_temp);
     if (have_source)
@@ -7253,7 +7253,7 @@ bool js_builtin_number_to_string(js_runtime_t *rt,
     }
 
     size_t cap = 70;
-    char *buf = (char *)malloc(cap);
+    char *buf = (char *)js_malloc(cap);
     if (!buf)
     {
         if (error_message)
@@ -7281,7 +7281,7 @@ bool js_builtin_number_to_string(js_runtime_t *rt,
         buf[len - 1 - i] = tmp;
     }
     bool ok = js_value_make_string(out, buf, len);
-    free(buf);
+    js_free(buf);
     if (!ok && error_message)
     {
         *error_message = js_strdup("allocation failed");
@@ -8163,7 +8163,7 @@ bool js_builtin_define_property(js_runtime_t *rt,
 
 define_cleanup:
     js_desc_request_destroy(&request);
-    free(prop_name);
+    js_free(prop_name);
     if (!ok)
     {
         return false;
@@ -8279,11 +8279,11 @@ bool js_builtin_define_properties(js_runtime_t *rt,
         }
         else
         {
-            free(collect_err);
+            js_free(collect_err);
         }
         return false;
     }
-    free(collect_err);
+    js_free(collect_err);
 
     for (size_t i = 0; i < names.count; ++i)
     {
@@ -8305,7 +8305,7 @@ bool js_builtin_define_properties(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(desc_err);
+                    js_free(desc_err);
                 }
             }
             return false;
@@ -8332,12 +8332,12 @@ bool js_builtin_define_properties(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(value_err);
+                    js_free(value_err);
                 }
             }
             return false;
         }
-        free(value_err);
+        js_free(value_err);
 
         js_value_t key;
         if (!js_value_make_cstring(&key, name))
@@ -8368,12 +8368,12 @@ bool js_builtin_define_properties(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(err);
+                    js_free(err);
                 }
             }
             return false;
         }
-        free(err);
+        js_free(err);
     }
     js_name_list_destroy(&names);
     if (!js_value_copy(out, target))
@@ -8398,14 +8398,14 @@ static void js_bound_fn_release(js_bound_fn_t *bound)
     if (bound->owned_target_user_data)
     {
         js_value_destroy(bound->owned_target_user_data);
-        free(bound->owned_target_user_data);
+        js_free(bound->owned_target_user_data);
     }
     for (size_t i = 0; i < bound->arg_count; ++i)
     {
         js_value_destroy(&bound->args[i]);
     }
-    free(bound->args);
-    free(bound);
+    js_free(bound->args);
+    js_free(bound);
 }
 
 static bool js_builtin_bound_function(js_runtime_t *rt,
@@ -8451,7 +8451,7 @@ static bool js_builtin_bound_function(js_runtime_t *rt,
     js_value_t *call_args = NULL;
     if (call_argc)
     {
-        call_args = (js_value_t *)calloc(call_argc, sizeof(*call_args));
+        call_args = (js_value_t *)js_calloc(call_argc, sizeof(*call_args));
         if (!call_args)
         {
             if (error_message)
@@ -8467,7 +8467,7 @@ static bool js_builtin_bound_function(js_runtime_t *rt,
     {
         if (!js_value_copy(&call_args[index++], &bound->this_arg))
         {
-            free(call_args);
+            js_free(call_args);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8483,7 +8483,7 @@ static bool js_builtin_bound_function(js_runtime_t *rt,
             {
                 js_value_destroy(&call_args[j]);
             }
-            free(call_args);
+            js_free(call_args);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8499,7 +8499,7 @@ static bool js_builtin_bound_function(js_runtime_t *rt,
             {
                 js_value_destroy(&call_args[j]);
             }
-            free(call_args);
+            js_free(call_args);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8513,7 +8513,7 @@ static bool js_builtin_bound_function(js_runtime_t *rt,
     {
         js_value_destroy(&call_args[i]);
     }
-    free(call_args);
+    js_free(call_args);
     return ok;
 }
 
@@ -8584,7 +8584,7 @@ bool js_builtin_function_call(js_runtime_t *rt,
     js_value_t *call_args = NULL;
     if (call_argc)
     {
-        call_args = (js_value_t *)calloc(call_argc, sizeof(*call_args));
+        call_args = (js_value_t *)js_calloc(call_argc, sizeof(*call_args));
         if (!call_args)
         {
             if (error_message)
@@ -8602,7 +8602,7 @@ bool js_builtin_function_call(js_runtime_t *rt,
         const js_value_t *use_this = this_arg ? this_arg : &undef;
         if (!js_value_copy(&call_args[out_index++], use_this))
         {
-            free(call_args);
+            js_free(call_args);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8618,7 +8618,7 @@ bool js_builtin_function_call(js_runtime_t *rt,
             {
                 js_value_destroy(&call_args[j]);
             }
-            free(call_args);
+            js_free(call_args);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8632,7 +8632,7 @@ bool js_builtin_function_call(js_runtime_t *rt,
     {
         js_value_destroy(&call_args[i]);
     }
-    free(call_args);
+    js_free(call_args);
     return ok;
 }
 
@@ -8683,7 +8683,7 @@ bool js_builtin_function_bind(js_runtime_t *rt,
     }
     size_t bound_count = (argc > arg_index) ? (argc - arg_index) : 0;
 
-    js_bound_fn_t *bound = (js_bound_fn_t *)calloc(1, sizeof(*bound));
+    js_bound_fn_t *bound = (js_bound_fn_t *)js_calloc(1, sizeof(*bound));
     if (!bound)
     {
         if (error_message)
@@ -8696,10 +8696,10 @@ bool js_builtin_function_bind(js_runtime_t *rt,
         target->as.native.fn == js_builtin_function_call &&
         target->as.native.user_data)
     {
-        js_value_t *target_copy = (js_value_t *)calloc(1, sizeof(*target_copy));
+        js_value_t *target_copy = (js_value_t *)js_calloc(1, sizeof(*target_copy));
         if (!target_copy)
         {
-            free(bound);
+            js_free(bound);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8708,8 +8708,8 @@ bool js_builtin_function_bind(js_runtime_t *rt,
         }
         if (!js_value_copy(target_copy, (const js_value_t *)target->as.native.user_data))
         {
-            free(target_copy);
-            free(bound);
+            js_free(target_copy);
+            js_free(bound);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8719,8 +8719,8 @@ bool js_builtin_function_bind(js_runtime_t *rt,
         if (!js_value_copy(&bound->target, target))
         {
             js_value_destroy(target_copy);
-            free(target_copy);
-            free(bound);
+            js_free(target_copy);
+            js_free(bound);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8732,7 +8732,7 @@ bool js_builtin_function_bind(js_runtime_t *rt,
     }
     else if (!js_value_copy(&bound->target, target))
     {
-        free(bound);
+        js_free(bound);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -8744,7 +8744,7 @@ bool js_builtin_function_bind(js_runtime_t *rt,
         if (!js_value_copy(&bound->this_arg, this_arg))
         {
             js_value_destroy(&bound->target);
-            free(bound);
+            js_free(bound);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8759,12 +8759,12 @@ bool js_builtin_function_bind(js_runtime_t *rt,
 
     if (bound_count)
     {
-        bound->args = (js_value_t *)calloc(bound_count, sizeof(*bound->args));
+        bound->args = (js_value_t *)js_calloc(bound_count, sizeof(*bound->args));
         if (!bound->args)
         {
             js_value_destroy(&bound->target);
             js_value_destroy(&bound->this_arg);
-            free(bound);
+            js_free(bound);
             if (error_message)
             {
                 *error_message = js_strdup("allocation failed");
@@ -8779,10 +8779,10 @@ bool js_builtin_function_bind(js_runtime_t *rt,
                 {
                     js_value_destroy(&bound->args[j]);
                 }
-                free(bound->args);
+                js_free(bound->args);
                 js_value_destroy(&bound->target);
                 js_value_destroy(&bound->this_arg);
-                free(bound);
+                js_free(bound);
                 if (error_message)
                 {
                     *error_message = js_strdup("allocation failed");
@@ -9048,7 +9048,7 @@ bool js_builtin_object_get_own_property_descriptor(js_runtime_t *rt,
         return false;
     }
     bool ok = js_build_prop_descriptor(rt, target, prop_name, out, error_message);
-    free(prop_name);
+    js_free(prop_name);
     return ok;
 }
 
@@ -9084,11 +9084,11 @@ bool js_builtin_object_get_own_property_names(js_runtime_t *rt,
         }
         else
         {
-            free(collect_err);
+            js_free(collect_err);
         }
         return false;
     }
-    free(collect_err);
+    js_free(collect_err);
 
     js_value_t result;
     if (!js_value_make_array(&result))
@@ -9163,11 +9163,11 @@ bool js_builtin_object_get_own_property_descriptors(js_runtime_t *rt,
         }
         else
         {
-            free(collect_err);
+            js_free(collect_err);
         }
         return false;
     }
-    free(collect_err);
+    js_free(collect_err);
 
     js_value_t result;
     if (!js_value_make_host_object(&result, NULL, NULL, NULL, NULL))
@@ -9247,7 +9247,7 @@ bool js_builtin_object_has_own_property(js_runtime_t *rt,
     }
     js_prop_desc_t desc;
     bool ok = js_builtin_get_prop_desc(rt, this_val, prop_name, &desc, error_message);
-    free(prop_name);
+    js_free(prop_name);
     if (!ok)
     {
         return false;
@@ -9307,7 +9307,7 @@ bool js_builtin_object_property_is_enumerable(js_runtime_t *rt,
     }
     js_prop_desc_t desc;
     bool ok = js_builtin_get_prop_desc(rt, this_val, prop_name, &desc, error_message);
-    free(prop_name);
+    js_free(prop_name);
     if (!ok)
     {
         return false;
@@ -9374,7 +9374,7 @@ bool js_builtin_object_to_string(js_runtime_t *rt,
                     {
                         size_t tag_len = tag.as.string.len;
                         size_t total_len = tag_len + 9;
-                        char *buffer = (char *)malloc(total_len + 1);
+                        char *buffer = (char *)js_malloc(total_len + 1);
                         if (!buffer)
                         {
                             js_value_destroy(&tag);
@@ -9389,7 +9389,7 @@ bool js_builtin_object_to_string(js_runtime_t *rt,
                         buffer[8 + tag_len] = ']';
                         buffer[total_len] = '\0';
                         bool ok = js_value_make_string(out, buffer, total_len);
-                        free(buffer);
+                        js_free(buffer);
                         js_value_destroy(&tag);
                         return ok;
                     }
@@ -9575,7 +9575,7 @@ bool js_builtin_array_join(js_runtime_t *rt,
         char *len_err = NULL;
         if (!js_object_get_property(rt, this_val->as.object, "length", &len_val, &len_err))
         {
-            free(len_err);
+            js_free(len_err);
             js_temp_string_release(&sep_temp);
             if (error_message)
             {
@@ -9583,7 +9583,7 @@ bool js_builtin_array_join(js_runtime_t *rt,
             }
             return false;
         }
-        free(len_err);
+        js_free(len_err);
         bool ok = true;
         double len_num = js_value_to_number(&len_val, &ok);
         js_value_destroy(&len_val);
@@ -9612,10 +9612,10 @@ bool js_builtin_array_join(js_runtime_t *rt,
                 {
                     new_cap *= 2u;
                 }
-                char *next = (char *)realloc(buffer, new_cap);
+                char *next = (char *)js_realloc(buffer, new_cap);
                 if (!next)
                 {
-                    free(buffer);
+                    js_free(buffer);
                     js_temp_string_release(&sep_temp);
                     if (error_message)
                     {
@@ -9636,7 +9636,7 @@ bool js_builtin_array_join(js_runtime_t *rt,
         {
             if (!js_array_get(this_val->as.array, i, &value))
             {
-                free(buffer);
+                js_free(buffer);
                 js_temp_string_release(&sep_temp);
                 if (error_message)
                 {
@@ -9651,7 +9651,7 @@ bool js_builtin_array_join(js_runtime_t *rt,
             int key_len = snprintf(key, sizeof(key), "%zu", i);
             if (key_len < 0 || (size_t)key_len >= sizeof(key))
             {
-                free(buffer);
+                js_free(buffer);
                 js_temp_string_release(&sep_temp);
                 if (error_message)
                 {
@@ -9662,7 +9662,7 @@ bool js_builtin_array_join(js_runtime_t *rt,
             char *prop_err = NULL;
             if (!js_object_get_property(rt, this_val->as.object, key, &value, &prop_err))
             {
-                free(buffer);
+                js_free(buffer);
                 js_temp_string_release(&sep_temp);
                 if (error_message)
                 {
@@ -9670,11 +9670,11 @@ bool js_builtin_array_join(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(prop_err);
+                    js_free(prop_err);
                 }
                 return false;
             }
-            free(prop_err);
+            js_free(prop_err);
         }
         if (value.type == JS_VALUE_UNDEFINED || value.type == JS_VALUE_NULL)
         {
@@ -9685,7 +9685,7 @@ bool js_builtin_array_join(js_runtime_t *rt,
         if (!js_temp_string_from_value(rt, &value, &temp, error_message))
         {
             js_value_destroy(&value);
-            free(buffer);
+            js_free(buffer);
             js_temp_string_release(&sep_temp);
             return false;
         }
@@ -9697,12 +9697,12 @@ bool js_builtin_array_join(js_runtime_t *rt,
             {
                 new_cap *= 2u;
             }
-            char *next = (char *)realloc(buffer, new_cap);
+            char *next = (char *)js_realloc(buffer, new_cap);
             if (!next)
             {
                 js_temp_string_release(&temp);
                 js_value_destroy(&value);
-                free(buffer);
+                js_free(buffer);
                 js_temp_string_release(&sep_temp);
                 if (error_message)
                 {
@@ -9724,7 +9724,7 @@ bool js_builtin_array_join(js_runtime_t *rt,
     }
 
     bool ok = js_value_make_string(out, buffer ? buffer : "", len);
-    free(buffer);
+    js_free(buffer);
     js_temp_string_release(&sep_temp);
     if (!ok && error_message)
     {
@@ -9832,7 +9832,7 @@ bool js_builtin_array_map(js_runtime_t *rt,
         char *len_err = NULL;
         if (!js_object_get_property(rt, this_val->as.object, "length", &len_val, &len_err))
         {
-            free(len_err);
+            js_free(len_err);
             js_value_destroy(out);
             if (error_message)
             {
@@ -9840,7 +9840,7 @@ bool js_builtin_array_map(js_runtime_t *rt,
             }
             return false;
         }
-        free(len_err);
+        js_free(len_err);
         bool ok = true;
         double len_num = js_value_to_number(&len_val, &ok);
         js_value_destroy(&len_val);
@@ -9895,13 +9895,13 @@ bool js_builtin_array_map(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(prop_err);
+                    js_free(prop_err);
                 }
                 return false;
             }
-            free(prop_err);
+            js_free(prop_err);
         }
-        js_value_t *call_args = (js_value_t *)calloc(3, sizeof(*call_args));
+        js_value_t *call_args = (js_value_t *)js_calloc(3, sizeof(*call_args));
         if (!call_args)
         {
             js_value_destroy(&value);
@@ -9914,7 +9914,7 @@ bool js_builtin_array_map(js_runtime_t *rt,
         }
         if (!js_value_copy(&call_args[0], &value))
         {
-            free(call_args);
+            js_free(call_args);
             js_value_destroy(&value);
             js_value_destroy(out);
             if (error_message)
@@ -9927,7 +9927,7 @@ bool js_builtin_array_map(js_runtime_t *rt,
         if (!js_value_copy(&call_args[2], this_val))
         {
             js_value_destroy(&call_args[0]);
-            free(call_args);
+            js_free(call_args);
             js_value_destroy(&value);
             js_value_destroy(out);
             if (error_message)
@@ -9944,7 +9944,7 @@ bool js_builtin_array_map(js_runtime_t *rt,
         {
             js_value_destroy(&call_args[j]);
         }
-        free(call_args);
+        js_free(call_args);
         if (!ok)
         {
             js_value_destroy(&mapped);
@@ -9957,7 +9957,7 @@ bool js_builtin_array_map(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(call_err);
+                    js_free(call_err);
                 }
             }
             return false;
@@ -10176,7 +10176,7 @@ bool js_builtin_regexp(js_runtime_t *rt,
         return false;
     }
     js_realm_t *realm = (js_realm_t *)user_data;
-    js_regexp_t *re = (js_regexp_t *)calloc(1, sizeof(*re));
+    js_regexp_t *re = (js_regexp_t *)js_calloc(1, sizeof(*re));
     if (!re)
     {
         js_temp_string_release(&temp);
@@ -10194,7 +10194,7 @@ bool js_builtin_regexp(js_runtime_t *rt,
         re->pattern_len = temp.len;
         if (!re->pattern)
         {
-            free(re);
+            js_free(re);
             js_temp_string_release(&temp);
             js_temp_string_release(&flags_temp);
             if (error_message)
@@ -10305,7 +10305,7 @@ bool js_builtin_string_from_char_code(js_runtime_t *rt,
         return js_value_make_cstring(out, "");
     }
     size_t cap = argc * 3;
-    char *buf = (char *)malloc(cap ? cap : 1);
+    char *buf = (char *)js_malloc(cap ? cap : 1);
     if (!buf)
     {
         if (error_message)
@@ -10341,7 +10341,7 @@ bool js_builtin_string_from_char_code(js_runtime_t *rt,
         }
     }
     bool ok = js_value_make_string(out, buf, len);
-    free(buf);
+    js_free(buf);
     return ok;
 }
 
@@ -10542,7 +10542,7 @@ bool js_builtin_escape(js_runtime_t *rt,
     }
 
     size_t cap = temp.len * 6 + 1;
-    char *buf = (char *)malloc(cap);
+    char *buf = (char *)js_malloc(cap);
     if (!buf)
     {
         js_temp_string_release(&temp);
@@ -10555,7 +10555,7 @@ bool js_builtin_escape(js_runtime_t *rt,
         unsigned int code = 0;
         if (!js_utf8_next(temp.data, temp.len, &index, &code))
         {
-            free(buf);
+            js_free(buf);
             js_temp_string_release(&temp);
             return false;
         }
@@ -10563,7 +10563,7 @@ bool js_builtin_escape(js_runtime_t *rt,
         {
             if (out_len + 1 > cap)
             {
-                free(buf);
+                js_free(buf);
                 js_temp_string_release(&temp);
                 return false;
             }
@@ -10574,7 +10574,7 @@ bool js_builtin_escape(js_runtime_t *rt,
         {
             if (!js_append_escape_hex(buf, cap, &out_len, code, false))
             {
-                free(buf);
+                js_free(buf);
                 js_temp_string_release(&temp);
                 return false;
             }
@@ -10584,7 +10584,7 @@ bool js_builtin_escape(js_runtime_t *rt,
         {
             if (!js_append_escape_hex(buf, cap, &out_len, code, true))
             {
-                free(buf);
+                js_free(buf);
                 js_temp_string_release(&temp);
                 return false;
             }
@@ -10596,7 +10596,7 @@ bool js_builtin_escape(js_runtime_t *rt,
         if (!js_append_escape_hex(buf, cap, &out_len, high, true) ||
             !js_append_escape_hex(buf, cap, &out_len, low, true))
         {
-            free(buf);
+            js_free(buf);
             js_temp_string_release(&temp);
             return false;
         }
@@ -10604,7 +10604,7 @@ bool js_builtin_escape(js_runtime_t *rt,
     buf[out_len] = '\0';
 
     bool ok = js_value_make_string(out, buf, out_len);
-    free(buf);
+    js_free(buf);
     js_temp_string_release(&temp);
     return ok;
 }
@@ -10634,7 +10634,7 @@ bool js_builtin_unescape(js_runtime_t *rt,
     }
 
     size_t cap = temp.len * 3 + 1;
-    char *buf = (char *)malloc(cap);
+    char *buf = (char *)js_malloc(cap);
     if (!buf)
     {
         js_temp_string_release(&temp);
@@ -10660,7 +10660,7 @@ bool js_builtin_unescape(js_runtime_t *rt,
                         unsigned int code = (unsigned int)((h0 << 12) | (h1 << 8) | (h2 << 4) | h3);
                         if (!js_append_utf8(buf, cap, &out_len, code))
                         {
-                            free(buf);
+                            js_free(buf);
                             js_temp_string_release(&temp);
                             return false;
                         }
@@ -10678,7 +10678,7 @@ bool js_builtin_unescape(js_runtime_t *rt,
                     unsigned int code = (unsigned int)((h0 << 4) | h1);
                     if (!js_append_utf8(buf, cap, &out_len, code))
                     {
-                        free(buf);
+                        js_free(buf);
                         js_temp_string_release(&temp);
                         return false;
                     }
@@ -10689,7 +10689,7 @@ bool js_builtin_unescape(js_runtime_t *rt,
         }
         if (out_len + 1 > cap)
         {
-            free(buf);
+            js_free(buf);
             js_temp_string_release(&temp);
             return false;
         }
@@ -10699,7 +10699,7 @@ bool js_builtin_unescape(js_runtime_t *rt,
     buf[out_len] = '\0';
 
     bool ok = js_value_make_string(out, buf, out_len);
-    free(buf);
+    js_free(buf);
     js_temp_string_release(&temp);
     return ok;
 }
@@ -10731,7 +10731,7 @@ bool js_builtin_eval(js_runtime_t *rt,
     }
     size_t len = argv[0].as.string.len;
     const char *src = argv[0].as.string.data ? argv[0].as.string.data : "";
-    char *buf = (char *)malloc(len + 1);
+    char *buf = (char *)js_malloc(len + 1);
     if (!buf)
     {
         if (error_message)
@@ -10747,7 +10747,7 @@ bool js_builtin_eval(js_runtime_t *rt,
     }
     buf[len] = '\0';
     js_exec_result_t res = js_eval(rt, buf);
-    free(buf);
+    js_free(buf);
     if (res.ok)
     {
         *out = res.value;
@@ -10759,7 +10759,7 @@ bool js_builtin_eval(js_runtime_t *rt,
     }
     else
     {
-        free(res.error_message);
+        js_free(res.error_message);
     }
     js_value_destroy(&res.value);
     return false;
@@ -10963,7 +10963,7 @@ bool js_builtin_create_realm(js_runtime_t *rt,
     {
         return false;
     }
-    js_realm_t *realm = (js_realm_t *)calloc(1, sizeof(*realm));
+    js_realm_t *realm = (js_realm_t *)js_calloc(1, sizeof(*realm));
     if (!realm)
     {
         if (error_message)
@@ -10977,7 +10977,7 @@ bool js_builtin_create_realm(js_runtime_t *rt,
     js_value_t global_obj;
     if (!js_value_make_host_object(&global_obj, NULL, NULL, js_realm_finalize, realm))
     {
-        free(realm);
+        js_free(realm);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -11136,7 +11136,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
             }
             else
             {
-                free(name_err);
+                js_free(name_err);
             }
         }
         else if (error_message)
@@ -11160,7 +11160,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
     char *err = NULL;
     if (!js_builtin_get_prop_desc(rt, obj, name, &actual, &err))
     {
-        free(name);
+        js_free(name);
         if (err)
         {
             if (error_message)
@@ -11169,7 +11169,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
             }
             else
             {
-                free(err);
+                js_free(err);
             }
         }
         return false;
@@ -11182,7 +11182,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
             js_value_destroy(&actual.value);
             js_value_destroy(&actual.getter);
             js_value_destroy(&actual.setter);
-            free(name);
+            js_free(name);
             if (error_message)
             {
                 *error_message = js_strdup("property should be undefined");
@@ -11190,7 +11190,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
             return false;
         }
         *out = js_value_make_bool(true);
-        free(name);
+        js_free(name);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
         return true;
@@ -11201,7 +11201,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         if (error_message)
         {
             *error_message = js_strdup("descriptor must be an object");
@@ -11216,7 +11216,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         return false;
     }
 
@@ -11226,7 +11226,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         if (error_message)
         {
             *error_message = js_strdup("property value mismatch");
@@ -11242,7 +11242,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         return false;
     }
     if (has_writable && expected_writable.type != JS_VALUE_UNDEFINED)
@@ -11254,7 +11254,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
             js_value_destroy(&actual.value);
             js_value_destroy(&actual.getter);
             js_value_destroy(&actual.setter);
-            free(name);
+            js_free(name);
             if (error_message)
             {
                 *error_message = js_strdup("writable mismatch");
@@ -11271,7 +11271,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         return false;
     }
     if (has_enumerable && expected_enumerable.type != JS_VALUE_UNDEFINED)
@@ -11283,7 +11283,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
             js_value_destroy(&actual.value);
             js_value_destroy(&actual.getter);
             js_value_destroy(&actual.setter);
-            free(name);
+            js_free(name);
             if (error_message)
             {
                 *error_message = js_strdup("enumerable mismatch");
@@ -11300,7 +11300,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         return false;
     }
     if (has_configurable && expected_configurable.type != JS_VALUE_UNDEFINED)
@@ -11312,7 +11312,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
             js_value_destroy(&actual.value);
             js_value_destroy(&actual.getter);
             js_value_destroy(&actual.setter);
-            free(name);
+            js_free(name);
             if (error_message)
             {
                 *error_message = js_strdup("configurable mismatch");
@@ -11329,7 +11329,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         return false;
     }
 
@@ -11341,7 +11341,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         return false;
     }
 
@@ -11352,7 +11352,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         if (error_message)
         {
             *error_message = js_strdup("property is not an accessor");
@@ -11366,7 +11366,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         if (error_message)
         {
             *error_message = js_strdup("getter mismatch");
@@ -11380,7 +11380,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
         js_value_destroy(&actual.value);
         js_value_destroy(&actual.getter);
         js_value_destroy(&actual.setter);
-        free(name);
+        js_free(name);
         if (error_message)
         {
             *error_message = js_strdup("setter mismatch");
@@ -11394,7 +11394,7 @@ bool js_builtin_verify_property(js_runtime_t *rt,
     js_value_destroy(&actual.getter);
     js_value_destroy(&actual.setter);
     *out = js_value_make_bool(true);
-    free(name);
+    js_free(name);
     return true;
 }
 
@@ -11411,7 +11411,7 @@ static void js_boxed_primitive_finalize(void *user_data)
         return;
     }
     js_value_destroy(&boxed->primitive);
-    free(boxed);
+    js_free(boxed);
 }
 
 static bool js_boxed_primitive_value_of(js_runtime_t *rt,
@@ -11454,7 +11454,7 @@ static bool js_date_box_number(js_runtime_t *rt,
     {
         return false;
     }
-    js_boxed_primitive_t *boxed = (js_boxed_primitive_t *)calloc(1, sizeof(*boxed));
+    js_boxed_primitive_t *boxed = (js_boxed_primitive_t *)js_calloc(1, sizeof(*boxed));
     if (!boxed)
     {
         if (error_message)
@@ -11465,7 +11465,7 @@ static bool js_date_box_number(js_runtime_t *rt,
     }
     if (!js_value_copy(&boxed->primitive, value))
     {
-        free(boxed);
+        js_free(boxed);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -11475,7 +11475,7 @@ static bool js_date_box_number(js_runtime_t *rt,
     if (!js_value_make_host_object(out, NULL, NULL, js_boxed_primitive_finalize, boxed))
     {
         js_value_destroy(&boxed->primitive);
-        free(boxed);
+        js_free(boxed);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -11866,7 +11866,7 @@ bool js_builtin_date(js_runtime_t *rt,
     }
     time_ms = js_date_time_clip(time_ms);
 
-    js_date_t *date = (js_date_t *)calloc(1, sizeof(*date));
+    js_date_t *date = (js_date_t *)js_calloc(1, sizeof(*date));
     if (!date)
     {
         if (error_message)
@@ -11878,7 +11878,7 @@ bool js_builtin_date(js_runtime_t *rt,
     date->time_ms = time_ms;
     if (!js_value_make_host_object(out, js_date_get, NULL, js_date_finalize, date))
     {
-        free(date);
+        js_free(date);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -12425,7 +12425,7 @@ bool js_date_proto_to_json(js_runtime_t *rt,
             }
             else
             {
-                free(err);
+                js_free(err);
             }
             return false;
         }
@@ -12476,7 +12476,7 @@ bool js_date_proto_to_json(js_runtime_t *rt,
             }
             else
             {
-                free(call_err);
+                js_free(call_err);
             }
             js_value_destroy(&result);
             return false;
@@ -12498,7 +12498,7 @@ bool js_date_proto_to_json(js_runtime_t *rt,
         }
         else
         {
-            free(call_err);
+            js_free(call_err);
         }
         js_value_destroy(&result);
         return false;
@@ -14418,7 +14418,7 @@ static bool js_temporal_duration_create(js_runtime_t *rt,
     {
         return false;
     }
-    js_temporal_duration_t *duration = (js_temporal_duration_t *)calloc(1, sizeof(*duration));
+    js_temporal_duration_t *duration = (js_temporal_duration_t *)js_calloc(1, sizeof(*duration));
     if (!duration)
     {
         if (error_message)
@@ -14439,7 +14439,7 @@ static bool js_temporal_duration_create(js_runtime_t *rt,
     duration->nanoseconds = nanoseconds;
     if (!js_value_make_host_object(out, js_temporal_duration_get, NULL, js_temporal_duration_finalize, duration))
     {
-        free(duration);
+        js_free(duration);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -14471,7 +14471,7 @@ static bool js_temporal_instant_create(js_runtime_t *rt,
         }
         return false;
     }
-    js_temporal_instant_t *instant = (js_temporal_instant_t *)calloc(1, sizeof(*instant));
+    js_temporal_instant_t *instant = (js_temporal_instant_t *)js_calloc(1, sizeof(*instant));
     if (!instant)
     {
         if (error_message)
@@ -14982,7 +14982,7 @@ bool js_temporal_duration_to_string(js_runtime_t *rt,
     int64_t nanoseconds = js_temporal_int64_abs(duration->nanoseconds);
     bool has_time = hours || minutes || seconds || milliseconds || microseconds || nanoseconds;
     size_t cap = 512;
-    char *buf = (char *)malloc(cap);
+    char *buf = (char *)js_malloc(cap);
     if (!buf)
     {
         if (error_message)
@@ -15003,7 +15003,7 @@ bool js_temporal_duration_to_string(js_runtime_t *rt,
         int written = snprintf(buf + pos, cap - pos, fmt, __VA_ARGS__);                 \
         if (written < 0 || (size_t)written >= cap - pos)                                \
         {                                                                               \
-            free(buf);                                                                  \
+            js_free(buf);                                                                  \
             if (error_message)                                                          \
             {                                                                           \
                 *error_message = js_strdup("allocation failed");                        \
@@ -15056,7 +15056,7 @@ bool js_temporal_duration_to_string(js_runtime_t *rt,
                 {
                     if (pos + 1 + frac_len >= cap)
                     {
-                        free(buf);
+                        js_free(buf);
                         if (error_message)
                         {
                             *error_message = js_strdup("allocation failed");
@@ -15069,7 +15069,7 @@ bool js_temporal_duration_to_string(js_runtime_t *rt,
                 }
                 if (pos + 1 >= cap)
                 {
-                    free(buf);
+                    js_free(buf);
                     if (error_message)
                     {
                         *error_message = js_strdup("allocation failed");
@@ -15086,7 +15086,7 @@ bool js_temporal_duration_to_string(js_runtime_t *rt,
     }
 #undef JS_APPEND_FMT
     bool ok = js_value_make_string(out, buf, pos);
-    free(buf);
+    js_free(buf);
     return ok;
 }
 
@@ -15369,7 +15369,7 @@ bool js_temporal_instant_getter(js_runtime_t *rt,
             }
             else
             {
-                free(err);
+                js_free(err);
             }
             return false;
         }
@@ -15432,7 +15432,7 @@ bool js_temporal_instant_to_string(js_runtime_t *rt,
         }
         else
         {
-            free(err);
+            js_free(err);
         }
         js_bigint_destroy(quot);
         js_bigint_destroy(rem);
@@ -15460,7 +15460,7 @@ bool js_temporal_instant_to_string(js_runtime_t *rt,
     char year_buf[32];
     js_date_format_iso_year(parts.year, year_buf, sizeof(year_buf));
     size_t cap = 256;
-    char *buf = (char *)malloc(cap);
+    char *buf = (char *)js_malloc(cap);
     if (!buf)
     {
         if (error_message)
@@ -15480,7 +15480,7 @@ bool js_temporal_instant_to_string(js_runtime_t *rt,
                        parts.second);
     if (len < 0 || (size_t)len >= cap)
     {
-        free(buf);
+        js_free(buf);
         return false;
     }
     size_t pos = (size_t)len;
@@ -15495,7 +15495,7 @@ bool js_temporal_instant_to_string(js_runtime_t *rt,
         }
         if (pos + 1 + frac_len >= cap)
         {
-            free(buf);
+            js_free(buf);
             return false;
         }
         buf[pos++] = '.';
@@ -15504,12 +15504,12 @@ bool js_temporal_instant_to_string(js_runtime_t *rt,
     }
     if (pos + 1 >= cap)
     {
-        free(buf);
+        js_free(buf);
         return false;
     }
     buf[pos++] = 'Z';
     ok = js_value_make_string(out, buf, pos);
-    free(buf);
+    js_free(buf);
     return ok;
 }
 

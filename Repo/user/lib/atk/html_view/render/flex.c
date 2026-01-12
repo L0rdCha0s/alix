@@ -1,5 +1,6 @@
 #include "atk/html_view/render/render_internal.h"
 
+#include "web/css/css_internal.h"
 #include "ctype.h"
 #include "serial.h"
 #include "string.h"
@@ -57,6 +58,42 @@ typedef struct
     int grow_sum;
     int64_t shrink_weight_sum;
 } html_view_flex_line_t;
+
+static void *html_view_flex_scratch_begin(atk_html_view_priv_t *priv,
+                                          void **scratch,
+                                          size_t *cap,
+                                          uint32_t *in_use,
+                                          size_t count,
+                                          size_t elem_size)
+{
+    if (!priv || !scratch || !cap || !in_use || count == 0 || *in_use)
+    {
+        return NULL;
+    }
+    size_t capacity = *cap;
+    if (capacity < count)
+    {
+        size_t new_cap = capacity ? capacity : 16u;
+        while (new_cap < count)
+        {
+            new_cap *= 2u;
+        }
+        void *next = realloc(*scratch, new_cap * elem_size);
+        if (!next)
+        {
+            return NULL;
+        }
+        *scratch = next;
+        *cap = new_cap;
+        capacity = new_cap;
+    }
+    if (!*scratch || capacity < count)
+    {
+        return NULL;
+    }
+    *in_use = 1u;
+    return *scratch;
+}
 
 static void html_view_shift_recorded_ops(html_view_ctx_t *ctx,
                                          size_t op_start,
@@ -469,6 +506,8 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
         return;
     }
 
+    atk_html_view_priv_t *priv = ctx->priv;
+
     css_flex_direction_t dir = style->has_flex_direction ? style->flex_direction : CSS_FLEX_DIRECTION_ROW;
     bool row = (dir == CSS_FLEX_DIRECTION_ROW || dir == CSS_FLEX_DIRECTION_ROW_REVERSE);
     bool reverse = (dir == CSS_FLEX_DIRECTION_ROW_REVERSE || dir == CSS_FLEX_DIRECTION_COLUMN_REVERSE);
@@ -868,13 +907,33 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     html_view_flex_line_t *lines = NULL;
     size_t item_count = 0;
     size_t line_count = 0;
+    bool items_scratch = false;
+    bool lines_scratch = false;
 
     if (child_cap > 0)
     {
-        items = (html_view_flex_item_t *)calloc(child_cap, sizeof(*items));
+        if (priv)
+        {
+            items = (html_view_flex_item_t *)html_view_flex_scratch_begin(
+                priv,
+                &priv->flex_items_scratch,
+                &priv->flex_items_scratch_cap,
+                &priv->flex_items_scratch_in_use,
+                child_cap,
+                sizeof(*items));
+            if (items)
+            {
+                memset(items, 0, child_cap * sizeof(*items));
+                items_scratch = true;
+            }
+        }
         if (!items)
         {
-            return;
+            items = (html_view_flex_item_t *)calloc(child_cap, sizeof(*items));
+            if (!items)
+            {
+                return;
+            }
         }
 
         for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
@@ -893,7 +952,7 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
 
             html_view_flex_item_t *item = &items[item_count++];
             item->node = child;
-            item->style = child_style;
+            css_style_copy_shallow(&item->style, &child_style);
             item->flex_grow_milli = child_style.has_flex_grow ? child_style.flex_grow_milli : 0;
             item->flex_shrink_milli = child_style.has_flex_shrink ? child_style.flex_shrink_milli : 1000;
             if (item->flex_grow_milli < 0) item->flex_grow_milli = 0;
@@ -1093,7 +1152,25 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
 
         if (item_count > 0)
         {
-            lines = (html_view_flex_line_t *)calloc(item_count, sizeof(*lines));
+            if (priv)
+            {
+                lines = (html_view_flex_line_t *)html_view_flex_scratch_begin(
+                    priv,
+                    &priv->flex_lines_scratch,
+                    &priv->flex_lines_scratch_cap,
+                    &priv->flex_lines_scratch_in_use,
+                    item_count,
+                    sizeof(*lines));
+                if (lines)
+                {
+                    memset(lines, 0, item_count * sizeof(*lines));
+                    lines_scratch = true;
+                }
+            }
+            if (!lines)
+            {
+                lines = (html_view_flex_line_t *)calloc(item_count, sizeof(*lines));
+            }
         }
     }
 
@@ -1162,8 +1239,22 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
 
     if (item_count == 0 || !lines || line_count == 0)
     {
-        free(lines);
-        free(items);
+        if (lines_scratch)
+        {
+            priv->flex_lines_scratch_in_use = 0u;
+        }
+        else
+        {
+            free(lines);
+        }
+        if (items_scratch)
+        {
+            priv->flex_items_scratch_in_use = 0u;
+        }
+        else
+        {
+            free(items);
+        }
 
         int content_w = row ? content_main : content_cross;
         int content_h = row ? content_cross : content_main;
@@ -1891,8 +1982,22 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
         }
     }
 
-    free(lines);
-    free(items);
+    if (lines_scratch)
+    {
+        priv->flex_lines_scratch_in_use = 0u;
+    }
+    else
+    {
+        free(lines);
+    }
+    if (items_scratch)
+    {
+        priv->flex_items_scratch_in_use = 0u;
+    }
+    else
+    {
+        free(items);
+    }
 
     int bottom = border_box_y + border_box_h + margin_bottom;
     if (bottom > ctx->content_bottom)

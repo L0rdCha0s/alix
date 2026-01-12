@@ -27,7 +27,7 @@ void js_function_release(js_function_t *fn)
         return;
     }
     js_env_release(fn->closure);
-    free(fn);
+    js_free(fn);
 }
 
 js_function_t *js_function_create(const js_function_decl_t *decl,
@@ -35,7 +35,7 @@ js_function_t *js_function_create(const js_function_decl_t *decl,
                                   js_env_t *closure,
                                   bool is_constructible)
 {
-    js_function_t *fn = (js_function_t *)calloc(1, sizeof(*fn));
+    js_function_t *fn = (js_function_t *)js_calloc(1, sizeof(*fn));
     if (!fn)
     {
         return NULL;

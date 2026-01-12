@@ -459,7 +459,7 @@ void html_view_render_grid_container(html_view_ctx_t *ctx,
 
             html_view_grid_item_t *item = &items[item_count++];
             item->node = child;
-            item->style = child_style;
+            css_style_copy_shallow(&item->style, &child_style);
             item->start_line = child_style.has_grid_column_start ? child_style.grid_column_start : 0;
             item->end_line = child_style.has_grid_column_end ? child_style.grid_column_end : 0;
             item->span = child_style.has_grid_column_span ? child_style.grid_column_span : 1;

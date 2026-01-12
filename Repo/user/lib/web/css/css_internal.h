@@ -23,6 +23,7 @@ void css_style_apply_property(css_style_t *style,
                               const char *val_end);
 void css_style_release(css_style_t *style);
 bool css_style_copy(css_style_t *dst, const css_style_t *src);
+void css_style_copy_shallow(css_style_t *dst, const css_style_t *src);
 bool css_style_dup_owned_strings(css_style_t *style);
 void css_style_resolve_deferred(css_style_t *style);
 

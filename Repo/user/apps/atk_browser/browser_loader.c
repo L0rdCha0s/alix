@@ -45,6 +45,15 @@ static void browser_resource_log_start(browser_app_t *app,
     {
         show = BROWSER_RESOURCE_LOG_URL_MAX;
     }
+    char url_buf[BROWSER_RESOURCE_LOG_URL_MAX + 4];
+    const char *serial_url = safe_url;
+    if (url_len > BROWSER_RESOURCE_LOG_URL_MAX)
+    {
+        memcpy(url_buf, safe_url, BROWSER_RESOURCE_LOG_URL_MAX);
+        memcpy(url_buf + BROWSER_RESOURCE_LOG_URL_MAX, "...", 3);
+        url_buf[BROWSER_RESOURCE_LOG_URL_MAX + 3] = '\0';
+        serial_url = url_buf;
+    }
     browser_debug_logf(app,
                        "[res] start id=%llu kind=%s url=%.*s%s",
                        (unsigned long long)load_id,
@@ -52,6 +61,10 @@ static void browser_resource_log_start(browser_app_t *app,
                        (int)show,
                        safe_url,
                        url_len > show ? "..." : "");
+    serial_printf("[res] start id=%llu kind=%s url=%s",
+                  (unsigned long long)load_id,
+                  kind_label,
+                  serial_url);
 }
 
 static void browser_resource_log_done(browser_app_t *app,
@@ -76,6 +89,15 @@ static void browser_resource_log_done(browser_app_t *app,
     {
         show = BROWSER_RESOURCE_LOG_URL_MAX;
     }
+    char url_buf[BROWSER_RESOURCE_LOG_URL_MAX + 4];
+    const char *serial_url = safe_url;
+    if (url_len > BROWSER_RESOURCE_LOG_URL_MAX)
+    {
+        memcpy(url_buf, safe_url, BROWSER_RESOURCE_LOG_URL_MAX);
+        memcpy(url_buf + BROWSER_RESOURCE_LOG_URL_MAX, "...", 3);
+        url_buf[BROWSER_RESOURCE_LOG_URL_MAX + 3] = '\0';
+        serial_url = url_buf;
+    }
     if (detail && detail[0] != '\0')
     {
         browser_debug_logf(app,
@@ -89,6 +111,14 @@ static void browser_resource_log_done(browser_app_t *app,
                            safe_url,
                            url_len > show ? "..." : "",
                            detail);
+        serial_printf("[res] done id=%llu kind=%s status=%s ms=%llu bytes=%u url=%s err=%s",
+                      (unsigned long long)load_id,
+                      kind_label,
+                      safe_status,
+                      (unsigned long long)elapsed_ms,
+                      (unsigned)bytes,
+                      serial_url,
+                      detail);
     }
     else
     {
@@ -102,6 +132,13 @@ static void browser_resource_log_done(browser_app_t *app,
                            (int)show,
                            safe_url,
                            url_len > show ? "..." : "");
+        serial_printf("[res] done id=%llu kind=%s status=%s ms=%llu bytes=%u url=%s",
+                      (unsigned long long)load_id,
+                      kind_label,
+                      safe_status,
+                      (unsigned long long)elapsed_ms,
+                      (unsigned)bytes,
+                      serial_url);
     }
 }
 
@@ -1896,6 +1933,11 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
         return NULL;
     }
 
+    size_t css_jobs = queue->count;
+    serial_printf("[css] queue start id=%llu count=%u",
+                  (unsigned long long)load_id,
+                  (unsigned)css_jobs);
+
     char *css_buf = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
@@ -2032,10 +2074,15 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
         {
             *out_len = css_len;
         }
+        serial_printf("[css] queue done id=%llu bytes=%u",
+                      (unsigned long long)load_id,
+                      (unsigned)css_len);
         return css_buf;
     }
 
     free(css_buf);
+    serial_printf("[css] queue done id=%llu bytes=0",
+                  (unsigned long long)load_id);
     return NULL;
 }
 
@@ -2071,6 +2118,9 @@ static void browser_apply_error_page(browser_app_t *app, uint64_t load_id, const
     }
 
     const char *msg = message ? message : "unknown error";
+    serial_printf("[load] error id=%llu msg=%s",
+                  (unsigned long long)load_id,
+                  msg);
     char page_buf[512];
     snprintf(page_buf,
              sizeof(page_buf),
@@ -2091,6 +2141,7 @@ static void browser_apply_loading_page(browser_app_t *app, uint64_t load_id)
         return;
     }
 
+    serial_printf("[load] loading id=%llu", (unsigned long long)load_id);
     (void)atk_html_view_set_html(app->viewer,
                                  "<!doctype html><html><head><style>"
                                  "body{margin:0;padding:0;}"
@@ -2122,6 +2173,9 @@ static void browser_apply_document(browser_app_t *app,
     atk_html_view_set_document(app->viewer, doc);
     (void)atk_html_view_rebuild_cache(app->viewer);
     browser_debug_logf(app, "[render] set document ok");
+    serial_printf("[render] set document id=%llu doc=%p",
+                  (unsigned long long)load_id,
+                  (void *)doc);
     browser_emit_nav_update(app, load_id, final_url);
 }
 
@@ -2150,6 +2204,9 @@ static void browser_load_thread(void *arg)
     browser_debug_logf(app, "[load] start id=%llu url=%s",
                        (unsigned long long)load_id,
                        url_text ? url_text : "(null)");
+    serial_printf("[load] start id=%llu url=%s",
+                  (unsigned long long)load_id,
+                  url_text ? url_text : "(null)");
 
     if (!url_text || url_text[0] == '\0')
     {
@@ -2176,6 +2233,12 @@ static void browser_load_thread(void *arg)
                        url.host ? url.host : "(null)",
                        (unsigned)url.port,
                        url.path ? url.path : "(null)");
+    serial_printf("[load] parsed id=%llu tls=%u host=%s port=%u path=%s",
+                  (unsigned long long)load_id,
+                  url.use_tls ? 1u : 0u,
+                  url.host ? url.host : "(null)",
+                  (unsigned)url.port,
+                  url.path ? url.path : "(null)");
 
     html = browser_fetch_http(app, &url, &html_len, &final_url);
     if (!html)
@@ -2192,10 +2255,15 @@ static void browser_load_thread(void *arg)
     if (!browser_load_is_active(app, load_id))
     {
         browser_debug_logf(app, "[load] canceled before parse id=%llu", (unsigned long long)load_id);
+        serial_printf("[load] canceled id=%llu stage=before-parse",
+                      (unsigned long long)load_id);
         goto done_fetch;
     }
 
     browser_debug_logf(app, "[load] html bytes=%u", (unsigned)html_len);
+    serial_printf("[load] html id=%llu bytes=%u",
+                  (unsigned long long)load_id,
+                  (unsigned)html_len);
     html_parse_error_t parse_err = {0};
     html_document_t *doc = html_parse(html, &parse_err);
     if (!doc)
@@ -2248,6 +2316,8 @@ static void browser_load_thread(void *arg)
     if (!browser_load_is_active(app, load_id))
     {
         browser_debug_logf(app, "[load] canceled after parse id=%llu", (unsigned long long)load_id);
+        serial_printf("[load] canceled id=%llu stage=after-parse",
+                      (unsigned long long)load_id);
         html_document_destroy(doc);
         doc = NULL;
         goto done_resources;
@@ -2256,18 +2326,30 @@ static void browser_load_thread(void *arg)
     if (css_count > 0)
     {
         browser_debug_logf(app, "[css] total stylesheets=%u", (unsigned)css_count);
+        serial_printf("[css] total id=%llu count=%u",
+                      (unsigned long long)load_id,
+                      (unsigned)css_count);
     }
     if (script_count > 0)
     {
         browser_debug_logf(app, "[js] total scripts=%u", (unsigned)script_count);
+        serial_printf("[js] total id=%llu count=%u",
+                      (unsigned long long)load_id,
+                      (unsigned)script_count);
     }
     if (!js_enabled && script_count > 0)
     {
         browser_debug_logf(app, "[js] disabled (skip %u scripts)", (unsigned)script_count);
+        serial_printf("[js] disabled id=%llu skip=%u",
+                      (unsigned long long)load_id,
+                      (unsigned)script_count);
     }
     if (img_count > 0)
     {
         browser_debug_logf(app, "[img] total images=%u", (unsigned)img_count);
+        serial_printf("[img] total id=%llu count=%u",
+                      (unsigned long long)load_id,
+                      (unsigned)img_count);
     }
 
     if (!browser_load_is_active(app, load_id))
@@ -2293,27 +2375,52 @@ static void browser_load_thread(void *arg)
             memcpy(title_preview, title_text, copy);
             title_preview[copy] = '\0';
             browser_debug_logf(app, "[parse] title %s", title_preview);
+            serial_printf("[parse] title id=%llu %s",
+                          (unsigned long long)load_id,
+                          title_preview);
         }
         browser_debug_logf(app, "[parse] nodes=%u body=%s",
                            (unsigned)node_count,
                            body ? "yes" : "no");
+        serial_printf("[parse] nodes id=%llu count=%u body=%u",
+                      (unsigned long long)load_id,
+                      (unsigned)node_count,
+                      body ? 1u : 0u);
     }
 
+    bool wait_for_css = (use_css && css_count > 0);
+    atk_html_view_set_wait_for_css(app->viewer, wait_for_css);
+    serial_printf("[css] wait id=%llu enabled=%u",
+                  (unsigned long long)load_id,
+                  wait_for_css ? 1u : 0u);
     browser_apply_document(app, load_id, doc, &final_url);
     doc = NULL;
 
-    if (use_css && css_count > 0)
+    if (wait_for_css)
     {
         size_t css_len = 0;
         char *css_buf = browser_resource_queue_fetch_css(app, load_id, &css_queue, &css_len);
-        if (css_buf && css_len > 0 && browser_load_is_active(app, load_id))
+        if (browser_load_is_active(app, load_id))
         {
-            bool ok = atk_html_view_try_set_external_stylesheet(app->viewer, css_buf);
-            if (!ok)
+            atk_html_view_set_wait_for_css(app->viewer, false);
+            if (css_buf && css_len > 0)
             {
-                atk_html_view_set_external_stylesheet(app->viewer, css_buf);
+                bool ok = atk_html_view_try_set_external_stylesheet(app->viewer, css_buf);
+                if (!ok)
+                {
+                    atk_html_view_set_external_stylesheet(app->viewer, css_buf);
+                }
+                browser_debug_logf(app, "[css] external bytes=%u", (unsigned)css_len);
+                serial_printf("[css] external id=%llu bytes=%u ok=%u",
+                              (unsigned long long)load_id,
+                              (unsigned)css_len,
+                              ok ? 1u : 0u);
             }
-            browser_debug_logf(app, "[css] external bytes=%u", (unsigned)css_len);
+            else
+            {
+                serial_printf("[css] external id=%llu bytes=0",
+                              (unsigned long long)load_id);
+            }
         }
         free(css_buf);
     }
@@ -2336,6 +2443,7 @@ done_resources:
     browser_resource_queue_release(&css_queue);
     browser_resource_queue_release(&script_queue);
     browser_resource_queue_release(&img_queue);
+    serial_printf("[load] done id=%llu", (unsigned long long)load_id);
 
 done_fetch:
     free(html);
@@ -2371,6 +2479,9 @@ bool browser_loader_start(browser_app_t *app, const char *url_text)
     load_id = ++app->next_load_id;
     app->active_load_id = load_id;
     browser_lock_exit(app, &app->lock, "app_lock");
+    serial_printf("[load] queue id=%llu url=%s",
+                  (unsigned long long)load_id,
+                  url_text);
     browser_app_css_reset(app);
     browser_resource_queue_clear(app);
     browser_load_queue_clear(app);

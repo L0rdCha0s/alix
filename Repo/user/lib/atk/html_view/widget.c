@@ -1,5 +1,6 @@
 #include "atk/html_view/html_view_internal.h"
 
+#include "web/css/css_internal.h"
 #include "ctype.h"
 #include "serial.h"
 #include "stdarg.h"
@@ -361,6 +362,25 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     if (!view || !priv)
     {
         return false;
+    }
+    static uint64_t last_rebuild_enter_log_ms = 0;
+    if (html_view_log_throttle(&last_rebuild_enter_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+        uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+        uint32_t dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE);
+        uint32_t css_dirty = __atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE);
+        uint64_t pending_len = __atomic_load_n(&priv->external_css_pending_len, __ATOMIC_RELAXED);
+        serial_printf("[html_view] render_cache_rebuild_enter view=%p doc=%p sheet=%p dirty=%u css_dirty=%u seq=%u done=%u ext_len=%llu pending_len=%llu",
+                      (void *)view,
+                      (void *)priv->doc,
+                      (void *)priv->sheet,
+                      dirty,
+                      css_dirty,
+                      seq,
+                      done,
+                      (unsigned long long)priv->external_css_len,
+                      (unsigned long long)pending_len);
     }
     uint64_t build_start_ms = sys_time_millis();
     uint64_t stage_start_ms = build_start_ms;
@@ -875,6 +895,20 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                               (unsigned long long)layout_ms);
             }
         }
+        static uint64_t last_rebuild_exit_log_ms = 0;
+        if (html_view_log_throttle(&last_rebuild_exit_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+        {
+            uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+            uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+            serial_printf("[html_view] render_cache_rebuild_exit view=%p ok=1 seq=%u done=%u ops=%llu tiles=%llu fixed=%llu ms=%llu",
+                          (void *)view,
+                          seq,
+                          done,
+                          (unsigned long long)cache->op_count,
+                          (unsigned long long)cache->tile_used,
+                          (unsigned long long)cache->fixed_count,
+                          (unsigned long long)build_ms);
+        }
         return true;
     }
 
@@ -902,6 +936,20 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                           (unsigned long long)style_ms,
                           (unsigned long long)layout_ms);
         }
+    }
+    static uint64_t last_rebuild_exit_log_ms = 0;
+    if (html_view_log_throttle(&last_rebuild_exit_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+    {
+        uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+        uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+        serial_printf("[html_view] render_cache_rebuild_exit view=%p ok=0 seq=%u done=%u ops=%llu tiles=%llu fixed=%llu ms=%llu",
+                      (void *)view,
+                      seq,
+                      done,
+                      (unsigned long long)cache->op_count,
+                      (unsigned long long)cache->tile_used,
+                      (unsigned long long)cache->fixed_count,
+                      (unsigned long long)build_ms);
     }
     html_view_render_cache_clear(cache);
     return false;
@@ -1207,7 +1255,7 @@ void html_view_render_request(atk_html_view_priv_t *priv)
     {
         uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
         uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
-        if (seq != done)
+        if((seq-done)>1)
         {
             return;
         }
@@ -1934,10 +1982,13 @@ static void html_view_draw_cb(const atk_state_t *state,
     bool cache_empty = cache_valid && cache->op_count == 0 && cache->fixed_count == 0;
     if (cache_empty && body_has_renderable)
     {
-        cache_valid = false;
-        if ((priv->render_async || priv->render_external) && !cache_dirty)
+        if (cache_dirty)
         {
-            html_view_render_request(priv);
+            cache_valid = false;
+            if (priv->render_async || priv->render_external)
+            {
+                html_view_render_request(priv);
+            }
         }
     }
     int cache_body_box_h = cache->body_box_h;
@@ -2083,6 +2134,22 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
         priv->style_cache_cap = 0;
         priv->style_cache_mask = 0;
         html_view_rule_index_clear(priv);
+        free(priv->rule_list_scratch);
+        priv->rule_list_scratch = NULL;
+        priv->rule_list_scratch_cap = 0;
+        priv->rule_list_scratch_in_use = 0;
+        free(priv->rule_positions_scratch);
+        priv->rule_positions_scratch = NULL;
+        priv->rule_positions_scratch_cap = 0;
+        priv->rule_positions_scratch_in_use = 0;
+        free(priv->flex_items_scratch);
+        priv->flex_items_scratch = NULL;
+        priv->flex_items_scratch_cap = 0;
+        priv->flex_items_scratch_in_use = 0;
+        free(priv->flex_lines_scratch);
+        priv->flex_lines_scratch = NULL;
+        priv->flex_lines_scratch_cap = 0;
+        priv->flex_lines_scratch_in_use = 0;
         if (priv->external_css)
         {
             free(priv->external_css);
@@ -2188,6 +2255,7 @@ atk_widget_t *atk_window_add_html_view(atk_widget_t *window, int x, int y, int w
     priv->stylesheet_dirty = 0;
     priv->render_async = false;
     priv->render_external = false;
+    priv->render_wait_for_css = 0;
     html_view_js_init(priv);
 
     atk_list_node_t *child_node = atk_list_push_back(&wpriv->children, view);
@@ -2278,19 +2346,27 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     priv->scroll_y = 0;
     html_view_stylesheet_mark_dirty(priv);
     html_view_controls_build(view, priv);
+    bool wait_for_css = (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u);
+    priv->js_defer_start = wait_for_css ? 1u : 0u;
     atk_state_lock_release(ui_lock);
-    if (priv->render_external)
+    if (!wait_for_css && priv->render_external)
     {
         html_view_stylesheet_rebuild_async_locked(priv);
     }
-    else
+    else if (!wait_for_css)
     {
         html_view_stylesheet_rebuild_if_needed(priv);
     }
     html_view_dom_unlock(priv);
-    html_view_render_request(priv);
-    html_view_invalidate(view);
-    html_view_js_start(view, priv);
+    if (!wait_for_css)
+    {
+        html_view_render_request(priv);
+        html_view_invalidate(view);
+    }
+    if (!wait_for_css)
+    {
+        html_view_js_start(view, priv);
+    }
 }
 
 bool atk_html_view_scroll_to_id(atk_widget_t *view, const char *id)
@@ -2473,6 +2549,7 @@ static bool html_view_set_external_stylesheet_impl(atk_widget_t *view, const cha
     {
         html_view_dom_lock(priv);
     }
+    __atomic_store_n(&priv->render_wait_for_css, 0u, __ATOMIC_RELEASE);
     char *pending = __atomic_exchange_n(&priv->external_css_pending, NULL, __ATOMIC_ACQ_REL);
     free(pending);
     __atomic_store_n(&priv->external_css_pending_len, 0u, __ATOMIC_RELAXED);
@@ -2646,6 +2723,36 @@ void atk_html_view_enable_external_render(atk_widget_t *view, bool enabled)
     }
 }
 
+void atk_html_view_set_wait_for_css(atk_widget_t *view, bool enabled)
+{
+    if (!view)
+    {
+        return;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return;
+    }
+    bool start_js = false;
+    html_view_dom_lock(priv);
+    __atomic_store_n(&priv->render_wait_for_css, enabled ? 1u : 0u, __ATOMIC_RELEASE);
+    if (enabled)
+    {
+        priv->js_defer_start = 1u;
+    }
+    else if (priv->js_defer_start)
+    {
+        priv->js_defer_start = 0u;
+        start_js = true;
+    }
+    html_view_dom_unlock(priv);
+    if (start_js)
+    {
+        html_view_js_start(view, priv);
+    }
+}
+
 bool atk_html_view_rebuild_cache(atk_widget_t *view)
 {
     if (!view)
@@ -2657,6 +2764,11 @@ bool atk_html_view_rebuild_cache(atk_widget_t *view)
     {
         return false;
     }
+    if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
+    {
+        return false;
+    }
+    uint32_t target_seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
     html_view_dom_lock(priv);
     if (priv->render_external)
     {
@@ -2677,8 +2789,7 @@ bool atk_html_view_rebuild_cache(atk_widget_t *view)
     html_view_dom_unlock(priv);
     if (ok)
     {
-        uint32_t current = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
-        __atomic_store_n(&priv->render_done_seq, current, __ATOMIC_RELEASE);
+        __atomic_store_n(&priv->render_done_seq, target_seq, __ATOMIC_RELEASE);
         __atomic_store_n(&priv->render_redraw_pending, 1u, __ATOMIC_RELEASE);
         html_view_invalidate(view);
     }
@@ -2693,6 +2804,10 @@ bool atk_html_view_rebuild_cache_if_pending(atk_widget_t *view)
     }
     atk_html_view_priv_t *priv = html_view_priv_mut(view);
     if (!priv)
+    {
+        return false;
+    }
+    if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
     {
         return false;
     }
@@ -3696,11 +3811,26 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
         html_view_style_for_node(&root_frame.style, sheet, NULL, root, NULL);
         root_frame.has_style = true;
     }
-    stack[count++] = root_frame;
+    stack[count].node = root_frame.node;
+    stack[count].depth = root_frame.depth;
+    stack[count].has_style = root_frame.has_style;
+    if (root_frame.has_style)
+    {
+        css_style_copy_shallow(&stack[count].style, &root_frame.style);
+    }
+    count++;
 
     while (count > 0)
     {
-        html_view_dump_frame_t frame = stack[--count];
+        html_view_dump_frame_t frame = {0};
+        count--;
+        frame.node = stack[count].node;
+        frame.depth = stack[count].depth;
+        frame.has_style = stack[count].has_style;
+        if (frame.has_style)
+        {
+            css_style_copy_shallow(&frame.style, &stack[count].style);
+        }
         const html_node_t *node = frame.node;
         const css_style_t *parent_style = frame.has_style ? &frame.style : NULL;
 
@@ -3738,10 +3868,17 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
             }
             else if (parent_style)
             {
-                child_frame.style = *parent_style;
+                css_style_copy_shallow(&child_frame.style, parent_style);
                 child_frame.has_style = true;
             }
-            stack[count++] = child_frame;
+            stack[count].node = child_frame.node;
+            stack[count].depth = child_frame.depth;
+            stack[count].has_style = child_frame.has_style;
+            if (child_frame.has_style)
+            {
+                css_style_copy_shallow(&stack[count].style, &child_frame.style);
+            }
+            count++;
         }
     }
 

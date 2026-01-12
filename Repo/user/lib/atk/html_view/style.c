@@ -5661,6 +5661,8 @@ typedef struct html_view_rule_trie_cache_entry
     size_t attr_count;
     css_rule_t **rules;
     size_t rule_count;
+    char *pool;
+    size_t pool_size;
     bool valid;
 } html_view_rule_trie_cache_entry_t;
 
@@ -6211,14 +6213,12 @@ static uint64_t html_view_rule_trie_cache_hash_node(const html_node_t *node,
     return h;
 }
 
-static bool html_view_rule_trie_cache_class_tokens_build(html_view_rule_trie_cache_entry_t *entry)
+static size_t html_view_rule_trie_cache_class_token_count(const char *classes)
 {
-    if (!entry || !entry->class_value || entry->class_value[0] == '\0')
+    if (!classes)
     {
-        return true;
+        return 0;
     }
-
-    const char *classes = entry->class_value;
     size_t count = 0;
     const char *p = classes;
     while (*p)
@@ -6241,20 +6241,20 @@ static bool html_view_rule_trie_cache_class_tokens_build(html_view_rule_trie_cac
             ++count;
         }
     }
-    if (count == 0)
-    {
-        return true;
-    }
+    return count;
+}
 
-    html_class_token_t *tokens = (html_class_token_t *)calloc(count, sizeof(*tokens));
-    if (!tokens)
+static size_t html_view_rule_trie_cache_class_tokens_fill(const char *classes,
+                                                          html_class_token_t *tokens,
+                                                          size_t token_cap)
+{
+    if (!classes || !tokens || token_cap == 0)
     {
-        return false;
+        return 0;
     }
-
     size_t idx = 0;
-    p = classes;
-    while (*p && idx < count)
+    const char *p = classes;
+    while (*p && idx < token_cap)
     {
         while (*p && isspace((unsigned char)*p))
         {
@@ -6279,10 +6279,25 @@ static bool html_view_rule_trie_cache_class_tokens_build(html_view_rule_trie_cac
             .len = len,
         };
     }
+    return idx;
+}
 
-    entry->class_tokens = tokens;
-    entry->class_token_count = idx;
-    return true;
+static size_t html_view_rule_trie_cache_align_up(size_t value, size_t align)
+{
+    return (value + align - 1u) & ~(align - 1u);
+}
+
+static char *html_view_rule_trie_cache_copy_string(char **cursor, const char *src, size_t len)
+{
+    if (!cursor || !*cursor || !src)
+    {
+        return NULL;
+    }
+    char *dst = *cursor;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+    *cursor = dst + len + 1u;
+    return dst;
 }
 
 static void html_view_rule_trie_cache_entry_clear(html_view_rule_trie_cache_entry_t *entry)
@@ -6291,19 +6306,7 @@ static void html_view_rule_trie_cache_entry_clear(html_view_rule_trie_cache_entr
     {
         return;
     }
-    free(entry->tag);
-    free(entry->id);
-    free(entry->class_value);
-    free(entry->class_tokens);
-    if (entry->attrs)
-    {
-        for (size_t i = 0; i < entry->attr_count; ++i)
-        {
-            free(entry->attrs[i].name);
-            free(entry->attrs[i].value);
-        }
-        free(entry->attrs);
-    }
+    free(entry->pool);
     free(entry->rules);
     *entry = (html_view_rule_trie_cache_entry_t){0};
 }
@@ -6320,40 +6323,38 @@ static bool html_view_rule_trie_cache_entry_copy_key(html_view_rule_trie_cache_e
     {
         entry->parent = node->parent;
     }
-    if (node->name && node->name[0] != '\0')
-    {
-        entry->tag = html_view_strdup(node->name);
-        if (!entry->tag)
-        {
-            return false;
-        }
-        entry->tag_len = strlen(entry->tag);
-    }
-
+    const char *tag = (node->name && node->name[0] != '\0') ? node->name : NULL;
     const char *id = html_attr_get(node, "id");
+    const char *classes = html_attr_get(node, "class");
+
+    size_t tag_len = 0;
+    size_t id_len = 0;
+    size_t class_len = 0;
+    size_t class_token_count = 0;
+    size_t string_bytes = 0;
+    if (tag)
+    {
+        tag_len = strlen(tag);
+        string_bytes += tag_len + 1u;
+    }
     if (id && id[0] != '\0')
     {
-        entry->id = html_view_strdup(id);
-        if (!entry->id)
-        {
-            return false;
-        }
-        entry->id_len = strlen(entry->id);
+        id_len = strlen(id);
+        string_bytes += id_len + 1u;
     }
-
-    const char *classes = html_attr_get(node, "class");
+    else
+    {
+        id = NULL;
+    }
     if (classes && classes[0] != '\0')
     {
-        entry->class_value = html_view_strdup(classes);
-        if (!entry->class_value)
-        {
-            return false;
-        }
-        entry->class_len = strlen(entry->class_value);
-        if (!html_view_rule_trie_cache_class_tokens_build(entry))
-        {
-            return false;
-        }
+        class_len = strlen(classes);
+        string_bytes += class_len + 1u;
+        class_token_count = html_view_rule_trie_cache_class_token_count(classes);
+    }
+    else
+    {
+        classes = NULL;
     }
 
     size_t attr_count = 0;
@@ -6368,15 +6369,110 @@ static bool html_view_rule_trie_cache_entry_copy_key(html_view_rule_trie_cache_e
             continue;
         }
         attr_count++;
+        string_bytes += strlen(attr->name) + 1u;
+        if (attr->value && attr->value[0] != '\0')
+        {
+            string_bytes += strlen(attr->value) + 1u;
+        }
     }
+
+    size_t attr_bytes = 0;
+    size_t token_bytes = 0;
     if (attr_count > 0)
     {
-        entry->attrs = (html_view_rule_trie_cache_attr_t *)calloc(attr_count, sizeof(*entry->attrs));
-        if (!entry->attrs)
+        if (attr_count > (size_t)-1 / sizeof(*entry->attrs))
         {
             return false;
         }
+        attr_bytes = attr_count * sizeof(*entry->attrs);
+    }
+    if (class_token_count > 0)
+    {
+        if (class_token_count > (size_t)-1 / sizeof(*entry->class_tokens))
+        {
+            return false;
+        }
+        token_bytes = class_token_count * sizeof(*entry->class_tokens);
+    }
+
+    size_t offset = 0;
+    const size_t align = sizeof(void *);
+    size_t attrs_offset = 0;
+    size_t tokens_offset = 0;
+    size_t strings_offset = 0;
+    if (attr_bytes > 0)
+    {
+        offset = html_view_rule_trie_cache_align_up(offset, align);
+        attrs_offset = offset;
+        offset += attr_bytes;
+    }
+    if (token_bytes > 0)
+    {
+        offset = html_view_rule_trie_cache_align_up(offset, align);
+        tokens_offset = offset;
+        offset += token_bytes;
+    }
+    strings_offset = offset;
+    offset += string_bytes;
+
+    if (offset > 0)
+    {
+        entry->pool = (char *)malloc(offset);
+        if (!entry->pool)
+        {
+            return false;
+        }
+        entry->pool_size = offset;
+    }
+
+    if (attr_bytes > 0)
+    {
+        entry->attrs = (html_view_rule_trie_cache_attr_t *)(entry->pool + attrs_offset);
         entry->attr_count = attr_count;
+    }
+    if (token_bytes > 0)
+    {
+        entry->class_tokens = (html_class_token_t *)(entry->pool + tokens_offset);
+    }
+
+    char *cursor = entry->pool ? (entry->pool + strings_offset) : NULL;
+    if (tag)
+    {
+        entry->tag = html_view_rule_trie_cache_copy_string(&cursor, tag, tag_len);
+        if (!entry->tag)
+        {
+            return false;
+        }
+        entry->tag_len = tag_len;
+    }
+    if (id)
+    {
+        entry->id = html_view_rule_trie_cache_copy_string(&cursor, id, id_len);
+        if (!entry->id)
+        {
+            return false;
+        }
+        entry->id_len = id_len;
+    }
+    if (classes)
+    {
+        entry->class_value = html_view_rule_trie_cache_copy_string(&cursor, classes, class_len);
+        if (!entry->class_value)
+        {
+            return false;
+        }
+        entry->class_len = class_len;
+        if (class_token_count > 0)
+        {
+            entry->class_token_count =
+                html_view_rule_trie_cache_class_tokens_fill(entry->class_value,
+                                                            entry->class_tokens,
+                                                            class_token_count);
+        }
+    }
+
+    if (attr_count > 0)
+    {
         size_t idx = 0;
         for (const html_attr_t *attr = node->attrs; attr; attr = attr->next)
         {
@@ -6388,20 +6484,26 @@ static bool html_view_rule_trie_cache_entry_copy_key(html_view_rule_trie_cache_e
             {
                 continue;
             }
-            entry->attrs[idx].name = html_view_strdup(attr->name);
+            size_t name_len = strlen(attr->name);
+            entry->attrs[idx].name = html_view_rule_trie_cache_copy_string(&cursor,
+                                                                            attr->name,
+                                                                            name_len);
             if (!entry->attrs[idx].name)
             {
                 return false;
             }
-            entry->attrs[idx].name_len = strlen(entry->attrs[idx].name);
+            entry->attrs[idx].name_len = name_len;
             if (attr->value && attr->value[0] != '\0')
             {
-                entry->attrs[idx].value = html_view_strdup(attr->value);
+                size_t value_len = strlen(attr->value);
+                entry->attrs[idx].value = html_view_rule_trie_cache_copy_string(&cursor,
+                                                                                attr->value,
+                                                                                value_len);
                 if (!entry->attrs[idx].value)
                 {
                     return false;
                 }
-                entry->attrs[idx].value_len = strlen(entry->attrs[idx].value);
+                entry->attrs[idx].value_len = value_len;
             }
             ++idx;
         }
@@ -8436,6 +8538,76 @@ typedef struct
     bool owned;
 } html_view_rule_list_t;
 
+static bool html_view_rule_list_scratch_begin(atk_html_view_priv_t *priv,
+                                              html_view_rule_list_t **lists,
+                                              size_t *cap)
+{
+    if (!priv || !lists || !cap || priv->rule_list_scratch_in_use)
+    {
+        return false;
+    }
+    priv->rule_list_scratch_in_use = 1u;
+    *lists = (html_view_rule_list_t *)priv->rule_list_scratch;
+    *cap = priv->rule_list_scratch_cap;
+    return true;
+}
+
+static void html_view_rule_list_scratch_end(atk_html_view_priv_t *priv,
+                                            html_view_rule_list_t *lists,
+                                            size_t cap)
+{
+    if (!priv)
+    {
+        return;
+    }
+    priv->rule_list_scratch = lists;
+    priv->rule_list_scratch_cap = cap;
+    priv->rule_list_scratch_in_use = 0u;
+}
+
+static bool html_view_rule_positions_scratch_begin(atk_html_view_priv_t *priv,
+                                                   size_t **positions,
+                                                   size_t count)
+{
+    if (!priv || !positions || count == 0 || priv->rule_positions_scratch_in_use)
+    {
+        return false;
+    }
+    size_t cap = priv->rule_positions_scratch_cap;
+    if (cap < count)
+    {
+        size_t new_cap = cap ? cap : 16u;
+        while (new_cap < count)
+        {
+            new_cap *= 2u;
+        }
+        size_t *next = (size_t *)realloc(priv->rule_positions_scratch, new_cap * sizeof(*next));
+        if (!next)
+        {
+            return false;
+        }
+        priv->rule_positions_scratch = next;
+        priv->rule_positions_scratch_cap = new_cap;
+        cap = new_cap;
+    }
+    if (!priv->rule_positions_scratch || cap < count)
+    {
+        return false;
+    }
+    priv->rule_positions_scratch_in_use = 1u;
+    *positions = priv->rule_positions_scratch;
+    return true;
+}
+
+static void html_view_rule_positions_scratch_end(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    priv->rule_positions_scratch_in_use = 0u;
+}
+
 typedef enum
 {
     HTML_VIEW_RULE_PHASE_NORMAL = 0,
@@ -8698,6 +8870,7 @@ static void html_view_apply_rule_lists(css_style_t *out,
                                        html_view_pseudo_t pseudo,
                                        const html_view_rule_list_t *lists,
                                        size_t list_count,
+                                       atk_html_view_priv_t *priv,
                                        html_view_rule_phase_t phase)
 {
     if (!out || !node || !lists || list_count == 0)
@@ -8722,7 +8895,17 @@ static void html_view_apply_rule_lists(css_style_t *out,
         return;
     }
 
-    size_t *positions = (size_t *)calloc(list_count, sizeof(*positions));
+    size_t *positions = NULL;
+    bool positions_scratch = false;
+    if (priv && html_view_rule_positions_scratch_begin(priv, &positions, list_count))
+    {
+        memset(positions, 0, list_count * sizeof(*positions));
+        positions_scratch = true;
+    }
+    if (!positions)
+    {
+        positions = (size_t *)calloc(list_count, sizeof(*positions));
+    }
     if (!positions)
     {
         for (size_t i = 0; i < list_count; ++i)
@@ -8797,7 +8980,14 @@ static void html_view_apply_rule_lists(css_style_t *out,
         }
     }
 
-    free(positions);
+    if (positions_scratch)
+    {
+        html_view_rule_positions_scratch_end(priv);
+    }
+    else
+    {
+        free(positions);
+    }
 }
 
 static bool html_view_rule_trie_add_matches(html_view_rule_list_t **lists,
@@ -8896,7 +9086,9 @@ static bool html_view_rule_trie_add_matches(html_view_rule_list_t **lists,
     return true;
 }
 
-static void html_view_rule_lists_release(html_view_rule_list_t *lists, size_t list_count)
+static void html_view_rule_lists_release_ex(html_view_rule_list_t *lists,
+                                            size_t list_count,
+                                            bool free_lists)
 {
     if (!lists)
     {
@@ -8909,14 +9101,19 @@ static void html_view_rule_lists_release(html_view_rule_list_t *lists, size_t li
             free(lists[i].rules);
         }
     }
-    free(lists);
+    if (free_lists)
+    {
+        free(lists);
+    }
 }
+
 
 static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                  html_view_pseudo_t pseudo,
                                                  const html_view_rule_index_t *index,
                                                  html_view_rule_list_t **lists_out,
-                                                 size_t *list_count_out)
+                                                 size_t *list_count_out,
+                                                 size_t *list_cap_out)
 {
     if (!node || !index || !lists_out || !list_count_out)
     {
@@ -8946,9 +9143,9 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
     uint8_t pseudo_mask = html_view_pseudo_mask(pseudo);
     bool wants_pseudo = (pseudo != HTML_VIEW_PSEUDO_NONE);
 
-    html_view_rule_list_t *lists = NULL;
+    html_view_rule_list_t *lists = *lists_out;
     size_t list_count = 0;
-    size_t list_cap = 0;
+    size_t list_cap = list_cap_out ? *list_cap_out : 0;
     if (index->global_count > 0 &&
         (!wants_pseudo || (index->global_pseudo_mask & pseudo_mask) != 0))
     {
@@ -9567,10 +9764,19 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
 
     *lists_out = lists;
     *list_count_out = list_count;
+    if (list_cap_out)
+    {
+        *list_cap_out = list_cap;
+    }
     return true;
 
 fallback:
-    html_view_rule_lists_release(lists, list_count);
+    *lists_out = lists;
+    *list_count_out = list_count;
+    if (list_cap_out)
+    {
+        *list_cap_out = list_cap;
+    }
     return false;
 }
 
@@ -9607,7 +9813,8 @@ static void html_view_apply_rule_sheet_phase(css_style_t *out,
 static void html_view_apply_indexed_rules(css_style_t *out,
                                           const html_node_t *node,
                                           html_view_pseudo_t pseudo,
-                                          const html_view_rule_index_t *index)
+                                          const html_view_rule_index_t *index,
+                                          atk_html_view_priv_t *priv)
 {
     if (!out || !node || !index)
     {
@@ -9616,7 +9823,9 @@ static void html_view_apply_indexed_rules(css_style_t *out,
 
     html_view_rule_list_t *lists = NULL;
     size_t list_count = 0;
-    if (html_view_collect_indexed_rule_lists(node, pseudo, index, &lists, &list_count))
+    size_t list_cap = 0;
+    bool lists_scratch = html_view_rule_list_scratch_begin(priv, &lists, &list_cap);
+    if (html_view_collect_indexed_rule_lists(node, pseudo, index, &lists, &list_count, &list_cap))
     {
         if (list_count > 0)
         {
@@ -9625,18 +9834,29 @@ static void html_view_apply_indexed_rules(css_style_t *out,
                                        pseudo,
                                        lists,
                                        list_count,
+                                       priv,
                                        HTML_VIEW_RULE_PHASE_NORMAL);
             html_view_apply_rule_lists(out,
                                        node,
                                        pseudo,
                                        lists,
                                        list_count,
+                                       priv,
                                        HTML_VIEW_RULE_PHASE_IMPORTANT);
         }
-        html_view_rule_lists_release(lists, list_count);
+        html_view_rule_lists_release_ex(lists, list_count, !lists_scratch);
+        if (lists_scratch)
+        {
+            html_view_rule_list_scratch_end(priv, lists, list_cap);
+        }
         return;
     }
 
+    html_view_rule_lists_release_ex(lists, list_count, !lists_scratch);
+    if (lists_scratch)
+    {
+        html_view_rule_list_scratch_end(priv, lists, list_cap);
+    }
     html_view_apply_rule_sheet_phase(out,
                                      node,
                                      pseudo,
@@ -10368,20 +10588,25 @@ void html_view_style_for_node(css_style_t *out,
 
     html_view_rule_list_t *rule_lists = NULL;
     size_t rule_list_count = 0;
+    size_t rule_list_cap = 0;
     bool use_rule_lists = false;
     bool use_fallback = false;
     const html_view_rule_index_t *index = NULL;
+    bool rule_lists_scratch = false;
 
     if (sheet && node && node->type == HTML_NODE_ELEMENT)
     {
         index = html_view_rule_index_get(priv, sheet);
         if (index)
         {
-            if (html_view_collect_indexed_rule_lists(node,
-                                                     HTML_VIEW_PSEUDO_NONE,
-                                                     index,
-                                                     &rule_lists,
-                                                     &rule_list_count))
+            rule_lists_scratch = html_view_rule_list_scratch_begin(priv, &rule_lists, &rule_list_cap);
+            bool ok = html_view_collect_indexed_rule_lists(node,
+                                                           HTML_VIEW_PSEUDO_NONE,
+                                                           index,
+                                                           &rule_lists,
+                                                           &rule_list_count,
+                                                           &rule_list_cap);
+            if (ok)
             {
                 use_rule_lists = true;
                 if (rule_list_count > 0)
@@ -10391,6 +10616,7 @@ void html_view_style_for_node(css_style_t *out,
                                                HTML_VIEW_PSEUDO_NONE,
                                                rule_lists,
                                                rule_list_count,
+                                               priv,
                                                HTML_VIEW_RULE_PHASE_NORMAL);
                 }
             }
@@ -10454,6 +10680,7 @@ void html_view_style_for_node(css_style_t *out,
                                    HTML_VIEW_PSEUDO_NONE,
                                    rule_lists,
                                    rule_list_count,
+                                   priv,
                                    HTML_VIEW_RULE_PHASE_IMPORTANT);
     }
     else if (use_fallback)
@@ -10477,9 +10704,10 @@ void html_view_style_for_node(css_style_t *out,
     {
         css_stylesheet_destroy(inline_sheet);
     }
-    if (use_rule_lists)
+    html_view_rule_lists_release_ex(rule_lists, rule_list_count, !rule_lists_scratch);
+    if (rule_lists_scratch)
     {
-        html_view_rule_lists_release(rule_lists, rule_list_count);
+        html_view_rule_list_scratch_end(priv, rule_lists, rule_list_cap);
     }
 
     html_view_resolve_float_inherit(out, parent);
@@ -10563,7 +10791,7 @@ bool html_view_style_for_pseudo(css_style_t *out,
         const html_view_rule_index_t *index = html_view_rule_index_get(priv, sheet);
         if (index)
         {
-            html_view_apply_indexed_rules(out, node, pseudo, index);
+            html_view_apply_indexed_rules(out, node, pseudo, index, priv);
         }
         else
         {

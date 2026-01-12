@@ -1,5 +1,7 @@
 #include "atk/html_view/html_view_internal.h"
 
+#include "web/js/internal.h"
+
 #include "ctype.h"
 #include "serial.h"
 #include "stdio.h"
@@ -427,6 +429,7 @@ static void html_view_js_scripts_clear_locked(atk_html_view_priv_t *priv)
         free(cur);
         cur = next;
     }
+    priv->js_script_count = 0;
 }
 
 static void html_view_js_scripts_append_locked(atk_html_view_priv_t *priv, html_view_js_script_t *scripts)
@@ -444,11 +447,14 @@ static void html_view_js_scripts_append_locked(atk_html_view_priv_t *priv, html_
         priv->js_script_head = scripts;
     }
     html_view_js_script_t *tail = scripts;
+    uint32_t count = 1u;
     while (tail->next)
     {
         tail = tail->next;
+        ++count;
     }
     priv->js_script_tail = tail;
+    priv->js_script_count += count;
 }
 
 static html_view_js_script_t *html_view_js_pop_script_locked(atk_html_view_priv_t *priv)
@@ -468,6 +474,10 @@ static html_view_js_script_t *html_view_js_pop_script_locked(atk_html_view_priv_
         priv->js_script_tail = NULL;
     }
     script->next = NULL;
+    if (priv->js_script_count > 0u)
+    {
+        --priv->js_script_count;
+    }
     return script;
 }
 
@@ -500,6 +510,7 @@ static bool html_view_js_queue_source_locked(atk_html_view_priv_t *priv, const c
         priv->js_script_head = script;
     }
     priv->js_script_tail = script;
+    ++priv->js_script_count;
     return true;
 }
 
@@ -527,6 +538,7 @@ static bool html_view_js_queue_program_locked(atk_html_view_priv_t *priv, js_pro
         priv->js_script_head = script;
     }
     priv->js_script_tail = script;
+    ++priv->js_script_count;
     return true;
 }
 
@@ -947,7 +959,7 @@ static bool html_view_js_out_string(js_value_t *out,
     {
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -1156,7 +1168,7 @@ static bool html_view_js_out_array(js_value_t *out, char **error_message)
     {
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -1174,7 +1186,7 @@ static bool html_view_js_array_push_handle(js_value_t *array, size_t handle, cha
     {
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -1241,7 +1253,7 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
         html_view_dom_unlock(priv);
         if (error_message)
         {
-            *error_message = html_view_strdup("listener name overflow");
+            *error_message = js_strdup("listener name overflow");
         }
         return false;
     }
@@ -1252,7 +1264,7 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
     {
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -1262,7 +1274,7 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
         free(handler_name);
         if (error_message)
         {
-            *error_message = html_view_strdup("listener registration failed");
+            *error_message = js_strdup("listener registration failed");
         }
         return false;
     }
@@ -1276,7 +1288,7 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
         free(handler_name);
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -1296,7 +1308,7 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
         free(handler_name);
         if (error_message)
         {
-            *error_message = parse_err.message ? html_view_strdup(parse_err.message) : html_view_strdup("parse error");
+            *error_message = parse_err.message ? js_strdup(parse_err.message) : js_strdup("parse error");
         }
         return false;
     }
@@ -1310,7 +1322,7 @@ static bool html_view_js_element_add_event_listener(js_runtime_t *rt,
         free(handler_name);
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -1499,7 +1511,7 @@ static bool html_view_js_make_element_object(js_value_t *out,
     {
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -1510,7 +1522,7 @@ static bool html_view_js_make_element_object(js_value_t *out,
         free(elem);
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -2388,7 +2400,7 @@ static bool html_view_js_dom_get_elements_by_tag(js_runtime_t *rt,
         js_value_destroy(out);
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -2519,7 +2531,7 @@ static bool html_view_js_dom_get_elements_by_class(js_runtime_t *rt,
         js_value_destroy(out);
         if (error_message)
         {
-            *error_message = html_view_strdup("allocation failed");
+            *error_message = js_strdup("allocation failed");
         }
         return false;
     }
@@ -2774,6 +2786,11 @@ static void html_view_js_thread(void *arg)
                   (void *)view);
     while (!html_view_js_should_stop(priv))
     {
+        if (__atomic_load_n(&priv->js_script_count, __ATOMIC_ACQUIRE) == 0u)
+        {
+            (void)sys_sleep_ms(2);
+            continue;
+        }
         html_view_dom_lock(priv);
         html_view_js_script_t *script = html_view_js_pop_script_locked(priv);
         html_view_dom_unlock(priv);
@@ -2878,8 +2895,10 @@ void html_view_js_init(atk_html_view_priv_t *priv)
     priv->js_enabled = true;
     priv->js_script_head = NULL;
     priv->js_script_tail = NULL;
+    priv->js_script_count = 0;
     priv->js_listeners = NULL;
     priv->js_listener_seq = 0;
+    priv->js_defer_start = 0;
     priv->js_handles = NULL;
     priv->js_handle_count = 0;
     priv->js_handle_cap = 0;
@@ -2893,7 +2912,12 @@ static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *
     }
     html_view_dom_lock(priv);
     bool running = (priv->js_thread != 0);
+    bool defer_start = (priv->js_defer_start != 0u);
     html_view_dom_unlock(priv);
+    if (defer_start)
+    {
+        return;
+    }
     if (running)
     {
         serial_printf("[html_js] start skip view=%p (already running)", (void *)view);
@@ -2986,9 +3010,10 @@ void html_view_js_start(atk_widget_t *view, atk_html_view_priv_t *priv)
         html_view_js_scripts_append_locked(priv, scripts);
     }
     bool has_scripts = (priv->js_script_head != NULL);
+    bool defer_start = (priv->js_defer_start != 0u);
     html_view_dom_unlock(priv);
 
-    if (!has_scripts)
+    if (!has_scripts || defer_start)
     {
         return;
     }
@@ -3012,6 +3037,7 @@ static bool html_view_js_queue_external_impl(atk_widget_t *view,
     }
 
     bool queued = false;
+    bool defer_start = false;
     if (try_only)
     {
         if (!html_view_dom_try_lock(priv))
@@ -3024,12 +3050,17 @@ static bool html_view_js_queue_external_impl(atk_widget_t *view,
         html_view_dom_lock(priv);
     }
     queued = html_view_js_queue_source_locked(priv, script_text, len);
+    defer_start = (priv->js_defer_start != 0u);
     html_view_dom_unlock(priv);
     if (!queued)
     {
         return false;
     }
 
+    if (defer_start)
+    {
+        return true;
+    }
     html_view_js_start_thread(view, priv);
     return true;
 }

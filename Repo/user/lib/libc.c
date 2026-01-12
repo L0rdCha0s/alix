@@ -2166,6 +2166,10 @@ void *malloc(size_t size)
 
 void free(void *ptr)
 {
+    if (!ptr)
+    {
+        return;
+    }
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     user_heap_log_caller("free ptr=", (uintptr_t)ptr, caller);
     user_heap_lock_acquire();

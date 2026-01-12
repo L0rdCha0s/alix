@@ -57,7 +57,7 @@ static bool js_string_builder_append(char **buf, size_t *len, size_t *cap, const
         {
             new_cap = needed + 1;
         }
-        char *next = (char *)realloc(*buf, new_cap);
+        char *next = (char *)js_realloc(*buf, new_cap);
         if (!next)
         {
             return false;
@@ -222,7 +222,7 @@ static js_eval_result_t js_eval_add_values(js_runtime_t *rt, const js_value_t *l
             if (err)
             {
                 js_eval_result_t res = js_eval_error(err);
-                free(err);
+                js_free(err);
                 return res;
             }
             return js_eval_error("allocation failed");
@@ -234,7 +234,7 @@ static js_eval_result_t js_eval_add_values(js_runtime_t *rt, const js_value_t *l
             if (err)
             {
                 js_eval_result_t res = js_eval_error(err);
-                free(err);
+                js_free(err);
                 return res;
             }
             return js_eval_error("allocation failed");
@@ -246,7 +246,7 @@ static js_eval_result_t js_eval_add_values(js_runtime_t *rt, const js_value_t *l
             return js_eval_error("string too large");
         }
         size_t total = ltemp.len + rtemp.len;
-        char *joined = (char *)malloc(total + 1);
+        char *joined = (char *)js_malloc(total + 1);
         if (!joined)
         {
             js_temp_string_release(&ltemp);
@@ -518,7 +518,7 @@ static void js_member_access_release(js_member_access_t *access)
     }
     if (access->property_owned)
     {
-        free(access->property);
+        js_free(access->property);
     }
     access->property = NULL;
     access->property_owned = false;
@@ -567,7 +567,7 @@ static js_property_t *js_object_ensure_property(js_object_t *object,
     {
         return prop;
     }
-    js_property_t *new_prop = (js_property_t *)calloc(1, sizeof(*new_prop));
+    js_property_t *new_prop = (js_property_t *)js_calloc(1, sizeof(*new_prop));
     if (!new_prop)
     {
         if (error_message)
@@ -579,7 +579,7 @@ static js_property_t *js_object_ensure_property(js_object_t *object,
     new_prop->name = js_strdup(name);
     if (!new_prop->name)
     {
-        free(new_prop);
+        js_free(new_prop);
         if (error_message)
         {
             *error_message = js_strdup("allocation failed");
@@ -658,12 +658,12 @@ bool js_object_get_property(js_runtime_t *rt,
                         }
                         else
                         {
-                            free(err);
+                            js_free(err);
                         }
                         js_value_destroy(&result);
                         return false;
                     }
-                    free(err);
+                    js_free(err);
                     *out = result;
                     return true;
                 }
@@ -680,12 +680,12 @@ bool js_object_get_property(js_runtime_t *rt,
                         }
                         else
                         {
-                            free(err);
+                            js_free(err);
                         }
                         js_value_destroy(&result);
                         return false;
                     }
-                    free(err);
+                    js_free(err);
                     *out = result;
                     return true;
                 }
@@ -808,11 +808,11 @@ static bool js_object_set_property(js_runtime_t *rt,
                     }
                     else
                     {
-                        free(err);
+                        js_free(err);
                     }
                     return false;
                 }
-                free(err);
+                js_free(err);
             }
             return true;
         }
@@ -880,12 +880,12 @@ static bool js_array_get_index_value(js_runtime_t *rt,
                         }
                         else
                         {
-                            free(err);
+                            js_free(err);
                         }
                         js_value_destroy(&result);
                         return false;
                     }
-                    free(err);
+                    js_free(err);
                     *out = result;
                     return true;
                 }
@@ -934,11 +934,11 @@ static bool js_array_set_index_value(js_runtime_t *rt,
                         }
                         else
                         {
-                            free(err);
+                            js_free(err);
                         }
                         return false;
                     }
-                    free(err);
+                    js_free(err);
                 }
                 return true;
             }
@@ -1002,11 +1002,11 @@ static bool js_array_set_named_property(js_runtime_t *rt,
                     }
                     else
                     {
-                        free(err);
+                        js_free(err);
                     }
                     return false;
                 }
-                free(err);
+                js_free(err);
             }
             return true;
         }
@@ -1085,7 +1085,7 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                     js_value_destroy(&prop_res.value);
                     js_member_access_release(out);
                     js_eval_result_t res = js_eval_error(prop_err);
-                    free(prop_err);
+                    js_free(prop_err);
                     return res;
                 }
             }
@@ -1110,7 +1110,7 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                     js_value_destroy(&prop_res.value);
                     js_member_access_release(out);
                     js_eval_result_t res = js_eval_error(prop_err);
-                    free(prop_err);
+                    js_free(prop_err);
                     return res;
                 }
             }
@@ -1128,7 +1128,7 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                 js_value_destroy(&prop_res.value);
                 js_member_access_release(out);
                 js_eval_result_t res = js_eval_error(prop_err);
-                free(prop_err);
+                js_free(prop_err);
                 return res;
             }
         }
@@ -1145,7 +1145,7 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                 js_value_destroy(&prop_res.value);
                 js_member_access_release(out);
                 js_eval_result_t res = js_eval_error(prop_err);
-                free(prop_err);
+                js_free(prop_err);
                 return res;
             }
         }
@@ -1162,7 +1162,7 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                 js_value_destroy(&prop_res.value);
                 js_member_access_release(out);
                 js_eval_result_t res = js_eval_error(prop_err);
-                free(prop_err);
+                js_free(prop_err);
                 return res;
             }
         }
@@ -1186,7 +1186,7 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                     js_value_destroy(&prop_res.value);
                     js_member_access_release(out);
                     js_eval_result_t res = js_eval_error(prop_err);
-                    free(prop_err);
+                    js_free(prop_err);
                     return res;
                 }
             }
@@ -1203,7 +1203,7 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                     js_value_destroy(&prop_res.value);
                     js_member_access_release(out);
                     js_eval_result_t res = js_eval_error(prop_err);
-                    free(prop_err);
+                    js_free(prop_err);
                     return res;
                 }
             }
@@ -1221,7 +1221,7 @@ static js_eval_result_t js_eval_member_access(js_runtime_t *rt,
                 js_value_destroy(&prop_res.value);
                 js_member_access_release(out);
                 js_eval_result_t res = js_eval_error(prop_err);
-                free(prop_err);
+                js_free(prop_err);
                 return res;
             }
         }
@@ -1366,7 +1366,7 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
                 if (err)
                 {
                     js_eval_result_t res = js_eval_error(err);
-                    free(err);
+                    js_free(err);
                     return res;
                 }
                 return js_eval_error("allocation failed");
@@ -1382,7 +1382,7 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
                 if (prop_err)
                 {
                     js_eval_result_t res = js_eval_error(prop_err);
-                    free(prop_err);
+                    js_free(prop_err);
                     return res;
                 }
                 return js_eval_error("allocation failed");
@@ -1499,12 +1499,12 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
                     if (err)
                     {
                         js_eval_result_t res = js_eval_error(err);
-                        free(err);
+                        js_free(err);
                         return res;
                     }
                     return js_eval_error("property lookup failed");
                 }
-                free(err);
+                js_free(err);
                 return js_eval_ok(value);
             }
         }
@@ -1779,12 +1779,12 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
                     if (err)
                     {
                         js_eval_result_t res = js_eval_error(err);
-                        free(err);
+                        js_free(err);
                         return res;
                     }
                     return js_eval_error("property lookup failed");
                 }
-                free(err);
+                js_free(err);
                 return js_eval_ok(value);
             }
         }
@@ -1799,7 +1799,7 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
             if (err)
             {
                 js_eval_result_t res = js_eval_error(err);
-                free(err);
+                js_free(err);
                 return res;
             }
             return js_eval_error("property lookup failed");
@@ -1832,7 +1832,7 @@ static bool js_name_list_push(js_name_ref_t **items,
         {
             new_cap = *count + 1;
         }
-        js_name_ref_t *next = (js_name_ref_t *)realloc(*items, new_cap * sizeof(*next));
+        js_name_ref_t *next = (js_name_ref_t *)js_realloc(*items, new_cap * sizeof(*next));
         if (!next)
         {
             return false;
@@ -1872,10 +1872,10 @@ static void js_name_list_destroy(js_name_ref_t *items, size_t count)
     {
         if (items[i].owned)
         {
-            free(items[i].name);
+            js_free(items[i].name);
         }
     }
-    free(items);
+    js_free(items);
 }
 
 static bool js_parse_index_key(const char *text, size_t *out_index)
@@ -1944,7 +1944,7 @@ static bool js_binding_get_index_value(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(err);
+                    js_free(err);
                 }
                 return false;
             }
@@ -2046,12 +2046,12 @@ static size_t js_binding_length(js_runtime_t *rt, const js_value_t *value)
             if (js_value_to_array_length(&len_value, &length))
             {
                 js_value_destroy(&len_value);
-                free(err);
+                js_free(err);
                 return length;
             }
             js_value_destroy(&len_value);
         }
-        free(err);
+        js_free(err);
     }
     return 0;
 }
@@ -2137,7 +2137,7 @@ static js_eval_result_t js_binding_apply_array(js_runtime_t *rt,
         if (!js_binding_get_index_value(rt, value, i, &elem_value, &err))
         {
             js_eval_result_t res = js_eval_error(err ? err : "allocation failed");
-            free(err);
+            js_free(err);
             return res;
         }
         if (elem_value.type == JS_VALUE_UNDEFINED && binding->as.array.elements[i].init)
@@ -2183,7 +2183,7 @@ static js_eval_result_t js_binding_apply_array(js_runtime_t *rt,
             {
                 js_value_destroy(&rest_value);
                 js_eval_result_t res = js_eval_error(err ? err : "allocation failed");
-                free(err);
+                js_free(err);
                 return res;
             }
             if (!js_value_array_push(&rest_value, &item))
@@ -2262,7 +2262,7 @@ static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
                 js_value_destroy(&key_res.value);
                 js_name_list_destroy(exclude, exclude_count);
                 js_eval_result_t res = js_eval_error(key_err ? key_err : "allocation failed");
-                free(key_err);
+                js_free(key_err);
                 return res;
             }
             js_value_destroy(&key_res.value);
@@ -2277,7 +2277,7 @@ static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
         {
             if (owned)
             {
-                free(prop_name);
+                js_free(prop_name);
             }
             js_name_list_destroy(exclude, exclude_count);
             return js_eval_error("allocation failed");
@@ -2289,7 +2289,7 @@ static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
         {
             js_name_list_destroy(exclude, exclude_count);
             js_eval_result_t res = js_eval_error(err ? err : "allocation failed");
-            free(err);
+            js_free(err);
             return res;
         }
         if (prop_value.type == JS_VALUE_UNDEFINED && prop->init)
@@ -2337,7 +2337,7 @@ static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
                     js_name_list_destroy(exclude, exclude_count);
                     js_value_destroy(&rest_obj);
                     js_eval_result_t res = js_eval_error(err ? err : "property set failed");
-                    free(err);
+                    js_free(err);
                     return res;
                 }
             }
@@ -2362,10 +2362,10 @@ static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
                 {
                     js_name_list_destroy(exclude, exclude_count);
                     js_value_destroy(&rest_obj);
-                    free(item_err);
+                    js_free(item_err);
                     return js_eval_error("allocation failed");
                 }
-                free(item_err);
+                js_free(item_err);
                 char *err = NULL;
                 if (!js_binding_add_object_prop(rt, &rest_obj, key, &item, &err))
                 {
@@ -2373,7 +2373,7 @@ static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
                     js_name_list_destroy(exclude, exclude_count);
                     js_value_destroy(&rest_obj);
                     js_eval_result_t res = js_eval_error(err ? err : "property set failed");
-                    free(err);
+                    js_free(err);
                     return res;
                 }
                 js_value_destroy(&item);
@@ -2390,7 +2390,7 @@ static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
                     js_name_list_destroy(exclude, exclude_count);
                     js_value_destroy(&rest_obj);
                     js_eval_result_t res = js_eval_error(err ? err : "property set failed");
-                    free(err);
+                    js_free(err);
                     return res;
                 }
             }
@@ -2423,7 +2423,7 @@ static js_eval_result_t js_binding_apply_object(js_runtime_t *rt,
                     js_name_list_destroy(exclude, exclude_count);
                     js_value_destroy(&rest_obj);
                     js_eval_result_t res = js_eval_error(err ? err : "property set failed");
-                    free(err);
+                    js_free(err);
                     return res;
                 }
                 js_value_destroy(&item);
@@ -2541,7 +2541,7 @@ static js_eval_result_t js_assign_to_target(js_runtime_t *rt,
                 if (err)
                 {
                     js_eval_result_t res = js_eval_error(err);
-                    free(err);
+                    js_free(err);
                     return res;
                 }
                 return js_eval_error("assignment failed");
@@ -2556,7 +2556,7 @@ static js_eval_result_t js_assign_to_target(js_runtime_t *rt,
                 if (err)
                 {
                     js_eval_result_t res = js_eval_error(err);
-                    free(err);
+                    js_free(err);
                     return res;
                 }
                 return js_eval_error("assignment failed");
@@ -2578,7 +2578,7 @@ static js_eval_result_t js_assign_to_target(js_runtime_t *rt,
             if (err)
             {
                 js_eval_result_t res = js_eval_error(err);
-                free(err);
+                js_free(err);
                 return res;
             }
             return js_eval_error("assignment failed");
@@ -2605,7 +2605,7 @@ static js_eval_result_t js_for_in_fail(js_value_t *keys,
         {
             js_value_destroy(&keys[i]);
         }
-        free(keys);
+        js_free(keys);
     }
     if (iterable)
     {
@@ -3043,7 +3043,7 @@ bool js_call_value(js_runtime_t *rt,
         }
         else
         {
-            free(res.error_message);
+            js_free(res.error_message);
         }
         js_value_destroy(&res.value);
         return false;
@@ -3062,7 +3062,7 @@ bool js_call_value(js_runtime_t *rt,
             }
         }
         js_value_destroy(&method);
-        free(err);
+        js_free(err);
     }
     if (error_message)
     {
@@ -3112,7 +3112,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                                               seg->data ? seg->data : "",
                                               seg->len))
                 {
-                    free(joined);
+                    js_free(joined);
                     return js_eval_error("allocation failed");
                 }
                 if (i < templ->expr_count)
@@ -3120,7 +3120,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     js_eval_result_t expr_res = js_eval_expr(rt, env, templ->exprs[i]);
                     if (!expr_res.ok)
                     {
-                        free(joined);
+                        js_free(joined);
                         return expr_res;
                     }
                     js_temp_string_t temp = {0};
@@ -3128,11 +3128,11 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     if (!js_temp_string_from_value(rt, &expr_res.value, &temp, &err))
                     {
                         js_value_destroy(&expr_res.value);
-                        free(joined);
+                        js_free(joined);
                         if (err)
                         {
                             js_eval_result_t res = js_eval_error(err);
-                            free(err);
+                            js_free(err);
                             return res;
                         }
                         return js_eval_error("allocation failed");
@@ -3145,7 +3145,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                                                   temp.len))
                     {
                         js_temp_string_release(&temp);
-                        free(joined);
+                        js_free(joined);
                         return js_eval_error("allocation failed");
                     }
                     js_temp_string_release(&temp);
@@ -3418,16 +3418,16 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                         js_value_destroy(&current);
                         js_value_destroy(&new_value);
                         js_eval_result_t res = js_eval_error(err);
-                        free(err);
+                        js_free(err);
                         return res;
                     }
-                    free(err);
+                    js_free(err);
                 }
                 else if (access.object.type == JS_VALUE_OBJECT)
                 {
                     char *err = NULL;
                     assigned_ok = js_object_set_property(rt, access.object.as.object, access.property, &new_value, &err);
-                    free(err);
+                    js_free(err);
                 }
             }
 
@@ -3545,7 +3545,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                             if (err)
                             {
                                 js_eval_result_t res = js_eval_error(err);
-                                free(err);
+                                js_free(err);
                                 return res;
                             }
                             return js_eval_error("division failed");
@@ -3620,7 +3620,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                         if (err)
                         {
                             js_eval_result_t res = js_eval_error(err);
-                            free(err);
+                            js_free(err);
                             return res;
                         }
                         return js_eval_error("pow failed");
@@ -3920,7 +3920,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                             if (err)
                             {
                                 js_eval_result_t res = js_eval_error(err);
-                                free(err);
+                                js_free(err);
                                 return res;
                             }
                             return js_eval_error("assignment failed");
@@ -3935,7 +3935,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                             if (err)
                             {
                                 js_eval_result_t res = js_eval_error(err);
-                                free(err);
+                                js_free(err);
                                 return res;
                             }
                             return js_eval_error("assignment failed");
@@ -3945,10 +3945,10 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     {
                         js_member_access_release(&access);
                         js_value_destroy(&add_res.value);
-                        free(err);
+                        js_free(err);
                         return js_eval_error("invalid assignment");
                     }
-                    free(err);
+                    js_free(err);
                 }
                 else if (access.object.type == JS_VALUE_OBJECT)
                 {
@@ -3961,7 +3961,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                         if (err)
                         {
                             js_eval_result_t res = js_eval_error(err);
-                            free(err);
+                            js_free(err);
                             return res;
                         }
                         return js_eval_error("assignment failed");
@@ -4057,7 +4057,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                             if (err)
                             {
                                 js_eval_result_t res = js_eval_error(err);
-                                free(err);
+                                js_free(err);
                                 return res;
                             }
                             return js_eval_error("assignment failed");
@@ -4072,7 +4072,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                             if (err)
                             {
                                 js_eval_result_t res = js_eval_error(err);
-                                free(err);
+                                js_free(err);
                                 return res;
                             }
                             return js_eval_error("assignment failed");
@@ -4082,10 +4082,10 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     {
                         js_member_access_release(&access);
                         js_value_destroy(&assigned.value);
-                        free(err);
+                        js_free(err);
                         return js_eval_error("invalid assignment");
                     }
-                    free(err);
+                    js_free(err);
                 }
                 else if (access.object.type == JS_VALUE_OBJECT)
                 {
@@ -4098,7 +4098,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                         if (err)
                         {
                             js_eval_result_t res = js_eval_error(err);
-                            free(err);
+                            js_free(err);
                             return res;
                         }
                         return js_eval_error("assignment failed");
@@ -4128,7 +4128,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             js_value_t *args = NULL;
             if (argc)
             {
-                args = (js_value_t *)calloc(argc, sizeof(*args));
+                args = (js_value_t *)js_calloc(argc, sizeof(*args));
                 if (!args)
                 {
                     js_value_destroy(&callee);
@@ -4144,7 +4144,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     {
                         js_value_destroy(&args[j]);
                     }
-                    free(args);
+                    js_free(args);
                     js_value_destroy(&callee);
                     return arg;
                 }
@@ -4157,7 +4157,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 {
                     js_value_destroy(&args[i]);
                 }
-                free(args);
+                js_free(args);
                 js_value_destroy(&callee);
                 return js_eval_error("TypeError: not a constructor");
             }
@@ -4176,14 +4176,14 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             {
                 js_value_destroy(&args[i]);
             }
-            free(args);
+            js_free(args);
             js_value_destroy(&callee);
             if (!ok)
             {
                 if (err)
                 {
                     js_eval_result_t res = js_eval_error(err);
-                    free(err);
+                    js_free(err);
                     return res;
                 }
                 return js_eval_error("constructor failed");
@@ -4244,7 +4244,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             js_value_t *args = NULL;
             if (call_argc)
             {
-                args = (js_value_t *)calloc(call_argc, sizeof(*args));
+                args = (js_value_t *)js_calloc(call_argc, sizeof(*args));
                 if (!args)
                 {
                     js_value_destroy(&callee);
@@ -4259,7 +4259,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             {
                 if (!js_value_copy(&args[0], &access.object))
                 {
-                    free(args);
+                    js_free(args);
                     js_value_destroy(&callee);
                     if (has_access)
                     {
@@ -4277,7 +4277,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     {
                         js_value_destroy(&args[j]);
                     }
-                    free(args);
+                    js_free(args);
                     js_value_destroy(&callee);
                     if (has_access)
                     {
@@ -4301,7 +4301,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 if (err)
                 {
                     res = js_eval_error(err);
-                    free(err);
+                    js_free(err);
                 }
                 else
                 {
@@ -4313,7 +4313,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             {
                 js_value_destroy(&args[i]);
             }
-            free(args);
+            js_free(args);
             js_value_destroy(&callee);
             if (has_access)
             {
@@ -4378,7 +4378,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                         if (key_err)
                         {
                             js_eval_result_t res = js_eval_error(key_err);
-                            free(key_err);
+                            js_free(key_err);
                             return res;
                         }
                         return js_eval_error("allocation failed");
@@ -4396,7 +4396,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 js_eval_result_t item = js_eval_expr(rt, env, expr->as.object.props[i].value);
                 if (!item.ok)
                 {
-                    free(owned_name);
+                    js_free(owned_name);
                     js_value_destroy(&obj_value);
                     return item;
                 }
@@ -4408,12 +4408,12 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     if (!prop)
                     {
                         js_value_destroy(&item.value);
-                        free(owned_name);
+                        js_free(owned_name);
                         js_value_destroy(&obj_value);
                         if (prop_err)
                         {
                             js_eval_result_t res = js_eval_error(prop_err);
-                            free(prop_err);
+                            js_free(prop_err);
                             return res;
                         }
                         return js_eval_error("allocation failed");
@@ -4447,7 +4447,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     ok = js_object_set_slot(obj_value.as.object, prop_name, &item.value);
                 }
                 js_value_destroy(&item.value);
-                free(owned_name);
+                js_free(owned_name);
                 if (!ok)
                 {
                     js_value_destroy(&obj_value);
@@ -4520,7 +4520,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                         {
                             js_member_access_release(&access);
                             js_eval_result_t res = js_eval_error(err);
-                            free(err);
+                            js_free(err);
                             return res;
                         }
                         js_member_access_release(&access);
@@ -4538,7 +4538,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                         if (prop_err)
                         {
                             js_eval_result_t res = js_eval_error(prop_err);
-                            free(prop_err);
+                            js_free(prop_err);
                             return res;
                         }
                         return js_eval_error("allocation failed");
@@ -4561,7 +4561,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     if (err)
                     {
                         js_eval_result_t res = js_eval_error(err);
-                        free(err);
+                        js_free(err);
                         return res;
                     }
                     return js_eval_error("property lookup failed");
@@ -4996,7 +4996,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                 if (err)
                 {
                     js_eval_result_t res = js_eval_error(err);
-                    free(err);
+                    js_free(err);
                     return res;
                 }
                 return js_eval_error("throw");
@@ -5009,7 +5009,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                 return js_eval_error("allocation failed");
             }
             js_eval_result_t res = js_eval_error(msg);
-            free(msg);
+            js_free(msg);
             return res;
         }
         case JS_STMT_FUNCTION_DECL:
@@ -5234,10 +5234,10 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                         if (!js_array_get_index_value(rt, iterable.as.array, i, &item, &item_err))
                         {
                             js_value_destroy(&iterable);
-                            free(item_err);
+                            js_free(item_err);
                             return js_eval_error("allocation failed");
                         }
-                        free(item_err);
+                        js_free(item_err);
                     }
                     else
                     {
@@ -5350,7 +5350,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                     if (key_count + 1 > key_cap)
                     {
                         size_t new_cap = key_cap ? key_cap * 2u : 8u;
-                        js_value_t *next = (js_value_t *)realloc(keys, new_cap * sizeof(*next));
+                        js_value_t *next = (js_value_t *)js_realloc(keys, new_cap * sizeof(*next));
                         if (!next)
                         {
                             return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
@@ -5378,7 +5378,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                     if (key_count + 1 > key_cap)
                     {
                         size_t new_cap = key_cap ? key_cap * 2u : 8u;
-                        js_value_t *next = (js_value_t *)realloc(keys, new_cap * sizeof(*next));
+                        js_value_t *next = (js_value_t *)js_realloc(keys, new_cap * sizeof(*next));
                         if (!next)
                         {
                             return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
@@ -5409,7 +5409,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                     if (key_count + 1 > key_cap)
                     {
                         size_t new_cap = key_cap ? key_cap * 2u : 8u;
-                        js_value_t *next = (js_value_t *)realloc(keys, new_cap * sizeof(*next));
+                        js_value_t *next = (js_value_t *)js_realloc(keys, new_cap * sizeof(*next));
                         if (!next)
                         {
                             return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
@@ -5437,7 +5437,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                     if (key_count + 1 > key_cap)
                     {
                         size_t new_cap = key_cap ? key_cap * 2u : 8u;
-                        js_value_t *next = (js_value_t *)realloc(keys, new_cap * sizeof(*next));
+                        js_value_t *next = (js_value_t *)js_realloc(keys, new_cap * sizeof(*next));
                         if (!next)
                         {
                             return js_for_in_fail(keys, key_count, &iterable, "allocation failed");
@@ -5465,7 +5465,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                         {
                             js_value_destroy(&keys[k]);
                         }
-                        free(keys);
+                        js_free(keys);
                         js_value_destroy(&iterable);
                         return js_eval_error("allocation failed");
                     }
@@ -5506,7 +5506,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                     {
                         js_value_destroy(&keys[k]);
                     }
-                    free(keys);
+                    js_free(keys);
                     js_value_destroy(&iterable);
                     return bind_res;
                 }
@@ -5523,7 +5523,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                     {
                         js_value_destroy(&keys[k]);
                     }
-                    free(keys);
+                    js_free(keys);
                     js_value_destroy(&iterable);
                     return body;
                 }
@@ -5533,7 +5533,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
                     {
                         js_value_destroy(&keys[k]);
                     }
-                    free(keys);
+                    js_free(keys);
                     js_value_destroy(&iterable);
                     return body;
                 }
@@ -5554,7 +5554,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
             {
                 js_value_destroy(&keys[k]);
             }
-            free(keys);
+            js_free(keys);
             js_value_destroy(&iterable);
             return js_eval_ok(js_value_make_undefined_internal());
         }
@@ -5658,7 +5658,7 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
             if (!catch_env)
             {
                 js_value_destroy(&res.value);
-                free(res.error_message);
+                js_free(res.error_message);
                 return js_eval_error("allocation failed");
             }
             js_value_t err_value;
@@ -5667,13 +5667,13 @@ static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const
             {
                 js_env_release(catch_env);
                 js_value_destroy(&res.value);
-                free(res.error_message);
+                js_free(res.error_message);
                 return js_eval_error("allocation failed");
             }
             bool ok = js_env_define_local(catch_env, stmt->as.try_stmt.catch_name, &err_value, false, false);
             js_value_destroy(&err_value);
             js_value_destroy(&res.value);
-            free(res.error_message);
+            js_free(res.error_message);
             if (!ok)
             {
                 js_env_release(catch_env);
@@ -5787,7 +5787,7 @@ void js_exec_result_destroy(js_exec_result_t *result)
         return;
     }
     js_value_destroy(&result->value);
-    free(result->error_message);
+    js_free(result->error_message);
     result->error_message = NULL;
     result->error_offset = 0;
     result->ok = false;

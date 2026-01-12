@@ -28,17 +28,17 @@ static double js_trunc_local(double value)
 
 static js_bigint_t *js_bigint_new(size_t length)
 {
-    js_bigint_t *value = (js_bigint_t *)calloc(1, sizeof(*value));
+    js_bigint_t *value = (js_bigint_t *)js_calloc(1, sizeof(*value));
     if (!value)
     {
         return NULL;
     }
     if (length)
     {
-        value->digits = (uint32_t *)calloc(length, sizeof(uint32_t));
+        value->digits = (uint32_t *)js_calloc(length, sizeof(uint32_t));
         if (!value->digits)
         {
-            free(value);
+            js_free(value);
             return NULL;
         }
         value->length = length;
@@ -52,8 +52,8 @@ static void js_bigint_free(js_bigint_t *value)
     {
         return;
     }
-    free(value->digits);
-    free(value);
+    js_free(value->digits);
+    js_free(value);
 }
 
 static void js_bigint_trim(js_bigint_t *value)
@@ -267,7 +267,7 @@ static bool js_bigint_mul_small(js_bigint_t *value, uint32_t mul)
     if (carry)
     {
         size_t new_len = value->length + 1;
-        uint32_t *digits = (uint32_t *)realloc(value->digits, new_len * sizeof(uint32_t));
+        uint32_t *digits = (uint32_t *)js_realloc(value->digits, new_len * sizeof(uint32_t));
         if (!digits)
         {
             return false;
@@ -287,7 +287,7 @@ static bool js_bigint_add_small(js_bigint_t *value, uint32_t add)
     }
     if (value->length == 0)
     {
-        value->digits = (uint32_t *)calloc(1, sizeof(uint32_t));
+        value->digits = (uint32_t *)js_calloc(1, sizeof(uint32_t));
         if (!value->digits)
         {
             return false;
@@ -310,7 +310,7 @@ static bool js_bigint_add_small(js_bigint_t *value, uint32_t add)
     if (carry)
     {
         size_t new_len = value->length + 1;
-        uint32_t *digits = (uint32_t *)realloc(value->digits, new_len * sizeof(uint32_t));
+        uint32_t *digits = (uint32_t *)js_realloc(value->digits, new_len * sizeof(uint32_t));
         if (!digits)
         {
             return false;
@@ -487,8 +487,8 @@ static void js_symbol_finalize(void *user_data)
     {
         return;
     }
-    free(sym->description);
-    free(sym);
+    js_free(sym->description);
+    js_free(sym);
 }
 
 bool js_object_is_symbol(const js_object_t *object)
@@ -592,7 +592,7 @@ bool js_value_make_host_object(js_value_t *out,
     {
         return false;
     }
-    js_object_t *object = (js_object_t *)calloc(1, sizeof(*object));
+    js_object_t *object = (js_object_t *)js_calloc(1, sizeof(*object));
     if (!object)
     {
         return false;
@@ -613,7 +613,7 @@ bool js_value_make_symbol(js_value_t *out, const char *description)
     {
         return false;
     }
-    js_symbol_data_t *sym = (js_symbol_data_t *)calloc(1, sizeof(*sym));
+    js_symbol_data_t *sym = (js_symbol_data_t *)js_calloc(1, sizeof(*sym));
     if (!sym)
     {
         return false;
@@ -623,14 +623,14 @@ bool js_value_make_symbol(js_value_t *out, const char *description)
         sym->description = js_strdup(description);
         if (!sym->description)
         {
-            free(sym);
+            js_free(sym);
             return false;
         }
     }
     if (!js_value_make_host_object(out, js_symbol_get, NULL, js_symbol_finalize, sym))
     {
-        free(sym->description);
-        free(sym);
+        js_free(sym->description);
+        js_free(sym);
         return false;
     }
     return true;
@@ -910,7 +910,7 @@ char *js_bigint_to_string(const js_bigint_t *value)
         return js_strdup("0");
     }
     size_t buf_len = value->length * JS_BIGINT_BASE_DIGITS + 2;
-    char *buf = (char *)malloc(buf_len);
+    char *buf = (char *)js_malloc(buf_len);
     if (!buf)
     {
         return NULL;
@@ -971,7 +971,7 @@ void js_value_destroy(js_value_t *value)
     }
     if (value->type == JS_VALUE_STRING)
     {
-        free(value->as.string.data);
+        js_free(value->as.string.data);
         value->as.string.data = NULL;
         value->as.string.len = 0;
     }
@@ -1142,7 +1142,7 @@ static char *js_number_to_string(double value, size_t *out_len)
         frac -= 1.0;
     }
 
-    char *int_digits = (char *)malloc(32);
+    char *int_digits = (char *)js_malloc(32);
     if (!int_digits)
     {
         return NULL;
@@ -1159,10 +1159,10 @@ static char *js_number_to_string(double value, size_t *out_len)
     size_t frac_len = 0;
     if (frac > 0.0)
     {
-        frac_digits = (char *)malloc((size_t)max_frac);
+        frac_digits = (char *)js_malloc((size_t)max_frac);
         if (!frac_digits)
         {
-            free(int_digits);
+            js_free(int_digits);
             return NULL;
         }
         double scaled = frac;
@@ -1182,11 +1182,11 @@ static char *js_number_to_string(double value, size_t *out_len)
     }
 
     size_t total_len = (neg ? 1u : 0u) + int_len + (frac_len ? (1u + frac_len) : 0u);
-    char *out = (char *)malloc(total_len + 1);
+    char *out = (char *)js_malloc(total_len + 1);
     if (!out)
     {
-        free(int_digits);
-        free(frac_digits);
+        js_free(int_digits);
+        js_free(frac_digits);
         return NULL;
     }
     size_t pos = 0;
@@ -1210,8 +1210,8 @@ static char *js_number_to_string(double value, size_t *out_len)
     {
         *out_len = pos;
     }
-    free(int_digits);
-    free(frac_digits);
+    js_free(int_digits);
+    js_free(frac_digits);
     return out;
 }
 
@@ -1294,7 +1294,7 @@ static bool js_try_object_method(js_runtime_t *rt,
         }
         else
         {
-            free(err);
+            js_free(err);
         }
         return false;
     }
@@ -1504,7 +1504,7 @@ bool js_temp_string_from_value(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(err);
+                    js_free(err);
                 }
                 return false;
             }
@@ -1537,7 +1537,7 @@ void js_temp_string_release(js_temp_string_t *temp)
     }
     if (temp->owned)
     {
-        free(temp->data);
+        js_free(temp->data);
     }
     temp->data = NULL;
     temp->len = 0;
@@ -1935,7 +1935,7 @@ bool js_value_to_bigint(js_runtime_t *rt,
         }
         bool ok = false;
         js_bigint_t *big = js_bigint_from_string_internal(buf, base, &ok);
-        free(buf);
+        js_free(buf);
         if (!big || !ok)
         {
             js_bigint_free(big);
@@ -1971,7 +1971,7 @@ bool js_value_to_bigint(js_runtime_t *rt,
                 }
                 else
                 {
-                    free(err);
+                    js_free(err);
                 }
             }
             return false;

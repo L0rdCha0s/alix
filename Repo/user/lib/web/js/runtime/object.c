@@ -55,14 +55,14 @@ void js_object_release(js_object_t *object)
     while (prop)
     {
         js_property_t *next = prop->next;
-        free(prop->name);
+        js_free(prop->name);
         js_value_destroy(&prop->value);
         js_value_destroy(&prop->getter);
         js_value_destroy(&prop->setter);
-        free(prop);
+        js_free(prop);
         prop = next;
     }
-    free(object);
+    js_free(object);
 }
 
 bool js_object_get_slot(js_object_t *object, const char *name, js_value_t *out)
@@ -111,7 +111,7 @@ bool js_object_set_slot(js_object_t *object, const char *name, const js_value_t 
         js_value_destroy(&prop->value);
         return js_value_copy(&prop->value, value);
     }
-    js_property_t *new_prop = (js_property_t *)calloc(1, sizeof(*new_prop));
+    js_property_t *new_prop = (js_property_t *)js_calloc(1, sizeof(*new_prop));
     if (!new_prop)
     {
         return false;
@@ -119,7 +119,7 @@ bool js_object_set_slot(js_object_t *object, const char *name, const js_value_t 
     new_prop->name = js_strdup(name);
     if (!new_prop->name)
     {
-        free(new_prop);
+        js_free(new_prop);
         return false;
     }
     new_prop->value = js_value_make_undefined_internal();
@@ -131,8 +131,8 @@ bool js_object_set_slot(js_object_t *object, const char *name, const js_value_t 
     new_prop->is_accessor = false;
     if (!js_value_copy(&new_prop->value, value))
     {
-        free(new_prop->name);
-        free(new_prop);
+        js_free(new_prop->name);
+        js_free(new_prop);
         return false;
     }
     new_prop->next = object->properties;

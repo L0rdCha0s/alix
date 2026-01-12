@@ -11,7 +11,7 @@ void js_token_destroy(js_token_t *tok)
     }
     if (tok->text && tok->text_owned)
     {
-        free(tok->text);
+        js_free(tok->text);
     }
     tok->text = NULL;
     tok->length = 0;
@@ -626,7 +626,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
 
     size_t raw_len = (size_t)(p - start);
     size_t cap = raw_len * 4 + 1;
-    char *buf = lex && lex->arena ? (char *)js_arena_alloc(lex->arena, cap) : (char *)malloc(cap);
+    char *buf = lex && lex->arena ? (char *)js_arena_alloc(lex->arena, cap) : (char *)js_malloc(cap);
     bool buf_owned = !(lex && lex->arena);
     if (!buf)
     {
@@ -665,7 +665,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                     {
                         if (buf_owned)
                         {
-                            free(buf);
+                            js_free(buf);
                         }
                         js_parse_error_set(error_out, start_offset, "invalid hex escape");
                         return false;
@@ -688,7 +688,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                             {
                                 if (buf_owned)
                                 {
-                                    free(buf);
+                                    js_free(buf);
                                 }
                                 js_parse_error_set(error_out, start_offset, "invalid unicode escape");
                                 return false;
@@ -701,7 +701,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                         {
                             if (buf_owned)
                             {
-                                free(buf);
+                                js_free(buf);
                             }
                             js_parse_error_set(error_out, start_offset, "invalid unicode escape");
                             return false;
@@ -711,7 +711,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                         {
                             if (buf_owned)
                             {
-                                free(buf);
+                                js_free(buf);
                             }
                             js_parse_error_set(error_out, start_offset, "allocation failed");
                             return false;
@@ -726,7 +726,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                     {
                         if (buf_owned)
                         {
-                            free(buf);
+                            js_free(buf);
                         }
                         js_parse_error_set(error_out, start_offset, "invalid unicode escape");
                         return false;
@@ -737,7 +737,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
                     {
                         if (buf_owned)
                         {
-                            free(buf);
+                            js_free(buf);
                         }
                         js_parse_error_set(error_out, start_offset, "allocation failed");
                         return false;
@@ -751,7 +751,7 @@ static bool js_lexer_read_string(js_lexer_t *lex, js_token_t *out, char quote, s
         {
             if (buf_owned)
             {
-                free(buf);
+                js_free(buf);
             }
             js_parse_error_set(error_out, start_offset, "allocation failed");
             return false;

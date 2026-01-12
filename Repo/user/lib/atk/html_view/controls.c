@@ -1214,6 +1214,7 @@ void html_view_apply_pending_external_css_locked(atk_html_view_priv_t *priv)
     }
     priv->external_css = pending;
     priv->external_css_len = pending ? (size_t)pending_len : 0;
+    __atomic_store_n(&priv->render_wait_for_css, 0u, __ATOMIC_RELEASE);
     static uint64_t last_apply_log_ms = 0;
     if (html_view_css_log_throttle(&last_apply_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
     {

@@ -319,6 +319,18 @@ typedef struct
     size_t inline_cache_count;
     size_t inline_cache_cap;
     html_view_rule_index_t *rule_index;
+    void *rule_list_scratch; /* html_view_rule_list_t */
+    size_t rule_list_scratch_cap;
+    uint32_t rule_list_scratch_in_use;
+    size_t *rule_positions_scratch;
+    size_t rule_positions_scratch_cap;
+    uint32_t rule_positions_scratch_in_use;
+    void *flex_items_scratch; /* html_view_flex_item_t */
+    size_t flex_items_scratch_cap;
+    uint32_t flex_items_scratch_in_use;
+    void *flex_lines_scratch; /* html_view_flex_line_t */
+    size_t flex_lines_scratch_cap;
+    uint32_t flex_lines_scratch_in_use;
     html_view_measure_cache_entry_t *measure_cache;
     size_t measure_cache_count;
     size_t measure_cache_cap;
@@ -350,6 +362,7 @@ typedef struct
     volatile uint32_t stylesheet_dirty;
     bool render_async;
     bool render_external;
+    volatile uint32_t render_wait_for_css;
     alix_thread_t js_thread;
     volatile uint32_t js_stop;
     volatile uint32_t js_dirty;
@@ -359,8 +372,10 @@ typedef struct
     bool js_enabled;
     html_view_js_script_t *js_script_head;
     html_view_js_script_t *js_script_tail;
+    volatile uint32_t js_script_count;
     html_view_js_listener_t *js_listeners;
     uint32_t js_listener_seq;
+    uint32_t js_defer_start;
     html_node_t **js_handles;
     size_t js_handle_count;
     size_t js_handle_cap;

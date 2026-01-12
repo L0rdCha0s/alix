@@ -498,6 +498,7 @@ static char *browser_cache_read(browser_app_t *app, const char *uri, size_t *bod
         else
         {
             browser_debug_logf(app, "[cache] hit url=%s", uri);
+            serial_printf("[cache] hit url=%s", uri);
         }
     }
     free(path);
@@ -529,6 +530,7 @@ static void browser_cache_write(browser_app_t *app, const char *uri, const uint8
         if (browser_write_all(fd, data, len))
         {
             browser_debug_logf(app, "[cache] store url=%s bytes=%u", uri, (unsigned)len);
+            serial_printf("[cache] store url=%s bytes=%u", uri, (unsigned)len);
         }
         close(fd);
     }
@@ -1058,6 +1060,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
     if (!url || !url->host || !url->path)
     {
         browser_debug_logf(app, "[fetch] invalid url (missing host/path)");
+        serial_printf("[http] invalid url");
         return browser_format_error("invalid url");
     }
 
@@ -1068,6 +1071,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
     if (redirect_depth > BROWSER_MAX_REDIRECTS)
     {
         browser_debug_logf(app, "[http] too many redirects");
+        serial_printf("[http] too many redirects");
         return browser_format_error("too many redirects");
     }
 
@@ -1077,6 +1081,11 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                        url->host ? url->host : "(null)",
                        (unsigned)url->port,
                        url->path ? url->path : "(null)");
+    serial_printf("[http] connect tls=%u host=%s port=%u path=%s",
+                  url->use_tls ? 1u : 0u,
+                  url->host ? url->host : "(null)",
+                  (unsigned)url->port,
+                  url->path ? url->path : "(null)");
 
     int fd = socket_open(NULL);
     if (fd < 0)
@@ -1088,15 +1097,23 @@ static char *browser_fetch_http_internal(browser_app_t *app,
     if (socket_connect(fd, url->host, url->port) != 0)
     {
         browser_debug_logf(app, "[net] socket_connect failed");
+        serial_printf("[net] socket_connect failed host=%s port=%u",
+                      url->host ? url->host : "(null)",
+                      (unsigned)url->port);
         close(fd);
         return browser_format_error("socket_connect failed");
     }
     browser_debug_logf(app, "[net] connected");
+    serial_printf("[net] connected host=%s port=%u",
+                  url->host ? url->host : "(null)",
+                  (unsigned)url->port);
 
     char *request = browser_build_request(url->host, url->path);
     if (!request)
     {
         browser_debug_logf(app, "[http] alloc request failed");
+        serial_printf("[http] request alloc failed host=%s",
+                      url->host ? url->host : "(null)");
         close(fd);
         return browser_format_error("alloc request failed");
     }
@@ -1104,6 +1121,9 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                        "[http] request GET %s Host: %s",
                        url->path ? url->path : "/",
                        url->host ? url->host : "(null)");
+    serial_printf("[http] request host=%s path=%s",
+                  url->host ? url->host : "(null)",
+                  url->path ? url->path : "/");
 
     char *header_buf = NULL;
     size_t header_len = 0;
@@ -1128,6 +1148,8 @@ static char *browser_fetch_http_internal(browser_app_t *app,
     if (!chunk)
     {
         browser_debug_logf(app, "[http] alloc recv buffer failed");
+        serial_printf("[http] recv buffer alloc failed host=%s",
+                      url->host ? url->host : "(null)");
         free(request);
         close(fd);
         return browser_format_error("alloc recv buffer failed");
@@ -1136,10 +1158,12 @@ static char *browser_fetch_http_internal(browser_app_t *app,
     if (url->use_tls)
     {
         browser_debug_logf(app, "[tls] handshake start");
+        serial_printf("[tls] handshake start host=%s", url->host ? url->host : "(null)");
         tls_session_t *tls = tls_session_create_fd(fd);
         if (!tls)
         {
             browser_debug_logf(app, "[tls] alloc tls session failed");
+            serial_printf("[tls] alloc session failed host=%s", url->host ? url->host : "(null)");
             free(chunk);
             free(request);
             close(fd);
@@ -1149,6 +1173,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
         if (!tls_session_handshake(tls, url->host))
         {
             browser_debug_logf(app, "[tls] handshake failed (see serial log)");
+            serial_printf("[tls] handshake failed host=%s", url->host ? url->host : "(null)");
             tls_session_destroy(tls);
             free(chunk);
             free(request);
@@ -1156,10 +1181,12 @@ static char *browser_fetch_http_internal(browser_app_t *app,
             return browser_format_error("tls handshake failed");
         }
         browser_debug_logf(app, "[tls] handshake ok");
+        serial_printf("[tls] handshake ok host=%s", url->host ? url->host : "(null)");
 
         if (!tls_session_send(tls, (const uint8_t *)request, strlen(request)))
         {
             browser_debug_logf(app, "[tls] send failed");
+            serial_printf("[tls] send failed host=%s", url->host ? url->host : "(null)");
             tls_session_destroy(tls);
             free(chunk);
             free(request);
@@ -1202,6 +1229,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                 int status = browser_http_parse_status_code(header_buf, header_block_len);
                 status_code = status;
                 browser_debug_logf(app, "[http] status %s (code=%d)", status_line, status);
+                serial_printf("[http] status %s code=%d", status_line, status);
 
                 const char *value = NULL;
                 size_t value_len = 0;
@@ -1227,6 +1255,27 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                     {
                         have_content_length = true;
                         content_length = parsed_len;
+                    }
+                }
+
+                if (have_content_length)
+                {
+                    size_t reserve = content_length + 1;
+                    if (reserve > body_cap)
+                    {
+                        char *new_buf = (char *)realloc(body_buf, reserve);
+                        if (!new_buf)
+                        {
+                            tls_session_destroy(tls);
+                            free(request);
+                            close(fd);
+                            free(header_buf);
+                            free(body_buf);
+                            free(chunk);
+                            return browser_format_error("alloc body buffer failed");
+                        }
+                        body_buf = new_buf;
+                        body_cap = reserve;
                     }
                 }
 
@@ -1319,6 +1368,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                     }
                     redirect_status = status;
                     browser_debug_logf(app, "[http] redirect %d -> %s", status, redirect_target);
+                    serial_printf("[http] redirect %d url=%s", status, redirect_target);
 
                     free(header_buf);
                     header_buf = NULL;
@@ -1331,6 +1381,9 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                                    "[http] transfer=%s content-length=%u",
                                    is_chunked ? "chunked" : "identity",
                                    have_content_length ? (unsigned)content_length : 0u);
+                serial_printf("[http] transfer=%s content-length=%u",
+                              is_chunked ? "chunked" : "identity",
+                              have_content_length ? (unsigned)content_length : 0u);
 
                 if (header_len > body_offset)
                 {
@@ -1447,6 +1500,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
         if (!browser_write_all(fd, (const uint8_t *)request, strlen(request)))
         {
             browser_debug_logf(app, "[http] write failed");
+            serial_printf("[http] write failed host=%s", url->host ? url->host : "(null)");
             free(chunk);
             free(request);
             close(fd);
@@ -1493,6 +1547,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                 int status = browser_http_parse_status_code(header_buf, header_block_len);
                 status_code = status;
                 browser_debug_logf(app, "[http] status %s (code=%d)", status_line, status);
+                serial_printf("[http] status %s code=%d", status_line, status);
 
                 const char *value = NULL;
                 size_t value_len = 0;
@@ -1518,6 +1573,27 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                     {
                         have_content_length = true;
                         content_length = parsed_len;
+                    }
+                }
+
+                if (have_content_length)
+                {
+                    size_t reserve = content_length + 1;
+                    if (reserve > body_cap)
+                    {
+                        char *new_buf = (char *)realloc(body_buf, reserve);
+                        if (!new_buf)
+                        {
+                            browser_debug_logf(app, "[http] body alloc failed");
+                            free(request);
+                            close(fd);
+                            free(header_buf);
+                            free(body_buf);
+                            free(chunk);
+                            return browser_format_error("alloc body buffer failed");
+                        }
+                        body_buf = new_buf;
+                        body_cap = reserve;
                     }
                 }
 
@@ -1578,6 +1654,7 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                     }
                     redirect_status = status;
                     browser_debug_logf(app, "[http] redirect %d -> %s", status, redirect_target);
+                    serial_printf("[http] redirect %d url=%s", status, redirect_target);
 
                     free(header_buf);
                     header_buf = NULL;
@@ -1590,6 +1667,9 @@ static char *browser_fetch_http_internal(browser_app_t *app,
                                    "[http] transfer=%s content-length=%u",
                                    is_chunked ? "chunked" : "identity",
                                    have_content_length ? (unsigned)content_length : 0u);
+                serial_printf("[http] transfer=%s content-length=%u",
+                              is_chunked ? "chunked" : "identity",
+                              have_content_length ? (unsigned)content_length : 0u);
 
                 if (header_len > body_offset)
                 {
@@ -1719,14 +1799,20 @@ static char *browser_fetch_http_internal(browser_app_t *app,
         browser_url_t next = {0};
         if (!browser_parse_url(redirect_target, &next))
         {
-            browser_debug_logf(app, "[http] redirect parse failed");
-            free(redirect_target);
-            return browser_format_error("invalid redirect url");
-        }
-        browser_debug_logf(app, "[http] follow redirect %d depth=%d url=%s",
-                           redirect_status,
-                           redirect_depth + 1,
-                           redirect_target);
+        browser_debug_logf(app, "[http] redirect parse failed");
+        serial_printf("[http] redirect parse failed url=%s",
+                      redirect_target ? redirect_target : "(null)");
+        free(redirect_target);
+        return browser_format_error("invalid redirect url");
+    }
+    browser_debug_logf(app, "[http] follow redirect %d depth=%d url=%s",
+                       redirect_status,
+                       redirect_depth + 1,
+                       redirect_target);
+    serial_printf("[http] follow redirect status=%d depth=%d url=%s",
+                  redirect_status,
+                  redirect_depth + 1,
+                  redirect_target);
         free(redirect_target);
         char *res = browser_fetch_http_internal(app,
                                                 &next,
@@ -1742,6 +1828,8 @@ static char *browser_fetch_http_internal(browser_app_t *app,
     {
         browser_debug_logf(app, "[http] incomplete body got=%u expected=%u",
                            (unsigned)body_len, (unsigned)content_length);
+        serial_printf("[http] incomplete body got=%u expected=%u",
+                      (unsigned)body_len, (unsigned)content_length);
         free(body_buf);
         return browser_format_error("incomplete response body");
     }
@@ -1749,10 +1837,12 @@ static char *browser_fetch_http_internal(browser_app_t *app,
     if (!body_buf)
     {
         browser_debug_logf(app, "[http] empty response body");
+        serial_printf("[http] empty response body");
         return browser_format_error("empty response");
     }
 
     browser_debug_logf(app, "[http] body bytes=%u", (unsigned)body_len);
+    serial_printf("[http] body bytes=%u", (unsigned)body_len);
     if (body_len_out)
     {
         *body_len_out = body_len;

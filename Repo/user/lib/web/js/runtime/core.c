@@ -93,7 +93,7 @@ static bool js_runtime_register_native(js_runtime_t *rt,
     {
         return false;
     }
-    js_native_meta_t *meta = (js_native_meta_t *)calloc(1, sizeof(*meta));
+    js_native_meta_t *meta = (js_native_meta_t *)js_calloc(1, sizeof(*meta));
     if (!meta)
     {
         return false;
@@ -111,7 +111,7 @@ static bool js_runtime_register_native(js_runtime_t *rt,
     value.as.native.user_data = user_data;
     if (!js_env_define_local(rt->global, name, &value, true, true))
     {
-        free(meta);
+        js_free(meta);
         return false;
     }
     meta->next = rt->native_meta;
@@ -125,7 +125,7 @@ bool js_runtime_track_program(js_runtime_t *rt, js_program_t *program)
     {
         return false;
     }
-    js_program_node_t *node = (js_program_node_t *)calloc(1, sizeof(*node));
+    js_program_node_t *node = (js_program_node_t *)js_calloc(1, sizeof(*node));
     if (!node)
     {
         return false;
@@ -138,7 +138,7 @@ bool js_runtime_track_program(js_runtime_t *rt, js_program_t *program)
 
 js_runtime_t *js_runtime_create(void)
 {
-    js_runtime_t *rt = (js_runtime_t *)calloc(1, sizeof(*rt));
+    js_runtime_t *rt = (js_runtime_t *)js_calloc(1, sizeof(*rt));
     if (!rt)
     {
         return NULL;
@@ -146,7 +146,7 @@ js_runtime_t *js_runtime_create(void)
     rt->global = js_env_create(NULL, true);
     if (!rt->global)
     {
-        free(rt);
+        js_free(rt);
         return NULL;
     }
     rt->programs = NULL;
@@ -370,14 +370,14 @@ void js_runtime_destroy(js_runtime_t *rt)
         {
             js_program_destroy(node->program);
         }
-        free(node);
+        js_free(node);
         node = next;
     }
     js_native_meta_t *meta = rt->native_meta;
     while (meta)
     {
         js_native_meta_t *next = meta->next;
-        free(meta);
+        js_free(meta);
         meta = next;
     }
     js_env_release(rt->global);
@@ -476,7 +476,7 @@ void js_runtime_destroy(js_runtime_t *rt)
         js_object_release(rt->object_proto);
         rt->object_proto = NULL;
     }
-    free(rt);
+    js_free(rt);
 }
 
 bool js_runtime_set_global(js_runtime_t *rt, const char *name, const js_value_t *value)

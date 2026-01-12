@@ -29,7 +29,7 @@ void js_env_retain(js_env_t *env)
 
 js_env_t *js_env_create(js_env_t *parent, bool is_function)
 {
-    js_env_t *env = (js_env_t *)calloc(1, sizeof(*env));
+    js_env_t *env = (js_env_t *)js_calloc(1, sizeof(*env));
     if (!env)
     {
         return NULL;
@@ -64,13 +64,13 @@ void js_env_release(js_env_t *env)
     while (var)
     {
         js_var_t *next = var->next;
-        free(var->name);
+        js_free(var->name);
         js_value_destroy(&var->value);
-        free(var);
+        js_free(var);
         var = next;
     }
     js_env_t *parent = env->parent;
-    free(env);
+    js_free(env);
     if (parent)
     {
         js_env_release(parent);
@@ -132,7 +132,7 @@ bool js_env_define_local(js_env_t *env,
         return true;
     }
 
-    js_var_t *var = (js_var_t *)calloc(1, sizeof(*var));
+    js_var_t *var = (js_var_t *)js_calloc(1, sizeof(*var));
     if (!var)
     {
         return false;
@@ -140,13 +140,13 @@ bool js_env_define_local(js_env_t *env,
     var->name = js_strdup(name);
     if (!var->name)
     {
-        free(var);
+        js_free(var);
         return false;
     }
     if (!js_value_copy(&var->value, value))
     {
-        free(var->name);
-        free(var);
+        js_free(var->name);
+        js_free(var);
         return false;
     }
     var->is_const = is_const;

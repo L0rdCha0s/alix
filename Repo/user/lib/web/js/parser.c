@@ -75,7 +75,7 @@ static void *js_parser_alloc(js_parser_t *parser, size_t size)
     }
     if (!parser->use_arena)
     {
-        return calloc(1, size);
+        return js_calloc(1, size);
     }
     return js_arena_alloc(&parser->arena, size);
 }
@@ -97,7 +97,7 @@ static void *js_parser_realloc(js_parser_t *parser,
     }
     if (!parser->use_arena)
     {
-        return realloc(items, bytes);
+        return js_realloc(items, bytes);
     }
     void *next = js_arena_alloc(&parser->arena, bytes);
     if (!next)
@@ -143,7 +143,7 @@ static void js_parser_free(js_parser_t *parser, void *ptr)
     {
         return;
     }
-    free(ptr);
+    js_free(ptr);
 }
 
 static void js_parser_init(js_parser_t *parser, const char *source, js_parse_error_t *error_out)
@@ -662,7 +662,7 @@ static void js_param_list_destroy(js_param_list_t *params, bool arena_owned)
     }
     if (!arena_owned)
     {
-        free(params->items);
+        js_free(params->items);
     }
     params->items = NULL;
     params->count = 0;
@@ -702,7 +702,7 @@ static void js_binding_destroy(js_binding_t *binding, bool arena_owned)
         case JS_BINDING_IDENTIFIER:
             if (!arena_owned)
             {
-                free(binding->as.ident.name);
+                js_free(binding->as.ident.name);
             }
             break;
         case JS_BINDING_ARRAY:
@@ -713,7 +713,7 @@ static void js_binding_destroy(js_binding_t *binding, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(binding->as.array.elements);
+                js_free(binding->as.array.elements);
             }
             js_binding_destroy(binding->as.array.rest, arena_owned);
             break;
@@ -728,7 +728,7 @@ static void js_binding_destroy(js_binding_t *binding, bool arena_owned)
                 {
                     if (!arena_owned)
                     {
-                        free(binding->as.object.props[i].name);
+                        js_free(binding->as.object.props[i].name);
                     }
                 }
                 js_binding_destroy(binding->as.object.props[i].binding, arena_owned);
@@ -736,14 +736,14 @@ static void js_binding_destroy(js_binding_t *binding, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(binding->as.object.props);
-                free(binding->as.object.rest_name);
+                js_free(binding->as.object.props);
+                js_free(binding->as.object.rest_name);
             }
             break;
     }
     if (!arena_owned)
     {
-        free(binding);
+        js_free(binding);
     }
 }
 
@@ -763,7 +763,7 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(stmt->as.var.bindings);
+                js_free(stmt->as.var.bindings);
             }
             break;
         case JS_STMT_EXPR:
@@ -776,7 +776,7 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(stmt->as.block.stmts);
+                js_free(stmt->as.block.stmts);
             }
             break;
         case JS_STMT_RETURN:
@@ -788,7 +788,7 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
         case JS_STMT_FUNCTION_DECL:
             if (!arena_owned)
             {
-                free(stmt->as.func.name);
+                js_free(stmt->as.func.name);
             }
             for (size_t p = 0; p < stmt->as.func.param_count; ++p)
             {
@@ -797,7 +797,7 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(stmt->as.func.params);
+                js_free(stmt->as.func.params);
             }
             for (size_t i = 0; i < stmt->as.func.body.count; ++i)
             {
@@ -805,7 +805,7 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(stmt->as.func.body.stmts);
+                js_free(stmt->as.func.body.stmts);
             }
             break;
         case JS_STMT_IF:
@@ -846,12 +846,12 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
                 }
                 if (!arena_owned)
                 {
-                    free(case_stmt->stmts);
+                    js_free(case_stmt->stmts);
                 }
             }
             if (!arena_owned)
             {
-                free(stmt->as.switch_stmt.cases);
+                js_free(stmt->as.switch_stmt.cases);
             }
             break;
         case JS_STMT_TRY:
@@ -861,13 +861,13 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(stmt->as.try_stmt.try_block.stmts);
+                js_free(stmt->as.try_stmt.try_block.stmts);
             }
             if (stmt->as.try_stmt.has_catch)
             {
                 if (!arena_owned)
                 {
-                    free(stmt->as.try_stmt.catch_name);
+                    js_free(stmt->as.try_stmt.catch_name);
                 }
                 for (size_t i = 0; i < stmt->as.try_stmt.catch_block.count; ++i)
                 {
@@ -875,7 +875,7 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
                 }
                 if (!arena_owned)
                 {
-                    free(stmt->as.try_stmt.catch_block.stmts);
+                    js_free(stmt->as.try_stmt.catch_block.stmts);
                 }
             }
             break;
@@ -886,7 +886,7 @@ static void js_stmt_destroy(js_stmt_t *stmt, bool arena_owned)
     }
     if (!arena_owned)
     {
-        free(stmt);
+        js_free(stmt);
     }
 }
 
@@ -927,7 +927,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
         case JS_EXPR_IDENTIFIER:
             if (!arena_owned)
             {
-                free(expr->as.ident.name);
+                js_free(expr->as.ident.name);
             }
             break;
         case JS_EXPR_THIS:
@@ -954,7 +954,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(expr->as.new_expr.args);
+                js_free(expr->as.new_expr.args);
             }
             break;
         case JS_EXPR_CALL:
@@ -965,7 +965,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(expr->as.call.args);
+                js_free(expr->as.call.args);
             }
             break;
         case JS_EXPR_ARRAY:
@@ -975,7 +975,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(expr->as.array.items);
+                js_free(expr->as.array.items);
             }
             break;
         case JS_EXPR_OBJECT:
@@ -987,13 +987,13 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
                 }
                 else if (!arena_owned)
                 {
-                    free(expr->as.object.props[i].name);
+                    js_free(expr->as.object.props[i].name);
                 }
                 js_expr_destroy(expr->as.object.props[i].value, arena_owned);
             }
             if (!arena_owned)
             {
-                free(expr->as.object.props);
+                js_free(expr->as.object.props);
             }
             break;
         case JS_EXPR_TEMPLATE:
@@ -1001,12 +1001,12 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
             {
                 if (!arena_owned)
                 {
-                    free(expr->as.template.segments[i].data);
+                    js_free(expr->as.template.segments[i].data);
                 }
             }
             if (!arena_owned)
             {
-                free(expr->as.template.segments);
+                js_free(expr->as.template.segments);
             }
             for (size_t i = 0; i < expr->as.template.expr_count; ++i)
             {
@@ -1014,7 +1014,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(expr->as.template.exprs);
+                js_free(expr->as.template.exprs);
             }
             break;
         case JS_EXPR_MEMBER:
@@ -1025,7 +1025,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(expr->as.member.property);
+                js_free(expr->as.member.property);
             }
             break;
         case JS_EXPR_REGEXP_SUBCLASS:
@@ -1038,7 +1038,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
         case JS_EXPR_FUNCTION:
             if (!arena_owned)
             {
-                free(expr->as.func.name);
+                js_free(expr->as.func.name);
             }
             for (size_t p = 0; p < expr->as.func.param_count; ++p)
             {
@@ -1047,7 +1047,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(expr->as.func.params);
+                js_free(expr->as.func.params);
             }
             for (size_t i = 0; i < expr->as.func.body.count; ++i)
             {
@@ -1055,7 +1055,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
             }
             if (!arena_owned)
             {
-                free(expr->as.func.body.stmts);
+                js_free(expr->as.func.body.stmts);
             }
             break;
         case JS_EXPR_YIELD:
@@ -1064,7 +1064,7 @@ static void js_expr_destroy(js_expr_t *expr, bool arena_owned)
     }
     if (!arena_owned)
     {
-        free(expr);
+        js_free(expr);
     }
 }
 
@@ -1088,9 +1088,9 @@ void js_program_destroy(js_program_t *program)
     }
     else
     {
-        free(program->statements);
+        js_free(program->statements);
     }
-    free(program);
+    js_free(program);
 }
 
 static js_expr_t *js_parse_expression(js_parser_t *parser);
@@ -5059,7 +5059,7 @@ js_program_t *js_parse(const char *source, js_parse_error_t *error_out)
         return NULL;
     }
 
-    js_program_t *program = (js_program_t *)calloc(1, sizeof(*program));
+    js_program_t *program = (js_program_t *)js_calloc(1, sizeof(*program));
     if (!program)
     {
         for (size_t i = 0; i < list.count; ++i)

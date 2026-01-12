@@ -102,6 +102,14 @@ void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled);
 void atk_html_view_enable_external_render(atk_widget_t *view, bool enabled);
 
 /*
+ * Defer rendering until external CSS has been applied.
+ *
+ * When enabled, the view will not rebuild its render cache until callers clear
+ * the flag (typically after external CSS is ready).
+ */
+void atk_html_view_set_wait_for_css(atk_widget_t *view, bool enabled);
+
+/*
  * Rebuild the render cache immediately on the caller thread.
  */
 bool atk_html_view_rebuild_cache(atk_widget_t *view);

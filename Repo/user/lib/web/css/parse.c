@@ -30,6 +30,8 @@ enum
     CSS_SHEET_ARENA_BLOCK_SIZE = 32768
 };
 
+#define CSS_DYNSTR_SCRATCH_MIN_CAP 512u
+
 typedef enum
 {
     CSS_VAR_TOKEN_TEXT = 0,
@@ -68,6 +70,9 @@ typedef struct
     bool resolved;
 } css_var_cache_entry_t;
 
+#define CSS_VAR_CACHE_INLINE_CAP 16u
+#define CSS_VAR_CACHE_INLINE_SLOTS 32u
+
 typedef struct
 {
     css_var_cache_entry_t *items;
@@ -75,6 +80,8 @@ typedef struct
     size_t cap;
     uint32_t *slots;
     size_t slot_cap;
+    css_var_cache_entry_t inline_items[CSS_VAR_CACHE_INLINE_CAP];
+    uint32_t inline_slots[CSS_VAR_CACHE_INLINE_SLOTS];
 } css_var_cache_t;
 
 typedef struct
@@ -87,6 +94,9 @@ typedef struct
     bool resolved;
 } css_var_eval_cache_entry_t;
 
+#define CSS_VAR_EVAL_CACHE_INLINE_CAP 16u
+#define CSS_VAR_EVAL_CACHE_INLINE_SLOTS 32u
+
 typedef struct
 {
     css_var_eval_cache_entry_t *items;
@@ -94,6 +104,8 @@ typedef struct
     size_t cap;
     uint32_t *slots;
     size_t slot_cap;
+    css_var_eval_cache_entry_t inline_items[CSS_VAR_EVAL_CACHE_INLINE_CAP];
+    uint32_t inline_slots[CSS_VAR_EVAL_CACHE_INLINE_SLOTS];
 } css_var_eval_cache_t;
 
 struct css_var_env
@@ -103,6 +115,9 @@ struct css_var_env
     css_var_map_t map;
     css_var_cache_t cache;
     css_var_eval_cache_t eval_cache;
+    char *dynstr_scratch;
+    size_t dynstr_scratch_cap;
+    uint32_t dynstr_scratch_in_use;
 };
 
 typedef struct
@@ -441,7 +456,112 @@ typedef struct css_dynstr
     char *data;
     size_t len;
     size_t cap;
+    css_var_env_t *scratch_env;
 } css_dynstr_t;
+
+static bool css_dynstr_reserve(css_dynstr_t *out, size_t needed);
+
+static void css_dynstr_scratch_release(css_dynstr_t *out)
+{
+    if (!out || !out->scratch_env)
+    {
+        return;
+    }
+    out->scratch_env->dynstr_scratch_in_use = 0u;
+    out->scratch_env = NULL;
+}
+
+static bool css_dynstr_prepare(css_dynstr_t *out, css_var_env_t *env, size_t needed)
+{
+    if (!out || needed == 0)
+    {
+        return true;
+    }
+    if (out->cap >= needed)
+    {
+        return true;
+    }
+    if (env && !out->scratch_env && !env->dynstr_scratch_in_use)
+    {
+        size_t cap = env->dynstr_scratch_cap;
+        if (cap < needed)
+        {
+            size_t new_cap = cap ? cap : CSS_DYNSTR_SCRATCH_MIN_CAP;
+            while (new_cap < needed)
+            {
+                new_cap *= 2u;
+            }
+            char *next = (char *)realloc(env->dynstr_scratch, new_cap);
+            if (!next)
+            {
+                return false;
+            }
+            env->dynstr_scratch = next;
+            env->dynstr_scratch_cap = new_cap;
+            cap = new_cap;
+        }
+        env->dynstr_scratch_in_use = 1u;
+        out->data = env->dynstr_scratch;
+        out->cap = cap;
+        out->len = 0;
+        out->scratch_env = env;
+        out->data[0] = '\0';
+        return true;
+    }
+    return css_dynstr_reserve(out, needed);
+}
+
+static void css_dynstr_release(css_dynstr_t *out)
+{
+    if (!out)
+    {
+        return;
+    }
+    if (out->scratch_env)
+    {
+        css_dynstr_scratch_release(out);
+    }
+    else
+    {
+        free(out->data);
+    }
+    out->data = NULL;
+    out->len = 0;
+    out->cap = 0;
+}
+
+static char *css_dynstr_detach(css_dynstr_t *out)
+{
+    if (!out)
+    {
+        return NULL;
+    }
+    if (out->scratch_env)
+    {
+        char *copy = NULL;
+        if (out->len > 0)
+        {
+            copy = (char *)malloc(out->len + 1u);
+            if (!copy)
+            {
+                css_dynstr_release(out);
+                return NULL;
+            }
+            memcpy(copy, out->data, out->len);
+            copy[out->len] = '\0';
+        }
+        css_dynstr_scratch_release(out);
+        out->data = NULL;
+        out->len = 0;
+        out->cap = 0;
+        return copy;
+    }
+    char *data = out->data;
+    out->data = NULL;
+    out->len = 0;
+    out->cap = 0;
+    return data;
+}
 
 bool css_decl_list_push(css_decl_list_t *list,
                         const char *prop_start,
@@ -525,9 +645,55 @@ static void css_var_map_slots_free(css_var_map_t *map)
     {
         return;
     }
-    free(map->slots);
+    if (map->slots != map->inline_slots)
+    {
+        free(map->slots);
+    }
     map->slots = NULL;
     map->slot_cap = 0;
+}
+
+static bool css_var_slots_prepare(uint32_t **slots,
+                                  size_t *slot_cap,
+                                  size_t min_cap,
+                                  uint32_t *inline_slots,
+                                  size_t inline_cap)
+{
+    if (!slots || !slot_cap || min_cap == 0)
+    {
+        return false;
+    }
+    size_t cap = *slot_cap;
+    if (!*slots || cap < min_cap)
+    {
+        if (!*slots && inline_slots && inline_cap >= min_cap)
+        {
+            *slots = inline_slots;
+            cap = inline_cap;
+            *slot_cap = cap;
+        }
+        else
+        {
+            uint32_t *next = NULL;
+            if (*slots && (!inline_slots || *slots != inline_slots))
+            {
+                next = (uint32_t *)realloc(*slots, min_cap * sizeof(**slots));
+            }
+            else
+            {
+                next = (uint32_t *)malloc(min_cap * sizeof(**slots));
+            }
+            if (!next)
+            {
+                return false;
+            }
+            *slots = next;
+            cap = min_cap;
+            *slot_cap = cap;
+        }
+    }
+    memset(*slots, 0, cap * sizeof(**slots));
+    return true;
 }
 
 static bool css_var_map_rebuild_index(css_var_map_t *map)
@@ -548,13 +714,17 @@ static bool css_var_map_rebuild_index(css_var_map_t *map)
         cap <<= 1;
     }
 
-    uint32_t *slots = (uint32_t *)calloc(cap, sizeof(*slots));
-    if (!slots)
+    if (!css_var_slots_prepare(&map->slots,
+                               &map->slot_cap,
+                               cap,
+                               map->inline_slots,
+                               CSS_VAR_MAP_INLINE_SLOTS))
     {
         return false;
     }
 
-    size_t mask = cap - 1u;
+    uint32_t *slots = map->slots;
+    size_t mask = map->slot_cap - 1u;
     for (size_t i = 0; i < map->count; ++i)
     {
         const css_var_entry_t *entry = &map->items[i];
@@ -570,9 +740,6 @@ static bool css_var_map_rebuild_index(css_var_map_t *map)
         slots[idx] = (uint32_t)(i + 1u);
     }
 
-    css_var_map_slots_free(map);
-    map->slots = slots;
-    map->slot_cap = cap;
     return true;
 }
 
@@ -597,7 +764,10 @@ void css_var_map_free(css_var_map_t *map)
     {
         return;
     }
-    free(map->items);
+    if (map->items && map->items != map->inline_items)
+    {
+        free(map->items);
+    }
     css_var_map_slots_free(map);
     map->items = NULL;
     map->count = 0;
@@ -617,25 +787,40 @@ bool css_var_map_clone(css_var_map_t *dst, const css_var_map_t *src)
     {
         return true;
     }
-    css_var_entry_t *items = (css_var_entry_t *)calloc(src->count, sizeof(*items));
-    if (!items)
+    if (src->count <= CSS_VAR_MAP_INLINE_CAP)
     {
-        return false;
+        dst->items = dst->inline_items;
+        dst->cap = CSS_VAR_MAP_INLINE_CAP;
     }
-    memcpy(items, src->items, src->count * sizeof(*items));
-    dst->items = items;
-    dst->count = src->count;
-    dst->cap = src->count;
-    if (src->slot_cap > 0 && src->slots)
+    else
     {
-        dst->slots = (uint32_t *)calloc(src->slot_cap, sizeof(*dst->slots));
-        if (!dst->slots)
+        dst->items = (css_var_entry_t *)calloc(src->count, sizeof(*dst->items));
+        if (!dst->items)
         {
-            css_var_map_free(dst);
             return false;
         }
+        dst->cap = src->count;
+    }
+    memcpy(dst->items, src->items, src->count * sizeof(*dst->items));
+    dst->count = src->count;
+    if (src->slot_cap > 0 && src->slots)
+    {
+        if (src->slot_cap <= CSS_VAR_MAP_INLINE_SLOTS)
+        {
+            dst->slots = dst->inline_slots;
+            dst->slot_cap = src->slot_cap;
+        }
+        else
+        {
+            dst->slots = (uint32_t *)calloc(src->slot_cap, sizeof(*dst->slots));
+            if (!dst->slots)
+            {
+                css_var_map_free(dst);
+                return false;
+            }
+            dst->slot_cap = src->slot_cap;
+        }
         memcpy(dst->slots, src->slots, src->slot_cap * sizeof(*dst->slots));
-        dst->slot_cap = src->slot_cap;
     }
     return true;
 }
@@ -750,13 +935,31 @@ bool css_var_map_set(css_var_map_t *map,
         }
     }
 
+    if (!map->items)
+    {
+        map->items = map->inline_items;
+        map->cap = CSS_VAR_MAP_INLINE_CAP;
+    }
     if (map->count == map->cap)
     {
-        size_t new_cap = map->cap ? map->cap * 2u : 16u;
-        css_var_entry_t *next = (css_var_entry_t *)realloc(map->items, new_cap * sizeof(*next));
-        if (!next)
+        size_t new_cap = map->cap ? map->cap * 2u : CSS_VAR_MAP_INLINE_CAP;
+        css_var_entry_t *next = NULL;
+        if (map->items == map->inline_items)
         {
-            return false;
+            next = (css_var_entry_t *)malloc(new_cap * sizeof(*next));
+            if (!next)
+            {
+                return false;
+            }
+            memcpy(next, map->items, map->count * sizeof(*next));
+        }
+        else
+        {
+            next = (css_var_entry_t *)realloc(map->items, new_cap * sizeof(*next));
+            if (!next)
+            {
+                return false;
+            }
         }
         map->items = next;
         map->cap = new_cap;
@@ -866,22 +1069,52 @@ static bool css_dynstr_append(css_dynstr_t *out, const char *data, size_t len)
     }
     if (out->len + len + 1 > out->cap)
     {
-        size_t new_cap = out->cap ? out->cap * 2u : 64u;
-        while (new_cap < out->len + len + 1)
-        {
-            new_cap *= 2u;
-        }
-        char *next = (char *)realloc(out->data, new_cap);
-        if (!next)
+        if (!css_dynstr_reserve(out, out->len + len + 1))
         {
             return false;
         }
-        out->data = next;
-        out->cap = new_cap;
     }
     memcpy(out->data + out->len, data, len);
     out->len += len;
     out->data[out->len] = '\0';
+    return true;
+}
+
+static bool css_dynstr_reserve(css_dynstr_t *out, size_t needed)
+{
+    if (!out || needed <= out->cap)
+    {
+        return true;
+    }
+    size_t new_cap = out->cap ? out->cap : 64u;
+    while (new_cap < needed)
+    {
+        new_cap *= 2u;
+    }
+    if (out->scratch_env)
+    {
+        char *next = (char *)malloc(new_cap);
+        if (!next)
+        {
+            return false;
+        }
+        if (out->data && out->len > 0)
+        {
+            memcpy(next, out->data, out->len);
+        }
+        next[out->len] = '\0';
+        css_dynstr_scratch_release(out);
+        out->data = next;
+        out->cap = new_cap;
+        return true;
+    }
+    char *next = out->data ? (char *)realloc(out->data, new_cap) : (char *)malloc(new_cap);
+    if (!next)
+    {
+        return false;
+    }
+    out->data = next;
+    out->cap = new_cap;
     return true;
 }
 
@@ -1284,7 +1517,10 @@ static void css_var_cache_slots_free(css_var_cache_t *cache)
     {
         return;
     }
-    free(cache->slots);
+    if (cache->slots != cache->inline_slots)
+    {
+        free(cache->slots);
+    }
     cache->slots = NULL;
     cache->slot_cap = 0;
 }
@@ -1307,13 +1543,17 @@ static bool css_var_cache_rebuild_index(css_var_cache_t *cache)
         cap <<= 1;
     }
 
-    uint32_t *slots = (uint32_t *)calloc(cap, sizeof(*slots));
-    if (!slots)
+    if (!css_var_slots_prepare(&cache->slots,
+                               &cache->slot_cap,
+                               cap,
+                               cache->inline_slots,
+                               CSS_VAR_CACHE_INLINE_SLOTS))
     {
         return false;
     }
 
-    size_t mask = cap - 1u;
+    uint32_t *slots = cache->slots;
+    size_t mask = cache->slot_cap - 1u;
     for (size_t i = 0; i < cache->count; ++i)
     {
         const css_var_cache_entry_t *entry = &cache->items[i];
@@ -1329,9 +1569,6 @@ static bool css_var_cache_rebuild_index(css_var_cache_t *cache)
         slots[idx] = (uint32_t)(i + 1u);
     }
 
-    css_var_cache_slots_free(cache);
-    cache->slots = slots;
-    cache->slot_cap = cap;
     return true;
 }
 
@@ -1422,13 +1659,31 @@ static bool css_var_cache_set(css_var_cache_t *cache,
         return true;
     }
 
+    if (!cache->items)
+    {
+        cache->items = cache->inline_items;
+        cache->cap = CSS_VAR_CACHE_INLINE_CAP;
+    }
     if (cache->count == cache->cap)
     {
-        size_t new_cap = cache->cap ? cache->cap * 2u : 16u;
-        css_var_cache_entry_t *next = (css_var_cache_entry_t *)realloc(cache->items, new_cap * sizeof(*next));
-        if (!next)
+        size_t new_cap = cache->cap ? cache->cap * 2u : CSS_VAR_CACHE_INLINE_CAP;
+        css_var_cache_entry_t *next = NULL;
+        if (cache->items == cache->inline_items)
         {
-            return false;
+            next = (css_var_cache_entry_t *)malloc(new_cap * sizeof(*next));
+            if (!next)
+            {
+                return false;
+            }
+            memcpy(next, cache->items, cache->count * sizeof(*next));
+        }
+        else
+        {
+            next = (css_var_cache_entry_t *)realloc(cache->items, new_cap * sizeof(*next));
+            if (!next)
+            {
+                return false;
+            }
         }
         cache->items = next;
         cache->cap = new_cap;
@@ -1476,7 +1731,10 @@ static void css_var_cache_free(css_var_cache_t *cache)
             }
         }
     }
-    free(cache->items);
+    if (cache->items && cache->items != cache->inline_items)
+    {
+        free(cache->items);
+    }
     cache->items = NULL;
     cache->count = 0;
     cache->cap = 0;
@@ -1500,7 +1758,10 @@ static void css_var_eval_cache_slots_free(css_var_eval_cache_t *cache)
     {
         return;
     }
-    free(cache->slots);
+    if (cache->slots && cache->slots != cache->inline_slots)
+    {
+        free(cache->slots);
+    }
     cache->slots = NULL;
     cache->slot_cap = 0;
 }
@@ -1509,7 +1770,6 @@ static bool css_var_eval_cache_rebuild_index(css_var_eval_cache_t *cache)
 {
     if (!cache || cache->count == 0)
     {
-        css_var_eval_cache_slots_free(cache);
         return true;
     }
     size_t new_cap = 1u;
@@ -1517,16 +1777,17 @@ static bool css_var_eval_cache_rebuild_index(css_var_eval_cache_t *cache)
     {
         new_cap <<= 1u;
     }
-    uint32_t *slots = (uint32_t *)calloc(new_cap, sizeof(*slots));
-    if (!slots)
+    if (!css_var_slots_prepare(&cache->slots,
+                               &cache->slot_cap,
+                               new_cap,
+                               cache->inline_slots,
+                               CSS_VAR_EVAL_CACHE_INLINE_SLOTS))
     {
         return false;
     }
-    css_var_eval_cache_slots_free(cache);
-    cache->slots = slots;
-    cache->slot_cap = new_cap;
 
-    size_t mask = new_cap - 1u;
+    uint32_t *slots = cache->slots;
+    size_t mask = cache->slot_cap - 1u;
     for (size_t i = 0; i < cache->count; ++i)
     {
         const css_var_eval_cache_entry_t *entry = &cache->items[i];
@@ -1623,14 +1884,32 @@ static bool css_var_eval_cache_set(css_var_eval_cache_t *cache,
         return true;
     }
 
+    if (!cache->items)
+    {
+        cache->items = cache->inline_items;
+        cache->cap = CSS_VAR_EVAL_CACHE_INLINE_CAP;
+    }
     if (cache->count == cache->cap)
     {
-        size_t new_cap = cache->cap ? cache->cap * 2u : 16u;
-        css_var_eval_cache_entry_t *next = (css_var_eval_cache_entry_t *)realloc(cache->items,
-                                                                                 new_cap * sizeof(*next));
-        if (!next)
+        size_t new_cap = cache->cap ? cache->cap * 2u : CSS_VAR_EVAL_CACHE_INLINE_CAP;
+        css_var_eval_cache_entry_t *next = NULL;
+        if (cache->items == cache->inline_items)
         {
-            return false;
+            next = (css_var_eval_cache_entry_t *)malloc(new_cap * sizeof(*next));
+            if (!next)
+            {
+                return false;
+            }
+            memcpy(next, cache->items, cache->count * sizeof(*next));
+        }
+        else
+        {
+            next = (css_var_eval_cache_entry_t *)realloc(cache->items,
+                                                         new_cap * sizeof(*next));
+            if (!next)
+            {
+                return false;
+            }
         }
         cache->items = next;
         cache->cap = new_cap;
@@ -1678,7 +1957,10 @@ static void css_var_eval_cache_free(css_var_eval_cache_t *cache)
             }
         }
     }
-    free(cache->items);
+    if (cache->items && cache->items != cache->inline_items)
+    {
+        free(cache->items);
+    }
     cache->items = NULL;
     cache->count = 0;
     cache->cap = 0;
@@ -1725,6 +2007,13 @@ void css_var_env_release(css_var_env_t *env)
     css_var_map_free(&env->map);
     css_var_cache_free(&env->cache);
     css_var_eval_cache_free(&env->eval_cache);
+    if (env->dynstr_scratch)
+    {
+        free(env->dynstr_scratch);
+        env->dynstr_scratch = NULL;
+        env->dynstr_scratch_cap = 0;
+        env->dynstr_scratch_in_use = 0u;
+    }
     free(env);
 }
 
@@ -1831,15 +2120,22 @@ static const char *css_var_env_resolve(css_var_env_t *env,
                 g_css_perf.expand_calls++;
                 g_css_perf.expand_output_bytes += out.len;
             }
+            size_t resolved_len = out.len;
+            char *resolved = css_dynstr_detach(&out);
+            if (resolved_len > 0 && !resolved)
+            {
+                (void)css_var_cache_set(&env->cache, name_start, name_len, name_hash, NULL, 0u, false, true);
+                return NULL;
+            }
             (void)css_var_cache_set(&env->cache, name_start, name_len, name_hash,
-                                    out.data, (uint32_t)out.len, true, true);
+                                    resolved, (uint32_t)resolved_len, true, true);
             if (out_len)
             {
-                *out_len = out.len;
+                *out_len = resolved_len;
             }
-            return out.data;
+            return resolved;
         }
-        free(out.data);
+        css_dynstr_release(&out);
         (void)css_var_cache_set(&env->cache, name_start, name_len, name_hash, NULL, 0u, false, true);
         return NULL;
     }
@@ -1865,6 +2161,27 @@ static bool css_var_tokens_eval_into(css_dynstr_t *out,
     if (depth > 32)
     {
         return false;
+    }
+    if (out->cap == 0 && tokens->count > 0)
+    {
+        size_t reserve = 0;
+        for (size_t i = 0; i < tokens->count; ++i)
+        {
+            const css_var_token_t *token = &tokens->items[i];
+            if (token->kind == CSS_VAR_TOKEN_TEXT)
+            {
+                reserve += token->len;
+                continue;
+            }
+            if (token->kind == CSS_VAR_TOKEN_VAR && token->raw_len > 0)
+            {
+                reserve += token->raw_len;
+            }
+        }
+        if (reserve > 0 && !css_dynstr_prepare(out, env, reserve + 1u))
+        {
+            return false;
+        }
     }
     for (size_t i = 0; i < tokens->count; ++i)
     {
@@ -1959,7 +2276,10 @@ static void css_deferred_map_slots_free(css_deferred_map_t *map)
     {
         return;
     }
-    free(map->slots);
+    if (map->slots != map->inline_slots)
+    {
+        free(map->slots);
+    }
     map->slots = NULL;
     map->slot_cap = 0;
 }
@@ -1982,13 +2302,17 @@ static bool css_deferred_map_rebuild_index(css_deferred_map_t *map)
         cap <<= 1;
     }
 
-    uint32_t *slots = (uint32_t *)calloc(cap, sizeof(*slots));
-    if (!slots)
+    if (!css_var_slots_prepare(&map->slots,
+                               &map->slot_cap,
+                               cap,
+                               map->inline_slots,
+                               CSS_DEFERRED_MAP_INLINE_SLOTS))
     {
         return false;
     }
 
-    size_t mask = cap - 1u;
+    uint32_t *slots = map->slots;
+    size_t mask = map->slot_cap - 1u;
     for (size_t i = 0; i < map->count; ++i)
     {
         const css_deferred_prop_t *entry = &map->items[i];
@@ -2004,9 +2328,6 @@ static bool css_deferred_map_rebuild_index(css_deferred_map_t *map)
         slots[idx] = (uint32_t)(i + 1u);
     }
 
-    css_deferred_map_slots_free(map);
-    map->slots = slots;
-    map->slot_cap = cap;
     return true;
 }
 
@@ -2105,13 +2426,31 @@ bool css_deferred_map_set(css_deferred_map_t *map,
         return true;
     }
 
+    if (!map->items)
+    {
+        map->items = map->inline_items;
+        map->cap = CSS_DEFERRED_MAP_INLINE_CAP;
+    }
     if (map->count == map->cap)
     {
-        size_t new_cap = map->cap ? map->cap * 2u : 16u;
-        css_deferred_prop_t *next = (css_deferred_prop_t *)realloc(map->items, new_cap * sizeof(*next));
-        if (!next)
+        size_t new_cap = map->cap ? map->cap * 2u : CSS_DEFERRED_MAP_INLINE_CAP;
+        css_deferred_prop_t *next = NULL;
+        if (map->items == map->inline_items)
         {
-            return false;
+            next = (css_deferred_prop_t *)malloc(new_cap * sizeof(*next));
+            if (!next)
+            {
+                return false;
+            }
+            memcpy(next, map->items, map->count * sizeof(*next));
+        }
+        else
+        {
+            next = (css_deferred_prop_t *)realloc(map->items, new_cap * sizeof(*next));
+            if (!next)
+            {
+                return false;
+            }
         }
         map->items = next;
         map->cap = new_cap;
@@ -2146,7 +2485,10 @@ void css_deferred_map_free(css_deferred_map_t *map)
     {
         return;
     }
-    free(map->items);
+    if (map->items && map->items != map->inline_items)
+    {
+        free(map->items);
+    }
     map->items = NULL;
     map->count = 0;
     map->cap = 0;
@@ -2164,25 +2506,40 @@ bool css_deferred_map_clone(css_deferred_map_t *dst, const css_deferred_map_t *s
     {
         return true;
     }
-    css_deferred_prop_t *items = (css_deferred_prop_t *)calloc(src->count, sizeof(*items));
-    if (!items)
+    if (src->count <= CSS_DEFERRED_MAP_INLINE_CAP)
     {
-        return false;
+        dst->items = dst->inline_items;
+        dst->cap = CSS_DEFERRED_MAP_INLINE_CAP;
     }
-    memcpy(items, src->items, src->count * sizeof(*items));
-    dst->items = items;
-    dst->count = src->count;
-    dst->cap = src->count;
-    if (src->slot_cap > 0 && src->slots)
+    else
     {
-        dst->slots = (uint32_t *)calloc(src->slot_cap, sizeof(*dst->slots));
-        if (!dst->slots)
+        dst->items = (css_deferred_prop_t *)calloc(src->count, sizeof(*dst->items));
+        if (!dst->items)
         {
-            css_deferred_map_free(dst);
             return false;
         }
+        dst->cap = src->count;
+    }
+    memcpy(dst->items, src->items, src->count * sizeof(*dst->items));
+    dst->count = src->count;
+    if (src->slot_cap > 0 && src->slots)
+    {
+        if (src->slot_cap <= CSS_DEFERRED_MAP_INLINE_SLOTS)
+        {
+            dst->slots = dst->inline_slots;
+            dst->slot_cap = src->slot_cap;
+        }
+        else
+        {
+            dst->slots = (uint32_t *)calloc(src->slot_cap, sizeof(*dst->slots));
+            if (!dst->slots)
+            {
+                css_deferred_map_free(dst);
+                return false;
+            }
+            dst->slot_cap = src->slot_cap;
+        }
         memcpy(dst->slots, src->slots, src->slot_cap * sizeof(*dst->slots));
-        dst->slot_cap = src->slot_cap;
     }
     return true;
 }
@@ -2253,7 +2610,7 @@ void css_style_resolve_deferred(css_style_t *style)
         css_dynstr_t out = {0};
         if (!css_var_tokens_eval_into(&out, entry->tokens, style->custom_env, 0))
         {
-            free(out.data);
+            css_dynstr_release(&out);
             if (style->custom_env)
             {
                 (void)css_var_eval_cache_set(&style->custom_env->eval_cache,
@@ -2270,24 +2627,40 @@ void css_style_resolve_deferred(css_style_t *style)
             g_css_perf.expand_calls++;
             g_css_perf.expand_output_bytes += out.len;
         }
+        size_t resolved_len = out.len;
+        char *resolved = css_dynstr_detach(&out);
+        if (resolved_len > 0 && !resolved)
+        {
+            if (style->custom_env)
+            {
+                (void)css_var_eval_cache_set(&style->custom_env->eval_cache,
+                                             entry->tokens,
+                                             NULL,
+                                             0u,
+                                             false,
+                                             true);
+            }
+            continue;
+        }
         bool cached = false;
         if (style->custom_env)
         {
             cached = css_var_eval_cache_set(&style->custom_env->eval_cache,
                                             entry->tokens,
-                                            out.data,
-                                            (uint32_t)out.len,
+                                            resolved,
+                                            (uint32_t)resolved_len,
                                             true,
                                             true);
         }
+        const char *resolved_end = resolved ? resolved + resolved_len : NULL;
         css_style_apply_property(style,
                                  entry->prop_start,
                                  entry->prop_start + entry->prop_len,
-                                 out.data,
-                                 out.data + out.len);
+                                 resolved,
+                                 resolved_end);
         if (!cached)
         {
-            free(out.data);
+            free(resolved);
         }
     }
     css_deferred_map_free(&style->deferred_props);
@@ -2387,7 +2760,7 @@ char *css_expand_vars_range(const char *val_start,
             {
                 if (!css_dynstr_append(&out, func_start, (size_t)(val_end - func_start)))
                 {
-                    free(out.data);
+                    css_dynstr_release(&out);
                     return NULL;
                 }
                 return out.data ? out.data : css_strdup_range(val_start, val_end);
@@ -2417,7 +2790,7 @@ char *css_expand_vars_range(const char *val_start,
                     free(expanded);
                     if (!ok)
                     {
-                        free(out.data);
+                        css_dynstr_release(&out);
                         return NULL;
                     }
                 }
@@ -2425,7 +2798,7 @@ char *css_expand_vars_range(const char *val_start,
                 {
                     if (!css_dynstr_append(&out, value, value_len))
                     {
-                        free(out.data);
+                        css_dynstr_release(&out);
                         return NULL;
                     }
                 }
@@ -2439,7 +2812,7 @@ char *css_expand_vars_range(const char *val_start,
                     free(expanded);
                     if (!ok)
                     {
-                        free(out.data);
+                        css_dynstr_release(&out);
                         return NULL;
                     }
                 }
@@ -2447,7 +2820,7 @@ char *css_expand_vars_range(const char *val_start,
                 {
                     if (!css_dynstr_append(&out, fallback_start, (size_t)(fallback_end - fallback_start)))
                     {
-                        free(out.data);
+                        css_dynstr_release(&out);
                         return NULL;
                     }
                 }
@@ -2456,7 +2829,7 @@ char *css_expand_vars_range(const char *val_start,
             {
                 if (!css_dynstr_append(&out, func_start, (size_t)(scan + 1 - func_start)))
                 {
-                    free(out.data);
+                    css_dynstr_release(&out);
                     return NULL;
                 }
             }
@@ -2467,7 +2840,7 @@ char *css_expand_vars_range(const char *val_start,
 
         if (!css_dynstr_append(&out, p, 1))
         {
-            free(out.data);
+            css_dynstr_release(&out);
             return NULL;
         }
         ++p;
@@ -4068,6 +4441,14 @@ css_stylesheet_t *css_parse(const char *css_text)
             return NULL;
         }
         sheet->global_env->map = global_vars;
+        if (sheet->global_env->map.items && sheet->global_env->map.cap <= CSS_VAR_MAP_INLINE_CAP)
+        {
+            sheet->global_env->map.items = sheet->global_env->map.inline_items;
+        }
+        if (sheet->global_env->map.slots && sheet->global_env->map.slot_cap <= CSS_VAR_MAP_INLINE_SLOTS)
+        {
+            sheet->global_env->map.slots = sheet->global_env->map.inline_slots;
+        }
         global_vars = (css_var_map_t){0};
     }
     css_var_map_free(&global_vars);

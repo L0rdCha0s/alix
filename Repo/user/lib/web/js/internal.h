@@ -19,6 +19,11 @@ void *js_arena_alloc(js_arena_t *arena, size_t size);
 char *js_arena_strdup_len(js_arena_t *arena, const char *src, size_t len);
 void js_arena_release(js_arena_t *arena);
 
+void *js_malloc(size_t size);
+void *js_calloc(size_t count, size_t size);
+void *js_realloc(void *ptr, size_t size);
+void js_free(void *ptr);
+
 void js_parse_error_set(js_parse_error_t *err, size_t offset, const char *message);
 char *js_strdup_len(const char *src, size_t len);
 char *js_strdup(const char *src);
