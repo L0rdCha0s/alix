@@ -80,8 +80,54 @@ static bool libc_env_reserve(size_t needed)
 }
 
 #ifdef ENABLE_USER_MEM_DEBUG_LOGS
+#define USER_HEAP_LOG_PROC_PATH "/proc/sys/mem/uheap_log_enable"
+#define USER_HEAP_LOG_POLL_MASK 0x3Fu
+
+static uint32_t g_user_heap_log_enable = 1;
+static uint32_t g_user_heap_log_poll = 0;
+
+static bool user_heap_log_enabled(void)
+{
+    uint32_t poll = __atomic_add_fetch(&g_user_heap_log_poll, 1, __ATOMIC_RELAXED);
+    if ((poll & USER_HEAP_LOG_POLL_MASK) != 0)
+    {
+        return __atomic_load_n(&g_user_heap_log_enable, __ATOMIC_ACQUIRE) != 0;
+    }
+
+    uint32_t enabled = __atomic_load_n(&g_user_heap_log_enable, __ATOMIC_ACQUIRE);
+    int fd = sys_open(USER_HEAP_LOG_PROC_PATH, SYSCALL_OPEN_READ);
+    if (fd >= 0)
+    {
+        char buf[4];
+        ssize_t got = sys_read(fd, buf, sizeof(buf));
+        sys_close(fd);
+        if (got > 0)
+        {
+            for (ssize_t i = 0; i < got; ++i)
+            {
+                if (buf[i] == '0')
+                {
+                    enabled = 0;
+                    break;
+                }
+                if (buf[i] == '1')
+                {
+                    enabled = 1;
+                    break;
+                }
+            }
+        }
+        __atomic_store_n(&g_user_heap_log_enable, enabled, __ATOMIC_RELEASE);
+    }
+    return enabled != 0;
+}
+
 static void user_heap_log(const char *msg, uintptr_t value)
 {
+    if (!user_heap_log_enabled())
+    {
+        return;
+    }
     serial_printf("[uheap] %s0x%016llX\n",
                   msg ? msg : "",
                   (unsigned long long)((uint64_t)value));
@@ -89,12 +135,34 @@ static void user_heap_log(const char *msg, uintptr_t value)
 
 static void user_heap_log_caller(const char *msg, uintptr_t value, uintptr_t caller)
 {
+    if (!user_heap_log_enabled())
+    {
+        return;
+    }
     serial_printf("[uheap] %s0x%016llX caller=0x%016llX\n",
                   msg ? msg : "",
                   (unsigned long long)((uint64_t)value),
                   (unsigned long long)((uint64_t)caller));
 }
+
+static void user_heap_log_caller_size(const char *msg, uintptr_t value, size_t size, uintptr_t caller)
+{
+    if (!user_heap_log_enabled())
+    {
+        return;
+    }
+    serial_printf("[uheap] %s0x%016llX size=0x%016llX caller=0x%016llX\n",
+                  msg ? msg : "",
+                  (unsigned long long)((uint64_t)value),
+                  (unsigned long long)((uint64_t)size),
+                  (unsigned long long)((uint64_t)caller));
+}
 #else
+static bool user_heap_log_enabled(void)
+{
+    return false;
+}
+
 static void user_heap_log(const char *msg, uintptr_t value)
 {
     (void)msg;
@@ -105,6 +173,14 @@ static void user_heap_log_caller(const char *msg, uintptr_t value, uintptr_t cal
 {
     (void)msg;
     (void)value;
+    (void)caller;
+}
+
+static void user_heap_log_caller_size(const char *msg, uintptr_t value, size_t size, uintptr_t caller)
+{
+    (void)msg;
+    (void)value;
+    (void)size;
     (void)caller;
 }
 #endif
@@ -159,6 +235,10 @@ static void user_heap_log_corruption(const char *where,
                                      const heap_block_t *new_block,
                                      const heap_block_t *suspect)
 {
+    if (!user_heap_log_enabled())
+    {
+        return;
+    }
     uint64_t caller = (uint64_t)__builtin_return_address(0);
     uintptr_t brk = user_heap_current_brk();
 
@@ -2151,7 +2231,7 @@ void *malloc(size_t size)
 {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     user_heap_log_caller("malloc req=", size, caller);
-    if (size >= USER_HEAP_LARGE_THRESHOLD)
+    if (size >= USER_HEAP_LARGE_THRESHOLD && user_heap_log_enabled())
     {
         serial_printf("[uheap] large malloc size=0x%016llX caller=0x%016llX",
                       (unsigned long long)size,
@@ -2160,7 +2240,7 @@ void *malloc(size_t size)
     user_heap_lock_acquire();
     void *ptr = malloc_locked(size);
     user_heap_lock_release();
-    user_heap_log_caller("malloc ptr=", (uintptr_t)ptr, caller);
+    user_heap_log_caller_size("malloc ptr=", (uintptr_t)ptr, size, caller);
     return ptr;
 }
 
@@ -2180,9 +2260,9 @@ void free(void *ptr)
 void *realloc(void *ptr, size_t size)
 {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
-    user_heap_log_caller("realloc ptr=", (uintptr_t)ptr, caller);
+    user_heap_log_caller_size("realloc ptr=", (uintptr_t)ptr, size, caller);
     user_heap_log_caller("realloc size=", size, caller);
-    if (size >= USER_HEAP_LARGE_THRESHOLD)
+    if (size >= USER_HEAP_LARGE_THRESHOLD && user_heap_log_enabled())
     {
         serial_printf("[uheap] large realloc ptr=0x%016llX size=0x%016llX caller=0x%016llX",
                       (unsigned long long)(uintptr_t)ptr,
@@ -2205,7 +2285,8 @@ void *calloc(size_t count, size_t size)
         return NULL;
     }
     size_t total = count * size;
-    if (total >= USER_HEAP_LARGE_THRESHOLD)
+    user_heap_log_caller("calloc total=", total, caller);
+    if (total >= USER_HEAP_LARGE_THRESHOLD && user_heap_log_enabled())
     {
         serial_printf("[uheap] large calloc count=0x%016llX size=0x%016llX total=0x%016llX caller=0x%016llX",
                       (unsigned long long)count,

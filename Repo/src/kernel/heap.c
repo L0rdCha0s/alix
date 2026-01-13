@@ -79,6 +79,7 @@ static size_t g_heap_trace_frees = 0;
 #endif
 
 static uint32_t g_heap_trace_log_enable = 0;
+static uint32_t g_uheap_log_enable = 1;
 
 typedef struct
 {
@@ -249,6 +250,7 @@ static ssize_t heap_log_enable_write(vfs_node_t *node, size_t offset, const void
 void heap_sys_controls_init(void)
 {
     (void)procfs_create_file_at("sys/mem/log_enable", heap_log_enable_read, heap_log_enable_write, &g_heap_trace_log_enable);
+    (void)procfs_create_file_at("sys/mem/uheap_log_enable", heap_log_enable_read, heap_log_enable_write, &g_uheap_log_enable);
 }
 
 #ifdef ENABLE_MEM_DEBUG_LOGS

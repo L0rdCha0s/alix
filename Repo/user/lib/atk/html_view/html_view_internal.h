@@ -38,7 +38,7 @@
 #define HTML_VIEW_FONT_MAX_PX 512
 #define HTML_VIEW_MEASURE_CACHE_MAX 8192
 #define HTML_VIEW_STYLE_CACHE_MAX 8192
-#define HTML_VIEW_EXTERNAL_CSS_MAX (256u * 1024u)
+#define HTML_VIEW_EXTERNAL_CSS_MAX (2u * 1024u * 1024u)
 
 typedef struct html_view_js_script
 {
