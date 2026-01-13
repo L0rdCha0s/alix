@@ -1184,29 +1184,6 @@ void html_view_apply_pending_external_css_locked(atk_html_view_priv_t *priv)
     {
         pending_len = strlen(pending);
     }
-    if (pending && pending_len > HTML_VIEW_EXTERNAL_CSS_MAX)
-    {
-        size_t limit = HTML_VIEW_EXTERNAL_CSS_MAX;
-        size_t cut = limit;
-        while (cut > 0 && pending[cut - 1] != '}')
-        {
-            --cut;
-        }
-        if (cut == 0)
-        {
-            cut = limit;
-        }
-        pending[cut] = '\0';
-        static uint64_t last_truncate_log_ms = 0;
-        if (html_view_css_log_throttle(&last_truncate_log_ms, HTML_VIEW_CSS_LOG_THROTTLE_MS))
-        {
-            serial_printf("[html_view] external_css_truncate priv=%p from=%llu to=%llu",
-                          (void *)priv,
-                          (unsigned long long)pending_len,
-                          (unsigned long long)cut);
-        }
-        pending_len = cut;
-    }
     bool replaced = (priv->external_css != NULL);
     if (priv->external_css)
     {
@@ -1263,6 +1240,10 @@ void html_view_stylesheet_rebuild_if_needed(atk_html_view_priv_t *priv)
         return;
     }
     html_view_apply_pending_external_css_locked(priv);
+    if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
+    {
+        return;
+    }
     if (__atomic_exchange_n(&priv->stylesheet_dirty, 0u, __ATOMIC_ACQ_REL) == 0u)
     {
         return;

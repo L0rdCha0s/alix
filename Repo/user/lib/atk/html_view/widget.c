@@ -1,6 +1,5 @@
 #include "atk/html_view/html_view_internal.h"
 
-#include "web/css/css_internal.h"
 #include "ctype.h"
 #include "serial.h"
 #include "stdarg.h"
@@ -39,94 +38,26 @@ static bool html_view_text_has_non_ws_inline(const char *text)
     return false;
 }
 
-static int html_view_root_font_px(const css_style_t *style,
-                                  int viewport_w,
-                                  int viewport_h,
-                                  int default_px)
-{
-    int result = default_px;
-    if (!style || !style->has_font_size || !style->font_size.valid || style->font_size.is_auto)
-    {
-        return result;
-    }
-
-    if (style->font_size.unit == CSS_UNIT_PERCENT)
-    {
-        int64_t scaled = (int64_t)default_px * (int64_t)style->font_size.value_milli;
-        int px = (int)((scaled + 50000LL) / 100000LL);
-        if (px > 0)
-        {
-            result = px;
-        }
-    }
-    else
-    {
-        int px = html_view_length_to_px(&style->font_size,
-                                        viewport_w,
-                                        viewport_h,
-                                        viewport_w,
-                                        viewport_h,
-                                        default_px,
-                                        true);
-        if (px > 0)
-        {
-            result = px;
-        }
-    }
-
-    if (result > HTML_VIEW_FONT_MAX_PX)
-    {
-        result = HTML_VIEW_FONT_MAX_PX;
-    }
-    return result;
-}
-
-static char *html_view_external_css_clamp(const char *css_text, size_t *out_len, bool *out_truncated)
+static char *html_view_external_css_copy(const char *css_text, size_t *out_len)
 {
     if (out_len)
     {
         *out_len = 0;
-    }
-    if (out_truncated)
-    {
-        *out_truncated = false;
     }
     if (!css_text || css_text[0] == '\0')
     {
         return NULL;
     }
     size_t len = strlen(css_text);
-    if (len <= HTML_VIEW_EXTERNAL_CSS_MAX)
-    {
-        if (out_len)
-        {
-            *out_len = len;
-        }
-        return html_view_strdup(css_text);
-    }
-    size_t cut = HTML_VIEW_EXTERNAL_CSS_MAX;
-    while (cut > 0 && css_text[cut - 1] != '}')
-    {
-        --cut;
-    }
-    if (cut == 0)
-    {
-        cut = HTML_VIEW_EXTERNAL_CSS_MAX;
-    }
-    char *copy = (char *)malloc(cut + 1);
+    char *copy = (char *)malloc(len + 1);
     if (!copy)
     {
         return NULL;
     }
-    memcpy(copy, css_text, cut);
-    copy[cut] = '\0';
+    memcpy(copy, css_text, len + 1);
     if (out_len)
     {
-        *out_len = cut;
-    }
-    if (out_truncated)
-    {
-        *out_truncated = true;
+        *out_len = len;
     }
     return copy;
 }
@@ -405,25 +336,6 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     {
         return false;
     }
-    static uint64_t last_rebuild_enter_log_ms = 0;
-    if (html_view_log_throttle(&last_rebuild_enter_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
-    {
-        uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
-        uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
-        uint32_t dirty = __atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE);
-        uint32_t css_dirty = __atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE);
-        uint64_t pending_len = __atomic_load_n(&priv->external_css_pending_len, __ATOMIC_RELAXED);
-        serial_printf("[html_view] render_cache_rebuild_enter view=%p doc=%p sheet=%p dirty=%u css_dirty=%u seq=%u done=%u ext_len=%llu pending_len=%llu",
-                      (void *)view,
-                      (void *)priv->doc,
-                      (void *)priv->sheet,
-                      dirty,
-                      css_dirty,
-                      seq,
-                      done,
-                      (unsigned long long)priv->external_css_len,
-                      (unsigned long long)pending_len);
-    }
     uint64_t build_start_ms = sys_time_millis();
     uint64_t stage_start_ms = build_start_ms;
     uint64_t bloom_ms = 0;
@@ -521,7 +433,24 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         font_src = &body_style;
     }
 
-    css_font_px = html_view_root_font_px(font_src, viewport_w, viewport_h, actual_font_px);
+    if (font_src->has_font_size && font_src->font_size.valid && !font_src->font_size.is_auto)
+    {
+        int computed = html_view_length_to_px(&font_src->font_size,
+                                              viewport_w,
+                                              viewport_h,
+                                              viewport_w,
+                                              viewport_h,
+                                              actual_font_px,
+                                              true);
+        if (computed > 0)
+        {
+            css_font_px = computed;
+        }
+    }
+    if (css_font_px > HTML_VIEW_FONT_MAX_PX)
+    {
+        css_font_px = HTML_VIEW_FONT_MAX_PX;
+    }
 
     int base_font_px = css_font_px;
     int base_line_height = base_font_px + 4;
@@ -920,20 +849,6 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                               (unsigned long long)layout_ms);
             }
         }
-        static uint64_t last_rebuild_exit_log_ms = 0;
-        if (html_view_log_throttle(&last_rebuild_exit_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
-        {
-            uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
-            uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
-            serial_printf("[html_view] render_cache_rebuild_exit view=%p ok=1 seq=%u done=%u ops=%llu tiles=%llu fixed=%llu ms=%llu",
-                          (void *)view,
-                          seq,
-                          done,
-                          (unsigned long long)cache->op_count,
-                          (unsigned long long)cache->tile_used,
-                          (unsigned long long)cache->fixed_count,
-                          (unsigned long long)build_ms);
-        }
         return true;
     }
 
@@ -962,20 +877,6 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                           (unsigned long long)layout_ms);
         }
     }
-    static uint64_t last_rebuild_exit_log_ms = 0;
-    if (html_view_log_throttle(&last_rebuild_exit_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
-    {
-        uint32_t seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
-        uint32_t done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
-        serial_printf("[html_view] render_cache_rebuild_exit view=%p ok=0 seq=%u done=%u ops=%llu tiles=%llu fixed=%llu ms=%llu",
-                      (void *)view,
-                      seq,
-                      done,
-                      (unsigned long long)cache->op_count,
-                      (unsigned long long)cache->tile_used,
-                      (unsigned long long)cache->fixed_count,
-                      (unsigned long long)build_ms);
-    }
     html_view_render_cache_clear(cache);
     return false;
 }
@@ -988,6 +889,10 @@ static void html_view_stylesheet_rebuild_async_locked(atk_html_view_priv_t *priv
     }
 
     html_view_apply_pending_external_css_locked(priv);
+    if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
+    {
+        return;
+    }
     uint32_t dirty = __atomic_exchange_n(&priv->stylesheet_dirty, 0u, __ATOMIC_ACQ_REL);
     if (dirty == 0u)
     {
@@ -1188,6 +1093,12 @@ static void html_view_render_thread(void *arg)
             continue;
         }
         html_view_stylesheet_rebuild_async_locked(priv);
+        if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
+        {
+            html_view_dom_unlock(priv);
+            (void)sys_sleep_ms(1);
+            continue;
+        }
         if (!html_view_render_try_lock(priv))
         {
             html_view_dom_unlock(priv);
@@ -1565,6 +1476,11 @@ static void html_view_draw_cb(const atk_state_t *state,
                           (unsigned long long)priv->js_thread,
                           (unsigned long long)priv->render_thread);
         }
+        if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
+        {
+            html_view_draw_loading(state, widget, origin_x, origin_y, priv);
+            return;
+        }
         bool drew = false;
         if (html_view_render_try_lock(priv))
         {
@@ -1654,6 +1570,13 @@ static void html_view_draw_cb(const atk_state_t *state,
     {
         html_view_stylesheet_rebuild_if_needed(priv);
     }
+    if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
+    {
+        html_view_dom_unlock(priv);
+        html_view_render_unlock(priv);
+        html_view_draw_loading(state, widget, origin_x, origin_y, priv);
+        return;
+    }
     html_view_js_apply_dirty((atk_widget_t *)widget, priv);
 
     html_view_controls_hide_all(priv);
@@ -1742,7 +1665,24 @@ static void html_view_draw_cb(const atk_state_t *state,
         font_src = &body_style;
     }
 
-    css_font_px = html_view_root_font_px(font_src, viewport_w, viewport_h, actual_font_px);
+    if (font_src->has_font_size && font_src->font_size.valid && !font_src->font_size.is_auto)
+    {
+        int computed = html_view_length_to_px(&font_src->font_size,
+                                              viewport_w,
+                                              viewport_h,
+                                              viewport_w,
+                                              viewport_h,
+                                              actual_font_px,
+                                              true);
+        if (computed > 0)
+        {
+            css_font_px = computed;
+        }
+    }
+    if (css_font_px > HTML_VIEW_FONT_MAX_PX)
+    {
+        css_font_px = HTML_VIEW_FONT_MAX_PX;
+    }
 
     int base_font_px = css_font_px;
     int base_line_height = base_font_px + 4;
@@ -1990,13 +1930,10 @@ static void html_view_draw_cb(const atk_state_t *state,
     bool cache_empty = cache_valid && cache->op_count == 0 && cache->fixed_count == 0;
     if (cache_empty && body_has_renderable)
     {
-        if (cache_dirty)
+        cache_valid = false;
+        if ((priv->render_async || priv->render_external) && !cache_dirty)
         {
-            cache_valid = false;
-            if (priv->render_async || priv->render_external)
-            {
-                html_view_render_request(priv);
-            }
+            html_view_render_request(priv);
         }
     }
     int cache_body_box_h = cache->body_box_h;
@@ -2142,22 +2079,6 @@ static void html_view_destroy_cb(atk_widget_t *widget, void *context)
         priv->style_cache_cap = 0;
         priv->style_cache_mask = 0;
         html_view_rule_index_clear(priv);
-        free(priv->rule_list_scratch);
-        priv->rule_list_scratch = NULL;
-        priv->rule_list_scratch_cap = 0;
-        priv->rule_list_scratch_in_use = 0;
-        free(priv->rule_positions_scratch);
-        priv->rule_positions_scratch = NULL;
-        priv->rule_positions_scratch_cap = 0;
-        priv->rule_positions_scratch_in_use = 0;
-        free(priv->flex_items_scratch);
-        priv->flex_items_scratch = NULL;
-        priv->flex_items_scratch_cap = 0;
-        priv->flex_items_scratch_in_use = 0;
-        free(priv->flex_lines_scratch);
-        priv->flex_lines_scratch = NULL;
-        priv->flex_lines_scratch_cap = 0;
-        priv->flex_lines_scratch_in_use = 0;
         if (priv->external_css)
         {
             free(priv->external_css);
@@ -2354,27 +2275,19 @@ void atk_html_view_set_document(atk_widget_t *view, html_document_t *doc)
     priv->scroll_y = 0;
     html_view_stylesheet_mark_dirty(priv);
     html_view_controls_build(view, priv);
-    bool wait_for_css = (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u);
-    priv->js_defer_start = wait_for_css ? 1u : 0u;
     atk_state_lock_release(ui_lock);
-    if (!wait_for_css && priv->render_external)
+    if (priv->render_external)
     {
         html_view_stylesheet_rebuild_async_locked(priv);
     }
-    else if (!wait_for_css)
+    else
     {
         html_view_stylesheet_rebuild_if_needed(priv);
     }
     html_view_dom_unlock(priv);
-    if (!wait_for_css)
-    {
-        html_view_render_request(priv);
-        html_view_invalidate(view);
-    }
-    if (!wait_for_css)
-    {
-        html_view_js_start(view, priv);
-    }
+    html_view_render_request(priv);
+    html_view_invalidate(view);
+    html_view_js_start(view, priv);
 }
 
 bool atk_html_view_scroll_to_id(atk_widget_t *view, const char *id)
@@ -2469,8 +2382,7 @@ static bool html_view_queue_external_css(atk_html_view_priv_t *priv, const char 
         return false;
     }
     size_t copy_len = 0;
-    bool truncated = false;
-    char *copy = html_view_external_css_clamp(css_text, &copy_len, &truncated);
+    char *copy = html_view_external_css_copy(css_text, &copy_len);
     if (!copy)
     {
         if (css_text && css_text[0] != '\0')
@@ -2493,17 +2405,6 @@ static bool html_view_queue_external_css(atk_html_view_priv_t *priv, const char 
                               (void *)priv);
             }
             return false;
-        }
-    }
-    if (truncated)
-    {
-        static uint64_t last_truncate_log_ms = 0;
-        if (html_view_log_throttle(&last_truncate_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
-        {
-            serial_printf("[html_view] external_css_truncate priv=%p from=%llu to=%llu",
-                          (void *)priv,
-                          (unsigned long long)strlen(css_text),
-                          (unsigned long long)copy_len);
         }
     }
     uint64_t now_ms = sys_time_millis();
@@ -2557,7 +2458,6 @@ static bool html_view_set_external_stylesheet_impl(atk_widget_t *view, const cha
     {
         html_view_dom_lock(priv);
     }
-    __atomic_store_n(&priv->render_wait_for_css, 0u, __ATOMIC_RELEASE);
     char *pending = __atomic_exchange_n(&priv->external_css_pending, NULL, __ATOMIC_ACQ_REL);
     free(pending);
     __atomic_store_n(&priv->external_css_pending_len, 0u, __ATOMIC_RELAXED);
@@ -2573,19 +2473,7 @@ static bool html_view_set_external_stylesheet_impl(atk_widget_t *view, const cha
     }
 
     size_t copy_len = 0;
-    bool truncated = false;
-    char *copy = html_view_external_css_clamp(css_text, &copy_len, &truncated);
-    if (truncated)
-    {
-        static uint64_t last_truncate_log_ms = 0;
-        if (html_view_log_throttle(&last_truncate_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
-        {
-            serial_printf("[html_view] external_css_truncate priv=%p from=%llu to=%llu",
-                          (void *)priv,
-                          (unsigned long long)strlen(css_text),
-                          (unsigned long long)copy_len);
-        }
-    }
+    char *copy = html_view_external_css_copy(css_text, &copy_len);
     if (copy)
     {
         priv->external_css = copy;
@@ -2666,12 +2554,11 @@ void atk_html_view_set_js_enabled(atk_widget_t *view, bool enabled)
     {
         return;
     }
-    if (priv->js_enabled == enabled && priv->js_thread_enabled == enabled)
+    if (priv->js_enabled == enabled)
     {
         return;
     }
     priv->js_enabled = enabled;
-    priv->js_thread_enabled = enabled;
     if (!enabled)
     {
         html_view_js_stop(priv);
@@ -2701,23 +2588,7 @@ void atk_html_view_set_js_thread_enabled(atk_widget_t *view, bool enabled)
         html_view_js_stop_thread(priv);
         return;
     }
-
-    bool has_scripts = false;
-    bool has_doc = false;
-    html_view_dom_lock(priv);
-    has_scripts = (priv->js_script_head != NULL);
-    has_doc = (priv->doc && priv->doc->root);
-    html_view_dom_unlock(priv);
-
-    if (has_scripts)
-    {
-        html_view_js_start_thread(view, priv);
-        return;
-    }
-    if (has_doc)
-    {
-        html_view_js_start(view, priv);
-    }
+    html_view_js_start_thread(view, priv);
 }
 
 void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled)
@@ -2783,22 +2654,11 @@ void atk_html_view_set_wait_for_css(atk_widget_t *view, bool enabled)
     {
         return;
     }
-    bool start_js = false;
-    html_view_dom_lock(priv);
     __atomic_store_n(&priv->render_wait_for_css, enabled ? 1u : 0u, __ATOMIC_RELEASE);
-    if (enabled)
+    if (!enabled)
     {
-        priv->js_defer_start = 1u;
-    }
-    else if (priv->js_defer_start)
-    {
-        priv->js_defer_start = 0u;
-        start_js = true;
-    }
-    html_view_dom_unlock(priv);
-    if (start_js)
-    {
-        html_view_js_start(view, priv);
+        html_view_render_request(priv);
+        html_view_invalidate(view);
     }
 }
 
@@ -2813,10 +2673,6 @@ bool atk_html_view_rebuild_cache(atk_widget_t *view)
     {
         return false;
     }
-    if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
-    {
-        return false;
-    }
     uint32_t target_seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
     html_view_dom_lock(priv);
     if (priv->render_external)
@@ -2826,6 +2682,11 @@ bool atk_html_view_rebuild_cache(atk_widget_t *view)
     else
     {
         html_view_stylesheet_rebuild_if_needed(priv);
+    }
+    if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
+    {
+        html_view_dom_unlock(priv);
+        return false;
     }
     if (!html_view_render_try_lock(priv))
     {
@@ -2853,10 +2714,6 @@ bool atk_html_view_rebuild_cache_if_pending(atk_widget_t *view)
     }
     atk_html_view_priv_t *priv = html_view_priv_mut(view);
     if (!priv)
-    {
-        return false;
-    }
-    if (__atomic_load_n(&priv->render_wait_for_css, __ATOMIC_ACQUIRE) != 0u)
     {
         return false;
     }
@@ -3860,26 +3717,11 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
         html_view_style_for_node(&root_frame.style, sheet, NULL, root, NULL);
         root_frame.has_style = true;
     }
-    stack[count].node = root_frame.node;
-    stack[count].depth = root_frame.depth;
-    stack[count].has_style = root_frame.has_style;
-    if (root_frame.has_style)
-    {
-        css_style_copy_shallow(&stack[count].style, &root_frame.style);
-    }
-    count++;
+    stack[count++] = root_frame;
 
     while (count > 0)
     {
-        html_view_dump_frame_t frame = {0};
-        count--;
-        frame.node = stack[count].node;
-        frame.depth = stack[count].depth;
-        frame.has_style = stack[count].has_style;
-        if (frame.has_style)
-        {
-            css_style_copy_shallow(&frame.style, &stack[count].style);
-        }
+        html_view_dump_frame_t frame = stack[--count];
         const html_node_t *node = frame.node;
         const css_style_t *parent_style = frame.has_style ? &frame.style : NULL;
 
@@ -3917,17 +3759,10 @@ static void html_view_dump_tree(const html_node_t *root, const css_stylesheet_t 
             }
             else if (parent_style)
             {
-                css_style_copy_shallow(&child_frame.style, parent_style);
+                child_frame.style = *parent_style;
                 child_frame.has_style = true;
             }
-            stack[count].node = child_frame.node;
-            stack[count].depth = child_frame.depth;
-            stack[count].has_style = child_frame.has_style;
-            if (child_frame.has_style)
-            {
-                css_style_copy_shallow(&stack[count].style, &child_frame.style);
-            }
-            count++;
+            stack[count++] = child_frame;
         }
     }
 
