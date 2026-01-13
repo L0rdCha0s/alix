@@ -1520,6 +1520,13 @@ static void html_view_draw_cb(const atk_state_t *state,
         html_view_invalidate(widget);
         return;
     }
+    if (priv->last_width != widget->width || priv->last_height != widget->height)
+    {
+        priv->last_width = widget->width;
+        priv->last_height = widget->height;
+        __atomic_store_n(&priv->stylesheet_dirty, 1u, __ATOMIC_RELEASE);
+        html_view_render_cache_mark_dirty(priv);
+    }
     if (priv->render_async || priv->render_external)
     {
         html_view_render_cache_t *cache = &priv->render_cache;
