@@ -87,6 +87,11 @@ void atk_html_view_stop_js(atk_widget_t *view);
 void atk_html_view_set_js_enabled(atk_widget_t *view, bool enabled);
 
 /*
+ * Enable or disable the JS execution thread without changing JS support reporting.
+ */
+void atk_html_view_set_js_thread_enabled(atk_widget_t *view, bool enabled);
+
+/*
  * Enable or disable asynchronous render cache builds.
  *
  * When enabled, the view rebuilds its render cache on a worker thread and

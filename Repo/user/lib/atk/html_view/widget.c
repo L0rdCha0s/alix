@@ -39,6 +39,48 @@ static bool html_view_text_has_non_ws_inline(const char *text)
     return false;
 }
 
+static int html_view_root_font_px(const css_style_t *style,
+                                  int viewport_w,
+                                  int viewport_h,
+                                  int default_px)
+{
+    int result = default_px;
+    if (!style || !style->has_font_size || !style->font_size.valid || style->font_size.is_auto)
+    {
+        return result;
+    }
+
+    if (style->font_size.unit == CSS_UNIT_PERCENT)
+    {
+        int64_t scaled = (int64_t)default_px * (int64_t)style->font_size.value_milli;
+        int px = (int)((scaled + 50000LL) / 100000LL);
+        if (px > 0)
+        {
+            result = px;
+        }
+    }
+    else
+    {
+        int px = html_view_length_to_px(&style->font_size,
+                                        viewport_w,
+                                        viewport_h,
+                                        viewport_w,
+                                        viewport_h,
+                                        default_px,
+                                        true);
+        if (px > 0)
+        {
+            result = px;
+        }
+    }
+
+    if (result > HTML_VIEW_FONT_MAX_PX)
+    {
+        result = HTML_VIEW_FONT_MAX_PX;
+    }
+    return result;
+}
+
 static char *html_view_external_css_clamp(const char *css_text, size_t *out_len, bool *out_truncated)
 {
     if (out_len)
@@ -479,24 +521,7 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         font_src = &body_style;
     }
 
-    if (font_src->has_font_size && font_src->font_size.valid && !font_src->font_size.is_auto)
-    {
-        int computed = html_view_length_to_px(&font_src->font_size,
-                                              viewport_w,
-                                              viewport_h,
-                                              viewport_w,
-                                              viewport_h,
-                                              actual_font_px,
-                                              true);
-        if (computed > 0)
-        {
-            css_font_px = computed;
-        }
-    }
-    if (css_font_px > HTML_VIEW_FONT_MAX_PX)
-    {
-        css_font_px = HTML_VIEW_FONT_MAX_PX;
-    }
+    css_font_px = html_view_root_font_px(font_src, viewport_w, viewport_h, actual_font_px);
 
     int base_font_px = css_font_px;
     int base_line_height = base_font_px + 4;
@@ -1717,24 +1742,7 @@ static void html_view_draw_cb(const atk_state_t *state,
         font_src = &body_style;
     }
 
-    if (font_src->has_font_size && font_src->font_size.valid && !font_src->font_size.is_auto)
-    {
-        int computed = html_view_length_to_px(&font_src->font_size,
-                                              viewport_w,
-                                              viewport_h,
-                                              viewport_w,
-                                              viewport_h,
-                                              actual_font_px,
-                                              true);
-        if (computed > 0)
-        {
-            css_font_px = computed;
-        }
-    }
-    if (css_font_px > HTML_VIEW_FONT_MAX_PX)
-    {
-        css_font_px = HTML_VIEW_FONT_MAX_PX;
-    }
+    css_font_px = html_view_root_font_px(font_src, viewport_w, viewport_h, actual_font_px);
 
     int base_font_px = css_font_px;
     int base_line_height = base_font_px + 4;
@@ -2658,17 +2666,58 @@ void atk_html_view_set_js_enabled(atk_widget_t *view, bool enabled)
     {
         return;
     }
-    if (priv->js_enabled == enabled)
+    if (priv->js_enabled == enabled && priv->js_thread_enabled == enabled)
     {
         return;
     }
     priv->js_enabled = enabled;
+    priv->js_thread_enabled = enabled;
     if (!enabled)
     {
         html_view_js_stop(priv);
         return;
     }
     html_view_js_start(view, priv);
+}
+
+void atk_html_view_set_js_thread_enabled(atk_widget_t *view, bool enabled)
+{
+    if (!view)
+    {
+        return;
+    }
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv)
+    {
+        return;
+    }
+    if (priv->js_thread_enabled == enabled)
+    {
+        return;
+    }
+    priv->js_thread_enabled = enabled;
+    if (!enabled)
+    {
+        html_view_js_stop_thread(priv);
+        return;
+    }
+
+    bool has_scripts = false;
+    bool has_doc = false;
+    html_view_dom_lock(priv);
+    has_scripts = (priv->js_script_head != NULL);
+    has_doc = (priv->doc && priv->doc->root);
+    html_view_dom_unlock(priv);
+
+    if (has_scripts)
+    {
+        html_view_js_start_thread(view, priv);
+        return;
+    }
+    if (has_doc)
+    {
+        html_view_js_start(view, priv);
+    }
 }
 
 void atk_html_view_enable_async_render(atk_widget_t *view, bool enabled)

@@ -207,6 +207,7 @@ typedef struct browser_app
     atk_widget_t *url_input;
     atk_widget_t *viewer;
     bool js_enabled;
+    bool js_thread_enabled;
 
     alix_mutex_t lock;
     alix_mutex_t debug_lock;

@@ -30,7 +30,7 @@ typedef struct
     size_t handle;
 } html_view_js_dom_element_t;
 
-static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *priv);
+void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *priv);
 void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
 static bool html_view_js_should_stop(const atk_html_view_priv_t *priv);
 static bool html_view_js_queue_source_locked(atk_html_view_priv_t *priv, const char *source, size_t len);
@@ -359,6 +359,10 @@ void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node)
     }
     atk_html_view_priv_t *priv = html_view_priv_mut(view);
     if (!priv)
+    {
+        return;
+    }
+    if (!priv->js_thread_enabled || !priv->js_enabled)
     {
         return;
     }
@@ -2893,6 +2897,7 @@ void html_view_js_init(atk_html_view_priv_t *priv)
     priv->js_runtime = NULL;
     priv->js_runtime_ready = false;
     priv->js_enabled = true;
+    priv->js_thread_enabled = true;
     priv->js_script_head = NULL;
     priv->js_script_tail = NULL;
     priv->js_script_count = 0;
@@ -2904,9 +2909,13 @@ void html_view_js_init(atk_html_view_priv_t *priv)
     priv->js_handle_cap = 0;
 }
 
-static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *priv)
+void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *priv)
 {
     if (!view || !priv)
+    {
+        return;
+    }
+    if (!priv->js_enabled || !priv->js_thread_enabled)
     {
         return;
     }
@@ -2946,7 +2955,7 @@ static void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *
                   (unsigned long long)thread);
 }
 
-void html_view_js_stop(atk_html_view_priv_t *priv)
+void html_view_js_stop_thread(atk_html_view_priv_t *priv)
 {
     if (!priv)
     {
@@ -2981,6 +2990,16 @@ void html_view_js_stop(atk_html_view_priv_t *priv)
     __atomic_store_n(&priv->js_stop, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&priv->js_dirty, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&priv->js_redraw_pending, 0u, __ATOMIC_RELEASE);
+}
+
+void html_view_js_stop(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+
+    html_view_js_stop_thread(priv);
 
     html_view_dom_lock(priv);
     html_view_js_scripts_clear_locked(priv);

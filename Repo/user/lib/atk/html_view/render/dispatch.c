@@ -2,9 +2,215 @@
 #include "serial.h"
 
 #include <ctype.h>
+#include "stdio.h"
 #include <string.h>
 
 void html_view_render_children(html_view_ctx_t *ctx, const html_node_t *node, const css_style_t *style);
+
+#define HTML_VIEW_LARGE_FONT_PX 64
+#define HTML_VIEW_LARGE_TEXT_SNIPPET 80
+
+static bool html_view_text_has_non_ws_local(const char *text)
+{
+    if (!text)
+    {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p)
+    {
+        if (*p >= 0x80u || !isspace(*p))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void html_view_sanitize_text(const char *src, char *dst, size_t cap, size_t max_len)
+{
+    if (!dst || cap == 0)
+    {
+        return;
+    }
+    if (!src)
+    {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t out = 0;
+    size_t seen = 0;
+    bool last_space = false;
+    while (*src && out + 1 < cap && seen < max_len)
+    {
+        unsigned char ch = (unsigned char)*src++;
+        seen++;
+        if (ch < 0x20 || ch == 0x7F)
+        {
+            if (!last_space)
+            {
+                dst[out++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        if (ch >= 0x80)
+        {
+            ch = '?';
+        }
+        if (isspace(ch))
+        {
+            if (!last_space)
+            {
+                dst[out++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        dst[out++] = (char)ch;
+        last_space = false;
+    }
+    if ((*src || seen >= max_len) && out + 4 < cap)
+    {
+        dst[out++] = '.';
+        dst[out++] = '.';
+        dst[out++] = '.';
+    }
+    dst[out] = '\0';
+}
+
+static const char *html_view_css_unit_name(css_unit_t unit)
+{
+    switch (unit)
+    {
+        case CSS_UNIT_PX: return "px";
+        case CSS_UNIT_EM: return "em";
+        case CSS_UNIT_VW: return "vw";
+        case CSS_UNIT_VH: return "vh";
+        case CSS_UNIT_PERCENT: return "%";
+        case CSS_UNIT_NONE: default: return "";
+    }
+}
+
+static void html_view_format_length(const css_length_t *len, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    if (!len || !len->valid)
+    {
+        (void)snprintf(buf, cap, "unset");
+        return;
+    }
+    if (len->is_auto)
+    {
+        (void)snprintf(buf, cap, "auto");
+        return;
+    }
+    int32_t v = len->value_milli;
+    int32_t whole = v / 1000;
+    int32_t frac = v % 1000;
+    if (frac < 0)
+    {
+        frac = -frac;
+    }
+    const char *unit = html_view_css_unit_name(len->unit);
+    if (frac == 0)
+    {
+        (void)snprintf(buf, cap, "%d%s", whole, unit);
+    }
+    else
+    {
+        (void)snprintf(buf, cap, "%d.%03d%s", whole, frac, unit);
+    }
+}
+
+static void html_view_format_line_height(const css_style_t *style, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+    {
+        return;
+    }
+    if (!style || !style->has_line_height)
+    {
+        (void)snprintf(buf, cap, "inherit");
+        return;
+    }
+    if (style->line_height_is_length)
+    {
+        html_view_format_length(&style->line_height, buf, cap);
+        return;
+    }
+    int32_t v = style->line_height_milli;
+    int32_t whole = v / 1000;
+    int32_t frac = v % 1000;
+    if (frac < 0)
+    {
+        frac = -frac;
+    }
+    if (frac == 0)
+    {
+        (void)snprintf(buf, cap, "%d", whole);
+    }
+    else
+    {
+        (void)snprintf(buf, cap, "%d.%03d", whole, frac);
+    }
+}
+
+static void html_view_log_large_text(const html_view_ctx_t *ctx,
+                                     const html_node_t *node,
+                                     const css_style_t *style)
+{
+    if (!ctx || !node || !node->text || !style)
+    {
+        return;
+    }
+    if (ctx->actual_font_px < HTML_VIEW_LARGE_FONT_PX)
+    {
+        return;
+    }
+    if (!html_view_text_has_non_ws_local(node->text))
+    {
+        return;
+    }
+
+    char text_buf[96];
+    char font_buf[32];
+    char line_buf[32];
+    char id_buf[48];
+    char class_buf[96];
+    const html_node_t *parent = node->parent;
+    const char *tag = parent && parent->name ? parent->name : "?";
+    const char *id = parent ? html_attr_get(parent, "id") : NULL;
+    const char *class_name = parent ? html_attr_get(parent, "class") : NULL;
+
+    html_view_sanitize_text(node->text, text_buf, sizeof(text_buf), HTML_VIEW_LARGE_TEXT_SNIPPET);
+    if (style->has_font_size)
+    {
+        html_view_format_length(&style->font_size, font_buf, sizeof(font_buf));
+    }
+    else
+    {
+        (void)snprintf(font_buf, sizeof(font_buf), "inherit");
+    }
+    html_view_format_line_height(style, line_buf, sizeof(line_buf));
+    html_view_sanitize_text(id, id_buf, sizeof(id_buf), 40);
+    html_view_sanitize_text(class_name, class_buf, sizeof(class_buf), 72);
+
+    serial_printf("[html_view] large_text tag=%s id=%s class=%s font_px=%d line_h=%d css_font=%s css_line=%s viewport=%dx%d text=\"%s\"",
+                  tag,
+                  id_buf[0] ? id_buf : "-",
+                  class_buf[0] ? class_buf : "-",
+                  ctx->actual_font_px,
+                  ctx->line_height,
+                  font_buf,
+                  line_buf,
+                  ctx->viewport_w,
+                  ctx->viewport_h,
+                  text_buf);
+}
 
 static bool html_view_attr_has_class_local(const html_node_t *node, const char *token)
 {
@@ -313,6 +519,7 @@ void html_view_render_node_internal(html_view_ctx_t *ctx, const html_node_t *nod
         {
             ctx->paint_layer = HTML_VIEW_PAINT_LAYER_INLINE;
         }
+        html_view_log_large_text(ctx, node, parent_style);
         html_view_draw_text(ctx, node->text, color, ctx->text_underline, ctx->text_bold);
         ctx->paint_layer = saved_layer;
         return;

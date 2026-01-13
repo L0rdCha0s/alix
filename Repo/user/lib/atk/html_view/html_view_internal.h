@@ -370,6 +370,7 @@ typedef struct
     js_runtime_t *js_runtime;
     bool js_runtime_ready;
     bool js_enabled;
+    bool js_thread_enabled;
     html_view_js_script_t *js_script_head;
     html_view_js_script_t *js_script_tail;
     volatile uint32_t js_script_count;
@@ -908,6 +909,8 @@ void html_view_render_cache_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_js_dispatch_click(atk_widget_t *view, const html_node_t *node);
 void html_view_js_apply_dirty(atk_widget_t *view, atk_html_view_priv_t *priv);
 void html_view_js_init(atk_html_view_priv_t *priv);
+void html_view_js_start_thread(atk_widget_t *view, atk_html_view_priv_t *priv);
+void html_view_js_stop_thread(atk_html_view_priv_t *priv);
 void html_view_js_stop(atk_html_view_priv_t *priv);
 void html_view_js_start(atk_widget_t *view, atk_html_view_priv_t *priv);
 bool html_view_js_queue_external(atk_widget_t *view,

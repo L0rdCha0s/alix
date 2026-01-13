@@ -300,13 +300,13 @@ static void browser_js_toggle_action(atk_widget_t *button, void *context)
 
     bool enabled = false;
     browser_lock_enter(app, &app->lock, "app_lock");
-    app->js_enabled = !app->js_enabled;
-    enabled = app->js_enabled;
+    app->js_thread_enabled = !app->js_thread_enabled;
+    enabled = app->js_thread_enabled;
     browser_lock_exit(app, &app->lock, "app_lock");
 
     if (app->viewer)
     {
-        atk_html_view_set_js_enabled(app->viewer, enabled);
+        atk_html_view_set_js_thread_enabled(app->viewer, enabled);
     }
     browser_js_update_button(app, enabled);
     browser_debug_logf(app, "[js] %s", enabled ? "enabled" : "disabled");
@@ -1202,6 +1202,7 @@ bool browser_build_ui(browser_app_t *app)
     atk_menu_bar_set_enabled(state, false);
     apply_theme(state);
     app->js_enabled = true;
+    app->js_thread_enabled = true;
 
     app->window = atk_window_create_at(state, BROWSER_WIDTH / 2, BROWSER_HEIGHT / 2);
     if (!app->window)
@@ -1304,7 +1305,7 @@ bool browser_build_ui(browser_app_t *app)
     {
         menu_w_js = 72;
     }
-    const char *js_label = app->js_enabled ? "JS: On" : "JS: Off";
+    const char *js_label = app->js_thread_enabled ? "JS: On" : "JS: Off";
     app->menu_js_button = atk_window_add_button(app->window,
                                                 js_label,
                                                 menu_x,
@@ -1414,6 +1415,7 @@ bool browser_build_ui(browser_app_t *app)
         return false;
     }
     atk_html_view_set_js_enabled(app->viewer, app->js_enabled);
+    atk_html_view_set_js_thread_enabled(app->viewer, app->js_thread_enabled);
     atk_html_view_enable_async_render(app->viewer, false);
     atk_html_view_enable_external_render(app->viewer, true);
     atk_html_view_set_link_handler(app->viewer, browser_html_link_clicked, app);
