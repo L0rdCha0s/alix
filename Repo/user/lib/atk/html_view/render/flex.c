@@ -27,6 +27,10 @@ typedef struct
     int border_left;
     int content_w;
     int content_h;
+    int min_w;
+    int max_w;
+    int min_h;
+    int max_h;
     int border_box_w;
     int border_box_h;
     int outer_w;
@@ -440,6 +444,36 @@ static void html_view_flex_update_sizes(html_view_flex_item_t *item, bool row)
     if (!item)
     {
         return;
+    }
+    if (item->max_w >= 0 && item->min_w > item->max_w)
+    {
+        item->content_w = item->min_w;
+    }
+    else
+    {
+        if (item->max_w >= 0 && item->content_w > item->max_w)
+        {
+            item->content_w = item->max_w;
+        }
+        if (item->min_w >= 0 && item->content_w < item->min_w)
+        {
+            item->content_w = item->min_w;
+        }
+    }
+    if (item->max_h >= 0 && item->min_h > item->max_h)
+    {
+        item->content_h = item->min_h;
+    }
+    else
+    {
+        if (item->max_h >= 0 && item->content_h > item->max_h)
+        {
+            item->content_h = item->max_h;
+        }
+        if (item->min_h >= 0 && item->content_h < item->min_h)
+        {
+            item->content_h = item->min_h;
+        }
     }
     if (item->content_w < 0) item->content_w = 0;
     if (item->content_h < 0) item->content_h = 0;
@@ -985,6 +1019,10 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             item->auto_margin_left = child_style.has_margin &&
                                      child_style.margin.left.valid &&
                                      child_style.margin.left.is_auto;
+            item->min_w = -1;
+            item->max_w = -1;
+            item->min_h = -1;
+            item->max_h = -1;
 
             bool has_basis = child_style.has_flex_basis && child_style.flex_basis.valid && !child_style.flex_basis.is_auto;
             int basis_px = 0;
@@ -1139,6 +1177,80 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
                 {
                     content_w = measured_w;
                 }
+            }
+
+            int width_ref = row ? layout_main : (layout_main > 0 ? layout_main : ctx->body_w);
+            if (child_style.has_min_width && child_style.min_width.valid && !child_style.min_width.is_auto)
+            {
+                int min_w = html_view_length_to_px(&child_style.min_width,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   width_ref,
+                                                   ctx->viewport_h,
+                                                   ctx->base_font_px,
+                                                   true);
+                min_w = html_view_box_sizing_content_width(&child_style,
+                                                          min_w,
+                                                          item->pad_left,
+                                                          item->pad_right,
+                                                          item->border_left,
+                                                          item->border_right);
+                if (min_w < 0) min_w = 0;
+                item->min_w = min_w;
+            }
+            if (child_style.has_max_width && child_style.max_width.valid && !child_style.max_width.is_auto)
+            {
+                int max_w = html_view_length_to_px(&child_style.max_width,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   width_ref,
+                                                   ctx->viewport_h,
+                                                   ctx->base_font_px,
+                                                   true);
+                max_w = html_view_box_sizing_content_width(&child_style,
+                                                          max_w,
+                                                          item->pad_left,
+                                                          item->pad_right,
+                                                          item->border_left,
+                                                          item->border_right);
+                if (max_w < 0) max_w = 0;
+                item->max_w = max_w;
+            }
+            if (child_style.has_min_height && child_style.min_height.valid && !child_style.min_height.is_auto)
+            {
+                int min_h = html_view_length_to_px(&child_style.min_height,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   ctx->base_font_px,
+                                                   false);
+                min_h = html_view_box_sizing_content_height(&child_style,
+                                                           min_h,
+                                                           item->pad_top,
+                                                           item->pad_bottom,
+                                                           item->border_top,
+                                                           item->border_bottom);
+                if (min_h < 0) min_h = 0;
+                item->min_h = min_h;
+            }
+            if (child_style.has_max_height && child_style.max_height.valid && !child_style.max_height.is_auto)
+            {
+                int max_h = html_view_length_to_px(&child_style.max_height,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   ctx->viewport_w,
+                                                   ctx->viewport_h,
+                                                   ctx->base_font_px,
+                                                   false);
+                max_h = html_view_box_sizing_content_height(&child_style,
+                                                           max_h,
+                                                           item->pad_top,
+                                                           item->pad_bottom,
+                                                           item->border_top,
+                                                           item->border_bottom);
+                if (max_h < 0) max_h = 0;
+                item->max_h = max_h;
             }
 
             if (content_w < 0) content_w = 0;
