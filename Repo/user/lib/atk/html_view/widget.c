@@ -2373,7 +2373,9 @@ bool atk_html_view_set_html(atk_widget_t *view, const char *html, html_parse_err
     {
         error_out = &tmp;
     }
-    html_document_t *doc = html_parse(html, error_out);
+    atk_html_view_priv_t *priv = view ? html_view_priv_mut(view) : NULL;
+    bool js_enabled = priv ? priv->js_enabled : true;
+    html_document_t *doc = html_parse_with_options(html, error_out, js_enabled);
     if (!doc)
     {
         return false;

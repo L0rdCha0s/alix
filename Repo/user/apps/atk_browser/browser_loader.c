@@ -223,6 +223,364 @@ static void browser_css_log_sniff(browser_app_t *app, const char *url, const uin
                        url_len > show ? "..." : "");
 }
 
+static bool browser_css_url_is_image(const char *url, size_t len)
+{
+    if (!url || len == 0)
+    {
+        return false;
+    }
+
+    while (len > 0 && isspace((unsigned char)url[0]))
+    {
+        url++;
+        len--;
+    }
+    while (len > 0 && isspace((unsigned char)url[len - 1]))
+    {
+        len--;
+    }
+    if (len == 0)
+    {
+        return false;
+    }
+
+    if (len >= 5 && strncasecmp(url, "data:", 5) == 0)
+    {
+        const char *comma = NULL;
+        for (size_t i = 0; i < len; ++i)
+        {
+            if (url[i] == ',')
+            {
+                comma = url + i;
+                break;
+            }
+        }
+        size_t meta_len = comma ? (size_t)(comma - url) : len;
+        if (meta_len >= 11 && strncasecmp(url, "data:image/", 11) == 0)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    size_t end = len;
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (url[i] == '?' || url[i] == '#')
+        {
+            end = i;
+            break;
+        }
+    }
+    if (end == 0)
+    {
+        return false;
+    }
+
+    const char *dot = NULL;
+    for (size_t i = 0; i < end; ++i)
+    {
+        if (url[i] == '.')
+        {
+            dot = url + i;
+        }
+    }
+    if (!dot || dot + 1 >= url + end)
+    {
+        return false;
+    }
+
+    const char *ext = dot + 1;
+    size_t ext_len = (size_t)((url + end) - ext);
+    if (ext_len == 0)
+    {
+        return false;
+    }
+
+    return (ext_len == 3 && strncasecmp(ext, "png", 3) == 0) ||
+           (ext_len == 3 && strncasecmp(ext, "gif", 3) == 0) ||
+           (ext_len == 3 && strncasecmp(ext, "jpg", 3) == 0) ||
+           (ext_len == 4 && strncasecmp(ext, "jpeg", 4) == 0) ||
+           (ext_len == 3 && strncasecmp(ext, "svg", 3) == 0) ||
+           (ext_len == 4 && strncasecmp(ext, "webp", 4) == 0) ||
+           (ext_len == 3 && strncasecmp(ext, "bmp", 3) == 0) ||
+           (ext_len == 3 && strncasecmp(ext, "ico", 3) == 0);
+}
+
+static void browser_css_queue_image(browser_app_t *app,
+                                    browser_resource_set_t *requested,
+                                    browser_resource_queue_t *img_queue,
+                                    uint64_t load_id,
+                                    const char *url)
+{
+    if (!app || !requested || !img_queue || !url || url[0] == '\0')
+    {
+        return;
+    }
+
+    if (!browser_css_url_is_image(url, strlen(url)))
+    {
+        return;
+    }
+
+    browser_resource_track_t track = browser_resource_set_track(requested, BROWSER_RESOURCE_IMAGE, url);
+    if (track == BROWSER_RESOURCE_TRACK_DUP)
+    {
+        return;
+    }
+    if (track == BROWSER_RESOURCE_TRACK_ERROR)
+    {
+        browser_debug_logf(app, "[css] image track failed url=%s", url);
+    }
+
+    browser_resource_job_t *job = (browser_resource_job_t *)calloc(1, sizeof(*job));
+    if (!job)
+    {
+        browser_debug_logf(app, "[css] image queue failed url=%s", url);
+        return;
+    }
+    job->kind = BROWSER_RESOURCE_IMAGE;
+    job->load_id = load_id;
+    job->url = browser_strdup(url);
+    if (!job->url)
+    {
+        free(job);
+        return;
+    }
+    if (img_queue->tail)
+    {
+        img_queue->tail->next = job;
+    }
+    else
+    {
+        img_queue->head = job;
+    }
+    img_queue->tail = job;
+    img_queue->count++;
+}
+
+static char *browser_css_rewrite_urls(browser_app_t *app,
+                                      uint64_t load_id,
+                                      const char *css,
+                                      size_t css_len,
+                                      const browser_url_t *base_url,
+                                      browser_resource_set_t *requested,
+                                      browser_resource_queue_t *img_queue,
+                                      size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!css || css_len == 0)
+    {
+        return NULL;
+    }
+
+    char *out = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    size_t last_emit = 0;
+    bool in_comment = false;
+    bool in_string = false;
+    char string_quote = '\0';
+
+    size_t i = 0;
+    while (i < css_len)
+    {
+        char c = css[i];
+        if (in_comment)
+        {
+            if (c == '*' && i + 1 < css_len && css[i + 1] == '/')
+            {
+                in_comment = false;
+                i += 2;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (in_string)
+        {
+            if (c == '\\')
+            {
+                i += (i + 1 < css_len) ? 2 : 1;
+                continue;
+            }
+            if (c == string_quote)
+            {
+                in_string = false;
+            }
+            i++;
+            continue;
+        }
+
+        if (c == '/' && i + 1 < css_len && css[i + 1] == '*')
+        {
+            in_comment = true;
+            i += 2;
+            continue;
+        }
+        if (c == '"' || c == '\'')
+        {
+            in_string = true;
+            string_quote = c;
+            i++;
+            continue;
+        }
+
+        if ((c == 'u' || c == 'U') && i + 2 < css_len && strncasecmp(css + i, "url", 3) == 0)
+        {
+            size_t func_start = i;
+            size_t j = i + 3;
+            while (j < css_len && isspace((unsigned char)css[j]))
+            {
+                j++;
+            }
+            if (j < css_len && css[j] == '(')
+            {
+                size_t k = j + 1;
+                while (k < css_len && isspace((unsigned char)css[k]))
+                {
+                    k++;
+                }
+                char quote = '\0';
+                if (k < css_len && (css[k] == '"' || css[k] == '\''))
+                {
+                    quote = css[k++];
+                }
+                size_t url_start = k;
+                size_t url_end = k;
+                size_t func_end = 0;
+                bool ok = false;
+
+                if (quote)
+                {
+                    while (k < css_len)
+                    {
+                        char ch = css[k];
+                        if (ch == '\\' && k + 1 < css_len)
+                        {
+                            k += 2;
+                            continue;
+                        }
+                        if (ch == quote)
+                        {
+                            url_end = k;
+                            k++;
+                            ok = true;
+                            break;
+                        }
+                        k++;
+                    }
+                    if (!ok)
+                    {
+                        i = j + 1;
+                        continue;
+                    }
+                    while (k < css_len && isspace((unsigned char)css[k]))
+                    {
+                        k++;
+                    }
+                    if (k >= css_len || css[k] != ')')
+                    {
+                        i = j + 1;
+                        continue;
+                    }
+                    func_end = k + 1;
+                }
+                else
+                {
+                    while (k < css_len && css[k] != ')')
+                    {
+                        k++;
+                    }
+                    if (k >= css_len)
+                    {
+                        i = j + 1;
+                        continue;
+                    }
+                    url_end = k;
+                    while (url_end > url_start && isspace((unsigned char)css[url_end - 1]))
+                    {
+                        url_end--;
+                    }
+                    func_end = k + 1;
+                }
+
+                size_t url_len = url_end > url_start ? (size_t)(url_end - url_start) : 0;
+
+                if (!browser_buf_append(&out, &len, &cap,
+                                        (const uint8_t *)css + last_emit,
+                                        func_start - last_emit))
+                {
+                    free(out);
+                    return NULL;
+                }
+
+                char *resolved = NULL;
+                if (url_len > 0)
+                {
+                    if (base_url)
+                    {
+                        resolved = browser_build_absolute_url(base_url, css + url_start, url_len);
+                    }
+                    if (!resolved)
+                    {
+                        resolved = browser_strdup_len(css + url_start, url_len);
+                    }
+                }
+
+                if (resolved)
+                {
+                    browser_css_queue_image(app, requested, img_queue, load_id, resolved);
+                    if (!browser_buf_append(&out, &len, &cap, (const uint8_t *)"url(\"", 5) ||
+                        !browser_buf_append(&out, &len, &cap, (const uint8_t *)resolved, strlen(resolved)) ||
+                        !browser_buf_append(&out, &len, &cap, (const uint8_t *)"\")", 2))
+                    {
+                        free(resolved);
+                        free(out);
+                        return NULL;
+                    }
+                }
+                else
+                {
+                    if (!browser_buf_append(&out, &len, &cap,
+                                            (const uint8_t *)css + func_start,
+                                            func_end - func_start))
+                    {
+                        free(out);
+                        return NULL;
+                    }
+                }
+
+                free(resolved);
+                last_emit = func_end;
+                i = func_end;
+                continue;
+            }
+        }
+        i++;
+    }
+
+    if (last_emit < css_len)
+    {
+        if (!browser_buf_append(&out, &len, &cap,
+                                (const uint8_t *)css + last_emit,
+                                css_len - last_emit))
+        {
+            free(out);
+            return NULL;
+        }
+    }
+
+    if (out_len)
+    {
+        *out_len = len;
+    }
+    return out;
+}
+
 static bool browser_span_equals_ci(const char *a, size_t a_len, const char *b)
 {
     if (!a || !b)
@@ -1922,6 +2280,8 @@ static void browser_resource_queue_process_images_inline(browser_app_t *app,
 static char *browser_resource_queue_fetch_css(browser_app_t *app,
                                               uint64_t load_id,
                                               browser_resource_queue_t *queue,
+                                              browser_resource_set_t *requested,
+                                              browser_resource_queue_t *img_queue,
                                               size_t *out_len)
 {
     if (out_len)
@@ -1985,12 +2345,24 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
             size_t log_bytes = decoded_len;
             if (decoded && decoded_len > 0)
             {
-                if (!browser_buf_append(&css_buf, &css_len, &css_cap, (const uint8_t *)decoded, decoded_len) ||
+                size_t rewritten_len = 0;
+                char *rewritten = browser_css_rewrite_urls(app,
+                                                           load_id,
+                                                           decoded,
+                                                           decoded_len,
+                                                           NULL,
+                                                           requested,
+                                                           img_queue,
+                                                           &rewritten_len);
+                const uint8_t *append_ptr = (const uint8_t *)(rewritten ? rewritten : decoded);
+                size_t append_len = rewritten ? rewritten_len : decoded_len;
+                if (!browser_buf_append(&css_buf, &css_len, &css_cap, append_ptr, append_len) ||
                     !browser_buf_append(&css_buf, &css_len, &css_cap, (const uint8_t *)"\n", 1))
                 {
                     log_status = "fail";
                     log_detail = "css append failed";
                 }
+                free(rewritten);
             }
             uint64_t elapsed_ms = sys_time_millis() - start_ms;
             browser_resource_log_done(app, load_id, BROWSER_RESOURCE_CSS, abs, log_status, elapsed_ms, log_bytes, log_detail);
@@ -2037,7 +2409,19 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
         {
             if (res_body && strncmp(res_body, "Error:\n", 6) != 0)
             {
-                if (browser_buf_append(&css_buf, &css_len, &css_cap, (const uint8_t *)res_body, res_len))
+                const browser_url_t *css_base = res_final.host ? &res_final : &res_url;
+                size_t rewritten_len = 0;
+                char *rewritten = browser_css_rewrite_urls(app,
+                                                           load_id,
+                                                           res_body,
+                                                           res_len,
+                                                           css_base,
+                                                           requested,
+                                                           img_queue,
+                                                           &rewritten_len);
+                const uint8_t *append_ptr = (const uint8_t *)(rewritten ? rewritten : res_body);
+                size_t append_len = rewritten ? rewritten_len : res_len;
+                if (browser_buf_append(&css_buf, &css_len, &css_cap, append_ptr, append_len))
                 {
                     (void)browser_buf_append(&css_buf, &css_len, &css_cap, (const uint8_t *)"\n", 1);
                     log_status = "ok";
@@ -2049,6 +2433,7 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
                     log_status = "fail";
                     log_detail = "css append failed";
                 }
+                free(rewritten);
             }
         }
 
@@ -2264,8 +2649,9 @@ static void browser_load_thread(void *arg)
     serial_printf("[load] html id=%llu bytes=%u",
                   (unsigned long long)load_id,
                   (unsigned)html_len);
+    bool js_enabled = browser_js_enabled(app);
     html_parse_error_t parse_err = {0};
-    html_document_t *doc = html_parse(html, &parse_err);
+    html_document_t *doc = html_parse_with_options(html, &parse_err, js_enabled);
     if (!doc)
     {
         const char *detail = parse_err.message ? parse_err.message : "parse failed";
@@ -2284,7 +2670,6 @@ static void browser_load_thread(void *arg)
     browser_resource_queue_t img_queue = {0};
     browser_resource_queue_t script_queue = {0};
     bool use_css = true;
-    bool js_enabled = browser_js_enabled(app);
     if (doc->root)
     {
         if (use_css)
@@ -2399,7 +2784,12 @@ static void browser_load_thread(void *arg)
     if (wait_for_css)
     {
         size_t css_len = 0;
-        char *css_buf = browser_resource_queue_fetch_css(app, load_id, &css_queue, &css_len);
+        char *css_buf = browser_resource_queue_fetch_css(app,
+                                                         load_id,
+                                                         &css_queue,
+                                                         &job->requested,
+                                                         &img_queue,
+                                                         &css_len);
         if (browser_load_is_active(app, load_id))
         {
             atk_html_view_set_wait_for_css(app->viewer, false);

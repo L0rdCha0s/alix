@@ -12,7 +12,10 @@
 
 #include "atk/html_view/html_view_internal.h"
 #include "atk/html_view/render/render_internal.h"
+#include "atk/util/gif.h"
+#include "atk/util/jpeg.h"
 #include "atk/util/png.h"
+#include "atk/util/svg.h"
 #include "libc.h"
 #include "video.h"
 #include "web/css.h"
@@ -47,7 +50,12 @@ static FILE *g_serial_log = NULL;
 static bool g_html_trace_enabled = false;
 static uint32_t g_html_trace_rule_stride = 0;
 static uint32_t g_html_trace_node_stride = 0;
+static bool g_dump_dom = false;
+static const char *g_dump_dom_class = NULL;
+static const char *g_dump_dom_id = NULL;
 static bool ensure_test_out_dir(void);
+static char *read_file(const char *path, size_t *out_len);
+static char *host_resolve_local_url(const char *base_dir, const char *href);
 
 static bool surface_init(int width, int height, video_color_t bg)
 {
@@ -1263,6 +1271,162 @@ static void html_view_dump_tree(const html_node_t *root,
     free(stack);
 }
 
+static bool html_view_dump_class_match(const char *classes, const char *needle)
+{
+    if (!classes || !needle || needle[0] == '\0')
+    {
+        return false;
+    }
+    size_t needle_len = strlen(needle);
+    const char *p = classes;
+    while (*p)
+    {
+        while (*p && isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p))
+        {
+            ++p;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == needle_len && strncmp(start, needle, len) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool html_view_dump_node_matches_filter(const html_node_t *node)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT)
+    {
+        return false;
+    }
+    if (g_dump_dom_id)
+    {
+        const char *node_id = html_attr_get(node, "id");
+        if (node_id && strcmp(node_id, g_dump_dom_id) == 0)
+        {
+            return true;
+        }
+    }
+    if (g_dump_dom_class)
+    {
+        const char *classes = html_attr_get(node, "class");
+        if (html_view_dump_class_match(classes, g_dump_dom_class))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void host_html_view_dump_dom_filtered(const html_node_t *root,
+                                             const css_stylesheet_t *sheet,
+                                             atk_html_view_priv_t *priv,
+                                             const void *tag)
+{
+    if (!root)
+    {
+        serial_printf("[html_view] dump: no document");
+        return;
+    }
+
+    char filter_buf[256];
+    if (g_dump_dom_id)
+    {
+        (void)snprintf(filter_buf, sizeof(filter_buf), "id:%s", g_dump_dom_id);
+    }
+    else if (g_dump_dom_class)
+    {
+        (void)snprintf(filter_buf, sizeof(filter_buf), "class:%s", g_dump_dom_class);
+    }
+    else
+    {
+        (void)snprintf(filter_buf, sizeof(filter_buf), "none");
+    }
+    serial_printf("[html_view] dump begin view=%p filter=%s", tag, filter_buf);
+
+    size_t cap = 0;
+    const html_node_t *count_node = root;
+    while (count_node)
+    {
+        ++cap;
+        if (count_node->first_child)
+        {
+            count_node = count_node->first_child;
+            continue;
+        }
+        while (count_node && !count_node->next_sibling)
+        {
+            count_node = count_node->parent;
+        }
+        if (count_node)
+        {
+            count_node = count_node->next_sibling;
+        }
+    }
+    if (cap < 64)
+    {
+        cap = 64;
+    }
+    const html_node_t **stack = (const html_node_t **)calloc(cap, sizeof(*stack));
+    if (!stack)
+    {
+        return;
+    }
+
+    size_t count = 0;
+    stack[count++] = root;
+    size_t matches = 0;
+    while (count > 0)
+    {
+        const html_node_t *node = stack[--count];
+        if (!node)
+        {
+            continue;
+        }
+        if (html_view_dump_node_matches_filter(node))
+        {
+            matches++;
+            serial_printf("[html_view] dump match=%zu tag=%s", matches, node->name ? node->name : "?");
+            html_view_dump_tree(node, sheet, priv);
+            continue;
+        }
+        for (const html_node_t *child = node->last_child; child; child = child->prev_sibling)
+        {
+            if (count >= cap)
+            {
+                size_t new_cap = cap * 2u;
+                const html_node_t **next = (const html_node_t **)realloc(stack, new_cap * sizeof(*next));
+                if (!next)
+                {
+                    serial_printf("[html_view] dump filter=%s aborted=oom", filter_buf);
+                    free(stack);
+                    return;
+                }
+                stack = next;
+                cap = new_cap;
+            }
+            stack[count++] = child;
+        }
+    }
+
+    if (matches == 0)
+    {
+        serial_printf("[html_view] dump filter=%s matches=0", filter_buf);
+    }
+    serial_printf("[html_view] dump end view=%p matches=%zu", tag, matches);
+    free(stack);
+}
+
 static void host_html_view_dump_dom(const html_node_t *root,
                                     const css_stylesheet_t *sheet,
                                     atk_html_view_priv_t *priv,
@@ -1277,6 +1441,31 @@ static void host_html_view_dump_dom(const html_node_t *root,
     html_view_dump_tree(root, sheet, priv);
     html_view_dump_dom_summary(root);
     serial_printf("[html_view] dump end view=%p", tag);
+}
+
+static void host_html_view_dump_dom_optional(const html_node_t *root,
+                                             const css_stylesheet_t *sheet,
+                                             atk_html_view_priv_t *priv,
+                                             const void *tag)
+{
+    if (!g_dump_dom)
+    {
+        return;
+    }
+    FILE *saved_log = g_serial_log;
+    if (!saved_log)
+    {
+        g_serial_log = stdout;
+    }
+    if (g_dump_dom_class || g_dump_dom_id)
+    {
+        host_html_view_dump_dom_filtered(root, sheet, priv, tag);
+    }
+    else
+    {
+        host_html_view_dump_dom(root, sheet, priv, tag);
+    }
+    g_serial_log = saved_log;
 }
 
 static void host_debug_dump_op_ranges(const html_view_render_cache_t *cache)
@@ -1353,6 +1542,40 @@ static void host_debug_dump_rect_ops(const html_view_render_cache_t *cache, int 
                           op->h,
                           op->fixed ? 1 : 0,
                           (int)op->z_index);
+        }
+    }
+}
+
+static void host_debug_dump_text_ops(const html_view_render_cache_t *cache, const char *needle)
+{
+    if (!cache || !needle || needle[0] == '\0')
+    {
+        return;
+    }
+    size_t needle_len = strlen(needle);
+    for (size_t i = 0; i < cache->op_count; ++i)
+    {
+        const html_view_op_t *op = &cache->ops[i];
+        if (op->kind != HTML_VIEW_OP_TEXT || !op->text || op->text_len == 0)
+        {
+            continue;
+        }
+        const char *text = op->text;
+        size_t text_len = op->text_len;
+        for (size_t j = 0; j + needle_len <= text_len; ++j)
+        {
+            if (memcmp(text + j, needle, needle_len) == 0)
+            {
+                serial_printf("[html_view][ops] text match=\"%s\" x=%d y=%d w=%d h=%d fixed=%d z=%d",
+                              needle,
+                              op->x,
+                              op->y,
+                              op->w,
+                              op->h,
+                              op->fixed ? 1 : 0,
+                              (int)op->z_index);
+                break;
+            }
         }
     }
 }
@@ -1983,7 +2206,10 @@ static bool host_data_url_parse_base64(const char *url,
                                        const char **out_payload,
                                        size_t *out_payload_len,
                                        bool *out_has_type,
-                                       bool *out_is_png)
+                                       bool *out_is_png,
+                                       bool *out_is_svg,
+                                       bool *out_is_jpeg,
+                                       bool *out_is_gif)
 {
     if (!url || strncasecmp(url, "data:", 5) != 0)
     {
@@ -2007,6 +2233,9 @@ static bool host_data_url_parse_base64(const char *url,
     bool base64 = false;
     bool has_type = false;
     bool is_png = false;
+    bool is_svg = false;
+    bool is_jpeg = false;
+    bool is_gif = false;
 
     const char *cursor = meta;
     const char *semi = host_find_char(cursor, meta_len, ';');
@@ -2017,6 +2246,26 @@ static bool host_data_url_parse_base64(const char *url,
         if (token_len == 9 && strncasecmp(cursor, "image/png", 9) == 0)
         {
             is_png = true;
+        }
+        else if (token_len == 13 && strncasecmp(cursor, "image/svg+xml", 13) == 0)
+        {
+            is_svg = true;
+        }
+        else if (token_len == 9 && strncasecmp(cursor, "image/svg", 9) == 0)
+        {
+            is_svg = true;
+        }
+        else if (token_len == 10 && strncasecmp(cursor, "image/jpeg", 10) == 0)
+        {
+            is_jpeg = true;
+        }
+        else if (token_len == 9 && strncasecmp(cursor, "image/jpg", 9) == 0)
+        {
+            is_jpeg = true;
+        }
+        else if (token_len == 9 && strncasecmp(cursor, "image/gif", 9) == 0)
+        {
+            is_gif = true;
         }
     }
 
@@ -2069,6 +2318,18 @@ static bool host_data_url_parse_base64(const char *url,
     if (out_is_png)
     {
         *out_is_png = is_png;
+    }
+    if (out_is_svg)
+    {
+        *out_is_svg = is_svg;
+    }
+    if (out_is_jpeg)
+    {
+        *out_is_jpeg = is_jpeg;
+    }
+    if (out_is_gif)
+    {
+        *out_is_gif = is_gif;
     }
     return true;
 }
@@ -2206,6 +2467,123 @@ static bool host_is_png_bytes(const uint8_t *data, size_t len)
     return memcmp(data, signature, sizeof(signature)) == 0;
 }
 
+static bool host_is_gif_bytes(const uint8_t *data, size_t len)
+{
+    if (!data || len < 6)
+    {
+        return false;
+    }
+    return (memcmp(data, "GIF87a", 6) == 0 || memcmp(data, "GIF89a", 6) == 0);
+}
+
+static bool host_is_jpeg_bytes(const uint8_t *data, size_t len)
+{
+    if (!data || len < 3)
+    {
+        return false;
+    }
+    return data[0] == 0xFFu && data[1] == 0xD8u && data[2] == 0xFFu;
+}
+
+static bool host_is_svg_bytes(const uint8_t *data, size_t len)
+{
+    if (!data || len < 4)
+    {
+        return false;
+    }
+    size_t scan = len < 512 ? len : 512;
+    for (size_t i = 0; i + 3 < scan; ++i)
+    {
+        if (data[i] != '<')
+        {
+            continue;
+        }
+        size_t j = i + 1;
+        while (j < scan && isspace((unsigned char)data[j]))
+        {
+            j++;
+        }
+        if (j + 2 < scan &&
+            (data[j] == 's' || data[j] == 'S') &&
+            (data[j + 1] == 'v' || data[j + 1] == 'V') &&
+            (data[j + 2] == 'g' || data[j + 2] == 'G'))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+typedef enum
+{
+    HOST_IMAGE_UNKNOWN = 0,
+    HOST_IMAGE_PNG,
+    HOST_IMAGE_GIF,
+    HOST_IMAGE_JPEG,
+    HOST_IMAGE_SVG
+} host_image_type_t;
+
+static host_image_type_t host_detect_image_type(const uint8_t *data, size_t len)
+{
+    if (host_is_gif_bytes(data, len))
+    {
+        return HOST_IMAGE_GIF;
+    }
+    if (host_is_png_bytes(data, len))
+    {
+        return HOST_IMAGE_PNG;
+    }
+    if (host_is_jpeg_bytes(data, len))
+    {
+        return HOST_IMAGE_JPEG;
+    }
+    if (host_is_svg_bytes(data, len))
+    {
+        return HOST_IMAGE_SVG;
+    }
+    return HOST_IMAGE_UNKNOWN;
+}
+
+static bool host_decode_image_bytes(const uint8_t *data,
+                                    size_t len,
+                                    video_color_t **out_pixels,
+                                    int *out_w,
+                                    int *out_h,
+                                    int *out_stride_bytes,
+                                    host_image_type_t *out_type)
+{
+    if (!data || len == 0 || !out_pixels || !out_w || !out_h || !out_stride_bytes)
+    {
+        return false;
+    }
+
+    host_image_type_t type = host_detect_image_type(data, len);
+    if (out_type)
+    {
+        *out_type = type;
+    }
+
+    int rc = -1;
+    switch (type)
+    {
+        case HOST_IMAGE_GIF:
+            rc = gif_decode_rgba32(data, len, out_pixels, out_w, out_h, out_stride_bytes);
+            break;
+        case HOST_IMAGE_PNG:
+            rc = png_decode_rgba32(data, len, out_pixels, out_w, out_h, out_stride_bytes);
+            break;
+        case HOST_IMAGE_JPEG:
+            rc = jpeg_decode_rgba32(data, len, out_pixels, out_w, out_h, out_stride_bytes);
+            break;
+        case HOST_IMAGE_SVG:
+            rc = svg_decode_rgba32(data, len, out_pixels, out_w, out_h, out_stride_bytes);
+            break;
+        default:
+            return false;
+    }
+    return rc == 0;
+}
+
 html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *src)
 {
     if (!priv || !src)
@@ -2222,61 +2600,14 @@ html_view_image_t *html_view_image_find(atk_html_view_priv_t *priv, const char *
     return NULL;
 }
 
-bool html_view_try_load_data_image_locked(atk_html_view_priv_t *priv, const char *src)
+static bool host_add_image_rgba(atk_html_view_priv_t *priv,
+                                const char *src,
+                                video_color_t *pixels,
+                                int w,
+                                int h,
+                                int stride_bytes)
 {
-    if (!priv || !src)
-    {
-        return false;
-    }
-    if (strncasecmp(src, "data:", 5) != 0)
-    {
-        return false;
-    }
-    if (html_view_image_find(priv, src))
-    {
-        return true;
-    }
-
-    const char *payload = NULL;
-    size_t payload_len = 0;
-    bool has_type = false;
-    bool is_png = false;
-    if (!host_data_url_parse_base64(src, &payload, &payload_len, &has_type, &is_png))
-    {
-        return false;
-    }
-    if (has_type && !is_png)
-    {
-        return false;
-    }
-
-    size_t decoded_len = 0;
-    char *decoded_payload = host_decode_percent(payload, payload_len, &decoded_len);
-    if (!decoded_payload)
-    {
-        return false;
-    }
-
-    size_t png_len = 0;
-    uint8_t *png_bytes = host_decode_base64(decoded_payload, decoded_len, &png_len);
-    free(decoded_payload);
-    if (!png_bytes)
-    {
-        return false;
-    }
-    if (!host_is_png_bytes(png_bytes, png_len))
-    {
-        free(png_bytes);
-        return false;
-    }
-
-    video_color_t *pixels = NULL;
-    int w = 0;
-    int h = 0;
-    int stride_bytes = 0;
-    int rc = png_decode_rgba32(png_bytes, png_len, &pixels, &w, &h, &stride_bytes);
-    free(png_bytes);
-    if (rc != 0 || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
+    if (!priv || !src || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
     {
         free(pixels);
         return false;
@@ -2302,6 +2633,263 @@ bool html_view_try_load_data_image_locked(atk_html_view_priv_t *priv, const char
     img->next = priv->images;
     priv->images = img;
     return true;
+}
+
+bool html_view_try_load_data_image_locked(atk_html_view_priv_t *priv, const char *src)
+{
+    if (!priv || !src)
+    {
+        return false;
+    }
+    if (strncasecmp(src, "data:", 5) != 0)
+    {
+        return false;
+    }
+    if (html_view_image_find(priv, src))
+    {
+        return true;
+    }
+
+    const char *payload = NULL;
+    size_t payload_len = 0;
+    bool has_type = false;
+    bool is_png = false;
+    bool is_svg = false;
+    bool is_jpeg = false;
+    bool is_gif = false;
+    if (!host_data_url_parse_base64(src,
+                                    &payload,
+                                    &payload_len,
+                                    &has_type,
+                                    &is_png,
+                                    &is_svg,
+                                    &is_jpeg,
+                                    &is_gif))
+    {
+        return false;
+    }
+    if (has_type && !(is_png || is_svg || is_jpeg || is_gif))
+    {
+        return false;
+    }
+
+    size_t decoded_len = 0;
+    char *decoded_payload = host_decode_percent(payload, payload_len, &decoded_len);
+    if (!decoded_payload)
+    {
+        return false;
+    }
+
+    size_t png_len = 0;
+    uint8_t *png_bytes = host_decode_base64(decoded_payload, decoded_len, &png_len);
+    free(decoded_payload);
+    if (!png_bytes)
+    {
+        return false;
+    }
+    host_image_type_t detected = host_detect_image_type(png_bytes, png_len);
+    if (detected == HOST_IMAGE_UNKNOWN)
+    {
+        free(png_bytes);
+        return false;
+    }
+
+    if (has_type)
+    {
+        if ((is_png && detected != HOST_IMAGE_PNG) ||
+            (is_svg && detected != HOST_IMAGE_SVG) ||
+            (is_jpeg && detected != HOST_IMAGE_JPEG) ||
+            (is_gif && detected != HOST_IMAGE_GIF))
+        {
+            free(png_bytes);
+            return false;
+        }
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0;
+    int h = 0;
+    int stride_bytes = 0;
+    int rc = -1;
+    switch (detected)
+    {
+        case HOST_IMAGE_GIF:
+            rc = gif_decode_rgba32(png_bytes, png_len, &pixels, &w, &h, &stride_bytes);
+            break;
+        case HOST_IMAGE_PNG:
+            rc = png_decode_rgba32(png_bytes, png_len, &pixels, &w, &h, &stride_bytes);
+            break;
+        case HOST_IMAGE_JPEG:
+            rc = jpeg_decode_rgba32(png_bytes, png_len, &pixels, &w, &h, &stride_bytes);
+            break;
+        case HOST_IMAGE_SVG:
+            rc = svg_decode_rgba32(png_bytes, png_len, &pixels, &w, &h, &stride_bytes);
+            break;
+        default:
+            break;
+    }
+    free(png_bytes);
+    if (rc != 0 || !pixels || w <= 0 || h <= 0 || stride_bytes <= 0)
+    {
+        free(pixels);
+        return false;
+    }
+
+    return host_add_image_rgba(priv, src, pixels, w, h, stride_bytes);
+}
+
+static bool host_try_load_image(atk_html_view_priv_t *priv, const char *src, const char *base_dir)
+{
+    if (!priv || !src || src[0] == '\0')
+    {
+        return false;
+    }
+    if (html_view_image_find(priv, src))
+    {
+        return true;
+    }
+    if (strncasecmp(src, "data:", 5) == 0)
+    {
+        return html_view_try_load_data_image_locked(priv, src);
+    }
+
+    char *path = host_resolve_local_url(base_dir, src);
+    if (!path)
+    {
+        return false;
+    }
+
+    size_t file_len = 0;
+    char *file = read_file(path, &file_len);
+    free(path);
+    if (!file || file_len == 0)
+    {
+        free(file);
+        return false;
+    }
+
+    video_color_t *pixels = NULL;
+    int w = 0;
+    int h = 0;
+    int stride_bytes = 0;
+    host_image_type_t detected = HOST_IMAGE_UNKNOWN;
+    bool ok = host_decode_image_bytes((const uint8_t *)file,
+                                      file_len,
+                                      &pixels,
+                                      &w,
+                                      &h,
+                                      &stride_bytes,
+                                      &detected);
+    free(file);
+    if (!ok || detected == HOST_IMAGE_UNKNOWN)
+    {
+        free(pixels);
+        return false;
+    }
+
+    return host_add_image_rgba(priv, src, pixels, w, h, stride_bytes);
+}
+
+typedef struct
+{
+    const html_node_t *node;
+    const html_node_t *next_child;
+    const css_style_t *parent_style;
+    css_style_t style;
+    bool computed;
+    bool has_style;
+} host_style_stack_entry_t;
+
+static void host_prefetch_background_images(const html_node_t *root,
+                                            css_stylesheet_t *sheet,
+                                            const css_style_t *base_style,
+                                            atk_html_view_priv_t *priv,
+                                            const char *base_dir)
+{
+    if (!root || !sheet || !base_style || !priv)
+    {
+        return;
+    }
+
+    size_t cap = 64;
+    size_t sp = 0;
+    host_style_stack_entry_t *stack = (host_style_stack_entry_t *)calloc(cap, sizeof(*stack));
+    if (!stack)
+    {
+        return;
+    }
+
+    stack[sp++] = (host_style_stack_entry_t){
+        .node = root,
+        .next_child = root->first_child,
+        .parent_style = base_style,
+        .computed = false,
+        .has_style = false
+    };
+
+    while (sp > 0)
+    {
+        host_style_stack_entry_t *entry = &stack[sp - 1];
+
+        if (!entry->computed)
+        {
+            entry->computed = true;
+            if (entry->node->type == HTML_NODE_ELEMENT)
+            {
+                html_view_style_for_node(&entry->style, sheet, entry->parent_style, entry->node, priv);
+                entry->has_style = true;
+                if (entry->style.has_background_image && entry->style.background_image &&
+                    strcasecmp(entry->style.background_image, "none") != 0)
+                {
+                    (void)host_try_load_image(priv, entry->style.background_image, base_dir);
+                }
+            }
+        }
+
+        if (entry->next_child)
+        {
+            const html_node_t *child = entry->next_child;
+            entry->next_child = child->next_sibling;
+
+            if (sp == cap)
+            {
+                size_t new_cap = cap * 2u;
+                host_style_stack_entry_t *next =
+                    (host_style_stack_entry_t *)realloc(stack, new_cap * sizeof(*next));
+                if (!next)
+                {
+                    break;
+                }
+                stack = next;
+                cap = new_cap;
+            }
+
+            const css_style_t *parent_style = entry->has_style ? &entry->style : entry->parent_style;
+            stack[sp++] = (host_style_stack_entry_t){
+                .node = child,
+                .next_child = child->first_child,
+                .parent_style = parent_style,
+                .computed = false,
+                .has_style = false
+            };
+            continue;
+        }
+
+        if (entry->has_style)
+        {
+            css_style_release(&entry->style);
+        }
+        sp--;
+    }
+
+    for (size_t i = 0; i < sp; ++i)
+    {
+        if (stack[i].has_style)
+        {
+            css_style_release(&stack[i].style);
+        }
+    }
+    free(stack);
 }
 
 void html_view_images_clear(atk_html_view_priv_t *priv)
@@ -3099,9 +3687,15 @@ static void collect_style_text_with_base(const html_node_t *node,
                                          char **css,
                                          size_t *len,
                                          size_t *cap,
-                                         const char *base_dir)
+                                         const char *base_dir,
+                                         bool js_enabled)
 {
     if (!node)
+    {
+        return;
+    }
+    if (js_enabled && node->type == HTML_NODE_ELEMENT && node->name &&
+        strcmp(node->name, "noscript") == 0)
     {
         return;
     }
@@ -3162,7 +3756,7 @@ static void collect_style_text_with_base(const html_node_t *node,
 next_node:
     for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
     {
-        collect_style_text_with_base(child, css, len, cap, base_dir);
+        collect_style_text_with_base(child, css, len, cap, base_dir, js_enabled);
     }
 }
 
@@ -3171,9 +3765,15 @@ static void collect_style_text_with_url_base(const html_node_t *node,
                                              size_t *len,
                                              size_t *cap,
                                              const char *base_url,
-                                             size_t *fetch_count)
+                                             size_t *fetch_count,
+                                             bool js_enabled)
 {
     if (!node)
+    {
+        return;
+    }
+    if (js_enabled && node->type == HTML_NODE_ELEMENT && node->name &&
+        strcmp(node->name, "noscript") == 0)
     {
         return;
     }
@@ -3250,13 +3850,17 @@ static void collect_style_text_with_url_base(const html_node_t *node,
 next_node:
     for (const html_node_t *child = node->first_child; child; child = child->next_sibling)
     {
-        collect_style_text_with_url_base(child, css, len, cap, base_url, fetch_count);
+        collect_style_text_with_url_base(child, css, len, cap, base_url, fetch_count, js_enabled);
     }
 }
 
-static void collect_style_text(const html_node_t *node, char **css, size_t *len, size_t *cap)
+static void collect_style_text(const html_node_t *node,
+                               char **css,
+                               size_t *len,
+                               size_t *cap,
+                               bool js_enabled)
 {
-    collect_style_text_with_base(node, css, len, cap, NULL);
+    collect_style_text_with_base(node, css, len, cap, NULL, js_enabled);
 }
 
 void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
@@ -3281,7 +3885,7 @@ void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
     char *css = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
-    collect_style_text(priv->doc->root, &css, &css_len, &css_cap);
+    collect_style_text(priv->doc->root, &css, &css_len, &css_cap, priv->js_enabled);
 
     priv->sheet = css_parse(css ? css : "");
     free(css);
@@ -4332,7 +4936,7 @@ static bool test_acid2_render_snapshot(void)
     char *css = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
-    collect_style_text(doc->root, &css, &css_len, &css_cap);
+    collect_style_text(doc->root, &css, &css_len, &css_cap, true);
     css_stylesheet_t *sheet = css_parse(css ? css : "");
     if (!sheet)
     {
@@ -4374,8 +4978,8 @@ static bool test_acid2_render_snapshot(void)
 
     const int viewport_x = 0;
     const int viewport_y = 0;
-    const int viewport_w = 1000;
-    const int viewport_h = 800;
+    const int viewport_w = 1920;
+    const int viewport_h = 1080;
 
     video_color_t default_page_bg = video_make_color(0xFF, 0xFF, 0xFF);
     video_color_t default_text = video_make_color(0x00, 0x00, 0x00);
@@ -4693,7 +5297,7 @@ static bool test_acid2_render_snapshot(void)
     }
     html_view_align_current_line(&record);
     html_view_style_stack_destroy(&record);
-    host_html_view_dump_dom(doc->root, sheet, &priv, doc);
+    host_html_view_dump_dom_optional(doc->root, sheet, &priv, doc);
     host_debug_dump_op_ranges(&priv.render_cache);
     host_debug_dump_rect_ops(&priv.render_cache, 2680, 2900);
     host_debug_dump_rect_ops(&priv.render_cache, 3000, 3120);
@@ -4835,6 +5439,7 @@ static size_t html_view_count_rules(const css_stylesheet_t *sheet)
 
 static bool render_doc_case(const char *case_name,
                             const char *png_tag,
+                            const char *asset_base_dir,
                             html_document_t *doc,
                             css_stylesheet_t *sheet,
                             bool draw,
@@ -4891,8 +5496,8 @@ static bool render_doc_case(const char *case_name,
 
     const int viewport_x = 0;
     const int viewport_y = 0;
-    const int viewport_w = 1000;
-    const int viewport_h = 800;
+    const int viewport_w = 1920;
+    const int viewport_h = 1080;
 
     video_color_t default_page_bg = video_make_color(0xFF, 0xFF, 0xFF);
     video_color_t default_text = video_make_color(0x00, 0x00, 0x00);
@@ -4909,6 +5514,8 @@ static bool render_doc_case(const char *case_name,
     };
     base_style.has_line_height = true;
     base_style.line_height_milli = 1000;
+
+    host_prefetch_background_images(doc->root, sheet, &base_style, priv, asset_base_dir);
 
     css_style_t html_style = {0};
     if (html_node)
@@ -5218,6 +5825,14 @@ static bool render_doc_case(const char *case_name,
     }
     html_view_align_current_line(&record);
     html_view_style_stack_destroy(&record);
+    host_html_view_dump_dom_optional(doc->root, sheet, priv, doc);
+    if (g_dump_dom && strcmp(case_name, "stackoverflow") == 0)
+    {
+        host_debug_dump_text_ops(&priv->render_cache, "Stack Overflow");
+        host_debug_dump_text_ops(&priv->render_cache, "About");
+        host_debug_dump_text_ops(&priv->render_cache, "Products");
+        host_debug_dump_text_ops(&priv->render_cache, "For Teams");
+    }
     double record_end = host_now_ms();
 #ifdef HTML_VIEW_HOST_TRACE
     if (g_html_trace_enabled)
@@ -5321,7 +5936,7 @@ static bool test_hacker_news_render(void)
     char *css = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
-    collect_style_text_with_base(doc->root, &css, &css_len, &css_cap, "tests/yctest");
+    collect_style_text_with_base(doc->root, &css, &css_len, &css_cap, "tests/yctest", true);
     css_stylesheet_t *sheet = css_parse(css ? css : "");
     if (!sheet)
     {
@@ -5337,6 +5952,7 @@ static bool test_hacker_news_render(void)
     html_view_render_stats_t stats = {0};
     bool ok = render_doc_case("hacker_news",
                               "hacker-news",
+                              "tests/yctest",
                               doc,
                               sheet,
                               true,
@@ -5395,7 +6011,13 @@ static bool test_hacker_news_live_render(void)
     size_t css_cap = 0;
     size_t css_fetches = 0;
     double css_collect_start = host_now_ms();
-    collect_style_text_with_url_base(doc->root, &css, &css_len, &css_cap, url, &css_fetches);
+    collect_style_text_with_url_base(doc->root,
+                                     &css,
+                                     &css_len,
+                                     &css_cap,
+                                     url,
+                                     &css_fetches,
+                                     true);
     double css_collect_end = host_now_ms();
 
     double css_parse_start = host_now_ms();
@@ -5422,6 +6044,7 @@ static bool test_hacker_news_live_render(void)
     double draw_ms = 0.0;
     bool ok = render_doc_case("hacker_news_live",
                               "hacker-news-live",
+                              NULL,
                               doc,
                               sheet,
                               draw,
@@ -5538,7 +6161,12 @@ static bool test_stackoverflow_render(void)
     char *css = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
-    collect_style_text_with_base(doc->root, &css, &css_len, &css_cap, "tests/stackoverflow-test");
+    collect_style_text_with_base(doc->root,
+                                 &css,
+                                 &css_len,
+                                 &css_cap,
+                                 "tests/stackoverflow-test",
+                                 true);
 
     css_stylesheet_t *sheet = css_parse(css ? css : "");
     if (!sheet)
@@ -5554,6 +6182,7 @@ static bool test_stackoverflow_render(void)
     html_view_render_stats_t stats = {0};
     bool ok = render_doc_case("stackoverflow",
                               "stackoverflow",
+                              "tests/stackoverflow-test",
                               doc,
                               sheet,
                               true,
@@ -5562,7 +6191,7 @@ static bool test_stackoverflow_render(void)
                               NULL,
                               &priv);
 
-    host_html_view_dump_dom(doc->root, sheet, &priv, doc);
+    host_html_view_dump_dom_optional(doc->root, sheet, &priv, doc);
     html_view_images_clear(&priv);
     html_view_inline_style_cache_clear(&priv);
     html_view_measure_cache_clear(&priv);
@@ -5626,12 +6255,92 @@ typedef struct
     bool (*fn)(void);
 } hv_case_t;
 
-int main(void)
+static bool host_set_dump_dom_filter(const char *value)
+{
+    if (!value || value[0] == '\0')
+    {
+        return false;
+    }
+    if (g_dump_dom_class || g_dump_dom_id)
+    {
+        return false;
+    }
+    const char *class_value = NULL;
+    const char *id_value = NULL;
+    if (strncmp(value, "class:", 6) == 0)
+    {
+        class_value = value + 6;
+    }
+    else if (strncmp(value, "id:", 3) == 0)
+    {
+        id_value = value + 3;
+    }
+    else if (value[0] == '.')
+    {
+        class_value = value + 1;
+    }
+    else if (value[0] == '#')
+    {
+        id_value = value + 1;
+    }
+    else
+    {
+        class_value = value;
+    }
+    if ((class_value && class_value[0] == '\0') || (id_value && id_value[0] == '\0'))
+    {
+        return false;
+    }
+    g_dump_dom_class = class_value;
+    g_dump_dom_id = id_value;
+    return true;
+}
+
+static void host_usage(const char *exe)
+{
+    const char *name = exe && exe[0] != '\0' ? exe : "html_view_host_test";
+    printf("usage: %s [--dump-dom[=FILTER]]\n", name);
+    printf("  FILTER: .class  #id  class:NAME  id:NAME\n");
+}
+
+int main(int argc, char **argv)
 {
 #ifdef HTML_VIEW_HOST_TRACE
     html_view_host_trace_init();
 #endif
-    css_media_env_set(1000, 800, CSS_MEDIA_COLOR_SCHEME_LIGHT);
+    for (int i = 1; i < argc; ++i)
+    {
+        const char *arg = argv[i];
+        if (!arg || arg[0] == '\0')
+        {
+            continue;
+        }
+        if (strcmp(arg, "--dump-dom") == 0)
+        {
+            g_dump_dom = true;
+            continue;
+        }
+        if (strncmp(arg, "--dump-dom=", 11) == 0)
+        {
+            g_dump_dom = true;
+            if (!host_set_dump_dom_filter(arg + 11))
+            {
+                printf("html_view_host_test: invalid --dump-dom filter %s\n", arg + 11);
+                host_usage(argv[0]);
+                return 2;
+            }
+            continue;
+        }
+        if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0)
+        {
+            host_usage(argv[0]);
+            return 0;
+        }
+        printf("html_view_host_test: unknown option %s\n", arg);
+        host_usage(argv[0]);
+        return 2;
+    }
+    css_media_env_set(1920, 1080, CSS_MEDIA_COLOR_SCHEME_LIGHT);
 
     hv_case_t cases[] = {
         { "table-cell-align-left", test_table_cell_alignment },

@@ -67,6 +67,9 @@ typedef struct html_parse_error
     const char *message;
 } html_parse_error_t;
 
+html_document_t *html_parse_with_options(const char *input,
+                                         html_parse_error_t *error_out,
+                                         bool scripting_enabled);
 html_document_t *html_parse(const char *input, html_parse_error_t *error_out);
 void html_document_destroy(html_document_t *doc);
 

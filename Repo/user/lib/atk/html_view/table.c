@@ -907,6 +907,23 @@ void html_view_render_float_box(html_view_ctx_t *ctx,
     int outer_w = border_box_w + margin_left + margin_right;
     int outer_h = border_box_h + margin_top + margin_bottom;
     bool measuring = (!ctx->draw && !ctx->record);
+    if (ctx->record && outer_h > 200)
+    {
+        static int logged_float_count = 0;
+        if (logged_float_count < 8)
+        {
+            const char *id = html_attr_get(node, "id");
+            const char *cls = html_attr_get(node, "class");
+            serial_printf("[html_view][debug] float tag=%s id=%s class=%s y=%d h=%d side=%d",
+                          node->name ? node->name : "(null)",
+                          id ? id : "(none)",
+                          cls ? cls : "(none)",
+                          float_start_y,
+                          outer_h,
+                          (int)side);
+            logged_float_count++;
+        }
+    }
 
     if (ctx->record && html_view_node_in_smile(node))
     {

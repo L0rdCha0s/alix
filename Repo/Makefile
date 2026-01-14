@@ -524,7 +524,10 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
                        src/kernel/ttf.c \
                        user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
                        user/lib/web/url.c \
+                       src/atk/util/gif.c \
+                       src/atk/util/jpeg.c \
                        src/atk/util/png.c \
+                       src/atk/util/svg.c \
                        src/atk/atk_font.c \
                        user/lib/atk/html_view/font.c \
                        user/lib/atk/html_view/style.c \
@@ -538,14 +541,17 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
                        user/lib/atk/html_view/render/grid.c \
                        user/lib/atk/html_view/render/forms.c
 	@mkdir -p $(HOST_TEST_DIR)
-	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD -DGIF_HOST_BUILD -DSVG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
 	    tests/html_view_host_test.c \
 	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
 	    src/kernel/utf8.c \
 	    src/kernel/ttf.c \
 	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
 	    user/lib/web/url.c \
+	    src/atk/util/gif.c \
+	    src/atk/util/jpeg.c \
 	    src/atk/util/png.c \
+	    src/atk/util/svg.c \
 	    src/atk/atk_font.c \
 	    user/lib/atk/html_view/font.c \
 	    user/lib/atk/html_view/style.c \

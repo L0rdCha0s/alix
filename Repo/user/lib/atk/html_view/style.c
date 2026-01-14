@@ -10722,6 +10722,30 @@ void html_view_style_for_node(css_style_t *out,
     (void)css_style_apply_custom_props(out, &out->custom_props);
     css_style_resolve_deferred(out);
 
+    if (node && node->type == HTML_NODE_ELEMENT && node->name)
+    {
+        bool hide = false;
+        if (strcmp(node->name, "head") == 0 ||
+            strcmp(node->name, "meta") == 0 ||
+            strcmp(node->name, "link") == 0 ||
+            strcmp(node->name, "title") == 0 ||
+            strcmp(node->name, "script") == 0 ||
+            strcmp(node->name, "style") == 0 ||
+            strcmp(node->name, "base") == 0)
+        {
+            hide = true;
+        }
+        else if (strcmp(node->name, "noscript") == 0)
+        {
+            hide = (!priv || priv->js_enabled);
+        }
+        if (hide)
+        {
+            out->has_display = true;
+            out->display = CSS_DISPLAY_NONE;
+        }
+    }
+
     if (priv && node && node->type == HTML_NODE_ELEMENT)
     {
         (void)html_view_style_cache_store(priv, node, HTML_VIEW_PSEUDO_NONE, out);

@@ -925,7 +925,11 @@ bool html_view_try_load_data_image_locked(atk_html_view_priv_t *priv, const char
     return true;
 }
 
-static void html_view_collect_style_text(const html_node_t *node, char **buf, size_t *len, size_t *cap)
+static void html_view_collect_style_text(const html_node_t *node,
+                                         char **buf,
+                                         size_t *len,
+                                         size_t *cap,
+                                         bool js_enabled)
 {
     if (!node || !buf || !len || !cap)
     {
@@ -940,7 +944,13 @@ static void html_view_collect_style_text(const html_node_t *node, char **buf, si
     while (cur)
     {
         bool descend = cur->first_child != NULL;
-        if (cur->type == HTML_NODE_ELEMENT && cur->name && strcmp(cur->name, "style") == 0)
+        bool skip_children = js_enabled && cur->type == HTML_NODE_ELEMENT && cur->name &&
+                             strcmp(cur->name, "noscript") == 0;
+        if (skip_children)
+        {
+            descend = false;
+        }
+        else if (cur->type == HTML_NODE_ELEMENT && cur->name && strcmp(cur->name, "style") == 0)
         {
             for (const html_node_t *txt = cur->first_child; txt; txt = txt->next_sibling)
             {
@@ -1042,7 +1052,11 @@ bool html_view_build_stylesheet_text_locked(atk_html_view_priv_t *priv,
     char *css_text = NULL;
     size_t css_len = 0;
     size_t css_cap = 0;
-    html_view_collect_style_text(priv->doc->root, &css_text, &css_len, &css_cap);
+    html_view_collect_style_text(priv->doc->root,
+                                 &css_text,
+                                 &css_len,
+                                 &css_cap,
+                                 priv->js_enabled);
     size_t inline_len = css_len;
 
     if (priv->external_css && priv->external_css_len > 0)

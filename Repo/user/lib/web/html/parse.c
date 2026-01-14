@@ -484,7 +484,8 @@ static bool html_parse_start_tag(html_document_t *doc,
                                  const char **p,
                                  html_node_stack_t *stack,
                                  html_parse_error_t *error_out,
-                                 const char *input_base)
+                                 const char *input_base,
+                                 bool scripting_enabled)
 {
     if (!doc || !p || !*p || !stack)
     {
@@ -554,9 +555,22 @@ static bool html_parse_start_tag(html_document_t *doc,
         html_node_append_child(parent, node);
     }
 
-    if (strcmp(tag, "style") == 0 || strcmp(tag, "script") == 0)
+    const char *close_pat = NULL;
+    if (strcmp(tag, "style") == 0)
     {
-        const char *close_pat = (strcmp(tag, "style") == 0) ? "</style" : "</script";
+        close_pat = "</style";
+    }
+    else if (strcmp(tag, "script") == 0)
+    {
+        close_pat = "</script";
+    }
+    else if (scripting_enabled && strcmp(tag, "noscript") == 0)
+    {
+        close_pat = "</noscript";
+    }
+
+    if (close_pat)
+    {
         const char *end = html_strcasestr_simple(s, close_pat);
         const char *content_end = end ? end : (s + strlen(s));
         if (content_end > s)
@@ -578,7 +592,7 @@ static bool html_parse_start_tag(html_document_t *doc,
             s = content_end;
         }
 
-        /* style/script should not remain open if we consumed until close tag. */
+        /* rawtext tags should not remain open if we consumed until close tag. */
         if (needs_push && html_stack_top(stack) == node)
         {
             (void)html_stack_pop(stack);
@@ -656,7 +670,9 @@ static void html_append_text_node(html_document_t *doc,
     html_node_append_child(parent, text);
 }
 
-html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
+html_document_t *html_parse_with_options(const char *input,
+                                         html_parse_error_t *error_out,
+                                         bool scripting_enabled)
 {
     html_parse_error_t tmp_err = {0};
     if (!error_out)
@@ -734,7 +750,7 @@ html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
         }
         if (p[0] == '<')
         {
-            if (html_parse_start_tag(doc, &p, &stack, error_out, input))
+            if (html_parse_start_tag(doc, &p, &stack, error_out, input, scripting_enabled))
             {
                 continue;
             }
@@ -753,4 +769,9 @@ html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
 
     html_stack_destroy(&stack);
     return doc;
+}
+
+html_document_t *html_parse(const char *input, html_parse_error_t *error_out)
+{
+    return html_parse_with_options(input, error_out, true);
 }

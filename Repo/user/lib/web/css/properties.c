@@ -1724,6 +1724,45 @@ static bool css_parse_flex_wrap_keyword(const char *start, const char *end, css_
     return false;
 }
 
+static bool css_parse_flex_flow(const char *start,
+                                const char *end,
+                                css_flex_direction_t *out_dir,
+                                bool *out_has_dir,
+                                css_flex_wrap_t *out_wrap,
+                                bool *out_has_wrap)
+{
+    if (!out_dir || !out_wrap || !out_has_dir || !out_has_wrap)
+    {
+        return false;
+    }
+    *out_has_dir = false;
+    *out_has_wrap = false;
+
+    const char *p = start;
+    const char *tok_s = NULL;
+    const char *tok_e = NULL;
+    while (css_next_token(&p, end, &tok_s, &tok_e))
+    {
+        css_flex_direction_t dir = CSS_FLEX_DIRECTION_ROW;
+        css_flex_wrap_t wrap = CSS_FLEX_WRAP_NOWRAP;
+        if (!*out_has_dir && css_parse_flex_direction_keyword(tok_s, tok_e, &dir))
+        {
+            *out_dir = dir;
+            *out_has_dir = true;
+            continue;
+        }
+        if (!*out_has_wrap && css_parse_flex_wrap_keyword(tok_s, tok_e, &wrap))
+        {
+            *out_wrap = wrap;
+            *out_has_wrap = true;
+            continue;
+        }
+        return false;
+    }
+
+    return *out_has_dir || *out_has_wrap;
+}
+
 static bool css_parse_justify_keyword(const char *start, const char *end, css_justify_content_t *out)
 {
     if (!out)
@@ -2864,7 +2903,7 @@ void css_style_apply_property(css_style_t *style,
             style->has_display = true;
             style->display = CSS_DISPLAY_INLINE;
         }
-        else if (len == 11 && strncasecmp(s, "inline-block", 11) == 0)
+        else if (len == 12 && strncasecmp(s, "inline-block", 12) == 0)
         {
             style->has_display = true;
             style->display = CSS_DISPLAY_INLINE_BLOCK;
@@ -2874,7 +2913,7 @@ void css_style_apply_property(css_style_t *style,
             style->has_display = true;
             style->display = CSS_DISPLAY_FLEX;
         }
-        else if (len == 10 && strncasecmp(s, "inline-flex", 10) == 0)
+        else if (len == 11 && strncasecmp(s, "inline-flex", 11) == 0)
         {
             style->has_display = true;
             style->display = CSS_DISPLAY_INLINE_FLEX;
@@ -3048,6 +3087,28 @@ void css_style_apply_property(css_style_t *style,
         {
             style->has_flex_direction = true;
             style->flex_direction = dir;
+        }
+        return;
+    }
+
+    if ((size_t)(prop_end - prop_start) == 9 && strncasecmp(prop_start, "flex-flow", 9) == 0)
+    {
+        css_flex_direction_t dir = CSS_FLEX_DIRECTION_ROW;
+        css_flex_wrap_t wrap = CSS_FLEX_WRAP_NOWRAP;
+        bool has_dir = false;
+        bool has_wrap = false;
+        if (css_parse_flex_flow(val_start, val_end, &dir, &has_dir, &wrap, &has_wrap))
+        {
+            if (has_dir)
+            {
+                style->has_flex_direction = true;
+                style->flex_direction = dir;
+            }
+            if (has_wrap)
+            {
+                style->has_flex_wrap = true;
+                style->flex_wrap = wrap;
+            }
         }
         return;
     }
