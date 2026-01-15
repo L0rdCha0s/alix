@@ -1542,6 +1542,10 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
             min_h = 0;
         }
     }
+    else
+    {
+        min_h = -1;
+    }
     if (html_view_length_to_px_height(ctx, &style->max_height, &max_h))
     {
         max_h = html_view_box_sizing_content_height(style,
@@ -1554,6 +1558,10 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
         {
             max_h = 0;
         }
+    }
+    else
+    {
+        max_h = -1;
     }
     if (max_h >= 0 && content_h > max_h)
     {
