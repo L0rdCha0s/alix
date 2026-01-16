@@ -405,6 +405,57 @@ void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
     video_blit_rgba32_untracked(x0, y0, draw_w, draw_h, src, stride_bytes, true);
 }
 
+void html_view_record_image_op(html_view_ctx_t *ctx,
+                               int dst_x,
+                               int dst_y,
+                               int width,
+                               int height,
+                               const char *src,
+                               const video_color_t *pixels,
+                               int stride_bytes,
+                               bool placeholder,
+                               const atk_rect_t *clip)
+{
+    if (!ctx || !ctx->record || width <= 0 || height <= 0)
+    {
+        return;
+    }
+    if (ctx->record_failed || !ctx->priv)
+    {
+        return;
+    }
+
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    html_view_op_t op = {0};
+    op.kind = HTML_VIEW_OP_IMAGE;
+    op.x = html_view_record_x(ctx, dst_x);
+    op.y = html_view_record_y(ctx, dst_y);
+    op.w = width;
+    op.h = height;
+    op.pixels = pixels;
+    op.stride_bytes = stride_bytes;
+    op.href = ctx->active_href;
+    op.z_index = html_view_effective_z_index(ctx);
+    op.fixed = ctx->fixed_mode;
+    op.image_placeholder = placeholder;
+    if (placeholder)
+    {
+        op.color = video_make_color(0xDD, 0xDD, 0xDD);
+    }
+    if (src && src[0] != '\0')
+    {
+        op.image_src = html_view_render_cache_strdup(cache, src);
+    }
+    if (clip)
+    {
+        html_view_record_op_clip(ctx, &op, clip);
+    }
+    if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
+    {
+        ctx->record_failed = true;
+    }
+}
+
 void html_view_align_current_line(html_view_ctx_t *ctx)
 {
     if (!ctx || !ctx->record || ctx->record_failed || !ctx->priv)

@@ -154,6 +154,8 @@ typedef struct
     int16_t font_px;
     const video_color_t *pixels;
     int stride_bytes;
+    const char *image_src;
+    bool image_placeholder;
     int32_t z_index;
     bool fixed;
     bool has_clip;
@@ -726,6 +728,16 @@ void html_view_blit_rgba32_clipped(html_view_ctx_t *ctx,
                                    const video_color_t *pixels,
                                    int stride_bytes,
                                    const atk_rect_t *clip);
+void html_view_record_image_op(html_view_ctx_t *ctx,
+                               int dst_x,
+                               int dst_y,
+                               int width,
+                               int height,
+                               const char *src,
+                               const video_color_t *pixels,
+                               int stride_bytes,
+                               bool placeholder,
+                               const atk_rect_t *clip);
 void html_view_align_current_line(html_view_ctx_t *ctx);
 void html_view_flush_underline_run(html_view_ctx_t *ctx);
 void html_view_new_line(html_view_ctx_t *ctx);

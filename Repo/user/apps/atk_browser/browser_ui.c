@@ -41,6 +41,7 @@ static void browser_menu_back_item(void *context);
 static void browser_back_button_action(atk_widget_t *button, void *context);
 static void browser_js_toggle_action(atk_widget_t *button, void *context);
 static void browser_js_update_button(browser_app_t *app, bool enabled);
+static void browser_cache_clear_action(atk_widget_t *button, void *context);
 
 static bool browser_button_hit_test(const atk_widget_t *button, int px, int py)
 {
@@ -310,6 +311,18 @@ static void browser_js_toggle_action(atk_widget_t *button, void *context)
     }
     browser_js_update_button(app, enabled);
     browser_debug_logf(app, "[js] %s", enabled ? "enabled" : "disabled");
+}
+
+static void browser_cache_clear_action(atk_widget_t *button, void *context)
+{
+    (void)button;
+    browser_app_t *app = (browser_app_t *)context;
+    if (!app)
+    {
+        return;
+    }
+    browser_menus_close(app);
+    (void)browser_cache_clear(app);
 }
 
 static void browser_menu_open_debug(void *context)
@@ -1321,6 +1334,28 @@ bool browser_build_ui(browser_app_t *app)
         return false;
     }
     atk_widget_set_layout(app->menu_js_button, ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_LEFT);
+
+    menu_x += menu_w_js + 8;
+    int menu_w_cache = atk_font_text_width("Clear Cache") + 32;
+    if (menu_w_cache < 112)
+    {
+        menu_w_cache = 112;
+    }
+    app->menu_cache_button = atk_window_add_button(app->window,
+                                                   "Clear Cache",
+                                                   menu_x,
+                                                   menu_y,
+                                                   menu_w_cache,
+                                                   menu_h,
+                                                   ATK_BUTTON_STYLE_TITLE_INSIDE,
+                                                   false,
+                                                   browser_cache_clear_action,
+                                                   app);
+    if (!app->menu_cache_button)
+    {
+        return false;
+    }
+    atk_widget_set_layout(app->menu_cache_button, ATK_WIDGET_ANCHOR_TOP | ATK_WIDGET_ANCHOR_LEFT);
 
     int url_y = menu_y + menu_h + BROWSER_GAP;
     app->url_input = atk_window_add_text_input(app->window, content_x, url_y, content_w);

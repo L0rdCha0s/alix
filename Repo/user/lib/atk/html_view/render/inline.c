@@ -2106,7 +2106,20 @@ bool html_view_render_inline_element(html_view_ctx_t *ctx, const html_node_t *no
 
         int content_x = draw_x + border_left + pad_left;
         int content_y = draw_y + border_top + pad_top;
-        if (img && img->pixels)
+        if (ctx->record)
+        {
+            html_view_record_image_op(ctx,
+                                      content_x,
+                                      content_y,
+                                      content_w,
+                                      content_h,
+                                      src,
+                                      (img && img->pixels) ? img->pixels : NULL,
+                                      (img && img->pixels) ? img->stride_bytes : 0,
+                                      false,
+                                      &ctx->clip);
+        }
+        else if (img && img->pixels)
         {
             html_view_blit_rgba32_clipped(ctx,
                                           content_x,

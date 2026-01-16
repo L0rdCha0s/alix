@@ -2796,6 +2796,56 @@ bool atk_html_view_poll_js(atk_widget_t *view)
     return true;
 }
 
+static bool html_view_render_cache_apply_image_locked(atk_html_view_priv_t *priv,
+                                                      const char *src,
+                                                      const html_view_image_t *img)
+{
+    if (!priv || !src || !img || !img->pixels)
+    {
+        return false;
+    }
+
+    html_view_render_cache_t *cache = &priv->render_cache;
+    if (!cache->valid || cache->doc != priv->doc || cache->sheet != priv->sheet)
+    {
+        return false;
+    }
+    if (__atomic_load_n(&priv->render_cache_dirty, __ATOMIC_ACQUIRE) != 0u)
+    {
+        return false;
+    }
+
+    bool found = false;
+    bool safe = true;
+    for (size_t i = 0; i < cache->op_count; ++i)
+    {
+        html_view_op_t *op = &cache->ops[i];
+        if (op->kind != HTML_VIEW_OP_IMAGE || !op->image_src)
+        {
+            continue;
+        }
+        if (strcmp(op->image_src, src) != 0)
+        {
+            continue;
+        }
+        found = true;
+        if (op->w <= 0 || op->h <= 0 || img->width <= 0 || img->height <= 0)
+        {
+            safe = false;
+            continue;
+        }
+        if (op->w > img->width || op->h > img->height)
+        {
+            safe = false;
+            continue;
+        }
+        op->pixels = img->pixels;
+        op->stride_bytes = img->stride_bytes;
+    }
+
+    return found && safe;
+}
+
 bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint8_t *data, size_t size)
 {
     if (!view || !src || src[0] == '\0' || !data || size == 0)
@@ -2859,6 +2909,19 @@ bool atk_html_view_add_image_png(atk_widget_t *view, const char *src, const uint
     }
     img->next = priv->images;
     priv->images = img;
+
+    bool updated = false;
+    if (html_view_render_try_lock(priv))
+    {
+        updated = html_view_render_cache_apply_image_locked(priv, src, img);
+        html_view_render_unlock(priv);
+    }
+    if (updated)
+    {
+        html_view_dom_unlock(priv);
+        html_view_invalidate(view);
+        return true;
+    }
 
     html_view_render_cache_mark_dirty(priv);
     html_view_dom_unlock(priv);
@@ -2931,6 +2994,19 @@ bool atk_html_view_add_image_gif(atk_widget_t *view, const char *src, const uint
     img->next = priv->images;
     priv->images = img;
 
+    bool updated = false;
+    if (html_view_render_try_lock(priv))
+    {
+        updated = html_view_render_cache_apply_image_locked(priv, src, img);
+        html_view_render_unlock(priv);
+    }
+    if (updated)
+    {
+        html_view_dom_unlock(priv);
+        html_view_invalidate(view);
+        return true;
+    }
+
     html_view_render_cache_mark_dirty(priv);
     html_view_dom_unlock(priv);
     html_view_render_request(priv);
@@ -2998,7 +3074,19 @@ static bool html_view_add_image_rgba_impl(atk_widget_t *view,
     img->next = priv->images;
     priv->images = img;
 
+    bool updated = false;
+    if (html_view_render_try_lock(priv))
+    {
+        updated = html_view_render_cache_apply_image_locked(priv, src, img);
+        html_view_render_unlock(priv);
+    }
     html_view_dom_unlock(priv);
+    if (updated)
+    {
+        html_view_invalidate(view);
+        return true;
+    }
+
     html_view_render_cache_invalidate(priv);
     html_view_render_request(priv);
     html_view_invalidate(view);

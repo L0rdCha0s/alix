@@ -950,14 +950,27 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
                 break;
             }
             case HTML_VIEW_OP_IMAGE:
-                html_view_blit_rgba32_clipped(ctx,
-                                             abs_x,
-                                             abs_y,
-                                             (int)op->w,
-                                             (int)op->h,
-                                             op->pixels,
-                                             op->stride_bytes,
-                                             &draw_clip);
+                if (op->pixels)
+                {
+                    html_view_blit_rgba32_clipped(ctx,
+                                                 abs_x,
+                                                 abs_y,
+                                                 (int)op->w,
+                                                 (int)op->h,
+                                                 op->pixels,
+                                                 op->stride_bytes,
+                                                 &draw_clip);
+                }
+                else if (op->image_placeholder)
+                {
+                    html_view_draw_rect_clipped(ctx,
+                                                abs_x,
+                                                abs_y,
+                                                (int)op->w,
+                                                (int)op->h,
+                                                op->color,
+                                                &draw_clip);
+                }
                 break;
             case HTML_VIEW_OP_CONTROL:
             {

@@ -3,6 +3,7 @@
 #include "crypto/sha1.h"
 #include "net/tls.h"
 #include "usyscall.h"
+#include "unistd.h"
 
 #include "stdio.h"
 #include "string.h"
@@ -535,6 +536,131 @@ static void browser_cache_write(browser_app_t *app, const char *uri, const uint8
         close(fd);
     }
     free(path);
+}
+
+static char *browser_cache_join_path(const char *base, const char *name)
+{
+    if (!base || !name)
+    {
+        return NULL;
+    }
+
+    size_t base_len = strlen(base);
+    size_t name_len = strlen(name);
+    bool needs_slash = (base_len > 0 && base[base_len - 1] != '/');
+    size_t total_len = base_len + name_len + (needs_slash ? 1u : 0u);
+    if (total_len == 0)
+    {
+        return NULL;
+    }
+
+    char *path = (char *)malloc(total_len + 1);
+    if (!path)
+    {
+        return NULL;
+    }
+
+    memcpy(path, base, base_len);
+    size_t offset = base_len;
+    if (needs_slash)
+    {
+        path[offset++] = '/';
+    }
+    memcpy(path + offset, name, name_len);
+    path[total_len] = '\0';
+    return path;
+}
+
+bool browser_cache_clear(browser_app_t *app)
+{
+    if (!app)
+    {
+        return false;
+    }
+
+    const char *cache_dir = browser_cache_dir(app);
+    if (!cache_dir)
+    {
+        browser_debug_logf(app, "[cache] clear skipped (no dir)");
+        serial_printf("[cache] clear skipped (no dir)");
+        return false;
+    }
+
+    const size_t capacity = 128;
+    syscall_dirent_t *entries = (syscall_dirent_t *)calloc(capacity, sizeof(*entries));
+    if (!entries)
+    {
+        browser_debug_logf(app, "[cache] clear failed (alloc)");
+        serial_printf("[cache] clear failed (alloc)");
+        return false;
+    }
+
+    size_t removed = 0;
+    size_t skipped = 0;
+    bool error = false;
+    for (;;)
+    {
+        ssize_t count = sys_list_dir(cache_dir, entries, capacity);
+        if (count < 0)
+        {
+            error = true;
+            break;
+        }
+        if (count == 0)
+        {
+            break;
+        }
+
+        size_t removed_this_round = 0;
+        for (ssize_t i = 0; i < count; ++i)
+        {
+            const syscall_dirent_t *ent = &entries[i];
+            if (ent->name[0] == '\0' || strcmp(ent->name, ".") == 0 || strcmp(ent->name, "..") == 0)
+            {
+                continue;
+            }
+            if (ent->type != SYSCALL_NODE_TYPE_FILE && ent->type != SYSCALL_NODE_TYPE_SYMLINK)
+            {
+                skipped++;
+                continue;
+            }
+
+            char *path = browser_cache_join_path(cache_dir, ent->name);
+            if (!path)
+            {
+                skipped++;
+                continue;
+            }
+            if (unlink(path) == 0)
+            {
+                removed++;
+                removed_this_round++;
+            }
+            else
+            {
+                skipped++;
+            }
+            free(path);
+        }
+
+        if ((size_t)count < capacity || removed_this_round == 0)
+        {
+            break;
+        }
+    }
+
+    free(entries);
+
+    if (error)
+    {
+        browser_debug_logf(app, "[cache] clear failed dir=%s", cache_dir);
+        serial_printf("[cache] clear failed dir=%s", cache_dir);
+        return false;
+    }
+
+    browser_debug_logf(app, "[cache] clear removed=%u skipped=%u", (unsigned)removed, (unsigned)skipped);
+    serial_printf("[cache] clear removed=%u skipped=%u", (unsigned)removed, (unsigned)skipped);
+    return true;
 }
 
 static bool browser_http_find_header_end(const char *data,

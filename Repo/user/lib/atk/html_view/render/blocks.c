@@ -2333,20 +2333,27 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                 draw_x = ctx->body_x;
             }
             int draw_y = html_view_draw_y(ctx, ctx->y);
-            if (img && img->pixels && img_w > 0 && img_h > 0)
+            bool has_pixels = img && img->pixels && img_w > 0 && img_h > 0;
+            if (ctx->record && img_w > 0 && img_h > 0)
             {
-                if (ctx->draw)
-                {
-                    html_view_blit_rgba32_clipped(ctx, draw_x, draw_y, img_w, img_h, img->pixels, img->stride_bytes, &ctx->clip);
-                }
-                else if (ctx->record)
-                {
-                    html_view_blit_rgba32_clipped(ctx, draw_x, draw_y, img_w, img_h, img->pixels, img->stride_bytes, &ctx->clip);
-                }
+                html_view_record_image_op(ctx,
+                                          draw_x,
+                                          draw_y,
+                                          img_w,
+                                          img_h,
+                                          src,
+                                          has_pixels ? img->pixels : NULL,
+                                          has_pixels ? img->stride_bytes : 0,
+                                          (!has_pixels && !skip_placeholder),
+                                          &ctx->clip);
             }
-            else
+            else if (ctx->draw)
             {
-                if (!skip_placeholder && img_w > 0 && img_h > 0)
+                if (has_pixels)
+                {
+                    html_view_blit_rgba32_clipped(ctx, draw_x, draw_y, img_w, img_h, img->pixels, img->stride_bytes, &ctx->clip);
+                }
+                else if (!skip_placeholder && img_w > 0 && img_h > 0)
                 {
                     video_color_t ph = video_make_color(0xDD, 0xDD, 0xDD);
                     html_view_draw_rect_clipped(ctx, draw_x, draw_y, img_w, img_h, ph, &ctx->clip);

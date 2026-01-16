@@ -200,6 +200,7 @@ typedef struct browser_app
     atk_widget_t *menu_bookmarks_button;
     atk_widget_t *menu_debug_button;
     atk_widget_t *menu_js_button;
+    atk_widget_t *menu_cache_button;
     atk_widget_t *menu_back;
     atk_widget_t *menu_bookmarks;
     atk_widget_t *menu_debug;
@@ -298,6 +299,7 @@ char *browser_fetch_http_with_status(browser_app_t *app,
                                      size_t *body_len_out,
                                      browser_url_t *final_url_out,
                                      int *status_out);
+bool browser_cache_clear(browser_app_t *app);
 
 /* loader/events */
 void browser_ui_event_free_payload(browser_ui_event_t *ev);
