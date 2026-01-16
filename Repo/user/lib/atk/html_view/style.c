@@ -7127,6 +7127,60 @@ typedef struct
     const html_node_t *dom;
 } html_view_rule_trie_stack_t;
 
+static bool html_view_rule_trie_stack_scratch_begin(atk_html_view_priv_t *priv,
+                                                    html_view_rule_trie_stack_t **stack,
+                                                    size_t *cap)
+{
+    if (!priv || !stack || !cap || priv->rule_trie_stack_scratch_in_use)
+    {
+        return false;
+    }
+    priv->rule_trie_stack_scratch_in_use = 1u;
+    *stack = (html_view_rule_trie_stack_t *)priv->rule_trie_stack_scratch;
+    *cap = priv->rule_trie_stack_scratch_cap;
+    return true;
+}
+
+static void html_view_rule_trie_stack_scratch_end(atk_html_view_priv_t *priv,
+                                                  html_view_rule_trie_stack_t *stack,
+                                                  size_t cap)
+{
+    if (!priv)
+    {
+        return;
+    }
+    priv->rule_trie_stack_scratch = stack;
+    priv->rule_trie_stack_scratch_cap = cap;
+    priv->rule_trie_stack_scratch_in_use = 0u;
+}
+
+static bool html_view_rule_trie_match_scratch_begin(atk_html_view_priv_t *priv,
+                                                    css_rule_t ***rules,
+                                                    size_t *cap)
+{
+    if (!priv || !rules || !cap || priv->rule_trie_match_scratch_in_use)
+    {
+        return false;
+    }
+    priv->rule_trie_match_scratch_in_use = 1u;
+    *rules = (css_rule_t **)priv->rule_trie_match_scratch;
+    *cap = priv->rule_trie_match_scratch_cap;
+    return true;
+}
+
+static void html_view_rule_trie_match_scratch_end(atk_html_view_priv_t *priv,
+                                                  css_rule_t **rules,
+                                                  size_t cap)
+{
+    if (!priv)
+    {
+        return;
+    }
+    priv->rule_trie_match_scratch = rules;
+    priv->rule_trie_match_scratch_cap = cap;
+    priv->rule_trie_match_scratch_in_use = 0u;
+}
+
 static bool html_view_rule_trie_stack_push(html_view_rule_trie_stack_t **stack,
                                            size_t *count,
                                            size_t *cap,
@@ -7220,7 +7274,8 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
                                                 const html_node_t *node,
                                                 html_view_pseudo_t pseudo,
                                                 css_rule_t ***out_rules,
-                                                size_t *out_count)
+                                                size_t *out_count,
+                                                atk_html_view_priv_t *priv)
 {
     if (out_rules)
     {
@@ -7244,6 +7299,21 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
     html_view_rule_trie_stack_t *stack = NULL;
     size_t stack_count = 0;
     size_t stack_cap = 0;
+    bool stack_scratch = false;
+    if (priv && html_view_rule_trie_stack_scratch_begin(priv, &stack, &stack_cap))
+    {
+        stack_scratch = true;
+    }
+
+    css_rule_t **matched = NULL;
+    size_t matched_count = 0;
+    size_t matched_cap = 0;
+    bool matched_scratch = false;
+    if (priv && html_view_rule_trie_match_scratch_begin(priv, &matched, &matched_cap))
+    {
+        matched_scratch = true;
+    }
+
     for (size_t i = 0; i < trie->root_count; ++i)
     {
         const html_view_rule_trie_node_t *root = trie->roots[i];
@@ -7259,15 +7329,10 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
         {
             if (!html_view_rule_trie_stack_push(&stack, &stack_count, &stack_cap, root, node))
             {
-                free(stack);
-                return false;
+                goto fail;
             }
         }
     }
-
-    css_rule_t **matched = NULL;
-    size_t matched_count = 0;
-    size_t matched_cap = 0;
 
     while (stack_count > 0)
     {
@@ -7283,9 +7348,7 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
                                                   cur->rules,
                                                   cur->rule_count))
             {
-                free(stack);
-                free(matched);
-                return false;
+                goto fail;
             }
         }
 
@@ -7313,9 +7376,7 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
                 {
                     if (!html_view_rule_trie_stack_push(&stack, &stack_count, &stack_cap, child, p))
                     {
-                        free(stack);
-                        free(matched);
-                        return false;
+                        goto fail;
                     }
                 }
                 continue;
@@ -7331,9 +7392,7 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
                 {
                     if (!html_view_rule_trie_stack_push(&stack, &stack_count, &stack_cap, child, p))
                     {
-                        free(stack);
-                        free(matched);
-                        return false;
+                        goto fail;
                     }
                 }
                 continue;
@@ -7352,9 +7411,7 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
                     {
                         if (!html_view_rule_trie_stack_push(&stack, &stack_count, &stack_cap, child, p))
                         {
-                            free(stack);
-                            free(matched);
-                            return false;
+                            goto fail;
                         }
                     }
                 }
@@ -7384,16 +7441,21 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
                 {
                     if (!html_view_rule_trie_stack_push(&stack, &stack_count, &stack_cap, child, p))
                     {
-                        free(stack);
-                        free(matched);
-                        return false;
+                        goto fail;
                     }
                 }
             }
         }
     }
 
-    free(stack);
+    if (stack_scratch)
+    {
+        html_view_rule_trie_stack_scratch_end(priv, stack, stack_cap);
+    }
+    else
+    {
+        free(stack);
+    }
 
     if (matched_count > 1)
     {
@@ -7412,6 +7474,23 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
         matched_count = out_idx;
     }
 
+    if (matched_scratch)
+    {
+        css_rule_t **scratch_rules = matched;
+        css_rule_t **copy = NULL;
+        if (matched_count > 0)
+        {
+            copy = (css_rule_t **)malloc(matched_count * sizeof(*copy));
+            if (!copy)
+            {
+                goto fail_release_match_scratch;
+            }
+            memcpy(copy, scratch_rules, matched_count * sizeof(*copy));
+        }
+        matched = copy;
+        html_view_rule_trie_match_scratch_end(priv, scratch_rules, matched_cap);
+    }
+
     if (out_rules)
     {
         *out_rules = matched;
@@ -7425,6 +7504,27 @@ static bool html_view_rule_trie_collect_matches(const html_view_rule_trie_t *tri
         *out_count = matched_count;
     }
     return true;
+
+fail:
+    if (stack_scratch)
+    {
+        html_view_rule_trie_stack_scratch_end(priv, stack, stack_cap);
+    }
+    else
+    {
+        free(stack);
+    }
+
+fail_release_match_scratch:
+    if (matched_scratch)
+    {
+        html_view_rule_trie_match_scratch_end(priv, matched, matched_cap);
+    }
+    else
+    {
+        free(matched);
+    }
+    return false;
 }
 
 static void html_view_rule_index_free(html_view_rule_index_t *index)
@@ -8996,7 +9096,8 @@ static bool html_view_rule_trie_add_matches(html_view_rule_list_t **lists,
                                             const html_view_rule_trie_t *trie,
                                             const html_node_t *node,
                                             html_view_pseudo_t pseudo,
-                                            const void *key)
+                                            const void *key,
+                                            atk_html_view_priv_t *priv)
 {
     if (!trie)
     {
@@ -9045,7 +9146,7 @@ static bool html_view_rule_trie_add_matches(html_view_rule_list_t **lists,
 
     css_rule_t **matched = NULL;
     size_t matched_count = 0;
-    if (!html_view_rule_trie_collect_matches(trie, node, pseudo, &matched, &matched_count))
+    if (!html_view_rule_trie_collect_matches(trie, node, pseudo, &matched, &matched_count, priv))
     {
         free(matched);
         return false;
@@ -9113,7 +9214,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                  const html_view_rule_index_t *index,
                                                  html_view_rule_list_t **lists_out,
                                                  size_t *list_count_out,
-                                                 size_t *list_cap_out)
+                                                 size_t *list_cap_out,
+                                                 atk_html_view_priv_t *priv)
 {
     if (!node || !index || !lists_out || !list_count_out)
     {
@@ -9157,7 +9259,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                  index->global_trie,
                                                  node,
                                                  pseudo,
-                                                 index))
+                                                 index,
+                                                 priv))
             {
                 goto fallback;
             }
@@ -9195,7 +9298,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                      bucket->trie,
                                                      node,
                                                      pseudo,
-                                                     bucket))
+                                                     bucket,
+                                                     priv))
                 {
                     goto fallback;
                 }
@@ -9234,7 +9338,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                      bucket->trie,
                                                      node,
                                                      pseudo,
-                                                     bucket))
+                                                     bucket,
+                                                     priv))
                 {
                     goto fallback;
                 }
@@ -9283,7 +9388,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                          bucket->trie,
                                                          node,
                                                          pseudo,
-                                                         bucket))
+                                                         bucket,
+                                                         priv))
                     {
                         goto fallback;
                     }
@@ -9334,7 +9440,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                          bucket->trie,
                                                          node,
                                                          pseudo,
-                                                         bucket))
+                                                         bucket,
+                                                         priv))
                     {
                         goto fallback;
                     }
@@ -9379,7 +9486,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                                      parent_bucket->trie,
                                                                      node,
                                                                      pseudo,
-                                                                     parent_bucket))
+                                                                     parent_bucket,
+                                                                     priv))
                                 {
                                     goto fallback;
                                 }
@@ -9438,7 +9546,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                                      parent_bucket->trie,
                                                                      node,
                                                                      pseudo,
-                                                                     parent_bucket))
+                                                                     parent_bucket,
+                                                                     priv))
                                 {
                                     goto fallback;
                                 }
@@ -9515,7 +9624,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                                  bucket->trie,
                                                                  node,
                                                                  pseudo,
-                                                                 bucket))
+                                                                 bucket,
+                                                                 priv))
                             {
                                 goto fallback;
                             }
@@ -9566,7 +9676,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                                  bucket->trie,
                                                                  node,
                                                                  pseudo,
-                                                                 bucket))
+                                                                 bucket,
+                                                                 priv))
                             {
                                 goto fallback;
                             }
@@ -9632,7 +9743,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                          bucket->trie,
                                                          node,
                                                          pseudo,
-                                                         bucket))
+                                                         bucket,
+                                                         priv))
                     {
                         goto fallback;
                     }
@@ -9677,7 +9789,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                                      parent_bucket->trie,
                                                                      node,
                                                                      pseudo,
-                                                                     parent_bucket))
+                                                                     parent_bucket,
+                                                                     priv))
                                 {
                                     goto fallback;
                                 }
@@ -9736,7 +9849,8 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                                                                      parent_bucket->trie,
                                                                      node,
                                                                      pseudo,
-                                                                     parent_bucket))
+                                                                     parent_bucket,
+                                                                     priv))
                                 {
                                     goto fallback;
                                 }
@@ -9825,7 +9939,13 @@ static void html_view_apply_indexed_rules(css_style_t *out,
     size_t list_count = 0;
     size_t list_cap = 0;
     bool lists_scratch = html_view_rule_list_scratch_begin(priv, &lists, &list_cap);
-    if (html_view_collect_indexed_rule_lists(node, pseudo, index, &lists, &list_count, &list_cap))
+    if (html_view_collect_indexed_rule_lists(node,
+                                             pseudo,
+                                             index,
+                                             &lists,
+                                             &list_count,
+                                             &list_cap,
+                                             priv))
     {
         if (list_count > 0)
         {
@@ -10605,7 +10725,8 @@ void html_view_style_for_node(css_style_t *out,
                                                            index,
                                                            &rule_lists,
                                                            &rule_list_count,
-                                                           &rule_list_cap);
+                                                           &rule_list_cap,
+                                                           priv);
             if (ok)
             {
                 use_rule_lists = true;

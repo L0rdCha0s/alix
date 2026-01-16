@@ -83,7 +83,7 @@ static bool libc_env_reserve(size_t needed)
 #define USER_HEAP_LOG_PROC_PATH "/proc/sys/mem/uheap_log_enable"
 #define USER_HEAP_LOG_POLL_MASK 0x3Fu
 
-static uint32_t g_user_heap_log_enable = 1;
+static uint32_t g_user_heap_log_enable = 0;
 static uint32_t g_user_heap_log_poll = 0;
 
 static bool user_heap_log_enabled(void)

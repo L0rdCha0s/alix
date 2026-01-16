@@ -324,6 +324,12 @@ typedef struct
     size_t *rule_positions_scratch;
     size_t rule_positions_scratch_cap;
     uint32_t rule_positions_scratch_in_use;
+    void *rule_trie_stack_scratch; /* html_view_rule_trie_stack_t */
+    size_t rule_trie_stack_scratch_cap;
+    uint32_t rule_trie_stack_scratch_in_use;
+    void *rule_trie_match_scratch; /* css_rule_t * */
+    size_t rule_trie_match_scratch_cap;
+    uint32_t rule_trie_match_scratch_in_use;
     void *flex_items_scratch; /* html_view_flex_item_t */
     size_t flex_items_scratch_cap;
     uint32_t flex_items_scratch_in_use;

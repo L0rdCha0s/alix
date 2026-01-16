@@ -1937,10 +1937,31 @@ static void html_view_draw_cb(const atk_state_t *state,
     bool cache_empty = cache_valid && cache->op_count == 0 && cache->fixed_count == 0;
     if (cache_empty && body_has_renderable)
     {
-        cache_valid = false;
-        if ((priv->render_async || priv->render_external) && !cache_dirty)
+        uint32_t css_dirty = __atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE);
+        uint32_t render_seq = __atomic_load_n(&priv->render_seq, __ATOMIC_ACQUIRE);
+        uint32_t render_done = __atomic_load_n(&priv->render_done_seq, __ATOMIC_ACQUIRE);
+        bool pending = (priv->render_async || priv->render_external) &&
+                       (render_seq != render_done || cache_dirty || css_dirty != 0u);
+        if (pending)
         {
-            html_view_render_request(priv);
+            cache_valid = false;
+            if (render_seq == render_done)
+            {
+                html_view_render_request(priv);
+            }
+        }
+        else
+        {
+            static uint64_t last_empty_log_ms = 0;
+            if (html_view_log_throttle(&last_empty_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
+            {
+                serial_printf("[html_view] render_empty view=%p ops=0 body_renderable=1 dirty=%u css_dirty=%u seq=%u done=%u",
+                              (void *)widget,
+                              cache_dirty ? 1u : 0u,
+                              css_dirty ? 1u : 0u,
+                              render_seq,
+                              render_done);
+            }
         }
     }
     int cache_body_box_h = cache->body_box_h;

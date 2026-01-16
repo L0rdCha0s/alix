@@ -79,7 +79,7 @@ static size_t g_heap_trace_frees = 0;
 #endif
 
 static uint32_t g_heap_trace_log_enable = 0;
-static uint32_t g_uheap_log_enable = 1;
+static uint32_t g_uheap_log_enable = 0;
 
 typedef struct
 {
