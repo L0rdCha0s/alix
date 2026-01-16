@@ -154,17 +154,25 @@ static void html_view_form_draw_label(html_view_ctx_t *ctx,
         if (!ctx->record_failed && ctx->priv)
         {
             html_view_render_cache_t *cache = &ctx->priv->render_cache;
+            const char *label_text = text;
+            char *owned = html_view_render_cache_strdup(cache, text);
+            if (!owned)
+            {
+                ctx->record_failed = true;
+                return;
+            }
+            label_text = owned;
             html_view_op_t op = {0};
             op.kind = HTML_VIEW_OP_TEXT;
             op.x = html_view_record_x(ctx, draw_x);
             op.y = html_view_record_y(ctx, draw_y);
-            op.w = html_view_text_width(ctx, text);
+            op.w = html_view_text_width(ctx, label_text);
             op.h = box_h;
             op.baseline_off = (int16_t)(baseline - draw_y);
             op.font_px = (int16_t)ctx->actual_font_px;
             op.color = color;
-            op.text = text;
-            op.text_len = (uint32_t)strlen(text);
+            op.text = label_text;
+            op.text_len = (uint32_t)strlen(label_text);
             op.text_owned = false;
             op.href = ctx->active_href;
             op.z_index = html_view_effective_z_index(ctx);

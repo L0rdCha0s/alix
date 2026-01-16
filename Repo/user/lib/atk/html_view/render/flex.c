@@ -157,6 +157,45 @@ static void html_view_shift_recorded_anchors(html_view_ctx_t *ctx,
     }
 }
 
+static size_t html_view_record_rect_placeholder(html_view_ctx_t *ctx,
+                                                int x,
+                                                int y,
+                                                int w,
+                                                int h,
+                                                video_color_t color,
+                                                const atk_rect_t *clip)
+{
+    if (!ctx || !ctx->record || ctx->record_failed || !ctx->priv)
+    {
+        return (size_t)-1;
+    }
+    html_view_render_cache_t *cache = &ctx->priv->render_cache;
+    html_view_op_t op = {0};
+    op.kind = HTML_VIEW_OP_RECT;
+    op.x = html_view_record_x(ctx, x);
+    op.y = html_view_record_y(ctx, y);
+    op.w = w;
+    op.h = h;
+    op.color = color;
+    op.z_index = html_view_effective_z_index(ctx);
+    op.fixed = ctx->fixed_mode;
+    if (clip)
+    {
+        op.has_clip = true;
+        op.clip_scroll = ctx->clip_scroll;
+        op.clip_x = html_view_record_x(ctx, clip->x);
+        op.clip_y = html_view_record_y(ctx, clip->y);
+        op.clip_w = clip->width;
+        op.clip_h = clip->height;
+    }
+    if (!html_view_render_cache_push_op(cache, &op, cache->tile_h))
+    {
+        ctx->record_failed = true;
+        return (size_t)-1;
+    }
+    return cache->op_count - 1u;
+}
+
 static bool html_view_style_uses_border_box(const css_style_t *style)
 {
     return style && style->has_box_sizing && style->box_sizing == CSS_BOX_SIZING_BORDER_BOX;
@@ -509,6 +548,15 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     }
 
     atk_html_view_priv_t *priv = ctx->priv;
+    bool record_only = ctx->record && !ctx->draw && ctx->priv && !ctx->record_failed;
+    size_t bg_op = (size_t)-1;
+    if (record_only &&
+        style->has_background &&
+        !style->background_transparent &&
+        !(style->has_background_image && style->background_image))
+    {
+        bg_op = html_view_record_rect_placeholder(ctx, 0, 0, 0, 0, style->background, &ctx->clip);
+    }
 
     css_flex_direction_t dir = style->has_flex_direction ? style->flex_direction : CSS_FLEX_DIRECTION_ROW;
     bool row = (dir == CSS_FLEX_DIRECTION_ROW || dir == CSS_FLEX_DIRECTION_ROW_REVERSE);
@@ -1421,7 +1469,20 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
 
         if (style->has_background && !style->background_transparent)
         {
-            html_view_draw_rect_clipped(ctx, border_box_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
+            if (record_only && ctx->priv && bg_op != (size_t)-1 && bg_op < ctx->priv->render_cache.op_count)
+            {
+                html_view_render_cache_t *cache = &ctx->priv->render_cache;
+                html_view_op_t *op = &cache->ops[bg_op];
+                op->x = html_view_record_x(ctx, border_box_x);
+                op->y = html_view_record_y(ctx, draw_y);
+                op->w = border_box_w;
+                op->h = border_box_h;
+                html_view_render_cache_reindex_op(cache, bg_op);
+            }
+            else
+            {
+                html_view_draw_rect_clipped(ctx, border_box_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
+            }
         }
         if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
         {
@@ -1926,7 +1987,20 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     if (style->has_background && !style->background_transparent)
     {
         int draw_y = html_view_draw_y(ctx, border_box_y);
-        html_view_draw_rect_clipped(ctx, border_box_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
+        if (record_only && ctx->priv && bg_op != (size_t)-1 && bg_op < ctx->priv->render_cache.op_count)
+        {
+            html_view_render_cache_t *cache = &ctx->priv->render_cache;
+            html_view_op_t *op = &cache->ops[bg_op];
+            op->x = html_view_record_x(ctx, border_box_x);
+            op->y = html_view_record_y(ctx, draw_y);
+            op->w = border_box_w;
+            op->h = border_box_h;
+            html_view_render_cache_reindex_op(cache, bg_op);
+        }
+        else
+        {
+            html_view_draw_rect_clipped(ctx, border_box_x, draw_y, border_box_w, border_box_h, style->background, &ctx->clip);
+        }
     }
     if (style->has_border && (border_top > 0 || border_right > 0 || border_bottom > 0 || border_left > 0))
     {
