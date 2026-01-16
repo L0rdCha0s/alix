@@ -366,6 +366,7 @@ typedef struct
     volatile uint32_t render_redraw_pending;
     volatile uint64_t render_request_ms;
     volatile uint32_t render_cache_dirty;
+    volatile uint32_t image_pending;
     volatile uint32_t stylesheet_dirty;
     bool render_async;
     bool render_external;

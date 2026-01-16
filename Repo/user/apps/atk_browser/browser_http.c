@@ -9,7 +9,28 @@
 #include "string.h"
 
 #define BROWSER_MAX_PASSWD_BYTES (64u * 1024u)
-#define BROWSER_CACHE_MAX_AGE_SECONDS 7200u
+#define BROWSER_CACHE_MAX_AGE_DEFAULT_SECONDS 7200u
+#define BROWSER_CACHE_MAX_AGE_LONG_SECONDS (48u * 60u * 60u)
+#define BROWSER_CACHE_META_MAX_BYTES 64u
+
+typedef enum
+{
+    BROWSER_READ_STATUS_OK = 0,
+    BROWSER_READ_STATUS_INVALID,
+    BROWSER_READ_STATUS_OPEN,
+    BROWSER_READ_STATUS_STAT,
+    BROWSER_READ_STATUS_EMPTY,
+    BROWSER_READ_STATUS_TOO_LARGE,
+    BROWSER_READ_STATUS_ALLOC,
+    BROWSER_READ_STATUS_READ
+} browser_read_status_t;
+
+typedef enum
+{
+    BROWSER_CACHE_STATE_MISS = 0,
+    BROWSER_CACHE_STATE_HIT,
+    BROWSER_CACHE_STATE_STALE
+} browser_cache_state_t;
 
 static bool browser_parse_u32_range(const char *start, const char *end, uint32_t *out)
 {
@@ -36,9 +57,135 @@ static bool browser_parse_u32_range(const char *start, const char *end, uint32_t
     return true;
 }
 
-static bool browser_cache_expired(uint64_t mtime_seconds)
+static bool browser_parse_u64_range(const char *start, const char *end, uint64_t *out)
 {
-    if (BROWSER_CACHE_MAX_AGE_SECONDS == 0)
+    if (!start || !end || !out || start >= end)
+    {
+        return false;
+    }
+    uint64_t value = 0;
+    for (const char *cur = start; cur < end; ++cur)
+    {
+        if (*cur < '0' || *cur > '9')
+        {
+            return false;
+        }
+        uint64_t digit = (uint64_t)(*cur - '0');
+        if (value > (((uint64_t)-1 - digit) / 10u))
+        {
+            return false;
+        }
+        value = value * 10u + digit;
+    }
+    *out = value;
+    return true;
+}
+
+static char browser_ascii_lower(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+    {
+        return (char)(c + ('a' - 'A'));
+    }
+    return c;
+}
+
+static const char *browser_url_find_extension(const char *uri, size_t *ext_len_out)
+{
+    if (ext_len_out)
+    {
+        *ext_len_out = 0;
+    }
+    if (!uri)
+    {
+        return NULL;
+    }
+    const char *end = uri + strlen(uri);
+    for (const char *p = uri; *p; ++p)
+    {
+        if (*p == '?' || *p == '#')
+        {
+            end = p;
+            break;
+        }
+    }
+    const char *last_slash = NULL;
+    const char *last_dot = NULL;
+    for (const char *p = uri; p < end; ++p)
+    {
+        if (*p == '/')
+        {
+            last_slash = p;
+        }
+        else if (*p == '.')
+        {
+            last_dot = p;
+        }
+    }
+    if (!last_dot || (last_slash && last_dot < last_slash) || last_dot + 1 >= end)
+    {
+        return NULL;
+    }
+    if (ext_len_out)
+    {
+        *ext_len_out = (size_t)(end - (last_dot + 1));
+    }
+    return last_dot + 1;
+}
+
+static bool browser_extension_matches(const char *ext, size_t ext_len, const char *match)
+{
+    if (!ext || !match)
+    {
+        return false;
+    }
+    size_t match_len = strlen(match);
+    if (ext_len != match_len)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < ext_len; ++i)
+    {
+        if (browser_ascii_lower(ext[i]) != browser_ascii_lower(match[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static uint32_t browser_cache_max_age_for_uri(const char *uri)
+{
+    size_t ext_len = 0;
+    const char *ext = browser_url_find_extension(uri, &ext_len);
+    if (!ext || ext_len == 0)
+    {
+        return BROWSER_CACHE_MAX_AGE_DEFAULT_SECONDS;
+    }
+    if (browser_extension_matches(ext, ext_len, "css"))
+    {
+        return BROWSER_CACHE_MAX_AGE_LONG_SECONDS;
+    }
+    if (browser_extension_matches(ext, ext_len, "png") ||
+        browser_extension_matches(ext, ext_len, "jpg") ||
+        browser_extension_matches(ext, ext_len, "jpeg") ||
+        browser_extension_matches(ext, ext_len, "gif") ||
+        browser_extension_matches(ext, ext_len, "svg") ||
+        browser_extension_matches(ext, ext_len, "webp") ||
+        browser_extension_matches(ext, ext_len, "bmp") ||
+        browser_extension_matches(ext, ext_len, "ico") ||
+        browser_extension_matches(ext, ext_len, "tif") ||
+        browser_extension_matches(ext, ext_len, "tiff") ||
+        browser_extension_matches(ext, ext_len, "avif"))
+    {
+        return BROWSER_CACHE_MAX_AGE_LONG_SECONDS;
+    }
+    return BROWSER_CACHE_MAX_AGE_DEFAULT_SECONDS;
+}
+
+static bool browser_cache_expired(uint64_t mtime_seconds, uint32_t max_age_seconds)
+{
+    if (max_age_seconds == 0)
     {
         return false;
     }
@@ -55,10 +202,39 @@ static bool browser_cache_expired(uint64_t mtime_seconds)
     {
         return false;
     }
-    return (now_seconds - mtime_seconds) >= (uint64_t)BROWSER_CACHE_MAX_AGE_SECONDS;
+    return (now_seconds - mtime_seconds) >= (uint64_t)max_age_seconds;
 }
 
-static char *browser_read_file_all(const char *path, size_t *len_out, size_t max_bytes, uint64_t *mtime_out)
+static const char *browser_read_status_reason(browser_read_status_t status)
+{
+    switch (status)
+    {
+        case BROWSER_READ_STATUS_OK:
+            return "ok";
+        case BROWSER_READ_STATUS_INVALID:
+            return "invalid";
+        case BROWSER_READ_STATUS_OPEN:
+            return "open-failed";
+        case BROWSER_READ_STATUS_STAT:
+            return "stat-failed";
+        case BROWSER_READ_STATUS_EMPTY:
+            return "empty";
+        case BROWSER_READ_STATUS_TOO_LARGE:
+            return "too-large";
+        case BROWSER_READ_STATUS_ALLOC:
+            return "alloc";
+        case BROWSER_READ_STATUS_READ:
+            return "read-failed";
+        default:
+            return "unknown";
+    }
+}
+
+static char *browser_read_file_all(const char *path,
+                                  size_t *len_out,
+                                  size_t max_bytes,
+                                  uint64_t *mtime_out,
+                                  browser_read_status_t *status_out)
 {
     if (len_out)
     {
@@ -68,6 +244,10 @@ static char *browser_read_file_all(const char *path, size_t *len_out, size_t max
     {
         *mtime_out = 0;
     }
+    if (status_out)
+    {
+        *status_out = BROWSER_READ_STATUS_INVALID;
+    }
     if (!path || path[0] == '\0')
     {
         return NULL;
@@ -76,6 +256,10 @@ static char *browser_read_file_all(const char *path, size_t *len_out, size_t max
     int fd = open(path, SYSCALL_OPEN_READ);
     if (fd < 0)
     {
+        if (status_out)
+        {
+            *status_out = BROWSER_READ_STATUS_OPEN;
+        }
         return NULL;
     }
 
@@ -83,6 +267,10 @@ static char *browser_read_file_all(const char *path, size_t *len_out, size_t max
     if (fstat(fd, &st) != 0)
     {
         close(fd);
+        if (status_out)
+        {
+            *status_out = BROWSER_READ_STATUS_STAT;
+        }
         return NULL;
     }
     if (mtime_out)
@@ -93,11 +281,19 @@ static char *browser_read_file_all(const char *path, size_t *len_out, size_t max
     if (st.st_size == 0)
     {
         close(fd);
+        if (status_out)
+        {
+            *status_out = BROWSER_READ_STATUS_EMPTY;
+        }
         return NULL;
     }
     if (st.st_size > (uint64_t)max_bytes)
     {
         close(fd);
+        if (status_out)
+        {
+            *status_out = BROWSER_READ_STATUS_TOO_LARGE;
+        }
         return NULL;
     }
 
@@ -106,6 +302,10 @@ static char *browser_read_file_all(const char *path, size_t *len_out, size_t max
     if (!buf)
     {
         close(fd);
+        if (status_out)
+        {
+            *status_out = BROWSER_READ_STATUS_ALLOC;
+        }
         return NULL;
     }
 
@@ -117,6 +317,10 @@ static char *browser_read_file_all(const char *path, size_t *len_out, size_t max
         {
             free(buf);
             close(fd);
+            if (status_out)
+            {
+                *status_out = BROWSER_READ_STATUS_READ;
+            }
             return NULL;
         }
         offset += (size_t)got;
@@ -127,6 +331,10 @@ static char *browser_read_file_all(const char *path, size_t *len_out, size_t max
     if (len_out)
     {
         *len_out = size;
+    }
+    if (status_out)
+    {
+        *status_out = BROWSER_READ_STATUS_OK;
     }
     return buf;
 }
@@ -201,7 +409,11 @@ static bool browser_passwd_line_home(const char *line,
 static char *browser_home_from_passwd(uint32_t uid)
 {
     size_t data_len = 0;
-    char *data = browser_read_file_all("/etc/passwd", &data_len, BROWSER_MAX_PASSWD_BYTES, NULL);
+    char *data = browser_read_file_all("/etc/passwd",
+                                       &data_len,
+                                       BROWSER_MAX_PASSWD_BYTES,
+                                       NULL,
+                                       NULL);
     if (!data || data_len == 0)
     {
         free(data);
@@ -460,11 +672,99 @@ static char *browser_cache_path_for_uri(const char *cache_dir, const char *uri)
     return path;
 }
 
-static char *browser_cache_read(browser_app_t *app, const char *uri, size_t *body_len_out)
+static char *browser_cache_meta_path(const char *path)
+{
+    if (!path)
+    {
+        return NULL;
+    }
+    const char suffix[] = ".meta";
+    size_t path_len = strlen(path);
+    size_t meta_len = path_len + sizeof(suffix);
+    char *meta_path = (char *)malloc(meta_len);
+    if (!meta_path)
+    {
+        return NULL;
+    }
+    memcpy(meta_path, path, path_len);
+    memcpy(meta_path + path_len, suffix, sizeof(suffix));
+    return meta_path;
+}
+
+static bool browser_cache_parse_timestamp(const char *data, size_t len, uint64_t *timestamp_out)
+{
+    if (!data || len == 0 || !timestamp_out)
+    {
+        return false;
+    }
+    const char *cur = data;
+    const char *end = data + len;
+    while (cur < end &&
+           (*cur == ' ' || *cur == '\n' || *cur == '\r' || *cur == '\t'))
+    {
+        ++cur;
+    }
+    const char *start = cur;
+    while (cur < end && *cur >= '0' && *cur <= '9')
+    {
+        ++cur;
+    }
+    if (start == cur)
+    {
+        return false;
+    }
+    return browser_parse_u64_range(start, cur, timestamp_out);
+}
+
+static bool browser_cache_read_meta(const char *path, uint64_t *timestamp_out)
+{
+    if (timestamp_out)
+    {
+        *timestamp_out = 0;
+    }
+    if (!path || !timestamp_out)
+    {
+        return false;
+    }
+    char *meta_path = browser_cache_meta_path(path);
+    if (!meta_path)
+    {
+        return false;
+    }
+    size_t len = 0;
+    char *data = browser_read_file_all(meta_path,
+                                       &len,
+                                       BROWSER_CACHE_META_MAX_BYTES,
+                                       NULL,
+                                       NULL);
+    free(meta_path);
+    if (!data)
+    {
+        return false;
+    }
+    uint64_t timestamp = 0;
+    bool ok = browser_cache_parse_timestamp(data, len, &timestamp);
+    free(data);
+    if (!ok || timestamp == 0)
+    {
+        return false;
+    }
+    *timestamp_out = timestamp;
+    return true;
+}
+
+static char *browser_cache_read(browser_app_t *app,
+                                const char *uri,
+                                size_t *body_len_out,
+                                browser_cache_state_t *state_out)
 {
     if (body_len_out)
     {
         *body_len_out = 0;
+    }
+    if (state_out)
+    {
+        *state_out = BROWSER_CACHE_STATE_MISS;
     }
     if (!app || !uri || uri[0] == '\0')
     {
@@ -474,36 +774,118 @@ static char *browser_cache_read(browser_app_t *app, const char *uri, size_t *bod
     const char *cache_dir = browser_cache_dir(app);
     if (!cache_dir)
     {
+        browser_debug_logf(app, "[cache] miss url=%s reason=no-dir", uri);
+        serial_printf("[cache] miss url=%s reason=no-dir", uri);
         return NULL;
     }
 
     char *path = browser_cache_path_for_uri(cache_dir, uri);
     if (!path)
     {
+        browser_debug_logf(app, "[cache] miss url=%s reason=alloc", uri);
+        serial_printf("[cache] miss url=%s reason=alloc", uri);
         return NULL;
     }
 
     uint64_t mtime_seconds = 0;
-    char *data = browser_read_file_all(path, body_len_out, BROWSER_MAX_BYTES, &mtime_seconds);
+    browser_read_status_t read_status = BROWSER_READ_STATUS_OK;
+    char *data = browser_read_file_all(path,
+                                       body_len_out,
+                                       BROWSER_MAX_BYTES,
+                                       &mtime_seconds,
+                                       &read_status);
     if (data)
     {
-        if (browser_cache_expired(mtime_seconds))
+        uint32_t max_age_seconds = browser_cache_max_age_for_uri(uri);
+        uint64_t cache_time_seconds = mtime_seconds;
+        const char *time_source = "mtime";
+        uint64_t meta_seconds = 0;
+        if (browser_cache_read_meta(path, &meta_seconds))
         {
-            free(data);
-            if (body_len_out)
+            cache_time_seconds = meta_seconds;
+            time_source = "meta";
+        }
+        else if (cache_time_seconds == 0)
+        {
+            time_source = "none";
+        }
+        if (browser_cache_expired(cache_time_seconds, max_age_seconds))
+        {
+            uint64_t now_seconds = sys_time_millis() / 1000ULL;
+            uint64_t age = (now_seconds > cache_time_seconds) ? (now_seconds - cache_time_seconds) : 0;
+            if (state_out)
             {
-                *body_len_out = 0;
+                *state_out = BROWSER_CACHE_STATE_STALE;
             }
-            data = NULL;
+            browser_debug_logf(app,
+                               "[cache] stale url=%s age=%llu max=%u src=%s",
+                               uri,
+                               (unsigned long long)age,
+                               (unsigned)max_age_seconds,
+                               time_source);
+            serial_printf("[cache] stale url=%s age=%llu max=%u src=%s",
+                          uri,
+                          (unsigned long long)age,
+                          (unsigned)max_age_seconds,
+                          time_source);
         }
         else
         {
-            browser_debug_logf(app, "[cache] hit url=%s", uri);
-            serial_printf("[cache] hit url=%s", uri);
+            uint64_t now_seconds = sys_time_millis() / 1000ULL;
+            uint64_t age = (now_seconds > cache_time_seconds) ? (now_seconds - cache_time_seconds) : 0;
+            unsigned bytes = body_len_out ? (unsigned)*body_len_out : 0;
+            if (state_out)
+            {
+                *state_out = BROWSER_CACHE_STATE_HIT;
+            }
+            browser_debug_logf(app,
+                               "[cache] hit url=%s bytes=%u age=%llu src=%s",
+                               uri,
+                               bytes,
+                               (unsigned long long)age,
+                               time_source);
+            serial_printf("[cache] hit url=%s bytes=%u age=%llu src=%s",
+                          uri,
+                          bytes,
+                          (unsigned long long)age,
+                          time_source);
         }
+    }
+    else
+    {
+        const char *reason = browser_read_status_reason(read_status);
+        browser_debug_logf(app, "[cache] miss url=%s reason=%s", uri, reason);
+        serial_printf("[cache] miss url=%s reason=%s", uri, reason);
     }
     free(path);
     return data;
+}
+
+static void browser_cache_write_meta(const char *path, uint64_t timestamp_seconds)
+{
+    if (!path || timestamp_seconds == 0)
+    {
+        return;
+    }
+    char *meta_path = browser_cache_meta_path(path);
+    if (!meta_path)
+    {
+        return;
+    }
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%llu\n", (unsigned long long)timestamp_seconds);
+    if (len <= 0)
+    {
+        free(meta_path);
+        return;
+    }
+    int fd = open(meta_path, SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE);
+    if (fd >= 0)
+    {
+        (void)browser_write_all(fd, (const uint8_t *)buf, (size_t)len);
+        close(fd);
+    }
+    free(meta_path);
 }
 
 static void browser_cache_write(browser_app_t *app, const char *uri, const uint8_t *data, size_t len)
@@ -530,6 +912,8 @@ static void browser_cache_write(browser_app_t *app, const char *uri, const uint8
     {
         if (browser_write_all(fd, data, len))
         {
+            uint64_t now_seconds = sys_time_millis() / 1000ULL;
+            browser_cache_write_meta(path, now_seconds);
             browser_debug_logf(app, "[cache] store url=%s bytes=%u", uri, (unsigned)len);
             serial_printf("[cache] store url=%s bytes=%u", uri, (unsigned)len);
         }
@@ -1990,12 +2374,20 @@ char *browser_fetch_http_with_status(browser_app_t *app,
                                      browser_url_t *final_url_out,
                                      int *status_out)
 {
+    browser_url_t final_local = {0};
+    browser_url_t *final_url = final_url_out ? final_url_out : &final_local;
     char *url_text = browser_url_to_string(url);
     if (url_text)
     {
-        char *cached = browser_cache_read(app, url_text, body_len_out);
-        if (cached)
+        browser_cache_state_t cache_state = BROWSER_CACHE_STATE_MISS;
+        size_t cached_len = 0;
+        char *cached = browser_cache_read(app, url_text, &cached_len, &cache_state);
+        if (cached && cache_state == BROWSER_CACHE_STATE_HIT)
         {
+            if (body_len_out)
+            {
+                *body_len_out = cached_len;
+            }
             if (final_url_out)
             {
                 (void)browser_url_clone(url, final_url_out);
@@ -2007,10 +2399,85 @@ char *browser_fetch_http_with_status(browser_app_t *app,
             free(url_text);
             return cached;
         }
+        if (cached && cache_state == BROWSER_CACHE_STATE_STALE)
+        {
+            char *stale = cached;
+            size_t stale_len = cached_len;
+            int status_code = 0;
+            size_t body_len = 0;
+            char *body = browser_fetch_http_internal(app, url, 0, &body_len, final_url, &status_code);
+            if (body_len_out)
+            {
+                *body_len_out = body_len;
+            }
+            if (status_out)
+            {
+                *status_out = status_code;
+            }
+
+            bool fetch_error = (body == NULL) ||
+                               (status_code >= 400) ||
+                               (body && strncmp(body, "Error:\n", 6) == 0);
+            if (fetch_error)
+            {
+                browser_debug_logf(app, "[cache] stale use url=%s status=%d", url_text, status_code);
+                serial_printf("[cache] stale use url=%s status=%d", url_text, status_code);
+                free(body);
+                if (!final_url_out)
+                {
+                    browser_url_destroy(&final_local);
+                }
+                if (body_len_out)
+                {
+                    *body_len_out = stale_len;
+                }
+                if (final_url_out)
+                {
+                    (void)browser_url_clone(url, final_url_out);
+                }
+                if (status_out)
+                {
+                    *status_out = 200;
+                }
+                free(url_text);
+                return stale;
+            }
+            free(stale);
+            if (body && url_text && body_len_out && *body_len_out > 0 &&
+                status_code > 0 && status_code < 400 &&
+                strncmp(body, "Error:\n", 6) != 0)
+            {
+                char *final_text = NULL;
+                if (final_url && final_url->host && final_url->path)
+                {
+                    final_text = browser_url_to_string(final_url);
+                }
+                if (final_text && (!url_text || strcmp(final_text, url_text) != 0))
+                {
+                    browser_cache_write(app, final_text, (const uint8_t *)body, *body_len_out);
+                }
+                if (url_text)
+                {
+                    browser_cache_write(app, url_text, (const uint8_t *)body, *body_len_out);
+                }
+                free(final_text);
+            }
+            free(url_text);
+            if (!final_url_out)
+            {
+                browser_url_destroy(&final_local);
+            }
+            return body;
+        }
     }
 
     int status_code = 0;
-    char *body = browser_fetch_http_internal(app, url, 0, body_len_out, final_url_out, &status_code);
+    size_t body_len = 0;
+    char *body = browser_fetch_http_internal(app, url, 0, &body_len, final_url, &status_code);
+    if (body_len_out)
+    {
+        *body_len_out = body_len;
+    }
     if (status_out)
     {
         *status_out = status_code;
@@ -2019,9 +2486,26 @@ char *browser_fetch_http_with_status(browser_app_t *app,
         status_code > 0 && status_code < 400 &&
         strncmp(body, "Error:\n", 6) != 0)
     {
-        browser_cache_write(app, url_text, (const uint8_t *)body, *body_len_out);
+        char *final_text = NULL;
+        if (final_url && final_url->host && final_url->path)
+        {
+            final_text = browser_url_to_string(final_url);
+        }
+        if (final_text && (!url_text || strcmp(final_text, url_text) != 0))
+        {
+            browser_cache_write(app, final_text, (const uint8_t *)body, *body_len_out);
+        }
+        if (url_text)
+        {
+            browser_cache_write(app, url_text, (const uint8_t *)body, *body_len_out);
+        }
+        free(final_text);
     }
     free(url_text);
+    if (!final_url_out)
+    {
+        browser_url_destroy(&final_local);
+    }
     return body;
 }
 

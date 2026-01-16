@@ -246,6 +246,12 @@ size_t browser_collect_resource_urls(browser_app_t *app,
                 const char *value = html_attr_get(node, attr);
                 if (value && value[0] != '\0')
                 {
+                    if (kind == BROWSER_RESOURCE_IMAGE &&
+                        strncasecmp(value, "inline-svg:", 11) == 0)
+                    {
+                        goto next_node;
+                    }
+
                     char *abs = browser_build_absolute_url(base_url, value, strlen(value));
                     if (abs)
                     {

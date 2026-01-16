@@ -2244,6 +2244,7 @@ static void browser_resource_queue_process_images_inline(browser_app_t *app,
     queue->tail = NULL;
     queue->count = 0;
 
+    bool any_added = false;
     while (job)
     {
         browser_resource_job_t *next = job->next;
@@ -2272,8 +2273,12 @@ static void browser_resource_queue_process_images_inline(browser_app_t *app,
         bool added = browser_resource_fetch_image_inline(app, load_id, abs);
         if (added)
         {
-            (void)atk_html_view_rebuild_cache_if_pending(app->viewer);
+            any_added = true;
         }
+    }
+    if (any_added && app->viewer)
+    {
+        (void)atk_html_view_rebuild_cache_if_pending(app->viewer);
     }
 }
 

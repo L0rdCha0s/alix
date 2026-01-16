@@ -268,6 +268,11 @@ char *browser_build_absolute_url(const browser_url_t *base, const char *location
         return NULL;
     }
 
+    if (location_len >= 11 && strncasecmp(location, "inline-svg:", 11) == 0)
+    {
+        return browser_strdup_len(location, location_len);
+    }
+
     if (location_len >= 5 && strncasecmp(location, "data:", 5) == 0)
     {
         return browser_strdup_len(location, location_len);

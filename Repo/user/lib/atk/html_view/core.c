@@ -1018,6 +1018,7 @@ void html_view_images_clear(atk_html_view_priv_t *priv)
         img = next;
     }
     priv->images = NULL;
+    __atomic_store_n(&priv->image_pending, 0u, __ATOMIC_RELEASE);
 }
 
 void html_view_window_remove_widget(atk_widget_t *window, atk_widget_t *child)
