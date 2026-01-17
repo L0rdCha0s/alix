@@ -8715,10 +8715,32 @@ static void html_view_rule_index_build_tries(html_view_rule_index_t *index)
     html_view_rule_index_build_bucket_tries(index->attr_buckets, index->attr_bucket_count);
 }
 
+static bool html_view_selector_dom_quick_reject_simple(const char *selector)
+{
+    if (!selector || selector[0] == '\0')
+    {
+        return false;
+    }
+    for (const char *p = selector; *p; ++p)
+    {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\\' || c == ':' || c == '[' || c == ']' || c == '(' || c == ')' ||
+            c == ',' || c == '>' || c == '+' || c == '~' || isspace(c))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool html_view_selector_dom_quick_reject(const char *selector,
                                                 const html_view_dom_token_map_t *dom)
 {
     if (!selector || !dom)
+    {
+        return false;
+    }
+    if (!html_view_selector_dom_quick_reject_simple(selector))
     {
         return false;
     }
