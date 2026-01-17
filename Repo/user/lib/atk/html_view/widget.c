@@ -345,6 +345,7 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
     uint64_t bloom_ms = 0;
     uint64_t style_ms = 0;
     uint64_t layout_ms = 0;
+    html_view_perf_begin(priv);
 
     html_view_dom_bloom_rebuild_if_needed(priv);
     uint64_t now_ms = sys_time_millis();
@@ -845,14 +846,27 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
             static uint64_t last_stage_log_ms = 0;
             if (html_view_log_throttle(&last_stage_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
             {
-                serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu",
+                serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu style_nodes=%llu style_hits=%llu measure_hit=%llu measure_miss=%llu text=%llu text_len=%llu layout_inline=%llu layout_inline_block=%llu layout_block=%llu layout_table=%llu layout_flex=%llu layout_grid=%llu",
                               (void *)view,
                               (unsigned long long)build_ms,
                               (unsigned long long)bloom_ms,
                               (unsigned long long)style_ms,
-                              (unsigned long long)layout_ms);
+                              (unsigned long long)layout_ms,
+                              (unsigned long long)priv->perf.style_nodes,
+                              (unsigned long long)priv->perf.style_cache_hits,
+                              (unsigned long long)priv->perf.measure_cache_hits,
+                              (unsigned long long)priv->perf.measure_cache_misses,
+                              (unsigned long long)priv->perf.text_width_calls,
+                              (unsigned long long)priv->perf.text_width_len_calls,
+                              (unsigned long long)priv->perf.measure_inline,
+                              (unsigned long long)priv->perf.measure_inline_block,
+                              (unsigned long long)priv->perf.measure_block,
+                              (unsigned long long)priv->perf.measure_table,
+                              (unsigned long long)priv->perf.measure_flex,
+                              (unsigned long long)priv->perf.measure_grid);
             }
         }
+        html_view_perf_end(priv);
         return true;
     }
 
@@ -873,14 +887,27 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         static uint64_t last_stage_log_ms = 0;
         if (html_view_log_throttle(&last_stage_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
         {
-            serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu",
+            serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu style_nodes=%llu style_hits=%llu measure_hit=%llu measure_miss=%llu text=%llu text_len=%llu layout_inline=%llu layout_inline_block=%llu layout_block=%llu layout_table=%llu layout_flex=%llu layout_grid=%llu",
                           (void *)view,
                           (unsigned long long)build_ms,
                           (unsigned long long)bloom_ms,
                           (unsigned long long)style_ms,
-                          (unsigned long long)layout_ms);
+                          (unsigned long long)layout_ms,
+                          (unsigned long long)priv->perf.style_nodes,
+                          (unsigned long long)priv->perf.style_cache_hits,
+                          (unsigned long long)priv->perf.measure_cache_hits,
+                          (unsigned long long)priv->perf.measure_cache_misses,
+                          (unsigned long long)priv->perf.text_width_calls,
+                          (unsigned long long)priv->perf.text_width_len_calls,
+                          (unsigned long long)priv->perf.measure_inline,
+                          (unsigned long long)priv->perf.measure_inline_block,
+                          (unsigned long long)priv->perf.measure_block,
+                          (unsigned long long)priv->perf.measure_table,
+                          (unsigned long long)priv->perf.measure_flex,
+                          (unsigned long long)priv->perf.measure_grid);
         }
     }
+    html_view_perf_end(priv);
     html_view_render_cache_clear(cache);
     return false;
 }

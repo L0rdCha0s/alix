@@ -10948,6 +10948,7 @@ void html_view_style_for_node(css_style_t *out,
     {
         return;
     }
+    bool perf_track = (priv && node && node->type == HTML_NODE_ELEMENT);
     if (priv)
     {
         html_view_style_cache_clear_if_needed(priv);
@@ -10957,10 +10958,18 @@ void html_view_style_for_node(css_style_t *out,
             const css_style_t *cached = html_view_style_cache_lookup(priv, node, HTML_VIEW_PSEUDO_NONE);
             if (cached)
             {
+                if (perf_track)
+                {
+                    html_view_perf_note_style(priv, true);
+                }
                 html_view_style_cache_copy_out(out, cached);
                 return;
             }
         }
+    }
+    if (perf_track)
+    {
+        html_view_perf_note_style(priv, false);
     }
 
     memset(out, 0, sizeof(*out));

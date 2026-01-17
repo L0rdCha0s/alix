@@ -105,6 +105,7 @@ bool html_view_measure_cache_lookup(atk_html_view_priv_t *priv,
         const html_view_measure_cache_entry_t *entry = &priv->measure_cache[index];
         if (!entry->valid)
         {
+            html_view_perf_note_measure_cache(priv, false);
             return false;
         }
         if (entry->hash == hash &&
@@ -124,11 +125,13 @@ bool html_view_measure_cache_lookup(atk_html_view_priv_t *priv,
             {
                 *out_h = entry->out_h;
             }
+            html_view_perf_note_measure_cache(priv, true);
             return true;
         }
         index = (index + 1u) & mask;
     }
 
+    html_view_perf_note_measure_cache(priv, false);
     return false;
 }
 

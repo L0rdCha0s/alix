@@ -282,6 +282,7 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
     {
         return 0;
     }
+    html_view_perf_note_text(ctx->priv, false);
 
     html_view_font_size_cache_t *cache = html_view_font_cache_for_ctx(ctx);
     if (!cache)
@@ -320,6 +321,7 @@ int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_
     {
         return 0;
     }
+    html_view_perf_note_text(ctx->priv, true);
 
     html_view_font_size_cache_t *cache = html_view_font_cache_for_ctx(ctx);
     if (!cache)

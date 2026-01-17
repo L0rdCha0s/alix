@@ -225,6 +225,7 @@ static void html_view_measure_node_size(const html_view_ctx_t *ctx,
     }
 
     html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_GRID);
+    html_view_perf_note_measure(ctx->priv, HTML_VIEW_TRACE_MEASURE_GRID);
     html_view_render_node_internal(&measure, node, parent_style);
     html_view_style_stack_destroy(&measure);
 

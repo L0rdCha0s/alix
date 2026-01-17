@@ -323,7 +323,9 @@ static void html_view_measure_inline_block_children(const html_view_ctx_t *ctx,
     measure.height_basis_explicit = false;
 
     html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK);
+    html_view_perf_note_measure(ctx->priv, HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK);
     html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_INLINE);
+    html_view_perf_note_measure(ctx->priv, HTML_VIEW_TRACE_MEASURE_INLINE);
     html_view_render_children(&measure, node, style);
     if (measure.x != measure.body_x)
     {
@@ -1428,6 +1430,7 @@ static bool html_view_render_inline_block_element(html_view_ctx_t *ctx,
         record_start_y = inner.y;
 
         html_view_trace_note_measure(HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK);
+        html_view_perf_note_measure(ctx->priv, HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK);
         html_view_render_children(&inner, node, style);
         if (inner.x != inner.body_x)
         {

@@ -294,6 +294,22 @@ typedef struct
     bool valid;
 } html_view_style_cache_entry_t;
 
+typedef struct
+{
+    uint64_t style_nodes;
+    uint64_t style_cache_hits;
+    uint64_t measure_cache_hits;
+    uint64_t measure_cache_misses;
+    uint64_t text_width_calls;
+    uint64_t text_width_len_calls;
+    uint64_t measure_inline;
+    uint64_t measure_inline_block;
+    uint64_t measure_block;
+    uint64_t measure_table;
+    uint64_t measure_flex;
+    uint64_t measure_grid;
+} html_view_perf_counters_t;
+
 typedef struct html_view_style_block html_view_style_block_t;
 
 typedef struct
@@ -349,6 +365,8 @@ typedef struct
     volatile uint32_t style_cache_dirty;
     html_view_style_block_t *style_block_free;
     size_t style_block_free_count;
+    volatile uint32_t perf_active;
+    html_view_perf_counters_t perf;
     atk_html_view_link_t link_handler;
     void *link_context;
     const char *pressed_href;
@@ -706,6 +724,128 @@ static inline void html_view_trace_dump_measure(const char *label)
     (void)label;
 }
 #endif
+
+static inline bool html_view_perf_active(const atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return false;
+    }
+    if (__atomic_load_n(&priv->perf_active, __ATOMIC_RELAXED) == 0u)
+    {
+        return false;
+    }
+#ifdef TTF_HOST_BUILD
+    return true;
+#else
+    alix_thread_t owner = __atomic_load_n(&priv->render_lock_owner, __ATOMIC_RELAXED);
+    return owner != 0 && owner == alix_thread_self();
+#endif
+}
+
+static inline void html_view_perf_reset(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    memset(&priv->perf, 0, sizeof(priv->perf));
+}
+
+static inline void html_view_perf_begin(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    html_view_perf_reset(priv);
+    __atomic_store_n(&priv->perf_active, 1u, __ATOMIC_RELEASE);
+}
+
+static inline void html_view_perf_end(atk_html_view_priv_t *priv)
+{
+    if (!priv)
+    {
+        return;
+    }
+    __atomic_store_n(&priv->perf_active, 0u, __ATOMIC_RELEASE);
+}
+
+static inline void html_view_perf_note_style(atk_html_view_priv_t *priv, bool cache_hit)
+{
+    if (!html_view_perf_active(priv))
+    {
+        return;
+    }
+    priv->perf.style_nodes++;
+    if (cache_hit)
+    {
+        priv->perf.style_cache_hits++;
+    }
+}
+
+static inline void html_view_perf_note_measure_cache(atk_html_view_priv_t *priv, bool hit)
+{
+    if (!html_view_perf_active(priv))
+    {
+        return;
+    }
+    if (hit)
+    {
+        priv->perf.measure_cache_hits++;
+    }
+    else
+    {
+        priv->perf.measure_cache_misses++;
+    }
+}
+
+static inline void html_view_perf_note_text(atk_html_view_priv_t *priv, bool is_len)
+{
+    if (!html_view_perf_active(priv))
+    {
+        return;
+    }
+    if (is_len)
+    {
+        priv->perf.text_width_len_calls++;
+    }
+    else
+    {
+        priv->perf.text_width_calls++;
+    }
+}
+
+static inline void html_view_perf_note_measure(atk_html_view_priv_t *priv, html_view_trace_measure_kind_t kind)
+{
+    if (!html_view_perf_active(priv))
+    {
+        return;
+    }
+    switch (kind)
+    {
+    case HTML_VIEW_TRACE_MEASURE_INLINE:
+        priv->perf.measure_inline++;
+        break;
+    case HTML_VIEW_TRACE_MEASURE_INLINE_BLOCK:
+        priv->perf.measure_inline_block++;
+        break;
+    case HTML_VIEW_TRACE_MEASURE_BLOCK:
+        priv->perf.measure_block++;
+        break;
+    case HTML_VIEW_TRACE_MEASURE_TABLE:
+        priv->perf.measure_table++;
+        break;
+    case HTML_VIEW_TRACE_MEASURE_FLEX:
+        priv->perf.measure_flex++;
+        break;
+    case HTML_VIEW_TRACE_MEASURE_GRID:
+        priv->perf.measure_grid++;
+        break;
+    default:
+        break;
+    }
+}
 
 void html_view_draw_rect_clipped(html_view_ctx_t *ctx,
                                  int x,

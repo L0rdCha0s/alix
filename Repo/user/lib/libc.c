@@ -81,10 +81,12 @@ static bool libc_env_reserve(size_t needed)
 
 #ifdef ENABLE_USER_MEM_DEBUG_LOGS
 #define USER_HEAP_LOG_PROC_PATH "/proc/sys/mem/uheap_log_enable"
-#define USER_HEAP_LOG_POLL_MASK 0x3Fu
+#define USER_HEAP_LOG_POLL_MASK 0x3FFu
+#define USER_HEAP_LOG_CHECK_INTERVAL_MS 5000u
 
 static uint32_t g_user_heap_log_enable = 0;
 static uint32_t g_user_heap_log_poll = 0;
+static uint64_t g_user_heap_log_last_check_ms = 0;
 
 static bool user_heap_log_enabled(void)
 {
@@ -95,6 +97,13 @@ static bool user_heap_log_enabled(void)
     }
 
     uint32_t enabled = __atomic_load_n(&g_user_heap_log_enable, __ATOMIC_ACQUIRE);
+    uint64_t now_ms = sys_time_millis();
+    uint64_t last_ms = __atomic_load_n(&g_user_heap_log_last_check_ms, __ATOMIC_RELAXED);
+    if ((now_ms - last_ms) < USER_HEAP_LOG_CHECK_INTERVAL_MS)
+    {
+        return enabled != 0;
+    }
+    __atomic_store_n(&g_user_heap_log_last_check_ms, now_ms, __ATOMIC_RELAXED);
     int fd = sys_open(USER_HEAP_LOG_PROC_PATH, SYSCALL_OPEN_READ);
     if (fd >= 0)
     {
@@ -496,13 +505,46 @@ static void *realloc_locked(void *ptr, size_t size)
     return new_ptr;
 }
 
+static inline size_t libc_word_repeat(uint8_t byte)
+{
+    size_t word = (size_t)byte;
+    word |= word << 8;
+    word |= word << 16;
+    if (sizeof(size_t) >= 8)
+    {
+        word |= word << 32;
+    }
+    return word;
+}
+
 void *memset(void *dst, int value, size_t count)
 {
-    uint8_t *ptr = (uint8_t *)dst;
+    uint8_t *d = (uint8_t *)dst;
     uint8_t byte = (uint8_t)value;
-    for (size_t i = 0; i < count; ++i)
+    if (count == 0)
     {
-        ptr[i] = byte;
+        return dst;
+    }
+
+    size_t word = libc_word_repeat(byte);
+    size_t word_size = sizeof(size_t);
+    size_t word_mask = word_size - 1u;
+
+    while (count && (((uintptr_t)d) & word_mask))
+    {
+        *d++ = byte;
+        count--;
+    }
+    size_t *dw = (size_t *)d;
+    while (count >= word_size)
+    {
+        *dw++ = word;
+        count -= word_size;
+    }
+    d = (uint8_t *)dw;
+    while (count--)
+    {
+        *d++ = byte;
     }
     return dst;
 }
@@ -511,9 +553,58 @@ void *memcpy(void *dst, const void *src, size_t count)
 {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
-    for (size_t i = 0; i < count; ++i)
+    if (count == 0 || d == s)
     {
-        d[i] = s[i];
+        return dst;
+    }
+
+    size_t word_size = sizeof(size_t);
+    size_t word_mask = word_size - 1u;
+    if ((((uintptr_t)d ^ (uintptr_t)s) & word_mask) == 0)
+    {
+        while (count && (((uintptr_t)d) & word_mask))
+        {
+            *d++ = *s++;
+            count--;
+        }
+        size_t *dw = (size_t *)d;
+        const size_t *sw = (const size_t *)s;
+        while (count >= word_size * 4u)
+        {
+            dw[0] = sw[0];
+            dw[1] = sw[1];
+            dw[2] = sw[2];
+            dw[3] = sw[3];
+            dw += 4;
+            sw += 4;
+            count -= word_size * 4u;
+        }
+        while (count >= word_size)
+        {
+            *dw++ = *sw++;
+            count -= word_size;
+        }
+        d = (uint8_t *)dw;
+        s = (const uint8_t *)sw;
+    }
+
+    while (count >= 8)
+    {
+        d[0] = s[0];
+        d[1] = s[1];
+        d[2] = s[2];
+        d[3] = s[3];
+        d[4] = s[4];
+        d[5] = s[5];
+        d[6] = s[6];
+        d[7] = s[7];
+        d += 8;
+        s += 8;
+        count -= 8;
+    }
+    while (count--)
+    {
+        *d++ = *s++;
     }
     return dst;
 }
@@ -529,19 +620,38 @@ void *memmove(void *dst, const void *src, size_t count)
 
     if (d < s)
     {
-        for (size_t i = 0; i < count; ++i)
-        {
-            d[i] = s[i];
-        }
-    }
-    else
-    {
-        for (size_t i = count; i > 0; --i)
-        {
-            d[i - 1] = s[i - 1];
-        }
+        return memcpy(dst, src, count);
     }
 
+    size_t word_size = sizeof(size_t);
+    size_t word_mask = word_size - 1u;
+    d += count;
+    s += count;
+
+    if ((((uintptr_t)d ^ (uintptr_t)s) & word_mask) == 0)
+    {
+        while (count && (((uintptr_t)d) & word_mask))
+        {
+            *--d = *--s;
+            count--;
+        }
+        size_t *dw = (size_t *)d;
+        const size_t *sw = (const size_t *)s;
+        while (count >= word_size)
+        {
+            dw--;
+            sw--;
+            *dw = *sw;
+            count -= word_size;
+        }
+        d = (uint8_t *)dw;
+        s = (const uint8_t *)sw;
+    }
+
+    while (count--)
+    {
+        *--d = *--s;
+    }
     return dst;
 }
 
@@ -549,47 +659,167 @@ int memcmp(const void *a, const void *b, size_t count)
 {
     const uint8_t *pa = (const uint8_t *)a;
     const uint8_t *pb = (const uint8_t *)b;
-    for (size_t i = 0; i < count; ++i)
+    size_t word_size = sizeof(size_t);
+    size_t word_mask = word_size - 1u;
+
+    if ((((uintptr_t)pa ^ (uintptr_t)pb) & word_mask) == 0)
     {
-        uint8_t va = pa[i];
-        uint8_t vb = pb[i];
-        if (va != vb)
+        while (count && (((uintptr_t)pa) & word_mask))
         {
-            return (int)va - (int)vb;
+            if (*pa != *pb)
+            {
+                return (int)*pa - (int)*pb;
+            }
+            pa++;
+            pb++;
+            count--;
         }
+
+        const size_t *wa = (const size_t *)pa;
+        const size_t *wb = (const size_t *)pb;
+        while (count >= word_size)
+        {
+            if (*wa != *wb)
+            {
+                const uint8_t *ba = (const uint8_t *)wa;
+                const uint8_t *bb = (const uint8_t *)wb;
+                for (size_t i = 0; i < word_size; ++i)
+                {
+                    if (ba[i] != bb[i])
+                    {
+                        return (int)ba[i] - (int)bb[i];
+                    }
+                }
+            }
+            wa++;
+            wb++;
+            count -= word_size;
+        }
+        pa = (const uint8_t *)wa;
+        pb = (const uint8_t *)wb;
+    }
+
+    while (count--)
+    {
+        if (*pa != *pb)
+        {
+            return (int)*pa - (int)*pb;
+        }
+        pa++;
+        pb++;
     }
     return 0;
 }
 
 size_t strlen(const char *str)
 {
-    size_t len = 0;
-    while (str && str[len] != '\0')
+    if (!str)
     {
-        ++len;
+        return 0;
     }
-    return len;
+    const char *s = str;
+    for (;;)
+    {
+        if (s[0] == '\0') return (size_t)(s - str);
+        if (s[1] == '\0') return (size_t)(s - str + 1);
+        if (s[2] == '\0') return (size_t)(s - str + 2);
+        if (s[3] == '\0') return (size_t)(s - str + 3);
+        s += 4;
+    }
 }
 
 int strcmp(const char *a, const char *b)
 {
-    while (*a && (*a == *b))
+    for (;;)
     {
-        ++a;
-        ++b;
+        unsigned char ca = (unsigned char)a[0];
+        unsigned char cb = (unsigned char)b[0];
+        if (ca != cb)
+        {
+            return (int)ca - (int)cb;
+        }
+        if (ca == '\0')
+        {
+            return 0;
+        }
+
+        ca = (unsigned char)a[1];
+        cb = (unsigned char)b[1];
+        if (ca != cb)
+        {
+            return (int)ca - (int)cb;
+        }
+        if (ca == '\0')
+        {
+            return 0;
+        }
+
+        ca = (unsigned char)a[2];
+        cb = (unsigned char)b[2];
+        if (ca != cb)
+        {
+            return (int)ca - (int)cb;
+        }
+        if (ca == '\0')
+        {
+            return 0;
+        }
+
+        ca = (unsigned char)a[3];
+        cb = (unsigned char)b[3];
+        if (ca != cb)
+        {
+            return (int)ca - (int)cb;
+        }
+        if (ca == '\0')
+        {
+            return 0;
+        }
+
+        a += 4;
+        b += 4;
     }
-    return (unsigned char)*a - (unsigned char)*b;
 }
 
 int strncmp(const char *a, const char *b, size_t n)
 {
-    for (size_t i = 0; i < n; ++i)
+    while (n >= 4)
     {
-        unsigned char ca = a[i];
-        unsigned char cb = b[i];
+        unsigned char ca = (unsigned char)a[0];
+        unsigned char cb = (unsigned char)b[0];
         if (ca != cb || ca == '\0' || cb == '\0')
         {
-            return ca - cb;
+            return (int)ca - (int)cb;
+        }
+        ca = (unsigned char)a[1];
+        cb = (unsigned char)b[1];
+        if (ca != cb || ca == '\0' || cb == '\0')
+        {
+            return (int)ca - (int)cb;
+        }
+        ca = (unsigned char)a[2];
+        cb = (unsigned char)b[2];
+        if (ca != cb || ca == '\0' || cb == '\0')
+        {
+            return (int)ca - (int)cb;
+        }
+        ca = (unsigned char)a[3];
+        cb = (unsigned char)b[3];
+        if (ca != cb || ca == '\0' || cb == '\0')
+        {
+            return (int)ca - (int)cb;
+        }
+        a += 4;
+        b += 4;
+        n -= 4;
+    }
+    while (n--)
+    {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        if (ca != cb || ca == '\0' || cb == '\0')
+        {
+            return (int)ca - (int)cb;
         }
     }
     return 0;
@@ -725,20 +955,57 @@ int strcasecmp(const char *a, const char *b)
     {
         return 0;
     }
-    while (a && b && *a && *b)
+    if (!a || !b)
     {
-        int ca = libc_tolower_char((unsigned char)*a);
-        int cb = libc_tolower_char((unsigned char)*b);
+        int ca = a ? libc_tolower_char((unsigned char)*a) : 0;
+        int cb = b ? libc_tolower_char((unsigned char)*b) : 0;
+        return ca - cb;
+    }
+    for (;;)
+    {
+        int ca = libc_tolower_char((unsigned char)a[0]);
+        int cb = libc_tolower_char((unsigned char)b[0]);
         if (ca != cb)
         {
             return ca - cb;
         }
-        ++a;
-        ++b;
+        if (ca == 0)
+        {
+            return 0;
+        }
+        ca = libc_tolower_char((unsigned char)a[1]);
+        cb = libc_tolower_char((unsigned char)b[1]);
+        if (ca != cb)
+        {
+            return ca - cb;
+        }
+        if (ca == 0)
+        {
+            return 0;
+        }
+        ca = libc_tolower_char((unsigned char)a[2]);
+        cb = libc_tolower_char((unsigned char)b[2]);
+        if (ca != cb)
+        {
+            return ca - cb;
+        }
+        if (ca == 0)
+        {
+            return 0;
+        }
+        ca = libc_tolower_char((unsigned char)a[3]);
+        cb = libc_tolower_char((unsigned char)b[3]);
+        if (ca != cb)
+        {
+            return ca - cb;
+        }
+        if (ca == 0)
+        {
+            return 0;
+        }
+        a += 4;
+        b += 4;
     }
-    int ca = a ? libc_tolower_char((unsigned char)*a) : 0;
-    int cb = b ? libc_tolower_char((unsigned char)*b) : 0;
-    return ca - cb;
 }
 
 int strncasecmp(const char *a, const char *b, size_t n)
@@ -747,10 +1014,46 @@ int strncasecmp(const char *a, const char *b, size_t n)
     {
         return 0;
     }
-    for (size_t i = 0; i < n; ++i)
+    if (!a || !b)
     {
-        int ca = a ? libc_tolower_char((unsigned char)a[i]) : 0;
-        int cb = b ? libc_tolower_char((unsigned char)b[i]) : 0;
+        int ca = a ? libc_tolower_char((unsigned char)*a) : 0;
+        int cb = b ? libc_tolower_char((unsigned char)*b) : 0;
+        return ca - cb;
+    }
+    while (n >= 4)
+    {
+        int ca = libc_tolower_char((unsigned char)a[0]);
+        int cb = libc_tolower_char((unsigned char)b[0]);
+        if (ca != cb || ca == 0 || cb == 0)
+        {
+            return ca - cb;
+        }
+        ca = libc_tolower_char((unsigned char)a[1]);
+        cb = libc_tolower_char((unsigned char)b[1]);
+        if (ca != cb || ca == 0 || cb == 0)
+        {
+            return ca - cb;
+        }
+        ca = libc_tolower_char((unsigned char)a[2]);
+        cb = libc_tolower_char((unsigned char)b[2]);
+        if (ca != cb || ca == 0 || cb == 0)
+        {
+            return ca - cb;
+        }
+        ca = libc_tolower_char((unsigned char)a[3]);
+        cb = libc_tolower_char((unsigned char)b[3]);
+        if (ca != cb || ca == 0 || cb == 0)
+        {
+            return ca - cb;
+        }
+        a += 4;
+        b += 4;
+        n -= 4;
+    }
+    while (n--)
+    {
+        int ca = libc_tolower_char((unsigned char)*a++);
+        int cb = libc_tolower_char((unsigned char)*b++);
         if (ca != cb || ca == 0 || cb == 0)
         {
             return ca - cb;

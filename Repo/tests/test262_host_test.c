@@ -476,10 +476,10 @@ static bool native_assert(js_runtime_t *rt,
             {
                 *error_message = dup_cstring("assert.throws wrong error type");
             }
-            free(call_error);
+            js_free(call_error);
             return false;
         }
-        free(call_error);
+        js_free(call_error);
         *out = js_value_make_undefined();
         return true;
     }
