@@ -18,8 +18,19 @@
 #include "video.h"
 #include "web/css.h"
 #include "web/html.h"
+#ifdef TTF_HOST_BUILD
+#include <time.h>
+#endif
 #include "web/js.h"
 #include "web/url.h"
+
+#ifndef HTML_VIEW_PERF_TIMING
+#ifdef TTF_HOST_BUILD
+#define HTML_VIEW_PERF_TIMING 1
+#else
+#define HTML_VIEW_PERF_TIMING 0
+#endif
+#endif
 
 #define ATK_HTML_VIEW_PADDING 8
 #define ATK_HTML_VIEW_SCROLLBAR_WIDTH 14
@@ -326,12 +337,16 @@ typedef struct
     uint64_t measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_COUNT];
     uint64_t text_width_calls;
     uint64_t text_width_len_calls;
+    uint64_t text_width_ms;
+    uint64_t text_width_len_ms;
     uint64_t measure_inline;
     uint64_t measure_inline_block;
     uint64_t measure_block;
     uint64_t measure_table;
     uint64_t measure_flex;
     uint64_t measure_grid;
+    uint64_t layout_flex_ms;
+    uint64_t layout_grid_ms;
 } html_view_perf_counters_t;
 
 typedef struct html_view_style_block html_view_style_block_t;
@@ -755,6 +770,21 @@ static inline bool html_view_perf_active(const atk_html_view_priv_t *priv)
 #else
     alix_thread_t owner = __atomic_load_n(&priv->render_lock_owner, __ATOMIC_RELAXED);
     return owner != 0 && owner == alix_thread_self();
+#endif
+}
+
+static inline uint64_t html_view_perf_now_ms(void)
+{
+#if HTML_VIEW_PERF_TIMING
+#ifdef TTF_HOST_BUILD
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+#else
+    return sys_time_millis();
+#endif
+#else
+    return 0;
 #endif
 }
 

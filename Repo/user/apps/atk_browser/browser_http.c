@@ -162,7 +162,9 @@ static uint32_t browser_cache_max_age_for_uri(const char *uri)
     {
         return BROWSER_CACHE_MAX_AGE_DEFAULT_SECONDS;
     }
-    if (browser_extension_matches(ext, ext_len, "css"))
+    if (browser_extension_matches(ext, ext_len, "css") ||
+        browser_extension_matches(ext, ext_len, "js") ||
+        browser_extension_matches(ext, ext_len, "mjs"))
     {
         return BROWSER_CACHE_MAX_AGE_LONG_SECONDS;
     }

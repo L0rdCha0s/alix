@@ -35,6 +35,7 @@ struct js_object
     js_host_finalize_fn_t finalize_fn;
     void *user_data;
     js_property_t *properties;
+    bool is_html_dda;
 };
 
 struct js_function
@@ -45,6 +46,8 @@ struct js_function
     bool is_expr;
     bool is_constructible;
     js_env_t *closure;
+    js_value_t prototype_value;
+    bool has_prototype;
 };
 
 struct js_native_meta
@@ -81,6 +84,7 @@ struct js_runtime
     js_object_t *array_proto;
     js_object_t *date_proto;
     js_object_t *number_proto;
+    js_object_t *string_proto;
     js_object_t *symbol_proto;
     js_object_t *temporal_object;
     js_object_t *temporal_now_object;
@@ -117,6 +121,7 @@ double js_nan(void);
 bool js_is_nan(double value);
 
 bool js_value_is_truthy(const js_value_t *value);
+bool js_value_is_html_dda(const js_value_t *value);
 double js_value_to_number(const js_value_t *value, bool *ok_out);
 bool js_value_strict_equal(const js_value_t *a, const js_value_t *b);
 bool js_value_loose_equal(const js_value_t *a, const js_value_t *b);
@@ -357,6 +362,12 @@ bool js_builtin_reflect_get(js_runtime_t *rt,
                             void *user_data,
                             js_value_t *out,
                             char **error_message);
+bool js_builtin_reflect_set(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
 bool js_builtin_test_with_typed_array_constructors(js_runtime_t *rt,
                                                    size_t argc,
                                                    const js_value_t *argv,
@@ -381,7 +392,127 @@ bool js_builtin_string_substring(js_runtime_t *rt,
                                  void *user_data,
                                  js_value_t *out,
                                  char **error_message);
+bool js_string_proto_anchor(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_string_proto_match_all(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_string_proto_big(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
+bool js_string_proto_blink(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_string_proto_bold(js_runtime_t *rt,
+                          size_t argc,
+                          const js_value_t *argv,
+                          void *user_data,
+                          js_value_t *out,
+                          char **error_message);
+bool js_string_proto_fixed(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_string_proto_fontcolor(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_string_proto_fontsize(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message);
+bool js_string_proto_italics(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_string_proto_link(js_runtime_t *rt,
+                          size_t argc,
+                          const js_value_t *argv,
+                          void *user_data,
+                          js_value_t *out,
+                          char **error_message);
+bool js_string_proto_replace(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_string_proto_replace_all(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_string_proto_search(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_string_proto_small(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_string_proto_split(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
+bool js_string_proto_substr(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_string_proto_strike(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_string_proto_sub(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
+bool js_string_proto_sup(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message);
 bool js_regexp_legacy_getter(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_regexp_legacy_setter(js_runtime_t *rt,
                              size_t argc,
                              const js_value_t *argv,
                              void *user_data,
@@ -430,6 +561,12 @@ bool js_builtin_object_get_own_property_descriptors(js_runtime_t *rt,
                                                     void *user_data,
                                                     js_value_t *out,
                                                     char **error_message);
+bool js_builtin_object_is(js_runtime_t *rt,
+                          size_t argc,
+                          const js_value_t *argv,
+                          void *user_data,
+                          js_value_t *out,
+                          char **error_message);
 bool js_builtin_object_has_own_property(js_runtime_t *rt,
                                         size_t argc,
                                         const js_value_t *argv,
@@ -492,6 +629,12 @@ bool js_builtin_array_is_array(js_runtime_t *rt,
                                void *user_data,
                                js_value_t *out,
                                char **error_message);
+bool js_builtin_array_from(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message);
 bool js_builtin_array_join(js_runtime_t *rt,
                            size_t argc,
                            const js_value_t *argv,
@@ -510,6 +653,12 @@ bool js_builtin_array_map(js_runtime_t *rt,
                           void *user_data,
                           js_value_t *out,
                           char **error_message);
+bool js_builtin_array_for_each(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
 js_object_t *js_get_array_proto(js_runtime_t *rt);
 bool js_builtin_math_pow(js_runtime_t *rt,
                          size_t argc,
@@ -533,6 +682,7 @@ js_object_t *js_get_iterator_proto(js_runtime_t *rt);
 js_object_t *js_get_math_object(js_runtime_t *rt);
 js_object_t *js_get_date_proto(js_runtime_t *rt);
 js_object_t *js_get_number_proto(js_runtime_t *rt);
+js_object_t *js_get_string_proto(js_runtime_t *rt);
 js_object_t *js_get_symbol_proto(js_runtime_t *rt);
 js_object_t *js_get_temporal_object(js_runtime_t *rt);
 js_object_t *js_get_temporal_now_object(js_runtime_t *rt);

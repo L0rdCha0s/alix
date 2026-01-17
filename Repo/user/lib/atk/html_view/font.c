@@ -372,12 +372,20 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
     {
         return 0;
     }
-    html_view_perf_note_text(ctx->priv, false);
+    atk_html_view_priv_t *priv = ctx->priv;
+    bool perf_active = html_view_perf_active(priv);
+    uint64_t start_ms = perf_active ? html_view_perf_now_ms() : 0;
+    html_view_perf_note_text(priv, false);
 
     html_view_font_size_cache_t *cache = html_view_font_cache_for_ctx(ctx);
     if (!cache)
     {
-        return atk_font_text_width(text);
+        int width = atk_font_text_width(text);
+        if (perf_active)
+        {
+            priv->perf.text_width_ms += (html_view_perf_now_ms() - start_ms);
+        }
+        return width;
     }
 
     size_t cache_len = 0;
@@ -388,6 +396,10 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
         int cached_width = 0;
         if (html_view_text_cache_lookup(cache, text, cache_len, cache_hash, &cached_width))
         {
+            if (perf_active)
+            {
+                priv->perf.text_width_ms += (html_view_perf_now_ms() - start_ms);
+            }
             return cached_width;
         }
     }
@@ -418,6 +430,10 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
     {
         html_view_text_cache_store(cache, text, cache_len, cache_hash, width);
     }
+    if (perf_active)
+    {
+        priv->perf.text_width_ms += (html_view_perf_now_ms() - start_ms);
+    }
     return width;
 }
 
@@ -427,7 +443,10 @@ int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_
     {
         return 0;
     }
-    html_view_perf_note_text(ctx->priv, true);
+    atk_html_view_priv_t *priv = ctx->priv;
+    bool perf_active = html_view_perf_active(priv);
+    uint64_t start_ms = perf_active ? html_view_perf_now_ms() : 0;
+    html_view_perf_note_text(priv, true);
 
     html_view_font_size_cache_t *cache = html_view_font_cache_for_ctx(ctx);
     if (!cache)
@@ -435,12 +454,20 @@ int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_
         char *copy = (char *)malloc(len + 1);
         if (!copy)
         {
+            if (perf_active)
+            {
+                priv->perf.text_width_len_ms += (html_view_perf_now_ms() - start_ms);
+            }
             return 0;
         }
         memcpy(copy, text, len);
         copy[len] = '\0';
         int width = atk_font_text_width(copy);
         free(copy);
+        if (perf_active)
+        {
+            priv->perf.text_width_len_ms += (html_view_perf_now_ms() - start_ms);
+        }
         return width;
     }
 
@@ -452,6 +479,10 @@ int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_
         int cached_width = 0;
         if (html_view_text_cache_lookup(cache, text, len, cache_hash, &cached_width))
         {
+            if (perf_active)
+            {
+                priv->perf.text_width_len_ms += (html_view_perf_now_ms() - start_ms);
+            }
             return cached_width;
         }
     }
@@ -481,6 +512,10 @@ int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_
     if (cacheable)
     {
         html_view_text_cache_store(cache, text, len, cache_hash, width);
+    }
+    if (perf_active)
+    {
+        priv->perf.text_width_len_ms += (html_view_perf_now_ms() - start_ms);
     }
     return width;
 }

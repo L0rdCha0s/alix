@@ -267,6 +267,10 @@ void html_view_render_grid_container(html_view_ctx_t *ctx,
         return;
     }
 
+    atk_html_view_priv_t *priv = ctx->priv;
+    bool perf_active = html_view_perf_active(priv);
+    uint64_t start_ms = perf_active ? html_view_perf_now_ms() : 0;
+
     int cols = style->has_grid_template_columns ? style->grid_template_columns : 1;
     if (cols < 1) cols = 1;
 
@@ -440,6 +444,10 @@ void html_view_render_grid_container(html_view_ctx_t *ctx,
         items = (html_view_grid_item_t *)calloc(child_cap, sizeof(*items));
         if (!items)
         {
+            if (perf_active)
+            {
+                priv->perf.layout_grid_ms += (html_view_perf_now_ms() - start_ms);
+            }
             return;
         }
 
@@ -815,5 +823,9 @@ void html_view_render_grid_container(html_view_ctx_t *ctx,
         {
             ctx->line_op_start = 0;
         }
+    }
+    if (perf_active)
+    {
+        priv->perf.layout_grid_ms += (html_view_perf_now_ms() - start_ms);
     }
 }

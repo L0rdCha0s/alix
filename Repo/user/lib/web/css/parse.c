@@ -3573,27 +3573,6 @@ static bool css_ident_is(const char *start, const char *end, const char *name)
     return len == name_len && strncasecmp(start, name, name_len) == 0;
 }
 
-static bool css_range_contains_ci(const char *start, const char *end, const char *needle)
-{
-    if (!start || !end || !needle)
-    {
-        return false;
-    }
-    size_t needle_len = strlen(needle);
-    if (needle_len == 0 || (size_t)(end - start) < needle_len)
-    {
-        return false;
-    }
-    for (const char *p = start; p + needle_len <= end; ++p)
-    {
-        if (strncasecmp(p, needle, needle_len) == 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 static bool css_selector_has_theme_override(const char *start, const char *end)
 {
     if (!start || !end || end <= start)

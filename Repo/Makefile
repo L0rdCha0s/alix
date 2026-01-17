@@ -213,6 +213,7 @@ PNG_TEST_BIN := $(HOST_TEST_DIR)/png_host_test
 WEB_TEST_BIN := $(HOST_TEST_DIR)/web_host_test
 CSS_TEST_BIN := $(HOST_TEST_DIR)/css_test
 HTML_VIEW_TEST_BIN := $(HOST_TEST_DIR)/html_view_host_test
+HTML_VIEW_TEST_LIBC_BIN := $(HOST_TEST_DIR)/html_view_host_test_libc
 BROWSER_EVENT_TEST_BIN := $(HOST_TEST_DIR)/browser_event_host_test
 HTML_JS_TEST_BIN := $(HOST_TEST_DIR)/html_js_host_test
 TLS_TEST_BIN := $(HOST_TEST_DIR)/tls_host_test
@@ -564,6 +565,57 @@ $(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
 	    user/lib/atk/html_view/render/flex.c \
 	    user/lib/atk/html_view/render/grid.c \
 	    user/lib/atk/html_view/render/forms.c -o $@
+
+$(HTML_VIEW_TEST_LIBC_BIN): tests/html_view_host_test.c \
+                       user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                       src/kernel/utf8.c \
+                       src/kernel/ttf.c \
+                       user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+                       user/lib/web/url.c \
+                       src/atk/util/gif.c \
+                       src/atk/util/jpeg.c \
+                       src/atk/util/png.c \
+                       src/atk/util/svg.c \
+                       src/atk/atk_font.c \
+                       user/lib/atk/html_view/font.c \
+                       user/lib/atk/html_view/style.c \
+                       user/lib/atk/html_view/measure_cache.c \
+                       user/lib/atk/html_view/layout.c \
+                       user/lib/atk/html_view/table.c \
+                       user/lib/atk/html_view/render/dispatch.c \
+                       user/lib/atk/html_view/render/blocks.c \
+                       user/lib/atk/html_view/render/inline.c \
+                       user/lib/atk/html_view/render/flex.c \
+                       user/lib/atk/html_view/render/grid.c \
+                       user/lib/atk/html_view/render/forms.c \
+                       user/lib/libc.c \
+                       user/lib/syscall_host.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -fno-builtin -DPNG_HOST_BUILD -DGIF_HOST_BUILD -DSVG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	    tests/html_view_host_test.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
+	    src/kernel/ttf.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    user/lib/web/url.c \
+	    src/atk/util/gif.c \
+	    src/atk/util/jpeg.c \
+	    src/atk/util/png.c \
+	    src/atk/util/svg.c \
+	    src/atk/atk_font.c \
+	    user/lib/atk/html_view/font.c \
+	    user/lib/atk/html_view/style.c \
+	    user/lib/atk/html_view/measure_cache.c \
+	    user/lib/atk/html_view/layout.c \
+	    user/lib/atk/html_view/table.c \
+	    user/lib/atk/html_view/render/dispatch.c \
+	    user/lib/atk/html_view/render/blocks.c \
+	    user/lib/atk/html_view/render/inline.c \
+	    user/lib/atk/html_view/render/flex.c \
+	    user/lib/atk/html_view/render/grid.c \
+	    user/lib/atk/html_view/render/forms.c \
+	    user/lib/libc.c \
+	    user/lib/syscall_host.c -o $@
 
 $(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c
 	@mkdir -p $(HOST_TEST_DIR)

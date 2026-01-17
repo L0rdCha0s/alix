@@ -26,6 +26,10 @@ void js_function_release(js_function_t *fn)
     {
         return;
     }
+    if (fn->has_prototype)
+    {
+        js_value_destroy(&fn->prototype_value);
+    }
     js_env_release(fn->closure);
     js_free(fn);
 }
@@ -49,6 +53,23 @@ js_function_t *js_function_create(const js_function_decl_t *decl,
     if (closure)
     {
         js_env_retain(closure);
+    }
+    fn->prototype_value = js_value_make_undefined_internal();
+    fn->has_prototype = false;
+    if (is_constructible)
+    {
+        js_value_t proto_val;
+        if (!js_value_make_host_object(&proto_val, NULL, NULL, NULL, NULL))
+        {
+            if (closure)
+            {
+                js_env_release(closure);
+            }
+            js_free(fn);
+            return NULL;
+        }
+        fn->prototype_value = proto_val;
+        fn->has_prototype = true;
     }
     return fn;
 }

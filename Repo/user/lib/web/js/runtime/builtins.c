@@ -2826,6 +2826,13 @@ static bool js_array_proto_get(js_runtime_t *rt,
         out->as.native.user_data = NULL;
         return true;
     }
+    if (strcmp(name, "forEach") == 0)
+    {
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = js_builtin_array_for_each;
+        out->as.native.user_data = NULL;
+        return true;
+    }
     *out = js_value_make_undefined_internal();
     return true;
 }
@@ -2895,7 +2902,7 @@ static bool js_date_proto_get(js_runtime_t *rt,
     }
     else if (strcmp(name, "toGMTString") == 0)
     {
-        fn = js_date_proto_to_gmt_string;
+        fn = js_date_proto_to_utc_string;
     }
     else if (strcmp(name, "toISOString") == 0)
     {
@@ -3263,6 +3270,149 @@ js_object_t *js_get_number_proto(js_runtime_t *rt)
         (void)js_object_set_slot(rt->number_proto, "__proto__", &proto_slot);
     }
     return rt->number_proto;
+}
+
+static bool js_string_proto_get(js_runtime_t *rt,
+                                void *user_data,
+                                const char *name,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!name)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    js_native_fn_t fn = NULL;
+    if (strcmp(name, "constructor") == 0)
+    {
+        fn = js_builtin_string;
+    }
+    else if (strcmp(name, "anchor") == 0)
+    {
+        fn = js_string_proto_anchor;
+    }
+    else if (strcmp(name, "big") == 0)
+    {
+        fn = js_string_proto_big;
+    }
+    else if (strcmp(name, "blink") == 0)
+    {
+        fn = js_string_proto_blink;
+    }
+    else if (strcmp(name, "bold") == 0)
+    {
+        fn = js_string_proto_bold;
+    }
+    else if (strcmp(name, "fixed") == 0)
+    {
+        fn = js_string_proto_fixed;
+    }
+    else if (strcmp(name, "fontcolor") == 0)
+    {
+        fn = js_string_proto_fontcolor;
+    }
+    else if (strcmp(name, "fontsize") == 0)
+    {
+        fn = js_string_proto_fontsize;
+    }
+    else if (strcmp(name, "italics") == 0)
+    {
+        fn = js_string_proto_italics;
+    }
+    else if (strcmp(name, "link") == 0)
+    {
+        fn = js_string_proto_link;
+    }
+    else if (strcmp(name, "matchAll") == 0)
+    {
+        fn = js_string_proto_match_all;
+    }
+    else if (strcmp(name, "replace") == 0)
+    {
+        fn = js_string_proto_replace;
+    }
+    else if (strcmp(name, "replaceAll") == 0)
+    {
+        fn = js_string_proto_replace_all;
+    }
+    else if (strcmp(name, "search") == 0)
+    {
+        fn = js_string_proto_search;
+    }
+    else if (strcmp(name, "small") == 0)
+    {
+        fn = js_string_proto_small;
+    }
+    else if (strcmp(name, "split") == 0)
+    {
+        fn = js_string_proto_split;
+    }
+    else if (strcmp(name, "substr") == 0)
+    {
+        fn = js_string_proto_substr;
+    }
+    else if (strcmp(name, "strike") == 0)
+    {
+        fn = js_string_proto_strike;
+    }
+    else if (strcmp(name, "sub") == 0)
+    {
+        fn = js_string_proto_sub;
+    }
+    else if (strcmp(name, "sup") == 0)
+    {
+        fn = js_string_proto_sup;
+    }
+    if (fn)
+    {
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = fn;
+        out->as.native.user_data = NULL;
+        return true;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+js_object_t *js_get_string_proto(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return NULL;
+    }
+    if (rt->string_proto)
+    {
+        return rt->string_proto;
+    }
+    js_value_t proto_val;
+    if (!js_value_make_host_object(&proto_val, js_string_proto_get, NULL, NULL, NULL))
+    {
+        return NULL;
+    }
+    rt->string_proto = proto_val.as.object;
+    js_object_retain(rt->string_proto);
+    js_value_destroy(&proto_val);
+    js_object_t *obj_proto = js_get_object_proto(rt);
+    if (obj_proto)
+    {
+        js_value_t proto_slot;
+        memset(&proto_slot, 0, sizeof(proto_slot));
+        proto_slot.type = JS_VALUE_OBJECT;
+        proto_slot.as.object = obj_proto;
+        (void)js_object_set_slot(rt->string_proto, "__proto__", &proto_slot);
+    }
+    return rt->string_proto;
 }
 
 js_object_t *js_get_symbol_proto(js_runtime_t *rt)
@@ -4964,6 +5114,8 @@ static bool js_parse_index_key(const char *text, size_t *out_index)
     return true;
 }
 
+static bool js_regexp_is_legacy_setter_property(const char *name);
+
 static bool js_builtin_get_prop_desc(js_runtime_t *rt,
                                      const js_value_t *obj,
                                      const char *name,
@@ -5080,6 +5232,28 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
         }
     }
 
+    if (strcmp(name, "prototype") == 0 && obj->type == JS_VALUE_FUNCTION)
+    {
+        js_function_t *fn = obj->as.function;
+        if (!fn || !fn->has_prototype)
+        {
+            return true;
+        }
+        out->exists = true;
+        if (!js_value_copy(&out->value, &fn->prototype_value))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        out->writable = true;
+        out->enumerable = false;
+        out->configurable = false;
+        return true;
+    }
+
     if (obj->type == JS_VALUE_NATIVE_FN &&
         obj->as.native.fn == js_builtin_regexp &&
         js_regexp_is_legacy_static_property(name))
@@ -5092,7 +5266,16 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
         out->getter.type = JS_VALUE_NATIVE_FN;
         out->getter.as.native.fn = js_regexp_legacy_getter;
         out->getter.as.native.user_data = obj->as.native.user_data;
-        out->setter = js_value_make_undefined_internal();
+        if (js_regexp_is_legacy_setter_property(name))
+        {
+            out->setter.type = JS_VALUE_NATIVE_FN;
+            out->setter.as.native.fn = js_regexp_legacy_setter;
+            out->setter.as.native.user_data = obj->as.native.user_data;
+        }
+        else
+        {
+            out->setter = js_value_make_undefined_internal();
+        }
         return true;
     }
 
@@ -5237,6 +5420,10 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
             {
                 proto = js_get_number_proto(rt);
             }
+            else if (native_name && strcmp(native_name, "String") == 0)
+            {
+                proto = js_get_string_proto(rt);
+            }
             else if (native_name && strcmp(native_name, "Symbol") == 0)
             {
                 proto = js_get_symbol_proto(rt);
@@ -5312,6 +5499,10 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
             {
                 fn = js_builtin_object_get_own_property_descriptors;
             }
+            else if (strcmp(name, "is") == 0)
+            {
+                fn = js_builtin_object_is;
+            }
             if (fn)
             {
                 out->exists = true;
@@ -5328,6 +5519,16 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
             out->exists = true;
             out->value.type = JS_VALUE_NATIVE_FN;
             out->value.as.native.fn = js_builtin_array_is_array;
+            out->value.as.native.user_data = NULL;
+            out->writable = true;
+            out->enumerable = false;
+            out->configurable = true;
+        }
+        if (native_name && strcmp(native_name, "Array") == 0 && strcmp(name, "from") == 0)
+        {
+            out->exists = true;
+            out->value.type = JS_VALUE_NATIVE_FN;
+            out->value.as.native.fn = js_builtin_array_from;
             out->value.as.native.user_data = NULL;
             out->writable = true;
             out->enumerable = false;
@@ -6317,7 +6518,7 @@ bool js_regexp_exec(js_runtime_t *rt,
         return true;
     }
     js_value_t result;
-    if (!js_value_make_host_object(&result, NULL, NULL, NULL, NULL))
+    if (!js_value_make_array(&result))
     {
         js_temp_string_release(&temp);
         return false;
@@ -6329,12 +6530,16 @@ bool js_regexp_exec(js_runtime_t *rt,
         js_temp_string_release(&temp);
         return false;
     }
-    (void)js_object_set_slot(result.as.object, "0", &match_value);
+    if (!js_value_array_set(&result, 0, &match_value))
+    {
+        js_value_destroy(&match_value);
+        js_value_destroy(&result);
+        js_temp_string_release(&temp);
+        return false;
+    }
     js_value_destroy(&match_value);
-    js_value_t length_value = js_value_make_number(1.0);
-    (void)js_object_set_slot(result.as.object, "length", &length_value);
     js_value_t index_value = js_value_make_number((double)start);
-    (void)js_object_set_slot(result.as.object, "index", &index_value);
+    (void)js_array_set_property(result.as.array, "index", &index_value);
     js_value_t input_value;
     if (!js_value_make_string(&input_value, text, text_len))
     {
@@ -6342,7 +6547,7 @@ bool js_regexp_exec(js_runtime_t *rt,
         js_temp_string_release(&temp);
         return false;
     }
-    (void)js_object_set_slot(result.as.object, "input", &input_value);
+    (void)js_array_set_property(result.as.array, "input", &input_value);
     js_value_destroy(&input_value);
     js_temp_string_release(&temp);
     if (use_last_index && re && re->object)
@@ -6990,6 +7195,11 @@ bool js_regexp_is_legacy_static_property(const char *name)
     return false;
 }
 
+static bool js_regexp_is_legacy_setter_property(const char *name)
+{
+    return name && (strcmp(name, "input") == 0 || strcmp(name, "$_") == 0);
+}
+
 bool js_regexp_legacy_getter(js_runtime_t *rt,
                              size_t argc,
                              const js_value_t *argv,
@@ -7018,6 +7228,37 @@ bool js_regexp_legacy_getter(js_runtime_t *rt,
         return false;
     }
     return js_value_make_cstring(out, "");
+}
+
+bool js_regexp_legacy_setter(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *receiver = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!receiver || receiver->type != JS_VALUE_NATIVE_FN ||
+        receiver->as.native.fn != js_builtin_regexp ||
+        receiver->as.native.user_data != user_data)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid RegExp receiver");
+        }
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
 }
 
 static bool js_regexp_get(js_runtime_t *rt,
@@ -7089,7 +7330,7 @@ static bool js_regexp_get(js_runtime_t *rt,
     {
         memset(out, 0, sizeof(*out));
         out->type = JS_VALUE_NATIVE_FN;
-        out->as.native.fn = js_regexp_test;
+        out->as.native.fn = js_regexp_exec;
         out->as.native.user_data = user_data;
         return true;
     }
@@ -7145,6 +7386,227 @@ static bool js_regexp_get(js_runtime_t *rt,
     return true;
 }
 
+static bool js_string_is_callable(const js_value_t *value)
+{
+    return value && (value->type == JS_VALUE_FUNCTION ||
+                     value->type == JS_VALUE_NATIVE_FN ||
+                     js_value_is_html_dda(value));
+}
+
+static bool js_string_get_symbol_method(js_runtime_t *rt,
+                                        const js_value_t *target,
+                                        const char *symbol_name,
+                                        js_value_t *method,
+                                        bool *has_method,
+                                        char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (has_method)
+    {
+        *has_method = false;
+    }
+    if (!method)
+    {
+        return false;
+    }
+    *method = js_value_make_undefined_internal();
+    if (!target || !symbol_name)
+    {
+        return true;
+    }
+    if (target->type != JS_VALUE_OBJECT && target->type != JS_VALUE_ARRAY)
+    {
+        return true;
+    }
+    char *err = NULL;
+    bool ok = false;
+    if (target->type == JS_VALUE_OBJECT)
+    {
+        ok = js_object_get_property(rt, target->as.object, symbol_name, method, &err);
+    }
+    else
+    {
+        ok = js_array_get_property(rt, target->as.array, symbol_name, method, &err);
+    }
+    if (!ok)
+    {
+        if (error_message)
+        {
+            *error_message = err ? err : js_strdup("property lookup failed");
+        }
+        else
+        {
+            js_free(err);
+        }
+        return false;
+    }
+    js_free(err);
+    if (method->type == JS_VALUE_UNDEFINED || method->type == JS_VALUE_NULL)
+    {
+        return true;
+    }
+    if (has_method)
+    {
+        *has_method = true;
+    }
+    return true;
+}
+
+static bool js_string_call_method(js_runtime_t *rt,
+                                  const js_value_t *method,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!method || !out)
+    {
+        return false;
+    }
+    js_value_t *call_args = NULL;
+    if (argc)
+    {
+        call_args = (js_value_t *)js_calloc(argc, sizeof(*call_args));
+        if (!call_args)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        for (size_t i = 0; i < argc; ++i)
+        {
+            if (!js_value_copy(&call_args[i], &argv[i]))
+            {
+                for (size_t j = 0; j < i; ++j)
+                {
+                    js_value_destroy(&call_args[j]);
+                }
+                js_free(call_args);
+                if (error_message)
+                {
+                    *error_message = js_strdup("allocation failed");
+                }
+                return false;
+            }
+        }
+    }
+    bool ok = js_call_value(rt, method, argc, call_args, out, error_message);
+    for (size_t i = 0; i < argc; ++i)
+    {
+        js_value_destroy(&call_args[i]);
+    }
+    js_free(call_args);
+    return ok;
+}
+
+static bool js_string_find(const char *text,
+                           size_t text_len,
+                           const char *needle,
+                           size_t needle_len,
+                           size_t start,
+                           size_t *out_pos)
+{
+    if (!out_pos)
+    {
+        return false;
+    }
+    if (start > text_len)
+    {
+        return false;
+    }
+    if (needle_len == 0)
+    {
+        *out_pos = start;
+        return true;
+    }
+    if (!text || !needle || needle_len > text_len)
+    {
+        return false;
+    }
+    for (size_t i = start; i + needle_len <= text_len; ++i)
+    {
+        if (memcmp(text + i, needle, needle_len) == 0)
+        {
+            *out_pos = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool js_value_to_integer(js_runtime_t *rt,
+                                const js_value_t *value,
+                                double *out,
+                                char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = 0.0;
+    if (!value || value->type == JS_VALUE_UNDEFINED)
+    {
+        return true;
+    }
+    if (value->type == JS_VALUE_OBJECT && value->as.object && js_object_is_symbol(value->as.object))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: cannot convert Symbol to number");
+        }
+        return false;
+    }
+    js_value_t prim = js_value_make_undefined_internal();
+    bool prim_owned = false;
+    const js_value_t *num_val = value;
+    if (value->type == JS_VALUE_OBJECT && value->as.object)
+    {
+        if (!js_object_to_primitive_number(rt, value->as.object, &prim, error_message))
+        {
+            return false;
+        }
+        prim_owned = true;
+        num_val = &prim;
+    }
+    if (num_val->type == JS_VALUE_OBJECT && num_val->as.object && js_object_is_symbol(num_val->as.object))
+    {
+        if (prim_owned)
+        {
+            js_value_destroy(&prim);
+        }
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: cannot convert Symbol to number");
+        }
+        return false;
+    }
+    bool ok = true;
+    double num = js_value_to_number(num_val, &ok);
+    if (prim_owned)
+    {
+        js_value_destroy(&prim);
+    }
+    if (!ok || js_is_nan(num))
+    {
+        num = 0.0;
+    }
+    *out = num;
+    return true;
+}
+
 bool js_builtin_string_match(js_runtime_t *rt,
                              size_t argc,
                              const js_value_t *argv,
@@ -7166,10 +7628,39 @@ bool js_builtin_string_match(js_runtime_t *rt,
         *out = js_value_make_null();
         return true;
     }
+    const js_value_t *arg = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (arg && arg->type != JS_VALUE_UNDEFINED && arg->type != JS_VALUE_NULL)
+    {
+        js_value_t matcher = js_value_make_undefined_internal();
+        bool has_matcher = false;
+        if (!js_string_get_symbol_method(rt, arg, "Symbol.match", &matcher, &has_matcher, error_message))
+        {
+            return false;
+        }
+        if (has_matcher)
+        {
+            if (!js_string_is_callable(&matcher))
+            {
+                js_value_destroy(&matcher);
+                if (error_message)
+                {
+                    *error_message = js_strdup("TypeError: matcher is not callable");
+                }
+                return false;
+            }
+            if (!js_string_call_method(rt, &matcher, 1, this_val, out, error_message))
+            {
+                js_value_destroy(&matcher);
+                return false;
+            }
+            js_value_destroy(&matcher);
+            return true;
+        }
+        js_value_destroy(&matcher);
+    }
     const char *text = this_val->as.string.data ? this_val->as.string.data : "";
     size_t text_len = this_val->as.string.len;
 
-    const js_value_t *arg = (argc > 0 && argv) ? &argv[0] : NULL;
     js_value_t source = js_value_make_undefined_internal();
     bool have_source = false;
     const char *pattern = NULL;
@@ -7388,6 +7879,1094 @@ bool js_builtin_string_substring(js_runtime_t *rt,
                                    temp.data ? temp.data + start : "",
                                    slice_len);
     js_temp_string_release(&temp);
+    return ok;
+}
+
+static bool js_string_proto_create_html(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        const char *tag,
+                                        const char *attr,
+                                        js_value_t *out,
+                                        char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out || !tag)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!this_val || this_val->type == JS_VALUE_UNDEFINED || this_val->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: String.prototype method called on null or undefined");
+        }
+        return false;
+    }
+    js_temp_string_t str = {0};
+    if (!js_temp_string_from_value(rt, this_val, &str, error_message))
+    {
+        return false;
+    }
+    js_temp_string_t attr_str = {0};
+    size_t escaped_len = 0;
+    if (attr)
+    {
+        js_value_t undef = js_value_make_undefined_internal();
+        const js_value_t *attr_val = (argc > 1 && argv) ? &argv[1] : &undef;
+        if (!js_temp_string_from_value(rt, attr_val, &attr_str, error_message))
+        {
+            js_temp_string_release(&str);
+            return false;
+        }
+        const char *attr_data = attr_str.data ? attr_str.data : "";
+        for (size_t i = 0; i < attr_str.len; ++i)
+        {
+            escaped_len += (attr_data[i] == '"') ? 6u : 1u;
+        }
+    }
+
+    size_t tag_len = strlen(tag);
+    size_t attr_len = attr ? strlen(attr) : 0;
+    size_t open_len = 1 + tag_len;
+    if (attr)
+    {
+        open_len += 1 + attr_len + 2 + escaped_len + 1;
+    }
+    open_len += 1;
+    size_t close_len = 2 + tag_len + 1;
+    size_t total_len = open_len + str.len + close_len;
+    char *buf = (char *)js_malloc(total_len + 1);
+    if (!buf)
+    {
+        js_temp_string_release(&attr_str);
+        js_temp_string_release(&str);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    char *p = buf;
+    *p++ = '<';
+    memcpy(p, tag, tag_len);
+    p += tag_len;
+    if (attr)
+    {
+        *p++ = ' ';
+        memcpy(p, attr, attr_len);
+        p += attr_len;
+        *p++ = '=';
+        *p++ = '"';
+        const char *attr_data = attr_str.data ? attr_str.data : "";
+        for (size_t i = 0; i < attr_str.len; ++i)
+        {
+            if (attr_data[i] == '"')
+            {
+                memcpy(p, "&quot;", 6);
+                p += 6;
+            }
+            else
+            {
+                *p++ = attr_data[i];
+            }
+        }
+        *p++ = '"';
+    }
+    *p++ = '>';
+    if (str.len && str.data)
+    {
+        memcpy(p, str.data, str.len);
+        p += str.len;
+    }
+    *p++ = '<';
+    *p++ = '/';
+    memcpy(p, tag, tag_len);
+    p += tag_len;
+    *p++ = '>';
+    *p = '\0';
+
+    bool ok = js_value_make_string(out, buf, total_len);
+    js_free(buf);
+    js_temp_string_release(&attr_str);
+    js_temp_string_release(&str);
+    return ok;
+}
+
+bool js_string_proto_anchor(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "a", "name", out, error_message);
+}
+
+bool js_string_proto_big(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "big", NULL, out, error_message);
+}
+
+bool js_string_proto_blink(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "blink", NULL, out, error_message);
+}
+
+bool js_string_proto_bold(js_runtime_t *rt,
+                          size_t argc,
+                          const js_value_t *argv,
+                          void *user_data,
+                          js_value_t *out,
+                          char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "b", NULL, out, error_message);
+}
+
+bool js_string_proto_fixed(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "tt", NULL, out, error_message);
+}
+
+bool js_string_proto_fontcolor(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "font", "color", out, error_message);
+}
+
+bool js_string_proto_fontsize(js_runtime_t *rt,
+                              size_t argc,
+                              const js_value_t *argv,
+                              void *user_data,
+                              js_value_t *out,
+                              char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "font", "size", out, error_message);
+}
+
+bool js_string_proto_italics(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "i", NULL, out, error_message);
+}
+
+bool js_string_proto_link(js_runtime_t *rt,
+                          size_t argc,
+                          const js_value_t *argv,
+                          void *user_data,
+                          js_value_t *out,
+                          char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "a", "href", out, error_message);
+}
+
+bool js_string_proto_small(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "small", NULL, out, error_message);
+}
+
+bool js_string_proto_strike(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "strike", NULL, out, error_message);
+}
+
+bool js_string_proto_sub(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "sub", NULL, out, error_message);
+}
+
+bool js_string_proto_sup(js_runtime_t *rt,
+                         size_t argc,
+                         const js_value_t *argv,
+                         void *user_data,
+                         js_value_t *out,
+                         char **error_message)
+{
+    (void)user_data;
+    return js_string_proto_create_html(rt, argc, argv, "sup", NULL, out, error_message);
+}
+
+bool js_string_proto_match_all(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!this_val || this_val->type == JS_VALUE_UNDEFINED || this_val->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: String.prototype method called on null or undefined");
+        }
+        return false;
+    }
+    const js_value_t *regexp = (argc > 1 && argv) ? &argv[1] : NULL;
+    if (regexp && regexp->type != JS_VALUE_UNDEFINED && regexp->type != JS_VALUE_NULL)
+    {
+        js_value_t matcher = js_value_make_undefined_internal();
+        bool has_matcher = false;
+        if (!js_string_get_symbol_method(rt, regexp, "Symbol.matchAll", &matcher, &has_matcher, error_message))
+        {
+            return false;
+        }
+        if (has_matcher)
+        {
+            if (!js_string_is_callable(&matcher))
+            {
+                js_value_destroy(&matcher);
+                if (error_message)
+                {
+                    *error_message = js_strdup("TypeError: matcher is not callable");
+                }
+                return false;
+            }
+            bool ok = js_string_call_method(rt, &matcher, 1, this_val, out, error_message);
+            js_value_destroy(&matcher);
+            return ok;
+        }
+        js_value_destroy(&matcher);
+    }
+    if (!js_value_make_array(out))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
+bool js_string_proto_search(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!this_val || this_val->type == JS_VALUE_UNDEFINED || this_val->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: String.prototype method called on null or undefined");
+        }
+        return false;
+    }
+    const js_value_t *regexp = (argc > 1 && argv) ? &argv[1] : NULL;
+    if (regexp && regexp->type != JS_VALUE_UNDEFINED && regexp->type != JS_VALUE_NULL)
+    {
+        js_value_t searcher = js_value_make_undefined_internal();
+        bool has_searcher = false;
+        if (!js_string_get_symbol_method(rt, regexp, "Symbol.search", &searcher, &has_searcher, error_message))
+        {
+            return false;
+        }
+        if (has_searcher)
+        {
+            if (!js_string_is_callable(&searcher))
+            {
+                js_value_destroy(&searcher);
+                if (error_message)
+                {
+                    *error_message = js_strdup("TypeError: searcher is not callable");
+                }
+                return false;
+            }
+            bool ok = js_string_call_method(rt, &searcher, 1, this_val, out, error_message);
+            js_value_destroy(&searcher);
+            return ok;
+        }
+        js_value_destroy(&searcher);
+    }
+
+    js_temp_string_t text = {0};
+    if (!js_temp_string_from_value(rt, this_val, &text, error_message))
+    {
+        return false;
+    }
+
+    js_value_t source = js_value_make_undefined_internal();
+    bool have_source = false;
+    const char *pattern = NULL;
+    size_t pattern_len = 0;
+    js_temp_string_t pattern_temp = {0};
+    if (regexp && regexp->type == JS_VALUE_OBJECT)
+    {
+        if (js_builtin_object_get_value(rt, regexp->as.object, "source", &source, error_message) &&
+            source.type == JS_VALUE_STRING)
+        {
+            pattern = source.as.string.data ? source.as.string.data : "";
+            pattern_len = source.as.string.len;
+            have_source = true;
+        }
+        else
+        {
+            js_value_destroy(&source);
+        }
+    }
+    if (!have_source)
+    {
+        if (!js_temp_string_from_value(rt, regexp, &pattern_temp, error_message))
+        {
+            js_temp_string_release(&text);
+            return false;
+        }
+        pattern = pattern_temp.data ? pattern_temp.data : "";
+        pattern_len = pattern_temp.len;
+    }
+
+    size_t pos = 0;
+    bool found = js_string_find(text.data, text.len, pattern, pattern_len, 0, &pos);
+    if (!found)
+    {
+        *out = js_value_make_number(-1.0);
+    }
+    else
+    {
+        *out = js_value_make_number((double)pos);
+    }
+
+    js_temp_string_release(&pattern_temp);
+    if (have_source)
+    {
+        js_value_destroy(&source);
+    }
+    js_temp_string_release(&text);
+    return true;
+}
+
+bool js_string_proto_replace(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!this_val || this_val->type == JS_VALUE_UNDEFINED || this_val->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: String.prototype method called on null or undefined");
+        }
+        return false;
+    }
+    const js_value_t *search_val = (argc > 1 && argv) ? &argv[1] : NULL;
+    const js_value_t *replace_val = (argc > 2 && argv) ? &argv[2] : NULL;
+    if (search_val && search_val->type != JS_VALUE_UNDEFINED && search_val->type != JS_VALUE_NULL)
+    {
+        js_value_t replacer = js_value_make_undefined_internal();
+        bool has_replacer = false;
+        if (!js_string_get_symbol_method(rt, search_val, "Symbol.replace", &replacer, &has_replacer, error_message))
+        {
+            return false;
+        }
+        if (has_replacer)
+        {
+            if (!js_string_is_callable(&replacer))
+            {
+                js_value_destroy(&replacer);
+                if (error_message)
+                {
+                    *error_message = js_strdup("TypeError: replacer is not callable");
+                }
+                return false;
+            }
+            js_value_t args[2];
+            js_value_t undef = js_value_make_undefined_internal();
+            args[0] = *this_val;
+            args[1] = replace_val ? *replace_val : undef;
+            bool ok = js_string_call_method(rt, &replacer, 2, args, out, error_message);
+            js_value_destroy(&replacer);
+            return ok;
+        }
+        js_value_destroy(&replacer);
+    }
+
+    js_temp_string_t text = {0};
+    if (!js_temp_string_from_value(rt, this_val, &text, error_message))
+    {
+        return false;
+    }
+    js_temp_string_t search = {0};
+    if (!js_temp_string_from_value(rt, search_val, &search, error_message))
+    {
+        js_temp_string_release(&text);
+        return false;
+    }
+    js_temp_string_t replace = {0};
+    if (!js_temp_string_from_value(rt, replace_val, &replace, error_message))
+    {
+        js_temp_string_release(&search);
+        js_temp_string_release(&text);
+        return false;
+    }
+
+    size_t match_pos = 0;
+    bool found = js_string_find(text.data, text.len,
+                                search.data ? search.data : "",
+                                search.len,
+                                0,
+                                &match_pos);
+    if (!found)
+    {
+        bool ok = js_value_make_string(out,
+                                       text.data ? text.data : "",
+                                       text.len);
+        js_temp_string_release(&replace);
+        js_temp_string_release(&search);
+        js_temp_string_release(&text);
+        return ok;
+    }
+
+    size_t new_len = text.len + replace.len;
+    if (search.len <= text.len)
+    {
+        new_len -= search.len;
+    }
+    char *buf = (char *)js_malloc(new_len + 1);
+    if (!buf)
+    {
+        js_temp_string_release(&replace);
+        js_temp_string_release(&search);
+        js_temp_string_release(&text);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    size_t prefix_len = match_pos;
+    size_t suffix_pos = match_pos + search.len;
+    char *p = buf;
+    if (prefix_len && text.data)
+    {
+        memcpy(p, text.data, prefix_len);
+        p += prefix_len;
+    }
+    if (replace.len && replace.data)
+    {
+        memcpy(p, replace.data, replace.len);
+        p += replace.len;
+    }
+    if (suffix_pos < text.len && text.data)
+    {
+        memcpy(p, text.data + suffix_pos, text.len - suffix_pos);
+        p += text.len - suffix_pos;
+    }
+    *p = '\0';
+
+    bool ok = js_value_make_string(out, buf, new_len);
+    js_free(buf);
+    js_temp_string_release(&replace);
+    js_temp_string_release(&search);
+    js_temp_string_release(&text);
+    return ok;
+}
+
+bool js_string_proto_replace_all(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!this_val || this_val->type == JS_VALUE_UNDEFINED || this_val->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: String.prototype method called on null or undefined");
+        }
+        return false;
+    }
+    const js_value_t *search_val = (argc > 1 && argv) ? &argv[1] : NULL;
+    const js_value_t *replace_val = (argc > 2 && argv) ? &argv[2] : NULL;
+    if (search_val && search_val->type != JS_VALUE_UNDEFINED && search_val->type != JS_VALUE_NULL)
+    {
+        js_value_t replacer = js_value_make_undefined_internal();
+        bool has_replacer = false;
+        if (!js_string_get_symbol_method(rt, search_val, "Symbol.replace", &replacer, &has_replacer, error_message))
+        {
+            return false;
+        }
+        if (has_replacer)
+        {
+            if (!js_string_is_callable(&replacer))
+            {
+                js_value_destroy(&replacer);
+                if (error_message)
+                {
+                    *error_message = js_strdup("TypeError: replacer is not callable");
+                }
+                return false;
+            }
+            js_value_t args[2];
+            js_value_t undef = js_value_make_undefined_internal();
+            args[0] = *this_val;
+            args[1] = replace_val ? *replace_val : undef;
+            bool ok = js_string_call_method(rt, &replacer, 2, args, out, error_message);
+            js_value_destroy(&replacer);
+            return ok;
+        }
+        js_value_destroy(&replacer);
+    }
+
+    js_temp_string_t text = {0};
+    if (!js_temp_string_from_value(rt, this_val, &text, error_message))
+    {
+        return false;
+    }
+    js_temp_string_t search = {0};
+    if (!js_temp_string_from_value(rt, search_val, &search, error_message))
+    {
+        js_temp_string_release(&text);
+        return false;
+    }
+    js_temp_string_t replace = {0};
+    if (!js_temp_string_from_value(rt, replace_val, &replace, error_message))
+    {
+        js_temp_string_release(&search);
+        js_temp_string_release(&text);
+        return false;
+    }
+
+    if (search.len == 0)
+    {
+        size_t slots = text.len + 1;
+        size_t new_len = text.len + replace.len * slots;
+        char *buf = (char *)js_malloc(new_len + 1);
+        if (!buf)
+        {
+            js_temp_string_release(&replace);
+            js_temp_string_release(&search);
+            js_temp_string_release(&text);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        char *p = buf;
+        for (size_t i = 0; i < slots; ++i)
+        {
+            if (replace.len && replace.data)
+            {
+                memcpy(p, replace.data, replace.len);
+                p += replace.len;
+            }
+            if (i < text.len && text.data)
+            {
+                *p++ = text.data[i];
+            }
+        }
+        *p = '\0';
+        bool ok = js_value_make_string(out, buf, new_len);
+        js_free(buf);
+        js_temp_string_release(&replace);
+        js_temp_string_release(&search);
+        js_temp_string_release(&text);
+        return ok;
+    }
+
+    size_t count = 0;
+    size_t pos = 0;
+    size_t match_pos = 0;
+    while (js_string_find(text.data, text.len,
+                          search.data ? search.data : "",
+                          search.len,
+                          pos,
+                          &match_pos))
+    {
+        count++;
+        pos = match_pos + search.len;
+        if (pos > text.len)
+        {
+            break;
+        }
+    }
+    if (count == 0)
+    {
+        bool ok = js_value_make_string(out,
+                                       text.data ? text.data : "",
+                                       text.len);
+        js_temp_string_release(&replace);
+        js_temp_string_release(&search);
+        js_temp_string_release(&text);
+        return ok;
+    }
+
+    size_t new_len = text.len + count * replace.len;
+    if (search.len <= text.len)
+    {
+        new_len -= count * search.len;
+    }
+    char *buf = (char *)js_malloc(new_len + 1);
+    if (!buf)
+    {
+        js_temp_string_release(&replace);
+        js_temp_string_release(&search);
+        js_temp_string_release(&text);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+
+    char *p = buf;
+    size_t cursor = 0;
+    pos = 0;
+    while (js_string_find(text.data, text.len,
+                          search.data ? search.data : "",
+                          search.len,
+                          pos,
+                          &match_pos))
+    {
+        if (match_pos > cursor && text.data)
+        {
+            memcpy(p, text.data + cursor, match_pos - cursor);
+            p += match_pos - cursor;
+        }
+        if (replace.len && replace.data)
+        {
+            memcpy(p, replace.data, replace.len);
+            p += replace.len;
+        }
+        cursor = match_pos + search.len;
+        pos = cursor;
+        if (pos > text.len)
+        {
+            break;
+        }
+    }
+    if (cursor < text.len && text.data)
+    {
+        memcpy(p, text.data + cursor, text.len - cursor);
+        p += text.len - cursor;
+    }
+    *p = '\0';
+
+    bool ok = js_value_make_string(out, buf, new_len);
+    js_free(buf);
+    js_temp_string_release(&replace);
+    js_temp_string_release(&search);
+    js_temp_string_release(&text);
+    return ok;
+}
+
+bool js_string_proto_split(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!this_val || this_val->type == JS_VALUE_UNDEFINED || this_val->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: String.prototype method called on null or undefined");
+        }
+        return false;
+    }
+    const js_value_t *sep_val = (argc > 1 && argv) ? &argv[1] : NULL;
+    const js_value_t *limit_val = (argc > 2 && argv) ? &argv[2] : NULL;
+    if (sep_val && sep_val->type != JS_VALUE_UNDEFINED && sep_val->type != JS_VALUE_NULL)
+    {
+        js_value_t splitter = js_value_make_undefined_internal();
+        bool has_splitter = false;
+        if (!js_string_get_symbol_method(rt, sep_val, "Symbol.split", &splitter, &has_splitter, error_message))
+        {
+            return false;
+        }
+        if (has_splitter)
+        {
+            if (!js_string_is_callable(&splitter))
+            {
+                js_value_destroy(&splitter);
+                if (error_message)
+                {
+                    *error_message = js_strdup("TypeError: splitter is not callable");
+                }
+                return false;
+            }
+            js_value_t args[2];
+            js_value_t undef = js_value_make_undefined_internal();
+            args[0] = *this_val;
+            args[1] = limit_val ? *limit_val : undef;
+            bool ok = js_string_call_method(rt, &splitter, 2, args, out, error_message);
+            js_value_destroy(&splitter);
+            return ok;
+        }
+        js_value_destroy(&splitter);
+    }
+
+    js_temp_string_t text = {0};
+    if (!js_temp_string_from_value(rt, this_val, &text, error_message))
+    {
+        return false;
+    }
+
+    size_t limit = SIZE_MAX;
+    if (limit_val && limit_val->type != JS_VALUE_UNDEFINED)
+    {
+        bool ok = true;
+        double num = js_value_to_number(limit_val, &ok);
+        if (!ok || js_is_nan(num) || num <= 0.0)
+        {
+            limit = 0;
+        }
+        else if (num > (double)SIZE_MAX)
+        {
+            limit = SIZE_MAX;
+        }
+        else
+        {
+            limit = (size_t)num;
+        }
+    }
+
+    if (!js_value_make_array(out))
+    {
+        js_temp_string_release(&text);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (limit == 0)
+    {
+        js_temp_string_release(&text);
+        return true;
+    }
+    if (!sep_val || sep_val->type == JS_VALUE_UNDEFINED || sep_val->type == JS_VALUE_NULL)
+    {
+        js_value_t full;
+        bool ok = js_value_make_string(&full,
+                                       text.data ? text.data : "",
+                                       text.len);
+        if (!ok || !js_value_array_push(out, &full))
+        {
+            js_value_destroy(&full);
+            js_temp_string_release(&text);
+            js_value_destroy(out);
+            return false;
+        }
+        js_value_destroy(&full);
+        js_temp_string_release(&text);
+        return true;
+    }
+
+    js_temp_string_t sep = {0};
+    if (!js_temp_string_from_value(rt, sep_val, &sep, error_message))
+    {
+        js_temp_string_release(&text);
+        js_value_destroy(out);
+        return false;
+    }
+
+    size_t count = 0;
+    if (sep.len == 0)
+    {
+        for (size_t i = 0; i < text.len && count < limit; ++i)
+        {
+            js_value_t piece;
+            if (!js_value_make_string(&piece, text.data ? text.data + i : "", 1))
+            {
+                js_temp_string_release(&sep);
+                js_temp_string_release(&text);
+                js_value_destroy(out);
+                return false;
+            }
+            if (!js_value_array_push(out, &piece))
+            {
+                js_value_destroy(&piece);
+                js_temp_string_release(&sep);
+                js_temp_string_release(&text);
+                js_value_destroy(out);
+                return false;
+            }
+            js_value_destroy(&piece);
+            count++;
+        }
+        js_temp_string_release(&sep);
+        js_temp_string_release(&text);
+        return true;
+    }
+
+    size_t cursor = 0;
+    size_t match_pos = 0;
+    while (count < limit &&
+           js_string_find(text.data, text.len,
+                          sep.data ? sep.data : "",
+                          sep.len,
+                          cursor,
+                          &match_pos))
+    {
+        size_t part_len = match_pos - cursor;
+        js_value_t piece;
+        if (!js_value_make_string(&piece,
+                                  text.data ? text.data + cursor : "",
+                                  part_len))
+        {
+            js_temp_string_release(&sep);
+            js_temp_string_release(&text);
+            js_value_destroy(out);
+            return false;
+        }
+        if (!js_value_array_push(out, &piece))
+        {
+            js_value_destroy(&piece);
+            js_temp_string_release(&sep);
+            js_temp_string_release(&text);
+            js_value_destroy(out);
+            return false;
+        }
+        js_value_destroy(&piece);
+        count++;
+        cursor = match_pos + sep.len;
+        if (cursor > text.len)
+        {
+            break;
+        }
+    }
+    if (count < limit)
+    {
+        size_t tail_len = (cursor <= text.len) ? (text.len - cursor) : 0;
+        js_value_t piece;
+        if (!js_value_make_string(&piece,
+                                  text.data ? text.data + cursor : "",
+                                  tail_len))
+        {
+            js_temp_string_release(&sep);
+            js_temp_string_release(&text);
+            js_value_destroy(out);
+            return false;
+        }
+        if (!js_value_array_push(out, &piece))
+        {
+            js_value_destroy(&piece);
+            js_temp_string_release(&sep);
+            js_temp_string_release(&text);
+            js_value_destroy(out);
+            return false;
+        }
+        js_value_destroy(&piece);
+    }
+    js_temp_string_release(&sep);
+    js_temp_string_release(&text);
+    return true;
+}
+
+bool js_string_proto_substr(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!this_val || this_val->type == JS_VALUE_UNDEFINED || this_val->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: String.prototype method called on null or undefined");
+        }
+        return false;
+    }
+    js_temp_string_t text = {0};
+    if (!js_temp_string_from_value(rt, this_val, &text, error_message))
+    {
+        return false;
+    }
+
+    const js_value_t *start_val = (argc > 1 && argv) ? &argv[1] : NULL;
+    const js_value_t *length_val = (argc > 2 && argv) ? &argv[2] : NULL;
+
+    double start_num = 0.0;
+    if (!js_value_to_integer(rt, start_val, &start_num, error_message))
+    {
+        js_temp_string_release(&text);
+        return false;
+    }
+    double start_trunc = (start_num < 0.0) ? ceil(start_num) : floor(start_num);
+    size_t start = 0;
+    if (start_trunc < 0.0)
+    {
+        double pos = (double)text.len + start_trunc;
+        if (pos > 0.0)
+        {
+            if (pos >= (double)text.len)
+            {
+                start = text.len;
+            }
+            else
+            {
+                start = (size_t)pos;
+            }
+        }
+    }
+    else
+    {
+        if (start_trunc >= (double)text.len)
+        {
+            start = text.len;
+        }
+        else
+        {
+            start = (size_t)start_trunc;
+        }
+    }
+
+    size_t length = 0;
+    if (!length_val || length_val->type == JS_VALUE_UNDEFINED)
+    {
+        length = (start <= text.len) ? (text.len - start) : 0;
+    }
+    else
+    {
+        double len_num = 0.0;
+        if (!js_value_to_integer(rt, length_val, &len_num, error_message))
+        {
+            js_temp_string_release(&text);
+            return false;
+        }
+        double len_trunc = (len_num < 0.0) ? ceil(len_num) : floor(len_num);
+        if (len_trunc > 0.0)
+        {
+            if ((double)SIZE_MAX < len_trunc)
+            {
+                length = text.len - start;
+            }
+            else
+            {
+                length = (size_t)len_trunc;
+            }
+        }
+        if (start + length > text.len)
+        {
+            length = (start <= text.len) ? (text.len - start) : 0;
+        }
+    }
+
+    bool ok = js_value_make_string(out,
+                                   text.data ? text.data + start : "",
+                                   length);
+    js_temp_string_release(&text);
     return ok;
 }
 
@@ -8753,6 +10332,30 @@ bool js_builtin_function_stub(js_runtime_t *rt,
     return true;
 }
 
+static bool js_dynamic_function_has_leading_html_close_comment(const char *text, size_t len)
+{
+    if (!text || len < 3)
+    {
+        return false;
+    }
+    size_t i = 0;
+    while (i < len)
+    {
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\v' || c == '\f')
+        {
+            ++i;
+            continue;
+        }
+        break;
+    }
+    if (i + 2 < len && text[i] == '-' && text[i + 1] == '-' && text[i + 2] == '>')
+    {
+        return true;
+    }
+    return false;
+}
+
 bool js_builtin_function_call(js_runtime_t *rt,
                               size_t argc,
                               const js_value_t *argv,
@@ -9031,9 +10634,6 @@ bool js_builtin_function(js_runtime_t *rt,
                          js_value_t *out,
                          char **error_message)
 {
-    (void)rt;
-    (void)argc;
-    (void)argv;
     (void)user_data;
     if (error_message)
     {
@@ -9042,6 +10642,27 @@ bool js_builtin_function(js_runtime_t *rt,
     if (!out)
     {
         return false;
+    }
+    if (argc && argv && argc > 1)
+    {
+        for (size_t i = 0; i + 1 < argc; ++i)
+        {
+            js_temp_string_t temp = {0};
+            if (!js_temp_string_from_value(rt, &argv[i], &temp, error_message))
+            {
+                return false;
+            }
+            bool invalid = js_dynamic_function_has_leading_html_close_comment(temp.data, temp.len);
+            js_temp_string_release(&temp);
+            if (invalid)
+            {
+                if (error_message)
+                {
+                    *error_message = js_strdup("SyntaxError: invalid HTML close comment");
+                }
+                return false;
+            }
+        }
     }
     out->type = JS_VALUE_NATIVE_FN;
     out->as.native.fn = js_builtin_function_stub;
@@ -9412,6 +11033,55 @@ bool js_builtin_object_get_own_property_descriptors(js_runtime_t *rt,
     return true;
 }
 
+static bool js_value_same_value(const js_value_t *a, const js_value_t *b)
+{
+    if (!a || !b)
+    {
+        return false;
+    }
+    if (a->type != b->type)
+    {
+        return false;
+    }
+    if (a->type == JS_VALUE_NUMBER)
+    {
+        if (js_is_nan(a->as.number) && js_is_nan(b->as.number))
+        {
+            return true;
+        }
+        if (a->as.number == 0.0 && b->as.number == 0.0)
+        {
+            return (1.0 / a->as.number) == (1.0 / b->as.number);
+        }
+        return a->as.number == b->as.number;
+    }
+    return js_value_strict_equal(a, b);
+}
+
+bool js_builtin_object_is(js_runtime_t *rt,
+                          size_t argc,
+                          const js_value_t *argv,
+                          void *user_data,
+                          js_value_t *out,
+                          char **error_message)
+{
+    (void)rt;
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_value_t undef = js_value_make_undefined_internal();
+    const js_value_t *left = (argc > 0 && argv) ? &argv[0] : &undef;
+    const js_value_t *right = (argc > 1 && argv) ? &argv[1] : &undef;
+    *out = js_value_make_bool(js_value_same_value(left, right));
+    return true;
+}
+
 bool js_builtin_object_has_own_property(js_runtime_t *rt,
                                         size_t argc,
                                         const js_value_t *argv,
@@ -9729,6 +11399,1046 @@ bool js_builtin_array_is_array(js_runtime_t *rt,
         }
     }
     *out = js_value_make_bool(is_array);
+    return true;
+}
+
+static bool js_array_from_call_with_this(js_runtime_t *rt,
+                                         const js_value_t *callee,
+                                         const js_value_t *this_val,
+                                         size_t argc,
+                                         const js_value_t *argv,
+                                         js_value_t *out,
+                                         char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!callee || !out)
+    {
+        return false;
+    }
+    if (callee->type == JS_VALUE_NATIVE_FN && js_native_needs_this(callee->as.native.fn))
+    {
+        size_t call_argc = argc + 1u;
+        js_value_t *call_args = (js_value_t *)js_calloc(call_argc, sizeof(*call_args));
+        if (!call_args)
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        if (this_val)
+        {
+            if (!js_value_copy(&call_args[0], this_val))
+            {
+                js_free(call_args);
+                if (error_message)
+                {
+                    *error_message = js_strdup("allocation failed");
+                }
+                return false;
+            }
+        }
+        else
+        {
+            call_args[0] = js_value_make_undefined_internal();
+        }
+        for (size_t i = 0; i < argc; ++i)
+        {
+            if (!js_value_copy(&call_args[i + 1], &argv[i]))
+            {
+                for (size_t j = 0; j <= i + 1; ++j)
+                {
+                    js_value_destroy(&call_args[j]);
+                }
+                js_free(call_args);
+                if (error_message)
+                {
+                    *error_message = js_strdup("allocation failed");
+                }
+                return false;
+            }
+        }
+        bool ok = js_call_value(rt, callee, call_argc, call_args, out, error_message);
+        for (size_t i = 0; i < call_argc; ++i)
+        {
+            js_value_destroy(&call_args[i]);
+        }
+        js_free(call_args);
+        return ok;
+    }
+    if (callee->type == JS_VALUE_FUNCTION && this_val && this_val->type == JS_VALUE_OBJECT && rt)
+    {
+        js_object_t *prev_global = rt->global_object;
+        rt->global_object = this_val->as.object;
+        bool ok = js_call_value(rt, callee, argc, argv, out, error_message);
+        rt->global_object = prev_global;
+        return ok;
+    }
+    return js_call_value(rt, callee, argc, argv, out, error_message);
+}
+
+static bool js_array_from_define_data_property(js_runtime_t *rt,
+                                               js_value_t *target,
+                                               const char *name,
+                                               const js_value_t *value,
+                                               char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!target || !name || !value)
+    {
+        return false;
+    }
+    js_value_t desc;
+    if (!js_value_make_host_object(&desc, NULL, NULL, NULL, NULL))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_value_t flag = js_value_make_bool(true);
+    bool ok = js_object_set_slot(desc.as.object, "value", value) &&
+        js_object_set_slot(desc.as.object, "writable", &flag) &&
+        js_object_set_slot(desc.as.object, "enumerable", &flag) &&
+        js_object_set_slot(desc.as.object, "configurable", &flag);
+    if (!ok)
+    {
+        js_value_destroy(&desc);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_value_t name_val;
+    if (!js_value_make_cstring(&name_val, name))
+    {
+        js_value_destroy(&desc);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    js_value_t args[3];
+    args[0] = *target;
+    args[1] = name_val;
+    args[2] = desc;
+    js_value_t tmp = js_value_make_undefined_internal();
+    char *err = NULL;
+    ok = js_builtin_define_property(rt, 3, args, NULL, &tmp, &err);
+    js_value_destroy(&tmp);
+    js_value_destroy(&name_val);
+    js_value_destroy(&desc);
+    if (!ok)
+    {
+        if (error_message)
+        {
+            *error_message = err ? err : js_strdup("define property failed");
+        }
+        else
+        {
+            js_free(err);
+        }
+        return false;
+    }
+    js_free(err);
+    return true;
+}
+
+static bool js_array_from_set_length(js_runtime_t *rt,
+                                     js_value_t *target,
+                                     size_t length,
+                                     char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!target)
+    {
+        return false;
+    }
+    if (target->type == JS_VALUE_ARRAY && target->as.array)
+    {
+        if (!js_array_set_length(target->as.array, length))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        return true;
+    }
+    if (target->type != JS_VALUE_OBJECT || !target->as.object)
+    {
+        return true;
+    }
+
+    js_value_t length_val = js_value_make_number((double)length);
+    js_object_t *cursor = target->as.object;
+    while (cursor)
+    {
+        js_property_t *prop = js_object_find_property(cursor, "length");
+        if (prop)
+        {
+            if (prop->is_accessor)
+            {
+                if (prop->setter.type == JS_VALUE_UNDEFINED)
+                {
+                    if (error_message)
+                    {
+                        *error_message = js_strdup("TypeError: invalid length setter");
+                    }
+                    return false;
+                }
+                js_value_t result = js_value_make_undefined_internal();
+                char *call_err = NULL;
+                bool ok = js_array_from_call_with_this(rt,
+                                                       &prop->setter,
+                                                       target,
+                                                       1,
+                                                       &length_val,
+                                                       &result,
+                                                       &call_err);
+                js_value_destroy(&result);
+                if (!ok)
+                {
+                    if (error_message)
+                    {
+                        *error_message = call_err ? call_err : js_strdup("length setter failed");
+                    }
+                    else
+                    {
+                        js_free(call_err);
+                    }
+                    return false;
+                }
+                js_free(call_err);
+                return true;
+            }
+            if (!prop->writable)
+            {
+                if (error_message)
+                {
+                    *error_message = js_strdup("TypeError: length is not writable");
+                }
+                return false;
+            }
+            break;
+        }
+        js_value_t proto_val = js_value_make_undefined_internal();
+        if (!js_object_get_slot(cursor, "__proto__", &proto_val))
+        {
+            break;
+        }
+        if (proto_val.type != JS_VALUE_OBJECT || !proto_val.as.object)
+        {
+            js_value_destroy(&proto_val);
+            break;
+        }
+        cursor = proto_val.as.object;
+        js_value_destroy(&proto_val);
+    }
+
+    if (!js_object_set_slot(target->as.object, "length", &length_val))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool js_array_from_construct(js_runtime_t *rt,
+                                    const js_value_t *ctor,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!ctor || !out)
+    {
+        return false;
+    }
+    if (ctor->type == JS_VALUE_FUNCTION)
+    {
+        js_value_t this_obj;
+        if (!js_value_make_host_object(&this_obj, NULL, NULL, NULL, NULL))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        if (rt && this_obj.type == JS_VALUE_OBJECT && this_obj.as.object)
+        {
+            js_function_t *fn = ctor->as.function;
+            js_object_t *proto_obj = NULL;
+            if (fn && fn->has_prototype &&
+                fn->prototype_value.type == JS_VALUE_OBJECT &&
+                fn->prototype_value.as.object)
+            {
+                proto_obj = fn->prototype_value.as.object;
+            }
+            if (!proto_obj)
+            {
+                proto_obj = js_get_object_proto(rt);
+            }
+            if (proto_obj)
+            {
+                js_value_t proto_slot;
+                memset(&proto_slot, 0, sizeof(proto_slot));
+                proto_slot.type = JS_VALUE_OBJECT;
+                proto_slot.as.object = proto_obj;
+                (void)js_object_set_slot(this_obj.as.object, "__proto__", &proto_slot);
+            }
+        }
+        js_object_t *prev_global = rt ? rt->global_object : NULL;
+        if (rt && this_obj.type == JS_VALUE_OBJECT)
+        {
+            rt->global_object = this_obj.as.object;
+        }
+        js_value_t result = js_value_make_undefined_internal();
+        char *err = NULL;
+        bool ok = js_call_value(rt, ctor, argc, argv, &result, &err);
+        if (rt)
+        {
+            rt->global_object = prev_global;
+        }
+        if (!ok)
+        {
+            js_value_destroy(&this_obj);
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("constructor failed");
+            }
+            else
+            {
+                js_free(err);
+            }
+            js_value_destroy(&result);
+            return false;
+        }
+        js_free(err);
+        if (result.type == JS_VALUE_OBJECT ||
+            result.type == JS_VALUE_ARRAY ||
+            result.type == JS_VALUE_FUNCTION)
+        {
+            js_value_destroy(&this_obj);
+            *out = result;
+            return true;
+        }
+        js_value_destroy(&result);
+        *out = this_obj;
+        return true;
+    }
+    if (ctor->type == JS_VALUE_NATIVE_FN)
+    {
+        js_value_t result = js_value_make_undefined_internal();
+        char *err = NULL;
+        bool prev_constructing = false;
+        js_native_fn_t prev_constructing_fn = NULL;
+        if (rt)
+        {
+            prev_constructing = rt->constructing;
+            prev_constructing_fn = rt->constructing_fn;
+            rt->constructing = true;
+            rt->constructing_fn = ctor->as.native.fn;
+        }
+        bool ok = js_call_value(rt, ctor, argc, argv, &result, &err);
+        if (rt)
+        {
+            rt->constructing = prev_constructing;
+            rt->constructing_fn = prev_constructing_fn;
+        }
+        if (!ok)
+        {
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("constructor failed");
+            }
+            else
+            {
+                js_free(err);
+            }
+            js_value_destroy(&result);
+            return false;
+        }
+        js_free(err);
+        if (result.type == JS_VALUE_OBJECT ||
+            result.type == JS_VALUE_ARRAY ||
+            result.type == JS_VALUE_FUNCTION)
+        {
+            *out = result;
+            return true;
+        }
+        js_value_destroy(&result);
+        if (!js_value_make_host_object(out, NULL, NULL, NULL, NULL))
+        {
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        return true;
+    }
+    if (error_message)
+    {
+        *error_message = js_strdup("TypeError: invalid constructor");
+    }
+    return false;
+}
+
+bool js_builtin_array_from(js_runtime_t *rt,
+                           size_t argc,
+                           const js_value_t *argv,
+                           void *user_data,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    size_t arg_index = 0;
+    const js_value_t *this_val = NULL;
+    if (argv && argc >= 2)
+    {
+        this_val = &argv[0];
+        arg_index = 1;
+    }
+    const js_value_t *items = (argv && argc > arg_index) ? &argv[arg_index] : NULL;
+    const js_value_t *mapfn = (argv && argc > arg_index + 1) ? &argv[arg_index + 1] : NULL;
+    const js_value_t *this_arg = (argv && argc > arg_index + 2) ? &argv[arg_index + 2] : NULL;
+
+    if (!items || items->type == JS_VALUE_UNDEFINED || items->type == JS_VALUE_NULL)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid array source");
+        }
+        return false;
+    }
+
+    bool mapping = mapfn && mapfn->type != JS_VALUE_UNDEFINED;
+    if (mapping && mapfn->type != JS_VALUE_FUNCTION && mapfn->type != JS_VALUE_NATIVE_FN)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: mapfn is not callable");
+        }
+        return false;
+    }
+
+    js_value_t default_ctor;
+    const js_value_t *ctor = NULL;
+    if (this_val && js_value_is_constructor(rt, this_val))
+    {
+        ctor = this_val;
+    }
+    else
+    {
+        memset(&default_ctor, 0, sizeof(default_ctor));
+        default_ctor.type = JS_VALUE_NATIVE_FN;
+        default_ctor.as.native.fn = js_builtin_array;
+        default_ctor.as.native.user_data = NULL;
+        ctor = &default_ctor;
+    }
+
+    js_value_t iterator_method = js_value_make_undefined_internal();
+    if (items->type == JS_VALUE_ARRAY && items->as.array)
+    {
+        char *err = NULL;
+        if (!js_array_get_property(rt, items->as.array, "Symbol.iterator", &iterator_method, &err))
+        {
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("property lookup failed");
+            }
+            else
+            {
+                js_free(err);
+            }
+            return false;
+        }
+        js_free(err);
+    }
+    else if (items->type == JS_VALUE_OBJECT && items->as.object)
+    {
+        char *err = NULL;
+        if (!js_object_get_property(rt, items->as.object, "Symbol.iterator", &iterator_method, &err))
+        {
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("property lookup failed");
+            }
+            else
+            {
+                js_free(err);
+            }
+            return false;
+        }
+        js_free(err);
+    }
+
+    bool has_iterator = !(iterator_method.type == JS_VALUE_UNDEFINED ||
+                          iterator_method.type == JS_VALUE_NULL);
+    if (has_iterator)
+    {
+        if (iterator_method.type != JS_VALUE_FUNCTION && iterator_method.type != JS_VALUE_NATIVE_FN)
+        {
+            js_value_destroy(&iterator_method);
+            if (error_message)
+            {
+                *error_message = js_strdup("TypeError: iterator method is not callable");
+            }
+            return false;
+        }
+
+        js_value_t result = js_value_make_undefined_internal();
+        if (!js_array_from_construct(rt, ctor, 0, NULL, &result, error_message))
+        {
+            js_value_destroy(&iterator_method);
+            return false;
+        }
+        if (result.type == JS_VALUE_OBJECT)
+        {
+            (void)js_object_set_slot(result.as.object, "constructor", ctor);
+        }
+
+        js_value_t iterator = js_value_make_undefined_internal();
+        char *iter_err = NULL;
+        bool ok = js_array_from_call_with_this(rt,
+                                               &iterator_method,
+                                               items,
+                                               0,
+                                               NULL,
+                                               &iterator,
+                                               &iter_err);
+        js_value_destroy(&iterator_method);
+        if (!ok)
+        {
+            js_value_destroy(&result);
+            if (error_message)
+            {
+                *error_message = iter_err ? iter_err : js_strdup("iterator creation failed");
+            }
+            else
+            {
+                js_free(iter_err);
+            }
+            return false;
+        }
+        js_free(iter_err);
+        if (iterator.type != JS_VALUE_OBJECT || !iterator.as.object)
+        {
+            js_value_destroy(&iterator);
+            js_value_destroy(&result);
+            if (error_message)
+            {
+                *error_message = js_strdup("TypeError: iterator is not object");
+            }
+            return false;
+        }
+
+        js_value_t next_method = js_value_make_undefined_internal();
+        char *next_err = NULL;
+        if (!js_object_get_property(rt, iterator.as.object, "next", &next_method, &next_err))
+        {
+            js_value_destroy(&iterator);
+            js_value_destroy(&result);
+            if (error_message)
+            {
+                *error_message = next_err ? next_err : js_strdup("iterator next failed");
+            }
+            else
+            {
+                js_free(next_err);
+            }
+            return false;
+        }
+        js_free(next_err);
+        if (next_method.type != JS_VALUE_FUNCTION && next_method.type != JS_VALUE_NATIVE_FN)
+        {
+            js_value_destroy(&next_method);
+            js_value_destroy(&iterator);
+            js_value_destroy(&result);
+            if (error_message)
+            {
+                *error_message = js_strdup("TypeError: iterator next is not callable");
+            }
+            return false;
+        }
+
+        size_t k = 0;
+        for (;;)
+        {
+            js_value_t next_result = js_value_make_undefined_internal();
+            char *step_err = NULL;
+            ok = js_array_from_call_with_this(rt,
+                                              &next_method,
+                                              &iterator,
+                                              0,
+                                              NULL,
+                                              &next_result,
+                                              &step_err);
+            if (!ok)
+            {
+                js_value_destroy(&next_method);
+                js_value_destroy(&iterator);
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = step_err ? step_err : js_strdup("iterator next failed");
+                }
+                else
+                {
+                    js_free(step_err);
+                }
+                return false;
+            }
+            js_free(step_err);
+            if (next_result.type != JS_VALUE_OBJECT || !next_result.as.object)
+            {
+                js_value_destroy(&next_result);
+                js_value_destroy(&next_method);
+                js_value_destroy(&iterator);
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = js_strdup("TypeError: iterator result is not an object");
+                }
+                return false;
+            }
+            js_value_t done_val = js_value_make_undefined_internal();
+            char *done_err = NULL;
+            if (!js_object_get_property(rt, next_result.as.object, "done", &done_val, &done_err))
+            {
+                js_value_destroy(&next_result);
+                js_value_destroy(&next_method);
+                js_value_destroy(&iterator);
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = done_err ? done_err : js_strdup("iterator done failed");
+                }
+                else
+                {
+                    js_free(done_err);
+                }
+                return false;
+            }
+            js_free(done_err);
+            bool done = js_value_is_truthy(&done_val);
+            js_value_destroy(&done_val);
+            if (done)
+            {
+                js_value_destroy(&next_result);
+                js_value_destroy(&next_method);
+                js_value_destroy(&iterator);
+                if (!js_array_from_set_length(rt, &result, k, error_message))
+                {
+                    js_value_destroy(&result);
+                    return false;
+                }
+                *out = result;
+                return true;
+            }
+
+            js_value_t value = js_value_make_undefined_internal();
+            char *value_err = NULL;
+            if (!js_object_get_property(rt, next_result.as.object, "value", &value, &value_err))
+            {
+                js_value_destroy(&next_result);
+                js_value_destroy(&next_method);
+                js_value_destroy(&iterator);
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = value_err ? value_err : js_strdup("iterator value failed");
+                }
+                else
+                {
+                    js_free(value_err);
+                }
+                return false;
+            }
+            js_free(value_err);
+            js_value_destroy(&next_result);
+
+            js_value_t mapped = js_value_make_undefined_internal();
+            if (mapping)
+            {
+                js_value_t call_args[2];
+                memset(call_args, 0, sizeof(call_args));
+                if (!js_value_copy(&call_args[0], &value))
+                {
+                    js_value_destroy(&value);
+                    js_value_destroy(&next_method);
+                    js_value_destroy(&iterator);
+                    js_value_destroy(&result);
+                    if (error_message)
+                    {
+                        *error_message = js_strdup("allocation failed");
+                    }
+                    return false;
+                }
+                call_args[1] = js_value_make_number((double)k);
+                char *call_err = NULL;
+                ok = js_array_from_call_with_this(rt,
+                                                  mapfn,
+                                                  this_arg,
+                                                  2,
+                                                  call_args,
+                                                  &mapped,
+                                                  &call_err);
+                js_value_destroy(&call_args[0]);
+                js_value_destroy(&call_args[1]);
+                if (!ok)
+                {
+                    char *close_err = NULL;
+                    bool closed_ok = js_iterator_close(rt, &iterator, &close_err);
+                    js_value_destroy(&value);
+                    js_value_destroy(&next_method);
+                    js_value_destroy(&iterator);
+                    js_value_destroy(&result);
+                    if (!closed_ok)
+                    {
+                        if (error_message)
+                        {
+                            *error_message = close_err ? close_err : js_strdup("iterator close failed");
+                        }
+                        else
+                        {
+                            js_free(close_err);
+                        }
+                        js_free(call_err);
+                        return false;
+                    }
+                    if (error_message)
+                    {
+                        *error_message = call_err ? call_err : js_strdup("mapper failed");
+                    }
+                    else
+                    {
+                        js_free(call_err);
+                    }
+                    return false;
+                }
+                js_free(call_err);
+                js_value_destroy(&value);
+            }
+            else
+            {
+                if (!js_value_copy(&mapped, &value))
+                {
+                    js_value_destroy(&value);
+                    js_value_destroy(&next_method);
+                    js_value_destroy(&iterator);
+                    js_value_destroy(&result);
+                    if (error_message)
+                    {
+                        *error_message = js_strdup("allocation failed");
+                    }
+                    return false;
+                }
+                js_value_destroy(&value);
+            }
+
+            char key[32];
+            int key_len = snprintf(key, sizeof(key), "%zu", k);
+            if (key_len < 0 || (size_t)key_len >= sizeof(key))
+            {
+                js_value_destroy(&mapped);
+                js_value_destroy(&next_method);
+                js_value_destroy(&iterator);
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = js_strdup("invalid index");
+                }
+                return false;
+            }
+            char *define_err = NULL;
+            if (!js_array_from_define_data_property(rt, &result, key, &mapped, &define_err))
+            {
+                char *close_err = NULL;
+                bool closed_ok = js_iterator_close(rt, &iterator, &close_err);
+                js_value_destroy(&mapped);
+                js_value_destroy(&next_method);
+                js_value_destroy(&iterator);
+                js_value_destroy(&result);
+                if (!closed_ok)
+                {
+                    if (error_message)
+                    {
+                        *error_message = close_err ? close_err : js_strdup("iterator close failed");
+                    }
+                    else
+                    {
+                        js_free(close_err);
+                    }
+                    js_free(define_err);
+                    return false;
+                }
+                if (error_message)
+                {
+                    *error_message = define_err ? define_err : js_strdup("define property failed");
+                }
+                else
+                {
+                    js_free(define_err);
+                }
+                return false;
+            }
+            js_free(define_err);
+            js_value_destroy(&mapped);
+            k++;
+        }
+    }
+
+    js_value_destroy(&iterator_method);
+
+    size_t length = 0;
+    if (items->type == JS_VALUE_ARRAY && items->as.array)
+    {
+        length = items->as.array->length;
+    }
+    else if (items->type == JS_VALUE_STRING)
+    {
+        length = items->as.string.len;
+    }
+    else if (items->type == JS_VALUE_OBJECT && items->as.object)
+    {
+        js_value_t len_val = js_value_make_undefined_internal();
+        char *len_err = NULL;
+        if (!js_object_get_property(rt, items->as.object, "length", &len_val, &len_err))
+        {
+            if (error_message)
+            {
+                *error_message = len_err ? len_err : js_strdup("property lookup failed");
+            }
+            else
+            {
+                js_free(len_err);
+            }
+            return false;
+        }
+        js_free(len_err);
+        bool ok = true;
+        double len_num = js_value_to_number(&len_val, &ok);
+        js_value_destroy(&len_val);
+        if (!ok || len_num <= 0.0)
+        {
+            length = 0;
+        }
+        else if (len_num > (double)SIZE_MAX)
+        {
+            length = SIZE_MAX;
+        }
+        else
+        {
+            length = (size_t)len_num;
+        }
+    }
+
+    js_value_t length_val = js_value_make_number((double)length);
+    js_value_t result = js_value_make_undefined_internal();
+    if (!js_array_from_construct(rt, ctor, 1, &length_val, &result, error_message))
+    {
+        return false;
+    }
+    if (result.type == JS_VALUE_OBJECT)
+    {
+        (void)js_object_set_slot(result.as.object, "constructor", ctor);
+    }
+
+    for (size_t k = 0; k < length; ++k)
+    {
+        js_value_t value = js_value_make_undefined_internal();
+        if (items->type == JS_VALUE_ARRAY && items->as.array)
+        {
+            char key[32];
+            int key_len = snprintf(key, sizeof(key), "%zu", k);
+            if (key_len < 0 || (size_t)key_len >= sizeof(key))
+            {
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = js_strdup("invalid index");
+                }
+                return false;
+            }
+            char *prop_err = NULL;
+            if (!js_array_get_property(rt, items->as.array, key, &value, &prop_err))
+            {
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = prop_err ? prop_err : js_strdup("property lookup failed");
+                }
+                else
+                {
+                    js_free(prop_err);
+                }
+                return false;
+            }
+            js_free(prop_err);
+        }
+        else if (items->type == JS_VALUE_STRING && items->as.string.data && k < items->as.string.len)
+        {
+            if (!js_value_make_string(&value, items->as.string.data + k, 1))
+            {
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = js_strdup("allocation failed");
+                }
+                return false;
+            }
+        }
+        else if (items->type == JS_VALUE_OBJECT && items->as.object)
+        {
+            char key[32];
+            int key_len = snprintf(key, sizeof(key), "%zu", k);
+            if (key_len < 0 || (size_t)key_len >= sizeof(key))
+            {
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = js_strdup("invalid index");
+                }
+                return false;
+            }
+            char *prop_err = NULL;
+            if (!js_object_get_property(rt, items->as.object, key, &value, &prop_err))
+            {
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = prop_err ? prop_err : js_strdup("property lookup failed");
+                }
+                else
+                {
+                    js_free(prop_err);
+                }
+                return false;
+            }
+            js_free(prop_err);
+        }
+
+        js_value_t mapped = js_value_make_undefined_internal();
+        if (mapping)
+        {
+            js_value_t call_args[2];
+            memset(call_args, 0, sizeof(call_args));
+            if (!js_value_copy(&call_args[0], &value))
+            {
+                js_value_destroy(&value);
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = js_strdup("allocation failed");
+                }
+                return false;
+            }
+            call_args[1] = js_value_make_number((double)k);
+            char *call_err = NULL;
+            bool ok = js_array_from_call_with_this(rt,
+                                                   mapfn,
+                                                   this_arg,
+                                                   2,
+                                                   call_args,
+                                                   &mapped,
+                                                   &call_err);
+            js_value_destroy(&call_args[0]);
+            js_value_destroy(&call_args[1]);
+            js_value_destroy(&value);
+            if (!ok)
+            {
+                if (error_message)
+                {
+                    *error_message = call_err ? call_err : js_strdup("mapper failed");
+                }
+                else
+                {
+                    js_free(call_err);
+                }
+                js_value_destroy(&result);
+                return false;
+            }
+            js_free(call_err);
+        }
+        else
+        {
+            if (!js_value_copy(&mapped, &value))
+            {
+                js_value_destroy(&value);
+                js_value_destroy(&result);
+                if (error_message)
+                {
+                    *error_message = js_strdup("allocation failed");
+                }
+                return false;
+            }
+            js_value_destroy(&value);
+        }
+
+        char key[32];
+        int key_len = snprintf(key, sizeof(key), "%zu", k);
+        if (key_len < 0 || (size_t)key_len >= sizeof(key))
+        {
+            js_value_destroy(&mapped);
+            js_value_destroy(&result);
+            if (error_message)
+            {
+                *error_message = js_strdup("invalid index");
+            }
+            return false;
+        }
+        char *define_err = NULL;
+        if (!js_array_from_define_data_property(rt, &result, key, &mapped, &define_err))
+        {
+            js_value_destroy(&mapped);
+            js_value_destroy(&result);
+            if (error_message)
+            {
+                *error_message = define_err ? define_err : js_strdup("define property failed");
+            }
+            else
+            {
+                js_free(define_err);
+            }
+            return false;
+        }
+        js_free(define_err);
+        js_value_destroy(&mapped);
+    }
+
+    *out = result;
     return true;
 }
 
@@ -10187,6 +12897,186 @@ bool js_builtin_array_map(js_runtime_t *rt,
         }
         js_value_destroy(&mapped);
     }
+    return true;
+}
+
+bool js_builtin_array_for_each(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (argc > 0 && argv) ? &argv[0] : NULL;
+    const js_value_t *callback = (argc > 1 && argv) ? &argv[1] : NULL;
+    bool is_array = this_val && this_val->type == JS_VALUE_ARRAY;
+    bool is_object = this_val && this_val->type == JS_VALUE_OBJECT;
+    if (!this_val || (!is_array && !is_object) ||
+        (is_array && !this_val->as.array) ||
+        (is_object && !this_val->as.object))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: Array.prototype.forEach called on non-array");
+        }
+        return false;
+    }
+    if (!callback || (callback->type != JS_VALUE_FUNCTION && callback->type != JS_VALUE_NATIVE_FN))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: callback is not callable");
+        }
+        return false;
+    }
+
+    size_t length = 0;
+    if (is_array)
+    {
+        length = this_val->as.array->length;
+    }
+    else
+    {
+        js_value_t len_val = js_value_make_undefined_internal();
+        char *len_err = NULL;
+        if (!js_object_get_property(rt, this_val->as.object, "length", &len_val, &len_err))
+        {
+            js_free(len_err);
+            if (error_message)
+            {
+                *error_message = js_strdup("property lookup failed");
+            }
+            return false;
+        }
+        js_free(len_err);
+        bool ok = true;
+        double len_num = js_value_to_number(&len_val, &ok);
+        js_value_destroy(&len_val);
+        if (!ok || len_num < 0.0)
+        {
+            length = 0;
+        }
+        else if (len_num > (double)SIZE_MAX)
+        {
+            length = SIZE_MAX;
+        }
+        else
+        {
+            length = (size_t)len_num;
+        }
+    }
+
+    for (size_t i = 0; i < length; ++i)
+    {
+        js_value_t value = js_value_make_undefined_internal();
+        if (is_array)
+        {
+            if (!js_array_get(this_val->as.array, i, &value))
+            {
+                if (error_message)
+                {
+                    *error_message = js_strdup("allocation failed");
+                }
+                return false;
+            }
+        }
+        else
+        {
+            char key[32];
+            int key_len = snprintf(key, sizeof(key), "%zu", i);
+            if (key_len < 0 || (size_t)key_len >= sizeof(key))
+            {
+                if (error_message)
+                {
+                    *error_message = js_strdup("invalid index");
+                }
+                return false;
+            }
+            char *prop_err = NULL;
+            if (!js_object_get_property(rt, this_val->as.object, key, &value, &prop_err))
+            {
+                if (error_message)
+                {
+                    *error_message = prop_err ? prop_err : js_strdup("property lookup failed");
+                }
+                else
+                {
+                    js_free(prop_err);
+                }
+                return false;
+            }
+            js_free(prop_err);
+        }
+
+        js_value_t *call_args = (js_value_t *)js_calloc(3, sizeof(*call_args));
+        if (!call_args)
+        {
+            js_value_destroy(&value);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        if (!js_value_copy(&call_args[0], &value))
+        {
+            js_free(call_args);
+            js_value_destroy(&value);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        call_args[1] = js_value_make_number((double)i);
+        if (!js_value_copy(&call_args[2], this_val))
+        {
+            js_value_destroy(&call_args[0]);
+            js_free(call_args);
+            js_value_destroy(&value);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        js_value_destroy(&value);
+        js_value_t ignored = js_value_make_undefined_internal();
+        char *call_err = NULL;
+        bool ok = js_call_value(rt, callback, 3, call_args, &ignored, &call_err);
+        for (size_t j = 0; j < 3; ++j)
+        {
+            js_value_destroy(&call_args[j]);
+        }
+        js_free(call_args);
+        js_value_destroy(&ignored);
+        if (!ok)
+        {
+            if (call_err)
+            {
+                if (error_message)
+                {
+                    *error_message = call_err;
+                }
+                else
+                {
+                    js_free(call_err);
+                }
+            }
+            return false;
+        }
+    }
+
+    *out = js_value_make_undefined_internal();
     return true;
 }
 
@@ -11347,6 +14237,138 @@ bool js_builtin_reflect_get(js_runtime_t *rt,
     js_value_destroy(&desc.getter);
     js_value_destroy(&desc.setter);
     *out = value;
+    return true;
+}
+
+bool js_builtin_reflect_set(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_bool(false);
+    if (!argv || argc < 3)
+    {
+        return true;
+    }
+    const js_value_t *target = &argv[0];
+    const js_value_t *receiver = (argc > 3) ? &argv[3] : target;
+    js_temp_string_t prop_name = {0};
+    if (!js_temp_string_from_value(rt, &argv[1], &prop_name, error_message))
+    {
+        return false;
+    }
+
+    js_prop_desc_t desc;
+    bool ok = js_builtin_get_prop_desc(rt,
+                                       target,
+                                       prop_name.data ? prop_name.data : "",
+                                       &desc,
+                                       error_message);
+    if (!ok)
+    {
+        js_temp_string_release(&prop_name);
+        return false;
+    }
+
+    if (desc.exists && desc.is_accessor)
+    {
+        if (desc.setter.type == JS_VALUE_UNDEFINED)
+        {
+            js_value_destroy(&desc.value);
+            js_value_destroy(&desc.getter);
+            js_value_destroy(&desc.setter);
+            js_temp_string_release(&prop_name);
+            *out = js_value_make_bool(false);
+            return true;
+        }
+        js_value_t call_args[2];
+        memset(call_args, 0, sizeof(call_args));
+        bool copied = js_value_copy(&call_args[0], receiver) &&
+            js_value_copy(&call_args[1], &argv[2]);
+        if (!copied)
+        {
+            js_value_destroy(&call_args[0]);
+            js_value_destroy(&call_args[1]);
+            js_value_destroy(&desc.value);
+            js_value_destroy(&desc.getter);
+            js_value_destroy(&desc.setter);
+            js_temp_string_release(&prop_name);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        js_value_t result = js_value_make_undefined_internal();
+        char *err = NULL;
+        bool call_ok = js_call_value(rt, &desc.setter, 2, call_args, &result, &err);
+        js_value_destroy(&call_args[0]);
+        js_value_destroy(&call_args[1]);
+        js_value_destroy(&result);
+        js_value_destroy(&desc.value);
+        js_value_destroy(&desc.getter);
+        js_value_destroy(&desc.setter);
+        js_temp_string_release(&prop_name);
+        if (!call_ok)
+        {
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("call failed");
+            }
+            else
+            {
+                js_free(err);
+            }
+            return false;
+        }
+        js_free(err);
+        *out = js_value_make_bool(true);
+        return true;
+    }
+
+    bool set_ok = false;
+    const char *name = prop_name.data ? prop_name.data : "";
+    if (receiver->type == JS_VALUE_ARRAY && receiver->as.array)
+    {
+        size_t index = 0;
+        if (js_parse_index_key(name, &index))
+        {
+            set_ok = js_array_set(receiver->as.array, index, &argv[2]);
+        }
+        else
+        {
+            set_ok = js_array_set_property(receiver->as.array, name, &argv[2]);
+        }
+    }
+    else if (receiver->type == JS_VALUE_OBJECT && receiver->as.object)
+    {
+        set_ok = js_object_set_slot(receiver->as.object, name, &argv[2]);
+    }
+
+    js_value_destroy(&desc.value);
+    js_value_destroy(&desc.getter);
+    js_value_destroy(&desc.setter);
+    js_temp_string_release(&prop_name);
+    if (!set_ok)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    *out = js_value_make_bool(true);
     return true;
 }
 

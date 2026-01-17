@@ -1075,12 +1075,20 @@ bool js_value_is_truthy(const js_value_t *value)
         case JS_VALUE_STRING:
             return value->as.string.len != 0;
         case JS_VALUE_ARRAY:
+            return true;
         case JS_VALUE_OBJECT:
+            return !js_value_is_html_dda(value);
         case JS_VALUE_NATIVE_FN:
         case JS_VALUE_FUNCTION:
             return true;
     }
     return false;
+}
+
+bool js_value_is_html_dda(const js_value_t *value)
+{
+    return value && value->type == JS_VALUE_OBJECT && value->as.object &&
+           value->as.object->is_html_dda;
 }
 
 static char *js_number_to_string(double value, size_t *out_len)
@@ -1992,6 +2000,14 @@ bool js_value_loose_equal(const js_value_t *a, const js_value_t *b)
     if (!a || !b)
     {
         return false;
+    }
+    if (js_value_is_html_dda(a) && (b->type == JS_VALUE_NULL || b->type == JS_VALUE_UNDEFINED))
+    {
+        return true;
+    }
+    if (js_value_is_html_dda(b) && (a->type == JS_VALUE_NULL || a->type == JS_VALUE_UNDEFINED))
+    {
+        return true;
     }
     if (a->type == b->type)
     {

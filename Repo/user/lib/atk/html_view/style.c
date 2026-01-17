@@ -8527,6 +8527,10 @@ static bool html_view_rule_index_add_rule(html_view_rule_index_t *index, css_rul
         rule->selector_cache = cache;
     }
     cache->order = order;
+    if (cache->dom_never_match)
+    {
+        return true;
+    }
     if (cache && !cache->parsed && !cache->parse_failed)
     {
         (void)html_view_selector_cache_parse(cache, rule->selector);
@@ -8711,6 +8715,141 @@ static void html_view_rule_index_build_tries(html_view_rule_index_t *index)
     html_view_rule_index_build_bucket_tries(index->attr_buckets, index->attr_bucket_count);
 }
 
+static bool html_view_selector_dom_quick_reject(const char *selector,
+                                                const html_view_dom_token_map_t *dom)
+{
+    if (!selector || !dom)
+    {
+        return false;
+    }
+    const char *end = selector + strlen(selector);
+    const char *p = selector;
+    bool at_start = true;
+    bool group_missing = false;
+
+    while (p < end)
+    {
+        char c = *p;
+        if (c == '\\')
+        {
+            return false;
+        }
+        if (c == '[')
+        {
+            p = html_view_selector_skip_bracket(p, end);
+            at_start = false;
+            continue;
+        }
+        if (c == '(')
+        {
+            p = html_view_selector_skip_parens(p, end);
+            at_start = false;
+            continue;
+        }
+        if (c == ',')
+        {
+            if (!group_missing)
+            {
+                return false;
+            }
+            group_missing = false;
+            at_start = true;
+            ++p;
+            continue;
+        }
+        if (isspace((unsigned char)c) || c == '>' || c == '+' || c == '~')
+        {
+            at_start = true;
+            ++p;
+            continue;
+        }
+
+        if (group_missing)
+        {
+            at_start = false;
+            ++p;
+            continue;
+        }
+
+        if (c == '.')
+        {
+            const char *cls_start = p + 1;
+            const char *cls_end = html_view_selector_token_end(cls_start, end);
+            if (cls_end > cls_start &&
+                !html_view_key_count_has(&dom->classes, cls_start, cls_end))
+            {
+                group_missing = true;
+            }
+            p = cls_end;
+            at_start = false;
+            continue;
+        }
+        if (c == '#')
+        {
+            const char *id_start = p + 1;
+            const char *id_end = html_view_selector_token_end(id_start, end);
+            if (id_end > id_start &&
+                !html_view_key_count_has(&dom->ids, id_start, id_end))
+            {
+                group_missing = true;
+            }
+            p = id_end;
+            at_start = false;
+            continue;
+        }
+        if (c == ':')
+        {
+            ++p;
+            if (p < end && *p == ':')
+            {
+                ++p;
+            }
+            const char *name_end = html_view_selector_token_end(p, end);
+            if (name_end > p && name_end < end && *name_end == '(')
+            {
+                p = html_view_selector_skip_parens(name_end, end);
+            }
+            else
+            {
+                p = name_end;
+            }
+            at_start = false;
+            continue;
+        }
+        if (c == '*')
+        {
+            at_start = false;
+            ++p;
+            continue;
+        }
+        if (at_start && (isalpha((unsigned char)c) || c == '_'))
+        {
+            const char *tag_end = html_view_selector_token_end(p, end);
+            bool has_ns = false;
+            for (const char *q = p; q < tag_end; ++q)
+            {
+                if (*q == '|')
+                {
+                    has_ns = true;
+                    break;
+                }
+            }
+            if (!has_ns && !html_view_key_count_has(&dom->tags, p, tag_end))
+            {
+                group_missing = true;
+            }
+            p = tag_end;
+            at_start = false;
+            continue;
+        }
+
+        at_start = false;
+        ++p;
+    }
+
+    return group_missing;
+}
+
 static bool html_view_selector_dom_maybe_match(const css_selector_cache_t *cache,
                                                const char *selector,
                                                const html_view_dom_token_map_t *dom)
@@ -8800,6 +8939,10 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
         return NULL;
     }
     uint64_t build_start_ms = html_view_style_now_ms();
+    uint64_t dom_tokens_ms = 0;
+    uint64_t parse_ms = 0;
+    uint64_t add_ms = 0;
+    uint64_t tries_ms = 0;
     html_view_rule_index_t *index = (html_view_rule_index_t *)calloc(1, sizeof(*index));
     if (!index)
     {
@@ -8814,7 +8957,9 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
     size_t dom_never_match = 0;
     if (priv && priv->doc && priv->doc->root)
     {
+        uint64_t dom_start_ms = html_view_style_now_ms();
         dom_tokens_valid = html_view_dom_token_map_build(&dom_tokens, priv->doc);
+        dom_tokens_ms = html_view_style_now_ms() - dom_start_ms;
     }
     size_t rule_total = 0;
     size_t selector_missing = 0;
@@ -8826,6 +8971,7 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
     const char *sample_parse_failed = NULL;
     const char *sample_never_match = NULL;
     const char *sample_compiled_failed = NULL;
+    uint64_t parse_start_ms = html_view_style_now_ms();
     for (css_rule_t *rule = sheet->rules; rule; rule = rule->next)
     {
         ++rule_total;
@@ -8845,6 +8991,13 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
             rule->selector_cache = cache;
         }
         cache->dom_never_match = false;
+        if (dom_tokens_valid &&
+            html_view_selector_dom_quick_reject(rule->selector, &dom_tokens))
+        {
+            cache->dom_never_match = true;
+            ++dom_never_match;
+            continue;
+        }
         if (!cache->parsed && !cache->parse_failed)
         {
             (void)html_view_selector_cache_parse(cache, rule->selector);
@@ -8905,10 +9058,16 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
             }
         }
     }
+    parse_ms = html_view_style_now_ms() - parse_start_ms;
 
     uint32_t order = 0;
+    uint64_t add_start_ms = html_view_style_now_ms();
     for (css_rule_t *rule = sheet->rules; rule; rule = rule->next)
     {
+        if (rule->selector_cache && rule->selector_cache->dom_never_match)
+        {
+            continue;
+        }
         if (rule->selector && rule->selector_cache && rule->selector_cache->parsed)
         {
             if (rule->selector_cache->dom_never_match)
@@ -8930,10 +9089,13 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
             return NULL;
         }
     }
+    add_ms = html_view_style_now_ms() - add_start_ms;
 
     html_view_key_count_map_free(&class_freq);
     html_view_dom_token_map_free(&dom_tokens);
+    uint64_t tries_start_ms = html_view_style_now_ms();
     html_view_rule_index_build_tries(index);
+    tries_ms = html_view_style_now_ms() - tries_start_ms;
     uint64_t build_ms = html_view_style_now_ms() - build_start_ms;
     static uint64_t last_rule_log_ms = 0;
     if (html_view_style_log_throttle(&last_rule_log_ms, HTML_VIEW_STYLE_LOG_THROTTLE_MS))
@@ -8955,6 +9117,13 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
                       (unsigned long long)index->id_bucket_count,
                       (unsigned long long)index->attr_bucket_count,
                       (unsigned long long)index->scope_class_bucket_count);
+        serial_printf("[html_view] rule_index_build_stage sheet=%p total_ms=%llu dom_ms=%llu parse_ms=%llu add_ms=%llu tries_ms=%llu",
+                      (void *)sheet,
+                      (unsigned long long)build_ms,
+                      (unsigned long long)dom_tokens_ms,
+                      (unsigned long long)parse_ms,
+                      (unsigned long long)add_ms,
+                      (unsigned long long)tries_ms);
         if (sample_parse_failed)
         {
             serial_printf("[html_view] rule_parse_failed sel=%.96s", sample_parse_failed);

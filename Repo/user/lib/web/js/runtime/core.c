@@ -289,6 +289,17 @@ js_runtime_t *js_runtime_create(void)
         js_runtime_destroy(rt);
         return NULL;
     }
+    js_value_t reflect_set;
+    memset(&reflect_set, 0, sizeof(reflect_set));
+    reflect_set.type = JS_VALUE_NATIVE_FN;
+    reflect_set.as.native.fn = js_builtin_reflect_set;
+    reflect_set.as.native.user_data = NULL;
+    if (!js_object_set_slot(reflect_obj.as.object, "set", &reflect_set))
+    {
+        js_value_destroy(&reflect_obj);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
     if (!js_runtime_set_global(rt, "Reflect", &reflect_obj))
     {
         js_value_destroy(&reflect_obj);
@@ -330,16 +341,33 @@ js_runtime_t *js_runtime_create(void)
         return NULL;
     }
     js_value_t is_html_dda;
-    memset(&is_html_dda, 0, sizeof(is_html_dda));
-    is_html_dda.type = JS_VALUE_NATIVE_FN;
-    is_html_dda.as.native.fn = js_builtin_is_html_dda;
-    is_html_dda.as.native.user_data = NULL;
-    if (!js_object_set_slot(host_helpers.as.object, "IsHTMLDDA", &is_html_dda))
+    if (!js_value_make_host_object(&is_html_dda, NULL, NULL, NULL, NULL))
     {
         js_value_destroy(&host_helpers);
         js_runtime_destroy(rt);
         return NULL;
     }
+    if (is_html_dda.type == JS_VALUE_OBJECT && is_html_dda.as.object)
+    {
+        is_html_dda.as.object->is_html_dda = true;
+        js_object_t *obj_proto = js_get_object_proto(rt);
+        if (obj_proto)
+        {
+            js_value_t proto_val;
+            memset(&proto_val, 0, sizeof(proto_val));
+            proto_val.type = JS_VALUE_OBJECT;
+            proto_val.as.object = obj_proto;
+            (void)js_object_set_slot(is_html_dda.as.object, "__proto__", &proto_val);
+        }
+    }
+    if (!js_object_set_slot(host_helpers.as.object, "IsHTMLDDA", &is_html_dda))
+    {
+        js_value_destroy(&is_html_dda);
+        js_value_destroy(&host_helpers);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_destroy(&is_html_dda);
     js_value_t create_realm;
     memset(&create_realm, 0, sizeof(create_realm));
     create_realm.type = JS_VALUE_NATIVE_FN;
@@ -419,6 +447,11 @@ void js_runtime_destroy(js_runtime_t *rt)
     {
         js_object_release(rt->number_proto);
         rt->number_proto = NULL;
+    }
+    if (rt->string_proto)
+    {
+        js_object_release(rt->string_proto);
+        rt->string_proto = NULL;
     }
     if (rt->symbol_proto)
     {
@@ -585,9 +618,113 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         {
             return "fromCharCode";
         }
+        if (value->as.native.fn == js_string_proto_anchor)
+        {
+            return "anchor";
+        }
+        if (value->as.native.fn == js_string_proto_big)
+        {
+            return "big";
+        }
+        if (value->as.native.fn == js_string_proto_blink)
+        {
+            return "blink";
+        }
+        if (value->as.native.fn == js_string_proto_bold)
+        {
+            return "bold";
+        }
+        if (value->as.native.fn == js_string_proto_fixed)
+        {
+            return "fixed";
+        }
+        if (value->as.native.fn == js_string_proto_fontcolor)
+        {
+            return "fontcolor";
+        }
+        if (value->as.native.fn == js_string_proto_fontsize)
+        {
+            return "fontsize";
+        }
+        if (value->as.native.fn == js_string_proto_italics)
+        {
+            return "italics";
+        }
+        if (value->as.native.fn == js_string_proto_link)
+        {
+            return "link";
+        }
+        if (value->as.native.fn == js_string_proto_match_all)
+        {
+            return "matchAll";
+        }
+        if (value->as.native.fn == js_string_proto_replace)
+        {
+            return "replace";
+        }
+        if (value->as.native.fn == js_string_proto_replace_all)
+        {
+            return "replaceAll";
+        }
+        if (value->as.native.fn == js_string_proto_search)
+        {
+            return "search";
+        }
+        if (value->as.native.fn == js_string_proto_small)
+        {
+            return "small";
+        }
+        if (value->as.native.fn == js_string_proto_split)
+        {
+            return "split";
+        }
+        if (value->as.native.fn == js_string_proto_strike)
+        {
+            return "strike";
+        }
+        if (value->as.native.fn == js_string_proto_sub)
+        {
+            return "sub";
+        }
+        if (value->as.native.fn == js_string_proto_substr)
+        {
+            return "substr";
+        }
+        if (value->as.native.fn == js_string_proto_sup)
+        {
+            return "sup";
+        }
+        if (value->as.native.fn == js_builtin_string_match)
+        {
+            return "match";
+        }
+        if (value->as.native.fn == js_builtin_array_join)
+        {
+            return "join";
+        }
+        if (value->as.native.fn == js_builtin_array_push)
+        {
+            return "push";
+        }
+        if (value->as.native.fn == js_builtin_array_map)
+        {
+            return "map";
+        }
+        if (value->as.native.fn == js_builtin_array_for_each)
+        {
+            return "forEach";
+        }
+        if (value->as.native.fn == js_builtin_array_from)
+        {
+            return "from";
+        }
         if (value->as.native.fn == js_builtin_reflect_get)
         {
             return "get";
+        }
+        if (value->as.native.fn == js_builtin_reflect_set)
+        {
+            return "set";
         }
         if (value->as.native.fn == js_builtin_define_property)
         {
@@ -596,6 +733,10 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         if (value->as.native.fn == js_builtin_define_properties)
         {
             return "defineProperties";
+        }
+        if (value->as.native.fn == js_builtin_object_is)
+        {
+            return "is";
         }
         if (value->as.native.fn == js_builtin_object_get_own_property_descriptor)
         {
@@ -800,6 +941,10 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         if (value->as.native.fn == js_builtin_array_is_array)
         {
             return "isArray";
+        }
+        if (value->as.native.fn == js_builtin_array_from)
+        {
+            return "from";
         }
         if (value->as.native.fn == js_builtin_array_join)
         {
@@ -1060,11 +1205,103 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
             return true;
         }
         if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_string_proto_anchor ||
+             value->as.native.fn == js_string_proto_link ||
+             value->as.native.fn == js_string_proto_fontcolor ||
+             value->as.native.fn == js_string_proto_fontsize))
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_string_proto_match_all ||
+             value->as.native.fn == js_string_proto_search ||
+             value->as.native.fn == js_builtin_string_match))
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_string_proto_replace ||
+             value->as.native.fn == js_string_proto_replace_all ||
+             value->as.native.fn == js_string_proto_split ||
+             value->as.native.fn == js_string_proto_substr))
+        {
+            if (out_len)
+            {
+                *out_len = 2;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_string_proto_big ||
+             value->as.native.fn == js_string_proto_blink ||
+             value->as.native.fn == js_string_proto_bold ||
+             value->as.native.fn == js_string_proto_fixed ||
+             value->as.native.fn == js_string_proto_italics ||
+             value->as.native.fn == js_string_proto_small ||
+             value->as.native.fn == js_string_proto_strike ||
+             value->as.native.fn == js_string_proto_sub ||
+             value->as.native.fn == js_string_proto_sup))
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            (value->as.native.fn == js_builtin_array_join ||
+             value->as.native.fn == js_builtin_array_push ||
+             value->as.native.fn == js_builtin_array_map ||
+             value->as.native.fn == js_builtin_array_for_each ||
+             value->as.native.fn == js_builtin_array_from))
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
             value->as.native.fn == js_builtin_reflect_get)
         {
             if (out_len)
             {
                 *out_len = 2;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_reflect_set)
+        {
+            if (out_len)
+            {
+                *out_len = 3;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_regexp_legacy_getter)
+        {
+            if (out_len)
+            {
+                *out_len = 0;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_regexp_legacy_setter)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
             }
             return true;
         }
@@ -1079,6 +1316,15 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
         }
         if (value && value->type == JS_VALUE_NATIVE_FN &&
             value->as.native.fn == js_builtin_define_properties)
+        {
+            if (out_len)
+            {
+                *out_len = 2;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_object_is)
         {
             if (out_len)
             {
@@ -1278,6 +1524,15 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
         }
         if (value && value->type == JS_VALUE_NATIVE_FN &&
             value->as.native.fn == js_builtin_array_is_array)
+        {
+            if (out_len)
+            {
+                *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_array_from)
         {
             if (out_len)
             {

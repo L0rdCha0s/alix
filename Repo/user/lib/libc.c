@@ -14,6 +14,15 @@ int errno = 0;
 #define USER_HEAP_LARGE_THRESHOLD ((size_t)(64u * 1024u * 1024u))
 #define ENABLE_USER_MEM_DEBUG_LOGS 1
 
+static inline void libc_cpu_relax(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile ("pause");
+#else
+    __asm__ volatile ("" ::: "memory");
+#endif
+}
+
 typedef struct heap_block
 {
     size_t size;
@@ -81,8 +90,8 @@ static bool libc_env_reserve(size_t needed)
 
 #ifdef ENABLE_USER_MEM_DEBUG_LOGS
 #define USER_HEAP_LOG_PROC_PATH "/proc/sys/mem/uheap_log_enable"
-#define USER_HEAP_LOG_POLL_MASK 0x3FFu
-#define USER_HEAP_LOG_CHECK_INTERVAL_MS 5000u
+#define USER_HEAP_LOG_POLL_MASK 0xFFFFu
+#define USER_HEAP_LOG_CHECK_INTERVAL_MS 60000u
 
 static uint32_t g_user_heap_log_enable = 0;
 static uint32_t g_user_heap_log_poll = 0;
@@ -405,7 +414,7 @@ static void user_heap_lock_acquire(void)
     {
         while (g_heap_lock)
         {
-            __asm__ volatile ("pause");
+            libc_cpu_relax();
         }
     }
 }
@@ -515,6 +524,19 @@ static inline size_t libc_word_repeat(uint8_t byte)
         word |= word << 32;
     }
     return word;
+}
+
+#define LIBC_WORD_ONES ((size_t)-1 / 0xFF)
+#define LIBC_WORD_HIGHS (LIBC_WORD_ONES << 7)
+
+static inline bool libc_word_has_zero(size_t word)
+{
+    return ((word - LIBC_WORD_ONES) & ~word & LIBC_WORD_HIGHS) != 0;
+}
+
+static inline bool libc_word_has_byte(size_t word, size_t byte_mask)
+{
+    return libc_word_has_zero(word ^ byte_mask);
 }
 
 void *memset(void *dst, int value, size_t count)
@@ -717,23 +739,89 @@ size_t strlen(const char *str)
     {
         return 0;
     }
-    const char *s = str;
-    for (;;)
+    const unsigned char *start = (const unsigned char *)str;
+    const unsigned char *s = start;
+    size_t word_size = sizeof(size_t);
+    size_t word_mask = word_size - 1u;
+    while (((uintptr_t)s & word_mask) != 0u)
     {
-        if (s[0] == '\0') return (size_t)(s - str);
-        if (s[1] == '\0') return (size_t)(s - str + 1);
-        if (s[2] == '\0') return (size_t)(s - str + 2);
-        if (s[3] == '\0') return (size_t)(s - str + 3);
-        s += 4;
+        if (*s == '\0')
+        {
+            return (size_t)(s - start);
+        }
+        ++s;
     }
+    const size_t *w = (const size_t *)s;
+    while (!libc_word_has_zero(*w))
+    {
+        ++w;
+    }
+    s = (const unsigned char *)w;
+    while (*s)
+    {
+        ++s;
+    }
+    return (size_t)(s - start);
 }
 
 int strcmp(const char *a, const char *b)
 {
+    const unsigned char *pa = (const unsigned char *)a;
+    const unsigned char *pb = (const unsigned char *)b;
+    size_t word_size = sizeof(size_t);
+    size_t word_mask = word_size - 1u;
+
+    if ((((uintptr_t)pa ^ (uintptr_t)pb) & word_mask) == 0u)
+    {
+        while (((uintptr_t)pa & word_mask) != 0u)
+        {
+            unsigned char ca = *pa;
+            unsigned char cb = *pb;
+            if (ca != cb)
+            {
+                return (int)ca - (int)cb;
+            }
+            if (ca == '\0')
+            {
+                return 0;
+            }
+            ++pa;
+            ++pb;
+        }
+        for (;;)
+        {
+            size_t wa = *(const size_t *)pa;
+            size_t wb = *(const size_t *)pb;
+            if (wa == wb)
+            {
+                if (libc_word_has_zero(wa))
+                {
+                    return 0;
+                }
+                pa += word_size;
+                pb += word_size;
+                continue;
+            }
+            for (size_t i = 0; i < word_size; ++i)
+            {
+                unsigned char ca = pa[i];
+                unsigned char cb = pb[i];
+                if (ca != cb)
+                {
+                    return (int)ca - (int)cb;
+                }
+                if (ca == '\0')
+                {
+                    return 0;
+                }
+            }
+        }
+    }
+
     for (;;)
     {
-        unsigned char ca = (unsigned char)a[0];
-        unsigned char cb = (unsigned char)b[0];
+        unsigned char ca = *pa;
+        unsigned char cb = *pb;
         if (ca != cb)
         {
             return (int)ca - (int)cb;
@@ -742,84 +830,82 @@ int strcmp(const char *a, const char *b)
         {
             return 0;
         }
-
-        ca = (unsigned char)a[1];
-        cb = (unsigned char)b[1];
-        if (ca != cb)
-        {
-            return (int)ca - (int)cb;
-        }
-        if (ca == '\0')
-        {
-            return 0;
-        }
-
-        ca = (unsigned char)a[2];
-        cb = (unsigned char)b[2];
-        if (ca != cb)
-        {
-            return (int)ca - (int)cb;
-        }
-        if (ca == '\0')
-        {
-            return 0;
-        }
-
-        ca = (unsigned char)a[3];
-        cb = (unsigned char)b[3];
-        if (ca != cb)
-        {
-            return (int)ca - (int)cb;
-        }
-        if (ca == '\0')
-        {
-            return 0;
-        }
-
-        a += 4;
-        b += 4;
+        ++pa;
+        ++pb;
     }
 }
 
 int strncmp(const char *a, const char *b, size_t n)
 {
-    while (n >= 4)
+    const unsigned char *pa = (const unsigned char *)a;
+    const unsigned char *pb = (const unsigned char *)b;
+    size_t word_size = sizeof(size_t);
+    size_t word_mask = word_size - 1u;
+
+    if (n == 0)
     {
-        unsigned char ca = (unsigned char)a[0];
-        unsigned char cb = (unsigned char)b[0];
-        if (ca != cb || ca == '\0' || cb == '\0')
-        {
-            return (int)ca - (int)cb;
-        }
-        ca = (unsigned char)a[1];
-        cb = (unsigned char)b[1];
-        if (ca != cb || ca == '\0' || cb == '\0')
-        {
-            return (int)ca - (int)cb;
-        }
-        ca = (unsigned char)a[2];
-        cb = (unsigned char)b[2];
-        if (ca != cb || ca == '\0' || cb == '\0')
-        {
-            return (int)ca - (int)cb;
-        }
-        ca = (unsigned char)a[3];
-        cb = (unsigned char)b[3];
-        if (ca != cb || ca == '\0' || cb == '\0')
-        {
-            return (int)ca - (int)cb;
-        }
-        a += 4;
-        b += 4;
-        n -= 4;
+        return 0;
     }
+
+    if ((((uintptr_t)pa ^ (uintptr_t)pb) & word_mask) == 0u)
+    {
+        while (n && (((uintptr_t)pa & word_mask) != 0u))
+        {
+            unsigned char ca = *pa;
+            unsigned char cb = *pb;
+            if (ca != cb)
+            {
+                return (int)ca - (int)cb;
+            }
+            if (ca == '\0')
+            {
+                return 0;
+            }
+            ++pa;
+            ++pb;
+            --n;
+        }
+        while (n >= word_size)
+        {
+            size_t wa = *(const size_t *)pa;
+            size_t wb = *(const size_t *)pb;
+            if (wa == wb && !libc_word_has_zero(wa))
+            {
+                pa += word_size;
+                pb += word_size;
+                n -= word_size;
+                continue;
+            }
+            for (size_t i = 0; i < word_size && i < n; ++i)
+            {
+                unsigned char ca = pa[i];
+                unsigned char cb = pb[i];
+                if (ca != cb)
+                {
+                    return (int)ca - (int)cb;
+                }
+                if (ca == '\0')
+                {
+                    return 0;
+                }
+            }
+            pa += word_size;
+            pb += word_size;
+            n -= word_size;
+        }
+    }
+
     while (n--)
     {
-        unsigned char ca = (unsigned char)*a++;
-        unsigned char cb = (unsigned char)*b++;
-        if (ca != cb || ca == '\0' || cb == '\0')
+        unsigned char ca = *pa++;
+        unsigned char cb = *pb++;
+        if (ca != cb)
         {
             return (int)ca - (int)cb;
+        }
+        if (ca == '\0')
+        {
+            return 0;
         }
     }
     return 0;
@@ -883,16 +969,43 @@ char *strchr(const char *str, int ch)
     {
         return NULL;
     }
-    char target = (char)ch;
-    while (*str)
+    unsigned char target = (unsigned char)ch;
+    const unsigned char *s = (const unsigned char *)str;
+    size_t word_size = sizeof(size_t);
+    size_t word_mask = word_size - 1u;
+    while (((uintptr_t)s & word_mask) != 0u)
     {
-        if (*str == target)
+        if (*s == target)
         {
-            return (char *)str;
+            return (char *)s;
         }
-        ++str;
+        if (*s == '\0')
+        {
+            return (target == '\0') ? (char *)s : NULL;
+        }
+        ++s;
     }
-    return (target == '\0') ? (char *)str : NULL;
+    size_t mask = LIBC_WORD_ONES * target;
+    for (;;)
+    {
+        size_t w = *(const size_t *)s;
+        if (libc_word_has_zero(w) || libc_word_has_byte(w, mask))
+        {
+            for (size_t i = 0; i < word_size; ++i)
+            {
+                unsigned char c = s[i];
+                if (c == target)
+                {
+                    return (char *)(s + i);
+                }
+                if (c == '\0')
+                {
+                    return (target == '\0') ? (char *)(s + i) : NULL;
+                }
+            }
+        }
+        s += word_size;
+    }
 }
 
 char *strrchr(const char *str, int ch)
@@ -1319,47 +1432,47 @@ static char *libc_read_file_all(const char *path, size_t *len_out, size_t max_by
         return NULL;
     }
 
-    int fd = open(path, SYSCALL_OPEN_READ);
+    int fd = sys_open(path, SYSCALL_OPEN_READ);
     if (fd < 0)
     {
         return NULL;
     }
 
-    struct stat st;
-    if (fstat(fd, &st) != 0)
+    syscall_stat_t st;
+    if (sys_fstat(fd, &st) != 0)
     {
-        close(fd);
+        sys_close(fd);
         return NULL;
     }
 
-    if (st.st_size == 0 || st.st_size > (uint64_t)max_bytes)
+    if (st.size_bytes == 0 || st.size_bytes > max_bytes)
     {
-        close(fd);
+        sys_close(fd);
         return NULL;
     }
 
-    size_t size = (size_t)st.st_size;
+    size_t size = (size_t)st.size_bytes;
     char *buf = (char *)malloc(size + 1);
     if (!buf)
     {
-        close(fd);
+        sys_close(fd);
         return NULL;
     }
 
     size_t offset = 0;
     while (offset < size)
     {
-        ssize_t got = read(fd, buf + offset, size - offset);
+        ssize_t got = sys_read(fd, buf + offset, size - offset);
         if (got <= 0)
         {
             free(buf);
-            close(fd);
+            sys_close(fd);
             return NULL;
         }
         offset += (size_t)got;
     }
     buf[size] = '\0';
-    close(fd);
+    sys_close(fd);
 
     if (len_out)
     {
@@ -1625,7 +1738,11 @@ int setenv(const char *name, const char *value, int overwrite)
     return 0;
 }
 
+#ifdef TTF_HOST_BUILD
+int mkdir(const char *path, mode_t mode)
+#else
 int mkdir(const char *path, uint32_t mode)
+#endif
 {
     (void)mode;
     if (!path || path[0] == '\0')
@@ -1681,6 +1798,7 @@ char *strerror(int errnum)
     }
 }
 
+#ifndef TTF_HOST_BUILD
 typedef struct
 {
     int fd;
@@ -2529,6 +2647,7 @@ int snprintf(char *buf, size_t size, const char *format, ...)
     va_end(args);
     return result;
 }
+#endif /* TTF_HOST_BUILD */
 
 void *malloc(size_t size)
 {
@@ -2608,6 +2727,7 @@ void *calloc(size_t count, size_t size)
     return ptr;
 }
 
+#ifndef TTF_HOST_BUILD
 static FILE g_stdout_obj = { .fd = 1, .error = 0, .eof = 0 };
 static FILE g_stderr_obj = { .fd = 2, .error = 0, .eof = 0 };
 static FILE g_stdin_obj = { .fd = 0, .error = 0, .eof = 0 };
@@ -3353,6 +3473,7 @@ int fscanf(FILE *stream, const char *fmt, ...)
     va_end(args);
     return assigned;
 }
+#endif /* TTF_HOST_BUILD */
 
 void exit(int status)
 {
@@ -3406,7 +3527,7 @@ void alix_mutex_lock(alix_mutex_t *mutex)
     {
         while (__atomic_load_n(&mutex->state, __ATOMIC_RELAXED))
         {
-            __asm__ volatile ("pause");
+            libc_cpu_relax();
             if (((++spins) & 0xFFu) == 0)
             {
                 (void)sys_yield();

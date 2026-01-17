@@ -549,6 +549,8 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
     }
 
     atk_html_view_priv_t *priv = ctx->priv;
+    bool perf_active = html_view_perf_active(priv);
+    uint64_t start_ms = perf_active ? html_view_perf_now_ms() : 0;
     bool record_only = ctx->record && !ctx->draw && ctx->priv && !ctx->record_failed;
     size_t bg_op = (size_t)-1;
     if (record_only &&
@@ -965,6 +967,10 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             items = (html_view_flex_item_t *)calloc(child_cap, sizeof(*items));
             if (!items)
             {
+                if (perf_active)
+                {
+                    priv->perf.layout_flex_ms += (html_view_perf_now_ms() - start_ms);
+                }
                 return;
             }
         }
@@ -1531,6 +1537,10 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
             {
                 ctx->line_op_start = 0;
             }
+        }
+        if (perf_active)
+        {
+            priv->perf.layout_flex_ms += (html_view_perf_now_ms() - start_ms);
         }
         return;
     }
@@ -2158,5 +2168,9 @@ void html_view_render_flex_container(html_view_ctx_t *ctx,
         {
             ctx->line_op_start = 0;
         }
+    }
+    if (perf_active)
+    {
+        priv->perf.layout_flex_ms += (html_view_perf_now_ms() - start_ms);
     }
 }
