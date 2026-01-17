@@ -12,6 +12,10 @@ static void browser_loader_emit_event(browser_app_t *app, browser_ui_event_t *ev
 static void browser_load_thread(void *arg);
 
 #define BROWSER_RESOURCE_LOG_URL_MAX 160u
+#define BROWSER_CSS_REWRITE_TIMEOUT_MS 3000u
+#define BROWSER_CSS_REWRITE_CHECK_STRIDE 4096u
+#define BROWSER_CSS_REWRITE_URL_LIMIT 4096u
+#define BROWSER_CSS_REWRITE_URL_MAX_LEN 2048u
 
 static const char *browser_resource_kind_label(browser_resource_kind_t kind)
 {
@@ -366,11 +370,21 @@ static char *browser_css_rewrite_urls(browser_app_t *app,
                                       const browser_url_t *base_url,
                                       browser_resource_set_t *requested,
                                       browser_resource_queue_t *img_queue,
-                                      size_t *out_len)
+                                      size_t *out_len,
+                                      bool *timed_out,
+                                      const char **abort_reason)
 {
     if (out_len)
     {
         *out_len = 0;
+    }
+    if (timed_out)
+    {
+        *timed_out = false;
+    }
+    if (abort_reason)
+    {
+        *abort_reason = NULL;
     }
     if (!css || css_len == 0)
     {
@@ -384,10 +398,23 @@ static char *browser_css_rewrite_urls(browser_app_t *app,
     bool in_comment = false;
     bool in_string = false;
     char string_quote = '\0';
+    uint64_t start_ms = sys_time_millis();
+    bool abort_rewrite = false;
+    const char *abort_reason_local = NULL;
+    size_t url_count = 0;
 
     size_t i = 0;
     while (i < css_len)
     {
+        if ((i & (BROWSER_CSS_REWRITE_CHECK_STRIDE - 1u)) == 0u)
+        {
+            if ((sys_time_millis() - start_ms) > BROWSER_CSS_REWRITE_TIMEOUT_MS)
+            {
+                abort_rewrite = true;
+                abort_reason_local = "timeout";
+                break;
+            }
+        }
         char c = css[i];
         if (in_comment)
         {
@@ -510,6 +537,19 @@ static char *browser_css_rewrite_urls(browser_app_t *app,
 
                 size_t url_len = url_end > url_start ? (size_t)(url_end - url_start) : 0;
 
+                if (url_len > BROWSER_CSS_REWRITE_URL_MAX_LEN)
+                {
+                    abort_rewrite = true;
+                    abort_reason_local = "url-too-long";
+                    break;
+                }
+                if (url_count >= BROWSER_CSS_REWRITE_URL_LIMIT)
+                {
+                    abort_rewrite = true;
+                    abort_reason_local = "url-limit";
+                    break;
+                }
+
                 if (!browser_buf_append(&out, &len, &cap,
                                         (const uint8_t *)css + last_emit,
                                         func_start - last_emit))
@@ -533,6 +573,7 @@ static char *browser_css_rewrite_urls(browser_app_t *app,
 
                 if (resolved)
                 {
+                    url_count++;
                     browser_css_queue_image(app, requested, img_queue, load_id, resolved);
                     if (!browser_buf_append(&out, &len, &cap, (const uint8_t *)"url(\"", 5) ||
                         !browser_buf_append(&out, &len, &cap, (const uint8_t *)resolved, strlen(resolved)) ||
@@ -561,6 +602,37 @@ static char *browser_css_rewrite_urls(browser_app_t *app,
             }
         }
         i++;
+    }
+
+    if (abort_rewrite)
+    {
+        if (timed_out)
+        {
+            *timed_out = true;
+        }
+        if (abort_reason)
+        {
+            *abort_reason = abort_reason_local;
+        }
+        if (!out)
+        {
+            return NULL;
+        }
+        if (last_emit < css_len)
+        {
+            if (!browser_buf_append(&out, &len, &cap,
+                                    (const uint8_t *)css + last_emit,
+                                    css_len - last_emit))
+            {
+                free(out);
+                return NULL;
+            }
+        }
+        if (out_len)
+        {
+            *out_len = len;
+        }
+        return out;
     }
 
     if (last_emit < css_len)
@@ -2351,6 +2423,8 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
             if (decoded && decoded_len > 0)
             {
                 size_t rewritten_len = 0;
+                bool rewrite_timed_out = false;
+                const char *rewrite_reason = NULL;
                 char *rewritten = browser_css_rewrite_urls(app,
                                                            load_id,
                                                            decoded,
@@ -2358,7 +2432,9 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
                                                            NULL,
                                                            requested,
                                                            img_queue,
-                                                           &rewritten_len);
+                                                           &rewritten_len,
+                                                           &rewrite_timed_out,
+                                                           &rewrite_reason);
                 const uint8_t *append_ptr = (const uint8_t *)(rewritten ? rewritten : decoded);
                 size_t append_len = rewritten ? rewritten_len : decoded_len;
                 if (!browser_buf_append(&css_buf, &css_len, &css_cap, append_ptr, append_len) ||
@@ -2366,6 +2442,18 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
                 {
                     log_status = "fail";
                     log_detail = "css append failed";
+                }
+                if (rewrite_timed_out)
+                {
+                    browser_debug_logf(app,
+                                       "[css] rewrite abort url=%s bytes=%u reason=%s",
+                                       abs ? abs : "(null)",
+                                       (unsigned)decoded_len,
+                                       rewrite_reason ? rewrite_reason : "timeout");
+                    serial_printf("[css] rewrite abort url=%s bytes=%u reason=%s",
+                                  abs ? abs : "(null)",
+                                  (unsigned)decoded_len,
+                                  rewrite_reason ? rewrite_reason : "timeout");
                 }
                 free(rewritten);
             }
@@ -2416,6 +2504,8 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
             {
                 const browser_url_t *css_base = res_final.host ? &res_final : &res_url;
                 size_t rewritten_len = 0;
+                bool rewrite_timed_out = false;
+                const char *rewrite_reason = NULL;
                 char *rewritten = browser_css_rewrite_urls(app,
                                                            load_id,
                                                            res_body,
@@ -2423,7 +2513,9 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
                                                            css_base,
                                                            requested,
                                                            img_queue,
-                                                           &rewritten_len);
+                                                           &rewritten_len,
+                                                           &rewrite_timed_out,
+                                                           &rewrite_reason);
                 const uint8_t *append_ptr = (const uint8_t *)(rewritten ? rewritten : res_body);
                 size_t append_len = rewritten ? rewritten_len : res_len;
                 if (browser_buf_append(&css_buf, &css_len, &css_cap, append_ptr, append_len))
@@ -2437,6 +2529,18 @@ static char *browser_resource_queue_fetch_css(browser_app_t *app,
                 {
                     log_status = "fail";
                     log_detail = "css append failed";
+                }
+                if (rewrite_timed_out)
+                {
+                    browser_debug_logf(app,
+                                       "[css] rewrite abort url=%s bytes=%u reason=%s",
+                                       abs ? abs : "(null)",
+                                       (unsigned)res_len,
+                                       rewrite_reason ? rewrite_reason : "timeout");
+                    serial_printf("[css] rewrite abort url=%s bytes=%u reason=%s",
+                                  abs ? abs : "(null)",
+                                  (unsigned)res_len,
+                                  rewrite_reason ? rewrite_reason : "timeout");
                 }
                 free(rewritten);
             }

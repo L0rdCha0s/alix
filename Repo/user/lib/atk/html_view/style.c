@@ -7754,6 +7754,32 @@ static uint32_t html_view_key_count_get(const html_view_key_count_map_t *map,
     return out;
 }
 
+static bool html_view_key_count_has(const html_view_key_count_map_t *map,
+                                    const char *start,
+                                    const char *end)
+{
+    if (!map || !start || !end || end <= start)
+    {
+        return false;
+    }
+    size_t len = (size_t)(end - start);
+    size_t unescaped_len = html_view_selector_range_unescaped_len(start, len);
+    uint64_t hash = html_view_bloom_hash_range_ci(start, end, true);
+    for (size_t i = 0; i < map->count; ++i)
+    {
+        const html_view_key_count_t *entry = &map->items[i];
+        if (entry->hash != hash || entry->unescaped_len != unescaped_len)
+        {
+            continue;
+        }
+        if (html_view_selector_range_eq_ci_ranges(entry->start, entry->len, start, len))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void html_view_key_count_map_free(html_view_key_count_map_t *map)
 {
     if (!map)
@@ -7764,6 +7790,149 @@ static void html_view_key_count_map_free(html_view_key_count_map_t *map)
     map->items = NULL;
     map->count = 0;
     map->cap = 0;
+}
+
+typedef struct
+{
+    html_view_key_count_map_t tags;
+    html_view_key_count_map_t ids;
+    html_view_key_count_map_t classes;
+    html_view_key_count_map_t attrs;
+} html_view_dom_token_map_t;
+
+static void html_view_dom_token_map_free(html_view_dom_token_map_t *map)
+{
+    if (!map)
+    {
+        return;
+    }
+    html_view_key_count_map_free(&map->tags);
+    html_view_key_count_map_free(&map->ids);
+    html_view_key_count_map_free(&map->classes);
+    html_view_key_count_map_free(&map->attrs);
+}
+
+static bool html_view_dom_token_map_build(html_view_dom_token_map_t *map,
+                                          const html_document_t *doc)
+{
+    if (!map || !doc || !doc->root)
+    {
+        return false;
+    }
+    memset(map, 0, sizeof(*map));
+
+    size_t cap = 128;
+    size_t count = 0;
+    html_node_t **stack = (html_node_t **)malloc(cap * sizeof(*stack));
+    if (!stack)
+    {
+        return false;
+    }
+
+    bool ok = true;
+    stack[count++] = doc->root;
+    while (count > 0 && ok)
+    {
+        html_node_t *node = stack[--count];
+        if (!node)
+        {
+            continue;
+        }
+
+        if (node->type == HTML_NODE_ELEMENT)
+        {
+            if (node->name && node->name[0] != '\0')
+            {
+                ok = html_view_key_count_inc(&map->tags, node->name, node->name + strlen(node->name));
+            }
+            const char *id = html_attr_get(node, "id");
+            if (ok && id && id[0] != '\0')
+            {
+                ok = html_view_key_count_inc(&map->ids, id, id + strlen(id));
+            }
+            if (ok)
+            {
+                size_t token_count = 0;
+                const char *classes = NULL;
+                const html_class_token_t *tokens = html_view_node_class_tokens(node, &token_count, &classes);
+                if (tokens && token_count > 0)
+                {
+                    for (size_t i = 0; i < token_count && ok; ++i)
+                    {
+                        const html_class_token_t *tok = &tokens[i];
+                        if (tok->len == 0)
+                        {
+                            continue;
+                        }
+                        ok = html_view_key_count_inc(&map->classes, tok->start, tok->start + tok->len);
+                    }
+                }
+                else if (classes && classes[0] != '\0')
+                {
+                    const char *p = classes;
+                    while (*p && ok)
+                    {
+                        while (*p && isspace((unsigned char)*p))
+                        {
+                            ++p;
+                        }
+                        if (!*p)
+                        {
+                            break;
+                        }
+                        const char *start = p;
+                        while (*p && !isspace((unsigned char)*p))
+                        {
+                            ++p;
+                        }
+                        if (p > start)
+                        {
+                            ok = html_view_key_count_inc(&map->classes, start, p);
+                        }
+                    }
+                }
+            }
+            if (ok)
+            {
+                for (const html_attr_t *attr = node->attrs; attr; attr = attr->next)
+                {
+                    if (!attr->name || attr->name[0] == '\0')
+                    {
+                        continue;
+                    }
+                    ok = html_view_key_count_inc(&map->attrs, attr->name, attr->name + strlen(attr->name));
+                    if (!ok)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (html_node_t *child = node->first_child; child; child = child->next_sibling)
+        {
+            if (count == cap)
+            {
+                size_t new_cap = cap ? (cap * 2u) : 128u;
+                html_node_t **next = (html_node_t **)realloc(stack, new_cap * sizeof(*next));
+                if (!next)
+                {
+                    ok = false;
+                    break;
+                }
+                stack = next;
+                cap = new_cap;
+            }
+            stack[count++] = child;
+        }
+    }
+
+    free(stack);
+    if (!ok)
+    {
+        html_view_dom_token_map_free(map);
+    }
+    return ok;
 }
 
 static void html_view_selector_collect_class_counts(const char *part_start,
@@ -8452,7 +8621,89 @@ static void html_view_rule_index_build_tries(html_view_rule_index_t *index)
     html_view_rule_index_build_bucket_tries(index->attr_buckets, index->attr_bucket_count);
 }
 
-static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t *sheet)
+static bool html_view_selector_dom_maybe_match(const css_selector_cache_t *cache,
+                                               const char *selector,
+                                               const html_view_dom_token_map_t *dom)
+{
+    if (!cache || !selector || !dom)
+    {
+        return true;
+    }
+    if (cache->tag_hint_valid && !cache->tag_hint_any)
+    {
+        const char *tag = selector + cache->tag_hint_start;
+        if (!html_view_key_count_has(&dom->tags, tag, tag + cache->tag_hint_len))
+        {
+            return false;
+        }
+    }
+    if (cache->id_hint_valid)
+    {
+        const char *id = selector + cache->id_hint_start;
+        if (!html_view_key_count_has(&dom->ids, id, id + cache->id_hint_len))
+        {
+            return false;
+        }
+    }
+    if (cache->class_hint_valid)
+    {
+        const char *cls = selector + cache->class_hint_start;
+        if (!html_view_key_count_has(&dom->classes, cls, cls + cache->class_hint_len))
+        {
+            return false;
+        }
+    }
+    if (cache->parent_class_hint_valid)
+    {
+        const char *cls = selector + cache->parent_class_hint_start;
+        if (!html_view_key_count_has(&dom->classes, cls, cls + cache->parent_class_hint_len))
+        {
+            return false;
+        }
+    }
+    if (cache->scope_class_hint_valid)
+    {
+        const char *cls = selector + cache->scope_class_hint_start;
+        if (!html_view_key_count_has(&dom->classes, cls, cls + cache->scope_class_hint_len))
+        {
+            return false;
+        }
+    }
+    if (cache->attr_hint_valid)
+    {
+        const char *name = selector + cache->attr_hint_name_start;
+        if (!html_view_key_count_has(&dom->attrs, name, name + cache->attr_hint_name_len))
+        {
+            return false;
+        }
+    }
+    if (cache->self_class_count > 0)
+    {
+        for (uint8_t i = 0; i < cache->self_class_count; ++i)
+        {
+            const char *cls = selector + cache->self_class_start[i];
+            if (!html_view_key_count_has(&dom->classes, cls, cls + cache->self_class_len[i]))
+            {
+                return false;
+            }
+        }
+    }
+    if (cache->self_attr_count > 0)
+    {
+        for (uint8_t i = 0; i < cache->self_attr_count; ++i)
+        {
+            const char *attr = selector + cache->self_attr_start[i];
+            if (!html_view_key_count_has(&dom->attrs, attr, attr + cache->self_attr_len[i]))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *priv,
+                                                          const css_stylesheet_t *sheet)
 {
     if (!sheet)
     {
@@ -8464,8 +8715,16 @@ static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t
         return NULL;
     }
     index->sheet = sheet;
+    index->doc = priv ? priv->doc : NULL;
 
     html_view_key_count_map_t class_freq = {0};
+    html_view_dom_token_map_t dom_tokens = {0};
+    bool dom_tokens_valid = false;
+    size_t dom_never_match = 0;
+    if (priv && priv->doc && priv->doc->root)
+    {
+        dom_tokens_valid = html_view_dom_token_map_build(&dom_tokens, priv->doc);
+    }
     size_t rule_total = 0;
     size_t selector_missing = 0;
     size_t parse_failed = 0;
@@ -8494,6 +8753,7 @@ static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t
             }
             rule->selector_cache = cache;
         }
+        cache->dom_never_match = false;
         if (!cache->parsed && !cache->parse_failed)
         {
             (void)html_view_selector_cache_parse(cache, rule->selector);
@@ -8514,6 +8774,13 @@ static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t
             {
                 sample_never_match = rule->selector;
             }
+            continue;
+        }
+        if (dom_tokens_valid &&
+            !html_view_selector_dom_maybe_match(cache, rule->selector, &dom_tokens))
+        {
+            cache->dom_never_match = true;
+            ++dom_never_match;
             continue;
         }
         if (cache->compiled_failed)
@@ -8553,6 +8820,10 @@ static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t
     {
         if (rule->selector && rule->selector_cache && rule->selector_cache->parsed)
         {
+            if (rule->selector_cache->dom_never_match)
+            {
+                continue;
+            }
             html_view_selector_choose_best_class_hint(rule->selector_cache,
                                                       rule->selector,
                                                       &class_freq);
@@ -8563,22 +8834,25 @@ static html_view_rule_index_t *html_view_rule_index_build(const css_stylesheet_t
         if (!html_view_rule_index_add_rule(index, rule, order++))
         {
             html_view_key_count_map_free(&class_freq);
+            html_view_dom_token_map_free(&dom_tokens);
             html_view_rule_index_free(index);
             return NULL;
         }
     }
 
     html_view_key_count_map_free(&class_freq);
+    html_view_dom_token_map_free(&dom_tokens);
     html_view_rule_index_build_tries(index);
     static uint64_t last_rule_log_ms = 0;
     if (html_view_style_log_throttle(&last_rule_log_ms, HTML_VIEW_STYLE_LOG_THROTTLE_MS))
     {
-        serial_printf("[html_view] rule_index_build sheet=%p rules=%llu parsed_ok=%llu parse_failed=%llu never_match=%llu compiled_failed=%llu empty_parts=%llu selector_missing=%llu global=%llu tags=%llu classes=%llu ids=%llu attrs=%llu scope_classes=%llu",
+        serial_printf("[html_view] rule_index_build sheet=%p rules=%llu parsed_ok=%llu parse_failed=%llu never_match=%llu dom_never_match=%llu compiled_failed=%llu empty_parts=%llu selector_missing=%llu global=%llu tags=%llu classes=%llu ids=%llu attrs=%llu scope_classes=%llu",
                       (void *)sheet,
                       (unsigned long long)rule_total,
                       (unsigned long long)parsed_ok,
                       (unsigned long long)parse_failed,
                       (unsigned long long)never_match,
+                      (unsigned long long)dom_never_match,
                       (unsigned long long)compiled_failed,
                       (unsigned long long)empty_parts,
                       (unsigned long long)selector_missing,
@@ -8611,13 +8885,13 @@ static const html_view_rule_index_t *html_view_rule_index_get(atk_html_view_priv
     {
         return NULL;
     }
-    if (priv->rule_index && priv->rule_index->sheet == sheet)
+    if (priv->rule_index && priv->rule_index->sheet == sheet && priv->rule_index->doc == priv->doc)
     {
         return priv->rule_index;
     }
 
     html_view_rule_index_clear(priv);
-    priv->rule_index = html_view_rule_index_build(sheet);
+    priv->rule_index = html_view_rule_index_build(priv, sheet);
     if (!priv->rule_index)
     {
         static uint64_t last_fail_log_ms = 0;

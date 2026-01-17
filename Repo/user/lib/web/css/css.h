@@ -416,6 +416,7 @@ typedef struct css_selector_cache
     bool parsed;
     bool parse_failed;
     bool never_match;
+    bool dom_never_match;
     bool tag_hint_valid;
     bool tag_hint_any;
     uint32_t tag_hint_start;

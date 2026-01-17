@@ -248,6 +248,7 @@ typedef struct html_view_rule_bucket
 typedef struct
 {
     const css_stylesheet_t *sheet;
+    const html_document_t *doc;
     css_rule_t **global_rules;
     size_t global_count;
     size_t global_cap;
