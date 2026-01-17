@@ -1402,6 +1402,24 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
             value.as.native.user_data = &access->object;
             return js_eval_ok(value);
         }
+        if (access->property && strcmp(access->property, "charCodeAt") == 0)
+        {
+            js_value_t value;
+            memset(&value, 0, sizeof(value));
+            value.type = JS_VALUE_NATIVE_FN;
+            value.as.native.fn = js_builtin_string_char_code_at;
+            value.as.native.user_data = &access->object;
+            return js_eval_ok(value);
+        }
+        if (access->property && strcmp(access->property, "substring") == 0)
+        {
+            js_value_t value;
+            memset(&value, 0, sizeof(value));
+            value.type = JS_VALUE_NATIVE_FN;
+            value.as.native.fn = js_builtin_string_substring;
+            value.as.native.user_data = &access->object;
+            return js_eval_ok(value);
+        }
         if (access->property)
         {
             size_t index = 0;
@@ -1612,6 +1630,39 @@ static js_eval_result_t js_member_access_value(js_runtime_t *rt, js_member_acces
             value.as.native.fn = js_builtin_function_bind;
             value.as.native.user_data = &access->object;
             return js_eval_ok(value);
+        }
+        if (native_name && access->property &&
+            strcmp(native_name, "RegExp") == 0 &&
+            js_regexp_is_legacy_static_property(access->property))
+        {
+            js_value_t getter;
+            memset(&getter, 0, sizeof(getter));
+            getter.type = JS_VALUE_NATIVE_FN;
+            getter.as.native.fn = js_regexp_legacy_getter;
+            getter.as.native.user_data = access->object.as.native.user_data;
+            js_value_t receiver;
+            if (!js_value_copy(&receiver, &access->object))
+            {
+                return js_eval_error("allocation failed");
+            }
+            js_value_t result = js_value_make_undefined_internal();
+            char *err = NULL;
+            bool ok = js_call_value(rt, &getter, 1, &receiver, &result, &err);
+            js_value_destroy(&receiver);
+            if (!ok)
+            {
+                if (err)
+                {
+                    js_eval_result_t res = js_eval_error(err);
+                    js_free(err);
+                    js_value_destroy(&result);
+                    return res;
+                }
+                js_value_destroy(&result);
+                return js_eval_error("getter failed");
+            }
+            js_free(err);
+            return js_eval_ok(result);
         }
         if (native_name && access->property && strcmp(native_name, "Object") == 0 &&
             strcmp(access->property, "defineProperty") == 0)
@@ -2936,6 +2987,7 @@ bool js_native_needs_this(js_native_fn_t fn)
            fn == js_builtin_array_map ||
            fn == js_builtin_object_has_own_property ||
            fn == js_builtin_object_property_is_enumerable ||
+           fn == js_regexp_legacy_getter ||
            fn == js_builtin_object_to_string ||
            fn == js_date_proto_to_string ||
            fn == js_date_proto_to_date_string ||
@@ -4598,6 +4650,10 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             else if (access.object.type == JS_VALUE_NATIVE_FN)
             {
                 const char *native_name = js_value_native_name(rt, &access.object);
+                bool is_regexp_ctor = (native_name && strcmp(native_name, "RegExp") == 0) ||
+                    access.object.as.native.fn == js_builtin_regexp;
+                bool is_regexp_subclass_ctor =
+                    access.object.as.native.fn == js_builtin_regexp_subclass;
                 if (access.property && strcmp(access.property, "name") == 0)
                 {
                     js_value_t value;
@@ -4609,6 +4665,42 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     result = js_eval_ok(value);
                     js_member_access_release(&access);
                     return result;
+                }
+                if (access.property &&
+                    js_regexp_is_legacy_static_property(access.property) &&
+                    (is_regexp_ctor || is_regexp_subclass_ctor))
+                {
+                    js_value_t getter;
+                    memset(&getter, 0, sizeof(getter));
+                    getter.type = JS_VALUE_NATIVE_FN;
+                    getter.as.native.fn = js_regexp_legacy_getter;
+                    getter.as.native.user_data = access.object.as.native.user_data;
+                    js_value_t receiver;
+                    if (!js_value_copy(&receiver, &access.object))
+                    {
+                        js_member_access_release(&access);
+                        return js_eval_error("allocation failed");
+                    }
+                    js_value_t result_value = js_value_make_undefined_internal();
+                    char *err = NULL;
+                    bool ok = js_call_value(rt, &getter, 1, &receiver, &result_value, &err);
+                    js_value_destroy(&receiver);
+                    if (!ok)
+                    {
+                        js_member_access_release(&access);
+                        if (err)
+                        {
+                            js_eval_result_t res = js_eval_error(err);
+                            js_free(err);
+                            js_value_destroy(&result_value);
+                            return res;
+                        }
+                        js_value_destroy(&result_value);
+                        return js_eval_error("getter failed");
+                    }
+                    js_free(err);
+                    js_member_access_release(&access);
+                    return js_eval_ok(result_value);
                 }
                 if (access.property && strcmp(access.property, "prototype") == 0 &&
                     (access.object.as.native.fn == js_builtin_iterator ||

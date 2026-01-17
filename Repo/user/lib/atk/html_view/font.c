@@ -29,6 +29,7 @@ static void html_view_font_cache_clear_glyphs(html_view_font_size_cache_t *cache
         cache->extra_glyphs[i].last_used = 0;
     }
 
+    memset(cache->text_cache, 0, sizeof(cache->text_cache));
     cache->glyph_use_counter = 0;
 }
 
@@ -276,6 +277,95 @@ static html_view_font_size_cache_t *html_view_font_cache_for_ctx(const html_view
     return html_view_font_state_get_cache(&ctx->priv->font, ctx->actual_font_px);
 }
 
+static uint32_t html_view_text_cache_hash(const char *text, size_t len)
+{
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < len; ++i)
+    {
+        hash ^= (uint8_t)text[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static bool html_view_text_cache_prepare(const char *text, size_t *out_len, uint32_t *out_hash)
+{
+    if (!text || !out_len || !out_hash)
+    {
+        return false;
+    }
+
+    uint32_t hash = 2166136261u;
+    size_t len = 0;
+    while (len < HTML_VIEW_TEXT_CACHE_MAX_LEN)
+    {
+        uint8_t ch = (uint8_t)text[len];
+        if (ch == 0)
+        {
+            break;
+        }
+        hash ^= ch;
+        hash *= 16777619u;
+        len++;
+    }
+    if (text[len] != '\0')
+    {
+        return false;
+    }
+
+    *out_len = len;
+    *out_hash = hash;
+    return (len > 0);
+}
+
+static bool html_view_text_cache_lookup(html_view_font_size_cache_t *cache,
+                                        const char *text,
+                                        size_t len,
+                                        uint32_t hash,
+                                        int *out_width)
+{
+    if (!cache || !text || len == 0 || len > HTML_VIEW_TEXT_CACHE_MAX_LEN)
+    {
+        return false;
+    }
+
+    size_t index = (size_t)hash & (HTML_VIEW_TEXT_CACHE_SLOTS - 1u);
+    html_view_text_width_cache_entry_t *entry = &cache->text_cache[index];
+    if (!entry->valid || entry->hash != hash || entry->len != len)
+    {
+        return false;
+    }
+    if (memcmp(entry->text, text, len) != 0)
+    {
+        return false;
+    }
+    if (out_width)
+    {
+        *out_width = entry->width;
+    }
+    return true;
+}
+
+static void html_view_text_cache_store(html_view_font_size_cache_t *cache,
+                                       const char *text,
+                                       size_t len,
+                                       uint32_t hash,
+                                       int width)
+{
+    if (!cache || !text || len == 0 || len > HTML_VIEW_TEXT_CACHE_MAX_LEN)
+    {
+        return;
+    }
+
+    size_t index = (size_t)hash & (HTML_VIEW_TEXT_CACHE_SLOTS - 1u);
+    html_view_text_width_cache_entry_t *entry = &cache->text_cache[index];
+    entry->hash = hash;
+    entry->width = width;
+    entry->len = (uint8_t)len;
+    entry->valid = true;
+    memcpy(entry->text, text, len);
+}
+
 int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
 {
     if (!ctx || !text || *text == '\0')
@@ -288,6 +378,18 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
     if (!cache)
     {
         return atk_font_text_width(text);
+    }
+
+    size_t cache_len = 0;
+    uint32_t cache_hash = 0;
+    bool cacheable = html_view_text_cache_prepare(text, &cache_len, &cache_hash);
+    if (cacheable)
+    {
+        int cached_width = 0;
+        if (html_view_text_cache_lookup(cache, text, cache_len, cache_hash, &cached_width))
+        {
+            return cached_width;
+        }
     }
 
     html_view_font_state_t *font_state = &ctx->priv->font;
@@ -311,6 +413,10 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
             continue;
         }
         width += glyph->advance;
+    }
+    if (cacheable)
+    {
+        html_view_text_cache_store(cache, text, cache_len, cache_hash, width);
     }
     return width;
 }
@@ -338,6 +444,18 @@ int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_
         return width;
     }
 
+    bool cacheable = (len > 0 && len <= HTML_VIEW_TEXT_CACHE_MAX_LEN);
+    uint32_t cache_hash = 0;
+    if (cacheable)
+    {
+        cache_hash = html_view_text_cache_hash(text, len);
+        int cached_width = 0;
+        if (html_view_text_cache_lookup(cache, text, len, cache_hash, &cached_width))
+        {
+            return cached_width;
+        }
+    }
+
     html_view_font_state_t *font_state = &ctx->priv->font;
     int width = 0;
     size_t guard = 0;
@@ -359,6 +477,10 @@ int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_
             continue;
         }
         width += glyph->advance;
+    }
+    if (cacheable)
+    {
+        html_view_text_cache_store(cache, text, len, cache_hash, width);
     }
     return width;
 }

@@ -4658,6 +4658,10 @@ static bool js_regexp_parse_atom(const char *pattern,
                     return true;
                 }
             }
+            out->kind = JS_REGEXP_ATOM_LITERAL;
+            out->literal = '\\';
+            *index += 1;
+            return true;
         }
         out->kind = JS_REGEXP_ATOM_LITERAL;
         switch (esc)
@@ -5074,6 +5078,22 @@ static bool js_builtin_get_prop_desc(js_runtime_t *rt,
             out->configurable = false;
             return true;
         }
+    }
+
+    if (obj->type == JS_VALUE_NATIVE_FN &&
+        obj->as.native.fn == js_builtin_regexp &&
+        js_regexp_is_legacy_static_property(name))
+    {
+        out->exists = true;
+        out->is_accessor = true;
+        out->enumerable = false;
+        out->configurable = true;
+        out->writable = false;
+        out->getter.type = JS_VALUE_NATIVE_FN;
+        out->getter.as.native.fn = js_regexp_legacy_getter;
+        out->getter.as.native.user_data = obj->as.native.user_data;
+        out->setter = js_value_make_undefined_internal();
+        return true;
     }
 
     if (obj->type == JS_VALUE_ARRAY)
@@ -6937,6 +6957,69 @@ static bool js_regexp_split(js_runtime_t *rt,
     return true;
 }
 
+bool js_regexp_is_legacy_static_property(const char *name)
+{
+    if (!name)
+    {
+        return false;
+    }
+    if (strcmp(name, "input") == 0 ||
+        strcmp(name, "lastMatch") == 0 ||
+        strcmp(name, "lastParen") == 0 ||
+        strcmp(name, "leftContext") == 0 ||
+        strcmp(name, "rightContext") == 0)
+    {
+        return true;
+    }
+    if (name[0] != '$')
+    {
+        return false;
+    }
+    if (strcmp(name, "$_") == 0 ||
+        strcmp(name, "$&") == 0 ||
+        strcmp(name, "$`") == 0 ||
+        strcmp(name, "$'") == 0 ||
+        strcmp(name, "$+") == 0)
+    {
+        return true;
+    }
+    if (name[1] >= '1' && name[1] <= '9' && name[2] == '\0')
+    {
+        return true;
+    }
+    return false;
+}
+
+bool js_regexp_legacy_getter(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *receiver = (argc > 0 && argv) ? &argv[0] : NULL;
+    if (!receiver || receiver->type != JS_VALUE_NATIVE_FN ||
+        receiver->as.native.fn != js_builtin_regexp ||
+        receiver->as.native.user_data != user_data)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("TypeError: invalid RegExp receiver");
+        }
+        return false;
+    }
+    return js_value_make_cstring(out, "");
+}
+
 static bool js_regexp_get(js_runtime_t *rt,
                           void *user_data,
                           const char *name,
@@ -7176,6 +7259,136 @@ bool js_builtin_string_match(js_runtime_t *rt,
         return false;
     }
     return true;
+}
+
+bool js_builtin_string_char_code_at(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (const js_value_t *)user_data;
+    js_temp_string_t temp = {0};
+    if (!js_temp_string_from_value(rt, this_val, &temp, error_message))
+    {
+        return false;
+    }
+
+    double index_num = 0.0;
+    if (argc > 0 && argv && argv[0].type != JS_VALUE_UNDEFINED)
+    {
+        bool ok = true;
+        index_num = js_value_to_number(&argv[0], &ok);
+        if (!ok || js_is_nan(index_num))
+        {
+            index_num = 0.0;
+        }
+    }
+    double trunc = (index_num < 0.0) ? ceil(index_num) : floor(index_num);
+    if (trunc < 0.0 || trunc >= (double)temp.len)
+    {
+        js_temp_string_release(&temp);
+        *out = js_value_make_number(js_nan());
+        return true;
+    }
+    size_t index = (size_t)trunc;
+    unsigned char code = (unsigned char)temp.data[index];
+    js_temp_string_release(&temp);
+    *out = js_value_make_number((double)code);
+    return true;
+}
+
+bool js_builtin_string_substring(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    const js_value_t *this_val = (const js_value_t *)user_data;
+    js_temp_string_t temp = {0};
+    if (!js_temp_string_from_value(rt, this_val, &temp, error_message))
+    {
+        return false;
+    }
+
+    double start_num = 0.0;
+    double end_num = (double)temp.len;
+    if (argc > 0 && argv && argv[0].type != JS_VALUE_UNDEFINED)
+    {
+        bool ok = true;
+        start_num = js_value_to_number(&argv[0], &ok);
+        if (!ok || js_is_nan(start_num))
+        {
+            start_num = 0.0;
+        }
+    }
+    if (argc > 1 && argv && argv[1].type != JS_VALUE_UNDEFINED)
+    {
+        bool ok = true;
+        end_num = js_value_to_number(&argv[1], &ok);
+        if (!ok || js_is_nan(end_num))
+        {
+            end_num = 0.0;
+        }
+    }
+
+    double start_trunc = (start_num < 0.0) ? ceil(start_num) : floor(start_num);
+    double end_trunc = (end_num < 0.0) ? ceil(end_num) : floor(end_num);
+    size_t start = 0;
+    size_t end = 0;
+    if (start_trunc > 0.0)
+    {
+        if (start_trunc >= (double)temp.len)
+        {
+            start = temp.len;
+        }
+        else
+        {
+            start = (size_t)start_trunc;
+        }
+    }
+    if (end_trunc > 0.0)
+    {
+        if (end_trunc >= (double)temp.len)
+        {
+            end = temp.len;
+        }
+        else
+        {
+            end = (size_t)end_trunc;
+        }
+    }
+    if (start > end)
+    {
+        size_t tmp = start;
+        start = end;
+        end = tmp;
+    }
+
+    size_t slice_len = (end >= start) ? (end - start) : 0;
+    bool ok = js_value_make_string(out,
+                                   temp.data ? temp.data + start : "",
+                                   slice_len);
+    js_temp_string_release(&temp);
+    return ok;
 }
 
 bool js_builtin_number_to_string(js_runtime_t *rt,
@@ -11037,6 +11250,103 @@ bool js_builtin_create_realm(js_runtime_t *rt,
     }
     js_value_destroy(&global_obj);
     *out = realm_obj;
+    return true;
+}
+
+bool js_builtin_reflect_get(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!argv || argc < 2)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    const js_value_t *target = &argv[0];
+    const js_value_t *receiver = (argc > 2) ? &argv[2] : target;
+    js_temp_string_t prop_name = {0};
+    if (!js_temp_string_from_value(rt, &argv[1], &prop_name, error_message))
+    {
+        return false;
+    }
+
+    js_prop_desc_t desc;
+    bool ok = js_builtin_get_prop_desc(rt,
+                                       target,
+                                       prop_name.data ? prop_name.data : "",
+                                       &desc,
+                                       error_message);
+    js_temp_string_release(&prop_name);
+    if (!ok)
+    {
+        return false;
+    }
+    if (!desc.exists)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (desc.is_accessor)
+    {
+        if (desc.getter.type == JS_VALUE_UNDEFINED)
+        {
+            js_value_destroy(&desc.getter);
+            js_value_destroy(&desc.setter);
+            *out = js_value_make_undefined_internal();
+            return true;
+        }
+        js_value_t receiver_copy;
+        if (!js_value_copy(&receiver_copy, receiver))
+        {
+            js_value_destroy(&desc.getter);
+            js_value_destroy(&desc.setter);
+            if (error_message)
+            {
+                *error_message = js_strdup("allocation failed");
+            }
+            return false;
+        }
+        js_value_t result = js_value_make_undefined_internal();
+        char *err = NULL;
+        bool call_ok = js_call_value(rt, &desc.getter, 1, &receiver_copy, &result, &err);
+        js_value_destroy(&receiver_copy);
+        js_value_destroy(&desc.getter);
+        js_value_destroy(&desc.setter);
+        if (!call_ok)
+        {
+            if (error_message)
+            {
+                *error_message = err ? err : js_strdup("call failed");
+            }
+            else
+            {
+                js_free(err);
+            }
+            js_value_destroy(&result);
+            return false;
+        }
+        js_free(err);
+        *out = result;
+        return true;
+    }
+
+    js_value_t value = desc.value;
+    desc.value = js_value_make_undefined_internal();
+    js_value_destroy(&desc.getter);
+    js_value_destroy(&desc.setter);
+    *out = value;
     return true;
 }
 

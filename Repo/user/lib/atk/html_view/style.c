@@ -7650,6 +7650,7 @@ typedef struct
     size_t unescaped_len;
     uint64_t hash;
     uint32_t count;
+    bool used;
 } html_view_key_count_t;
 
 typedef struct
@@ -7665,24 +7666,87 @@ static html_view_key_count_t *html_view_key_count_find(html_view_key_count_map_t
                                                        uint64_t hash,
                                                        size_t unescaped_len)
 {
-    if (!map || !start || !end || end <= start)
+    if (!map || !start || !end || end <= start || !map->items || map->cap == 0)
     {
         return NULL;
     }
     size_t len = (size_t)(end - start);
-    for (size_t i = 0; i < map->count; ++i)
+    size_t mask = map->cap - 1u;
+    size_t index = (size_t)hash & mask;
+    for (size_t probe = 0; probe < map->cap; ++probe)
     {
-        html_view_key_count_t *entry = &map->items[i];
+        html_view_key_count_t *entry = &map->items[index];
+        if (!entry->used)
+        {
+            return NULL;
+        }
         if (entry->hash != hash || entry->unescaped_len != unescaped_len)
         {
+            index = (index + 1u) & mask;
             continue;
         }
         if (html_view_selector_range_eq_ci_ranges(entry->start, entry->len, start, len))
         {
             return entry;
         }
+        index = (index + 1u) & mask;
     }
     return NULL;
+}
+
+static bool html_view_key_count_map_resize(html_view_key_count_map_t *map, size_t new_cap)
+{
+    if (!map)
+    {
+        return false;
+    }
+    if (new_cap < 16u)
+    {
+        new_cap = 16u;
+    }
+    if ((new_cap & (new_cap - 1u)) != 0u)
+    {
+        size_t pow2 = 1u;
+        while (pow2 < new_cap)
+        {
+            pow2 <<= 1u;
+        }
+        new_cap = pow2;
+    }
+
+    html_view_key_count_t *next = (html_view_key_count_t *)calloc(new_cap, sizeof(*next));
+    if (!next)
+    {
+        return false;
+    }
+
+    html_view_key_count_t *old = map->items;
+    size_t old_cap = map->cap;
+    map->items = next;
+    map->cap = new_cap;
+    map->count = 0;
+
+    if (old)
+    {
+        size_t mask = map->cap - 1u;
+        for (size_t i = 0; i < old_cap; ++i)
+        {
+            html_view_key_count_t *entry = &old[i];
+            if (!entry->used)
+            {
+                continue;
+            }
+            size_t index = (size_t)entry->hash & mask;
+            while (map->items[index].used)
+            {
+                index = (index + 1u) & mask;
+            }
+            map->items[index] = *entry;
+            map->count++;
+        }
+        free(old);
+    }
+    return true;
 }
 
 static bool html_view_key_count_inc(html_view_key_count_map_t *map,
@@ -7703,26 +7767,36 @@ static bool html_view_key_count_inc(html_view_key_count_map_t *map,
         return true;
     }
 
-    if (map->count == map->cap)
+    if (!map->items || map->cap == 0)
     {
-        size_t new_cap = map->cap ? (map->cap * 2u) : 16u;
-        html_view_key_count_t *next = (html_view_key_count_t *)realloc(map->items,
-                                                                       new_cap * sizeof(*next));
-        if (!next)
+        if (!html_view_key_count_map_resize(map, 64u))
         {
             return false;
         }
-        map->items = next;
-        map->cap = new_cap;
+    }
+    if ((map->count + 1u) * 10u >= map->cap * 7u)
+    {
+        if (!html_view_key_count_map_resize(map, map->cap * 2u))
+        {
+            return false;
+        }
     }
 
-    map->items[map->count++] = (html_view_key_count_t){
+    size_t mask = map->cap - 1u;
+    size_t index = (size_t)hash & mask;
+    while (map->items[index].used)
+    {
+        index = (index + 1u) & mask;
+    }
+    map->items[index] = (html_view_key_count_t){
         .start = start,
         .len = len,
         .unescaped_len = unescaped_len,
         .hash = hash,
         .count = 1u,
+        .used = true,
     };
+    map->count++;
     return true;
 }
 
@@ -7730,7 +7804,7 @@ static uint32_t html_view_key_count_get(const html_view_key_count_map_t *map,
                                         const char *start,
                                         const char *end)
 {
-    if (!map || !start || !end || end <= start)
+    if (!map || !start || !end || end <= start || !map->items || map->cap == 0)
     {
         return 0xffffffffu;
     }
@@ -7738,11 +7812,18 @@ static uint32_t html_view_key_count_get(const html_view_key_count_map_t *map,
     size_t unescaped_len = html_view_selector_range_unescaped_len(start, len);
     uint64_t hash = html_view_bloom_hash_range_ci(start, end, true);
     uint32_t out = 0xffffffffu;
-    for (size_t i = 0; i < map->count; ++i)
+    size_t mask = map->cap - 1u;
+    size_t index = (size_t)hash & mask;
+    for (size_t probe = 0; probe < map->cap; ++probe)
     {
-        const html_view_key_count_t *entry = &map->items[i];
+        const html_view_key_count_t *entry = &map->items[index];
+        if (!entry->used)
+        {
+            break;
+        }
         if (entry->hash != hash || entry->unescaped_len != unescaped_len)
         {
+            index = (index + 1u) & mask;
             continue;
         }
         if (html_view_selector_range_eq_ci_ranges(entry->start, entry->len, start, len))
@@ -7750,6 +7831,7 @@ static uint32_t html_view_key_count_get(const html_view_key_count_map_t *map,
             out = entry->count;
             break;
         }
+        index = (index + 1u) & mask;
     }
     return out;
 }
@@ -7758,24 +7840,32 @@ static bool html_view_key_count_has(const html_view_key_count_map_t *map,
                                     const char *start,
                                     const char *end)
 {
-    if (!map || !start || !end || end <= start)
+    if (!map || !start || !end || end <= start || !map->items || map->cap == 0)
     {
         return false;
     }
     size_t len = (size_t)(end - start);
     size_t unescaped_len = html_view_selector_range_unescaped_len(start, len);
     uint64_t hash = html_view_bloom_hash_range_ci(start, end, true);
-    for (size_t i = 0; i < map->count; ++i)
+    size_t mask = map->cap - 1u;
+    size_t index = (size_t)hash & mask;
+    for (size_t probe = 0; probe < map->cap; ++probe)
     {
-        const html_view_key_count_t *entry = &map->items[i];
+        const html_view_key_count_t *entry = &map->items[index];
+        if (!entry->used)
+        {
+            return false;
+        }
         if (entry->hash != hash || entry->unescaped_len != unescaped_len)
         {
+            index = (index + 1u) & mask;
             continue;
         }
         if (html_view_selector_range_eq_ci_ranges(entry->start, entry->len, start, len))
         {
             return true;
         }
+        index = (index + 1u) & mask;
     }
     return false;
 }
@@ -8709,6 +8799,7 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
     {
         return NULL;
     }
+    uint64_t build_start_ms = html_view_style_now_ms();
     html_view_rule_index_t *index = (html_view_rule_index_t *)calloc(1, sizeof(*index));
     if (!index)
     {
@@ -8843,12 +8934,14 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
     html_view_key_count_map_free(&class_freq);
     html_view_dom_token_map_free(&dom_tokens);
     html_view_rule_index_build_tries(index);
+    uint64_t build_ms = html_view_style_now_ms() - build_start_ms;
     static uint64_t last_rule_log_ms = 0;
     if (html_view_style_log_throttle(&last_rule_log_ms, HTML_VIEW_STYLE_LOG_THROTTLE_MS))
     {
-        serial_printf("[html_view] rule_index_build sheet=%p rules=%llu parsed_ok=%llu parse_failed=%llu never_match=%llu dom_never_match=%llu compiled_failed=%llu empty_parts=%llu selector_missing=%llu global=%llu tags=%llu classes=%llu ids=%llu attrs=%llu scope_classes=%llu",
+        serial_printf("[html_view] rule_index_build sheet=%p rules=%llu ms=%llu parsed_ok=%llu parse_failed=%llu never_match=%llu dom_never_match=%llu compiled_failed=%llu empty_parts=%llu selector_missing=%llu global=%llu tags=%llu classes=%llu ids=%llu attrs=%llu scope_classes=%llu",
                       (void *)sheet,
                       (unsigned long long)rule_total,
+                      (unsigned long long)build_ms,
                       (unsigned long long)parsed_ok,
                       (unsigned long long)parse_failed,
                       (unsigned long long)never_match,
@@ -8901,6 +8994,26 @@ static const html_view_rule_index_t *html_view_rule_index_get(atk_html_view_priv
         }
     }
     return priv->rule_index;
+}
+
+bool html_view_rule_index_prepare(atk_html_view_priv_t *priv, const css_stylesheet_t *sheet)
+{
+    if (!priv || !sheet)
+    {
+        return false;
+    }
+    html_view_rule_index_clear(priv);
+    priv->rule_index = html_view_rule_index_build(priv, sheet);
+    if (!priv->rule_index)
+    {
+        static uint64_t last_fail_log_ms = 0;
+        if (html_view_style_log_throttle(&last_fail_log_ms, HTML_VIEW_STYLE_LOG_THROTTLE_MS))
+        {
+            serial_printf("[html_view] rule_index_build_failed sheet=%p", (void *)sheet);
+        }
+        return false;
+    }
+    return true;
 }
 
 typedef struct

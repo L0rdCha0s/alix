@@ -1160,6 +1160,7 @@ void html_view_rebuild_stylesheet(atk_html_view_priv_t *priv)
         free(css_text);
         return;
     }
+    (void)html_view_rule_index_prepare(priv, priv->sheet);
     free(css_text);
 }
 

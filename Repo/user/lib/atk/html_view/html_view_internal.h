@@ -36,7 +36,9 @@
 #define HTML_VIEW_FONT_MAX_ROW_PIXELS 256
 #define HTML_VIEW_FONT_TEXT_GUARD 2048
 #define HTML_VIEW_FONT_MAX_PX 512
-#define HTML_VIEW_MEASURE_CACHE_MAX 8192
+#define HTML_VIEW_TEXT_CACHE_MAX_LEN 32
+#define HTML_VIEW_TEXT_CACHE_SLOTS 128
+#define HTML_VIEW_MEASURE_CACHE_MAX 16384
 #define HTML_VIEW_STYLE_CACHE_MAX 8192
 
 typedef struct html_view_js_script
@@ -111,11 +113,21 @@ typedef struct
 
 typedef struct
 {
+    uint32_t hash;
+    int width;
+    uint8_t len;
+    bool valid;
+    char text[HTML_VIEW_TEXT_CACHE_MAX_LEN];
+} html_view_text_width_cache_entry_t;
+
+typedef struct
+{
     bool used;
     int pixel_height;
     ttf_font_metrics_t metrics;
     html_view_font_glyph_t glyphs[HTML_VIEW_FONT_CACHE_COUNT];
     html_view_font_glyph_entry_t extra_glyphs[HTML_VIEW_FONT_EXTRA_CACHE_SLOTS];
+    html_view_text_width_cache_entry_t text_cache[HTML_VIEW_TEXT_CACHE_SLOTS];
     uint32_t glyph_use_counter;
     uint32_t last_used;
 } html_view_font_size_cache_t;
@@ -294,12 +306,24 @@ typedef struct
     bool valid;
 } html_view_style_cache_entry_t;
 
+typedef enum
+{
+    HTML_VIEW_MEASURE_KIND_BLOCK = 0,
+    HTML_VIEW_MEASURE_KIND_TABLE = 1,
+    HTML_VIEW_MEASURE_KIND_INLINE = 2,
+    HTML_VIEW_MEASURE_KIND_INLINE_BLOCK = 3,
+    HTML_VIEW_MEASURE_KIND_FLEX_ITEM = 4,
+    HTML_VIEW_MEASURE_KIND_COUNT
+} html_view_measure_kind_t;
+
 typedef struct
 {
     uint64_t style_nodes;
     uint64_t style_cache_hits;
     uint64_t measure_cache_hits;
     uint64_t measure_cache_misses;
+    uint64_t measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_COUNT];
+    uint64_t measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_COUNT];
     uint64_t text_width_calls;
     uint64_t text_width_len_calls;
     uint64_t measure_inline;
@@ -452,15 +476,6 @@ enum
 {
     HTML_VIEW_Z_INDEX_STRIDE = 4
 };
-
-typedef enum
-{
-    HTML_VIEW_MEASURE_KIND_BLOCK = 0,
-    HTML_VIEW_MEASURE_KIND_TABLE = 1,
-    HTML_VIEW_MEASURE_KIND_INLINE = 2,
-    HTML_VIEW_MEASURE_KIND_INLINE_BLOCK = 3,
-    HTML_VIEW_MEASURE_KIND_FLEX_ITEM = 4,
-} html_view_measure_kind_t;
 
 typedef struct html_view_style_block
 {
@@ -784,7 +799,7 @@ static inline void html_view_perf_note_style(atk_html_view_priv_t *priv, bool ca
     }
 }
 
-static inline void html_view_perf_note_measure_cache(atk_html_view_priv_t *priv, bool hit)
+static inline void html_view_perf_note_measure_cache(atk_html_view_priv_t *priv, bool hit, uint8_t kind)
 {
     if (!html_view_perf_active(priv))
     {
@@ -797,6 +812,17 @@ static inline void html_view_perf_note_measure_cache(atk_html_view_priv_t *priv,
     else
     {
         priv->perf.measure_cache_misses++;
+    }
+    if (kind < (uint8_t)HTML_VIEW_MEASURE_KIND_COUNT)
+    {
+        if (hit)
+        {
+            priv->perf.measure_cache_hits_kind[kind]++;
+        }
+        else
+        {
+            priv->perf.measure_cache_misses_kind[kind]++;
+        }
     }
 }
 
@@ -1031,6 +1057,7 @@ const html_view_inline_style_cache_t *html_view_inline_style_cached(atk_html_vie
                                                                     const html_node_t *node,
                                                                     const char *inline_style);
 void html_view_rule_index_clear(atk_html_view_priv_t *priv);
+bool html_view_rule_index_prepare(atk_html_view_priv_t *priv, const css_stylesheet_t *sheet);
 void html_view_style_cache_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_style_cache_clear(atk_html_view_priv_t *priv);
 void html_view_style_block_pool_clear(atk_html_view_priv_t *priv);
@@ -1050,8 +1077,8 @@ void html_view_measure_cache_store(atk_html_view_priv_t *priv,
                                    int font_px,
                                    int line_height,
                                    bool shrink,
-                                    int origin_x,
-                                    uint8_t kind,
+                                   int origin_x,
+                                   uint8_t kind,
                                    int out_w,
                                    int out_h);
 void html_view_measure_cache_clear(atk_html_view_priv_t *priv);

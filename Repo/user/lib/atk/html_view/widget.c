@@ -846,7 +846,7 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
             static uint64_t last_stage_log_ms = 0;
             if (html_view_log_throttle(&last_stage_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
             {
-                serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu style_nodes=%llu style_hits=%llu measure_hit=%llu measure_miss=%llu text=%llu text_len=%llu layout_inline=%llu layout_inline_block=%llu layout_block=%llu layout_table=%llu layout_flex=%llu layout_grid=%llu",
+                serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu style_nodes=%llu style_hits=%llu measure_hit=%llu measure_miss=%llu measure_hit_k=blk:%llu tbl:%llu inl:%llu inlb:%llu flex:%llu measure_miss_k=blk:%llu tbl:%llu inl:%llu inlb:%llu flex:%llu text=%llu text_len=%llu layout_inline=%llu layout_inline_block=%llu layout_block=%llu layout_table=%llu layout_flex=%llu layout_grid=%llu",
                               (void *)view,
                               (unsigned long long)build_ms,
                               (unsigned long long)bloom_ms,
@@ -856,6 +856,16 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                               (unsigned long long)priv->perf.style_cache_hits,
                               (unsigned long long)priv->perf.measure_cache_hits,
                               (unsigned long long)priv->perf.measure_cache_misses,
+                              (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_BLOCK],
+                              (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_TABLE],
+                              (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_INLINE],
+                              (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_INLINE_BLOCK],
+                              (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_FLEX_ITEM],
+                              (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_BLOCK],
+                              (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_TABLE],
+                              (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_INLINE],
+                              (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_INLINE_BLOCK],
+                              (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_FLEX_ITEM],
                               (unsigned long long)priv->perf.text_width_calls,
                               (unsigned long long)priv->perf.text_width_len_calls,
                               (unsigned long long)priv->perf.measure_inline,
@@ -887,7 +897,7 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
         static uint64_t last_stage_log_ms = 0;
         if (html_view_log_throttle(&last_stage_log_ms, HTML_VIEW_LOG_THROTTLE_MS))
         {
-            serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu style_nodes=%llu style_hits=%llu measure_hit=%llu measure_miss=%llu text=%llu text_len=%llu layout_inline=%llu layout_inline_block=%llu layout_block=%llu layout_table=%llu layout_flex=%llu layout_grid=%llu",
+            serial_printf("[html_view] render_build_stage view=%p total_ms=%llu bloom_ms=%llu style_ms=%llu layout_ms=%llu style_nodes=%llu style_hits=%llu measure_hit=%llu measure_miss=%llu measure_hit_k=blk:%llu tbl:%llu inl:%llu inlb:%llu flex:%llu measure_miss_k=blk:%llu tbl:%llu inl:%llu inlb:%llu flex:%llu text=%llu text_len=%llu layout_inline=%llu layout_inline_block=%llu layout_block=%llu layout_table=%llu layout_flex=%llu layout_grid=%llu",
                           (void *)view,
                           (unsigned long long)build_ms,
                           (unsigned long long)bloom_ms,
@@ -897,6 +907,16 @@ static bool html_view_render_cache_rebuild_locked(atk_widget_t *view, atk_html_v
                           (unsigned long long)priv->perf.style_cache_hits,
                           (unsigned long long)priv->perf.measure_cache_hits,
                           (unsigned long long)priv->perf.measure_cache_misses,
+                          (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_BLOCK],
+                          (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_TABLE],
+                          (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_INLINE],
+                          (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_INLINE_BLOCK],
+                          (unsigned long long)priv->perf.measure_cache_hits_kind[HTML_VIEW_MEASURE_KIND_FLEX_ITEM],
+                          (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_BLOCK],
+                          (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_TABLE],
+                          (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_INLINE],
+                          (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_INLINE_BLOCK],
+                          (unsigned long long)priv->perf.measure_cache_misses_kind[HTML_VIEW_MEASURE_KIND_FLEX_ITEM],
                           (unsigned long long)priv->perf.text_width_calls,
                           (unsigned long long)priv->perf.text_width_len_calls,
                           (unsigned long long)priv->perf.measure_inline,
@@ -1057,12 +1077,12 @@ static void html_view_stylesheet_rebuild_async_locked(atk_html_view_priv_t *priv
         return;
     }
 
-    html_view_rule_index_clear(priv);
     if (priv->sheet)
     {
         css_stylesheet_destroy(priv->sheet);
     }
     priv->sheet = new_sheet;
+    (void)html_view_rule_index_prepare(priv, new_sheet);
     if (pending_dirty)
     {
         __atomic_store_n(&priv->stylesheet_dirty, 1u, __ATOMIC_RELEASE);

@@ -2389,6 +2389,118 @@ static js_expr_t *js_parse_class_expression(js_parser_t *parser)
     return expr;
 }
 
+static js_stmt_t *js_parse_class_decl(js_parser_t *parser)
+{
+    if (!parser)
+    {
+        return NULL;
+    }
+    size_t offset = parser->current.offset;
+    if (!js_token_is_identifier(&parser->current, "class"))
+    {
+        js_parser_error(parser, parser->current.offset, "expected 'class'");
+        return NULL;
+    }
+    char *class_kw = js_token_take_text(&parser->current);
+    js_parser_free(parser, class_kw);
+    js_parser_advance(parser);
+    if (parser->current.type != JS_TOKEN_IDENTIFIER ||
+        !parser->current.text ||
+        strcmp(parser->current.text, "extends") == 0)
+    {
+        js_parser_error(parser, parser->current.offset, "expected class name");
+        return NULL;
+    }
+    char *name = js_token_take_text(&parser->current);
+    js_parser_advance(parser);
+    if (!js_token_is_identifier(&parser->current, "extends"))
+    {
+        js_parser_free(parser, name);
+        js_parser_error(parser, parser->current.offset, "expected 'extends'");
+        return NULL;
+    }
+    char *extends_kw = js_token_take_text(&parser->current);
+    js_parser_free(parser, extends_kw);
+    js_parser_advance(parser);
+    if (parser->current.type != JS_TOKEN_IDENTIFIER || !parser->current.text)
+    {
+        js_parser_free(parser, name);
+        js_parser_error(parser, parser->current.offset, "expected base class");
+        return NULL;
+    }
+    char *base = js_token_take_text(&parser->current);
+    js_parser_advance(parser);
+    bool is_regexp = base && strcmp(base, "RegExp") == 0;
+    js_parser_free(parser, base);
+    if (!is_regexp)
+    {
+        js_parser_free(parser, name);
+        js_parser_error(parser, offset, "unsupported class base");
+        return NULL;
+    }
+    if (!js_parser_expect(parser, JS_TOKEN_LBRACE, "expected '{'") )
+    {
+        js_parser_free(parser, name);
+        return NULL;
+    }
+    if (!js_parser_expect(parser, JS_TOKEN_RBRACE, "expected '}'") )
+    {
+        js_parser_free(parser, name);
+        return NULL;
+    }
+    if (!js_parser_consume_semicolon(parser))
+    {
+        js_parser_free(parser, name);
+        return NULL;
+    }
+
+    js_binding_t *binding = js_new_binding(parser, JS_BINDING_IDENTIFIER);
+    if (!binding)
+    {
+        js_parser_free(parser, name);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    binding->as.ident.name = name;
+
+    js_expr_t *init = js_new_expr(parser, JS_EXPR_REGEXP_SUBCLASS);
+    if (!init)
+    {
+        js_binding_destroy(binding, parser->use_arena);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    js_var_binding_t entry = {0};
+    entry.binding = binding;
+    entry.init = init;
+
+    js_var_list_t list = {0};
+    if (!js_var_list_push(parser, &list, &entry))
+    {
+        js_expr_destroy(init, parser->use_arena);
+        js_binding_destroy(binding, parser->use_arena);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+
+    js_stmt_t *stmt = js_new_stmt(parser, JS_STMT_VAR);
+    if (!stmt)
+    {
+        for (size_t i = 0; i < list.count; ++i)
+        {
+            js_binding_destroy(list.items[i].binding, parser->use_arena);
+            js_expr_destroy(list.items[i].init, parser->use_arena);
+        }
+        js_parser_free(parser, list.items);
+        js_parser_error(parser, offset, "allocation failed");
+        return NULL;
+    }
+    stmt->as.var.kind = JS_VAR_LET;
+    stmt->as.var.bindings = list.items;
+    stmt->as.var.count = list.count;
+    return stmt;
+}
+
 static js_expr_t *js_parse_primary(js_parser_t *parser)
 {
     if (!parser)
@@ -4923,6 +5035,10 @@ static js_stmt_t *js_parse_statement(js_parser_t *parser, bool allow_return)
     if (!parser)
     {
         return NULL;
+    }
+    if (js_token_is_identifier(&parser->current, "class"))
+    {
+        return js_parse_class_decl(parser);
     }
     switch (parser->current.type)
     {

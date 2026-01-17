@@ -272,6 +272,30 @@ js_runtime_t *js_runtime_create(void)
         return NULL;
     }
     js_value_destroy(&math_val);
+    js_value_t reflect_obj;
+    if (!js_value_make_host_object(&reflect_obj, NULL, NULL, NULL, NULL))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_t reflect_get;
+    memset(&reflect_get, 0, sizeof(reflect_get));
+    reflect_get.type = JS_VALUE_NATIVE_FN;
+    reflect_get.as.native.fn = js_builtin_reflect_get;
+    reflect_get.as.native.user_data = NULL;
+    if (!js_object_set_slot(reflect_obj.as.object, "get", &reflect_get))
+    {
+        js_value_destroy(&reflect_obj);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_set_global(rt, "Reflect", &reflect_obj))
+    {
+        js_value_destroy(&reflect_obj);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_destroy(&reflect_obj);
     js_object_t *temporal_obj = js_get_temporal_object(rt);
     if (!temporal_obj)
     {
@@ -560,6 +584,10 @@ const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value)
         if (value->as.native.fn == js_builtin_string_from_char_code)
         {
             return "fromCharCode";
+        }
+        if (value->as.native.fn == js_builtin_reflect_get)
+        {
+            return "get";
         }
         if (value->as.native.fn == js_builtin_define_property)
         {
@@ -1028,6 +1056,15 @@ bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *o
             if (out_len)
             {
                 *out_len = 1;
+            }
+            return true;
+        }
+        if (value && value->type == JS_VALUE_NATIVE_FN &&
+            value->as.native.fn == js_builtin_reflect_get)
+        {
+            if (out_len)
+            {
+                *out_len = 2;
             }
             return true;
         }

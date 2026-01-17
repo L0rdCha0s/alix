@@ -351,6 +351,12 @@ bool js_builtin_create_realm(js_runtime_t *rt,
                              void *user_data,
                              js_value_t *out,
                              char **error_message);
+bool js_builtin_reflect_get(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
 bool js_builtin_test_with_typed_array_constructors(js_runtime_t *rt,
                                                    size_t argc,
                                                    const js_value_t *argv,
@@ -363,6 +369,25 @@ bool js_builtin_string_match(js_runtime_t *rt,
                              void *user_data,
                              js_value_t *out,
                              char **error_message);
+bool js_builtin_string_char_code_at(js_runtime_t *rt,
+                                    size_t argc,
+                                    const js_value_t *argv,
+                                    void *user_data,
+                                    js_value_t *out,
+                                    char **error_message);
+bool js_builtin_string_substring(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message);
+bool js_regexp_legacy_getter(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message);
+bool js_regexp_is_legacy_static_property(const char *name);
 bool js_builtin_number_to_string(js_runtime_t *rt,
                                  size_t argc,
                                  const js_value_t *argv,
