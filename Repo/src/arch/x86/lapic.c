@@ -20,6 +20,8 @@
 #define LAPIC_DELIVERY_STARTUP   (6u << 8)
 #define LAPIC_LEVEL_ASSERT       (1u << 14)
 #define LAPIC_TRIGGER_LEVEL      (1u << 15)
+#define LAPIC_DEST_ALL_INCLUDING_SELF  (2u << 18)
+#define LAPIC_DEST_ALL_EXCLUDING_SELF  (3u << 18)
 
 #define LAPIC_SVR_ENABLE         0x100
 #define LAPIC_SPURIOUS_VECTOR    0xFF
@@ -135,11 +137,13 @@ void lapic_broadcast_ipi(uint8_t vector, bool include_self)
     uint32_t icr = LAPIC_DELIVERY_FIXED | vector;
     if (!include_self)
     {
-        icr |= (1u << 18); /* shorthand: all excluding self */
+        /* APIC destination shorthand 01 is self-only; 11 is all excluding
+         * self.  Using 01 here silently left every AP asleep. */
+        icr |= LAPIC_DEST_ALL_EXCLUDING_SELF;
     }
     else
     {
-        icr |= (2u << 18); /* shorthand: all including self */
+        icr |= LAPIC_DEST_ALL_INCLUDING_SELF;
     }
     lapic_wait_for_icr();
     lapic_write(LAPIC_REG_ICR_HIGH, 0);

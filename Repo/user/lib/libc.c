@@ -733,6 +733,54 @@ int memcmp(const void *a, const void *b, size_t count)
     return 0;
 }
 
+void *memchr(const void *src, int ch, size_t count)
+{
+    const uint8_t *s = (const uint8_t *)src;
+    uint8_t needle = (uint8_t)ch;
+    size_t word_size = sizeof(size_t);
+    size_t byte_mask = libc_word_repeat(needle);
+
+    while (count && (((uintptr_t)s) & (word_size - 1u)))
+    {
+        if (*s == needle)
+        {
+            return (void *)s;
+        }
+        ++s;
+        --count;
+    }
+
+    const size_t *w = (const size_t *)s;
+    while (count >= word_size)
+    {
+        size_t word = *w;
+        if (libc_word_has_byte(word, byte_mask))
+        {
+            s = (const uint8_t *)w;
+            for (size_t i = 0; i < word_size; ++i)
+            {
+                if (s[i] == needle)
+                {
+                    return (void *)(s + i);
+                }
+            }
+        }
+        ++w;
+        count -= word_size;
+    }
+
+    s = (const uint8_t *)w;
+    while (count--)
+    {
+        if (*s == needle)
+        {
+            return (void *)s;
+        }
+        ++s;
+    }
+    return NULL;
+}
+
 size_t strlen(const char *str)
 {
     if (!str)

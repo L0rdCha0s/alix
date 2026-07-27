@@ -19600,6 +19600,1071 @@ bool js_builtin_temporal_plain_month_day(js_runtime_t *rt,
     return true;
 }
 
+typedef enum
+{
+    JS_PROMISE_PENDING = 0,
+    JS_PROMISE_FULFILLED,
+    JS_PROMISE_REJECTED
+} js_promise_state_t;
+
+typedef struct js_promise js_promise_t;
+typedef struct js_promise_reaction js_promise_reaction_t;
+typedef struct js_promise_task js_promise_task_t;
+
+struct js_promise_reaction
+{
+    js_value_t on_fulfilled;
+    js_value_t on_rejected;
+    js_promise_t *next_promise;
+    js_promise_reaction_t *next;
+};
+
+struct js_promise
+{
+    int refcount;
+    js_promise_state_t state;
+    js_value_t value;
+    js_promise_reaction_t *reactions;
+};
+
+struct js_promise_task
+{
+    js_promise_state_t state;
+    js_value_t value;
+    js_value_t on_fulfilled;
+    js_value_t on_rejected;
+    js_promise_t *next_promise;
+};
+
+typedef struct
+{
+    int refcount;
+    js_runtime_t *rt;
+    js_promise_t *promise;
+    js_value_t results;
+    size_t remaining;
+    bool done;
+} js_promise_all_state_t;
+
+typedef struct
+{
+    js_promise_all_state_t *state;
+    size_t index;
+} js_promise_all_entry_t;
+
+static void js_promise_retain(js_promise_t *promise)
+{
+    if (!promise)
+    {
+        return;
+    }
+    promise->refcount++;
+}
+
+static void js_promise_release(js_promise_t *promise)
+{
+    if (!promise)
+    {
+        return;
+    }
+    if (promise->refcount <= 0)
+    {
+        return;
+    }
+    promise->refcount--;
+    if (promise->refcount > 0)
+    {
+        return;
+    }
+    js_value_destroy(&promise->value);
+    js_promise_reaction_t *reaction = promise->reactions;
+    while (reaction)
+    {
+        js_promise_reaction_t *next = reaction->next;
+        js_value_destroy(&reaction->on_fulfilled);
+        js_value_destroy(&reaction->on_rejected);
+        if (reaction->next_promise)
+        {
+            js_promise_release(reaction->next_promise);
+        }
+        js_free(reaction);
+        reaction = next;
+    }
+    js_free(promise);
+}
+
+static void js_promise_finalize(void *user_data)
+{
+    js_promise_release((js_promise_t *)user_data);
+}
+
+static bool js_promise_is_callable(const js_value_t *value)
+{
+    if (!value)
+    {
+        return false;
+    }
+    return value->type == JS_VALUE_FUNCTION || value->type == JS_VALUE_NATIVE_FN;
+}
+
+static js_promise_t *js_promise_from_value(const js_value_t *value);
+static bool js_promise_get(js_runtime_t *rt,
+                           void *user_data,
+                           const char *name,
+                           js_value_t *out,
+                           char **error_message);
+
+static bool js_promise_task_run(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+
+static bool js_promise_schedule_reaction(js_runtime_t *rt,
+                                         js_promise_t *promise,
+                                         js_promise_reaction_t *reaction)
+{
+    if (!promise || !reaction)
+    {
+        return false;
+    }
+    js_promise_task_t *task = (js_promise_task_t *)js_calloc(1, sizeof(*task));
+    if (!task)
+    {
+        return false;
+    }
+    task->state = promise->state;
+    task->value = js_value_make_undefined_internal();
+    task->on_fulfilled = js_value_make_undefined_internal();
+    task->on_rejected = js_value_make_undefined_internal();
+    if (!js_value_copy(&task->value, &promise->value) ||
+        !js_value_copy(&task->on_fulfilled, &reaction->on_fulfilled) ||
+        !js_value_copy(&task->on_rejected, &reaction->on_rejected))
+    {
+        js_value_destroy(&task->value);
+        js_value_destroy(&task->on_fulfilled);
+        js_value_destroy(&task->on_rejected);
+        js_free(task);
+        return false;
+    }
+    task->next_promise = reaction->next_promise;
+    js_promise_retain(task->next_promise);
+
+    js_value_t callback;
+    memset(&callback, 0, sizeof(callback));
+    callback.type = JS_VALUE_NATIVE_FN;
+    callback.as.native.fn = js_promise_task_run;
+    callback.as.native.user_data = task;
+    if (!js_runtime_queue_microtask(rt, &callback, 0, NULL))
+    {
+        js_promise_release(task->next_promise);
+        js_value_destroy(&task->value);
+        js_value_destroy(&task->on_fulfilled);
+        js_value_destroy(&task->on_rejected);
+        js_free(task);
+        return false;
+    }
+    return true;
+}
+
+static bool js_promise_settle(js_runtime_t *rt,
+                              js_promise_t *promise,
+                              js_promise_state_t state,
+                              const js_value_t *value)
+{
+    if (!promise || promise->state != JS_PROMISE_PENDING)
+    {
+        return true;
+    }
+    promise->state = state;
+    js_value_destroy(&promise->value);
+    promise->value = js_value_make_undefined_internal();
+    if (value && !js_value_copy(&promise->value, value))
+    {
+        return false;
+    }
+    js_promise_reaction_t *reaction = promise->reactions;
+    promise->reactions = NULL;
+    while (reaction)
+    {
+        js_promise_reaction_t *next = reaction->next;
+        (void)js_promise_schedule_reaction(rt, promise, reaction);
+        js_value_destroy(&reaction->on_fulfilled);
+        js_value_destroy(&reaction->on_rejected);
+        if (reaction->next_promise)
+        {
+            js_promise_release(reaction->next_promise);
+        }
+        js_free(reaction);
+        reaction = next;
+    }
+    return true;
+}
+
+static bool js_promise_reject_value(js_runtime_t *rt,
+                                    js_promise_t *promise,
+                                    const js_value_t *value)
+{
+    return js_promise_settle(rt, promise, JS_PROMISE_REJECTED, value);
+}
+
+static bool js_promise_link(js_runtime_t *rt, js_promise_t *source, js_promise_t *target)
+{
+    if (!source || !target)
+    {
+        return false;
+    }
+    js_promise_reaction_t *reaction = (js_promise_reaction_t *)js_calloc(1, sizeof(*reaction));
+    if (!reaction)
+    {
+        return false;
+    }
+    reaction->on_fulfilled = js_value_make_undefined_internal();
+    reaction->on_rejected = js_value_make_undefined_internal();
+    reaction->next_promise = target;
+    js_promise_retain(target);
+    if (source->state == JS_PROMISE_PENDING)
+    {
+        reaction->next = source->reactions;
+        source->reactions = reaction;
+        return true;
+    }
+    bool ok = js_promise_schedule_reaction(rt, source, reaction);
+    js_value_destroy(&reaction->on_fulfilled);
+    js_value_destroy(&reaction->on_rejected);
+    js_promise_release(reaction->next_promise);
+    js_free(reaction);
+    return ok;
+}
+
+static bool js_promise_resolve_value(js_runtime_t *rt,
+                                     js_promise_t *promise,
+                                     const js_value_t *value)
+{
+    if (!promise || promise->state != JS_PROMISE_PENDING)
+    {
+        return true;
+    }
+    js_promise_t *other = js_promise_from_value(value);
+    if (other)
+    {
+        if (other == promise)
+        {
+            js_value_t err;
+            if (!js_value_make_cstring(&err, "TypeError: promise cycle"))
+            {
+                return false;
+            }
+            bool ok = js_promise_reject_value(rt, promise, &err);
+            js_value_destroy(&err);
+            return ok;
+        }
+        if (other->state == JS_PROMISE_PENDING)
+        {
+            return js_promise_link(rt, other, promise);
+        }
+        if (other->state == JS_PROMISE_FULFILLED)
+        {
+            return js_promise_settle(rt, promise, JS_PROMISE_FULFILLED, &other->value);
+        }
+        return js_promise_settle(rt, promise, JS_PROMISE_REJECTED, &other->value);
+    }
+    return js_promise_settle(rt, promise, JS_PROMISE_FULFILLED, value);
+}
+
+static js_promise_t *js_promise_from_value(const js_value_t *value)
+{
+    if (!value || value->type != JS_VALUE_OBJECT || !value->as.object)
+    {
+        return NULL;
+    }
+    if (value->as.object->get_fn != js_promise_get)
+    {
+        return NULL;
+    }
+    return (js_promise_t *)value->as.object->user_data;
+}
+
+static bool js_promise_create_value(js_runtime_t *rt, js_value_t *out, js_promise_t **promise_out)
+{
+    (void)rt;
+    if (!out)
+    {
+        return false;
+    }
+    js_promise_t *promise = (js_promise_t *)js_calloc(1, sizeof(*promise));
+    if (!promise)
+    {
+        return false;
+    }
+    promise->refcount = 1;
+    promise->state = JS_PROMISE_PENDING;
+    promise->value = js_value_make_undefined_internal();
+    promise->reactions = NULL;
+    if (!js_value_make_host_object(out, js_promise_get, NULL, js_promise_finalize, promise))
+    {
+        js_free(promise);
+        return false;
+    }
+    if (promise_out)
+    {
+        *promise_out = promise;
+    }
+    return true;
+}
+
+static bool js_promise_task_run(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)argc;
+    (void)argv;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (out)
+    {
+        *out = js_value_make_undefined_internal();
+    }
+    js_promise_task_t *task = (js_promise_task_t *)user_data;
+    if (!task)
+    {
+        return true;
+    }
+    js_value_t *handler = (task->state == JS_PROMISE_FULFILLED) ? &task->on_fulfilled : &task->on_rejected;
+    bool handled = js_promise_is_callable(handler);
+    if (!handled)
+    {
+        if (task->state == JS_PROMISE_FULFILLED)
+        {
+            (void)js_promise_resolve_value(rt, task->next_promise, &task->value);
+        }
+        else
+        {
+            (void)js_promise_reject_value(rt, task->next_promise, &task->value);
+        }
+    }
+    else
+    {
+        js_value_t result = js_value_make_undefined_internal();
+        char *err = NULL;
+        bool ok = js_call_value(rt, handler, 1, &task->value, &result, &err);
+        if (ok)
+        {
+            (void)js_promise_resolve_value(rt, task->next_promise, &result);
+        }
+        else
+        {
+            js_value_t err_val = js_value_make_undefined_internal();
+            if (err && !js_value_make_cstring(&err_val, err))
+            {
+                js_value_destroy(&result);
+                js_free(err);
+                return false;
+            }
+            if (!err)
+            {
+                (void)js_value_make_cstring(&err_val, "promise rejection");
+            }
+            (void)js_promise_reject_value(rt, task->next_promise, &err_val);
+            js_value_destroy(&err_val);
+        }
+        js_free(err);
+        js_value_destroy(&result);
+    }
+    js_value_destroy(&task->value);
+    js_value_destroy(&task->on_fulfilled);
+    js_value_destroy(&task->on_rejected);
+    js_promise_release(task->next_promise);
+    js_free(task);
+    return true;
+}
+
+static bool js_promise_then_impl(js_runtime_t *rt,
+                                 js_promise_t *promise,
+                                 const js_value_t *on_fulfilled,
+                                 const js_value_t *on_rejected,
+                                 js_value_t *out)
+{
+    if (!promise || !out)
+    {
+        return false;
+    }
+    js_value_t next_value = js_value_make_undefined_internal();
+    js_promise_t *next_promise = NULL;
+    if (!js_promise_create_value(rt, &next_value, &next_promise))
+    {
+        return false;
+    }
+    js_promise_reaction_t *reaction = (js_promise_reaction_t *)js_calloc(1, sizeof(*reaction));
+    if (!reaction)
+    {
+        js_value_destroy(&next_value);
+        return false;
+    }
+    reaction->on_fulfilled = js_value_make_undefined_internal();
+    reaction->on_rejected = js_value_make_undefined_internal();
+    if (on_fulfilled && js_promise_is_callable(on_fulfilled))
+    {
+        if (!js_value_copy(&reaction->on_fulfilled, on_fulfilled))
+        {
+            js_value_destroy(&next_value);
+            js_free(reaction);
+            return false;
+        }
+    }
+    if (on_rejected && js_promise_is_callable(on_rejected))
+    {
+        if (!js_value_copy(&reaction->on_rejected, on_rejected))
+        {
+            js_value_destroy(&reaction->on_fulfilled);
+            js_value_destroy(&next_value);
+            js_free(reaction);
+            return false;
+        }
+    }
+    reaction->next_promise = next_promise;
+    js_promise_retain(next_promise);
+    if (promise->state == JS_PROMISE_PENDING)
+    {
+        reaction->next = promise->reactions;
+        promise->reactions = reaction;
+    }
+    else
+    {
+        (void)js_promise_schedule_reaction(rt, promise, reaction);
+        js_value_destroy(&reaction->on_fulfilled);
+        js_value_destroy(&reaction->on_rejected);
+        js_promise_release(reaction->next_promise);
+        js_free(reaction);
+    }
+    *out = next_value;
+    return true;
+}
+
+static bool js_promise_then(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_promise_t *promise = (js_promise_t *)user_data;
+    size_t arg_start = 0;
+    if (!promise && argc > 0)
+    {
+        promise = js_promise_from_value(&argv[0]);
+        if (promise)
+        {
+            arg_start = 1;
+        }
+    }
+    if (!promise)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    const js_value_t *on_fulfilled = (argc > arg_start) ? &argv[arg_start] : NULL;
+    const js_value_t *on_rejected = (argc > arg_start + 1) ? &argv[arg_start + 1] : NULL;
+    if (!js_promise_then_impl(rt, promise, on_fulfilled, on_rejected, out))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool js_promise_catch(js_runtime_t *rt,
+                             size_t argc,
+                             const js_value_t *argv,
+                             void *user_data,
+                             js_value_t *out,
+                             char **error_message)
+{
+    return js_promise_then(rt, argc, argv, user_data, out, error_message);
+}
+
+static bool js_promise_finally(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    return js_promise_then(rt, argc, argv, user_data, out, error_message);
+}
+
+static bool js_promise_get(js_runtime_t *rt,
+                           void *user_data,
+                           const char *name,
+                           js_value_t *out,
+                           char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out || !name)
+    {
+        return false;
+    }
+    if (strcmp(name, "then") == 0)
+    {
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = js_promise_then;
+        out->as.native.user_data = user_data;
+        return true;
+    }
+    if (strcmp(name, "catch") == 0)
+    {
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = js_promise_catch;
+        out->as.native.user_data = user_data;
+        return true;
+    }
+    if (strcmp(name, "finally") == 0)
+    {
+        out->type = JS_VALUE_NATIVE_FN;
+        out->as.native.fn = js_promise_finally;
+        out->as.native.user_data = user_data;
+        return true;
+    }
+    *out = js_value_make_undefined_internal();
+    return true;
+}
+
+bool js_promise_await(js_runtime_t *rt,
+                      const js_value_t *value,
+                      js_value_t *out,
+                      char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (!value)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    js_promise_t *promise = js_promise_from_value(value);
+    if (!promise)
+    {
+        return js_value_copy(out, value);
+    }
+    if (promise->state == JS_PROMISE_PENDING)
+    {
+        js_runtime_run_microtasks(rt);
+    }
+    if (promise->state == JS_PROMISE_PENDING)
+    {
+        return js_value_copy(out, value);
+    }
+    if (promise->state == JS_PROMISE_FULFILLED)
+    {
+        return js_value_copy(out, &promise->value);
+    }
+    js_temp_string_t temp = {0};
+    char *err = NULL;
+    if (!js_temp_string_from_value(rt, &promise->value, &temp, &err))
+    {
+        if (err)
+        {
+            if (error_message)
+            {
+                *error_message = err;
+            }
+            else
+            {
+                js_free(err);
+            }
+            return false;
+        }
+        if (error_message)
+        {
+            *error_message = js_strdup("promise rejected");
+        }
+        return false;
+    }
+    char *msg = js_strdup_len(temp.data ? temp.data : "", temp.len);
+    js_temp_string_release(&temp);
+    if (!msg)
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("promise rejected");
+        }
+        return false;
+    }
+    if (error_message)
+    {
+        *error_message = msg;
+    }
+    else
+    {
+        js_free(msg);
+    }
+    return false;
+}
+
+static bool js_promise_resolve_native(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    js_promise_t *promise = (js_promise_t *)user_data;
+    if (!promise)
+    {
+        return true;
+    }
+    const js_value_t *value = (argc > 0) ? &argv[0] : NULL;
+    (void)js_promise_resolve_value(rt, promise, value);
+    return true;
+}
+
+static bool js_promise_reject_native(js_runtime_t *rt,
+                                     size_t argc,
+                                     const js_value_t *argv,
+                                     void *user_data,
+                                     js_value_t *out,
+                                     char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    js_promise_t *promise = (js_promise_t *)user_data;
+    if (!promise)
+    {
+        return true;
+    }
+    const js_value_t *value = (argc > 0) ? &argv[0] : NULL;
+    (void)js_promise_reject_value(rt, promise, value);
+    return true;
+}
+
+bool js_builtin_promise(js_runtime_t *rt,
+                        size_t argc,
+                        const js_value_t *argv,
+                        void *user_data,
+                        js_value_t *out,
+                        char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_promise_t *promise = NULL;
+    if (!js_promise_create_value(rt, out, &promise))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!argv || argc < 1 || !js_promise_is_callable(&argv[0]))
+    {
+        return true;
+    }
+    js_value_t resolve_fn;
+    memset(&resolve_fn, 0, sizeof(resolve_fn));
+    resolve_fn.type = JS_VALUE_NATIVE_FN;
+    resolve_fn.as.native.fn = js_promise_resolve_native;
+    resolve_fn.as.native.user_data = promise;
+    js_value_t reject_fn;
+    memset(&reject_fn, 0, sizeof(reject_fn));
+    reject_fn.type = JS_VALUE_NATIVE_FN;
+    reject_fn.as.native.fn = js_promise_reject_native;
+    reject_fn.as.native.user_data = promise;
+    js_value_t call_args[2] = { resolve_fn, reject_fn };
+    js_value_t result = js_value_make_undefined_internal();
+    char *err = NULL;
+    bool ok = js_call_value(rt, &argv[0], 2, call_args, &result, &err);
+    js_value_destroy(&result);
+    if (!ok)
+    {
+        js_value_t err_val = js_value_make_undefined_internal();
+        if (err && !js_value_make_cstring(&err_val, err))
+        {
+            js_free(err);
+            return true;
+        }
+        if (!err)
+        {
+            (void)js_value_make_cstring(&err_val, "promise executor failed");
+        }
+        (void)js_promise_reject_value(rt, promise, &err_val);
+        js_value_destroy(&err_val);
+    }
+    js_free(err);
+    return true;
+}
+
+bool js_builtin_promise_resolve(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    if (argc > 0)
+    {
+        js_promise_t *existing = js_promise_from_value(&argv[0]);
+        if (existing)
+        {
+            return js_value_copy(out, &argv[0]);
+        }
+    }
+    js_promise_t *promise = NULL;
+    if (!js_promise_create_value(rt, out, &promise))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    const js_value_t *value = (argc > 0) ? &argv[0] : NULL;
+    (void)js_promise_resolve_value(rt, promise, value);
+    return true;
+}
+
+bool js_builtin_promise_reject(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_promise_t *promise = NULL;
+    if (!js_promise_create_value(rt, out, &promise))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    const js_value_t *value = (argc > 0) ? &argv[0] : NULL;
+    (void)js_promise_reject_value(rt, promise, value);
+    return true;
+}
+
+static void js_promise_all_state_retain(js_promise_all_state_t *state)
+{
+    if (!state)
+    {
+        return;
+    }
+    state->refcount++;
+}
+
+static void js_promise_all_state_release(js_promise_all_state_t *state)
+{
+    if (!state || state->refcount <= 0)
+    {
+        return;
+    }
+    state->refcount--;
+    if (state->refcount > 0)
+    {
+        return;
+    }
+    js_value_destroy(&state->results);
+    if (state->promise)
+    {
+        js_promise_release(state->promise);
+    }
+    js_free(state);
+}
+
+static bool js_promise_all_fulfill(js_runtime_t *rt,
+                                  size_t argc,
+                                  const js_value_t *argv,
+                                  void *user_data,
+                                  js_value_t *out,
+                                  char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (out)
+    {
+        *out = js_value_make_undefined_internal();
+    }
+    js_promise_all_entry_t *entry = (js_promise_all_entry_t *)user_data;
+    if (!entry || !entry->state)
+    {
+        return true;
+    }
+    js_promise_all_state_t *state = entry->state;
+    if (!state->done && state->results.type == JS_VALUE_ARRAY)
+    {
+        const js_value_t *value = (argc > 0) ? &argv[0] : NULL;
+        if (value)
+        {
+            (void)js_value_array_set(&state->results, entry->index, value);
+        }
+        if (state->remaining > 0)
+        {
+            state->remaining--;
+        }
+        if (state->remaining == 0 && !state->done)
+        {
+            state->done = true;
+            (void)js_promise_resolve_value(rt, state->promise, &state->results);
+        }
+    }
+    js_promise_all_state_release(state);
+    js_free(entry);
+    return true;
+}
+
+static bool js_promise_all_reject(js_runtime_t *rt,
+                                 size_t argc,
+                                 const js_value_t *argv,
+                                 void *user_data,
+                                 js_value_t *out,
+                                 char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (out)
+    {
+        *out = js_value_make_undefined_internal();
+    }
+    js_promise_all_state_t *state = (js_promise_all_state_t *)user_data;
+    if (!state)
+    {
+        return true;
+    }
+    if (!state->done)
+    {
+        state->done = true;
+        const js_value_t *value = (argc > 0) ? &argv[0] : NULL;
+        (void)js_promise_reject_value(rt, state->promise, value);
+    }
+    js_promise_all_state_release(state);
+    return true;
+}
+
+bool js_builtin_promise_all(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    js_promise_t *result_promise = NULL;
+    if (!js_promise_create_value(rt, out, &result_promise))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (!argv || argc < 1 || argv[0].type != JS_VALUE_ARRAY || !argv[0].as.array)
+    {
+        js_value_t empty;
+        if (!js_value_make_array(&empty))
+        {
+            return true;
+        }
+        (void)js_promise_resolve_value(rt, result_promise, &empty);
+        js_value_destroy(&empty);
+        return true;
+    }
+    size_t length = argv[0].as.array->length;
+    js_value_t results;
+    if (!js_value_make_array(&results))
+    {
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    if (length == 0)
+    {
+        (void)js_promise_resolve_value(rt, result_promise, &results);
+        js_value_destroy(&results);
+        return true;
+    }
+    js_promise_all_state_t *state = (js_promise_all_state_t *)js_calloc(1, sizeof(*state));
+    if (!state)
+    {
+        js_value_destroy(&results);
+        if (error_message)
+        {
+            *error_message = js_strdup("allocation failed");
+        }
+        return false;
+    }
+    state->refcount = 1;
+    state->rt = rt;
+    state->promise = result_promise;
+    js_promise_retain(result_promise);
+    state->results = results;
+    state->remaining = length;
+    state->done = false;
+
+    for (size_t i = 0; i < length; ++i)
+    {
+        js_value_t item = js_value_make_undefined_internal();
+        if (!js_array_get(argv[0].as.array, i, &item))
+        {
+            continue;
+        }
+        js_promise_t *item_promise = js_promise_from_value(&item);
+        if (item_promise)
+        {
+            js_promise_all_entry_t *entry = (js_promise_all_entry_t *)js_calloc(1, sizeof(*entry));
+            if (!entry)
+            {
+                js_value_destroy(&item);
+                continue;
+            }
+            entry->state = state;
+            entry->index = i;
+            js_promise_all_state_retain(state);
+
+            js_value_t on_fulfilled;
+            memset(&on_fulfilled, 0, sizeof(on_fulfilled));
+            on_fulfilled.type = JS_VALUE_NATIVE_FN;
+            on_fulfilled.as.native.fn = js_promise_all_fulfill;
+            on_fulfilled.as.native.user_data = entry;
+
+            js_value_t on_rejected;
+            memset(&on_rejected, 0, sizeof(on_rejected));
+            on_rejected.type = JS_VALUE_NATIVE_FN;
+            on_rejected.as.native.fn = js_promise_all_reject;
+            on_rejected.as.native.user_data = state;
+            js_promise_all_state_retain(state);
+
+            js_value_t chained = js_value_make_undefined_internal();
+            (void)js_promise_then_impl(rt, item_promise, &on_fulfilled, &on_rejected, &chained);
+            js_value_destroy(&chained);
+        }
+        else
+        {
+            (void)js_value_array_set(&state->results, i, &item);
+            if (state->remaining > 0)
+            {
+                state->remaining--;
+            }
+        }
+        js_value_destroy(&item);
+    }
+    if (state->remaining == 0 && !state->done)
+    {
+        state->done = true;
+        (void)js_promise_resolve_value(rt, result_promise, &state->results);
+    }
+    js_promise_all_state_release(state);
+    return true;
+}
+
+bool js_builtin_queue_microtask(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message)
+{
+    (void)user_data;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined_internal();
+    if (argc < 1 || !argv || !js_promise_is_callable(&argv[0]))
+    {
+        return true;
+    }
+    (void)js_runtime_queue_microtask(rt, &argv[0], 0, NULL);
+    return true;
+}
+
 void js_release_bound_functions(js_runtime_t *rt)
 {
     if (!rt)

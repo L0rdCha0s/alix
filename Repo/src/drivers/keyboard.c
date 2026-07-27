@@ -643,7 +643,7 @@ static bool buffer_empty(void)
 
 static void buffer_push(uint8_t code)
 {
-    spinlock_lock(&g_kbd_buffer_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_kbd_buffer_lock);
     size_t next_head = (buffer_head + 1) % KBD_BUFFER_SIZE;
     if (next_head == buffer_tail)
     {
@@ -656,7 +656,7 @@ static void buffer_push(uint8_t code)
     }
     scancode_buffer[buffer_head] = code;
     buffer_head = next_head;
-    spinlock_unlock(&g_kbd_buffer_lock);
+    spinlock_unlock_irqrestore(&g_kbd_buffer_lock, flags);
 
     //serial_write_string("keyboard.c: buffer_push scancode=0x");
     //static const char hex[] = "0123456789ABCDEF";
@@ -667,10 +667,10 @@ static void buffer_push(uint8_t code)
 
 static bool buffer_pop(uint8_t *code)
 {
-    spinlock_lock(&g_kbd_buffer_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_kbd_buffer_lock);
     if (buffer_empty())
     {
-        spinlock_unlock(&g_kbd_buffer_lock);
+        spinlock_unlock_irqrestore(&g_kbd_buffer_lock, flags);
         return false;
     }
     *code = scancode_buffer[buffer_tail];
@@ -679,7 +679,7 @@ static bool buffer_pop(uint8_t *code)
     {
         g_kbd_buffer_overflow_logged = false;
     }
-    spinlock_unlock(&g_kbd_buffer_lock);
+    spinlock_unlock_irqrestore(&g_kbd_buffer_lock, flags);
     return true;
 }
 
@@ -714,11 +714,11 @@ static void keyboard_reset_state(void)
     left_ctrl_pressed = 0;
     right_ctrl_pressed = 0;
     extended_code_pending = 0;
-    spinlock_lock(&g_kbd_buffer_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_kbd_buffer_lock);
     buffer_head = 0;
     buffer_tail = 0;
     g_kbd_buffer_overflow_logged = false;
-    spinlock_unlock(&g_kbd_buffer_lock);
+    spinlock_unlock_irqrestore(&g_kbd_buffer_lock, flags);
     for (size_t i = 0; i < sizeof(key_down); ++i)
     {
         key_down[i] = 0;

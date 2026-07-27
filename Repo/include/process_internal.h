@@ -248,6 +248,7 @@ struct thread
     uint64_t fs_base;
     uint64_t gs_base;
     uint32_t time_slice_remaining;
+    uint32_t preempt_disable_depth;
     uint64_t runtime_ticks;
     thread_priority_t base_priority;
     thread_priority_t priority;
@@ -284,6 +285,9 @@ struct thread
     uint64_t sleep_until_tick;
     struct thread *sleep_queue_next;
     uint32_t running_cpu;
+    bool counted_running;
+    uintptr_t user_stack_base;
+    size_t user_stack_size;
     uint64_t context_guard_hash;
     uintptr_t context_guard_ptr;
     uint64_t context_guard_generation;
@@ -323,8 +327,11 @@ struct process
     thread_t *main_thread;
     thread_t *current_thread;
     spinlock_t threads_lock;
+    spinlock_t memory_lock;
     thread_t *threads;
     uint32_t thread_count;
+    uint32_t running_thread_count;
+    uint32_t join_waiters;
     int exit_status;
     struct process *next;
     int stdout_fd;
@@ -359,6 +366,11 @@ struct process
     size_t user_argc;
     uintptr_t user_argv_ptr;
     wait_queue_t wait_queue;
+    thread_priority_t default_priority;
+    thread_priority_t default_priority_override;
+    bool default_priority_override_active;
+    bool default_affinity_enabled;
+    uint32_t default_affinity_cpu;
     uint32_t magic;
 };
 
@@ -397,6 +409,8 @@ extern const uint8_t g_user_preempt_stub[66];
 extern process_t *g_process_list;
 extern process_t *g_current_processes[SMP_MAX_CPUS];
 extern thread_t *g_current_threads[SMP_MAX_CPUS];
+extern thread_t *g_switch_out_threads[SMP_MAX_CPUS];
+extern uint64_t g_switch_restore_rflags[SMP_MAX_CPUS];
 extern thread_t *g_idle_threads[SMP_MAX_CPUS];
 extern thread_t *g_deferred_thread_frees[SMP_MAX_CPUS];
 extern spinlock_t g_deferred_free_locks[SMP_MAX_CPUS];
@@ -605,13 +619,15 @@ static inline uint64_t scheduler_lock_acquire(const char *where)
     (void)where;
     uint64_t flags = cpu_save_flags();
     cpu_cli();
-    spinlock_lock(&g_scheduler_lock);
+    /* context_switch releases this lock from assembly after changing stacks,
+     * so it must not participate in the C spinlock preemption-depth pairing. */
+    spinlock_lock_raw(&g_scheduler_lock);
     return flags;
 }
 
 static inline void scheduler_lock_release(uint64_t flags)
 {
-    spinlock_unlock(&g_scheduler_lock);
+    spinlock_unlock_raw(&g_scheduler_lock);
     cpu_restore_flags(flags);
 }
 
@@ -655,7 +671,10 @@ void fatal(const char *msg) __attribute__((noreturn));
 void context_switch(cpu_context_t **prev_ctx,
                     cpu_context_t *next_ctx,
                     uint8_t *transition_flag,
-                    uint32_t *stack_guard_label);
+                    uint32_t *running_cpu_ptr,
+                    uint64_t saved_rflags,
+                    spinlock_t *scheduler_lock,
+                    uint64_t *restore_rflags_ptr);
 void process_handle_stack_guard_fault(void);
 void process_handle_fatal_fault(void);
 
@@ -690,9 +709,15 @@ void idle_thread_entry(void *arg) __attribute__((noreturn));
 void thread_trampoline(void) __attribute__((noreturn));
 void process_attach_child(process_t *parent, process_t *child);
 void process_detach_child(process_t *child);
-process_t *process_detach_first_child(process_t *parent);
+void process_orphan_children(process_t *parent);
+process_t *process_retain_first_child(process_t *parent);
+void process_release_reference(process_t *process);
+bool process_threads_quiescent_locked(process_t *process);
+/* Caller must hold g_scheduler_lock. */
+void wait_queue_wake_all_locked(wait_queue_t *queue);
 void thread_remove_from_wait_queue(thread_t *thread);
 void remove_from_run_queue(thread_t *thread);
+void remove_from_run_queue_locked(thread_t *thread);
 void thread_context_guard_release_pages(thread_t *thread);
 void thread_enqueue_deferred_free(thread_t *thread);
 bool process_try_mark_destroying(process_t *process);
@@ -701,6 +726,16 @@ bool thread_pointer_valid(const thread_t *thread);
 bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t end);
 bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes);
 bool process_stack_handle_page_fault(process_t *process, uintptr_t fault_addr, uintptr_t rsp);
+uint64_t process_memory_lock(process_t *process);
+void process_memory_unlock(process_t *process, uint64_t flags);
+bool process_unmap_user_segment(process_t *process, uintptr_t user_base, size_t bytes);
+bool process_map_user_segment_locked(process_t *process,
+                                     uintptr_t user_base,
+                                     size_t bytes,
+                                     bool writable,
+                                     bool executable,
+                                     bool allow_reserved,
+                                     void **host_ptr_out);
 thread_t *thread_find_stack_owner(uintptr_t addr, size_t len);
 bool thread_stack_watch_activate(thread_t *thread, const char *context, uintptr_t suspect);
 void thread_stack_watch_deactivate(thread_t *thread);
@@ -720,7 +755,12 @@ extern void process_preempt_trampoline(void);
 void thread_set_base_priority(thread_t *thread, thread_priority_t priority);
 void thread_set_priority_override(thread_t *thread, bool enabled, thread_priority_t priority);
 void thread_set_affinity(thread_t *thread, bool enabled, uint32_t cpu_index);
+void thread_set_base_priority_locked(thread_t *thread, thread_priority_t priority);
+void thread_set_priority_override_locked(thread_t *thread, bool enabled, thread_priority_t priority);
+void thread_set_affinity_locked(thread_t *thread, bool enabled, uint32_t cpu_index);
 void enqueue_thread(thread_t *thread);
+uint32_t scheduler_select_target_cpu(thread_t *thread);
+void enqueue_thread_on_cpu_locked(thread_t *thread, uint32_t cpu_index);
 void thread_quarantine_corrupt(thread_t *thread, const char *reason);
 void stack_owner_register(thread_t *thread);
 void stack_owner_unregister(thread_t *thread);
@@ -731,8 +771,9 @@ bool thread_stack_watch_snapshot_changed(thread_t *thread,
                                          uint8_t *new_out);
 bool thread_context_in_bounds(thread_t *thread, const char *reason);
 bool thread_fpu_region_valid(const thread_t *thread);
-void thread_assert_stack_current(thread_t *thread, const char *context);
-bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *stats);
+bool thread_assert_stack_current(thread_t *thread, const char *context);
+/* Caller must hold g_scheduler_lock. */
+bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stats_t *stats);
 void thread_stack_watch_maybe_arm(thread_t *thread);
 void thread_registry_add(thread_t *thread);
 void procfs_register_process_priority(process_t *process);

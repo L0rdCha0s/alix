@@ -6,6 +6,8 @@
 #include "quakedef.h"
 #include "sys.h"
 
+#include "vid_alix.h"
+
 #include "stdio.h"
 #include "stdlib.h"
 #include "usyscall.h"
@@ -224,6 +226,8 @@ int main(int argc, char **argv)
     COM_InitArgv(argc, argv);
     parms.argc = com_argc;
     parms.argv = com_argv;
+
+    quake_video_set_liveness_test(COM_CheckParm("-liveness-test") != 0);
 
     isDedicated = (COM_CheckParm("-dedicated") != 0);
 

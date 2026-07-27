@@ -119,6 +119,8 @@ const uint8_t g_user_preempt_stub[66] = {
 process_t *g_process_list = NULL;
 process_t *g_current_processes[SMP_MAX_CPUS] = { NULL };
 thread_t *g_current_threads[SMP_MAX_CPUS] = { NULL };
+thread_t *g_switch_out_threads[SMP_MAX_CPUS] = { NULL };
+uint64_t g_switch_restore_rflags[SMP_MAX_CPUS] = { 0 };
 thread_t *g_idle_threads[SMP_MAX_CPUS] = { NULL };
 thread_t *g_deferred_thread_frees[SMP_MAX_CPUS] = { NULL };
 spinlock_t g_deferred_free_locks[SMP_MAX_CPUS];
@@ -1103,7 +1105,7 @@ bool process_pointer_on_stack(const void *ptr, size_t len)
 }
 
 static void thread_free_resources(thread_t *thread);
-bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *stats);
+bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stats_t *stats);
 static bool thread_saved_frame_valid(thread_t *thread, const char *label);
 
 void thread_registry_add(thread_t *thread)
@@ -1396,6 +1398,14 @@ static void thread_free_resources(thread_t *thread)
     if (owner_valid)
     {
         spinlock_lock(&owner_proc->threads_lock);
+        if (owner_proc->current_thread == thread)
+        {
+            owner_proc->current_thread = NULL;
+        }
+        if (owner_proc->main_thread == thread)
+        {
+            owner_proc->main_thread = NULL;
+        }
         thread_t **cursor = &owner_proc->threads;
         while (*cursor)
         {
@@ -1413,6 +1423,15 @@ static void thread_free_resources(thread_t *thread)
         spinlock_unlock(&owner_proc->threads_lock);
     }
     thread->process_next = NULL;
+
+    if (owner_valid && thread->user_stack_base != 0 && thread->user_stack_size != 0)
+    {
+        (void)process_unmap_user_segment(owner_proc,
+                                         thread->user_stack_base,
+                                         thread->user_stack_size);
+        thread->user_stack_base = 0;
+        thread->user_stack_size = 0;
+    }
 
 #if ENABLE_STACK_WRITE_DEBUG
     if (thread->stack_watch_active || thread->stack_watch_blocked)
@@ -1505,7 +1524,7 @@ void thread_enqueue_deferred_free(thread_t *thread)
     cpu_restore_flags(flags);
 }
 
-bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *stats)
+bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stats_t *stats)
 {
     if (cpu_index >= SMP_MAX_CPUS)
     {
@@ -1553,10 +1572,14 @@ bool thread_process_deferred_frees(uint32_t cpu_index, deferred_free_stats_t *st
         {
             in_use = true;
         }
-        /* Avoid freeing anything still running or referenced as current. */
+        /* The switch-out slot is a hazard pointer: context_switch clears the
+         * old ownership fields from the incoming stack before C bookkeeping
+         * has finished using the outgoing thread. */
         for (uint32_t i = 0; i < SMP_MAX_CPUS && !in_use; ++i)
         {
-            if (g_current_threads[i] == cursor)
+            thread_t *current = __atomic_load_n(&g_current_threads[i], __ATOMIC_ACQUIRE);
+            thread_t *switching_out = __atomic_load_n(&g_switch_out_threads[i], __ATOMIC_ACQUIRE);
+            if (current == cursor || switching_out == cursor)
             {
                 in_use = true;
                 break;
@@ -1797,21 +1820,21 @@ static void thread_log_stack_issue(const thread_t *thread,
                   (unsigned long long)rsp);
 }
 
-void thread_assert_stack_current(thread_t *thread, const char *context)
+bool thread_assert_stack_current(thread_t *thread, const char *context)
 {
     if (!thread)
     {
-        return;
+        return true;
     }
     /* If the thread is already dead (e.g. faulted on an IST stack), do not
      * enforce kernel stack bounds/guards while we switch away. */
     if (thread->state == THREAD_STATE_ZOMBIE || thread->exited)
     {
-        return;
+        return true;
     }
     if (thread->is_idle)
     {
-        return;
+        return true;
     }
     uint64_t rsp = 0;
     __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp));
@@ -1820,8 +1843,7 @@ void thread_assert_stack_current(thread_t *thread, const char *context)
         thread_log_stack_issue(thread, context, "rsp_out_of_bounds");
         if (thread->process && thread->process->is_user)
         {
-            thread_quarantine_corrupt(thread, "rsp_out_of_bounds");
-            return;
+            return false;
         }
         fatal("kernel stack pointer left bounds");
     }
@@ -1830,12 +1852,12 @@ void thread_assert_stack_current(thread_t *thread, const char *context)
         thread_log_stack_issue(thread, context, "guard_corrupted");
         if (thread->process && thread->process->is_user)
         {
-            thread_quarantine_corrupt(thread, "stack_guard_corrupted");
-            return;
+            return false;
         }
         fatal("kernel stack guard corrupted");
     }
     thread_scan_stack_for_suspicious_values(thread, rsp, false, context);
+    return true;
 }
 
 static void __attribute__((unused)) thread_assert_current_stack_owner(const char *context)
@@ -2725,7 +2747,10 @@ void process_trigger_fatal_fault(thread_t *thread,
 __attribute__((naked)) void context_switch(cpu_context_t **,
                                            cpu_context_t *,
                                            uint8_t *,
-                                           uint32_t *)
+                                           uint32_t *,
+                                           uint64_t,
+                                           spinlock_t *,
+                                           uint64_t *)
 {
     __asm__ volatile (
         "pushfq\n\t"
@@ -2735,10 +2760,19 @@ __attribute__((naked)) void context_switch(cpu_context_t **,
         "push %%r13\n\t"
         "push %%r14\n\t"
         "push %%r15\n\t"
+        /* The seventh argument is above the return address on the old stack. */
+        "mov 64(%%rsp), %%r10\n\t"
+        /* Preserve the flags from before scheduler_lock_acquire() disabled IRQs. */
+        "mov %%r8, 48(%%rsp)\n\t"
         /* Ensure reserved bit stays set in saved RFLAGS. */
         "orl $0x2, 48(%%rsp)\n\t"
         "mov %%rsp, (%%rdi)\n\t"
         "mov %%rsi, %%rsp\n\t"
+        /* Keep interrupts masked until scheduler_finish_switch has completed
+         * incoming/outgoing ownership bookkeeping. */
+        "mov 48(%%rsp), %%rax\n\t"
+        "mov %%rax, (%%r10)\n\t"
+        "andq $-513, 48(%%rsp)\n\t"
         "test %%rdx, %%rdx\n\t"
         "jz 1f\n\t"
         "movb $0, (%%rdx)\n\t"
@@ -2747,6 +2781,8 @@ __attribute__((naked)) void context_switch(cpu_context_t **,
         "jz 2f\n\t"
         "movl $0xFFFFFFFF, (%%rcx)\n\t"
         "2:\n\t"
+        /* The old stack is no longer in use; publish the switch atomically. */
+        "movl $0, (%%r9)\n\t"
         "pop %%r15\n\t"
         "pop %%r14\n\t"
         "pop %%r13\n\t"

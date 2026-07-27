@@ -18,7 +18,7 @@ The kernel’s VFS is a heap-backed tree of nodes with optional backing storage 
 
 ## Locking Model (`src/kernel/vfs.c`)
 
-- `g_vfs_tree_lock`: protects tree shape (parent/child links, node creation/removal, mount list).
+- `g_vfs_tree_lock`: protects tree shape (parent/child links, node creation/removal, mount list). It uses an adaptive scheduler-friendly acquisition path because mount loading can poll storage and yield; contenders yield instead of pinning every CPU behind a preempted owner.
 - `node->data_lock`: protects per-file content buffer + dirty tracking fields.
 
 Callers generally:

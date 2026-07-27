@@ -46,6 +46,8 @@ void process_system_init(void)
     {
         g_current_processes[i] = NULL;
         g_current_threads[i] = NULL;
+        g_switch_out_threads[i] = NULL;
+        g_switch_restore_rflags[i] = 0;
         g_idle_threads[i] = NULL;
     }
     for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
@@ -115,10 +117,13 @@ void process_system_init(void)
     idle_process->state = PROCESS_STATE_READY;
     idle_process->is_user = false;
     idle_process->cr3 = read_cr3();
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
     spinlock_lock(&g_process_lock);
     idle_process->next = g_process_list;
     g_process_list = idle_process;
     spinlock_unlock(&g_process_lock);
+    cpu_restore_flags(flags);
     g_idle_process = idle_process;
 
     uint32_t cpu_count = smp_cpu_count();
@@ -188,8 +193,13 @@ static void scheduler_main_loop(void)
     scheduler_wait_for_boot_ready();
     while (1)
     {
+        /* Close the empty-queue-to-HLT lost-wakeup window.  With interrupts
+         * masked before the scheduler checks the local queue, an enqueue IPI
+         * that races the check remains pending; STI's interrupt shadow makes
+         * the following HLT an atomic wait. */
+        cpu_cli();
         scheduler_schedule(false);
-        __asm__ volatile ("hlt");
+        __asm__ volatile ("sti; hlt" ::: "memory");
     }
 }
 
@@ -248,7 +258,8 @@ void process_start_scheduler(void)
  */
 void process_bind_idle_to_bsp(void)
 {
-    thread_t *idle = g_idle_threads[0];
+    uint32_t cpu = current_cpu_index();
+    thread_t *idle = g_idle_threads[cpu];
     if (!idle)
     {
         fatal("no idle thread for BSP");
@@ -259,9 +270,9 @@ void process_bind_idle_to_bsp(void)
     idle->context_valid = true;
     idle->preempt_pending = false;
     idle->time_slice_remaining = scheduler_time_slice_ticks();
-    __atomic_store_n(&idle->running_cpu, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_cpu_usage[0].last_tick, timer_ticks(), __ATOMIC_RELAXED);
-    arch_cpu_set_kernel_stack(0, idle->kernel_stack_top);
+    __atomic_store_n(&idle->running_cpu, cpu, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_cpu_usage[cpu].last_tick, timer_ticks(), __ATOMIC_RELAXED);
+    arch_cpu_set_kernel_stack(cpu, idle->kernel_stack_top);
     wrmsr(MSR_GS_BASE, idle->gs_base);
     wrmsr(MSR_FS_BASE, idle->fs_base);
 }

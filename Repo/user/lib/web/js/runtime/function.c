@@ -30,6 +30,17 @@ void js_function_release(js_function_t *fn)
     {
         js_value_destroy(&fn->prototype_value);
     }
+    js_property_t *prop = fn->properties;
+    while (prop)
+    {
+        js_property_t *next = prop->next;
+        js_free(prop->name);
+        js_value_destroy(&prop->value);
+        js_value_destroy(&prop->getter);
+        js_value_destroy(&prop->setter);
+        js_free(prop);
+        prop = next;
+    }
     js_env_release(fn->closure);
     js_free(fn);
 }
@@ -50,6 +61,7 @@ js_function_t *js_function_create(const js_function_decl_t *decl,
     fn->is_expr = (expr != NULL);
     fn->is_constructible = is_constructible;
     fn->closure = closure;
+    fn->properties = NULL;
     if (closure)
     {
         js_env_retain(closure);

@@ -121,16 +121,12 @@ static void rtl8139_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *con
 
 static inline uint64_t rtl8139_acquire_tx(void)
 {
-    uint64_t flags = rtl8139_save_flags();
-    rtl8139_cli();
-    spinlock_lock(&g_tx_lock);
-    return flags;
+    return spinlock_lock_irqsave(&g_tx_lock);
 }
 
 static inline void rtl8139_release_tx(uint64_t flags)
 {
-    spinlock_unlock(&g_tx_lock);
-    rtl8139_restore_flags(flags);
+    spinlock_unlock_irqrestore(&g_tx_lock, flags);
 }
 
 #define RTL_TX_SLOT_COUNT 4
@@ -426,7 +422,7 @@ static void rtl8139_handle_receive(void)
 
     int safety = RTL_RX_IRQ_BUDGET;
 
-    spinlock_lock(&g_rx_lock);
+    uint64_t irq_flags = spinlock_lock_irqsave(&g_rx_lock);
     while ((inb(g_io_base + RTL_REG_CR) & RTL_CR_RX_EMPTY) == 0 && safety-- > 0)
     {
         uint32_t offset = g_rx_offset;
@@ -583,7 +579,7 @@ release_frame:
             outw(g_io_base + RTL_REG_CAPR, (uint16_t)((g_rx_offset - 16) & 0xFFFF));
         }
     }
-    spinlock_unlock(&g_rx_lock);
+    spinlock_unlock_irqrestore(&g_rx_lock, irq_flags);
 }
 
 

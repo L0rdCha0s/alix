@@ -2,7 +2,7 @@
 
 #include "libc.h"
 #include "serial.h"
-#include "process_internal.h"
+#include "memory_layout.h"
 
 #define ELF_MAGIC 0x464C457FU
 #define ELF_CLASS_64 2U
@@ -62,9 +62,9 @@ static inline size_t elf_align_up_size(size_t value)
     return (value + mask) & ~mask;
 }
 
-bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uintptr_t *entry_out)
+bool elf_validate_image(const uint8_t *image, size_t size, uintptr_t *entry_out)
 {
-    if (!process || !image || size < sizeof(elf64_ehdr_t))
+    if (!image || size < sizeof(elf64_ehdr_t))
     {
         return false;
     }
@@ -84,12 +84,70 @@ bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uin
         return false;
     }
 
-    if ((size_t)ehdr->phoff + (size_t)ehdr->phnum * sizeof(elf64_phdr_t) > size)
+    if (ehdr->phoff > (uint64_t)size ||
+        (size_t)ehdr->phnum > (size - (size_t)ehdr->phoff) / sizeof(elf64_phdr_t))
     {
         return false;
     }
 
     const elf64_phdr_t *phdr = (const elf64_phdr_t *)(image + ehdr->phoff);
+    bool entry_in_executable_segment = false;
+    for (uint16_t i = 0; i < ehdr->phnum; ++i)
+    {
+        const elf64_phdr_t *ph = &phdr[i];
+        if (ph->type != ELF_PH_TYPE_LOAD || ph->memsz == 0)
+        {
+            continue;
+        }
+        if (ph->filesz > ph->memsz ||
+            ph->offset > (uint64_t)size ||
+            ph->filesz > (uint64_t)size - ph->offset ||
+            ph->vaddr > UINTPTR_MAX || ph->memsz > SIZE_MAX ||
+            ph->vaddr < g_mem_layout.user_pointer_base ||
+            ph->memsz > (uint64_t)(UINTPTR_MAX - (uintptr_t)ph->vaddr))
+        {
+            return false;
+        }
+
+        uintptr_t seg_start = (uintptr_t)ph->vaddr;
+        uintptr_t seg_end = seg_start + (uintptr_t)ph->memsz;
+        uintptr_t seg_base = elf_align_down(seg_start);
+        size_t seg_offset = (size_t)(seg_start - seg_base);
+        if (seg_end == 0 || seg_end - 1 > g_mem_layout.user_pointer_limit ||
+            (size_t)ph->memsz > SIZE_MAX - seg_offset ||
+            (size_t)ph->memsz + seg_offset > SIZE_MAX - (ELF_PAGE_SIZE - 1ULL))
+        {
+            return false;
+        }
+        if ((ph->flags & ELF_FLAG_EXEC) != 0 &&
+            ehdr->entry >= ph->vaddr && ehdr->entry < ph->vaddr + ph->memsz)
+        {
+            entry_in_executable_segment = true;
+        }
+    }
+    if (!entry_in_executable_segment)
+    {
+        return false;
+    }
+
+    if (entry_out)
+    {
+        *entry_out = (uintptr_t)ehdr->entry;
+    }
+    return true;
+}
+
+bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uintptr_t *entry_out)
+{
+    uintptr_t validated_entry = 0;
+    if (!process || !elf_validate_image(image, size, &validated_entry))
+    {
+        return false;
+    }
+
+    const elf64_ehdr_t *ehdr = (const elf64_ehdr_t *)image;
+    const elf64_phdr_t *phdr = (const elf64_phdr_t *)(image + ehdr->phoff);
+
     for (uint16_t i = 0; i < ehdr->phnum; ++i)
     {
         const elf64_phdr_t *ph = &phdr[i];
@@ -98,19 +156,14 @@ bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uin
             continue;
         }
 
-        serial_printf("[elf] segment process=%s type=0x%X flags=0x%X off=0x%016llX vaddr=0x%016llX filesz=0x%016llX memsz=0x%016llX\r\n",
-                      process->name,
+        serial_printf("[elf] segment pid=0x%016llX type=0x%X flags=0x%X off=0x%016llX vaddr=0x%016llX filesz=0x%016llX memsz=0x%016llX\r\n",
+                      (unsigned long long)process_get_pid(process),
                       (unsigned)ph->type,
                       (unsigned)ph->flags,
                       (unsigned long long)ph->offset,
                       (unsigned long long)ph->vaddr,
                       (unsigned long long)ph->filesz,
                       (unsigned long long)ph->memsz);
-
-        if (ph->offset + ph->filesz > size)
-        {
-            return false;
-        }
 
         uintptr_t seg_start = (uintptr_t)ph->vaddr;
         uintptr_t seg_base = elf_align_down(seg_start);
@@ -147,7 +200,7 @@ bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uin
 
     if (entry_out)
     {
-        *entry_out = (uintptr_t)ehdr->entry;
+        *entry_out = validated_entry;
     }
     return true;
 }

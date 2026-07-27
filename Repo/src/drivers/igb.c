@@ -441,6 +441,13 @@ void igb_on_irq(void)
     {
         return;
     }
+    /* Reading ICR acknowledges the interrupt.  If it interrupted a generic
+     * lock owner, leave descriptor work to the periodic poll on a safe tick;
+     * receive dispatch can wake threads and enter the scheduler. */
+    if (spinlock_preempt_disabled())
+    {
+        return;
+    }
     if (g_irq_log_budget > 0)
     {
         --g_irq_log_budget;
@@ -451,9 +458,9 @@ void igb_on_irq(void)
     }
 
     igb_handle_receive();
-    spinlock_lock(&g_tx_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_tx_lock);
     igb_reclaim_tx();
-    spinlock_unlock(&g_tx_lock);
+    spinlock_unlock_irqrestore(&g_tx_lock, flags);
     /* TCP maintenance runs in tcp_timerd to avoid IRQ-context polling. */
 }
 
@@ -464,9 +471,9 @@ void igb_poll(void)
         return;
     }
     igb_handle_receive();
-    spinlock_lock(&g_tx_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_tx_lock);
     igb_reclaim_tx();
-    spinlock_unlock(&g_tx_lock);
+    spinlock_unlock_irqrestore(&g_tx_lock, flags);
 }
 
 bool igb_is_present(void)
@@ -634,7 +641,7 @@ static bool igb_setup_tx(void)
 
 static void igb_handle_receive(void)
 {
-    spinlock_lock(&g_rx_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_rx_lock);
     for (int safety = IGB_RX_DESC_COUNT; safety > 0; --safety)
     {
         igb_rx_desc_t *desc = &g_rx_desc[g_rx_index];
@@ -692,7 +699,7 @@ static void igb_handle_receive(void)
         g_rx_index = (g_rx_index + 1U) % IGB_RX_DESC_COUNT;
         igb_write32(IGB_REG_RDT0, cur);
     }
-    spinlock_unlock(&g_rx_lock);
+    spinlock_unlock_irqrestore(&g_rx_lock, flags);
 }
 
 static void igb_reclaim_tx(void)
@@ -736,10 +743,7 @@ static bool igb_tx_send(net_interface_t *iface, const uint8_t *data, size_t len)
     }
 
     bool ok = false;
-    uint64_t flags = 0;
-    __asm__ volatile ("pushfq; pop %0" : "=r"(flags) :: "memory");
-    __asm__ volatile ("cli" ::: "memory");
-    spinlock_lock(&g_tx_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_tx_lock);
 
     igb_reclaim_tx();
 
@@ -766,8 +770,7 @@ static bool igb_tx_send(net_interface_t *iface, const uint8_t *data, size_t len)
     ok = true;
 
 out:
-    spinlock_unlock(&g_tx_lock);
-    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "memory", "cc");
+    spinlock_unlock_irqrestore(&g_tx_lock, flags);
     if (stack_clone)
     {
         free(stack_clone);

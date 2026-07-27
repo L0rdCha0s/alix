@@ -246,6 +246,8 @@ void html_view_render_cache_clear(html_view_render_cache_t *cache)
     size_t op_cap = cache->op_cap;
     size_t *fixed_ops = cache->fixed_ops;
     size_t fixed_cap = cache->fixed_cap;
+    size_t *sticky_ops = cache->sticky_ops;
+    size_t sticky_cap = cache->sticky_cap;
     html_view_anchor_t *anchors = cache->anchors;
     size_t anchor_cap = cache->anchor_cap;
     html_view_tile_t *tiles = cache->tiles;
@@ -281,6 +283,8 @@ void html_view_render_cache_clear(html_view_render_cache_t *cache)
     cache->op_cap = op_cap;
     cache->fixed_ops = fixed_ops;
     cache->fixed_cap = fixed_cap;
+    cache->sticky_ops = sticky_ops;
+    cache->sticky_cap = sticky_cap;
     cache->anchors = anchors;
     cache->anchor_cap = anchor_cap;
     cache->tiles = tiles;
@@ -668,6 +672,124 @@ typedef struct
     int32_t z_index;
 } html_view_draw_item_t;
 
+static int html_view_sticky_offset_y(const html_view_ctx_t *ctx,
+                                     const html_view_op_t *op,
+                                     int scroll_y)
+{
+    if (!ctx || !op || !op->sticky || op->fixed || op->sticky_flags == 0)
+    {
+        return 0;
+    }
+
+    int box_h = op->sticky_box_h > 0 ? (int)op->sticky_box_h : (int)op->h;
+    if (box_h < 0)
+    {
+        box_h = 0;
+    }
+    int origin_top = ctx->doc_origin_y + (int)op->sticky_origin_y - scroll_y;
+    uint8_t flags = op->sticky_flags;
+
+    if ((flags & HTML_VIEW_STICKY_TOP) && (flags & HTML_VIEW_STICKY_BOTTOM))
+    {
+        int top_limit = ctx->viewport_y + (int)op->sticky_top;
+        int bottom_limit = ctx->viewport_y + ctx->viewport_h - (int)op->sticky_bottom;
+        int avail = bottom_limit - top_limit;
+        if (avail < 0)
+        {
+            avail = 0;
+        }
+        if (box_h > avail)
+        {
+            int origin_bottom = origin_top + box_h;
+            if (origin_bottom <= bottom_limit)
+            {
+                return 0;
+            }
+            int target_top = bottom_limit - box_h;
+            if (op->sticky_container_bottom > op->sticky_container_top && box_h > 0)
+            {
+                int min_top = ctx->doc_origin_y + (int)op->sticky_container_top - scroll_y;
+                if (target_top < min_top)
+                {
+                    target_top = min_top;
+                }
+            }
+            if (target_top < origin_top)
+            {
+                return target_top - origin_top;
+            }
+            return 0;
+        }
+        if (origin_top >= top_limit)
+        {
+            return 0;
+        }
+        int target_top = top_limit;
+        if (op->sticky_container_bottom > op->sticky_container_top && box_h > 0)
+        {
+            int max_top = ctx->doc_origin_y + (int)op->sticky_container_bottom - scroll_y - box_h;
+            if (target_top > max_top)
+            {
+                target_top = max_top;
+            }
+        }
+        if (target_top > origin_top)
+        {
+            return target_top - origin_top;
+        }
+        return 0;
+    }
+
+    if (flags & HTML_VIEW_STICKY_TOP)
+    {
+        int top_limit = ctx->viewport_y + (int)op->sticky_top;
+        if (origin_top >= top_limit)
+        {
+            return 0;
+        }
+        int target_top = top_limit;
+        if (op->sticky_container_bottom > op->sticky_container_top && box_h > 0)
+        {
+            int max_top = ctx->doc_origin_y + (int)op->sticky_container_bottom - scroll_y - box_h;
+            if (target_top > max_top)
+            {
+                target_top = max_top;
+            }
+        }
+        if (target_top > origin_top)
+        {
+            return target_top - origin_top;
+        }
+        return 0;
+    }
+
+    if (flags & HTML_VIEW_STICKY_BOTTOM)
+    {
+        int bottom_limit = ctx->viewport_y + ctx->viewport_h - (int)op->sticky_bottom;
+        int origin_bottom = origin_top + box_h;
+        if (origin_bottom <= bottom_limit)
+        {
+            return 0;
+        }
+        int target_top = bottom_limit - box_h;
+        if (op->sticky_container_bottom > op->sticky_container_top && box_h > 0)
+        {
+            int min_top = ctx->doc_origin_y + (int)op->sticky_container_top - scroll_y;
+            if (target_top < min_top)
+            {
+                target_top = min_top;
+            }
+        }
+        if (target_top < origin_top)
+        {
+            return target_top - origin_top;
+        }
+        return 0;
+    }
+
+    return 0;
+}
+
 void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
 {
     if (!ctx || !ctx->priv)
@@ -680,7 +802,7 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
     {
         return;
     }
-    if (cache->tile_used == 0 && cache->fixed_count == 0)
+    if (cache->tile_used == 0 && cache->fixed_count == 0 && cache->sticky_count == 0)
     {
         return;
     }
@@ -713,7 +835,8 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
     }
 
     bool has_fixed = cache->fixed_count > 0;
-    int stream_count = tile_count + (has_fixed ? 1 : 0);
+    bool has_sticky = cache->sticky_count > 0;
+    int stream_count = tile_count + (has_fixed ? 1 : 0) + (has_sticky ? 1 : 0);
     if (stream_count <= 0)
     {
         return;
@@ -761,6 +884,15 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
             .count = cache->fixed_count,
             .pos = 0,
             .fixed = true,
+        };
+    }
+    if (has_sticky)
+    {
+        streams[stream_index++] = (html_view_op_stream_t){
+            .ops = cache->sticky_ops,
+            .count = cache->sticky_count,
+            .pos = 0,
+            .fixed = false,
         };
     }
 
@@ -812,11 +944,24 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
 
         if (!fixed)
         {
-            int op_y0 = (int)op->y;
-            int op_y1 = (int)op->y + (int)op->h;
-            if (op_y1 <= visible_y0 || op_y0 >= visible_y1)
+            if (op->sticky)
             {
-                continue;
+                int sticky_offset = html_view_sticky_offset_y(ctx, op, scroll_y);
+                int draw_y = ctx->doc_origin_y + (int)op->y - scroll_y + sticky_offset;
+                int draw_bottom = draw_y + (int)op->h;
+                if (draw_bottom <= ctx->viewport_y || draw_y >= (ctx->viewport_y + ctx->viewport_h))
+                {
+                    continue;
+                }
+            }
+            else
+            {
+                int op_y0 = (int)op->y;
+                int op_y1 = (int)op->y + (int)op->h;
+                if (op_y1 <= visible_y0 || op_y0 >= visible_y1)
+                {
+                    continue;
+                }
             }
         }
         else
@@ -893,6 +1038,10 @@ void html_view_render_cache_draw_visible(html_view_ctx_t *ctx)
         {
             abs_x = ctx->doc_origin_x + (int)op->x;
             abs_y = ctx->doc_origin_y + (int)op->y - scroll_y;
+            if (op->sticky)
+            {
+                abs_y += html_view_sticky_offset_y(ctx, op, scroll_y);
+            }
         }
         else
         {

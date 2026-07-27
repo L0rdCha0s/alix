@@ -167,11 +167,8 @@ static inline void paging_log_lock_event(const char *label, uint32_t cpu)
 
 static inline uint64_t paging_lock(void)
 {
-    uint64_t flags;
-    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
     uint32_t cpu = smp_current_cpu_index();
-    __asm__ volatile ("cli" ::: "memory");
-    spinlock_lock(&g_paging_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_paging_lock);
     paging_log_lock_event("acquire", cpu);
     g_paging_lock_owner = cpu;
     if (cpu < SMP_MAX_CPUS)
@@ -192,8 +189,7 @@ static inline void paging_unlock(uint64_t flags)
         g_paging_lock_owner_ra[cpu] = NULL;
         g_paging_lock_owner_tsc[cpu] = 0;
     }
-    spinlock_unlock(&g_paging_lock);
-    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
+    spinlock_unlock_irqrestore(&g_paging_lock, flags);
 }
 
 bool paging_global_lock_held_by_current_cpu(void)
@@ -216,15 +212,12 @@ static inline uint64_t paging_space_lock(paging_space_t *space, bool *used_globa
     {
         *used_global = false;
     }
-    uint64_t flags;
-    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
-    __asm__ volatile ("cli" ::: "memory");
+    uint64_t flags = spinlock_lock_irqsave(&space->lock);
     /* Lock ordering: never take paging locks while holding heap lock. */
     if (heap_lock_held_by_current_cpu())
     {
         serial_early_write_string("[paging] lock_order_violation: heap->paging\r\n");
     }
-    spinlock_lock(&space->lock);
     paging_log_lock_event("acquire-space", smp_current_cpu_index());
     return flags;
 }
@@ -237,8 +230,7 @@ static inline void paging_space_unlock(paging_space_t *space, bool used_global, 
         return;
     }
     paging_log_lock_event("release-space", smp_current_cpu_index());
-    spinlock_unlock(&space->lock);
-    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
+    spinlock_unlock_irqrestore(&space->lock, flags);
 }
 
 static void paging_log_lock_state(const char *context)
@@ -1168,13 +1160,13 @@ void paging_destroy_space(paging_space_t *space)
     {
         flags = paging_space_lock(space, &used_global);
     }
-    space->lock_inited = false;
     if (space->allocation_base == g_kernel_space.allocation_base)
     {
         if (space->lock_inited)
         {
             paging_space_unlock(space, used_global, flags);
         }
+        space->lock_inited = false;
         return;
     }
     for (size_t i = 0; i < space->extra_page_count; ++i)
@@ -1197,6 +1189,7 @@ void paging_destroy_space(paging_space_t *space)
     {
         paging_space_unlock(space, used_global, flags);
     }
+    space->lock_inited = false;
 }
 
 /*
@@ -1280,6 +1273,10 @@ bool paging_map_user_range(paging_space_t *space,
     {
         return false;
     }
+    if (length > SIZE_MAX - (PAGE_SIZE_BYTES - 1))
+    {
+        return false;
+    }
 
     if (!paging_check_lock_order("paging_map_user_range"))
     {
@@ -1289,13 +1286,24 @@ bool paging_map_user_range(paging_space_t *space,
     bool used_global = false;
     uint64_t flags = paging_space_lock(space, &used_global);
     uintptr_t virt = align_down(virtual_addr, PAGE_SIZE_BYTES);
+    uintptr_t first_virt = virt;
     uintptr_t phys = align_down(physical_addr, PAGE_SIZE_BYTES);
     size_t remaining = align_up(length, PAGE_SIZE_BYTES);
+    if (virt > UINTPTR_MAX - remaining || phys > UINTPTR_MAX - remaining)
+    {
+        paging_space_unlock(space, used_global, flags);
+        return false;
+    }
 
     while (remaining > 0)
     {
         if (!paging_map_user_page_internal(space, virt, phys, writable, executable))
         {
+            while (virt > first_virt)
+            {
+                virt -= PAGE_SIZE_BYTES;
+                (void)paging_unmap_user_page_internal(space, virt);
+            }
             paging_space_unlock(space, used_global, flags);
             return false;
         }

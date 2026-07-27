@@ -5,5 +5,6 @@
 #include "process.h"
 
 bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uintptr_t *entry_out);
+bool elf_validate_image(const uint8_t *image, size_t size, uintptr_t *entry_out);
 
 #endif

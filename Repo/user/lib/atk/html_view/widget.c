@@ -2026,7 +2026,7 @@ static void html_view_draw_cb(const atk_state_t *state,
     cache->doc_origin_local_y = doc_origin_local_y;
 
     bool cache_valid = cache_matches && cache->valid;
-    bool cache_empty = cache_valid && cache->op_count == 0 && cache->fixed_count == 0;
+    bool cache_empty = cache_valid && cache->op_count == 0 && cache->fixed_count == 0 && cache->sticky_count == 0;
     if (cache_empty && body_has_renderable)
     {
         uint32_t css_dirty = __atomic_load_n(&priv->stylesheet_dirty, __ATOMIC_ACQUIRE);

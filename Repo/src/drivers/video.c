@@ -172,8 +172,9 @@ static uint8_t vga_gc_read(uint8_t index);
 static void vga_gc_write(uint8_t index, uint8_t value);
 static void video_dirty_reset(void);
 static void video_flush_dirty(void);
-static void video_perform_refresh_locked(void);
+static bool video_perform_refresh_locked(bool full_refresh_prepared);
 static void video_perform_refresh(void);
+static bool video_full_refresh_pending(void);
 static void cursor_draw_overlay(void);
 static void cursor_restore_background(void);
 static void video_prepare_font(void);
@@ -1201,7 +1202,7 @@ static void video_flush_dirty(void)
     framebuffer_wc_fence();
 }
 
-static void video_perform_refresh_locked(void)
+static bool video_perform_refresh_locked(bool full_refresh_prepared)
 {
     if (atk_drag_active())
     {
@@ -1210,7 +1211,7 @@ static void video_perform_refresh_locked(void)
         refresh_requested_full = false;
         refresh_requested = false;
         spinlock_unlock(&g_video_lock);
-        return;
+        return false;
     }
 
     atk_widget_t *target = NULL;
@@ -1218,6 +1219,11 @@ static void video_perform_refresh_locked(void)
     bool active = false;
 
     spinlock_lock(&g_video_lock);
+    if (refresh_requested_full && !full_refresh_prepared)
+    {
+        spinlock_unlock(&g_video_lock);
+        return true;
+    }
     active = video_active;
     target = refresh_window;
     refresh_window = NULL;
@@ -1228,23 +1234,29 @@ static void video_perform_refresh_locked(void)
 
     if (!active)
     {
-        return;
+        return false;
     }
     if (!target && !do_full)
     {
-        return;
+        return false;
     }
 
     /* Erase cursor overlay before modifying/flushing the framebuffer. */
     cursor_restore_background();
 
-    atk_state_t *state = atk_state_get();
+    if (do_full)
+    {
+        atk_render();
+        video_flush_dirty();
+        cursor_draw_overlay();
+        return false;
+    }
 
     if (target)
     {
         atk_state_lock_init();
         uint64_t irq_state = atk_state_lock_acquire();
-        state = atk_state_get();
+        atk_state_t *state = atk_state_get();
         if (state)
         {
             atk_window_draw_from(state, target);
@@ -1252,22 +1264,36 @@ static void video_perform_refresh_locked(void)
         atk_state_lock_release(irq_state);
         video_flush_dirty();
         cursor_draw_overlay();
-        return;
+        return false;
     }
+    return false;
+}
 
-    if (do_full)
-    {
-        atk_render();
-        video_flush_dirty();
-        cursor_draw_overlay();
-    }
+static bool video_full_refresh_pending(void)
+{
+    spinlock_lock(&g_video_lock);
+    bool pending = refresh_requested_full;
+    spinlock_unlock(&g_video_lock);
+    return pending;
 }
 
 static void video_perform_refresh(void)
 {
-    spinlock_lock(&g_video_render_lock);
-    video_perform_refresh_locked();
-    spinlock_unlock(&g_video_render_lock);
+    for (;;)
+    {
+        bool full_refresh_prepared = video_full_refresh_pending();
+        if (full_refresh_prepared)
+        {
+            atk_background_refresh();
+        }
+        spinlock_lock(&g_video_render_lock);
+        bool retry = video_perform_refresh_locked(full_refresh_prepared);
+        spinlock_unlock(&g_video_render_lock);
+        if (!retry)
+        {
+            return;
+        }
+    }
 }
 
 void video_cursor_set_shape(video_cursor_shape_t shape)
@@ -1315,6 +1341,7 @@ bool video_enter_mode(void)
 
     video_dirty_reset();
     atk_enter_mode();
+    atk_background_refresh();
     atk_render();
     video_flush_dirty();
 
@@ -1553,8 +1580,12 @@ void video_on_mouse_event(int dx, int dy, bool left_pressed, bool right_pressed)
 
     if (pending_refresh)
     {
-        video_perform_refresh_locked();
+        bool retry = video_perform_refresh_locked(false);
         spinlock_unlock(&g_video_render_lock);
+        if (retry)
+        {
+            video_perform_refresh();
+        }
         return;
     }
 

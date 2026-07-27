@@ -99,6 +99,21 @@ void *memcpy(void *dst, const void *src, size_t count)
     return dst;
 }
 
+void *memchr(const void *src, int ch, size_t count)
+{
+    const uint8_t *s = (const uint8_t *)src;
+    uint8_t needle = (uint8_t)ch;
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (s[i] == needle)
+        {
+            return (void *)(s + i);
+        }
+    }
+    return NULL;
+}
+
 size_t strlen(const char *str)
 {
     size_t len = 0;

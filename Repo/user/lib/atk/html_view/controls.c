@@ -1029,6 +1029,70 @@ static void html_view_collect_style_text(const html_node_t *node,
     free(stack);
 }
 
+static bool html_view_doc_has_id(const html_node_t *root, const char *id)
+{
+    if (!root || !id || id[0] == '\0')
+    {
+        return false;
+    }
+
+    const html_node_t **stack = NULL;
+    size_t sp = 0;
+    size_t stack_cap = 0;
+    const html_node_t *cur = root;
+
+    while (cur)
+    {
+        if (cur->type == HTML_NODE_ELEMENT)
+        {
+            const char *val = html_attr_get(cur, "id");
+            if (val && strcmp(val, id) == 0)
+            {
+                free(stack);
+                return true;
+            }
+        }
+
+        if (cur->first_child)
+        {
+            if (cur->next_sibling)
+            {
+                if (sp == stack_cap)
+                {
+                    size_t new_cap = stack_cap ? (stack_cap * 2u) : 64u;
+                    const html_node_t **new_stack =
+                        (const html_node_t **)realloc(stack, new_cap * sizeof(*new_stack));
+                    if (!new_stack)
+                    {
+                        free(stack);
+                        return false;
+                    }
+                    stack = new_stack;
+                    stack_cap = new_cap;
+                }
+                stack[sp++] = cur->next_sibling;
+            }
+            cur = cur->first_child;
+            continue;
+        }
+
+        if (cur->next_sibling)
+        {
+            cur = cur->next_sibling;
+            continue;
+        }
+        if (sp > 0)
+        {
+            cur = stack[--sp];
+            continue;
+        }
+        break;
+    }
+
+    free(stack);
+    return false;
+}
+
 bool html_view_build_stylesheet_text_locked(atk_html_view_priv_t *priv,
                                             char **out_text,
                                             size_t *out_len,

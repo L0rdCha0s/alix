@@ -44,6 +44,14 @@ void atk_init(void);
  */
 void atk_enter_mode(void);
 
+#ifdef KERNEL_BUILD
+/*
+ * Refresh the desktop background from VFS without holding ATK's render lock
+ * across file I/O or PNG decoding.
+ */
+void atk_background_refresh(void);
+#endif
+
 /*
  * Render the current dirty region into the backing surface (backbuffer).
  *

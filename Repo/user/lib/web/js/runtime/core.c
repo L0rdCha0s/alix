@@ -152,6 +152,8 @@ js_runtime_t *js_runtime_create(void)
     rt->programs = NULL;
     rt->native_meta = NULL;
     rt->global_object = NULL;
+    rt->microtask_head = NULL;
+    rt->microtask_tail = NULL;
     js_value_t global_obj;
     if (!js_value_make_host_object(&global_obj, js_global_object_get, js_global_object_set, NULL, rt->global))
     {
@@ -159,6 +161,18 @@ js_runtime_t *js_runtime_create(void)
         return NULL;
     }
     rt->global_object = global_obj.as.object;
+    js_value_t global_val;
+    memset(&global_val, 0, sizeof(global_val));
+    global_val.type = JS_VALUE_OBJECT;
+    global_val.as.object = rt->global_object;
+    js_object_retain(rt->global_object);
+    if (!js_runtime_set_global(rt, "globalThis", &global_val))
+    {
+        js_value_destroy(&global_val);
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    js_value_destroy(&global_val);
     if (!js_runtime_register_native(rt, "Number", js_builtin_number, NULL, true, 1))
     {
         js_runtime_destroy(rt);
@@ -215,6 +229,16 @@ js_runtime_t *js_runtime_create(void)
         return NULL;
     }
     if (!js_runtime_register_native(rt, "Array", js_builtin_array, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_register_native(rt, "Promise", js_builtin_promise, NULL, true, 1))
+    {
+        js_runtime_destroy(rt);
+        return NULL;
+    }
+    if (!js_runtime_register_native(rt, "queueMicrotask", js_builtin_queue_microtask, NULL, false, 1))
     {
         js_runtime_destroy(rt);
         return NULL;
@@ -408,6 +432,19 @@ void js_runtime_destroy(js_runtime_t *rt)
     {
         return;
     }
+    while (rt->microtask_head)
+    {
+        js_microtask_t *task = rt->microtask_head;
+        rt->microtask_head = task->next;
+        js_value_destroy(&task->callback);
+        for (size_t i = 0; i < task->argc; ++i)
+        {
+            js_value_destroy(&task->argv[i]);
+        }
+        js_free(task->argv);
+        js_free(task);
+    }
+    rt->microtask_tail = NULL;
     js_release_bound_functions(rt);
     if (rt->global_object)
     {
@@ -543,6 +580,110 @@ bool js_runtime_set_global(js_runtime_t *rt, const char *name, const js_value_t 
         return false;
     }
     return js_env_define_local(rt->global, name, value, false, true);
+}
+
+bool js_runtime_get_global(js_runtime_t *rt, const char *name, js_value_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    if (!rt || !rt->global || !name)
+    {
+        *out = js_value_make_undefined_internal();
+        return true;
+    }
+    if (!js_env_get(rt->global, name, out))
+    {
+        *out = js_value_make_undefined_internal();
+    }
+    return true;
+}
+
+bool js_runtime_queue_microtask(js_runtime_t *rt,
+                                const js_value_t *callback,
+                                size_t argc,
+                                const js_value_t *argv)
+{
+    if (!rt || !callback)
+    {
+        return false;
+    }
+    js_microtask_t *task = (js_microtask_t *)js_calloc(1, sizeof(*task));
+    if (!task)
+    {
+        return false;
+    }
+    if (!js_value_copy(&task->callback, callback))
+    {
+        js_free(task);
+        return false;
+    }
+    if (argc)
+    {
+        task->argv = (js_value_t *)js_calloc(argc, sizeof(*task->argv));
+        if (!task->argv)
+        {
+            js_value_destroy(&task->callback);
+            js_free(task);
+            return false;
+        }
+        for (size_t i = 0; i < argc; ++i)
+        {
+            if (!js_value_copy(&task->argv[i], &argv[i]))
+            {
+                for (size_t j = 0; j < i; ++j)
+                {
+                    js_value_destroy(&task->argv[j]);
+                }
+                js_free(task->argv);
+                js_value_destroy(&task->callback);
+                js_free(task);
+                return false;
+            }
+        }
+    }
+    task->argc = argc;
+    task->next = NULL;
+    if (rt->microtask_tail)
+    {
+        rt->microtask_tail->next = task;
+    }
+    else
+    {
+        rt->microtask_head = task;
+    }
+    rt->microtask_tail = task;
+    return true;
+}
+
+void js_runtime_run_microtasks(js_runtime_t *rt)
+{
+    if (!rt)
+    {
+        return;
+    }
+    while (rt->microtask_head)
+    {
+        js_microtask_t *task = rt->microtask_head;
+        rt->microtask_head = task->next;
+        if (!rt->microtask_head)
+        {
+            rt->microtask_tail = NULL;
+        }
+        js_value_t result = js_value_make_undefined_internal();
+        char *err = NULL;
+        (void)js_call_value(rt, &task->callback, task->argc, task->argv, &result, &err);
+        js_free(err);
+        js_value_destroy(&result);
+        js_value_destroy(&task->callback);
+        for (size_t i = 0; i < task->argc; ++i)
+        {
+            js_value_destroy(&task->argv[i]);
+        }
+        js_free(task->argv);
+        js_free(task);
+    }
 }
 
 bool js_runtime_set_native(js_runtime_t *rt, const char *name, js_native_fn_t fn, void *user_data)

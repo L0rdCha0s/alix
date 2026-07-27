@@ -59,8 +59,8 @@ typedef struct process_info
     uint64_t pid;
     process_state_t state;
     thread_state_t thread_state;
-    const char *name;
-    const char *thread_name;
+    char name[PROCESS_NAME_MAX];
+    char thread_name[PROCESS_NAME_MAX];
     bool is_current;
     bool is_idle;
     uint32_t time_slice_remaining;
@@ -81,8 +81,8 @@ typedef struct process_cpu_info
     uint64_t idle_ticks;
     uint64_t switch_count;
     uint64_t current_pid;
-    const char *current_process_name;
-    const char *current_thread_name;
+    char current_process_name[PROCESS_NAME_MAX];
+    char current_thread_name[PROCESS_NAME_MAX];
 } process_cpu_info_t;
 
 typedef struct process_priority_info
@@ -229,9 +229,6 @@ void process_set_affinity(process_t *process, uint32_t cpu_index);
 void process_clear_affinity(process_t *process);
 void process_set_ui_cpu(uint32_t cpu_index);
 uint32_t process_get_ui_cpu(void);
-void process_set_ui_cpu(uint32_t cpu_index);
-uint32_t process_get_ui_cpu(void);
-void process_set_thread_priority(thread_t *thread, thread_priority_t priority);
 
 void wait_queue_init(wait_queue_t *queue);
 void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void *context);

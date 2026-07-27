@@ -73,6 +73,22 @@ static process_t *process_create_user_dummy_internal(const char *name,
                                                      int stdout_fd,
                                                      process_t *parent);
 static process_priority_info_t process_priority_info(const process_t *process);
+
+static void process_snapshot_copy_name(char *dest, const char *source)
+{
+    if (!dest)
+    {
+        return;
+    }
+    const char *value = source ? source : "";
+    size_t i = 0;
+    while (i + 1 < PROCESS_NAME_MAX && value[i])
+    {
+        dest[i] = value[i];
+        ++i;
+    }
+    dest[i] = '\0';
+}
 static process_t *process_create_user_dummy_internal(const char *name,
                                                      size_t stack_size,
                                                      int stdout_fd,
@@ -279,13 +295,80 @@ process_t *process_create_user_elf_with_parent(const char *name,
     return process_create_user_elf_internal(name, image, size, stdout_fd, parent, argv, argc);
 }
 
+static volatile uint32_t g_bootstrap_preempt_depth[SMP_MAX_CPUS];
+
+void spinlock_preempt_disable(void)
+{
+    thread_t *thread = current_thread_local();
+    if (thread)
+    {
+        __atomic_add_fetch(&thread->preempt_disable_depth, 1u, __ATOMIC_ACQ_REL);
+        return;
+    }
+    uint32_t cpu = smp_current_cpu_index();
+    if (cpu < SMP_MAX_CPUS)
+    {
+        __atomic_add_fetch(&g_bootstrap_preempt_depth[cpu], 1u, __ATOMIC_ACQ_REL);
+    }
+}
+
+void spinlock_preempt_enable(void)
+{
+    thread_t *thread = current_thread_local();
+    if (thread)
+    {
+        uint32_t depth = __atomic_load_n(&thread->preempt_disable_depth, __ATOMIC_ACQUIRE);
+        if (depth > 0)
+        {
+            __atomic_sub_fetch(&thread->preempt_disable_depth, 1u, __ATOMIC_ACQ_REL);
+        }
+        return;
+    }
+    uint32_t cpu = smp_current_cpu_index();
+    if (cpu >= SMP_MAX_CPUS)
+    {
+        return;
+    }
+    uint32_t depth = __atomic_load_n(&g_bootstrap_preempt_depth[cpu], __ATOMIC_ACQUIRE);
+    if (depth > 0)
+    {
+        __atomic_sub_fetch(&g_bootstrap_preempt_depth[cpu], 1u, __ATOMIC_ACQ_REL);
+    }
+}
+
+bool spinlock_preempt_disabled(void)
+{
+    thread_t *thread = current_thread_local();
+    if (thread)
+    {
+        return __atomic_load_n(&thread->preempt_disable_depth, __ATOMIC_ACQUIRE) != 0;
+    }
+    uint32_t cpu = smp_current_cpu_index();
+    return cpu < SMP_MAX_CPUS &&
+           __atomic_load_n(&g_bootstrap_preempt_depth[cpu], __ATOMIC_ACQUIRE) != 0;
+}
+
 void process_yield(void)
 {
+    /* A voluntary yield is not permitted while this CPU owns a spinlock. In
+     * particular, storage polling can be reached while the VFS tree lock is
+     * held; switching there would strand the lock owner behind its waiters. */
+    if (spinlock_preempt_disabled())
+    {
+        return;
+    }
     scheduler_schedule(true);
 }
 
 void process_sleep_ticks(uint64_t ticks)
 {
+    /* Sleeping changes the current thread to BLOCKED and switches stacks.  A
+     * spinlock owner must remain runnable until it releases every held lock. */
+    if (spinlock_preempt_disabled())
+    {
+        return;
+    }
+
     if (ticks == 0)
     {
         process_yield();
@@ -309,8 +392,6 @@ void process_sleep_ticks(uint64_t ticks)
     }
     thread->state = THREAD_STATE_BLOCKED;
     thread->sleep_until_tick = wake_tick;
-    thread_clear_running_cpu(thread);
-    thread->in_transition = false;
     thread->wake_pending = false;
     SCHED_SLEEP_LOG("[sleep] enqueue thread=%s pid=0x%016llX wake_tick=%llu now=%llu\r\n",
                     thread->name[0] ? thread->name : "<unnamed>",
@@ -349,55 +430,38 @@ void process_destroy_marked(process_t *process)
     shell_service_cleanup_process(process);
     procfs_unregister_process(process);
 
-    if (process->first_child)
-    {
-        process_t *child = process->first_child;
-        while (child)
-        {
-            process_t *next = child->sibling_next;
-            process_detach_child(child);
-            child = next;
-        }
-    }
+    process_orphan_children(process);
 
     process_detach_child(process);
 
+    /* Deferred reclamation also runs under g_scheduler_lock. Detach the whole
+     * list and sever every thread->process link while holding that lock so a
+     * reclaimer cannot retain a process pointer across address-space teardown. */
+    uint64_t sched_flags = scheduler_lock_acquire("process_destroy_detach_threads");
     spinlock_lock(&process->threads_lock);
     thread_t *thread = process->threads;
     process->threads = NULL;
     process->thread_count = 0;
     process->main_thread = NULL;
     process->current_thread = NULL;
+    for (thread_t *cursor = thread; cursor; cursor = cursor->process_next)
+    {
+        cursor->process = NULL;
+    }
     spinlock_unlock(&process->threads_lock);
+    scheduler_lock_release(sched_flags);
 
     while (thread)
     {
         thread_t *next = thread->process_next;
         thread->process_next = NULL;
-        thread_clear_running_cpu(thread);
-        thread_remove_from_wait_queue(thread);
-        if (thread->sleeping)
-        {
-            sleep_queue_remove(thread);
-        }
-        if (thread_in_run_queue_load(thread))
-        {
-            remove_from_run_queue(thread);
-        }
         thread_context_guard_release_pages(thread);
-        thread->exit_status = process->exit_status;
-        thread->exited = true;
-        thread->state = THREAD_STATE_ZOMBIE;
-        thread->preempt_pending = false;
-        thread->time_slice_remaining = 0;
-        thread->wake_pending = false;
-        wait_queue_wake_all(&thread->join_queue);
-        thread->process = NULL;
-        thread->magic = 0;
         thread_enqueue_deferred_free(thread);
         thread = next;
     }
 
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
     spinlock_lock(&g_process_lock);
     process_t **cursor = &g_process_list;
     while (*cursor)
@@ -410,6 +474,7 @@ void process_destroy_marked(process_t *process)
         cursor = &(*cursor)->next;
     }
     spinlock_unlock(&g_process_lock);
+    cpu_restore_flags(flags);
 
     process->magic = 0;
     process_free_user_regions(process);
@@ -420,17 +485,102 @@ void process_destroy_marked(process_t *process)
 
 void process_destroy(process_t *process)
 {
-    if (!process || process->state != PROCESS_STATE_ZOMBIE || process == g_idle_process)
+    if (!process || process == g_idle_process)
     {
         return;
     }
 
-    if (!process_try_mark_destroying(process))
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    uint64_t sched_flags = scheduler_lock_acquire("process_destroy");
+    spinlock_lock(&g_process_lock);
+    bool ready = process->magic == PROCESS_MAGIC &&
+                 process->state == PROCESS_STATE_ZOMBIE &&
+                 __atomic_load_n(&process->join_waiters, __ATOMIC_ACQUIRE) == 0 &&
+                 process_threads_quiescent_locked(process) &&
+                 process_try_mark_destroying(process);
+    spinlock_unlock(&g_process_lock);
+    scheduler_lock_release(sched_flags);
+    cpu_restore_flags(flags);
+    if (!ready)
     {
         return;
     }
 
     process_destroy_marked(process);
+}
+
+/* Consume a reference retained under g_process_lock and, when it is the last
+ * reference, atomically hand the process to teardown.  Callers must not touch
+ * process after this returns: another owner may destroy it when this function
+ * only releases the reference. */
+static void process_destroy_retained(process_t *process)
+{
+    if (!process)
+    {
+        return;
+    }
+
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    uint64_t sched_flags = scheduler_lock_acquire("process_destroy_retained");
+    spinlock_lock(&g_process_lock);
+    bool ready = process->magic == PROCESS_MAGIC &&
+                 process->state == PROCESS_STATE_ZOMBIE &&
+                 __atomic_load_n(&process->join_waiters, __ATOMIC_ACQUIRE) == 1 &&
+                 process_threads_quiescent_locked(process) &&
+                 process_try_mark_destroying(process);
+    if (process->join_waiters > 0)
+    {
+        __atomic_sub_fetch(&process->join_waiters, 1u, __ATOMIC_ACQ_REL);
+    }
+    spinlock_unlock(&g_process_lock);
+    scheduler_lock_release(sched_flags);
+    cpu_restore_flags(flags);
+
+    if (ready)
+    {
+        process_destroy_marked(process);
+    }
+}
+
+static void process_mark_terminated(process_t *process, int status)
+{
+    if (!process)
+    {
+        return;
+    }
+
+    uint64_t sched_flags = scheduler_lock_acquire("process_mark_terminated");
+    process->exit_status = status;
+    process->state = PROCESS_STATE_ZOMBIE;
+
+    spinlock_lock(&process->threads_lock);
+    for (thread_t *thread = process->threads; thread; thread = thread->process_next)
+    {
+        if (thread_in_run_queue_load(thread))
+        {
+            remove_from_run_queue_locked(thread);
+        }
+        thread_remove_from_wait_queue(thread);
+        if (thread->sleeping)
+        {
+            sleep_queue_remove(thread);
+        }
+        thread->exit_status = status;
+        thread->exited = true;
+        thread->state = THREAD_STATE_ZOMBIE;
+        thread->preempt_pending = false;
+        thread->time_slice_remaining = 0;
+        thread->wake_pending = false;
+        wait_queue_wake_all_locked(&thread->join_queue);
+    }
+    spinlock_unlock(&process->threads_lock);
+
+    /* Process joiners are released last, once the entire thread list has been
+     * made terminal. */
+    wait_queue_wake_all_locked(&process->wait_queue);
+    scheduler_lock_release(sched_flags);
 }
 
 void process_exit(int status)
@@ -444,53 +594,53 @@ void process_exit(int status)
     process_t *proc = current->process;
     if (proc)
     {
-        proc->exit_status = status;
-        proc->state = PROCESS_STATE_ZOMBIE;
-        wait_queue_wake_all(&proc->wait_queue);
-
-        spinlock_lock(&proc->threads_lock);
-        thread_t *thread = proc->threads;
-        while (thread)
-        {
-            if (thread != current)
-            {
-                if (thread_in_run_queue_load(thread))
-                {
-                    remove_from_run_queue(thread);
-                }
-                thread_remove_from_wait_queue(thread);
-                if (thread->sleeping)
-                {
-                    sleep_queue_remove(thread);
-                }
-                thread->exit_status = status;
-                thread->exited = true;
-                thread->state = THREAD_STATE_ZOMBIE;
-                thread->preempt_pending = false;
-                thread->time_slice_remaining = 0;
-                thread->wake_pending = false;
-            }
-            thread = thread->process_next;
-        }
-        spinlock_unlock(&proc->threads_lock);
-        smp_broadcast_schedule_ipi(true);
+        process_mark_terminated(proc, status);
     }
-
-    current->exit_status = status;
-    current->exited = true;
-    current->state = THREAD_STATE_ZOMBIE;
-    current->preempt_pending = false;
-    current->time_slice_remaining = 0;
-    wait_queue_wake_all(&current->join_queue);
+    else
+    {
+        current->exit_status = status;
+        current->exited = true;
+        current->state = THREAD_STATE_ZOMBIE;
+        current->preempt_pending = false;
+        current->time_slice_remaining = 0;
+        wait_queue_wake_all(&current->join_queue);
+    }
+    smp_broadcast_schedule_ipi(false);
 
     scheduler_schedule(false);
     fatal("process_exit returned");
 }
 
-static bool __attribute__((unused)) process_has_exited(void *context)
+static bool process_join_ready(void *context)
 {
     process_t *proc = (process_t *)context;
-    return !proc || !process_pointer_valid(proc) || proc->state == PROCESS_STATE_ZOMBIE;
+    return !proc ||
+           (proc->state == PROCESS_STATE_ZOMBIE && process_threads_quiescent_locked(proc));
+}
+
+static bool process_join_begin(process_t *process)
+{
+    if (!process || process == current_process_local())
+    {
+        return false;
+    }
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    spinlock_lock(&g_process_lock);
+    bool valid = process->magic == PROCESS_MAGIC &&
+                 __atomic_load_n(&process->lifetime_state, __ATOMIC_ACQUIRE) == PROCESS_LIFETIME_ALIVE;
+    if (valid)
+    {
+        __atomic_add_fetch(&process->join_waiters, 1u, __ATOMIC_ACQ_REL);
+    }
+    spinlock_unlock(&g_process_lock);
+    cpu_restore_flags(flags);
+    return valid;
+}
+
+static void process_join_end(process_t *process)
+{
+    process_release_reference(process);
 }
 
 int process_join_with_hook(process_t *process,
@@ -498,31 +648,38 @@ int process_join_with_hook(process_t *process,
                           process_wait_hook_t hook,
                           void *context)
 {
-    if (!process)
+    if (!process_join_begin(process))
     {
         return -1;
     }
 
-    while (process->state != PROCESS_STATE_ZOMBIE)
+    if (hook)
     {
-        if (hook)
+        while (1)
         {
-            hook(context);
-            if (process->state == PROCESS_STATE_ZOMBIE)
+            uint64_t sched_flags = scheduler_lock_acquire("process_join_hook_check");
+            bool ready = process_join_ready(process);
+            scheduler_lock_release(sched_flags);
+            if (ready)
             {
                 break;
             }
+            hook(context);
             process_yield();
-            continue;
         }
-        process_yield();
+    }
+    else
+    {
+        wait_queue_wait(&process->wait_queue, process_join_ready, process);
     }
 
+    int status = process->exit_status;
     if (status_out)
     {
-        *status_out = process->exit_status;
+        *status_out = status;
     }
-    return process->exit_status;
+    process_join_end(process);
+    return status;
 }
 
 int process_join(process_t *process, int *status_out)
@@ -537,61 +694,30 @@ bool process_kill(process_t *process, int status)
         return false;
     }
 
-    uint64_t flags = cpu_save_flags();
-    cpu_cli();
-
-    thread_t *thread = process->current_thread ? process->current_thread : process->main_thread;
-    if (!thread)
+    if (process == current_process_local())
     {
-        cpu_restore_flags(flags);
-        return false;
-    }
-
-    if (process->state == PROCESS_STATE_ZOMBIE || thread->state == THREAD_STATE_ZOMBIE)
-    {
-        process->state = PROCESS_STATE_ZOMBIE;
-        process->exit_status = status;
-        cpu_restore_flags(flags);
-        return true;
-    }
-
-    bool target_running = (thread == current_thread_local());
-    if (target_running)
-    {
-        cpu_restore_flags(flags);
         process_exit(status);
     }
 
-    process->exit_status = status;
-    process->state = PROCESS_STATE_ZOMBIE;
-    wait_queue_wake_all(&process->wait_queue);
-
-    spinlock_lock(&process->threads_lock);
-    thread_t *cursor = process->threads;
-    while (cursor)
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    spinlock_lock(&g_process_lock);
+    bool valid = process->magic == PROCESS_MAGIC &&
+                 __atomic_load_n(&process->lifetime_state, __ATOMIC_ACQUIRE) == PROCESS_LIFETIME_ALIVE;
+    if (valid)
     {
-        if (thread_in_run_queue_load(cursor))
-        {
-            remove_from_run_queue(cursor);
-        }
-        thread_remove_from_wait_queue(cursor);
-        if (cursor->sleeping)
-        {
-            sleep_queue_remove(cursor);
-        }
-        cursor->exit_status = status;
-        cursor->exited = true;
-        cursor->state = THREAD_STATE_ZOMBIE;
-        cursor->preempt_pending = false;
-        cursor->time_slice_remaining = 0;
-        cursor->wake_pending = false;
-        cursor = cursor->process_next;
+        __atomic_add_fetch(&process->join_waiters, 1u, __ATOMIC_ACQ_REL);
     }
-    spinlock_unlock(&process->threads_lock);
-    smp_broadcast_schedule_ipi(true);
-
+    spinlock_unlock(&g_process_lock);
     cpu_restore_flags(flags);
+    if (!valid)
+    {
+        return false;
+    }
 
+    process_mark_terminated(process, status);
+    smp_broadcast_schedule_ipi(false);
+    process_join_end(process);
     return true;
 }
 
@@ -603,10 +729,11 @@ void process_kill_tree(process_t *process)
     }
 
     process_t *child = NULL;
-    while ((child = process_detach_first_child(process)) != NULL)
+    while ((child = process_retain_first_child(process)) != NULL)
     {
         process_kill_tree(child);
-        process_destroy(child);
+        process_join(child, NULL);
+        process_destroy_retained(child);
     }
 
     process_kill(process, -1);
@@ -839,7 +966,7 @@ void wait_queue_wait(wait_queue_t *queue, wait_queue_predicate_t predicate, void
 
         if (thread_in_run_queue_load(thread))
         {
-            remove_from_run_queue(thread);
+            remove_from_run_queue_locked(thread);
         }
         thread->state = THREAD_STATE_BLOCKED;
         thread->waiting_queue = queue;
@@ -913,7 +1040,7 @@ bool wait_queue_wait_timeout(wait_queue_t *queue,
 
         if (thread_in_run_queue_load(thread))
         {
-            remove_from_run_queue(thread);
+            remove_from_run_queue_locked(thread);
         }
         thread->state = THREAD_STATE_BLOCKED;
         thread->waiting_queue = queue;
@@ -930,8 +1057,6 @@ bool wait_queue_wait_timeout(wait_queue_t *queue,
         spinlock_unlock(&queue->lock);
         scheduler_lock_release(sched_flags);
 
-        /* Mirror process_sleep_ticks: clear running_cpu before blocking. */
-        thread_clear_running_cpu(thread);
         scheduler_schedule(false);
         sched_flags = scheduler_lock_acquire("wait_queue_wait_timeout");
     }
@@ -949,7 +1074,6 @@ void wait_queue_wake_one(wait_queue_t *queue)
     spinlock_lock(&queue->lock);
 
     thread_t *thread = wait_queue_dequeue_locked(queue);
-    thread_t *to_enqueue = NULL;
     if (thread)
     {
         thread->waiting_queue = NULL;
@@ -959,36 +1083,32 @@ void wait_queue_wake_one(wait_queue_t *queue)
             !thread->exited &&
             !thread_in_run_queue_load(thread))
         {
-            thread->wake_pending = false;
-            thread->state = THREAD_STATE_READY;
-            __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
-            to_enqueue = thread;
+            uint32_t running_cpu = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
+            if (running_cpu != RUN_QUEUE_CPU_INVALID || thread->in_transition)
+            {
+                thread->wake_pending = true;
+            }
+            else
+            {
+                thread->wake_pending = false;
+                thread->state = THREAD_STATE_READY;
+                enqueue_thread_on_cpu_locked(thread, scheduler_select_target_cpu(thread));
+            }
         }
     }
 
     spinlock_unlock(&queue->lock);
     scheduler_lock_release(sched_flags);
     cpu_restore_flags(flags);
-
-    if (to_enqueue)
-    {
-        enqueue_thread(to_enqueue);
-    }
 }
 
-void wait_queue_wake_all(wait_queue_t *queue)
+void wait_queue_wake_all_locked(wait_queue_t *queue)
 {
     if (!queue)
     {
         return;
     }
-    uint64_t flags = cpu_save_flags();
-    cpu_cli();
-    uint64_t sched_flags = scheduler_lock_acquire("wait_queue_wake_all");
     spinlock_lock(&queue->lock);
-
-    thread_t *pending[32];
-    size_t pending_count = 0;
 
     thread_t *thread = wait_queue_dequeue_locked(queue);
     while (thread)
@@ -1000,34 +1120,57 @@ void wait_queue_wake_all(wait_queue_t *queue)
             !thread->exited &&
             !thread_in_run_queue_load(thread))
         {
-            thread->wake_pending = false;
-            thread->state = THREAD_STATE_READY;
-            __atomic_store_n(&thread->running_cpu, RUN_QUEUE_CPU_INVALID, __ATOMIC_RELEASE);
-            if (pending_count < (sizeof(pending) / sizeof(pending[0])))
+            uint32_t running_cpu = __atomic_load_n(&thread->running_cpu, __ATOMIC_ACQUIRE);
+            if (running_cpu != RUN_QUEUE_CPU_INVALID || thread->in_transition)
             {
-                pending[pending_count++] = thread;
+                thread->wake_pending = true;
+            }
+            else
+            {
+                thread->wake_pending = false;
+                thread->state = THREAD_STATE_READY;
+                enqueue_thread_on_cpu_locked(thread, scheduler_select_target_cpu(thread));
             }
         }
         thread = wait_queue_dequeue_locked(queue);
     }
 
     spinlock_unlock(&queue->lock);
+}
+
+void wait_queue_wake_all(wait_queue_t *queue)
+{
+    if (!queue)
+    {
+        return;
+    }
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    uint64_t sched_flags = scheduler_lock_acquire("wait_queue_wake_all");
+    wait_queue_wake_all_locked(queue);
     scheduler_lock_release(sched_flags);
     cpu_restore_flags(flags);
-
-    for (size_t i = 0; i < pending_count; ++i)
-    {
-        enqueue_thread(pending[i]);
-    }
 }
 
 void process_set_priority(process_t *process, thread_priority_t priority)
 {
-    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    if (!process_pointer_valid(process))
     {
         return;
     }
-    thread_set_base_priority(process->main_thread, priority);
+    if (priority >= THREAD_PRIORITY_COUNT)
+    {
+        priority = THREAD_PRIORITY_NORMAL;
+    }
+    uint64_t sched_flags = scheduler_lock_acquire("process_set_priority");
+    spinlock_lock(&process->threads_lock);
+    process->default_priority = priority;
+    for (thread_t *thread = process->threads; thread; thread = thread->process_next)
+    {
+        thread_set_base_priority_locked(thread, priority);
+    }
+    spinlock_unlock(&process->threads_lock);
+    scheduler_lock_release(sched_flags);
 }
 
 void process_set_thread_priority(thread_t *thread, thread_priority_t priority)
@@ -1041,38 +1184,80 @@ void process_set_thread_priority(thread_t *thread, thread_priority_t priority)
 
 void process_set_affinity(process_t *process, uint32_t cpu_index)
 {
-    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    if (!process_pointer_valid(process) ||
+        cpu_index >= smp_cpu_count() ||
+        !smp_cpu_by_index(cpu_index) ||
+        !__atomic_load_n(&smp_cpu_by_index(cpu_index)->online, __ATOMIC_ACQUIRE))
     {
         return;
     }
-    thread_set_affinity(process->main_thread, true, cpu_index);
+    uint64_t sched_flags = scheduler_lock_acquire("process_set_affinity");
+    spinlock_lock(&process->threads_lock);
+    process->default_affinity_enabled = true;
+    process->default_affinity_cpu = cpu_index;
+    for (thread_t *thread = process->threads; thread; thread = thread->process_next)
+    {
+        thread_set_affinity_locked(thread, true, cpu_index);
+    }
+    spinlock_unlock(&process->threads_lock);
+    scheduler_lock_release(sched_flags);
 }
 
 void process_clear_affinity(process_t *process)
 {
-    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    if (!process_pointer_valid(process))
     {
         return;
     }
-    thread_set_affinity(process->main_thread, false, RUN_QUEUE_CPU_INVALID);
+    uint64_t sched_flags = scheduler_lock_acquire("process_clear_affinity");
+    spinlock_lock(&process->threads_lock);
+    process->default_affinity_enabled = false;
+    process->default_affinity_cpu = RUN_QUEUE_CPU_INVALID;
+    for (thread_t *thread = process->threads; thread; thread = thread->process_next)
+    {
+        thread_set_affinity_locked(thread, false, RUN_QUEUE_CPU_INVALID);
+    }
+    spinlock_unlock(&process->threads_lock);
+    scheduler_lock_release(sched_flags);
 }
 
 void process_set_priority_override(process_t *process, thread_priority_t priority)
 {
-    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    if (!process_pointer_valid(process))
     {
         return;
     }
-    thread_set_priority_override(process->main_thread, true, priority);
+    if (priority >= THREAD_PRIORITY_COUNT)
+    {
+        priority = THREAD_PRIORITY_NORMAL;
+    }
+    uint64_t sched_flags = scheduler_lock_acquire("process_set_priority_override");
+    spinlock_lock(&process->threads_lock);
+    process->default_priority_override_active = true;
+    process->default_priority_override = priority;
+    for (thread_t *thread = process->threads; thread; thread = thread->process_next)
+    {
+        thread_set_priority_override_locked(thread, true, priority);
+    }
+    spinlock_unlock(&process->threads_lock);
+    scheduler_lock_release(sched_flags);
 }
 
 void process_clear_priority_override(process_t *process)
 {
-    if (!process_pointer_valid(process) || !thread_pointer_valid(process->main_thread))
+    if (!process_pointer_valid(process))
     {
         return;
     }
-    thread_set_priority_override(process->main_thread, false, THREAD_PRIORITY_NORMAL);
+    uint64_t sched_flags = scheduler_lock_acquire("process_clear_priority_override");
+    spinlock_lock(&process->threads_lock);
+    process->default_priority_override_active = false;
+    for (thread_t *thread = process->threads; thread; thread = thread->process_next)
+    {
+        thread_set_priority_override_locked(thread, false, THREAD_PRIORITY_NORMAL);
+    }
+    spinlock_unlock(&process->threads_lock);
+    scheduler_lock_release(sched_flags);
 }
 
 
@@ -1132,7 +1317,7 @@ bool process_query_user_layout(const process_t *process,
  *
  * Returns the previous break on success; returns -1 on failure.
  */
-int64_t process_user_sbrk(process_t *process, int64_t increment)
+static int64_t process_user_sbrk_locked(process_t *process, int64_t increment)
 {
     if (!process || !process->is_user || process->user_heap_base == 0)
     {
@@ -1217,6 +1402,18 @@ int64_t process_user_sbrk(process_t *process, int64_t increment)
     return (int64_t)current;
 }
 
+int64_t process_user_sbrk(process_t *process, int64_t increment)
+{
+    if (!process)
+    {
+        return -1;
+    }
+    uint64_t flags = process_memory_lock(process);
+    int64_t result = process_user_sbrk_locked(process, increment);
+    process_memory_unlock(process, flags);
+    return result;
+}
+
 uint64_t thread_current_tid(void)
 {
     thread_t *thread = current_thread_local();
@@ -1241,7 +1438,7 @@ int64_t process_user_thread_create(const char *name,
     }
 
     if (entry < USER_ADDRESS_SPACE_BASE ||
-        entry >= g_mem_layout.user_pointer_limit)
+        entry > USER_ADDRESS_SPACE_LIMIT)
     {
         return -1;
     }
@@ -1254,6 +1451,7 @@ int64_t process_user_thread_create(const char *name,
     }
 
     const uintptr_t guard_bytes = PAGE_SIZE_BYTES_LOCAL;
+    uint64_t memory_flags = process_memory_lock(proc);
     uintptr_t top = proc->user_thread_stack_next;
     if (top == 0 || top > USER_STUB_CODE_BASE)
     {
@@ -1261,6 +1459,7 @@ int64_t process_user_thread_create(const char *name,
     }
     if (top <= stack_bytes + guard_bytes)
     {
+        process_memory_unlock(proc, memory_flags);
         return -1;
     }
 
@@ -1268,15 +1467,24 @@ int64_t process_user_thread_create(const char *name,
     uintptr_t next_top = base - guard_bytes;
     if (proc->user_heap_limit != 0 && next_top <= proc->user_heap_limit)
     {
+        process_memory_unlock(proc, memory_flags);
         return -1;
     }
 
     void *host_stack = NULL;
-    if (!process_map_user_segment(proc, base, stack_bytes, true, false, &host_stack))
+    if (!process_map_user_segment_locked(proc,
+                                         base,
+                                         stack_bytes,
+                                         true,
+                                         false,
+                                         false,
+                                         &host_stack))
     {
+        process_memory_unlock(proc, memory_flags);
         return -1;
     }
     proc->user_thread_stack_next = next_top;
+    process_memory_unlock(proc, memory_flags);
     paging_flush_space_tlb(&proc->address_space);
 
     uintptr_t ret_addr = USER_STUB_CODE_BASE + USER_THREAD_EXIT_STUB_OFFSET;
@@ -1286,6 +1494,7 @@ int64_t process_user_thread_create(const char *name,
     user_thread_bootstrap_t *bootstrap = (user_thread_bootstrap_t *)malloc(sizeof(*bootstrap));
     if (!bootstrap)
     {
+        (void)process_unmap_user_segment(proc, base, stack_bytes);
         return -1;
     }
     bootstrap->entry = entry;
@@ -1307,8 +1516,12 @@ int64_t process_user_thread_create(const char *name,
     if (!thread)
     {
         free(bootstrap);
+        (void)process_unmap_user_segment(proc, base, stack_bytes);
         return -1;
     }
+
+    thread->user_stack_base = base;
+    thread->user_stack_size = stack_bytes;
 
     enqueue_thread(thread);
     return (int64_t)thread->tid;
@@ -1425,13 +1638,14 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity)
         process_info_t *info = &buffer[count++];
         info->pid = proc->pid;
         info->state = proc->state;
-        info->name = proc->name[0] ? proc->name : "(anon)";
+        process_snapshot_copy_name(info->name, proc->name[0] ? proc->name : "(anon)");
         info->stdout_fd = proc->stdout_fd;
-        thread_t *thread = proc->current_thread ? proc->current_thread : proc->main_thread;
+        spinlock_lock(&proc->threads_lock);
+        thread_t *thread = proc->main_thread ? proc->main_thread : proc->threads;
         if (thread)
         {
             info->thread_state = thread->state;
-            info->thread_name = thread->name[0] ? thread->name : "";
+            process_snapshot_copy_name(info->thread_name, thread->name[0] ? thread->name : "");
             info->is_idle = thread->is_idle;
             info->time_slice_remaining = thread->time_slice_remaining;
             info->last_cpu_index = __atomic_load_n(&thread->last_cpu_index, __ATOMIC_RELAXED);
@@ -1439,14 +1653,24 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity)
         else
         {
             info->thread_state = THREAD_STATE_ZOMBIE;
-            info->thread_name = "";
+            info->thread_name[0] = '\0';
             info->is_idle = false;
             info->time_slice_remaining = 0;
             info->last_cpu_index = RUN_QUEUE_CPU_INVALID;
         }
-        info->is_current = (proc == current_process_local());
+        spinlock_unlock(&proc->threads_lock);
+        info->is_current = false;
+        for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; ++cpu)
+        {
+            if (g_current_processes[cpu] == proc)
+            {
+                info->is_current = true;
+                break;
+            }
+        }
         info->runtime_ticks = __atomic_load_n(&proc->runtime_ticks, __ATOMIC_RELAXED);
 
+        uint64_t memory_flags = process_memory_lock(proc);
         if (proc->is_user && proc->user_heap_base != 0 && proc->user_heap_brk >= proc->user_heap_base)
         {
             uintptr_t committed = proc->user_heap_committed;
@@ -1462,6 +1686,7 @@ size_t process_snapshot(process_info_t *buffer, size_t capacity)
             info->heap_used_bytes = 0;
             info->heap_committed_bytes = 0;
         }
+        process_memory_unlock(proc, memory_flags);
     }
     spinlock_unlock(&g_process_lock);
 
@@ -1482,6 +1707,7 @@ size_t process_cpu_snapshot(process_cpu_info_t *buffer, size_t capacity)
         cpu_count = SMP_MAX_CPUS;
     }
 
+    uint64_t sched_flags = scheduler_lock_acquire("process_cpu_snapshot");
     size_t count = 0;
     for (uint32_t i = 0; i < cpu_count && count < capacity; ++i)
     {
@@ -1495,19 +1721,21 @@ size_t process_cpu_snapshot(process_cpu_info_t *buffer, size_t capacity)
         info->switch_count = __atomic_load_n(&g_cpu_switch_counts[i], __ATOMIC_RELAXED);
         info->current_pid = 0;
         info->current_thread_state = THREAD_STATE_ZOMBIE;
-        info->current_process_name = "";
-        info->current_thread_name = "";
+        info->current_process_name[0] = '\0';
+        info->current_thread_name[0] = '\0';
 
         thread_t *current = g_current_threads[i];
         if (current)
         {
             info->current_thread_state = current->state;
             info->current_pid = current->process ? current->process->pid : 0;
-            info->current_process_name = (current->process && current->process->name[0]) ? current->process->name : "";
-            info->current_thread_name = current->name[0] ? current->name : "";
+            process_snapshot_copy_name(info->current_process_name,
+                                       (current->process && current->process->name[0]) ? current->process->name : "");
+            process_snapshot_copy_name(info->current_thread_name, current->name[0] ? current->name : "");
         }
     }
 
+    scheduler_lock_release(sched_flags);
     return count;
 }
 
@@ -1743,26 +1971,42 @@ void process_on_timer_tick(interrupt_frame_t *frame)
         return;
     }
 
-    static uint64_t last_proc_log = 0;
-    uint64_t now_ticks = timer_ticks();
-    uint64_t freq = timer_frequency();
-    if (freq == 0)
-    {
-        freq = 1000;
-    }
-    uint64_t interval = freq * 5ULL;
-    if (smp_current_cpu_index() == 0 &&
-        (last_proc_log == 0 || (now_ticks - last_proc_log) >= interval))
-    {
-        last_proc_log = now_ticks;
-        scheduler_log_process_age_snapshot(now_ticks);
-    }
-
-    sleep_queue_wake_due(timer_ticks());
-    stack_watch_check_timeouts();
-
     thread_t *thread = current_thread_local();
     cpu_account_tick(thread);
+
+    /* Generic spinlocks raise this depth before attempting the lock.  Do not
+     * enter scheduler housekeeping from an interrupt while the interrupted
+     * thread owns (or is waiting for) one: housekeeping acquires the scheduler
+     * lock and can otherwise invert scheduler -> subsidiary-lock ordering on
+     * another CPU.  A later timer/IPI will perform the deferred work. */
+    if (spinlock_preempt_disabled())
+    {
+        return;
+    }
+
+    /* IRQ0 runs on the BSP and broadcasts schedule IPIs to the APs.  Global
+     * housekeeping must run once per tick, not once on every CPU, otherwise
+     * every IPI contends on the same scheduler and sleep-queue locks. */
+    if (smp_current_cpu_index() == 0)
+    {
+        static uint64_t last_proc_log = 0;
+        uint64_t now_ticks = timer_ticks();
+        uint64_t freq = timer_frequency();
+        if (freq == 0)
+        {
+            freq = 1000;
+        }
+        uint64_t interval = freq * 5ULL;
+        if (last_proc_log == 0 || (now_ticks - last_proc_log) >= interval)
+        {
+            last_proc_log = now_ticks;
+            scheduler_log_process_age_snapshot(now_ticks);
+        }
+
+        sleep_queue_wake_due(now_ticks);
+        stack_watch_check_timeouts();
+    }
+
     if (!thread || thread->is_idle)
     {
         return;
@@ -1771,7 +2015,6 @@ void process_on_timer_tick(interrupt_frame_t *frame)
     {
         return;
     }
-
     uint64_t kernel_rsp = 0;
     __asm__ volatile ("mov %%rsp, %0" : "=r"(kernel_rsp));
 

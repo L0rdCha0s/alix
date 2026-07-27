@@ -82,17 +82,17 @@ void serial_init(void)
 
 static void serial_hw_write_char(char c)
 {
-    spinlock_lock(&g_serial_hw_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_serial_hw_lock);
     while (!serial_transmit_ready())
     {
     }
     outb(COM1, (uint8_t)c);
-    spinlock_unlock(&g_serial_hw_lock);
+    spinlock_unlock_irqrestore(&g_serial_hw_lock, flags);
 }
 
 static void serial_queue_push(char c)
 {
-    spinlock_lock(&g_serial_queue_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_serial_queue_lock);
     size_t next_tail = (g_serial_queue_tail + 1) % SERIAL_QUEUE_SIZE;
     if (next_tail == g_serial_queue_head)
     {
@@ -101,20 +101,20 @@ static void serial_queue_push(char c)
     }
     g_serial_queue[g_serial_queue_tail] = c;
     g_serial_queue_tail = next_tail;
-    spinlock_unlock(&g_serial_queue_lock);
+    spinlock_unlock_irqrestore(&g_serial_queue_lock, flags);
 }
 
 static bool serial_queue_pop(char *out)
 {
     bool result = false;
-    spinlock_lock(&g_serial_queue_lock);
+    uint64_t flags = spinlock_lock_irqsave(&g_serial_queue_lock);
     if (g_serial_queue_head != g_serial_queue_tail)
     {
         *out = g_serial_queue[g_serial_queue_head];
         g_serial_queue_head = (g_serial_queue_head + 1) % SERIAL_QUEUE_SIZE;
         result = true;
     }
-    spinlock_unlock(&g_serial_queue_lock);
+    spinlock_unlock_irqrestore(&g_serial_queue_lock, flags);
     return result;
 }
 

@@ -16,6 +16,28 @@
  * See docs/kernel/memory.md.
  */
 
+static uintptr_t process_stack_bottom(const process_t *process);
+
+uint64_t process_memory_lock(process_t *process)
+{
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    if (process)
+    {
+        spinlock_lock(&process->memory_lock);
+    }
+    return flags;
+}
+
+void process_memory_unlock(process_t *process, uint64_t flags)
+{
+    if (process)
+    {
+        spinlock_unlock(&process->memory_lock);
+    }
+    cpu_restore_flags(flags);
+}
+
 process_t *allocate_process(const char *name, bool is_user)
 {
     bool needs_clone = is_user;
@@ -49,7 +71,7 @@ process_t *allocate_process(const char *name, bool is_user)
     memset(proc, 0, sizeof(*proc));
     serial_printf("[process] allocate name=%s\r\n",
                   (name && name[0]) ? name : "<unnamed>");
-    proc->pid = g_next_pid++;
+    proc->pid = __sync_fetch_and_add(&g_next_pid, 1);
     proc->state = PROCESS_STATE_READY;
     proc->lifetime_state = PROCESS_LIFETIME_ALIVE;
     bool space_ready = false;
@@ -109,8 +131,11 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->main_thread = NULL;
     proc->current_thread = NULL;
     spinlock_init(&proc->threads_lock);
+    spinlock_init(&proc->memory_lock);
     proc->threads = NULL;
     proc->thread_count = 0;
+    proc->running_thread_count = 0;
+    proc->join_waiters = 0;
     proc->next = NULL;
     proc->stdout_fd = g_console_stdout_fd;
     proc->uid = VFS_UID_ROOT;
@@ -138,6 +163,11 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->user_heap_committed = 0;
     proc->heap_page_dirs = NULL;
     proc->heap_dir_count = 0;
+    proc->default_priority = THREAD_PRIORITY_NORMAL;
+    proc->default_priority_override = THREAD_PRIORITY_NORMAL;
+    proc->default_priority_override_active = false;
+    proc->default_affinity_enabled = false;
+    proc->default_affinity_cpu = RUN_QUEUE_CPU_INVALID;
     proc->magic = PROCESS_MAGIC;
     wait_queue_init(&proc->wait_queue);
     return proc;
@@ -575,12 +605,21 @@ static bool __attribute__((unused)) process_heap_commit(process_t *process, uint
  * On success, `host_ptr_out` receives a kernel-mapped pointer to the same
  * physical pages, which is useful for initialising contents (ELF copy, zeroing).
  */
-bool process_map_user_segment(process_t *process,
-                              uintptr_t user_base,
-                              size_t bytes,
-                              bool writable,
-                              bool executable,
-                              void **host_ptr_out)
+static bool process_ranges_overlap(uintptr_t lhs_base,
+                                   uintptr_t lhs_end,
+                                   uintptr_t rhs_base,
+                                   uintptr_t rhs_end)
+{
+    return lhs_base < rhs_end && rhs_base < lhs_end;
+}
+
+bool process_map_user_segment_locked(process_t *process,
+                                     uintptr_t user_base,
+                                     size_t bytes,
+                                     bool writable,
+                                     bool executable,
+                                     bool allow_reserved,
+                                     void **host_ptr_out)
 {
     if (!process || bytes == 0)
     {
@@ -589,7 +628,55 @@ bool process_map_user_segment(process_t *process,
 
     uintptr_t aligned_base = align_down_uintptr(user_base, PAGE_SIZE_BYTES_LOCAL);
     size_t offset = (size_t)(user_base - aligned_base);
+    if (bytes > SIZE_MAX - offset)
+    {
+        return false;
+    }
+    if (bytes + offset > SIZE_MAX - (PAGE_SIZE_BYTES_LOCAL - 1))
+    {
+        return false;
+    }
     size_t total = align_up_size(bytes + offset, PAGE_SIZE_BYTES_LOCAL);
+    if (total == 0 || total < bytes || aligned_base < USER_ADDRESS_SPACE_BASE ||
+        aligned_base > UINTPTR_MAX - total)
+    {
+        return false;
+    }
+    uintptr_t aligned_end = aligned_base + total;
+    if (aligned_end == 0 || aligned_end - 1 > USER_ADDRESS_SPACE_LIMIT)
+    {
+        return false;
+    }
+
+    if (!allow_reserved)
+    {
+        uintptr_t stack_bottom = process_stack_bottom(process);
+        if ((process->user_heap_limit > process->user_heap_base &&
+             process_ranges_overlap(aligned_base, aligned_end,
+                                    process->user_heap_base, process->user_heap_limit)) ||
+            (stack_bottom != 0 && process->user_stack_top > stack_bottom &&
+             process_ranges_overlap(aligned_base, aligned_end,
+                                    stack_bottom, process->user_stack_top)) ||
+            process_ranges_overlap(aligned_base, aligned_end,
+                                   USER_STUB_CODE_BASE,
+                                   USER_PREEMPT_STUB_BASE + PAGE_SIZE_BYTES_LOCAL))
+        {
+            return false;
+        }
+    }
+
+    for (process_user_region_t *existing = process->user_regions;
+         existing;
+         existing = existing->next)
+    {
+        uintptr_t existing_end = existing->user_base + existing->mapped_size;
+        if (existing_end < existing->user_base ||
+            process_ranges_overlap(aligned_base, aligned_end,
+                                   existing->user_base, existing_end))
+        {
+            return false;
+        }
+    }
 
     process_user_region_t *region = NULL;
     if (!process_user_region_allocate(process,
@@ -613,6 +700,63 @@ bool process_map_user_segment(process_t *process,
         uint8_t *base_ptr = (uint8_t *)phys_to_virt(region->phys_base);
         *host_ptr_out = base_ptr + offset;
     }
+    return true;
+}
+
+bool process_map_user_segment(process_t *process,
+                              uintptr_t user_base,
+                              size_t bytes,
+                              bool writable,
+                              bool executable,
+                              void **host_ptr_out)
+{
+    uint64_t flags = process_memory_lock(process);
+    bool ok = process_map_user_segment_locked(process,
+                                              user_base,
+                                              bytes,
+                                              writable,
+                                              executable,
+                                              false,
+                                              host_ptr_out);
+    process_memory_unlock(process, flags);
+    return ok;
+}
+
+bool process_unmap_user_segment(process_t *process, uintptr_t user_base, size_t bytes)
+{
+    if (!process || bytes == 0)
+    {
+        return false;
+    }
+    uintptr_t aligned_base = align_down_uintptr(user_base, PAGE_SIZE_BYTES_LOCAL);
+    size_t offset = (size_t)(user_base - aligned_base);
+    if (bytes > SIZE_MAX - offset)
+    {
+        return false;
+    }
+    if (bytes + offset > SIZE_MAX - (PAGE_SIZE_BYTES_LOCAL - 1))
+    {
+        return false;
+    }
+    size_t total = align_up_size(bytes + offset, PAGE_SIZE_BYTES_LOCAL);
+    uint64_t flags = process_memory_lock(process);
+    process_user_region_t *region = process->user_regions;
+    while (region && (region->user_base != aligned_base || region->mapped_size != total))
+    {
+        region = region->next;
+    }
+    if (!region)
+    {
+        process_memory_unlock(process, flags);
+        return false;
+    }
+    for (uintptr_t addr = aligned_base; addr < aligned_base + total; addr += PAGE_SIZE_BYTES_LOCAL)
+    {
+        (void)paging_unmap_user_page(&process->address_space, addr);
+    }
+    process_unlink_user_region(process, region);
+    paging_flush_space_tlb(&process->address_space);
+    process_memory_unlock(process, flags);
     return true;
 }
 
@@ -934,7 +1078,7 @@ static bool process_stack_commit_range(process_t *process, uintptr_t start, uint
         }
         if (process->user_stack_pages[page_index] != 0)
         {
-            continue;
+            break;
         }
 
         paddr_t phys = 0;
@@ -1061,7 +1205,10 @@ bool process_stack_handle_page_fault(process_t *process, uintptr_t fault_addr, u
         return false;
     }
 
-    return process_stack_ensure_range(process, fault_addr, sizeof(uintptr_t));
+    uint64_t flags = process_memory_lock(process);
+    bool ok = process_stack_ensure_range(process, fault_addr, sizeof(uintptr_t));
+    process_memory_unlock(process, flags);
+    return ok;
 }
 
 static bool process_setup_preempt_stub(process_t *process)
@@ -1072,12 +1219,16 @@ static bool process_setup_preempt_stub(process_t *process)
     }
 
     void *stub_ptr = NULL;
-    if (!process_map_user_segment(process,
-                                  USER_PREEMPT_STUB_BASE,
-                                  PAGE_SIZE_BYTES_LOCAL,
-                                  false,
-                                  true,
-                                  &stub_ptr))
+    uint64_t flags = process_memory_lock(process);
+    bool mapped = process_map_user_segment_locked(process,
+                                                  USER_PREEMPT_STUB_BASE,
+                                                  PAGE_SIZE_BYTES_LOCAL,
+                                                  false,
+                                                  true,
+                                                  true,
+                                                  &stub_ptr);
+    process_memory_unlock(process, flags);
+    if (!mapped)
     {
         return false;
     }
@@ -1287,12 +1438,16 @@ bool process_setup_basic_user_memory(process_t *process)
         return false;
     }
     void *stub_ptr = NULL;
-    if (!process_map_user_segment(process,
-                                  USER_STUB_CODE_BASE,
-                                  PAGE_SIZE_BYTES_LOCAL,
-                                  false,
-                                  true,
-                                  &stub_ptr))
+    uint64_t flags = process_memory_lock(process);
+    bool mapped = process_map_user_segment_locked(process,
+                                                  USER_STUB_CODE_BASE,
+                                                  PAGE_SIZE_BYTES_LOCAL,
+                                                  false,
+                                                  true,
+                                                  true,
+                                                  &stub_ptr);
+    process_memory_unlock(process, flags);
+    if (!mapped)
     {
         return false;
     }

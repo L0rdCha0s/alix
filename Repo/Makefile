@@ -219,6 +219,8 @@ HTML_JS_TEST_BIN := $(HOST_TEST_DIR)/html_js_host_test
 TLS_TEST_BIN := $(HOST_TEST_DIR)/tls_host_test
 JS_TEST_BIN := $(HOST_TEST_DIR)/js_host_test
 TEST262_TEST_BIN := $(HOST_TEST_DIR)/test262_host_test
+ELF_VALIDATION_TEST_BIN := $(HOST_TEST_DIR)/elf_validation_host_test
+QUAKE_LIVENESS_TEST_BIN := $(HOST_TEST_DIR)/quake_liveness_host_test
 HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -iquote $(INCLUDE_DIR) -DTTF_HOST_BUILD
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
@@ -494,6 +496,16 @@ $(SHA256_TEST_BIN): tests/sha256_host_test.c src/crypto/sha256.c include/crypto/
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/sha256_host_test.c src/crypto/sha256.c -o $@
 
+$(ELF_VALIDATION_TEST_BIN): tests/elf_validation_host_test.c src/kernel/elf.c include/elf.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/elf_validation_host_test.c src/kernel/elf.c -o $@
+
+$(QUAKE_LIVENESS_TEST_BIN): tests/quake_liveness_host_test.c \
+                            user/apps/quake/liveness.c user/apps/quake/liveness.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/apps/quake \
+	    tests/quake_liveness_host_test.c user/apps/quake/liveness.c -o $@
+
 $(PNG_TEST_BIN): tests/png_host_test.c src/atk/util/png.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD tests/png_host_test.c src/atk/util/png.c -o $@
@@ -748,6 +760,10 @@ else
   QEMU_CPU_OPTS := -cpu $(CPU_TYPE)
 endif
 QEMU_MACHINE_OPTS := -machine q35,accel=$(QEMU_ACCEL)
+# q35 creates an i8042/PS2 keyboard even with -nodefaults.  USB kernels disable
+# their PS/2 input path, so leave no unserviced keyboard for the display backend
+# to select.  The dedicated run-ps2-hdd target intentionally keeps i8042.
+QEMU_USB_MACHINE_OPTS := -machine q35,accel=$(QEMU_ACCEL),i8042=off
 
 # --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)
 NET_BACKEND ?= vmnet-shared
@@ -790,7 +806,7 @@ QEMU_AUDIO := -audiodev $(AUDIO_DEV),id=$(HDA_AUDIO_ID)
 
 run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
@@ -811,7 +827,7 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 
 run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
@@ -832,7 +848,7 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 
 run-hdd-rtl: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 	$(QEMU_NET_PREFIX) \
-	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
 		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
@@ -892,6 +908,34 @@ ttf-test: $(HOST_TEST_BIN)
 sha256-test: $(SHA256_TEST_BIN)
 	$(SHA256_TEST_BIN)
 
+quake-liveness-test: $(QUAKE_LIVENESS_TEST_BIN)
+	$(QUAKE_LIVENESS_TEST_BIN)
+
+elf-validation-test: $(ELF_VALIDATION_TEST_BIN)
+	$(ELF_VALIDATION_TEST_BIN)
+
+process-smoke-test: all
+	./run-via-agent.sh
+	./tests/process_smoke_test.sh qemu-serial.log
+
+process-lock-contract-test:
+	python3 tests/process_locking_contract_test.py
+
+atk-background-lock-contract-test:
+	python3 tests/atk_background_locking_contract_test.py
+
+process-lock-stress-test: all process-lock-contract-test
+	python3 tests/process_lock_stress_test.py
+
+keyboard-boot-input-test: all process-lock-contract-test
+	python3 tests/keyboard_boot_input_test.py
+
+gui-wakeup-test: all process-lock-contract-test
+	python3 tests/gui_wakeup_test.py
+
+quake-gui-liveness-test: all process-lock-contract-test atk-background-lock-contract-test quake-liveness-test
+	python3 tests/quake_gui_liveness_test.py
+
 web-test: $(WEB_TEST_BIN)
 	$(WEB_TEST_BIN)
 
@@ -923,6 +967,10 @@ test262-test: $(TEST262_TEST_BIN)
 test:
 	$(MAKE) test-dhcp
 	$(MAKE) sha256-test
+	$(MAKE) quake-liveness-test
+	$(MAKE) elf-validation-test
+	$(MAKE) process-lock-contract-test
+	$(MAKE) atk-background-lock-contract-test
 	$(MAKE) web-test
 	$(MAKE) css-test
 	$(MAKE) browser-event-test
@@ -933,9 +981,8 @@ test:
 	$(MAKE) html-js-test
 	$(MAKE) html-view-test
 
-.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test web-test css-test browser-event-test png-test tls-test js-test html-js-test html-view-test test262-test
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test quake-liveness-test elf-validation-test process-smoke-test process-lock-contract-test atk-background-lock-contract-test process-lock-stress-test keyboard-boot-input-test gui-wakeup-test quake-gui-liveness-test web-test css-test browser-event-test png-test tls-test js-test html-js-test html-view-test test262-test
 
--include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) \
-         $(USER_OBJDIR)/*.d $(USER_OBJDIR)/atk/*.d $(USER_OBJDIR)/atk/util/*.d \
-         $(USER_OBJDIR)/kernel/*.d $(USER_OBJDIR)/doom/*.d \
-         $(USER_OBJDIR)/lib/*.d $(USER_OBJDIR)/lib/atk/*.d $(USER_OBJDIR)/lib/web/*.d
+USER_DEPFILES := $(shell find $(USER_OBJDIR) -type f -name '*.d' 2>/dev/null)
+
+-include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) $(USER_DEPFILES)

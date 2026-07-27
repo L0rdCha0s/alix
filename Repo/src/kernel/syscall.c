@@ -214,10 +214,8 @@ static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t c
         out->runtime_ticks = info->runtime_ticks;
         out->last_cpu_index = info->last_cpu_index;
 
-        const char *proc_name = info->name ? info->name : "";
-        const char *thread_name = info->thread_name ? info->thread_name : "";
-        syscall_copy_string(out->process_name, SYSCALL_PROCESS_NAME_MAX, proc_name);
-        syscall_copy_string(out->thread_name, SYSCALL_PROCESS_NAME_MAX, thread_name);
+        syscall_copy_string(out->process_name, SYSCALL_PROCESS_NAME_MAX, info->name);
+        syscall_copy_string(out->thread_name, SYSCALL_PROCESS_NAME_MAX, info->thread_name);
     }
 
     if (count > 0)

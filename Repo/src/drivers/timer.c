@@ -1,6 +1,7 @@
 #include "timer.h"
 #include "io.h"
 #include "interrupts.h"
+#include "spinlock.h"
 
 #define PIT_CHANNEL0 0x40
 #define PIT_COMMAND  0x43
@@ -51,6 +52,16 @@ void timer_init(uint32_t frequency_hz)
 void timer_on_tick(void)
 {
     g_ticks++;
+
+    /* IRQ0 can interrupt code which already owns a generic kernel spinlock.
+     * Timer tasks enter the scheduler, storage and network stacks, so running
+     * them in that state creates an interrupt-side lock-order inversion.  Keep
+     * time monotonic, but defer task dispatch until a later safe tick. */
+    if (spinlock_preempt_disabled())
+    {
+        return;
+    }
+
     for (size_t i = 0; i < TIMER_MAX_TASKS; ++i)
     {
         timer_task_t *task = &g_tasks[i];

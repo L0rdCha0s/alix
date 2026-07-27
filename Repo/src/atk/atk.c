@@ -208,119 +208,184 @@ typedef struct
 } atk_background_image_t;
 
 static atk_background_image_t g_atk_background = { 0 };
+static volatile bool g_atk_background_refreshing = false;
 
-static void atk_background_free(void)
+static bool atk_background_read_exact(vfs_node_t *node, void *buffer, size_t size)
 {
-    if (g_atk_background.pixels)
+    size_t offset = 0;
+    while (offset < size)
     {
-        free(g_atk_background.pixels);
+        ssize_t read_bytes = vfs_read_at(node,
+                                         offset,
+                                         (uint8_t *)buffer + offset,
+                                         size - offset);
+        if (read_bytes <= 0 || (size_t)read_bytes > size - offset)
+        {
+            return false;
+        }
+        offset += (size_t)read_bytes;
     }
-    g_atk_background.pixels = NULL;
-    g_atk_background.width = 0;
-    g_atk_background.height = 0;
-    g_atk_background.stride_bytes = 0;
-    g_atk_background.path[0] = '\0';
-    g_atk_background.loaded = false;
+    return true;
 }
 
-static void atk_background_clear(void)
+static bool atk_background_read_config_path(char path[256])
 {
-    if (g_atk_background.loaded)
+    path[0] = '\0';
+
+    vfs_node_t *node = vfs_resolve(vfs_root(), "/etc/display/background");
+    size_t size = 0;
+    vfs_node_type_t type = VFS_NODE_DIR;
+    if (!node || !vfs_stat(node, &size, &type, NULL, NULL, NULL) ||
+        type != VFS_NODE_FILE || size == 0)
     {
-        atk_background_free();
-        atk_dirty_mark_all();
+        return false;
     }
+
+    size_t copy = (size < 255) ? size : 255;
+    if (!atk_background_read_exact(node, path, copy))
+    {
+        return false;
+    }
+    path[copy] = '\0';
+
+    while (copy > 0 &&
+           (path[copy - 1] == '\n' || path[copy - 1] == '\r' ||
+            path[copy - 1] == ' ' || path[copy - 1] == '\t'))
+    {
+        path[--copy] = '\0';
+    }
+    return path[0] != '\0';
 }
 
-static bool atk_background_load_path(const char *path)
+static bool atk_background_stage_path(const char *path, atk_background_image_t *staged)
 {
-    if (!path || *path == '\0')
+    if (!path || *path == '\0' || !staged)
     {
         return false;
     }
 
     vfs_node_t *node = vfs_resolve(vfs_root(), path);
-    if (!node || !vfs_is_file(node))
+    size_t size = 0;
+    vfs_node_type_t type = VFS_NODE_DIR;
+    if (!node || !vfs_stat(node, &size, &type, NULL, NULL, NULL) ||
+        type != VFS_NODE_FILE || size == 0)
     {
         return false;
     }
-    size_t size = 0;
-    const char *data = vfs_data(node, &size);
-    if (!data || size == 0)
+
+    uint8_t *data = (uint8_t *)malloc(size);
+    if (!data)
     {
+        return false;
+    }
+    if (!atk_background_read_exact(node, data, size))
+    {
+        free(data);
         return false;
     }
 
     video_color_t *pixels = NULL;
     int w = 0, h = 0, stride = 0;
-    int rc = png_decode_rgba32((const uint8_t *)data, size, &pixels, &w, &h, &stride);
+    int rc = png_decode_rgba32(data, size, &pixels, &w, &h, &stride);
+    free(data);
     if (rc != 0 || !pixels)
     {
         return false;
     }
 
-    atk_background_free();
-    g_atk_background.pixels = pixels;
-    g_atk_background.width = w;
-    g_atk_background.height = h;
-    g_atk_background.stride_bytes = stride;
-    g_atk_background.loaded = true;
+    staged->pixels = pixels;
+    staged->width = w;
+    staged->height = h;
+    staged->stride_bytes = stride;
+    staged->loaded = true;
     size_t path_len = strlen(path);
-    if (path_len >= sizeof(g_atk_background.path))
+    if (path_len >= sizeof(staged->path))
     {
-        path_len = sizeof(g_atk_background.path) - 1;
+        path_len = sizeof(staged->path) - 1;
     }
-    memcpy(g_atk_background.path, path, path_len);
-    g_atk_background.path[path_len] = '\0';
+    memcpy(staged->path, path, path_len);
+    staged->path[path_len] = '\0';
     return true;
 }
 
-static void atk_background_reload_if_needed(void)
+static bool atk_background_path_is_current(const char *path)
 {
-    vfs_node_t *bgfile = vfs_resolve(vfs_root(), "/etc/display/background");
-    if (!bgfile || !vfs_is_file(bgfile))
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
+    bool current = g_atk_background.loaded &&
+                   path && strcmp(path, g_atk_background.path) == 0;
+    atk_state_lock_release(irq_state);
+    return current;
+}
+
+static void atk_background_commit(atk_background_image_t *staged)
+{
+    video_color_t *old_pixels = NULL;
+    bool changed = false;
+
+    atk_state_lock_init();
+    uint64_t irq_state = atk_state_lock_acquire();
+    if (staged && staged->loaded)
     {
-        atk_background_clear();
-        return;
+        if (!g_atk_background.loaded ||
+            strcmp(staged->path, g_atk_background.path) != 0)
+        {
+            old_pixels = g_atk_background.pixels;
+            g_atk_background = *staged;
+            staged->pixels = NULL;
+            staged->loaded = false;
+            changed = true;
+        }
     }
-
-    size_t size = 0;
-    const char *data = vfs_data(bgfile, &size);
-    if (!data || size == 0)
+    else if (g_atk_background.loaded)
     {
-        atk_background_clear();
-        return;
+        old_pixels = g_atk_background.pixels;
+        atk_background_image_t empty = { 0 };
+        g_atk_background = empty;
+        changed = true;
     }
-
-    char path[256];
-    size_t copy = (size < sizeof(path) - 1) ? size : (sizeof(path) - 1);
-    memcpy(path, data, copy);
-    path[copy] = '\0';
-
-    while (copy > 0 && (path[copy - 1] == '\n' || path[copy - 1] == '\r' || path[copy - 1] == ' ' || path[copy - 1] == '\t'))
-    {
-        path[--copy] = '\0';
-    }
-
-    if (path[0] == '\0')
-    {
-        atk_background_clear();
-        return;
-    }
-
-    if (g_atk_background.loaded && strcmp(path, g_atk_background.path) == 0)
-    {
-        return;
-    }
-
-    if (atk_background_load_path(path))
+    if (changed)
     {
         atk_dirty_mark_all();
     }
-    else
+    atk_state_lock_release(irq_state);
+
+    if (old_pixels)
     {
-        atk_background_clear();
+        free(old_pixels);
     }
+}
+
+void atk_background_refresh(void)
+{
+    /* Refresh callers run without the render/ATK locks, so another video
+     * thread may arrive here concurrently. Wait cooperatively rather than
+     * letting that caller consume the full refresh before staging completes. */
+    while (__atomic_exchange_n(&g_atk_background_refreshing, true, __ATOMIC_ACQUIRE))
+    {
+        process_yield();
+    }
+
+    char path[256];
+    bool have_path = atk_background_read_config_path(path);
+    if (have_path && atk_background_path_is_current(path))
+    {
+        __atomic_store_n(&g_atk_background_refreshing, false, __ATOMIC_RELEASE);
+        return;
+    }
+
+    atk_background_image_t staged = { 0 };
+    if (have_path)
+    {
+        (void)atk_background_stage_path(path, &staged);
+    }
+    atk_background_commit(&staged);
+    if (staged.pixels)
+    {
+        free(staged.pixels);
+    }
+
+    __atomic_store_n(&g_atk_background_refreshing, false, __ATOMIC_RELEASE);
 }
 
 #if defined(KERNEL_BUILD) && !defined(ATK_NO_DESKTOP_APPS)
@@ -475,7 +540,6 @@ static void atk_paint_background_region(const atk_state_t *state, int x, int y, 
                       true);
 }
 #else
-static __attribute__((unused)) void atk_background_reload_if_needed(void) {}
 static void atk_paint_background_region(const atk_state_t *state, int x, int y, int width, int height)
 {
     if (!state || width <= 0 || height <= 0)
@@ -689,10 +753,6 @@ static __attribute__((unused)) void atk_render_scene_without(atk_state_t *state,
     {
         atk_apply_default_theme(state);
     }
-
-#ifdef KERNEL_BUILD
-    atk_background_reload_if_needed();
-#endif
 
     int screen_w = video_screen_width();
     int screen_h = video_screen_height();
@@ -1136,10 +1196,6 @@ void atk_render(void)
         atk_apply_default_theme(state);
         atk_dirty_mark_all();
     }
-
-#ifdef KERNEL_BUILD
-    atk_background_reload_if_needed();
-#endif
 
     atk_rect_t region;
     if (!atk_dirty_consume(&region))

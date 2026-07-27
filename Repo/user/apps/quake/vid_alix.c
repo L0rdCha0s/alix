@@ -7,8 +7,10 @@
 #include "atk_user.h"
 #include "quakedef.h"
 #include "d_local.h"
+#include "liveness.h"
 #include "serial.h"
 #include "usyscall.h"
+#include "vid_alix.h"
 #include "video.h"
 #include "video_surface.h"
 
@@ -40,6 +42,12 @@ static int g_mouse_dy = 0;
 static bool g_mouse_btn_down = false;
 static bool g_mouse_captured = false;
 static int g_keycode_by_scancode[512];
+static quake_liveness_t g_liveness;
+
+void quake_video_set_liveness_test(bool enabled)
+{
+    quake_liveness_init(&g_liveness, enabled);
+}
 
 static unsigned char quake_scancode_to_ascii(uint32_t scancode)
 {
@@ -246,6 +254,17 @@ void Sys_SendKeyEvents(void)
     user_atk_event_t ev;
     while (atk_user_poll_event(&g_window, &ev))
     {
+        quake_liveness_input_kind_t input_kind = QUAKE_LIVENESS_INPUT_OTHER;
+        if (ev.type == USER_ATK_EVENT_KEY)
+        {
+            input_kind = QUAKE_LIVENESS_INPUT_KEY;
+        }
+        else if (ev.type == USER_ATK_EVENT_MOUSE)
+        {
+            input_kind = QUAKE_LIVENESS_INPUT_MOUSE;
+        }
+        quake_liveness_record_input(&g_liveness, input_kind);
+
         switch (ev.type)
         {
             case USER_ATK_EVENT_KEY:
@@ -583,7 +602,22 @@ void VID_Update(vrect_t *rects)
     video_surface_convert8_to_rgba32(vid.buffer, g_palette_rgba, g_frame_rgba, pixel_count);
     quake_blit_scaled();
     video_surface_force_dirty();
-    atk_user_present(&g_window);
+    bool present_succeeded = atk_user_present(&g_window);
+    quake_liveness_record_present(&g_liveness, present_succeeded);
+
+    if (g_liveness.enabled && quake_liveness_report_due(&g_liveness, sys_time_millis()))
+    {
+        uint32_t source_hash = quake_liveness_hash_source(vid.buffer, pixel_count);
+        serial_printf("[quake][liveness] ms=%llu frames=%llu presents_ok=%llu presents_fail=%llu input=%llu key=%llu mouse=%llu src_hash=%08X\n",
+                      (unsigned long long)g_liveness.last_report_ms,
+                      (unsigned long long)g_liveness.frame_count,
+                      (unsigned long long)g_liveness.present_success_count,
+                      (unsigned long long)g_liveness.present_failure_count,
+                      (unsigned long long)g_liveness.input_event_count,
+                      (unsigned long long)g_liveness.key_event_count,
+                      (unsigned long long)g_liveness.mouse_event_count,
+                      source_hash);
+    }
 }
 
 void D_BeginDirectRect(int x, int y, byte *pbitmap, int width, int height)

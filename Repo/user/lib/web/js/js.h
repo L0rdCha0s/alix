@@ -138,8 +138,11 @@ typedef enum
     JS_EXPR_OBJECT,
     JS_EXPR_TEMPLATE,
     JS_EXPR_MEMBER,
+    JS_EXPR_SPREAD,
+    JS_EXPR_CLASS,
     JS_EXPR_REGEXP_SUBCLASS,
     JS_EXPR_FUNCTION,
+    JS_EXPR_AWAIT,
     JS_EXPR_YIELD
 } js_expr_type_t;
 
@@ -171,7 +174,8 @@ typedef enum
     JS_BINARY_GTE,
     JS_BINARY_INSTANCEOF,
     JS_BINARY_AND,
-    JS_BINARY_OR
+    JS_BINARY_OR,
+    JS_BINARY_NULLISH
 } js_binary_op_t;
 
 typedef enum
@@ -185,7 +189,8 @@ typedef enum
 typedef enum
 {
     JS_ASSIGN_SET = 0,
-    JS_ASSIGN_ADD
+    JS_ASSIGN_ADD,
+    JS_ASSIGN_NULLISH
 } js_assign_op_t;
 
 typedef struct js_expr js_expr_t;
@@ -289,6 +294,7 @@ typedef struct
     js_block_t body;
     bool is_arrow;
     bool is_generator;
+    bool is_async;
 } js_function_decl_t;
 
 typedef struct
@@ -299,6 +305,7 @@ typedef struct
     js_block_t body;
     bool is_arrow;
     bool is_generator;
+    bool is_async;
 } js_function_expr_t;
 
 typedef struct
@@ -430,6 +437,7 @@ typedef struct
     js_expr_t *callee;
     js_expr_t **args;
     size_t arg_count;
+    bool optional;
 } js_call_expr_t;
 
 typedef struct
@@ -443,6 +451,7 @@ typedef struct
     bool computed;
     bool is_getter;
     bool is_setter;
+    bool is_spread;
     char *name;
     js_expr_t *name_expr;
     js_expr_t *value;
@@ -472,9 +481,35 @@ typedef struct
 {
     js_expr_t *object;
     bool computed;
+    bool optional;
     char *property;
     js_expr_t *property_expr;
 } js_member_expr_t;
+
+typedef struct
+{
+    js_expr_t *expr;
+} js_spread_expr_t;
+
+typedef struct
+{
+    bool computed;
+    bool is_static;
+    bool is_getter;
+    bool is_setter;
+    char *name;
+    js_expr_t *name_expr;
+    js_expr_t *value;
+} js_class_method_t;
+
+typedef struct
+{
+    char *name;
+    js_expr_t *base;
+    js_expr_t *constructor;
+    js_class_method_t *methods;
+    size_t method_count;
+} js_class_expr_t;
 
 typedef struct
 {
@@ -492,6 +527,11 @@ typedef struct
 {
     js_expr_t *value;
 } js_yield_expr_t;
+
+typedef struct
+{
+    js_expr_t *value;
+} js_await_expr_t;
 
 struct js_expr
 {
@@ -511,8 +551,11 @@ struct js_expr
         js_object_expr_t object;
         js_template_expr_t template;
         js_member_expr_t member;
+        js_spread_expr_t spread;
+        js_class_expr_t class_expr;
         js_regexp_subclass_expr_t regexp_subclass;
         js_function_expr_t func;
+        js_await_expr_t await;
         js_yield_expr_t yield;
     } as;
 };
@@ -539,7 +582,9 @@ js_runtime_t *js_runtime_create(void);
 void js_runtime_destroy(js_runtime_t *rt);
 
 bool js_runtime_set_global(js_runtime_t *rt, const char *name, const js_value_t *value);
+bool js_runtime_get_global(js_runtime_t *rt, const char *name, js_value_t *out);
 bool js_runtime_set_native(js_runtime_t *rt, const char *name, js_native_fn_t fn, void *user_data);
+void js_runtime_run_microtasks(js_runtime_t *rt);
 
 js_exec_result_t js_execute(js_runtime_t *rt, const js_program_t *program);
 js_exec_result_t js_eval(js_runtime_t *rt, const char *source);

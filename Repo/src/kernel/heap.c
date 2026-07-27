@@ -368,7 +368,9 @@ static inline void heap_lock_release(uint64_t flags)
     }
     g_heap_lock_owner = UINT32_MAX;
     g_heap_lock_depth = 0;
-    spinlock_unlock(&g_heap_lock);
+    /* heap_lock_acquire uses its own IRQ-safe raw acquisition and recursion
+     * tracking, so release must not decrement the generic preemption depth. */
+    spinlock_unlock_raw(&g_heap_lock);
 
     uint64_t restore_flags = flags;
     if (cpu < SMP_MAX_CPUS)

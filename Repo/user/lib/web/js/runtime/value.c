@@ -1085,6 +1085,15 @@ bool js_value_is_truthy(const js_value_t *value)
     return false;
 }
 
+bool js_value_is_nullish(const js_value_t *value)
+{
+    if (!value)
+    {
+        return true;
+    }
+    return value->type == JS_VALUE_NULL || value->type == JS_VALUE_UNDEFINED;
+}
+
 bool js_value_is_html_dda(const js_value_t *value)
 {
     return value && value->type == JS_VALUE_OBJECT && value->as.object &&

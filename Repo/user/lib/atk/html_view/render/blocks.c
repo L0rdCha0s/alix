@@ -136,6 +136,78 @@ static size_t html_view_record_rect_placeholder(html_view_ctx_t *ctx,
     return cache->op_count - 1u;
 }
 
+static bool html_view_render_cache_add_sticky_op_local(html_view_render_cache_t *cache, size_t op_index)
+{
+    if (!cache)
+    {
+        return false;
+    }
+    if (cache->sticky_count == cache->sticky_cap)
+    {
+        size_t new_cap = cache->sticky_cap ? (cache->sticky_cap * 2) : 64;
+        size_t *new_ops = (size_t *)realloc(cache->sticky_ops, new_cap * sizeof(*new_ops));
+        if (!new_ops)
+        {
+            return false;
+        }
+        cache->sticky_ops = new_ops;
+        cache->sticky_cap = new_cap;
+    }
+    cache->sticky_ops[cache->sticky_count++] = op_index;
+    return true;
+}
+
+static void html_view_apply_sticky_ops(atk_html_view_priv_t *priv,
+                                       size_t start,
+                                       size_t end,
+                                       int origin_y,
+                                       uint8_t flags,
+                                       int top_px,
+                                       int bottom_px,
+                                       int container_top,
+                                       int container_bottom,
+                                       int box_h)
+{
+    if (!priv || !priv->render_cache.ops || start == (size_t)-1)
+    {
+        return;
+    }
+    html_view_render_cache_t *cache = &priv->render_cache;
+    if (end > cache->op_count)
+    {
+        end = cache->op_count;
+    }
+    if (start >= end)
+    {
+        return;
+    }
+    if (box_h < 0)
+    {
+        box_h = 0;
+    }
+    if (container_bottom < container_top)
+    {
+        container_bottom = container_top;
+    }
+    for (size_t i = start; i < end; ++i)
+    {
+        html_view_op_t *op = &cache->ops[i];
+        if (op->fixed)
+        {
+            continue;
+        }
+        op->sticky = true;
+        op->sticky_flags = flags;
+        op->sticky_origin_y = origin_y;
+        op->sticky_top = top_px;
+        op->sticky_bottom = bottom_px;
+        op->sticky_container_top = container_top;
+        op->sticky_container_bottom = container_bottom;
+        op->sticky_box_h = box_h;
+        (void)html_view_render_cache_add_sticky_op_local(cache, i);
+    }
+}
+
 static const char *html_view_dump_clear_mode(css_clear_t value)
 {
     switch (value)
@@ -2819,6 +2891,74 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
 
     int border_doc_x = ctx->body_x + margin_left;
     int border_doc_y = ctx->y;
+    bool sticky = style->has_position && style->position == CSS_POSITION_STICKY;
+    const char *scroller_anchor = NULL;
+    bool scroller_affix = false;
+    if (!sticky)
+    {
+        scroller_anchor = html_view_scroller_anchor_for_node(node);
+        if (scroller_anchor)
+        {
+            sticky = true;
+            scroller_affix = true;
+        }
+    }
+    uint8_t sticky_flags = 0;
+    int sticky_top_px = 0;
+    int sticky_bottom_px = 0;
+    int sticky_origin_y = 0;
+    int sticky_container_top = 0;
+    int sticky_container_bottom = 0;
+    size_t sticky_op_start = (size_t)-1;
+    if (sticky)
+    {
+        if (style->has_top && style->top.valid && !style->top.is_auto)
+        {
+            sticky_flags |= HTML_VIEW_STICKY_TOP;
+            sticky_top_px = html_view_length_to_px_signed(&style->top,
+                                                          ctx->viewport_w,
+                                                          ctx->viewport_h,
+                                                          ctx->body_w,
+                                                          ctx->viewport_h,
+                                                          ctx->base_font_px,
+                                                          false);
+        }
+        if (style->has_bottom && style->bottom.valid && !style->bottom.is_auto)
+        {
+            sticky_flags |= HTML_VIEW_STICKY_BOTTOM;
+            sticky_bottom_px = html_view_length_to_px_signed(&style->bottom,
+                                                             ctx->viewport_w,
+                                                             ctx->viewport_h,
+                                                             ctx->body_w,
+                                                             ctx->viewport_h,
+                                                             ctx->base_font_px,
+                                                             false);
+        }
+        if (scroller_affix && sticky_flags == 0)
+        {
+            sticky_flags = (HTML_VIEW_STICKY_TOP | HTML_VIEW_STICKY_BOTTOM);
+            sticky_top_px = html_view_scroll_padding_top(ctx);
+            sticky_bottom_px = 0;
+        }
+        if (sticky_flags != 0)
+        {
+            sticky_origin_y = border_doc_y - ctx->doc_origin_y;
+            if (scroller_affix && scroller_anchor && ctx->priv)
+            {
+                int anchor_y = 0;
+                if (html_view_anchor_lookup_y(&ctx->priv->render_cache, scroller_anchor, &anchor_y))
+                {
+                    sticky_origin_y = anchor_y;
+                }
+            }
+            sticky_container_top = ctx->pos_y - ctx->doc_origin_y;
+            sticky_container_bottom = sticky_container_top + ctx->pos_h;
+            if (ctx->record && ctx->priv)
+            {
+                sticky_op_start = ctx->priv->render_cache.op_count;
+            }
+        }
+    }
 
     int outer_w = border_box_w + margin_left + margin_right;
     bool avoid_floats = false;
@@ -2860,8 +3000,7 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
     int content_doc_y = border_doc_y + border_top + pad_top;
     int rel_x = 0;
     int rel_y = 0;
-    if (style->has_position &&
-        (style->position == CSS_POSITION_RELATIVE || style->position == CSS_POSITION_STICKY))
+    if (style->has_position && style->position == CSS_POSITION_RELATIVE)
     {
         if (style->has_left && style->left.valid && !style->left.is_auto)
         {
@@ -3280,6 +3419,22 @@ bool html_view_render_block_element(html_view_ctx_t *ctx, const html_node_t *nod
                                                     &ctx->clip);
             }
         }
+    }
+
+    if (sticky_op_start != (size_t)-1 && ctx->priv && sticky_flags != 0)
+    {
+        int sticky_box_h = content_h + pad_top + pad_bottom + border_top + border_bottom;
+        size_t sticky_op_end = ctx->priv->render_cache.op_count;
+        html_view_apply_sticky_ops(ctx->priv,
+                                   sticky_op_start,
+                                   sticky_op_end,
+                                   sticky_origin_y,
+                                   sticky_flags,
+                                   sticky_top_px,
+                                   sticky_bottom_px,
+                                   sticky_container_top,
+                                   sticky_container_bottom,
+                                   sticky_box_h);
     }
 
     bool empty_block = (!height_specified &&

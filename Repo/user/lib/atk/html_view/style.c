@@ -286,6 +286,89 @@ static bool html_view_selector_range_eq_ci_token(const char *token,
                                                  size_t sel_len);
 static const char *html_view_selector_token_end(const char *p, const char *end);
 
+static int html_view_selector_hex_value(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f')
+    {
+        return 10 + (c - 'a');
+    }
+    if (c >= 'A' && c <= 'F')
+    {
+        return 10 + (c - 'A');
+    }
+    return -1;
+}
+
+static bool html_view_selector_read_escaped(const char **p, const char *end, char *out)
+{
+    if (!p || !*p || !out || *p >= end)
+    {
+        return false;
+    }
+
+    const char *cur = *p;
+    char c = *cur++;
+    if (c != '\\')
+    {
+        *p = cur;
+        *out = c;
+        return true;
+    }
+
+    if (cur >= end)
+    {
+        *p = cur;
+        *out = '\\';
+        return true;
+    }
+
+    int hex = html_view_selector_hex_value(*cur);
+    if (hex >= 0)
+    {
+        int value = 0;
+        int digits = 0;
+        while (cur < end && digits < 6)
+        {
+            hex = html_view_selector_hex_value(*cur);
+            if (hex < 0)
+            {
+                break;
+            }
+            value = (value << 4) | hex;
+            ++cur;
+            ++digits;
+        }
+        if (cur < end && isspace((unsigned char)*cur))
+        {
+            ++cur;
+        }
+        if (value <= 0)
+        {
+            c = '\0';
+        }
+        else if (value <= 0x7f)
+        {
+            c = (char)value;
+        }
+        else
+        {
+            c = '?';
+        }
+        *p = cur;
+        *out = c;
+        return true;
+    }
+
+    c = *cur++;
+    *p = cur;
+    *out = c;
+    return true;
+}
+
 static uint64_t html_view_bloom_hash_range_ci(const char *start, const char *end, bool unescape)
 {
     if (!start || !end || end <= start)
@@ -293,13 +376,20 @@ static uint64_t html_view_bloom_hash_range_ci(const char *start, const char *end
         return 0;
     }
     uint64_t h = 1469598103934665603ull;
-    for (const char *p = start; p < end; ++p)
+    const char *p = start;
+    while (p < end)
     {
-        char c = *p;
-        if (unescape && c == '\\' && (p + 1) < end)
+        char c = '\0';
+        if (unescape)
         {
-            ++p;
-            c = *p;
+            if (!html_view_selector_read_escaped(&p, end, &c))
+            {
+                break;
+            }
+        }
+        else
+        {
+            c = *p++;
         }
         c = (char)tolower((unsigned char)c);
         h ^= (uint64_t)(unsigned char)c;
@@ -867,13 +957,13 @@ static bool html_view_selector_range_eq_ci_token(const char *token,
     }
     const char *sel_end = sel_start + sel_len;
     size_t ti = 0;
-    for (const char *p = sel_start; p < sel_end; ++p)
+    const char *p = sel_start;
+    while (p < sel_end)
     {
-        char c = *p;
-        if (c == '\\' && (p + 1) < sel_end)
+        char c = '\0';
+        if (!html_view_selector_read_escaped(&p, sel_end, &c))
         {
-            ++p;
-            c = *p;
+            break;
         }
         if (ti >= token_len)
         {
@@ -915,26 +1005,19 @@ static bool html_view_selector_range_eq_ci_ranges(const char *a_start,
     const char *b = b_start;
     while (a < a_end && b < b_end)
     {
-        char ca = *a;
-        char cb = *b;
-        if (ca == '\\' && (a + 1) < a_end)
+        char ca = '\0';
+        char cb = '\0';
+        if (!html_view_selector_read_escaped(&a, a_end, &ca) ||
+            !html_view_selector_read_escaped(&b, b_end, &cb))
         {
-            ++a;
-            ca = *a;
-        }
-        if (cb == '\\' && (b + 1) < b_end)
-        {
-            ++b;
-            cb = *b;
+            break;
         }
         if (tolower((unsigned char)ca) != tolower((unsigned char)cb))
         {
             return false;
         }
-        ++a;
-        ++b;
     }
-    return a == a_end && b == b_end;
+    return a >= a_end && b >= b_end;
 }
 
 static size_t html_view_selector_range_unescaped_len(const char *sel_start, size_t sel_len)
@@ -948,12 +1031,12 @@ static size_t html_view_selector_range_unescaped_len(const char *sel_start, size
     size_t len = 0;
     while (p < end)
     {
-        if (*p == '\\' && (p + 1) < end)
+        char c = '\0';
+        if (!html_view_selector_read_escaped(&p, end, &c))
         {
-            ++p;
+            break;
         }
         ++len;
-        ++p;
     }
     return len;
 }
@@ -5394,6 +5477,11 @@ static bool html_view_selector_matches_internal(const char *selector,
     return match;
 }
 
+bool html_view_selector_matches(const char *selector, const html_node_t *node)
+{
+    return html_view_selector_matches_internal(selector, node, HTML_VIEW_PSEUDO_NONE);
+}
+
 static bool html_view_selector_cache_precheck(css_rule_t *rule,
                                               const html_node_t *node,
                                               html_view_pseudo_t pseudo,
@@ -8715,32 +8803,39 @@ static void html_view_rule_index_build_tries(html_view_rule_index_t *index)
     html_view_rule_index_build_bucket_tries(index->attr_buckets, index->attr_bucket_count);
 }
 
-static bool html_view_selector_dom_quick_reject_simple(const char *selector)
+static const char *html_view_selector_token_end_quick(const char *p, const char *end)
 {
-    if (!selector || selector[0] == '\0')
+    bool escape = false;
+    while (p < end)
     {
-        return false;
-    }
-    for (const char *p = selector; *p; ++p)
-    {
-        unsigned char c = (unsigned char)*p;
-        if (c == '\\' || c == ':' || c == '[' || c == ']' || c == '(' || c == ')' ||
-            c == ',' || c == '>' || c == '+' || c == '~' || isspace(c))
+        char c = *p;
+        if (escape)
         {
-            return false;
+            escape = false;
+            ++p;
+            continue;
         }
+        if (c == '\\')
+        {
+            escape = true;
+            ++p;
+            continue;
+        }
+        if (c == ':' || c == '.' || c == '#' || c == '[' || c == ']' ||
+            c == '(' || c == ')' || c == ',' || c == '>' || c == '+' ||
+            c == '~' || c == '*' || isspace((unsigned char)c))
+        {
+            break;
+        }
+        ++p;
     }
-    return true;
+    return p;
 }
 
 static bool html_view_selector_dom_quick_reject(const char *selector,
                                                 const html_view_dom_token_map_t *dom)
 {
     if (!selector || !dom)
-    {
-        return false;
-    }
-    if (!html_view_selector_dom_quick_reject_simple(selector))
     {
         return false;
     }
@@ -8752,10 +8847,6 @@ static bool html_view_selector_dom_quick_reject(const char *selector,
     while (p < end)
     {
         char c = *p;
-        if (c == '\\')
-        {
-            return false;
-        }
         if (c == '[')
         {
             p = html_view_selector_skip_bracket(p, end);
@@ -8796,7 +8887,7 @@ static bool html_view_selector_dom_quick_reject(const char *selector,
         if (c == '.')
         {
             const char *cls_start = p + 1;
-            const char *cls_end = html_view_selector_token_end(cls_start, end);
+            const char *cls_end = html_view_selector_token_end_quick(cls_start, end);
             if (cls_end > cls_start &&
                 !html_view_key_count_has(&dom->classes, cls_start, cls_end))
             {
@@ -8809,7 +8900,7 @@ static bool html_view_selector_dom_quick_reject(const char *selector,
         if (c == '#')
         {
             const char *id_start = p + 1;
-            const char *id_end = html_view_selector_token_end(id_start, end);
+            const char *id_end = html_view_selector_token_end_quick(id_start, end);
             if (id_end > id_start &&
                 !html_view_key_count_has(&dom->ids, id_start, id_end))
             {
@@ -8826,7 +8917,7 @@ static bool html_view_selector_dom_quick_reject(const char *selector,
             {
                 ++p;
             }
-            const char *name_end = html_view_selector_token_end(p, end);
+            const char *name_end = html_view_selector_token_end_quick(p, end);
             if (name_end > p && name_end < end && *name_end == '(')
             {
                 p = html_view_selector_skip_parens(name_end, end);
@@ -8846,7 +8937,7 @@ static bool html_view_selector_dom_quick_reject(const char *selector,
         }
         if (at_start && (isalpha((unsigned char)c) || c == '_'))
         {
-            const char *tag_end = html_view_selector_token_end(p, end);
+            const char *tag_end = html_view_selector_token_end_quick(p, end);
             bool has_ns = false;
             for (const char *q = p; q < tag_end; ++q)
             {

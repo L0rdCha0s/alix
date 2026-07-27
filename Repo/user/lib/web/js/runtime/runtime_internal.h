@@ -17,6 +17,7 @@ typedef struct js_program_node js_program_node_t;
 typedef struct js_native_meta js_native_meta_t;
 typedef struct js_property js_property_t;
 typedef struct js_bound_fn js_bound_fn_t;
+typedef struct js_microtask js_microtask_t;
 
 struct js_array
 {
@@ -46,6 +47,7 @@ struct js_function
     bool is_expr;
     bool is_constructible;
     js_env_t *closure;
+    js_property_t *properties;
     js_value_t prototype_value;
     bool has_prototype;
 };
@@ -71,6 +73,14 @@ struct js_property
     bool configurable;
     bool is_accessor;
     js_property_t *next;
+};
+
+struct js_microtask
+{
+    js_value_t callback;
+    js_value_t *argv;
+    size_t argc;
+    js_microtask_t *next;
 };
 
 struct js_runtime
@@ -105,6 +115,8 @@ struct js_runtime
     js_bound_fn_t *bound_functions;
     bool constructing;
     js_native_fn_t constructing_fn;
+    js_microtask_t *microtask_head;
+    js_microtask_t *microtask_tail;
 };
 
 typedef struct
@@ -121,6 +133,7 @@ double js_nan(void);
 bool js_is_nan(double value);
 
 bool js_value_is_truthy(const js_value_t *value);
+bool js_value_is_nullish(const js_value_t *value);
 bool js_value_is_html_dda(const js_value_t *value);
 double js_value_to_number(const js_value_t *value, bool *ok_out);
 bool js_value_strict_equal(const js_value_t *a, const js_value_t *b);
@@ -210,6 +223,14 @@ bool js_value_is_constructor(js_runtime_t *rt, const js_value_t *value);
 const char *js_value_native_name(js_runtime_t *rt, const js_value_t *value);
 bool js_value_native_length(js_runtime_t *rt, const js_value_t *value, size_t *out_len);
 bool js_native_needs_this(js_native_fn_t fn);
+bool js_runtime_queue_microtask(js_runtime_t *rt,
+                                const js_value_t *callback,
+                                size_t argc,
+                                const js_value_t *argv);
+bool js_promise_await(js_runtime_t *rt,
+                      const js_value_t *value,
+                      js_value_t *out,
+                      char **error_message);
 
 bool js_call_value(js_runtime_t *rt,
                    const js_value_t *callee,
@@ -659,6 +680,36 @@ bool js_builtin_array_for_each(js_runtime_t *rt,
                                void *user_data,
                                js_value_t *out,
                                char **error_message);
+bool js_builtin_promise(js_runtime_t *rt,
+                        size_t argc,
+                        const js_value_t *argv,
+                        void *user_data,
+                        js_value_t *out,
+                        char **error_message);
+bool js_builtin_promise_resolve(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
+bool js_builtin_promise_reject(js_runtime_t *rt,
+                               size_t argc,
+                               const js_value_t *argv,
+                               void *user_data,
+                               js_value_t *out,
+                               char **error_message);
+bool js_builtin_promise_all(js_runtime_t *rt,
+                            size_t argc,
+                            const js_value_t *argv,
+                            void *user_data,
+                            js_value_t *out,
+                            char **error_message);
+bool js_builtin_queue_microtask(js_runtime_t *rt,
+                                size_t argc,
+                                const js_value_t *argv,
+                                void *user_data,
+                                js_value_t *out,
+                                char **error_message);
 js_object_t *js_get_array_proto(js_runtime_t *rt);
 bool js_builtin_math_pow(js_runtime_t *rt,
                          size_t argc,

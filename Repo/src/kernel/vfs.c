@@ -41,6 +41,36 @@ static spinlock_t g_vfs_tree_lock;
 static const uint64_t VFS_SYNC_LOG_MS_THRESHOLD = 100ULL;
 static uint32_t g_vfs_log_enable = 0;
 
+/*
+ * Tree operations can include filesystem load paths that poll storage and
+ * voluntarily yield.  This is therefore an adaptive scheduler-friendly lock,
+ * not a generic non-preemptible spinlock: a contending process yields so a
+ * preempted owner can run and complete the operation.  Before the scheduler is
+ * available, contention falls back to a normal pause loop.
+ */
+static void vfs_tree_lock_acquire(void)
+{
+    while (__sync_lock_test_and_set(&g_vfs_tree_lock.value, 1) != 0)
+    {
+        while (__atomic_load_n(&g_vfs_tree_lock.value, __ATOMIC_ACQUIRE) != 0)
+        {
+            if (process_scheduler_ready() && thread_current())
+            {
+                process_yield();
+            }
+            else
+            {
+                __asm__ volatile ("pause");
+            }
+        }
+    }
+}
+
+static void vfs_tree_lock_release(void)
+{
+    spinlock_unlock_raw(&g_vfs_tree_lock);
+}
+
 static uint64_t vfs_now_seconds(void)
 {
     return timekeeping_now_seconds();
@@ -972,7 +1002,7 @@ static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all)
     stack_cap = initial_cap;
     flush_cap = initial_cap;
 
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     stack[stack_count++] = mount->mount_point;
     while (stack_count > 0)
     {
@@ -1050,7 +1080,7 @@ static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all)
         vfs_node_retain(node);
         flush_nodes[flush_count++] = node;
     }
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
 
     if (ok)
     {
@@ -1363,9 +1393,9 @@ vfs_node_t *vfs_root(void)
  */
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path)
 {
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     vfs_node_t *res = resolve_node(cwd ? cwd : root, path);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return res;
 }
 
@@ -1381,11 +1411,11 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     vfs_node_t *parent = NULL;
     char *name = NULL;
 
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
 
     if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
 
@@ -1393,14 +1423,14 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     if (existing)
     {
         free(name);
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return (existing->type == VFS_NODE_DIR) ? existing : NULL;
     }
 
     if (!vfs_node_allows_mutation(parent))
     {
         free(name);
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
 
@@ -1408,7 +1438,7 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     if (!dir)
     {
         free(name);
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
 
@@ -1421,7 +1451,7 @@ vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path)
     vfs_attach_child(parent, dir);
     vfs_mark_meta_dirty(parent);
     vfs_mark_meta_dirty(dir);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return dir;
 }
 
@@ -1439,7 +1469,7 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
 
     bool trace_proc = (path && strncmp(path, "/proc/devices", 13) == 0);
 
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
 
     if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
     {
@@ -1449,7 +1479,7 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
             serial_printf("%s", path ? path : "<null>");
             serial_printf("%s", "\r\n");
         }
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
 
@@ -1467,20 +1497,20 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
                 serial_printf("%s", "\r\n");
             }
             free(name);
-            spinlock_unlock(&g_vfs_tree_lock);
+            vfs_tree_lock_release();
             return NULL;
         }
         if (!vfs_node_allows_mutation(parent))
         {
             free(name);
-            spinlock_unlock(&g_vfs_tree_lock);
+            vfs_tree_lock_release();
             return NULL;
         }
         file = vfs_alloc_node(VFS_NODE_FILE);
         if (!file)
         {
             free(name);
-            spinlock_unlock(&g_vfs_tree_lock);
+            vfs_tree_lock_release();
             return NULL;
         }
         file->name   = name;   /* take ownership */
@@ -1507,7 +1537,7 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
             serial_printf("%016llX", (unsigned long long)file->type);
             serial_printf("%s", "\r\n");
         }
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
 
@@ -1515,7 +1545,7 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
     {
         if (!vfs_node_allows_mutation(file))
         {
-            spinlock_unlock(&g_vfs_tree_lock);
+            vfs_tree_lock_release();
             return NULL;
         }
         vfs_lock_node_data(file);
@@ -1530,7 +1560,7 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
                 serial_printf("%s", file->name ? file->name : "<noname>");
                 serial_printf("%s", "\r\n");
             }
-            spinlock_unlock(&g_vfs_tree_lock);
+            vfs_tree_lock_release();
             return NULL;
         }
         file->data[0] = '\0';
@@ -1542,7 +1572,7 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
     vfs_lock_node_data(file);
     ensure_terminator_locked(file);
     vfs_unlock_node_data(file);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return file;
 }
 
@@ -1631,9 +1661,9 @@ static vfs_node_t *vfs_symlink_locked(vfs_node_t *cwd,
  */
 vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path)
 {
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     vfs_node_t *node = vfs_symlink_locked(cwd, target_path, link_path, false);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return node;
 }
 
@@ -1645,9 +1675,9 @@ vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *li
  */
 bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path)
 {
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     vfs_node_t *node = vfs_symlink_locked(cwd, target_path, link_path, true);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return node != NULL;
 }
 
@@ -2064,19 +2094,19 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
         return false;
     }
 
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
 
     vfs_node_t *parent = NULL;
     char *name = NULL;
     if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
     if (!parent)
     {
         free(name);
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
@@ -2084,13 +2114,13 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
     free(name);
     if (!node || (node->type != VFS_NODE_FILE && node->type != VFS_NODE_SYMLINK))
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
     if (!vfs_node_allows_mutation(parent))
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
@@ -2098,7 +2128,7 @@ bool vfs_remove_file(vfs_node_t *cwd, const char *path)
     vfs_node_release(node);
 
     vfs_mark_meta_dirty(parent);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return true;
 }
 
@@ -2116,19 +2146,19 @@ bool vfs_remove_tree(vfs_node_t *cwd, const char *path)
         return false;
     }
 
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
 
     vfs_node_t *parent = NULL;
     char *name = NULL;
     if (!split_parent_and_name(cwd ? cwd : root, path, &parent, &name))
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
     if (!parent)
     {
         free(name);
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
@@ -2136,13 +2166,13 @@ bool vfs_remove_tree(vfs_node_t *cwd, const char *path)
     free(name);
     if (!node)
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
     if (!vfs_node_allows_mutation(parent))
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
@@ -2150,26 +2180,26 @@ bool vfs_remove_tree(vfs_node_t *cwd, const char *path)
     {
         if (vfs_is_mount_point(node))
         {
-            spinlock_unlock(&g_vfs_tree_lock);
+            vfs_tree_lock_release();
             return false;
         }
         if (!vfs_node_allows_mutation(node))
         {
-            spinlock_unlock(&g_vfs_tree_lock);
+            vfs_tree_lock_release();
             return false;
         }
         vfs_clear_directory(node);
     }
     else if (node->type != VFS_NODE_FILE && node->type != VFS_NODE_SYMLINK)
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
     vfs_detach_child(node);
     vfs_node_release(node);
     vfs_mark_meta_dirty(parent);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return true;
 }
 
@@ -2255,7 +2285,7 @@ size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context)
     }
 
     size_t count = 0;
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     for (vfs_node_t *child = dir->first_child; child; child = child->next_sibling)
     {
         ++count;
@@ -2264,7 +2294,7 @@ size_t vfs_enum_children(vfs_node_t *dir, vfs_enum_cb_t callback, void *context)
             break;
         }
     }
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return count;
 }
 
@@ -2281,7 +2311,7 @@ vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device
         return NULL;
     }
 
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
 
     vfs_node_t *existing = vfs_find_child(dir, name);
     if (existing)
@@ -2289,23 +2319,23 @@ vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device
         if (existing->type == VFS_NODE_BLOCK)
         {
             existing->block_device = device;
-            spinlock_unlock(&g_vfs_tree_lock);
+            vfs_tree_lock_release();
             return existing;
         }
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
 
     if (!vfs_node_allows_mutation(dir))
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
 
     vfs_node_t *node = vfs_alloc_node(VFS_NODE_BLOCK);
     if (!node)
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
 
@@ -2313,7 +2343,7 @@ vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device
     if (!node->name)
     {
         free(node);
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return NULL;
     }
     node->block_device = device;
@@ -2323,7 +2353,7 @@ vfs_node_t *vfs_add_block_device(vfs_node_t *dir, const char *name, block_device
 
     vfs_attach_child_tail(dir, node);
     vfs_mark_meta_dirty(dir);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return node;
 }
 
@@ -2370,9 +2400,9 @@ bool vfs_format(block_device_t *device)
         return false;
     }
 
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     bool mounted = vfs_device_is_mounted(device);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     if (mounted)
     {
         return false;
@@ -2502,21 +2532,21 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
         return false;
     }
 
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
 
     if (vfs_is_mount_point(mount_point) ||
         mount_point->first_child ||
         mount_point->mount ||
         vfs_device_is_mounted(device))
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
     vfs_mount_t *mount = (vfs_mount_t *)calloc(1, sizeof(vfs_mount_t));
     if (!mount)
     {
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
@@ -2533,7 +2563,7 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
     if (!mount->backend)
     {
         free(mount);
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
 
@@ -2545,14 +2575,14 @@ bool vfs_mount_device(block_device_t *device, vfs_node_t *mount_point)
         mount_point->mount = NULL;
         alixfs_mount_destroy(mount->backend);
         free(mount);
-        spinlock_unlock(&g_vfs_tree_lock);
+        vfs_tree_lock_release();
         return false;
     }
     mount->supports_times = alixfs_mount_supports_times(mount->backend);
 
     mount->next = mounts;
     mounts = mount;
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return true;
 }
 
@@ -2578,9 +2608,9 @@ bool vfs_is_mount_point(const vfs_node_t *node)
 bool vfs_sync_all(void)
 {
     bool ok = true;
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     vfs_mount_t *head = mounts;
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
 
     for (vfs_mount_t *mount = head; mount; mount = mount->next)
     {
@@ -2600,9 +2630,9 @@ bool vfs_sync_all(void)
 bool vfs_sync_dirty(void)
 {
     bool ok = true;
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     vfs_mount_t *head = mounts;
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
 
     for (vfs_mount_t *mount = head; mount; mount = mount->next)
     {
@@ -2643,9 +2673,9 @@ bool vfs_flush_node(vfs_node_t *node)
  */
 void vfs_set_subtree_mutable(vfs_node_t *node, bool allow)
 {
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     vfs_set_subtree_mutable_locked(node ? node : root, allow);
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
 }
 
 /*
@@ -2657,7 +2687,7 @@ void vfs_set_subtree_mutable(vfs_node_t *node, bool allow)
 size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max)
 {
     size_t count = 0;
-    spinlock_lock(&g_vfs_tree_lock);
+    vfs_tree_lock_acquire();
     for (vfs_mount_t *m = mounts; m; m = m->next)
     {
         if (out && count < max)
@@ -2677,6 +2707,6 @@ size_t vfs_snapshot_mounts(vfs_mount_info_t *out, size_t max)
         }
         count++;
     }
-    spinlock_unlock(&g_vfs_tree_lock);
+    vfs_tree_lock_release();
     return count;
 }

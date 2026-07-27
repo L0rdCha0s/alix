@@ -295,7 +295,8 @@ static inline void tcp_unlock(uint64_t flags)
 {
     uint64_t hold_start = g_tcp_lock_hold_start;
     g_tcp_lock_hold_start = 0;
-    spinlock_unlock(&g_tcp_lock);
+    /* tcp_lock uses its own IRQ-save raw acquisition. */
+    spinlock_unlock_raw(&g_tcp_lock);
     tcp_irq_restore(flags);
     if (hold_start)
     {

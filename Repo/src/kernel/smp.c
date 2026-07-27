@@ -575,14 +575,12 @@ void smp_handle_schedule_ipi(interrupt_frame_t *frame)
  */
 void smp_broadcast_schedule_ipi(bool include_self)
 {
-    (void)include_self;
-    lapic_broadcast_ipi(SMP_SCHEDULE_IPI_VECTOR, true);
-    // uint32_t online = __atomic_load_n(&g_online_cpus, __ATOMIC_ACQUIRE);
-    // if (online <= 1)
-    // {
-    //     return;
-    // }
-    // lapic_broadcast_ipi(SMP_SCHEDULE_IPI_VECTOR, include_self);
+    uint32_t online = __atomic_load_n(&g_online_cpus, __ATOMIC_ACQUIRE);
+    if (online <= 1 && !include_self)
+    {
+        return;
+    }
+    lapic_broadcast_ipi(SMP_SCHEDULE_IPI_VECTOR, include_self);
 }
 
 /*

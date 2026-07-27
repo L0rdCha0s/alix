@@ -63,10 +63,15 @@ typedef struct html_view_js_script
 typedef struct html_view_js_listener
 {
     size_t handle;
-    char *handler_name;
-    js_program_t *call_program;
+    uint32_t target;
+    char *event_name;
+    js_value_t handler;
     struct html_view_js_listener *next;
 } html_view_js_listener_t;
+
+typedef struct html_view_js_event html_view_js_event_t;
+typedef struct html_view_js_timer html_view_js_timer_t;
+typedef struct html_view_js_storage_entry html_view_js_storage_entry_t;
 
 typedef struct html_view_image
 {
@@ -181,6 +186,14 @@ typedef struct
     bool image_placeholder;
     int32_t z_index;
     bool fixed;
+    bool sticky;
+    uint8_t sticky_flags;
+    int32_t sticky_origin_y;
+    int32_t sticky_top;
+    int32_t sticky_bottom;
+    int32_t sticky_container_top;
+    int32_t sticky_container_bottom;
+    int32_t sticky_box_h;
     bool has_clip;
     bool clip_scroll;
     int32_t clip_x;
@@ -236,6 +249,9 @@ typedef struct
     size_t *fixed_ops;
     size_t fixed_count;
     size_t fixed_cap;
+    size_t *sticky_ops;
+    size_t sticky_count;
+    size_t sticky_cap;
     html_view_anchor_t *anchors;
     size_t anchor_count;
     size_t anchor_cap;
@@ -441,6 +457,19 @@ typedef struct
     html_view_js_script_t *js_script_tail;
     volatile uint32_t js_script_count;
     html_view_js_listener_t *js_listeners;
+    html_view_js_event_t *js_event_head;
+    html_view_js_event_t *js_event_tail;
+    volatile uint32_t js_event_count;
+    html_view_js_timer_t *js_timers;
+    uint64_t js_timer_seq;
+    uint64_t js_timer_active_id;
+    bool js_timer_active_cancel;
+    bool js_dom_ready_fired;
+    size_t js_active_handle;
+    char *js_cookie;
+    char *js_location_href;
+    html_view_js_storage_entry_t *js_local_storage;
+    html_view_js_storage_entry_t *js_session_storage;
     uint32_t js_listener_seq;
     uint32_t js_defer_start;
     html_node_t **js_handles;
@@ -451,6 +480,7 @@ typedef struct
 
 void html_view_dom_bloom_mark_dirty(atk_html_view_priv_t *priv);
 void html_view_dom_bloom_rebuild_if_needed(atk_html_view_priv_t *priv);
+bool html_view_selector_matches(const char *selector, const html_node_t *node);
 
 enum
 {
@@ -490,6 +520,12 @@ typedef enum
 enum
 {
     HTML_VIEW_Z_INDEX_STRIDE = 4
+};
+
+enum
+{
+    HTML_VIEW_STICKY_TOP = 1u,
+    HTML_VIEW_STICKY_BOTTOM = 2u
 };
 
 typedef struct html_view_style_block

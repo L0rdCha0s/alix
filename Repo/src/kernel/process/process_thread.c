@@ -132,10 +132,13 @@ process_t *process_finalize_new_process(process_t *proc,
                   (unsigned long long)proc->cr3,
                   (unsigned long long)proc->address_space.cr3,
                   (unsigned long long)(uintptr_t)thread);
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
     spinlock_lock(&g_process_lock);
     proc->next = g_process_list;
     g_process_list = proc;
     spinlock_unlock(&g_process_lock);
+    cpu_restore_flags(flags);
 
     process_t *actual_parent = parent ? parent : current_process_local();
     vfs_node_t *inherit_cwd = NULL;
@@ -363,14 +366,6 @@ thread_t *thread_create(process_t *process,
     thread->context_valid = true;
     thread->kernel_stack_top = stack_limit;
     thread->process = process;
-    if (process)
-    {
-        spinlock_lock(&process->threads_lock);
-        thread->process_next = process->threads;
-        process->threads = thread;
-        process->thread_count++;
-        spinlock_unlock(&process->threads_lock);
-    }
     thread->entry = entry;
     thread->arg = arg;
     thread->state = THREAD_STATE_READY;
@@ -392,17 +387,24 @@ thread_t *thread_create(process_t *process,
     {
         default_priority = scheduler_default_priority();
     }
+    if (!is_idle && process)
+    {
+        default_priority = process->default_priority;
+    }
     thread->base_priority = default_priority;
-    thread->priority = default_priority;
-    thread->priority_override = default_priority;
-    thread->priority_override_active = false;
-    thread->affinity_enabled = false;
-    thread->affinity_cpu = RUN_QUEUE_CPU_INVALID;
+    thread->priority_override = process ? process->default_priority_override : default_priority;
+    thread->priority_override_active = process ? process->default_priority_override_active : false;
+    thread->priority = thread->priority_override_active ? thread->priority_override : default_priority;
+    thread->affinity_enabled = process ? process->default_affinity_enabled : false;
+    thread->affinity_cpu = thread->affinity_enabled ? process->default_affinity_cpu : RUN_QUEUE_CPU_INVALID;
     thread->in_transition = false;
     thread->preempt_pending = false;
     thread->fs_base = 0;
     thread->gs_base = (uint64_t)&thread->tls;
     thread->running_cpu = RUN_QUEUE_CPU_INVALID;
+    thread->counted_running = false;
+    thread->user_stack_base = 0;
+    thread->user_stack_size = 0;
     thread->fpu_initialized = true;
     spinlock_init(&thread->context_lock);
     thread->waiting_queue = NULL;
@@ -492,6 +494,50 @@ thread_t *thread_create(process_t *process,
         thread_context_guard_update(thread, "thread_create");
     }
 #endif
+
+    if (process)
+    {
+        /* Publish the fully initialized thread and consume process-wide policy
+         * under the same locks, so policy changes and process termination
+         * cannot miss a new thread. */
+        uint64_t sched_flags = scheduler_lock_acquire("thread_create_publish");
+        spinlock_lock(&process->threads_lock);
+        bool can_publish = __atomic_load_n(&process->lifetime_state, __ATOMIC_ACQUIRE) ==
+                               PROCESS_LIFETIME_ALIVE &&
+                           process->state != PROCESS_STATE_ZOMBIE;
+        if (can_publish && !is_idle)
+        {
+            thread->base_priority = process->default_priority;
+            thread->priority_override = process->default_priority_override;
+            thread->priority_override_active = process->default_priority_override_active;
+            thread->priority = thread->priority_override_active
+                               ? thread->priority_override
+                               : thread->base_priority;
+            thread->affinity_enabled = process->default_affinity_enabled;
+            thread->affinity_cpu = thread->affinity_enabled
+                                   ? process->default_affinity_cpu
+                                   : RUN_QUEUE_CPU_INVALID;
+        }
+        if (can_publish)
+        {
+            thread->process_next = process->threads;
+            process->threads = thread;
+            process->thread_count++;
+        }
+        spinlock_unlock(&process->threads_lock);
+        scheduler_lock_release(sched_flags);
+
+        if (!can_publish)
+        {
+            thread_context_guard_release_pages(thread);
+            thread_stack_watch_deactivate(thread);
+            thread->magic = 0;
+            thread->process = NULL;
+            free(thread->stack_allocation_raw);
+            free(thread);
+            return NULL;
+        }
+    }
 
     stack_owner_register(thread);
     thread_registry_add(thread);
