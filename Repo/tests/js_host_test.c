@@ -352,6 +352,41 @@ static bool test_function_persistence(void)
     return ok;
 }
 
+typedef struct
+{
+    size_t polls;
+    size_t stop_after;
+} interrupt_test_state_t;
+
+static bool interrupt_after_polls(void *user_data)
+{
+    interrupt_test_state_t *state = (interrupt_test_state_t *)user_data;
+    if (!state)
+    {
+        return true;
+    }
+    state->polls++;
+    return state->polls >= state->stop_after;
+}
+
+static bool test_cooperative_interrupt(void)
+{
+    js_runtime_t *rt = js_runtime_create();
+    if (!rt)
+    {
+        return false;
+    }
+    interrupt_test_state_t state = {.polls = 0, .stop_after = 2};
+    js_runtime_set_interrupt_handler(rt, interrupt_after_polls, &state);
+    js_exec_result_t res = js_eval(rt, "let count = 0; while (true) { count = count + 1; }");
+    bool ok = !res.ok && res.error_message &&
+              strcmp(res.error_message, "execution interrupted") == 0 &&
+              state.polls == state.stop_after;
+    js_exec_result_destroy(&res);
+    js_runtime_destroy(rt);
+    return ok;
+}
+
 int main(void)
 {
     js_case_t cases[] = {
@@ -384,12 +419,21 @@ int main(void)
         JS_CASE_NUM("unary-minus-bool", "-true;", -1.0),
         JS_CASE_NUM("unary-plus-string", "+\"3\";", 3.0),
         JS_CASE_NUM("unary-minus-string", "-\"4\";", -4.0),
+        JS_CASE_UNDEF("unary-void", "let x = 0; void (x = 3);"),
+        JS_CASE_NUM("unary-void-side-effect", "let x = 0; void (x = 3); x;", 3.0),
 
         JS_CASE_NUM("add", "1 + 2;", 3.0),
         JS_CASE_NUM("sub", "5 - 2;", 3.0),
         JS_CASE_NUM("mul", "3 * 4;", 12.0),
         JS_CASE_NUM("div", "8 / 2;", 4.0),
         JS_CASE_NUM("mod", "7 % 4;", 3.0),
+        JS_CASE_NUM("bitwise-and", "19 & 7;", 3.0),
+        JS_CASE_NUM("bitwise-or", "8 | 3;", 11.0),
+        JS_CASE_NUM("bitwise-and-stack-pattern", "6 & 3;", 2.0),
+        JS_CASE_NUM("bitwise-or-stack-pattern", "4 | 1;", 5.0),
+        JS_CASE_NUM("bitwise-to-int32", "3.9 | 0;", 3.0),
+        JS_CASE_NUM("bitwise-precedence", "1 | 6 & 3;", 3.0),
+        JS_CASE_NUM("bitwise-mixed-precedence", "1 | 2 & 4;", 1.0),
         JS_CASE_NUM("precedence", "(1 + 2) * 3;", 9.0),
 
         JS_CASE_BOOL("lt-number", "1 < 2;", true),
@@ -400,6 +444,9 @@ int main(void)
         JS_CASE_BOOL("gt-string", "\"b\" > \"a\";", true),
         JS_CASE_BOOL("compare-string-number", "\"2\" < 10;", true),
         JS_CASE_BOOL("compare-number-string", "10 > \"2\";", true),
+        JS_CASE_BOOL("in-object", "\"value\" in {value: 1};", true),
+        JS_CASE_BOOL("in-array-length", "\"length\" in [1, 2];", true),
+        JS_CASE_BOOL("in-object-missing", "\"missing\" in {value: 1};", false),
 
         JS_CASE_BOOL("strict-eq-number", "1 === 1;", true),
         JS_CASE_BOOL("strict-neq-number", "1 !== 2;", true),
@@ -421,6 +468,11 @@ int main(void)
         JS_CASE_NUM_SETUP("logical-shortcircuit-or", "true || bump(); count();", 0.0, setup_native_counter),
         JS_CASE_NUM("ternary-true", "true ? 1 : 2;", 1.0),
         JS_CASE_NUM("ternary-false", "false ? 1 : 2;", 2.0),
+        JS_CASE_NUM("ternary-false-assignment", "let x = 0; false ? 1 : x = 7; x;", 7.0),
+        JS_CASE_NUM("sequence-expression", "let x = 0; (x = 1, x = x + 2, x);", 3.0),
+        JS_CASE_NUM("sequence-return", "function f() { return 1, 2, 3; } f();", 3.0),
+        JS_CASE_NUM("sequence-condition", "let x = 0; if ((x = 1, x)) { x = x + 1; } x;", 2.0),
+        JS_CASE_NUM("sequence-keeps-argument-separators", "function add(a, b) { return a + b; } add(2, 3);", 5.0),
 
         JS_CASE_NUM("if-true", "let x = 0; if (1) { x = 2; } x;", 2.0),
         JS_CASE_NUM("if-false-else", "let x = 1; if (0) { x = 2; } else { x = 3; } x;", 3.0),
@@ -483,7 +535,15 @@ int main(void)
         JS_CASE_NUM("array-shared", "let a = [1, 2]; let b = a; b[0] = 7; a[0];", 7.0),
         JS_CASE_NUM("array-index-expr", "let a = [1, 2, 3]; let i = 2; a[i];", 3.0),
         JS_CASE_NUM("array-assign-expr", "let a = [1, 2]; let i = 0; a[i] = a[i] + 5; a[0];", 6.0),
+        JS_CASE_NUM("subtract-assign-identifier", "let value = 7; value -= 2; value;", 5.0),
+        JS_CASE_NUM("subtract-assign-member", "let values = [7]; values[0] -= 2; values[0];", 5.0),
         JS_CASE_NUM("array-sum-while", "function sum(a) { var i = 0; var s = 0; while (i < a.length) { s = s + a[i]; i = i + 1; } return s; } let a = [1, 2, 3, 4]; sum(a);", 10.0),
+        JS_CASE_NUM("array-spread", "let a = [0, ...[1, 2], 3]; a.length + a[2];", 6.0),
+        JS_CASE_NUM("call-spread", "function sum(a, b, c) { return a + b + c; } sum(...[1, 2, 3]);", 6.0),
+        JS_CASE_NUM("object-spread", "let a = {x: 1}; let b = {...a, y: 2}; b.x + b.y;", 3.0),
+        JS_CASE_NUM("numeric-object-key", "let modules = {61215: (x) => x + 1}; modules[61215](2);", 3.0),
+        JS_CASE_NUM("keyword-member-name", "let module = {default: 4}; module.default;", 4.0),
+        JS_CASE_NUM("keyword-optional-member-name", "let module = {default: 4}; module?.default;", 4.0),
         JS_CASE_NUM("string-length-prop", "\"hello\".length;", 5.0),
         JS_CASE_NUM_SETUP("host-object-get", "obj.value;", 5.0, setup_host_object),
         JS_CASE_NUM_SETUP("host-object-set", "obj.value = 12; obj.value;", 12.0, setup_host_object),
@@ -539,6 +599,16 @@ int main(void)
     else
     {
         printf("js_host_test: function-persistence failed\n");
+        fail++;
+    }
+
+    if (test_cooperative_interrupt())
+    {
+        pass++;
+    }
+    else
+    {
+        printf("js_host_test: cooperative-interrupt failed\n");
         fail++;
     }
 

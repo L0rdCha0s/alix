@@ -8,6 +8,7 @@
 
 #define BROWSER_TICK_SLOW_MS 16u
 #define BROWSER_TICK_LOG_RATE_MS 250u
+#define BROWSER_FIRST_RENDER_TIMEOUT_MS 180000u
 
 static bool browser_log_throttle(uint64_t *last_ms, uint64_t interval_ms)
 {
@@ -25,7 +26,12 @@ static void browser_menu_toggle(browser_app_t *app, atk_widget_t *menu, atk_widg
 static void browser_open_url(browser_app_t *app, const char *url);
 static void on_url_submit(atk_widget_t *input, void *context);
 static void browser_html_link_clicked(atk_widget_t *view, const char *href, void *context);
-static bool browser_requeue_event(browser_app_t *app, browser_ui_event_t *ev);
+static void browser_clear_deferred_event(browser_app_t *app);
+static bool browser_defer_apply_event(browser_app_t *app,
+                                      browser_ui_event_t *ev,
+                                      const char *kind,
+                                      const char *src,
+                                      size_t bytes);
 static void browser_cancel_active_load(browser_app_t *app);
 static void browser_clear_pending_fragment(browser_app_t *app);
 static void browser_set_pending_fragment(browser_app_t *app, const char *fragment);
@@ -439,6 +445,9 @@ void browser_on_close_event(void *context)
     browser_lock_enter(app, &app->lock, "app_lock");
     app->active_load_id = 0;
     browser_lock_exit(app, &app->lock, "app_lock");
+    app->first_render_pending = false;
+    app->first_render_release_armed = false;
+    __atomic_store_n(&app->resource_defer_load_id, 0u, __ATOMIC_RELEASE);
 
     if (app->debug_remote.handle != 0)
     {
@@ -814,12 +823,18 @@ static void browser_cancel_active_load(browser_app_t *app)
     browser_lock_enter(app, &app->lock, "app_lock");
     app->active_load_id = 0;
     browser_lock_exit(app, &app->lock, "app_lock");
+    app->first_render_pending = false;
+    app->first_render_release_armed = false;
+    app->first_render_started_ms = 0u;
+    __atomic_store_n(&app->resource_defer_load_id, 0u, __ATOMIC_RELEASE);
+    browser_first_render_scripts_clear(app);
 
     if (app->viewer)
     {
         atk_html_view_stop_js(app->viewer);
     }
 
+    browser_clear_deferred_event(app);
     browser_ui_event_t ev = {0};
     while (browser_ui_event_dequeue(app, &ev))
     {
@@ -832,19 +847,73 @@ static void browser_cancel_active_load(browser_app_t *app)
     browser_clear_pending_fragment(app);
 }
 
-static bool browser_requeue_event(browser_app_t *app, browser_ui_event_t *ev)
+static void browser_clear_deferred_event(browser_app_t *app)
+{
+    if (!app)
+    {
+        return;
+    }
+    if (app->deferred_ui_event_valid)
+    {
+        browser_ui_event_free_payload(&app->deferred_ui_event);
+        memset(&app->deferred_ui_event, 0, sizeof(app->deferred_ui_event));
+        app->deferred_ui_event_valid = false;
+    }
+    browser_ui_event_defer_chain_reset(app);
+}
+
+static bool browser_defer_apply_event(browser_app_t *app,
+                                      browser_ui_event_t *ev,
+                                      const char *kind,
+                                      const char *src,
+                                      size_t bytes)
 {
     if (!app || !ev)
     {
         return false;
     }
-    if (browser_ui_event_enqueue(app, ev))
+    uint64_t now_ms = sys_time_millis();
+    uint64_t waited_ms = ev->defer_attempts > 0u && now_ms >= ev->defer_started_ms
+                              ? now_ms - ev->defer_started_ms
+                              : 0u;
+    const char *safe_kind = kind ? kind : "resource";
+    const char *safe_src = src ? src : "(null)";
+    if (browser_ui_event_defer_expired(app, ev, now_ms))
     {
-        return true;
+        browser_debug_logf(app,
+                           "[%s] apply timeout (drop) src=%s bytes=%u attempts=%u waited=%llu",
+                           safe_kind,
+                           safe_src,
+                           (unsigned)bytes,
+                           (unsigned)ev->defer_attempts,
+                           (unsigned long long)waited_ms);
+        return false;
     }
-    browser_debug_logf(app, "[ui] drop deferred event type=%u", (unsigned)ev->type);
-    browser_ui_event_free_payload(ev);
-    return false;
+
+    bool log_wait = ev->defer_attempts == 0u ||
+                    now_ms < ev->defer_last_log_ms ||
+                    (now_ms - ev->defer_last_log_ms) >= BROWSER_UI_DEFER_LOG_INTERVAL_MS;
+    if (log_wait)
+    {
+        ev->defer_last_log_ms = now_ms;
+    }
+    uint32_t attempt = ev->defer_attempts == UINT32_MAX ? UINT32_MAX : ev->defer_attempts + 1u;
+    if (!browser_ui_event_defer(app, ev, now_ms))
+    {
+        browser_debug_logf(app, "[%s] apply defer failed (drop) src=%s", safe_kind, safe_src);
+        return false;
+    }
+    if (log_wait)
+    {
+        browser_debug_logf(app,
+                           "[%s] wait renderer src=%s bytes=%u attempts=%u waited=%llu",
+                           safe_kind,
+                           safe_src,
+                           (unsigned)bytes,
+                           (unsigned)attempt,
+                           (unsigned long long)waited_ms);
+    }
+    return true;
 }
 
 static void on_url_submit(atk_widget_t *input, void *context)
@@ -895,6 +964,16 @@ bool browser_tick(void *context)
     {
         return false;
     }
+    if (app->first_render_release_armed)
+    {
+        app->first_render_release_armed = false;
+        app->first_render_pending = false;
+        app->first_render_started_ms = 0u;
+        __atomic_store_n(&app->resource_defer_load_id, 0u, __ATOMIC_RELEASE);
+        browser_debug_logf(app,
+                           "[render] first frame presented; releasing resources scripts=%u",
+                           (unsigned)app->first_render_script_count);
+    }
 
     uint64_t tick_start_ms = sys_time_millis();
     size_t event_counts[BROWSER_UI_EVENT_THREAD_DONE + 1] = {0};
@@ -921,7 +1000,19 @@ bool browser_tick(void *context)
         {
             break;
         }
-        if (!browser_ui_event_dequeue(app, &ev))
+        if (app->deferred_ui_event_valid)
+        {
+            if (!browser_ui_event_take_deferred(app, sys_time_millis(), &ev))
+            {
+                break;
+            }
+        }
+        else if (!app->first_render_pending &&
+                 browser_first_render_script_take(app, &ev))
+        {
+            /* Buffered external scripts retain source order after first paint. */
+        }
+        else if (!browser_ui_event_dequeue(app, &ev))
         {
             break;
         }
@@ -935,15 +1026,59 @@ bool browser_tick(void *context)
         bool defer_event = false;
         switch (ev.type)
         {
+            case BROWSER_UI_EVENT_LOAD_BEGIN:
+            {
+                if (browser_load_is_active(app, ev.load_id))
+                {
+                    app->first_render_pending = false;
+                    app->first_render_release_armed = false;
+                    app->first_render_started_ms = 0u;
+                    browser_first_render_scripts_clear(app);
+                    (void)atk_html_view_set_html(app->viewer,
+                                                 "<!doctype html><html><head><style>"
+                                                 "body{margin:0;padding:0;}"
+                                                 "p{margin-top:40vh;text-align:center;font-size:16px;color:#444;}"
+                                                 "</style></head><body><p>Loading...</p></body></html>",
+                                                 NULL);
+                    atk_window_mark_dirty(app->window);
+                    redraw = true;
+                }
+                break;
+            }
             case BROWSER_UI_EVENT_DOC_READY:
             {
                 if (browser_load_is_active(app, ev.load_id))
                 {
+                    browser_first_render_scripts_clear(app);
+                    app->first_render_pending = true;
+                    app->first_render_release_armed = false;
+                    app->first_render_started_ms = sys_time_millis();
+                    size_t initial_css_len = ev.u.doc_ready.external_css_len;
+                    browser_app_css_reset(app);
+                    app->external_css = ev.u.doc_ready.external_css;
+                    app->external_css_len = initial_css_len;
+                    app->external_css_cap = app->external_css ? initial_css_len + 1u : 0u;
+                    ev.u.doc_ready.external_css = NULL;
+                    ev.u.doc_ready.external_css_len = 0;
+                    atk_html_view_set_wait_for_css(app->viewer, true);
+                    atk_html_view_set_document(app->viewer, ev.u.doc_ready.doc);
+                    ev.u.doc_ready.doc = NULL;
+                    atk_html_view_set_external_stylesheet(app->viewer,
+                                                          app->external_css ? app->external_css : "");
+                    atk_html_view_set_wait_for_css(app->viewer, false);
+                    browser_debug_logf(app,
+                                       "[render] document+css applied bytes=%u",
+                                       (unsigned)initial_css_len);
                     if (ev.u.doc_ready.final_url && ev.u.doc_ready.final_url[0] != '\0' && app->url_input)
                     {
                         atk_text_input_set_text(app->url_input, ev.u.doc_ready.final_url);
                         browser_history_update_current(app, ev.u.doc_ready.final_url);
                         browser_try_apply_pending_fragment(app);
+                        atk_window_mark_dirty(app->window);
+                        redraw = true;
+                    }
+                    else
+                    {
                         atk_window_mark_dirty(app->window);
                         redraw = true;
                     }
@@ -969,6 +1104,11 @@ bool browser_tick(void *context)
             {
                 if (browser_load_is_active(app, ev.load_id))
                 {
+                    app->first_render_pending = false;
+                    app->first_render_release_armed = false;
+                    app->first_render_started_ms = 0u;
+                    __atomic_store_n(&app->resource_defer_load_id, 0u, __ATOMIC_RELEASE);
+                    browser_first_render_scripts_clear(app);
                     const char *msg = ev.u.error.message ? ev.u.error.message : "unknown error";
                     browser_debug_logf(app, "[render] showing fetch error page");
 
@@ -1018,23 +1158,52 @@ bool browser_tick(void *context)
                                            ev.u.script_append.src ? ev.u.script_append.src : "(null)");
                         break;
                     }
-                    bool ok = atk_html_view_try_add_script(app->viewer,
-                                                           ev.u.script_append.script,
-                                                           ev.u.script_append.len);
-                    if (!ok)
+                    if (app->first_render_pending)
                     {
-                        browser_debug_logf(app,
-                                           "[js] defer src=%s bytes=%u",
-                                           ev.u.script_append.src ? ev.u.script_append.src : "(null)",
-                                           (unsigned)ev.u.script_append.len);
-                        if (browser_requeue_event(app, &ev))
+                        const char *src = ev.u.script_append.src
+                            ? ev.u.script_append.src
+                            : "(null)";
+                        size_t script_len = ev.u.script_append.len;
+                        if (browser_first_render_script_buffer(app, &ev))
+                        {
+                            skip_free = true;
+                            browser_debug_logf(app,
+                                               "[js] buffered until first cache src=%s bytes=%u queued=%u",
+                                               src,
+                                               (unsigned)script_len,
+                                               (unsigned)app->first_render_script_count);
+                        }
+                        else
+                        {
+                            browser_debug_logf(app,
+                                               "[js] first-cache buffer full (drop) src=%s bytes=%u",
+                                               src,
+                                               (unsigned)script_len);
+                        }
+                        break;
+                    }
+                    atk_html_view_apply_result_t result =
+                        atk_html_view_try_add_script_result(app->viewer,
+                                                            ev.u.script_append.script,
+                                                            ev.u.script_append.len);
+                    if (result != ATK_HTML_VIEW_APPLY_OK)
+                    {
+                        if (result == ATK_HTML_VIEW_APPLY_BUSY &&
+                            browser_defer_apply_event(app,
+                                                     &ev,
+                                                     "js",
+                                                     ev.u.script_append.src,
+                                                     ev.u.script_append.len))
                         {
                             skip_free = true;
                             defer_event = true;
                         }
-                        else
+                        else if (result == ATK_HTML_VIEW_APPLY_FAILED)
                         {
-                            skip_free = true;
+                            browser_debug_logf(app,
+                                               "[js] apply failed src=%s bytes=%u",
+                                               ev.u.script_append.src ? ev.u.script_append.src : "(null)",
+                                               (unsigned)ev.u.script_append.len);
                         }
                         break;
                     }
@@ -1087,33 +1256,40 @@ bool browser_tick(void *context)
             {
                 if (browser_load_is_active(app, ev.load_id))
                 {
-                    bool ok = atk_html_view_try_add_image_rgba(app->viewer,
-                                                              ev.u.image_rgba.src ? ev.u.image_rgba.src : "",
-                                                              ev.u.image_rgba.pixels,
-                                                              ev.u.image_rgba.width,
-                                                              ev.u.image_rgba.height,
-                                                              ev.u.image_rgba.stride_bytes);
-                    if (!ok)
+                    size_t image_bytes = (size_t)ev.u.image_rgba.stride_bytes *
+                                         (size_t)ev.u.image_rgba.height;
+                    atk_html_view_apply_result_t result =
+                        atk_html_view_try_add_image_rgba_result(app->viewer,
+                                                                ev.u.image_rgba.src ? ev.u.image_rgba.src : "",
+                                                                ev.u.image_rgba.pixels,
+                                                                ev.u.image_rgba.width,
+                                                                ev.u.image_rgba.height,
+                                                                ev.u.image_rgba.stride_bytes);
+                    if (result != ATK_HTML_VIEW_APPLY_OK)
                     {
-                        browser_debug_logf(app,
-                                           "[img] defer src=%s bytes=%u",
-                                           ev.u.image_rgba.src ? ev.u.image_rgba.src : "(null)",
-                                           (unsigned)(ev.u.image_rgba.stride_bytes * ev.u.image_rgba.height));
-                        if (browser_requeue_event(app, &ev))
+                        if (result == ATK_HTML_VIEW_APPLY_BUSY &&
+                            browser_defer_apply_event(app,
+                                                     &ev,
+                                                     "img",
+                                                     ev.u.image_rgba.src,
+                                                     image_bytes))
                         {
                             skip_free = true;
                             defer_event = true;
                         }
-                        else
+                        else if (result == ATK_HTML_VIEW_APPLY_FAILED)
                         {
-                            skip_free = true;
+                            browser_debug_logf(app,
+                                               "[img] apply failed src=%s bytes=%u",
+                                               ev.u.image_rgba.src ? ev.u.image_rgba.src : "(null)",
+                                               (unsigned)image_bytes);
                         }
                         break;
                     }
                     browser_debug_logf(app,
                                        "[img] loaded src=%s bytes=%u",
                                        ev.u.image_rgba.src ? ev.u.image_rgba.src : "(null)",
-                                       (unsigned)(ev.u.image_rgba.stride_bytes * ev.u.image_rgba.height));
+                                       (unsigned)image_bytes);
                     ev.u.image_rgba.pixels = NULL;
                     atk_window_mark_dirty(app->window);
                     redraw = true;
@@ -1176,6 +1352,23 @@ bool browser_tick(void *context)
     if (app->viewer && atk_html_view_poll_js(app->viewer))
     {
         redraw = true;
+    }
+    if (app->first_render_pending && app->viewer)
+    {
+        uint64_t now_ms = sys_time_millis();
+        bool timed_out = app->first_render_started_ms != 0u &&
+                         now_ms >= app->first_render_started_ms &&
+                         (now_ms - app->first_render_started_ms) >=
+                             BROWSER_FIRST_RENDER_TIMEOUT_MS;
+        if (atk_html_view_document_drawn(app->viewer) || timed_out)
+        {
+            app->first_render_release_armed = true;
+            browser_debug_logf(app,
+                               timed_out
+                                   ? "[render] first cache timeout; release next frame scripts=%u"
+                                   : "[render] first cache observed; release next frame scripts=%u",
+                               (unsigned)app->first_render_script_count);
+        }
     }
     browser_try_apply_pending_fragment(app);
 
@@ -1451,8 +1644,8 @@ bool browser_build_ui(browser_app_t *app)
     }
     atk_html_view_set_js_enabled(app->viewer, app->js_enabled);
     atk_html_view_set_js_thread_enabled(app->viewer, app->js_thread_enabled);
-    atk_html_view_enable_async_render(app->viewer, false);
-    atk_html_view_enable_external_render(app->viewer, true);
+    atk_html_view_enable_external_render(app->viewer, false);
+    atk_html_view_enable_async_render(app->viewer, true);
     atk_html_view_set_link_handler(app->viewer, browser_html_link_clicked, app);
     atk_widget_set_layout(app->viewer,
                           ATK_WIDGET_ANCHOR_LEFT | ATK_WIDGET_ANCHOR_RIGHT |

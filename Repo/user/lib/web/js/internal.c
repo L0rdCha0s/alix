@@ -59,20 +59,25 @@ static void js_pool_lock_release(void)
 
 static void js_pool_init(void)
 {
-    if (js_pool_ready)
+    if (__atomic_load_n(&js_pool_ready, __ATOMIC_ACQUIRE))
     {
         return;
     }
-    for (size_t i = 0; i < JS_POOL_CLASS_COUNT; ++i)
+    js_pool_lock_acquire();
+    if (!__atomic_load_n(&js_pool_ready, __ATOMIC_RELAXED))
     {
-        size_t payload = js_pool_sizes[i];
-        payload = (payload + JS_ALLOC_ALIGN - 1u) & ~(JS_ALLOC_ALIGN - 1u);
-        js_pool_classes[i].payload_size = payload;
-        js_pool_classes[i].chunk_size = JS_ALLOC_HEADER_SIZE + payload;
-        js_pool_classes[i].free_list = NULL;
-        js_pool_classes[i].blocks = NULL;
+        for (size_t i = 0; i < JS_POOL_CLASS_COUNT; ++i)
+        {
+            size_t payload = js_pool_sizes[i];
+            payload = (payload + JS_ALLOC_ALIGN - 1u) & ~(JS_ALLOC_ALIGN - 1u);
+            js_pool_classes[i].payload_size = payload;
+            js_pool_classes[i].chunk_size = JS_ALLOC_HEADER_SIZE + payload;
+            js_pool_classes[i].free_list = NULL;
+            js_pool_classes[i].blocks = NULL;
+        }
+        __atomic_store_n(&js_pool_ready, 1, __ATOMIC_RELEASE);
     }
-    js_pool_ready = 1;
+    js_pool_lock_release();
 }
 
 static size_t js_pool_class_for(size_t size)

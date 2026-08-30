@@ -4,6 +4,21 @@
 
 #define BROWSER_RESOURCE_SET_INIT_CAP 128u
 
+size_t browser_resource_kind_limit(browser_resource_kind_t kind)
+{
+    switch (kind)
+    {
+        case BROWSER_RESOURCE_CSS:
+            return BROWSER_MAX_STYLESHEETS;
+        case BROWSER_RESOURCE_SCRIPT:
+            return BROWSER_MAX_SCRIPTS;
+        case BROWSER_RESOURCE_IMAGE:
+            return BROWSER_MAX_IMAGES;
+        default:
+            return 0u;
+    }
+}
+
 static uint32_t browser_resource_hash(const char *url, browser_resource_kind_t kind)
 {
     if (!url)
@@ -146,4 +161,22 @@ browser_resource_track_t browser_resource_set_track(browser_resource_set_t *set,
         }
         idx = (idx + 1u) & mask;
     }
+}
+
+size_t browser_resource_set_count_kind(const browser_resource_set_t *set,
+                                       browser_resource_kind_t kind)
+{
+    if (!set || !set->entries)
+    {
+        return 0u;
+    }
+    size_t count = 0u;
+    for (size_t i = 0; i < set->cap; ++i)
+    {
+        if (set->entries[i].url && set->entries[i].kind == kind)
+        {
+            count++;
+        }
+    }
+    return count;
 }

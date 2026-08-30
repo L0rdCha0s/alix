@@ -32,10 +32,15 @@
 #define BROWSER_MAX_STYLESHEETS 8
 #define BROWSER_MAX_IMAGES 16
 #define BROWSER_MAX_SCRIPTS 16
+#define BROWSER_MAX_INLINE_IMAGES 64
 #define BROWSER_UI_EVENT_QUEUE_CAP 256
 #define BROWSER_MAX_LOAD_THREADS 8
 #define BROWSER_UI_EVENTS_PER_TICK 8
 #define BROWSER_UI_EVENT_BUDGET_MS 4
+#define BROWSER_UI_DEFER_RETRY_MS 16u
+#define BROWSER_UI_DEFER_TIMEOUT_MS 60000u
+#define BROWSER_UI_DEFER_MAX_ATTEMPTS (BROWSER_UI_DEFER_TIMEOUT_MS / BROWSER_UI_DEFER_RETRY_MS)
+#define BROWSER_UI_DEFER_LOG_INTERVAL_MS 5000u
 #define BROWSER_CSS_APPLY_DEBOUNCE_MS 64
 #define BROWSER_HISTORY_MAX 64
 #define BROWSER_BACK_MENU_MAX_ITEMS 12
@@ -59,7 +64,8 @@ typedef struct
 
 typedef enum
 {
-    BROWSER_UI_EVENT_DOC_READY = 0,
+    BROWSER_UI_EVENT_LOAD_BEGIN = 0,
+    BROWSER_UI_EVENT_DOC_READY,
     BROWSER_UI_EVENT_NAV_UPDATE,
     BROWSER_UI_EVENT_ERROR,
     BROWSER_UI_EVENT_CSS_APPEND,
@@ -74,12 +80,18 @@ typedef struct
 {
     browser_ui_event_type_t type;
     uint64_t load_id;
+    uint64_t defer_started_ms;
+    uint64_t defer_retry_after_ms;
+    uint64_t defer_last_log_ms;
+    uint32_t defer_attempts;
     union
     {
         struct
         {
             html_document_t *doc;
             char *final_url;
+            char *external_css;
+            size_t external_css_len;
         } doc_ready;
         struct
         {
@@ -165,8 +177,7 @@ typedef struct
 
 typedef enum
 {
-    BROWSER_LOAD_JOB_URL = 0,
-    BROWSER_LOAD_JOB_REBUILD
+    BROWSER_LOAD_JOB_URL = 0
 } browser_load_job_kind_t;
 
 typedef struct browser_load_request
@@ -216,6 +227,11 @@ typedef struct browser_app
     alix_mutex_t resource_lock;
     uint64_t next_load_id;
     uint64_t active_load_id;
+    bool first_render_pending;
+    bool first_render_release_armed;
+    uint64_t first_render_started_ms;
+    browser_ui_event_t first_render_scripts[BROWSER_MAX_SCRIPTS];
+    size_t first_render_script_count;
 
     alix_mutex_t load_lock;
     alix_thread_t html_thread;
@@ -224,6 +240,7 @@ typedef struct browser_app
 
     alix_thread_t resource_thread;
     uint32_t resource_thread_stop;
+    volatile uint64_t resource_defer_load_id;
     browser_resource_queue_t resource_queue;
 
     char *cache_dir;
@@ -247,6 +264,12 @@ typedef struct browser_app
     browser_ui_event_t ui_events[BROWSER_UI_EVENT_QUEUE_CAP];
     size_t ui_event_head;
     size_t ui_event_count;
+    browser_ui_event_t deferred_ui_event;
+    bool deferred_ui_event_valid;
+    bool ui_defer_chain_active;
+    uint64_t ui_defer_chain_load_id;
+    uint64_t ui_defer_chain_started_ms;
+    uint32_t ui_defer_chain_attempts;
 
     atk_widget_t *debug_window;
     atk_widget_t *debug_text;
@@ -265,6 +288,10 @@ char *browser_strdup_len(const char *src, size_t len);
 bool browser_write_all(int fd, const uint8_t *data, size_t len);
 bool browser_buf_append(char **buf, size_t *len, size_t *cap, const uint8_t *data, size_t data_len);
 bool browser_has_token_ci(const char *value, size_t value_len, const char *token);
+bool browser_main_document_error(int status,
+                                 const char *body,
+                                 char *message,
+                                 size_t message_cap);
 
 /* url */
 bool browser_parse_url(const char *input, browser_url_t *out);
@@ -280,7 +307,8 @@ size_t browser_dom_count_nodes(const html_node_t *root, size_t limit);
 bool browser_is_png_bytes(const uint8_t *data, size_t len);
 bool browser_is_gif_bytes(const uint8_t *data, size_t len);
 bool browser_is_svg_bytes(const uint8_t *data, size_t len);
-void browser_dom_set_attr(html_node_t *node, const char *name, const char *value);
+bool browser_dom_set_attr(html_node_t *node, const char *name, const char *value);
+bool browser_dom_set_tag_name(html_node_t *node, const char *name);
 size_t browser_collect_resource_urls(browser_app_t *app,
                                      html_node_t *root,
                                      const browser_url_t *base_url,
@@ -303,7 +331,26 @@ bool browser_cache_clear(browser_app_t *app);
 
 /* loader/events */
 void browser_ui_event_free_payload(browser_ui_event_t *ev);
-bool browser_ui_event_enqueue(browser_app_t *app, const browser_ui_event_t *ev);
+bool browser_ui_event_move(browser_ui_event_t *dst, browser_ui_event_t *src);
+bool browser_ui_event_defer(browser_app_t *app, browser_ui_event_t *ev, uint64_t now_ms);
+bool browser_ui_event_take_deferred(browser_app_t *app, uint64_t now_ms, browser_ui_event_t *out);
+bool browser_ui_event_defer_expired(const browser_app_t *app,
+                                    const browser_ui_event_t *ev,
+                                    uint64_t now_ms);
+void browser_ui_event_defer_chain_reset(browser_app_t *app);
+bool browser_first_render_script_buffer(browser_app_t *app, browser_ui_event_t *ev);
+bool browser_first_render_script_take(browser_app_t *app, browser_ui_event_t *out);
+void browser_first_render_scripts_clear(browser_app_t *app);
+/* Always consumes *ev, freeing its payload if the queue cannot accept it. */
+bool browser_ui_event_enqueue_owned(browser_app_t *app, browser_ui_event_t *ev);
+/* Atomically enqueues every event or consumes and frees the complete batch. */
+bool browser_ui_event_enqueue_batch_owned(browser_app_t *app,
+                                          browser_ui_event_t *events,
+                                          size_t count);
+bool browser_ui_event_enqueue_batch_for_load_owned(browser_app_t *app,
+                                                   uint64_t load_id,
+                                                   browser_ui_event_t *events,
+                                                   size_t count);
 bool browser_ui_event_dequeue(browser_app_t *app, browser_ui_event_t *out);
 bool browser_load_is_active(browser_app_t *app, uint64_t load_id);
 bool browser_load_queue_push(browser_app_t *app, browser_load_job_kind_t kind, uint64_t load_id, char *url_text);
@@ -319,11 +366,24 @@ bool browser_script_event_init(browser_ui_event_t *ev,
                                const char *src,
                                char *script,
                                size_t len);
+/* On success, the event owns doc, final_url, and external_css. */
+bool browser_document_event_init_owned(browser_ui_event_t *ev,
+                                       uint64_t load_id,
+                                       html_document_t *doc,
+                                       char *final_url,
+                                       char *external_css,
+                                       size_t external_css_len);
+bool browser_error_event_init(browser_ui_event_t *ev,
+                              uint64_t load_id,
+                              const char *message);
 bool browser_resource_set_init(browser_resource_set_t *set);
 void browser_resource_set_destroy(browser_resource_set_t *set);
 browser_resource_track_t browser_resource_set_track(browser_resource_set_t *set,
                                                     browser_resource_kind_t kind,
                                                     const char *url);
+size_t browser_resource_set_count_kind(const browser_resource_set_t *set,
+                                       browser_resource_kind_t kind);
+size_t browser_resource_kind_limit(browser_resource_kind_t kind);
 bool browser_resource_queue_push(browser_app_t *app,
                                  browser_resource_kind_t kind,
                                  uint64_t load_id,
@@ -365,6 +425,8 @@ static inline void browser_lock_enter(browser_app_t *app, alix_mutex_t *mutex, c
     if (log_enabled)
     {
         uint64_t waited_ms = sys_time_millis() - start_ms;
+        (void)tid;
+        (void)waited_ms;
         // serial_printf("[lock] enter name=%s tid=%llu wait=%llu",
         //               name,
         //               (unsigned long long)tid,
@@ -391,6 +453,7 @@ static inline void browser_lock_exit(browser_app_t *app, alix_mutex_t *mutex, co
     if (log_enabled)
     {
         uint64_t tid = alix_thread_self();
+        (void)tid;
         // serial_printf("[lock] exit name=%s tid=%llu",
         //               name,
         //               (unsigned long long)tid);

@@ -299,6 +299,8 @@ static bool js_same_value(const js_value_t *a, const js_value_t *b)
             }
             return an == bn;
         }
+        case JS_VALUE_BIGINT:
+            return js_bigint_compare(a->as.bigint, b->as.bigint) == 0;
         case JS_VALUE_STRING:
             if (a->as.string.len != b->as.string.len)
             {
@@ -620,6 +622,13 @@ static void print_value(FILE *fp, const js_value_t *value)
         case JS_VALUE_NUMBER:
             fprintf(fp, "%.17g", value->as.number);
             return;
+        case JS_VALUE_BIGINT:
+        {
+            char *text = js_bigint_to_string(value->as.bigint);
+            fputs(text ? text : "<bigint>", fp);
+            free(text);
+            return;
+        }
         case JS_VALUE_STRING:
             if (value->as.string.data && value->as.string.len)
             {
@@ -1034,7 +1043,7 @@ static bool run_test_file(const char *path, test262_ctx_t *ctx)
     if (!passed)
     {
         const char *reason = meta.negative ? "expected failure" : "unexpected failure";
-        fprintf(stderr, "FAIL %s (%s)", path, reason);
+        fprintf(stderr, "FAIL %s (%s at byte %zu)", path, reason, res.error_offset);
         if (res.error_message)
         {
             fprintf(stderr, ": %s", res.error_message);

@@ -14075,7 +14075,7 @@ bool js_builtin_create_realm(js_runtime_t *rt,
         }
         return false;
     }
-    realm->id = js_realm_next_id++;
+    realm->id = __atomic_fetch_add(&js_realm_next_id, 1, __ATOMIC_RELAXED);
 
     js_value_t global_obj;
     if (!js_value_make_host_object(&global_obj, NULL, NULL, js_realm_finalize, realm))

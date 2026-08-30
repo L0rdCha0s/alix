@@ -898,6 +898,11 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
                 (void)js_lexer_advance(lex);
                 out->type = JS_TOKEN_MINUS_MINUS;
             }
+            else if (js_lexer_peek(lex) == '=')
+            {
+                (void)js_lexer_advance(lex);
+                out->type = JS_TOKEN_MINUS_EQUAL;
+            }
             else
             {
                 out->type = JS_TOKEN_MINUS;
@@ -926,8 +931,7 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
             }
             else
             {
-                js_parse_error_set(error_out, start_offset, "unexpected '&'");
-                return false;
+                out->type = JS_TOKEN_BIT_AND;
             }
             out->offset = start_offset;
             return true;
@@ -939,8 +943,7 @@ bool js_lexer_next(js_lexer_t *lex, js_token_t *out, js_parse_error_t *error_out
             }
             else
             {
-                js_parse_error_set(error_out, start_offset, "unexpected '|'");
-                return false;
+                out->type = JS_TOKEN_BIT_OR;
             }
             out->offset = start_offset;
             return true;

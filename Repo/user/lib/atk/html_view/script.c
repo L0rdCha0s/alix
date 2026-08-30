@@ -2,6 +2,7 @@
 
 #include "web/js/internal.h"
 #include "web/js/runtime/runtime_internal.h"
+#include "web/html/html_internal.h"
 
 #include "ctype.h"
 #include "serial.h"
@@ -813,11 +814,14 @@ static html_view_js_timer_t *html_view_js_timer_take_due_locked(atk_html_view_pr
     {
         if (cur->due_ms <= now_ms)
         {
-            chosen = cur;
-            chosen_prev = prev;
-            break;
+            if (!chosen || cur->due_ms < chosen->due_ms ||
+                (cur->due_ms == chosen->due_ms && cur->id < chosen->id))
+            {
+                chosen = cur;
+                chosen_prev = prev;
+            }
         }
-        if (next_due == 0 || cur->due_ms < next_due)
+        else if (next_due == 0 || cur->due_ms < next_due)
         {
             next_due = cur->due_ms;
         }
@@ -844,6 +848,156 @@ static html_view_js_timer_t *html_view_js_timer_take_due_locked(atk_html_view_pr
     }
     chosen->next = NULL;
     return chosen;
+}
+
+static uint64_t html_view_js_timer_delay(const js_value_t *value)
+{
+    if (!value || value->type == JS_VALUE_UNDEFINED)
+    {
+        return 0;
+    }
+    bool ok = true;
+    double number = js_value_to_number(value, &ok);
+    if (!ok || js_is_nan(number) || number <= 0.0)
+    {
+        return 0;
+    }
+    if (number > 2147483647.0)
+    {
+        return 2147483647u;
+    }
+    return (uint64_t)number;
+}
+
+static bool html_view_js_schedule_timer(js_runtime_t *rt,
+                                        size_t argc,
+                                        const js_value_t *argv,
+                                        void *user_data,
+                                        js_value_t *out,
+                                        char **error_message,
+                                        bool repeating,
+                                        bool animation_frame)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_number(0.0);
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv || !argv || argc == 0 || html_view_js_should_stop(priv))
+    {
+        return true;
+    }
+
+    const js_value_t *callback = &argv[0];
+    bool is_eval = !animation_frame && callback->type == JS_VALUE_STRING;
+    if (!is_eval && callback->type != JS_VALUE_FUNCTION && callback->type != JS_VALUE_NATIVE_FN)
+    {
+        return true;
+    }
+    uint64_t delay_ms = animation_frame ? 16u : ((argc > 1) ? html_view_js_timer_delay(&argv[1]) : 0u);
+    if (repeating && delay_ms == 0u)
+    {
+        delay_ms = 1u;
+    }
+    const js_value_t *extra_args = (!animation_frame && argc > 2) ? &argv[2] : NULL;
+    size_t extra_argc = (!animation_frame && argc > 2) ? (argc - 2u) : 0u;
+    const char *source = is_eval && callback->as.string.data ? callback->as.string.data : "";
+    size_t source_len = is_eval ? callback->as.string.len : 0u;
+    uint64_t id = 0;
+
+    html_view_dom_lock(priv);
+    bool scheduled = !html_view_js_should_stop(priv) &&
+                     html_view_js_timer_add_locked(priv,
+                                                   repeating,
+                                                   is_eval,
+                                                   animation_frame,
+                                                   delay_ms,
+                                                   callback,
+                                                   extra_args,
+                                                   extra_argc,
+                                                   source,
+                                                   source_len,
+                                                   &id,
+                                                   error_message);
+    html_view_dom_unlock(priv);
+    if (!scheduled)
+    {
+        return error_message == NULL || *error_message == NULL;
+    }
+    *out = js_value_make_number((double)id);
+    return true;
+}
+
+static bool html_view_js_set_timeout(js_runtime_t *rt,
+                                     size_t argc,
+                                     const js_value_t *argv,
+                                     void *user_data,
+                                     js_value_t *out,
+                                     char **error_message)
+{
+    return html_view_js_schedule_timer(rt, argc, argv, user_data, out, error_message, false, false);
+}
+
+static bool html_view_js_set_interval(js_runtime_t *rt,
+                                      size_t argc,
+                                      const js_value_t *argv,
+                                      void *user_data,
+                                      js_value_t *out,
+                                      char **error_message)
+{
+    return html_view_js_schedule_timer(rt, argc, argv, user_data, out, error_message, true, false);
+}
+
+static bool html_view_js_request_animation_frame(js_runtime_t *rt,
+                                                 size_t argc,
+                                                 const js_value_t *argv,
+                                                 void *user_data,
+                                                 js_value_t *out,
+                                                 char **error_message)
+{
+    return html_view_js_schedule_timer(rt, argc, argv, user_data, out, error_message, false, true);
+}
+
+static bool html_view_js_clear_timer(js_runtime_t *rt,
+                                     size_t argc,
+                                     const js_value_t *argv,
+                                     void *user_data,
+                                     js_value_t *out,
+                                     char **error_message)
+{
+    (void)rt;
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!out)
+    {
+        return false;
+    }
+    *out = js_value_make_undefined();
+    atk_widget_t *view = (atk_widget_t *)user_data;
+    atk_html_view_priv_t *priv = html_view_priv_mut(view);
+    if (!priv || !argv || argc == 0)
+    {
+        return true;
+    }
+    bool number_ok = true;
+    double number = js_value_to_number(&argv[0], &number_ok);
+    if (!number_ok || js_is_nan(number) || number <= 0.0)
+    {
+        return true;
+    }
+    html_view_dom_lock(priv);
+    (void)html_view_js_timer_remove_locked(priv, (uint64_t)number);
+    html_view_dom_unlock(priv);
+    return true;
 }
 
 void html_view_dom_lock(atk_html_view_priv_t *priv)
@@ -1523,8 +1677,12 @@ static html_node_t *html_view_js_find_element_by_id(const html_node_t *root, con
     return NULL;
 }
 
-static html_node_t *html_view_js_create_node(html_node_type_t type)
+static html_node_t *html_view_js_create_node(html_document_t *doc, html_node_type_t type)
 {
+    if (doc)
+    {
+        return html_node_create(doc, type);
+    }
     html_node_t *node = (html_node_t *)calloc(1, sizeof(*node));
     if (!node)
     {
@@ -1536,22 +1694,34 @@ static html_node_t *html_view_js_create_node(html_node_type_t type)
 
 static void html_view_js_append_child(html_node_t *parent, html_node_t *child)
 {
-    if (!parent || !child)
+    html_node_append_child(parent, child);
+}
+
+static char *html_view_js_node_strdup(html_node_t *node, const char *text, size_t len)
+{
+    const char *source = text ? text : "";
+    if (node && node->doc)
+    {
+        return html_doc_strdup_range(node->doc, source, source + len, false);
+    }
+    return html_view_js_strdup_len(source, len);
+}
+
+static void html_view_js_node_reset_class_cache(html_node_t *node)
+{
+    if (!node)
     {
         return;
     }
-    child->parent = parent;
-    child->prev_sibling = parent->last_child;
-    child->next_sibling = NULL;
-    if (parent->last_child)
+    bool arena_owned = node->doc && node->doc->arena_blocks;
+    if (node->class_tokens && !arena_owned)
     {
-        parent->last_child->next_sibling = child;
+        free(node->class_tokens);
     }
-    else
-    {
-        parent->first_child = child;
-    }
-    parent->last_child = child;
+    node->class_tokens = NULL;
+    node->class_token_count = 0;
+    node->class_token_cap = 0;
+    node->class_cache_value = NULL;
 }
 
 static bool html_view_js_node_set_text(html_node_t *node, const char *text, size_t len)
@@ -1561,7 +1731,7 @@ static bool html_view_js_node_set_text(html_node_t *node, const char *text, size
         return false;
     }
 
-    char *copy = html_view_js_strdup_len(text, len);
+    char *copy = html_view_js_node_strdup(node, text, len);
     if (!copy)
     {
         return false;
@@ -1569,7 +1739,10 @@ static bool html_view_js_node_set_text(html_node_t *node, const char *text, size
 
     if (node->type == HTML_NODE_TEXT)
     {
-        free(node->text);
+        if (!node->doc)
+        {
+            free(node->text);
+        }
         node->text = copy;
         return true;
     }
@@ -1585,16 +1758,22 @@ static bool html_view_js_node_set_text(html_node_t *node, const char *text, size
     }
     if (!target)
     {
-        target = html_view_js_create_node(HTML_NODE_TEXT);
+        target = html_view_js_create_node(node->doc, HTML_NODE_TEXT);
         if (!target)
         {
-            free(copy);
+            if (!node->doc)
+            {
+                free(copy);
+            }
             return false;
         }
         html_view_js_append_child(node, target);
     }
 
-    free(target->text);
+    if (!target->doc)
+    {
+        free(target->text);
+    }
     target->text = copy;
     return true;
 }
@@ -1616,32 +1795,48 @@ static bool html_view_js_node_set_attr(html_node_t *node, const char *name, cons
         {
             continue;
         }
-        char *copy = html_view_strdup(value);
+        char *copy = html_view_js_node_strdup(node, value, strlen(value));
         if (!copy)
         {
             return false;
         }
-        free(attr->value);
+        if (!node->doc)
+        {
+            free(attr->value);
+        }
         attr->value = copy;
+        if (strcasecmp(name, "class") == 0)
+        {
+            html_view_js_node_reset_class_cache(node);
+        }
         return true;
     }
 
-    html_attr_t *attr = (html_attr_t *)calloc(1, sizeof(*attr));
+    html_attr_t *attr = node->doc
+                            ? (html_attr_t *)html_doc_alloc(node->doc, sizeof(*attr))
+                            : (html_attr_t *)calloc(1, sizeof(*attr));
     if (!attr)
     {
         return false;
     }
-    attr->name = html_view_strdup(name);
-    attr->value = html_view_strdup(value);
+    attr->name = html_view_js_node_strdup(node, name, strlen(name));
+    attr->value = html_view_js_node_strdup(node, value, strlen(value));
     if (!attr->name || !attr->value)
     {
-        free(attr->name);
-        free(attr->value);
-        free(attr);
+        if (!node->doc)
+        {
+            free(attr->name);
+            free(attr->value);
+            free(attr);
+        }
         return false;
     }
     attr->next = node->attrs;
     node->attrs = attr;
+    if (strcasecmp(name, "class") == 0)
+    {
+        html_view_js_node_reset_class_cache(node);
+    }
     return true;
 }
 
@@ -1674,9 +1869,16 @@ static bool html_view_js_node_remove_attr(html_node_t *node, const char *name)
             {
                 node->attrs = attr->next;
             }
-            free(attr->name);
-            free(attr->value);
-            free(attr);
+            if (strcasecmp(name, "class") == 0)
+            {
+                html_view_js_node_reset_class_cache(node);
+            }
+            if (!node->doc)
+            {
+                free(attr->name);
+                free(attr->value);
+                free(attr);
+            }
             return true;
         }
         prev = attr;
@@ -6786,7 +6988,13 @@ static bool html_view_js_register_natives(js_runtime_t *rt, atk_widget_t *view)
         !js_runtime_set_native(rt, "dom_get_elements_by_class", html_view_js_dom_get_elements_by_class, view) ||
         !js_runtime_set_native(rt, "view_invalidate", html_view_js_view_invalidate, view) ||
         !js_runtime_set_native(rt, "view_get_width", html_view_js_view_get_width, view) ||
-        !js_runtime_set_native(rt, "view_get_height", html_view_js_view_get_height, view))
+        !js_runtime_set_native(rt, "view_get_height", html_view_js_view_get_height, view) ||
+        !js_runtime_set_native(rt, "setTimeout", html_view_js_set_timeout, view) ||
+        !js_runtime_set_native(rt, "clearTimeout", html_view_js_clear_timer, view) ||
+        !js_runtime_set_native(rt, "setInterval", html_view_js_set_interval, view) ||
+        !js_runtime_set_native(rt, "clearInterval", html_view_js_clear_timer, view) ||
+        !js_runtime_set_native(rt, "requestAnimationFrame", html_view_js_request_animation_frame, view) ||
+        !js_runtime_set_native(rt, "cancelAnimationFrame", html_view_js_clear_timer, view))
     {
         return false;
     }
@@ -6812,7 +7020,25 @@ static bool html_view_js_register_natives(js_runtime_t *rt, atk_widget_t *view)
         return false;
     }
 
+    js_value_t window_value;
+    memset(&window_value, 0, sizeof(window_value));
+    window_value.type = JS_VALUE_OBJECT;
+    window_value.as.object = rt->global_object;
+    js_object_retain(rt->global_object);
+    ok = js_runtime_set_global(rt, "window", &window_value) &&
+         js_runtime_set_global(rt, "self", &window_value);
+    js_value_destroy(&window_value);
+    if (!ok)
+    {
+        return false;
+    }
+
     return true;
+}
+
+static bool html_view_js_interrupt_requested(void *user_data)
+{
+    return html_view_js_should_stop((const atk_html_view_priv_t *)user_data);
 }
 
 static bool html_view_js_runtime_ensure(atk_widget_t *view, atk_html_view_priv_t *priv)
@@ -6831,6 +7057,7 @@ static bool html_view_js_runtime_ensure(atk_widget_t *view, atk_html_view_priv_t
         printf("html_view_js: runtime create failed\n");
         return false;
     }
+    js_runtime_set_interrupt_handler(priv->js_runtime, html_view_js_interrupt_requested, priv);
     if (!html_view_js_register_natives(priv->js_runtime, view))
     {
         printf("html_view_js: failed to register host functions\n");
@@ -7137,8 +7364,13 @@ static bool html_view_js_queue_external_impl(atk_widget_t *view,
                                              atk_html_view_priv_t *priv,
                                              const char *script_text,
                                              size_t len,
-                                             bool try_only)
+                                             bool try_only,
+                                             bool *busy_out)
 {
+    if (busy_out)
+    {
+        *busy_out = false;
+    }
     if (!view || !priv || !script_text || len == 0)
     {
         return false;
@@ -7148,12 +7380,14 @@ static bool html_view_js_queue_external_impl(atk_widget_t *view,
         return false;
     }
 
-    bool queued = false;
-    bool defer_start = false;
     if (try_only)
     {
         if (!html_view_dom_try_lock(priv))
         {
+            if (busy_out)
+            {
+                *busy_out = true;
+            }
             return false;
         }
     }
@@ -7161,20 +7395,36 @@ static bool html_view_js_queue_external_impl(atk_widget_t *view,
     {
         html_view_dom_lock(priv);
     }
-    queued = html_view_js_queue_source_locked(priv, script_text, len);
-    defer_start = (priv->js_defer_start != 0u);
-    html_view_dom_unlock(priv);
-    if (!queued)
+
+    alix_thread_t started_thread = 0;
+    bool should_start = priv->js_thread_enabled &&
+                        priv->js_defer_start == 0u &&
+                        priv->js_thread == 0;
+    if (should_start)
     {
-        return false;
+        if (!html_view_js_runtime_ensure(view, priv))
+        {
+            html_view_dom_unlock(priv);
+            return false;
+        }
+        __atomic_store_n(&priv->js_stop, 0u, __ATOMIC_RELEASE);
+        if (alix_thread_create(&started_thread, "atk_html_js", html_view_js_thread, view) != 0)
+        {
+            html_view_dom_unlock(priv);
+            return false;
+        }
+        priv->js_thread = started_thread;
     }
 
-    if (defer_start)
+    bool queued = html_view_js_queue_source_locked(priv, script_text, len);
+    html_view_dom_unlock(priv);
+    if (started_thread)
     {
-        return true;
+        serial_printf("[html_js] start view=%p thread=%llu",
+                      (void *)view,
+                      (unsigned long long)started_thread);
     }
-    html_view_js_start_thread(view, priv);
-    return true;
+    return queued;
 }
 
 bool html_view_js_queue_external(atk_widget_t *view,
@@ -7182,7 +7432,7 @@ bool html_view_js_queue_external(atk_widget_t *view,
                                  const char *script_text,
                                  size_t len)
 {
-    return html_view_js_queue_external_impl(view, priv, script_text, len, false);
+    return html_view_js_queue_external_impl(view, priv, script_text, len, false, NULL);
 }
 
 bool html_view_js_queue_external_try(atk_widget_t *view,
@@ -7190,7 +7440,27 @@ bool html_view_js_queue_external_try(atk_widget_t *view,
                                      const char *script_text,
                                      size_t len)
 {
-    return html_view_js_queue_external_impl(view, priv, script_text, len, true);
+    return html_view_js_queue_external_try_result(view, priv, script_text, len) ==
+           ATK_HTML_VIEW_APPLY_OK;
+}
+
+atk_html_view_apply_result_t html_view_js_queue_external_try_result(atk_widget_t *view,
+                                                                    atk_html_view_priv_t *priv,
+                                                                    const char *script_text,
+                                                                    size_t len)
+{
+    bool busy = false;
+    bool queued = html_view_js_queue_external_impl(view,
+                                                   priv,
+                                                   script_text,
+                                                   len,
+                                                   true,
+                                                   &busy);
+    if (queued)
+    {
+        return ATK_HTML_VIEW_APPLY_OK;
+    }
+    return busy ? ATK_HTML_VIEW_APPLY_BUSY : ATK_HTML_VIEW_APPLY_FAILED;
 }
 
 void html_view_js_shutdown(atk_widget_t *view, atk_html_view_priv_t *priv)

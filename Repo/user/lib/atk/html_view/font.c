@@ -191,35 +191,34 @@ static bool html_view_font_render_glyph(html_view_font_state_t *state,
     out->advance = metrics.advance;
     out->bearing_x = metrics.bearing_x;
     out->bearing_y = metrics.bearing_y;
+    out->advance_ready = true;
     out->ready = true;
 
     ttf_bitmap_destroy(&bitmap);
     return true;
 }
 
-static html_view_font_glyph_t *html_view_font_cache_get_glyph(html_view_font_state_t *state,
-                                                              html_view_font_size_cache_t *cache,
-                                                              uint32_t codepoint)
+static uint32_t html_view_font_normalize_codepoint(uint32_t codepoint)
 {
-    if (!state || !cache || !state->ready || cache->pixel_height <= 0)
-    {
-        return NULL;
-    }
-
     if (codepoint < 0x20u || codepoint == 0x7Fu)
     {
-        codepoint = (uint32_t)'?';
+        return (uint32_t)'?';
+    }
+    return codepoint;
+}
+
+static html_view_font_glyph_t *html_view_font_cache_get_slot(html_view_font_size_cache_t *cache,
+                                                             uint32_t codepoint)
+{
+    if (!cache || cache->pixel_height <= 0)
+    {
+        return NULL;
     }
 
     if (codepoint >= HTML_VIEW_FONT_CACHE_FIRST && codepoint <= HTML_VIEW_FONT_CACHE_LAST)
     {
         size_t idx = (size_t)(codepoint - HTML_VIEW_FONT_CACHE_FIRST);
-        html_view_font_glyph_t *glyph = &cache->glyphs[idx];
-        if (!glyph->ready)
-        {
-            (void)html_view_font_render_glyph(state, cache, codepoint, glyph);
-        }
-        return glyph;
+        return &cache->glyphs[idx];
     }
 
     uint32_t tick = ++cache->glyph_use_counter;
@@ -232,13 +231,9 @@ static html_view_font_glyph_t *html_view_font_cache_get_glyph(html_view_font_sta
         if (entry->codepoint == codepoint)
         {
             entry->last_used = tick;
-            if (!entry->glyph.ready)
-            {
-                (void)html_view_font_render_glyph(state, cache, codepoint, &entry->glyph);
-            }
             return &entry->glyph;
         }
-        if (!entry->glyph.ready)
+        if (!entry->glyph.ready && !entry->glyph.advance_ready)
         {
             slot = entry;
         }
@@ -260,8 +255,58 @@ static html_view_font_glyph_t *html_view_font_cache_get_glyph(html_view_font_sta
     html_view_font_glyph_free(&slot->glyph);
     slot->codepoint = codepoint;
     slot->last_used = tick;
-    (void)html_view_font_render_glyph(state, cache, codepoint, &slot->glyph);
     return &slot->glyph;
+}
+
+static bool html_view_font_cache_get_advance(html_view_font_state_t *state,
+                                             html_view_font_size_cache_t *cache,
+                                             uint32_t codepoint,
+                                             int *advance_out)
+{
+    if (advance_out)
+    {
+        *advance_out = 0;
+    }
+    if (!state || !cache || !state->ready || cache->pixel_height <= 0 || !advance_out)
+    {
+        return false;
+    }
+
+    codepoint = html_view_font_normalize_codepoint(codepoint);
+    html_view_font_glyph_t *glyph = html_view_font_cache_get_slot(cache, codepoint);
+    if (!glyph)
+    {
+        return false;
+    }
+    if (!glyph->advance_ready)
+    {
+        int advance = 0;
+        if (!ttf_font_glyph_advance(&state->font, codepoint, cache->pixel_height, &advance))
+        {
+            return false;
+        }
+        glyph->advance = advance;
+        glyph->advance_ready = true;
+    }
+    *advance_out = glyph->advance;
+    return true;
+}
+
+static html_view_font_glyph_t *html_view_font_cache_get_glyph(html_view_font_state_t *state,
+                                                              html_view_font_size_cache_t *cache,
+                                                              uint32_t codepoint)
+{
+    if (!state || !cache || !state->ready || cache->pixel_height <= 0)
+    {
+        return NULL;
+    }
+    codepoint = html_view_font_normalize_codepoint(codepoint);
+    html_view_font_glyph_t *glyph = html_view_font_cache_get_slot(cache, codepoint);
+    if (glyph && !glyph->ready)
+    {
+        (void)html_view_font_render_glyph(state, cache, codepoint, glyph);
+    }
+    return glyph;
 }
 
 static html_view_font_size_cache_t *html_view_font_cache_for_ctx(const html_view_ctx_t *ctx)
@@ -418,13 +463,13 @@ int html_view_text_width(const html_view_ctx_t *ctx, const char *text)
         guard += (size_t)dec.consumed;
         cursor += dec.consumed;
 
-        html_view_font_glyph_t *glyph = html_view_font_cache_get_glyph(font_state, cache, dec.codepoint);
-        if (!glyph || !glyph->ready)
+        int advance = 0;
+        if (!html_view_font_cache_get_advance(font_state, cache, dec.codepoint, &advance))
         {
             width += ctx->actual_font_px / 2;
             continue;
         }
-        width += glyph->advance;
+        width += advance;
     }
     if (cacheable)
     {
@@ -501,13 +546,13 @@ int html_view_text_width_len(const html_view_ctx_t *ctx, const char *text, size_
         guard += (size_t)dec.consumed;
         offset += dec.consumed;
 
-        html_view_font_glyph_t *glyph = html_view_font_cache_get_glyph(font_state, cache, dec.codepoint);
-        if (!glyph || !glyph->ready)
+        int advance = 0;
+        if (!html_view_font_cache_get_advance(font_state, cache, dec.codepoint, &advance))
         {
             width += ctx->actual_font_px / 2;
             continue;
         }
-        width += glyph->advance;
+        width += advance;
     }
     if (cacheable)
     {

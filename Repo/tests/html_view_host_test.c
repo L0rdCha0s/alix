@@ -4551,6 +4551,67 @@ static bool test_attribute_selectors_with_escapes(void)
     return ok_div && ok_span;
 }
 
+static bool test_indexed_selector_bucket_hashes(void)
+{
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse(
+        "<section class=\"scope-root\"><div id=\"hero\" class=\"alpha sm:w-50\" data-kind=\"question\"></div></section>",
+        &err);
+    if (!doc)
+    {
+        return false;
+    }
+    const html_node_t *target = find_node_by_id(doc->root, "hero");
+    if (!target)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    css_stylesheet_t *sheet = css_parse(
+        "div { width: 10px; }"
+        "#hero { height: 11px; }"
+        "[data-kind] { color: red; }"
+        ".sm\\:w-50 { background: blue; }"
+        ".scope-root > .alpha { float: right; }"
+        ".scope-root * { position: relative; }");
+    if (!sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    atk_html_view_priv_t priv = {0};
+    priv.doc = doc;
+    priv.sheet = sheet;
+    html_view_dom_bloom_mark_dirty(&priv);
+    bool prepared = html_view_rule_index_prepare(&priv, sheet);
+
+    css_style_t parent = {0};
+    css_style_t out = {0};
+    if (prepared)
+    {
+        html_view_style_for_node(&out, sheet, &parent, target, &priv);
+    }
+
+    bool ok = prepared &&
+              out.has_width && out.width.valid && out.width.value_milli == 10000 &&
+              out.has_height && out.height.valid && out.height.value_milli == 11000 &&
+              out.has_color && out.color == video_make_color(0xFF, 0x00, 0x00) &&
+              out.has_background && out.background == video_make_color(0x00, 0x00, 0xFF) &&
+              out.has_float && out.float_mode == CSS_FLOAT_RIGHT &&
+              out.has_position && out.position == CSS_POSITION_RELATIVE;
+
+    css_style_release(&out);
+    html_view_style_cache_clear(&priv);
+    html_view_style_block_pool_clear(&priv);
+    free(priv.style_cache);
+    html_view_rule_index_clear(&priv);
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+    return ok;
+}
+
 static bool test_adjacent_sibling_selector(void)
 {
     html_parse_error_t err = {0};
@@ -4836,6 +4897,48 @@ static bool test_object_fallback_text(void)
     html_view_font_state_reset(&priv.font);
     html_document_destroy(doc);
     return rendered && ctx.x == expected;
+}
+
+static bool test_text_measurement_defers_bitmap_rasterization(void)
+{
+    atk_html_view_priv_t priv = {0};
+    html_view_ctx_t ctx = {0};
+    ctx.priv = &priv;
+    ctx.actual_font_px = 16;
+    ctx.base_font_px = 16;
+    ctx.base_line_height = 16;
+    ctx.line_height = 16;
+
+    int measured = html_view_text_width_len(&ctx, "A", 1u);
+    html_view_font_size_cache_t *cache = html_view_font_state_get_cache(&priv.font, 16);
+    if (measured <= 0 || !cache)
+    {
+        html_view_font_state_reset(&priv.font);
+        return false;
+    }
+
+    html_view_font_glyph_t *glyph =
+        &cache->glyphs[(size_t)('A' - HTML_VIEW_FONT_CACHE_FIRST)];
+    bool ok = glyph->advance_ready && !glyph->ready && glyph->alpha == NULL &&
+              glyph->advance == measured;
+
+    atk_rect_t offscreen_clip = {
+        .x = 1000,
+        .y = 1000,
+        .width = 1,
+        .height = 1,
+    };
+    html_view_draw_string_clipped_len(&ctx,
+                                      0,
+                                      16,
+                                      "A",
+                                      1u,
+                                      video_make_color(0, 0, 0),
+                                      &offscreen_clip);
+    ok = ok && glyph->advance_ready && glyph->ready && glyph->advance == measured;
+
+    html_view_font_state_reset(&priv.font);
+    return ok;
 }
 
 static bool test_float_inherit(void)
@@ -5384,6 +5487,15 @@ typedef struct
     uint64_t hash;
 } html_view_render_stats_t;
 
+typedef bool (*html_view_host_before_layout_fn)(atk_html_view_priv_t *priv,
+                                                const html_document_t *doc,
+                                                css_stylesheet_t *sheet,
+                                                const char *asset_base_dir,
+                                                void *context);
+
+static html_view_host_before_layout_fn g_html_view_host_before_layout = NULL;
+static void *g_html_view_host_before_layout_context = NULL;
+
 static size_t html_view_count_nodes(const html_node_t *root)
 {
     if (!root)
@@ -5490,6 +5602,17 @@ static bool render_doc_case(const char *case_name,
     priv->sheet = sheet;
     html_view_render_cache_clear(&priv->render_cache);
     priv->render_cache.tile_h = ATK_HTML_VIEW_RENDER_TILE_H;
+
+    if (g_html_view_host_before_layout &&
+        !g_html_view_host_before_layout(priv,
+                                        doc,
+                                        sheet,
+                                        asset_base_dir,
+                                        g_html_view_host_before_layout_context))
+    {
+        printf("html_view_host_test: %s before-layout hook failed\n", case_name);
+        return false;
+    }
 
     const html_node_t *html_node = find_first_tag(doc->root, "html");
     const html_node_t *body_node = find_first_tag(doc->root, "body");
@@ -5909,6 +6032,41 @@ static bool render_doc_case(const char *case_name,
         html_view_render_cache_clear(&priv->render_cache);
     }
     return true;
+}
+
+static bool test_http_error_page_is_visible(void)
+{
+    const char *html =
+        "<!doctype html><html><body>"
+        "<p>Fetch error:</p><p>HTTP 403 Forbidden</p>"
+        "</body></html>";
+    html_parse_error_t err = {0};
+    html_document_t *doc = html_parse(html, &err);
+    if (!doc)
+    {
+        return false;
+    }
+    css_stylesheet_t *sheet = css_parse("");
+    if (!sheet)
+    {
+        html_document_destroy(doc);
+        return false;
+    }
+
+    html_view_render_stats_t stats = {0};
+    bool rendered = render_doc_case("http-error-page",
+                                    NULL,
+                                    NULL,
+                                    doc,
+                                    sheet,
+                                    false,
+                                    &stats,
+                                    NULL,
+                                    NULL,
+                                    NULL);
+    css_stylesheet_destroy(sheet);
+    html_document_destroy(doc);
+    return rendered && stats.op_count >= 4u;
 }
 
 static bool test_hacker_news_render(void)
@@ -6353,6 +6511,7 @@ int main(int argc, char **argv)
         { "margin-collapse-siblings", test_margin_collapse_siblings },
         { "margin-collapse-empty-block", test_margin_collapse_empty_block },
         { "attribute-selectors-escapes", test_attribute_selectors_with_escapes },
+        { "indexed-selector-bucket-hashes", test_indexed_selector_bucket_hashes },
         { "adjacent-sibling-selector", test_adjacent_sibling_selector },
         { "child-descendant-selector", test_child_and_descendant_selectors },
         { "link-pseudo-class", test_link_pseudo_class },
@@ -6360,8 +6519,10 @@ int main(int argc, char **argv)
         { "inline-background-style", test_inline_background_style },
         { "link-stylesheet-data-url", test_link_stylesheet_data_url },
         { "object-fallback-text", test_object_fallback_text },
+        { "text-measurement-defers-bitmap", test_text_measurement_defers_bitmap_rasterization },
         { "float-inherit", test_float_inherit },
         { "float-measure-width", test_float_measure_width },
+        { "http-error-page-visible", test_http_error_page_is_visible },
         { "acid2-snapshot", test_acid2_render_snapshot },
         { "hacker-news-render", test_hacker_news_render },
         { "hacker-news-live", test_hacker_news_live_render },

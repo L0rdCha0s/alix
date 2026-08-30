@@ -154,6 +154,9 @@ js_runtime_t *js_runtime_create(void)
     rt->global_object = NULL;
     rt->microtask_head = NULL;
     rt->microtask_tail = NULL;
+    rt->interrupt_fn = NULL;
+    rt->interrupt_user_data = NULL;
+    rt->interrupt_poll_count = 0;
     js_value_t global_obj;
     if (!js_value_make_host_object(&global_obj, js_global_object_get, js_global_object_set, NULL, rt->global))
     {
@@ -434,6 +437,10 @@ void js_runtime_destroy(js_runtime_t *rt)
     }
     while (rt->microtask_head)
     {
+        if (js_runtime_interrupt_requested(rt))
+        {
+            break;
+        }
         js_microtask_t *task = rt->microtask_head;
         rt->microtask_head = task->next;
         js_value_destroy(&task->callback);
@@ -598,6 +605,33 @@ bool js_runtime_get_global(js_runtime_t *rt, const char *name, js_value_t *out)
         *out = js_value_make_undefined_internal();
     }
     return true;
+}
+
+void js_runtime_set_interrupt_handler(js_runtime_t *rt,
+                                      js_interrupt_fn_t handler,
+                                      void *user_data)
+{
+    if (!rt)
+    {
+        return;
+    }
+    rt->interrupt_fn = handler;
+    rt->interrupt_user_data = user_data;
+    rt->interrupt_poll_count = 0;
+}
+
+bool js_runtime_interrupt_requested(js_runtime_t *rt)
+{
+    if (!rt || !rt->interrupt_fn)
+    {
+        return false;
+    }
+    rt->interrupt_poll_count++;
+    if ((rt->interrupt_poll_count & 0xFFu) != 0u)
+    {
+        return false;
+    }
+    return rt->interrupt_fn(rt->interrupt_user_data);
 }
 
 bool js_runtime_queue_microtask(js_runtime_t *rt,

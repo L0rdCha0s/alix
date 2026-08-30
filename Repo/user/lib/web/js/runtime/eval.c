@@ -31,6 +31,27 @@ static double js_trunc(double value)
     return (value < 0.0) ? ceil(value) : floor(value);
 }
 
+static int32_t js_to_int32(double value)
+{
+    if (js_is_nan(value) || value == 0.0 || value == INFINITY || value == -INFINITY)
+    {
+        return 0;
+    }
+    double integer = js_trunc(value);
+    double quotient = js_trunc(integer / 4294967296.0);
+    double modulo = integer - quotient * 4294967296.0;
+    if (modulo < 0.0)
+    {
+        modulo += 4294967296.0;
+    }
+    uint32_t bits = (uint32_t)modulo;
+    if (bits >= 0x80000000u)
+    {
+        return (int32_t)((int64_t)bits - 4294967296LL);
+    }
+    return (int32_t)bits;
+}
+
 static bool js_string_builder_append(char **buf, size_t *len, size_t *cap, const char *data, size_t data_len)
 {
     if (!buf || !len || !cap)
@@ -303,6 +324,39 @@ static js_eval_result_t js_eval_add_values(js_runtime_t *rt, const js_value_t *l
     return js_eval_ok(js_value_make_number(ln + rn));
 }
 
+static js_eval_result_t js_eval_sub_values(const js_value_t *left, const js_value_t *right)
+{
+    if (!left || !right)
+    {
+        return js_eval_error("invalid subtract");
+    }
+    if (left->type == JS_VALUE_BIGINT || right->type == JS_VALUE_BIGINT)
+    {
+        if (left->type != JS_VALUE_BIGINT || right->type != JS_VALUE_BIGINT)
+        {
+            return js_eval_error("TypeError: cannot mix BigInt and other types");
+        }
+        js_bigint_t *difference = js_bigint_sub(left->as.bigint, right->as.bigint);
+        if (!difference)
+        {
+            return js_eval_error("allocation failed");
+        }
+        js_value_t value = js_value_make_undefined_internal();
+        value.type = JS_VALUE_BIGINT;
+        value.as.bigint = difference;
+        return js_eval_ok(value);
+    }
+    bool ok_left = true;
+    bool ok_right = true;
+    double left_number = js_value_to_number(left, &ok_left);
+    double right_number = js_value_to_number(right, &ok_right);
+    if (!ok_left || !ok_right || js_is_nan(left_number) || js_is_nan(right_number))
+    {
+        return js_eval_error("expected number");
+    }
+    return js_eval_ok(js_value_make_number(left_number - right_number));
+}
+
 static js_eval_result_t js_eval_error(const char *message)
 {
     js_eval_result_t res;
@@ -337,6 +391,217 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
 static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const js_stmt_t *stmt);
 
 static bool js_hoist_vars_in_stmt(js_env_t *var_env, const js_stmt_t *stmt);
+
+static void js_value_list_destroy(js_value_t *items, size_t count)
+{
+    for (size_t i = 0; i < count; ++i)
+    {
+        js_value_destroy(&items[i]);
+    }
+    js_free(items);
+}
+
+static bool js_value_list_append(js_value_t **items,
+                                 size_t *count,
+                                 size_t *capacity,
+                                 js_value_t *value)
+{
+    if (!items || !count || !capacity || !value)
+    {
+        return false;
+    }
+    if (*count == *capacity)
+    {
+        size_t next_capacity = *capacity ? (*capacity * 2u) : 8u;
+        if (next_capacity < *count + 1u)
+        {
+            next_capacity = *count + 1u;
+        }
+        js_value_t *next = (js_value_t *)js_realloc(*items, next_capacity * sizeof(*next));
+        if (!next)
+        {
+            return false;
+        }
+        memset(next + *capacity, 0, (next_capacity - *capacity) * sizeof(*next));
+        *items = next;
+        *capacity = next_capacity;
+    }
+    (*items)[*count] = *value;
+    *value = js_value_make_undefined_internal();
+    (*count)++;
+    return true;
+}
+
+static js_eval_result_t js_eval_argument_list(js_runtime_t *rt,
+                                              js_env_t *env,
+                                              js_expr_t *const *expressions,
+                                              size_t expression_count,
+                                              const js_value_t *prefix,
+                                              size_t prefix_count,
+                                              js_value_t **out_items,
+                                              size_t *out_count)
+{
+    js_value_t *items = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    for (size_t i = 0; i < prefix_count; ++i)
+    {
+        js_value_t copy = js_value_make_undefined_internal();
+        if (!js_value_copy(&copy, &prefix[i]) ||
+            !js_value_list_append(&items, &count, &capacity, &copy))
+        {
+            js_value_destroy(&copy);
+            js_value_list_destroy(items, count);
+            return js_eval_error("allocation failed");
+        }
+    }
+
+    for (size_t i = 0; i < expression_count; ++i)
+    {
+        const js_expr_t *expression = expressions[i];
+        bool spread = expression && expression->type == JS_EXPR_SPREAD;
+        const js_expr_t *value_expr = spread ? expression->as.spread.expr : expression;
+        js_eval_result_t evaluated = js_eval_expr(rt, env, value_expr);
+        if (!evaluated.ok)
+        {
+            js_value_list_destroy(items, count);
+            return evaluated;
+        }
+
+        if (!spread)
+        {
+            if (!js_value_list_append(&items, &count, &capacity, &evaluated.value))
+            {
+                js_value_destroy(&evaluated.value);
+                js_value_list_destroy(items, count);
+                return js_eval_error("allocation failed");
+            }
+            continue;
+        }
+
+        if (evaluated.value.type == JS_VALUE_ARRAY && evaluated.value.as.array)
+        {
+            js_array_t *array = evaluated.value.as.array;
+            for (size_t index = 0; index < array->length; ++index)
+            {
+                js_value_t item = js_value_make_undefined_internal();
+                if (!js_array_get(array, index, &item) ||
+                    !js_value_list_append(&items, &count, &capacity, &item))
+                {
+                    js_value_destroy(&item);
+                    js_value_destroy(&evaluated.value);
+                    js_value_list_destroy(items, count);
+                    return js_eval_error("allocation failed");
+                }
+            }
+        }
+        else if (evaluated.value.type == JS_VALUE_STRING)
+        {
+            for (size_t index = 0; index < evaluated.value.as.string.len; ++index)
+            {
+                js_value_t item = js_value_make_undefined_internal();
+                char character = evaluated.value.as.string.data[index];
+                if (!js_value_make_string(&item, &character, 1) ||
+                    !js_value_list_append(&items, &count, &capacity, &item))
+                {
+                    js_value_destroy(&item);
+                    js_value_destroy(&evaluated.value);
+                    js_value_list_destroy(items, count);
+                    return js_eval_error("allocation failed");
+                }
+            }
+        }
+        else
+        {
+            js_value_destroy(&evaluated.value);
+            js_value_list_destroy(items, count);
+            return js_eval_error("TypeError: spread value is not iterable");
+        }
+        js_value_destroy(&evaluated.value);
+    }
+
+    *out_items = items;
+    *out_count = count;
+    return js_eval_ok(js_value_make_undefined_internal());
+}
+
+static bool js_copy_spread_properties(js_runtime_t *rt,
+                                      js_object_t *target,
+                                      const js_value_t *source,
+                                      char **error_message)
+{
+    if (error_message)
+    {
+        *error_message = NULL;
+    }
+    if (!target || !source || source->type == JS_VALUE_NULL || source->type == JS_VALUE_UNDEFINED)
+    {
+        return target != NULL;
+    }
+    if (source->type == JS_VALUE_OBJECT && source->as.object)
+    {
+        for (js_property_t *prop = source->as.object->properties; prop; prop = prop->next)
+        {
+            if (!prop->enumerable || !prop->name || strcmp(prop->name, "__proto__") == 0)
+            {
+                continue;
+            }
+            js_value_t value = js_value_make_undefined_internal();
+            if (!js_object_get_property(rt, source->as.object, prop->name, &value, error_message) ||
+                !js_object_set_slot(target, prop->name, &value))
+            {
+                js_value_destroy(&value);
+                return false;
+            }
+            js_value_destroy(&value);
+        }
+        return true;
+    }
+    if (source->type == JS_VALUE_ARRAY && source->as.array)
+    {
+        for (size_t index = 0; index < source->as.array->length; ++index)
+        {
+            char name[32];
+            int written = snprintf(name, sizeof(name), "%zu", index);
+            js_value_t value = js_value_make_undefined_internal();
+            if (written < 0 || (size_t)written >= sizeof(name) ||
+                !js_array_get(source->as.array, index, &value) ||
+                !js_object_set_slot(target, name, &value))
+            {
+                js_value_destroy(&value);
+                return false;
+            }
+            js_value_destroy(&value);
+        }
+        for (js_property_t *prop = source->as.array->properties; prop; prop = prop->next)
+        {
+            if (prop->enumerable && prop->name &&
+                !js_object_set_slot(target, prop->name, &prop->value))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (source->type == JS_VALUE_STRING)
+    {
+        for (size_t index = 0; index < source->as.string.len; ++index)
+        {
+            char name[32];
+            int written = snprintf(name, sizeof(name), "%zu", index);
+            js_value_t value = js_value_make_undefined_internal();
+            if (written < 0 || (size_t)written >= sizeof(name) ||
+                !js_value_make_string(&value, source->as.string.data + index, 1) ||
+                !js_object_set_slot(target, name, &value))
+            {
+                js_value_destroy(&value);
+                return false;
+            }
+            js_value_destroy(&value);
+        }
+    }
+    return true;
+}
 
 static bool js_hoist_binding(js_env_t *var_env, const js_binding_t *binding)
 {
@@ -3333,6 +3598,10 @@ bool js_call_value(js_runtime_t *rt,
 
 static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_expr_t *expr)
 {
+    if (js_runtime_interrupt_requested(rt))
+    {
+        return js_eval_error("execution interrupted");
+    }
     if (!expr)
     {
         return js_eval_error("null expression");
@@ -3491,6 +3760,11 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             if (!right.ok)
             {
                 return right;
+            }
+            if (expr->as.unary.op == JS_UNARY_VOID)
+            {
+                js_value_destroy(&right.value);
+                return js_eval_ok(js_value_make_undefined_internal());
             }
             js_value_t result = js_value_make_undefined_internal();
             if (expr->as.unary.op == JS_UNARY_NOT)
@@ -3882,6 +4156,25 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     }
                 }
             }
+            else if (op == JS_BINARY_BIT_AND || op == JS_BINARY_BIT_OR)
+            {
+                bool ok_left = true;
+                bool ok_right = true;
+                double left_number = js_value_to_number(&left.value, &ok_left);
+                double right_number = js_value_to_number(&right.value, &ok_right);
+                if (!ok_left || !ok_right)
+                {
+                    js_value_destroy(&left.value);
+                    js_value_destroy(&right.value);
+                    return js_eval_error("expected number");
+                }
+                int32_t left_bits = js_to_int32(left_number);
+                int32_t right_bits = js_to_int32(right_number);
+                int32_t bits = (op == JS_BINARY_BIT_AND)
+                                   ? (left_bits & right_bits)
+                                   : (left_bits | right_bits);
+                result = js_value_make_number((double)bits);
+            }
             else if (op == JS_BINARY_EXP)
             {
                 if (left.value.type == JS_VALUE_BIGINT || right.value.type == JS_VALUE_BIGINT)
@@ -3923,6 +4216,77 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     }
                     result = js_value_make_number(pow(ln, rn));
                 }
+            }
+            else if (op == JS_BINARY_IN)
+            {
+                js_temp_string_t property = {0};
+                char *property_error = NULL;
+                if (!js_temp_string_from_value(rt, &left.value, &property, &property_error))
+                {
+                    js_value_destroy(&left.value);
+                    js_value_destroy(&right.value);
+                    if (property_error)
+                    {
+                        js_eval_result_t error = js_eval_error(property_error);
+                        js_free(property_error);
+                        return error;
+                    }
+                    return js_eval_error("property conversion failed");
+                }
+
+                const char *name = property.data ? property.data : "";
+                bool has = false;
+                if (right.value.type == JS_VALUE_OBJECT && right.value.as.object)
+                {
+                    has = js_object_has_property(rt, right.value.as.object, name);
+                }
+                else if (right.value.type == JS_VALUE_ARRAY && right.value.as.array)
+                {
+                    size_t index = 0;
+                    has = strcmp(name, "length") == 0 ||
+                          (js_parse_index_key(name, &index) && index < right.value.as.array->length) ||
+                          js_array_has_property(right.value.as.array, name);
+                    if (!has)
+                    {
+                        js_object_t *array_proto = js_get_array_proto(rt);
+                        has = array_proto && js_object_has_property(rt, array_proto, name);
+                    }
+                }
+                else if (right.value.type == JS_VALUE_FUNCTION && right.value.as.function)
+                {
+                    has = strcmp(name, "length") == 0 || strcmp(name, "name") == 0 ||
+                          strcmp(name, "call") == 0 || strcmp(name, "bind") == 0 ||
+                          (strcmp(name, "prototype") == 0 && right.value.as.function->has_prototype);
+                    for (js_property_t *prop = right.value.as.function->properties; !has && prop; prop = prop->next)
+                    {
+                        has = prop->name && strcmp(prop->name, name) == 0;
+                    }
+                    if (!has)
+                    {
+                        js_object_t *function_proto = js_get_function_proto(rt);
+                        has = function_proto && js_object_has_property(rt, function_proto, name);
+                    }
+                }
+                else if (right.value.type == JS_VALUE_NATIVE_FN)
+                {
+                    has = strcmp(name, "length") == 0 || strcmp(name, "name") == 0 ||
+                          strcmp(name, "call") == 0 || strcmp(name, "bind") == 0 ||
+                          strcmp(name, "prototype") == 0;
+                    if (!has)
+                    {
+                        js_object_t *function_proto = js_get_function_proto(rt);
+                        has = function_proto && js_object_has_property(rt, function_proto, name);
+                    }
+                }
+                else
+                {
+                    js_temp_string_release(&property);
+                    js_value_destroy(&left.value);
+                    js_value_destroy(&right.value);
+                    return js_eval_error("TypeError: right-hand side of 'in' is not an object");
+                }
+                js_temp_string_release(&property);
+                result = js_value_make_bool(has);
             }
             else if (op == JS_BINARY_INSTANCEOF)
             {
@@ -4376,7 +4740,8 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 return rhs;
             }
 
-            if (expr->as.assign.op == JS_ASSIGN_ADD && target->type == JS_EXPR_MEMBER)
+            if ((expr->as.assign.op == JS_ASSIGN_ADD || expr->as.assign.op == JS_ASSIGN_SUB) &&
+                target->type == JS_EXPR_MEMBER)
             {
                 js_member_access_t access;
                 js_eval_result_t access_res = js_eval_member_access(rt, env, &target->as.member, &access);
@@ -4402,7 +4767,9 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     js_value_destroy(&rhs.value);
                     return current;
                 }
-                js_eval_result_t add_res = js_eval_add_values(rt, &current.value, &rhs.value);
+                js_eval_result_t add_res = expr->as.assign.op == JS_ASSIGN_ADD
+                                               ? js_eval_add_values(rt, &current.value, &rhs.value)
+                                               : js_eval_sub_values(&current.value, &rhs.value);
                 js_value_destroy(&current.value);
                 js_value_destroy(&rhs.value);
                 if (!add_res.ok)
@@ -4498,7 +4865,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             }
 
             js_eval_result_t assigned = rhs;
-            if (expr->as.assign.op == JS_ASSIGN_ADD)
+            if (expr->as.assign.op == JS_ASSIGN_ADD || expr->as.assign.op == JS_ASSIGN_SUB)
             {
                 if (target->type != JS_EXPR_IDENTIFIER)
                 {
@@ -4511,7 +4878,9 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                     js_value_destroy(&rhs.value);
                     return js_eval_error("unknown identifier");
                 }
-                js_eval_result_t add_res = js_eval_add_values(rt, &current, &rhs.value);
+                js_eval_result_t add_res = expr->as.assign.op == JS_ASSIGN_ADD
+                                               ? js_eval_add_values(rt, &current, &rhs.value)
+                                               : js_eval_sub_values(&current, &rhs.value);
                 js_value_destroy(&current);
                 js_value_destroy(&rhs.value);
                 if (!add_res.ok)
@@ -4698,40 +5067,26 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 return callee_res;
             }
             js_value_t callee = callee_res.value;
-            size_t argc = expr->as.new_expr.arg_count;
+            size_t argc = 0;
             js_value_t *args = NULL;
-            if (argc)
+            js_eval_result_t arguments = js_eval_argument_list(rt,
+                                                               env,
+                                                               expr->as.new_expr.args,
+                                                               expr->as.new_expr.arg_count,
+                                                               NULL,
+                                                               0,
+                                                               &args,
+                                                               &argc);
+            if (!arguments.ok)
             {
-                args = (js_value_t *)js_calloc(argc, sizeof(*args));
-                if (!args)
-                {
-                    js_value_destroy(&callee);
-                    return js_eval_error("allocation failed");
-                }
+                js_value_destroy(&callee);
+                return arguments;
             }
-            for (size_t i = 0; i < argc; ++i)
-            {
-                js_eval_result_t arg = js_eval_expr(rt, env, expr->as.new_expr.args[i]);
-                if (!arg.ok)
-                {
-                    for (size_t j = 0; j < i; ++j)
-                    {
-                        js_value_destroy(&args[j]);
-                    }
-                    js_free(args);
-                    js_value_destroy(&callee);
-                    return arg;
-                }
-                args[i] = arg.value;
-            }
+            js_value_destroy(&arguments.value);
 
             if (!js_value_is_constructor(rt, &callee))
             {
-                for (size_t i = 0; i < argc; ++i)
-                {
-                    js_value_destroy(&args[i]);
-                }
-                js_free(args);
+                js_value_list_destroy(args, argc);
                 js_value_destroy(&callee);
                 return js_eval_error("TypeError: not a constructor");
             }
@@ -4746,11 +5101,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             bool ok = js_call_value(rt, &callee, argc, args, &out, &err);
             rt->constructing = prev_constructing;
             rt->constructing_fn = prev_constructing_fn;
-            for (size_t i = 0; i < argc; ++i)
-            {
-                js_value_destroy(&args[i]);
-            }
-            js_free(args);
+            js_value_list_destroy(args, argc);
             js_value_destroy(&callee);
             if (!ok)
             {
@@ -4843,57 +5194,30 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 }
                 return js_eval_ok(js_value_make_undefined_internal());
             }
-            size_t argc = expr->as.call.arg_count;
             bool inject_this = has_access &&
                                callee.type == JS_VALUE_NATIVE_FN &&
                                js_native_needs_this(callee.as.native.fn);
-            size_t call_argc = argc + (inject_this ? 1u : 0u);
+            size_t call_argc = 0;
             js_value_t *args = NULL;
-            if (call_argc)
+            const js_value_t *prefix = inject_this ? &access.object : NULL;
+            js_eval_result_t arguments = js_eval_argument_list(rt,
+                                                               env,
+                                                               expr->as.call.args,
+                                                               expr->as.call.arg_count,
+                                                               prefix,
+                                                               inject_this ? 1u : 0u,
+                                                               &args,
+                                                               &call_argc);
+            if (!arguments.ok)
             {
-                args = (js_value_t *)js_calloc(call_argc, sizeof(*args));
-                if (!args)
+                js_value_destroy(&callee);
+                if (has_access)
                 {
-                    js_value_destroy(&callee);
-                    if (has_access)
-                    {
-                        js_member_access_release(&access);
-                    }
-                    return js_eval_error("allocation failed");
+                    js_member_access_release(&access);
                 }
+                return arguments;
             }
-            if (inject_this)
-            {
-                if (!js_value_copy(&args[0], &access.object))
-                {
-                    js_free(args);
-                    js_value_destroy(&callee);
-                    if (has_access)
-                    {
-                        js_member_access_release(&access);
-                    }
-                    return js_eval_error("allocation failed");
-                }
-            }
-            for (size_t i = 0; i < argc; ++i)
-            {
-                js_eval_result_t arg = js_eval_expr(rt, env, expr->as.call.args[i]);
-                if (!arg.ok)
-                {
-                    for (size_t j = 0; j < i + (inject_this ? 1u : 0u); ++j)
-                    {
-                        js_value_destroy(&args[j]);
-                    }
-                    js_free(args);
-                    js_value_destroy(&callee);
-                    if (has_access)
-                    {
-                        js_member_access_release(&access);
-                    }
-                    return arg;
-                }
-                args[i + (inject_this ? 1u : 0u)] = arg.value;
-            }
+            js_value_destroy(&arguments.value);
 
             js_eval_result_t res;
             js_value_t out = js_value_make_undefined_internal();
@@ -4916,11 +5240,7 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 }
             }
 
-            for (size_t i = 0; i < call_argc; ++i)
-            {
-                js_value_destroy(&args[i]);
-            }
-            js_free(args);
+            js_value_list_destroy(args, call_argc);
             js_value_destroy(&callee);
             if (has_access)
             {
@@ -4935,22 +5255,32 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             {
                 return js_eval_error("allocation failed");
             }
-            for (size_t i = 0; i < expr->as.array.count; ++i)
+            js_value_t *items = NULL;
+            size_t item_count = 0;
+            js_eval_result_t items_result = js_eval_argument_list(rt,
+                                                                  env,
+                                                                  expr->as.array.items,
+                                                                  expr->as.array.count,
+                                                                  NULL,
+                                                                  0,
+                                                                  &items,
+                                                                  &item_count);
+            if (!items_result.ok)
             {
-                js_eval_result_t item = js_eval_expr(rt, env, expr->as.array.items[i]);
-                if (!item.ok)
+                js_array_release(array);
+                return items_result;
+            }
+            js_value_destroy(&items_result.value);
+            for (size_t i = 0; i < item_count; ++i)
+            {
+                if (!js_array_set(array, i, &items[i]))
                 {
-                    js_array_release(array);
-                    return item;
-                }
-                if (!js_array_set(array, i, &item.value))
-                {
-                    js_value_destroy(&item.value);
+                    js_value_list_destroy(items, item_count);
                     js_array_release(array);
                     return js_eval_error("allocation failed");
                 }
-                js_value_destroy(&item.value);
             }
+            js_value_list_destroy(items, item_count);
             js_value_t out;
             memset(&out, 0, sizeof(out));
             out.type = JS_VALUE_ARRAY;
@@ -4966,6 +5296,34 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             }
             for (size_t i = 0; i < expr->as.object.count; ++i)
             {
+                if (expr->as.object.props[i].is_spread)
+                {
+                    js_eval_result_t spread = js_eval_expr(rt, env, expr->as.object.props[i].value);
+                    if (!spread.ok)
+                    {
+                        js_value_destroy(&obj_value);
+                        return spread;
+                    }
+                    char *spread_error = NULL;
+                    bool spread_ok = js_copy_spread_properties(rt,
+                                                               obj_value.as.object,
+                                                               &spread.value,
+                                                               &spread_error);
+                    js_value_destroy(&spread.value);
+                    if (!spread_ok)
+                    {
+                        js_value_destroy(&obj_value);
+                        if (spread_error)
+                        {
+                            js_eval_result_t error = js_eval_error(spread_error);
+                            js_free(spread_error);
+                            return error;
+                        }
+                        return js_eval_error("object spread failed");
+                    }
+                    js_free(spread_error);
+                    continue;
+                }
                 const char *prop_name = expr->as.object.props[i].name;
                 char *owned_name = NULL;
                 if (expr->as.object.props[i].computed)
@@ -5742,6 +6100,8 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
             js_member_access_release(&access);
             return result;
         }
+        case JS_EXPR_SPREAD:
+            return js_eval_error("unexpected spread expression");
         case JS_EXPR_REGEXP_SUBCLASS:
         {
             js_value_t value;
@@ -5795,6 +6155,20 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
                 return js_eval_expr(rt, env, expr->as.ternary.then_expr);
             }
             return js_eval_expr(rt, env, expr->as.ternary.else_expr);
+        }
+        case JS_EXPR_SEQUENCE:
+        {
+            js_eval_result_t result = js_eval_ok(js_value_make_undefined_internal());
+            for (size_t i = 0; i < expr->as.sequence.count; ++i)
+            {
+                js_value_destroy(&result.value);
+                result = js_eval_expr(rt, env, expr->as.sequence.items[i]);
+                if (!result.ok)
+                {
+                    return result;
+                }
+            }
+            return result;
         }
         case JS_EXPR_AWAIT:
         {
@@ -5857,6 +6231,10 @@ static js_eval_result_t js_eval_expr(js_runtime_t *rt, js_env_t *env, const js_e
 
 static js_eval_result_t js_eval_statement(js_runtime_t *rt, js_env_t *env, const js_stmt_t *stmt)
 {
+    if (js_runtime_interrupt_requested(rt))
+    {
+        return js_eval_error("execution interrupted");
+    }
     if (!stmt)
     {
         return js_eval_ok(js_value_make_undefined_internal());
@@ -6701,6 +7079,7 @@ js_exec_result_t js_execute(js_runtime_t *rt, const js_program_t *program)
         out.error_message = js_strdup("invalid runtime");
         return out;
     }
+    rt->interrupt_poll_count = 0;
 
     if (!js_hoist_vars(rt->global, program->statements, program->count))
     {

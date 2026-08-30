@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "web/html.h"
+#include "web/html/html_internal.h"
 #include "web/js.h"
 
 typedef struct
@@ -143,7 +144,10 @@ static bool node_set_text(html_node_t *node, const char *text)
         text = "";
     }
 
-    char *copy = strdup(text);
+    size_t text_len = strlen(text);
+    char *copy = node->doc
+                     ? html_doc_strdup_range(node->doc, text, text + text_len, false)
+                     : strdup(text);
     if (!copy)
     {
         return false;
@@ -151,7 +155,10 @@ static bool node_set_text(html_node_t *node, const char *text)
 
     if (node->type == HTML_NODE_TEXT)
     {
-        free(node->text);
+        if (!node->doc)
+        {
+            free(node->text);
+        }
         node->text = copy;
         return true;
     }
@@ -175,7 +182,10 @@ static bool node_set_text(html_node_t *node, const char *text)
         }
         append_child(node, target);
     }
-    free(target->text);
+    if (!target->doc)
+    {
+        free(target->text);
+    }
     target->text = copy;
     return true;
 }
@@ -190,28 +200,43 @@ static bool node_set_attr(html_node_t *node, const char *name, const char *value
     {
         if (attr->name && strcasecmp(attr->name, name) == 0)
         {
-            char *copy = strdup(value);
+            size_t value_len = strlen(value);
+            char *copy = node->doc
+                             ? html_doc_strdup_range(node->doc, value, value + value_len, false)
+                             : strdup(value);
             if (!copy)
             {
                 return false;
             }
-            free(attr->value);
+            if (!node->doc)
+            {
+                free(attr->value);
+            }
             attr->value = copy;
             return true;
         }
     }
-    html_attr_t *attr = (html_attr_t *)calloc(1, sizeof(*attr));
+    html_attr_t *attr = node->doc
+                            ? (html_attr_t *)html_doc_alloc(node->doc, sizeof(*attr))
+                            : (html_attr_t *)calloc(1, sizeof(*attr));
     if (!attr)
     {
         return false;
     }
-    attr->name = strdup(name);
-    attr->value = strdup(value);
+    attr->name = node->doc
+                     ? html_doc_strdup_range(node->doc, name, name + strlen(name), false)
+                     : strdup(name);
+    attr->value = node->doc
+                      ? html_doc_strdup_range(node->doc, value, value + strlen(value), false)
+                      : strdup(value);
     if (!attr->name || !attr->value)
     {
-        free(attr->name);
-        free(attr->value);
-        free(attr);
+        if (!node->doc)
+        {
+            free(attr->name);
+            free(attr->value);
+            free(attr);
+        }
         return false;
     }
     attr->next = node->attrs;

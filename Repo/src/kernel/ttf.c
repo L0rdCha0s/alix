@@ -940,8 +940,66 @@ static bool ttf_get_hmetrics(const ttf_font_impl_t *impl,
 static int32_t ttf_scale_value(int32_t value, int pixel_height, uint16_t units_per_em)
 {
     int64_t numerator = (int64_t)value * (int64_t)pixel_height;
-    numerator <<= TTF_FP_SHIFT;
+    numerator *= ((int64_t)1 << TTF_FP_SHIFT);
     return (int32_t)(numerator / units_per_em);
+}
+
+static bool ttf_font_scaled_hmetrics(const ttf_font_t *font,
+                                     uint32_t codepoint,
+                                     int pixel_height,
+                                     uint16_t *glyph_index_out,
+                                     int *advance_out,
+                                     int *bearing_x_out)
+{
+    if (!font || !font->impl || pixel_height <= 0 || !advance_out)
+    {
+        return false;
+    }
+
+    const ttf_font_impl_t *impl = (const ttf_font_impl_t *)font->impl;
+    if (impl->units_per_em == 0)
+    {
+        return false;
+    }
+
+    uint16_t glyph_index = ttf_font_lookup_glyph(font, codepoint);
+    if (glyph_index == 0 && codepoint != '?')
+    {
+        glyph_index = ttf_font_lookup_glyph(font, '?');
+    }
+
+    uint16_t advance_raw = 0;
+    int16_t lsb_raw = 0;
+    if (!ttf_get_hmetrics(impl, glyph_index, &advance_raw, &lsb_raw))
+    {
+        return false;
+    }
+
+    *advance_out = ttf_round_fixed(
+        ttf_scale_value(advance_raw, pixel_height, impl->units_per_em));
+    if (bearing_x_out)
+    {
+        *bearing_x_out = ttf_round_fixed(
+            ttf_scale_value(lsb_raw, pixel_height, impl->units_per_em));
+    }
+    if (glyph_index_out)
+    {
+        *glyph_index_out = glyph_index;
+    }
+    return true;
+}
+
+bool ttf_font_glyph_advance(const ttf_font_t *font,
+                            uint32_t codepoint,
+                            int pixel_height,
+                            int *out_advance)
+{
+    return ttf_font_scaled_hmetrics(font,
+                                    codepoint,
+                                    pixel_height,
+                                    NULL,
+                                    out_advance,
+                                    NULL);
 }
 
 static void ttf_point_mid(const ttf_point_t *a,
@@ -966,8 +1024,8 @@ static bool ttf_flatten_quadratic(ttf_edge_list_t *edges,
         return ttf_edge_list_add(edges, p0->x, p0->y, p2->x, p2->y, bounds);
     }
 
-    int32_t dx = (p0->x + p2->x) - (p1->x << 1);
-    int32_t dy = (p0->y + p2->y) - (p1->y << 1);
+    int32_t dx = (p0->x + p2->x) - (p1->x * 2);
+    int32_t dy = (p0->y + p2->y) - (p1->y * 2);
     if (ttf_abs_i32(dx) <= tolerance && ttf_abs_i32(dy) <= tolerance)
     {
         return ttf_edge_list_add(edges, p0->x, p0->y, p2->x, p2->y, bounds);
@@ -1250,23 +1308,16 @@ bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
     out_bitmap->pixels = NULL;
 
     ttf_font_impl_t *impl = (ttf_font_impl_t *)font->impl;
-    uint16_t glyph_index = ttf_font_lookup_glyph(font, codepoint);
-    if (glyph_index == 0 && codepoint != '?')
-    {
-        glyph_index = ttf_font_lookup_glyph(font, '?');
-    }
-
-    uint16_t advance_raw = 0;
-    int16_t lsb_raw = 0;
-    if (!ttf_get_hmetrics(impl, glyph_index, &advance_raw, &lsb_raw))
+    uint16_t glyph_index = 0;
+    if (!ttf_font_scaled_hmetrics(font,
+                                  codepoint,
+                                  pixel_height,
+                                  &glyph_index,
+                                  &metrics->advance,
+                                  &metrics->bearing_x))
     {
         return false;
     }
-
-    int32_t advance_fixed = ttf_scale_value(advance_raw, pixel_height, impl->units_per_em);
-    int32_t bearing_fixed = ttf_scale_value(lsb_raw, pixel_height, impl->units_per_em);
-    metrics->advance = ttf_round_fixed(advance_fixed);
-    metrics->bearing_x = ttf_round_fixed(bearing_fixed);
 
     const uint8_t *glyph_data = NULL;
     uint32_t glyph_length = 0;

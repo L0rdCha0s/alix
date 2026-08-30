@@ -34,6 +34,11 @@ void browser_ui_event_free_payload(browser_ui_event_t *ev)
             }
             free(ev->u.doc_ready.final_url);
             ev->u.doc_ready.final_url = NULL;
+            free(ev->u.doc_ready.external_css);
+            ev->u.doc_ready.external_css = NULL;
+            ev->u.doc_ready.external_css_len = 0;
+            break;
+        case BROWSER_UI_EVENT_LOAD_BEGIN:
             break;
         case BROWSER_UI_EVENT_NAV_UPDATE:
             free(ev->u.nav_update.final_url);
@@ -85,25 +90,72 @@ void browser_ui_event_free_payload(browser_ui_event_t *ev)
     }
 }
 
-bool browser_ui_event_enqueue(browser_app_t *app, const browser_ui_event_t *ev)
+bool browser_ui_event_enqueue_owned(browser_app_t *app, browser_ui_event_t *ev)
 {
-    if (!app || !ev)
+    return browser_ui_event_enqueue_batch_owned(app, ev, 1u);
+}
+
+static bool browser_ui_event_enqueue_batch_impl(browser_app_t *app,
+                                                uint64_t required_load_id,
+                                                bool require_active_load,
+                                                browser_ui_event_t *events,
+                                                size_t count)
+{
+    if (!events || count == 0u)
     {
+        return false;
+    }
+    if (!app)
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            browser_ui_event_free_payload(&events[i]);
+            memset(&events[i], 0, sizeof(events[i]));
+        }
         return false;
     }
 
     bool ok = false;
     browser_lock_enter(app, &app->lock, "app_lock");
     browser_ui_event_sanitize_locked(app);
-    if (app->ui_event_count < BROWSER_UI_EVENT_QUEUE_CAP)
+    bool active_ok = !require_active_load ||
+                     (required_load_id != 0u && app->active_load_id == required_load_id);
+    if (active_ok && count <= BROWSER_UI_EVENT_QUEUE_CAP - app->ui_event_count)
     {
-        size_t idx = (app->ui_event_head + app->ui_event_count) % BROWSER_UI_EVENT_QUEUE_CAP;
-        app->ui_events[idx] = *ev;
-        app->ui_event_count++;
+        for (size_t i = 0; i < count; ++i)
+        {
+            size_t idx = (app->ui_event_head + app->ui_event_count + i) %
+                         BROWSER_UI_EVENT_QUEUE_CAP;
+            (void)browser_ui_event_move(&app->ui_events[idx], &events[i]);
+        }
+        app->ui_event_count += count;
         ok = true;
     }
     browser_lock_exit(app, &app->lock, "app_lock");
+    if (!ok)
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            browser_ui_event_free_payload(&events[i]);
+            memset(&events[i], 0, sizeof(events[i]));
+        }
+    }
     return ok;
+}
+
+bool browser_ui_event_enqueue_batch_owned(browser_app_t *app,
+                                          browser_ui_event_t *events,
+                                          size_t count)
+{
+    return browser_ui_event_enqueue_batch_impl(app, 0u, false, events, count);
+}
+
+bool browser_ui_event_enqueue_batch_for_load_owned(browser_app_t *app,
+                                                   uint64_t load_id,
+                                                   browser_ui_event_t *events,
+                                                   size_t count)
+{
+    return browser_ui_event_enqueue_batch_impl(app, load_id, true, events, count);
 }
 
 bool browser_load_queue_push(browser_app_t *app, browser_load_job_kind_t kind, uint64_t load_id, char *url_text)
@@ -262,11 +314,14 @@ browser_resource_job_t *browser_resource_queue_pop(browser_app_t *app)
     {
         return NULL;
     }
-
     browser_resource_job_t *job = NULL;
     browser_lock_enter(app, &app->resource_lock, "resource_lock");
     job = app->resource_queue.head;
-    if (job)
+    uint64_t deferred_load_id =
+        __atomic_load_n(&app->resource_defer_load_id, __ATOMIC_ACQUIRE);
+    bool defer_job = job && job->kind != BROWSER_RESOURCE_CSS &&
+                     deferred_load_id != 0u && job->load_id == deferred_load_id;
+    if (job && !defer_job)
     {
         app->resource_queue.head = job->next;
         if (!app->resource_queue.head)
@@ -277,6 +332,10 @@ browser_resource_job_t *browser_resource_queue_pop(browser_app_t *app)
         {
             app->resource_queue.count--;
         }
+    }
+    else if (defer_job)
+    {
+        job = NULL;
     }
     browser_lock_exit(app, &app->resource_lock, "resource_lock");
 

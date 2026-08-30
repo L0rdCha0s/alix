@@ -14,6 +14,8 @@ typedef struct js_array js_array_t;
 typedef struct js_object js_object_t;
 typedef struct js_bigint js_bigint_t;
 
+typedef bool (*js_interrupt_fn_t)(void *user_data);
+
 typedef bool (*js_native_fn_t)(js_runtime_t *rt,
                                size_t argc,
                                const js_value_t *argv,
@@ -134,6 +136,7 @@ typedef enum
     JS_EXPR_NEW,
     JS_EXPR_CALL,
     JS_EXPR_TERNARY,
+    JS_EXPR_SEQUENCE,
     JS_EXPR_ARRAY,
     JS_EXPR_OBJECT,
     JS_EXPR_TEMPLATE,
@@ -173,6 +176,9 @@ typedef enum
     JS_BINARY_GT,
     JS_BINARY_GTE,
     JS_BINARY_INSTANCEOF,
+    JS_BINARY_IN,
+    JS_BINARY_BIT_AND,
+    JS_BINARY_BIT_OR,
     JS_BINARY_AND,
     JS_BINARY_OR,
     JS_BINARY_NULLISH
@@ -183,13 +189,15 @@ typedef enum
     JS_UNARY_NEGATE = 0,
     JS_UNARY_NOT,
     JS_UNARY_POSITIVE,
-    JS_UNARY_TYPEOF
+    JS_UNARY_TYPEOF,
+    JS_UNARY_VOID
 } js_unary_op_t;
 
 typedef enum
 {
     JS_ASSIGN_SET = 0,
     JS_ASSIGN_ADD,
+    JS_ASSIGN_SUB,
     JS_ASSIGN_NULLISH
 } js_assign_op_t;
 
@@ -520,6 +528,12 @@ typedef struct
 
 typedef struct
 {
+    js_expr_t **items;
+    size_t count;
+} js_sequence_expr_t;
+
+typedef struct
+{
     int dummy;
 } js_regexp_subclass_expr_t;
 
@@ -547,6 +561,7 @@ struct js_expr
         js_new_expr_t new_expr;
         js_call_expr_t call;
         js_ternary_expr_t ternary;
+        js_sequence_expr_t sequence;
         js_array_expr_t array;
         js_object_expr_t object;
         js_template_expr_t template;
@@ -580,6 +595,9 @@ typedef struct
 
 js_runtime_t *js_runtime_create(void);
 void js_runtime_destroy(js_runtime_t *rt);
+void js_runtime_set_interrupt_handler(js_runtime_t *rt,
+                                      js_interrupt_fn_t handler,
+                                      void *user_data);
 
 bool js_runtime_set_global(js_runtime_t *rt, const char *name, const js_value_t *value);
 bool js_runtime_get_global(js_runtime_t *rt, const char *name, js_value_t *out);

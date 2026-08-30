@@ -214,7 +214,9 @@ WEB_TEST_BIN := $(HOST_TEST_DIR)/web_host_test
 CSS_TEST_BIN := $(HOST_TEST_DIR)/css_test
 HTML_VIEW_TEST_BIN := $(HOST_TEST_DIR)/html_view_host_test
 HTML_VIEW_TEST_LIBC_BIN := $(HOST_TEST_DIR)/html_view_host_test_libc
+WEB_RENDER_HARNESS_BIN := $(HOST_TEST_DIR)/web_render_harness
 BROWSER_EVENT_TEST_BIN := $(HOST_TEST_DIR)/browser_event_host_test
+BROWSER_RESOURCE_TEST_BIN := $(HOST_TEST_DIR)/browser_resource_host_test
 HTML_JS_TEST_BIN := $(HOST_TEST_DIR)/html_js_host_test
 TLS_TEST_BIN := $(HOST_TEST_DIR)/tls_host_test
 JS_TEST_BIN := $(HOST_TEST_DIR)/js_host_test
@@ -222,6 +224,17 @@ TEST262_TEST_BIN := $(HOST_TEST_DIR)/test262_host_test
 ELF_VALIDATION_TEST_BIN := $(HOST_TEST_DIR)/elf_validation_host_test
 QUAKE_LIVENESS_TEST_BIN := $(HOST_TEST_DIR)/quake_liveness_host_test
 HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -iquote $(INCLUDE_DIR) -DTTF_HOST_BUILD
+WEB_RENDER_HARNESS_CFLAGS ?= -O2
+WEB_RENDER_HARNESS_HEADERS := $(wildcard \
+	$(INCLUDE_DIR)/*.h \
+	$(INCLUDE_DIR)/atk/*.h \
+	$(ATK_DIR)/*.h \
+	$(ATK_DIR)/util/*.h \
+	$(USER_DIR)/lib/*.h \
+	$(USER_DIR)/lib/atk/html_view/*.h \
+	$(USER_DIR)/lib/atk/html_view/render/*.h \
+	$(USER_DIR)/lib/web/*.h \
+	$(USER_DIR)/lib/web/*/*.h)
 
 KERNEL_ELF := $(OBJDIR)/alix.elf
 EFI_DIR    := build/EFI/BOOT
@@ -629,10 +642,82 @@ $(HTML_VIEW_TEST_LIBC_BIN): tests/html_view_host_test.c \
 	    user/lib/libc.c \
 	    user/lib/syscall_host.c -o $@
 
-$(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c
+$(WEB_RENDER_HARNESS_BIN): tests/web_render_harness.c tests/html_view_host_test.c $(WEB_RENDER_HARNESS_HEADERS) \
+                       user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                       src/kernel/utf8.c \
+                       src/kernel/ttf.c \
+                       user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+                       user/lib/web/url.c \
+                       src/atk/util/gif.c \
+                       src/atk/util/jpeg.c \
+                       src/atk/util/png.c \
+                       src/atk/util/svg.c \
+                       src/atk/atk_font.c \
+                       user/lib/atk/html_view/font.c \
+                       user/lib/atk/html_view/style.c \
+                       user/lib/atk/html_view/measure_cache.c \
+                       user/lib/atk/html_view/layout.c \
+                       user/lib/atk/html_view/table.c \
+                       user/lib/atk/html_view/render/dispatch.c \
+                       user/lib/atk/html_view/render/blocks.c \
+                       user/lib/atk/html_view/render/inline.c \
+                       user/lib/atk/html_view/render/flex.c \
+                       user/lib/atk/html_view/render/grid.c \
+                       user/lib/atk/html_view/render/forms.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) $(WEB_RENDER_HARNESS_CFLAGS) -DPNG_HOST_BUILD -DGIF_HOST_BUILD -DSVG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	    tests/web_render_harness.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
+	    src/kernel/ttf.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    user/lib/web/url.c \
+	    src/atk/util/gif.c \
+	    src/atk/util/jpeg.c \
+	    src/atk/util/png.c \
+	    src/atk/util/svg.c \
+	    src/atk/atk_font.c \
+	    user/lib/atk/html_view/font.c \
+	    user/lib/atk/html_view/style.c \
+	    user/lib/atk/html_view/measure_cache.c \
+	    user/lib/atk/html_view/layout.c \
+	    user/lib/atk/html_view/table.c \
+	    user/lib/atk/html_view/render/dispatch.c \
+	    user/lib/atk/html_view/render/blocks.c \
+	    user/lib/atk/html_view/render/inline.c \
+	    user/lib/atk/html_view/render/flex.c \
+	    user/lib/atk/html_view/render/grid.c \
+	    user/lib/atk/html_view/render/forms.c -o $@
+
+$(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c \
+                           user/apps/atk_browser/browser_events.c \
+                           user/apps/atk_browser/browser_common.c \
+                           user/apps/atk_browser/browser_queue.c \
+                           user/lib/web/html/dom.c
 	@mkdir -p $(HOST_TEST_DIR)
 	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(USER_DIR)/apps/atk_browser -I$(ATK_DIR) \
-	    tests/browser_event_host_test.c user/apps/atk_browser/browser_events.c user/apps/atk_browser/browser_common.c -o $@
+	    tests/browser_event_host_test.c \
+	    user/apps/atk_browser/browser_events.c \
+	    user/apps/atk_browser/browser_common.c \
+	    user/apps/atk_browser/browser_queue.c \
+	    user/lib/web/html/dom.c -o $@
+
+$(BROWSER_RESOURCE_TEST_BIN): tests/browser_resource_host_test.c \
+                              user/apps/atk_browser/browser_common.c \
+                              user/apps/atk_browser/browser_dom.c \
+                              user/apps/atk_browser/browser_resources.c \
+                              user/apps/atk_browser/browser_url.c \
+                              user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                              user/lib/web/url.c src/kernel/utf8.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(USER_DIR)/apps/atk_browser -I$(ATK_DIR) \
+	    tests/browser_resource_host_test.c \
+	    user/apps/atk_browser/browser_common.c \
+	    user/apps/atk_browser/browser_dom.c \
+	    user/apps/atk_browser/browser_resources.c \
+	    user/apps/atk_browser/browser_url.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    user/lib/web/url.c src/kernel/utf8.c -o $@
 
 $(HTML_JS_TEST_BIN): tests/html_js_host_test.c \
                      user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
@@ -733,7 +818,9 @@ RAM ?= 4G
 OVMF_CODE ?= vendor/OVMF_CODE.fd
 OVMF_VARS ?= vendor/OVMF_VARS-1024x768.fd
 QEMU_DEBUG_LOG   ?= qemu.log
-QEMU_DEBUG_FLAGS ?= -d cpu_reset,int,guest_errors,trace:ahci_*,trace:ide_* -D $(QEMU_DEBUG_LOG)
+# Full interrupt/CPU/AHCI tracing can write gigabytes and severely distort TCG
+# performance. Opt in when diagnosing QEMU itself via QEMU_DEBUG_FLAGS='-d ...'.
+QEMU_DEBUG_FLAGS ?=
 QEMU_GDB_FLAGS   ?=
 HOMEBREW_PREFIX  := $(shell brew --prefix)
 UNAME_S          := $(shell uname -s)
@@ -768,8 +855,9 @@ QEMU_USB_MACHINE_OPTS := -machine q35,accel=$(QEMU_ACCEL),i8042=off
 # --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)
 NET_BACKEND ?= vmnet-shared
 
-# Packet capture (works for all backends)
-NETDUMP := -object filter-dump,id=n0dump,netdev=n0,queue=all,file=qemu-net.pcap
+# Packet capture is opt-in: continuous filter-dump I/O distorts TCG workloads.
+# Example: NETDUMP='-object filter-dump,id=n0dump,netdev=n0,queue=all,file=qemu-net.pcap'
+NETDUMP ?=
 
 # Backend-specific NETDEV flags
 NETDEV_user := -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15
@@ -945,6 +1033,9 @@ css-test: $(CSS_TEST_BIN)
 browser-event-test: $(BROWSER_EVENT_TEST_BIN)
 	$(BROWSER_EVENT_TEST_BIN)
 
+browser-resource-test: $(BROWSER_RESOURCE_TEST_BIN)
+	$(BROWSER_RESOURCE_TEST_BIN)
+
 PNG_TEST_IMAGE ?=
 png-test: $(PNG_TEST_BIN)
 	$(PNG_TEST_BIN) $(PNG_TEST_IMAGE)
@@ -961,6 +1052,11 @@ html-js-test: $(HTML_JS_TEST_BIN)
 html-view-test: $(HTML_VIEW_TEST_BIN)
 	$(HTML_VIEW_TEST_BIN)
 
+web-render-harness: $(WEB_RENDER_HARNESS_BIN)
+
+web-render-stackoverflow: $(WEB_RENDER_HARNESS_BIN)
+	python3 tests/web_render_harness.py --no-build --expect-images 16
+
 test262-test: $(TEST262_TEST_BIN)
 	$(TEST262_TEST_BIN)
 
@@ -974,6 +1070,7 @@ test:
 	$(MAKE) web-test
 	$(MAKE) css-test
 	$(MAKE) browser-event-test
+	$(MAKE) browser-resource-test
 	$(MAKE) png-test
 	$(MAKE) ttf-test
 	$(MAKE) tls-test
@@ -981,7 +1078,7 @@ test:
 	$(MAKE) html-js-test
 	$(MAKE) html-view-test
 
-.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test quake-liveness-test elf-validation-test process-smoke-test process-lock-contract-test atk-background-lock-contract-test process-lock-stress-test keyboard-boot-input-test gui-wakeup-test quake-gui-liveness-test web-test css-test browser-event-test png-test tls-test js-test html-js-test html-view-test test262-test
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test quake-liveness-test elf-validation-test process-smoke-test process-lock-contract-test atk-background-lock-contract-test process-lock-stress-test keyboard-boot-input-test gui-wakeup-test quake-gui-liveness-test web-test css-test browser-event-test browser-resource-test png-test tls-test js-test html-js-test html-view-test web-render-harness web-render-stackoverflow test262-test
 
 USER_DEPFILES := $(shell find $(USER_OBJDIR) -type f -name '*.d' 2>/dev/null)
 

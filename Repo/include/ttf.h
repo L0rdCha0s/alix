@@ -45,6 +45,10 @@ void ttf_font_unload(ttf_font_t *font);
 
 bool ttf_font_metrics(const ttf_font_t *font, int pixel_height, ttf_font_metrics_t *out_metrics);
 uint16_t ttf_font_lookup_glyph(const ttf_font_t *font, uint32_t codepoint);
+bool ttf_font_glyph_advance(const ttf_font_t *font,
+                            uint32_t codepoint,
+                            int pixel_height,
+                            int *out_advance);
 
 bool ttf_font_render_glyph_bitmap(const ttf_font_t *font,
                                   uint32_t codepoint,

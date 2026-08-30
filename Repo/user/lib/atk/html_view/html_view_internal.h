@@ -111,6 +111,7 @@ typedef struct html_view_control
 typedef struct
 {
     bool ready;
+    bool advance_ready;
     uint8_t *alpha;
     int width;
     int height;
@@ -216,11 +217,89 @@ typedef struct
     int y;
 } html_view_anchor_t;
 
+/*
+ * Published by the UI thread while holding dom_lock. Async rendering consumes
+ * only this heap-owned snapshot and never traverses live ATK widget geometry.
+ */
+typedef struct
+{
+    int abs_x;
+    int abs_y;
+    int width;
+    int height;
+    uint64_t generation;
+    bool valid;
+} html_view_geometry_snapshot_t;
+
+static inline bool html_view_geometry_snapshot_update(html_view_geometry_snapshot_t *snapshot,
+                                                      int abs_x,
+                                                      int abs_y,
+                                                      int width,
+                                                      int height)
+{
+    if (!snapshot)
+    {
+        return false;
+    }
+    bool changed = !snapshot->valid ||
+                   snapshot->abs_x != abs_x ||
+                   snapshot->abs_y != abs_y ||
+                   snapshot->width != width ||
+                   snapshot->height != height;
+    if (!changed)
+    {
+        return false;
+    }
+    snapshot->abs_x = abs_x;
+    snapshot->abs_y = abs_y;
+    snapshot->width = width;
+    snapshot->height = height;
+    snapshot->generation++;
+    if (snapshot->generation == 0u)
+    {
+        snapshot->generation = 1u;
+    }
+    snapshot->valid = true;
+    return true;
+}
+
+/*
+ * CSS parsing temporarily releases dom_lock. Before the expensive layout pass,
+ * reject a stale stylesheet and acknowledge every render request accumulated
+ * while parsing; dom_lock then freezes the consumed document/image state.
+ */
+static inline bool html_view_render_prepare_generation(const volatile uint32_t *sequence,
+                                                       const volatile uint32_t *stylesheet_dirty,
+                                                       const volatile uint32_t *js_dirty,
+                                                       char *const *pending_css,
+                                                       uint32_t *target_out)
+{
+    if (!sequence || !stylesheet_dirty || !js_dirty || !pending_css || !target_out)
+    {
+        return false;
+    }
+    uint32_t target = __atomic_load_n(sequence, __ATOMIC_ACQUIRE);
+    uint32_t css_dirty = __atomic_load_n(stylesheet_dirty, __ATOMIC_ACQUIRE);
+    uint32_t pending_js_dirty = __atomic_load_n(js_dirty, __ATOMIC_ACQUIRE);
+    char *css_pending = __atomic_load_n(pending_css, __ATOMIC_ACQUIRE);
+    if (css_dirty != 0u || pending_js_dirty != 0u || css_pending)
+    {
+        return false;
+    }
+    *target_out = target;
+    return true;
+}
+
 typedef struct
 {
     bool valid;
     const html_document_t *doc;
     const css_stylesheet_t *sheet;
+    int view_abs_x;
+    int view_abs_y;
+    int view_width;
+    int view_height;
+    uint64_t geometry_generation;
     int viewport_w;
     int viewport_h;
     int doc_origin_local_x;
@@ -274,6 +353,7 @@ typedef struct html_view_rule_bucket
 {
     const char *tag;
     size_t tag_len;
+    uint64_t key_hash;
     css_rule_t **rules;
     size_t count;
     size_t cap;
@@ -282,7 +362,15 @@ typedef struct html_view_rule_bucket
     struct html_view_rule_bucket *parent_buckets;
     size_t parent_count;
     size_t parent_cap;
+    size_t *parent_hash_slots;
+    size_t parent_hash_slot_count;
 } html_view_rule_bucket_t;
+
+typedef struct
+{
+    size_t *slots;
+    size_t slot_count;
+} html_view_rule_bucket_lookup_t;
 
 typedef struct
 {
@@ -296,18 +384,23 @@ typedef struct
     html_view_rule_bucket_t *tag_buckets;
     size_t tag_bucket_count;
     size_t tag_bucket_cap;
+    html_view_rule_bucket_lookup_t tag_lookup;
     html_view_rule_bucket_t *class_buckets;
     size_t class_bucket_count;
     size_t class_bucket_cap;
+    html_view_rule_bucket_lookup_t class_lookup;
     html_view_rule_bucket_t *scope_class_buckets;
     size_t scope_class_bucket_count;
     size_t scope_class_bucket_cap;
+    html_view_rule_bucket_lookup_t scope_class_lookup;
     html_view_rule_bucket_t *id_buckets;
     size_t id_bucket_count;
     size_t id_bucket_cap;
+    html_view_rule_bucket_lookup_t id_lookup;
     html_view_rule_bucket_t *attr_buckets;
     size_t attr_bucket_count;
     size_t attr_bucket_cap;
+    html_view_rule_bucket_lookup_t attr_lookup;
 } html_view_rule_index_t;
 
 typedef struct
@@ -377,6 +470,7 @@ typedef struct
     int content_height;
     int last_width;
     int last_height;
+    html_view_geometry_snapshot_t render_geometry;
     html_document_t *doc;
     css_stylesheet_t *sheet;
     char *external_css;
@@ -437,6 +531,9 @@ typedef struct
     volatile uint32_t render_stop;
     volatile uint32_t render_seq;
     volatile uint32_t render_done_seq;
+    volatile uint32_t render_document_generation;
+    volatile uint32_t render_published_document_generation;
+    volatile uint32_t render_drawn_document_generation;
     volatile uint32_t render_redraw_pending;
     volatile uint64_t render_request_ms;
     volatile uint32_t render_cache_dirty;
@@ -1173,6 +1270,10 @@ bool html_view_js_queue_external_try(atk_widget_t *view,
                                      atk_html_view_priv_t *priv,
                                      const char *script_text,
                                      size_t len);
+atk_html_view_apply_result_t html_view_js_queue_external_try_result(atk_widget_t *view,
+                                                                    atk_html_view_priv_t *priv,
+                                                                    const char *script_text,
+                                                                    size_t len);
 void html_view_js_shutdown(atk_widget_t *view, atk_html_view_priv_t *priv);
 
 void html_view_render_request(atk_html_view_priv_t *priv);

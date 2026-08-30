@@ -56,32 +56,96 @@ static bool read_entire_file(const char *path, uint8_t **out_data, size_t *out_s
     return true;
 }
 
-static bool render_codepoint(ttf_font_t *font, uint32_t codepoint, int pixel_height)
+typedef struct
 {
-    uint16_t glyph_index = ttf_font_lookup_glyph(font, codepoint);
-    if (glyph_index == 0)
+    uint32_t codepoint;
+    int pixel_height;
+    bool expect_fallback;
+} advance_case_t;
+
+static bool compare_glyph_advance(ttf_font_t *font, const advance_case_t *test_case)
+{
+    if (!font || !test_case)
     {
-        fprintf(stderr, "ttf_host_test: missing glyph for U+%04X\n", codepoint);
         return false;
     }
+
+    uint16_t glyph_index = ttf_font_lookup_glyph(font, test_case->codepoint);
+    if (test_case->expect_fallback && glyph_index != 0)
+    {
+        fprintf(stderr,
+                "ttf_host_test: fallback codepoint U+%04X unexpectedly mapped to glyph %u\n",
+                test_case->codepoint,
+                glyph_index);
+        return false;
+    }
+
+    int advance_only = 0;
+    if (!ttf_font_glyph_advance(font,
+                                test_case->codepoint,
+                                test_case->pixel_height,
+                                &advance_only))
+    {
+        fprintf(stderr,
+                "ttf_host_test: failed to measure U+%04X at %d px\n",
+                test_case->codepoint,
+                test_case->pixel_height);
+        return false;
+    }
+
     ttf_bitmap_t bitmap = {0};
     ttf_glyph_metrics_t metrics = {0};
-    if (!ttf_font_render_glyph_bitmap(font, codepoint, pixel_height, &bitmap, &metrics))
+    if (!ttf_font_render_glyph_bitmap(font,
+                                      test_case->codepoint,
+                                      test_case->pixel_height,
+                                      &bitmap,
+                                      &metrics))
     {
-        fprintf(stderr, "ttf_host_test: failed to render U+%04X (glyph %u)\n",
-                codepoint, glyph_index);
+        fprintf(stderr,
+                "ttf_host_test: failed to render U+%04X at %d px (glyph %u)\n",
+                test_case->codepoint,
+                test_case->pixel_height,
+                glyph_index);
         return false;
     }
-    printf("glyph U+%04X idx=%u size=%dx%d offset=(%d,%d) advance=%d\n",
-           codepoint,
+
+    bool ok = advance_only == metrics.advance;
+    if (!ok)
+    {
+        fprintf(stderr,
+                "ttf_host_test: advance mismatch U+%04X at %d px: metrics-only=%d rendered=%d\n",
+                test_case->codepoint,
+                test_case->pixel_height,
+                advance_only,
+                metrics.advance);
+    }
+
+    if (test_case->expect_fallback)
+    {
+        int question_advance = 0;
+        if (!ttf_font_glyph_advance(font,
+                                    '?',
+                                    test_case->pixel_height,
+                                    &question_advance) ||
+            question_advance != advance_only)
+        {
+            fprintf(stderr,
+                    "ttf_host_test: fallback advance U+%04X at %d px did not match '?'\n",
+                    test_case->codepoint,
+                    test_case->pixel_height);
+            ok = false;
+        }
+    }
+
+    printf("advance U+%04X idx=%u px=%d metrics-only=%d rendered=%d fallback=%u\n",
+           test_case->codepoint,
            glyph_index,
-           metrics.width,
-           metrics.height,
-           bitmap.offset_x,
-           bitmap.offset_y,
-           metrics.advance);
+           test_case->pixel_height,
+           advance_only,
+           metrics.advance,
+           test_case->expect_fallback ? 1u : 0u);
     ttf_bitmap_destroy(&bitmap);
-    return true;
+    return ok;
 }
 
 int main(int argc, char **argv)
@@ -117,10 +181,34 @@ int main(int argc, char **argv)
            metrics.descent,
            metrics.line_gap);
 
-    const uint32_t samples[] = { 'A', 'g', '0', 0x00E9, 0x20AC };
-    for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i)
+    int unused_advance = 0;
+    if (ttf_font_glyph_advance(NULL, 'A', 16, &unused_advance) ||
+        ttf_font_glyph_advance(&font, 'A', 0, &unused_advance) ||
+        ttf_font_glyph_advance(&font, 'A', 16, NULL))
     {
-        if (!render_codepoint(&font, samples[i], 48))
+        fprintf(stderr, "ttf_host_test: glyph advance accepted invalid arguments\n");
+        ttf_font_unload(&font);
+        return 1;
+    }
+
+    const advance_case_t cases[] = {
+        { 'A', 9, false },
+        { 'A', 16, false },
+        { 'A', 48, false },
+        { 'A', 96, false },
+        { 'g', 13, false },
+        { '0', 48, false },
+        { 0x00E9, 12, false },
+        { 0x00E9, 48, false },
+        { 0x20AC, 24, false },
+        { 0x20AC, 73, false },
+        { 0x0378, 9, true },
+        { 0x0378, 48, true },
+        { 0x0378, 96, true },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+    {
+        if (!compare_glyph_advance(&font, &cases[i]))
         {
             ttf_font_unload(&font);
             return 1;

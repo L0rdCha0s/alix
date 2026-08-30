@@ -4099,6 +4099,7 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
                     css_style_release(&important_style);
                     return false;
                 }
+                has_important = true;
             }
             else
             {
@@ -4114,6 +4115,7 @@ static bool css_apply_rule_from_decls(css_stylesheet_t *sheet,
                     css_style_release(&important_style);
                     return false;
                 }
+                has_style = true;
             }
 
             if (allow_global_vars && global_vars && !css_var_name_is_local(prop_start, prop_end))

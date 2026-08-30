@@ -7632,6 +7632,7 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
             html_view_rule_trie_free(parent->trie);
             free(parent->rules);
         }
+        free(bucket->parent_hash_slots);
         free(bucket->parent_buckets);
         free(bucket->rules);
     }
@@ -7645,6 +7646,7 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
             html_view_rule_trie_free(parent->trie);
             free(parent->rules);
         }
+        free(bucket->parent_hash_slots);
         free(bucket->parent_buckets);
         free(bucket->rules);
     }
@@ -7658,6 +7660,7 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
             html_view_rule_trie_free(parent->trie);
             free(parent->rules);
         }
+        free(bucket->parent_hash_slots);
         free(bucket->parent_buckets);
         free(bucket->rules);
     }
@@ -7671,6 +7674,7 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
             html_view_rule_trie_free(parent->trie);
             free(parent->rules);
         }
+        free(bucket->parent_hash_slots);
         free(bucket->parent_buckets);
         free(bucket->rules);
     }
@@ -7684,6 +7688,7 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
             html_view_rule_trie_free(parent->trie);
             free(parent->rules);
         }
+        free(bucket->parent_hash_slots);
         free(bucket->parent_buckets);
         free(bucket->rules);
     }
@@ -7692,6 +7697,11 @@ static void html_view_rule_index_free(html_view_rule_index_t *index)
     free(index->scope_class_buckets);
     free(index->id_buckets);
     free(index->attr_buckets);
+    free(index->tag_lookup.slots);
+    free(index->class_lookup.slots);
+    free(index->scope_class_lookup.slots);
+    free(index->id_lookup.slots);
+    free(index->attr_lookup.slots);
     free(index->global_rules);
     free(index);
 }
@@ -8531,6 +8541,112 @@ static html_view_rule_bucket_t *html_view_rule_index_find_bucket_list(html_view_
     return NULL;
 }
 
+static bool html_view_rule_bucket_lookup_build(html_view_rule_bucket_lookup_t *lookup,
+                                               html_view_rule_bucket_t *buckets,
+                                               size_t bucket_count)
+{
+    if (!lookup)
+    {
+        return false;
+    }
+    free(lookup->slots);
+    lookup->slots = NULL;
+    lookup->slot_count = 0;
+    if (!buckets || bucket_count == 0)
+    {
+        return true;
+    }
+
+    if (bucket_count > ((size_t)-1) / 2u)
+    {
+        return false;
+    }
+    size_t desired = bucket_count * 2u;
+    size_t slot_count = 8u;
+    while (slot_count < desired)
+    {
+        if (slot_count > ((size_t)-1) / 2u)
+        {
+            return false;
+        }
+        slot_count *= 2u;
+    }
+    size_t *slots = (size_t *)calloc(slot_count, sizeof(*slots));
+    if (!slots)
+    {
+        return false;
+    }
+
+    size_t mask = slot_count - 1u;
+    for (size_t i = 0; i < bucket_count; ++i)
+    {
+        html_view_rule_bucket_t *bucket = &buckets[i];
+        if (!bucket->tag || bucket->tag_len == 0)
+        {
+            continue;
+        }
+        uint64_t hash = html_view_bloom_hash_range_ci(bucket->tag,
+                                                       bucket->tag + bucket->tag_len,
+                                                       true);
+        bucket->key_hash = hash;
+        size_t slot = (size_t)hash & mask;
+        while (slots[slot] != 0u)
+        {
+            slot = (slot + 1u) & mask;
+        }
+        slots[slot] = i + 1u;
+    }
+
+    lookup->slots = slots;
+    lookup->slot_count = slot_count;
+    return true;
+}
+
+static html_view_rule_bucket_t *html_view_rule_index_find_bucket_lookup(
+    html_view_rule_bucket_t *buckets,
+    size_t bucket_count,
+    const html_view_rule_bucket_lookup_t *lookup,
+    const char *key,
+    size_t len)
+{
+    if (!buckets || !key || len == 0)
+    {
+        return NULL;
+    }
+    if (!lookup || !lookup->slots || lookup->slot_count == 0)
+    {
+        return html_view_rule_index_find_bucket_list(buckets, bucket_count, key, len);
+    }
+
+    uint64_t hash = html_view_bloom_hash_range_ci(key, key + len, false);
+    size_t mask = lookup->slot_count - 1u;
+    size_t slot = (size_t)hash & mask;
+    for (size_t probes = 0; probes < lookup->slot_count; ++probes)
+    {
+        size_t stored = lookup->slots[slot];
+        if (stored == 0u)
+        {
+            return NULL;
+        }
+        size_t index = stored - 1u;
+        if (index < bucket_count)
+        {
+            html_view_rule_bucket_t *bucket = &buckets[index];
+            if (bucket->key_hash == hash &&
+                bucket->tag &&
+                html_view_selector_range_eq_ci_ranges(bucket->tag,
+                                                       bucket->tag_len,
+                                                       key,
+                                                       len))
+            {
+                return bucket;
+            }
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return NULL;
+}
+
 static html_view_rule_bucket_t *html_view_rule_index_get_bucket_list(html_view_rule_bucket_t **buckets,
                                                                      size_t *bucket_count,
                                                                      size_t *bucket_cap,
@@ -8579,7 +8695,15 @@ static html_view_rule_bucket_t *html_view_rule_bucket_find_parent_bucket(html_vi
     {
         return NULL;
     }
-    return html_view_rule_index_find_bucket_list(bucket->parent_buckets, bucket->parent_count, key, len);
+    html_view_rule_bucket_lookup_t lookup = {
+        .slots = bucket->parent_hash_slots,
+        .slot_count = bucket->parent_hash_slot_count,
+    };
+    return html_view_rule_index_find_bucket_lookup(bucket->parent_buckets,
+                                                   bucket->parent_count,
+                                                   &lookup,
+                                                   key,
+                                                   len);
 }
 
 static html_view_rule_bucket_t *html_view_rule_bucket_get_parent_bucket(html_view_rule_bucket_t *bucket,
@@ -8787,6 +8911,57 @@ static void html_view_rule_index_build_bucket_tries(html_view_rule_bucket_t *buc
             parent->trie = html_view_rule_trie_build(parent->rules, parent->count);
         }
     }
+}
+
+static void html_view_rule_index_build_bucket_lookups(html_view_rule_bucket_t *buckets,
+                                                      size_t bucket_count)
+{
+    if (!buckets || bucket_count == 0)
+    {
+        return;
+    }
+    for (size_t i = 0; i < bucket_count; ++i)
+    {
+        html_view_rule_bucket_t *bucket = &buckets[i];
+        html_view_rule_bucket_lookup_t parent_lookup = {0};
+        if (html_view_rule_bucket_lookup_build(&parent_lookup,
+                                               bucket->parent_buckets,
+                                               bucket->parent_count))
+        {
+            bucket->parent_hash_slots = parent_lookup.slots;
+            bucket->parent_hash_slot_count = parent_lookup.slot_count;
+        }
+    }
+}
+
+static void html_view_rule_index_build_lookups(html_view_rule_index_t *index)
+{
+    if (!index)
+    {
+        return;
+    }
+    (void)html_view_rule_bucket_lookup_build(&index->tag_lookup,
+                                             index->tag_buckets,
+                                             index->tag_bucket_count);
+    (void)html_view_rule_bucket_lookup_build(&index->class_lookup,
+                                             index->class_buckets,
+                                             index->class_bucket_count);
+    (void)html_view_rule_bucket_lookup_build(&index->scope_class_lookup,
+                                             index->scope_class_buckets,
+                                             index->scope_class_bucket_count);
+    (void)html_view_rule_bucket_lookup_build(&index->id_lookup,
+                                             index->id_buckets,
+                                             index->id_bucket_count);
+    (void)html_view_rule_bucket_lookup_build(&index->attr_lookup,
+                                             index->attr_buckets,
+                                             index->attr_bucket_count);
+
+    html_view_rule_index_build_bucket_lookups(index->tag_buckets, index->tag_bucket_count);
+    html_view_rule_index_build_bucket_lookups(index->class_buckets, index->class_bucket_count);
+    html_view_rule_index_build_bucket_lookups(index->scope_class_buckets,
+                                              index->scope_class_bucket_count);
+    html_view_rule_index_build_bucket_lookups(index->id_buckets, index->id_bucket_count);
+    html_view_rule_index_build_bucket_lookups(index->attr_buckets, index->attr_bucket_count);
 }
 
 static void html_view_rule_index_build_tries(html_view_rule_index_t *index)
@@ -9055,6 +9230,7 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
     uint64_t dom_tokens_ms = 0;
     uint64_t parse_ms = 0;
     uint64_t add_ms = 0;
+    uint64_t lookup_ms = 0;
     uint64_t tries_ms = 0;
     html_view_rule_index_t *index = (html_view_rule_index_t *)calloc(1, sizeof(*index));
     if (!index)
@@ -9206,6 +9382,9 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
 
     html_view_key_count_map_free(&class_freq);
     html_view_dom_token_map_free(&dom_tokens);
+    uint64_t lookup_start_ms = html_view_style_now_ms();
+    html_view_rule_index_build_lookups(index);
+    lookup_ms = html_view_style_now_ms() - lookup_start_ms;
     uint64_t tries_start_ms = html_view_style_now_ms();
     html_view_rule_index_build_tries(index);
     tries_ms = html_view_style_now_ms() - tries_start_ms;
@@ -9230,12 +9409,13 @@ static html_view_rule_index_t *html_view_rule_index_build(atk_html_view_priv_t *
                       (unsigned long long)index->id_bucket_count,
                       (unsigned long long)index->attr_bucket_count,
                       (unsigned long long)index->scope_class_bucket_count);
-        serial_printf("[html_view] rule_index_build_stage sheet=%p total_ms=%llu dom_ms=%llu parse_ms=%llu add_ms=%llu tries_ms=%llu",
+        serial_printf("[html_view] rule_index_build_stage sheet=%p total_ms=%llu dom_ms=%llu parse_ms=%llu add_ms=%llu lookup_ms=%llu tries_ms=%llu",
                       (void *)sheet,
                       (unsigned long long)build_ms,
                       (unsigned long long)dom_tokens_ms,
                       (unsigned long long)parse_ms,
                       (unsigned long long)add_ms,
+                      (unsigned long long)lookup_ms,
                       (unsigned long long)tries_ms);
         if (sample_parse_failed)
         {
@@ -9952,10 +10132,11 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
 
     if (node->name)
     {
-        html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(index->tag_buckets,
-                                                                                index->tag_bucket_count,
-                                                                                node->name,
-                                                                                strlen(node->name));
+        html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_lookup(index->tag_buckets,
+                                                                                  index->tag_bucket_count,
+                                                                                  &index->tag_lookup,
+                                                                                  node->name,
+                                                                                  strlen(node->name));
         if (bucket && bucket->count > 0 &&
             (!wants_pseudo || (bucket->pseudo_mask & pseudo_mask) != 0))
         {
@@ -9992,10 +10173,11 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
 
     if (id_len > 0)
     {
-        html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(index->id_buckets,
-                                                                                index->id_bucket_count,
-                                                                                id,
-                                                                                id_len);
+        html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_lookup(index->id_buckets,
+                                                                                  index->id_bucket_count,
+                                                                                  &index->id_lookup,
+                                                                                  id,
+                                                                                  id_len);
         if (bucket && bucket->count > 0 &&
             (!wants_pseudo || (bucket->pseudo_mask & pseudo_mask) != 0))
         {
@@ -10038,10 +10220,11 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
             {
                 continue;
             }
-            html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(index->attr_buckets,
-                                                                                    index->attr_bucket_count,
-                                                                                    attr->name,
-                                                                                    strlen(attr->name));
+            html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_lookup(index->attr_buckets,
+                                                                                      index->attr_bucket_count,
+                                                                                      &index->attr_lookup,
+                                                                                      attr->name,
+                                                                                      strlen(attr->name));
             if (!bucket)
             {
                 continue;
@@ -10090,10 +10273,11 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
             {
                 continue;
             }
-            html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(index->class_buckets,
-                                                                                    index->class_bucket_count,
-                                                                                    tok->start,
-                                                                                    tok->len);
+            html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_lookup(index->class_buckets,
+                                                                                      index->class_bucket_count,
+                                                                                      &index->class_lookup,
+                                                                                      tok->start,
+                                                                                      tok->len);
             if (!bucket)
             {
                 continue;
@@ -10274,10 +10458,11 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                     {
                         continue;
                     }
-                    html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(index->scope_class_buckets,
-                                                                                            index->scope_class_bucket_count,
-                                                                                            start,
-                                                                                            len);
+                    html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_lookup(index->scope_class_buckets,
+                                                                                              index->scope_class_bucket_count,
+                                                                                              &index->scope_class_lookup,
+                                                                                              start,
+                                                                                              len);
                     if (!bucket)
                     {
                         continue;
@@ -10326,10 +10511,11 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
                     {
                         continue;
                     }
-                    html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(index->scope_class_buckets,
-                                                                                            index->scope_class_bucket_count,
-                                                                                            tok->start,
-                                                                                            tok->len);
+                    html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_lookup(index->scope_class_buckets,
+                                                                                              index->scope_class_bucket_count,
+                                                                                              &index->scope_class_lookup,
+                                                                                              tok->start,
+                                                                                              tok->len);
                     if (!bucket)
                     {
                         continue;
@@ -10393,10 +10579,11 @@ static bool html_view_collect_indexed_rule_lists(const html_node_t *node,
             {
                 continue;
             }
-            html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_list(index->class_buckets,
-                                                                                    index->class_bucket_count,
-                                                                                    start,
-                                                                                    len);
+            html_view_rule_bucket_t *bucket = html_view_rule_index_find_bucket_lookup(index->class_buckets,
+                                                                                      index->class_bucket_count,
+                                                                                      &index->class_lookup,
+                                                                                      start,
+                                                                                      len);
             if (!bucket)
             {
                 continue;

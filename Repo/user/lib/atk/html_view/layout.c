@@ -766,10 +766,10 @@ static void html_view_draw_flat_bottom_triangle(html_view_ctx_t *ctx,
     {
         return;
     }
-    int32_t inv1 = ((x1 - x0) << 16) / dy1;
-    int32_t inv2 = ((x2 - x0) << 16) / dy2;
-    int32_t cur1 = x0 << 16;
-    int32_t cur2 = x0 << 16;
+    int64_t inv1 = ((int64_t)(x1 - x0) * 65536) / dy1;
+    int64_t inv2 = ((int64_t)(x2 - x0) * 65536) / dy2;
+    int64_t cur1 = (int64_t)x0 * 65536;
+    int64_t cur2 = (int64_t)x0 * 65536;
     for (int y = y0; y <= y1; ++y)
     {
         int xa = cur1 >> 16;
@@ -806,10 +806,10 @@ static void html_view_draw_flat_top_triangle(html_view_ctx_t *ctx,
     {
         return;
     }
-    int32_t inv1 = ((x2 - x0) << 16) / dy1;
-    int32_t inv2 = ((x2 - x1) << 16) / dy2;
-    int32_t cur1 = x2 << 16;
-    int32_t cur2 = x2 << 16;
+    int64_t inv1 = ((int64_t)(x2 - x0) * 65536) / dy1;
+    int64_t inv2 = ((int64_t)(x2 - x1) * 65536) / dy2;
+    int64_t cur1 = (int64_t)x2 * 65536;
+    int64_t cur2 = (int64_t)x2 * 65536;
     for (int y = y2; y >= y0; --y)
     {
         int xa = cur1 >> 16;

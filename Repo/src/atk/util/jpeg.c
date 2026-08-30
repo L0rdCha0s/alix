@@ -369,7 +369,7 @@ static void idct_8x8(const int32_t *in, int16_t *out)
         if (ip[8] == 0 && ip[16] == 0 && ip[24] == 0 && ip[32] == 0 &&
             ip[40] == 0 && ip[48] == 0 && ip[56] == 0)
         {
-            int32_t dc = ip[0] << PASS1_BITS;
+            int32_t dc = (int32_t)((int64_t)ip[0] * ((int64_t)1 << PASS1_BITS));
             for (int i = 0; i < 8; ++i) workspace[i * 8 + col] = dc;
             continue;
         }
@@ -380,8 +380,8 @@ static void idct_8x8(const int32_t *in, int16_t *out)
         int64_t tmp2 = z1 + MULTIPLY(z3, -C1_847759065);
         int64_t tmp3 = z1 + MULTIPLY(z2,  C0_765366865);
 
-        int64_t tmp0 = ((int64_t)ip[0] + (int64_t)ip[32]) << CONST_BITS;
-        int64_t tmp1 = ((int64_t)ip[0] - (int64_t)ip[32]) << CONST_BITS;
+        int64_t tmp0 = ((int64_t)ip[0] + (int64_t)ip[32]) * ((int64_t)1 << CONST_BITS);
+        int64_t tmp1 = ((int64_t)ip[0] - (int64_t)ip[32]) * ((int64_t)1 << CONST_BITS);
 
         int64_t tmp10 = tmp0 + tmp3;
         int64_t tmp13 = tmp0 - tmp3;
@@ -452,8 +452,8 @@ static void idct_8x8(const int32_t *in, int16_t *out)
         int64_t tmp2 = z1 + MULTIPLY(z3, -C1_847759065);
         int64_t tmp3 = z1 + MULTIPLY(z2,  C0_765366865);
 
-        int64_t tmp0 = ((int64_t)rp[0] + (int64_t)rp[4]) << CONST_BITS;
-        int64_t tmp1 = ((int64_t)rp[0] - (int64_t)rp[4]) << CONST_BITS;
+        int64_t tmp0 = ((int64_t)rp[0] + (int64_t)rp[4]) * ((int64_t)1 << CONST_BITS);
+        int64_t tmp1 = ((int64_t)rp[0] - (int64_t)rp[4]) * ((int64_t)1 << CONST_BITS);
 
         int64_t tmp10 = tmp0 + tmp3;
         int64_t tmp13 = tmp0 - tmp3;
@@ -897,7 +897,7 @@ static bool prog_dc_first(bitreader_t *br, const jpg_t *jpg, comp_t *c, int16_t 
     if (s) diff = jsgnextend((int)br_get(br, s), s);
 
     int dc = c->dc_pred + diff; c->dc_pred = dc;
-    blk[0] = (int16_t)(dc << Al);
+    blk[0] = (int16_t)((int64_t)dc * ((int64_t)1 << Al));
     return true;
 }
 
@@ -929,7 +929,7 @@ static bool prog_ac_first(bitreader_t *br, const jpg_t *jpg, const comp_t *c,
 
         int vbits = (int)br_get(br, s);
         int coef  = jsgnextend(vbits, s);
-        blk[zigzag[k]] = (int16_t)(coef << Al);
+        blk[zigzag[k]] = (int16_t)((int64_t)coef * ((int64_t)1 << Al));
         ++k;
     }
     return true;

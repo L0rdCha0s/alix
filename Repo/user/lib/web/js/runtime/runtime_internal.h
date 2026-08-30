@@ -117,6 +117,9 @@ struct js_runtime
     js_native_fn_t constructing_fn;
     js_microtask_t *microtask_head;
     js_microtask_t *microtask_tail;
+    js_interrupt_fn_t interrupt_fn;
+    void *interrupt_user_data;
+    size_t interrupt_poll_count;
 };
 
 typedef struct
@@ -227,6 +230,7 @@ bool js_runtime_queue_microtask(js_runtime_t *rt,
                                 const js_value_t *callback,
                                 size_t argc,
                                 const js_value_t *argv);
+bool js_runtime_interrupt_requested(js_runtime_t *rt);
 bool js_promise_await(js_runtime_t *rt,
                       const js_value_t *value,
                       js_value_t *out,

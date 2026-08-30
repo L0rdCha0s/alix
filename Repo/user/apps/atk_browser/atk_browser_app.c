@@ -13,17 +13,6 @@ static bool browser_on_resize_event(uint32_t width, uint32_t height, void *conte
     app->window->width = (int)width;
     app->window->height = (int)height;
     atk_window_request_layout(app->window);
-    if (app->viewer)
-    {
-        uint64_t load_id = 0;
-        browser_lock_enter(app, &app->lock, "app_lock");
-        load_id = app->active_load_id;
-        browser_lock_exit(app, &app->lock, "app_lock");
-        if (load_id != 0)
-        {
-            (void)browser_load_queue_push(app, BROWSER_LOAD_JOB_REBUILD, load_id, NULL);
-        }
-    }
     return true;
 }
 
@@ -60,6 +49,14 @@ int main(void)
         free(app);
         return 1;
     }
+    app->ui_event_head = 0;
+    app->ui_event_count = 0;
+    memset(app->ui_events, 0, sizeof(app->ui_events));
+    memset(&app->deferred_ui_event, 0, sizeof(app->deferred_ui_event));
+    app->deferred_ui_event_valid = false;
+    app->debug_open_requested = false;
+    app->debug_clear_requested = false;
+
     if (!browser_html_worker_start(app))
     {
         printf("atk_browser: failed to start html worker\n");
@@ -68,12 +65,6 @@ int main(void)
     {
         printf("atk_browser: failed to start resource worker\n");
     }
-
-    app->ui_event_head = 0;
-    app->ui_event_count = 0;
-    memset(app->ui_events, 0, sizeof(app->ui_events));
-    app->debug_open_requested = false;
-    app->debug_clear_requested = false;
 
     atk_render();
     atk_user_present_force(&app->remote);
@@ -97,12 +88,19 @@ int main(void)
     browser_html_worker_stop(app);
     browser_resource_worker_stop(app);
 
+    if (app->deferred_ui_event_valid)
+    {
+        browser_ui_event_free_payload(&app->deferred_ui_event);
+        memset(&app->deferred_ui_event, 0, sizeof(app->deferred_ui_event));
+        app->deferred_ui_event_valid = false;
+    }
     browser_ui_event_t ev = {0};
     while (browser_ui_event_dequeue(app, &ev))
     {
         browser_ui_event_free_payload(&ev);
         memset(&ev, 0, sizeof(ev));
     }
+    browser_first_render_scripts_clear(app);
     browser_app_css_reset(app);
 
     if (app->debug_remote.handle != 0 || app->debug_window)

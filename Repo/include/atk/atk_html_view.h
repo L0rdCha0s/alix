@@ -13,6 +13,13 @@ typedef struct html_parse_error html_parse_error_t;
 
 typedef void (*atk_html_view_link_t)(atk_widget_t *view, const char *href, void *context);
 
+typedef enum
+{
+    ATK_HTML_VIEW_APPLY_FAILED = 0,
+    ATK_HTML_VIEW_APPLY_OK,
+    ATK_HTML_VIEW_APPLY_BUSY
+} atk_html_view_apply_result_t;
+
 /*
  * Create an HTML view widget as a child of `window`.
  *
@@ -70,11 +77,15 @@ bool atk_html_view_try_set_external_stylesheet(atk_widget_t *view, const char *c
  */
 bool atk_html_view_add_script(atk_widget_t *view, const char *script_text, size_t len);
 /*
- * Non-blocking script queue; returns false if the view is busy.
+ * Non-blocking script queue; returns false if the view is busy or queueing fails.
  *
  * The script is copied by the view when queued.
  */
 bool atk_html_view_try_add_script(atk_widget_t *view, const char *script_text, size_t len);
+/* Detailed result for callers that must distinguish contention from failure. */
+atk_html_view_apply_result_t atk_html_view_try_add_script_result(atk_widget_t *view,
+                                                                 const char *script_text,
+                                                                 size_t len);
 
 /*
  * Stop JS execution and clear queued scripts/listeners for the view.
@@ -125,6 +136,12 @@ bool atk_html_view_rebuild_cache(atk_widget_t *view);
 bool atk_html_view_rebuild_cache_if_pending(atk_widget_t *view);
 
 /*
+ * Return whether the current asynchronous document has drawn its first
+ * successful render cache. This remains true if later work dirties the cache.
+ */
+bool atk_html_view_document_drawn(atk_widget_t *view);
+
+/*
  * Poll for JS-driven DOM changes that require a redraw.
  *
  * Call this from the UI thread (e.g. your main loop tick) to propagate
@@ -162,7 +179,7 @@ bool atk_html_view_add_image_rgba(atk_widget_t *view,
                                   int height,
                                   int stride_bytes);
 /*
- * Non-blocking RGBA image registration; returns false if the view is busy.
+ * Non-blocking RGBA image registration; returns false if the view is busy or registration fails.
  *
  * Ownership of `pixels` is transferred only on success.
  */
@@ -172,6 +189,16 @@ bool atk_html_view_try_add_image_rgba(atk_widget_t *view,
                                       int width,
                                       int height,
                                       int stride_bytes);
+/*
+ * Detailed non-blocking result. Ownership of `pixels` transfers only when
+ * ATK_HTML_VIEW_APPLY_OK is returned.
+ */
+atk_html_view_apply_result_t atk_html_view_try_add_image_rgba_result(atk_widget_t *view,
+                                                                     const char *src,
+                                                                     video_color_t *pixels,
+                                                                     int width,
+                                                                     int height,
+                                                                     int stride_bytes);
 
 extern const atk_class_t ATK_HTML_VIEW_CLASS;
 

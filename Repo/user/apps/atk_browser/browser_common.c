@@ -36,6 +36,61 @@ char *browser_strdup_len(const char *src, size_t len)
     return out;
 }
 
+bool browser_main_document_error(int status,
+                                 const char *body,
+                                 char *message,
+                                 size_t message_cap)
+{
+    if (!message || message_cap == 0u)
+    {
+        return false;
+    }
+    message[0] = '\0';
+
+    if (status >= 400)
+    {
+        const char *reason = NULL;
+        switch (status)
+        {
+            case 400: reason = "Bad Request"; break;
+            case 401: reason = "Unauthorized"; break;
+            case 403: reason = "Forbidden"; break;
+            case 404: reason = "Not Found"; break;
+            case 408: reason = "Request Timeout"; break;
+            case 429: reason = "Too Many Requests"; break;
+            case 500: reason = "Internal Server Error"; break;
+            case 502: reason = "Bad Gateway"; break;
+            case 503: reason = "Service Unavailable"; break;
+            case 504: reason = "Gateway Timeout"; break;
+            default: reason = "Request Failed"; break;
+        }
+        snprintf(message, message_cap, "HTTP %d %s", status, reason);
+        return true;
+    }
+
+    if (body && strncmp(body, "Error:\n", 7) == 0)
+    {
+        const char *detail = body + 7;
+        size_t len = 0u;
+        while (detail[len] != '\0' && detail[len] != '\r' && detail[len] != '\n')
+        {
+            len++;
+        }
+        if (len >= message_cap)
+        {
+            len = message_cap - 1u;
+        }
+        memcpy(message, detail, len);
+        message[len] = '\0';
+        if (len == 0u)
+        {
+            snprintf(message, message_cap, "network error");
+        }
+        return true;
+    }
+    return false;
+}
+
 bool browser_write_all(int fd, const uint8_t *data, size_t len)
 {
     if (fd < 0 || (!data && len > 0))

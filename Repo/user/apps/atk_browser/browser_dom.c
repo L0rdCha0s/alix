@@ -1,6 +1,7 @@
 #include "browser_internal.h"
 
 #include "string.h"
+#include "web/html/html_internal.h"
 #include "web/url.h"
 
 const html_node_t *browser_dom_find_first_element(const html_node_t *root, const char *tag)
@@ -140,11 +141,45 @@ bool browser_is_svg_bytes(const uint8_t *data, size_t len)
     return false;
 }
 
-void browser_dom_set_attr(html_node_t *node, const char *name, const char *value)
+static char *browser_dom_node_strdup(html_node_t *node, const char *value)
+{
+    if (!node || !value)
+    {
+        return NULL;
+    }
+    size_t len = strlen(value);
+    if (node->doc)
+    {
+        return html_doc_strdup_range(node->doc, value, value + len, false);
+    }
+    return browser_strdup_len(value, len);
+}
+
+bool browser_dom_set_tag_name(html_node_t *node, const char *name)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT || !name || name[0] == '\0')
+    {
+        return false;
+    }
+
+    char *copy = browser_dom_node_strdup(node, name);
+    if (!copy)
+    {
+        return false;
+    }
+    if (!node->doc)
+    {
+        free(node->name);
+    }
+    node->name = copy;
+    return true;
+}
+
+bool browser_dom_set_attr(html_node_t *node, const char *name, const char *value)
 {
     if (!node || node->type != HTML_NODE_ELEMENT || !name || name[0] == '\0' || !value)
     {
-        return;
+        return false;
     }
 
     for (html_attr_t *attr = node->attrs; attr; attr = attr->next)
@@ -158,32 +193,41 @@ void browser_dom_set_attr(html_node_t *node, const char *name, const char *value
             continue;
         }
 
-        char *copy = browser_strdup(value);
+        char *copy = browser_dom_node_strdup(node, value);
         if (!copy)
         {
-            return;
+            return false;
         }
-        free(attr->value);
+        if (!node->doc)
+        {
+            free(attr->value);
+        }
         attr->value = copy;
-        return;
+        return true;
     }
 
-    html_attr_t *attr = (html_attr_t *)calloc(1, sizeof(*attr));
+    html_attr_t *attr = node->doc
+                            ? (html_attr_t *)html_doc_alloc(node->doc, sizeof(*attr))
+                            : (html_attr_t *)calloc(1, sizeof(*attr));
     if (!attr)
     {
-        return;
+        return false;
     }
-    attr->name = browser_strdup(name);
-    attr->value = browser_strdup(value);
+    attr->name = browser_dom_node_strdup(node, name);
+    attr->value = browser_dom_node_strdup(node, value);
     if (!attr->name || !attr->value)
     {
-        free(attr->name);
-        free(attr->value);
-        free(attr);
-        return;
+        if (!node->doc)
+        {
+            free(attr->name);
+            free(attr->value);
+            free(attr);
+        }
+        return false;
     }
     attr->next = node->attrs;
     node->attrs = attr;
+    return true;
 }
 
 size_t browser_collect_resource_urls(browser_app_t *app,
@@ -227,6 +271,9 @@ size_t browser_collect_resource_urls(browser_app_t *app,
     }
 
     size_t count = 0;
+    size_t kind_limit = browser_resource_kind_limit(kind);
+    size_t tracked_for_kind = browser_resource_set_count_kind(requested, kind);
+    bool limit_logged = false;
 
     for (html_node_t *node = root; node;)
     {
@@ -255,19 +302,34 @@ size_t browser_collect_resource_urls(browser_app_t *app,
                     char *abs = browser_build_absolute_url(base_url, value, strlen(value));
                     if (abs)
                     {
-                        browser_dom_set_attr(node, attr, abs);
+                        if (!browser_dom_set_attr(node, attr, abs))
+                        {
+                            browser_debug_logf(app, "[%s] attribute rewrite failed url=%s", log_label, abs);
+                            free(abs);
+                            goto next_node;
+                        }
+                        if (tracked_for_kind >= kind_limit)
+                        {
+                            if (!limit_logged)
+                            {
+                                browser_debug_logf(app,
+                                                   "[%s] resource limit=%u (skip remaining)",
+                                                   log_label,
+                                                   (unsigned)kind_limit);
+                                limit_logged = true;
+                            }
+                            free(abs);
+                            goto next_node;
+                        }
                         browser_resource_track_t track = browser_resource_set_track(requested, kind, abs);
                         if (track == BROWSER_RESOURCE_TRACK_DUP)
                         {
                             browser_debug_logf(app, "[%s] skip duplicate url=%s", log_label, abs);
                             free(abs);
                         }
-                        else
+                        else if (track == BROWSER_RESOURCE_TRACK_NEW)
                         {
-                            if (track == BROWSER_RESOURCE_TRACK_ERROR)
-                            {
-                                browser_debug_logf(app, "[%s] track failed url=%s", log_label, abs);
-                            }
+                            tracked_for_kind++;
                             browser_debug_logf(app, "[%s] discovered %s", log_label, abs);
                             if (queue)
                             {
@@ -299,6 +361,11 @@ size_t browser_collect_resource_urls(browser_app_t *app,
                             {
                                 free(abs);
                             }
+                        }
+                        else
+                        {
+                            browser_debug_logf(app, "[%s] track failed (skip) url=%s", log_label, abs);
+                            free(abs);
                         }
                     }
                 }
