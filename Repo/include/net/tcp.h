@@ -15,6 +15,10 @@ bool net_tcp_socket_send(net_tcp_socket_t *socket, const uint8_t *data, size_t l
 size_t net_tcp_socket_available(const net_tcp_socket_t *socket);
 size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
 ssize_t net_tcp_socket_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
+ssize_t net_tcp_socket_read_blocking_timeout(net_tcp_socket_t *socket,
+                                             uint8_t *buffer,
+                                             size_t capacity,
+                                             uint64_t timeout_ticks);
 bool net_tcp_socket_is_established(const net_tcp_socket_t *socket);
 bool net_tcp_socket_remote_closed(const net_tcp_socket_t *socket);
 bool net_tcp_socket_has_error(const net_tcp_socket_t *socket);

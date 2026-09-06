@@ -31,7 +31,9 @@ extern void storage_request_flush(void);
  * See docs/kernel/vfs.md for an overview of the VFS and mount/writeback flow.
  */
 
-#define VFS_DIRTY_BACKPRESSURE_LIMIT   (10ULL * 1024ULL * 1024ULL)
+#define VFS_DIRTY_BACKPRESSURE_LIMIT     (64ULL * 1024ULL * 1024ULL)
+#define VFS_ACTIVE_WRITE_FLUSH_THRESHOLD (48ULL * 1024ULL * 1024ULL)
+#define VFS_ACTIVE_WRITE_GRACE_MS        300ULL
 
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
 
@@ -943,6 +945,7 @@ static void vfs_mark_data_dirty(vfs_node_t *node, size_t len)
     uint64_t now = vfs_now_seconds();
     node->dirty = true;
     node->disk_data_dirty = true;
+    node->last_data_write_tick = timer_ticks();
     node->mtime = now;
     node->ctime = now;
     if (node->mount)
@@ -1044,6 +1047,7 @@ static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all)
         }
 
         bool needs_flush = force_all;
+        bool defer_active_write = false;
         if (!needs_flush)
         {
             vfs_lock_node_data(node);
@@ -1052,7 +1056,29 @@ static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all)
             {
                 needs_flush = true;
             }
+            if (needs_flush && node->disk_data_dirty &&
+                node->pending_dirty_bytes < VFS_ACTIVE_WRITE_FLUSH_THRESHOLD &&
+                node->last_data_write_tick != 0)
+            {
+                uint64_t freq = timer_frequency();
+                if (freq == 0)
+                {
+                    freq = 1000;
+                }
+                uint64_t grace_ticks =
+                    (VFS_ACTIVE_WRITE_GRACE_MS * freq + 999ULL) / 1000ULL;
+                uint64_t now_ticks = timer_ticks();
+                defer_active_write = now_ticks >= node->last_data_write_tick &&
+                    now_ticks - node->last_data_write_tick < grace_ticks;
+            }
             vfs_unlock_node_data(node);
+        }
+
+        if (defer_active_write)
+        {
+            /* Keep the mount dirty so flushd retries after the writer goes idle. */
+            vfs_mark_mount_dirty(mount);
+            continue;
         }
 
         if (!needs_flush)

@@ -35,6 +35,7 @@ struct vfs_node
     char *data;
     size_t pending_dirty_bytes;
     uint64_t dirty_seq;
+    uint64_t last_data_write_tick;
     spinlock_t data_lock;
 
     uint32_t disk_id;

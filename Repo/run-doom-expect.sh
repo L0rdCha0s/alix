@@ -4,24 +4,29 @@
 #
 # This is meant for debugging: it waits for the shell prompt, then follows
 # the host-sync workflow:
-#   1) wait 5s after boot
+#   1) log in as the development root user
 #   2) cd /usr/bin
 #   3) run ./dl.sh to pull latest doom bits
-#   4) wait 10s for transfer
+#   4) wait for bundle extraction
 #   5) run ./doom.elf
 
 # Default timeout (in seconds). Under TCG, guest time runs much slower than
 # wall-clock, so keep this fairly high for long-run stability tests.
 set timeout 600
 
-set workdir "/Users/alex/Documents/Projects/alix"
+set script_path [file normalize [info script]]
+set workdir [file dirname $script_path]
 set net_backend "user"
 if {[info exists ::env(NET_BACKEND)]} {
     set net_backend $::env(NET_BACKEND)
 }
 set cmd "cd $workdir && NET_BACKEND=$net_backend make run-hdd"
 
-log_file -a "$workdir/qemu-serial.log"
+set serial_log "$workdir/qemu-serial.log"
+if {[info exists ::env(QEMU_SERIAL_LOG)]} {
+    set serial_log $::env(QEMU_SERIAL_LOG)
+}
+log_file -a $serial_log
 # Don't spam stdout; the serial log above is the source of truth.
 log_user 0
 
@@ -30,37 +35,27 @@ if {[catch {spawn bash -lc $cmd} err]} {
     exit 1
 }
 
-# Wait for the shell to come up (best-effort; logs can interleave).
+# Step 1: log in after startup networking has completed.
 set timeout 30
-expect {
-    -re {In-memory FS shell ready} { }
-    timeout { }
-}
-
-# Step 1: wait a bit after boot for services.
-after 5000
-
-# Nudge the shell to print a prompt even if stdout is buffered.
-catch { send "\r" }
-set timeout 5
-expect {
-    -re {alex@alix\\$} { }
-    timeout { }
-}
+expect -re {login:}
+send "root\r"
+expect -re {password:}
+send "root\r"
+expect -re {root@alix\$}
 
 # Step 2: cd into /usr/bin.
 send "cd /usr/bin\r"
 set timeout 10
-expect {
-    -re {alex@alix\\$} { }
-    timeout { }
-}
+expect -re {root@alix\$}
 
 # Step 3: download latest doom build/files.
 send "./dl.sh\r"
 
-# Step 4: give the download time to complete.
-after 10000
+# Step 4: wait for bundle extraction.
+set timeout 120
+expect -re {unzip: done}
+set timeout 30
+expect -re {root@alix\$}
 
 # Step 5: launch doom.
 set doom_args ""

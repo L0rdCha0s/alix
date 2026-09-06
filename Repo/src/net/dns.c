@@ -64,7 +64,8 @@ typedef struct
 {
     bool valid;
     uint16_t qtype;
-    uint32_t addr;
+    uint32_t addrs[NET_DNS_MAX_ADDRS];
+    size_t addr_count;
     uint64_t expires_tick;
     uint64_t last_used_tick;
     char name[NET_DNS_NAME_MAX + 1];
@@ -131,7 +132,11 @@ static void dns_log_ipv4(const char *prefix, uint32_t addr);
 static void dns_debug_ipv4(const char *prefix, uint32_t addr);
 static uint64_t dns_cache_expiry_tick(uint32_t ttl_sec, uint64_t now);
 static bool dns_cache_lookup(const char *hostname, uint16_t qtype, net_dns_result_t *result);
-static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_sec);
+static void dns_cache_store_a(const char *hostname,
+                              const uint32_t *addrs,
+                              size_t addr_count,
+                              uint32_t ttl_sec);
+static bool dns_add_unique_addr(uint32_t *addrs, size_t *count, uint32_t addr);
 
 void net_dns_init(void)
 {
@@ -209,7 +214,8 @@ static bool dns_cache_lookup(const char *hostname, uint16_t qtype, net_dns_resul
     }
 
     uint64_t now = timer_ticks();
-    uint32_t addr = 0;
+    uint32_t addrs[NET_DNS_MAX_ADDRS];
+    size_t addr_count = 0;
     bool hit = false;
 
     uint64_t flags = dns_lock();
@@ -234,7 +240,12 @@ static bool dns_cache_lookup(const char *hostname, uint16_t qtype, net_dns_resul
             continue;
         }
         entry->last_used_tick = now;
-        addr = entry->addr;
+        addr_count = entry->addr_count;
+        if (addr_count > NET_DNS_MAX_ADDRS)
+        {
+            addr_count = NET_DNS_MAX_ADDRS;
+        }
+        memcpy(addrs, entry->addrs, addr_count * sizeof(addrs[0]));
         hit = true;
         break;
     }
@@ -244,15 +255,20 @@ static bool dns_cache_lookup(const char *hostname, uint16_t qtype, net_dns_resul
     {
         memset(result, 0, sizeof(*result));
         result->has_a = true;
-        result->addr = addr;
+        result->addr_count = addr_count;
+        memcpy(result->addrs, addrs, addr_count * sizeof(addrs[0]));
+        result->addr = addr_count > 0 ? addrs[0] : 0;
         result->rr_type = NET_DNS_TYPE_A;
     }
     return hit;
 }
 
-static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_sec)
+static void dns_cache_store_a(const char *hostname,
+                              const uint32_t *addrs,
+                              size_t addr_count,
+                              uint32_t ttl_sec)
 {
-    if (!hostname || hostname[0] == '\0')
+    if (!hostname || hostname[0] == '\0' || !addrs || addr_count == 0)
     {
         return;
     }
@@ -270,7 +286,12 @@ static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_
         if (entry->valid && entry->qtype == NET_DNS_TYPE_A &&
             dns_name_equal(entry->name, hostname))
         {
-            entry->addr = addr;
+            entry->addr_count = addr_count > NET_DNS_MAX_ADDRS
+                ? NET_DNS_MAX_ADDRS
+                : addr_count;
+            memcpy(entry->addrs,
+                   addrs,
+                   entry->addr_count * sizeof(entry->addrs[0]));
             entry->expires_tick = expires_tick;
             entry->last_used_tick = now;
             dns_unlock(flags);
@@ -311,11 +332,37 @@ static void dns_cache_store_a(const char *hostname, uint32_t addr, uint32_t ttl_
         entry->name[len] = '\0';
         entry->valid = true;
         entry->qtype = NET_DNS_TYPE_A;
-        entry->addr = addr;
+        entry->addr_count = addr_count > NET_DNS_MAX_ADDRS
+            ? NET_DNS_MAX_ADDRS
+            : addr_count;
+        memcpy(entry->addrs,
+               addrs,
+               entry->addr_count * sizeof(entry->addrs[0]));
         entry->expires_tick = expires_tick;
         entry->last_used_tick = now;
     }
     dns_unlock(flags);
+}
+
+static bool dns_add_unique_addr(uint32_t *addrs, size_t *count, uint32_t addr)
+{
+    if (!addrs || !count || addr == 0)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < *count; ++i)
+    {
+        if (addrs[i] == addr)
+        {
+            return true;
+        }
+    }
+    if (*count >= NET_DNS_MAX_ADDRS)
+    {
+        return false;
+    }
+    addrs[(*count)++] = addr;
+    return true;
 }
 
 
@@ -545,6 +592,36 @@ bool net_dns_resolve_ipv4(const char *hostname, net_interface_t *preferred_iface
     }
     *out_addr = result.addr;
     return true;
+}
+
+size_t net_dns_resolve_ipv4_all(const char *hostname,
+                                net_interface_t *preferred_iface,
+                                uint32_t *out_addrs,
+                                size_t capacity)
+{
+    if (!out_addrs || capacity == 0)
+    {
+        return 0;
+    }
+    net_dns_result_t result;
+    if (!net_dns_resolve(hostname, NET_DNS_TYPE_A, preferred_iface, &result) ||
+        !result.has_a)
+    {
+        return 0;
+    }
+
+    size_t count = result.addr_count;
+    if (count == 0 && result.addr != 0)
+    {
+        out_addrs[0] = result.addr;
+        return 1;
+    }
+    if (count > capacity)
+    {
+        count = capacity;
+    }
+    memcpy(out_addrs, result.addrs, count * sizeof(out_addrs[0]));
+    return count;
 }
 
 bool net_dns_resolve_cname(const char *hostname, net_interface_t *preferred_iface,
@@ -998,7 +1075,8 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
 
     /* Look for A(target) in Answer section */
     bool found_a = false;
-    uint32_t found_addr = 0;
+    uint32_t found_addrs[NET_DNS_MAX_ADDRS];
+    size_t found_addr_count = 0;
     uint32_t found_ttl = 0;
     {
         size_t o = answers_start;
@@ -1017,9 +1095,13 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
             if (rr_cls == 1 && type == NET_DNS_TYPE_A && rdlen == 4 && dns_name_equal(rr_name, target))
             {
                 found_a = true;
-                found_addr = ((uint32_t)dns[o] << 24) | ((uint32_t)dns[o+1] << 16) |
-                             ((uint32_t)dns[o+2] << 8)  |  (uint32_t)dns[o+3];
-                found_ttl = ttl;
+                uint32_t addr = ((uint32_t)dns[o] << 24) | ((uint32_t)dns[o+1] << 16) |
+                                ((uint32_t)dns[o+2] << 8)  |  (uint32_t)dns[o+3];
+                (void)dns_add_unique_addr(found_addrs, &found_addr_count, addr);
+                if (found_ttl == 0 || (ttl != 0 && ttl < found_ttl))
+                {
+                    found_ttl = ttl;
+                }
             }
             o += rdlen;
         }
@@ -1046,29 +1128,43 @@ void net_dns_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
                 if (rr_cls == 1 && type == NET_DNS_TYPE_A && rdlen == 4 && dns_name_equal(rr_name, target))
                 {
                     found_a = true;
-                    found_addr = ((uint32_t)dns[o] << 24) | ((uint32_t)dns[o+1] << 16) |
-                                 ((uint32_t)dns[o+2] << 8)  |  (uint32_t)dns[o+3];
-                    found_ttl = ttl;
+                    uint32_t addr = ((uint32_t)dns[o] << 24) | ((uint32_t)dns[o+1] << 16) |
+                                    ((uint32_t)dns[o+2] << 8)  |  (uint32_t)dns[o+3];
+                    (void)dns_add_unique_addr(found_addrs, &found_addr_count, addr);
+                    if (found_ttl == 0 || (ttl != 0 && ttl < found_ttl))
+                    {
+                        found_ttl = ttl;
+                    }
                 }
             }
             o += rdlen;
         }
     }
 
-    if (found_a)
+    if (found_a && found_addr_count > 0)
     {
         if (pending->qtype == NET_DNS_TYPE_A)
         {
-            dns_cache_store_a(pending->hostname, found_addr, found_ttl);
+            dns_cache_store_a(pending->hostname,
+                              found_addrs,
+                              found_addr_count,
+                              found_ttl);
             if (target[0] && !dns_name_equal(target, pending->hostname))
             {
-                dns_cache_store_a(target, found_addr, found_ttl);
+                dns_cache_store_a(target,
+                                  found_addrs,
+                                  found_addr_count,
+                                  found_ttl);
             }
         }
         net_dns_result_t res;
         memset(&res, 0, sizeof(res));
         res.has_a  = true;
-        res.addr   = found_addr;
+        res.addr_count = found_addr_count;
+        memcpy(res.addrs,
+               found_addrs,
+               found_addr_count * sizeof(found_addrs[0]));
+        res.addr   = found_addrs[0];
         res.rr_type = NET_DNS_TYPE_A;
         dns_finish_pending(pending, true, &res);
         return;

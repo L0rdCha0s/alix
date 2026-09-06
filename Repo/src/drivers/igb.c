@@ -33,9 +33,17 @@ static void igb_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context
 #define IGB_REG_STATUS      0x00008
 #define IGB_REG_MDIC        0x00020
 #define IGB_REG_CTRL_EXT    0x00018
-#define IGB_REG_ICR         0x01500
-#define IGB_REG_IMS         0x01504
-#define IGB_REG_IMC         0x01508
+/*
+ * Use the 82576 legacy aliases here.  They are valid on the hardware and are
+ * the register addresses implemented by QEMU's igb model.  The main register
+ * block is ICR=0x1500, ICS=0x1504, IMS=0x1508, IMC=0x150C; the old constants
+ * accidentally treated ICS as IMS and IMS as IMC.
+ */
+#define IGB_REG_ICR         0x000C0
+#define IGB_REG_ICS         0x000C8
+#define IGB_REG_IMS         0x000D0
+#define IGB_REG_IMC         0x000D8
+#define IGB_REG_IAM         0x000E0
 #define IGB_REG_RCTL        0x00100
 #define IGB_REG_TCTL        0x00400
 #define IGB_REG_TIPG        0x00410
@@ -133,11 +141,10 @@ static void igb_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context
 #define IGB_VMOLR_MPME   (1U << 28)
 #define IGB_VMOLR_RLPML_MASK 0x00003FFFU
 
-#define IGB_IMS_RXQ0   (1U << 20)
 #define IGB_IMS_TXDW   (1U << 0)
 #define IGB_IMS_RXDMT0 (1U << 4)
 #define IGB_IMS_RXO    (1U << 6)
-#define IGB_IMS_RXT0   (1U << 7)
+#define IGB_IMS_RXDW   (1U << 7)
 
 #define IGB_PHY_ADDR            1U
 #define IGB_MII_BMCR            0x00U
@@ -146,7 +153,7 @@ static void igb_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context
 #define IGB_BMCR_AN_RESTART     0x0200U
 #define IGB_BMCR_AN_ENABLE      0x1000U
 
-#define IGB_RX_DESC_COUNT 128
+#define IGB_RX_DESC_COUNT 256
 #define IGB_TX_DESC_COUNT 64
 #define IGB_RX_BUFFER_SIZE 2048
 #define IGB_TX_BUFFER_SIZE 2048
@@ -297,7 +304,6 @@ void igb_init(void)
     pci_set_command_bits(g_device, 0x0006, 0); /* enable memory + bus master */
 
     igb_reset();
-    igb_write32(IGB_REG_IMC, 0xFFFFFFFFU);
     igb_phy_restart_autoneg();
 
     uint32_t rah = igb_read32(IGB_REG_RAH0);
@@ -349,9 +355,6 @@ void igb_init(void)
     igb_write32(IGB_REG_TCTL, tctl);
     igb_write32(IGB_REG_TIPG, 0x0060200AU);
 
-    uint32_t imr = IGB_IMS_RXQ0 | IGB_IMS_RXT0 | IGB_IMS_RXO | IGB_IMS_RXDMT0 | IGB_IMS_TXDW;
-    igb_write32(IGB_REG_IMS, imr);
-
     /* Some emulations gate RX on STATUS.LU; try to force link-up in case PHY/AN bits lag. */
     uint32_t status = igb_read32(IGB_REG_STATUS);
     igb_write32(IGB_REG_STATUS, status | 0x00000002U);
@@ -399,12 +402,28 @@ void igb_init(void)
                       (unsigned)apic);
     }
 
+    /*
+     * Clear stale causes only after the handler and MSI/INTx route exist, then
+     * enable receive causes.  TXDW is deliberately omitted: TCP ACK traffic
+     * would otherwise generate a completion interrupt for every ACK frame.
+     */
+    (void)igb_read32(IGB_REG_ICR);
+    igb_write32(IGB_REG_IAM, 0);
+    uint32_t imr = IGB_IMS_RXDW | IGB_IMS_RXO | IGB_IMS_RXDMT0;
+    igb_write32(IGB_REG_IMS, imr);
+    uint32_t enabled_imr = igb_read32(IGB_REG_IMS);
+    serial_printf("[igb] interrupt mask requested=0x%08X enabled=0x%08X mode=%s\r\n",
+                  (unsigned)imr,
+                  (unsigned)enabled_imr,
+                  (pci_config_read16(g_device, 0x04) & 0x0400U) ? "msi" : "intx");
+
     uint32_t freq = timer_frequency();
     if (freq == 0)
     {
         freq = 100;
     }
-    uint32_t interval = freq / 200U;
+    /* A slow watchdog recovers a genuinely missed interrupt; normal RX is IRQ-driven. */
+    uint32_t interval = freq / 10U;
     if (interval == 0)
     {
         interval = 1;
@@ -442,7 +461,7 @@ void igb_on_irq(void)
         return;
     }
     /* Reading ICR acknowledges the interrupt.  If it interrupted a generic
-     * lock owner, leave descriptor work to the periodic poll on a safe tick;
+     * lock owner, leave descriptor work to the watchdog on a safe tick;
      * receive dispatch can wake threads and enter the scheduler. */
     if (spinlock_preempt_disabled())
     {
@@ -849,6 +868,7 @@ static void igb_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16_t f
 static void igb_timer_task(void *context)
 {
     (void)context;
+    /* Polling is only a watchdog/deferred-IRQ fallback, never the fast path. */
     igb_poll();
 }
 

@@ -63,6 +63,21 @@ Polling:
 - `net_tcp_poll()` advances timers (retransmit, connect timeout, etc).
 - It is called from a dedicated kernel process (`tcp_timerd` created in `src/kernel/kernel.c`) and also from some driver paths.
 
+Receive performance:
+
+- The IGB driver programs the 82576 interrupt registers through their legacy
+  aliases (`ICR/ICS/IMS/IMC/IAM`) so both real hardware and QEMU's `igb`
+  model deliver receive interrupts. A 100 ms poll remains only as a missed-IRQ
+  watchdog.
+- The IGB receive ring has 256 descriptors. TCP advertises a window-scaled
+  receive window sized to stay within that ring's burst capacity.
+- TCP negotiates RFC window scaling in the SYN, acknowledges every second
+  full-sized in-order segment (or immediately for short/PSH/out-of-order
+  traffic), and uses wait queues for blocking reads instead of tick polling.
+- DNS A responses retain up to eight unique addresses in response order and in
+  the cache. `ntpdate` tries each address with a two-second per-server timeout,
+  so one unresponsive `pool.ntp.org` member does not fail the whole update.
+
 ## Higher-Level Protocols
 
 - DHCP (`src/net/dhcp.c`) — assigns interface IPv4/netmask/gateway (used by shell `dhclient` command).
@@ -70,4 +85,3 @@ Polling:
 - NTP  (`src/net/ntp.c`) — queries time servers and feeds `timekeeping`.
 - ICMP (`src/net/icmp.c`) — ping/echo handling.
 - TLS  (`src/net/tls.c`, `src/net/tls_asn1.c`) — TLS client pieces layered on TCP sockets.
-

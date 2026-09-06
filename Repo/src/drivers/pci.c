@@ -103,8 +103,8 @@ void pci_set_command_bits(pci_device_t dev, uint16_t set_bits, uint16_t clear_bi
 static uint8_t pci_find_capability(pci_device_t dev, uint8_t cap_id)
 {
     /* Capabilities list pointer at 0x34 for header type 0. */
-    uint8_t status = (uint8_t)((pci_config_read16(dev, 0x06) >> 8) & 0xFF);
-    const uint8_t CAP_LIST_BIT = 0x10;
+    uint16_t status = pci_config_read16(dev, 0x06);
+    const uint16_t CAP_LIST_BIT = (1u << 4);
     if ((status & CAP_LIST_BIT) == 0)
     {
         return 0;

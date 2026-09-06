@@ -7,7 +7,18 @@ export WORKDIR="$workdir"
 python3 /dev/fd/3 3<<'PY'
 import os, signal, subprocess, shlex
 workdir = os.environ["WORKDIR"]
-cmd = ["bash", "-lc", "cd " + shlex.quote(workdir) + " && NET_BACKEND=user make run-hdd"]
+net_backend = os.environ.get("NET_BACKEND", "user")
+data_img = os.environ.get("QEMU_DATA_IMG")
+make_overrides = ""
+if data_img:
+    make_overrides = " DATA_IMG=" + shlex.quote(data_img)
+cmd = [
+    "bash",
+    "-lc",
+    "cd " + shlex.quote(workdir) +
+    " && NET_BACKEND=" + shlex.quote(net_backend) +
+    " make" + make_overrides + " run-hdd",
+]
 log_path = os.environ.get("QEMU_SERIAL_LOG", os.path.join(workdir, "qemu-serial.log"))
 timeout_seconds = float(os.environ.get("QEMU_TIMEOUT_SECONDS", "40"))
 with open(log_path, "w") as log:

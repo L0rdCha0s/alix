@@ -29,7 +29,7 @@
 #endif
 
 #define WGET_HEADER_CAP 2048
-#define WGET_CHUNK_SIZE 4096
+#define WGET_CHUNK_SIZE (64U * 1024U)
 
 static const char *skip_ws(const char *cursor);
 static bool read_token(const char **cursor, char *out, size_t capacity);
@@ -749,7 +749,19 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 #endif
 
     uint32_t remote_ip = 0;
-    if (!net_parse_ipv4(host_name, &remote_ip))
+    if (strcmp(host_name, "gateway") == 0)
+    {
+        net_interface_t *gateway_iface = NULL;
+        if (!net_route_get_default(&gateway_iface, &remote_ip) || remote_ip == 0)
+        {
+            return shell_output_error(out, "default gateway unavailable");
+        }
+        if (!iface)
+        {
+            iface = gateway_iface;
+        }
+    }
+    else if (!net_parse_ipv4(host_name, &remote_ip))
     {
         shell_output_write(out, "Resolving ");
         shell_output_write(out, host_name);
@@ -1092,7 +1104,16 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         }
         else
         {
-            size_t got = net_tcp_socket_read(socket, chunk, WGET_CHUNK_SIZE);
+            ssize_t got_result = net_tcp_socket_read_blocking_timeout(socket,
+                                                                      chunk,
+                                                                      WGET_CHUNK_SIZE,
+                                                                      data_timeout);
+            if (got_result < 0)
+            {
+                shell_output_error(out, "TCP connection error");
+                goto cleanup;
+            }
+            size_t got = (size_t)got_result;
             // serial_printf("[wget] recv plain bytes=%zu err=%u remote_closed=%u\r\n",
             //               got,
             //               net_tcp_socket_has_error(socket) ? 1U : 0U,
@@ -1131,7 +1152,6 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     shell_output_error(out, "no data received (timeout)");
                     goto cleanup;
                 }
-                process_sleep_ms(1);
                 continue;
             }
             bytes_read = got;

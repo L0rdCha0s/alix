@@ -23,6 +23,7 @@
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_NO_STDIO
 #include "minimp3.h"
+#include "mp3_stream.h"
 
 #define MP3_UI_WIDTH  720
 #define MP3_UI_HEIGHT 360
@@ -32,9 +33,10 @@
 #define MP3_BUTTON_HEIGHT (ATK_FONT_HEIGHT + 10)
 #define MP3_TARGET_RATE 48000
 #define MP3_TARGET_CHANNELS 2
-#define MP3_READ_CHUNK 8192u
-#define MP3_INPUT_BUFFER_SIZE (MP3_READ_CHUNK * 4u)
+#define MP3_INPUT_BUFFER_SIZE MP3_STREAM_BUFFER_SIZE
 #define MP3_MAX_RESAMPLED_SAMPLES 65536u
+#define MP3_SEEK_PREROLL_BYTES 4096u
+#define MP3_TRANSITION_FRAMES 240u /* 5 ms at the 48 kHz output rate. */
 #define MP3_SCRUB_MAX 1000
 #define MP3_SCRUB_PAGE 40
 #define MP3_MIN_FILE_KNOWN 1024
@@ -45,6 +47,7 @@ typedef struct
     int16_t prev[2];
     bool have_prev;
     uint32_t src_rate;
+    uint32_t src_channels;
     uint64_t step;
     uint64_t src_pos;
 } mp3_resample_state_t;
@@ -55,19 +58,34 @@ typedef struct
     int audio_fd;
     mp3dec_t dec;
     mp3_resample_state_t rs;
-    uint8_t *in_buffer;
-    size_t in_capacity;
-    size_t buf_filled;
-    size_t buf_pos;
+    mp3_stream_input_t input;
     mp3d_sample_t *decode_buffer;
     int16_t *out_buffer;
+    int16_t *pending_buffer;
+    size_t pending_samples;
+    uint32_t fade_in_frames;
     bool active;
     bool seekable;
     uint64_t file_size;
-    uint64_t file_pos;
     uint64_t consumed_bytes;
+    uint64_t discard_until_offset;
     int last_progress;
+    /* Only the producer touches decoder/input/PCM state while this is nonzero.
+     * The UI joins before control changes; these four publications are atomic. */
+    alix_thread_t worker_thread;
+    bool worker_stop;
+    bool worker_done;
+    int worker_result;
+    uint64_t progress_offset;
 } mp3_player_t;
+
+enum
+{
+    MP3_PLAYER_RUNNING,
+    MP3_PLAYER_FINISHED,
+    MP3_PLAYER_READ_ERROR,
+    MP3_PLAYER_AUDIO_ERROR
+};
 
 typedef struct
 {
@@ -106,6 +124,8 @@ static void mp3_close_file_dialog(mp3_ui_t *ui);
 static bool mp3_on_resize_event(uint32_t width, uint32_t height, void *context);
 static void mp3_on_close_event(void *context);
 static bool mp3_on_tick(void *context);
+static bool mp3_start_worker(mp3_player_t *p);
+static void mp3_stop_worker(mp3_player_t *p);
 
 static void log_mp3(const char *msg)
 {
@@ -471,16 +491,7 @@ static void build_ui(mp3_ui_t *ui)
 
 static uint64_t mp3_current_offset(const mp3_player_t *p)
 {
-    if (!p)
-    {
-        return 0;
-    }
-    /* file_pos tracks total bytes read into buffers; buf_filled/buf_pos track what remains. */
-    if (p->file_pos >= (uint64_t)p->buf_filled)
-    {
-        return p->file_pos - ((uint64_t)p->buf_filled - (uint64_t)p->buf_pos);
-    }
-    return p->consumed_bytes;
+    return p ? mp3_stream_offset(&p->input) : 0;
 }
 
 static void mp3_set_status(mp3_ui_t *ui, const char *text)
@@ -527,18 +538,13 @@ static bool mp3_update_progress(mp3_ui_t *ui, bool force_update)
         return false;
     }
 
-    uint64_t consumed = mp3_current_offset(p);
+    uint64_t consumed = __atomic_load_n(&p->progress_offset, __ATOMIC_ACQUIRE);
     uint64_t size_est = p->file_size;
     if (size_est == 0)
     {
-        /* Fall back to what we currently have in flight if stat failed. */
-        size_est = consumed + (uint64_t)(p->buf_filled - p->buf_pos);
-    }
-    if (size_est == 0)
-    {
+        /* A changing denominator is not a useful seek bar for unknown input. */
         return false;
     }
-
     if (consumed > size_est)
     {
         consumed = size_est;
@@ -631,9 +637,11 @@ static size_t mp3_resample_to_target(const mp3d_sample_t *in,
         return 0;
     }
 
-    if (state->src_rate != (uint32_t)src_rate)
+    if (state->src_rate != (uint32_t)src_rate ||
+        state->src_channels != (uint32_t)src_channels)
     {
         state->src_rate = (uint32_t)src_rate;
+        state->src_channels = (uint32_t)src_channels;
         state->step = ((uint64_t)src_rate << 32) / MP3_TARGET_RATE;
         state->phase = 0;
         state->src_pos = 0;
@@ -692,6 +700,89 @@ static size_t mp3_resample_to_target(const mp3d_sample_t *in,
     return produced;
 }
 
+static void mp3_apply_pending_fade_in(mp3_player_t *p)
+{
+    if (!p || !p->pending_buffer || p->fade_in_frames == 0)
+    {
+        return;
+    }
+
+    size_t frames = p->pending_samples / MP3_TARGET_CHANNELS;
+    for (size_t frame = 0; frame < frames && p->fade_in_frames > 0; ++frame)
+    {
+        uint32_t numerator = MP3_TRANSITION_FRAMES - p->fade_in_frames + 1u;
+        size_t sample = frame * MP3_TARGET_CHANNELS;
+        p->pending_buffer[sample] = (int16_t)(
+            ((int32_t)p->pending_buffer[sample] * (int32_t)numerator) /
+            (int32_t)MP3_TRANSITION_FRAMES);
+        p->pending_buffer[sample + 1u] = (int16_t)(
+            ((int32_t)p->pending_buffer[sample + 1u] * (int32_t)numerator) /
+            (int32_t)MP3_TRANSITION_FRAMES);
+        p->fade_in_frames--;
+    }
+}
+
+static void mp3_apply_pending_fade_out(mp3_player_t *p)
+{
+    if (!p || !p->pending_buffer || p->pending_samples == 0)
+    {
+        return;
+    }
+
+    size_t frames = p->pending_samples / MP3_TARGET_CHANNELS;
+    size_t fade_frames = (frames < MP3_TRANSITION_FRAMES)
+        ? frames
+        : MP3_TRANSITION_FRAMES;
+    size_t first_fade = frames - fade_frames;
+    for (size_t i = 0; i < fade_frames; ++i)
+    {
+        uint32_t numerator = (uint32_t)(fade_frames - i);
+        size_t sample = (first_fade + i) * MP3_TARGET_CHANNELS;
+        p->pending_buffer[sample] = (int16_t)(
+            ((int32_t)p->pending_buffer[sample] * (int32_t)numerator) /
+            (int32_t)fade_frames);
+        p->pending_buffer[sample + 1u] = (int16_t)(
+            ((int32_t)p->pending_buffer[sample + 1u] * (int32_t)numerator) /
+            (int32_t)fade_frames);
+    }
+}
+
+static bool mp3_write_pending(mp3_player_t *p, bool fade_out)
+{
+    if (!p || p->pending_samples == 0)
+    {
+        return true;
+    }
+
+    mp3_apply_pending_fade_in(p);
+    if (fade_out)
+    {
+        mp3_apply_pending_fade_out(p);
+    }
+
+    size_t samples = p->pending_samples;
+    p->pending_samples = 0;
+    return mp3_write_all(p->audio_fd,
+                         p->pending_buffer,
+                         samples * sizeof(int16_t));
+}
+
+static bool mp3_queue_pcm(mp3_player_t *p, const int16_t *samples, size_t sample_count)
+{
+    if (!p || !p->pending_buffer || !samples || sample_count == 0 ||
+        sample_count > MP3_MAX_RESAMPLED_SAMPLES)
+    {
+        return false;
+    }
+    if (!mp3_write_pending(p, false))
+    {
+        return false;
+    }
+    memcpy(p->pending_buffer, samples, sample_count * sizeof(int16_t));
+    p->pending_samples = sample_count;
+    return true;
+}
+
 static void mp3_player_cleanup(mp3_ui_t *ui, const char *status)
 {
     if (!ui)
@@ -699,6 +790,11 @@ static void mp3_player_cleanup(mp3_ui_t *ui, const char *status)
         return;
     }
     mp3_player_t *p = &ui->player;
+    mp3_stop_worker(p);
+    if (p->audio_fd >= 0 && p->pending_samples > 0)
+    {
+        (void)mp3_write_pending(p, true);
+    }
     if (p->input_fd >= 0)
     {
         close(p->input_fd);
@@ -707,9 +803,9 @@ static void mp3_player_cleanup(mp3_ui_t *ui, const char *status)
     {
         close(p->audio_fd);
     }
-    if (p->in_buffer)
+    if (p->input.buffer)
     {
-        free(p->in_buffer);
+        free(p->input.buffer);
     }
     if (p->decode_buffer)
     {
@@ -718,6 +814,10 @@ static void mp3_player_cleanup(mp3_ui_t *ui, const char *status)
     if (p->out_buffer)
     {
         free(p->out_buffer);
+    }
+    if (p->pending_buffer)
+    {
+        free(p->pending_buffer);
     }
     memset(p, 0, sizeof(*p));
     p->input_fd = -1;
@@ -776,15 +876,16 @@ static bool mp3_player_start(mp3_ui_t *ui)
     }
 
     p->out_buffer = (int16_t *)malloc(sizeof(int16_t) * MP3_MAX_RESAMPLED_SAMPLES);
+    p->pending_buffer = (int16_t *)malloc(sizeof(int16_t) * MP3_MAX_RESAMPLED_SAMPLES);
     p->decode_buffer = (mp3d_sample_t *)malloc(sizeof(mp3d_sample_t) * MINIMP3_MAX_SAMPLES_PER_FRAME);
-    p->in_buffer = (uint8_t *)malloc(MP3_INPUT_BUFFER_SIZE);
-    p->in_capacity = MP3_INPUT_BUFFER_SIZE;
+    p->input.buffer = (uint8_t *)malloc(MP3_INPUT_BUFFER_SIZE);
+    p->input.capacity = MP3_INPUT_BUFFER_SIZE;
     p->file_size = 0;
-    p->file_pos = 0;
+    p->input.file_pos = 0;
     p->consumed_bytes = 0;
     p->last_progress = -1;
     p->seekable = false;
-    if (!p->out_buffer || !p->decode_buffer || !p->in_buffer)
+    if (!p->out_buffer || !p->pending_buffer || !p->decode_buffer || !p->input.buffer)
     {
         mp3_player_cleanup(ui, "Out of memory");
         return false;
@@ -814,18 +915,21 @@ static bool mp3_player_start(mp3_ui_t *ui)
         (void)lseek(p->input_fd, 0, SYSCALL_SEEK_SET);
     }
 
-    ssize_t initial = read(p->input_fd, p->in_buffer, p->in_capacity);
-    if (initial <= 0)
+    if (!mp3_stream_refill(&p->input, p->input_fd))
+    {
+        mp3_player_cleanup(ui, "Input read failed");
+        return false;
+    }
+    if (p->input.filled == 0)
     {
         mp3_player_cleanup(ui, "Empty input");
         return false;
     }
-    p->buf_filled = (size_t)initial;
-    p->buf_pos = 0;
-    p->file_pos = (uint64_t)p->buf_filled;
+    __atomic_store_n(&p->progress_offset, 0, __ATOMIC_RELEASE);
 
     mp3dec_init(&p->dec);
     memset(&p->rs, 0, sizeof(p->rs));
+    p->fade_in_frames = MP3_TRANSITION_FRAMES;
     p->active = true;
     ui->playing = true;
     ui->user_scrub_active = false;
@@ -837,40 +941,11 @@ static bool mp3_player_start(mp3_ui_t *ui)
     mp3_set_status(ui, "Playing...");
     mp3_update_play_button(ui);
     mp3_update_progress(ui, true);
-    return true;
-}
-
-static bool mp3_player_refill(mp3_player_t *p)
-{
-    if (!p || !p->in_buffer || p->in_capacity == 0)
+    if (!mp3_start_worker(p))
     {
+        mp3_player_cleanup(ui, "Unable to start audio worker");
         return false;
     }
-
-    if (p->buf_pos > 0 && p->buf_pos < p->buf_filled)
-    {
-        memmove(p->in_buffer, p->in_buffer + p->buf_pos, p->buf_filled - p->buf_pos);
-        p->buf_filled -= p->buf_pos;
-        p->buf_pos = 0;
-    }
-    else if (p->buf_pos >= p->buf_filled)
-    {
-        p->buf_pos = 0;
-        p->buf_filled = 0;
-    }
-
-    if (p->buf_filled >= p->in_capacity)
-    {
-        return true;
-    }
-
-    ssize_t got = read(p->input_fd, p->in_buffer + p->buf_filled, p->in_capacity - p->buf_filled);
-    if (got <= 0)
-    {
-        return false;
-    }
-    p->buf_filled += (size_t)got;
-    p->file_pos += (uint64_t)got;
     return true;
 }
 
@@ -882,7 +957,7 @@ static bool mp3_player_seek_bytes(mp3_ui_t *ui, uint64_t offset)
     }
 
     mp3_player_t *p = &ui->player;
-    if (!p->active || !p->seekable || !p->in_buffer)
+    if (!p->active || !p->seekable || !p->input.buffer)
     {
         return false;
     }
@@ -892,29 +967,56 @@ static bool mp3_player_seek_bytes(mp3_ui_t *ui, uint64_t offset)
         offset = (p->file_size > 0) ? (p->file_size - 1u) : 0u;
     }
 
-    if (lseek(p->input_fd, (int64_t)offset, SYSCALL_SEEK_SET) < 0)
+    /*
+     * Layer III frames can reference the bit reservoir from earlier frames.
+     * Start a little before the requested byte and decode/discard through the
+     * target so the first audible frame is not a damaged reservoir frame.
+     */
+    uint64_t target_offset = offset;
+    uint64_t read_offset = (target_offset > MP3_SEEK_PREROLL_BYTES)
+        ? (target_offset - MP3_SEEK_PREROLL_BYTES)
+        : 0u;
+
+    mp3_stop_worker(p);
+    if (lseek(p->input_fd, (int64_t)read_offset, SYSCALL_SEEK_SET) < 0)
     {
+        if (ui->playing && !mp3_start_worker(p))
+        {
+            mp3_player_cleanup(ui, "Unable to restart audio worker");
+        }
         return false;
     }
 
-    p->buf_filled = 0;
-    p->buf_pos = 0;
-    p->file_pos = offset;
-    p->consumed_bytes = offset;
+    if (!mp3_write_pending(p, true))
+    {
+        mp3_player_cleanup(ui, "Audio write failed");
+        return false;
+    }
+
+    p->input.filled = 0;
+    p->input.consumed = 0;
+    p->input.file_pos = read_offset;
+    p->input.eof = false;
+    p->input.failed = false;
+    p->consumed_bytes = target_offset;
+    __atomic_store_n(&p->progress_offset, target_offset, __ATOMIC_RELEASE);
+    p->discard_until_offset = target_offset;
     p->last_progress = -1;
     mp3dec_init(&p->dec);
     memset(&p->rs, 0, sizeof(p->rs));
+    p->fade_in_frames = MP3_TRANSITION_FRAMES;
 
-    ssize_t got = read(p->input_fd, p->in_buffer, p->in_capacity);
-    if (got <= 0)
+    if (!mp3_stream_refill(&p->input, p->input_fd) || p->input.filled == 0)
     {
         mp3_player_cleanup(ui, "Seek failed");
         return false;
     }
-
-    p->buf_filled = (size_t)got;
-    p->file_pos += (uint64_t)got;
     mp3_update_progress(ui, true);
+    if (ui->playing && !mp3_start_worker(p))
+    {
+        mp3_player_cleanup(ui, "Unable to restart audio worker");
+        return false;
+    }
     return true;
 }
 
@@ -938,117 +1040,157 @@ static bool mp3_player_seek_percent(mp3_ui_t *ui, int value)
     return mp3_player_seek_bytes(ui, target);
 }
 
-static bool mp3_player_tick(mp3_ui_t *ui)
+/* Decode bounded batches so a control request is observed between frames. */
+static int mp3_player_tick(mp3_player_t *p)
 {
-    if (!ui)
+    for (unsigned frame = 0; frame < 4u; ++frame)
     {
-        return false;
-    }
-    mp3_player_t *p = &ui->player;
-    if (!p->active)
-    {
-        return false;
-    }
-    bool ui_changed = false;
-
-    const int MAX_FRAMES_PER_TICK = 4;
-    int frames = 0;
-
-    while (frames < MAX_FRAMES_PER_TICK && p->active)
-    {
+        if (__atomic_load_n(&p->worker_stop, __ATOMIC_ACQUIRE))
+        {
+            return MP3_PLAYER_RUNNING;
+        }
+        uint64_t decode_offset = mp3_current_offset(p);
         mp3dec_frame_info_t frame_info;
-        int samples = mp3dec_decode_frame(&p->dec,
-                                          p->in_buffer + p->buf_pos,
-                                          (int)(p->buf_filled - p->buf_pos),
-                                          p->decode_buffer,
-                                          &frame_info);
-
-        if (frame_info.frame_bytes == 0 && samples == 0)
+        int samples = mp3_stream_next(&p->input, &p->dec, p->input_fd,
+                                       p->decode_buffer, &frame_info);
+        if (samples == MP3_STREAM_EOF)
         {
-            if (!mp3_player_refill(p))
+            __atomic_store_n(&p->progress_offset, p->input.file_pos, __ATOMIC_RELEASE);
+            return MP3_PLAYER_FINISHED;
+        }
+        if (samples == MP3_STREAM_ERROR)
+        {
+            return MP3_PLAYER_READ_ERROR;
+        }
+
+        uint64_t progress = mp3_current_offset(p);
+        if (progress < p->discard_until_offset)
+        {
+            progress = p->discard_until_offset;
+        }
+        __atomic_store_n(&p->progress_offset, progress, __ATOMIC_RELEASE);
+        if (samples <= 0 || frame_info.hz <= 0 || frame_info.channels <= 0)
+        {
+            continue;
+        }
+
+        uint64_t frame_start_offset = decode_offset;
+        if (frame_info.frame_offset > 0)
+        {
+            frame_start_offset += (uint64_t)frame_info.frame_offset;
+        }
+        if (p->discard_until_offset != 0)
+        {
+            if (frame_start_offset < p->discard_until_offset)
             {
-                if (p->file_size > 0)
-                {
-                    p->consumed_bytes = p->file_size;
-                    mp3_update_progress(ui, true);
-                }
-                mp3_player_cleanup(ui, "Playback finished");
-                return false;
+                continue;
             }
-            continue;
+            p->discard_until_offset = 0;
         }
-
-        p->buf_pos += (size_t)frame_info.frame_bytes;
-        if (samples <= 0)
-        {
-            if (p->buf_pos >= p->buf_filled)
-            {
-                p->buf_pos = 0;
-                p->buf_filled = 0;
-            }
-            ++frames;
-            continue;
-        }
-
-        if (frame_info.hz <= 0 || frame_info.channels <= 0)
-        {
-            ++frames;
-            continue;
-        }
-
-        size_t samples_per_channel = (size_t)samples;
 
         if (frame_info.hz == MP3_TARGET_RATE && frame_info.channels == MP3_TARGET_CHANNELS)
         {
-            size_t total_samples = samples_per_channel * MP3_TARGET_CHANNELS;
-            size_t bytes_to_write = total_samples * sizeof(int16_t);
-            if (!mp3_write_all(p->audio_fd, p->decode_buffer, bytes_to_write))
+            size_t total_samples = (size_t)samples * MP3_TARGET_CHANNELS;
+            if (!mp3_queue_pcm(p, p->decode_buffer, total_samples))
             {
-                mp3_player_cleanup(ui, "Audio write failed");
-                return false;
+                return MP3_PLAYER_AUDIO_ERROR;
             }
             memset(&p->rs, 0, sizeof(p->rs));
         }
         else
         {
             size_t out_samples = mp3_resample_to_target(p->decode_buffer,
-                                                        samples_per_channel,
+                                                        (size_t)samples,
                                                         frame_info.channels,
                                                         frame_info.hz,
                                                         p->out_buffer,
                                                         MP3_MAX_RESAMPLED_SAMPLES,
                                                         &p->rs);
-            if (out_samples > 0)
+            if (out_samples > 0 && !mp3_queue_pcm(p, p->out_buffer, out_samples))
             {
-                size_t bytes_to_write = out_samples * sizeof(int16_t);
-                if (!mp3_write_all(p->audio_fd, p->out_buffer, bytes_to_write))
-                {
-                    mp3_player_cleanup(ui, "Audio write failed");
-                    return false;
-                }
+                return MP3_PLAYER_AUDIO_ERROR;
             }
         }
-
-        if (p->buf_pos >= p->buf_filled)
-        {
-            p->buf_pos = 0;
-            p->buf_filled = 0;
-        }
-        ++frames;
     }
+    return MP3_PLAYER_RUNNING;
+}
 
-    if (p->active)
+static void mp3_audio_worker(void *context)
+{
+    mp3_player_t *p = (mp3_player_t *)context;
+    int result = MP3_PLAYER_RUNNING;
+    while (!__atomic_load_n(&p->worker_stop, __ATOMIC_ACQUIRE))
     {
-        ui_changed |= mp3_update_progress(ui, false);
+        result = mp3_player_tick(p);
+        if (result != MP3_PLAYER_RUNNING)
+        {
+            break;
+        }
     }
+    if (result != MP3_PLAYER_RUNNING && !mp3_write_pending(p, true))
+    {
+        result = MP3_PLAYER_AUDIO_ERROR;
+    }
+    __atomic_store_n(&p->worker_result, result, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->worker_done, true, __ATOMIC_RELEASE);
+}
 
-    return ui_changed;
+static bool mp3_start_worker(mp3_player_t *p)
+{
+    if (!p || p->worker_thread)
+    {
+        return false;
+    }
+    __atomic_store_n(&p->worker_stop, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->worker_done, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->worker_result, MP3_PLAYER_RUNNING, __ATOMIC_RELEASE);
+    return alix_thread_create(&p->worker_thread, "mp3_audio", mp3_audio_worker, p) == 0;
+}
+
+static void mp3_stop_worker(mp3_player_t *p)
+{
+    if (p && p->worker_thread)
+    {
+        __atomic_store_n(&p->worker_stop, true, __ATOMIC_RELEASE);
+        if (alix_thread_join(p->worker_thread, NULL) < 0)
+        {
+            /* A failed join must never let the UI free live producer buffers.
+             * worker_done is the producer's final access to the shared state. */
+            while (!__atomic_load_n(&p->worker_done, __ATOMIC_ACQUIRE))
+            {
+                (void)sys_sleep_ms(1);
+            }
+            (void)alix_thread_join(p->worker_thread, NULL);
+        }
+        p->worker_thread = 0;
+    }
+}
+
+static const char *mp3_worker_status(int result)
+{
+    if (result == MP3_PLAYER_FINISHED)
+    {
+        return "Playback finished";
+    }
+    return result == MP3_PLAYER_READ_ERROR ? "Input read failed" : "Audio write failed";
 }
 
 static void mp3_pause(mp3_ui_t *ui)
 {
     if (!ui || !ui->player.active || !ui->playing)
     {
+        return;
+    }
+    mp3_stop_worker(&ui->player);
+    int result = __atomic_load_n(&ui->player.worker_result, __ATOMIC_ACQUIRE);
+    if (result != MP3_PLAYER_RUNNING)
+    {
+        mp3_player_cleanup(ui, mp3_worker_status(result));
+        return;
+    }
+    if (!mp3_write_pending(&ui->player, true))
+    {
+        mp3_player_cleanup(ui, "Audio write failed");
         return;
     }
     ui->playing = false;
@@ -1060,6 +1202,12 @@ static void mp3_resume(mp3_ui_t *ui)
 {
     if (!ui || !ui->player.active || ui->playing)
     {
+        return;
+    }
+    ui->player.fade_in_frames = MP3_TRANSITION_FRAMES;
+    if (!mp3_start_worker(&ui->player))
+    {
+        mp3_player_cleanup(ui, "Unable to restart audio worker");
         return;
     }
     ui->playing = true;
@@ -1139,24 +1287,33 @@ static bool mp3_on_tick(void *context)
         return false;
     }
     ui->user_scrub_active = false;
-    if (!ui->playing)
+    mp3_player_t *p = &ui->player;
+    if (p->worker_thread && __atomic_load_n(&p->worker_done, __ATOMIC_ACQUIRE))
     {
-        return false;
+        mp3_stop_worker(p);
+        int result = __atomic_load_n(&p->worker_result, __ATOMIC_ACQUIRE);
+        mp3_update_progress(ui, true);
+        mp3_player_cleanup(ui, mp3_worker_status(result));
+        return true;
     }
-    return mp3_player_tick(ui);
+    return ui->playing && mp3_update_progress(ui, false);
 }
 
 int main(void)
 {
     log_mp3("[atk_mp3] main begin\r\n");
-    mp3_ui_t ui;
-    memset(&ui, 0, sizeof(ui));
-    ui.running = true;
-    ui.player.input_fd = -1;
-    ui.player.audio_fd = -1;
-    ui.player.last_progress = -1;
+    /* The producer receives &ui->player, so the context must outlive all stacks. */
+    mp3_ui_t *ui = (mp3_ui_t *)calloc(1, sizeof(*ui));
+    if (!ui)
+    {
+        return 1;
+    }
+    ui->running = true;
+    ui->player.input_fd = -1;
+    ui->player.audio_fd = -1;
+    ui->player.last_progress = -1;
 
-    if (!atk_user_window_open_with_flags(&ui.remote,
+    if (!atk_user_window_open_with_flags(&ui->remote,
                                          "ATK MP3",
                                          MP3_UI_WIDTH,
                                          MP3_UI_HEIGHT,
@@ -1164,44 +1321,47 @@ int main(void)
     {
         printf("atk_mp3_ui: failed to open window\n");
         log_mp3("[atk_mp3] window open failed\r\n");
+        free(ui);
         return 1;
     }
-    atk_user_enable_dirty_tracking(&ui.remote, true);
+    atk_user_enable_dirty_tracking(&ui->remote, true);
     log_mp3("[atk_mp3] window opened\r\n");
 
-    build_ui(&ui);
-    if (ui.file_input)
+    build_ui(ui);
+    if (ui->file_input)
     {
-        atk_text_input_set_submit_handler(ui.file_input, on_file_submit, &ui);
+        atk_text_input_set_submit_handler(ui->file_input, on_file_submit, ui);
     }
-    if (!ui.window)
+    if (!ui->window)
     {
         printf("atk_mp3_ui: failed to build UI\n");
-        atk_user_close(&ui.remote);
+        atk_user_close(&ui->remote);
         log_mp3("[atk_mp3] build_ui failed\r\n");
+        free(ui);
         return 1;
     }
     log_mp3("[atk_mp3] build_ui ok\r\n");
 
     atk_main_config_t main_cfg = {
-        .window = &ui.remote,
+        .window = &ui->remote,
         .tick = mp3_on_tick,
-        .tick_context = &ui,
+        .tick_context = ui,
         .present_on_idle = false,
         .legacy_input = false
     };
 
     atk_render();
-    atk_user_present_force(&ui.remote);
+    atk_user_present_force(&ui->remote);
     log_mp3("[atk_mp3] first present\r\n");
 
-    atk_main_register_resize_handler(mp3_on_resize_event, &ui);
-    atk_main_register_close_handler(mp3_on_close_event, &ui);
+    atk_main_register_resize_handler(mp3_on_resize_event, ui);
+    atk_main_register_close_handler(mp3_on_close_event, ui);
 
     atk_main(&main_cfg);
-    mp3_close_file_dialog(&ui);
-    mp3_player_cleanup(&ui, NULL);
-    atk_user_close(&ui.remote);
+    mp3_close_file_dialog(ui);
+    mp3_player_cleanup(ui, NULL);
+    atk_user_close(&ui->remote);
     log_mp3("[atk_mp3] main exit\r\n");
+    free(ui);
     return 0;
 }

@@ -185,6 +185,7 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/playmp3.elf \
              $(USER_OBJDIR)/socket_demo.elf \
              $(USER_OBJDIR)/unzip.elf
+USER_ELF_ARCHIVE := $(USER_OBJDIR)/user-elfs.zip
 USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
@@ -396,7 +397,11 @@ $(USER_OBJDIR)/unzip.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o
 
-$(DL_SCRIPT_SRC): $(USER_ELFS)
+$(USER_ELF_ARCHIVE): $(USER_ELFS)
+	@mkdir -p $(dir $@)
+	zip -j -q -9 -FS $@ $(USER_ELFS)
+
+$(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) Makefile
 	@mkdir -p $(GENERATED_DIR)
 	@{ \
 		echo '#include "types.h"'; \
@@ -405,18 +410,11 @@ $(DL_SCRIPT_SRC): $(USER_ELFS)
 		printf '    "%s\\n"\n' '#!/bin/sh'; \
 		printf '    "%s\\n"\n' '# Auto-generated user binary downloader'; \
 		printf '    "%s\\n"\n' 'cd /usr/bin'; \
-		printf '    "%s\\n"\n' 'rm *.elf'; \
-		found=0; \
-		for elf in $(USER_OBJDIR)/*.elf; do \
-			if [ -f "$$elf" ]; then \
-				name=$$(basename "$$elf"); \
-				printf '    "wget 192.168.105.1:8000/build/user/%s\\n"\n' "$$name"; \
-				found=1; \
-			fi; \
-		done; \
-		if [ $$found -eq 0 ]; then \
-			printf '    "%s\\n"\n' '# No user ELF files were built'; \
-		fi; \
+		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/unzip.elf /tmp/dl-unzip.elf'; \
+		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/user-elfs.zip /tmp/user-elfs.zip'; \
+		printf '    "%s\\n"\n' '/tmp/dl-unzip.elf /tmp/user-elfs.zip /root/usr/bin'; \
+		printf '    "%s\\n"\n' 'rm /tmp/dl-unzip.elf'; \
+		printf '    "%s\\n"\n' 'rm /tmp/user-elfs.zip'; \
 		echo ';'; \
 		echo 'const size_t g_dl_script_content_len = sizeof(g_dl_script_content) - 1;'; \
 	} > $(DL_SCRIPT_SRC)
@@ -887,7 +885,10 @@ NIC_RTL := -device rtl8139,netdev=n0,mac=52:54:00:12:34:57
 
 # Audio backend (default coreaudio on macOS; override with AUDIO_DEV=pa/alsa/none)
 AUDIO_DEV ?= coreaudio
-HDA_MODEL ?= hda-output
+# Let the host audio callback pace DMA. QEMU's codec timer mode can discard
+# its entire private 8 KiB buffer on an overrun without a guest stream error.
+# Override HDA_MODEL=hda-output,use-timer=on to compare/debug that model.
+HDA_MODEL ?= hda-output,use-timer=off
 HDA_CONTROLLER ?= intel-hda
 HDA_AUDIO_ID ?= snd0
 QEMU_AUDIO := -audiodev $(AUDIO_DEV),id=$(HDA_AUDIO_ID)
@@ -1012,6 +1013,17 @@ process-lock-contract-test:
 atk-background-lock-contract-test:
 	python3 tests/atk_background_locking_contract_test.py
 
+audio-stream-contract-test:
+	python3 tests/audio_stream_contract_test.py
+
+audio-qemu-playback-test: all audio-stream-contract-test
+	python3 tests/audio_qemu_playback_test.py --no-build --expect-clean --exercise-controls
+
+.PHONY: audio-qemu-playback-test
+
+network-download-contract-test:
+	python3 tests/network_download_contract_test.py
+
 process-lock-stress-test: all process-lock-contract-test
 	python3 tests/process_lock_stress_test.py
 
@@ -1067,6 +1079,8 @@ test:
 	$(MAKE) elf-validation-test
 	$(MAKE) process-lock-contract-test
 	$(MAKE) atk-background-lock-contract-test
+	$(MAKE) audio-stream-contract-test
+	$(MAKE) network-download-contract-test
 	$(MAKE) web-test
 	$(MAKE) css-test
 	$(MAKE) browser-event-test
@@ -1078,7 +1092,7 @@ test:
 	$(MAKE) html-js-test
 	$(MAKE) html-view-test
 
-.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test quake-liveness-test elf-validation-test process-smoke-test process-lock-contract-test atk-background-lock-contract-test process-lock-stress-test keyboard-boot-input-test gui-wakeup-test quake-gui-liveness-test web-test css-test browser-event-test browser-resource-test png-test tls-test js-test html-js-test html-view-test web-render-harness web-render-stackoverflow test262-test
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test quake-liveness-test elf-validation-test process-smoke-test process-lock-contract-test atk-background-lock-contract-test audio-stream-contract-test network-download-contract-test process-lock-stress-test keyboard-boot-input-test gui-wakeup-test quake-gui-liveness-test web-test css-test browser-event-test browser-resource-test png-test tls-test js-test html-js-test html-view-test web-render-harness web-render-stackoverflow test262-test
 
 USER_DEPFILES := $(shell find $(USER_OBJDIR) -type f -name '*.d' 2>/dev/null)
 

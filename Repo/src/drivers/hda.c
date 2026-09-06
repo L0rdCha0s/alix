@@ -87,7 +87,15 @@
 #define HDA_BDL_ENTRIES    64u
 #define HDA_BUFFER_BYTES   (HDA_BDL_ENTRIES * 4096u)
 /* Cap how far ahead writers can buffer audio to keep latency bounded. */
-#define HDA_MAX_QUEUED_BYTES (32u * 1024u)
+#define HDA_MAX_QUEUED_BYTES (64u * 1024u)
+#define HDA_START_QUEUED_BYTES (16u * 1024u)
+#define HDA_START_WAIT_MS      20u
+#define HDA_FRAME_BYTES       4u
+#define HDA_FADE_IN_FRAMES    240u /* 5 ms, only on cold start/true underrun. */
+#define HDA_REPRIME_LEAD_BYTES 8192u /* Cover the controller/codec fetch window. */
+#define HDA_BYTES_PER_SECOND  (48000u * HDA_FRAME_BYTES)
+#define HDA_GAIN_RAMP_FRAMES  240u
+#define HDA_GAIN_ONE          65536u
 
 #define HDA_STREAM_INDEX   0u
 #define HDA_STREAM_TAG     (HDA_STREAM_INDEX + 1u)
@@ -137,12 +145,25 @@ typedef struct
     uint16_t rirb_rp;
     uint32_t hw_pos_prev;
     size_t used_bytes;
-    int16_t last_sample[2];
-    bool have_last_sample;
-    uint64_t last_write_ms;
+    uint32_t fade_in_frames;
+    uint64_t last_hw_update_ms;
+    bool needs_reprogram;
+    bool reconfiguring;
+    uint64_t first_queued_ms;
+    uint64_t writer_pid;
+    bool writer_claimed;
+    uint32_t gain_q16;
+    uint32_t target_gain_q16;
+    uint32_t gain_ramp_frames;
+    bool gain_initialized;
+    uint64_t empty_events;
+    uint64_t reprime_events;
+    uint64_t stream_errors;
+    uint64_t rejected_writers;
 } hda_state_t;
 
 static hda_state_t g_hda;
+static bool g_hda_ready;
 
 static inline uint64_t hda_now_ms(void)
 {
@@ -225,68 +246,61 @@ static inline void hda_write16(hda_state_t *hda, uint32_t offset, uint16_t value
 }
 
 static uint32_t hda_hw_position(hda_state_t *hda);
+static void hda_check_stream_errors_locked(hda_state_t *hda, const char *context);
 
 static int g_hda_lpib_log_budget = 8;
 static int g_hda_error_log_budget = 8;
-static int g_hda_empty_log_budget = 32;
 
-static void hda_stop_stream(hda_state_t *hda)
+static bool hda_stop_stream(hda_state_t *hda)
 {
     if (!hda)
     {
-        return;
+        return false;
     }
     uint32_t ctl_off = HDA_REG_SD_CTL(HDA_STREAM_INDEX);
     uint32_t ctl = hda_read32(hda, ctl_off);
     ctl &= ~HDA_SDCTL_RUN;
     hda_write32(hda, ctl_off, ctl);
+
+    bool stopped = false;
+    for (uint32_t i = 0; i < 100000u; ++i)
+    {
+        if ((hda_read32(hda, ctl_off) & HDA_SDCTL_RUN) == 0)
+        {
+            stopped = true;
+            break;
+        }
+        __asm__ volatile ("pause");
+    }
+    if (!stopped)
+    {
+        hda->needs_reprogram = true;
+        return false;
+    }
+
     hda->running = false;
     hda->used_bytes = 0;
     hda->write_pos = 0;
-    hda->last_write_ms = 0;
-    hda->have_last_sample = false;
-    hda->last_sample[0] = 0;
-    hda->last_sample[1] = 0;
+    hda->last_hw_update_ms = 0;
+    hda->fade_in_frames = HDA_FADE_IN_FRAMES;
+    hda->needs_reprogram = true;
+    return true;
 }
 
-static void hda_fill_pattern(hda_state_t *hda, uint32_t offset, size_t len)
+static void hda_clear_ring_range(hda_state_t *hda, uint32_t offset, size_t len)
 {
     if (!hda || !hda->buffer || len == 0)
     {
         return;
     }
-    /* Fade the last stereo sample to silence over a small window to avoid clicks. */
-    const int16_t last_l = hda->have_last_sample ? hda->last_sample[0] : 0;
-    const int16_t last_r = hda->have_last_sample ? hda->last_sample[1] : 0;
-    const size_t frames = len / 4;
-    const size_t fade_frames = (frames < 32) ? frames : 32;
     uint32_t pos = offset % (uint32_t)hda->buffer_size;
-    uint32_t buf_size = (uint32_t)hda->buffer_size;
-
-    for (size_t i = 0; i < frames; ++i)
+    while (len > 0)
     {
-        int32_t l = 0;
-        int32_t r = 0;
-        if (fade_frames > 0 && i < fade_frames)
-        {
-            uint32_t scale = (uint32_t)(fade_frames - i);
-            l = (int32_t)((last_l * (int32_t)scale) / (int32_t)fade_frames);
-            r = (int32_t)((last_r * (int32_t)scale) / (int32_t)fade_frames);
-        }
-        /* write one stereo frame */
-        hda->buffer[pos + 0] = (uint8_t)(l & 0xFF);
-        hda->buffer[pos + 1] = (uint8_t)((l >> 8) & 0xFF);
-        hda->buffer[pos + 2] = (uint8_t)(r & 0xFF);
-        hda->buffer[pos + 3] = (uint8_t)((r >> 8) & 0xFF);
-        pos = (pos + 4u) % buf_size;
-    }
-
-    /* Handle any tail bytes (should be rare): fill zeros. */
-    size_t tail = len - frames * 4u;
-    for (size_t i = 0; i < tail; ++i)
-    {
-        hda->buffer[pos] = 0;
-        pos = (pos + 1u) % buf_size;
+        size_t to_end = hda->buffer_size - (size_t)pos;
+        size_t chunk = (len < to_end) ? len : to_end;
+        memset(hda->buffer + pos, 0, chunk);
+        len -= chunk;
+        pos = 0;
     }
 }
 
@@ -298,19 +312,10 @@ static void hda_silence_advance(hda_state_t *hda, uint32_t prev, uint32_t hw_pos
     }
 
     uint32_t buf = (uint32_t)hda->buffer_size;
-    if (hw_pos > prev)
-    {
-        hda_fill_pattern(hda, prev, (size_t)(hw_pos - prev));
-    }
-    else
-    {
-        size_t first = (size_t)(buf - prev);
-        hda_fill_pattern(hda, prev, first);
-        if (hw_pos != 0)
-        {
-            hda_fill_pattern(hda, 0, hw_pos);
-        }
-    }
+    size_t consumed = (hw_pos >= prev)
+        ? (size_t)(hw_pos - prev)
+        : (size_t)(buf - prev) + (size_t)hw_pos;
+    hda_clear_ring_range(hda, prev, consumed);
 }
 
 static void hda_log_hwpos(hda_state_t *hda, const char *context)
@@ -339,34 +344,78 @@ static void hda_update_used_bytes(hda_state_t *hda, uint32_t hw_pos)
     uint32_t prev = hda->hw_pos_prev % (uint32_t)hda->buffer_size;
     uint32_t buf = (uint32_t)hda->buffer_size;
     uint32_t delta = (hw_pos >= prev) ? (hw_pos - prev) : (buf - (prev - hw_pos));
-    if (delta < buf)
+    uint64_t now_ms = hda_now_ms();
+    uint64_t ring_ms = ((uint64_t)hda->buffer_size * 1000ULL) /
+                       (uint64_t)HDA_BYTES_PER_SECOND;
+    bool missed_full_ring = hda->last_hw_update_ms != 0 &&
+                            now_ms >= hda->last_hw_update_ms &&
+                            (now_ms - hda->last_hw_update_ms) >= ring_ms;
+
+    if (missed_full_ring)
     {
-        hda_silence_advance(hda, prev, hw_pos);
-        if (hda->used_bytes >= delta)
-        {
-            hda->used_bytes -= delta;
-        }
-        else
-        {
-            hda->used_bytes = 0;
-        }
+        /* A modulo LPIB cannot reveal how many full wraps elapsed. */
+        hda->used_bytes = 0;
+        hda->write_pos = (size_t)hw_pos;
+        hda->needs_reprogram = true;
     }
     else
     {
-        // If the hardware position jumps unexpectedly, treat the buffer as empty
-        // and resync writer state to avoid writing far behind playback (which can
-        // introduce ~1s of apparent latency with a 256 KiB ring).
-        hda->used_bytes = 0;
-    }
+        hda_silence_advance(hda, prev, hw_pos);
 
-    // If the buffer is empty, keep the write cursor pinned to the current
-    // hardware position so subsequent writes are played immediately instead of
-    // waiting for a full ring wrap (which can be >1s with a 256 KiB ring).
-    if (hda->used_bytes == 0)
-    {
-        hda->write_pos = (size_t)hw_pos;
+        if ((size_t)delta >= hda->used_bytes)
+        {
+            hda->used_bytes = 0;
+            hda->write_pos = (size_t)hw_pos;
+        }
+        else
+        {
+            hda->used_bytes -= (size_t)delta;
+        }
     }
     hda->hw_pos_prev = hw_pos;
+    hda->last_hw_update_ms = now_ms;
+}
+
+/* Called with the stream lock held; also used by writers before queueing PCM. */
+static void hda_service_locked(hda_state_t *hda)
+{
+    if (hda->reconfiguring)
+    {
+        return;
+    }
+    if (hda->running)
+    {
+        hda_check_stream_errors_locked(hda, "service");
+    }
+    if (hda->running)
+    {
+        uint32_t hw = hda_hw_position(hda);
+        size_t used_before = hda->used_bytes;
+        hda_update_used_bytes(hda, hw);
+        if (hda->needs_reprogram)
+        {
+            (void)hda_stop_stream(hda);
+        }
+        if (used_before > 0 && hda->used_bytes == 0)
+        {
+            hda->empty_events++;
+        }
+    }
+    else if (!hda->needs_reprogram && hda->used_bytes > 0)
+    {
+        uint64_t now = hda_now_ms();
+        if (hda->used_bytes >= HDA_START_QUEUED_BYTES ||
+            (now >= hda->first_queued_ms &&
+             now - hda->first_queued_ms >= HDA_START_WAIT_MS))
+        {
+            /* Short sounds must start even when no further write arrives. */
+            __atomic_thread_fence(__ATOMIC_RELEASE);
+            if (!hda_start_stream(hda))
+            {
+                hda->needs_reprogram = true;
+            }
+        }
+    }
 }
 
 static void hda_housekeeping(void *arg)
@@ -376,62 +425,48 @@ static void hda_housekeeping(void *arg)
     {
         process_sleep_ms(1);
         spinlock_lock(&g_hda.lock);
-        if (g_hda.running)
-        {
-            uint32_t hw = hda_hw_position(&g_hda);
-            size_t used_before = g_hda.used_bytes;
-            hda_update_used_bytes(&g_hda, hw);
-            if (used_before > 0 && g_hda.used_bytes == 0 && g_hda_empty_log_budget > 0)
-            {
-                serial_printf("[hda] ring empty lpib=0x%08X\r\n", (unsigned)hw);
-                g_hda_empty_log_budget--;
-            }
-            uint64_t now_ms = hda_now_ms();
-            if (now_ms != 0 &&
-                g_hda.last_write_ms != 0 &&
-                g_hda.used_bytes == 0 &&
-                now_ms >= g_hda.last_write_ms &&
-                (now_ms - g_hda.last_write_ms) > 200ULL)
-            {
-                hda_stop_stream(&g_hda);
-                if (g_hda_empty_log_budget > 0)
-                {
-                    serial_printf("[hda] idle stop after %llu ms\r\n",
-                                  (unsigned long long)(now_ms - g_hda.last_write_ms));
-                    g_hda_empty_log_budget--;
-                }
-            }
-        }
+        hda_service_locked(&g_hda);
         spinlock_unlock(&g_hda.lock);
     }
 }
 
-static void hda_check_stream_errors(hda_state_t *hda, const char *context)
+static void hda_check_stream_errors_locked(hda_state_t *hda, const char *context)
 {
-    if (!hda || g_hda_error_log_budget <= 0)
+    if (!hda)
     {
         return;
     }
     uint8_t sts = hda_read8(hda, HDA_REG_SD_STS(HDA_STREAM_INDEX));
     if (sts & (HDA_SDSTS_FIFOE | HDA_SDSTS_DESE))
     {
-        g_hda_error_log_budget--;
-        uint32_t lpib = hda_read32(hda, HDA_REG_SD_LPIB(HDA_STREAM_INDEX));
-        uint32_t cbl = hda_read32(hda, HDA_REG_SD_CBL(HDA_STREAM_INDEX));
-        uint16_t lvi = hda_read16(hda, HDA_REG_SD_LVI(HDA_STREAM_INDEX));
-        uint32_t bdlpl = hda_read32(hda, HDA_REG_SD_BDLPL(HDA_STREAM_INDEX));
-        uint32_t ctl = hda_read32(hda, HDA_REG_SD_CTL(HDA_STREAM_INDEX));
-        serial_printf("[hda] stream error ctx=%s sts=0x%02X lpib=0x%08X cbl=0x%08X lvi=0x%04X bdlpl=0x%08X ctl=0x%08X restarting\r\n",
-                      context ? context : "?",
-                      (unsigned)sts,
-                      (unsigned)lpib,
-                      (unsigned)cbl,
-                      (unsigned)lvi,
-                      (unsigned)bdlpl,
-                      (unsigned)ctl);
+        hda->stream_errors++;
+        if (g_hda_error_log_budget > 0)
+        {
+            g_hda_error_log_budget--;
+            uint32_t lpib = hda_read32(hda, HDA_REG_SD_LPIB(HDA_STREAM_INDEX));
+            uint32_t cbl = hda_read32(hda, HDA_REG_SD_CBL(HDA_STREAM_INDEX));
+            uint16_t lvi = hda_read16(hda, HDA_REG_SD_LVI(HDA_STREAM_INDEX));
+            uint32_t bdlpl = hda_read32(hda, HDA_REG_SD_BDLPL(HDA_STREAM_INDEX));
+            uint32_t ctl = hda_read32(hda, HDA_REG_SD_CTL(HDA_STREAM_INDEX));
+            serial_printf("[hda] stream error ctx=%s sts=0x%02X lpib=0x%08X cbl=0x%08X lvi=0x%04X bdlpl=0x%08X ctl=0x%08X\r\n",
+                          context ? context : "?",
+                          (unsigned)sts,
+                          (unsigned)lpib,
+                          (unsigned)cbl,
+                          (unsigned)lvi,
+                          (unsigned)bdlpl,
+                          (unsigned)ctl);
+        }
         hda_write8(hda, HDA_REG_SD_STS(HDA_STREAM_INDEX), HDA_SDSTS_CLEAR);
-        (void)hda_program_stream(hda);
-        (void)hda_start_stream(hda);
+        if (sts & HDA_SDSTS_DESE)
+        {
+            bool stopped = hda_stop_stream(hda);
+            hda->needs_reprogram = true;
+            if (!stopped)
+            {
+                hda->needs_reprogram = true;
+            }
+        }
     }
 }
 
@@ -901,11 +936,12 @@ static bool hda_prepare_buffers(hda_state_t *hda)
     memset(hda->buffer, 0, hda->buffer_size);
     hda->write_pos = 0;
     hda->used_bytes = 0;
+    hda->fade_in_frames = HDA_FADE_IN_FRAMES;
     hda->hw_pos_prev = 0;
-    hda->have_last_sample = false;
-    hda->last_sample[0] = 0;
-    hda->last_sample[1] = 0;
-    hda->last_write_ms = 0;
+    hda->last_hw_update_ms = 0;
+    hda->first_queued_ms = 0;
+    hda->gain_initialized = false;
+    hda->gain_ramp_frames = 0;
 
     size_t entry_bytes = hda->buffer_size / HDA_BDL_ENTRIES;
     for (uint32_t i = 0; i < HDA_BDL_ENTRIES; ++i)
@@ -950,19 +986,21 @@ static bool hda_reset_stream(hda_state_t *hda)
     }
     hda->hw_pos_prev = hda_read32(hda, HDA_REG_SD_LPIB(HDA_STREAM_INDEX));
     hda->used_bytes = 0;
+    hda->running = false;
     return true;
 }
 
 static bool hda_program_stream(hda_state_t *hda)
 {
-    if (!hda_prepare_buffers(hda))
+    /* Stop/reset DMA before clearing the live BDL or sample ring. */
+    if (!hda_reset_stream(hda))
     {
-        serial_printf("[hda] buffer allocation failed\r\n");
         return false;
     }
 
-    if (!hda_reset_stream(hda))
+    if (!hda_prepare_buffers(hda))
     {
+        serial_printf("[hda] buffer allocation failed\r\n");
         return false;
     }
 
@@ -1021,11 +1059,16 @@ static bool hda_program_stream(hda_state_t *hda)
                         HDA_PIN_WIDGET_CTRL_OUT,
                         NULL);
 
+    hda->needs_reprogram = false;
     return true;
 }
 
 static bool hda_start_stream(hda_state_t *hda)
 {
+    if (!hda || hda->used_bytes == 0)
+    {
+        return false;
+    }
     uint32_t ctl_off = HDA_REG_SD_CTL(HDA_STREAM_INDEX);
     uint32_t sts_off = HDA_REG_SD_STS(HDA_STREAM_INDEX);
 
@@ -1036,9 +1079,7 @@ static bool hda_start_stream(hda_state_t *hda)
     ctl |= (HDA_STREAM_TAG << HDA_SDCTL_STREAM_SHIFT) | HDA_SDCTL_RUN;
     hda_write32(hda, ctl_off, ctl);
     hda->running = true;
-    hda->hw_pos_prev = hda_read32(hda, HDA_REG_SD_LPIB(HDA_STREAM_INDEX));
-    hda->used_bytes = 0;
-    hda->last_write_ms = hda_now_ms();
+    hda->last_hw_update_ms = hda_now_ms();
     hda_log_hwpos(hda, "after-start");
     return true;
 }
@@ -1075,7 +1116,10 @@ static inline int16_t hda_scale_sample(int16_t sample, uint32_t volume_percent)
     return (int16_t)scaled;
 }
 
-static void hda_copy_scaled_pcm(uint8_t *dst, const uint8_t *src, size_t len, uint32_t volume_percent)
+static void hda_copy_scaled_pcm(uint8_t *dst,
+                                const uint8_t *src,
+                                size_t len,
+                                uint32_t volume_percent)
 {
     if (!dst || !src || len == 0)
     {
@@ -1087,18 +1131,100 @@ static void hda_copy_scaled_pcm(uint8_t *dst, const uint8_t *src, size_t len, ui
         return;
     }
 
-    size_t i = 0;
-    for (; i + 1 < len; i += 2)
+    for (size_t i = 0; i + 1 < len; i += 2)
     {
         int16_t sample = (int16_t)((uint16_t)src[i] | ((uint16_t)src[i + 1] << 8));
         int16_t scaled = hda_scale_sample(sample, volume_percent);
-        dst[i] = (uint8_t)((uint16_t)scaled & 0xFF);
-        dst[i + 1] = (uint8_t)(((uint16_t)scaled >> 8) & 0xFF);
+        dst[i] = (uint8_t)((uint16_t)scaled & 0xFFu);
+        dst[i + 1] = (uint8_t)(((uint16_t)scaled >> 8) & 0xFFu);
     }
-    if (i < len)
+}
+
+static void hda_copy_pcm_chunk(hda_state_t *hda,
+                               uint8_t *dst,
+                               const uint8_t *src,
+                               size_t len,
+                               uint32_t volume_percent)
+{
+    if (volume_percent > 100u)
     {
-        dst[i] = src[i];
+        volume_percent = 100u;
     }
+    uint32_t target = (volume_percent * HDA_GAIN_ONE) / 100u;
+    if (!hda->gain_initialized)
+    {
+        hda->gain_q16 = target;
+        hda->target_gain_q16 = target;
+        hda->gain_initialized = true;
+    }
+    else if (target != hda->target_gain_q16)
+    {
+        hda->target_gain_q16 = target;
+        hda->gain_ramp_frames = HDA_GAIN_RAMP_FRAMES;
+    }
+
+    size_t fade_frames = hda->fade_in_frames;
+    if (fade_frames < hda->gain_ramp_frames)
+    {
+        fade_frames = hda->gain_ramp_frames;
+    }
+    if (fade_frames > len / HDA_FRAME_BYTES)
+    {
+        fade_frames = len / HDA_FRAME_BYTES;
+    }
+
+    size_t faded_bytes = fade_frames * HDA_FRAME_BYTES;
+    for (size_t frame = 0; frame < fade_frames; ++frame)
+    {
+        size_t i = frame * HDA_FRAME_BYTES;
+        int16_t left = (int16_t)((uint16_t)src[i] | ((uint16_t)src[i + 1] << 8));
+        int16_t right = (int16_t)((uint16_t)src[i + 2] | ((uint16_t)src[i + 3] << 8));
+        if (hda->gain_ramp_frames > 0)
+        {
+            int32_t difference = (int32_t)hda->target_gain_q16 - (int32_t)hda->gain_q16;
+            hda->gain_q16 = (uint32_t)((int32_t)hda->gain_q16 +
+                difference / (int32_t)hda->gain_ramp_frames);
+            hda->gain_ramp_frames--;
+        }
+        left = (int16_t)(((int32_t)left * (int32_t)hda->gain_q16) / (int32_t)HDA_GAIN_ONE);
+        right = (int16_t)(((int32_t)right * (int32_t)hda->gain_q16) / (int32_t)HDA_GAIN_ONE);
+
+        if (hda->fade_in_frames > 0)
+        {
+            uint32_t numerator = HDA_FADE_IN_FRAMES - hda->fade_in_frames + 1u;
+            left = (int16_t)(((int32_t)left * (int32_t)numerator) /
+                             (int32_t)HDA_FADE_IN_FRAMES);
+            right = (int16_t)(((int32_t)right * (int32_t)numerator) /
+                              (int32_t)HDA_FADE_IN_FRAMES);
+            hda->fade_in_frames--;
+        }
+
+        dst[i] = (uint8_t)((uint16_t)left & 0xFFu);
+        dst[i + 1] = (uint8_t)(((uint16_t)left >> 8) & 0xFFu);
+        dst[i + 2] = (uint8_t)((uint16_t)right & 0xFFu);
+        dst[i + 3] = (uint8_t)(((uint16_t)right >> 8) & 0xFFu);
+    }
+
+    if (faded_bytes < len)
+    {
+        hda_copy_scaled_pcm(dst + faded_bytes,
+                            src + faded_bytes,
+                            len - faded_bytes,
+                            volume_percent);
+    }
+}
+
+static bool hda_claim_writer_locked(hda_state_t *hda, uint64_t pid)
+{
+    if (hda->writer_claimed && hda->writer_pid != pid && hda->used_bytes > 0)
+    {
+        hda->rejected_writers++;
+        return false;
+    }
+    /* A drained stream can change owners, including after a producer exits. */
+    hda->writer_pid = pid;
+    hda->writer_claimed = true;
+    return true;
 }
 
 static ssize_t hda_dev_write(vfs_node_t *node,
@@ -1108,44 +1234,101 @@ static ssize_t hda_dev_write(vfs_node_t *node,
                              void *context)
 {
     (void)node;
-    (void)offset;
     hda_state_t *hda = (hda_state_t *)context;
-    if (!hda || !buffer)
+    if (count == 0)
+    {
+        return 0;
+    }
+    if (!hda || !buffer ||
+        (count % HDA_FRAME_BYTES) != 0 ||
+        (offset % HDA_FRAME_BYTES) != 0)
     {
         return -1;
     }
 
-    /* If the stream was stopped while idle, bring it back up. */
-    if (!hda->running)
-    {
-        if (!hda_program_stream(hda) || !hda_start_stream(hda))
-        {
-            return -1;
-        }
-    }
-
     const uint8_t *src = (const uint8_t *)buffer;
-    uint32_t volume = audio_volume_get_percent();
+    uint64_t writer_pid = process_current_pid();
     size_t written = 0;
 
     while (written < count)
     {
         spinlock_lock(&hda->lock);
-        uint32_t hw_pos = hda_hw_position(hda);
-        hda_update_used_bytes(hda, hw_pos);
+
+        if (hda->reconfiguring)
+        {
+            spinlock_unlock(&hda->lock);
+            process_sleep_ms(1);
+            continue;
+        }
+
+        hda_service_locked(hda);
+        if (!hda_claim_writer_locked(hda, writer_pid))
+        {
+            spinlock_unlock(&hda->lock);
+            return written > 0 ? (ssize_t)written : -1;
+        }
+
+        if (hda->running)
+        {
+            if (hda->used_bytes == 0 && !hda->needs_reprogram)
+            {
+                uint32_t hw_pos = hda_hw_position(hda);
+                /*
+                 * RUN must remain set across a short producer gap: QEMU keeps
+                 * up to 8 KiB of already-fetched audio in its codec buffer and
+                 * discards it on a RUN transition.  Re-prime after a silent
+                 * lead instead of stopping or writing under the DMA cursor.
+                 */
+                hda_clear_ring_range(hda, hw_pos, HDA_REPRIME_LEAD_BYTES);
+                hda->write_pos = ((size_t)hw_pos + HDA_REPRIME_LEAD_BYTES) %
+                                 hda->buffer_size;
+                hda->used_bytes = HDA_REPRIME_LEAD_BYTES;
+                hda->hw_pos_prev = hw_pos;
+                hda->last_hw_update_ms = hda_now_ms();
+                hda->fade_in_frames = HDA_FADE_IN_FRAMES;
+                hda->reprime_events++;
+            }
+        }
+
+        if (hda->needs_reprogram)
+        {
+            hda->reconfiguring = true;
+            spinlock_unlock(&hda->lock);
+
+            bool programmed = hda_program_stream(hda);
+
+            spinlock_lock(&hda->lock);
+            hda->needs_reprogram = !programmed;
+            hda->reconfiguring = false;
+            spinlock_unlock(&hda->lock);
+            if (!programmed)
+            {
+                return written > 0 ? (ssize_t)written : -1;
+            }
+            continue;
+        }
+
+        bool start_after_copy = !hda->running;
+        if (start_after_copy && hda->used_bytes == 0)
+        {
+            hda->first_queued_ms = hda_now_ms();
+        }
+
         size_t max_queue = (hda->buffer_size > 0) ? (hda->buffer_size - 1u) : 0u;
         if (max_queue > HDA_MAX_QUEUED_BYTES)
         {
             max_queue = HDA_MAX_QUEUED_BYTES;
         }
-        size_t free_bytes = (max_queue > hda->used_bytes) ? (max_queue - hda->used_bytes) : 0u;
+        size_t free_bytes = (max_queue > hda->used_bytes)
+            ? (max_queue - hda->used_bytes)
+            : 0u;
+        free_bytes -= free_bytes % HDA_FRAME_BYTES;
         if (free_bytes == 0)
         {
+            hda_log_hwpos(hda, "write-wait");
             spinlock_unlock(&hda->lock);
             /* Avoid busy-spinning when the hardware lags; sleep briefly. */
             process_sleep_ms(1);
-            hda_log_hwpos(hda, "write-wait");
-            hda_check_stream_errors(hda, "write-wait");
             continue;
         }
 
@@ -1153,34 +1336,62 @@ static ssize_t hda_dev_write(vfs_node_t *node,
         size_t chunk = (remaining < free_bytes) ? remaining : free_bytes;
         size_t to_end = hda->buffer_size - hda->write_pos;
         size_t first = (chunk < to_end) ? chunk : to_end;
-        hda_copy_scaled_pcm(hda->buffer + hda->write_pos, src + written, first, volume);
+        uint32_t volume = audio_volume_get_percent();
+        hda_copy_pcm_chunk(hda,
+                           hda->buffer + hda->write_pos,
+                           src + written,
+                           first,
+                           volume);
         hda->write_pos = (hda->write_pos + first) % hda->buffer_size;
-        written += first;
         hda->used_bytes += first;
+        written += first;
+
         if (first < chunk)
         {
             size_t second = chunk - first;
-            hda_copy_scaled_pcm(hda->buffer + hda->write_pos, src + written, second, volume);
+            hda_copy_pcm_chunk(hda,
+                               hda->buffer + hda->write_pos,
+                               src + written,
+                               second,
+                               volume);
             hda->write_pos = (hda->write_pos + second) % hda->buffer_size;
-            written += second;
             hda->used_bytes += second;
+            written += second;
         }
-        /* Remember the last stereo sample to smooth underrun padding. */
-        size_t total_written = written;
-        if (total_written >= 4)
+        if (start_after_copy && hda->used_bytes >= HDA_START_QUEUED_BYTES)
         {
-            const uint8_t *tail = src + total_written - 4;
-            int16_t last_l = (int16_t)((uint16_t)tail[0] | ((uint16_t)tail[1] << 8));
-            int16_t last_r = (int16_t)((uint16_t)tail[2] | ((uint16_t)tail[3] << 8));
-            hda->last_sample[0] = hda_scale_sample(last_l, volume);
-            hda->last_sample[1] = hda_scale_sample(last_r, volume);
-            hda->have_last_sample = true;
+            /* Publish the complete prebuffer before the controller can fetch it. */
+            __atomic_thread_fence(__ATOMIC_RELEASE);
+            if (!hda_start_stream(hda))
+            {
+                hda->needs_reprogram = true;
+                spinlock_unlock(&hda->lock);
+                return -1;
+            }
         }
-        hda->last_write_ms = hda_now_ms();
         spinlock_unlock(&hda->lock);
     }
 
     return (ssize_t)written;
+}
+
+bool hda_get_status(hda_status_t *status)
+{
+    if (!status || !__atomic_load_n(&g_hda_ready, __ATOMIC_ACQUIRE))
+    {
+        return false;
+    }
+    spinlock_lock(&g_hda.lock);
+    /* Stream reprogramming owns the DMA/accounting fields outside this lock. */
+    status->queued_bytes = g_hda.reconfiguring ? 0 : g_hda.used_bytes;
+    status->running = !g_hda.reconfiguring && g_hda.running;
+    status->empty_events = g_hda.empty_events;
+    status->reprime_events = g_hda.reprime_events;
+    status->stream_errors = g_hda.stream_errors;
+    status->rejected_writers = g_hda.rejected_writers;
+    status->writer_pid = g_hda.writer_pid;
+    spinlock_unlock(&g_hda.lock);
+    return true;
 }
 
 void hda_init(void)
@@ -1325,9 +1536,10 @@ void hda_init(void)
     {
         return;
     }
-    if (!hda_start_stream(&g_hda))
+
+    if (!process_create_kernel("hda_idle", hda_housekeeping, NULL, PROCESS_DEFAULT_STACK_SIZE, -1))
     {
-        serial_printf("[hda] failed to start output stream\r\n");
+        serial_printf("[hda] failed to start housekeeping thread\r\n");
         return;
     }
 
@@ -1337,10 +1549,6 @@ void hda_init(void)
         return;
     }
 
-    if (!process_create_kernel("hda_idle", hda_housekeeping, NULL, PROCESS_DEFAULT_STACK_SIZE, -1))
-    {
-        serial_printf("[hda] failed to start housekeeping thread\r\n");
-    }
-
+    __atomic_store_n(&g_hda_ready, true, __ATOMIC_RELEASE);
     serial_printf("[hda] output ready on /dev/audio\r\n");
 }

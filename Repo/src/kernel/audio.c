@@ -3,6 +3,7 @@
 #include "libc.h"
 #include "procfs.h"
 #include "vfs.h"
+#include "hda.h"
 
 static uint32_t g_audio_volume_percent = 100;
 
@@ -39,14 +40,14 @@ static size_t audio_append_char(char *out, size_t cap, size_t pos, char ch)
     return pos;
 }
 
-static size_t audio_append_uint(char *out, size_t cap, size_t pos, uint32_t value)
+static size_t audio_append_uint(char *out, size_t cap, size_t pos, uint64_t value)
 {
     if (!out || cap == 0 || pos >= cap)
     {
         return pos;
     }
 
-    char tmp[10];
+    char tmp[20];
     size_t digits = 0;
     if (value == 0)
     {
@@ -171,8 +172,52 @@ static ssize_t audio_volume_write(vfs_node_t *node, size_t offset, const void *b
     return (ssize_t)count;
 }
 
+static ssize_t audio_status_read(vfs_node_t *node, size_t offset,
+                                 void *buffer, size_t count, void *context)
+{
+    (void)node;
+    if (!buffer || count == 0)
+    {
+        return 0;
+    }
+    /* Small synchronous snapshot; no stack address escapes to another thread. */
+    hda_status_t status = {0};
+    (void)hda_get_status(&status);
+    uint64_t value;
+    switch ((uintptr_t)context)
+    {
+        case 0: value = status.queued_bytes; break;
+        case 1: value = status.empty_events; break;
+        case 2: value = status.reprime_events; break;
+        case 3: value = status.stream_errors; break;
+        case 4: value = status.rejected_writers; break;
+        case 5: value = status.writer_pid; break;
+        default: value = status.running ? 1u : 0u; break;
+    }
+    char text[24];
+    size_t len = audio_append_uint(text, sizeof(text), 0, value);
+    len = audio_append_char(text, sizeof(text), len, '\n');
+    if (offset >= len)
+    {
+        return 0;
+    }
+    size_t bytes = len - offset;
+    if (bytes > count)
+    {
+        bytes = count;
+    }
+    memcpy(buffer, text + offset, bytes);
+    return (ssize_t)bytes;
+}
+
 void audio_sys_controls_init(void)
 {
     (void)procfs_create_file_at("sys/audio/volume", audio_volume_read, audio_volume_write, NULL);
+    (void)procfs_create_file_at("sys/audio/queued_bytes", audio_status_read, NULL, (void *)0u);
+    (void)procfs_create_file_at("sys/audio/empty_events", audio_status_read, NULL, (void *)1u);
+    (void)procfs_create_file_at("sys/audio/reprime_events", audio_status_read, NULL, (void *)2u);
+    (void)procfs_create_file_at("sys/audio/stream_errors", audio_status_read, NULL, (void *)3u);
+    (void)procfs_create_file_at("sys/audio/rejected_writers", audio_status_read, NULL, (void *)4u);
+    (void)procfs_create_file_at("sys/audio/writer_pid", audio_status_read, NULL, (void *)5u);
+    (void)procfs_create_file_at("sys/audio/running", audio_status_read, NULL, (void *)6u);
 }
-

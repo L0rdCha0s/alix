@@ -4,9 +4,9 @@
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_NO_STDIO
 #include "minimp3.h"
+#include "mp3_stream.h"
 
-#define READ_CHUNK 8192u
-#define INPUT_BUFFER_SIZE (READ_CHUNK * 4u)
+#define INPUT_BUFFER_SIZE MP3_STREAM_BUFFER_SIZE
 #define TARGET_RATE 48000
 #define TARGET_CHANNELS 2
 #define MAX_INPUT_SAMPLES_PER_CHANNEL 1152
@@ -18,6 +18,7 @@ typedef struct
     int16_t prev[2];
     bool have_prev;
     uint32_t src_rate;
+    uint32_t src_channels;
     uint64_t step;
     uint64_t src_pos;
 } resample_state_t;
@@ -94,9 +95,11 @@ static size_t resample_to_target(const mp3d_sample_t *in,
         return 0;
     }
 
-    if (state->src_rate != (uint32_t)src_rate)
+    if (state->src_rate != (uint32_t)src_rate ||
+        state->src_channels != (uint32_t)src_channels)
     {
         state->src_rate = (uint32_t)src_rate;
+        state->src_channels = (uint32_t)src_channels;
         state->step = ((uint64_t)src_rate << 32) / TARGET_RATE;
         state->phase = 0;
         state->src_pos = 0;
@@ -193,9 +196,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    uint8_t *in_buffer = (uint8_t *)malloc(INPUT_BUFFER_SIZE);
-    if (!in_buffer)
+    mp3_stream_input_t *input = (mp3_stream_input_t *)calloc(1, sizeof(*input));
+    if (input)
     {
+        input->buffer = (uint8_t *)malloc(INPUT_BUFFER_SIZE);
+        input->capacity = INPUT_BUFFER_SIZE;
+    }
+    if (!input || !input->buffer)
+    {
+        free(input);
         printf("playmp3: out of memory\n");
         free(decode_buffer);
         free(out_buffer);
@@ -204,20 +213,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    size_t buf_filled = 0;
-    size_t buf_pos = 0;
-    ssize_t initial = read(input_fd, in_buffer, INPUT_BUFFER_SIZE);
-    if (initial <= 0)
+    if (!mp3_stream_refill(input, input_fd) || input->filled == 0)
     {
-        printf("playmp3: empty input\n");
-        free(in_buffer);
+        printf("playmp3: %s\n", input->failed ? "input read failed" : "empty input");
+        free(input->buffer);
+        free(input);
         free(out_buffer);
         free(decode_buffer);
         close(audio_fd);
         close(input_fd);
         return 1;
     }
-    buf_filled = (size_t)initial;
 
     resample_state_t rs = {0};
     bool logged_frame = false;
@@ -226,43 +232,19 @@ int main(int argc, char **argv)
     for (;;)
     {
         mp3dec_frame_info_t frame_info;
-        int samples = mp3dec_decode_frame(&dec,
-                                          in_buffer + buf_pos,
-                                          (int)(buf_filled - buf_pos),
-                                          decode_buffer,
-                                          &frame_info);
-
-        if (frame_info.frame_bytes == 0 && samples == 0)
+        int samples = mp3_stream_next(input, &dec, input_fd, decode_buffer, &frame_info);
+        if (samples == MP3_STREAM_EOF)
         {
-            if (buf_pos > 0 && buf_pos < buf_filled)
-            {
-                memmove(in_buffer, in_buffer + buf_pos, buf_filled - buf_pos);
-                buf_filled -= buf_pos;
-                buf_pos = 0;
-            }
-            else if (buf_pos == buf_filled)
-            {
-                buf_pos = 0;
-                buf_filled = 0;
-            }
-
-            ssize_t got = read(input_fd, in_buffer + buf_filled, INPUT_BUFFER_SIZE - buf_filled);
-            if (got <= 0)
-            {
-                break;
-            }
-            buf_filled += (size_t)got;
-            continue;
+            break;
         }
-
-        buf_pos += (size_t)frame_info.frame_bytes;
-        if (samples <= 0)
+        if (samples == MP3_STREAM_ERROR)
         {
-            if (buf_pos >= buf_filled)
-            {
-                buf_pos = 0;
-                buf_filled = 0;
-            }
+            printf("playmp3: input read failed\n");
+            rc = 1;
+            break;
+        }
+        if (samples == 0)
+        {
             continue;
         }
 
@@ -296,11 +278,7 @@ int main(int argc, char **argv)
                 break;
             }
             /* Reset resampler history so a later rate change starts cleanly. */
-            rs.phase = 0;
-            rs.src_pos = 0;
-            rs.have_prev = false;
-            rs.src_rate = 0;
-            rs.step = 0;
+            memset(&rs, 0, sizeof(rs));
             continue;
         }
 
@@ -324,14 +302,10 @@ int main(int argc, char **argv)
             break;
         }
 
-        if (buf_pos >= buf_filled)
-        {
-            buf_pos = 0;
-            buf_filled = 0;
-        }
     }
 
-    free(in_buffer);
+    free(input->buffer);
+    free(input);
     free(out_buffer);
     free(decode_buffer);
     close(audio_fd);

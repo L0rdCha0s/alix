@@ -62,6 +62,14 @@ AlixFS2 specifics (on-disk layout, chunk table, writeback ordering, limitations)
 
 Dirty tracking is per-node and per-mount; `vfs_sync_dirty()` writes back dirty nodes and may apply backpressure when dirty bytes exceed thresholds.
 
+Growing regular files receive a short writeback grace period. Flushd leaves a
+file dirty while writes are still arriving, then persists it after 300 ms of
+quiescence; this avoids repeatedly serializing and rewriting the whole AlixFS
+node during a download. The mount-wide dirty-data limit is 64 MiB, while a
+single actively growing node is flushed early at 48 MiB so backpressure still
+has a bounded recovery path. Forced sync and shutdown always bypass the grace
+period.
+
 ## devfs and procfs
 
 - `src/kernel/devfs.c`:

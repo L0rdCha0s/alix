@@ -77,9 +77,13 @@ static inline void tcp_irq_restore(uint64_t flags)
 #define NET_TCP_RX_MAX_CAPACITY       (5U * 1024U * 1024U)
 #define NET_TCP_RX_WAKE_THRESHOLD     (NET_TCP_MAX_PAYLOAD * 4U)
 #define NET_TCP_RX_RESUME_THRESHOLD   (NET_TCP_MAX_PAYLOAD * 16U)
+#define NET_TCP_WINDOW_UPDATE_THRESHOLD (NET_TCP_MAX_PAYLOAD * 16U)
 #define NET_TCP_TX_FRAME_CAPACITY     2048
 #define NET_TCP_REASS_LIMIT           NET_TCP_RX_MAX_CAPACITY
 #define NET_TCP_REASS_MAX_SEGMENTS    2048
+/* Match the effective window to the 256-descriptor IGB receive ring. */
+#define NET_TCP_LOCAL_WINDOW_SCALE    2U
+#define NET_TCP_DELAYED_ACK_SEGMENTS  2U
 
 typedef struct tcp_reass_segment
 {
@@ -121,13 +125,18 @@ struct net_tcp_socket
     uint8_t pending_flags;
     uint8_t pending_payload[NET_TCP_MAX_PAYLOAD];
     size_t pending_payload_len;
-    uint16_t remote_window;
+    uint32_t remote_window;
+    uint8_t remote_window_scale;
+    uint8_t local_window_scale;
+    bool peer_window_scale_seen;
+    bool window_scaling_active;
     uint8_t *rx_buffer;
     size_t rx_size;
     size_t rx_capacity;
     size_t rx_head;
     bool rx_backpressure;
     uint16_t advertised_window;
+    uint32_t advertised_window_effective;
     uint8_t *tx_frame;
     size_t tx_frame_capacity;
     int fd;
@@ -150,6 +159,10 @@ struct net_tcp_socket
     uint64_t debug_last_log_tick;
     thread_t *owner;
     uint8_t syn_challenge_acks;
+    bool ack_pending;
+    uint8_t ack_pending_segments;
+    uint64_t ack_deadline_tick;
+    uint64_t read_event_seq;
 };
 
 static void tcp_log_send_block(const net_tcp_socket_t *socket, const char *reason, size_t len)
@@ -174,6 +187,14 @@ static void tcp_log_send_block(const net_tcp_socket_t *socket, const char *reaso
         tcp_log_hex32((uint32_t)socket->pending_payload_len);
     }
     TCP_LOG("%s", "\r\n");
+}
+
+static inline void tcp_signal_read_event(net_tcp_socket_t *socket)
+{
+    if (socket)
+    {
+        __atomic_add_fetch(&socket->read_event_seq, 1ULL, __ATOMIC_RELEASE);
+    }
 }
 
 static net_tcp_socket_t g_sockets[NET_TCP_MAX_SOCKETS];
@@ -203,8 +224,10 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
 static bool tcp_send_syn(net_tcp_socket_t *socket);
 static void tcp_handle_ack(net_tcp_socket_t *socket, uint32_t ack_num);
 static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
-                                const uint8_t *payload, size_t payload_len);
+                                const uint8_t *payload, size_t payload_len,
+                                bool immediate_ack);
 static void tcp_send_ack(net_tcp_socket_t *socket);
+static void tcp_schedule_ack(net_tcp_socket_t *socket, bool immediate);
 static void tcp_retransmit(net_tcp_socket_t *socket);
 static void tcp_mark_error(net_tcp_socket_t *socket, const char *reason);
 static bool tcp_rx_reserve_space(net_tcp_socket_t *socket, size_t additional);
@@ -217,6 +240,10 @@ static tcp_reass_segment_t *tcp_reass_alloc(void);
 static void tcp_reass_release(tcp_reass_segment_t *seg);
 static void tcp_log_size(const char *label, size_t value) __attribute__((unused));
 static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity);
+static ssize_t tcp_read_blocking_timeout(net_tcp_socket_t *socket,
+                                         uint8_t *buffer,
+                                         size_t capacity,
+                                         uint64_t timeout_ticks);
 static ssize_t tcp_fd_read(void *ctx, void *buffer, size_t count);
 static ssize_t tcp_fd_write(void *ctx, const void *buffer, size_t count);
 static int tcp_fd_close(void *ctx);
@@ -231,6 +258,8 @@ static const fd_ops_t g_tcp_fd_ops = {
 };
 
 static spinlock_t g_tcp_lock;
+static volatile uint32_t g_tcp_ticket_next = 0;
+static volatile uint32_t g_tcp_ticket_serving = 0;
 static uint64_t g_tcp_lock_hold_start = 0;
 static void *g_tcp_lock_hold_caller = NULL;
 static uint64_t g_tcp_lock_log_threshold_ticks = 0;
@@ -248,9 +277,10 @@ static inline uint64_t tcp_lock(void)
     {
         next_log = wait_start + g_tcp_lock_wait_log_threshold_ticks;
     }
-    while (__sync_lock_test_and_set(&g_tcp_lock.value, 1) != 0)
+    uint32_t ticket = __atomic_fetch_add(&g_tcp_ticket_next, 1U, __ATOMIC_RELAXED);
+    while (__atomic_load_n(&g_tcp_ticket_serving, __ATOMIC_ACQUIRE) != ticket)
     {
-        while (g_tcp_lock.value)
+        while (__atomic_load_n(&g_tcp_ticket_serving, __ATOMIC_ACQUIRE) != ticket)
         {
             if (next_log != 0)
             {
@@ -286,6 +316,7 @@ static inline uint64_t tcp_lock(void)
             __asm__ volatile ("pause");
         }
     }
+    __atomic_store_n(&g_tcp_lock.value, 1U, __ATOMIC_RELAXED);
     g_tcp_lock_hold_start = timer_ticks();
     g_tcp_lock_hold_caller = wait_caller;
     return flags;
@@ -295,8 +326,9 @@ static inline void tcp_unlock(uint64_t flags)
 {
     uint64_t hold_start = g_tcp_lock_hold_start;
     g_tcp_lock_hold_start = 0;
-    /* tcp_lock uses its own IRQ-save raw acquisition. */
-    spinlock_unlock_raw(&g_tcp_lock);
+    /* tcp_lock is a fair ticket lock; publish the next owner on release. */
+    __atomic_store_n(&g_tcp_lock.value, 0U, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_tcp_ticket_serving, 1U, __ATOMIC_RELEASE);
     tcp_irq_restore(flags);
     if (hold_start)
     {
@@ -315,6 +347,8 @@ static inline void tcp_unlock(uint64_t flags)
 void net_tcp_init(void)
 {
     spinlock_init(&g_tcp_lock);
+    __atomic_store_n(&g_tcp_ticket_next, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_tcp_ticket_serving, 0U, __ATOMIC_RELAXED);
     tcp_reassembly_pool_init();
     uint32_t freq = timer_frequency();
     if (freq == 0)
@@ -364,11 +398,20 @@ static void tcp_reset_socket(net_tcp_socket_t *socket)
     socket->state = TCP_STATE_UNUSED;
     wait_queue_init(&socket->wait_queue);
     socket->remote_window = 4096;
+    socket->remote_window_scale = 0;
+    socket->local_window_scale = NET_TCP_LOCAL_WINDOW_SCALE;
+    socket->peer_window_scale_seen = false;
+    socket->window_scaling_active = false;
     socket->max_retries = 10;
     socket->advertised_window = 0;
+    socket->advertised_window_effective = 0;
     socket->owner = NULL;
     socket->mss = NET_TCP_DEFAULT_MSS;
     socket->syn_challenge_acks = 0;
+    socket->ack_pending = false;
+    socket->ack_pending_segments = 0;
+    socket->ack_deadline_tick = 0;
+    __atomic_store_n(&socket->read_event_seq, 0, __ATOMIC_RELAXED);
     if (fd_registered && fd >= 0)
     {
         fd_release(fd);
@@ -398,7 +441,8 @@ static bool tcp_init_rx_buffer(net_tcp_socket_t *socket)
     socket->rx_head = 0;
     socket->rx_size = 0;
     socket->rx_backpressure = false;
-    socket->advertised_window = (uint16_t)NET_TCP_RX_MAX_CAPACITY;
+    socket->advertised_window = UINT16_MAX;
+    socket->advertised_window_effective = UINT16_MAX;
     return true;
 }
 
@@ -830,7 +874,7 @@ static void tcp_log_wait_event(const char *phase, net_tcp_socket_t *socket, uint
     bool error = false;
     bool awaiting_ack = false;
     bool rx_backpressure = false;
-    uint16_t remote_window = 0;
+    uint32_t remote_window = 0;
     uint16_t advertised = 0;
     uint16_t local_port = 0;
     uint16_t remote_port = 0;
@@ -866,7 +910,7 @@ static void tcp_log_wait_event(const char *phase, net_tcp_socket_t *socket, uint
     uint8_t ip_d = (uint8_t)(remote_ip & 0xFF);
     uint64_t waited_ms = tcp_ticks_to_ms(waited_ticks);
 
-    TCP_LOG("[tcp] wait %s pid=0x%016llX thread=%s local=%u remote=%u remote_ip=%u.%u.%u.%u state=%s waited_ms=%llu rx_size=%zu rx_capacity=%zu remote_win=0x%04X advertised=0x%04X awaiting_ack=%u remote_closed=%u error=%u rx_backpressure=%u\r\n",
+    TCP_LOG("[tcp] wait %s pid=0x%016llX thread=%s local=%u remote=%u remote_ip=%u.%u.%u.%u state=%s waited_ms=%llu rx_size=%zu rx_capacity=%zu remote_win=0x%08X advertised=0x%04X awaiting_ack=%u remote_closed=%u error=%u rx_backpressure=%u\r\n",
                   phase ? phase : "?",
                   (unsigned long long)pid,
                   thread_name,
@@ -1042,6 +1086,13 @@ bool net_tcp_socket_connect(net_tcp_socket_t *socket, uint32_t remote_ip, uint16
     socket->max_retries = 10;
     socket->syn_challenge_acks = 0;
     socket->mss = NET_TCP_DEFAULT_MSS;
+    socket->remote_window_scale = 0;
+    socket->local_window_scale = NET_TCP_LOCAL_WINDOW_SCALE;
+    socket->peer_window_scale_seen = false;
+    socket->window_scaling_active = false;
+    socket->ack_pending = false;
+    socket->ack_pending_segments = 0;
+    socket->ack_deadline_tick = 0;
 
     uint64_t now = timer_ticks();
     socket->last_activity_tick = now;
@@ -1210,6 +1261,7 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
         window_avail = socket->rx_capacity - socket->rx_size;
     }
     uint16_t prev_window = socket->advertised_window;
+    uint32_t prev_window_effective = socket->advertised_window_effective;
 #if TCP_TRACE_VERBOSE
     size_t rx_size_now = socket->rx_size;
     size_t rx_capacity_now = socket->rx_capacity;
@@ -1244,13 +1296,22 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
     TCP_LOG("%s", "\r\n");
 #endif
 
-    size_t available = window_avail;
+    size_t scale = socket->window_scaling_active ? socket->local_window_scale : 0U;
+    size_t available = scale ? (window_avail >> scale) : window_avail;
+    if (window_avail > 0 && available == 0)
+    {
+        available = 1;
+    }
     if (available > UINT16_MAX)
     {
         available = UINT16_MAX;
     }
     uint16_t window = (uint16_t)available;
-    if (window > prev_window &&
+    uint32_t effective_window = (uint32_t)window << scale;
+    bool material_window_growth = effective_window > prev_window_effective &&
+                                  effective_window - prev_window_effective >=
+                                      NET_TCP_WINDOW_UPDATE_THRESHOLD;
+    if ((prev_window == 0 || material_window_growth) &&
         socket->have_mac &&
         (socket->state == TCP_STATE_ESTABLISHED || socket->state == TCP_STATE_CLOSE_WAIT))
     {
@@ -1261,13 +1322,35 @@ size_t net_tcp_socket_read(net_tcp_socket_t *socket, uint8_t *buffer, size_t cap
         tcp_log_hex32((uint32_t)prev_window);
         TCP_LOG("%s", "\r\n");
 #endif
+        uint64_t ack_flags = tcp_lock();
         tcp_send_ack(socket);
+        tcp_unlock(ack_flags);
     }
 
     return to_copy;
 }
 
-static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
+typedef struct
+{
+    net_tcp_socket_t *socket;
+    uint64_t event_seq;
+} tcp_read_wait_context_t;
+
+static bool tcp_read_event_changed(void *context)
+{
+    tcp_read_wait_context_t *wait = (tcp_read_wait_context_t *)context;
+    if (!wait || !wait->socket)
+    {
+        return true;
+    }
+    return __atomic_load_n(&wait->socket->read_event_seq, __ATOMIC_ACQUIRE) !=
+           wait->event_seq;
+}
+
+static ssize_t tcp_read_blocking_timeout(net_tcp_socket_t *socket,
+                                         uint8_t *buffer,
+                                         size_t capacity,
+                                         uint64_t timeout_ticks)
 {
     if (!socket)
     {
@@ -1278,7 +1361,7 @@ static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size
         return 0;
     }
 
-    uint64_t last_wait_log = 0;
+    uint64_t start_tick = timer_ticks();
 
     for (;;)
     {
@@ -1286,6 +1369,7 @@ static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size
         bool error = socket->error || socket->state == TCP_STATE_ERROR;
         bool closed = socket->remote_closed && socket->rx_size == 0;
         size_t rx_size = socket->rx_size;
+        uint64_t event_seq = __atomic_load_n(&socket->read_event_seq, __ATOMIC_ACQUIRE);
         tcp_unlock(flags);
 
         if (error)
@@ -1321,22 +1405,35 @@ static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size
             return 0;
         }
 
-        uint64_t now = timer_ticks();
-        if (last_wait_log == 0 || now - last_wait_log >= timer_frequency())
+        uint64_t remaining = 0;
+        if (timeout_ticks > 0)
         {
-            if (tcp_debug_enabled())
+            uint64_t elapsed = timer_ticks() - start_tick;
+            if (elapsed >= timeout_ticks)
             {
-                TCP_LOG("[tcp] read_blocking yield socket=0x%016llX state=%s rx=%zu closed=%u\n",
-                              (unsigned long long)(uintptr_t)socket,
-                              net_tcp_socket_state(socket),
-                              rx_size,
-                              closed ? 1U : 0U);
+                return 0;
             }
-            last_wait_log = now;
+            remaining = timeout_ticks - elapsed;
         }
-        /* If a wakeup is missed, avoid spinning forever: sleep briefly. */
-        process_sleep_ms(1);
+
+        tcp_read_wait_context_t wait = {
+            .socket = socket,
+            .event_seq = event_seq,
+        };
+        bool ready = wait_queue_wait_timeout(&socket->wait_queue,
+                                             tcp_read_event_changed,
+                                             &wait,
+                                             remaining);
+        if (!ready && timeout_ticks > 0)
+        {
+            return 0;
+        }
     }
+}
+
+static ssize_t tcp_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
+{
+    return tcp_read_blocking_timeout(socket, buffer, capacity, 0);
 }
 
 bool net_tcp_socket_is_established(const net_tcp_socket_t *socket)
@@ -1491,7 +1588,7 @@ void net_tcp_log_state(const net_tcp_socket_t *socket, const char *tag)
     const char *state = net_tcp_socket_state(socket);
     size_t rx_size = socket->rx_size;
     size_t rx_cap = socket->rx_capacity;
-    uint16_t remote_win = socket->remote_window;
+    uint32_t remote_win = socket->remote_window;
     uint16_t advertised = socket->advertised_window;
     bool remote_closed = socket->remote_closed;
     bool error = socket->error || socket->state == TCP_STATE_ERROR;
@@ -1516,7 +1613,7 @@ void net_tcp_log_state(const net_tcp_socket_t *socket, const char *tag)
     uint8_t ip_c = (uint8_t)((remote_ip >> 8) & 0xFF);
     uint8_t ip_d = (uint8_t)(remote_ip & 0xFF);
 
-    TCP_LOG("[tcp] state tag=%s state=%s lp=%u rp=%u ip=%u.%u.%u.%u rx=%zu/%zu remote_win=0x%04X adv=0x%04X mss=%u await=%u pend=%zu unacked_seq=0x%08X unacked_len=0x%08X seq_next=0x%08X recv_next=0x%08X remote_closed=%u error=%u owner=%s owner_pid=0x%016llX\r\n",
+    TCP_LOG("[tcp] state tag=%s state=%s lp=%u rp=%u ip=%u.%u.%u.%u rx=%zu/%zu remote_win=0x%08X adv=0x%04X mss=%u await=%u pend=%zu unacked_seq=0x%08X unacked_len=0x%08X seq_next=0x%08X recv_next=0x%08X remote_closed=%u error=%u owner=%s owner_pid=0x%016llX\r\n",
                   tag ? tag : "(none)",
                   state ? state : "<unknown>",
                   (unsigned)local_port,
@@ -1545,6 +1642,14 @@ void net_tcp_log_state(const net_tcp_socket_t *socket, const char *tag)
 ssize_t net_tcp_socket_read_blocking(net_tcp_socket_t *socket, uint8_t *buffer, size_t capacity)
 {
     return tcp_read_blocking(socket, buffer, capacity);
+}
+
+ssize_t net_tcp_socket_read_blocking_timeout(net_tcp_socket_t *socket,
+                                             uint8_t *buffer,
+                                             size_t capacity,
+                                             uint64_t timeout_ticks)
+{
+    return tcp_read_blocking_timeout(socket, buffer, capacity, timeout_ticks);
 }
 
 static ssize_t tcp_fd_read(void *ctx, void *buffer, size_t count)
@@ -1657,6 +1762,11 @@ void net_tcp_poll(void)
                 tcp_mark_error(socket, "arp timeout");
             }
             continue;
+        }
+
+        if (socket->ack_pending && now >= socket->ack_deadline_tick)
+        {
+            tcp_send_ack(socket);
         }
 
         if (socket->awaiting_ack)
@@ -1914,6 +2024,16 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
                     socket->mss = mss_clamped;
                 }
             }
+            else if (kind == 3 && klen == 3)
+            {
+                uint8_t shift = opt[2];
+                if (shift > 14U)
+                {
+                    shift = 14U;
+                }
+                socket->remote_window_scale = shift;
+                socket->peer_window_scale_seen = true;
+            }
             opt += klen;
             opt_len -= klen;
         }
@@ -1935,7 +2055,14 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         goto out;
     }
 
-    socket->remote_window = window;
+    if ((flags & TCP_FLAG_SYN) != 0 || !socket->window_scaling_active)
+    {
+        socket->remote_window = window;
+    }
+    else
+    {
+        socket->remote_window = (uint32_t)window << socket->remote_window_scale;
+    }
     socket->last_activity_tick = timer_ticks();
 
     if (flags & TCP_FLAG_RST)
@@ -1971,6 +2098,9 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         socket->pending_flags = 0;
         socket->retry_count = 0;
         socket->awaiting_ack = false;
+        socket->remote_window_scale = 0;
+        socket->peer_window_scale_seen = false;
+        socket->window_scaling_active = false;
         socket->connect_deadline = timer_ticks() + g_connect_timeout_ticks;
 
         if (!tcp_send_syn(socket))
@@ -1999,6 +2129,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         socket->unacked_len = 0;
         socket->pending_payload_len = 0;
         socket->pending_flags = 0;
+        socket->window_scaling_active = socket->peer_window_scale_seen;
         tcp_send_ack(socket);
         wake_waiters = true;
         seq_num += 1;
@@ -2007,7 +2138,11 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     const uint8_t *payload = tcp + tcp_header_len;
     if (payload_len > 0)
     {
-        tcp_process_payload(socket, seq_num, payload, payload_len);
+        tcp_process_payload(socket,
+                            seq_num,
+                            payload,
+                            payload_len,
+                            (flags & TCP_FLAG_PSH) != 0);
         wake_waiters = true;
         TCP_LOG("[tcp] rx payload socket=0x%016llX len=%zu rx_size=%zu state=%s\n",
                       (unsigned long long)(uintptr_t)socket,
@@ -2023,6 +2158,7 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         {
             socket->recv_next = fin_seq + 1;
             socket->remote_closed = true;
+            tcp_signal_read_event(socket);
             wake_waiters = true;
             if (socket->state == TCP_STATE_ESTABLISHED)
             {
@@ -2087,7 +2223,8 @@ static void tcp_handle_ack(net_tcp_socket_t *socket, uint32_t ack_num)
 }
 
 static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
-                                const uint8_t *payload, size_t payload_len)
+                                const uint8_t *payload, size_t payload_len,
+                                bool immediate_ack)
 {
     if (!socket || payload_len == 0)
     {
@@ -2174,6 +2311,7 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
     memcpy(socket->rx_buffer + socket->rx_head + socket->rx_size, payload, payload_len);
     socket->rx_size += payload_len;
     socket->recv_next += (uint32_t)payload_len;
+    tcp_signal_read_event(socket);
     size_t rx_free = 0;
     if (socket->rx_capacity > socket->rx_size)
     {
@@ -2186,9 +2324,7 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
 
     tcp_reassembly_drain(socket);
 
-    wait_queue_wake_all(&socket->wait_queue);
-
-    tcp_send_ack(socket);
+    tcp_schedule_ack(socket, immediate_ack || payload_len < socket->mss);
 }
 
 static void tcp_send_ack(net_tcp_socket_t *socket)
@@ -2211,6 +2347,9 @@ static void tcp_send_ack(net_tcp_socket_t *socket)
     uint8_t flags = TCP_FLAG_ACK;
     if (tcp_send_segment(socket, socket->seq_next, flags, NULL, 0, false, false))
     {
+        socket->ack_pending = false;
+        socket->ack_pending_segments = 0;
+        socket->ack_deadline_tick = 0;
 #if TCP_TRACE_VERBOSE
         TCP_LOG("%s", "tcp: send ack seq=0x");
         tcp_log_hex32(socket->seq_next);
@@ -2232,6 +2371,41 @@ static void tcp_send_ack(net_tcp_socket_t *socket)
         {
             socket->reass_last_ack_tick = timer_ticks();
         }
+    }
+}
+
+static void tcp_schedule_ack(net_tcp_socket_t *socket, bool immediate)
+{
+    if (!socket)
+    {
+        return;
+    }
+    if (immediate)
+    {
+        tcp_send_ack(socket);
+        return;
+    }
+
+    if (!socket->ack_pending)
+    {
+        uint32_t freq = timer_frequency();
+        if (freq == 0)
+        {
+            freq = 100;
+        }
+        socket->ack_pending = true;
+        socket->ack_pending_segments = 1;
+        socket->ack_deadline_tick = timer_ticks() + ((freq / 100U) ? (freq / 100U) : 1U);
+        return;
+    }
+
+    if (socket->ack_pending_segments < UINT8_MAX)
+    {
+        socket->ack_pending_segments++;
+    }
+    if (socket->ack_pending_segments >= NET_TCP_DELAYED_ACK_SEGMENTS)
+    {
+        tcp_send_ack(socket);
     }
 }
 
@@ -2282,6 +2456,7 @@ static void tcp_mark_error(net_tcp_socket_t *socket, const char *reason)
     socket->state = TCP_STATE_ERROR;
     socket->awaiting_ack = false;
     socket->pending_payload_len = 0;
+    tcp_signal_read_event(socket);
     wait_queue_wake_all(&socket->wait_queue);
 }
 
@@ -2312,7 +2487,7 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     }
 
     bool syn = (flags & TCP_FLAG_SYN) != 0;
-    size_t opt_len = syn ? 4U : 0U; /* MSS option */
+    size_t opt_len = syn ? 8U : 0U; /* MSS + NOP + window scale */
     size_t tcp_header_len = 20U + opt_len;
     size_t ip_header_len = 20U;
     size_t frame_len = 14 + ip_header_len + tcp_header_len + payload_len;
@@ -2367,11 +2542,19 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
     {
         window_avail = socket->rx_capacity - socket->rx_size;
     }
-    if (window_avail > UINT16_MAX)
+    size_t scale = (!syn && socket->window_scaling_active)
+        ? socket->local_window_scale
+        : 0U;
+    size_t encoded_window = scale ? (window_avail >> scale) : window_avail;
+    if (window_avail > 0 && encoded_window == 0)
     {
-        window_avail = UINT16_MAX;
+        encoded_window = 1;
     }
-    uint16_t window = (uint16_t)window_avail;
+    if (encoded_window > UINT16_MAX)
+    {
+        encoded_window = UINT16_MAX;
+    }
+    uint16_t window = (uint16_t)encoded_window;
     // if (window == 0)
     // {
     //     serial_write_string("tcp: warn zero window seq=0x");
@@ -2400,6 +2583,10 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
         opt[0] = 2; /* MSS */
         opt[1] = 4;
         write_be16(opt + 2, advertised_mss);
+        opt[4] = 1; /* NOP: align the three-byte window-scale option. */
+        opt[5] = 3;
+        opt[6] = 3;
+        opt[7] = socket->local_window_scale;
     }
 
     if (payload_len > 0 && payload)
@@ -2470,6 +2657,14 @@ static bool tcp_send_segment(net_tcp_socket_t *socket, uint32_t seq, uint8_t fla
         return false;
     }
     socket->advertised_window = window;
+    socket->advertised_window_effective = (uint32_t)window << scale;
+    if ((flags & TCP_FLAG_ACK) != 0 &&
+        (payload_len > 0 || (flags & TCP_FLAG_FIN) != 0))
+    {
+        socket->ack_pending = false;
+        socket->ack_pending_segments = 0;
+        socket->ack_deadline_tick = 0;
+    }
 
     if (advance_seq)
     {

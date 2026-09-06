@@ -35,8 +35,8 @@ This file covers important kernel subsystems not captured in the main boot/proce
 ## Audio
 
 - `src/kernel/audio.c` and `src/drivers/hda.c`: audio device initialisation and control surfaces; HDA init may be deferred to a kernel thread.
+- See [Audio streaming and playback diagnostics](audio.md) for the PCM contract, ATK MP3 worker, queue ownership, runtime counters and QEMU capture workflow.
 
 ## Fonts
 
 - `src/kernel/font.c`, `src/kernel/ttf.c`, `src/kernel/font_cache.c`: font loading/raster and caching (used by console/UI).
-

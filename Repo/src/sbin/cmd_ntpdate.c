@@ -14,6 +14,7 @@
 #define NTP_DEFAULT_SERVER "pool.ntp.org"
 #define NTP_ETH_MIN_FRAME 60
 #define NTP_PORT 123
+#define NTP_ATTEMPT_TIMEOUT_SECONDS 2ULL
 
 static const char *ntp_skip_ws(const char *s);
 static bool ntp_read_token(const char **cursor, char *out, size_t capacity);
@@ -77,19 +78,36 @@ bool shell_cmd_ntpdate(shell_state_t *shell, shell_output_t *out, const char *ar
         }
     }
 
-    uint32_t server_ip = 0;
+    uint32_t server_ips[NET_DNS_MAX_ADDRS];
+    size_t server_count = 0;
     bool resolved = false;
-    if (!net_parse_ipv4(server_name, &server_ip))
+    uint32_t literal_ip = 0;
+    if (net_parse_ipv4(server_name, &literal_ip))
+    {
+        server_ips[0] = literal_ip;
+        server_count = 1;
+    }
+    else
     {
         shell_output_write(out, "Resolving ");
         shell_output_write(out, server_name);
         shell_output_write(out, "...\n");
-        if (!net_dns_resolve_ipv4(server_name, requested_iface, &server_ip))
+        server_count = net_dns_resolve_ipv4_all(server_name,
+                                                requested_iface,
+                                                server_ips,
+                                                NET_DNS_MAX_ADDRS);
+        if (server_count == 0)
         {
             return shell_output_error(out, "unable to resolve server");
         }
         resolved = true;
     }
+
+    size_t server_index = 0;
+
+try_server:
+    ;
+    uint32_t server_ip = server_ips[server_index];
 
     net_interface_t *iface = requested_iface;
     uint32_t next_hop_ip = server_ip;
@@ -211,7 +229,7 @@ bool shell_cmd_ntpdate(shell_state_t *shell, shell_output_t *out, const char *ar
     }
 
     uint64_t start_tick = timer_ticks();
-    uint64_t timeout_ticks = freq * 5ULL;
+    uint64_t timeout_ticks = freq * NTP_ATTEMPT_TIMEOUT_SECONDS;
     shell_output_write(out, "Waiting for response...\n");
     while (timer_ticks() - start_tick < timeout_ticks)
     {
@@ -243,6 +261,20 @@ bool shell_cmd_ntpdate(shell_state_t *shell, shell_output_t *out, const char *ar
     }
 
     net_ntp_clear_pending();
+    server_index++;
+    if (server_index < server_count)
+    {
+        char failed_ip[32];
+        char retry_ip[32];
+        net_format_ipv4(server_ip, failed_ip);
+        net_format_ipv4(server_ips[server_index], retry_ip);
+        shell_output_write(out, "No response from ");
+        shell_output_write(out, failed_ip);
+        shell_output_write(out, "; trying ");
+        shell_output_write(out, retry_ip);
+        shell_output_write(out, "...\n");
+        goto try_server;
+    }
     return shell_output_error(out, "NTP timeout");
 }
 

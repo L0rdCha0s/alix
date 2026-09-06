@@ -5,6 +5,7 @@
 
 #define NET_DNS_NAME_MAX 255
 #define NET_DNS_MAX_SERVERS 4
+#define NET_DNS_MAX_ADDRS 8
 
 #define NET_DNS_TYPE_A     0x0001
 #define NET_DNS_TYPE_CNAME 0x0005
@@ -13,6 +14,8 @@ typedef struct
 {
     bool has_a;
     uint32_t addr;
+    uint32_t addrs[NET_DNS_MAX_ADDRS];
+    size_t addr_count;
     bool has_cname;
     char cname[NET_DNS_NAME_MAX + 1];
     uint16_t rr_type;
@@ -26,6 +29,10 @@ bool net_dns_resolve(const char *hostname, uint16_t qtype,
                      net_interface_t *preferred_iface, net_dns_result_t *result);
 bool net_dns_resolve_ipv4(const char *hostname, net_interface_t *preferred_iface,
                           uint32_t *out_addr);
+size_t net_dns_resolve_ipv4_all(const char *hostname,
+                                net_interface_t *preferred_iface,
+                                uint32_t *out_addrs,
+                                size_t capacity);
 bool net_dns_resolve_cname(const char *hostname, net_interface_t *preferred_iface,
                            char *out_buffer, size_t buffer_len);
 
