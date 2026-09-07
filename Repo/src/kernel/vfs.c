@@ -215,7 +215,7 @@ static void vfs_inherit_mutability(vfs_node_t *parent, vfs_node_t *child);
 static void vfs_inherit_ownership(vfs_node_t *parent, vfs_node_t *child);
 static void vfs_set_subtree_mutable_locked(vfs_node_t *node, bool allow);
 static bool vfs_mount_writeback(vfs_mount_t *mount, bool force);
-static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all);
+static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all, bool force_sync);
 static bool vfs_mount_flush_single(vfs_node_t *node);
 void vfs_node_retain(vfs_node_t *node);
 void vfs_node_release(vfs_node_t *node);
@@ -977,7 +977,7 @@ static void vfs_note_file_dirty(vfs_node_t *node, size_t start, size_t len, bool
     }
 }
 
-static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all)
+static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all, bool force_sync)
 {
     if (!mount || !mount->backend || !mount->mount_point)
     {
@@ -1056,7 +1056,7 @@ static bool vfs_mount_flush_tree(vfs_mount_t *mount, bool force_all)
             {
                 needs_flush = true;
             }
-            if (needs_flush && node->disk_data_dirty &&
+            if (!force_sync && needs_flush && node->disk_data_dirty &&
                 node->pending_dirty_bytes < VFS_ACTIVE_WRITE_FLUSH_THRESHOLD &&
                 node->last_data_write_tick != 0)
             {
@@ -1138,16 +1138,69 @@ static bool vfs_mount_flush_single(vfs_node_t *node)
     }
     vfs_mount_t *mount = node->mount;
     bool ok = true;
+    uint64_t start_ticks = timer_ticks();
     if (!vfs_sync_lock_acquire(mount))
     {
         return false;
     }
-    ok = alixfs_mount_flush_single(mount->backend, node, mount, false);
+    /* Persist new directory ancestors first so a freshly downloaded file has
+     * valid parent IDs on the next mount. Retain the chain across yielding IO. */
+    size_t count = 0;
+    size_t capacity = 16;
+    vfs_node_t **chain = (vfs_node_t **)malloc(capacity * sizeof(*chain));
+    if (!chain)
+    {
+        vfs_sync_lock_release(mount);
+        return false;
+    }
+    vfs_tree_lock_acquire();
+    for (vfs_node_t *parent = node; parent && parent->mount == mount; parent = parent->parent)
+    {
+        if (count == capacity)
+        {
+            if (capacity > SIZE_MAX / (2 * sizeof(*chain)))
+            {
+                ok = false;
+                break;
+            }
+            capacity *= 2;
+            vfs_node_t **resized = (vfs_node_t **)realloc(chain, capacity * sizeof(*chain));
+            if (!resized)
+            {
+                ok = false;
+                break;
+            }
+            chain = resized;
+        }
+        vfs_node_retain(parent);
+        chain[count++] = parent;
+    }
+    vfs_tree_lock_release();
+    for (size_t i = count; ok && i > 0; --i)
+    {
+        ok = alixfs_mount_flush_single(mount->backend, chain[i - 1], mount, false);
+    }
     if (ok)
     {
         ok = alixfs_mount_commit(mount->backend);
     }
+    if (ok)
+    {
+        ok = block_flush(mount->device);
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        vfs_node_release(chain[i]);
+    }
+    free(chain);
     vfs_sync_lock_release(mount);
+
+    if (vfs_logs_enabled())
+    {
+        serial_printf("[vfs] file_sync status=%s duration_ms=%llu",
+                      ok ? "ok" : "fail",
+                      (unsigned long long)vfs_ticks_to_ms(timer_ticks() - start_ticks));
+    }
 
     if (!ok)
     {
@@ -2456,7 +2509,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
         return true;
     }
     bool do_flush = force;
-    bool force_all = force;
+    bool force_all = false;
     size_t pending_bytes = 0;
     uint64_t start_seq = 0;
     const char *dev_name = (mount->device && mount->device->name[0]) ? mount->device->name : "(anon)";
@@ -2465,7 +2518,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     if (mount->dirty || mount->needs_full_sync || force)
     {
         do_flush = true;
-        force_all = force || mount->needs_full_sync;
+        force_all = mount->needs_full_sync;
         pending_bytes = mount->dirty_bytes;
         start_seq = mount->dirty_seq;
         mount->dirty = false;
@@ -2487,7 +2540,7 @@ static bool vfs_mount_writeback(vfs_mount_t *mount, bool force)
     {
         return false;
     }
-    bool ok = vfs_mount_flush_tree(mount, force_all);
+    bool ok = vfs_mount_flush_tree(mount, force_all, force);
     if (ok && mount->backend)
     {
         ok = alixfs_mount_commit(mount->backend);

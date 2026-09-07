@@ -615,7 +615,21 @@ static bool wget_tls_handshake(shell_output_t *out,
 
 bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
 {
-    const char *cursor = args ? args : "";
+    const char *cursor = skip_ws(args ? args : "");
+    bool profile = false;
+    if (strncmp(cursor, "--profile", 9u) == 0 &&
+        (cursor[9] == '\0' || cursor[9] == ' ' || cursor[9] == '\t'))
+    {
+        profile = true;
+        cursor = skip_ws(cursor + 9u);
+    }
+    uint64_t profile_start = timer_ticks();
+    uint64_t receive_start = 0;
+    uint64_t read_ticks = 0;
+    uint64_t append_ticks = 0;
+    uint64_t reserve_ticks = 0;
+    uint64_t flush_ticks = 0;
+    size_t read_calls = 0;
     char tokens[3][256];
     size_t token_count = 0;
 
@@ -627,12 +641,12 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     cursor = skip_ws(cursor);
     if (*cursor != '\0')
     {
-        return shell_output_error(out, "Usage: wget [iface] <url> [dest]");
+        return shell_output_error(out, "Usage: wget [--profile] [iface] <url> [dest]");
     }
 
     if (token_count == 0)
     {
-        return shell_output_error(out, "Usage: wget [iface] <url> [dest]");
+        return shell_output_error(out, "Usage: wget [--profile] [iface] <url> [dest]");
     }
 
     bool have_iface = false;
@@ -670,7 +684,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     }
     else if (token_count < 2)
     {
-        return shell_output_error(out, "Usage: wget [iface] <url> [dest]");
+        return shell_output_error(out, "Usage: wget [--profile] [iface] <url> [dest]");
     }
 
     if (!url_arg || url_arg[0] == '\0')
@@ -917,7 +931,6 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         shell_output_error(out, "could not open destination file");
         goto cleanup;
     }
-    vfs_truncate(file);
 
     char host_header[160];
     size_t host_len = strlen(host_name);
@@ -993,7 +1006,6 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     serial_printf("[wget] sent request bytes=%zu\r\n", req_len);
 #endif
     shell_output_write(out, "Request sent, awaiting response...\n");
-    serial_printf("%s", "[wget] enter recv loop\r\n");
 
     header_buf = (char *)malloc(WGET_HEADER_CAP);
     chunk = (uint8_t *)malloc(WGET_CHUNK_SIZE);
@@ -1014,6 +1026,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
     bool chunked_done = false;
     uint64_t last_progress = timer_ticks();
     uint64_t last_status_log = last_progress;
+    receive_start = timer_ticks();
 
     // uint64_t loop_iter = 0;
 
@@ -1052,11 +1065,19 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         size_t bytes_read = 0;
         if (tls_active)
         {
+            uint64_t read_start = profile ? timer_ticks() : 0;
             bytes_read = tls_session_recv(tls_session, chunk, WGET_CHUNK_SIZE);
+            if (profile)
+            {
+                read_ticks += timer_ticks() - read_start;
+                read_calls++;
+            }
+#if WGET_TRACE_ENABLE
             serial_printf("[wget] recv tls bytes=%zu err=%u remote_closed=%u\r\n",
                           bytes_read,
                           net_tcp_socket_has_error(socket) ? 1U : 0U,
                           net_tcp_socket_remote_closed(socket) ? 1U : 0U);
+#endif
 #if WGET_TLS_TRACE_ENABLE
             if (bytes_read > 0 && !tls_trace_logged_first_payload)
             {
@@ -1104,10 +1125,16 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         }
         else
         {
+            uint64_t read_start = profile ? timer_ticks() : 0;
             ssize_t got_result = net_tcp_socket_read_blocking_timeout(socket,
                                                                       chunk,
                                                                       WGET_CHUNK_SIZE,
                                                                       data_timeout);
+            if (profile)
+            {
+                read_ticks += timer_ticks() - read_start;
+                read_calls++;
+            }
             if (got_result < 0)
             {
                 shell_output_error(out, "TCP connection error");
@@ -1185,9 +1212,11 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
             if (header_done && !header_parsed)
             {
                 int status_code = 0;
+#if WGET_TRACE_ENABLE
                 shell_output_write(out, "HTTP headers received:\n");
                 shell_output_write(out, header_buf);
                 shell_output_write(out, "\n");
+#endif
                 if (!parse_http_status(header_buf, &status_code))
                 {
                     shell_output_error(out, "invalid HTTP status line");
@@ -1244,10 +1273,15 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     have_length = true;
                     if (file && !file_preallocated)
                     {
+                        uint64_t reserve_start = profile ? timer_ticks() : 0;
                         if (!vfs_reserve(file, content_length))
                         {
                             shell_output_error(out, "failed to reserve file storage");
                             goto cleanup;
+                        }
+                        if (profile)
+                        {
+                            reserve_ticks += timer_ticks() - reserve_start;
                         }
                         file_preallocated = true;
                     }
@@ -1266,6 +1300,7 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         if (bytes_read > body_offset)
         {
             size_t body_len = bytes_read - body_offset;
+            uint64_t append_start = profile ? timer_ticks() : 0;
 
             if (is_chunked)
             {
@@ -1301,6 +1336,10 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
                     goto cleanup;
                 }
             }
+            if (profile)
+            {
+                append_ticks += timer_ticks() - append_start;
+            }
         }
 
 #if WGET_PROGRESS_LOG
@@ -1320,6 +1359,33 @@ bool shell_cmd_wget(shell_state_t *shell, shell_output_t *out, const char *args)
         }
     }
 
+    if (!header_parsed || (is_chunked && !chunked_done) ||
+        (have_length && written != content_length))
+    {
+        shell_output_error(out, "incomplete HTTP response");
+        goto cleanup;
+    }
+    /* Report success only after the destination and its metadata are durable.
+     * Unmounted RAM files (including the updater's /tmp archive) are a no-op. */
+    uint64_t flush_start = profile ? timer_ticks() : 0;
+    if (!vfs_flush_node(file))
+    {
+        shell_output_error(out, "failed to persist destination file");
+        goto cleanup;
+    }
+    if (profile)
+    {
+        flush_ticks = timer_ticks() - flush_start;
+        serial_printf("[wget] profile bytes=%zu setup_ms=%llu read_ms=%llu append_ms=%llu reserve_ms=%llu flush_ms=%llu total_ms=%llu reads=%zu",
+                      written,
+                      (unsigned long long)wget_ticks_to_ms(receive_start - profile_start),
+                      (unsigned long long)wget_ticks_to_ms(read_ticks),
+                      (unsigned long long)wget_ticks_to_ms(append_ticks),
+                      (unsigned long long)wget_ticks_to_ms(reserve_ticks),
+                      (unsigned long long)wget_ticks_to_ms(flush_ticks),
+                      (unsigned long long)wget_ticks_to_ms(timer_ticks() - profile_start),
+                      read_calls);
+    }
     success = true;
 #if WGET_PROGRESS_LOG
     {

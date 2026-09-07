@@ -2039,18 +2039,15 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
         }
     }
 
-    /* Validate checksum */
+    /* The one's-complement checksum over an intact valid segment is zero.
+     * Validate the DMA buffer directly, without copying a full packet onto
+     * the interrupted thread's stack just to clear the checksum field. */
     size_t tcp_len = tcp_header_len + payload_len;
-    uint8_t tcp_copy[60 + NET_TCP_MAX_PAYLOAD];
-    if (tcp_len > sizeof(tcp_copy))
+    if (tcp_len > 60U + NET_TCP_MAX_PAYLOAD)
     {
         goto out;
     }
-    memcpy(tcp_copy, tcp, tcp_len);
-    tcp_copy[16] = 0;
-    tcp_copy[17] = 0;
-    uint16_t calc = tcp_checksum(socket, tcp_copy, tcp_len);
-    if (calc != read_be16(tcp + 16))
+    if (tcp_checksum(socket, tcp, tcp_len) != 0)
     {
         goto out;
     }
@@ -2138,12 +2135,16 @@ void net_tcp_handle_frame(net_interface_t *iface, const uint8_t *frame, size_t l
     const uint8_t *payload = tcp + tcp_header_len;
     if (payload_len > 0)
     {
+        bool was_empty = socket->rx_size == 0;
         tcp_process_payload(socket,
                             seq_num,
                             payload,
                             payload_len,
                             (flags & TCP_FLAG_PSH) != 0);
-        wake_waiters = true;
+        /* Readers only sleep on an empty buffer. The event sequence protects
+         * the check-to-sleep race; buffered packets need no scheduler lock. */
+        wake_waiters = wake_waiters || socket->error ||
+                       (was_empty && socket->rx_size > 0);
         TCP_LOG("[tcp] rx payload socket=0x%016llX len=%zu rx_size=%zu state=%s\n",
                       (unsigned long long)(uintptr_t)socket,
                       payload_len,
@@ -2324,7 +2325,11 @@ static void tcp_process_payload(net_tcp_socket_t *socket, uint32_t seq_num,
 
     tcp_reassembly_drain(socket);
 
-    tcp_schedule_ack(socket, immediate_ack || payload_len < socket->mss);
+    /* MSS is an upper bound, not the peer's actual segment size. Slirp,
+     * for example, negotiates 1460 but streams 1440-byte payloads. Treating
+     * every shorter segment as urgent defeats delayed ACK for that stream.
+     * PSH still requests an immediate ACK; an unpaired tail is timer-bound. */
+    tcp_schedule_ack(socket, immediate_ack);
 }
 
 static void tcp_send_ack(net_tcp_socket_t *socket)

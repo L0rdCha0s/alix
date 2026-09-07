@@ -55,6 +55,13 @@ Important characteristics:
 - **Process policies**: priority, priority overrides, and affinity apply to every existing thread and are retained as defaults for threads created later.
 - **Idle threads**: there is an idle thread per CPU that halts (`hlt`) when no runnable work exists.
 - **Affinity**: `thread_set_affinity` and process-level affinity can force a thread onto a specific CPU run queue to avoid stranding.
+- **Selection handoff**: dequeueing claims a thread and removes it from its run
+  queue. The scheduler retains its lock and masked interrupts from that claim
+  through `switch_to_thread` until assembly moves stacks and releases the lock.
+  Failed handoffs release the lock before selecting a replacement; the original
+  interrupt flags are passed to assembly so the resumed thread restores its
+  prior state. `tests/scheduler_handoff_test.py` exercises this boundary with
+  interrupts enabled/disabled and with a rejected first candidate.
 - **Preemption migration**: when an affinity- or UI-bound current thread is requeued, it is placed directly on its required CPU's queue; the old CPU retains stack ownership until the assembly handoff clears it.
 - **Spinlock ownership**: generic kernel spinlocks maintain a per-thread nesting depth (with a per-CPU fallback before scheduler threads exist). Timer callbacks, timer/IPI scheduler housekeeping, and voluntary yields defer lock-taking or preemption while that depth is non-zero, ensuring an interrupted lock owner cannot invert the scheduler-to-subsidiary-lock order. Locks shared with an IRQ handler use the IRQ-save helpers; release publishes the unlocked word and restores the saved interrupt state while the nesting guard is still raised. The scheduler's cross-stack lock uses raw lock operations because assembly releases it only after moving to the incoming stack.
 

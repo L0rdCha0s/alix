@@ -100,6 +100,9 @@ def main() -> int:
 
     if makefile.count("wget gateway:8000/build/user/") != 2:
         raise AssertionError("dl.sh must use exactly two bootstrap/archive HTTP transfers")
+    require(makefile,
+            "wget gateway:8000/build/user/runtime/unzip.elf /tmp/dl-unzip.elf",
+            "dl.sh bootstrap must use the runtime ELF without DWARF")
     require(makefile, "USER_ELF_ARCHIVE := $(USER_OBJDIR)/user-elfs.zip",
             "user ELF archive target is missing")
     require(makefile, "/tmp/user-elfs.zip",

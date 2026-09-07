@@ -510,6 +510,7 @@ static bool alixfs_assign_node_id(alixfs_mount_t *fs, vfs_node_t *node)
 
 static bool alixfs_serialize_node(vfs_node_t *node,
                                   uint32_t version,
+                                  bool metadata_only,
                                   uint8_t **out_buf,
                                   size_t *out_len)
 {
@@ -531,7 +532,7 @@ static bool alixfs_serialize_node(vfs_node_t *node,
         data_len = node->size;
     }
     size_t header_size = alixfs_node_disk_header_size(version);
-    size_t total = header_size + name_len + data_len;
+    size_t total = header_size + name_len + (metadata_only ? 0 : data_len);
     uint8_t *buffer = (uint8_t *)malloc(total);
     if (!buffer)
     {
@@ -586,7 +587,7 @@ static bool alixfs_serialize_node(vfs_node_t *node,
         memcpy(buffer + offset, node->name, name_len);
         offset += name_len;
     }
-    if (data_len > 0 && node->data)
+    if (!metadata_only && data_len > 0 && node->data)
     {
         memcpy(buffer + offset, node->data, data_len);
     }
@@ -613,6 +614,7 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
     uint32_t node_id = UINT32_MAX;
     uint64_t dirty_seq = 0;
     size_t pending_bytes = 0;
+    bool metadata_only = false;
 
     spinlock_lock(&node->data_lock);
     bool dirty = force_all;
@@ -638,43 +640,59 @@ static bool alixfs_write_node(alixfs_mount_t *fs, vfs_node_t *node, bool force_a
         return false;
     }
     node_id = node->disk_id;
+    alixfs2_chunk_entry_t *entry = &fs->chunks[node_id];
+    size_t name_len = node->name ? strlen(node->name) : 0;
+    size_t data_len = (node->type == VFS_NODE_FILE || node->type == VFS_NODE_SYMLINK)
+        ? node->size : 0;
+    size_t stored_len = alixfs_node_disk_header_size(fs->header.version) + name_len + data_len;
+    /* Timestamp/ownership changes must not copy and rewrite an unchanged file. */
+    metadata_only = !force_all && !node->disk_data_dirty && !node->disk_name_dirty &&
+        entry->capacity > 0 && entry->length == stored_len;
 
-    if (!alixfs_serialize_node(node, fs->header.version, &payload, &payload_len))
+    if (!alixfs_serialize_node(node, fs->header.version, metadata_only, &payload, &payload_len))
     {
         spinlock_unlock(&node->data_lock);
         return false;
     }
     spinlock_unlock(&node->data_lock);
 
-    alixfs2_chunk_entry_t *entry = &fs->chunks[node_id];
-    size_t aligned = alixfs_align_size(payload_len, fs->sector_size);
+    size_t aligned = alixfs_align_size(stored_len, fs->sector_size);
+    uint64_t next_offset = entry->offset;
+    uint32_t next_capacity = entry->capacity;
+    bool relocated = false;
     if (entry->capacity < aligned)
     {
-        if (entry->capacity > 0)
-        {
-            alixfs_chunk_release(fs, entry->offset, entry->capacity);
-        }
-        uint64_t new_offset = 0;
-        uint32_t new_cap = 0;
-        if (!alixfs_chunk_allocate(fs, aligned, &new_offset, &new_cap))
+        if (!alixfs_chunk_allocate(fs, aligned, &next_offset, &next_capacity))
         {
             free(payload);
             return false;
         }
-        entry->offset = new_offset;
-        entry->capacity = new_cap;
+        relocated = true;
     }
     if (!alixfs_device_write(fs->device,
                               fs->sector_size,
-                              entry->offset,
+                              next_offset,
                               payload,
                               payload_len))
     {
+        if (relocated)
+        {
+            alixfs_chunk_release(fs, next_offset, next_capacity);
+        }
         free(payload);
         return false;
     }
-    entry->length = (uint32_t)payload_len;
-    alixfs_mark_chunk_dirty(fs, node_id);
+    if (relocated)
+    {
+        alixfs_chunk_release(fs, entry->offset, entry->capacity);
+        entry->offset = next_offset;
+        entry->capacity = next_capacity;
+    }
+    if (relocated || entry->length != stored_len)
+    {
+        entry->length = (uint32_t)stored_len;
+        alixfs_mark_chunk_dirty(fs, node_id);
+    }
 
     spinlock_lock(&node->data_lock);
     if (node->dirty_seq == dirty_seq)
@@ -728,22 +746,38 @@ static bool alixfs_flush_chunk_table(alixfs_mount_t *fs)
     {
         return true;
     }
-    for (uint32_t id = 0; id < fs->header.node_capacity; ++id)
+    for (size_t offset = 0; offset < fs->chunk_table_bytes; offset += fs->sector_size)
     {
-        if (!((fs->chunk_dirty_bitmap[id / 8] >> (id % 8)) & 1u))
+        size_t bytes = fs->chunk_table_bytes - offset;
+        if (bytes > fs->sector_size)
+        {
+            bytes = fs->sector_size;
+        }
+        uint32_t first = (uint32_t)(offset / sizeof(alixfs2_chunk_entry_t));
+        uint32_t end = (uint32_t)((offset + bytes) / sizeof(alixfs2_chunk_entry_t));
+        bool dirty = false;
+        for (uint32_t id = first; id < end; ++id)
+        {
+            dirty |= ((fs->chunk_dirty_bitmap[id / 8] >> (id % 8)) & 1u) != 0;
+        }
+        if (!dirty)
         {
             continue;
         }
-        uint64_t offset = fs->node_table_offset + (uint64_t)id * sizeof(alixfs2_chunk_entry_t);
+        /* The complete table is resident: write each dirty sector once, without
+         * a read/modify/write for each of its 32 individual chunk entries. */
         if (!alixfs_device_write(fs->device,
                                   fs->sector_size,
-                                  offset,
-                                  &fs->chunks[id],
-                                  sizeof(alixfs2_chunk_entry_t)))
+                                  fs->node_table_offset + offset,
+                                  (uint8_t *)fs->chunks + offset,
+                                  bytes))
         {
             return false;
         }
-        alixfs_clear_chunk_dirty(fs, id);
+        for (uint32_t id = first; id < end; ++id)
+        {
+            alixfs_clear_chunk_dirty(fs, id);
+        }
     }
     return true;
 }
@@ -1277,7 +1311,7 @@ bool alixfs_mount_format(block_device_t *device)
     root_stub.gid = VFS_GID_ROOT;
     uint8_t *payload = NULL;
     size_t payload_len = 0;
-    if (!alixfs_serialize_node(&root_stub, header.version, &payload, &payload_len))
+    if (!alixfs_serialize_node(&root_stub, header.version, false, &payload, &payload_len))
     {
         return false;
     }

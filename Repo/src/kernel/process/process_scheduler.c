@@ -2302,7 +2302,9 @@ static void scheduler_finish_switch(void)
     }
 }
 
-static bool switch_to_thread(thread_t *next)
+/* Consume the scheduler lock held by selection. A dequeued next thread is
+ * already claimed and must stay protected until the assembly stack handoff. */
+static bool switch_to_thread(thread_t *next, uint64_t sched_lock_enter)
 {
     thread_t *prev = current_thread_local();
     if (prev && !thread_pointer_valid(prev))
@@ -2323,7 +2325,6 @@ static bool switch_to_thread(thread_t *next)
     }
     process_t *next_process = next ? next->process : NULL;
     uint32_t cpu_idx = current_cpu_index();
-    uint64_t sched_lock_enter = scheduler_lock_acquire("switch_to_thread");
     scheduler_log_current_slot(cpu_idx, "switch_enter");
 
     if (!next || !thread_pointer_valid(next))
@@ -2705,18 +2706,23 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
             __atomic_fetch_add(&g_scheduler_switch_count, 1ULL, __ATOMIC_RELAXED);
             __atomic_fetch_add(&g_cpu_switch_counts[cpu_index], 1ULL, __ATOMIC_RELAXED);
         }
-        scheduler_lock_release(sched_flags);
-
-        while (next && !switch_to_thread(next))
+        /* Keep selection and handoff in one scheduler-locked transaction.
+         * Releasing here exposes an off-queue READY claim to interrupts and
+         * termination before switch_to_thread publishes the incoming thread. */
+        while (next && !switch_to_thread(next, sched_flags))
         {
             scheduler_trace("[sched] switch_to failed; retry", next);
             sched_flags = scheduler_lock_acquire("schedule-retry");
+            cpu_index = current_cpu_index();
             next = dequeue_thread_for_cpu(cpu_index, NULL);
             if (!next)
             {
                 next = g_idle_threads[cpu_index];
+                if (!next)
+                {
+                    fatal("no idle thread for cpu");
+                }
             }
-            scheduler_lock_release(sched_flags);
         }
 
         scheduler_log_if_stalled("scheduler_schedule", sched_watch);

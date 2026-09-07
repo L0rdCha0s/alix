@@ -1,6 +1,7 @@
 CC       := x86_64-elf-gcc
 LD       := x86_64-elf-ld
 OBJCOPY  := x86_64-elf-objcopy
+STRIP    := x86_64-elf-strip
 QEMU     := qemu-system-x86_64  -display cocoa,zoom-to-fit=off
 HOST_CC  ?= cc
 
@@ -186,6 +187,8 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/socket_demo.elf \
              $(USER_OBJDIR)/unzip.elf
 USER_ELF_ARCHIVE := $(USER_OBJDIR)/user-elfs.zip
+USER_RUNTIME_DIR := $(USER_OBJDIR)/runtime
+USER_RUNTIME_ELFS := $(patsubst $(USER_OBJDIR)/%.elf,$(USER_RUNTIME_DIR)/%.elf,$(USER_ELFS))
 USER_BIN_DIR := build/bin
 USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/ttf_demo \
@@ -397,9 +400,18 @@ $(USER_OBJDIR)/unzip.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o
 
-$(USER_ELF_ARCHIVE): $(USER_ELFS)
+$(USER_RUNTIME_DIR)/%.elf: $(USER_OBJDIR)/%.elf Makefile
 	@mkdir -p $(dir $@)
-	zip -j -q -9 -FS $@ $(USER_ELFS)
+	$(STRIP) --strip-debug -o $@.tmp $<
+	mv -f $@.tmp $@
+
+# Full ELF debug information remains in build/user for addr2line/GDB. Publish
+# only runtime copies, with identical load segments, and replace the ZIP only
+# after it is complete so a concurrent HTTP download cannot see a partial ZIP.
+$(USER_ELF_ARCHIVE): $(USER_RUNTIME_ELFS)
+	@mkdir -p $(dir $@)
+	zip -j -q -9 -FS $@.tmp.zip $(USER_RUNTIME_ELFS)
+	mv -f $@.tmp.zip $@
 
 $(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) Makefile
 	@mkdir -p $(GENERATED_DIR)
@@ -410,7 +422,7 @@ $(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) Makefile
 		printf '    "%s\\n"\n' '#!/bin/sh'; \
 		printf '    "%s\\n"\n' '# Auto-generated user binary downloader'; \
 		printf '    "%s\\n"\n' 'cd /usr/bin'; \
-		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/unzip.elf /tmp/dl-unzip.elf'; \
+		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/runtime/unzip.elf /tmp/dl-unzip.elf'; \
 		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/user-elfs.zip /tmp/user-elfs.zip'; \
 		printf '    "%s\\n"\n' '/tmp/dl-unzip.elf /tmp/user-elfs.zip /root/usr/bin'; \
 		printf '    "%s\\n"\n' 'rm /tmp/dl-unzip.elf'; \
@@ -1009,6 +1021,7 @@ process-smoke-test: all
 
 process-lock-contract-test:
 	python3 tests/process_locking_contract_test.py
+	python3 tests/scheduler_handoff_test.py
 
 atk-background-lock-contract-test:
 	python3 tests/atk_background_locking_contract_test.py
@@ -1023,6 +1036,24 @@ audio-qemu-playback-test: all audio-stream-contract-test
 
 network-download-contract-test:
 	python3 tests/network_download_contract_test.py
+	python3 tests/network_receive_behavior_test.py
+	python3 tests/wget_transfer_test.py
+	python3 tests/kernel_memory_copy_test.py
+
+network-download-perf-test: all network-download-contract-test filesystem-writeback-test runtime-archive-test
+	python3 tests/network_download_perf_test.py --no-build --label fixed --files zip --repeat 1 --wget-profile --igb-stats --powercut-after-save
+
+.PHONY: network-download-perf-test
+
+runtime-archive-test: $(USER_ELF_ARCHIVE)
+	python3 tests/runtime_archive_test.py
+
+.PHONY: runtime-archive-test
+
+filesystem-writeback-test:
+	python3 tests/filesystem_writeback_test.py
+
+.PHONY: filesystem-writeback-test
 
 process-lock-stress-test: all process-lock-contract-test
 	python3 tests/process_lock_stress_test.py
@@ -1081,6 +1112,8 @@ test:
 	$(MAKE) atk-background-lock-contract-test
 	$(MAKE) audio-stream-contract-test
 	$(MAKE) network-download-contract-test
+	$(MAKE) filesystem-writeback-test
+	$(MAKE) runtime-archive-test
 	$(MAKE) web-test
 	$(MAKE) css-test
 	$(MAKE) browser-event-test

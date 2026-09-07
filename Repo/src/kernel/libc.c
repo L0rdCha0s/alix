@@ -45,6 +45,39 @@ static inline void libc_mem_debug(const char *label, void *dst, const void *src,
     process_debug_log_stack_write(label, caller, dst, count);
 }
 
+/* Network payloads and file offsets are commonly unaligned. Packed, aliasable
+ * words keep these copies in general registers without an aligned-only fast
+ * path, SIMD state, or reading beyond the caller's byte range. */
+typedef struct __attribute__((packed, may_alias))
+{
+    uint64_t value;
+} libc_copy_word_t;
+
+static inline void libc_copy_forward(uint8_t *dst, const uint8_t *src, size_t count)
+{
+    while (count >= 32u)
+    {
+        ((libc_copy_word_t *)dst)[0].value = ((const libc_copy_word_t *)src)[0].value;
+        ((libc_copy_word_t *)dst)[1].value = ((const libc_copy_word_t *)src)[1].value;
+        ((libc_copy_word_t *)dst)[2].value = ((const libc_copy_word_t *)src)[2].value;
+        ((libc_copy_word_t *)dst)[3].value = ((const libc_copy_word_t *)src)[3].value;
+        dst += 32u;
+        src += 32u;
+        count -= 32u;
+    }
+    while (count >= sizeof(uint64_t))
+    {
+        ((libc_copy_word_t *)dst)->value = ((const libc_copy_word_t *)src)->value;
+        dst += sizeof(uint64_t);
+        src += sizeof(uint64_t);
+        count -= sizeof(uint64_t);
+    }
+    while (count--)
+    {
+        *dst++ = *src++;
+    }
+}
+
 void *memset(void *dst, int value, size_t count)
 {
     uint8_t *ptr = (uint8_t *)dst;
@@ -69,18 +102,22 @@ void *memmove(void *dst, const void *src, size_t count)
         return dst;
     }
 
-    if (d < s)
+    if ((uintptr_t)d < (uintptr_t)s)
     {
-        for (size_t i = 0; i < count; ++i)
-        {
-            d[i] = s[i];
-        }
+        libc_copy_forward(d, s, count);
     }
     else
     {
-        for (size_t i = count; i > 0; --i)
+        while (count >= sizeof(uint64_t))
         {
-            d[i - 1] = s[i - 1];
+            count -= sizeof(uint64_t);
+            ((libc_copy_word_t *)(d + count))->value =
+                ((const libc_copy_word_t *)(s + count))->value;
+        }
+        while (count > 0)
+        {
+            --count;
+            d[count] = s[count];
         }
     }
 
@@ -92,10 +129,7 @@ void *memcpy(void *dst, const void *src, size_t count)
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
     libc_mem_debug("memcpy", dst, src, count);
-    for (size_t i = 0; i < count; ++i)
-    {
-        d[i] = s[i];
-    }
+    libc_copy_forward(d, s, count);
     return dst;
 }
 

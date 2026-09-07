@@ -12,6 +12,7 @@
 #include "process.h"
 #include "lapic.h"
 #include "smp.h"
+#include "timer.h"
 
 #ifndef AHCI_TRACE_IRQ
 #define AHCI_TRACE_IRQ 0
@@ -22,6 +23,9 @@
 
 #ifndef AHCI_DEBUG
 #define AHCI_DEBUG 0
+#endif
+#ifndef AHCI_TRACE_PERF
+#define AHCI_TRACE_PERF 0
 #endif
 
 
@@ -163,6 +167,14 @@ typedef struct
     volatile bool waiting;
     volatile bool wait_success;
     uint32_t wait_slot_mask;
+#if AHCI_TRACE_PERF
+    uint64_t perf_commands;
+    uint64_t perf_read_bytes;
+    uint64_t perf_write_bytes;
+    uint64_t perf_ticks;
+    uint64_t perf_yields;
+    uint64_t perf_failures;
+#endif
 } ahci_port_ctx_t;
 
 static volatile hba_mem_t *g_hba = NULL;
@@ -688,6 +700,10 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     bool has_payload = false;
     bool user_buffer = false;
     void *original_buffer = NULL;
+#if AHCI_TRACE_PERF
+    uint64_t perf_start = timer_ticks();
+    uint64_t perf_yields = 0;
+#endif
     hba_port_t *port = ctx->port;
     ahci_log_hex("cmd buffer=", (uint64_t)(uintptr_t)buffer);
     ahci_log_hex("cmd bytes=", (uint64_t)count * AHCI_SECTOR_SIZE);
@@ -701,6 +717,9 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
     while (ctx->busy)
     {
         spinlock_unlock(&ctx->lock);
+#if AHCI_TRACE_PERF
+        perf_yields++;
+#endif
         process_yield();
         spinlock_lock(&ctx->lock);
     }
@@ -858,6 +877,9 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
                 ctx->waiting = false;
                 break;
             }
+#if AHCI_TRACE_PERF
+            perf_yields++;
+#endif
             process_yield();
         }
         if (ctx->waiting)
@@ -895,6 +917,9 @@ static bool ahci_issue_cmd(ahci_port_ctx_t *ctx,
             ahci_log_wait_timeout(ctx->port_no, "poll", command, lba, count, port);
             goto cleanup;
         }
+#if AHCI_TRACE_PERF
+        perf_yields++;
+#endif
         process_yield();
     }
     if (port->is & HBA_PxIS_TFES)
@@ -926,6 +951,23 @@ cleanup:
     if (acquired_busy)
     {
         spinlock_lock(&ctx->lock);
+#if AHCI_TRACE_PERF
+        ctx->perf_commands++;
+        ctx->perf_ticks += timer_ticks() - perf_start;
+        ctx->perf_yields += perf_yields;
+        ctx->perf_failures += result ? 0 : 1;
+        if (result && has_payload)
+        {
+            if (write)
+            {
+                ctx->perf_write_bytes += total_bytes;
+            }
+            else
+            {
+                ctx->perf_read_bytes += total_bytes;
+            }
+        }
+#endif
         ctx->busy = false;
         spinlock_unlock(&ctx->lock);
     }
@@ -987,7 +1029,25 @@ static bool ahci_block_flush(block_device_t *device)
     {
         return false;
     }
-    return ahci_issue_cmd(ctx, ATA_CMD_FLUSH_CACHE_EXT, 0, 0, NULL, false);
+    bool ok = ahci_issue_cmd(ctx, ATA_CMD_FLUSH_CACHE_EXT, 0, 0, NULL, false);
+#if AHCI_TRACE_PERF
+    /* Cumulative per-port diagnostics: compare successive flush records to
+     * distinguish transfer time from scheduler waits and metadata IO. */
+    spinlock_lock(&ctx->lock);
+    uint64_t commands = ctx->perf_commands;
+    uint64_t reads = ctx->perf_read_bytes;
+    uint64_t writes = ctx->perf_write_bytes;
+    uint64_t ticks = ctx->perf_ticks;
+    uint64_t yields = ctx->perf_yields;
+    uint64_t failures = ctx->perf_failures;
+    spinlock_unlock(&ctx->lock);
+    serial_printf("[ahci] perf port=%u commands=%llu read_bytes=%llu write_bytes=%llu ticks=%llu yields=%llu failures=%llu hz=%u",
+                  (unsigned)ctx->port_no, (unsigned long long)commands,
+                  (unsigned long long)reads, (unsigned long long)writes,
+                  (unsigned long long)ticks, (unsigned long long)yields,
+                  (unsigned long long)failures, timer_frequency());
+#endif
+    return ok;
 }
 
 static void ahci_init_port(volatile hba_mem_t *hba, uint32_t port_no)

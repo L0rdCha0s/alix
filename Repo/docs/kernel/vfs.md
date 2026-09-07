@@ -70,6 +70,21 @@ single actively growing node is flushed early at 48 MiB so backpressure still
 has a bounded recovery path. Forced sync and shutdown always bypass the grace
 period.
 
+Forced sync commits dirty nodes and flushes the device cache; it does not
+rewrite clean files. A full rewrite is reserved for recovery after a writeback
+failure. `vfs_flush_node()` immediately persists the file and its directory
+ancestors, commits the chunk table/header, and flushes the device cache. It is
+a successful no-op for RAM-backed files such as `/tmp`.
+
+`make filesystem-writeback-test` executes the production VFS and AlixFS code
+against an in-memory block device. It checks IO counts, remount integrity,
+active-writer deferral, forced sync, directory creation, and injected failures.
+For QEMU storage timing investigations, compile `src/drivers/ahci.c` with
+`-DAHCI_TRACE_PERF=1`. Each device-cache flush then emits cumulative command,
+byte, scheduler-yield, and tick counts in one `[ahci] perf` line. Compare
+successive lines to measure the work attributable to a download. Enable
+`/proc/sys/vfs/log_enable` for per-file sync durations.
+
 ## devfs and procfs
 
 - `src/kernel/devfs.c`:

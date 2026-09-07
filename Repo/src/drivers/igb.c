@@ -15,6 +15,8 @@
 #include "spinlock.h"
 #include "process.h"
 #include "lapic.h"
+#include "procfs.h"
+#include "serial_format.h"
 
 static void igb_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context)
 {
@@ -154,6 +156,7 @@ static void igb_irq_handler(uint8_t irq, interrupt_frame_t *frame, void *context
 #define IGB_BMCR_AN_ENABLE      0x1000U
 
 #define IGB_RX_DESC_COUNT 256
+#define IGB_RX_REFILL_BATCH 32
 #define IGB_TX_DESC_COUNT 64
 #define IGB_RX_BUFFER_SIZE 2048
 #define IGB_TX_BUFFER_SIZE 2048
@@ -226,6 +229,18 @@ static uint32_t g_tx_clean = 0;
 static int g_rx_log_budget = 24;
 static int g_rx_idle_log_budget = 8;
 static int g_irq_log_budget = 16;
+static uint64_t g_irq_count = 0;
+static uint64_t g_irq_deferred_count = 0;
+static uint64_t g_irq_rx_count = 0;
+static uint64_t g_poll_rx_count = 0;
+static uint64_t g_rx_batch_count = 0;
+static uint64_t g_rx_batch_max = 0;
+static uint64_t g_rx_tail_write_count = 0;
+static bool g_rx_pending = false;
+static uint64_t g_deferred_poll_count = 0;
+static uint64_t g_watchdog_poll_count = 0;
+static uint64_t g_watchdog_interval_ticks = 1;
+static uint64_t g_watchdog_next_tick = 0;
 
 static void igb_log(const char *msg);
 static inline uint32_t igb_read32(uint32_t offset);
@@ -233,7 +248,7 @@ static inline void igb_write32(uint32_t offset, uint32_t value);
 static void igb_reset(void);
 static bool igb_setup_rx(void);
 static bool igb_setup_tx(void);
-static void igb_handle_receive(void);
+static uint32_t igb_handle_receive(void);
 static void igb_reclaim_tx(void);
 static bool igb_tx_send(net_interface_t *iface, const uint8_t *data, size_t len);
 static void igb_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16_t frame_len);
@@ -244,6 +259,8 @@ static void igb_phy_restart_autoneg(void);
 static uint8_t igb_select_msi_apic(void);
 static void igb_log_rx_debug(uint32_t idx, uint16_t len, uint16_t eth_type, uint32_t status);
 static void igb_log_rx_idle(uint32_t idx);
+static ssize_t igb_stats_read(vfs_node_t *node, size_t offset, void *buffer,
+                              size_t count, void *context);
 
 static const uint16_t g_device_ids[] = {
     IGB_DEVICE_ID_82576,
@@ -428,7 +445,12 @@ void igb_init(void)
     {
         interval = 1;
     }
-    (void)timer_register_periodic(igb_timer_task, NULL, interval);
+    g_watchdog_interval_ticks = interval;
+    g_watchdog_next_tick = timer_ticks() + interval;
+    /* Check deferred IRQ work at the next safe tick, but retain the slow
+     * watchdog interval when there is no pending receive work. */
+    (void)timer_register_periodic(igb_timer_task, NULL, 1);
+    (void)procfs_create_file_at("sys/net/igb_stats", igb_stats_read, NULL, NULL);
 
     serial_printf("igb: found at bus %02X device %02X function %02X mmio=0x%llX\r\n",
                   (unsigned)g_device.bus,
@@ -460,11 +482,15 @@ void igb_on_irq(void)
     {
         return;
     }
-    /* Reading ICR acknowledges the interrupt.  If it interrupted a generic
-     * lock owner, leave descriptor work to the watchdog on a safe tick;
-     * receive dispatch can wake threads and enter the scheduler. */
+    __atomic_add_fetch(&g_irq_count, 1ULL, __ATOMIC_RELAXED);
+    /* Reading ICR acknowledges the interrupt. If it interrupted a generic
+     * lock owner, preserve work for the next safe tick: receive dispatch can
+     * wake threads and enter the scheduler. An acknowledged MSI will not
+     * necessarily retrigger while the existing descriptors remain ready. */
     if (spinlock_preempt_disabled())
     {
+        __atomic_add_fetch(&g_irq_deferred_count, 1ULL, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_rx_pending, true, __ATOMIC_RELEASE);
         return;
     }
     if (g_irq_log_budget > 0)
@@ -476,7 +502,9 @@ void igb_on_irq(void)
                       (unsigned)status);
     }
 
-    igb_handle_receive();
+    __atomic_store_n(&g_rx_pending, false, __ATOMIC_RELEASE);
+    uint32_t received = igb_handle_receive();
+    __atomic_add_fetch(&g_irq_rx_count, received, __ATOMIC_RELAXED);
     uint64_t flags = spinlock_lock_irqsave(&g_tx_lock);
     igb_reclaim_tx();
     spinlock_unlock_irqrestore(&g_tx_lock, flags);
@@ -489,7 +517,9 @@ void igb_poll(void)
     {
         return;
     }
-    igb_handle_receive();
+    __atomic_store_n(&g_rx_pending, false, __ATOMIC_RELEASE);
+    uint32_t received = igb_handle_receive();
+    __atomic_add_fetch(&g_poll_rx_count, received, __ATOMIC_RELAXED);
     uint64_t flags = spinlock_lock_irqsave(&g_tx_lock);
     igb_reclaim_tx();
     spinlock_unlock_irqrestore(&g_tx_lock, flags);
@@ -658,8 +688,11 @@ static bool igb_setup_tx(void)
     return true;
 }
 
-static void igb_handle_receive(void)
+static uint32_t igb_handle_receive(void)
 {
+    uint32_t received = 0;
+    uint32_t refill_pending = 0;
+    uint32_t last_reclaimed = 0;
     uint64_t flags = spinlock_lock_irqsave(&g_rx_lock);
     for (int safety = IGB_RX_DESC_COUNT; safety > 0; --safety)
     {
@@ -670,14 +703,11 @@ static void igb_handle_receive(void)
             igb_log_rx_idle(g_rx_index);
             break;
         }
+        received++;
         if ((status & IGB_RX_STATUS_EOP) == 0)
         {
             /* Should not happen with one-buffer descriptors. */
-            desc->read.header_addr = 0;
-            desc->read.packet_addr = (uint64_t)(uintptr_t)g_rx_buffers[g_rx_index];
-            igb_write32(IGB_REG_RDT0, g_rx_index);
-            g_rx_index = (g_rx_index + 1) % IGB_RX_DESC_COUNT;
-            continue;
+            goto recycle;
         }
 
         uint16_t frame_len = desc->wb.upper.length;
@@ -712,13 +742,91 @@ static void igb_handle_receive(void)
             }
         }
 
+recycle:
         desc->read.header_addr = 0;
         desc->read.packet_addr = (uint64_t)(uintptr_t)g_rx_buffers[g_rx_index];
-        uint32_t cur = g_rx_index;
+        last_reclaimed = g_rx_index;
         g_rx_index = (g_rx_index + 1U) % IGB_RX_DESC_COUNT;
-        igb_write32(IGB_REG_RDT0, cur);
+        /* Publish a bounded group of rearmed descriptors per doorbell. Keep
+         * at most one eighth of the ring withheld while draining a burst. */
+        if (++refill_pending >= IGB_RX_REFILL_BATCH)
+        {
+            __atomic_thread_fence(__ATOMIC_RELEASE);
+            igb_write32(IGB_REG_RDT0, last_reclaimed);
+            __atomic_add_fetch(&g_rx_tail_write_count, 1ULL, __ATOMIC_RELAXED);
+            refill_pending = 0;
+        }
+    }
+    /* A short burst, a descriptor gap, and the budget limit must all return
+     * every consumed buffer to hardware before dropping the receive lock. */
+    if (refill_pending > 0)
+    {
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        igb_write32(IGB_REG_RDT0, last_reclaimed);
+        __atomic_add_fetch(&g_rx_tail_write_count, 1ULL, __ATOMIC_RELAXED);
+    }
+    if (received > 0)
+    {
+        __atomic_add_fetch(&g_rx_batch_count, 1ULL, __ATOMIC_RELAXED);
+        if (received > __atomic_load_n(&g_rx_batch_max, __ATOMIC_RELAXED))
+        {
+            __atomic_store_n(&g_rx_batch_max, received, __ATOMIC_RELAXED);
+        }
     }
     spinlock_unlock_irqrestore(&g_rx_lock, flags);
+    return received;
+}
+
+typedef struct
+{
+    char *buffer;
+    size_t capacity;
+    size_t offset;
+    size_t produced;
+    size_t copied;
+} igb_stats_output_t;
+
+static void igb_stats_putc(void *context, char value)
+{
+    igb_stats_output_t *out = (igb_stats_output_t *)context;
+    if (out->produced++ >= out->offset && out->copied < out->capacity)
+    {
+        out->buffer[out->copied++] = value;
+    }
+}
+
+static void igb_stats_counter(serial_format_ctx_t *format, const char *name,
+                              const uint64_t *counter)
+{
+    serial_format_emit_string(format, name);
+    serial_format_emit(format, ' ');
+    serial_format_print_unsigned(format,
+                                 __atomic_load_n(counter, __ATOMIC_RELAXED),
+                                 10, false, 0, false);
+    serial_format_emit(format, '\n');
+}
+
+static ssize_t igb_stats_read(vfs_node_t *node, size_t offset, void *buffer,
+                              size_t count, void *context)
+{
+    (void)node;
+    (void)context;
+    if (!buffer || count == 0)
+    {
+        return 0;
+    }
+    igb_stats_output_t out = { buffer, count, offset, 0, 0 };
+    serial_format_ctx_t format = { .putc = igb_stats_putc, .ctx = &out };
+    igb_stats_counter(&format, "interrupts", &g_irq_count);
+    igb_stats_counter(&format, "deferred_interrupts", &g_irq_deferred_count);
+    igb_stats_counter(&format, "irq_rx_packets", &g_irq_rx_count);
+    igb_stats_counter(&format, "poll_rx_packets", &g_poll_rx_count);
+    igb_stats_counter(&format, "rx_batches", &g_rx_batch_count);
+    igb_stats_counter(&format, "max_rx_batch", &g_rx_batch_max);
+    igb_stats_counter(&format, "rx_tail_writes", &g_rx_tail_write_count);
+    igb_stats_counter(&format, "deferred_polls", &g_deferred_poll_count);
+    igb_stats_counter(&format, "watchdog_polls", &g_watchdog_poll_count);
+    return (ssize_t)out.copied;
 }
 
 static void igb_reclaim_tx(void)
@@ -868,7 +976,23 @@ static void igb_dispatch_ipv4(net_interface_t *iface, uint8_t *frame, uint16_t f
 static void igb_timer_task(void *context)
 {
     (void)context;
-    /* Polling is only a watchdog/deferred-IRQ fallback, never the fast path. */
+    uint64_t now = timer_ticks();
+    bool pending = __atomic_load_n(&g_rx_pending, __ATOMIC_ACQUIRE);
+    if (!pending && now < g_watchdog_next_tick)
+    {
+        return;
+    }
+    if (pending)
+    {
+        __atomic_add_fetch(&g_deferred_poll_count, 1ULL, __ATOMIC_RELAXED);
+    }
+    else
+    {
+        __atomic_add_fetch(&g_watchdog_poll_count, 1ULL, __ATOMIC_RELAXED);
+    }
+    g_watchdog_next_tick = now + g_watchdog_interval_ticks;
+    /* timer_on_tick dispatches callbacks only after the interrupted thread
+     * has released its generic locks, preserving scheduler lock ordering. */
     igb_poll();
 }
 

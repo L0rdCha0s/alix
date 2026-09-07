@@ -72,7 +72,10 @@ Conventions:
 - `capacity == 0` means the node ID is unused/free.
 - `length` can be smaller than `capacity` because chunks are sector-aligned.
 
-AlixFS2 keeps the chunk table in memory while mounted. During writeback it writes only the chunk entries that changed, tracked by a dirty bitmap (`chunk_dirty_bitmap`).
+AlixFS2 keeps the chunk table in memory while mounted. During writeback it writes
+each sector containing changed chunk entries once, tracked by a dirty bitmap
+(`chunk_dirty_bitmap`). This uses the resident sector contents, avoiding a disk
+read and write for every individual 16-byte entry.
 
 ## Node Payload Format (`alixfs_node_disk_t` + data)
 
@@ -158,7 +161,15 @@ Files and symlinks store their contents inline in the node payload chunk. When c
 4. releases the old chunk (header free list), and
 5. commits metadata at sync time.
 
-This means large file edits rewrite the whole file payload (no streaming or partial block updates).
+Content changes still rewrite the whole file payload (no streaming or partial
+data updates). Metadata-only updates such as access time or ownership write
+only the node header/name prefix, preserving the existing data and chunk-table
+entry. Reading an 8 MiB file therefore requires a 512-byte metadata write when
+its access time changes, rather than rewriting 8 MiB of unchanged contents.
+
+On growth, the old extent remains allocated until the replacement payload is
+successfully written. An allocation or write failure retains the old chunk
+entry and leaves the node dirty for retry.
 
 ## Features and Limitations Summary
 
