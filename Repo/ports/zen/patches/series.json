@@ -1,0 +1,81 @@
+{
+  "firefox_revision": "9a2dc53c369c7ae5172018b35988e1d2ffeff402",
+  "firefox_version": "159.0",
+  "patches": [
+    {
+      "file": "0001-recognize-alix-target.patch",
+      "sha256": "f0d81278dec8370377a8759c4fe4305bb8d7ad851a4b0cc9505d3b925fe91289",
+      "files": [
+        {
+          "path": "build/autoconf/config.sub",
+          "before": "11c54f55c3ac99e5d2c3dc2bb0bcccbf69f8223cc68f6b2438daa806cf0d16d8",
+          "after": "626b67e5791bd68f1ea8c1b4e16aae37ed68d9498fbba044499bd73f9e34cb1b"
+        },
+        {
+          "path": "build/moz.configure/init.configure",
+          "before": "0893221bcb565193875b0889caf935376ee69b33bece54690ddad35aeb040294",
+          "after": "34c8caf1d69b1ae6ea457541028155ab3f0970857876e04348cb992aa25fd5e3"
+        },
+        {
+          "path": "python/mozbuild/mozbuild/configure/constants.py",
+          "before": "4cfc4176ff1439914f6da84fdd0aaac9aca5581a060fab14c2198bc925eba28f",
+          "after": "fb1cc96bb4a2d96c8b73601d461047ad9a3477fd8cdd9a0707c7ec77fc82ae53"
+        }
+      ]
+    },
+    {
+      "file": "0002-detect-current-apple-host-linker.patch",
+      "sha256": "bc8632613f591bf7cf26a7b0ebdf04a21b48991ca738335f5c297d8d3b10c4b8",
+      "files": [
+        {
+          "path": "build/moz.configure/toolchain.configure",
+          "before": "469ad489b02f30ef85d169a62c887e94ecc5284e38b2fee47f50b522a93382b0",
+          "after": "f3a5b1fce2f21e79b1e4361532ea341c96c94c9af450ff1f6e55b245f4a6eceb"
+        }
+      ]
+    },
+    {
+      "file": "0003-validate-custom-rust-target.patch",
+      "sha256": "66be5701620541067b6271e7f50383daf0fbdef0d325afa90663c70caa6a13db",
+      "files": [
+        {
+          "path": "build/moz.configure/rust.configure",
+          "before": "9ddfdae2c72515d327eccd5690954cc8a208b36c82b973d380bb669d6c1b2688",
+          "after": "961935867cce7adee1cd9bb846112f0756778e68b152ae12720c38f845bb7e3f"
+        }
+      ]
+    },
+    {
+      "file": "0004-native-alix-getrandom.patch",
+      "sha256": "50e3409932c3ec647c2c80f370f62d9b207aff05ae6d441b854e40acb9a30e96",
+      "files": [
+        {
+          "path": "third_party/rust/getrandom/src/backends.rs",
+          "before": "1c43868fdb6b1bfd0f6b6ac1e4f8195ad0045fa472e366821be2249ef5aa6da6",
+          "after": "688796caadb0854f4c2f21ce03cdff8a301b52c37e3dba0b2da12809690db837"
+        },
+        {
+          "path": "third_party/rust/getrandom/src/backends/alix.rs",
+          "before": null,
+          "after": "d1975c1f2d0c5d97483e132054fceed874d55f7652a51e2b0b8f923466e28eed"
+        },
+        {
+          "path": "third_party/rust/getrandom/.cargo-checksum.json",
+          "before": "c9f0d4617a0dd50a486769de4b3640bcdc351e86e73022cc072c59bde43c0e4f",
+          "after": "27b2079df61a5cd3b191c04e3df58ba418c6ec25c76dd7d74684c24aab85514b"
+        }
+      ]
+    },
+    {
+      "file": "0005-alix-icu-stdio-data-loader.patch",
+      "sha256": "589cd38f657e020d12879cdb9b7002ce3d3f2b31c0cac8c7221211299ffd0452",
+      "files": [
+        {
+          "path": "intl/icu/source/common/umapfile.h",
+          "before": "798632654926d0797c7cfecf29e975df175a395186c92e6e932216c0220da77f",
+          "after": "6352b827ec05f6661d722aad1bd8b2cd7e581b432a0bdc3fa3f0963a6212bb53"
+        }
+      ]
+    }
+  ]
+}

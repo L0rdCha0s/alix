@@ -1,0 +1,14 @@
+diff --git a/intl/icu/source/common/umapfile.h b/intl/icu/source/common/umapfile.h
+--- a/intl/icu/source/common/umapfile.h
++++ b/intl/icu/source/common/umapfile.h
+@@ -40,6 +40,10 @@
+ 
+ #if UCONFIG_NO_FILE_IO
+ #   define MAP_IMPLEMENTATION MAP_NONE
++#elif defined(__ALIX__)
++/* Alix currently supports anonymous VM. Preserve ICU file data loading via
++ * its actual stdio backend until native file-backed mappings are available. */
++#   define MAP_IMPLEMENTATION MAP_STDIO
+ #elif defined(__wasi__)
+ #   define MAP_IMPLEMENTATION MAP_STDIO
+ #elif U_PLATFORM_USES_ONLY_WIN32_API

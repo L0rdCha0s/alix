@@ -1054,12 +1054,12 @@ int64_t user_atk_sys_poll_event(uint32_t handle, user_atk_event_t *event_out, ui
         if (!block || win->closed)
         {
             user_atk_event_t zero = { 0 };
-            user_copy_to_user(event_out, &zero, sizeof(zero));
+            bool copied = user_copy_to_user(event_out, &zero, sizeof(zero));
 // #if USER_ATK_DEBUG
 //             user_atk_log_pair("sys_poll_event empty", handle, flags);
 // #endif
             user_atk_window_release(win);
-            return 0;
+            return copied ? 0 : -1;
         }
         wait_queue_wait(&win->event_waiters, user_atk_event_ready, win);
     }
@@ -1113,9 +1113,9 @@ int64_t user_atk_sys_poll_event_timeout(uint32_t handle, user_atk_event_t *event
         if (!user_atk_pop_event(win, &event) || win->closed)
         {
             user_atk_event_t zero = { 0 };
-            user_copy_to_user(event_out, &zero, sizeof(zero));
+            bool copied = user_copy_to_user(event_out, &zero, sizeof(zero));
             user_atk_window_release(win);
-            return 0;
+            return copied ? 0 : -1;
         }
         if (!user_copy_to_user(event_out, &event, sizeof(event)))
         {
@@ -1132,9 +1132,9 @@ int64_t user_atk_sys_poll_event_timeout(uint32_t handle, user_atk_event_t *event
         if (win->closed)
         {
             user_atk_event_t zero = { 0 };
-            user_copy_to_user(event_out, &zero, sizeof(zero));
+            bool copied = user_copy_to_user(event_out, &zero, sizeof(zero));
             user_atk_window_release(win);
-            return 0;
+            return copied ? 0 : -1;
         }
         if (!wait_queue_wait_timeout(&win->event_waiters,
                                      user_atk_event_ready,
@@ -1142,9 +1142,9 @@ int64_t user_atk_sys_poll_event_timeout(uint32_t handle, user_atk_event_t *event
                                      timeout_ticks))
         {
             user_atk_event_t zero = { 0 };
-            user_copy_to_user(event_out, &zero, sizeof(zero));
+            bool copied = user_copy_to_user(event_out, &zero, sizeof(zero));
             user_atk_window_release(win);
-            return 0;
+            return copied ? 0 : -1;
         }
     }
 

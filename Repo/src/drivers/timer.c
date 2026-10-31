@@ -82,6 +82,18 @@ uint64_t timer_ticks(void)
     return g_ticks;
 }
 
+uint64_t timer_monotonic_millis(void)
+{
+    uint64_t ticks = timer_ticks();
+    uint32_t frequency = timer_frequency();
+    if (frequency == 0)
+    {
+        return 0;
+    }
+    /* Divide first so ordinary uptimes do not overflow ticks * 1000. */
+    return (ticks / frequency) * 1000u + ((ticks % frequency) * 1000u) / frequency;
+}
+
 uint32_t timer_frequency(void)
 {
     if (g_frequency_hz == 0)

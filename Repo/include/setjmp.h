@@ -17,7 +17,15 @@ typedef struct
 
 typedef alix_jmp_buf_t jmp_buf[1];
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int setjmp(jmp_buf env) __attribute__((returns_twice));
 void longjmp(jmp_buf env, int value) __attribute__((noreturn));
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* SETJMP_H */

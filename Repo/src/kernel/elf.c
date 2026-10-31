@@ -10,6 +10,7 @@
 #define ELF_TYPE_EXEC 2U
 #define ELF_MACHINE_X86_64 0x3E
 #define ELF_PH_TYPE_LOAD 1U
+#define ELF_PH_TYPE_TLS 7U
 #define ELF_FLAG_EXEC 0x1U
 #define ELF_FLAG_WRITE 0x2U
 
@@ -92,9 +93,51 @@ bool elf_validate_image(const uint8_t *image, size_t size, uintptr_t *entry_out)
 
     const elf64_phdr_t *phdr = (const elf64_phdr_t *)(image + ehdr->phoff);
     bool entry_in_executable_segment = false;
+    bool has_tls = false;
     for (uint16_t i = 0; i < ehdr->phnum; ++i)
     {
         const elf64_phdr_t *ph = &phdr[i];
+        if (ph->type == ELF_PH_TYPE_TLS)
+        {
+            if (has_tls || ph->filesz > ph->memsz || ph->offset > size ||
+                ph->filesz > size - ph->offset || ph->memsz > SIZE_MAX ||
+                (ph->align != 0 && (ph->align & (ph->align - 1)) != 0) ||
+                ph->align > g_mem_layout.user_pointer_limit - g_mem_layout.user_pointer_base)
+            {
+                return false;
+            }
+            has_tls = true;
+            if (ph->memsz &&
+                (ph->vaddr < g_mem_layout.user_pointer_base ||
+                 ph->vaddr > g_mem_layout.user_pointer_limit ||
+                 ph->memsz - 1 > g_mem_layout.user_pointer_limit - ph->vaddr))
+            {
+                return false;
+            }
+            /* Only initialized TLS bytes need a PT_LOAD file image: .tbss
+             * can extend past that segment because it is instantiated per
+             * thread rather than occupying the ordinary BSS address range. */
+            bool covered = ph->filesz == 0;
+            for (uint16_t j = 0; !covered && j < ehdr->phnum; ++j)
+            {
+                const elf64_phdr_t *load = &phdr[j];
+                if (load->type != ELF_PH_TYPE_LOAD || ph->vaddr < load->vaddr)
+                {
+                    continue;
+                }
+                uint64_t delta = ph->vaddr - load->vaddr;
+                if (delta <= load->filesz && ph->filesz <= load->filesz - delta &&
+                    load->offset <= UINT64_MAX - delta && ph->offset == load->offset + delta)
+                {
+                    covered = true;
+                }
+            }
+            if (!covered)
+            {
+                return false;
+            }
+            continue;
+        }
         if (ph->type != ELF_PH_TYPE_LOAD || ph->memsz == 0)
         {
             continue;
@@ -195,6 +238,18 @@ bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uin
         if (file_bytes < remaining)
         {
             memset(dest + file_bytes, 0, remaining - file_bytes);
+        }
+    }
+
+    for (uint16_t i = 0; i < ehdr->phnum; ++i)
+    {
+        const elf64_phdr_t *ph = &phdr[i];
+        if (ph->type == ELF_PH_TYPE_TLS &&
+            !process_set_user_tls_template(process, image + ph->offset,
+                                            (size_t)ph->filesz, (size_t)ph->memsz,
+                                            (size_t)ph->align, (uintptr_t)ph->vaddr))
+        {
+            return false;
         }
     }
 

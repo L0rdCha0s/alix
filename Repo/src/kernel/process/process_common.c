@@ -818,24 +818,29 @@ static void thread_stack_watch_clear_snapshot(thread_t *thread)
 static bool thread_saved_frame_valid(thread_t *thread, const char *label)
 {
 #if ENABLE_STACK_WRITE_DEBUG
+    /* Stack-watch requests hold the scheduler lock, and process requests also
+     * hold threads_lock. This is a read-only diagnostic eligibility check:
+     * quarantine/kill would recursively take those locks, and repairing a
+     * frame here can write into an already protected stack. Scheduler handoff
+     * validation remains responsible for handling an invalid runnable frame. */
     if (!thread || !thread->context || !thread->stack_base)
     {
-        return true;
+        return false;
     }
     if (!thread_lifetime_active(thread))
     {
-        return true;
+        return false;
     }
 
     if (!thread->context_valid)
     {
-        return 0;              // ADD THIS
+        return false;
     }
 
     /* Avoid spinning on the lock if the thread is currently running. */
     if (thread->state == THREAD_STATE_RUNNING)
     {
-        return true;
+        return false;
     }
 
     spinlock_lock(&thread->context_lock);
@@ -844,7 +849,8 @@ static bool thread_saved_frame_valid(thread_t *thread, const char *label)
     uintptr_t lower = (uintptr_t)thread->stack_base;
     uintptr_t upper = thread->kernel_stack_top;
     size_t needed = (size_t)((CONTEXT_SWITCH_SAVED_WORDS + 1ULL) * sizeof(uint64_t));
-    if (ctx < lower || upper < ctx || (upper - ctx) < needed)
+    if ((ctx & (sizeof(uint64_t) - 1)) != 0 ||
+        ctx < lower || upper < ctx || (upper - ctx) < needed)
     {
         SCHED_LOG("[sched] stack watch: context out of range thread=%s pid=0x%016llX ctx=0x%016llX bounds=[0x%016llX,0x%016llX) label=%s\r\n",
                   thread->name[0] ? thread->name : "<unnamed>",
@@ -854,7 +860,6 @@ static bool thread_saved_frame_valid(thread_t *thread, const char *label)
                   (unsigned long long)upper,
                   label ? label : "<none>");
         spinlock_unlock(&thread->context_lock);
-        thread_quarantine_corrupt(thread, "stack_watch_ctx_oob");
         return false;
     }
 
@@ -866,19 +871,6 @@ static bool thread_saved_frame_valid(thread_t *thread, const char *label)
                          resume_rip >= (uint64_t)(uintptr_t)__kernel_text_start &&
                          resume_rip <  (uint64_t)(uintptr_t)__kernel_data_end;
     bool rflags_reserved_ok = (saved_rflags & RFLAGS_RESERVED_BIT) != 0;
-    if (!rflags_reserved_ok)
-    {
-        uint64_t patched = saved_rflags | RFLAGS_RESERVED_BIT;
-        uint64_t *ctx_mut = (uint64_t *)ctx;
-        ctx_mut[CTX_RFLAGS] = patched;
-        rflags_reserved_ok = true;
-        SCHED_LOG("[sched] patched reserved rflags bit thread=%s pid=0x%016llX where=%s old=0x%016llX new=0x%016llX\r\n",
-                  thread->name[0] ? thread->name : "<unnamed>",
-                  (unsigned long long)(thread->process ? thread->process->pid : 0),
-                  label ? label : "<none>",
-                  (unsigned long long)saved_rflags,
-                  (unsigned long long)patched);
-    }
     spinlock_unlock(&thread->context_lock);
 
     if (rip_in_kernel && rflags_reserved_ok)
@@ -892,7 +884,6 @@ static bool thread_saved_frame_valid(thread_t *thread, const char *label)
               (unsigned long long)resume_rip,
               (unsigned long long)saved_rflags,
               label ? label : "<none>");
-    thread_quarantine_corrupt(thread, rip_in_kernel ? "stack_watch_rflags" : "stack_watch_rip");
     return false;
 #else
     (void)thread;
@@ -1424,6 +1415,13 @@ static void thread_free_resources(thread_t *thread)
     }
     thread->process_next = NULL;
 
+    if (owner_valid && thread->user_tls_base != 0 && thread->user_tls_size != 0)
+    {
+        (void)process_unmap_user_segment(owner_proc, thread->user_tls_base, thread->user_tls_size);
+        thread->user_tls_base = 0;
+        thread->user_tls_size = 0;
+    }
+
     if (owner_valid && thread->user_stack_base != 0 && thread->user_stack_size != 0)
     {
         (void)process_unmap_user_segment(owner_proc,
@@ -1618,6 +1616,10 @@ bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stat
         }
         else
         {
+            if (!process_io_abandon_thread_locked(cursor))
+            {
+                fatal("I/O waiter still active at thread reclamation");
+            }
             thread_free_resources(cursor);
             local_stats.freed++;
         }

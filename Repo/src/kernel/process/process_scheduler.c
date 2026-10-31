@@ -140,6 +140,24 @@ static inline run_queue_t *scheduler_run_queue(uint32_t cpu_index)
 
 static uint32_t g_ui_cpu_index = RUN_QUEUE_CPU_INVALID;
 
+/* A required CPU is a placement constraint, unlike the default PID-based
+ * distribution policy. Explicit affinity takes precedence over the UI pin. */
+static uint32_t scheduler_required_cpu(const thread_t *thread)
+{
+    uint32_t limit = scheduler_cpu_limit();
+    if (thread && thread->affinity_enabled && thread->affinity_cpu < limit &&
+        scheduler_cpu_online(thread->affinity_cpu))
+    {
+        return thread->affinity_cpu;
+    }
+    if (thread && thread->priority == THREAD_PRIORITY_UI && g_ui_cpu_index < limit &&
+        scheduler_cpu_online(g_ui_cpu_index))
+    {
+        return g_ui_cpu_index;
+    }
+    return RUN_QUEUE_CPU_INVALID;
+}
+
 void process_set_ui_cpu(uint32_t cpu_index)
 {
     if (cpu_index == RUN_QUEUE_CPU_INVALID)
@@ -1196,17 +1214,10 @@ static void enqueue_current_thread_local_locked(thread_t *thread)
     {
         cpu_index = 0;
     }
-    if (thread->affinity_enabled &&
-        thread->affinity_cpu < limit &&
-        scheduler_cpu_online(thread->affinity_cpu))
+    uint32_t required_cpu = scheduler_required_cpu(thread);
+    if (required_cpu != RUN_QUEUE_CPU_INVALID)
     {
-        cpu_index = thread->affinity_cpu;
-    }
-    else if (thread->priority == THREAD_PRIORITY_UI &&
-             g_ui_cpu_index < limit &&
-             scheduler_cpu_online(g_ui_cpu_index))
-    {
-        cpu_index = g_ui_cpu_index;
+        cpu_index = required_cpu;
     }
     run_queue_t *queue = scheduler_run_queue(cpu_index);
     if (!queue)
@@ -2558,6 +2569,7 @@ static bool switch_to_thread(thread_t *next, uint64_t sched_lock_enter)
  */
 __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_current)
 {
+    process_reap_retired_memory();
     uint64_t sched_watch = timer_ticks();
 
     while (1)
@@ -2616,7 +2628,9 @@ __attribute__((visibility("default"))) void scheduler_schedule(bool requeue_curr
                 uint64_t rq_flags = run_queue_lock_acquire(local_rq, "requeue_peek");
                 uint32_t pending = local_rq->total;
                 run_queue_lock_release(local_rq, rq_flags);
-                if (pending == 0)
+                uint32_t required_cpu = scheduler_required_cpu(current);
+                if (pending == 0 &&
+                    (required_cpu == RUN_QUEUE_CPU_INVALID || required_cpu == cpu_index))
                 {
                     current->preempt_pending = false;
                     current->wake_pending = false;
@@ -2742,6 +2756,7 @@ void idle_thread_entry(void *arg)
     (void)arg;
     while (1)
     {
+        process_reap_retired_memory();
         /* Match scheduler_main_loop's atomic idle protocol. */
         cpu_cli();
         scheduler_schedule(false);
@@ -2935,12 +2950,13 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
         return false;
     }
 
-    /* Only handle not-present data faults (leave protection/reserved/execute faults as fatal). */
+    /* Only recover not-present faults; protection and reserved-bit faults
+     * remain fatal. Anonymous VM separately validates data/execute access. */
     if ((error_code & 0x1u) != 0)
     {
         return false;
     }
-    if ((error_code & 0x8u) != 0 || (error_code & 0x10u) != 0)
+    if ((error_code & 0x8u) != 0)
     {
         return false;
     }
@@ -2958,6 +2974,17 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
     }
 
     uintptr_t fault = (uintptr_t)address;
+    if (process_vm_range_reserved(fault, 1))
+    {
+        uint64_t flags = process_memory_lock(proc);
+        bool committed = process_vm_fault_locked(proc, fault,
+                                                  (error_code & 0x2u) != 0,
+                                                  (error_code & 0x10u) != 0);
+        process_memory_unlock(proc, flags);
+        return committed;
+    }
+    /* Legacy stack and sbrk faults only grow data mappings. */
+    if ((error_code & 0x10u) != 0) return false;
     uint64_t memory_flags = process_memory_lock(proc);
     if (fault < proc->user_heap_base || fault >= proc->user_heap_brk)
     {
@@ -3014,11 +3041,16 @@ bool process_handle_exception(interrupt_frame_t *frame,
     /* For user-mode faults, stop here and reschedule instead of bouncing through a kernel fault path. */
     if (user_mode)
     {
-        serial_printf("process: user fault in thread %s reason=%s error=0x%016llX addr=0x%016llX\r\n",
+        /* Keep the authoritative hardware snapshot in one queued line; the
+         * synchronous emergency dump can interleave with other CPUs' output. */
+        serial_printf("process: user fault in thread %s reason=%s error=0x%016llX addr=0x%016llX rip=0x%016llX cs=0x%llX cpu=%u",
                       thread->name[0] ? thread->name : "(anon)",
                       reason ? reason : "unknown",
                       (unsigned long long)error_code,
-                      has_address ? (unsigned long long)address : 0ULL);
+                      has_address ? (unsigned long long)address : 0ULL,
+                      (unsigned long long)frame->rip,
+                      (unsigned long long)frame->cs,
+                      (unsigned)smp_current_cpu_index());
         process_exit(-1);
     }
 

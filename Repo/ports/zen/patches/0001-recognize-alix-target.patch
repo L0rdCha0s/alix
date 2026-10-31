@@ -1,0 +1,58 @@
+diff --git a/build/autoconf/config.sub b/build/autoconf/config.sub
+--- a/build/autoconf/config.sub
++++ b/build/autoconf/config.sub
+@@ -1966,6 +1966,7 @@
+ 	# Each alternative MUST end in a * to match a version number.
+ 	  abug \
+ 	| aix* \
++	| alix* \
+ 	| amdhsa* \
+ 	| amigados* \
+ 	| amigaos* \
+diff --git a/build/moz.configure/init.configure b/build/moz.configure/init.configure
+--- a/build/moz.configure/init.configure
++++ b/build/moz.configure/init.configure
+@@ -487,6 +487,8 @@
+     if "android" in os:
+         canonical_os = "Android"
+         canonical_kernel = "Linux"
++    elif os.startswith("alix"):
++        canonical_os = canonical_kernel = "Alix"
+     elif os.startswith("linux"):
+         canonical_os = "GNU"
+         canonical_kernel = "Linux"
+diff --git a/python/mozbuild/mozbuild/configure/constants.py b/python/mozbuild/mozbuild/configure/constants.py
+--- a/python/mozbuild/mozbuild/configure/constants.py
++++ b/python/mozbuild/mozbuild/configure/constants.py
+@@ -30,6 +30,7 @@
+ 
+ class OS(EnumString):
+     POSSIBLE_VALUES = (
++        "Alix",
+         "Android",
+         "DragonFly",
+         "FreeBSD",
+@@ -46,6 +47,7 @@
+ 
+ class Kernel(EnumString):
+     POSSIBLE_VALUES = (
++        "Alix",
+         "Darwin",
+         "DragonFly",
+         "FreeBSD",
+@@ -135,6 +137,7 @@
+ assert sorted(CPU_preprocessor_checks.keys()) == sorted(CPU.POSSIBLE_VALUES)
+ 
+ kernel_preprocessor_checks = {
++    "Alix": "__ALIX__",
+     "Darwin": "__APPLE__",
+     "DragonFly": "__DragonFly__",
+     "FreeBSD": "__FreeBSD__",
+@@ -150,6 +153,7 @@
+ assert sorted(kernel_preprocessor_checks.keys()) == sorted(Kernel.POSSIBLE_VALUES)
+ 
+ OS_preprocessor_checks = {
++    "Alix": "__ALIX__",
+     "Android": "__ANDROID__",
+ }
+ 

@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/zen-browser/desktop.git",
+  "release": "1.24b",
+  "revision": "f75390aa2b797ddc3524ff9ed52ceb32a839f9fa",
+  "firefox_version": "159.0",
+  "firefox_revision": "9a2dc53c369c7ae5172018b35988e1d2ffeff402",
+  "firefox_source_url": "https://archive.mozilla.org/pub/firefox/releases/159.0/source/firefox-159.0.source.tar.xz",
+  "firefox_source_sha512": "669241f3fc672d8240ddc4158b6125e5c2566bd0013a0a96a3874ee17bf0d9b3d91c842e653cb35eab0921829ce3660e9d795900b3c3a5488cd6020f85a0aac3",
+  "firefox_checksums_url": "https://archive.mozilla.org/pub/firefox/releases/159.0/SHA512SUMS",
+  "license": "MPL-2.0",
+  "build_space_gib": 30
+}

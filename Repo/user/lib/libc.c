@@ -3,10 +3,31 @@
 #include "userlib.h"
 #include "serial.h"
 #include "stdio.h"
+#ifndef TTF_HOST_BUILD
+#include "stdio_internal.h"
+#endif
 #include "errno.h"
 #include "unistd.h"
+#include "stdlib.h"
+#include "time.h"
+#include "sys/time.h"
+#include "fenv.h"
+#include "printf_float.h"
+#include <limits.h>
+#include <stdint.h>
+#include <stddef.h>
+#include "signal.h"
+#include "wchar.h"
 
+#ifdef TTF_HOST_BUILD
 int errno = 0;
+#else
+static _Thread_local int alix_errno;
+int *__errno_location(void)
+{
+    return &alix_errno;
+}
+#endif
 
 #define ALIGNMENT 16UL
 #define SIZE_MAX_VALUE ((size_t)-1)
@@ -378,8 +399,11 @@ static heap_block_t *find_free_block(size_t size)
 
 static heap_block_t *request_block_unlinked(size_t size)
 {
-    if (size > SIZE_MAX_VALUE - sizeof(heap_block_t))
+    /* sys_sbrk takes a signed increment. Never turn an oversized positive
+     * allocation into a negative increment that shrinks a live heap. */
+    if (size > (((size_t)-1) >> 1) - sizeof(heap_block_t))
     {
+        errno = ENOMEM;
         return NULL;
     }
     size_t total = sizeof(heap_block_t) + size;
@@ -389,6 +413,7 @@ static heap_block_t *request_block_unlinked(size_t size)
     if (base == (void *)-1 || base == NULL)
     {
         user_heap_log("sbrk failed size=", total);
+        errno = ENOMEM;
         return NULL;
     }
     heap_block_t *block = (heap_block_t *)base;
@@ -426,6 +451,11 @@ static void user_heap_lock_release(void)
 
 static void *malloc_locked(size_t size)
 {
+    if (size > SIZE_MAX_VALUE - (ALIGNMENT - 1u))
+    {
+        errno = ENOMEM;
+        return NULL;
+    }
     size = align_size(size);
     if (size == 0)
     {
@@ -482,6 +512,11 @@ static void *realloc_locked(void *ptr, size_t size)
     if (size == 0)
     {
         free_locked(ptr);
+        return NULL;
+    }
+    if (size > SIZE_MAX_VALUE - (ALIGNMENT - 1u))
+    {
+        errno = ENOMEM;
         return NULL;
     }
 
@@ -781,6 +816,13 @@ void *memchr(const void *src, int ch, size_t count)
     return NULL;
 }
 
+size_t strnlen(const char *str, size_t maximum)
+{
+    size_t length = 0;
+    while (length < maximum && str[length]) ++length;
+    return length;
+}
+
 size_t strlen(const char *str)
 {
     if (!str)
@@ -1008,6 +1050,29 @@ char *strcat(char *dst, const char *src)
         *dst++ = *src++;
     }
     *dst = '\0';
+    return out;
+}
+
+char *strncat(char *dst, const char *src, size_t n)
+{
+    if (!dst || !src || n == 0)
+    {
+        return dst;
+    }
+    char *out = dst;
+    while (*dst)
+    {
+        ++dst;
+    }
+    size_t copied = 0;
+    while (copied < n && src[copied] != '\0')
+    {
+        dst[copied] = src[copied];
+        ++copied;
+    }
+    /* n bounds source characters, not total destination capacity. Append
+     * exactly one terminator; unlike strncpy, do not pad the remainder. */
+    dst[copied] = '\0';
     return out;
 }
 
@@ -1261,6 +1326,14 @@ int isalnum(int ch)
 {
     return (isalpha(ch) || isdigit(ch)) ? 1 : 0;
 }
+
+int isxdigit(int ch) { return isdigit(ch) || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'); }
+int islower(int ch) { return ch >= 'a' && ch <= 'z'; }
+int isupper(int ch) { return ch >= 'A' && ch <= 'Z'; }
+int iscntrl(int ch) { return (ch >= 0 && ch < 32) || ch == 127; }
+int isgraph(int ch) { return ch > 32 && ch < 127; }
+int ispunct(int ch) { return isgraph(ch) && !isalnum(ch); }
+int isblank(int ch) { return ch == ' ' || ch == '\t'; }
 
 int abs(int value)
 {
@@ -1831,10 +1904,17 @@ int unsetenv(const char *name)
     return 0;
 }
 
-char *strerror(int errnum)
+static const char *libc_error_message(int errnum)
 {
     switch (errnum)
     {
+        case 0: return "Success";
+        case EPERM: return "Operation not permitted";
+        case ESRCH: return "No such process";
+        case EACCES: return "Permission denied";
+        case EBADF: return "Bad file descriptor";
+        case EBUSY: return "Resource busy";
+        case EFAULT: return "Bad address";
         case EINVAL: return "Invalid argument";
         case ENOMEM: return "Out of memory";
         case ENOENT: return "No such file or directory";
@@ -1842,20 +1922,71 @@ char *strerror(int errnum)
         case EINTR:  return "Interrupted system call";
         case EEXIST: return "File exists";
         case EIO:    return "I/O error";
-        default:     return "Unknown error";
+        case ENOSYS: return "Function not implemented";
+        case ENOSPC: return "No space left on device";
+        case EDOM: return "Numerical argument out of domain";
+        case ERANGE: return "Result out of range";
+        case EOVERFLOW: return "Value too large";
+        case ETIMEDOUT: return "Operation timed out";
+        case EDEADLK: return "Resource deadlock avoided";
+        case EILSEQ: return "Invalid byte sequence";
+        case ENOTSUP: return "Operation not supported";
+        default: return NULL;
     }
 }
 
+char *strerror(int errnum)
+{
+    const char *message = libc_error_message(errnum);
+    return (char *)(message ? message : "Unknown error");
+}
+
+int strerror_r(int errnum, char *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0) return ERANGE;
+    const char *message = libc_error_message(errnum);
+    if (!message) { buffer[0] = '\0'; return EINVAL; }
+    size_t length = strlen(message);
+    size_t copied = length < capacity - 1 ? length : capacity - 1;
+    memcpy(buffer, message, copied);
+    buffer[copied] = '\0';
+    return copied == length ? 0 : ERANGE;
+}
+
 #ifndef TTF_HOST_BUILD
+static size_t file_write_bytes_unlocked(FILE *stream, const void *data, size_t count);
+
 typedef struct
 {
-    int fd;
+    FILE *stream;
     char *buffer;
     size_t capacity;
     size_t length;
     bool error;
     bool buffer_mode;
+    bool dynamic_buffer;
 } printf_sink_t;
+
+static bool printf_sink_reserve(printf_sink_t *sink, size_t added)
+{
+    if (sink->error) return false;
+    if (added > (size_t)INT_MAX - sink->length)
+    { errno = EOVERFLOW; sink->error = true; return false; }
+    if (!sink->dynamic_buffer) return true;
+    size_t needed = sink->length + added + 1;
+    if (needed <= sink->capacity) return true;
+    size_t capacity = sink->capacity ? sink->capacity : 128;
+    while (capacity < needed)
+    {
+        if (capacity > ((size_t)INT_MAX + 1) / 2) { capacity = needed; break; }
+        capacity *= 2;
+    }
+    char *buffer = realloc(sink->buffer, capacity);
+    if (!buffer) { errno = ENOMEM; sink->error = true; return false; }
+    sink->buffer = buffer;
+    sink->capacity = capacity;
+    return true;
+}
 
 static void printf_sink_write(printf_sink_t *sink, const char *data, size_t len)
 {
@@ -1863,6 +1994,8 @@ static void printf_sink_write(printf_sink_t *sink, const char *data, size_t len)
     {
         return;
     }
+
+    if (!printf_sink_reserve(sink, len)) return;
 
     if (sink->buffer_mode)
     {
@@ -1890,18 +2023,9 @@ static void printf_sink_write(printf_sink_t *sink, const char *data, size_t len)
         return;
     }
 
-    size_t offset = 0;
-    while (offset < len)
-    {
-        ssize_t result = write(sink->fd, data + offset, len - offset);
-        if (result <= 0)
-        {
-            sink->error = true;
-            return;
-        }
-        offset += (size_t)result;
-        sink->length += (size_t)result;
-    }
+    size_t result = file_write_bytes_unlocked(sink->stream, data, len);
+    sink->length += result;
+    if (result != len) sink->error = true;
 }
 
 static void printf_sink_putc(printf_sink_t *sink, char c)
@@ -1911,9 +2035,26 @@ static void printf_sink_putc(printf_sink_t *sink, char c)
 
 static void printf_sink_pad(printf_sink_t *sink, char ch, int count)
 {
-    while (count-- > 0)
+    if (!sink || sink->error || count <= 0) return;
+    if (!printf_sink_reserve(sink, (size_t)count)) return;
+    if (sink->buffer_mode)
     {
-        printf_sink_putc(sink, ch);
+        if (sink->buffer && sink->capacity && sink->length < sink->capacity - 1)
+        {
+            size_t space = sink->capacity - 1 - sink->length;
+            size_t copy = (size_t)count < space ? (size_t)count : space;
+            memset(sink->buffer + sink->length, ch, copy);
+        }
+        sink->length += (size_t)count;
+        return;
+    }
+    char padding[64];
+    memset(padding, ch, sizeof(padding));
+    while (count && !sink->error)
+    {
+        size_t chunk = (unsigned)count < sizeof(padding) ? (unsigned)count : sizeof(padding);
+        printf_sink_write(sink, padding, chunk);
+        count -= (int)chunk;
     }
 }
 
@@ -1927,7 +2068,8 @@ static void printf_sink_print_uint_formatted(printf_sink_t *sink,
                                              bool has_precision,
                                              int precision,
                                              const char *prefix,
-                                             size_t prefix_len)
+                                             size_t prefix_len,
+                                             bool alternate)
 {
     if (base < 2 || base > 16)
     {
@@ -1967,6 +2109,13 @@ static void printf_sink_print_uint_formatted(printf_sink_t *sink,
         zero_pad = false;
     }
 
+    if (alternate && base == 8 && zeroes == 0)
+    {
+        if (digit_count == 0) buffer[digit_count++] = '0';
+        else if (buffer[digit_count - 1] != '0') zeroes = 1;
+    }
+    if (prefix_len + (size_t)zeroes + digit_count > INT_MAX)
+    { errno = EOVERFLOW; sink->error = true; return; }
     int total = (int)prefix_len + zeroes + (int)digit_count;
     int pad = 0;
     if (width > total)
@@ -2021,7 +2170,8 @@ static void printf_sink_print_int_formatted(printf_sink_t *sink,
                                             bool left_align,
                                             bool zero_pad,
                                             bool has_precision,
-                                            int precision)
+                                            int precision,
+                                            char positive_prefix)
 {
     const char *prefix = "";
     size_t prefix_len = 0;
@@ -2032,6 +2182,11 @@ static void printf_sink_print_int_formatted(printf_sink_t *sink,
         prefix = "-";
         prefix_len = 1;
         magnitude = (uint64_t)(-(value + 1)) + 1;
+    }
+    else if (positive_prefix)
+    {
+        prefix = &positive_prefix;
+        prefix_len = 1;
     }
 
     printf_sink_print_uint_formatted(sink,
@@ -2044,544 +2199,197 @@ static void printf_sink_print_int_formatted(printf_sink_t *sink,
                                      has_precision,
                                      precision,
                                      prefix,
-                                     prefix_len);
+                                     prefix_len,
+                                     false);
 }
 
-static size_t printf_uint_to_buffer(char *buffer, size_t capacity, uint64_t value)
+static void printf_float_write(void *context, const char *data, size_t length)
 {
-    if (!buffer || capacity == 0)
-    {
-        return 0;
-    }
-
-    size_t len = 0;
-    do
-    {
-        if (len + 1 >= capacity)
-        {
-            break;
-        }
-        buffer[len++] = (char)('0' + (value % 10));
-        value /= 10;
-    } while (value != 0);
-
-    for (size_t i = 0; i < len / 2; ++i)
-    {
-        char tmp = buffer[i];
-        buffer[i] = buffer[len - 1 - i];
-        buffer[len - 1 - i] = tmp;
-    }
-    buffer[len] = '\0';
-    return len;
+    printf_sink_write((printf_sink_t *)context, data, length);
 }
 
-static void printf_sink_print_literal(printf_sink_t *sink,
-                                      const char *prefix,
-                                      size_t prefix_len,
-                                      const char *text,
-                                      size_t text_len,
-                                      int width,
-                                      bool left_align)
+static void printf_float_pad(void *context, char byte, int count)
 {
-    size_t total = prefix_len + text_len;
-    int pad = 0;
-    if (width > (int)total)
-    {
-        pad = width - (int)total;
-    }
-
-    if (!left_align)
-    {
-        printf_sink_pad(sink, ' ', pad);
-    }
-    if (prefix_len)
-    {
-        printf_sink_write(sink, prefix, prefix_len);
-    }
-    if (text_len)
-    {
-        printf_sink_write(sink, text, text_len);
-    }
-    if (left_align)
-    {
-        printf_sink_pad(sink, ' ', pad);
-    }
-}
-
-static void printf_sink_print_float_formatted(printf_sink_t *sink,
-                                              double value,
-                                              int width,
-                                              bool left_align,
-                                              bool zero_pad,
-                                              bool has_precision,
-                                              int precision,
-                                              bool uppercase)
-{
-    if (!sink)
-    {
-        return;
-    }
-
-    if (value != value)
-    {
-        const char *nan_text = uppercase ? "NAN" : "nan";
-        printf_sink_print_literal(sink, "", 0, nan_text, 3, width, left_align);
-        return;
-    }
-    if (value > 1.0e308 || value < -1.0e308)
-    {
-        bool negative = (value < 0.0);
-        const char *prefix = negative ? "-" : "";
-        size_t prefix_len = negative ? 1 : 0;
-        const char *inf_text = uppercase ? "INF" : "inf";
-        printf_sink_print_literal(sink, prefix, prefix_len, inf_text, 3, width, left_align);
-        return;
-    }
-
-    bool negative = (value < 0.0);
-    if (value == 0.0 && (1.0 / value) < 0.0)
-    {
-        negative = true;
-    }
-    double abs_value = negative ? -value : value;
-
-    int prec = has_precision ? precision : 6;
-    if (prec < 0)
-    {
-        prec = 0;
-    }
-    if (prec > 9)
-    {
-        prec = 9;
-    }
-
-    uint64_t pow10 = 1;
-    for (int i = 0; i < prec; ++i)
-    {
-        pow10 *= 10;
-    }
-
-    uint64_t int_part = 0;
-    uint64_t frac_part = 0;
-    if (prec == 0)
-    {
-        int_part = (uint64_t)(abs_value + 0.5);
-    }
-    else
-    {
-        double scaled = abs_value * (double)pow10 + 0.5;
-        uint64_t rounded = (uint64_t)scaled;
-        int_part = rounded / pow10;
-        frac_part = rounded % pow10;
-    }
-
-    char int_buf[32];
-    size_t int_len = printf_uint_to_buffer(int_buf, sizeof(int_buf), int_part);
-
-    char frac_buf[32];
-    size_t frac_len = 0;
-    if (prec > 0)
-    {
-        frac_len = (size_t)prec;
-        for (size_t i = 0; i < frac_len; ++i)
-        {
-            frac_buf[frac_len - 1 - i] = (char)('0' + (frac_part % 10));
-            frac_part /= 10;
-        }
-    }
-
-    size_t digits_len = int_len + ((prec > 0) ? (1 + frac_len) : 0);
-    const char *prefix = negative ? "-" : "";
-    size_t prefix_len = negative ? 1 : 0;
-    int pad = 0;
-    if (width > (int)(prefix_len + digits_len))
-    {
-        pad = width - (int)(prefix_len + digits_len);
-    }
-
-    if (!left_align)
-    {
-        if (zero_pad)
-        {
-            if (prefix_len)
-            {
-                printf_sink_write(sink, prefix, prefix_len);
-            }
-            printf_sink_pad(sink, '0', pad);
-        }
-        else
-        {
-            printf_sink_pad(sink, ' ', pad);
-            if (prefix_len)
-            {
-                printf_sink_write(sink, prefix, prefix_len);
-            }
-        }
-    }
-    else if (prefix_len)
-    {
-        printf_sink_write(sink, prefix, prefix_len);
-    }
-
-    printf_sink_write(sink, int_buf, int_len);
-    if (prec > 0)
-    {
-        printf_sink_putc(sink, '.');
-        printf_sink_write(sink, frac_buf, frac_len);
-    }
-
-    if (left_align)
-    {
-        printf_sink_pad(sink, ' ', pad);
-    }
+    printf_sink_pad((printf_sink_t *)context, byte, count);
 }
 
 static void printf_format(printf_sink_t *sink, const char *format, va_list args)
 {
-    while (format && *format && sink && !sink->error)
+    while (*format && !sink->error)
     {
         if (*format != '%')
         {
             const char *start = format;
-            while (*format && *format != '%')
-            {
-                ++format;
-            }
+            while (*format && *format != '%') ++format;
             printf_sink_write(sink, start, (size_t)(format - start));
             continue;
         }
-
         ++format;
-        if (*format == '%')
+        unsigned flags = 0;
+        for (;; ++format)
         {
-            printf_sink_putc(sink, '%');
-            ++format;
-            continue;
+            if (*format == '-') flags |= ALIX_PRINTF_LEFT;
+            else if (*format == '0') flags |= ALIX_PRINTF_ZERO;
+            else if (*format == '#') flags |= ALIX_PRINTF_ALT;
+            else if (*format == '+') flags |= ALIX_PRINTF_PLUS;
+            else if (*format == ' ') flags |= ALIX_PRINTF_SPACE;
+            else if (*format != '\'') break; /* C locale has no digit grouping. */
         }
-
-        bool left_align = false;
-        bool zero_pad = false;
-        while (*format == '-' || *format == '0')
-        {
-            if (*format == '-')
-            {
-                left_align = true;
-                ++format;
-                continue;
-            }
-            if (*format == '0')
-            {
-                zero_pad = true;
-                ++format;
-                continue;
-            }
-        }
-
-        int width = 0;
+        bool left = (flags & ALIX_PRINTF_LEFT) != 0;
+        int width = 0, precision = -1;
         if (*format == '*')
         {
-            width = va_arg(args, int);
-            if (width < 0)
-            {
-                left_align = true;
-                width = -width;
-            }
-            ++format;
+            width = va_arg(args, int); ++format;
+            if (width == INT_MIN) goto overflow;
+            if (width < 0) { width = -width; left = true; flags |= ALIX_PRINTF_LEFT; }
         }
-        while (*format >= '0' && *format <= '9')
+        else while (*format >= '0' && *format <= '9')
         {
-            width = width * 10 + (*format - '0');
-            ++format;
+            int digit = *format++ - '0';
+            if (width > (INT_MAX - digit) / 10) goto overflow;
+            width = width * 10 + digit;
         }
-
-        bool has_precision = false;
-        int precision = 0;
         if (*format == '.')
         {
-            has_precision = true;
-            ++format;
+            ++format; precision = 0;
             if (*format == '*')
             {
-                precision = va_arg(args, int);
-                ++format;
+                precision = va_arg(args, int); ++format;
+                if (precision < 0) precision = -1;
             }
-            else
+            else while (*format >= '0' && *format <= '9')
             {
-                precision = 0;
-                while (*format >= '0' && *format <= '9')
-                {
-                    precision = precision * 10 + (*format - '0');
-                    ++format;
-                }
+                int digit = *format++ - '0';
+                if (precision > (INT_MAX - digit) / 10) goto overflow;
+                precision = precision * 10 + digit;
             }
         }
-
-        enum
+        enum { NORMAL, LONG, LLONG, SHORT, CHAR, SIZET, PTRDIFF, INTMAX, LDOUBLE } length = NORMAL;
+        if (*format == 'l') { ++format; length = LONG; if (*format == 'l') { ++format; length = LLONG; } }
+        else if (*format == 'h') { ++format; length = SHORT; if (*format == 'h') { ++format; length = CHAR; } }
+        else if (*format == 'z') { ++format; length = SIZET; }
+        else if (*format == 't') { ++format; length = PTRDIFF; }
+        else if (*format == 'j') { ++format; length = INTMAX; }
+        else if (*format == 'L') { ++format; length = LDOUBLE; }
+        char conversion = *format;
+        if (!conversion) { errno = EINVAL; sink->error = true; return; }
+        ++format;
+        bool zero = (flags & ALIX_PRINTF_ZERO) != 0;
+        bool alternate = (flags & ALIX_PRINTF_ALT) != 0;
+        switch (conversion)
         {
-            LENGTH_NONE,
-            LENGTH_Z,
-            LENGTH_L,
-            LENGTH_LL,
-        } length = LENGTH_NONE;
-
-        if (*format == 'z')
-        {
-            length = LENGTH_Z;
-            ++format;
-        }
-        else if (*format == 'l')
-        {
-            ++format;
-            if (*format == 'l')
-            {
-                length = LENGTH_LL;
-                ++format;
-            }
-            else
-            {
-                length = LENGTH_L;
-            }
-        }
-
-        char specifier = *format ? *format++ : '\0';
-        switch (specifier)
-        {
+            case '%': printf_sink_putc(sink, '%'); break;
             case 'c':
             {
-                char value = (char)va_arg(args, int);
-                if (!left_align && width > 1)
+                char value;
+                if (length == LONG)
                 {
-                    printf_sink_pad(sink, ' ', width - 1);
+                    wint_t wide = va_arg(args, wint_t);
+                    int converted = wctob(wide);
+                    if (converted == EOF) { errno = EILSEQ; sink->error = true; return; }
+                    value = (char)converted;
                 }
+                else if (length == NORMAL) value = (char)va_arg(args, int);
+                else { errno = EINVAL; sink->error = true; return; }
+                if (!left) printf_sink_pad(sink, ' ', width - 1);
                 printf_sink_putc(sink, value);
-                if (left_align && width > 1)
-                {
-                    printf_sink_pad(sink, ' ', width - 1);
-                }
+                if (left) printf_sink_pad(sink, ' ', width - 1);
                 break;
             }
             case 's':
             {
-                const char *text = va_arg(args, const char *);
-                if (!text)
+                const char *text = NULL;
+                const wchar_t *wide = NULL;
+                size_t count = 0;
+                if (length == LONG)
                 {
-                    text = "(null)";
+                    static const wchar_t null_wide[] = {'(', 'n', 'u', 'l', 'l', ')', 0};
+                    wide = va_arg(args, const wchar_t *);
+                    if (!wide) wide = null_wide;
+                    /* C/POSIX has one byte per representable wide unit. Do
+                     * not inspect a unit beyond the byte precision bound. */
+                    while (precision < 0 || count < (size_t)precision)
+                    {
+                        wchar_t unit = wide[count];
+                        if (!unit) break;
+                        if (wctob((wint_t)unit) == EOF) { errno = EILSEQ; sink->error = true; return; }
+                        if (count == INT_MAX) { errno = EOVERFLOW; sink->error = true; return; }
+                        ++count;
+                    }
                 }
-                size_t len = strlen(text);
-                if (has_precision && precision >= 0 && (size_t)precision < len)
+                else if (length == NORMAL)
                 {
-                    len = (size_t)precision;
+                    text = va_arg(args, const char *);
+                    if (!text) text = "(null)";
+                    count = precision < 0 ? strlen(text) : strnlen(text, (size_t)precision);
                 }
-                int pad = 0;
-                if (width > 0 && (size_t)width > len)
+                else { errno = EINVAL; sink->error = true; return; }
+                int padding = width > 0 && (size_t)width > count ? width - (int)count : 0;
+                if (!left) printf_sink_pad(sink, ' ', padding);
+                if (wide)
                 {
-                    pad = width - (int)len;
+                    for (size_t index = 0; index < count && !sink->error; ++index)
+                        printf_sink_putc(sink, (char)wide[index]);
                 }
-                if (!left_align)
-                {
-                    printf_sink_pad(sink, ' ', pad);
-                }
-                printf_sink_write(sink, text, len);
-                if (left_align)
-                {
-                    printf_sink_pad(sink, ' ', pad);
-                }
+                else printf_sink_write(sink, text, count);
+                if (left) printf_sink_pad(sink, ' ', padding);
                 break;
             }
-            case 'd':
-            case 'i':
+            case 'd': case 'i':
             {
                 int64_t value;
-                if (length == LENGTH_Z)
-                {
-                    value = (int64_t)va_arg(args, ssize_t);
-                }
-                else if (length == LENGTH_LL)
-                {
-                    value = (int64_t)va_arg(args, long long);
-                }
-                else if (length == LENGTH_L)
-                {
-                    value = (int64_t)va_arg(args, long);
-                }
-                else
-                {
-                    value = (int64_t)va_arg(args, int);
-                }
-                printf_sink_print_int_formatted(sink,
-                                               value,
-                                               width,
-                                               left_align,
-                                               zero_pad,
-                                               has_precision,
-                                               precision);
+                if (length == LONG) value = va_arg(args, long);
+                else if (length == LLONG) value = va_arg(args, long long);
+                else if (length == SIZET) value = va_arg(args, ssize_t);
+                else if (length == PTRDIFF) value = va_arg(args, ptrdiff_t);
+                else if (length == INTMAX) value = va_arg(args, intmax_t);
+                else { int promoted = va_arg(args, int); value = length == CHAR ? (signed char)promoted : length == SHORT ? (short)promoted : promoted; }
+                printf_sink_print_int_formatted(sink, value, width, left, zero, precision >= 0, precision,
+                    flags & ALIX_PRINTF_PLUS ? '+' : flags & ALIX_PRINTF_SPACE ? ' ' : 0);
                 break;
             }
-            case 'u':
+            case 'u': case 'o': case 'x': case 'X': case 'p':
             {
                 uint64_t value;
-                if (length == LENGTH_Z)
-                {
-                    value = (uint64_t)va_arg(args, size_t);
-                }
-                else if (length == LENGTH_LL)
-                {
-                    value = (uint64_t)va_arg(args, unsigned long long);
-                }
-                else if (length == LENGTH_L)
-                {
-                    value = (uint64_t)va_arg(args, unsigned long);
-                }
-                else
-                {
-                    value = (uint64_t)va_arg(args, unsigned int);
-                }
-                printf_sink_print_uint_formatted(sink,
-                                                 value,
-                                                 10,
-                                                 false,
-                                                 width,
-                                                 left_align,
-                                                 zero_pad,
-                                                 has_precision,
-                                                 precision,
-                                                 "",
-                                                 0);
+                if (conversion == 'p') value = (uintptr_t)va_arg(args, void *);
+                else if (length == LONG) value = va_arg(args, unsigned long);
+                else if (length == LLONG) value = va_arg(args, unsigned long long);
+                else if (length == SIZET) value = va_arg(args, size_t);
+                else if (length == PTRDIFF) value = va_arg(args, uintptr_t);
+                else if (length == INTMAX) value = va_arg(args, uintmax_t);
+                else { unsigned promoted = va_arg(args, unsigned); value = length == CHAR ? (unsigned char)promoted : length == SHORT ? (unsigned short)promoted : promoted; }
+                unsigned base = conversion == 'u' ? 10 : conversion == 'o' ? 8 : 16;
+                const char *prefix = ""; size_t prefix_size = 0;
+                if (conversion == 'p' || (base == 16 && alternate && value))
+                { prefix = conversion == 'X' ? "0X" : "0x"; prefix_size = 2; }
+                printf_sink_print_uint_formatted(sink, value, base, conversion == 'X', width, left, zero,
+                    precision >= 0, precision, prefix, prefix_size, alternate);
                 break;
             }
-            case 'x':
+            case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A':
             {
-                uint64_t value;
-                if (length == LENGTH_Z)
-                {
-                    value = (uint64_t)va_arg(args, size_t);
-                }
-                else if (length == LENGTH_LL)
-                {
-                    value = (uint64_t)va_arg(args, unsigned long long);
-                }
-                else if (length == LENGTH_L)
-                {
-                    value = (uint64_t)va_arg(args, unsigned long);
-                }
-                else
-                {
-                    value = (uint64_t)va_arg(args, unsigned int);
-                }
-                printf_sink_print_uint_formatted(sink,
-                                                 value,
-                                                 16,
-                                                 false,
-                                                 width,
-                                                 left_align,
-                                                 zero_pad,
-                                                 has_precision,
-                                                 precision,
-                                                 "",
-                                                 0);
+                long double value = length == LDOUBLE ? va_arg(args, long double) : (long double)va_arg(args, double);
+                alix_printf_float_output_t output = {sink, printf_float_write, printf_float_pad};
+                if (alix_printf_float(&output, value, width, precision, flags, conversion) < 0) sink->error = true;
                 break;
             }
-            case 'X':
-            {
-                uint64_t value;
-                if (length == LENGTH_Z)
-                {
-                    value = (uint64_t)va_arg(args, size_t);
-                }
-                else if (length == LENGTH_LL)
-                {
-                    value = (uint64_t)va_arg(args, unsigned long long);
-                }
-                else if (length == LENGTH_L)
-                {
-                    value = (uint64_t)va_arg(args, unsigned long);
-                }
-                else
-                {
-                    value = (uint64_t)va_arg(args, unsigned int);
-                }
-                printf_sink_print_uint_formatted(sink,
-                                                 value,
-                                                 16,
-                                                 true,
-                                                 width,
-                                                 left_align,
-                                                 zero_pad,
-                                                 has_precision,
-                                                 precision,
-                                                 "",
-                                                 0);
+            case 'n':
+                if (length == LONG) *va_arg(args, long *) = (long)sink->length;
+                else if (length == LLONG) *va_arg(args, long long *) = (long long)sink->length;
+                else if (length == SIZET) *va_arg(args, ssize_t *) = (ssize_t)sink->length;
+                else if (length == PTRDIFF) *va_arg(args, ptrdiff_t *) = (ptrdiff_t)sink->length;
+                else if (length == INTMAX) *va_arg(args, intmax_t *) = (intmax_t)sink->length;
+                else if (length == SHORT) *va_arg(args, short *) = (short)sink->length;
+                else if (length == CHAR) *va_arg(args, signed char *) = (signed char)sink->length;
+                else *va_arg(args, int *) = (int)sink->length;
                 break;
-            }
-            case 'p':
-            {
-                uintptr_t ptr = (uintptr_t)va_arg(args, void *);
-                printf_sink_print_uint_formatted(sink,
-                                                 (uint64_t)ptr,
-                                                 16,
-                                                 false,
-                                                 width,
-                                                 left_align,
-                                                 zero_pad,
-                                                 false,
-                                                 0,
-                                                 "0x",
-                                                 2);
-                break;
-            }
-            case 'f':
-            case 'F':
-            {
-                double value = va_arg(args, double);
-                printf_sink_print_float_formatted(sink,
-                                                  value,
-                                                  width,
-                                                  left_align,
-                                                  zero_pad,
-                                                  has_precision,
-                                                  precision,
-                                                  specifier == 'F');
-                break;
-            }
-            case '\0':
-            {
-                printf_sink_putc(sink, '%');
-                if (length == LENGTH_Z)
-                {
-                    printf_sink_putc(sink, 'z');
-                }
-                if (length == LENGTH_L)
-                {
-                    printf_sink_putc(sink, 'l');
-                }
-                if (length == LENGTH_LL)
-                {
-                    printf_sink_putc(sink, 'l');
-                    printf_sink_putc(sink, 'l');
-                }
-                return;
-            }
             default:
-            {
-                printf_sink_putc(sink, '%');
-                if (length == LENGTH_Z)
-                {
-                    printf_sink_putc(sink, 'z');
-                }
-                if (length == LENGTH_L)
-                {
-                    printf_sink_putc(sink, 'l');
-                }
-                if (length == LENGTH_LL)
-                {
-                    printf_sink_putc(sink, 'l');
-                    printf_sink_putc(sink, 'l');
-                }
-                printf_sink_putc(sink, specifier);
-                break;
-            }
+                printf_sink_putc(sink, '%'); printf_sink_putc(sink, conversion); break;
         }
     }
+    return;
+ overflow:
+    errno = EOVERFLOW; sink->error = true;
 }
 
 static void printf_sink_finalize_buffer(printf_sink_t *sink)
@@ -2598,15 +2406,16 @@ static void printf_sink_finalize_buffer(printf_sink_t *sink)
     sink->buffer[pos] = '\0';
 }
 
-static int vprintf_fd(int fd, const char *format, va_list args)
+static int vprintf_stream_unlocked(FILE *stream, const char *format, va_list args)
 {
     if (!format)
     {
+        errno = EINVAL;
         return -1;
     }
 
     printf_sink_t sink = {
-        .fd = fd,
+        .stream = stream,
         .buffer = NULL,
         .capacity = 0,
         .length = 0,
@@ -2624,12 +2433,13 @@ static int vprintf_fd(int fd, const char *format, va_list args)
 
 static int vsnprintf_internal(char *buf, size_t size, const char *format, va_list args)
 {
-    if (!format)
+    if (!format || (size && !buf))
     {
+        errno = EINVAL;
         return -1;
     }
     printf_sink_t sink = {
-        .fd = -1,
+        .stream = NULL,
         .buffer = buf,
         .capacity = size,
         .length = 0,
@@ -2638,14 +2448,14 @@ static int vsnprintf_internal(char *buf, size_t size, const char *format, va_lis
     };
     printf_format(&sink, format, args);
     printf_sink_finalize_buffer(&sink);
-    return (int)sink.length;
+    return sink.error ? -1 : (int)sink.length;
 }
 
 int printf(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    int result = vprintf_fd(1, format, args);
+    int result = vfprintf(stdout, format, args);
     va_end(args);
     return result;
 }
@@ -2654,9 +2464,15 @@ int vfprintf(FILE *stream, const char *format, va_list args)
 {
     if (!stream)
     {
+        errno = EBADF;
         return -1;
     }
-    return vprintf_fd(stream->fd, format, args);
+    alix_mutex_lock(&stream->mutex);
+    int result = __alix_stdio_orient_unlocked(stream, -1)
+                     ? vprintf_stream_unlocked(stream, format, args) : -1;
+    if (result < 0) stream->error = 1;
+    alix_mutex_unlock(&stream->mutex);
+    return result;
 }
 
 int fprintf(FILE *stream, const char *format, ...)
@@ -2695,6 +2511,28 @@ int snprintf(char *buf, size_t size, const char *format, ...)
     va_end(args);
     return result;
 }
+
+int vasprintf(char **result, const char *format, va_list args)
+{
+    if (!result) { errno = EINVAL; return -1; }
+    *result = NULL;
+    if (!format) { errno = EINVAL; return -1; }
+    printf_sink_t sink = {.buffer_mode = true, .dynamic_buffer = true};
+    if (printf_sink_reserve(&sink, 0)) printf_format(&sink, format, args);
+    if (sink.error) { free(sink.buffer); return -1; }
+    printf_sink_finalize_buffer(&sink);
+    *result = sink.buffer;
+    return (int)sink.length;
+}
+
+int asprintf(char **result, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int count = vasprintf(result, format, args);
+    va_end(args);
+    return count;
+}
 #endif /* TTF_HOST_BUILD */
 
 void *malloc(size_t size)
@@ -2727,6 +2565,81 @@ void free(void *ptr)
     user_heap_lock_release();
 }
 
+void *aligned_alloc(size_t alignment, size_t size)
+{
+    if (alignment == 0 || (alignment & (alignment - 1u)) != 0 || size % alignment != 0)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (size == 0)
+    {
+        return NULL;
+    }
+    size_t effective = alignment < ALIGNMENT ? ALIGNMENT : alignment;
+    if (effective > SIZE_MAX_VALUE - sizeof(heap_block_t) - 2 * ALIGNMENT ||
+        size > SIZE_MAX_VALUE - effective - sizeof(heap_block_t) - 2 * ALIGNMENT)
+    {
+        errno = ENOMEM;
+        return NULL;
+    }
+    size_t reserve = size + effective + sizeof(heap_block_t) + ALIGNMENT;
+    user_heap_lock_acquire();
+    void *allocation = malloc_locked(reserve);
+    if (!allocation)
+    {
+        user_heap_lock_release();
+        errno = ENOMEM;
+        return NULL;
+    }
+    heap_block_t *block = payload_to_block(allocation);
+    uintptr_t address = (uintptr_t)allocation;
+    uintptr_t aligned = (address + effective - 1u) & ~(uintptr_t)(effective - 1u);
+    if (aligned != address && aligned - address < sizeof(heap_block_t) + ALIGNMENT)
+    {
+        aligned += effective;
+    }
+    if (aligned != address)
+    {
+        size_t prefix = aligned - address;
+        heap_block_t *allocated = (heap_block_t *)(aligned - sizeof(heap_block_t));
+        allocated->size = block->size - prefix;
+        allocated->free = false;
+        allocated->next = block->next;
+        allocated->prev = block;
+        if (allocated->next) allocated->next->prev = allocated;
+        else g_heap_tail = allocated;
+        block->next = allocated;
+        block->size = prefix - sizeof(heap_block_t);
+        block->free = true;
+        split_block(allocated, align_size(size));
+        coalesce(block);
+    }
+    else
+    {
+        split_block(block, align_size(size));
+    }
+    user_heap_lock_release();
+    return (void *)aligned;
+}
+
+int posix_memalign(void **result, size_t alignment, size_t size)
+{
+    if (!result || alignment < sizeof(void *) || (alignment & (alignment - 1u)) != 0)
+    {
+        return EINVAL;
+    }
+    if (size > SIZE_MAX_VALUE - (alignment - 1u))
+    {
+        return ENOMEM;
+    }
+    size_t rounded = (size + alignment - 1u) & ~(alignment - 1u);
+    void *allocation = aligned_alloc(alignment, rounded);
+    if (!allocation && size != 0) return ENOMEM;
+    *result = allocation;
+    return 0;
+}
+
 void *realloc(void *ptr, size_t size)
 {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
@@ -2752,6 +2665,7 @@ void *calloc(size_t count, size_t size)
     user_heap_log_caller("calloc size=", size, caller);
     if (count != 0 && size > SIZE_MAX_VALUE / count)
     {
+        errno = ENOMEM;
         return NULL;
     }
     size_t total = count * size;
@@ -2776,23 +2690,27 @@ void *calloc(size_t count, size_t size)
 }
 
 #ifndef TTF_HOST_BUILD
-static FILE g_stdout_obj = { .fd = 1, .error = 0, .eof = 0 };
-static FILE g_stderr_obj = { .fd = 2, .error = 0, .eof = 0 };
-static FILE g_stdin_obj = { .fd = 0, .error = 0, .eof = 0 };
+static FILE g_stdout_obj = { .fd = 1, .access_flags = SYSCALL_OPEN_WRITE };
+static FILE g_stderr_obj = { .fd = 2, .access_flags = SYSCALL_OPEN_WRITE };
+static FILE g_stdin_obj = { .fd = 0, .access_flags = SYSCALL_OPEN_READ };
 FILE *stdout = &g_stdout_obj;
 FILE *stderr = &g_stderr_obj;
 FILE *stdin = &g_stdin_obj;
 
-static FILE *file_alloc(int fd)
+static void file_io_errno(int64_t result);
+
+static FILE *file_alloc(int fd, uint64_t flags, bool append)
 {
     FILE *stream = (FILE *)malloc(sizeof(FILE));
     if (!stream)
     {
         return NULL;
     }
+    memset(stream, 0, sizeof(*stream));
     stream->fd = fd;
-    stream->error = 0;
-    stream->eof = 0;
+    stream->access_flags = flags;
+    stream->append = append;
+    alix_mutex_init(&stream->mutex);
     return stream;
 }
 
@@ -2804,7 +2722,8 @@ static uint64_t fopen_mode_to_flags(const char *mode, bool *append_out)
     }
     if (!mode || mode[0] == '\0')
     {
-        return SYSCALL_OPEN_READ;
+        errno = EINVAL;
+        return 0;
     }
 
     bool plus = false;
@@ -2824,15 +2743,27 @@ static uint64_t fopen_mode_to_flags(const char *mode, bool *append_out)
             append = true;
             break;
         default:
-            flags = SYSCALL_OPEN_READ;
-            break;
+            errno = EINVAL;
+            return 0;
     }
 
-    for (const char *c = mode; *c; ++c)
+    bool binary = false;
+    for (const char *c = mode + 1; *c; ++c)
     {
         if (*c == '+')
         {
+            if (plus) { errno = EINVAL; return 0; }
             plus = true;
+        }
+        else if (*c == 'b' && !binary)
+        {
+            binary = true;
+        }
+        else
+        {
+            /* Exclusive creation needs a native atomic open flag. */
+            errno = *c == 'x' ? ENOTSUP : EINVAL;
+            return 0;
         }
     }
     if (plus)
@@ -2851,20 +2782,32 @@ FILE *fopen(const char *path, const char *mode)
 {
     bool append = false;
     uint64_t flags = fopen_mode_to_flags(mode, &append);
+    if (!path || !flags)
+    {
+        if (!path) errno = EINVAL;
+        return NULL;
+    }
+    int saved_errno = errno;
+    errno = 0;
     int fd = open(path, flags);
     if (fd < 0)
     {
+        file_io_errno(fd);
         return NULL;
     }
+    errno = saved_errno;
     if (append)
     {
         (void)lseek(fd, 0, SYSCALL_SEEK_END);
+        errno = saved_errno;
     }
 
-    FILE *stream = file_alloc(fd);
+    FILE *stream = file_alloc(fd, flags, append);
     if (!stream)
     {
+        int saved_errno = errno;
         close(fd);
+        errno = saved_errno ? saved_errno : ENOMEM;
         return NULL;
     }
     return stream;
@@ -2874,109 +2817,323 @@ int fclose(FILE *stream)
 {
     if (!stream)
     {
-        return -1;
+        errno = EBADF;
+        return EOF;
     }
+    /* The caller must exclude concurrent fclose/use of this FILE's lifetime.
+     * The stream mutex serializes operations, not access to freed pointers. */
+    alix_mutex_lock(&stream->mutex);
     int fd = stream->fd;
-    int res = (fd >= 0) ? close(fd) : -1;
+    int saved_errno = errno;
+    errno = 0;
+    int res = (fd >= 0) ? close(fd) : -EBADF;
+    if (res < 0)
+    {
+        file_io_errno(res);
+        stream->error = 1;
+    }
+    else errno = saved_errno;
+    stream->fd = -1;
+    stream->access_flags = 0;
+    stream->pushback_pending = false;
+    alix_mutex_unlock(&stream->mutex);
     if (stream != stdout && stream != stderr && stream != stdin)
     {
         free(stream);
     }
-    return res;
+    return res < 0 ? EOF : 0;
 }
 
-size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
+static void file_io_errno(int64_t result)
 {
-    if (!stream || !ptr || size == 0 || nmemb == 0)
+    /* Current native wrappers may return -errno directly; POSIX-style wrappers
+     * return -1 after setting errno. Accept both without retaining stale errno. */
+    if (result < -1 && result >= -2147483647LL) errno = (int)-result;
+    else if (!errno) errno = EIO;
+}
+
+static int64_t file_lseek_unlocked(FILE *stream, int64_t offset, int whence)
+{
+    if (stream->fd < 0) { errno = EBADF; return -1; }
+    int saved_errno = errno;
+    errno = 0;
+    int64_t result = lseek(stream->fd, offset, whence);
+    if (result < 0) file_io_errno(result);
+    else errno = saved_errno;
+    return result;
+}
+
+static int file_sync_pushback_unlocked(FILE *stream)
+{
+    if (!stream->pushback_pending) return 0;
+    if (file_lseek_unlocked(stream, -1, SYSCALL_SEEK_CUR) < 0)
     {
-        return 0;
+        stream->error = 1;
+        return EOF;
     }
-    size_t total = size * nmemb;
+    stream->pushback_pending = false;
+    return 0;
+}
+
+bool __alix_stdio_orient_unlocked(FILE *stream, int orientation)
+{
+    if (stream->fd < 0) { errno = EBADF; stream->error = 1; return false; }
+    int desired = orientation > 0 ? 1 : -1;
+    if (!stream->orientation) stream->orientation = desired;
+    if (stream->orientation != desired)
+    {
+        errno = EINVAL;
+        stream->error = 1;
+        return false;
+    }
+    return true;
+}
+
+size_t __alix_stdio_read_unlocked(FILE *stream, void *ptr, size_t total, bool *failed)
+{
+    *failed = false;
+    if (stream->fd < 0 || !(stream->access_flags & SYSCALL_OPEN_READ))
+    {
+        errno = EBADF; stream->error = 1; *failed = true; return 0;
+    }
     size_t read_bytes = 0;
     uint8_t *dst = (uint8_t *)ptr;
+    if (stream->pushback_pending && total)
+    {
+        dst[read_bytes++] = stream->pushback;
+        stream->pushback_pending = false;
+    }
+    if (stream->eof) return read_bytes;
     while (read_bytes < total)
     {
+        int saved_errno = errno;
+        errno = 0;
         ssize_t got = read(stream->fd, dst + read_bytes, total - read_bytes);
         if (got <= 0)
         {
             if (got == 0)
             {
                 stream->eof = 1;
+                errno = saved_errno;
             }
             else
             {
                 stream->error = 1;
+                file_io_errno(got);
+                *failed = true;
             }
             break;
         }
+        errno = saved_errno;
+        if ((size_t)got > total - read_bytes)
+        {
+            errno = EIO; stream->error = 1; *failed = true; break;
+        }
         read_bytes += (size_t)got;
     }
-    return read_bytes / size;
+    return read_bytes;
 }
 
-size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+static size_t file_read_bytes_unlocked(FILE *stream, void *ptr, size_t total, bool *failed)
 {
-    if (!stream || !ptr || size == 0 || nmemb == 0)
+    if (!__alix_stdio_orient_unlocked(stream, -1)) { *failed = true; return 0; }
+    return __alix_stdio_read_unlocked(stream, ptr, total, failed);
+}
+
+size_t __alix_stdio_write_unlocked(FILE *stream, const void *ptr, size_t total)
+{
+    if (!total) return 0;
+    if (stream->fd < 0 || !(stream->access_flags & SYSCALL_OPEN_WRITE))
     {
-        return 0;
+        errno = EBADF; stream->error = 1; return 0;
     }
-    size_t total = size * nmemb;
+    if (!ptr) { errno = EINVAL; stream->error = 1; return 0; }
+    if (stream->append)
+    {
+        if (file_lseek_unlocked(stream, 0, SYSCALL_SEEK_END) < 0)
+        {
+            stream->error = 1;
+            return 0;
+        }
+        stream->pushback_pending = false;
+    }
+    else if (file_sync_pushback_unlocked(stream) != 0) return 0;
     size_t written = 0;
     const uint8_t *src = (const uint8_t *)ptr;
     while (written < total)
     {
+        int saved_errno = errno;
+        errno = 0;
         ssize_t out = write(stream->fd, src + written, total - written);
         if (out <= 0)
         {
             stream->error = 1;
+            file_io_errno(out);
             break;
+        }
+        errno = saved_errno;
+        if ((size_t)out > total - written)
+        {
+            errno = EIO; stream->error = 1; break;
         }
         written += (size_t)out;
     }
-    return written / size;
+    return written;
+}
+
+/* Caller holds stream->mutex. Also used by the formatted-output sink. */
+static size_t file_write_bytes_unlocked(FILE *stream, const void *ptr, size_t total)
+{
+    if (!__alix_stdio_orient_unlocked(stream, -1)) return 0;
+    return __alix_stdio_write_unlocked(stream, ptr, total);
+}
+
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+    if (!size || !nmemb) return 0;
+    if (!stream) { errno = EBADF; return 0; }
+    alix_mutex_lock(&stream->mutex);
+    size_t total = 0, bytes = 0;
+    if (__builtin_mul_overflow(size, nmemb, &total)) { errno = EOVERFLOW; stream->error = 1; }
+    else if (!ptr) { errno = EINVAL; stream->error = 1; }
+    else
+    {
+        bool failed;
+        bytes = file_read_bytes_unlocked(stream, ptr, total, &failed);
+    }
+    alix_mutex_unlock(&stream->mutex);
+    return bytes / size;
+}
+
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+    if (!size || !nmemb) return 0;
+    if (!stream) { errno = EBADF; return 0; }
+    alix_mutex_lock(&stream->mutex);
+    size_t total = 0, bytes = 0;
+    if (__builtin_mul_overflow(size, nmemb, &total)) { errno = EOVERFLOW; stream->error = 1; }
+    else bytes = file_write_bytes_unlocked(stream, ptr, total);
+    alix_mutex_unlock(&stream->mutex);
+    return bytes / size;
 }
 
 int fflush(FILE *stream)
 {
-    (void)stream;
+    /* Output is unbuffered. Global output flushing must not discard input
+     * pushback, including on update streams whose latest operation was input. */
+    if (!stream) return 0;
+    alix_mutex_lock(&stream->mutex);
+    int result;
+    if (stream->fd < 0) { errno = EBADF; stream->error = 1; result = EOF; }
+    else result = file_sync_pushback_unlocked(stream);
+    alix_mutex_unlock(&stream->mutex);
+    return result;
+}
+
+static int file_seek_unlocked(FILE *stream, int64_t offset, int whence)
+{
+    if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if (whence == SEEK_CUR && stream->pushback_pending &&
+        __builtin_sub_overflow(offset, (int64_t)1, &offset))
+    {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    if (file_lseek_unlocked(stream, offset, whence) < 0) return -1;
+    stream->eof = 0;
+    stream->pushback_pending = false;
     return 0;
+}
+
+static int64_t file_tell_unlocked(FILE *stream)
+{
+    int64_t position = file_lseek_unlocked(stream, 0, SYSCALL_SEEK_CUR);
+    if (position < 0) return -1;
+    if (stream->pushback_pending)
+    {
+        /* Position after pushback at offset zero is unspecified. Report an
+         * unrepresentable position without changing the pending byte. */
+        if (!position) { errno = EINVAL; return -1; }
+        --position;
+    }
+    return position;
 }
 
 int fseek(FILE *stream, long offset, int whence)
 {
-    if (!stream)
-    {
-        return -1;
-    }
-    stream->eof = 0;
-    int64_t pos = lseek(stream->fd, offset, whence);
-    return (pos < 0) ? -1 : 0;
+    if (!stream) { errno = EBADF; return -1; }
+    alix_mutex_lock(&stream->mutex);
+    int result = file_seek_unlocked(stream, offset, whence);
+    alix_mutex_unlock(&stream->mutex);
+    return result;
 }
 
 long ftell(FILE *stream)
 {
-    if (!stream)
-    {
-        return -1;
-    }
-    return (long)lseek(stream->fd, 0, SYSCALL_SEEK_CUR);
+    if (!stream) { errno = EBADF; return -1; }
+    alix_mutex_lock(&stream->mutex);
+    int64_t position = file_tell_unlocked(stream);
+    if (position >= 0 && (int64_t)(long)position != position) { errno = EOVERFLOW; position = -1; }
+    alix_mutex_unlock(&stream->mutex);
+    return (long)position;
+}
+
+int fgetpos(FILE *stream, fpos_t *position)
+{
+    if (!stream || !position) { errno = !stream ? EBADF : EINVAL; return -1; }
+    alix_mutex_lock(&stream->mutex);
+    int64_t value = file_tell_unlocked(stream);
+    if (value >= 0) *position = value;
+    alix_mutex_unlock(&stream->mutex);
+    return value < 0 ? -1 : 0;
+}
+
+int fsetpos(FILE *stream, const fpos_t *position)
+{
+    if (!stream || !position) { errno = !stream ? EBADF : EINVAL; return -1; }
+    alix_mutex_lock(&stream->mutex);
+    int result = file_seek_unlocked(stream, *position, SEEK_SET);
+    alix_mutex_unlock(&stream->mutex);
+    return result;
+}
+
+void rewind(FILE *stream)
+{
+    if (!stream) { errno = EBADF; return; }
+    alix_mutex_lock(&stream->mutex);
+    (void)file_seek_unlocked(stream, 0, SEEK_SET);
+    stream->error = 0;
+    alix_mutex_unlock(&stream->mutex);
 }
 
 int fputc(int ch, FILE *stream)
 {
+    if (!stream) { errno = EBADF; return EOF; }
     unsigned char c = (unsigned char)ch;
-    return (fwrite(&c, 1, 1, stream) == 1) ? (int)c : -1;
+    alix_mutex_lock(&stream->mutex);
+    size_t wrote = file_write_bytes_unlocked(stream, &c, 1);
+    alix_mutex_unlock(&stream->mutex);
+    return wrote == 1 ? (int)c : EOF;
+}
+
+static int file_getc_unlocked(FILE *stream, bool *failed)
+{
+    unsigned char ch = 0;
+    return file_read_bytes_unlocked(stream, &ch, 1, failed) == 1 ? (int)ch : EOF;
 }
 
 int fgetc(FILE *stream)
 {
-    unsigned char ch = 0;
-    size_t got = fread(&ch, 1, 1, stream);
-    if (got == 1)
-    {
-        return (int)ch;
-    }
-    return EOF;
+    if (!stream) { errno = EBADF; return EOF; }
+    alix_mutex_lock(&stream->mutex);
+    bool failed;
+    int result = file_getc_unlocked(stream, &failed);
+    alix_mutex_unlock(&stream->mutex);
+    return result;
 }
 
 int getc(FILE *stream)
@@ -2984,18 +3141,50 @@ int getc(FILE *stream)
     return fgetc(stream);
 }
 
+int ungetc(int ch, FILE *stream)
+{
+    if (ch == EOF) return EOF;
+    if (!stream) { errno = EBADF; return EOF; }
+    alix_mutex_lock(&stream->mutex);
+    int result = __alix_stdio_orient_unlocked(stream, -1)
+                     ? __alix_stdio_pushback_unlocked(stream, (unsigned char)ch) : EOF;
+    alix_mutex_unlock(&stream->mutex);
+    return result;
+}
+
+int __alix_stdio_pushback_unlocked(FILE *stream, unsigned char ch)
+{
+    int result = EOF;
+    if (stream->fd < 0 || !(stream->access_flags & SYSCALL_OPEN_READ)) errno = EBADF;
+    else if (!stream->pushback_pending)
+    {
+        stream->pushback = (unsigned char)ch;
+        stream->pushback_pending = true;
+        stream->eof = 0;
+        result = stream->pushback;
+    }
+    return result;
+}
+
 char *fgets(char *s, int size, FILE *stream)
 {
     if (!s || size <= 0 || !stream)
     {
+        errno = !stream ? EBADF : EINVAL;
         return NULL;
     }
-    s[0] = '\0';
-
+    alix_mutex_lock(&stream->mutex);
+    if (size == 1)
+    {
+        s[0] = '\0';
+        alix_mutex_unlock(&stream->mutex);
+        return s;
+    }
     int idx = 0;
+    bool failed = false;
     while (idx < size - 1)
     {
-        int ch = fgetc(stream);
+        int ch = file_getc_unlocked(stream, &failed);
         if (ch == EOF)
         {
             break;
@@ -3007,11 +3196,13 @@ char *fgets(char *s, int size, FILE *stream)
         }
     }
 
-    if (idx == 0)
+    if (idx == 0 || failed)
     {
+        alix_mutex_unlock(&stream->mutex);
         return NULL;
     }
     s[idx] = '\0';
+    alix_mutex_unlock(&stream->mutex);
     return s;
 }
 
@@ -3021,7 +3212,40 @@ int feof(FILE *stream)
     {
         return 1;
     }
-    return stream->eof != 0;
+    alix_mutex_lock(&stream->mutex);
+    int result = stream->eof != 0;
+    alix_mutex_unlock(&stream->mutex);
+    return result;
+}
+
+int ferror(FILE *stream)
+{
+    if (!stream) return 1;
+    alix_mutex_lock(&stream->mutex);
+    int result = stream->error != 0;
+    alix_mutex_unlock(&stream->mutex);
+    return result;
+}
+
+void clearerr(FILE *stream)
+{
+    if (stream)
+    {
+        alix_mutex_lock(&stream->mutex);
+        stream->error = 0;
+        stream->eof = 0;
+        alix_mutex_unlock(&stream->mutex);
+    }
+}
+
+int fileno(FILE *stream)
+{
+    if (!stream) { errno = EBADF; return -1; }
+    alix_mutex_lock(&stream->mutex);
+    int result = stream->fd;
+    if (result < 0) errno = EBADF;
+    alix_mutex_unlock(&stream->mutex);
+    return result;
 }
 
 int fputs(const char *s, FILE *stream)
@@ -3042,13 +3266,7 @@ void setbuf(FILE *stream, char *buf)
 
 int getchar(void)
 {
-    unsigned char ch = 0;
-    ssize_t got = read(0, &ch, 1);
-    if (got == 1)
-    {
-        return (int)ch;
-    }
-    return -1;
+    return fgetc(stdin);
 }
 
 ssize_t read(int fd, void *buffer, size_t count)
@@ -3071,6 +3289,39 @@ int unlink(const char *path)
     (void)path;
     errno = ENOSYS;
     return -1;
+}
+
+int puts(const char *text)
+{
+    if (!text)
+    {
+        errno = EINVAL;
+        return EOF;
+    }
+    size_t length = strlen(text);
+    if (length == SIZE_MAX_VALUE)
+    {
+        errno = EOVERFLOW;
+        return EOF;
+    }
+    /* A heap-owned complete line also avoids splitting concurrent output into
+     * separate string/newline syscalls or retaining another thread's stack. */
+    char *line = malloc(length + 1);
+    if (!line)
+    {
+        errno = ENOMEM;
+        return EOF;
+    }
+    memcpy(line, text, length);
+    line[length] = '\n';
+    size_t written = fwrite(line, 1, length + 1, stdout);
+    free(line);
+    return written == length + 1 ? 0 : EOF;
+}
+
+int remove(const char *path)
+{
+    return unlink(path);
 }
 
 int64_t lseek(int fd, int64_t offset, int whence)
@@ -3525,6 +3776,38 @@ int fscanf(FILE *stream, const char *fmt, ...)
 
 void exit(int status)
 {
+#ifndef TTF_HOST_BUILD
+    static uint64_t exiting_thread;
+    static volatile uint32_t exit_wait;
+    uint64_t expected = 0;
+    uint64_t self = alix_thread_self();
+    if (!__atomic_compare_exchange_n(&exiting_thread, &expected, self, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+        if (expected == self)
+        {
+            /* Recursive exit from an exit handler must not invoke it twice. */
+            sys_exit(status);
+        }
+        /* A concurrent exit must not kill the first thread halfway through
+         * global destructors. Process termination will cancel this wait. */
+        for (;;) (void)sys_futex_wait(&exit_wait, 0, ALIX_WAIT_FOREVER);
+    }
+    alix_thread_run_tls_destructors();
+    alix_run_exit_handlers();
+    typedef void (*fini_hook_t)(void);
+    extern fini_hook_t __fini_array_start[];
+    extern fini_hook_t __fini_array_end[];
+    static uint32_t fini_started;
+    if (!__atomic_exchange_n(&fini_started, 1, __ATOMIC_ACQ_REL))
+    {
+        fini_hook_t *hook = __fini_array_end;
+        while (hook != __fini_array_start)
+        {
+            (*--hook)();
+        }
+    }
+#endif
     sys_exit(status);
     for (;;)
     {
@@ -3570,16 +3853,26 @@ void alix_mutex_lock(alix_mutex_t *mutex)
         return;
     }
 
-    uint32_t spins = 0;
-    while (__sync_lock_test_and_set(&mutex->state, 1) != 0)
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(&mutex->state, &expected, 1, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
     {
-        while (__atomic_load_n(&mutex->state, __ATOMIC_RELAXED))
+        return;
+    }
+    /* State 2 retains the contention marker until unlock wakes a waiter.
+     * The expected-value wait closes the unlock-before-sleep race. */
+    while (__atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE) != 0)
+    {
+        int result = sys_futex_wait(&mutex->state, 2, SYSCALL_FUTEX_WAIT_FOREVER);
+        if (result == -ENOSYS)
         {
-            libc_cpu_relax();
-            if (((++spins) & 0xFFu) == 0)
-            {
-                (void)sys_yield();
-            }
+            /* The host test syscall adapter has no kernel wait queues. */
+            (void)sys_yield();
+        }
+        else if (result != SYSCALL_FUTEX_OK && result != SYSCALL_FUTEX_AGAIN)
+        {
+            serial_printf("libc: mutex wait failed result=%d\n", result);
+            exit(1);
         }
     }
 }
@@ -3590,7 +3883,67 @@ void alix_mutex_unlock(alix_mutex_t *mutex)
     {
         return;
     }
-    __sync_lock_release(&mutex->state);
+    uint32_t previous = __atomic_exchange_n(&mutex->state, 0, __ATOMIC_RELEASE);
+    if (previous == 2)
+    {
+        int result = sys_futex_wake(&mutex->state, 1);
+        if (result < 0 && result != -ENOSYS)
+        {
+            serial_printf("libc: mutex wake failed result=%d\n", result);
+            exit(1);
+        }
+    }
+}
+
+void alix_cond_init(alix_cond_t *condition)
+{
+    if (condition)
+    {
+        __atomic_store_n(&condition->sequence, 0, __ATOMIC_RELEASE);
+    }
+}
+
+int alix_cond_timedwait(alix_cond_t *condition, alix_mutex_t *mutex, uint32_t timeout_ms)
+{
+    if (!condition || !mutex)
+    {
+        return SYSCALL_FUTEX_INVALID;
+    }
+    /* The caller's mutex protects its predicate. Take the sequence before
+     * releasing that mutex: signal between unlock and kernel registration is
+     * detected by the kernel's expected-value check instead of being lost. */
+    uint32_t sequence = __atomic_load_n(&condition->sequence, __ATOMIC_ACQUIRE);
+    alix_mutex_unlock(mutex);
+    int result = sys_futex_wait(&condition->sequence, sequence, timeout_ms);
+    alix_mutex_lock(mutex);
+    return result == SYSCALL_FUTEX_AGAIN ? SYSCALL_FUTEX_OK : result;
+}
+
+int alix_cond_wait(alix_cond_t *condition, alix_mutex_t *mutex)
+{
+    return alix_cond_timedwait(condition, mutex, ALIX_WAIT_FOREVER);
+}
+
+int alix_cond_signal(alix_cond_t *condition)
+{
+    if (!condition)
+    {
+        return SYSCALL_FUTEX_INVALID;
+    }
+    __atomic_add_fetch(&condition->sequence, 1u, __ATOMIC_RELEASE);
+    int result = sys_futex_wake(&condition->sequence, 1);
+    return result < 0 ? result : SYSCALL_FUTEX_OK;
+}
+
+int alix_cond_broadcast(alix_cond_t *condition)
+{
+    if (!condition)
+    {
+        return SYSCALL_FUTEX_INVALID;
+    }
+    __atomic_add_fetch(&condition->sequence, 1u, __ATOMIC_RELEASE);
+    int result = sys_futex_wake(&condition->sequence, (uint32_t)-1);
+    return result < 0 ? result : SYSCALL_FUTEX_OK;
 }
 
 alix_thread_t alix_thread_self(void)
@@ -3638,8 +3991,653 @@ int alix_thread_join(alix_thread_t thread, int *status_out)
 
 void alix_thread_exit(int status)
 {
+    alix_thread_run_tls_destructors();
+    if (sys_thread_prepare_exit() == 1)
+    {
+        /* The last surviving user thread owns process-wide finalization,
+         * even when the initial thread previously called thread_exit. */
+        exit(status);
+    }
     sys_thread_exit(status);
     for (;;)
     {
     }
 }
+
+bool alix_mutex_trylock(alix_mutex_t *mutex)
+{
+    if (!mutex)
+    {
+        return false;
+    }
+    uint32_t expected = 0;
+    return __atomic_compare_exchange_n(&mutex->state, &expected, 1, false,
+                                       __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+void alix_recursive_mutex_init(alix_recursive_mutex_t *mutex)
+{
+    if (mutex)
+    {
+        alix_mutex_init(&mutex->mutex);
+        __atomic_store_n(&mutex->owner, 0, __ATOMIC_RELEASE);
+        mutex->depth = 0;
+    }
+}
+
+int alix_recursive_mutex_lock(alix_recursive_mutex_t *mutex)
+{
+    if (!mutex)
+    {
+        return -EINVAL;
+    }
+    uint64_t self = alix_thread_self();
+    if (__atomic_load_n(&mutex->owner, __ATOMIC_ACQUIRE) == self)
+    {
+        if (mutex->depth == (uint32_t)-1)
+        {
+            return -EAGAIN;
+        }
+        ++mutex->depth;
+        return 0;
+    }
+    alix_mutex_lock(&mutex->mutex);
+    mutex->depth = 1;
+    __atomic_store_n(&mutex->owner, self, __ATOMIC_RELEASE);
+    return 0;
+}
+
+bool alix_recursive_mutex_trylock(alix_recursive_mutex_t *mutex)
+{
+    if (!mutex)
+    {
+        return false;
+    }
+    uint64_t self = alix_thread_self();
+    if (__atomic_load_n(&mutex->owner, __ATOMIC_ACQUIRE) == self)
+    {
+        if (mutex->depth == (uint32_t)-1)
+        {
+            return false;
+        }
+        ++mutex->depth;
+        return true;
+    }
+    if (!alix_mutex_trylock(&mutex->mutex))
+    {
+        return false;
+    }
+    mutex->depth = 1;
+    __atomic_store_n(&mutex->owner, self, __ATOMIC_RELEASE);
+    return true;
+}
+
+int alix_recursive_mutex_unlock(alix_recursive_mutex_t *mutex)
+{
+    if (!mutex || __atomic_load_n(&mutex->owner, __ATOMIC_ACQUIRE) != alix_thread_self() ||
+        mutex->depth == 0)
+    {
+        return -EPERM;
+    }
+    if (--mutex->depth == 0)
+    {
+        __atomic_store_n(&mutex->owner, 0, __ATOMIC_RELEASE);
+        alix_mutex_unlock(&mutex->mutex);
+    }
+    return 0;
+}
+
+int alix_call_once(alix_once_t *once, void (*initialize)(void))
+{
+    if (!once || !initialize)
+    {
+        return -EINVAL;
+    }
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(&once->state, &expected, 1, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
+    {
+        initialize();
+        __atomic_store_n(&once->state, 2, __ATOMIC_RELEASE);
+        int status = sys_futex_wake(&once->state, (uint32_t)-1);
+        return status == -ENOSYS ? 0 : (status < 0 ? status : 0);
+    }
+    while (__atomic_load_n(&once->state, __ATOMIC_ACQUIRE) != 2)
+    {
+        int status = sys_futex_wait(&once->state, 1, ALIX_WAIT_FOREVER);
+        if (status == -ENOSYS)
+        {
+            sys_yield();
+        }
+        else if (status != 0 && status != SYSCALL_FUTEX_AGAIN)
+        {
+            return status;
+        }
+    }
+    return 0;
+}
+
+int alix_thread_detach(alix_thread_t thread)
+{
+    return sys_thread_detach(thread);
+}
+
+/* TSD keys are process-wide; values and destructor stacks are native ELF TLS.
+ * No pointer to one thread's stack is published to another thread. */
+#define ALIX_TLS_KEYS 128u
+#define ALIX_TLS_DESTRUCTOR_ITERATIONS 4u
+typedef struct
+{
+    uint32_t generation;
+    bool active;
+    void (*destroy)(void *);
+} libc_tls_key_t;
+typedef struct { uint32_t generation; void *value; } libc_tls_value_t;
+typedef struct libc_thread_destructor
+{
+    struct libc_thread_destructor *next;
+    void (*function)(void *);
+    void *argument;
+} libc_thread_destructor_t;
+static libc_tls_key_t g_tls_keys[ALIX_TLS_KEYS];
+static alix_mutex_t g_tls_keys_lock;
+static _Thread_local libc_tls_value_t g_tls_values[ALIX_TLS_KEYS];
+static _Thread_local libc_thread_destructor_t *g_thread_destructors;
+static _Thread_local bool g_tls_cleanup_active;
+static _Thread_local bool g_tls_cleanup_done;
+
+static bool libc_tls_key_index(alix_tls_key_t key, uint32_t *index, uint32_t *generation)
+{
+    uint32_t slot = (uint32_t)key;
+    *generation = (uint32_t)(key >> 32);
+    if (slot == 0 || slot > ALIX_TLS_KEYS || *generation == 0)
+    {
+        return false;
+    }
+    *index = slot - 1;
+    return true;
+}
+
+int alix_tls_key_create(alix_tls_key_t *key, void (*destroy)(void *))
+{
+    if (!key)
+    {
+        return -EINVAL;
+    }
+    alix_mutex_lock(&g_tls_keys_lock);
+    for (uint32_t index = 0; index < ALIX_TLS_KEYS; ++index)
+    {
+        if (!g_tls_keys[index].active)
+        {
+            uint32_t generation = g_tls_keys[index].generation + 1;
+            /* A wrapped generation is never reused: stale keys stay invalid. */
+            if (generation == 0)
+            {
+                continue;
+            }
+            g_tls_keys[index].generation = generation;
+            g_tls_keys[index].destroy = destroy;
+            g_tls_keys[index].active = true;
+            *key = ((uint64_t)generation << 32) | (index + 1u);
+            alix_mutex_unlock(&g_tls_keys_lock);
+            return 0;
+        }
+    }
+    alix_mutex_unlock(&g_tls_keys_lock);
+    return -EAGAIN;
+}
+
+int alix_tls_key_delete(alix_tls_key_t key)
+{
+    uint32_t index, generation;
+    if (!libc_tls_key_index(key, &index, &generation))
+    {
+        return -EINVAL;
+    }
+    alix_mutex_lock(&g_tls_keys_lock);
+    bool valid = g_tls_keys[index].active && g_tls_keys[index].generation == generation;
+    if (valid)
+    {
+        g_tls_keys[index].active = false;
+        g_tls_keys[index].destroy = NULL;
+    }
+    alix_mutex_unlock(&g_tls_keys_lock);
+    return valid ? 0 : -EINVAL;
+}
+
+void *alix_tls_get(alix_tls_key_t key)
+{
+    uint32_t index, generation;
+    if (!libc_tls_key_index(key, &index, &generation))
+    {
+        return NULL;
+    }
+    alix_mutex_lock(&g_tls_keys_lock);
+    void *value = NULL;
+    if (g_tls_keys[index].active && g_tls_keys[index].generation == generation &&
+        g_tls_values[index].generation == generation)
+    {
+        value = g_tls_values[index].value;
+    }
+    alix_mutex_unlock(&g_tls_keys_lock);
+    return value;
+}
+
+int alix_tls_set(alix_tls_key_t key, void *value)
+{
+    uint32_t index, generation;
+    if (!libc_tls_key_index(key, &index, &generation))
+    {
+        return -EINVAL;
+    }
+    alix_mutex_lock(&g_tls_keys_lock);
+    bool valid = g_tls_keys[index].active && g_tls_keys[index].generation == generation;
+    if (valid)
+    {
+        g_tls_values[index].generation = generation;
+        g_tls_values[index].value = value;
+    }
+    alix_mutex_unlock(&g_tls_keys_lock);
+    return valid ? 0 : -EINVAL;
+}
+
+void alix_thread_run_tls_destructors(void)
+{
+    if (g_tls_cleanup_active || g_tls_cleanup_done)
+    {
+        return;
+    }
+    g_tls_cleanup_active = true;
+    while (g_thread_destructors)
+    {
+        libc_thread_destructor_t *item = g_thread_destructors;
+        g_thread_destructors = item->next;
+        void (*function)(void *) = item->function;
+        void *argument = item->argument;
+        free(item);
+        function(argument);
+    }
+    for (unsigned pass = 0; pass < ALIX_TLS_DESTRUCTOR_ITERATIONS; ++pass)
+    {
+        bool called = false;
+        for (unsigned index = 0; index < ALIX_TLS_KEYS; ++index)
+        {
+            alix_mutex_lock(&g_tls_keys_lock);
+            void (*destroy)(void *) = NULL;
+            void *value = NULL;
+            if (g_tls_keys[index].active &&
+                g_tls_values[index].generation == g_tls_keys[index].generation)
+            {
+                destroy = g_tls_keys[index].destroy;
+                value = g_tls_values[index].value;
+            }
+            g_tls_values[index].value = NULL;
+            alix_mutex_unlock(&g_tls_keys_lock);
+            if (destroy && value)
+            {
+                called = true;
+                destroy(value);
+            }
+        }
+        if (!called)
+        {
+            break;
+        }
+    }
+    g_tls_cleanup_done = true;
+    g_tls_cleanup_active = false;
+}
+
+#ifndef TTF_HOST_BUILD
+typedef struct libc_exit_handler
+{
+    struct libc_exit_handler *next;
+    void (*plain)(void);
+    void (*cxa)(void *);
+    void *argument;
+    void *dso;
+} libc_exit_handler_t;
+static libc_exit_handler_t *g_exit_handlers;
+static alix_mutex_t g_exit_handlers_lock;
+
+int atexit(void (*function)(void))
+{
+    if (!function)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    libc_exit_handler_t *item = (libc_exit_handler_t *)calloc(1, sizeof(*item));
+    if (!item)
+    {
+        errno = ENOMEM;
+        return -1;
+    }
+    item->plain = function;
+    alix_mutex_lock(&g_exit_handlers_lock);
+    item->next = g_exit_handlers;
+    g_exit_handlers = item;
+    alix_mutex_unlock(&g_exit_handlers_lock);
+    return 0;
+}
+
+int __cxa_atexit(void (*function)(void *), void *argument, void *dso)
+{
+    if (!function)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    libc_exit_handler_t *item = (libc_exit_handler_t *)calloc(1, sizeof(*item));
+    if (!item)
+    {
+        errno = ENOMEM;
+        return -1;
+    }
+    item->cxa = function;
+    item->argument = argument;
+    item->dso = dso;
+    alix_mutex_lock(&g_exit_handlers_lock);
+    item->next = g_exit_handlers;
+    g_exit_handlers = item;
+    alix_mutex_unlock(&g_exit_handlers_lock);
+    return 0;
+}
+
+void __cxa_finalize(void *dso)
+{
+    for (;;)
+    {
+        alix_mutex_lock(&g_exit_handlers_lock);
+        libc_exit_handler_t **cursor = &g_exit_handlers;
+        while (*cursor && dso && (*cursor)->dso != dso)
+        {
+            cursor = &(*cursor)->next;
+        }
+        libc_exit_handler_t *item = *cursor;
+        if (item)
+        {
+            *cursor = item->next;
+        }
+        alix_mutex_unlock(&g_exit_handlers_lock);
+        if (!item)
+        {
+            break;
+        }
+        /* Remove before calling: recursive finalize cannot invoke it twice. */
+        if (item->cxa)
+        {
+            item->cxa(item->argument);
+        }
+        else
+        {
+            item->plain();
+        }
+        free(item);
+    }
+}
+
+void alix_run_exit_handlers(void)
+{
+    __cxa_finalize(NULL);
+}
+
+int __cxa_thread_atexit_impl(void (*function)(void *), void *argument, void *dso)
+{
+    (void)dso; /* Static ET_EXEC images cannot unload their code. */
+    if (!function)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    libc_thread_destructor_t *item = (libc_thread_destructor_t *)malloc(sizeof(*item));
+    if (!item)
+    {
+        errno = ENOMEM;
+        return -1;
+    }
+    item->function = function;
+    item->argument = argument;
+    item->next = g_thread_destructors;
+    g_thread_destructors = item;
+    return 0;
+}
+
+void _Exit(int status)
+{
+    sys_exit(status);
+}
+
+void abort(void)
+{
+    raise(SIGABRT);
+    sys_exit(134);
+}
+
+void __assert_fail(const char *expression, const char *file, unsigned line, const char *function)
+{
+    serial_printf("assertion failed: %s:%u %s: %s\n", file, line, function, expression);
+    abort();
+}
+
+int fegetround(void)
+{
+    uint32_t mxcsr;
+    __asm__ volatile ("stmxcsr %0" : "=m"(mxcsr));
+    return (int)((mxcsr >> 3) & 0xC00u);
+}
+
+int fesetround(int mode)
+{
+    if (mode != FE_TONEAREST && mode != FE_DOWNWARD && mode != FE_UPWARD && mode != FE_TOWARDZERO)
+        return -1;
+    uint16_t control;
+    uint32_t mxcsr;
+    __asm__ volatile ("fnstcw %0; stmxcsr %1" : "=m"(control), "=m"(mxcsr));
+    control = (uint16_t)((control & ~0xC00u) | (unsigned)mode);
+    mxcsr = (mxcsr & ~0x6000u) | ((unsigned)mode << 3);
+    __asm__ volatile ("fldcw %0; ldmxcsr %1" :: "m"(control), "m"(mxcsr) : "memory");
+    return 0;
+}
+
+long labs(long value) { return value < 0 ? -value : value; }
+long long llabs(long long value) { return value < 0 ? -value : value; }
+div_t div(int n, int d) { return (div_t){n / d, n % d}; }
+ldiv_t ldiv(long n, long d) { return (ldiv_t){n / d, n % d}; }
+lldiv_t lldiv(long long n, long long d) { return (lldiv_t){n / d, n % d}; }
+
+static unsigned libc_integer_digit(unsigned char value)
+{
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'z') return value - 'a' + 10u;
+    if (value >= 'A' && value <= 'Z') return value - 'A' + 10u;
+    return 255u;
+}
+
+static uint64_t libc_parse_integer(const char *text, char **end, int base,
+                                    bool *negative, bool *overflow)
+{
+    *negative = false;
+    *overflow = false;
+    if (end) *end = (char *)text;
+    if (!text || (base != 0 && (base < 2 || base > 36)))
+    { errno = EINVAL; return 0; }
+    const char *cursor = text;
+    while (isspace((unsigned char)*cursor)) ++cursor;
+    if (*cursor == '+' || *cursor == '-') { *negative = *cursor == '-'; ++cursor; }
+    if ((base == 0 || base == 16) && cursor[0] == '0' &&
+        (cursor[1] == 'x' || cursor[1] == 'X') && libc_integer_digit((unsigned char)cursor[2]) < 16)
+    { base = 16; cursor += 2; }
+    if (base == 0) base = *cursor == '0' ? 8 : 10;
+    const char *first = cursor;
+    uint64_t value = 0;
+    uint64_t limit = (uint64_t)-1;
+    unsigned digit;
+    while ((digit = libc_integer_digit((unsigned char)*cursor)) < (unsigned)base)
+    {
+        if (value > (limit - digit) / (unsigned)base) *overflow = true;
+        else if (!*overflow) value = value * (unsigned)base + digit;
+        ++cursor;
+    }
+    if (cursor != first && end) *end = (char *)cursor;
+    return *overflow ? limit : value;
+}
+
+unsigned long long strtoull(const char *text, char **end, int base)
+{
+    bool negative, overflow;
+    uint64_t value = libc_parse_integer(text, end, base, &negative, &overflow);
+    if (overflow) { errno = ERANGE; return (unsigned long long)-1; }
+    return negative ? (uint64_t)0 - value : value;
+}
+
+long long strtoll(const char *text, char **end, int base)
+{
+    bool negative, overflow;
+    uint64_t value = libc_parse_integer(text, end, base, &negative, &overflow);
+    const uint64_t positive_limit = 0x7FFFFFFFFFFFFFFFULL;
+    if (overflow || value > positive_limit + (negative ? 1u : 0u))
+    { errno = ERANGE; return negative ? (-0x7FFFFFFFFFFFFFFFLL - 1) : 0x7FFFFFFFFFFFFFFFLL; }
+    if (!negative) return (long long)value;
+    return value ? -(long long)(value - 1u) - 1 : 0;
+}
+
+long strtol(const char *text, char **end, int base) { return (long)strtoll(text, end, base); }
+unsigned long strtoul(const char *text, char **end, int base) { return (unsigned long)strtoull(text, end, base); }
+long atol(const char *text) { return strtol(text, NULL, 10); }
+long long atoll(const char *text) { return strtoll(text, NULL, 10); }
+
+void *bsearch(const void *key, const void *base, size_t count, size_t width,
+              int (*compare)(const void *, const void *))
+{
+    if (!compare || !width || count > SIZE_MAX_VALUE / width)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+    const uint8_t *bytes = (const uint8_t *)base;
+    while (count)
+    {
+        size_t middle = count / 2;
+        const uint8_t *item = bytes + middle * width;
+        int order = compare(key, item);
+        if (!order) return (void *)item;
+        if (order > 0) { bytes = item + width; count -= middle + 1; }
+        else count = middle;
+    }
+    return NULL;
+}
+
+static void libc_sort_swap(uint8_t *a, uint8_t *b, size_t width)
+{
+    while (width--) { uint8_t value = *a; *a++ = *b; *b++ = value; }
+}
+
+static void libc_sort_sift(uint8_t *base, size_t root, size_t count, size_t width,
+                           int (*compare)(const void *, const void *))
+{
+    while (root < count / 2)
+    {
+        size_t child = root * 2 + 1;
+        if (child + 1 < count && compare(base + child * width, base + (child + 1) * width) < 0)
+            ++child;
+        if (compare(base + root * width, base + child * width) >= 0) return;
+        libc_sort_swap(base + root * width, base + child * width, width);
+        root = child;
+    }
+}
+
+void qsort(void *base, size_t count, size_t width, int (*compare)(const void *, const void *))
+{
+    if (count < 2) return;
+    if (!base || !compare || !width || count > SIZE_MAX_VALUE / width)
+    { errno = EINVAL; return; }
+    uint8_t *bytes = (uint8_t *)base;
+    for (size_t root = count / 2; root > 0; ) libc_sort_sift(bytes, --root, count, width, compare);
+    for (size_t remaining = count; remaining > 1; )
+    {
+        libc_sort_swap(bytes, bytes + (--remaining) * width, width);
+        libc_sort_sift(bytes, 0, remaining, width, compare);
+    }
+}
+
+int clock_gettime(clockid_t clock, struct timespec *value)
+{
+    if (!value || (clock != CLOCK_REALTIME && clock != CLOCK_MONOTONIC))
+    { errno = EINVAL; return -1; }
+    uint64_t milliseconds = clock == CLOCK_MONOTONIC ? sys_monotonic_millis() : sys_time_millis();
+    value->tv_sec = (time_t)(milliseconds / 1000u);
+    value->tv_nsec = (long)((milliseconds % 1000u) * 1000000u);
+    return 0;
+}
+
+int timespec_get(struct timespec *value, int base)
+{
+    return base == TIME_UTC && clock_gettime(CLOCK_REALTIME, value) == 0 ? TIME_UTC : 0;
+}
+
+int gettimeofday(struct timeval *value, void *timezone)
+{
+    (void)timezone;
+    if (!value) { errno = EFAULT; return -1; }
+    uint64_t milliseconds = sys_time_millis();
+    value->tv_sec = (time_t)(milliseconds / 1000u);
+    value->tv_usec = (suseconds_t)((milliseconds % 1000u) * 1000u);
+    return 0;
+}
+
+int nanosleep(const struct timespec *duration, struct timespec *remaining)
+{
+    if (!duration || duration->tv_sec < 0 || duration->tv_nsec < 0 || duration->tv_nsec >= 1000000000L)
+    { errno = EINVAL; return -1; }
+    uint64_t seconds = (uint64_t)duration->tv_sec;
+    while (seconds > 4294967u)
+    {
+        if (sys_sleep_ms(4294967000u) != 0) { errno = EINTR; return -1; }
+        seconds -= 4294967u;
+    }
+    uint64_t milliseconds = seconds * 1000u + ((uint64_t)duration->tv_nsec + 999999u) / 1000000u;
+    while (milliseconds > (uint32_t)-1)
+    {
+        if (sys_sleep_ms((uint32_t)-1) != 0) { errno = EINTR; return -1; }
+        milliseconds -= (uint32_t)-1;
+    }
+    if (milliseconds && sys_sleep_ms((uint32_t)milliseconds) != 0) { errno = EINTR; return -1; }
+    if (remaining) *remaining = (struct timespec){0, 0};
+    return 0;
+}
+
+time_t time(time_t *result)
+{
+    time_t value = (time_t)(sys_time_millis() / 1000u);
+    if (result) *result = value;
+    return value;
+}
+
+double difftime(time_t end, time_t beginning)
+{
+    return end >= beginning ? (double)((uint64_t)end - (uint64_t)beginning)
+                            : -(double)((uint64_t)beginning - (uint64_t)end);
+}
+
+long sysconf(int name)
+{
+    if (name == _SC_PAGESIZE) return 4096;
+    if (name != _SC_NPROCESSORS_ONLN && name != _SC_NPROCESSORS_CONF)
+    { errno = EINVAL; return -1; }
+    syscall_cpu_stats_t *cpus = (syscall_cpu_stats_t *)calloc(SYSCALL_CPU_MAX, sizeof(*cpus));
+    if (!cpus) { errno = ENOMEM; return -1; }
+    ssize_t count = sys_cpu_snapshot(cpus, SYSCALL_CPU_MAX);
+    if (count < 0) { free(cpus); errno = EIO; return -1; }
+    if (count > SYSCALL_CPU_MAX) count = SYSCALL_CPU_MAX;
+    long result = 0;
+    for (ssize_t i = 0; i < count; ++i)
+    {
+        if (name == _SC_NPROCESSORS_CONF || cpus[i].online) ++result;
+    }
+    free(cpus);
+    return result;
+}
+#else
+void alix_run_exit_handlers(void) { }
+#endif

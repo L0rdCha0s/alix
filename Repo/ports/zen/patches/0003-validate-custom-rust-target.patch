@@ -1,0 +1,93 @@
+diff --git a/build/moz.configure/rust.configure b/build/moz.configure/rust.configure
+--- a/build/moz.configure/rust.configure
++++ b/build/moz.configure/rust.configure
+@@ -496,6 +496,40 @@
+     return rustc_target
+ 
+ 
++@imports(_from="__builtin__", _import="open")
++def rust_archive_is_alix(path):
++    # The custom target must produce native ELF objects, not just a nonempty
++    # host archive. Symbol/name tables and Rust metadata are not ELF members.
++    found = False
++    with open(path, "rb") as archive:
++        if archive.read(8) != b"!<arch>\n":
++            return False
++        while True:
++            header = archive.read(60)
++            if not header:
++                break
++            if len(header) != 60 or header[-2:] != b"`\n":
++                return False
++            size = int(header[48:58])
++            if size < 0:
++                return False
++            data = archive.read(size)
++            if len(data) != size:
++                return False
++            if header[:3] == b"#1/":
++                data = data[int(header[3:16]):]
++            if data[:4] == b"\x7fELF":
++                if len(data) < 20 or data[4:6] != b"\x02\x01" or data[18:20] != b"\x3e\x00":
++                    return False
++                found = True
++            elif data[:4] in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
++                               b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce"):
++                return False
++            if size & 1:
++                archive.read(1)
++    return found
++
++
+ @imports("os")
+ @imports(_from="textwrap", _import="dedent")
+ @imports(_from="mozbuild.configure.util", _import="LineIO")
+@@ -541,6 +575,8 @@
+         check_cmd_output(*cmd, onerror=failed)
+         if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+             failed()
++        if host_or_target.os == "Alix" and not rust_archive_is_alix(out_path):
++            failed()
+ 
+ 
+ @depends(
+@@ -580,10 +616,36 @@
+     return rustc_target
+ 
+ 
+-@depends(rustc, target, rust_supported_targets, arm_target, when=rust_compiler)
++option(env="RUST_TARGET_SPEC", nargs=1,
++       help="Explicit custom Rust target JSON; its cfg and target std are validated", when=rust_compiler)
++
++
++@depends(rustc, target, rust_supported_targets, arm_target, "RUST_TARGET_SPEC", when=rust_compiler)
+ @checking("for rust target triplet")
+-def rust_target_triple(rustc, target, rust_supported_targets, arm_target):
+-    rustc_target = detect_rustc_target(target, arm_target, rust_supported_targets)
++@imports("json")
++@imports("os")
++@imports(_from="__builtin__", _import="open")
++def rust_target_triple(rustc, target, rust_supported_targets, arm_target, specification):
++    if specification:
++        path = os.path.realpath(specification[0])
++        with open(path) as source:
++            data = json.load(source)
++        if data.get("os") != target.raw_os or data.get("arch") != target.cpu:
++            die("Custom Rust target does not match the configured OS/CPU")
++        cfg = check_cmd_output(rustc, "--print", "cfg", "--target=" + path).splitlines()
++        expected = (
++            'target_os="{}"'.format(target.raw_os),
++            'target_arch="{}"'.format(target.cpu),
++            'target_endian="{}"'.format(target.endianness),
++            'target_pointer_width="{}"'.format(target.bitness),
++        )
++        if any(value not in cfg for value in expected):
++            die("Custom Rust compiler cfg does not match the configured target")
++        rustc_target = os.path.splitext(os.path.basename(path))[0]
++    else:
++        rustc_target = detect_rustc_target(target, arm_target, rust_supported_targets)
++    # Keep the real std/println! compile check for both built-in and custom
++    # targets. A JSON declaration alone cannot satisfy this build gate.
+     assert_rust_compile(target, rustc_target, rustc)
+     return rustc_target
+ 

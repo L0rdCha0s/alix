@@ -19,11 +19,19 @@ typedef signed long        int64_t;
 typedef unsigned long      size_t;
 typedef long               ssize_t;
 typedef unsigned long      uintptr_t;
+typedef signed long        intptr_t;
 
-typedef enum { false = 0, true = 1 } bool;
+#ifndef __cplusplus
+/* Match C++ bool and avoid include-order-dependent enum/_Bool ABI changes. */
+#include <stdbool.h>
+#endif
 
 #ifndef NULL
+#ifdef __cplusplus
+#define NULL 0
+#else
 #define NULL ((void*)0)
+#endif
 #endif
 #endif
 

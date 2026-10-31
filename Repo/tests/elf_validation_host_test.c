@@ -16,6 +16,15 @@ uint64_t process_get_pid(const process_t *process)
     return 0;
 }
 
+bool process_set_user_tls_template(process_t *process, const uint8_t *image,
+                                   size_t file_size, size_t memory_size,
+                                   size_t alignment, uintptr_t image_address)
+{
+    (void)process; (void)image; (void)file_size; (void)memory_size;
+    (void)alignment; (void)image_address;
+    return false;
+}
+
 /* Link stubs for the loading half of src/kernel/elf.c. Validation never calls
  * either function. */
 bool process_map_user_segment(process_t *process,
@@ -173,6 +182,45 @@ int main(void)
     image.ehdr.entry = image.phdr.vaddr;
     failures += expect(elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
                        "segment may end one byte beyond inclusive limit");
+
+    struct {
+        test_ehdr_t ehdr;
+        test_phdr_t phdr[3];
+        uint8_t payload[32];
+    } tls;
+    memset(&tls, 0, sizeof(tls));
+    image = valid_image();
+    tls.ehdr = image.ehdr;
+    tls.ehdr.phnum = 2;
+    tls.phdr[0] = image.phdr;
+    tls.phdr[0].offset = offsetof(__typeof__(tls), payload);
+    tls.phdr[1] = tls.phdr[0];
+    tls.phdr[1].type = 7;
+    tls.phdr[1].filesz = 4;
+    tls.phdr[1].memsz = 8192; /* TLS BSS may exceed ordinary PT_LOAD memsz. */
+    tls.phdr[1].align = 64;
+    failures += expect(elf_validate_image((const uint8_t *)&tls, sizeof(tls), NULL),
+                       "TLS initialized image with larger zero template");
+    tls.phdr[1].align = 3;
+    failures += expect(!elf_validate_image((const uint8_t *)&tls, sizeof(tls), NULL),
+                       "TLS rejects non-power-of-two alignment");
+    tls.phdr[1].align = 64;
+    ++tls.phdr[1].offset;
+    failures += expect(!elf_validate_image((const uint8_t *)&tls, sizeof(tls), NULL),
+                       "TLS initialized bytes must match their LOAD file image");
+    --tls.phdr[1].offset;
+    tls.phdr[2] = tls.phdr[1];
+    tls.ehdr.phnum = 3;
+    failures += expect(!elf_validate_image((const uint8_t *)&tls, sizeof(tls), NULL),
+                       "multiple TLS templates rejected");
+    tls.ehdr.phnum = 2;
+    tls.phdr[1].filesz = 8193;
+    failures += expect(!elf_validate_image((const uint8_t *)&tls, sizeof(tls), NULL),
+                       "TLS filesz exceeds memsz");
+    tls.phdr[1].filesz = 0;
+    tls.phdr[1].offset = sizeof(tls);
+    failures += expect(elf_validate_image((const uint8_t *)&tls, sizeof(tls), NULL),
+                       "zero-initialized TLS needs no LOAD file bytes");
 
     if (failures == 0)
     {

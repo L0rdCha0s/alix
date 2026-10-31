@@ -10,6 +10,14 @@ Defined primarily in `include/process.h` and `include/process_internal.h`:
 - `thread_t` — owns a kernel stack, saved CPU context, wait/sleep state, priority/affinity, and (for user threads) user-mode entry + TLS state.
 - `run_queue_t` — per-CPU run queue with per-priority linked lists.
 
+The user `pid_t` ABI is a signed 32-bit integer. The kernel retains its 64-bit
+accounting fields, but allocates process identities with an atomic compare and
+exchange loop over `1..INT32_MAX`. It never truncates or reuses an identity. Once
+the range is exhausted, new process allocation fails before creating an address
+space; the counter remains saturated. Allocation failures may leave gaps.
+`getpid()` returns the owning process ID, which is the same for all its threads.
+The scheduler's idle process retains its special internal ID zero.
+
 Per-CPU current pointers (arrays indexed by CPU):
 
 - `g_current_threads[SMP_MAX_CPUS]`
@@ -31,6 +39,17 @@ Thread creation allocates:
   - A “redzone” reserved below the top of stack (`THREAD_CONTEXT_REDZONE_BYTES`) so the context frame and preempt/save logic don’t collide with normal stack usage.
 
 The initial CPU context is built so that the first `context_switch(...)` into the thread returns into `thread_trampoline`, which calls the thread’s `entry(arg)` and then `process_exit(...)`.
+
+Public stack-watch requests hold the scheduler lock across the eligibility
+check and page-table publication. The process variant also resolves its main
+thread under `threads_lock`. This prevents another CPU from claiming and
+disarming a ready thread between the check and making its stack read-only.
+Without that serialization, a later TLB IPI can fault on the running thread's
+own stack. The regression model in `tests/stack_watch_race_test.py` injects
+exactly that remote claim and verifies both interrupt-state paths.
+Watch eligibility checks reject malformed saved frames without repairing them
+or recursively entering quarantine/kill while scheduler locks are held. Normal
+scheduler handoff retains responsibility for rejecting corrupt runnable frames.
 
 ## Context Switching (`process_common.c`)
 
@@ -63,6 +82,11 @@ Important characteristics:
   prior state. `tests/scheduler_handoff_test.py` exercises this boundary with
   interrupts enabled/disabled and with a rejected first candidate.
 - **Preemption migration**: when an affinity- or UI-bound current thread is requeued, it is placed directly on its required CPU's queue; the old CPU retains stack ownership until the assembly handoff clears it.
+- **Lone-thread migration**: the no-peers fast path retains the current thread
+  only when it is allowed on the current CPU. A newly pinned thread still
+  transfers through the scheduler when the local run queue is empty. User
+  `sys_thread_set_affinity` changes only the calling thread and yields outside
+  locks; `sys_thread_cpu` reports its current CPU index.
 - **Spinlock ownership**: generic kernel spinlocks maintain a per-thread nesting depth (with a per-CPU fallback before scheduler threads exist). Timer callbacks, timer/IPI scheduler housekeeping, and voluntary yields defer lock-taking or preemption while that depth is non-zero, ensuring an interrupted lock owner cannot invert the scheduler-to-subsidiary-lock order. Locks shared with an IRQ handler use the IRQ-save helpers; release publishes the unlocked word and restores the saved interrupt state while the nesting guard is still raised. The scheduler's cross-stack lock uses raw lock operations because assembly releases it only after moving to the incoming stack.
 
 The scheduler’s main loop (`scheduler_main_loop` in `process_init.c`) repeatedly calls `scheduler_schedule(false)` then halts.

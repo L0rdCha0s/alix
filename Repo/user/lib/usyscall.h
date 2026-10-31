@@ -5,6 +5,10 @@
 #include "syscall_defs.h"
 #include "user_atk_defs.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 ssize_t sys_write(int fd, const void *buffer, size_t count);
 ssize_t sys_read(int fd, void *buffer, size_t count);
 int sys_close(int fd);
@@ -37,7 +41,9 @@ ssize_t sys_proc_snapshot(syscall_process_info_t *buffer, size_t capacity);
 ssize_t sys_net_snapshot(syscall_net_stats_t *buffer, size_t capacity);
 ssize_t sys_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capacity);
 uint64_t sys_time_millis(void);
+uint64_t sys_monotonic_millis(void);
 int sys_time_info(syscall_time_info_t *info);
+int sys_timezone_info(syscall_timezone_info_t *info, size_t size);
 ssize_t sys_font_cache(void *buffer, size_t capacity);
 int64_t sys_lseek(int fd, int64_t offset, int whence);
 int sys_fstat(int fd, syscall_stat_t *st);
@@ -46,6 +52,24 @@ int sys_socket_open(const char *iface_name);
 int sys_socket_connect(int fd, const char *ipv4_text, uint16_t port);
 ssize_t sys_socket_available(int fd);
 uint64_t sys_thread_self(void);
+/* Raw TLS thread-pointer facility; it does not initialize ELF PT_TLS data. */
+int sys_thread_set_tls(uintptr_t base);
+uintptr_t sys_thread_get_tls(void);
+/* UINT32_MAX clears explicit affinity; other values must name an online CPU. */
+int sys_thread_set_affinity(uint32_t cpu_index);
+uint32_t sys_thread_cpu(void);
+int sys_futex_wait(volatile uint32_t *address, uint32_t expected, uint32_t timeout_ms);
+int sys_futex_wake(volatile uint32_t *address, uint32_t max_waiters);
+int64_t sys_vm_map(uintptr_t hint, size_t length, uint32_t protection, uint32_t flags);
+int sys_vm_protect(uintptr_t address, size_t length, uint32_t protection);
+int sys_vm_unmap(uintptr_t address, size_t length);
+int sys_vm_advise(uintptr_t address, size_t length, uint32_t advice);
+int sys_thread_detach(uint64_t tid);
+ssize_t sys_getrandom(void *buffer, size_t length, uint32_t flags);
+int sys_thread_info(uint64_t tid, syscall_thread_info_t *info);
+int sys_thread_set_name(uint64_t tid, const char *name);
+int sys_thread_prepare_exit(void);
+int32_t sys_getpid(void);
 int64_t sys_thread_create(uintptr_t entry,
                           uintptr_t arg,
                           size_t stack_size,
@@ -55,5 +79,9 @@ void sys_thread_exit(int status) __attribute__((noreturn));
 ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacity);
 uint32_t sys_getuid(void);
 int sys_mkdir(const char *path);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

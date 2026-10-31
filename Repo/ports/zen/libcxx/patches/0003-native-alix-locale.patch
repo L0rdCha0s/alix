@@ -1,0 +1,26 @@
+diff --git a/libcxx/include/__config b/libcxx/include/__config
+--- a/libcxx/include/__config
++++ b/libcxx/include/__config
+@@ -706,7 +706,7 @@
+ #  endif
+ 
+ #  if defined(__BIONIC__) || defined(__NuttX__) || defined(__Fuchsia__) || defined(__wasi__) ||                        \
+-      _LIBCPP_HAS_MUSL_LIBC || defined(__OpenBSD__) || defined(__LLVM_LIBC__)
++      _LIBCPP_HAS_MUSL_LIBC || defined(__OpenBSD__) || defined(__LLVM_LIBC__) || defined(__ALIX__)
+ #    define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE
+ #  endif
+ 
+diff --git a/libcxx/include/__locale_dir/locale_base_api.h b/libcxx/include/__locale_dir/locale_base_api.h
+--- a/libcxx/include/__locale_dir/locale_base_api.h
++++ b/libcxx/include/__locale_dir/locale_base_api.h
+@@ -106,7 +106,9 @@
+ 
+ #if _LIBCPP_HAS_LOCALIZATION
+ 
+-#  if defined(__APPLE__)
++#  if defined(__ALIX__)
++#    include <__alix_locale>
++#  elif defined(__APPLE__)
+ #    include <__locale_dir/support/apple.h>
+ #  elif defined(__FreeBSD__)
+ #    include <__locale_dir/support/freebsd.h>

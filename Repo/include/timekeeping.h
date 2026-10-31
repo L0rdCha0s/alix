@@ -3,6 +3,10 @@
 
 #include "types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define TIMEKEEPING_TZ_NAME_MAX 32
 
 typedef struct
@@ -39,6 +43,8 @@ bool timekeeping_set_utc_seconds(uint64_t seconds);
 bool timekeeping_save_timezone_spec(const timekeeping_timezone_spec_t *spec);
 bool timekeeping_save_timezone(const char *name, int offset_minutes);
 bool timekeeping_reload_timezone(void);
+/* Copy configuration and generation together; no borrowed state escapes. */
+bool timekeeping_timezone_snapshot(timekeeping_timezone_spec_t *spec, uint64_t *generation);
 bool timekeeping_ensure_timezone_config(void);
 const char *timekeeping_timezone_name(void);
 int timekeeping_timezone_offset_minutes(void);
@@ -48,5 +54,9 @@ bool timekeeping_local_time(timekeeping_time_of_day_t *out);
 void timekeeping_format_time(char *buffer, size_t length);
 void timekeeping_format_timestamp(uint64_t utc_seconds, char *buffer, size_t length);
 bool timekeeping_is_valid_timezone_offset(int offset_minutes);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -3,6 +3,10 @@
 
 #include "types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef uint32_t video_color_t;
 
 #ifndef VIDEO_WIDTH
@@ -74,5 +78,8 @@ void video_request_refresh_window(struct atk_widget *window);
 void video_pump_events(void);
 void video_cursor_set_shape(video_cursor_shape_t shape);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif

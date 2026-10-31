@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/llvm/llvm-project.git",
+  "tag": "llvmorg-22.1.8",
+  "revision": "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1",
+  "license": "Apache-2.0 WITH LLVM-exception",
+  "sparse_paths": ["libc", "libcxx", "libcxxabi", "libunwind", "runtimes", "cmake", "llvm/cmake", "llvm/include/llvm/Config"]
+}

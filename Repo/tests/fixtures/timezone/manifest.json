@@ -1,0 +1,30 @@
+{
+  "data_version": "2026e",
+  "source_format": "macOS 2026e.1.0 rearguard, leap-free TZif",
+  "fixtures": [
+    {
+      "name": "America/New_York",
+      "file": "new_york.tzif",
+      "symbol": "new_york",
+      "bytes": 3552,
+      "sha256": "e9ed07d7bee0c76a9d442d091ef1f01668fee7c4f26014c0a868b19fe6c18a95",
+      "source": "/private/var/db/timezone/tz/2026e.1.0/zoneinfo/America/New_York"
+    },
+    {
+      "name": "Australia/Sydney",
+      "file": "sydney.tzif",
+      "symbol": "sydney",
+      "bytes": 2190,
+      "sha256": "42c3857585b16db2f8ffd47ba19faa60f473340de8d4fe9320ea7be861605906",
+      "source": "/private/var/db/timezone/tz/2026e.1.0/zoneinfo/Australia/Sydney"
+    },
+    {
+      "name": "Australia/Lord_Howe",
+      "file": "lord_howe.tzif",
+      "symbol": "lord_howe",
+      "bytes": 1846,
+      "sha256": "a323c5433991a963eb497b7da4d1d09848bf3ef5f5d64d9c9649f388e4bab9df",
+      "source": "/private/var/db/timezone/tz/2026e.1.0/zoneinfo/Australia/Lord_Howe"
+    }
+  ]
+}

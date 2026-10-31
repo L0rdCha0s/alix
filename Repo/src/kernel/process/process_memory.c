@@ -18,6 +18,111 @@
 
 static uintptr_t process_stack_bottom(const process_t *process);
 
+typedef struct
+{
+    paddr_t physical;
+    size_t bytes;
+    uintptr_t virtual_address; /* Used only while preparing a rollback. */
+} process_retired_range_t;
+
+typedef struct process_retired_memory
+{
+    struct process_retired_memory *next;
+    paging_tlb_ticket_t ticket;
+    size_t count;
+    process_retired_range_t ranges[];
+} process_retired_memory_t;
+
+static spinlock_t g_retired_memory_lock;
+static process_retired_memory_t *g_retired_memory;
+
+/* Allocate before changing PTEs: allocation failure must leave ownership and
+ * mappings intact. Every record is heap-owned and outlives its source process. */
+static process_retired_memory_t *process_retirement_allocate(size_t capacity)
+{
+    if (capacity == 0 || capacity > (SIZE_MAX - sizeof(process_retired_memory_t)) /
+                                     sizeof(process_retired_range_t))
+    {
+        return NULL;
+    }
+    process_retired_memory_t *retired = malloc(sizeof(*retired) + capacity * sizeof(retired->ranges[0]));
+    if (retired)
+    {
+        retired->next = NULL;
+        retired->count = 0;
+    }
+    return retired;
+}
+
+static void process_retirement_enqueue(process_retired_memory_t *retired, paging_space_t *space)
+{
+    if (!retired)
+    {
+        return;
+    }
+    if (retired->count == 0)
+    {
+        free(retired);
+        return;
+    }
+    retired->ticket = paging_request_tlb_flush(space);
+    uint64_t flags = spinlock_lock_irqsave(&g_retired_memory_lock);
+    retired->next = g_retired_memory;
+    g_retired_memory = retired;
+    spinlock_unlock_irqrestore(&g_retired_memory_lock, flags);
+}
+
+/* Called only from ordinary scheduler/idle context, never the IPI handler.
+ * No acknowledgement wait, process pointer, or stack-owned asynchronous state. */
+void process_reap_retired_memory(void)
+{
+    if ((cpu_save_flags() & (1ULL << 9)) == 0 || spinlock_preempt_disabled())
+    {
+        return;
+    }
+    /* A killed/preempted user thread must not strand a detached global list
+     * on its discarded kernel stack. Keep ownership on-CPU until every batch
+     * is either freed or republished; IRQs remain enabled for TLB responses. */
+    spinlock_preempt_disable();
+    uint64_t flags = spinlock_lock_irqsave(&g_retired_memory_lock);
+    process_retired_memory_t *retired = g_retired_memory;
+    g_retired_memory = NULL;
+    spinlock_unlock_irqrestore(&g_retired_memory_lock, flags);
+
+    process_retired_memory_t *pending = NULL;
+    process_retired_memory_t *tail = NULL;
+    while (retired)
+    {
+        process_retired_memory_t *next = retired->next;
+        if (paging_tlb_flush_complete(retired->ticket))
+        {
+            for (size_t i = 0; i < retired->count; ++i)
+            {
+                user_memory_free(retired->ranges[i].physical, retired->ranges[i].bytes);
+            }
+            free(retired);
+        }
+        else
+        {
+            retired->next = pending;
+            pending = retired;
+            if (!tail)
+            {
+                tail = retired;
+            }
+        }
+        retired = next;
+    }
+    if (pending)
+    {
+        flags = spinlock_lock_irqsave(&g_retired_memory_lock);
+        tail->next = g_retired_memory;
+        g_retired_memory = pending;
+        spinlock_unlock_irqrestore(&g_retired_memory_lock, flags);
+    }
+    spinlock_preempt_enable();
+}
+
 uint64_t process_memory_lock(process_t *process)
 {
     uint64_t flags = cpu_save_flags();
@@ -36,6 +141,26 @@ void process_memory_unlock(process_t *process, uint64_t flags)
         spinlock_unlock(&process->memory_lock);
     }
     cpu_restore_flags(flags);
+}
+
+/* User-visible pid_t is signed 32-bit. Never truncate, recycle a live PID or
+ * wrap the counter: the value after INT32_MAX is a permanent exhaustion
+ * sentinel. Allocation failures may leave gaps, which do not affect identity. */
+static uint64_t process_allocate_pid(void)
+{
+    uint64_t candidate = __atomic_load_n(&g_next_pid, __ATOMIC_RELAXED);
+    for (;;)
+    {
+        if (candidate == 0 || candidate > 0x7fffffffULL)
+        {
+            return 0;
+        }
+        if (__atomic_compare_exchange_n(&g_next_pid, &candidate, candidate + 1,
+                                        false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        {
+            return candidate;
+        }
+    }
 }
 
 process_t *allocate_process(const char *name, bool is_user)
@@ -71,7 +196,17 @@ process_t *allocate_process(const char *name, bool is_user)
     memset(proc, 0, sizeof(*proc));
     serial_printf("[process] allocate name=%s\r\n",
                   (name && name[0]) ? name : "<unnamed>");
-    proc->pid = __sync_fetch_and_add(&g_next_pid, 1);
+    proc->pid = process_allocate_pid();
+    if (proc->pid == 0)
+    {
+        free(proc);
+        if (trace_clone)
+        {
+            paging_set_clone_trace(false);
+        }
+        process_create_log(name, "pid_exhausted");
+        return NULL;
+    }
     proc->state = PROCESS_STATE_READY;
     proc->lifetime_state = PROCESS_LIFETIME_ALIVE;
     bool space_ready = false;
@@ -175,10 +310,15 @@ process_t *allocate_process(const char *name, bool is_user)
 
 void process_free_user_regions(process_t *process)
 {
+    if (process)
+    {
+        process_clear_user_tls_template(process);
+    }
     if (!process)
     {
         return;
     }
+    process_vm_destroy(process);
 
     if (process->user_stack_pages && process->user_stack_page_count > 0 &&
         process->user_stack_top != 0 && process->user_stack_size != 0)
@@ -213,6 +353,7 @@ void process_free_user_regions(process_t *process)
         {
             user_memory_free(region->phys_base, region->mapped_size);
         }
+        free(region->retirement);
         free(region);
         region = next;
     }
@@ -240,10 +381,7 @@ static void process_unlink_user_region(process_t *process, process_user_region_t
         }
         cursor = &(*cursor)->next;
     }
-    if (region->phys_base != 0 && region->mapped_size > 0)
-    {
-        user_memory_free(region->phys_base, region->mapped_size);
-    }
+    /* The caller transfers backing ownership to a retirement batch first. */
     free(region);
 }
 
@@ -407,11 +545,11 @@ bool process_heap_zero_range(process_t *process, uintptr_t start, size_t bytes)
     return true;
 }
 
-void process_heap_release_from(process_t *process, uintptr_t virt_start)
+bool process_heap_release_from(process_t *process, uintptr_t virt_start)
 {
     if (!process || !process->heap_page_dirs)
     {
-        return;
+        return true;
     }
 
     if (virt_start < process->user_heap_base)
@@ -422,6 +560,30 @@ void process_heap_release_from(process_t *process, uintptr_t virt_start)
     uintptr_t aligned_start = align_down_uintptr(virt_start, PAGE_SIZE_BYTES_LOCAL);
     size_t start_page = (size_t)((aligned_start - process->user_heap_base) / PAGE_SIZE_BYTES_LOCAL);
     size_t max_pages = process_heap_dir_capacity(process) * PROCESS_HEAP_L2_ENTRIES;
+
+    size_t count = 0;
+    for (size_t page = start_page; page < max_pages; ++page)
+    {
+        uintptr_t virt = process->user_heap_base + page * PAGE_SIZE_BYTES_LOCAL;
+        if (virt >= process->user_heap_limit)
+        {
+            break;
+        }
+        process_heap_l2_t *table = process_heap_table(process, page >> PROCESS_HEAP_L2_SHIFT, false);
+        if (process_heap_entry_present(table, page & PROCESS_HEAP_L2_MASK))
+        {
+            ++count;
+        }
+    }
+    if (count == 0)
+    {
+        return true;
+    }
+    process_retired_memory_t *retired = process_retirement_allocate(count);
+    if (!retired)
+    {
+        return false;
+    }
 
     for (size_t page = start_page; page < max_pages; ++page)
     {
@@ -440,9 +602,14 @@ void process_heap_release_from(process_t *process, uintptr_t virt_start)
         }
 
         paddr_t phys = table->phys[entry_index];
+        if (!paging_unmap_user_page(&process->address_space, virt))
+        {
+            fatal("owned heap page could not be unmapped");
+        }
         process_heap_entry_clear(table, entry_index);
-        paging_unmap_user_page(&process->address_space, virt);
-        user_memory_free_page(phys);
+        retired->ranges[retired->count++] = (process_retired_range_t){
+            .physical = phys, .bytes = PAGE_SIZE_BYTES_LOCAL, .virtual_address = virt
+        };
 
         if (process_heap_table_empty(table))
         {
@@ -450,6 +617,8 @@ void process_heap_release_from(process_t *process, uintptr_t virt_start)
             process->heap_page_dirs[dir_index] = NULL;
         }
     }
+    process_retirement_enqueue(retired, &process->address_space);
+    return true;
 }
 
 void process_free_heap_pages(process_t *process)
@@ -458,9 +627,43 @@ void process_free_heap_pages(process_t *process)
     {
         return;
     }
-    process_heap_release_from(process, process->user_heap_base);
+    /* Only process creation failure and final quiescent teardown call this.
+     * No CPU can retain this process's non-global user translations then. */
+    for (size_t dir = 0; dir < process->heap_dir_count; ++dir)
+    {
+        process_heap_l2_t *table = process_heap_table(process, dir, false);
+        for (size_t index = 0; table && index < PROCESS_HEAP_L2_ENTRIES; ++index)
+        {
+            if (process_heap_entry_present(table, index))
+            {
+                user_memory_free_page(table->phys[index]);
+            }
+        }
+    }
     process->user_heap_committed = process->user_heap_base;
     process_heap_free_map(process);
+}
+
+static void process_heap_rollback(process_t *process, process_retired_memory_t *retired)
+{
+    for (size_t i = 0; i < retired->count; ++i)
+    {
+        uintptr_t virt = retired->ranges[i].virtual_address;
+        size_t page = (size_t)((virt - process->user_heap_base) / PAGE_SIZE_BYTES_LOCAL);
+        size_t dir = page >> PROCESS_HEAP_L2_SHIFT;
+        process_heap_l2_t *table = process_heap_table(process, dir, false);
+        if (!paging_unmap_user_page(&process->address_space, virt))
+        {
+            fatal("heap rollback could not remove owned mapping");
+        }
+        process_heap_entry_clear(table, page & PROCESS_HEAP_L2_MASK);
+        if (process_heap_table_empty(table))
+        {
+            free(table);
+            process->heap_page_dirs[dir] = NULL;
+        }
+    }
+    process_retirement_enqueue(retired, &process->address_space);
 }
 
 bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t end)
@@ -468,6 +671,16 @@ bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t en
     if (!process || start >= end)
     {
         return true;
+    }
+    if (((start | end) & (PAGE_SIZE_BYTES_LOCAL - 1)) != 0 ||
+        start < process->user_heap_base || end > process->user_heap_limit)
+    {
+        return false;
+    }
+    process_retired_memory_t *rollback = process_retirement_allocate((end - start) / PAGE_SIZE_BYTES_LOCAL);
+    if (!rollback)
+    {
+        return false;
     }
     uintptr_t page_addr = start;
     while (page_addr < end)
@@ -479,7 +692,7 @@ bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t en
 
         if (dir_index >= process->heap_dir_count)
         {
-            process_heap_release_from(process, start);
+            process_heap_rollback(process, rollback);
             process->user_heap_committed = start;
             return false;
         }
@@ -487,7 +700,7 @@ bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t en
         process_heap_l2_t *table = process_heap_table(process, dir_index, true);
         if (!table)
         {
-            process_heap_release_from(process, start);
+            process_heap_rollback(process, rollback);
             process->user_heap_committed = start;
             return false;
         }
@@ -504,7 +717,7 @@ bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t en
                           (unsigned long long)process->pid,
                           (unsigned long long)page_addr,
                           (unsigned long long)user_memory_available());
-            process_heap_release_from(process, start);
+            process_heap_rollback(process, rollback);
             process->user_heap_committed = start;
             return false;
         }
@@ -520,13 +733,17 @@ bool process_heap_commit_range(process_t *process, uintptr_t start, uintptr_t en
                           (unsigned long long)page_addr,
                           (unsigned long long)phys);
             user_memory_free_page(phys);
-            process_heap_release_from(process, start);
-             process->user_heap_committed = start;
+            process_heap_rollback(process, rollback);
+            process->user_heap_committed = start;
             return false;
         }
         process_heap_entry_set(table, entry_index, phys);
+        rollback->ranges[rollback->count++] = (process_retired_range_t){
+            .physical = phys, .bytes = PAGE_SIZE_BYTES_LOCAL, .virtual_address = page_addr
+        };
         page_addr += PAGE_SIZE_BYTES_LOCAL;
     }
+    free(rollback);
     process->user_heap_committed = end;
     return true;
 }
@@ -559,11 +776,20 @@ static bool process_user_region_allocate(process_t *process,
         return false;
     }
 
+    process_retired_memory_t *retirement = process_retirement_allocate(1);
+    if (!retirement)
+    {
+        user_memory_free(phys, aligned_bytes);
+        free(region);
+        return false;
+    }
+
     region->phys_base = phys;
     region->mapped_size = aligned_bytes;
     region->user_base = user_base;
     region->writable = writable;
     region->executable = executable;
+    region->retirement = retirement;
     region->next = process->user_regions;
     process->user_regions = region;
 
@@ -647,6 +873,12 @@ bool process_map_user_segment_locked(process_t *process,
     {
         return false;
     }
+    /* Native VM owns a separate arena, including uncommitted reservations.
+     * Legacy ELF/thread/TLS allocation must never collide with that arena. */
+    if (process_vm_range_reserved(aligned_base, total))
+    {
+        return false;
+    }
 
     if (!allow_reserved)
     {
@@ -691,7 +923,14 @@ bool process_map_user_segment_locked(process_t *process,
 
     if (!process_map_user_region(process, region))
     {
+        process_retired_memory_t *rollback = region->retirement;
+        rollback->ranges[rollback->count++] = (process_retired_range_t){
+            .physical = region->phys_base, .bytes = region->mapped_size, .virtual_address = region->user_base
+        };
         process_unlink_user_region(process, region);
+        /* paging_map_user_range removed any partially installed PTEs. Keep
+         * all backing until its remote translations have been invalidated. */
+        process_retirement_enqueue(rollback, &process->address_space);
         return false;
     }
 
@@ -699,6 +938,100 @@ bool process_map_user_segment_locked(process_t *process,
     {
         uint8_t *base_ptr = (uint8_t *)phys_to_virt(region->phys_base);
         *host_ptr_out = base_ptr + offset;
+    }
+    return true;
+}
+
+bool process_allocate_aux_user_segment_locked(process_t *process, size_t bytes,
+                                              uintptr_t *base_out, void **host_out)
+{
+    if (!process || !base_out || !host_out || !bytes ||
+        (bytes & (PAGE_SIZE_BYTES_LOCAL - 1)))
+    {
+        return false;
+    }
+    *base_out = 0;
+    *host_out = NULL;
+    uintptr_t floor = process_vm_auxiliary_base();
+    uintptr_t top = align_down_uintptr(USER_STUB_CODE_BASE, PAGE_SIZE_BYTES_LOCAL);
+    const uintptr_t guard = PAGE_SIZE_BYTES_LOCAL;
+    if (floor >= top || top - floor <= guard || bytes > top - floor - guard)
+    {
+        return false;
+    }
+
+    /* Scan the current region set rather than permanently consuming a cursor.
+     * Existing regions include both stacks and TLS. Reserving one page below
+     * every region also preserves stack guards when holes are reused. */
+    uintptr_t candidate_top = top;
+    while (candidate_top > floor && candidate_top - floor >= bytes + guard)
+    {
+        uintptr_t base = candidate_top - bytes;
+        uintptr_t guarded_base = base - guard;
+        uintptr_t conflict_top = candidate_top;
+        bool conflict = false;
+        for (process_user_region_t *region = process->user_regions; region; region = region->next)
+        {
+            if (region->mapped_size == 0)
+            {
+                continue;
+            }
+            if (region->user_base > UINTPTR_MAX - region->mapped_size)
+            {
+                return false;
+            }
+            uintptr_t occupied_end = region->user_base + region->mapped_size;
+            uintptr_t occupied_start = region->user_base >= guard ? region->user_base - guard : 0;
+            if (occupied_end <= floor || occupied_start >= candidate_top)
+            {
+                continue;
+            }
+            if (guarded_base < occupied_end && candidate_top > occupied_start)
+            {
+                conflict = true;
+                if (occupied_start < conflict_top)
+                {
+                    conflict_top = occupied_start;
+                }
+            }
+        }
+        if (conflict)
+        {
+            if (conflict_top <= floor)
+            {
+                return false;
+            }
+            candidate_top = conflict_top;
+            continue;
+        }
+        if (!process_map_user_segment_locked(process, base, bytes, true, false, false, host_out))
+        {
+            return false;
+        }
+        *base_out = base;
+        process->user_thread_stack_next = guarded_base;
+        return true;
+    }
+    return false;
+}
+
+bool process_complete_user_mapping(process_t *process)
+{
+    if (!process)
+    {
+        return false;
+    }
+    paging_tlb_ticket_t ticket = paging_request_tlb_flush(&process->address_space);
+    if (!paging_tlb_flush_complete(ticket) &&
+        (((cpu_save_flags() & RFLAGS_IF_BIT) == 0) || spinlock_preempt_disabled()))
+    {
+        return false;
+    }
+    /* Reused stack/TLS addresses must not reach a new thread while another
+     * CPU can still translate that VA to retired backing. No lock is held. */
+    while (!paging_tlb_flush_complete(ticket))
+    {
+        process_sleep_ms(1);
     }
     return true;
 }
@@ -750,12 +1083,21 @@ bool process_unmap_user_segment(process_t *process, uintptr_t user_base, size_t 
         process_memory_unlock(process, flags);
         return false;
     }
+    /* Reserved at map time, so thread-stack teardown cannot fail for lack of
+     * retirement metadata while holding the scheduler lock. */
+    process_retired_memory_t *retired = region->retirement;
+    retired->ranges[retired->count++] = (process_retired_range_t){
+        .physical = region->phys_base, .bytes = region->mapped_size, .virtual_address = region->user_base
+    };
     for (uintptr_t addr = aligned_base; addr < aligned_base + total; addr += PAGE_SIZE_BYTES_LOCAL)
     {
-        (void)paging_unmap_user_page(&process->address_space, addr);
+        if (!paging_unmap_user_page(&process->address_space, addr))
+        {
+            fatal("owned user segment could not be unmapped");
+        }
     }
     process_unlink_user_region(process, region);
-    paging_flush_space_tlb(&process->address_space);
+    process_retirement_enqueue(retired, &process->address_space);
     process_memory_unlock(process, flags);
     return true;
 }
@@ -958,6 +1300,78 @@ static bool process_stack_translate(process_t *process,
     return true;
 }
 
+bool process_memory_resolve_user_locked(process_t *process, uintptr_t address,
+                                        bool write_access, uint8_t **host_out,
+                                        size_t *available_out)
+{
+    if (!process || !host_out || !available_out ||
+        address < USER_ADDRESS_SPACE_BASE || address > USER_ADDRESS_SPACE_LIMIT)
+    {
+        return false;
+    }
+    *host_out = NULL;
+    *available_out = 0;
+    uint8_t *host = NULL;
+    paddr_t physical = 0;
+    uintptr_t page = align_down_uintptr(address, PAGE_SIZE_BYTES_LOCAL);
+    size_t available = PAGE_SIZE_BYTES_LOCAL - (size_t)(address - page);
+    if (process_heap_lookup(process, page, &physical))
+    {
+        host = (uint8_t *)phys_to_virt(physical) + (address - page);
+    }
+    else if (!process_stack_translate(process, address, &host, &available))
+    {
+        for (process_user_region_t *region = process->user_regions; region; region = region->next)
+        {
+            if (address >= region->user_base && address - region->user_base < region->mapped_size)
+            {
+                if (write_access && !region->writable)
+                {
+                    return false;
+                }
+                host = (uint8_t *)phys_to_virt(region->phys_base) + (address - region->user_base);
+                size_t remaining = region->mapped_size - (size_t)(address - region->user_base);
+                if (available > remaining)
+                {
+                    available = remaining;
+                }
+                break;
+            }
+        }
+    }
+    if (!host)
+    {
+        /* Anonymous VM ranges never overlap the legacy heap/stack/ELF ranges.
+         * Its resolver also rejects PROT_NONE and disallowed writes. */
+        return process_vm_resolve_locked(process, address, write_access,
+                                          host_out, available_out);
+    }
+    *host_out = host;
+    *available_out = available;
+    return true;
+}
+
+bool process_memory_read_user_u32(process_t *process, uintptr_t address, uint32_t *value_out)
+{
+    if (!process || !value_out || (address & (sizeof(uint32_t) - 1)) != 0 ||
+        address < USER_ADDRESS_SPACE_BASE || address > USER_ADDRESS_SPACE_LIMIT - (sizeof(uint32_t) - 1))
+    {
+        return false;
+    }
+    uint64_t flags = process_memory_lock(process);
+    uint8_t *host = NULL;
+    size_t available = 0;
+    bool valid = process_memory_resolve_user_locked(process, address, false, &host, &available) &&
+                 available >= sizeof(uint32_t);
+    if (valid)
+    {
+        /* memory_lock pins the physical backing and permission snapshot. */
+        *value_out = __atomic_load_n((const uint32_t *)host, __ATOMIC_ACQUIRE);
+    }
+    process_memory_unlock(process, flags);
+    return valid;
+}
+
 static bool process_stack_copy_to(process_t *process,
                                  uintptr_t addr,
                                  const void *src,
@@ -1068,6 +1482,11 @@ static bool process_stack_commit_range(process_t *process, uintptr_t start, uint
         return true;
     }
 
+    process_retired_memory_t *retired = process_retirement_allocate((aligned_end - aligned_start) / PAGE_SIZE_BYTES_LOCAL);
+    if (!retired)
+    {
+        return false;
+    }
     uintptr_t page_addr = aligned_start;
     for (; page_addr < aligned_end; page_addr += PAGE_SIZE_BYTES_LOCAL)
     {
@@ -1101,31 +1520,30 @@ static bool process_stack_commit_range(process_t *process, uintptr_t start, uint
             break;
         }
         process->user_stack_pages[page_index] = phys;
+        retired->ranges[retired->count++] = (process_retired_range_t){
+            .physical = phys, .bytes = PAGE_SIZE_BYTES_LOCAL, .virtual_address = page_addr
+        };
     }
 
     if (page_addr == aligned_end)
     {
+        free(retired);
         process->user_stack_committed = aligned_start;
         return true;
     }
 
     /* Roll back any pages we allocated for this range. */
-    for (uintptr_t rollback = aligned_start; rollback < page_addr; rollback += PAGE_SIZE_BYTES_LOCAL)
+    for (size_t i = 0; i < retired->count; ++i)
     {
+        uintptr_t rollback = retired->ranges[i].virtual_address;
         size_t page_index = (size_t)((rollback - stack_bottom) / PAGE_SIZE_BYTES_LOCAL);
-        if (page_index >= process->user_stack_page_count)
+        if (!paging_unmap_user_page(&process->address_space, rollback))
         {
-            continue;
-        }
-        paddr_t phys = process->user_stack_pages[page_index];
-        if (phys == 0)
-        {
-            continue;
+            fatal("stack rollback could not remove owned mapping");
         }
         process->user_stack_pages[page_index] = 0;
-        paging_unmap_user_page(&process->address_space, rollback);
-        user_memory_free_page(phys);
     }
+    process_retirement_enqueue(retired, &process->address_space);
     process->user_stack_committed = old_committed;
     return false;
 }

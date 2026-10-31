@@ -1,7 +1,10 @@
 CC       := x86_64-elf-gcc
+CXX      := x86_64-elf-g++
 LD       := x86_64-elf-ld
 OBJCOPY  := x86_64-elf-objcopy
+OBJDUMP  := x86_64-elf-objdump
 STRIP    := x86_64-elf-strip
+NM       := x86_64-elf-nm
 QEMU     := qemu-system-x86_64  -display cocoa,zoom-to-fit=off
 HOST_CC  ?= cc
 
@@ -35,6 +38,8 @@ endif
 USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(USER_DIR)/lib -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
                -msse2 -mfpmath=sse -mstackrealign -mcmodel=large -I$(USER_DIR)/apps/doom \
                -DNORMALUNIX
+USER_CXXFLAGS := $(filter-out -std=c11,$(USER_CFLAGS)) -std=c++17 \
+                 -fno-exceptions -fno-rtti -fno-use-cxa-atexit -fno-threadsafe-statics
 
 KERNEL_LD   := $(ARCH_DIR)/uefi.ld
 LOADER_DIR  := src/loader
@@ -55,6 +60,8 @@ C_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $
 PROCESS_SOURCES := $(wildcard $(KERNEL_DIR)/process/*.c)
 C_SOURCES := $(filter-out $(KERNEL_DIR)/process.c,$(C_SOURCES))
 C_SOURCES += $(PROCESS_SOURCES)
+# Shared ownership primitives used by process-owned asynchronous I/O records.
+C_SOURCES += $(KERNEL_DIR)/fd/table.c $(KERNEL_DIR)/io/request.c
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
@@ -67,9 +74,29 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/crt0.c \
 	$(USER_DIR)/lib/syscall.c \
 	$(USER_DIR)/lib/libc.c \
+	$(USER_DIR)/lib/calendar.c \
+	$(USER_DIR)/lib/calendar_format.c \
+	$(USER_DIR)/lib/timezone.c \
+	$(USER_DIR)/lib/locale.c \
+	$(USER_DIR)/lib/locale_objects.c \
+	$(USER_DIR)/lib/printf_float.c \
+	$(USER_DIR)/lib/signal.c \
+	$(USER_DIR)/lib/mman.c \
+	$(USER_DIR)/lib/random.c \
+	$(USER_DIR)/lib/pthread.c \
+	$(USER_DIR)/lib/process_posix.c \
 	$(USER_DIR)/lib/math.c \
 	$(USER_DIR)/lib/setjmp.c \
 	$(USER_DIR)/lib/atk_user.c \
+	$(USER_DIR)/lib/video_surface.c \
+	$(USER_DIR)/lib/serial_stub.c \
+	$(USER_DIR)/lib/atk_user_host_stub.c
+USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
+USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o $(USER_OBJDIR)/kernel/ttf.o
+USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/utf8.o
+# The legacy web engine is an explicit browser dependency, not part of libc or
+# the window/pixel API. External browser engines must not link these objects.
+USER_WEB_SOURCES := \
 	$(USER_DIR)/lib/web/html.c \
 	$(USER_DIR)/lib/web/html/entities.c \
 	$(USER_DIR)/lib/web/html/dom.c \
@@ -90,19 +117,17 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/web/js/runtime/core.c \
 	$(USER_DIR)/lib/web/js/runtime/builtins.c \
 	$(USER_DIR)/lib/web/js/runtime/eval.c \
-	$(USER_DIR)/lib/web/url.c \
-	$(USER_DIR)/lib/video_surface.c \
-	$(USER_DIR)/lib/serial_stub.c \
-	$(USER_DIR)/lib/atk_user_host_stub.c
-USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
-USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o $(USER_OBJDIR)/kernel/ttf.o
-USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/utf8.o
+	$(USER_DIR)/lib/web/url.c
+USER_WEB_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_WEB_SOURCES))
 USER_LD_SCRIPT := $(USER_DIR)/lib/link.ld
 USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(wildcard $(ATK_DIR)/*.c))
 USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
 USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
 USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c \
-                          $(USER_DIR)/lib/atk/atk_html_view.c \
+                          $(USER_DIR)/lib/atk_app.c
+USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
+USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
+USER_HTML_VIEW_SOURCES := $(USER_DIR)/lib/atk/atk_html_view.c \
                           $(USER_DIR)/lib/atk/html_view/core.c \
                           $(USER_DIR)/lib/atk/html_view/font.c \
                           $(USER_DIR)/lib/atk/html_view/controls.c \
@@ -117,10 +142,8 @@ USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c \
                           $(USER_DIR)/lib/atk/html_view/render/forms.c \
                           $(USER_DIR)/lib/atk/html_view/render/blocks.c \
                           $(USER_DIR)/lib/atk/html_view/render/inline.c \
-                          $(USER_DIR)/lib/atk/html_view/widget.c \
-                          $(USER_DIR)/lib/atk_app.c
-USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
-USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
+                          $(USER_DIR)/lib/atk/html_view/widget.c
+USER_HTML_VIEW_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_HTML_VIEW_SOURCES))
 USER_DOOM_SOURCES := $(wildcard $(USER_DIR)/apps/doom/*.c)
 USER_DOOM_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_DOOM_SOURCES))
 USER_TLS_SOURCES := \
@@ -253,11 +276,16 @@ LOADER_LDFLAGS := -nostdlib -Wl,--dll -Wl,--entry=efi_main -Wl,--subsystem,10 \
                   -Wl,--major-subsystem-version,10 -Wl,--minor-subsystem-version,0
 
 CPU_TYPE ?= EPYC
-TCG_CPU_TYPE ?= qemu64
+# RDRAND supplies the guest's native entropy service. QEMU's normal (non-seed,
+# non-replay) execution backs this instruction with its cryptographic RNG.
+TCG_CPU_TYPE ?= qemu64,+rdrand
 SMP_CORES ?= 8
 QEMU_SMP_OPTS := -smp $(SMP_CORES),sockets=1,cores=$(SMP_CORES),threads=1
 
 all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS) $(USER_BINS) $(HTML_VIEW_TEST_BIN)
+
+# Relink after dependency-list changes, including removal of a library.
+$(USER_ELFS): Makefile
 
 $(OBJDIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -287,6 +315,9 @@ $(OBJDIR)/generated/%.o: $(OBJDIR)/generated/%.c
 $(USER_OBJDIR)/%.o: $(USER_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+# The rounding probe in decimal/hex formatting must observe fesetround().
+$(USER_OBJDIR)/lib/printf_float.o: USER_CFLAGS += -frounding-math
 
 $(USER_OBJDIR)/apps/doom/%.o: USER_CFLAGS += -Wno-unused-const-variable
 $(USER_OBJDIR)/apps/quake/%.o: USER_CFLAGS += $(QUAKE_CFLAGS)
@@ -348,9 +379,9 @@ $(USER_OBJDIR)/atk_clock.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_clock/atk_clock_app.o
 
-$(USER_OBJDIR)/atk_browser.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_TLS_OBJECTS) $(USER_ATK_BROWSER_OBJECTS) $(USER_LD_SCRIPT)
+$(USER_OBJDIR)/atk_browser.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_WEB_OBJECTS) $(USER_HTML_VIEW_OBJECTS) $(USER_TLS_OBJECTS) $(USER_ATK_BROWSER_OBJECTS) $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
-	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_TLS_OBJECTS) $(USER_ATK_BROWSER_OBJECTS)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_WEB_OBJECTS) $(USER_HTML_VIEW_OBJECTS) $(USER_TLS_OBJECTS) $(USER_ATK_BROWSER_OBJECTS)
 
 $(USER_OBJDIR)/atk_richtext.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_richtext/atk_richtext_app.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
@@ -399,6 +430,24 @@ $(USER_OBJDIR)/socket_demo.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/socke
 $(USER_OBJDIR)/unzip.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o $(USER_LD_SCRIPT)
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o
+
+$(USER_OBJDIR)/tests/cpp_runtime_test.o: tests/cpp_runtime_test.cpp Makefile
+	@mkdir -p $(dir $@)
+	$(CXX) $(USER_CXXFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/tests/cpp_runtime_abi.o: tests/cpp_runtime_abi.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/cpp_runtime_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/cpp_runtime_test.o $(USER_OBJDIR)/tests/cpp_runtime_abi.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/cpp_runtime_test.o $(USER_OBJDIR)/tests/cpp_runtime_abi.o
+
+$(USER_OBJDIR)/tests/thread_%_test.o: tests/thread_%_test.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/thread_%_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/thread_%_test.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/thread_$*_test.o
 
 $(USER_RUNTIME_DIR)/%.elf: $(USER_OBJDIR)/%.elf Makefile
 	@mkdir -p $(dir $@)
@@ -832,6 +881,7 @@ QEMU_DEBUG_LOG   ?= qemu.log
 # performance. Opt in when diagnosing QEMU itself via QEMU_DEBUG_FLAGS='-d ...'.
 QEMU_DEBUG_FLAGS ?=
 QEMU_GDB_FLAGS   ?=
+QEMU_SERIAL      ?= stdio
 HOMEBREW_PREFIX  := $(shell brew --prefix)
 UNAME_S          := $(shell uname -s)
 
@@ -922,7 +972,7 @@ run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
-		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
@@ -943,7 +993,7 @@ run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
-		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
@@ -964,7 +1014,7 @@ run-hdd-rtl: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
-		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC_RTL)
 
@@ -981,7 +1031,7 @@ run-ps2-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
 		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
 		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
 		-device ide-hd,drive=data,bus=ahci0.1 \
-		-no-reboot -monitor vc:1920x1080 -serial stdio -vga std \
+		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
 		$(QEMU_AUDIO) \
 		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
 
@@ -1050,6 +1100,111 @@ runtime-archive-test: $(USER_ELF_ARCHIVE)
 
 .PHONY: runtime-archive-test
 
+# Inspect the linked ELF files: shared runtime/toolkit code must not silently
+# pull in the old engine, while the existing browser retains its dependencies.
+user-engine-isolation-test: $(USER_ELFS)
+	$(NM) --defined-only $(filter-out $(USER_OBJDIR)/atk_browser.elf,$(USER_ELFS)) > $(USER_OBJDIR)/nonweb-symbols.txt
+	@awk '$$NF ~ /^(html_|css_|js_|atk_html_|web_url_)/ { print "Unexpected web engine symbol: " $$0; bad = 1 } END { exit bad }' $(USER_OBJDIR)/nonweb-symbols.txt
+	$(NM) --defined-only $(USER_OBJDIR)/atk_browser.elf > $(USER_OBJDIR)/browser-symbols.txt
+	@awk '$$NF == "html_parse" { html = 1 } $$NF == "css_parse" { css = 1 } $$NF == "js_runtime_create" { js = 1 } $$NF == "atk_html_view_set_html" { view = 1 } END { if (!(html && css && js && view)) { print "Existing browser is missing an engine dependency"; exit 1 } }' $(USER_OBJDIR)/browser-symbols.txt
+	@echo "User engine isolation: PASS"
+
+.PHONY: user-engine-isolation-test
+
+# This checks the native binary's link contracts. Running it inside Alix is a
+# separate check; its main/fini PASS messages must both appear on serial.
+cpp-runtime-test: $(USER_OBJDIR)/cpp_runtime_test.elf
+	$(NM) --undefined-only $< > $(USER_OBJDIR)/cpp-runtime-undefined.txt
+	@test ! -s $(USER_OBJDIR)/cpp-runtime-undefined.txt
+	$(NM) --defined-only $< > $(USER_OBJDIR)/cpp-runtime-symbols.txt
+	@awk '$$NF ~ /^(html_|css_|js_|atk_html_|web_url_)/ { print "Unexpected web engine symbol: " $$0; bad = 1 } END { exit bad }' $(USER_OBJDIR)/cpp-runtime-symbols.txt
+	$(OBJDUMP) -h $< > $(USER_OBJDIR)/cpp-runtime-sections.txt
+	@awk '$$2 == ".preinit_array" { preinit = 1 } $$2 == ".init_array" { init = 1 } $$2 == ".fini_array" { fini = 1 } END { if (!(preinit && init && fini)) { print "C++ startup sections missing"; exit 1 } }' $(USER_OBJDIR)/cpp-runtime-sections.txt
+	@echo "C++ runtime compile/link: PASS (execution in Alix still required)"
+
+.PHONY: cpp-runtime-test
+
+cpp-runtime-qemu-test: all cpp-runtime-test
+	python3 tests/cpp_runtime_qemu_test.py
+
+.PHONY: cpp-runtime-qemu-test
+
+thread-platform-test: $(USER_OBJDIR)/thread_tls_test.elf $(USER_OBJDIR)/thread_elf_tls_test.elf $(USER_OBJDIR)/thread_pool_reuse_test.elf $(USER_OBJDIR)/thread_libc_support_test.elf $(USER_OBJDIR)/thread_main_exit_test.elf $(USER_OBJDIR)/thread_pthread_test.elf $(USER_OBJDIR)/thread_sync_test.elf $(USER_OBJDIR)/thread_memory_test.elf
+	$(NM) --undefined-only $^ > $(USER_OBJDIR)/thread-platform-undefined.txt
+	@awk 'NF && $$NF !~ /:$$/ { print; bad = 1 } END { exit bad }' $(USER_OBJDIR)/thread-platform-undefined.txt
+
+thread-platform-qemu-test: all thread-platform-test
+	python3 tests/thread_platform_qemu_test.py
+
+.PHONY: thread-platform-test thread-platform-qemu-test
+
+futex-contract-test:
+	python3 tests/futex_contract_test.py
+
+.PHONY: futex-contract-test
+
+vm-reclamation-test:
+	python3 tests/vm_reclamation_test.py
+
+.PHONY: vm-reclamation-test
+
+user-copy-contract-test:
+	python3 tests/user_copy_contract_test.py
+
+native-vm-contract-test:
+	python3 tests/native_vm_contract_test.py
+
+auxiliary-pool-test:
+	python3 tests/auxiliary_pool_test.py
+
+entropy-contract-test:
+	python3 tests/entropy_contract_test.py
+
+pthread-contract-test:
+	python3 tests/pthread_contract_test.py
+
+process-pid-contract-test:
+	python3 tests/process_pid_test.py
+
+libcxx-threading-contract-test:
+	python3 tests/libcxx_threading_contract_test.py
+
+$(USER_OBJDIR)/tests/entropy_test.o: tests/entropy_test.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/entropy_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/entropy_test.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/entropy_test.o
+
+entropy-qemu-test: all $(USER_OBJDIR)/entropy_test.elf
+	python3 tests/entropy_qemu_test.py
+
+.PHONY: entropy-contract-test entropy-qemu-test libcxx-threading-contract-test pthread-contract-test process-pid-contract-test
+
+$(USER_OBJDIR)/tests/virtual_memory_test.o: tests/virtual_memory_test.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/tests/user_copy_test.o: tests/user_copy_test.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/virtual_memory_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/virtual_memory_test.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/virtual_memory_test.o
+
+$(USER_OBJDIR)/user_copy_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/user_copy_test.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/user_copy_test.o
+
+virtual-memory-test: $(USER_OBJDIR)/virtual_memory_test.elf $(USER_OBJDIR)/user_copy_test.elf
+
+virtual-memory-qemu-test: all virtual-memory-test
+	python3 tests/virtual_memory_qemu_test.py
+
+vm-advice-qemu-test: all $(USER_OBJDIR)/thread_vm_advice_test.elf
+	python3 tests/vm_advice_qemu_test.py
+
+.PHONY: user-copy-contract-test native-vm-contract-test auxiliary-pool-test virtual-memory-test virtual-memory-qemu-test vm-advice-qemu-test
+
 filesystem-writeback-test:
 	python3 tests/filesystem_writeback_test.py
 
@@ -1114,6 +1269,8 @@ test:
 	$(MAKE) network-download-contract-test
 	$(MAKE) filesystem-writeback-test
 	$(MAKE) runtime-archive-test
+	$(MAKE) user-engine-isolation-test
+	$(MAKE) cpp-runtime-test
 	$(MAKE) web-test
 	$(MAKE) css-test
 	$(MAKE) browser-event-test
@@ -1126,6 +1283,8 @@ test:
 	$(MAKE) html-view-test
 
 .PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test quake-liveness-test elf-validation-test process-smoke-test process-lock-contract-test atk-background-lock-contract-test audio-stream-contract-test network-download-contract-test process-lock-stress-test keyboard-boot-input-test gui-wakeup-test quake-gui-liveness-test web-test css-test browser-event-test browser-resource-test png-test tls-test js-test html-js-test html-view-test web-render-harness web-render-stackoverflow test262-test
+
+include ports/zen/port.mk
 
 USER_DEPFILES := $(shell find $(USER_OBJDIR) -type f -name '*.d' 2>/dev/null)
 

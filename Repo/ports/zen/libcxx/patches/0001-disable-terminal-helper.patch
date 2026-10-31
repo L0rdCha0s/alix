@@ -1,0 +1,12 @@
+diff --git a/libcxx/src/print.cpp b/libcxx/src/print.cpp
+--- a/libcxx/src/print.cpp
++++ b/libcxx/src/print.cpp
+@@ -64,7 +64,7 @@ __write_to_windows_console([[maybe_unused]] FILE* __stream, [[maybe_unused]] wstrin
+ }
+ #  endif // _LIBCPP_HAS_WIDE_CHARACTERS
+ 
+-#elif defined(HAS_FILENO_AND_ISATTY) // !_LIBCPP_WIN32API
++#elif defined(HAS_FILENO_AND_ISATTY) && _LIBCPP_HAS_TERMINAL // !_LIBCPP_WIN32API
+ 
+ _LIBCPP_EXPORTED_FROM_ABI bool __is_posix_terminal(FILE* __stream) { return isatty(fileno(__stream)); }
+ #endif

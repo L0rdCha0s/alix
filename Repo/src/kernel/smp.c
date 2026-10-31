@@ -541,12 +541,16 @@ void smp_secondary_entry(uint32_t apic_id)
     lapic_set_tpr(0xFF); /* Mask AP interrupts until scheduler stack is live. */
 
     g_cpus[cpu_index].present = true;
-    __atomic_store_n(&g_cpus[cpu_index].online, true, __ATOMIC_RELEASE);
-    __sync_fetch_and_add(&g_online_cpus, 1);
     if (cpu_index < SMP_MAX_CPUS)
     {
         __atomic_fetch_or(&g_online_cpu_mask, (1u << cpu_index), __ATOMIC_RELEASE);
     }
+    /* Publish participation before the local flush. A request that missed our
+     * bit precedes this flush; a later request includes us and queues an IPI.
+     * The BSP must not observe online=true before this handoff is complete. */
+    paging_initialize_cpu_tlb(cpu_index);
+    __sync_fetch_and_add(&g_online_cpus, 1);
+    __atomic_store_n(&g_cpus[cpu_index].online, true, __ATOMIC_RELEASE);
 
     process_run_secondary_cpu(cpu_index);
 
@@ -637,4 +641,9 @@ void smp_tlb_flush_mask(uint32_t cpu_mask)
 uint32_t smp_online_cpu_count(void)
 {
     return __atomic_load_n(&g_online_cpus, __ATOMIC_ACQUIRE);
+}
+
+uint32_t smp_online_cpu_mask(void)
+{
+    return __atomic_load_n(&g_online_cpu_mask, __ATOMIC_ACQUIRE);
 }

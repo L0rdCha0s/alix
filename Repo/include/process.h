@@ -186,6 +186,27 @@ bool process_query_user_layout(const process_t *process,
                                process_user_layout_t *layout);
 int64_t process_user_sbrk(process_t *process, int64_t increment);
 uint64_t thread_current_tid(void);
+bool process_set_user_tls_template(process_t *process, const uint8_t *image,
+                                   size_t file_size, size_t memory_size,
+                                   size_t alignment, uintptr_t image_address);
+/* Set/query the current user thread's x86-64 FS base. Zero clears it.
+ * The caller owns the TLS allocation; these calls never dereference it. */
+int process_thread_set_tls(uintptr_t base);
+uintptr_t process_thread_get_tls(void);
+int process_thread_set_current_affinity(uint32_t cpu_index);
+uint32_t process_thread_current_cpu(void);
+int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms);
+int process_futex_wake(uintptr_t address, uint32_t max_waiters);
+int64_t process_vm_map(process_t *process, uintptr_t hint, size_t length,
+                       uint32_t protection, uint32_t flags);
+int process_vm_protect(process_t *process, uintptr_t address, size_t length, uint32_t protection);
+int process_vm_unmap(process_t *process, uintptr_t address, size_t length);
+int process_vm_advise(process_t *process, uintptr_t address, size_t length, uint32_t advice);
+int process_user_thread_detach(uint64_t tid);
+struct syscall_thread_info;
+int process_user_thread_info(uint64_t tid, struct syscall_thread_info *info);
+int process_user_thread_set_name(uint64_t tid, const char *name);
+int process_user_thread_prepare_exit(void);
 int64_t process_user_thread_create(const char *name,
                                   uintptr_t entry,
                                   uintptr_t arg,

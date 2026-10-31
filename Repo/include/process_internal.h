@@ -19,6 +19,7 @@
 #include "syscall_defs.h"
 #include "user_memory.h"
 #include "user_copy.h"
+#include "io_request.h"
 #include "memory_layout.h"
 #include "timer.h"
 #include "interrupts.h"
@@ -141,6 +142,7 @@ typedef struct process_user_region
     uintptr_t user_base;
     bool writable;
     bool executable;
+    struct process_retired_memory *retirement;
     struct process_user_region *next;
 } process_user_region_t;
 
@@ -264,6 +266,8 @@ struct thread
     bool preempt_pending;
     bool fpu_initialized;
     wait_queue_t *waiting_queue;
+    /* Scheduler-protected WAITER ownership; detached only after off-CPU quiescence. */
+    io_request_t *io_request;
     thread_t *wait_queue_next;
     uint32_t magic;
     char name[PROCESS_NAME_MAX];
@@ -288,6 +292,10 @@ struct thread
     bool counted_running;
     uintptr_t user_stack_base;
     size_t user_stack_size;
+    uintptr_t user_tls_base;
+    size_t user_tls_size;
+    bool detached;
+    bool user_cleanup_complete;
     uint64_t context_guard_hash;
     uintptr_t context_guard_ptr;
     uint64_t context_guard_generation;
@@ -314,6 +322,12 @@ struct thread
     size_t stack_watch_snapshot_len;
     bool stack_watch_snapshot_valid;
     uint8_t stack_watch_snapshot[STACK_WATCH_SNAPSHOT_BYTES];
+    /* Process-private user waits live with the heap-owned thread, never on a
+     * syscall stack. Scheduler locking protects registration and notification. */
+    wait_queue_t futex_queue;
+    uintptr_t futex_address;
+    bool futex_waiting;
+    bool futex_notified;
 };
 
 struct process
@@ -332,6 +346,7 @@ struct process
     uint32_t thread_count;
     uint32_t running_thread_count;
     uint32_t join_waiters;
+    uint64_t user_exit_owner_tid;
     int exit_status;
     struct process *next;
     int stdout_fd;
@@ -345,6 +360,8 @@ struct process
     process_t *sibling_next;
     vfs_node_t *cwd;
     process_user_region_t *user_regions;
+    struct process_vm_area *vm_areas;
+    struct process_vm_transaction *vm_pending;
     uintptr_t user_entry_point;
     uintptr_t user_stack_top;
     size_t user_stack_size;
@@ -352,6 +369,11 @@ struct process
     paddr_t *user_stack_pages;
     size_t user_stack_page_count;
     uintptr_t user_thread_stack_next;
+    uint8_t *user_tls_image;
+    size_t user_tls_filesz;
+    size_t user_tls_memsz;
+    size_t user_tls_align;
+    size_t user_tls_offset;
     uintptr_t user_heap_base;
     uintptr_t user_heap_brk;
     uintptr_t user_heap_limit;
@@ -509,13 +531,13 @@ static inline uint32_t scheduler_time_slice_ticks(void)
 static inline uint64_t cpu_save_flags(void)
 {
     uint64_t flags;
-    __asm__ volatile ("pushfq; pop %0" : "=r"(flags));
+    __asm__ volatile ("pushfq; pop %0" : "=r"(flags) :: "memory");
     return flags;
 }
 
 static inline void cpu_restore_flags(uint64_t flags)
 {
-    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc");
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "cc", "memory");
 }
 
 static inline void cpu_cli(void)
@@ -540,47 +562,41 @@ static inline thread_priority_t scheduler_default_priority(void)
 
 static inline thread_t *current_thread_local(void)
 {
+    /* CPU-index lookup and its slot access form one local snapshot. A timer
+     * migration between them would otherwise read another thread's slot. */
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
     uint32_t idx = smp_current_cpu_index();
-    if (idx >= SMP_MAX_CPUS)
-    {
-        return NULL;
-    }
-    return g_current_threads[idx];
+    thread_t *thread = idx < SMP_MAX_CPUS ? __atomic_load_n(&g_current_threads[idx], __ATOMIC_ACQUIRE) : NULL;
+    cpu_restore_flags(flags);
+    return thread;
 }
 
 static inline process_t *current_process_local(void)
 {
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
     uint32_t idx = smp_current_cpu_index();
-    if (idx >= SMP_MAX_CPUS)
-    {
-        return NULL;
-    }
-    return g_current_processes[idx];
+    process_t *process = idx < SMP_MAX_CPUS ? __atomic_load_n(&g_current_processes[idx], __ATOMIC_ACQUIRE) : NULL;
+    cpu_restore_flags(flags);
+    return process;
 }
 
 static inline void set_current_thread_local(thread_t *thread)
 {
-    uint32_t idx = smp_current_cpu_index();
-    if (idx >= SMP_MAX_CPUS)
-    {
-        return;
-    }
     uint64_t flags = cpu_save_flags();
     cpu_cli();
-    g_current_threads[idx] = thread;
+    uint32_t idx = smp_current_cpu_index();
+    if (idx < SMP_MAX_CPUS) __atomic_store_n(&g_current_threads[idx], thread, __ATOMIC_RELEASE);
     cpu_restore_flags(flags);
 }
 
 static inline void set_current_process_local(process_t *process)
 {
-    uint32_t idx = smp_current_cpu_index();
-    if (idx >= SMP_MAX_CPUS)
-    {
-        return;
-    }
     uint64_t flags = cpu_save_flags();
     cpu_cli();
-    g_current_processes[idx] = process;
+    uint32_t idx = smp_current_cpu_index();
+    if (idx < SMP_MAX_CPUS) __atomic_store_n(&g_current_processes[idx], process, __ATOMIC_RELEASE);
     cpu_restore_flags(flags);
 }
 
@@ -692,13 +708,36 @@ process_t *process_finalize_new_process(process_t *proc,
                                         process_t *parent);
 bool process_setup_dummy_user_space(process_t *process);
 bool process_setup_basic_user_memory(process_t *process);
+typedef struct process_tls_allocation
+{
+    uintptr_t base;
+    size_t size;
+    uintptr_t thread_pointer;
+} process_tls_allocation_t;
+bool process_allocate_user_tls(process_t *process, process_tls_allocation_t *out);
+void process_clear_user_tls_template(process_t *process);
 bool process_store_args(process_t *process,
                         const char *const *argv,
                         size_t argc);
 bool process_prepare_stack_with_args(process_t *process);
 void process_clear_args(process_t *process);
 void process_free_user_regions(process_t *process);
-void process_heap_release_from(process_t *process, uintptr_t virt_start);
+bool process_heap_release_from(process_t *process, uintptr_t virt_start);
+void process_reap_retired_memory(void);
+bool process_memory_read_user_u32(process_t *process, uintptr_t address, uint32_t *value_out);
+bool process_vm_fault_locked(process_t *process, uintptr_t address, bool write_access, bool execute_access);
+bool process_vm_resolve_locked(process_t *process, uintptr_t address, bool write_access,
+                               uint8_t **host_out, size_t *available_out);
+bool process_vm_range_reserved(uintptr_t address, size_t length);
+uintptr_t process_vm_auxiliary_base(void);
+void process_vm_destroy(process_t *process);
+bool process_allocate_aux_user_segment_locked(process_t *process, size_t bytes,
+                                              uintptr_t *base_out, void **host_out);
+bool process_complete_user_mapping(process_t *process);
+/* Caller holds memory_lock for the complete use of the returned physmap span. */
+bool process_memory_resolve_user_locked(process_t *process, uintptr_t address,
+                                        bool write_access, uint8_t **host_out,
+                                        size_t *available_out);
 void process_free_heap_pages(process_t *process);
 void sleep_queue_insert(thread_t *thread);
 void sleep_queue_remove(thread_t *thread);
@@ -715,6 +754,21 @@ void process_release_reference(process_t *process);
 bool process_threads_quiescent_locked(process_t *process);
 /* Caller must hold g_scheduler_lock. */
 void wait_queue_wake_all_locked(wait_queue_t *queue);
+/* Preparation/result APIs require a bounded preemption guard, with no other
+ * caller-held locks. Register transfers WAITER on success; on failure the
+ * preparer still owns it and must enqueue abandonment before dropping guard.
+ * Wait requires no preemption guard. Borrowed result pointers remain valid
+ * only until finish, within the caller's guard. Workers never borrow them. */
+int process_io_register_current(io_request_t *request);
+int process_io_wait_current(io_request_status_t *out);
+int process_io_result_current(io_request_t **request_out, io_request_status_t *out);
+int process_io_finish_current(bool abandon);
+/* Caller holds scheduler_lock; abandon also requires off-CPU quiescence. */
+void process_io_cancel_thread_locked(thread_t *thread);
+bool process_io_abandon_thread_locked(thread_t *thread);
+void process_io_notify_completion(void);
+int process_io_complete_request(io_request_t *request, int64_t result,
+                                fd_description_t *result_description_owned);
 void thread_remove_from_wait_queue(thread_t *thread);
 void remove_from_run_queue(thread_t *thread);
 void remove_from_run_queue_locked(thread_t *thread);

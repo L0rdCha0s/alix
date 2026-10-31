@@ -1,0 +1,58 @@
+/* Alix implementation of libc++'s external-threading interface.
+ * This is target glue; general synchronization/TSD/lifecycle lives in libc. */
+#ifndef ALIX_LIBCXX_EXTERNAL_THREADING
+#define ALIX_LIBCXX_EXTERNAL_THREADING
+
+#include <__config>
+#include <__chrono/duration.h>
+#include <libc.h>
+#include <time.h>
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+using __libcpp_timespec_t = ::timespec;
+using __libcpp_mutex_t = ::alix_mutex_t;
+using __libcpp_recursive_mutex_t = ::alix_recursive_mutex_t;
+using __libcpp_condvar_t = ::alix_cond_t;
+using __libcpp_exec_once_flag = ::alix_once_t;
+using __libcpp_thread_id = ::alix_thread_t;
+using __libcpp_thread_t = ::alix_thread_t;
+using __libcpp_tls_key = ::alix_tls_key_t;
+
+#define _LIBCPP_MUTEX_INITIALIZER {0}
+#define _LIBCPP_CONDVAR_INITIALIZER {0}
+#define _LIBCPP_EXEC_ONCE_INITIALIZER {0}
+#define _LIBCPP_NULL_THREAD 0
+#define _LIBCPP_TLS_DESTRUCTOR_CC
+
+int __libcpp_recursive_mutex_init(__libcpp_recursive_mutex_t*);
+int __libcpp_recursive_mutex_lock(__libcpp_recursive_mutex_t*);
+bool __libcpp_recursive_mutex_trylock(__libcpp_recursive_mutex_t*);
+int __libcpp_recursive_mutex_unlock(__libcpp_recursive_mutex_t*);
+int __libcpp_recursive_mutex_destroy(__libcpp_recursive_mutex_t*);
+int __libcpp_mutex_lock(__libcpp_mutex_t*);
+bool __libcpp_mutex_trylock(__libcpp_mutex_t*);
+int __libcpp_mutex_unlock(__libcpp_mutex_t*);
+int __libcpp_mutex_destroy(__libcpp_mutex_t*);
+int __libcpp_condvar_signal(__libcpp_condvar_t*);
+int __libcpp_condvar_broadcast(__libcpp_condvar_t*);
+int __libcpp_condvar_wait(__libcpp_condvar_t*, __libcpp_mutex_t*);
+int __libcpp_condvar_timedwait(__libcpp_condvar_t*, __libcpp_mutex_t*, __libcpp_timespec_t*);
+int __libcpp_condvar_destroy(__libcpp_condvar_t*);
+int __libcpp_execute_once(__libcpp_exec_once_flag*, void (*)());
+bool __libcpp_thread_id_equal(__libcpp_thread_id, __libcpp_thread_id);
+bool __libcpp_thread_id_less(__libcpp_thread_id, __libcpp_thread_id);
+bool __libcpp_thread_isnull(const __libcpp_thread_t*);
+int __libcpp_thread_create(__libcpp_thread_t*, void* (*)(void*), void*);
+__libcpp_thread_id __libcpp_thread_get_current_id();
+__libcpp_thread_id __libcpp_thread_get_id(const __libcpp_thread_t*);
+int __libcpp_thread_join(__libcpp_thread_t*);
+int __libcpp_thread_detach(__libcpp_thread_t*);
+void __libcpp_thread_yield();
+void __libcpp_thread_sleep_for(const chrono::nanoseconds&);
+int __libcpp_tls_create(__libcpp_tls_key*, void (*)(void*));
+void* __libcpp_tls_get(__libcpp_tls_key);
+int __libcpp_tls_set(__libcpp_tls_key, void*);
+
+_LIBCPP_END_NAMESPACE_STD
+#endif

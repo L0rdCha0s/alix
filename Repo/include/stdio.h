@@ -8,12 +8,24 @@
 #ifdef TTF_HOST_BUILD
 #include <stdio.h>
 #else
+#include "alix_mutex.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct FILE
 {
     int fd;
     int error;
     int eof;
+    int orientation; /* 0 undecided, -1 byte, +1 wide; unchanged by seeking. */
+    alix_mutex_t mutex;
+    uint64_t access_flags;
+    bool append;
+    bool pushback_pending;
+    unsigned char pushback;
 } FILE;
+typedef int64_t fpos_t;
 
 extern FILE *stdout;
 extern FILE *stderr;
@@ -30,11 +42,17 @@ int sprintf(char *buf, const char *format, ...);
 int snprintf(char *buf, size_t size, const char *format, ...);
 int vsprintf(char *buf, const char *format, va_list args);
 int vsnprintf(char *buf, size_t size, const char *format, va_list args);
+int asprintf(char **out, const char *format, ...);
+int vasprintf(char **out, const char *format, va_list args);
 int getchar(void);
 int fgetc(FILE *stream);
 int getc(FILE *stream);
+int ungetc(int ch, FILE *stream);
 char *fgets(char *s, int size, FILE *stream);
 int feof(FILE *stream);
+int ferror(FILE *stream);
+void clearerr(FILE *stream);
+int fileno(FILE *stream);
 void setbuf(FILE *stream, char *buf);
 int sscanf(const char *str, const char *format, ...);
 int fscanf(FILE *stream, const char *format, ...);
@@ -46,8 +64,16 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
 int fflush(FILE *stream);
 int fseek(FILE *stream, long offset, int whence);
 long ftell(FILE *stream);
+int fgetpos(FILE *stream, fpos_t *position);
+int fsetpos(FILE *stream, const fpos_t *position);
+void rewind(FILE *stream);
 int fputc(int ch, FILE *stream);
 int fputs(const char *s, FILE *stream);
+int puts(const char *s);
+int remove(const char *path);
+#ifdef __cplusplus
+}
+#endif
 #endif /* TTF_HOST_BUILD */
 #endif /* KERNEL_BUILD */
 

@@ -48,6 +48,47 @@ Locking:
 - There is a global paging lock, plus optional per-space locks (`paging_space_t.lock`).
 - Remote TLB flush uses SMP IPIs (see `smp_broadcast_tlb_flush` and `paging_handle_remote_tlb_flush`).
 
+### TLB completion and retired backing
+
+`paging_request_tlb_flush(space)` publishes page-table changes with a monotonic
+generation and returns a value-only `{generation, cpu_mask}` ticket. The local
+CPU invalidates immediately; each remote IPI handler captures the requested
+generation **before** its flush and publishes an acknowledgement afterward.
+Acknowledgements never move backwards. Local invalidation includes global PTEs
+by toggling CR4.PGE; reloading CR3 alone would leave those translations cached.
+
+`paging_tlb_flush_complete(ticket)` is a nonblocking query. The existing
+`paging_flush_space_tlb` remains an asynchronous request. No caller waits for
+an IPI while holding the memory, paging, scheduler, or heap locks. CPU startup
+publishes its online-mask participation before flushing and acknowledging prior
+requests, then publishes `online=true`; address-space switches publish the
+incoming active bit before loading CR3 and clear the outgoing bit afterward.
+
+User segment unmapping, heap shrinking, and failed mapping/commit rollback now
+transfer physical backing into heap-owned retirement batches. Those records
+contain physical ranges and the completion ticket, never a process pointer or
+another thread's stack pointer. Region retirement metadata is reserved at map
+time, including secondary-thread stacks. Heap shrink and heap/stack growth
+reserve their complete retirement/rollback batch before changing mappings, so
+allocation failure cannot force premature reclamation or a partial shrink.
+
+`process_reap_retired_memory()` detaches batches under its queue lock, checks
+acknowledgements without waiting, and returns completed backing to the PMM
+outside that lock. Scheduler/idle hooks only reap with interrupts enabled and
+without a generic spinlock held. The reaper defers preemption while it owns a
+detached list, keeping IRQ delivery enabled; process cancellation cannot strand
+other processes' retired memory on a discarded kernel stack. Final process teardown and creation-failure
+cleanup may free still-owned pages directly because the process has no active
+threads/address-space users at those call sites.
+
+These legacy helpers establish **safe backing reuse** while retaining their
+asynchronous completion contract. The native anonymous VM interfaces described
+below additionally await their completion tickets outside all locks before
+returning from mapping, protection and unmapping transactions.
+`tests/vm_reclamation_test.py` exercises production generation/retirement code
+with delayed CPU acknowledgement, a request arriving during invalidation, OOM,
+heap/stack rollback, and unmapped-word access.
+
 ### Kernel Mappings
 
 The kernel maintains a few always-present mappings:
@@ -58,6 +99,15 @@ The kernel maintains a few always-present mappings:
 - **Ioremap window**: a high-half virtual window at `KERNEL_IOREMAP_BASE` used to map device MMIO ranges on demand (see `include/ioremap.h` and `src/kernel/ioremap.c`).
 
 These upper-half mappings are shared into all address spaces via `paging_clone_kernel_space` so the kernel can run while a user CR3 is active.
+
+Kernel permission updates invalidate each affected local virtual address even
+when a user CR3 is active or another CPU already set the requested PTE bits.
+The local CPU can still hold an older global translation in either case.
+Remote flush publication remains conditional on actual PTE changes; local
+invalidation does not fabricate a remote acknowledgement. This lets scheduler
+stack activation restore local write access before entering the stack.
+`tests/kernel_permission_tlb_test.py` covers changed and unchanged PTEs under
+both kernel and user address spaces.
 
 ## Physical Memory Manager (PMM) (`include/pmm.h`, `src/kernel/pmm.c`)
 
@@ -95,6 +145,16 @@ User stack and heap:
 - The user stack is mapped near `USER_STACK_TOP` with a fixed size.
 - The user heap is a large reserved window; `process_user_sbrk` grows it by mapping additional pages on demand.
 
+`process_memory_resolve_user_locked` resolves heap, stack, ELF and anonymous VM
+backing while holding `memory_lock`, enforcing write permissions and bounding
+the returned span to one page. General syscall copies use that physical mapping
+under the lock, then release it before processing the next page. Unmapping and
+protection changes therefore cannot free or invalidate backing during a copy;
+invalid input fails instead of faulting on an unchecked user virtual address.
+A failed multi-page copy may have copied earlier pages. The resolver does not
+permit a physical pointer to escape its lock. `process_memory_read_user_u32`
+uses the same resolver for the atomic futex comparison.
+
 ## Stack Guards and Diagnostics
 
 The process subsystem contains multiple safety mechanisms:
@@ -102,3 +162,100 @@ The process subsystem contains multiple safety mechanisms:
 - Guard regions filled with a known pattern.
 - Optional guard page protection (depending on build flags).
 - Stack-owner tracking and “stack write debug” utilities to catch cross-thread/async stack misuse.
+
+## Native anonymous VM (`src/kernel/process/process_vm.c`)
+
+User libc exposes `mmap`, `mprotect` and `munmap` through `<sys/mman.h>` and
+syscalls 48–50. The current backend supports process-private anonymous mappings,
+`MAP_FIXED_NOREPLACE`, and atomic `MAP_FIXED` replacement. File-backed and shared
+mappings remain unsupported. The caller must pass `fd=-1` and `offset=0`.
+
+`PROT_NONE` reserves an interval without physical backing. Granting access
+commits zeroed pages; removing all access from an already committed mapping
+preserves its data for a later protection restore. Partial protection and
+unmapping split intervals while retaining unaffected fragments. Unmapping holes
+is harmless; protecting a range containing a hole fails without changing it.
+`MAP_FIXED` allocates fresh zeroed backing before replacing all intersecting VM
+areas and holes, retaining both outside fragments and the old physical pages
+until remote TLB acknowledgement. `MAP_FIXED_NOREPLACE` returns `EEXIST` on any
+overlap, including a `PROT_NONE` reservation.
+
+All defined `PROT_*` combinations are supported, including RWX mappings used by
+upstream SpiderMonkey. On x86-64, write or execute permission implies readable
+pages; the software-copy resolver uses the same effective permissions. Unknown
+protection bits are rejected without changing a mapping. Generated-code tests
+exercise both RW-to-RX transitions and direct RWX allocation.
+Each transaction prepares all metadata, new backing and page-table levels before
+changing leaf PTEs. Physical or metadata allocation failure preserves the prior
+mapping. Prepared empty page tables remain owned as address-space cache if later
+preparation fails; their allocation tracking is now dynamic instead of a fixed
+512-table ceiling.
+
+The process owns an in-flight transaction journal. It contains removed metadata,
+retired backing and the completion ticket, so killing the requesting thread's
+process cannot strand allocations on its kernel stack. Native VM operations are
+serialized until the journal completes. Leaf/metadata publication happens under
+`memory_lock`; the caller releases every lock and restores interrupts before
+waiting for remote acknowledgement. Only then are retired backing and metadata
+reclaimed and the syscall allowed to return. Quiescent process teardown also
+owns a journal abandoned by process termination.
+
+`madvise(address, length, MADV_DONTNEED)` uses syscall 56 to discard private
+anonymous backing without changing the mapping's address or permissions. The
+address must be page-aligned; the length rounds up to a page boundary. The
+entire range must be mapped, including any `PROT_NONE` portions, or the request
+fails without discarding a partial range. Physical pages are removed from PTEs
+and placed in the process-owned transaction journal; they are freed only after
+the TLB completion ticket is acknowledged. Discarding already sparse pages is
+valid and never frees physical address zero.
+
+A discarded page is a null entry in its VMA's backing array. The first allowed
+user instruction fault or safe syscall copy allocates one zero-filled page
+under `memory_lock` and publishes its prepared PTE. Permission checks happen
+before allocation, so a write to read-only memory, any access to `PROT_NONE`,
+and execution without `PROT_EXEC` remain rejected. The fault path never waits
+for an IPI: a refill during an outstanding discard uses new backing while the
+journal retains the old page until acknowledgement. Two first touches serialize
+under the lock and share the one committed page. A failed allocation leaves the
+page sparse; a failed syscall copy reports failure and a failed user fault takes
+the existing fatal-user-fault path. Protection changes, fixed replacement,
+splitting, unmapping, and teardown all accept sparse backing arrays.
+
+`posix_madvise` has deliberately different semantics: POSIX advice must preserve
+the contents. Its syscall advice namespace (`0x100 | advice`) validates the
+complete mapping and accepts NORMAL, RANDOM, SEQUENTIAL, WILLNEED, and DONTNEED
+as performance hints. Alix currently ignores those hints because it has no
+paging replacement/prefetch policy. It returns positive error codes and does
+not modify `errno`. This never invokes destructive discard; see the
+[POSIX interface specification](https://www.man7.org/linux/man-pages/man3/posix_madvise.3p.html).
+
+`tests/native_vm_contract_test.py` checks physical reclamation, partial-range
+preservation, allocation failures, sparse PTEs, first touches before delayed CPU
+acknowledgement, and cancellation during discard. The native
+`thread_vm_advice_test.elf` checks zero-fill through instructions and syscall
+copies, POSIX content/errno preservation, and 64 discard/refill rounds on four
+CPUs. `tests/vm_advice_qemu_test.py` also verifies that post-discard write,
+`PROT_NONE`, and execute violations remain fatal.
+
+The initial VM arena starts 16 MiB above the existing sbrk heap limit and ends
+256 MiB below the top-of-user-space stubs. That leaves a separate descending
+thread/TLS pool, while the existing ELF origin, main stack and heap remain at
+their current addresses. Legacy segment allocation rejects this arena even
+where no VMA currently exists. The current 4–8 GiB user window provides roughly
+2.7 GiB of native VM space; larger browser reservations will require the planned
+address-layout expansion. Stack and TLS allocation now searches existing region
+gaps in the auxiliary pool, preserving a guard page below each allocation. It
+reuses freed holes instead of permanently consuming a descending cursor. A new
+stack/TLS mapping also completes a cross-CPU TLB barrier before the new thread
+can use it, preventing a recycled VA from accessing retired physical backing.
+
+Validation targets: `make vm-reclamation-test`, `make native-vm-contract-test`
+and `make user-copy-contract-test`. `tests/auxiliary_pool_test.py` checks pool
+exhaustion, fragmentation, guard preservation, 4096 hole-reuse cycles, and the
+publication barrier. `thread_pool_reuse_test.elf` creates and joins 256 threads
+with 2 MiB of TLS each, exceeding the pool size cumulatively without exceeding
+its concurrent capacity. `virtual_memory_test.elf` exercises sparse
+reservation, partial protections, fixed replacement, generated code, and four
+CPUs reading during protection/replacement changes. Its `fault-write`,
+`fault-none` and `fault-exec` modes deliberately trigger user page faults to
+check hardware permissions; those cases require a fault-aware guest harness.

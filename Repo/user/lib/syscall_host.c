@@ -296,6 +296,13 @@ int sys_time_info(syscall_time_info_t *info)
     return -1;
 }
 
+int sys_timezone_info(syscall_timezone_info_t *info, size_t size)
+{
+    (void)info;
+    (void)size;
+    return -38; /* Native syscall result: ENOSYS, with no host timezone proxy. */
+}
+
 __attribute__((weak)) ssize_t sys_font_cache(void *buffer, size_t capacity)
 {
     (void)buffer;
@@ -369,6 +376,116 @@ ssize_t sys_socket_available(int fd)
 uint64_t sys_thread_self(void)
 {
     return 1;
+}
+
+int sys_thread_set_tls(uintptr_t base)
+{
+    /* Never modify the host libc's thread pointer in a host test. */
+    (void)base;
+    errno = ENOSYS;
+    return -1;
+}
+
+uint64_t sys_monotonic_millis(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    {
+        return 0;
+    }
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
+
+uintptr_t sys_thread_get_tls(void)
+{
+    errno = ENOSYS;
+    return 0;
+}
+
+int sys_thread_set_affinity(uint32_t cpu_index)
+{
+    (void)cpu_index;
+    errno = ENOSYS;
+    return -1;
+}
+
+uint32_t sys_thread_cpu(void)
+{
+    errno = ENOSYS;
+    return (uint32_t)-1;
+}
+
+int sys_futex_wait(volatile uint32_t *address, uint32_t expected, uint32_t timeout_ms)
+{
+    (void)address;
+    (void)expected;
+    (void)timeout_ms;
+    return -ENOSYS;
+}
+
+int sys_futex_wake(volatile uint32_t *address, uint32_t max_waiters)
+{
+    (void)address;
+    (void)max_waiters;
+    return -ENOSYS;
+}
+
+int64_t sys_vm_map(uintptr_t hint, size_t length, uint32_t protection, uint32_t flags)
+{
+    (void)hint; (void)length; (void)protection; (void)flags;
+    return -ENOSYS;
+}
+
+int sys_vm_protect(uintptr_t address, size_t length, uint32_t protection)
+{
+    (void)address; (void)length; (void)protection;
+    return -ENOSYS;
+}
+
+int sys_vm_unmap(uintptr_t address, size_t length)
+{
+    (void)address; (void)length;
+    return -ENOSYS;
+}
+
+int sys_vm_advise(uintptr_t address, size_t length, uint32_t advice)
+{
+    (void)address; (void)length; (void)advice;
+    return -ENOSYS;
+}
+
+int sys_thread_detach(uint64_t tid)
+{
+    (void)tid;
+    return -ENOSYS;
+}
+
+ssize_t sys_getrandom(void *buffer, size_t length, uint32_t flags)
+{
+    (void)buffer; (void)length; (void)flags;
+    return -ENOSYS;
+}
+
+int sys_thread_info(uint64_t tid, syscall_thread_info_t *info)
+{
+    (void)tid; (void)info;
+    return -ENOSYS;
+}
+
+int sys_thread_set_name(uint64_t tid, const char *name)
+{
+    (void)tid; (void)name;
+    return -ENOSYS;
+}
+
+int sys_thread_prepare_exit(void)
+{
+    return -ENOSYS;
+}
+
+int32_t sys_getpid(void)
+{
+    return (int32_t)syscall(SYS_getpid);
 }
 
 int64_t sys_thread_create(uintptr_t entry,

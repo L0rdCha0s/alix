@@ -1,0 +1,12 @@
+diff --git a/libcxx/src/include/config_elast.h b/libcxx/src/include/config_elast.h
+--- a/libcxx/src/include/config_elast.h
++++ b/libcxx/src/include/config_elast.h
+@@ -21,6 +21,8 @@
+ // where strerror/strerror_r can't handle out-of-range errno values.
+ #if defined(ELAST)
+ #  define _LIBCPP_ELAST ELAST
++#elif defined(__ALIX__)
++// Alix strerror/strerror_r safely handle arbitrary errno integers.
+ #elif defined(__LLVM_LIBC__)
+ // No _LIBCPP_ELAST needed for LLVM libc
+ #elif _LIBCPP_LIBC_NEWLIB

@@ -1,0 +1,20 @@
+diff --git a/build/moz.configure/toolchain.configure b/build/moz.configure/toolchain.configure
+--- a/build/moz.configure/toolchain.configure
++++ b/build/moz.configure/toolchain.configure
+@@ -1945,6 +1945,16 @@
+             env["LC_ALL"] = "C"
+             retcode, stdout, stderr = get_cmd_output(*cmd, env=env)
+             if retcode == 1 and "Logging ld64 options" in stderr:
++                kind = "ld64"
++
++            elif retcode != 0 and target.kernel == "Darwin":
++                # Recent Apple ld no longer emits LD_PRINT_OPTIONS. Ask the
++                # real linker for its version banner; a missing main is normal
++                # for this identification probe, which has no source input.
++                probe = cmd_base + linker_flag + ["-Wl,-v"] + toolchain_flags
++                _, _, version_stderr = get_cmd_output(*probe, env=env)
++                if "@(#)PROGRAM:ld PROJECT:ld-" not in version_stderr:
++                    return None
+                 kind = "ld64"
+ 
+             elif retcode != 0:

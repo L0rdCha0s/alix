@@ -1,0 +1,6 @@
+{
+  "rust_version": "1.97.1",
+  "rust_commit": "8bab26f4f68e0e26f0bb7960be334d5b520ea452",
+  "source": "matching rust-src component from the installed compiler sysroot",
+  "license": "MIT OR Apache-2.0"
+}

@@ -26,12 +26,12 @@ typedef unsigned char 		byte;
 #define BYTE_DEFINED 1
 #endif
 
+#if defined(ALIXOS)
+/* Keep Quake's original integer-sized ABI independently of C11 bool. */
+typedef int32_t qboolean;
+#else
 #undef true
 #undef false
-
-#if defined(ALIXOS)
-typedef bool qboolean;
-#else
 typedef enum {false, true}	qboolean;
 #endif
 

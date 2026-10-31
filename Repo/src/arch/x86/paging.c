@@ -119,6 +119,8 @@ static spinlock_t g_paging_lock;
 static volatile uint32_t g_paging_lock_owner = UINT32_MAX;
 static volatile void *g_paging_lock_owner_ra[SMP_MAX_CPUS];
 static volatile uint64_t g_paging_lock_owner_tsc[SMP_MAX_CPUS];
+static uint64_t g_tlb_request_generation;
+static uint64_t g_tlb_acknowledged[SMP_MAX_CPUS];
 
 static inline uint64_t read_tsc(void)
 {
@@ -343,12 +345,15 @@ static bool track_extra_page(paging_space_t *space, void *raw, void *aligned)
     {
         return false;
     }
-    if (space->extra_page_count >= PAGING_MAX_EXTRA_PAGES)
+    paging_extra_page_t *page = malloc(sizeof(*page));
+    if (!page)
     {
         return false;
     }
-    space->extra_pages[space->extra_page_count].raw = raw;
-    space->extra_pages[space->extra_page_count].aligned = aligned;
+    page->raw = raw;
+    page->aligned = aligned;
+    page->next = space->extra_pages;
+    space->extra_pages = page;
     space->extra_page_count++;
     return true;
 }
@@ -403,7 +408,48 @@ static inline void invalidate_page(uintptr_t addr)
 
 static inline void flush_local_tlb(void)
 {
-    write_cr3(read_cr3());
+    /* CR3 reload alone preserves global translations when PGE is enabled.
+     * Permission changes to shared kernel mappings must invalidate those too.
+     * CR4.PGE is supported on every CPU we enable it on; unlike INVPCID this
+     * also works with the baseline QEMU CPU. */
+    uint64_t cr4;
+    __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+    if (cr4 & (1ULL << 7))
+    {
+        uint64_t without_pge = cr4 & ~(1ULL << 7);
+        __asm__ volatile ("mov %0, %%cr4; mov %1, %%cr4"
+                          :: "r"(without_pge), "r"(cr4) : "memory");
+    }
+    else
+    {
+        write_cr3(read_cr3());
+    }
+}
+
+static void paging_acknowledge_tlb(uint32_t cpu, uint64_t generation)
+{
+    if (cpu >= SMP_MAX_CPUS)
+    {
+        return;
+    }
+    uint64_t previous = __atomic_load_n(&g_tlb_acknowledged[cpu], __ATOMIC_RELAXED);
+    while (previous < generation &&
+           !__atomic_compare_exchange_n(&g_tlb_acknowledged[cpu], &previous, generation,
+                                         false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+    {
+    }
+}
+
+static inline uint64_t paging_disable_interrupts(void)
+{
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static inline void paging_restore_interrupts(uint64_t flags)
+{
+    __asm__ volatile ("push %0; popfq" :: "r"(flags) : "memory", "cc");
 }
 
 static bool paging_map_user_page_internal(paging_space_t *space,
@@ -1022,11 +1068,7 @@ static bool build_identity_space(paging_space_t *space)
     paging_debug_log("build_identity_space start");
     space->active_cpu_mask = 0;
     space->extra_page_count = 0;
-    for (size_t i = 0; i < PAGING_MAX_EXTRA_PAGES; ++i)
-    {
-        space->extra_pages[i].raw = NULL;
-        space->extra_pages[i].aligned = NULL;
-    }
+    space->extra_pages = NULL;
     page_tables_t tables;
     memset(&tables, 0, sizeof(tables));
     if (!allocate_tables(&tables, space))
@@ -1169,15 +1211,15 @@ void paging_destroy_space(paging_space_t *space)
         space->lock_inited = false;
         return;
     }
-    for (size_t i = 0; i < space->extra_page_count; ++i)
+    paging_extra_page_t *page = space->extra_pages;
+    while (page)
     {
-        if (space->extra_pages[i].raw)
-        {
-            free(space->extra_pages[i].raw);
-            space->extra_pages[i].raw = NULL;
-            space->extra_pages[i].aligned = NULL;
-        }
+        paging_extra_page_t *next = page->next;
+        free(page->raw);
+        free(page);
+        page = next;
     }
+    space->extra_pages = NULL;
     space->extra_page_count = 0;
     free(space->allocation_base);
     space->allocation_base = NULL;
@@ -1330,6 +1372,81 @@ bool paging_unmap_user_page(paging_space_t *space,
     bool ok = paging_unmap_user_page_internal(space, virtual_addr);
     paging_space_unlock(space, used_global, flags);
     return ok;
+}
+
+bool paging_prepare_user_range(paging_space_t *space, uintptr_t address, size_t length)
+{
+    if (!space || !length || ((address | length) & (PAGE_SIZE_BYTES - 1)) ||
+        address > UINTPTR_MAX - length || !paging_check_lock_order("paging_prepare_user_range"))
+    {
+        return false;
+    }
+    bool used_global = false;
+    uint64_t flags = paging_space_lock(space, &used_global);
+    uintptr_t end = address + length;
+    bool okay = true;
+    for (uintptr_t current = address; current < end;)
+    {
+        uint64_t *table = NULL;
+        if (!ensure_page_table(space, current, true, &table))
+        {
+            okay = false;
+            break;
+        }
+        uintptr_t next = align_down(current, PAGE_LARGE_SIZE) + PAGE_LARGE_SIZE;
+        if (next <= current)
+        {
+            okay = false;
+            break;
+        }
+        current = next;
+    }
+    paging_space_unlock(space, used_global, flags);
+    return okay;
+}
+
+bool paging_write_prepared_user_page(paging_space_t *space, uintptr_t address,
+                                     paddr_t physical, bool present, bool writable,
+                                     bool executable)
+{
+    if (!space || !space->tables_base || (address & (PAGE_SIZE_BYTES - 1)) ||
+        (physical & (PAGE_SIZE_BYTES - 1)) ||
+        !paging_check_lock_order("paging_write_prepared_user_page"))
+    {
+        return false;
+    }
+    bool used_global = false;
+    uint64_t flags = paging_space_lock(space, &used_global);
+    uint64_t *table = (uint64_t *)space->tables_base;
+    size_t indexes[3] = { index_pml4(address), index_pdpt(address), index_pd(address) };
+    bool okay = true;
+    for (size_t level = 0; level < 3; ++level)
+    {
+        uint64_t entry = table[indexes[level]];
+        if (!(entry & PAGE_PRESENT) || !(entry & PAGE_USER) || (entry & PAGE_PAGE_SIZE))
+        {
+            okay = false;
+            break;
+        }
+        table = entry_to_table(entry);
+    }
+    if (okay)
+    {
+        if (present)
+        {
+            apply_small_mapping(&table[index_pt(address)], physical, writable, executable, true);
+        }
+        else
+        {
+            table[index_pt(address)] = 0;
+        }
+        if (space->cr3 == read_cr3())
+        {
+            invalidate_page(address);
+        }
+    }
+    paging_space_unlock(space, used_global, flags);
+    return okay;
 }
 
 static bool paging_unmap_user_page_internal(paging_space_t *space,
@@ -1584,10 +1701,12 @@ static bool paging_set_kernel_range_writable_internal(uintptr_t virtual_addr,
                 changed = true;
             }
         }
-        if (space->cr3 == read_cr3())
-        {
-            invalidate_page(start);
-        }
+        /* Kernel mappings are shared by every user CR3, including global TLB
+         * entries. A remote CPU may already have changed the PTE while this
+         * CPU still caches the previous permission. Invalidate locally even
+         * when the bit is already correct; a scheduler must not enter a stack
+         * with stale read-only permission while a remote flush IPI is pending. */
+        invalidate_page(start);
         start += PAGE_SIZE_BYTES;
     }
 
@@ -1635,9 +1754,18 @@ bool paging_set_kernel_range_writable_force(uintptr_t virtual_addr,
 /*
  * IPI handler: remote CPUs flush their local TLB on request.
  */
+void paging_initialize_cpu_tlb(uint32_t cpu_index)
+{
+    /* Capture BEFORE invalidation: a later request cannot be acknowledged by
+     * a flush that preceded its page-table writes. No locks or allocation here. */
+    uint64_t generation = __atomic_load_n(&g_tlb_request_generation, __ATOMIC_ACQUIRE);
+    flush_local_tlb();
+    paging_acknowledge_tlb(cpu_index, generation);
+}
+
 void paging_handle_remote_tlb_flush(void)
 {
-    flush_local_tlb();
+    paging_initialize_cpu_tlb(smp_current_cpu_index());
 }
 
 /*
@@ -1656,18 +1784,25 @@ void paging_flush_global_tlb(void)
  */
 void paging_flush_space_tlb(paging_space_t *space)
 {
-    flush_local_tlb();
-    if (!space)
+    (void)paging_request_tlb_flush(space);
+}
+
+paging_tlb_ticket_t paging_request_tlb_flush(paging_space_t *space)
+{
+    uint64_t flags = paging_disable_interrupts();
+    /* Keep CPU identity stable through the local flush, acknowledgement and
+     * IPI sends. We never wait for another CPU while interrupts are masked. */
+    uint64_t generation = __atomic_add_fetch(&g_tlb_request_generation, 1, __ATOMIC_SEQ_CST);
+    uint32_t mask = 0;
+    if (space)
     {
-        return;
+        mask = space == &g_kernel_space
+                 ? smp_online_cpu_mask()
+                 : __atomic_load_n(&space->active_cpu_mask, __ATOMIC_ACQUIRE) & smp_online_cpu_mask();
     }
-    if (space == &g_kernel_space)
-    {
-        smp_broadcast_tlb_flush();
-        return;
-    }
-    uint32_t mask = __atomic_load_n(&space->active_cpu_mask, __ATOMIC_ACQUIRE);
     uint32_t self = smp_current_cpu_index();
+    flush_local_tlb();
+    paging_acknowledge_tlb(self, generation);
     if (self < SMP_MAX_CPUS)
     {
         mask &= ~(1u << self);
@@ -1676,4 +1811,19 @@ void paging_flush_space_tlb(paging_space_t *space)
     {
         smp_tlb_flush_mask(mask);
     }
+    paging_restore_interrupts(flags);
+    return (paging_tlb_ticket_t){ .generation = generation, .cpu_mask = mask };
+}
+
+bool paging_tlb_flush_complete(paging_tlb_ticket_t ticket)
+{
+    for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; ++cpu)
+    {
+        if ((ticket.cpu_mask & (1u << cpu)) &&
+            __atomic_load_n(&g_tlb_acknowledged[cpu], __ATOMIC_ACQUIRE) < ticket.generation)
+        {
+            return false;
+        }
+    }
+    return true;
 }

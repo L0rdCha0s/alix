@@ -249,6 +249,11 @@ int sys_time_info(syscall_time_info_t *info)
     return (int)syscall1(SYSCALL_TIME_INFO, (long)info);
 }
 
+int sys_timezone_info(syscall_timezone_info_t *info, size_t size)
+{
+    return (int)syscall2(SYSCALL_TIMEZONE_INFO, (long)info, (long)size);
+}
+
 ssize_t sys_font_cache(void *buffer, size_t capacity)
 {
     return (ssize_t)syscall2(SYSCALL_FONT_CACHE, (long)buffer, (long)capacity);
@@ -302,6 +307,91 @@ ssize_t sys_socket_available(int fd)
 uint64_t sys_thread_self(void)
 {
     return (uint64_t)syscall0(SYSCALL_THREAD_SELF);
+}
+
+int sys_thread_set_tls(uintptr_t base)
+{
+    return (int)syscall1(SYSCALL_THREAD_SET_TLS, (long)base);
+}
+
+uint64_t sys_monotonic_millis(void)
+{
+    return (uint64_t)syscall0(SYSCALL_MONOTONIC_MILLIS);
+}
+
+uintptr_t sys_thread_get_tls(void)
+{
+    return (uintptr_t)syscall0(SYSCALL_THREAD_GET_TLS);
+}
+
+int sys_thread_set_affinity(uint32_t cpu_index)
+{
+    return (int)syscall1(SYSCALL_THREAD_SET_AFFINITY, (long)cpu_index);
+}
+
+uint32_t sys_thread_cpu(void)
+{
+    return (uint32_t)syscall0(SYSCALL_THREAD_CPU);
+}
+
+int sys_futex_wait(volatile uint32_t *address, uint32_t expected, uint32_t timeout_ms)
+{
+    return (int)syscall3(SYSCALL_FUTEX_WAIT, (long)address, (long)expected, (long)timeout_ms);
+}
+
+int sys_futex_wake(volatile uint32_t *address, uint32_t max_waiters)
+{
+    return (int)syscall2(SYSCALL_FUTEX_WAKE, (long)address, (long)max_waiters);
+}
+
+int64_t sys_vm_map(uintptr_t hint, size_t length, uint32_t protection, uint32_t flags)
+{
+    return (int64_t)syscall4(SYSCALL_VM_MAP, (long)hint, (long)length, protection, flags);
+}
+
+int sys_vm_protect(uintptr_t address, size_t length, uint32_t protection)
+{
+    return (int)syscall3(SYSCALL_VM_PROTECT, (long)address, (long)length, protection);
+}
+
+int sys_vm_unmap(uintptr_t address, size_t length)
+{
+    return (int)syscall2(SYSCALL_VM_UNMAP, (long)address, (long)length);
+}
+
+int sys_vm_advise(uintptr_t address, size_t length, uint32_t advice)
+{
+    return (int)syscall3(SYSCALL_VM_ADVISE, (long)address, (long)length, advice);
+}
+
+int sys_thread_detach(uint64_t tid)
+{
+    return (int)syscall1(SYSCALL_THREAD_DETACH, (long)tid);
+}
+
+ssize_t sys_getrandom(void *buffer, size_t length, uint32_t flags)
+{
+    return (ssize_t)syscall3(SYSCALL_GETRANDOM, (long)buffer, (long)length, (long)flags);
+}
+
+int sys_thread_info(uint64_t tid, syscall_thread_info_t *info)
+{
+    return (int)syscall2(SYSCALL_THREAD_INFO, (long)tid, (long)info);
+}
+
+int sys_thread_set_name(uint64_t tid, const char *name)
+{
+    return (int)syscall2(SYSCALL_THREAD_SET_NAME, (long)tid, (long)name);
+}
+
+int sys_thread_prepare_exit(void)
+{
+    return (int)syscall0(SYSCALL_THREAD_PREPARE_EXIT);
+}
+
+int32_t sys_getpid(void)
+{
+    return (int32_t)syscall0(SYSCALL_GETPID);
 }
 
 int64_t sys_thread_create(uintptr_t entry,

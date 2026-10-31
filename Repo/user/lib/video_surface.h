@@ -3,6 +3,11 @@
 
 #include "types.h"
 #include "video.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void video_surface_attach(video_color_t *buffer, uint32_t width, uint32_t height, size_t buffer_bytes);
 void video_surface_detach(void);
 bool video_surface_has_dirty(void);
@@ -14,5 +19,9 @@ void video_surface_convert8_to_rgba32(const uint8_t *src,
                                       const video_color_t *palette,
                                       video_color_t *dst,
                                       size_t pixel_count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* USER_VIDEO_SURFACE_H */

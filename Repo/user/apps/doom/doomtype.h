@@ -28,7 +28,9 @@
 #ifndef __BYTEBOOL__
 #define __BYTEBOOL__
 #include "types.h"
-typedef bool boolean;
+/* Doom saves raw structs and uses boolean for integer modes (deathmatch=2).
+ * Preserve its original 32-bit representation when Alix bool is C11 _Bool. */
+typedef int32_t boolean;
 typedef unsigned char byte;
 #endif
 

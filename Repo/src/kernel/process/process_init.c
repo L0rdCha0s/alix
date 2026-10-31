@@ -193,6 +193,7 @@ static void scheduler_main_loop(void)
     scheduler_wait_for_boot_ready();
     while (1)
     {
+        process_reap_retired_memory();
         /* Close the empty-queue-to-HLT lost-wakeup window.  With interrupts
          * masked before the scheduler checks the local queue, an enqueue IPI
          * that races the check remains pending; STI's interrupt shadow makes

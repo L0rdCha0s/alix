@@ -1,0 +1,22 @@
+{
+  "release": "2026f",
+  "release_date": "2026-10-27",
+  "release_index": "https://www.iana.org/time-zones/releases",
+  "license": "Public domain (see upstream LICENSE)",
+  "archives": [
+    {
+      "file": "tzcode2026f.tar.gz",
+      "url": "https://data.iana.org/time-zones/releases/tzcode2026f.tar.gz",
+      "bytes": 329832,
+      "sha256": "5a18da01393679ef2559214dc687563f7f3d05691f6f58b7fbc0166f3e796cd6"
+    },
+    {
+      "file": "tzdata2026f.tar.gz",
+      "url": "https://data.iana.org/time-zones/releases/tzdata2026f.tar.gz",
+      "bytes": 483310,
+      "sha256": "01b4a91cec5167ed48c11e8ab78f2048cead78ce94b0cafcad0ae8c5a3044d3d"
+    }
+  ],
+  "hash_provenance": "Computed from the exact official HTTPS downloads on 2026-10-31; no detached-signature verification is claimed.",
+  "build_profile": {"dataform": "main", "redo": "posix_only", "backward": true, "zic_flags": ["-b", "fat"]}
+}

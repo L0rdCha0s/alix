@@ -19,7 +19,13 @@ typedef struct stat
 } stat_t;
 
 #ifndef KERNEL_BUILD
+#ifdef __cplusplus
+extern "C" {
+#endif
 int fstat(int fd, struct stat *st);
+#ifdef __cplusplus
+}
+#endif
 #endif
 
 #endif

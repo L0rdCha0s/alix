@@ -130,6 +130,16 @@ static process_t *process_create_user_dummy_internal(const char *name,
     bootstrap->rdi = proc->user_argc;
     bootstrap->rsi = proc->user_argv_ptr;
 
+    process_tls_allocation_t tls = {0};
+    if (!process_allocate_user_tls(proc, &tls))
+    {
+        free(bootstrap);
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
     thread_t *thread = thread_create(proc,
                                      name,
                                      user_thread_entry,
@@ -146,6 +156,9 @@ static process_t *process_create_user_dummy_internal(const char *name,
         return NULL;
     }
 
+    thread->fs_base = tls.thread_pointer;
+    thread->user_tls_base = tls.base;
+    thread->user_tls_size = tls.size;
     return process_finalize_new_process(proc, thread, stdout_fd, parent);
 }
 
@@ -217,6 +230,16 @@ static process_t *process_create_user_elf_internal(const char *name,
     bootstrap->rdi = proc->user_argc;
     bootstrap->rsi = proc->user_argv_ptr;
 
+    process_tls_allocation_t tls = {0};
+    if (!process_allocate_user_tls(proc, &tls))
+    {
+        free(bootstrap);
+        process_free_user_regions(proc);
+        paging_destroy_space(&proc->address_space);
+        free(proc);
+        return NULL;
+    }
+
     thread_t *thread = thread_create(proc,
                                      name,
                                      user_thread_entry,
@@ -233,6 +256,9 @@ static process_t *process_create_user_elf_internal(const char *name,
         return NULL;
     }
 
+    thread->fs_base = tls.thread_pointer;
+    thread->user_tls_base = tls.base;
+    thread->user_tls_size = tls.size;
     return process_finalize_new_process(proc, thread, stdout_fd, parent);
 }
 
@@ -362,34 +388,30 @@ void process_yield(void)
 
 void process_sleep_ticks(uint64_t ticks)
 {
-    /* Sleeping changes the current thread to BLOCKED and switches stacks.  A
-     * spinlock owner must remain runnable until it releases every held lock. */
-    if (spinlock_preempt_disabled())
-    {
-        return;
-    }
+    /* A lock owner cannot block, but ordinary sleepers must register under the
+     * same scheduler lock used by termination and remote timer wakeups. */
+    if (spinlock_preempt_disabled()) return;
+    if (ticks == 0) { process_yield(); return; }
 
-    if (ticks == 0)
-    {
-        process_yield();
-        return;
-    }
-
+    uint64_t flags = scheduler_lock_acquire("process_sleep_ticks");
     thread_t *thread = current_thread_local();
     if (!thread || thread->is_idle)
     {
+        scheduler_lock_release(flags);
         process_yield();
         return;
     }
-
-    uint64_t flags = cpu_save_flags();
-    cpu_cli();
-    uint64_t now = timer_ticks();
-    uint64_t wake_tick = now + ticks;
-    if (wake_tick <= now)
+    if (!thread_lifetime_active(thread) || thread->exited || thread->pending_destroy ||
+        thread->state == THREAD_STATE_ZOMBIE ||
+        (thread->process && thread->process->state == PROCESS_STATE_ZOMBIE))
     {
-        wake_tick = now + 1;
+        scheduler_lock_release(flags);
+        scheduler_schedule(false);
+        return;
     }
+
+    uint64_t now = timer_ticks();
+    uint64_t wake_tick = ticks > UINT64_MAX - now ? UINT64_MAX : now + ticks;
     thread->state = THREAD_STATE_BLOCKED;
     thread->sleep_until_tick = wake_tick;
     thread->wake_pending = false;
@@ -399,8 +421,8 @@ void process_sleep_ticks(uint64_t ticks)
                     (unsigned long long)wake_tick,
                     (unsigned long long)now);
     sleep_queue_insert(thread);
+    scheduler_lock_release(flags);
     scheduler_schedule(false);
-    cpu_restore_flags(flags);
 }
 
 void process_sleep_ms(uint32_t ms)
@@ -558,6 +580,7 @@ static void process_mark_terminated(process_t *process, int status)
     spinlock_lock(&process->threads_lock);
     for (thread_t *thread = process->threads; thread; thread = thread->process_next)
     {
+        process_io_cancel_thread_locked(thread);
         if (thread_in_run_queue_load(thread))
         {
             remove_from_run_queue_locked(thread);
@@ -1379,7 +1402,8 @@ static int64_t process_user_sbrk_locked(process_t *process, int64_t increment)
     }
     else if (increment < 0)
     {
-        uint64_t dec = (uint64_t)(-increment);
+        /* Negate unsigned so INT64_MIN is rejected without signed overflow. */
+        uint64_t dec = 0u - (uint64_t)increment;
         if (dec > (current - base))
         {
             serial_printf("[sbrk] negative clamp pid=0x%016llX dec=0x%016llX cur=0x%016llX base=0x%016llX\n",
@@ -1393,7 +1417,10 @@ static int64_t process_user_sbrk_locked(process_t *process, int64_t increment)
         uintptr_t new_commit = align_up_uintptr(new_brk, PAGE_SIZE_BYTES_LOCAL);
         if (new_commit < process->user_heap_committed)
         {
-            process_heap_release_from(process, new_commit);
+            if (!process_heap_release_from(process, new_commit))
+            {
+                return -1;
+            }
             process->user_heap_committed = new_commit;
         }
     }
@@ -1420,6 +1447,78 @@ uint64_t thread_current_tid(void)
     return thread ? thread->tid : 0;
 }
 
+int process_thread_set_tls(uintptr_t base)
+{
+    /* Reject kernel/noncanonical bases before WRMSR, which would otherwise
+     * fault in supervisor mode. Mapping/lifetime remains the user's duty. */
+    if (base != 0 && !user_ptr_range_valid((const void *)base, 1))
+    {
+        return -1;
+    }
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    thread_t *thread = current_thread_local();
+    if (!thread || !thread->is_user || !thread->process || !thread->process->is_user)
+    {
+        cpu_restore_flags(flags);
+        return -1;
+    }
+    /* Save state and update the CPU as one non-preemptible operation. The
+     * scheduler already saves/restores this MSR across switches/migration. */
+    thread->fs_base = (uint64_t)base;
+    wrmsr(MSR_FS_BASE, (uint64_t)base);
+    __asm__ volatile ("" ::: "memory");
+    cpu_restore_flags(flags);
+    return 0;
+}
+
+uintptr_t process_thread_get_tls(void)
+{
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    thread_t *thread = current_thread_local();
+    uintptr_t base = 0;
+    if (thread && thread->is_user && thread->process && thread->process->is_user)
+    {
+        base = (uintptr_t)rdmsr(MSR_FS_BASE);
+    }
+    cpu_restore_flags(flags);
+    return base;
+}
+
+int process_thread_set_current_affinity(uint32_t cpu_index)
+{
+    thread_t *thread = current_thread_local();
+    if (!thread || !thread->is_user || !thread->process || !thread->process->is_user)
+    {
+        return -1;
+    }
+    bool enabled = cpu_index != UINT32_MAX;
+    const smp_cpu_t *cpu = enabled ? smp_cpu_by_index(cpu_index) : NULL;
+    if (enabled && (cpu_index >= SMP_MAX_CPUS || !cpu || !cpu->present ||
+                    !__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE)))
+    {
+        return -1;
+    }
+    thread_set_affinity(thread, enabled, cpu_index);
+    /* Yield outside every lock so the scheduler can transfer stack ownership
+     * to the requested CPU before this syscall returns. */
+    if (enabled)
+    {
+        process_yield();
+    }
+    return 0;
+}
+
+uint32_t process_thread_current_cpu(void)
+{
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    uint32_t cpu = current_cpu_index();
+    cpu_restore_flags(flags);
+    return cpu;
+}
+
 static bool user_thread_has_exited(void *context)
 {
     thread_t *thread = (thread_t *)context;
@@ -1444,52 +1543,34 @@ int64_t process_user_thread_create(const char *name,
     }
 
     size_t stack_bytes = user_stack_size ? user_stack_size : proc->user_stack_size;
+    if (stack_bytes > SIZE_MAX - (PAGE_SIZE_BYTES_LOCAL - 1))
+    {
+        return -1;
+    }
     stack_bytes = align_up_size(stack_bytes, PAGE_SIZE_BYTES_LOCAL);
     if (stack_bytes < PAGE_SIZE_BYTES_LOCAL)
     {
         stack_bytes = PAGE_SIZE_BYTES_LOCAL;
     }
 
-    const uintptr_t guard_bytes = PAGE_SIZE_BYTES_LOCAL;
     uint64_t memory_flags = process_memory_lock(proc);
-    uintptr_t top = proc->user_thread_stack_next;
-    if (top == 0 || top > USER_STUB_CODE_BASE)
-    {
-        top = align_down_uintptr(USER_STUB_CODE_BASE, PAGE_SIZE_BYTES_LOCAL);
-    }
-    if (top <= stack_bytes + guard_bytes)
-    {
-        process_memory_unlock(proc, memory_flags);
-        return -1;
-    }
-
-    uintptr_t base = top - stack_bytes;
-    uintptr_t next_top = base - guard_bytes;
-    if (proc->user_heap_limit != 0 && next_top <= proc->user_heap_limit)
-    {
-        process_memory_unlock(proc, memory_flags);
-        return -1;
-    }
-
+    uintptr_t base = 0;
     void *host_stack = NULL;
-    if (!process_map_user_segment_locked(proc,
-                                         base,
-                                         stack_bytes,
-                                         true,
-                                         false,
-                                         false,
-                                         &host_stack))
+    if (!process_allocate_aux_user_segment_locked(proc, stack_bytes, &base, &host_stack))
     {
         process_memory_unlock(proc, memory_flags);
         return -1;
     }
-    proc->user_thread_stack_next = next_top;
     process_memory_unlock(proc, memory_flags);
-    paging_flush_space_tlb(&proc->address_space);
 
     uintptr_t ret_addr = USER_STUB_CODE_BASE + USER_THREAD_EXIT_STUB_OFFSET;
     uintptr_t initial_rsp = base + stack_bytes - sizeof(uint64_t);
     memcpy((uint8_t *)host_stack + (stack_bytes - sizeof(uint64_t)), &ret_addr, sizeof(ret_addr));
+    if (!process_complete_user_mapping(proc))
+    {
+        (void)process_unmap_user_segment(proc, base, stack_bytes);
+        return -1;
+    }
 
     user_thread_bootstrap_t *bootstrap = (user_thread_bootstrap_t *)malloc(sizeof(*bootstrap));
     if (!bootstrap)
@@ -1501,6 +1582,14 @@ int64_t process_user_thread_create(const char *name,
     bootstrap->stack_top = initial_rsp;
     bootstrap->rdi = (uint64_t)arg;
     bootstrap->rsi = 0;
+
+    process_tls_allocation_t tls = {0};
+    if (!process_allocate_user_tls(proc, &tls))
+    {
+        free(bootstrap);
+        (void)process_unmap_user_segment(proc, base, stack_bytes);
+        return -1;
+    }
 
     if (!name || !name[0])
     {
@@ -1517,11 +1606,18 @@ int64_t process_user_thread_create(const char *name,
     {
         free(bootstrap);
         (void)process_unmap_user_segment(proc, base, stack_bytes);
+        if (tls.size)
+        {
+            (void)process_unmap_user_segment(proc, tls.base, tls.size);
+        }
         return -1;
     }
 
     thread->user_stack_base = base;
     thread->user_stack_size = stack_bytes;
+    thread->user_tls_base = tls.base;
+    thread->user_tls_size = tls.size;
+    thread->fs_base = tls.thread_pointer;
 
     enqueue_thread(thread);
     return (int64_t)thread->tid;
@@ -1585,6 +1681,130 @@ int process_user_thread_join(uint64_t tid, int *status_out)
     return status;
 }
 
+int process_user_thread_detach(uint64_t tid)
+{
+    thread_t *current = current_thread_local();
+    process_t *proc = current ? current->process : NULL;
+    if (!current || !current->is_user || !proc || !proc->is_user || tid == 0)
+    {
+        return -1;
+    }
+    uint64_t flags = scheduler_lock_acquire("thread_detach");
+    spinlock_lock(&proc->threads_lock);
+    thread_t *target = proc->threads;
+    while (target && target->tid != tid)
+    {
+        target = target->process_next;
+    }
+    int result = -1;
+    if (target && target->join_claimed == 0 &&
+        !target->pending_destroy && thread_lifetime_active(target))
+    {
+        target->join_claimed = 1;
+        target->detached = true;
+        if (target->exited || target->state == THREAD_STATE_ZOMBIE)
+        {
+            thread_enqueue_deferred_free(target);
+        }
+        result = 0;
+    }
+    spinlock_unlock(&proc->threads_lock);
+    scheduler_lock_release(flags);
+    return result;
+}
+
+int process_user_thread_info(uint64_t tid, syscall_thread_info_t *info)
+{
+    thread_t *current = current_thread_local();
+    process_t *proc = current ? current->process : NULL;
+    if (!info || !current || !current->is_user || !proc || !proc->is_user)
+    {
+        return -22;
+    }
+    if (tid == 0) tid = current->tid;
+    uint64_t flags = scheduler_lock_acquire("user_thread_info");
+    spinlock_lock(&proc->threads_lock);
+    thread_t *target = proc->threads;
+    while (target && target->tid != tid) target = target->process_next;
+    int result = -3;
+    if (target && !target->pending_destroy && thread_lifetime_active(target))
+    {
+        memset(info, 0, sizeof(*info));
+        bool main_thread = target == proc->main_thread;
+        info->tid = target->tid;
+        info->stack_base = main_thread ? proc->user_stack_top - proc->user_stack_size
+                                       : target->user_stack_base;
+        info->stack_size = main_thread ? proc->user_stack_size : target->user_stack_size;
+        info->guard_size = main_thread ? 0 : PAGE_SIZE_BYTES_LOCAL;
+        info->flags = (main_thread ? SYSCALL_THREAD_INFO_MAIN : 0) |
+                      (target->detached ? SYSCALL_THREAD_INFO_DETACHED : 0);
+        info->state = (uint32_t)target->state;
+        info->cpu_index = target->running_cpu < SMP_MAX_CPUS ? target->running_cpu : target->last_cpu_index;
+        memcpy(info->name, target->name, sizeof(info->name));
+        info->name[sizeof(info->name) - 1] = '\0';
+        result = 0;
+    }
+    spinlock_unlock(&proc->threads_lock);
+    scheduler_lock_release(flags);
+    return result;
+}
+
+int process_user_thread_set_name(uint64_t tid, const char *name)
+{
+    thread_t *current = current_thread_local();
+    process_t *proc = current ? current->process : NULL;
+    if (!name || !current || !current->is_user || !proc || !proc->is_user)
+    {
+        return -22;
+    }
+    size_t length = strlen(name);
+    if (length >= PROCESS_NAME_MAX) return -34;
+    if (tid == 0) tid = current->tid;
+    uint64_t flags = scheduler_lock_acquire("user_thread_set_name");
+    spinlock_lock(&proc->threads_lock);
+    thread_t *target = proc->threads;
+    while (target && target->tid != tid) target = target->process_next;
+    int result = -3;
+    if (target && !target->pending_destroy && !target->exited && thread_lifetime_active(target))
+    {
+        memset(target->name, 0, sizeof(target->name));
+        memcpy(target->name, name, length);
+        result = 0;
+    }
+    spinlock_unlock(&proc->threads_lock);
+    scheduler_lock_release(flags);
+    return result;
+}
+
+int process_user_thread_prepare_exit(void)
+{
+    thread_t *current = current_thread_local();
+    process_t *proc = current ? current->process : NULL;
+    if (!current || !current->is_user || !proc || !proc->is_user) return -22;
+    uint64_t flags = scheduler_lock_acquire("user_thread_prepare_exit");
+    spinlock_lock(&proc->threads_lock);
+    current->user_cleanup_complete = true;
+    bool others = false;
+    for (thread_t *thread = proc->threads; thread; thread = thread->process_next)
+    {
+        if (thread != current && thread->is_user && !thread->exited &&
+            thread->state != THREAD_STATE_ZOMBIE && !thread->user_cleanup_complete)
+        {
+            others = true;
+            break;
+        }
+    }
+    int result = 0;
+    if (!others && proc->user_exit_owner_tid == 0)
+    {
+        proc->user_exit_owner_tid = current->tid;
+        result = 1;
+    }
+    spinlock_unlock(&proc->threads_lock);
+    scheduler_lock_release(flags);
+    return result;
+}
+
 void process_user_thread_exit(int status)
 {
     thread_t *current = current_thread_local();
@@ -1593,17 +1813,39 @@ void process_user_thread_exit(int status)
         fatal("thread_exit with no current thread");
     }
     process_t *proc = current->process;
-    if (proc && current == proc->main_thread)
+    if (!proc || !proc->is_user || !current->is_user)
     {
+        fatal("thread_exit without user process");
+    }
+    uint64_t flags = scheduler_lock_acquire("user_thread_exit");
+    spinlock_lock(&proc->threads_lock);
+    bool last = true;
+    for (thread_t *thread = proc->threads; thread; thread = thread->process_next)
+    {
+        if (thread != current && !thread->exited && thread->state != THREAD_STATE_ZOMBIE)
+        {
+            last = false;
+            break;
+        }
+    }
+    if (last)
+    {
+        spinlock_unlock(&proc->threads_lock);
+        scheduler_lock_release(flags);
         process_exit(status);
     }
-
     current->exit_status = status;
     current->exited = true;
     current->state = THREAD_STATE_ZOMBIE;
     current->preempt_pending = false;
     current->time_slice_remaining = 0;
-    wait_queue_wake_all(&current->join_queue);
+    if (current->detached)
+    {
+        thread_enqueue_deferred_free(current);
+    }
+    spinlock_unlock(&proc->threads_lock);
+    wait_queue_wake_all_locked(&current->join_queue);
+    scheduler_lock_release(flags);
     scheduler_schedule(false);
     fatal("thread_exit returned");
 }
@@ -1885,7 +2127,12 @@ bool process_handle_stack_watch_fault(uintptr_t fault_addr,
 bool process_stack_watch_thread(thread_t *thread, const char *context)
 {
 #if ENABLE_STACK_WRITE_DEBUG
-    return thread_stack_watch_activate(thread, context, 0);
+    /* Arming changes global kernel PTEs. Keep the eligibility check and
+     * publication atomic with scheduler claims and their stack disarm. */
+    uint64_t flags = scheduler_lock_acquire("stack_watch_thread");
+    bool result = thread_stack_watch_activate(thread, context, 0);
+    scheduler_lock_release(flags);
+    return result;
 #else
     (void)thread;
     (void)context;
@@ -1896,11 +2143,18 @@ bool process_stack_watch_thread(thread_t *thread, const char *context)
 bool process_stack_watch_process(process_t *process, const char *context)
 {
 #if ENABLE_STACK_WRITE_DEBUG
-    if (!process || !process->main_thread)
+    if (!process)
     {
         return false;
     }
-    return process_stack_watch_thread(process->main_thread, context);
+    uint64_t flags = scheduler_lock_acquire("stack_watch_process");
+    spinlock_lock(&process->threads_lock);
+    /* Resolve the main-thread pointer while its lifetime is protected.
+     * Do not call the public wrapper and recursively take scheduler_lock. */
+    bool result = thread_stack_watch_activate(process->main_thread, context, 0);
+    spinlock_unlock(&process->threads_lock);
+    scheduler_lock_release(flags);
+    return result;
 #else
     (void)process;
     (void)context;

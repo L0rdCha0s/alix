@@ -20,7 +20,26 @@ User code executes `int 0x80`. The IDT routes vector 0x80 to `syscall_entry`, wh
 Pointer safety:
 
 - Most syscalls validate user pointers with `user_ptr_range_valid` and move data using `user_copy_*` helpers (`src/kernel/user_copy.c`).
-- These helpers validate the address range against `g_mem_layout.user_pointer_base/limit` and canonicality, then use `memcpy`.
+- `user_ptr_range_valid` checks address shape only; it never authorizes a direct
+  dereference. The copy helpers resolve owned physical backing and permissions
+  under the current process's `memory_lock`, then copy through the kernel
+  physmap. Each critical section is bounded to one 4 KiB page, and no backing
+  pointer survives unlocking. Concurrent unmap/protection changes cause a false
+  result on the next inaccessible page instead of a kernel page fault. A failed
+  multi-page copy may already have copied a prefix.
+- String copies fetch bytes once and stop at NUL without requiring the following
+  page to be mapped. Write copies reject read-only mappings as well as holes and
+  `PROT_NONE` ranges. Copying requires a current user process.
+- Shell polling uses a call-owned kernel buffer before copyout, and the process,
+  network and CPU snapshot syscalls use private heap buffers for each call so
+  concurrent callers cannot overwrite or reallocate each other's snapshots.
+  ATK event-poll paths report an inaccessible output buffer even when no event
+  is available.
+
+`make user-copy-contract-test` exercises page boundaries, permission checks,
+between-page revocation, concurrent snapshot interleavings and copyout errors.
+`user_copy_test.elf` adds native protected/unmapped syscall access and a two-CPU
+protection/copy race to the QEMU validation suite.
 
 ## File Descriptors (`src/kernel/fd.c`)
 
@@ -71,4 +90,77 @@ The syscall surface also includes:
 - Shell service session control (`SYSCALL_SHELL_*`)
 - UI syscalls for remote ATK windows (`SYSCALL_UI_*`)
 - User thread lifecycle (`SYSCALL_THREAD_*`)
+
+### Timezone configuration snapshot
+
+`SYSCALL_TIMEZONE_INFO` (58) accepts an output pointer and capacity. Version 1
+writes the 328-byte `syscall_timezone_info_t` without changing the older
+`SYSCALL_TIME_INFO` ABI. It returns a configuration generation and fixed,
+rule-based or IANA kind; offsets are seconds east of UTC. Monthly rules include
+month/week/weekday, transition seconds and an explicit wall-clock basis. Zone
+identifier and display name are separate bounded strings. A display name is
+not an abbreviation table and the IANA kind does not supply TZif transitions.
+
+Publication and snapshot copying share the timezone lock, so fields and
+generation come from one configuration. The syscall builds its wire structure
+in private heap storage, defers preemption while owning it, and uses safe
+copyout before freeing it. IRQ delivery remains enabled. Short capacity returns
+`-EINVAL`, an inaccessible destination returns `-EFAULT`, and allocation failure
+returns `-ENOMEM`. `tests/timezone_snapshot_test.py` covers concurrent publication,
+wire layout, initialization and failure cleanup under sanitizers. This snapshot
+supplies configured rules or a data identifier; historical timezone conversion
+still needs the user library's timezone implementation and its data files.
+
+## Thread-local storage and blocking waits
+
+The following native interfaces support future hosted runtimes; they do not
+claim Linux/POSIX syscall compatibility.
+
+| ID | Interface | Contract |
+| --- | --- | --- |
+| 41 | `sys_thread_set_tls(base)` | Set this user thread's x86-64 FS base; zero clears it. Reject noncanonical/kernel/out-of-window addresses. Returns 0 or -1. |
+| 42 | `sys_thread_get_tls()` | Return the current user thread's FS base. |
+| 43 | `sys_futex_wait(address, expected, timeout_ms)` | Wait on a process-private aligned 32-bit word if its current value matches `expected`. |
+| 44 | `sys_futex_wake(address, max_waiters)` | Notify at most `max_waiters` matching waiters in this process; return the count. |
+| 45 | `sys_monotonic_millis()` | Milliseconds since timer initialization, independent of wall-clock/NTP adjustments. |
+| 46 | `sys_thread_set_affinity(cpu_index)` | Pin the current user thread to an online CPU; `UINT32_MAX` clears explicit affinity. Returns 0 or -1. |
+| 47 | `sys_thread_cpu()` | Snapshot the current CPU index. |
+
+FS-base updates disable local interrupts while changing the saved thread state
+and hardware MSR. Existing scheduler save/restore preserves it across context
+switches. New threads start with a zero base. The user owns the allocation and
+must clear/replace the base before freeing it; setting the base does not check
+that it is mapped or initialize an ELF `PT_TLS` image. C/C++ `thread_local`,
+thread-local errno, TLS destructors and a hosted runtime TCB remain separate work.
+
+Setting affinity uses the existing scheduler's ownership-transfer path and
+yields outside locks before returning. It does not alter the process defaults
+or other threads' affinity. The TLS test migrates each of eight workers across
+all eight CPUs; the synchronization test pins four workers to distinct CPUs.
+
+Futex wait returns `SYSCALL_FUTEX_OK` (0), `AGAIN` (-11) for a value mismatch,
+`FAULT` (-14) for an unmapped word, `INVALID` (-22) for an invalid/misaligned
+address, or `TIMED_OUT` (-110). Timeouts are relative milliseconds: zero checks
+without blocking, and `SYSCALL_FUTEX_WAIT_FOREVER` waits without a deadline.
+Wake validates the address form and uses it as a key without dereferencing it.
+
+Expected-value comparison and waiter registration serialize with wake under
+the scheduler lock. The memory helper reads owned physical backing while
+holding the process memory lock, avoiding an unchecked kernel dereference of
+the user pointer. Once registered, notification predicates touch only state
+embedded in the heap-owned kernel thread. Wake-before-sleep is retained; process
+termination uses the existing wait/sleep queue cleanup.
+
+User libc now provides `alix_cond_init`, `alix_cond_wait`,
+`alix_cond_timedwait`, `alix_cond_signal` and `alix_cond_broadcast`. A valid wait
+releases and then reacquires the caller's mutex, including on timeout/error.
+The application must check its predicate in a loop. Shared mutexes, conditions
+and thread arguments must be heap-owned or static, never on another thread's
+stack. Do not reinitialize or free synchronization objects while in use.
+Condition APIs return status codes directly rather than using the currently
+global errno. `alix_mutex_t` retains its single-word layout; contention blocks
+through the futex interface instead of continuously spinning.
+
+Validation: `make futex-contract-test`, `make thread-platform-test`, and
+`make thread-platform-qemu-test` (isolated native Alix guests).
 

@@ -3,6 +3,10 @@
 
 #include "types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void serial_init(void);
 void serial_printf(const char *format, ...);
 void serial_output_bytes(const char *data, size_t length);
@@ -11,5 +15,9 @@ char serial_read_char(void);
 bool serial_has_char(void);
 bool serial_is_ready(void);
 void serial_start_async_worker(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

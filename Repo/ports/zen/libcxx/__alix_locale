@@ -1,0 +1,190 @@
+// Native Alix locale adapter for the installed C/POSIX locale.
+// Other locale names are rejected by Alix newlocale; ICU supplies its own
+// internationalization data independently of the C++ stream locale facets.
+#ifndef ALIX_LIBCXX_LOCALE_ADAPTER
+#define ALIX_LIBCXX_LOCALE_ADAPTER
+
+#include <__config>
+#include <__utility/forward.h>
+#include <clocale>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#if _LIBCPP_HAS_WIDE_CHARACTERS
+#include <cwchar>
+#include <cwctype>
+#endif
+
+#define _LIBCPP_COLLATE_MASK LC_COLLATE_MASK
+#define _LIBCPP_CTYPE_MASK LC_CTYPE_MASK
+#define _LIBCPP_MONETARY_MASK LC_MONETARY_MASK
+#define _LIBCPP_NUMERIC_MASK LC_NUMERIC_MASK
+#define _LIBCPP_TIME_MASK LC_TIME_MASK
+#define _LIBCPP_MESSAGES_MASK LC_MESSAGES_MASK
+#define _LIBCPP_ALL_MASK LC_ALL_MASK
+#define _LIBCPP_LC_ALL LC_ALL
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+namespace __locale {
+
+using __locale_t _LIBCPP_NODEBUG = ::locale_t;
+
+struct __locale_guard {
+  _LIBCPP_HIDE_FROM_ABI explicit __locale_guard(__locale_t locale) : previous_(::uselocale(locale)) {}
+  _LIBCPP_HIDE_FROM_ABI ~__locale_guard() {
+    if (previous_)
+      ::uselocale(previous_);
+  }
+  __locale_t previous_;
+  __locale_guard(const __locale_guard&) = delete;
+  __locale_guard& operator=(const __locale_guard&) = delete;
+};
+
+#if defined(_LIBCPP_BUILDING_LIBRARY)
+using __lconv_t _LIBCPP_NODEBUG = std::lconv;
+
+inline _LIBCPP_HIDE_FROM_ABI __locale_t __newlocale(int mask, const char* name, __locale_t base) {
+  return ::newlocale(mask, name, base);
+}
+inline _LIBCPP_HIDE_FROM_ABI void __freelocale(__locale_t locale) { ::freelocale(locale); }
+inline _LIBCPP_HIDE_FROM_ABI char* __setlocale(int category, const char* name) {
+  return ::setlocale(category, name);
+}
+inline _LIBCPP_HIDE_FROM_ABI __lconv_t* __localeconv(__locale_t& locale) {
+  __locale_guard selected(locale);
+  return std::localeconv();
+}
+inline _LIBCPP_HIDE_FROM_ABI decltype(MB_CUR_MAX) __mb_len_max(__locale_t locale) {
+  __locale_guard selected(locale);
+  return MB_CUR_MAX;
+}
+inline _LIBCPP_HIDE_FROM_ABI int __toupper(int value, __locale_t) { return std::toupper(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __tolower(int value, __locale_t) { return std::tolower(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __strcoll(const char* first, const char* second, __locale_t) {
+  return std::strcoll(first, second);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __strxfrm(char* output, const char* input, size_t capacity, __locale_t) {
+  return std::strxfrm(output, input, capacity);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __strftime(char* output, size_t capacity, const char* format,
+                                             const tm* value, __locale_t) {
+  return std::strftime(output, capacity, format, value);
+}
+#if _LIBCPP_HAS_WIDE_CHARACTERS
+inline _LIBCPP_HIDE_FROM_ABI int __iswctype(wint_t value, unsigned long mask, __locale_t) {
+  // These are libc++'s _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE bits, not Alix's
+  // opaque wctype_t descriptors. The native acceptance probe asserts the
+  // actual ctype_base constants before testing every mask combination.
+  return ((mask & (1UL << 0)) && std::iswspace(value)) ||
+         ((mask & (1UL << 1)) && std::iswprint(value)) ||
+         ((mask & (1UL << 2)) && std::iswcntrl(value)) ||
+         ((mask & (1UL << 3)) && std::iswupper(value)) ||
+         ((mask & (1UL << 4)) && std::iswlower(value)) ||
+         ((mask & (1UL << 5)) && std::iswalpha(value)) ||
+         ((mask & (1UL << 6)) && std::iswdigit(value)) ||
+         ((mask & (1UL << 7)) && std::iswpunct(value)) ||
+         ((mask & (1UL << 8)) && std::iswxdigit(value)) ||
+         ((mask & (1UL << 9)) && std::iswblank(value));
+}
+inline _LIBCPP_HIDE_FROM_ABI int __iswspace(wint_t value, __locale_t) { return std::iswspace(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswprint(wint_t value, __locale_t) { return std::iswprint(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswcntrl(wint_t value, __locale_t) { return std::iswcntrl(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswupper(wint_t value, __locale_t) { return std::iswupper(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswlower(wint_t value, __locale_t) { return std::iswlower(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswalpha(wint_t value, __locale_t) { return std::iswalpha(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswblank(wint_t value, __locale_t) { return std::iswblank(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswdigit(wint_t value, __locale_t) { return std::iswdigit(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswpunct(wint_t value, __locale_t) { return std::iswpunct(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __iswxdigit(wint_t value, __locale_t) { return std::iswxdigit(value); }
+inline _LIBCPP_HIDE_FROM_ABI wint_t __towupper(wint_t value, __locale_t) { return std::towupper(value); }
+inline _LIBCPP_HIDE_FROM_ABI wint_t __towlower(wint_t value, __locale_t) { return std::towlower(value); }
+inline _LIBCPP_HIDE_FROM_ABI int __wcscoll(const wchar_t* first, const wchar_t* second, __locale_t) {
+  return std::wcscoll(first, second);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __wcsxfrm(wchar_t* output, const wchar_t* input,
+                                            size_t capacity, __locale_t) {
+  return std::wcsxfrm(output, input, capacity);
+}
+inline _LIBCPP_HIDE_FROM_ABI wint_t __btowc(int value, __locale_t locale) {
+  __locale_guard selected(locale);
+  return std::btowc(value);
+}
+inline _LIBCPP_HIDE_FROM_ABI int __wctob(wint_t value, __locale_t locale) {
+  __locale_guard selected(locale);
+  return std::wctob(value);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __wcsnrtombs(char* output, const wchar_t** input,
+    size_t characters, size_t capacity, mbstate_t* state, __locale_t locale) {
+  __locale_guard selected(locale);
+  return ::wcsnrtombs(output, input, characters, capacity, state);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __wcrtomb(char* output, wchar_t value,
+    mbstate_t* state, __locale_t locale) {
+  __locale_guard selected(locale);
+  return std::wcrtomb(output, value, state);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __mbsnrtowcs(wchar_t* output, const char** input,
+    size_t bytes, size_t capacity, mbstate_t* state, __locale_t locale) {
+  __locale_guard selected(locale);
+  return ::mbsnrtowcs(output, input, bytes, capacity, state);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __mbrtowc(wchar_t* output, const char* input,
+    size_t length, mbstate_t* state, __locale_t locale) {
+  __locale_guard selected(locale);
+  return std::mbrtowc(output, input, length, state);
+}
+inline _LIBCPP_HIDE_FROM_ABI int __mbtowc(wchar_t* output, const char* input,
+    size_t length, __locale_t locale) {
+  __locale_guard selected(locale);
+  return std::mbtowc(output, input, length);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __mbrlen(const char* input, size_t length,
+    mbstate_t* state, __locale_t locale) {
+  __locale_guard selected(locale);
+  return std::mbrlen(input, length, state);
+}
+inline _LIBCPP_HIDE_FROM_ABI size_t __mbsrtowcs(wchar_t* output, const char** input,
+    size_t capacity, mbstate_t* state, __locale_t locale) {
+  __locale_guard selected(locale);
+  return std::mbsrtowcs(output, input, capacity, state);
+}
+#endif
+#endif
+
+_LIBCPP_DIAGNOSTIC_PUSH
+_LIBCPP_CLANG_DIAGNOSTIC_IGNORED("-Wgcc-compat")
+_LIBCPP_GCC_DIAGNOSTIC_IGNORED("-Wformat-nonliteral")
+#ifdef _LIBCPP_COMPILER_CLANG_BASED
+#define ALIX_LIBCXX_VARIADIC_FORMAT(...) _LIBCPP_ATTRIBUTE_FORMAT(__VA_ARGS__)
+#else
+#define ALIX_LIBCXX_VARIADIC_FORMAT(...)
+#endif
+
+template <class... Args>
+_LIBCPP_HIDE_FROM_ABI ALIX_LIBCXX_VARIADIC_FORMAT(__printf__, 4, 5)
+int __snprintf(char* output, size_t capacity, __locale_t locale,
+                                   const char* format, Args&&... arguments) {
+  __locale_guard selected(locale);
+  return std::snprintf(output, capacity, format, std::forward<Args>(arguments)...);
+}
+
+template <class... Args>
+_LIBCPP_HIDE_FROM_ABI ALIX_LIBCXX_VARIADIC_FORMAT(__printf__, 3, 4)
+int __asprintf(char** output, __locale_t locale,
+                                   const char* format, Args&&... arguments) {
+  __locale_guard selected(locale);
+  return ::asprintf(output, format, std::forward<Args>(arguments)...);
+}
+_LIBCPP_DIAGNOSTIC_POP
+#undef ALIX_LIBCXX_VARIADIC_FORMAT
+
+} // namespace __locale
+_LIBCPP_END_NAMESPACE_STD
+
+// Every accepted native locale is C/POSIX, so the upstream numeric adapter
+// uses the real locale-independent narrow floating parsers.
+#include <__locale_dir/support/no_locale/strtonum.h>
+
+#endif

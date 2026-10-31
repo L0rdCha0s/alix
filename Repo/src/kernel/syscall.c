@@ -15,6 +15,9 @@
 #include "user_copy.h"
 #include "timekeeping.h"
 #include "font_cache.h"
+#include "timer.h"
+#include "entropy.h"
+#include "spinlock.h"
 
 /*
  * src/kernel/syscall.c
@@ -33,19 +36,6 @@
  *
  * See docs/kernel/syscalls.md.
  */
-
-static process_info_t *g_proc_snapshot_buf = NULL;
-static size_t g_proc_snapshot_cap = 0;
-static syscall_process_info_t *g_proc_snapshot_user_buf = NULL;
-static size_t g_proc_snapshot_user_cap = 0;
-static process_cpu_info_t *g_cpu_snapshot_buf = NULL;
-static size_t g_cpu_snapshot_cap = 0;
-static syscall_cpu_stats_t *g_cpu_snapshot_user_buf = NULL;
-static size_t g_cpu_snapshot_user_cap = 0;
-static net_interface_stats_t *g_net_snapshot_buf = NULL;
-static size_t g_net_snapshot_cap = 0;
-static syscall_net_stats_t *g_net_snapshot_user_buf = NULL;
-static size_t g_net_snapshot_user_cap = 0;
 
 typedef struct
 {
@@ -149,6 +139,53 @@ static bool syscall_dir_collect(const vfs_node_t *child, void *context)
     return ctx->count < ctx->capacity;
 }
 
+static int64_t syscall_do_timezone_info(void *user, size_t size)
+{
+    _Static_assert(sizeof(syscall_timezone_info_t) == 328, "timezone syscall ABI");
+    if (size < sizeof(syscall_timezone_info_t)) return -22;
+    if (!user || !user_ptr_range_valid(user, sizeof(syscall_timezone_info_t))) return -14;
+    /* A bounded, nonblocking snapshot owns no resources on an abandoned
+     * thread stack. IRQ delivery stays enabled while preemption is deferred. */
+    spinlock_preempt_disable();
+    struct timezone_snapshot
+    {
+        timekeeping_timezone_spec_t spec;
+        syscall_timezone_info_t wire;
+    } *snapshot = calloc(1, sizeof(*snapshot));
+    int64_t result = -12;
+    if (snapshot)
+    {
+        timekeeping_timezone_spec_t *spec = &snapshot->spec;
+        syscall_timezone_info_t *wire = &snapshot->wire;
+        if (!timekeeping_timezone_snapshot(spec, &wire->generation)) result = -5;
+        else
+        {
+            wire->version = SYSCALL_TIMEZONE_VERSION;
+            wire->size = sizeof(*wire);
+            wire->kind = spec->use_zone ? SYSCALL_TIMEZONE_IANA :
+                         spec->dst_enabled ? SYSCALL_TIMEZONE_RULE : SYSCALL_TIMEZONE_FIXED;
+            wire->standard_offset_seconds = spec->standard_offset_minutes * 60;
+            wire->dst_offset_seconds = spec->dst_offset_minutes * 60;
+            wire->start.month = spec->dst_start.month;
+            wire->start.week = spec->dst_start.week;
+            wire->start.weekday = spec->dst_start.weekday;
+            wire->start.time_seconds = spec->dst_start.minute * 60;
+            wire->start.clock_basis = SYSCALL_TIMEZONE_CLOCK_WALL;
+            wire->end.month = spec->dst_end.month;
+            wire->end.week = spec->dst_end.week;
+            wire->end.weekday = spec->dst_end.weekday;
+            wire->end.time_seconds = spec->dst_end.minute * 60;
+            wire->end.clock_basis = SYSCALL_TIMEZONE_CLOCK_WALL;
+            syscall_copy_string(wire->zone_id, sizeof(wire->zone_id), spec->zone_name);
+            syscall_copy_string(wire->display_name, sizeof(wire->display_name), spec->name);
+            result = user_copy_to_user(user, wire, sizeof(*wire)) ? 0 : -14;
+        }
+        free(snapshot);
+    }
+    spinlock_preempt_enable();
+    return result;
+}
+
 static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t capacity)
 {
     if (!buffer || capacity == 0)
@@ -167,34 +204,19 @@ static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t c
         return -1;
     }
 
-    if (capacity > g_proc_snapshot_cap)
+    size_t snap_bytes = 0;
+    if (__builtin_mul_overflow(capacity, sizeof(process_info_t), &snap_bytes))
     {
-        size_t snap_bytes = sizeof(process_info_t) * capacity;
-        process_info_t *new_buf = (process_info_t *)realloc(g_proc_snapshot_buf, snap_bytes);
-        if (!new_buf)
-        {
-            return -1;
-        }
-        g_proc_snapshot_buf = new_buf;
-        g_proc_snapshot_cap = capacity;
+        return -1;
     }
-
-    if (capacity > g_proc_snapshot_user_cap)
-    {
-        syscall_process_info_t *new_out = (syscall_process_info_t *)realloc(g_proc_snapshot_user_buf,
-                                                                            bytes);
-        if (!new_out)
-        {
-            return -1;
-        }
-        g_proc_snapshot_user_buf = new_out;
-        g_proc_snapshot_user_cap = capacity;
-    }
-
-    process_info_t *tmp = g_proc_snapshot_buf;
-    syscall_process_info_t *out_buf = g_proc_snapshot_user_buf;
+    /* Concurrent callers must never realloc or overwrite one another's
+     * snapshots. Zero the wire buffer, including structure padding. */
+    process_info_t *tmp = (process_info_t *)malloc(snap_bytes);
+    syscall_process_info_t *out_buf = (syscall_process_info_t *)calloc(1, bytes);
     if (!tmp || !out_buf)
     {
+        free(tmp);
+        free(out_buf);
         return -1;
     }
 
@@ -218,16 +240,10 @@ static int64_t syscall_do_proc_snapshot(syscall_process_info_t *buffer, size_t c
         syscall_copy_string(out->thread_name, SYSCALL_PROCESS_NAME_MAX, info->thread_name);
     }
 
-    if (count > 0)
-    {
-        size_t copy_bytes = sizeof(syscall_process_info_t) * count;
-        if (!user_copy_to_user(buffer, out_buf, copy_bytes))
-        {
-            return -1;
-        }
-    }
-
-    return (int64_t)count;
+    bool copied = count == 0 || user_copy_to_user(buffer, out_buf, sizeof(*out_buf) * count);
+    free(out_buf);
+    free(tmp);
+    return copied ? (int64_t)count : -1;
 }
 
 static int64_t syscall_do_net_snapshot(syscall_net_stats_t *buffer, size_t capacity)
@@ -248,35 +264,17 @@ static int64_t syscall_do_net_snapshot(syscall_net_stats_t *buffer, size_t capac
         return -1;
     }
 
-    if (capacity > g_net_snapshot_cap)
+    size_t snap_bytes = 0;
+    if (__builtin_mul_overflow(capacity, sizeof(net_interface_stats_t), &snap_bytes))
     {
-        size_t snap_bytes = sizeof(net_interface_stats_t) * capacity;
-        net_interface_stats_t *new_buf = (net_interface_stats_t *)realloc(g_net_snapshot_buf,
-                                                                          snap_bytes);
-        if (!new_buf)
-        {
-            return -1;
-        }
-        g_net_snapshot_buf = new_buf;
-        g_net_snapshot_cap = capacity;
+        return -1;
     }
-
-    if (capacity > g_net_snapshot_user_cap)
-    {
-        syscall_net_stats_t *new_out = (syscall_net_stats_t *)realloc(g_net_snapshot_user_buf,
-                                                                      bytes);
-        if (!new_out)
-        {
-            return -1;
-        }
-        g_net_snapshot_user_buf = new_out;
-        g_net_snapshot_user_cap = capacity;
-    }
-
-    net_interface_stats_t *tmp = g_net_snapshot_buf;
-    syscall_net_stats_t *out_buf = g_net_snapshot_user_buf;
+    net_interface_stats_t *tmp = (net_interface_stats_t *)malloc(snap_bytes);
+    syscall_net_stats_t *out_buf = (syscall_net_stats_t *)calloc(1, bytes);
     if (!tmp || !out_buf)
     {
+        free(tmp);
+        free(out_buf);
         return -1;
     }
 
@@ -301,16 +299,10 @@ static int64_t syscall_do_net_snapshot(syscall_net_stats_t *buffer, size_t capac
         out->tx_errors = stats->tx_errors;
     }
 
-    if (count > 0)
-    {
-        size_t copy_bytes = sizeof(syscall_net_stats_t) * count;
-        if (!user_copy_to_user(buffer, out_buf, copy_bytes))
-        {
-            return -1;
-        }
-    }
-
-    return (int64_t)count;
+    bool copied = count == 0 || user_copy_to_user(buffer, out_buf, sizeof(*out_buf) * count);
+    free(out_buf);
+    free(tmp);
+    return copied ? (int64_t)count : -1;
 }
 
 static int64_t syscall_do_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capacity)
@@ -337,35 +329,12 @@ static int64_t syscall_do_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capac
         capped_capacity = SYSCALL_CPU_MAX;
     }
 
-    if (capped_capacity > g_cpu_snapshot_cap)
-    {
-        size_t snap_bytes = sizeof(process_cpu_info_t) * capped_capacity;
-        process_cpu_info_t *new_buf = (process_cpu_info_t *)realloc(g_cpu_snapshot_buf,
-                                                                    snap_bytes);
-        if (!new_buf)
-        {
-            return -1;
-        }
-        g_cpu_snapshot_buf = new_buf;
-        g_cpu_snapshot_cap = capped_capacity;
-    }
-
-    if (capacity > g_cpu_snapshot_user_cap)
-    {
-        syscall_cpu_stats_t *new_out = (syscall_cpu_stats_t *)realloc(g_cpu_snapshot_user_buf,
-                                                                      bytes);
-        if (!new_out)
-        {
-            return -1;
-        }
-        g_cpu_snapshot_user_buf = new_out;
-        g_cpu_snapshot_user_cap = capacity;
-    }
-
-    process_cpu_info_t *tmp = g_cpu_snapshot_buf;
-    syscall_cpu_stats_t *out_buf = g_cpu_snapshot_user_buf;
+    process_cpu_info_t *tmp = (process_cpu_info_t *)malloc(sizeof(*tmp) * capped_capacity);
+    syscall_cpu_stats_t *out_buf = (syscall_cpu_stats_t *)calloc(capped_capacity, sizeof(*out_buf));
     if (!tmp || !out_buf)
     {
+        free(tmp);
+        free(out_buf);
         return -1;
     }
 
@@ -395,16 +364,10 @@ static int64_t syscall_do_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capac
                             info->current_thread_name);
     }
 
-    if (count > 0)
-    {
-        size_t copy_bytes = sizeof(syscall_cpu_stats_t) * count;
-        if (!user_copy_to_user(buffer, out_buf, copy_bytes))
-        {
-            return -1;
-        }
-    }
-
-    return (int64_t)count;
+    bool copied = count == 0 || user_copy_to_user(buffer, out_buf, sizeof(*out_buf) * count);
+    free(out_buf);
+    free(tmp);
+    return copied ? (int64_t)count : -1;
 }
 
 /*
@@ -843,6 +806,49 @@ static int64_t syscall_do_fstat(uint64_t fd, syscall_stat_t *out)
 static int64_t syscall_do_close(uint64_t fd)
 {
     return (int64_t)fd_close((int)fd);
+}
+
+static int64_t syscall_do_shell_poll(uint32_t handle, char *output_user, size_t output_capacity,
+                                     int *status_user, int *running_user)
+{
+    if (output_user && output_capacity > 0 && !user_ptr_range_valid(output_user, output_capacity))
+    {
+        return -1;
+    }
+    char *output = NULL;
+    if (output_user && output_capacity > 0)
+    {
+        output = (char *)malloc(output_capacity);
+        if (!output)
+        {
+            return -1;
+        }
+    }
+    int status = 0;
+    int running = 0;
+    /* The service writes only to call-owned kernel memory. User pages can be
+     * unmapped/protected while it runs, so they are checked again on copyout. */
+    ssize_t result = shell_service_poll(handle, output, output_capacity,
+                                        status_user ? &status : NULL,
+                                        running_user ? &running : NULL);
+    if (result >= 0 && output)
+    {
+        if ((size_t)result >= output_capacity ||
+            !user_copy_to_user(output_user, output, (size_t)result + 1))
+        {
+            result = -1;
+        }
+    }
+    if (result >= 0 && status_user && !user_copy_to_user(status_user, &status, sizeof(status)))
+    {
+        result = -1;
+    }
+    if (result >= 0 && running_user && !user_copy_to_user(running_user, &running, sizeof(running)))
+    {
+        result = -1;
+    }
+    free(output);
+    return (int64_t)result;
 }
 
 static int64_t syscall_do_list_dir(const char *path, syscall_dirent_t *out_entries, size_t capacity)
@@ -1304,46 +1310,10 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         }
         case SYSCALL_SHELL_POLL:
-        {
-            char *output_user = (char *)frame->rsi;
-            size_t output_capacity = (size_t)frame->rdx;
-            int *status_user = (int *)frame->r10;
-            int *running_user = (int *)frame->r8;
-            if (output_user && output_capacity > 0 &&
-                !user_ptr_range_valid(output_user, output_capacity))
-            {
-                result = -1;
-                break;
-            }
-
-            int status_tmp = 0;
-            int running_tmp = 0;
-            ssize_t poll_res = shell_service_poll((uint32_t)frame->rdi,
-                                                  output_user,
-                                                  output_capacity,
-                                                  status_user ? &status_tmp : NULL,
-                                                  running_user ? &running_tmp : NULL);
-            if (poll_res >= 0)
-            {
-                if (poll_res >= 0 && status_user)
-                {
-                    if (!user_copy_to_user(status_user, &status_tmp, sizeof(status_tmp)))
-                    {
-                        poll_res = -1;
-                    }
-                }
-                if (poll_res >= 0 && running_user)
-                {
-                    if (!user_copy_to_user(running_user, &running_tmp, sizeof(running_tmp)))
-                    {
-                        poll_res = -1;
-                    }
-                }
-            }
-
-            result = (poll_res >= 0) ? (int64_t)poll_res : -1;
+            result = syscall_do_shell_poll((uint32_t)frame->rdi, (char *)frame->rsi,
+                                            (size_t)frame->rdx, (int *)frame->r10,
+                                            (int *)frame->r8);
             break;
-        }
         case SYSCALL_SHELL_CWD:
         {
             char *output_user = (char *)frame->rsi;
@@ -1447,6 +1417,12 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_TIME_MILLIS:
             result = (int64_t)timekeeping_now_millis();
             break;
+        case SYSCALL_TIMEZONE_INFO:
+            result = syscall_do_timezone_info((void *)frame->rdi, (size_t)frame->rsi);
+            break;
+        case SYSCALL_MONOTONIC_MILLIS:
+            result = (int64_t)timer_monotonic_millis();
+            break;
         case SYSCALL_GETUID:
             result = (int64_t)process_get_uid(process_current());
             break;
@@ -1463,6 +1439,93 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             break;
         case SYSCALL_THREAD_SELF:
             result = (int64_t)thread_current_tid();
+            break;
+        case SYSCALL_THREAD_SET_TLS:
+            result = (int64_t)process_thread_set_tls((uintptr_t)frame->rdi);
+            break;
+        case SYSCALL_THREAD_GET_TLS:
+            result = (int64_t)process_thread_get_tls();
+            break;
+        case SYSCALL_THREAD_SET_AFFINITY:
+            result = process_thread_set_current_affinity((uint32_t)frame->rdi);
+            break;
+        case SYSCALL_THREAD_CPU:
+            result = (int64_t)process_thread_current_cpu();
+            break;
+        case SYSCALL_VM_MAP:
+            result = process_vm_map(process_current(), (uintptr_t)frame->rdi,
+                                    (size_t)frame->rsi, (uint32_t)frame->rdx, (uint32_t)frame->r10);
+            break;
+        case SYSCALL_VM_PROTECT:
+            result = process_vm_protect(process_current(), (uintptr_t)frame->rdi,
+                                        (size_t)frame->rsi, (uint32_t)frame->rdx);
+            break;
+        case SYSCALL_VM_UNMAP:
+            result = process_vm_unmap(process_current(), (uintptr_t)frame->rdi, (size_t)frame->rsi);
+            break;
+        case SYSCALL_VM_ADVISE:
+            result = process_vm_advise(process_current(), (uintptr_t)frame->rdi,
+                                       (size_t)frame->rsi, (uint32_t)frame->rdx);
+            break;
+        case SYSCALL_THREAD_DETACH:
+            result = process_user_thread_detach(frame->rdi);
+            break;
+        case SYSCALL_GETRANDOM:
+            result = syscall_do_getrandom((void *)frame->rdi, (size_t)frame->rsi,
+                                          (uint32_t)frame->rdx);
+            break;
+        case SYSCALL_THREAD_INFO:
+        {
+            spinlock_preempt_disable();
+            syscall_thread_info_t *info = calloc(1, sizeof(*info));
+            result = info ? process_user_thread_info(frame->rdi, info) : -12;
+            if (result == 0 && !user_copy_to_user((void *)frame->rsi, info, sizeof(*info))) result = -14;
+            free(info);
+            spinlock_preempt_enable();
+            break;
+        }
+        case SYSCALL_THREAD_SET_NAME:
+        {
+            spinlock_preempt_disable();
+            char *name = malloc(SYSCALL_PROCESS_NAME_MAX);
+            result = name ? -34 : -12;
+            if (name)
+            {
+                for (size_t i = 0; i < SYSCALL_PROCESS_NAME_MAX; ++i)
+                {
+                    if ((uintptr_t)frame->rsi > UINTPTR_MAX - i ||
+                        !user_copy_from_user(name + i, (const void *)((uintptr_t)frame->rsi + i), 1))
+                    {
+                        result = -14;
+                        break;
+                    }
+                    if (name[i] == '\0')
+                    {
+                        result = process_user_thread_set_name(frame->rdi, name);
+                        break;
+                    }
+                }
+            }
+            free(name);
+            spinlock_preempt_enable();
+            break;
+        }
+        case SYSCALL_THREAD_PREPARE_EXIT:
+            result = process_user_thread_prepare_exit();
+            break;
+        case SYSCALL_GETPID:
+            spinlock_preempt_disable();
+            result = (int64_t)process_current_pid();
+            spinlock_preempt_enable();
+            break;
+        case SYSCALL_FUTEX_WAIT:
+            result = process_futex_wait((uintptr_t)frame->rdi,
+                                       (uint32_t)frame->rsi,
+                                       (uint32_t)frame->rdx);
+            break;
+        case SYSCALL_FUTEX_WAKE:
+            result = process_futex_wake((uintptr_t)frame->rdi,
+                                       (uint32_t)frame->rsi);
             break;
         case SYSCALL_THREAD_CREATE:
             result = syscall_do_thread_create((uintptr_t)frame->rdi,

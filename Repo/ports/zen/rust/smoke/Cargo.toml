@@ -1,0 +1,13 @@
+[package]
+name = "alix-rust-std-test"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[workspace]
+
+[profile.release]
+panic = "abort"
+debug = 1
+
+[dependencies]

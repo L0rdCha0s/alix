@@ -5,6 +5,7 @@
 #include "timer.h"
 #include "tzdb.h"
 #include "vfs.h"
+#include "spinlock.h"
 
 #define TIMEKEEPING_CONFIG_PATH "/etc/timezone/current"
 #define TIMEKEEPING_DAY_SECONDS (24 * 60 * 60)
@@ -16,6 +17,8 @@ static const uint8_t TIMEKEEPING_MONTH_DAYS[12] = {
 static uint64_t g_time_base_ms = 0;
 static uint64_t g_tick_base = 0;
 static uint32_t g_tick_frequency = 1000;
+static spinlock_t g_timezone_lock;
+static uint64_t g_timezone_generation = 1;
 typedef struct
 {
     char name[TIMEKEEPING_TZ_NAME_MAX];
@@ -125,6 +128,7 @@ static void timekeeping_set_timezone_internal(const char *name,
         name = "UTC";
     }
     const char *display_name = zone && zone->name ? zone->name : name;
+    spinlock_lock(&g_timezone_lock);
     timekeeping_copy_string(g_timezone.name, sizeof(g_timezone.name), display_name);
 
     if (zone_name && *zone_name)
@@ -153,6 +157,26 @@ static void timekeeping_set_timezone_internal(const char *name,
         memset(&g_timezone.dst_start, 0, sizeof(g_timezone.dst_start));
         memset(&g_timezone.dst_end, 0, sizeof(g_timezone.dst_end));
     }
+    if (++g_timezone_generation == 0) g_timezone_generation = 1;
+    spinlock_unlock(&g_timezone_lock);
+}
+
+bool timekeeping_timezone_snapshot(timekeeping_timezone_spec_t *spec, uint64_t *generation)
+{
+    if (!spec || !generation) return false;
+    spinlock_lock(&g_timezone_lock);
+    memset(spec, 0, sizeof(*spec));
+    memcpy(spec->name, g_timezone.name, sizeof(spec->name));
+    memcpy(spec->zone_name, g_timezone.zone_name, sizeof(spec->zone_name));
+    spec->use_zone = g_timezone.use_zone;
+    spec->standard_offset_minutes = g_timezone.standard_offset_minutes;
+    spec->dst_enabled = g_timezone.dst_enabled;
+    spec->dst_offset_minutes = g_timezone.dst_offset_minutes;
+    spec->dst_start = g_timezone.dst_start;
+    spec->dst_end = g_timezone.dst_end;
+    *generation = g_timezone_generation;
+    spinlock_unlock(&g_timezone_lock);
+    return true;
 }
 
 static bool timekeeping_parse_int(const char *text, size_t len, int *value)

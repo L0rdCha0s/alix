@@ -6,6 +6,10 @@
 #include "video.h"
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct
 {
     uint32_t handle;
@@ -98,5 +102,9 @@ void atk_user_close(atk_user_window_t *win);
  * raw deltas via USER_ATK_MOUSE_FLAG_RELATIVE.
  */
 bool atk_user_set_mouse_capture(atk_user_window_t *win, bool enable, bool relative);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* USER_ATK_USER_H */
