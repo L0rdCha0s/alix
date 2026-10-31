@@ -57,6 +57,23 @@ This FD layer is shared by:
 
 ## File Syscalls (VFS-backed)
 
+The ownership infrastructure in `fd/table.c`, `io/request.c`, `io/service.c` and
+`process/process_io.c` is integrated, but the file syscalls below still use the
+legacy global FD namespace. The protected executor has persistent storage
+workers and an independent cleanup worker. Requests own their kernel buffers,
+description pins, retained cwd and captured uid/gid; workers retain no caller
+process pointer or user address. Off-CPU thread reclamation abandons a killed
+caller's waiter, while a running continuation keeps all resources until it
+finishes. Final request release only queues cleanup; destructors run unlocked
+on the cleanup worker. Indefinite TCP waits are excluded from the finite pool.
+
+`tests/io_service_qemu_test.py` passes the native queued/running cancellation,
+independent cleanup, late OPEN-result disposal, retained service join and live
+waiter shutdown cases, followed by an eight-CPU TLS fixture. It restores the
+ordinary kernel image after the optional boot test. This acceptance proves
+executor lifetime behavior; real VFS/AHCI adapters and private user descriptors
+remain a separate integration gate.
+
 Important behavior:
 
 - `SYSCALL_OPEN` allocates a `file_handle_t`, retains the `vfs_node_t`, then installs an FD using `fd_allocate`.
@@ -111,6 +128,37 @@ wire layout, initialization and failure cleanup under sanitizers. This snapshot
 supplies configured rules or a data identifier; historical timezone conversion
 still needs the user library's timezone implementation and its data files.
 
+## Native signals and interruptible sleep
+
+These are native Alix calls, not Linux signal layouts. Public libc wrappers
+convert negative status to `errno` where required; pthread signal wrappers
+return positive error numbers. The shared version-1 wire types are in
+`include/signal_abi.h`; [signals.md](signals.md) describes ownership, context
+validation, limits and native acceptance.
+
+| ID | Interface | Contract |
+| --- | --- | --- |
+| 59 | `sys_sigaction(number, action, old, size)` | Read/install a process disposition; action wire size must be 24. Nullable action/old pointers select query/update. |
+| 60 | `sys_sigprocmask(how, set, old)` | Update the caller's 64-bit mask with BLOCK=0, UNBLOCK=1 or SETMASK=2; PENDING=3 with null set snapshots queued signals. |
+| 61 | `sys_sigaltstack(stack, old, size)` | Query/update a 24-byte alternate-stack descriptor; changing a stack currently used by the caller returns `-EPERM`. |
+| 62 | `sys_sigreturn(frame_address)` | Validate and restore the current thread's top signal frame; successful return resumes its saved/edited user context. |
+| 63 | `sys_raise(number, tid)` | Queue to a same-process native TID; tid=0 selects the caller. Signal zero probes target existence. |
+| 64 | `sys_kill(pid, number)` | Post to a positive user PID with ownership checks; group/job-control forms return `-ENOTSUP`. |
+| 65 | `sys_sleep_interruptible(milliseconds, remaining)` | Wait with signal interruption; optional remaining output is captured before delivery and bounded by the original milliseconds. |
+
+Unmasked pending signals deliver at full syscall return frames and timer-preempt
+SYS_YIELD returns. The latter reconstruct the original user PC/RSP and GPRs from
+the red-zone-preserving stub. Native sigreturn bypasses the ordinary result
+assignment and restores validated GPRs/flags/x87/SSE state. Demand-zero and
+main-stack page-fault recovery remain ahead of hardware signal delivery.
+
+Caught signals defer while a registered I/O request still owns an operation;
+they do not invoke destructive caller-abandonment cancellation. General I/O
+EINTR/restart semantics remain separate work. Syscall 36 retains its previous
+sleep behavior; libc `nanosleep` uses call 65 and clamps rounded remaining time
+to the original request. Normal, default and bad-frame native signal fixtures
+passed in eight-CPU guests; exact evidence is recorded in [signals.md](signals.md).
+
 ## Thread-local storage and blocking waits
 
 The following native interfaces support future hosted runtimes; they do not
@@ -127,11 +175,14 @@ claim Linux/POSIX syscall compatibility.
 | 47 | `sys_thread_cpu()` | Snapshot the current CPU index. |
 
 FS-base updates disable local interrupts while changing the saved thread state
-and hardware MSR. Existing scheduler save/restore preserves it across context
-switches. New threads start with a zero base. The user owns the allocation and
-must clear/replace the base before freeing it; setting the base does not check
-that it is mapped or initialize an ELF `PT_TLS` image. C/C++ `thread_local`,
-thread-local errno, TLS destructors and a hosted runtime TCB remain separate work.
+and hardware MSR. Scheduler save/restore preserves it across context switches.
+Normal ELF process/thread creation initializes native static variant-II `PT_TLS`
+storage before entry: the template is copied, TLS BSS is zeroed, and FS points
+to the thread control block with its self pointer at FS:0. C/C++ thread-local
+storage, thread-local errno and TLS destructor cleanup are implemented.
+The raw setter is an explicit override: it checks address shape, not mapping or
+TCB contents. Callers must preserve/restore the runtime's native base around
+such an override and must not free storage while a thread still references it.
 
 Setting affinity uses the existing scheduler's ownership-transfer path and
 yields outside locks before returning. It does not alter the process defaults
@@ -140,7 +191,8 @@ all eight CPUs; the synchronization test pins four workers to distinct CPUs.
 
 Futex wait returns `SYSCALL_FUTEX_OK` (0), `AGAIN` (-11) for a value mismatch,
 `FAULT` (-14) for an unmapped word, `INVALID` (-22) for an invalid/misaligned
-address, or `TIMED_OUT` (-110). Timeouts are relative milliseconds: zero checks
+address, `INTERRUPTED` (-4) for an unblocked pending signal, or `TIMED_OUT` (-110).
+Timeouts are relative milliseconds: zero checks
 without blocking, and `SYSCALL_FUTEX_WAIT_FOREVER` waits without a deadline.
 Wake validates the address form and uses it as a key without dereferencing it.
 
@@ -157,9 +209,10 @@ releases and then reacquires the caller's mutex, including on timeout/error.
 The application must check its predicate in a loop. Shared mutexes, conditions
 and thread arguments must be heap-owned or static, never on another thread's
 stack. Do not reinitialize or free synchronization objects while in use.
-Condition APIs return status codes directly rather than using the currently
-global errno. `alix_mutex_t` retains its single-word layout; contention blocks
-through the futex interface instead of continuously spinning.
+Condition APIs return status codes directly rather than setting thread-local
+errno. Interrupted mutex/once waits retry; timed condition waits recompute their
+remaining deadline and always reacquire the mutex. `alix_mutex_t` retains its
+single-word layout; contention blocks through the futex interface.
 
 Validation: `make futex-contract-test`, `make thread-platform-test`, and
 `make thread-platform-qemu-test` (isolated native Alix guests).

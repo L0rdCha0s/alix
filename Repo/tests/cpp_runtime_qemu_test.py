@@ -51,6 +51,70 @@ def command_complete(log, offset):
     return re.search(r"(?:^|\n)root@alix\$ ", log[offset:]) is not None
 
 
+def native_elf_symbol(binary, name):
+    defined = subprocess.check_output(["x86_64-elf-nm", "--defined-only", str(binary)], text=True)
+    values = {line.split()[2]: int(line.split()[0], 16)
+              for line in defined.splitlines() if len(line.split()) == 3}
+    if name not in values:
+        raise RuntimeError("expected instruction symbol is absent from fixture ELF")
+    return values[name]
+
+
+def verify_expected_user_exception(phase, binary, expected):
+    reason, symbol = expected
+    records = re.findall(
+        r"process: user fault in thread /tmp/test\.elf reason=([a-z_]+) "
+        r"error=0x([0-9A-Fa-f]+) addr=0x([0-9A-Fa-f]+) "
+        r"rip=0x([0-9A-Fa-f]+) cs=0x([0-9A-Fa-f]+) cpu=\d+", phase)
+    if len(records) != 1 or phase.count("process: user fault") != 1:
+        raise RuntimeError("incomplete expected user exception evidence")
+    found, error, address, rip, cs = records[0]
+    if found != reason or int(error, 16) != 0 or int(address, 16) != 0 or \
+            int(rip, 16) != native_elf_symbol(binary, symbol) or (int(cs, 16) & 3) != 3:
+        raise RuntimeError("user exception did not match the expected ELF instruction")
+
+
+def verify_signal_termination(phase, binary, expected):
+    marker, source, signo, status, vector, symbol = expected
+    armed = re.findall(re.escape(marker) +
+        r" pid=(\d+) tid=(\d+) signo=(\d+) status=(\d+) vector=(\d+) site=0x([0-9A-Fa-f]+)", phase)
+    records = re.findall(
+        r"process: default signal pid=(\d+) tid=(\d+) signo=(\d+) status=(\d+) "
+        r"source=([a-z]+) vector=(\d+) rip=0x([0-9A-Fa-f]+)", phase)
+    if len(armed) != 1 or len(records) != 1 or phase.count("process: default signal") != 1:
+        raise RuntimeError("incomplete default-signal evidence")
+    pid, tid, armed_signo, armed_status, armed_vector, armed_site = armed[0]
+    found_pid, found_tid, found_signo, found_status, found_source, found_vector, found_rip = records[0]
+    site = native_elf_symbol(binary, symbol) if symbol is not None else 0
+    if (int(pid) <= 0 or int(tid) <= 0 or (pid, tid) != (found_pid, found_tid) or
+        (int(armed_signo), int(armed_status), int(armed_vector), int(armed_site, 16)) != (signo, status, vector, site) or
+        (int(found_signo), int(found_status), int(found_vector), int(found_rip, 16)) != (signo, status, vector, site) or
+        found_source != source):
+        raise RuntimeError("default signal did not match armed process, source, status, and instruction")
+    if vector == 6:
+        # The symbol itself must be the UD2, not a nearby unrelated exception.
+        data = Path(binary).read_bytes()
+        if data[:6] != b"\x7fELF\x02\x01":
+            raise RuntimeError("expected a native little-endian ELF64 fixture")
+        phoff = int.from_bytes(data[32:40], "little")
+        size = int.from_bytes(data[54:56], "little")
+        count = int.from_bytes(data[56:58], "little")
+        opcode = None
+        for index in range(count):
+            header = data[phoff + index * size:phoff + (index + 1) * size]
+            if int.from_bytes(header[:4], "little") != 1:
+                continue
+            offset = int.from_bytes(header[8:16], "little")
+            virtual = int.from_bytes(header[16:24], "little")
+            length = int.from_bytes(header[32:40], "little")
+            if virtual <= site and site + 2 <= virtual + length:
+                position = offset + site - virtual
+                opcode = data[position:position + 2]
+                break
+        if opcode != b"\x0f\x0b":
+            raise RuntimeError("expected invalid-opcode site is not UD2 in the actual ELF")
+
+
 def capture_guest_failure(qmp, staging, log_path):
     """Retain stopped-guest evidence before the disposable VM is destroyed."""
     if qmp is None:
@@ -79,9 +143,11 @@ p g_current_threads
 p g_scheduler_lock
 p g_sleep_queue_lock
 set $alix_t = g_thread_registry_head
-while $alix_t != 0
+set $alix_count = 0
+while $alix_t != 0 && $alix_count < 256
  printf "THREAD %s state=%d cpu=%u queue=%d rqcpu=%u sleep=%d until=%llu depth=%u wake=%d transition=%d exited=%d\\n", $alix_t->name, $alix_t->state, $alix_t->running_cpu, $alix_t->in_run_queue, $alix_t->run_queue_cpu, $alix_t->sleeping, $alix_t->sleep_until_tick, $alix_t->preempt_disable_depth, $alix_t->wake_pending, $alix_t->in_transition, $alix_t->exited
  set $alix_t = $alix_t->registry_next
+ set $alix_count = $alix_count + 1
 end
 detach
 quit
@@ -95,7 +161,8 @@ quit
 
 def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                    arguments=(), expected_fault=None, tcg_cpu=None,
-                   forbidden_markers=()):
+                   forbidden_markers=(), download_timeout_seconds=10, boot_markers=(),
+                   expected_exception=None, expected_signal_termination=None):
     """Run a real target ELF, requiring its markers and successful shell return."""
     binary = ROOT / "build/user" / binary_name
     if not binary.is_file():
@@ -162,7 +229,17 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             def command(text):
                 uart.sendall(text.encode("ascii") + b"\r")
 
-            harness.wait_for(runner, "serial login", lambda log: "login:" in log, 25)
+            def boot_failed(log):
+                return ": FAIL" in log or any(marker in log for marker in forbidden_markers)
+
+            boot_log = harness.wait_for(
+                runner, "serial login", lambda log: "login:" in log or boot_failed(log), 25)
+            if boot_failed(boot_log):
+                failures = [line for line in boot_log.splitlines()
+                            if ": FAIL" in line or any(marker in line for marker in forbidden_markers)]
+                raise RuntimeError("kernel boot acceptance failed: " + " | ".join(failures[-3:]))
+            if boot_markers and not all(marker in boot_log for marker in boot_markers):
+                raise RuntimeError("kernel boot acceptance did not complete successfully")
             command("root")
             # Boot-time disk synchronization can occupy the shell's assigned
             # TCG CPU for several seconds while host compilers run in parallel.
@@ -177,7 +254,7 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             harness.wait_for(runner, "tmp directory", lambda log: command_complete(log, offset), 3)
             offset = len(harness.read_log())
             command(f"wget http://10.0.2.2:{port}/test.elf /tmp/test.elf")
-            harness.wait_for(runner, "test download", lambda log: command_complete(log, offset), 10)
+            harness.wait_for(runner, "test download", lambda log: command_complete(log, offset), download_timeout_seconds)
             offset = len(harness.read_log())
             launch = "runelf /tmp/test.elf"
             if arguments:
@@ -197,7 +274,15 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                 raise RuntimeError(f"{label} markers are out of order")
             if harness.FAILURE_RE.search(log):
                 raise RuntimeError("kernel fault or scheduler failure in guest log")
-            if expected_fault is None:
+            if expected_signal_termination is not None:
+                verify_signal_termination(phase, binary, expected_signal_termination)
+            if expected_exception is not None:
+                verify_expected_user_exception(phase, binary, expected_exception)
+                recovered = len(harness.read_log())
+                command("echo fault_recovered")
+                harness.wait_for(runner, "shell responds after expected user exception",
+                    lambda text: re.search(r"(?:^|\n)fault_recovered\r?\n", text[recovered:]), 5)
+            elif expected_fault is None:
                 if ("=== CPU EXCEPTION ===" in log or "process: user fault" in log or
                         "process: fatal fault" in log):
                     raise RuntimeError("unexpected CPU exception in guest log")

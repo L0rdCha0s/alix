@@ -8,7 +8,9 @@ from audio_stream_contract_test import ROOT, compile_and_run, function_definitio
 def main():
     production = (ROOT / "src/kernel/process/process_vm.c").read_text()
     production = "\n".join(line for line in production.splitlines() if not line.startswith("#include"))
-    program = r'''
+    layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
+                                if line.startswith("#define USER_DEFAULT_"))
+    program = layout_defines + r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -18,9 +20,9 @@ def main():
 #include <setjmp.h>
 #define CHECK(c) do { if (!(c)) { fprintf(stderr,"native VM check failed line %d: %s\n",__LINE__,#c); exit(1); } } while (0)
 #define PAGE_SIZE_BYTES_LOCAL 4096UL
-#define USER_HEAP_BASE 0x102000000UL
-#define USER_HEAP_SIZE 0x40000000UL
-#define USER_STUB_CODE_BASE 0x1FFFFE000UL
+#define USER_HEAP_BASE (USER_DEFAULT_POINTER_BASE+USER_DEFAULT_HEAP_BASE_OFFSET)
+#define USER_HEAP_SIZE USER_DEFAULT_HEAP_SIZE
+#define USER_STUB_CODE_BASE (USER_DEFAULT_POINTER_LIMIT+1ULL-8192ULL)
 #define RFLAGS_IF_BIT 512UL
 #define SYSCALL_VM_PROT_NONE 0u
 #define SYSCALL_VM_PROT_READ 1u
@@ -157,9 +159,31 @@ int main(void) {
     CHECK(process_vm_map(&process,0,4096,0x80,anonymous_flags)==-22);
     CHECK(process_vm_map(&process,0,4096,3,2)==-22);
     CHECK(process_vm_map(&process,0,4096,3,anonymous_flags|0x100000)==-22);
-    CHECK(process_vm_map(&process,0x100000000,4096,3,anonymous_flags)==-22);
+    CHECK(process_vm_map(&process,0x100000000,4096,3,anonymous_flags|16)==-22);
     CHECK(process_vm_map(&process,0,SIZE_MAX,0,anonymous_flags)==-22);
     CHECK(metadata_live==0 && physical_live==0);
+    /* Advisory hints must never make a legal nonfixed reservation fail. */
+    const uintptr_t hints[]={1,USER_HEAP_BASE,USER_STUB_CODE_BASE,UINTPTR_MAX};
+    for(unsigned i=0;i<sizeof(hints)/sizeof(hints[0]);++i) {
+        CHECK(process_vm_map(&process,hints[i],4096,0,anonymous_flags)==(int64_t)vm_arena_start());
+        clear_process();
+    }
+    uintptr_t hint=vm_arena_start()+17*4096;
+    CHECK(process_vm_map(&process,hint+123,4096,0,anonymous_flags)==(int64_t)hint);
+    CHECK(process_vm_map(&process,hint,4096,0,anonymous_flags)==(int64_t)vm_arena_start());
+    CHECK(process_vm_map(&process,hint+1,4096,0,anonymous_flags|16)==-22);
+    CHECK(process_vm_map(&process,hint+1,4096,0,anonymous_flags|0x100000)==-22);
+    clear_process();
+    /* Real address scale, no 12GiB backing or leaf preparation. */
+    uintptr_t high=(32ULL<<40)-(6ULL<<30);
+    size_t huge=12ULL<<30;
+    CHECK(process_vm_map(&process,high,huge,0,anonymous_flags)==(int64_t)high);
+    CHECK(!process.vm_areas->pages && physical_live==0 && leaf_count==0);
+    CHECK(process_vm_protect(&process,high,4096,3)==0);
+    CHECK(process_vm_protect(&process,high+huge-4096,4096,3)==0);
+    CHECK(physical_live==2 && resolve(high,true) && resolve(high+huge-4096,true));
+    CHECK(process_vm_unmap(&process,high,huge)==0 && physical_live==0 && metadata_live==0);
+    clear_process();
 
     /* Large reservation stays sparse. Partial commitment and PROT_NONE cycles
      * preserve existing bytes rather than silently allocating replacement data. */
@@ -385,7 +409,9 @@ int main(void) {
 '''
     compile_and_run("native-vm-contract", program)
     wrappers = (ROOT / "user/lib/mman.c").read_text()
-    program = r'''
+    layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
+                                if line.startswith("#define USER_DEFAULT_"))
+    program = layout_defines + r'''
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>

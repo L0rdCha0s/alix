@@ -126,8 +126,11 @@ Host ASan/UBSan tests passed full-package staging, idempotence, byte corruption,
 conflicts, symlink rejection, custom-file preservation and interrupted writes.
 All 2,392 calendar cases also passed against the production calendar/TZif code
 under host sanitizers. Both standalone tools and the combined guest fixture
-link as native ELF. Full-package guest execution remains a separate acceptance
-gate; its log belongs at `build/test-out/tzdata-package-qemu.log`.
+link as native ELF. Full-package guest execution passed on 2026-10-31:
+606 files staged twice and hash-verified, all 2,392 calendar cases passed, and
+the configuration/custom-file preservation markers were present. The harness
+completed successfully after a normal shell return with no unexpected kernel
+fault. Its log is `build/test-out/tzdata-package-qemu.log`.
 
 ## ICU integration still required
 

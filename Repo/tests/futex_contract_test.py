@@ -24,6 +24,8 @@ def kernel_test():
 #define SYSCALL_FUTEX_WAIT_FOREVER UINT32_MAX
 #define SYSCALL_FUTEX_OK 0
 #define SYSCALL_FUTEX_AGAIN (-11)
+#define SYSCALL_FUTEX_INTERRUPTED (-4)
+#define EINTR 4
 #define SYSCALL_FUTEX_FAULT (-14)
 #define SYSCALL_FUTEX_INVALID (-22)
 #define SYSCALL_FUTEX_TIMED_OUT (-110)
@@ -37,13 +39,14 @@ typedef struct thread {
     bool is_user, pending_destroy, exited, live;
     wait_queue_t futex_queue;
     uintptr_t futex_address;
-    bool futex_waiting, futex_notified;
+    bool futex_waiting, futex_notified, futex_interrupted, signal_pending;
 } thread_t;
 struct process { bool is_user; spinlock_t threads_lock; thread_t *threads; };
 static process_t process, other;
 static thread_t threads[5], outsider;
 static thread_t *current;
-static bool scheduler_locked, inject_wake;
+static bool scheduler_locked, inject_wake, inject_interrupt;
+static bool process_signal_pending_locked(thread_t *thread) { CHECK(scheduler_locked);return thread->signal_pending; }
 static unsigned waits;
 static uint32_t word;
 static uint64_t waited_ticks;
@@ -68,6 +71,7 @@ static bool injected_wait(wait_queue_t *queue, bool (*predicate)(void *), void *
 {
     CHECK(!scheduler_locked && queue == &current->futex_queue && context == current);
     ++waits;
+    if (inject_interrupt) { current->futex_interrupted = true; current->futex_notified = true; }
     if (inject_wake) {
         thread_t *waiter = current;
         current = &threads[0];
@@ -94,7 +98,7 @@ static void reset(void)
         threads[i].process_next = i < 4 ? &threads[i + 1] : NULL;
     }
     outsider.process = &other; outsider.is_user = outsider.live = true; other.threads = &outsider;
-    current = &threads[1]; scheduler_locked = inject_wake = false; waits = 0; word = 7; waited_ticks = 0;
+    current = &threads[1]; scheduler_locked = inject_wake = inject_interrupt = false; waits = 0; word = 7; waited_ticks = 0;
 }
 int main(void)
 {
@@ -117,6 +121,11 @@ int main(void)
     CHECK(waited_ticks == 2 && !current->futex_waiting);
     CHECK(process_futex_wait(ADDRESS, 7, 1) == SYSCALL_FUTEX_TIMED_OUT && waited_ticks == 1);
 
+    current->signal_pending = true;
+    CHECK(process_futex_wait(ADDRESS, 7, UINT32_MAX) == SYSCALL_FUTEX_INTERRUPTED);
+    current->signal_pending = false; inject_interrupt = true;
+    CHECK(process_futex_wait(ADDRESS, 7, UINT32_MAX) == SYSCALL_FUTEX_INTERRUPTED);
+    CHECK(!current->futex_waiting && !current->futex_interrupted);
     reset(); current = &threads[0];
     for (unsigned i = 1; i < 5; ++i) { threads[i].futex_waiting = true; threads[i].futex_address = ADDRESS; }
     threads[3].exited = true; threads[4].pending_destroy = true;
@@ -147,6 +156,8 @@ def condition_test():
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "failed line %d: %s\n", __LINE__, #c); exit(1); } } while (0)
 #define SYSCALL_FUTEX_OK 0
 #define SYSCALL_FUTEX_AGAIN (-11)
+#define SYSCALL_FUTEX_INTERRUPTED (-4)
+#define EINTR 4
 #define SYSCALL_FUTEX_INVALID (-22)
 #define SYSCALL_FUTEX_TIMED_OUT (-110)
 #define ALIX_WAIT_FOREVER UINT32_MAX
@@ -155,12 +166,15 @@ typedef struct { volatile uint32_t sequence; } alix_cond_t;
 static alix_mutex_t *expected_mutex;
 static int wait_result;
 static bool signal_before_wait;
-static uint32_t wake_count, wait_timeout;
+static uint32_t wake_count, wait_timeout, interrupted_waits;
+static uint64_t milliseconds;
+static uint64_t sys_monotonic_millis(void) { return milliseconds; }
 static void alix_mutex_unlock(alix_mutex_t *m) { CHECK(m == expected_mutex && m->state == 1); m->state = 0; }
 static void alix_mutex_lock(alix_mutex_t *m) { CHECK(m == expected_mutex && m->state == 0); m->state = 1; }
 static int sys_futex_wait(volatile uint32_t *word, uint32_t expected, uint32_t timeout)
 {
     CHECK(expected_mutex->state == 0); wait_timeout = timeout;
+    if (interrupted_waits) { --interrupted_waits; milliseconds += 7; return -EINTR; }
     if (signal_before_wait) __atomic_add_fetch(word, 1u, __ATOMIC_RELEASE);
     return *word != expected ? SYSCALL_FUTEX_AGAIN : wait_result;
 }
@@ -181,6 +195,12 @@ int main(void)
     signal_before_wait = false; wait_result = SYSCALL_FUTEX_TIMED_OUT;
     CHECK(alix_cond_timedwait(condition, expected_mutex, 20) == SYSCALL_FUTEX_TIMED_OUT);
     CHECK(expected_mutex->state == 1 && wait_timeout == 20);
+    interrupted_waits = 2; milliseconds = 100;
+    CHECK(alix_cond_timedwait(condition, expected_mutex, 20) == SYSCALL_FUTEX_TIMED_OUT);
+    CHECK(wait_timeout == 6 && expected_mutex->state == 1);
+    interrupted_waits = 3;
+    CHECK(alix_cond_timedwait(condition, expected_mutex, 20) == SYSCALL_FUTEX_TIMED_OUT);
+    CHECK(milliseconds == 135 && expected_mutex->state == 1);
     wait_result = -14;
     CHECK(alix_cond_wait(condition, expected_mutex) == -14 && expected_mutex->state == 1);
     uint32_t sequence = condition->sequence;
@@ -208,6 +228,8 @@ def mutex_test():
 #define SYSCALL_FUTEX_WAIT_FOREVER UINT32_MAX
 #define SYSCALL_FUTEX_OK 0
 #define SYSCALL_FUTEX_AGAIN (-11)
+#define SYSCALL_FUTEX_INTERRUPTED (-4)
+#define EINTR 4
 #define ENOSYS 38
 typedef struct { volatile uint32_t state; } alix_mutex_t;
 static alix_mutex_t mutex;
@@ -223,6 +245,7 @@ static int sys_futex_wait(volatile uint32_t *word, uint32_t expected, uint32_t t
     if (mode == 2) return -ENOSYS;
     if (mode == 3 && calls == 1) return 0; /* A spurious return never grants ownership. */
     if (mode == 4) return -14;
+    if (mode == 5 && calls == 1) return -EINTR;
     __atomic_store_n(word, 0, __ATOMIC_RELEASE);
     return mode == 0 ? SYSCALL_FUTEX_AGAIN : 0;
 }
@@ -247,6 +270,8 @@ int main(void)
         CHECK(yields == (mode == 2 ? 1u : 0u));
         alix_mutex_unlock(&mutex); CHECK(mutex.state == 0 && wakes == 1);
     }
+    mode = 5; mutex.state = 1; calls = 0;
+    alix_mutex_lock(&mutex); CHECK(calls == 2 && mutex.state == 2); alix_mutex_unlock(&mutex);
     mode = 4; mutex.state = 1;
     if (setjmp(failure) == 0) { alix_mutex_lock(&mutex); CHECK(false); }
     CHECK(fatal_status == 1 && mutex.state == 2);

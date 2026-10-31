@@ -12,6 +12,9 @@ bool user_ptr_range_valid(const void *ptr, size_t len);
 /* Mapping-safe page-bounded copies. False may leave a copied prefix. */
 bool user_copy_from_user(void *dst, const void *src_user, size_t len);
 bool user_copy_to_user(void *dst_user, const void *src, size_t len);
+/* Same single-fetch, page-safe copy; distinguishes EFAULT from a fully read
+ * unterminated string (-ENAMETOOLONG). out_len changes only on success. */
+int user_copy_cstring_from_user(char *dst, size_t capacity, const char *src_user, size_t *out_len);
 bool user_copy_string_from_user(char *dst,
                                 size_t capacity,
                                 const char *src_user,

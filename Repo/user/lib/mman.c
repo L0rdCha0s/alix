@@ -42,12 +42,15 @@ int munmap(void *address, size_t length)
 
 int madvise(void *address, size_t length, int advice)
 {
-    if (advice != MADV_DONTNEED)
+    if (advice != MADV_NORMAL && advice != MADV_DONTNEED)
     {
         errno = EINVAL;
         return -1;
     }
-    int result = sys_vm_advise((uintptr_t)address, length, (uint32_t)advice);
+    /* NORMAL changes no content. Reuse the kernel's checked, non-destructive
+     * advice path so invalid or unowned ranges still report real errors. */
+    uint32_t native_advice = advice == MADV_NORMAL ? SYSCALL_VM_ADVICE_POSIX : (uint32_t)advice;
+    int result = sys_vm_advise((uintptr_t)address, length, native_advice);
     if (result < 0)
     {
         errno = -result;

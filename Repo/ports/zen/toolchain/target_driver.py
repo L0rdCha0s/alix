@@ -53,6 +53,7 @@ def main(cxx=False):
             raise RuntimeError("x86_64-elf-ld is required for the native Alix link")
         libgcc = subprocess.check_output(["x86_64-elf-gcc", "-print-libgcc-file-name"], text=True).strip()
         libraries = [RUNTIME / "lib/libc++.a", RUNTIME / "lib/libc++abi.a", RUNTIME / "lib/libalix-cxx-support.a",
+                     ROOT / "ports/zen/upstream/libm-alix-build/lib/libalix-math.a",
                      ROOT / "build/user/lib/libalix-ssp.a"]
         for library in libraries:
             if not library.is_file():

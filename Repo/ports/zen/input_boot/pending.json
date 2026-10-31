@@ -1,0 +1,27 @@
+{
+  "applied": true,
+  "files": [
+    {
+      "path": "src/drivers/keyboard.c",
+      "before": "170598104457077adedb122019f301105f4209a1105ff6e1c67206e0c81fef00",
+      "after": "36f14e601711c0e18e8bc824fa01a72b3af22d8fdbafb82e8fd53e5f3bac169e"
+    },
+    {
+      "path": "src/drivers/mouse.c",
+      "before": "418981d6f55bd0126908f13ad75e133422b1cebfc6963377b439127b64ea45e7",
+      "after": "fa29541086e6bfe3e87a6e3925b372653b4986b352e9249a5dd29457f41c93ee"
+    },
+    {
+      "path": "tests/input_poll_contract_test.py",
+      "before": null,
+      "after": "7f2f13d413e8958e6d33755ad1d82668dd0886f24981e2cef24f8e3feea0e2c3"
+    }
+  ],
+  "applied_date": "2026-10-31",
+  "native_acceptance": {
+    "date": "2026-10-31",
+    "status": "pass",
+    "guests": 7,
+    "log": "build/ports/zen/input-runtime-guests.log"
+  }
+}

@@ -16,6 +16,7 @@
 #include "serial.h"
 #include "keyboard.h"
 #include "vfs.h"
+#include "io_vfs_service.h"
 #include "interrupts.h"
 #include "timer.h"
 #include "hwinfo.h"
@@ -57,6 +58,9 @@
 #if ENABLE_USB
 #include "usb_hid.h"
 #endif
+
+extern bool io_service_boot_test(void) __attribute__((weak));
+extern bool vfs_io_boot_test(void) __attribute__((weak));
 
 static void shell_process_entry(void *arg);
 static void storage_flush_process_entry(void *arg);
@@ -647,6 +651,16 @@ static void fstab_mount_run(void)
 static void warmup_run_sequence(void)
 {
     serial_printf("%s", "[warmup] sequence start\r\n");
+    if (!process_resource_start_cleanup())
+    {
+        serial_printf("process resource cleanup startup failed");
+        for (;;) { __asm__ volatile ("cli; hlt" ::: "memory"); }
+    }
+    if (!io_vfs_service_start())
+    {
+        serial_printf("protected VFS service startup failed");
+        for (;;) { __asm__ volatile ("cli; hlt" ::: "memory"); }
+    }
 #if ENABLE_USB
     serial_printf("%s", "[warmup] calling usb_hid_init\r\n");
     process_t *usb_init = process_create_kernel("usb_initd", (thread_entry_t)usb_hid_init, NULL, 0, -1);
@@ -671,6 +685,19 @@ static void warmup_run_sequence(void)
     g_fstab_ready = true;
     serial_printf("%s", "[alix] fstab mount disabled; skipping\r\n");
 #endif
+
+    /* Run before startup scripts or the shell can expose a cancellable test
+     * controller. The optional object is absent from ordinary kernel images. */
+    if (io_service_boot_test && !io_service_boot_test())
+    {
+        serial_printf("IO_SERVICE_TEST: FAIL boot hook");
+        for (;;) { __asm__ volatile ("cli; hlt" ::: "memory"); }
+    }
+    if (vfs_io_boot_test && !vfs_io_boot_test())
+    {
+        serial_printf("VFS_IO_TEST: FAIL boot hook");
+        for (;;) { __asm__ volatile ("cli; hlt" ::: "memory"); }
+    }
 
 #if ENABLE_STARTUP_SCRIPT
     if (!startup_schedule())

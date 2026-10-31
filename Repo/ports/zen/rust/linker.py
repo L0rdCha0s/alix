@@ -16,4 +16,5 @@ arguments = sys.argv[1:]
 if arguments[:2] == ["-flavor", "gnu"]:
     arguments = arguments[2:]
 os.execv(linker, [linker, "-T", str(root / "user/lib/link.ld"),
-                 *[str(root / item) for item in objects], *arguments, libgcc])
+                 *[str(root / item) for item in objects], *arguments,
+                 str(root / "ports/zen/upstream/libm-alix-build/lib/libalix-math.a"), libgcc])

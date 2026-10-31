@@ -1,0 +1,427 @@
+--- a/Repo/include/memory_layout.h
++++ b/Repo/include/memory_layout.h
+@@ -9,11 +9,15 @@
+  * inside per-process page tables when CR3 switches.
+  */
+ #define USER_DEFAULT_POINTER_BASE  0x0000000100000000ULL
+-#define USER_DEFAULT_POINTER_LIMIT 0x00000001FFFFFFFFULL
+-#define USER_DEFAULT_STACK_TOP_OFFSET 0x01000000ULL
+-#define USER_DEFAULT_STACK_SIZE   (1024ULL * 1024ULL)
+-#define USER_DEFAULT_HEAP_BASE_OFFSET 0x02000000ULL
+-#define USER_DEFAULT_HEAP_SIZE    (1024ULL * 1024ULL * 1024ULL)
++#define USER_DEFAULT_POINTER_LIMIT 0x00003FFFFFFFFFFFULL
++#define USER_DEFAULT_STACK_TOP_OFFSET 0x40000000ULL
++#define USER_DEFAULT_STACK_SIZE   (8ULL * 1024ULL * 1024ULL)
++#define USER_DEFAULT_HEAP_BASE_OFFSET 0x80000000ULL
++#define USER_DEFAULT_HEAP_SIZE    (16ULL * 1024ULL * 1024ULL * 1024ULL)
++#define USER_DEFAULT_STACK_GUARD_SIZE 4096ULL
++#define USER_DEFAULT_VM_HEAP_GAP  (16ULL * 1024ULL * 1024ULL)
++#define USER_DEFAULT_THREAD_POOL_SIZE (8ULL * 1024ULL * 1024ULL * 1024ULL)
++#define USER_DEFAULT_IMAGE_END (USER_DEFAULT_POINTER_BASE + USER_DEFAULT_STACK_TOP_OFFSET - USER_DEFAULT_STACK_SIZE - USER_DEFAULT_STACK_GUARD_SIZE)
+ 
+ typedef struct memory_layout
+ {
+--- a/Repo/user/lib/link.ld
++++ b/Repo/user/lib/link.ld
+@@ -1,3 +1,25 @@
++/* Native user VA contract; checked against include/memory_layout.h. */
++__alix_user_pointer_base = 0x0000000100000000;
++__alix_user_pointer_limit = 0x00003FFFFFFFFFFF;
++__alix_user_stack_top = 0x0000000140000000;
++__alix_user_stack_size = 0x00800000;
++__alix_user_stack_guard_size = 0x1000;
++__alix_user_image_end = __alix_user_stack_top - __alix_user_stack_size - __alix_user_stack_guard_size;
++__alix_user_heap_base = 0x0000000180000000;
++__alix_user_heap_size = 0x0000000400000000;
++__alix_user_vm_heap_gap = 0x01000000;
++__alix_user_thread_pool_size = 0x0000000200000000;
++__alix_user_stub_code_base = __alix_user_pointer_limit + 1 - 0x2000;
++__alix_user_vm_start = __alix_user_heap_base + __alix_user_heap_size + __alix_user_vm_heap_gap;
++__alix_user_vm_end = __alix_user_stub_code_base - __alix_user_thread_pool_size;
++ASSERT(__alix_user_pointer_base >= 0x100000000, "user range overlaps low kernel identity map")
++ASSERT(__alix_user_pointer_limit < 0x800000000000, "user range exceeds SpiderMonkey 47-bit pointers")
++ASSERT(__alix_user_pointer_base < __alix_user_image_end, "empty user ELF arena")
++ASSERT(__alix_user_stack_top <= __alix_user_heap_base, "user stack overlaps heap")
++ASSERT(__alix_user_vm_start < __alix_user_vm_end, "user heap overlaps VM or auxiliary pool")
++ASSERT((__alix_user_image_end & 0xFFF) == 0, "user image boundary is not page aligned")
++ASSERT((__alix_user_vm_start & 0xFFF) == 0 && (__alix_user_vm_end & 0xFFF) == 0, "VM boundary is not page aligned")
++
+ ENTRY(_start)
+ 
+ PHDRS
+@@ -9,7 +31,7 @@
+ 
+ SECTIONS
+ {
+-    . = 0x0000000100000000;
++    . = __alix_user_pointer_base;
+ 
+     .text : ALIGN(16)
+     {
+@@ -79,4 +101,6 @@
+         *(COMMON)
+         __bss_end = .;
+     } :data
++    __alix_user_image_loaded_end = ALIGN(., 0x1000);
++    ASSERT(__alix_user_image_loaded_end <= __alix_user_image_end, "user ELF image overlaps reserved main stack guard")
+ }
+--- a/Repo/src/arch/x86/uefi.ld
++++ b/Repo/src/arch/x86/uefi.ld
+@@ -1,3 +1,25 @@
++/* Native user VA contract; checked against include/memory_layout.h. */
++__alix_user_pointer_base = 0x0000000100000000;
++__alix_user_pointer_limit = 0x00003FFFFFFFFFFF;
++__alix_user_stack_top = 0x0000000140000000;
++__alix_user_stack_size = 0x00800000;
++__alix_user_stack_guard_size = 0x1000;
++__alix_user_image_end = __alix_user_stack_top - __alix_user_stack_size - __alix_user_stack_guard_size;
++__alix_user_heap_base = 0x0000000180000000;
++__alix_user_heap_size = 0x0000000400000000;
++__alix_user_vm_heap_gap = 0x01000000;
++__alix_user_thread_pool_size = 0x0000000200000000;
++__alix_user_stub_code_base = __alix_user_pointer_limit + 1 - 0x2000;
++__alix_user_vm_start = __alix_user_heap_base + __alix_user_heap_size + __alix_user_vm_heap_gap;
++__alix_user_vm_end = __alix_user_stub_code_base - __alix_user_thread_pool_size;
++ASSERT(__alix_user_pointer_base >= 0x100000000, "user range overlaps low kernel identity map")
++ASSERT(__alix_user_pointer_limit < 0x800000000000, "user range exceeds SpiderMonkey 47-bit pointers")
++ASSERT(__alix_user_pointer_base < __alix_user_image_end, "empty user ELF arena")
++ASSERT(__alix_user_stack_top <= __alix_user_heap_base, "user stack overlaps heap")
++ASSERT(__alix_user_vm_start < __alix_user_vm_end, "user heap overlaps VM or auxiliary pool")
++ASSERT((__alix_user_image_end & 0xFFF) == 0, "user image boundary is not page aligned")
++ASSERT((__alix_user_vm_start & 0xFFF) == 0 && (__alix_user_vm_end & 0xFFF) == 0, "VM boundary is not page aligned")
++
+ ENTRY(kernel_entry)
+ 
+ KERNEL_VMA_BASE = 0x0000000010000000;
+@@ -44,4 +66,5 @@
+   __kernel_vma_start = KERNEL_VMA_BASE;
+   /* Page-aligned end-of-kernel for heap / page allocator */
+   __kernel_vma_end   = ALIGN(__bss_end, 0x1000);
++  ASSERT(__kernel_vma_end <= __alix_user_pointer_base, "kernel image overlaps user VA contract")
+ }
+--- a/Repo/src/kernel/process/process_vm.c
++++ b/Repo/src/kernel/process/process_vm.c
+@@ -7,8 +7,8 @@
+  * array entries, even when their VMA remains accessible. Metadata and in-flight
+  * transactions belong to the process, never to a caller's stack. */
+ #define VM_PAGE_SIZE PAGE_SIZE_BYTES_LOCAL
+-#define VM_THREAD_POOL_BYTES (256ULL * 1024ULL * 1024ULL)
+-#define VM_HEAP_GAP_BYTES (16ULL * 1024ULL * 1024ULL)
++#define VM_THREAD_POOL_BYTES USER_DEFAULT_THREAD_POOL_SIZE
++#define VM_HEAP_GAP_BYTES USER_DEFAULT_VM_HEAP_GAP
+ #define VM_NEW_PAGE ((paddr_t)1)
+ #define VM_EINVAL (-22)
+ #define VM_ENOMEM (-12)
+@@ -630,10 +630,17 @@
+     size_t rounded;
+     if (!vm_call_valid(process) || !vm_length_valid(length, &rounded) ||
+         !vm_protection_valid(protection) || (flags & required) != required || (flags & ~allowed) ||
+-        (address && !vm_range_valid(address, rounded)) ||
++        ((flags & fixed) && !vm_range_valid(address, rounded)) ||
+         ((flags & fixed) && !address) || (flags & fixed) == fixed)
+     {
+         return VM_EINVAL;
++    }
++    /* Nonfixed addresses are advisory. Ignore impossible hints and round
++     * usable hints down to a page; fixed mappings remain exact and strict. */
++    if (!(flags & fixed) && address)
++    {
++        address = align_down_uintptr(address, VM_PAGE_SIZE);
++        if (!vm_range_valid(address, rounded)) address = 0;
+     }
+     protection = vm_protection_normalize(protection);
+     uint64_t irq_flags = vm_lock_ready(process);
+--- a/Repo/src/kernel/process/process_memory.c
++++ b/Repo/src/kernel/process/process_memory.c
+@@ -883,12 +883,14 @@
+     if (!allow_reserved)
+     {
+         uintptr_t stack_bottom = process_stack_bottom(process);
++        uintptr_t guarded_stack_bottom = stack_bottom >= USER_DEFAULT_STACK_GUARD_SIZE
++                                           ? stack_bottom - USER_DEFAULT_STACK_GUARD_SIZE : stack_bottom;
+         if ((process->user_heap_limit > process->user_heap_base &&
+              process_ranges_overlap(aligned_base, aligned_end,
+                                     process->user_heap_base, process->user_heap_limit)) ||
+             (stack_bottom != 0 && process->user_stack_top > stack_bottom &&
+              process_ranges_overlap(aligned_base, aligned_end,
+-                                    stack_bottom, process->user_stack_top)) ||
++                                    guarded_stack_bottom, process->user_stack_top)) ||
+             process_ranges_overlap(aligned_base, aligned_end,
+                                    USER_STUB_CODE_BASE,
+                                    USER_PREEMPT_STUB_BASE + PAGE_SIZE_BYTES_LOCAL))
+--- a/Repo/src/kernel/process/process_api.c
++++ b/Repo/src/kernel/process/process_api.c
+@@ -1735,7 +1735,7 @@
+         info->stack_base = main_thread ? proc->user_stack_top - proc->user_stack_size
+                                        : target->user_stack_base;
+         info->stack_size = main_thread ? proc->user_stack_size : target->user_stack_size;
+-        info->guard_size = main_thread ? 0 : PAGE_SIZE_BYTES_LOCAL;
++        info->guard_size = main_thread ? USER_DEFAULT_STACK_GUARD_SIZE : PAGE_SIZE_BYTES_LOCAL;
+         info->flags = (main_thread ? SYSCALL_THREAD_INFO_MAIN : 0) |
+                       (target->detached ? SYSCALL_THREAD_INFO_DETACHED : 0);
+         info->state = (uint32_t)target->state;
+--- a/Repo/src/kernel/elf.c
++++ b/Repo/src/kernel/elf.c
+@@ -70,6 +70,12 @@
+         return false;
+     }
+ 
++    if (g_mem_layout.user_stack_size > g_mem_layout.user_stack_top ||
++        g_mem_layout.user_stack_top - g_mem_layout.user_stack_size < USER_DEFAULT_STACK_GUARD_SIZE)
++        return false;
++    uintptr_t image_end = g_mem_layout.user_stack_top - g_mem_layout.user_stack_size - USER_DEFAULT_STACK_GUARD_SIZE;
++    if (image_end <= g_mem_layout.user_pointer_base) return false;
++
+     const elf64_ehdr_t *ehdr = (const elf64_ehdr_t *)image;
+     if (ehdr->magic != ELF_MAGIC ||
+         ehdr->class_id != ELF_CLASS_64 ||
+@@ -156,7 +162,7 @@
+         uintptr_t seg_end = seg_start + (uintptr_t)ph->memsz;
+         uintptr_t seg_base = elf_align_down(seg_start);
+         size_t seg_offset = (size_t)(seg_start - seg_base);
+-        if (seg_end == 0 || seg_end - 1 > g_mem_layout.user_pointer_limit ||
++        if (seg_end == 0 || seg_end > image_end || seg_end - 1 > g_mem_layout.user_pointer_limit ||
+             (size_t)ph->memsz > SIZE_MAX - seg_offset ||
+             (size_t)ph->memsz + seg_offset > SIZE_MAX - (ELF_PAGE_SIZE - 1ULL))
+         {
+--- a/Repo/tests/elf_validation_host_test.c
++++ b/Repo/tests/elf_validation_host_test.c
+@@ -51,6 +51,8 @@
+ memory_layout_t g_mem_layout = {
+     .user_pointer_base = USER_DEFAULT_POINTER_BASE,
+     .user_pointer_limit = USER_DEFAULT_POINTER_LIMIT,
++    .user_stack_top = USER_DEFAULT_POINTER_BASE + USER_DEFAULT_STACK_TOP_OFFSET,
++    .user_stack_size = USER_DEFAULT_STACK_SIZE,
+ };
+ 
+ typedef struct
+@@ -176,12 +178,24 @@
+                        "program header range overflow");
+ 
+     image = valid_image();
+-    image.phdr.vaddr = USER_DEFAULT_POINTER_LIMIT - 0xFFF;
++    image.phdr.vaddr = USER_DEFAULT_IMAGE_END - 0x1000;
+     image.phdr.memsz = 0x1000;
+     image.phdr.filesz = sizeof(image.payload);
+     image.ehdr.entry = image.phdr.vaddr;
+     failures += expect(elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
+-                       "segment may end one byte beyond inclusive limit");
++                       "segment may end exactly at the exclusive image limit");
++    image.phdr.memsz += 1;
++    failures += expect(!elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
++                       "segment cannot enter the main-stack guard");
++    image = valid_image();
++    image.phdr.vaddr = USER_DEFAULT_POINTER_LIMIT - 0xFFF;
++    image.ehdr.entry = image.phdr.vaddr;
++    failures += expect(!elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
++                       "ELF cannot occupy high auxiliary or stub addresses");
++    image = valid_image();
++    image.phdr.memsz = 32ULL * 1024 * 1024;
++    failures += expect(elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
++                       "large native image exceeds the old 15MiB ceiling");
+ 
+     struct {
+         test_ehdr_t ehdr;
+--- a/Repo/tests/native_vm_contract_test.py
++++ b/Repo/tests/native_vm_contract_test.py
+@@ -8,7 +8,9 @@
+ def main():
+     production = (ROOT / "src/kernel/process/process_vm.c").read_text()
+     production = "\n".join(line for line in production.splitlines() if not line.startswith("#include"))
+-    program = r'''
++    layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
++                                if line.startswith("#define USER_DEFAULT_"))
++    program = layout_defines + r'''
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <stddef.h>
+@@ -18,9 +20,9 @@
+ #include <setjmp.h>
+ #define CHECK(c) do { if (!(c)) { fprintf(stderr,"native VM check failed line %d: %s\n",__LINE__,#c); exit(1); } } while (0)
+ #define PAGE_SIZE_BYTES_LOCAL 4096UL
+-#define USER_HEAP_BASE 0x102000000UL
+-#define USER_HEAP_SIZE 0x40000000UL
+-#define USER_STUB_CODE_BASE 0x1FFFFE000UL
++#define USER_HEAP_BASE (USER_DEFAULT_POINTER_BASE+USER_DEFAULT_HEAP_BASE_OFFSET)
++#define USER_HEAP_SIZE USER_DEFAULT_HEAP_SIZE
++#define USER_STUB_CODE_BASE (USER_DEFAULT_POINTER_LIMIT+1ULL-8192ULL)
+ #define RFLAGS_IF_BIT 512UL
+ #define SYSCALL_VM_PROT_NONE 0u
+ #define SYSCALL_VM_PROT_READ 1u
+@@ -157,9 +159,31 @@
+     CHECK(process_vm_map(&process,0,4096,0x80,anonymous_flags)==-22);
+     CHECK(process_vm_map(&process,0,4096,3,2)==-22);
+     CHECK(process_vm_map(&process,0,4096,3,anonymous_flags|0x100000)==-22);
+-    CHECK(process_vm_map(&process,0x100000000,4096,3,anonymous_flags)==-22);
++    CHECK(process_vm_map(&process,0x100000000,4096,3,anonymous_flags|16)==-22);
+     CHECK(process_vm_map(&process,0,SIZE_MAX,0,anonymous_flags)==-22);
+     CHECK(metadata_live==0 && physical_live==0);
++    /* Advisory hints must never make a legal nonfixed reservation fail. */
++    const uintptr_t hints[]={1,USER_HEAP_BASE,USER_STUB_CODE_BASE,UINTPTR_MAX};
++    for(unsigned i=0;i<sizeof(hints)/sizeof(hints[0]);++i) {
++        CHECK(process_vm_map(&process,hints[i],4096,0,anonymous_flags)==(int64_t)vm_arena_start());
++        clear_process();
++    }
++    uintptr_t hint=vm_arena_start()+17*4096;
++    CHECK(process_vm_map(&process,hint+123,4096,0,anonymous_flags)==(int64_t)hint);
++    CHECK(process_vm_map(&process,hint,4096,0,anonymous_flags)==(int64_t)vm_arena_start());
++    CHECK(process_vm_map(&process,hint+1,4096,0,anonymous_flags|16)==-22);
++    CHECK(process_vm_map(&process,hint+1,4096,0,anonymous_flags|0x100000)==-22);
++    clear_process();
++    /* Real address scale, no 12GiB backing or leaf preparation. */
++    uintptr_t high=(32ULL<<40)-(6ULL<<30);
++    size_t huge=12ULL<<30;
++    CHECK(process_vm_map(&process,high,huge,0,anonymous_flags)==(int64_t)high);
++    CHECK(!process.vm_areas->pages && physical_live==0 && leaf_count==0);
++    CHECK(process_vm_protect(&process,high,4096,3)==0);
++    CHECK(process_vm_protect(&process,high+huge-4096,4096,3)==0);
++    CHECK(physical_live==2 && resolve(high,true) && resolve(high+huge-4096,true));
++    CHECK(process_vm_unmap(&process,high,huge)==0 && physical_live==0 && metadata_live==0);
++    clear_process();
+ 
+     /* Large reservation stays sparse. Partial commitment and PROT_NONE cycles
+      * preserve existing bytes rather than silently allocating replacement data. */
+@@ -385,7 +409,9 @@
+ '''
+     compile_and_run("native-vm-contract", program)
+     wrappers = (ROOT / "user/lib/mman.c").read_text()
+-    program = r'''
++    layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
++                                if line.startswith("#define USER_DEFAULT_"))
++    program = layout_defines + r'''
+ #include <stdint.h>
+ #include <stddef.h>
+ #include <stdbool.h>
+--- a/Repo/tests/auxiliary_pool_test.py
++++ b/Repo/tests/auxiliary_pool_test.py
+@@ -7,7 +7,9 @@
+ 
+ def main():
+     source = (ROOT / "src/kernel/process/process_memory.c").read_text()
+-    program = r'''
++    layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
++                                if line.startswith("#define USER_DEFAULT_"))
++    program = layout_defines + r'''
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <stddef.h>
+@@ -16,7 +18,7 @@
+ #include <string.h>
+ #define CHECK(c) do { if(!(c)) { fprintf(stderr,"auxiliary pool check failed line %d: %s\n",__LINE__,#c); exit(1); } } while(0)
+ #define PAGE_SIZE_BYTES_LOCAL 4096UL
+-#define POOL_BASE 0x180000000UL
++#define POOL_BASE (USER_DEFAULT_POINTER_LIMIT+1ULL-8192ULL-USER_DEFAULT_THREAD_POOL_SIZE)
+ #define USER_STUB_CODE_BASE (POOL_BASE+16*4096UL)
+ #define RFLAGS_IF_BIT 512UL
+ typedef struct { unsigned unused; } paging_space_t;
+--- a/Repo/tests/vm_reclamation_test.py
++++ b/Repo/tests/vm_reclamation_test.py
+@@ -9,7 +9,9 @@
+ def main():
+     paging = (ROOT / "src/arch/x86/paging.c").read_text()
+     memory = (ROOT / "src/kernel/process/process_memory.c").read_text()
+-    program = r'''
++    layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
++                                if line.startswith("#define USER_DEFAULT_"))
++    program = layout_defines + r'''
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <stddef.h>
+@@ -20,8 +22,8 @@
+ #define CHECK(c) do { if (!(c)) { fprintf(stderr, "VM check failed line %d: %s\n", __LINE__, #c); exit(1); } } while (0)
+ #define SMP_MAX_CPUS 4
+ #define PAGE_SIZE_BYTES_LOCAL 4096UL
+-#define USER_ADDRESS_SPACE_BASE 0x100000000UL
+-#define USER_ADDRESS_SPACE_LIMIT 0x1FFFFFFFFUL
++#define USER_ADDRESS_SPACE_BASE USER_DEFAULT_POINTER_BASE
++#define USER_ADDRESS_SPACE_LIMIT USER_DEFAULT_POINTER_LIMIT
+ #define PROCESS_HEAP_L2_SHIFT 9UL
+ #define PROCESS_HEAP_L2_ENTRIES 512UL
+ #define PROCESS_HEAP_L2_MASK 511UL
+--- a/Repo/tests/cpp_runtime_qemu_test.py
++++ b/Repo/tests/cpp_runtime_qemu_test.py
+@@ -95,7 +95,7 @@
+ 
+ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
+                    arguments=(), expected_fault=None, tcg_cpu=None,
+-                   forbidden_markers=()):
++                   forbidden_markers=(), download_timeout_seconds=10):
+     """Run a real target ELF, requiring its markers and successful shell return."""
+     binary = ROOT / "build/user" / binary_name
+     if not binary.is_file():
+@@ -177,7 +177,7 @@
+             harness.wait_for(runner, "tmp directory", lambda log: command_complete(log, offset), 3)
+             offset = len(harness.read_log())
+             command(f"wget http://10.0.2.2:{port}/test.elf /tmp/test.elf")
+-            harness.wait_for(runner, "test download", lambda log: command_complete(log, offset), 10)
++            harness.wait_for(runner, "test download", lambda log: command_complete(log, offset), download_timeout_seconds)
+             offset = len(harness.read_log())
+             launch = "runelf /tmp/test.elf"
+             if arguments:
+--- a/Repo/docs/kernel/memory.md
++++ b/Repo/docs/kernel/memory.md
+@@ -237,13 +237,29 @@
+ CPUs. `tests/vm_advice_qemu_test.py` also verifies that post-discard write,
+ `PROT_NONE`, and execute violations remain fatal.
+ 
+-The initial VM arena starts 16 MiB above the existing sbrk heap limit and ends
+-256 MiB below the top-of-user-space stubs. That leaves a separate descending
+-thread/TLS pool, while the existing ELF origin, main stack and heap remain at
+-their current addresses. Legacy segment allocation rejects this arena even
+-where no VMA currently exists. The current 4–8 GiB user window provides roughly
+-2.7 GiB of native VM space; larger browser reservations will require the planned
+-address-layout expansion. Stack and TLS allocation now searches existing region
++The native user address window is 4 GiB through 64 TiB minus one, below
++SpiderMonkey's 47-bit pointer ceiling. Static ELF images start at 4 GiB and must
++end before the guard beneath the 8 MiB main stack, whose top is 5 GiB. The brk
++heap reserves 16 GiB starting at 6 GiB; its initial two-level directory costs
++64 KiB, and physical pages are committed as brk grows. Main-stack backing
++metadata costs 16 KiB and its pages are committed on stack growth.
++
++The anonymous VM arena starts 16 MiB above the heap limit and ends beneath an
++8 GiB descending thread/TLS pool. Two stub pages remain at the top of the user
++window. Legacy segment allocation rejects the whole anonymous arena, including
++uncommitted holes. Nonfixed mmap addresses are advisory: usable hints are
++page-rounded, while occupied/out-of-range hints fall back to free space. Fixed
++and NOREPLACE addresses retain strict bounds/alignment checks.
++
++`include/memory_layout.h`, `user/lib/link.ld` and `src/arch/x86/uefi.ld` expose
++the same checked contract. Both linker scripts publish absolute layout symbols
++and reject overlap; ELF validation independently enforces the image ceiling and
++main-stack guard. `make user-layout-contract-test` compares C values with both
++linked symbol sets and proves oversized images fail their linker assertions.
++The separate `ports/zen/layout/user_layout_test.c` fixture contains a real
++32 MiB constant payload and reserves 12 GiB across PML4 entries 63/64, committing
++only eight pages. It checks high syscall copies, eight-CPU protection/TLS and
++high generated code; compilation alone is not guest acceptance. Stack and TLS allocation now searches existing region
+ gaps in the auxiliary pool, preserving a guard page below each allocation. It
+ reuses freed holes instead of permanently consuming a descending cursor. A new
+ stack/TLS mapping also completes a cross-CPU TLB barrier before the new thread
+--- /dev/null
++++ b/Repo/tests/user_layout_contract_test.py
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++"""Compare active C and both ELF linker layout contracts and overlap guards."""
++from pathlib import Path
++import sys
++import tempfile
++
++ROOT=Path(__file__).resolve().parents[1]
++sys.dont_write_bytecode=True
++sys.path.insert(0,str(ROOT/"ports/zen/layout"))
++import check_pending as contract
++
++contract.PENDING=ROOT
++with tempfile.TemporaryDirectory(prefix="alix-layout-contract-") as temporary:
++    contract.linker_contract(Path(temporary))
+--- a/Repo/Makefile
++++ b/Repo/Makefile
+@@ -1292,3 +1292,8 @@
+ USER_DEPFILES := $(shell find $(USER_OBJDIR) -type f -name '*.d' 2>/dev/null)
+ 
+ -include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) $(USER_DEPFILES)
++
++# C constants and both static ELF scripts must describe one address contract.
++.PHONY: user-layout-contract-test
++user-layout-contract-test:
++	python3 tests/user_layout_contract_test.py

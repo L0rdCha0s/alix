@@ -9,7 +9,9 @@ from audio_stream_contract_test import ROOT, compile_and_run, function_definitio
 def main():
     paging = (ROOT / "src/arch/x86/paging.c").read_text()
     memory = (ROOT / "src/kernel/process/process_memory.c").read_text()
-    program = r'''
+    layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
+                                if line.startswith("#define USER_DEFAULT_"))
+    program = layout_defines + r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -20,8 +22,8 @@ def main():
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "VM check failed line %d: %s\n", __LINE__, #c); exit(1); } } while (0)
 #define SMP_MAX_CPUS 4
 #define PAGE_SIZE_BYTES_LOCAL 4096UL
-#define USER_ADDRESS_SPACE_BASE 0x100000000UL
-#define USER_ADDRESS_SPACE_LIMIT 0x1FFFFFFFFUL
+#define USER_ADDRESS_SPACE_BASE USER_DEFAULT_POINTER_BASE
+#define USER_ADDRESS_SPACE_LIMIT USER_DEFAULT_POINTER_LIMIT
 #define PROCESS_HEAP_L2_SHIFT 9UL
 #define PROCESS_HEAP_L2_ENTRIES 512UL
 #define PROCESS_HEAP_L2_MASK 511UL

@@ -2,6 +2,7 @@
 #define PROCESS_INTERNAL_H
 
 #include "process.h"
+#include "process_signal.h"
 
 #include "heap.h"
 #include "arch/x86/segments.h"
@@ -328,11 +329,23 @@ struct thread
     uintptr_t futex_address;
     bool futex_waiting;
     bool futex_notified;
+    bool futex_interrupted;
+    alix_sigset_t signal_mask,signal_pending;
+    alix_siginfo_t signal_info[ALIX_SIGNAL_COUNT];
+    alix_stack_t signal_altstack;
+    struct process_signal_frame *signal_frames;
+    uint64_t signal_sequence;
+    uint64_t signal_jump_epoch;
+    uint32_t signal_depth;
+    int signal_fault_status;
+    bool signal_onstack,signal_sleeping,signal_sleep_interrupted;
+    wait_queue_t signal_wait_queue;
 };
 
 struct process
 {
     uint64_t pid;
+    uint64_t started_monotonic_ticks; /* Immutable creation timestamp. */
     process_state_t state;
     process_lifetime_state_t lifetime_state;
     char name[PROCESS_NAME_MAX];
@@ -342,11 +355,15 @@ struct process
     thread_t *current_thread;
     spinlock_t threads_lock;
     spinlock_t memory_lock;
+    spinlock_t context_lock;
     thread_t *threads;
     uint32_t thread_count;
     uint32_t running_thread_count;
     uint32_t join_waiters;
     uint64_t user_exit_owner_tid;
+    alix_sigaction_t signal_actions[ALIX_SIGNAL_COUNT];
+    alix_sigset_t signal_pending;
+    alix_siginfo_t signal_info[ALIX_SIGNAL_COUNT];
     int exit_status;
     struct process *next;
     int stdout_fd;
@@ -354,11 +371,13 @@ struct process
     uint32_t gid;
     uint64_t runtime_ticks;
     bool is_user;
+    bool kernel_service; /* Immutable after publication; public kill is refused. */
     process_t *parent;
     process_t *first_child;
     process_t *sibling_prev;
     process_t *sibling_next;
-    vfs_node_t *cwd;
+    vfs_node_t *cwd; /* Borrowed compatibility view, protected by cwd_owner. */
+    fd_description_t *cwd_owner;
     process_user_region_t *user_regions;
     struct process_vm_area *vm_areas;
     struct process_vm_transaction *vm_pending;
@@ -422,10 +441,11 @@ typedef struct cpu_usage_counters
 
 extern const uint8_t g_user_exit_stub[7];
 extern const uint8_t g_user_thread_exit_stub[10];
-extern const uint8_t g_user_preempt_stub[66];
+extern const uint8_t g_user_preempt_stub[ALIX_PREEMPT_STUB_SIZE];
+extern const uint8_t g_user_signal_restorer[ALIX_SIGNAL_RESTORER_SIZE];
 #define USER_EXIT_STUB_SIZE    7u
 #define USER_THREAD_EXIT_STUB_SIZE 10u
-#define USER_PREEMPT_STUB_SIZE 66u
+#define USER_PREEMPT_STUB_SIZE ALIX_PREEMPT_STUB_SIZE
 #define USER_THREAD_EXIT_STUB_OFFSET 0x100u
 
 extern process_t *g_process_list;
@@ -725,6 +745,7 @@ void process_free_user_regions(process_t *process);
 bool process_heap_release_from(process_t *process, uintptr_t virt_start);
 void process_reap_retired_memory(void);
 bool process_memory_read_user_u32(process_t *process, uintptr_t address, uint32_t *value_out);
+bool process_vm_contains_locked(process_t *process, uintptr_t address);
 bool process_vm_fault_locked(process_t *process, uintptr_t address, bool write_access, bool execute_access);
 bool process_vm_resolve_locked(process_t *process, uintptr_t address, bool write_access,
                                uint8_t **host_out, size_t *available_out);
@@ -828,11 +849,15 @@ bool thread_fpu_region_valid(const thread_t *thread);
 bool thread_assert_stack_current(thread_t *thread, const char *context);
 /* Caller must hold g_scheduler_lock. */
 bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stats_t *stats);
+/* Ordinary idle context only; skips IRQ-disabled or preempt-guarded calls. */
+void process_reap_deferred_threads(void);
 void thread_stack_watch_maybe_arm(thread_t *thread);
 void thread_registry_add(thread_t *thread);
 void procfs_register_process_priority(process_t *process);
 void procfs_unregister_process(process_t *process);
 void process_destroy_marked(process_t *process);
+bool process_prepare_inherited_context(process_t *process, process_t *parent, bool parentless);
+void process_release_context(process_t *process);
 void thread_debug_check_ownership(const thread_t *thread, const char *where);
 void scheduler_trace(const char *prefix, thread_t *thread);
 void scheduler_log_state_event(const char *tag, const thread_t *thread, const char *where);

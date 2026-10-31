@@ -47,6 +47,11 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
         scheduler_lock_release(flags);
         return SYSCALL_FUTEX_AGAIN;
     }
+    if (process_signal_pending_locked(thread))
+    {
+        scheduler_lock_release(flags);
+        return SYSCALL_FUTEX_INTERRUPTED;
+    }
     if (timeout_ms == 0)
     {
         scheduler_lock_release(flags);
@@ -56,6 +61,7 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
     wait_queue_init(&thread->futex_queue);
     thread->futex_address = address;
     __atomic_store_n(&thread->futex_notified, false, __ATOMIC_RELEASE);
+    thread->futex_interrupted = false;
     thread->futex_waiting = true;
     scheduler_lock_release(flags);
 
@@ -77,10 +83,12 @@ int process_futex_wait(uintptr_t address, uint32_t expected, uint32_t timeout_ms
 
     flags = scheduler_lock_acquire("futex_wait_finish");
     bool notified = futex_notified(thread);
+    bool interrupted = thread->futex_interrupted;
+    thread->futex_interrupted = false;
     thread->futex_waiting = false;
     thread->futex_address = 0;
     scheduler_lock_release(flags);
-    return notified ? SYSCALL_FUTEX_OK : SYSCALL_FUTEX_TIMED_OUT;
+    return interrupted ? SYSCALL_FUTEX_INTERRUPTED : notified ? SYSCALL_FUTEX_OK : SYSCALL_FUTEX_TIMED_OUT;
 }
 
 int process_futex_wake(uintptr_t address, uint32_t max_waiters)

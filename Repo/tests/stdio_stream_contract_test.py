@@ -12,7 +12,7 @@ from audio_stream_contract_test import ROOT, compile_and_run
 def rename(text):
     names = ("FILE", "fpos_t", "stdout", "stderr", "stdin", "fopen", "fclose", "fread", "fwrite",
              "fflush", "fseek", "ftell", "fgetpos", "fsetpos", "rewind", "fputc", "fgetc", "getc",
-             "ungetc", "fgets", "feof", "ferror", "clearerr", "fileno", "fputs", "setbuf", "getchar")
+             "ungetc", "fgets", "feof", "ferror", "clearerr", "fileno", "fputs", "setbuf", "setvbuf", "getchar")
     for name in names:
         text = re.sub(r"\b" + name + r"\b", "native_" + name, text)
     for name in ("read", "write", "lseek", "open", "close", "malloc", "free"):
@@ -40,6 +40,15 @@ def build_program():
 #include <pthread.h>
 #include <sched.h>
 #include <sys/types.h>
+#undef _IONBF
+#undef _IOFBF
+#undef _IOLBF
+#undef BUFSIZ
+#define _IONBF 0
+#define _IOFBF 1
+#define _IOLBF 2
+#define BUFSIZ 4096
+#define ALIX_WAIT_FOREVER UINT32_MAX
 #define CHECK(c) do { if (!(c)) { fprintf(stderr,"stdio contract line %d: %s\n",__LINE__,#c); abort(); } } while(0)
 #define SYSCALL_OPEN_READ 1u
 #define SYSCALL_OPEN_WRITE 2u
@@ -64,18 +73,28 @@ static void alix_mutex_unlock(alix_mutex_t *mutex) {
     mutex->state=0; held_stream=NULL; CHECK(!pthread_cond_broadcast(&mutex_changed));
     CHECK(!pthread_mutex_unlock(&mutex_guard));
 }
+static int sys_futex_wait(volatile uint32_t *address,uint32_t expected,uint32_t timeout) {
+    CHECK(!held_stream && timeout==ALIX_WAIT_FOREVER);
+    if(__atomic_load_n(address,__ATOMIC_ACQUIRE)==expected)sched_yield();
+    return 0;
+}
+static int sys_futex_wake(volatile uint32_t *address,uint32_t maximum) {
+    CHECK(address && maximum==UINT32_MAX); return 0;
+}
 '''
     code += rename(types + "\n" + internal) + r'''
 static size_t model_file_allocations;
 static bool fail_file_allocation;
 static void *model_malloc(size_t bytes) {
     if (fail_file_allocation) { fail_file_allocation=false; test_errno=ENOMEM; return NULL; }
-    void *value=malloc(bytes); CHECK(value); ++model_file_allocations; return value;
+    void *value=malloc(bytes); CHECK(value); __atomic_add_fetch(&model_file_allocations,1,__ATOMIC_RELAXED); return value;
 }
-static void model_free(void *value) { CHECK(value && model_file_allocations); --model_file_allocations; free(value); }
+static void model_free(void *value) { CHECK(value && __atomic_fetch_sub(&model_file_allocations,1,__ATOMIC_RELAXED)); free(value); }
 typedef struct {
     unsigned char *data; size_t size, capacity; int64_t position;
     bool opened, seekable, raw_errors, yield_io, zero_write, overread, overwrite;
+    bool block_write;
+    unsigned write_entered, release_write;
     size_t read_chunk, write_chunk;
     unsigned read_calls, write_calls, seek_calls, close_calls;
     unsigned read_fail_after, write_fail_after;
@@ -126,6 +145,10 @@ static ssize_t model_read(int fd,void *buffer,size_t count) {
 }
 static ssize_t model_write(int fd,const void *buffer,size_t count) {
     model_file_t *file=model_file(fd); CHECK(file->opened && file->stream && held_stream==&file->stream->mutex);
+    if(file->block_write) {
+        __atomic_store_n(&file->write_entered,1,__ATOMIC_RELEASE);
+        while(!__atomic_load_n(&file->release_write,__ATOMIC_ACQUIRE))sched_yield();
+    }
     ++file->write_calls; if (file->yield_io) sched_yield();
     if (file->write_calls>file->write_fail_after) return model_error(file,file->write_error ? file->write_error : EIO);
     if (file->zero_write) return 0;

@@ -8,6 +8,52 @@
 
 typedef struct fd_description fd_description_t;
 typedef struct fd_table fd_table_t;
+typedef struct fd_retirement_queue fd_retirement_queue_t;
+
+#define FD_RETIREMENT_MAX_OBJECTS 65536u
+typedef struct
+{
+    size_t capacity, live, pending, drainers;
+    uint32_t references;
+    bool closed;
+} fd_retirement_status_t;
+
+/* Opt-in deferred destruction. Admission counts every live table/description,
+ * in-progress allocation and queued finalizer. Saturation only rejects new
+ * objects; close, replacement and final put allocate nothing and cannot fail
+ * from saturation. Deferred tables accept only descriptions of the same queue.
+ * Constructors must run on a persistent protected worker or inside a bounded
+ * preemption guard: allocation reservations cannot survive an abandoned caller.
+ * Queue construction and successful reference acquisitions (get/pin) likewise
+ * require caller protection until the new ownership is registered/published.
+ * Deferred release/remove/replacement/shutdown operations internally guard the
+ * whole detach-to-enqueue interval. Callers must still protect ownership
+ * transfer into/out of their registered cleanup record (including pin outputs)
+ * with their own guard; the module cannot register a caller's local references.
+ * Final puts enqueue rather than calling close or freeing. Close returns zero
+ * after detaching; asynchronous destructor return codes are not reported.
+ * The existing constructors preserve synchronous destruction semantics.
+ *
+ * The creating owner retains the queue's base reference until destroy. Every
+ * concurrent worker/API user must own a get reference or be protected by the
+ * owner's external quiescence protocol. put releases only additional refs.
+ * Objects and allocation reservations independently keep destroy busy. No raw
+ * pointer may be resurrected. Shutdown stops admission, not finalization; after
+ * all API users are quiescent, destroy requires shutdown, no objects/drainers
+ * and only the creating owner's reference. */
+fd_retirement_queue_t *fd_retirement_queue_create(size_t capacity);
+bool fd_retirement_queue_get(fd_retirement_queue_t *queue);
+int fd_retirement_queue_put(fd_retirement_queue_t *queue);
+void fd_retirement_queue_shutdown(fd_retirement_queue_t *queue);
+int fd_retirement_queue_snapshot(fd_retirement_queue_t *queue, fd_retirement_status_t *out);
+int fd_retirement_queue_destroy(fd_retirement_queue_t *queue);
+/* Only persistent protected cleanup workers may drain, without any caller-held
+ * lock/preemption guard. Callbacks may block/reenter; detached finalizers must
+ * never be abandoned. budget bounds the number of objects, not callback time. */
+size_t fd_retirement_queue_drain(fd_retirement_queue_t *queue, size_t budget);
+fd_description_t *fd_description_create_deferred(const fd_ops_t *ops, void *context,
+                                                 fd_retirement_queue_t *queue);
+fd_table_t *fd_table_create_deferred(size_t capacity, fd_retirement_queue_t *queue);
 
 /* Standalone ownership primitives; the legacy global FD API is unchanged.
  * Every API caller must own a table/description reference, or acquire one
@@ -19,7 +65,7 @@ typedef struct fd_table fd_table_t;
  * owns context until the final close callback; on failure the caller retains
  * context. Shared offsets and operation serialization belong to that context.
  * All callbacks run without module locks. Functions which release references
- * must also be called without caller-held locks, from an execution context
+ * on synchronous objects must also run without caller-held locks, from an execution context
  * which cannot be abandoned during final cleanup (for example an owned I/O
  * worker). The module does not make an existing callback cancellation-safe.
  */
@@ -29,6 +75,8 @@ bool fd_description_get(fd_description_t *description);
 int fd_description_put(fd_description_t *description);
 const fd_ops_t *fd_description_ops(const fd_description_t *description);
 void *fd_description_context(const fd_description_t *description);
+/* Immutable identity query; caller holds a description reference. */
+bool fd_description_is_deferred_to(const fd_description_t *description, const fd_retirement_queue_t *queue);
 
 fd_table_t *fd_table_create(size_t capacity);
 bool fd_table_get(fd_table_t *table);

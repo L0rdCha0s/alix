@@ -1517,6 +1517,18 @@ static char *libc_strdup(const char *src)
     return libc_strdup_len(src, strlen(src));
 }
 
+char *strdup(const char *src)
+{
+    if (!src)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+    char *copy = libc_strdup(src);
+    if (!copy) errno = ENOMEM;
+    return copy;
+}
+
 static bool libc_parse_u32_range(const char *start, const char *end, uint32_t *out)
 {
     if (!start || !end || !out || start >= end)
@@ -2475,6 +2487,21 @@ int vfprintf(FILE *stream, const char *format, va_list args)
     return result;
 }
 
+int vprintf(const char *format, va_list args)
+{
+    return vfprintf(stdout, format, args);
+}
+
+void perror(const char *prefix)
+{
+    int saved_errno = errno;
+    const char *message = strerror(saved_errno);
+    if (prefix && *prefix)
+        (void)fprintf(stderr, "%s: %s\n", prefix, message);
+    else
+        (void)fprintf(stderr, "%s\n", message);
+}
+
 int fprintf(FILE *stream, const char *format, ...)
 {
     va_list args;
@@ -2690,14 +2717,102 @@ void *calloc(size_t count, size_t size)
 }
 
 #ifndef TTF_HOST_BUILD
-static FILE g_stdout_obj = { .fd = 1, .access_flags = SYSCALL_OPEN_WRITE };
-static FILE g_stderr_obj = { .fd = 2, .access_flags = SYSCALL_OPEN_WRITE };
-static FILE g_stdin_obj = { .fd = 0, .access_flags = SYSCALL_OPEN_READ };
+static FILE g_stdout_obj;
+static FILE g_stdin_obj;
+static FILE g_stderr_obj;
+static FILE g_stdout_obj = { .fd = 1, .access_flags = SYSCALL_OPEN_WRITE,
+                            .registry_id = 1, .registry_next = &g_stderr_obj };
+static FILE g_stderr_obj = { .fd = 2, .access_flags = SYSCALL_OPEN_WRITE,
+                            .registry_id = 2, .registry_next = &g_stdin_obj };
+static FILE g_stdin_obj = { .fd = 0, .access_flags = SYSCALL_OPEN_READ, .registry_id = 3 };
 FILE *stdout = &g_stdout_obj;
 FILE *stderr = &g_stderr_obj;
 FILE *stdin = &g_stdin_obj;
+static FILE *g_file_registry = &g_stdout_obj;
+static alix_mutex_t g_file_registry_lock;
+static uint64_t g_file_registry_id = 3;
 
 static void file_io_errno(int64_t result);
+static int file_flush_output_unlocked(FILE *stream);
+
+static bool file_register(FILE *stream)
+{
+    alix_mutex_lock(&g_file_registry_lock);
+    bool okay = g_file_registry_id != UINT64_MAX;
+    if (okay)
+    {
+        stream->registry_id = ++g_file_registry_id;
+        stream->registry_next = g_file_registry;
+        g_file_registry = stream;
+    }
+    alix_mutex_unlock(&g_file_registry_lock);
+    if (!okay) errno = EOVERFLOW;
+    return okay;
+}
+
+static void file_unregister(FILE *stream)
+{
+    alix_mutex_lock(&g_file_registry_lock);
+    FILE **cursor = &g_file_registry;
+    while (*cursor && *cursor != stream) cursor = &(*cursor)->registry_next;
+    if (*cursor) *cursor = stream->registry_next;
+    stream->registry_next = NULL;
+    alix_mutex_unlock(&g_file_registry_lock);
+}
+
+/* Global flushing uses pins, never a registry lock held across file I/O.
+ * Monotonic IDs allow an allocation-free snapshot walk despite concurrent
+ * close/unlink. Streams opened after the walk begins belong to a later flush. */
+static int file_flush_all(bool lines_only, FILE *except)
+{
+    alix_mutex_lock(&g_file_registry_lock);
+    uint64_t ceiling = g_file_registry_id;
+    alix_mutex_unlock(&g_file_registry_lock);
+    uint64_t cursor = 0;
+    int result = 0, first_error = 0;
+    for (;;)
+    {
+        alix_mutex_lock(&g_file_registry_lock);
+        FILE *selected = NULL;
+        for (FILE *item = g_file_registry; item; item = item->registry_next)
+            if (item != except && item->registry_id > cursor && item->registry_id <= ceiling &&
+                (!selected || item->registry_id < selected->registry_id)) selected = item;
+        if (!selected) { alix_mutex_unlock(&g_file_registry_lock); break; }
+        cursor = selected->registry_id;
+        if (__atomic_load_n(&selected->flush_pins, __ATOMIC_RELAXED) == UINT32_MAX)
+        {
+            result = EOF;
+            if (!first_error) first_error = EOVERFLOW;
+            alix_mutex_unlock(&g_file_registry_lock);
+            continue;
+        }
+        __atomic_add_fetch(&selected->flush_pins, 1u, __ATOMIC_RELAXED);
+        alix_mutex_unlock(&g_file_registry_lock);
+        alix_mutex_lock(&selected->mutex);
+        if (selected->fd >= 0 && (!lines_only || selected->buffering == _IOLBF) &&
+            file_flush_output_unlocked(selected) != 0)
+        {
+            result = EOF;
+            if (!first_error) first_error = errno;
+        }
+        alix_mutex_unlock(&selected->mutex);
+        alix_mutex_lock(&g_file_registry_lock);
+        if (__atomic_sub_fetch(&selected->flush_pins, 1u, __ATOMIC_RELEASE) == 0)
+            (void)sys_futex_wake(&selected->flush_pins, UINT32_MAX);
+        alix_mutex_unlock(&g_file_registry_lock);
+    }
+    if (first_error) errno = first_error;
+    return result;
+}
+
+void __alix_stdio_before_read(FILE *stream)
+{
+    if (!stream) return;
+    alix_mutex_lock(&stream->mutex);
+    bool flush_lines = stream->buffering != _IOFBF;
+    alix_mutex_unlock(&stream->mutex);
+    if (flush_lines) (void)file_flush_all(true, stream);
+}
 
 static FILE *file_alloc(int fd, uint64_t flags, bool append)
 {
@@ -2711,6 +2826,7 @@ static FILE *file_alloc(int fd, uint64_t flags, bool append)
     stream->access_flags = flags;
     stream->append = append;
     alix_mutex_init(&stream->mutex);
+    if (!file_register(stream)) { free(stream); return NULL; }
     return stream;
 }
 
@@ -2815,33 +2931,40 @@ FILE *fopen(const char *path, const char *mode)
 
 int fclose(FILE *stream)
 {
-    if (!stream)
-    {
-        errno = EBADF;
-        return EOF;
-    }
-    /* The caller must exclude concurrent fclose/use of this FILE's lifetime.
-     * The stream mutex serializes operations, not access to freed pointers. */
+    if (!stream) { errno = EBADF; return EOF; }
+    /* Ordinary concurrent use/fclose remains the caller's lifetime duty.
+     * Registry pins separately protect an in-flight fflush(NULL) traversal. */
+    file_unregister(stream);
     alix_mutex_lock(&stream->mutex);
-    int fd = stream->fd;
     int saved_errno = errno;
+    int failure = file_flush_output_unlocked(stream) == 0 ? 0 : errno;
+    int fd = stream->fd;
     errno = 0;
-    int res = (fd >= 0) ? close(fd) : -EBADF;
-    if (res < 0)
+    int result = fd >= 0 ? close(fd) : -EBADF;
+    if (result < 0)
     {
-        file_io_errno(res);
-        stream->error = 1;
+        file_io_errno(result);
+        if (!failure) failure = errno;
     }
-    else errno = saved_errno;
     stream->fd = -1;
     stream->access_flags = 0;
     stream->pushback_pending = false;
+    if (stream->buffer) free(stream->buffer);
+    stream->buffer = NULL;
+    stream->buffer_capacity = stream->read_position = stream->read_end = stream->write_length = 0;
+    if (failure) stream->error = 1;
     alix_mutex_unlock(&stream->mutex);
-    if (stream != stdout && stream != stderr && stream != stdin)
+    for (;;)
     {
-        free(stream);
+        alix_mutex_lock(&g_file_registry_lock);
+        uint32_t pins = __atomic_load_n(&stream->flush_pins, __ATOMIC_ACQUIRE);
+        alix_mutex_unlock(&g_file_registry_lock);
+        if (!pins) break;
+        (void)sys_futex_wait(&stream->flush_pins, pins, ALIX_WAIT_FOREVER);
     }
-    return res < 0 ? EOF : 0;
+    if (stream != &g_stdout_obj && stream != &g_stderr_obj && stream != &g_stdin_obj) free(stream);
+    errno = failure ? failure : saved_errno;
+    return failure ? EOF : 0;
 }
 
 static void file_io_errno(int64_t result)
@@ -2865,12 +2988,16 @@ static int64_t file_lseek_unlocked(FILE *stream, int64_t offset, int whence)
 
 static int file_sync_pushback_unlocked(FILE *stream)
 {
-    if (!stream->pushback_pending) return 0;
-    if (file_lseek_unlocked(stream, -1, SYSCALL_SEEK_CUR) < 0)
+    size_t unread = stream->read_end - stream->read_position;
+    if (stream->pushback_pending && __builtin_add_overflow(unread, (size_t)1, &unread))
+    { errno = EOVERFLOW; stream->error = 1; return EOF; }
+    if (unread && (unread > INT64_MAX || file_lseek_unlocked(stream, -(int64_t)unread, SEEK_CUR) < 0))
     {
+        if (unread > INT64_MAX) errno = EOVERFLOW;
         stream->error = 1;
         return EOF;
     }
+    stream->read_position = stream->read_end = 0;
     stream->pushback_pending = false;
     return 0;
 }
@@ -2879,6 +3006,7 @@ bool __alix_stdio_orient_unlocked(FILE *stream, int orientation)
 {
     if (stream->fd < 0) { errno = EBADF; stream->error = 1; return false; }
     int desired = orientation > 0 ? 1 : -1;
+    stream->io_started = true;
     if (!stream->orientation) stream->orientation = desired;
     if (stream->orientation != desired)
     {
@@ -2893,45 +3021,54 @@ size_t __alix_stdio_read_unlocked(FILE *stream, void *ptr, size_t total, bool *f
 {
     *failed = false;
     if (stream->fd < 0 || !(stream->access_flags & SYSCALL_OPEN_READ))
-    {
-        errno = EBADF; stream->error = 1; *failed = true; return 0;
-    }
-    size_t read_bytes = 0;
-    uint8_t *dst = (uint8_t *)ptr;
+    { errno = EBADF; stream->error = 1; *failed = true; return 0; }
+    stream->io_started = true;
+    if (file_flush_output_unlocked(stream) != 0) { *failed = true; return 0; }
+    size_t done = 0;
+    unsigned char *destination = ptr;
     if (stream->pushback_pending && total)
     {
-        dst[read_bytes++] = stream->pushback;
+        destination[done++] = stream->pushback;
         stream->pushback_pending = false;
     }
-    if (stream->eof) return read_bytes;
-    while (read_bytes < total)
+    while (done < total)
     {
-        int saved_errno = errno;
-        errno = 0;
-        ssize_t got = read(stream->fd, dst + read_bytes, total - read_bytes);
-        if (got <= 0)
+        if (stream->buffering != _IONBF && stream->read_position < stream->read_end)
         {
-            if (got == 0)
-            {
-                stream->eof = 1;
-                errno = saved_errno;
-            }
-            else
-            {
-                stream->error = 1;
-                file_io_errno(got);
-                *failed = true;
-            }
-            break;
+            size_t count = stream->read_end - stream->read_position;
+            if (count > total - done) count = total - done;
+            memcpy(destination + done, stream->buffer + stream->read_position, count);
+            stream->read_position += count;
+            done += count;
+            if (*failed) break;
+            continue;
         }
-        errno = saved_errno;
-        if ((size_t)got > total - read_bytes)
+        if (stream->eof || *failed) break;
+        stream->read_position = stream->read_end = 0;
+        bool buffered = stream->buffering != _IONBF;
+        do
         {
-            errno = EIO; stream->error = 1; *failed = true; break;
-        }
-        read_bytes += (size_t)got;
+            size_t want = buffered ? stream->buffer_capacity - stream->read_end : total - done;
+            if (buffered && stream->buffering == _IOLBF) want = 1;
+            unsigned char *target = buffered ? stream->buffer + stream->read_end : destination + done;
+            int saved_errno = errno;
+            errno = 0;
+            ssize_t got = read(stream->fd, target, want);
+            if (got <= 0)
+            {
+                if (!got) { stream->eof = 1; errno = saved_errno; }
+                else { file_io_errno(got); stream->error = 1; *failed = true; }
+                break;
+            }
+            errno = saved_errno;
+            if ((size_t)got > want)
+            { errno = EIO; stream->error = 1; *failed = true; break; }
+            if (!buffered) { done += (size_t)got; break; }
+            stream->read_end += (size_t)got;
+            if (stream->buffering != _IOLBF || target[got - 1] == '\n') break;
+        } while (stream->read_end < stream->buffer_capacity);
     }
-    return read_bytes;
+    return done;
 }
 
 static size_t file_read_bytes_unlocked(FILE *stream, void *ptr, size_t total, bool *failed)
@@ -2940,45 +3077,77 @@ static size_t file_read_bytes_unlocked(FILE *stream, void *ptr, size_t total, bo
     return __alix_stdio_read_unlocked(stream, ptr, total, failed);
 }
 
-size_t __alix_stdio_write_unlocked(FILE *stream, const void *ptr, size_t total)
+static size_t file_write_raw_unlocked(FILE *stream, const void *ptr, size_t total)
 {
-    if (!total) return 0;
-    if (stream->fd < 0 || !(stream->access_flags & SYSCALL_OPEN_WRITE))
-    {
-        errno = EBADF; stream->error = 1; return 0;
-    }
-    if (!ptr) { errno = EINVAL; stream->error = 1; return 0; }
-    if (stream->append)
-    {
-        if (file_lseek_unlocked(stream, 0, SYSCALL_SEEK_END) < 0)
-        {
-            stream->error = 1;
-            return 0;
-        }
-        stream->pushback_pending = false;
-    }
-    else if (file_sync_pushback_unlocked(stream) != 0) return 0;
+    if (stream->append && file_lseek_unlocked(stream, 0, SEEK_END) < 0)
+    { stream->error = 1; return 0; }
     size_t written = 0;
-    const uint8_t *src = (const uint8_t *)ptr;
     while (written < total)
     {
         int saved_errno = errno;
         errno = 0;
-        ssize_t out = write(stream->fd, src + written, total - written);
-        if (out <= 0)
-        {
-            stream->error = 1;
-            file_io_errno(out);
-            break;
-        }
+        ssize_t count = write(stream->fd, (const unsigned char *)ptr + written, total - written);
+        if (count <= 0) { file_io_errno(count); stream->error = 1; break; }
         errno = saved_errno;
-        if ((size_t)out > total - written)
-        {
-            errno = EIO; stream->error = 1; break;
-        }
-        written += (size_t)out;
+        if ((size_t)count > total - written)
+        { errno = EIO; stream->error = 1; break; }
+        written += (size_t)count;
     }
     return written;
+}
+
+static int file_flush_output_unlocked(FILE *stream)
+{
+    if (!stream->write_length) return 0;
+    size_t written = file_write_raw_unlocked(stream, stream->buffer, stream->write_length);
+    stream->write_length -= written;
+    if (written && stream->write_length) memmove(stream->buffer, stream->buffer + written, stream->write_length);
+    return stream->write_length ? EOF : 0;
+}
+
+size_t __alix_stdio_write_unlocked(FILE *stream, const void *ptr, size_t total)
+{
+    if (!total) return 0;
+    if (stream->fd < 0 || !(stream->access_flags & SYSCALL_OPEN_WRITE))
+    { errno = EBADF; stream->error = 1; return 0; }
+    if (!ptr) { errno = EINVAL; stream->error = 1; return 0; }
+    stream->io_started = true;
+    if (stream->append)
+    {
+        stream->read_position = stream->read_end = 0;
+        stream->pushback_pending = false;
+    }
+    else if (file_sync_pushback_unlocked(stream) != 0) return 0;
+    if (stream->buffering == _IONBF) return file_write_raw_unlocked(stream, ptr, total);
+    const unsigned char *bytes = ptr;
+    size_t accepted = 0;
+    while (accepted < total)
+    {
+        if (stream->write_length == stream->buffer_capacity && file_flush_output_unlocked(stream) != 0) break;
+        size_t count = stream->buffer_capacity - stream->write_length;
+        if (count > total - accepted) count = total - accepted;
+        bool newline = false;
+        if (stream->buffering == _IOLBF)
+        {
+            const unsigned char *end = memchr(bytes + accepted, '\n', count);
+            if (end) { count = (size_t)(end - (bytes + accepted)) + 1; newline = true; }
+        }
+        size_t previous = stream->write_length;
+        memcpy(stream->buffer + previous, bytes + accepted, count);
+        stream->write_length += count;
+        if ((newline || stream->write_length == stream->buffer_capacity) && file_flush_output_unlocked(stream) != 0)
+        {
+            size_t delivered = previous + count - stream->write_length;
+            /* Keep only earlier accepted bytes on failure. Newly supplied
+             * unwritten bytes are not reported accepted or silently duplicated
+             * if the caller retries after clearing the stream error. */
+            stream->write_length = delivered < previous ? previous - delivered : 0;
+            if (delivered > previous) accepted += delivered - previous;
+            break;
+        }
+        accepted += count;
+    }
+    return accepted;
 }
 
 /* Caller holds stream->mutex. Also used by the formatted-output sink. */
@@ -2992,6 +3161,7 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
 {
     if (!size || !nmemb) return 0;
     if (!stream) { errno = EBADF; return 0; }
+    __alix_stdio_before_read(stream);
     alix_mutex_lock(&stream->mutex);
     size_t total = 0, bytes = 0;
     if (__builtin_mul_overflow(size, nmemb, &total)) { errno = EOVERFLOW; stream->error = 1; }
@@ -3019,12 +3189,12 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
 
 int fflush(FILE *stream)
 {
-    /* Output is unbuffered. Global output flushing must not discard input
-     * pushback, including on update streams whose latest operation was input. */
-    if (!stream) return 0;
+    if (!stream) return file_flush_all(false, NULL);
     alix_mutex_lock(&stream->mutex);
+    stream->io_started = true;
     int result;
     if (stream->fd < 0) { errno = EBADF; stream->error = 1; result = EOF; }
+    else if (file_flush_output_unlocked(stream) != 0) result = EOF;
     else result = file_sync_pushback_unlocked(stream);
     alix_mutex_unlock(&stream->mutex);
     return result;
@@ -3032,34 +3202,36 @@ int fflush(FILE *stream)
 
 static int file_seek_unlocked(FILE *stream, int64_t offset, int whence)
 {
+    stream->io_started = true;
     if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END)
+    { errno = EINVAL; return -1; }
+    if (file_flush_output_unlocked(stream) != 0) return -1;
+    if (whence == SEEK_CUR)
     {
-        errno = EINVAL;
-        return -1;
-    }
-    if (whence == SEEK_CUR && stream->pushback_pending &&
-        __builtin_sub_overflow(offset, (int64_t)1, &offset))
-    {
-        errno = EOVERFLOW;
-        return -1;
+        size_t unread = stream->read_end - stream->read_position;
+        if ((stream->pushback_pending && __builtin_add_overflow(unread, (size_t)1, &unread)) ||
+            unread > INT64_MAX || __builtin_sub_overflow(offset, (int64_t)unread, &offset))
+        { errno = EOVERFLOW; return -1; }
     }
     if (file_lseek_unlocked(stream, offset, whence) < 0) return -1;
     stream->eof = 0;
     stream->pushback_pending = false;
+    stream->read_position = stream->read_end = 0;
     return 0;
 }
 
 static int64_t file_tell_unlocked(FILE *stream)
 {
-    int64_t position = file_lseek_unlocked(stream, 0, SYSCALL_SEEK_CUR);
+    stream->io_started = true;
+    int64_t position = file_lseek_unlocked(stream, 0, stream->append && stream->write_length ? SEEK_END : SEEK_CUR);
     if (position < 0) return -1;
-    if (stream->pushback_pending)
-    {
-        /* Position after pushback at offset zero is unspecified. Report an
-         * unrepresentable position without changing the pending byte. */
-        if (!position) { errno = EINVAL; return -1; }
-        --position;
-    }
+    size_t unread = stream->read_end - stream->read_position;
+    if ((stream->pushback_pending && __builtin_add_overflow(unread, (size_t)1, &unread)) || unread > INT64_MAX ||
+        position < (int64_t)unread)
+    { errno = EINVAL; return -1; }
+    position -= (int64_t)unread;
+    if (stream->write_length > INT64_MAX || __builtin_add_overflow(position, (int64_t)stream->write_length, &position))
+    { errno = EOVERFLOW; return -1; }
     return position;
 }
 
@@ -3129,6 +3301,7 @@ static int file_getc_unlocked(FILE *stream, bool *failed)
 int fgetc(FILE *stream)
 {
     if (!stream) { errno = EBADF; return EOF; }
+    __alix_stdio_before_read(stream);
     alix_mutex_lock(&stream->mutex);
     bool failed;
     int result = file_getc_unlocked(stream, &failed);
@@ -3173,6 +3346,7 @@ char *fgets(char *s, int size, FILE *stream)
         errno = !stream ? EBADF : EINVAL;
         return NULL;
     }
+    __alix_stdio_before_read(stream);
     alix_mutex_lock(&stream->mutex);
     if (size == 1)
     {
@@ -3258,10 +3432,34 @@ int fputs(const char *s, FILE *stream)
     return (fwrite(s, 1, len, stream) == len) ? 0 : -1;
 }
 
+int setvbuf(FILE *stream, char *buf, int mode, size_t size)
+{
+    if (!stream) { errno = EBADF; return -1; }
+    if (mode != _IONBF && mode != _IOFBF && mode != _IOLBF) { errno = EINVAL; return -1; }
+    if (mode != _IONBF && buf && !size) { errno = EINVAL; return -1; }
+    alix_mutex_lock(&stream->mutex);
+    if (stream->fd < 0 || stream->io_started)
+    {
+        errno = stream->fd < 0 ? EBADF : EBUSY;
+        alix_mutex_unlock(&stream->mutex);
+        return -1;
+    }
+    size_t capacity = mode == _IONBF ? 0 : size ? size : BUFSIZ;
+    /* C permits the supplied array to be unused. Always owning heap storage
+     * avoids retaining a caller stack that another stream user could access. */
+    unsigned char *buffer = capacity ? malloc(capacity) : NULL;
+    if (capacity && !buffer) { errno = ENOMEM; alix_mutex_unlock(&stream->mutex); return -1; }
+    if (stream->buffer) free(stream->buffer);
+    stream->buffer = buffer;
+    stream->buffer_capacity = capacity;
+    stream->buffering = mode;
+    alix_mutex_unlock(&stream->mutex);
+    return 0;
+}
+
 void setbuf(FILE *stream, char *buf)
 {
-    (void)stream;
-    (void)buf;
+    (void)setvbuf(stream, buf, buf ? _IOFBF : _IONBF, BUFSIZ);
 }
 
 int getchar(void)
@@ -3341,8 +3539,17 @@ int fstat(int fd, struct stat *st)
     {
         return res;
     }
+    uint32_t mode;
+    switch (tmp.type)
+    {
+        case SYSCALL_NODE_TYPE_DIR: mode = S_IFDIR; break;
+        case SYSCALL_NODE_TYPE_FILE: mode = S_IFREG; break;
+        case SYSCALL_NODE_TYPE_BLOCK: mode = S_IFBLK; break;
+        case SYSCALL_NODE_TYPE_SYMLINK: mode = S_IFLNK; break;
+        default: errno = EIO; return -1;
+    }
     st->st_size = tmp.size_bytes;
-    st->st_mode = 0;
+    st->st_mode = mode;
     st->st_type = tmp.type;
     st->st_atime = tmp.atime;
     st->st_mtime = tmp.mtime;
@@ -3807,6 +4014,7 @@ void exit(int status)
             (*--hook)();
         }
     }
+    (void)fflush(NULL);
 #endif
     sys_exit(status);
     for (;;)
@@ -3869,7 +4077,7 @@ void alix_mutex_lock(alix_mutex_t *mutex)
             /* The host test syscall adapter has no kernel wait queues. */
             (void)sys_yield();
         }
-        else if (result != SYSCALL_FUTEX_OK && result != SYSCALL_FUTEX_AGAIN)
+        else if (result != SYSCALL_FUTEX_OK && result != SYSCALL_FUTEX_AGAIN && result != -EINTR)
         {
             serial_printf("libc: mutex wait failed result=%d\n", result);
             exit(1);
@@ -3914,7 +4122,21 @@ int alix_cond_timedwait(alix_cond_t *condition, alix_mutex_t *mutex, uint32_t ti
      * detected by the kernel's expected-value check instead of being lost. */
     uint32_t sequence = __atomic_load_n(&condition->sequence, __ATOMIC_ACQUIRE);
     alix_mutex_unlock(mutex);
-    int result = sys_futex_wait(&condition->sequence, sequence, timeout_ms);
+    uint64_t now = sys_monotonic_millis();
+    uint64_t deadline = timeout_ms > UINT64_MAX - now ? UINT64_MAX : now + timeout_ms;
+    uint32_t remaining = timeout_ms;
+    int result;
+    for (;;)
+    {
+        result = sys_futex_wait(&condition->sequence, sequence, remaining);
+        if (result != -EINTR) break;
+        if (timeout_ms != ALIX_WAIT_FOREVER)
+        {
+            now = sys_monotonic_millis();
+            if (now >= deadline) { result = SYSCALL_FUTEX_TIMED_OUT; break; }
+            remaining = (uint32_t)(deadline - now);
+        }
+    }
     alix_mutex_lock(mutex);
     return result == SYSCALL_FUTEX_AGAIN ? SYSCALL_FUTEX_OK : result;
 }
@@ -4109,7 +4331,7 @@ int alix_call_once(alix_once_t *once, void (*initialize)(void))
         {
             sys_yield();
         }
-        else if (status != 0 && status != SYSCALL_FUTEX_AGAIN)
+        else if (status != 0 && status != SYSCALL_FUTEX_AGAIN && status != -EINTR)
         {
             return status;
         }
@@ -4410,7 +4632,10 @@ void _Exit(int status)
 
 void abort(void)
 {
-    raise(SIGABRT);
+    sigset_t set;
+    (void)sigemptyset(&set); (void)sigaddset(&set, SIGABRT);
+    (void)sigprocmask(SIG_UNBLOCK, &set, NULL);
+    (void)raise(SIGABRT);
     sys_exit(134);
 }
 
@@ -4590,20 +4815,40 @@ int nanosleep(const struct timespec *duration, struct timespec *remaining)
 {
     if (!duration || duration->tv_sec < 0 || duration->tv_nsec < 0 || duration->tv_nsec >= 1000000000L)
     { errno = EINVAL; return -1; }
-    uint64_t seconds = (uint64_t)duration->tv_sec;
-    while (seconds > 4294967u)
+    time_t seconds = duration->tv_sec;
+    long nanoseconds = duration->tv_nsec;
+    const uint32_t chunk_seconds = 4294967u;
+    while (seconds >= chunk_seconds)
     {
-        if (sys_sleep_ms(4294967000u) != 0) { errno = EINTR; return -1; }
-        seconds -= 4294967u;
+        uint32_t left = 0;
+        int status = sys_sleep_interruptible(chunk_seconds * 1000u, &left);
+        if (status < 0)
+        {
+            if (status == -EINTR && remaining)
+            {
+                remaining->tv_sec = seconds - chunk_seconds + left / 1000u;
+                remaining->tv_nsec = nanoseconds + (long)(left % 1000u) * 1000000L;
+                if (remaining->tv_nsec >= 1000000000L) { ++remaining->tv_sec; remaining->tv_nsec -= 1000000000L; }
+            }
+            errno = -status; return -1;
+        }
+        seconds -= chunk_seconds;
     }
-    uint64_t milliseconds = seconds * 1000u + ((uint64_t)duration->tv_nsec + 999999u) / 1000000u;
-    while (milliseconds > (uint32_t)-1)
+    uint32_t milliseconds = (uint32_t)seconds * 1000u + (uint32_t)((nanoseconds + 999999L) / 1000000L);
+    uint32_t left = 0;
+    int status = sys_sleep_interruptible(milliseconds, &left);
+    if (status < 0)
     {
-        if (sys_sleep_ms((uint32_t)-1) != 0) { errno = EINTR; return -1; }
-        milliseconds -= (uint32_t)-1;
+        if (status == -EINTR && remaining)
+        {
+            remaining->tv_sec = left / 1000u;
+            remaining->tv_nsec = (long)(left % 1000u) * 1000000L;
+            if (remaining->tv_sec > seconds || (remaining->tv_sec == seconds && remaining->tv_nsec > nanoseconds))
+            { remaining->tv_sec = seconds; remaining->tv_nsec = nanoseconds; }
+        }
+        errno = -status; return -1;
     }
-    if (milliseconds && sys_sleep_ms((uint32_t)milliseconds) != 0) { errno = EINTR; return -1; }
-    if (remaining) *remaining = (struct timespec){0, 0};
+    if (remaining) { remaining->tv_sec = 0; remaining->tv_nsec = 0; }
     return 0;
 }
 

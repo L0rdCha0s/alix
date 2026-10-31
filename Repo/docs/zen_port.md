@@ -97,8 +97,11 @@ pass pointers to one thread's stack to another thread or asynchronous callback.
   x86-64 ELF archives against Alix headers/libc, with a native external-thread
   adapter. Eight-CPU guest tests exercise containers, strings, clocks,
   mutexes/conditions, `std::thread` and compiler-generated TLS destructors.
-  This profile enables RTTI and threads but disables exceptions, filesystem,
-  localization, Unicode/wide-character, random-device and terminal facilities.
+  This profile enables RTTI, threads, C/POSIX locale facets, narrow/wide streams
+  and 16-bit wide characters. Native stream tests include 80-bit numeric
+  roundtrips and all wide-character masks. Exceptions, filesystem,
+  Unicode-specific C++ formatting, random-device and terminal facilities remain
+  disabled; ICU's own Unicode/locale support is independent and remains enabled.
   Shared-library unloading is not implemented. See
   [`ports/zen/libcxx/README.md`](../ports/zen/libcxx/README.md).
 - **Upstream Rust runtime.** Rust 1.97.1 `core`, `alloc` and `std` are rebuilt
@@ -130,9 +133,12 @@ pass pointers to one thread's stack to another thread or asynchronous callback.
   refills zero pages on permitted instruction faults or syscall copies;
   `posix_madvise` preserves contents. Native discard/refill and write-protection
   tests passed; the remaining fault-mode QA is recorded below. Shared and
-  file-backed mappings remain unsupported. The present 4–8 GiB user window
-  provides about 2.7 GiB of VM arena, so larger browser reservations still need
-  address-layout expansion. See [`kernel/memory.md`](kernel/memory.md).
+  file-backed mappings remain unsupported. The expanded user window runs from
+  4 GiB to 64 TiB, with a 16 GiB brk reservation and a separate anonymous-VM
+  arena. A native 32 MiB ELF and sparse 12 GiB mapping across high PML4 entries
+  passed on eight CPUs. Committed memory remains limited by physical RAM, and
+  the ELF loader still requires whole-file loading and contiguous segment
+  backing. See [`kernel/memory.md`](kernel/memory.md).
 - **Entropy and stack protection.** Native `getrandom`/`getentropy` use checked
   RDRAND output with bounded retries and real failure on unsupported hardware.
   Eight-CPU and unsupported-CPU guests passed. The optional compiler
@@ -167,9 +173,26 @@ signal APIs are implemented. Native timezone and signal fixtures passed.
 The next actual build has compiled ICU's existing stdio data loader on Alix,
 preserving data-file access while file-backed VM remains unavailable. It has
 advanced beyond the previous missing time/signal headers and file-map compile
-errors. The latest completed build now reaches Mozilla's `Maybe.h` stream
-insertion code, where the bootstrap libc++ profile lacks locale/iostream support.
-That native C++ runtime profile must be expanded; a complete SpiderMonkey
+errors. Locale/iostream, 16-bit wide strings and native `inttypes.h` now compile
+and have real guest acceptance. Native `pthread_rwlock_t` has also passed
+eight-CPU guest acceptance with recursive readers, queued writers and reader
+cohorts. The latest completed build clears that gate and the missing math
+constants, compiling JS builtins, Temporal, debugger and frontend sources. Its
+next reported error was `std::nearbyintf`; the pinned LLVM libc rounding helper
+now supplies the three native `nearbyint` entry points through Alix's hardware
+rounding-mode adapter. It passed 32,742 guest cases, including exception flags
+and x87 extended precision. The subsequent keep-going build cleared intgemm and
+compiled the explicit native Wasm signal-context bridge, then collected gaps
+in stdio, file/directory APIs, math, resource limits, signal-aware nonlocal jumps
+and process timing. Native `vprintf`, `perror`, `strdup`, file-type conversion
+and checked `MADV_NORMAL` now pass a guest fixture. A separate `libalix-math.a`
+reuses LLVM's sqrt/absolute-value/scaling code and passed another 39,861 native
+cases; C++ and Rust guests passed after the archive split. The next engine run
+must verify those compile gates. Buffered streams/exit flushing, signal-aware
+jumps, real process uptime and the current `RLIMIT_AS` policy now have native
+guest acceptance. Directory/symlink APIs and private descriptor flags/duplication
+remain in progress; the native uptime bridge is being connected upstream.
+A complete SpiderMonkey
 executable is still pending. The earlier
 `build/ports/zen/gecko-configure.log` triplet rejection is historical, not the
 current blocker. See [`ports/zen/README.md`](../ports/zen/README.md) for detailed
@@ -260,6 +283,7 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `thread-libc-qemu.log` | Four-CPU allocator/once/TSD checks and exit ordering passed; required `main PASS` and `exit PASS` are present. |
 | `thread-main_exit-qemu.log` | `MAIN_THREAD_EXIT_TEST: PASS main_joined=1 tls=1 last=1`: workers survive initial-thread exit and the last participant performs final cleanup. |
 | `thread-pthread-qemu.log`, `thread-pthread_initial-qemu.log` | Pthread main/exit and initial-exit harnesses passed: eight CPUs, 1,024 increments, 128 fast joins, 32 detached threads and full pointer return from the initial thread. |
+| `thread-rwlock-qemu.log` | Eight CPUs passed 1,024 writes, recursive readers, FIFO writers and bounded reader cohorts. |
 | `thread-tls-qemu.log`, `thread-sync-qemu.log`, `thread-memory-qemu.log` | Raw FS state across all eight CPUs, four-CPU condition handoff, and 32 heap growth/shrink/regrowth rounds passed. |
 | `thread-pool-qemu.log` | 256 joins with 2 MiB TLS per thread passed, reusing addresses across 512 MiB cumulative TLS allocation. |
 | `virtual-memory-qemu.log` | 512 MiB sparse reservation, four readers, 128 protection changes, fixed replacement, RW-to-RX code and RWX code passed. |
@@ -269,10 +293,25 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `entropy-qemu.log`, `entropy-unsupported-qemu.log` | Eight CPUs completed 512 samples; a separate CPU configuration without RDRAND returned the expected unsupported result. |
 | `stack-protector{,-corrupt,-no-entropy,-unprotected}-qemu.log` | Guard initialization precedes preinit/constructors; a real compiler epilogue detects corruption; protected startup rejects missing entropy while an unprotected process runs. |
 | `math-atan2-qemu.log` | `atan2f` and `atan2l` preserve signed zero, special values, extended precision and extended exponent range. |
+| `math-nearbyint-qemu.log` | LLVM's rounding implementation passed 32,742 cases across four modes, binary32/64 and x87-80, signed zero, signaling NaNs and preserved exception flags without new INEXACT. |
+| `math-support-qemu.log` | Separate native LLVM math archive passed 39,861 sqrt/absolute-value/scaling cases across four modes, extended precision, range errno and exception flags. |
+| `posix-entrypoints-qemu.log` | Owned `strdup` copies, captured `vprintf`/`perror` output, native regular-file mode/size and non-destructive checked `MADV_NORMAL` passed. |
+| `stdio-buffer-qemu.log`, `stdio-buffer-exit-qemu.log` | All three buffering modes, positions, wide I/O and 128 close/global-flush races passed; a separate queued marker appeared through normal exit flushing. |
+| `signal-jump-qemu.log` | Eight CPUs passed 64 real-fault handler jumps, 512 repeated checkpoints, masks/pending delivery, ancestor unwind, FP retention and stale/foreign rejection. |
+| `process-uptime-qemu.log` | Eight CPUs passed 1,024 samples with a shared process creation epoch and elapsed sleep time. The real clock resolution remains 10ms. |
 | `calendar-locale-qemu.log` | Gregorian UTC conversion, C/POSIX locale, TLS buffers across eight CPUs, real wall time and versioned timezone configuration snapshots passed. |
 | `alix-toolchain-qemu.log` | Actual native Clang C++ output passed vector, compiler TLS, PID and stdio execution checks. |
+| `cxx-stream-qemu.log`, `cxx-wide-qemu.log` | Real upstream narrow/wide streams, C/POSIX facets, 256 concurrent numeric roundtrips, 133,120 wide-mask checks and extended-precision conversions passed. |
+| `stdio-stream-qemu.log`, `printf-locale-qemu.log`, `wide-stdio-qemu.log` | Synchronized records, byte/wide orientation, pushback/positions, 80-bit formatting, four rounding modes, bounded strings and owned locale handles passed. |
+| `wchar-qemu.log`, `wchar-float-qemu.log`, `inttypes-qemu.log` | Native 16-bit code-unit/conversion contracts, wide 80-bit parsing and integer formatting/conversion interfaces passed. |
+| `user-layout-qemu.log` | A 32 MiB ELF ran with a sparse 12 GiB reservation across high PML4 entries; eight CPUs passed high-address stack/TLS, safe copies, protection changes and generated code. |
+| `exception-context-qemu.log` | 128 real demand-zero page faults across eight CPUs preserved 15 GPRs, stack, flags, x87 and SSE state through normalized exception entry. This is not user signal delivery. |
+| `kernel-preempt-qemu.log` | The production preemption assembly, with its GS resume slot mapped to fixture memory, preserved registers, flags and both stack alignments despite an overwritten resume slot. This is a modeled-slot assembly test, not a controlled kernel-timer injection test. |
 | `signal-{dispatch,default-fpe,abort-handler,abort-ignored}-qemu.log` | 2,048 callbacks executed on their calling threads; persistent/nested handlers and all deliberate process-termination modes returned control to the shell. Numeric exit codes are covered separately by host contracts. |
+| `signal-kernel-{normal,default,badframe}-qemu.log` | Native fault/asynchronous delivery passed 96 signals on eight CPUs, GPR/SSE/x87 preservation, nested/edited alternate stacks, masks, sleep interruption and forged-return rejection. Default and corrupted-return modes matched exact kernel termination records and recovered the shell. |
 | `timezone-qemu.log` | Eight CPUs passed POSIX rules, DST folds/gaps, formatting and 63 independently generated reference cases through real TZif files written and loaded inside Alix. |
+| `tzdata-package-qemu.log` | The full pinned 2026f package staged 606 files twice, verified their hashes and passed 2,392 calendar cases across 598 names. Existing configuration and custom files were preserved; the package remained inactive. |
+| `io-service-boot-qemu.log` | Protected workers passed three killed callers, independent cleanup while both storage workers blocked, two late-result releases, retained joins and shutdown waiting for a live caller. The following eight-CPU TLS test passed and the normal kernel was restored. |
 
 The Rust fixture contains one `println!`. Its marker appears twice because
 current global console routing taps output into shell capture as well as
@@ -308,11 +347,30 @@ toolchain guests all passed without unexpected faults.
 UTC calendar/locale and the new timezone snapshot syscall have passed their host
 contracts and native eight-CPU fixture. The standalone refcounted FD table
 has host concurrency/sanitizer checks but is not wired into kernel I/O yet.
-The timezone fixture contains pinned 2026e regression data. A full production
-IANA data package and ICU's native configured-zone identification still need
-integration. C `raise` is synchronous; CPU fault delivery, signal masks,
-alternate stacks and validated signal return remain required for Wasm.
+The protected I/O executor passed native cancellation, cleanup and shutdown
+acceptance. The first run exposed deferred thread reclamation depending on a
+later context switch on the former CPU. Bounded idle maintenance fixed that
+progress gap; the same guest test then passed within its original deadline.
+Actual VFS/socket syscall migration and private descriptor inheritance remain
+separate work.
+The original timezone fixture contains pinned 2026e regression data. The full
+2026f IANA package has now passed native staging and runtime acceptance.
+Atomic activation, ICU's native configured-zone identification and its separate
+timezone data update still need integration. Native CPU fault/asynchronous
+signal delivery, masks, alternate stacks and validated signal return now pass
+guest acceptance. The explicit upstream Wasm context bridge now maps Alix's
+named PC/BP/SP fields and passed its compile/patch contracts; actual Wasm
+execution awaits the engine. Signal-aware nonlocal unwind now has native
+acceptance; general interrupted-I/O restart remains unsupported.
 Update this list only from actual guest markers and completed harness results.
+
+A later pre-test password timeout was traced to input drivers compiling without
+the shared USB feature definition, then polling an absent PS/2 controller
+indefinitely. Explicit feature includes, common keyboard initialization, atomic
+backend flags and bounded polling passed host checks in USB/PS2 configurations.
+Seven subsequent native pthread/C++/Rust/protection guests passed serial login
+and recovered the shell; the original debugger evidence is retained under
+`build/ports/zen/usb-ps2-login-failure.*`.
 
 ## Primary upstream references
 

@@ -314,6 +314,11 @@ int sys_thread_set_tls(uintptr_t base)
     return (int)syscall1(SYSCALL_THREAD_SET_TLS, (long)base);
 }
 
+uint64_t sys_process_uptime_ns(void)
+{
+    return (uint64_t)syscall0(SYSCALL_PROCESS_UPTIME_NS);
+}
+
 uint64_t sys_monotonic_millis(void)
 {
     return (uint64_t)syscall0(SYSCALL_MONOTONIC_MILLIS);
@@ -418,4 +423,25 @@ void sys_thread_exit(int status)
     {
         syscall0(SYSCALL_THREAD_EXIT);
     }
+}
+
+int sys_sigaction(int number,const alix_sigaction_t *action,alix_sigaction_t *old,size_t size)
+{ return (int)syscall4(SYSCALL_SIGACTION,number,(long)action,(long)old,(long)size); }
+int sys_sigprocmask(int how,const alix_sigset_t *set,alix_sigset_t *old)
+{ return (int)syscall3(SYSCALL_SIGPROCMASK,how,(long)set,(long)old); }
+int sys_sigaltstack(const alix_stack_t *stack,alix_stack_t *old,size_t size)
+{ return (int)syscall3(SYSCALL_SIGALTSTACK,(long)stack,(long)old,(long)size); }
+int sys_sigreturn(uintptr_t frame) { return (int)syscall1(SYSCALL_SIGRETURN,(long)frame); }
+int sys_raise(int number,uint64_t thread) { return (int)syscall2(SYSCALL_RAISE,number,(long)thread); }
+int sys_kill(int32_t pid,int number) { return (int)syscall2(SYSCALL_KILL,pid,number); }
+int sys_sleep_interruptible(uint32_t milliseconds,uint32_t *remaining)
+{ return (int)syscall2(SYSCALL_SLEEP_INTERRUPTIBLE,milliseconds,(long)remaining); }
+
+int sys_signal_jump(uint32_t operation, alix_sigjmp_state_t *environment, size_t size, int argument)
+{ return (int)syscall4(SYSCALL_SIGNAL_JUMP, operation, (long)environment, (long)size, argument); }
+
+
+ssize_t sys_readlink(const char *path, char *buffer, size_t capacity)
+{
+    return (ssize_t)syscall3(SYSCALL_READLINK, (long)path, (long)buffer, (long)capacity);
 }

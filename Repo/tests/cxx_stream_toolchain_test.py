@@ -15,6 +15,8 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--wide", action="store_true")
     modes.add_argument("--wide-float", action="store_true")
+    modes.add_argument("--nearbyint", action="store_true")
+    modes.add_argument("--math-support", action="store_true")
     args = parser.parse_args()
     objects = shlex.split(os.environ.get("ALIX_RUNTIME_OBJECTS", ""))
     if not objects:
@@ -27,15 +29,17 @@ def main():
     temporary.replace(manifest)
     env = os.environ.copy()
     env["ALIX_RUNTIME_MANIFEST"] = str(manifest)
-    if args.wide_float:
-        output = ROOT / "build/user/wchar_float_test.elf"
-        sources = [ROOT / "tests/wchar_float_test.c"]
+    if args.wide_float or args.nearbyint or args.math_support:
+        name = "math_support_test" if args.math_support else ("math_nearbyint_test" if args.nearbyint else "wchar_float_test")
+        output = ROOT / f"build/user/{name}.elf"
+        sources = [ROOT / f"tests/{name}.c"]
         compiler, standard = "alix-clang", "-std=c11"
     else:
         output = ROOT / ("build/user/cxx_wide_test.elf" if args.wide else "build/user/cxx_stream_test.elf")
         sources = [ROOT / "tests/cxx_wide_test.cpp", ROOT / "tests/cxx_wide_backend_probe.cpp"] if args.wide else [ROOT / "tests/cxx_stream_test.cpp"]
         compiler, standard = "alix-clang++", "-std=c++20"
     subprocess.run([str(ROOT / "ports/zen/toolchain" / compiler), standard, "-O2",
+                    *(["-frounding-math", "-fno-builtin"] if args.nearbyint or args.math_support else []),
                     *map(str, sources), "-o", str(output)], env=env, check=True)
     if subprocess.check_output(["x86_64-elf-nm", "--undefined-only", str(output)], text=True).strip():
         raise RuntimeError("native C++ stream acceptance ELF contains unresolved symbols")

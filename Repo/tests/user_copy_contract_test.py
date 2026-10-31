@@ -14,6 +14,7 @@ def copy_test():
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #define CHECK(c) do { if (!(c)) { fprintf(stderr,"user copy check failed line %d: %s\n",__LINE__,#c); exit(1); } } while (0)
 #define PAGE_SIZE_BYTES_LOCAL 4096u
 #define USER_POINTER_BASE 0x100000000ULL
@@ -51,7 +52,7 @@ static void *checked_memcpy(void *dst,const void *src,size_t n) {
 '''
     for signature in ('static inline bool user_pointer_canonical', 'bool user_ptr_range_valid',
                       'static bool user_copy_bytes', 'bool user_copy_from_user',
-                      'bool user_copy_to_user', 'bool user_copy_string_from_user'):
+                      'bool user_copy_to_user', 'int user_copy_cstring_from_user', 'bool user_copy_string_from_user'):
         program += function_definition(source, signature) + '\n'
     program += r'''
 #undef memcpy
@@ -99,6 +100,8 @@ int main(void) {
     reset(); buffer[0]=0xAA; buffer[1]=0xBB;
     CHECK(!user_copy_string_from_user((char*)buffer,1,(char*)USER_POINTER_BASE,&length));
     CHECK(buffer[0]==0x31 && buffer[1]==0xBB && !locked);
+    CHECK(user_copy_cstring_from_user((char*)buffer,1,(char*)USER_POINTER_BASE,&length)==-ENAMETOOLONG);
+    readable[0]=false; CHECK(user_copy_cstring_from_user((char*)buffer,1,(char*)USER_POINTER_BASE,&length)==-EFAULT);
     reset(); pages[1][1]=0;
     CHECK(user_copy_string_from_user((char*)buffer,8,(char*)(USER_POINTER_BASE+4094),&length));
     CHECK(length==3 && buffer[0]==0x31 && buffer[2]==0x32 && buffer[3]==0 && resolves==2);

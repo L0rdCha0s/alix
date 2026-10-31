@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "io_vfs_service.h"
 #include "shell_commands.h"
 #include "shell_prompt.h"
 
@@ -920,11 +921,7 @@ static bool shell_prompt_login(shell_state_t *shell)
             process_set_identity(shell->owner_process, record.uid, record.gid);
             if (record.home && record.home[0] != '\0')
             {
-                vfs_node_t *home = vfs_resolve(vfs_root(), record.home);
-                if (home && vfs_is_dir(home))
-                {
-                    process_set_cwd(shell->owner_process, home);
-                }
+                (void)io_vfs_change_cwd_kernel(record.home, shell->owner_pid);
             }
             user_auth_free_record(&record);
             shell->cwd = process_current_cwd();
@@ -954,6 +951,7 @@ void shell_main(void)
     shell->wait_hook = shell_wait_for_interrupt;
     shell->wait_context = shell;
     shell->owner_process = process_current();
+    shell->owner_pid = process_current_pid();
     shell->cwd_changed_fn = NULL;
     shell->cwd_changed_context = NULL;
     g_active_shell = shell;

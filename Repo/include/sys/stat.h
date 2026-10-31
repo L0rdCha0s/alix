@@ -8,6 +8,22 @@
 #include_next <sys/stat.h>
 typedef struct stat stat_t;
 #else
+#define S_IFMT   0170000u
+#define S_IFREG  0100000u
+#define S_IFDIR  0040000u
+#define S_IFBLK  0060000u
+#define S_IFLNK  0120000u
+#define S_IFCHR  0020000u
+#define S_IFIFO  0010000u
+#define S_IFSOCK 0140000u
+#define S_ISREG(mode)  (((mode) & S_IFMT) == S_IFREG)
+#define S_ISDIR(mode)  (((mode) & S_IFMT) == S_IFDIR)
+#define S_ISBLK(mode)  (((mode) & S_IFMT) == S_IFBLK)
+#define S_ISLNK(mode)  (((mode) & S_IFMT) == S_IFLNK)
+#define S_ISCHR(mode)  (((mode) & S_IFMT) == S_IFCHR)
+#define S_ISFIFO(mode) (((mode) & S_IFMT) == S_IFIFO)
+#define S_ISSOCK(mode) (((mode) & S_IFMT) == S_IFSOCK)
+
 typedef struct stat
 {
     uint64_t st_size;

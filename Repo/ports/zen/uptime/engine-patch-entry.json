@@ -1,0 +1,11 @@
+{
+  "file": "0007-native-alix-process-uptime.patch",
+  "sha256": "a445f9576dc7a47b9bf73363ddde820be932e24d63b48f0666eb54a336a17e8e",
+  "files": [
+    {
+      "path": "mozglue/misc/TimeStamp_posix.cpp",
+      "before": "d45e599173f172f8f456e6f5a0f379290d4a03df8d1ba05e65342aee5673c8a7",
+      "after": "8f0eb8d7409b3fac2a4a3fb2e14bb0b9506fdd4778bec49f1a48880c2931fc0d"
+    }
+  ]
+}

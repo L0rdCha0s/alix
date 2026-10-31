@@ -68,6 +68,7 @@ def main():
         HERE.parent / "upstream/libcxx-alix-build/lib/libc++.a",
         HERE.parent / "upstream/libcxx-alix-build/lib/libc++abi.a",
         HERE.parent / "upstream/libcxx-alix-build/lib/libalix-cxx-support.a",
+        HERE.parent / "upstream/libm-alix-build/lib/libalix-math.a",
         ROOT / "build/user/lib/libalix-ssp.a"]
     env.update({"RUSTC_BOOTSTRAP": "1", "RUSTC": str(HERE / "rustc.py"),
                 "ALIX_REAL_RUSTC": shutil.which("rustc"), "CARGO_HOME": str(cargo_home),

@@ -1,0 +1,66 @@
+{
+  "applied": true,
+  "files": [
+    {
+      "path": "include/process_internal.h",
+      "before": "948c4de5b0be11681581345987ca9ef27c0936e51a4d4fb47159d961f8fb22ac",
+      "after": "fefb51ea8cf3b4171670f8565680ba28b7fe25fe4ccf16f0c5fa4d6f0bb0fe62"
+    },
+    {
+      "path": "include/process_signal.h",
+      "before": "697e1c1b4917f56729334df1c306660647caf4d6d4bbad9508c7be55725ab3a2",
+      "after": "0b099ca149d21e0f55457991b226c9a67aa91e011f80f2273c17034e9a2c5607"
+    },
+    {
+      "path": "include/setjmp.h",
+      "before": "9993dd0be084149dd28201248c9f0eff2d1a55071ef7f5ff84cbc97735b792c1",
+      "after": "b9bb368979f950462cd851378b1e6a876aa0412790fdedc3af69a13c497712dc"
+    },
+    {
+      "path": "include/signal_abi.h",
+      "before": "defb5477e851c8a95eee4c55e242e7a50688e2de9d69382c08aca3468bd22bd4",
+      "after": "50eb5bc156854883235153ea7937e39f894494dd20de910aad0364d997086e30"
+    },
+    {
+      "path": "include/syscall_defs.h",
+      "before": "f520bf8a95e9b90bdc521ae6315e2c127eb8899a55c828ab18e223e6574ed428",
+      "after": "18514eacf55a3f44efeee5c01d012a38a201ecff1e21dcc206a254e6dd208f0d"
+    },
+    {
+      "path": "ports/zen/signals/host_model.h",
+      "before": "3ef8d39e090aa421bc765bcf4051b3262000f4ad705863dcd1776a4d3026d575",
+      "after": "346c6a3caf40ab11c7db3860909649a6b9f5ee2943511125c9f03c9db0ae936c"
+    },
+    {
+      "path": "src/kernel/process/process_signal.c",
+      "before": "b5e53123540227dc32446c887eefe93d540386c72092e70ab3411f6e6e532bd8",
+      "after": "65f2a5ef1651e541a1439a2d3137416d2501ce44b26a1f74a20a898202eba7c2"
+    },
+    {
+      "path": "src/kernel/syscall.c",
+      "before": "aba580e0e56ed9d5a7349d6dce75ee0bd5572fd343e27f00d42a2a7b50f1b78b",
+      "after": "fd3a95c552d09d8a8738fd2d76906ea6a881e4d1d75dcbca1049772617d8011b"
+    },
+    {
+      "path": "user/lib/setjmp.c",
+      "before": "489db93bf81e83165139e68e3884daaab90fb8af13b1bc323a751f68146d8290",
+      "after": "1b54423163fcd12a26ed949330afdb01a40937aaeebdf809de304f56e790d81d"
+    },
+    {
+      "path": "user/lib/syscall.c",
+      "before": "ecb10ffcea6033437bb5636e4989fb19290ecef499cae73ed439a28762d83e60",
+      "after": "3194fef26ceb7b74e5e6fe42eb4ec7966cd1b043a2d8452b88f52a062356fa65"
+    },
+    {
+      "path": "user/lib/usyscall.h",
+      "before": "b115c80e622e7c1eec64ad38fa37dd7f3b92078b7f398c0a9d8ac5b95adba2e4",
+      "after": "9432f1a2e790a1ca8b118ba48572aa04b02e004de8641615e4f8e392e56d2956"
+    }
+  ],
+  "applied_date": "2026-10-31",
+  "native_acceptance": {
+    "status": "pass",
+    "date": "2026-10-31",
+    "log": "build/test-out/signal-jump-qemu.log"
+  }
+}

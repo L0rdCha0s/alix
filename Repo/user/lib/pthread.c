@@ -450,7 +450,7 @@ static void pthread_start(void *argument)
     while (!__atomic_load_n(&control->published, __ATOMIC_ACQUIRE))
     {
         int result = sys_futex_wait(&control->published, 0, ALIX_WAIT_FOREVER);
-        if (result != SYSCALL_FUTEX_OK && result != SYSCALL_FUTEX_AGAIN) __builtin_trap();
+        if (result != SYSCALL_FUTEX_OK && result != SYSCALL_FUTEX_AGAIN && result != -EINTR) __builtin_trap();
     }
     void *result = control->canceled_creation ? NULL : control->start(control->argument);
     pthread_exit(result);

@@ -1,4 +1,5 @@
 #include "user_copy.h"
+#include "errno.h"
 
 #include "libc.h"
 #include "process_internal.h"
@@ -101,17 +102,18 @@ bool user_copy_to_user(void *dst_user, const void *src, size_t len)
     return user_copy_bytes((void *)src, (uintptr_t)dst_user, len, true);
 }
 
-bool user_copy_string_from_user(char *dst, size_t capacity, const char *src_user,
+int user_copy_cstring_from_user(char *dst, size_t capacity, const char *src_user,
                                 size_t *out_len)
 {
-    if (!dst || capacity == 0 || !user_ptr_range_valid(src_user, 1))
+    if (!dst || capacity == 0) return -EINVAL;
+    if (!user_ptr_range_valid(src_user, 1))
     {
-        return false;
+        return -EFAULT;
     }
     process_t *process = process_current();
     if (!process || !process->is_user)
     {
-        return false;
+        return -EFAULT;
     }
     uintptr_t address = (uintptr_t)src_user;
     size_t copied = 0;
@@ -122,7 +124,7 @@ bool user_copy_string_from_user(char *dst, size_t capacity, const char *src_user
         if (copied > UINTPTR_MAX - address ||
             !user_ptr_range_valid((const void *)(address + copied), 1))
         {
-            return false;
+            return -EFAULT;
         }
         uint8_t *host = NULL;
         size_t available = 0;
@@ -131,7 +133,7 @@ bool user_copy_string_from_user(char *dst, size_t capacity, const char *src_user
                                                 &host, &available) || available == 0)
         {
             process_memory_unlock(process, flags);
-            return false;
+            return -EFAULT;
         }
         size_t page_left = PAGE_SIZE_BYTES_LOCAL - ((address + copied) & (PAGE_SIZE_BYTES_LOCAL - 1));
         if (available > page_left)
@@ -156,11 +158,17 @@ bool user_copy_string_from_user(char *dst, size_t capacity, const char *src_user
                 {
                     *out_len = copied + i;
                 }
-                return true;
+                return 0;
             }
         }
         process_memory_unlock(process, flags);
         copied += chunk;
     }
-    return false;
+    return -ENAMETOOLONG;
+}
+
+bool user_copy_string_from_user(char *dst, size_t capacity, const char *src_user,
+                                size_t *out_len)
+{
+    return user_copy_cstring_from_user(dst, capacity, src_user, out_len) == 0;
 }

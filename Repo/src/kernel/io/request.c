@@ -20,7 +20,7 @@ struct io_request
     void *buffer;
     size_t buffer_size;
     uint32_t uid, gid;
-    fd_description_t *description, *result_description;
+    fd_description_t *description, *result_description, *cwd_owner;
     void *cwd;
     io_cwd_release_t release_cwd;
 };
@@ -179,6 +179,29 @@ int io_request_bind(io_request_t *request, fd_description_t *description_owned,
     spinlock_unlock(&queue->lock);
     return result;
 }
+
+int io_request_bind_cwd_owner(io_request_t *request, fd_description_t *description_owned,
+                               fd_description_t *cwd_owner_owned)
+{
+    if (!request || !cwd_owner_owned || !fd_description_context(cwd_owner_owned)) return -EINVAL;
+    io_queue_t *queue = request->queue;
+    spinlock_lock(&queue->lock);
+    int result = 0;
+    if (!(request->owners & IO_OWNER_WAITER) || request->submitted || request->bound)
+        result = -EBUSY;
+    else
+    {
+        request->description = description_owned;
+        request->cwd_owner = cwd_owner_owned;
+        request->cwd = fd_description_context(cwd_owner_owned);
+        request->bound = true;
+    }
+    spinlock_unlock(&queue->lock);
+    return result;
+}
+
+bool io_request_uses_queue(const io_request_t *request, const io_queue_t *queue)
+{ return request && queue && request->queue == queue; }
 
 void *io_request_buffer(io_request_t *request) { return request ? request->buffer : NULL; }
 size_t io_request_buffer_size(const io_request_t *request) { return request ? request->buffer_size : 0; }
@@ -348,6 +371,7 @@ size_t io_queue_drain(io_queue_t *queue, size_t budget)
          * destructor returns, so reentrant shutdown/destroy cannot free queue. */
         fd_description_put(request->description);
         fd_description_put(request->result_description);
+        fd_description_put(request->cwd_owner);
         if (request->release_cwd) request->release_cwd(request->cwd);
         free(request->buffer);
         free(request);

@@ -1,0 +1,33 @@
+diff --git a/mozglue/misc/TimeStamp_posix.cpp b/mozglue/misc/TimeStamp_posix.cpp
+--- a/mozglue/misc/TimeStamp_posix.cpp
++++ b/mozglue/misc/TimeStamp_posix.cpp
+@@ -11,7 +11,11 @@
+ // obtained with this API; see TimeDuration::Resolution;
+ //
+ 
+-#include <sys/syscall.h>
++#if defined(__ALIX__)
++#  include "usyscall.h"
++#else
++#  include <sys/syscall.h>
++#endif
+ #include <time.h>
+ #include <unistd.h>
+ #include <string.h>
+@@ -153,7 +157,15 @@
+   return TimeStamp(ClockTimeNs(CLOCK_MONOTONIC));
+ }
+ 
+-#if defined(XP_LINUX) || defined(ANDROID)
++#if defined(__ALIX__)
++
++// Native process creation time uses the same monotonic timer as POSIX Now().
++// The kernel reports nanoseconds; this upstream interface returns microseconds.
++uint64_t TimeStamp::ComputeProcessUptime() {
++  return sys_process_uptime_ns() / kNsPerUs;
++}
++
++#elif defined(XP_LINUX) || defined(ANDROID)
+ 
+ // Calculates the amount of jiffies that have elapsed since boot and up to the
+ // starttime value of a specific process as found in its /proc/*/stat file.

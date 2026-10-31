@@ -1,44 +1,21 @@
 #include "shell_commands.h"
 
 #include "vfs.h"
+#include "io_vfs_service.h"
+#include "errno.h"
 
 bool shell_cmd_cd(shell_state_t *shell, shell_output_t *out, const char *path)
 {
-    if (!shell)
+    if (!shell) return shell_output_error(out, "cd internal error");
+    const char *target_path = path && *path ? path : "/";
+    int result = io_vfs_change_cwd_kernel(target_path, shell->owner_pid);
+    if (result)
     {
-        return shell_output_error(out, "cd internal error");
+        const char *message = result == -ENOENT ? "path not found" :
+                              result == -ENOTDIR ? "not a directory" : "unable to change directory";
+        return shell_output_error(out, message);
     }
-
-    const char *target_path = path;
-    if (!target_path || *target_path == '\0')
-    {
-        shell->cwd = vfs_root();
-        if (shell->cwd_changed_fn)
-        {
-            shell->cwd_changed_fn(shell->cwd_changed_context, shell->cwd);
-        }
-        return true;
-    }
-
-    vfs_node_t *target = vfs_resolve(shell->cwd, target_path);
-    if (!target)
-    {
-        return shell_output_error(out, "path not found");
-    }
-    if (!vfs_is_dir(target))
-    {
-        return shell_output_error(out, "not a directory");
-    }
-
-    shell->cwd = target;
-    process_set_cwd(process_current(), target);
-    if (shell && shell->owner_process)
-    {
-        process_set_cwd(shell->owner_process, target);
-    }
-    if (shell->cwd_changed_fn)
-    {
-        shell->cwd_changed_fn(shell->cwd_changed_context, target);
-    }
+    shell->cwd = process_current_cwd();
+    if (shell->cwd_changed_fn) shell->cwd_changed_fn(shell->cwd_changed_context, shell->cwd);
     return true;
 }

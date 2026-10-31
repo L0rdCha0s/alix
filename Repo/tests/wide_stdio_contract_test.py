@@ -13,7 +13,7 @@ from stdio_stream_contract_test import build_program, rename as rename_stdio
 def rename(text):
     text = "\n".join(line for line in text.splitlines() if not line.startswith("#include"))
     text = rename_stdio(text)
-    for name in ("printf", "vfprintf", "fprintf", "snprintf", "vsnprintf", "sprintf", "vsprintf", "asprintf", "vasprintf",
+    for name in ("printf", "vprintf", "perror", "vfprintf", "fprintf", "snprintf", "vsnprintf", "sprintf", "vsprintf", "asprintf", "vasprintf",
                  "frexpl", "strnlen", "wchar_t", "wint_t", "btowc", "wctob", "fwide", "fgetwc", "getwc", "getwchar",
                  "fputwc", "putwc", "putwchar", "ungetwc", "fgetws", "fputws", "swprintf", "vswprintf", "fwprintf",
                  "vfwprintf", "wprintf", "vwprintf"):

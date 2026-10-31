@@ -1,3 +1,4 @@
+#include "signal.h"
 #ifndef ALIX_PTHREAD_H
 #define ALIX_PTHREAD_H
 
@@ -56,6 +57,25 @@ typedef struct
     uint32_t magic;
 } pthread_cond_t;
 
+/* Native phase-fair read/write locks. Wait records are heap-owned. */
+struct alix_rwlock_record;
+typedef struct { int shared; uint32_t magic; } pthread_rwlockattr_t;
+typedef struct
+{
+    alix_mutex_t gate;
+    alix_cond_t changed;
+    uint64_t writer;
+    uint32_t readers;
+    uint32_t waiting_readers;
+    uint32_t waiting_writers;
+    uint32_t reader_batch;
+    uint32_t magic;
+    struct alix_rwlock_record *read_head;
+    struct alix_rwlock_record *write_head;
+    struct alix_rwlock_record *write_tail;
+} pthread_rwlock_t;
+#define PTHREAD_RWLOCK_INITIALIZER {{0},{0},0,0,0,0,0,0x50545257u,NULL,NULL,NULL}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -77,6 +97,8 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attribute,
 int pthread_join(pthread_t thread, void **result);
 int pthread_detach(pthread_t thread);
 pthread_t pthread_self(void);
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *old);
+int pthread_kill(pthread_t thread, int number);
 int pthread_equal(pthread_t left, pthread_t right);
 void pthread_exit(void *result) __attribute__((noreturn));
 int pthread_setname_np(pthread_t thread, const char *name);
@@ -107,6 +129,18 @@ int pthread_cond_timedwait(pthread_cond_t *condition, pthread_mutex_t *mutex,
                            const struct timespec *deadline);
 int pthread_cond_signal(pthread_cond_t *condition);
 int pthread_cond_broadcast(pthread_cond_t *condition);
+int pthread_rwlockattr_init(pthread_rwlockattr_t *attribute);
+int pthread_rwlockattr_destroy(pthread_rwlockattr_t *attribute);
+int pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attribute, int shared);
+int pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *attribute, int *shared);
+int pthread_rwlock_init(pthread_rwlock_t *lock, const pthread_rwlockattr_t *attribute);
+int pthread_rwlock_destroy(pthread_rwlock_t *lock);
+int pthread_rwlock_rdlock(pthread_rwlock_t *lock);
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *lock);
+int pthread_rwlock_wrlock(pthread_rwlock_t *lock);
+int pthread_rwlock_trywrlock(pthread_rwlock_t *lock);
+int pthread_rwlock_unlock(pthread_rwlock_t *lock);
+
 int pthread_once(pthread_once_t *once, void (*initialize)(void));
 int pthread_key_create(pthread_key_t *key, void (*destroy)(void *));
 int pthread_key_delete(pthread_key_t key);

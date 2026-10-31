@@ -7,7 +7,9 @@ from audio_stream_contract_test import ROOT, compile_and_run, function_definitio
 
 def main():
     source = (ROOT / "src/kernel/process/process_memory.c").read_text()
-    program = r'''
+    layout_defines = chr(10).join(line for line in (ROOT / "include/memory_layout.h").read_text().splitlines()
+                                if line.startswith("#define USER_DEFAULT_"))
+    program = layout_defines + r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -16,7 +18,7 @@ def main():
 #include <string.h>
 #define CHECK(c) do { if(!(c)) { fprintf(stderr,"auxiliary pool check failed line %d: %s\n",__LINE__,#c); exit(1); } } while(0)
 #define PAGE_SIZE_BYTES_LOCAL 4096UL
-#define POOL_BASE 0x180000000UL
+#define POOL_BASE (USER_DEFAULT_POINTER_LIMIT+1ULL-8192ULL-USER_DEFAULT_THREAD_POOL_SIZE)
 #define USER_STUB_CODE_BASE (POOL_BASE+16*4096UL)
 #define RFLAGS_IF_BIT 512UL
 typedef struct { unsigned unused; } paging_space_t;

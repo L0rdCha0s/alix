@@ -83,6 +83,7 @@ def main():
         temporary_archive = archive.with_name(f".{archive.name}.{os.getpid()}.tmp")
         subprocess.run([str(llvm / "bin/llvm-ar"), "rcs", str(temporary_archive)] + list(map(str, objects)), check=True)
         temporary_archive.replace(archive)
+        subprocess.run(["python3", str(ROOT / "ports/zen/libm/build.py")], check=True)
         if args.smoke:
             core = shlex.split(os.environ.get("ALIX_RUNTIME_OBJECTS", ""))
             if not core:
@@ -95,7 +96,8 @@ def main():
             subprocess.run(["x86_64-elf-ld", "-nostdlib", "-T", str(ROOT / "user/lib/link.ld"),
                            "-o", str(output)] + [str(ROOT / obj) for obj in core] + [str(test_object),
                            "--start-group", str(BUILD / "lib/libc++.a"), str(BUILD / "lib/libc++abi.a"),
-                           str(archive), libgcc, "--end-group"], check=True)
+                           str(archive), str(ROOT / "ports/zen/upstream/libm-alix-build/lib/libalix-math.a"),
+                           libgcc, "--end-group"], check=True)
             undefined = subprocess.check_output(["x86_64-elf-nm", "--undefined-only", str(output)], text=True)
             if undefined.strip(): raise RuntimeError("native C++ ELF has unresolved symbols: " + undefined)
             print(f"Native libc++ acceptance ELF linked: {output}")

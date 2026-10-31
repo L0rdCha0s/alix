@@ -79,6 +79,7 @@ void process_system_init(void)
     spinlock_init(&g_process_lock);
     spinlock_init(&g_thread_registry_lock);
     g_thread_registry_head = NULL;
+    process_resource_system_init();
     for (uint32_t i = 0; i < SMP_MAX_CPUS; ++i)
     {
         spinlock_init(&g_deferred_free_locks[i]);
@@ -194,6 +195,7 @@ static void scheduler_main_loop(void)
     while (1)
     {
         process_reap_retired_memory();
+        process_reap_deferred_threads();
         /* Close the empty-queue-to-HLT lost-wakeup window.  With interrupts
          * masked before the scheduler checks the local queue, an enqueue IPI
          * that races the check remains pending; STI's interrupt shadow makes

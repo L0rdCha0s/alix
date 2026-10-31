@@ -1,0 +1,143 @@
+{
+  "applied": true,
+  "files": [
+    {
+      "path": "include/process_internal.h",
+      "base_sha256": "e1bbe67aec4246614c0051f09d206e0bb4ee7cf0b755b1ddeab79db7bdd1d0f6",
+      "pending_sha256": "948c4de5b0be11681581345987ca9ef27c0936e51a4d4fb47159d961f8fb22ac"
+    },
+    {
+      "path": "include/process_signal.h",
+      "base_sha256": null,
+      "pending_sha256": "697e1c1b4917f56729334df1c306660647caf4d6d4bbad9508c7be55725ab3a2"
+    },
+    {
+      "path": "include/pthread.h",
+      "base_sha256": "403d1ae0f928d768635fb8fe74fed96db22b7b3838fe5b97693d20eae9491fbd",
+      "pending_sha256": "2427f969219fa755d59da5dbd0f849ed361b83e545367c9ca7dcd81aefeda303"
+    },
+    {
+      "path": "include/signal.h",
+      "base_sha256": "4e2ab7e2ca38dc1e22714c8a39484d1e9a02f9e7d846354bd71739950ddbaa70",
+      "pending_sha256": "2da7d46c8f37215f4d503f98298f71e503c4fd7dd635d63165753993c35d8130"
+    },
+    {
+      "path": "include/signal_abi.h",
+      "base_sha256": null,
+      "pending_sha256": "defb5477e851c8a95eee4c55e242e7a50688e2de9d69382c08aca3468bd22bd4"
+    },
+    {
+      "path": "include/sys/ucontext.h",
+      "base_sha256": null,
+      "pending_sha256": "3ec396b6a00964ea01af72c37011783fcee113683a376c36733e97b7cfffc5ac"
+    },
+    {
+      "path": "include/syscall_defs.h",
+      "base_sha256": "69886b10a20cf30e1b7e81103aca1da1135c6b52135208bbeb42ccd6cee0e65f",
+      "pending_sha256": "f520bf8a95e9b90bdc521ae6315e2c127eb8899a55c828ab18e223e6574ed428"
+    },
+    {
+      "path": "include/ucontext.h",
+      "base_sha256": null,
+      "pending_sha256": "593728afb7f6ce29822d111ad41365ba6df8fd757b5eefbccb964390422263d0"
+    },
+    {
+      "path": "src/arch/x86/interrupts.c",
+      "base_sha256": "64cc028a9c4b2c184265e98477ed48ae19a652e9e2d8606aff104a47db69c8c4",
+      "pending_sha256": "99bf3b1ce7e903f99ea085d13988436d2a72f03d332da735fcc5357fba405c3a"
+    },
+    {
+      "path": "src/kernel/process/process_common.c",
+      "base_sha256": "ad6ea690bcde8940f7beb378f40f346b0fa2a6e7c646b9de4dc442798430bbc4",
+      "pending_sha256": "c3324bb8fc598ce8274eb8be694965708665cdea8d7cc71702abaf04e933f65d"
+    },
+    {
+      "path": "src/kernel/process/process_futex.c",
+      "base_sha256": "0cbe92544591e28296101a70749783c28d2257f4cb4afdb95d5dc8ba8ade0697",
+      "pending_sha256": "318dcdfbb630044ff1ff332eb48380162d424dc6c2aa9946710c805985338c7b"
+    },
+    {
+      "path": "src/kernel/process/process_memory.c",
+      "base_sha256": "3ffae32090654c6d2e2736f378af4ab6463ac2b30c1207bf61cf41ecdbae57f8",
+      "pending_sha256": "5490fdd3f0e1bd672bc029db02fb8081cac411bd29db827eab74baea782a6db7"
+    },
+    {
+      "path": "src/kernel/process/process_scheduler.c",
+      "base_sha256": "6ded4220322fa031a488d38b161612f5fa9ac5aa884cb70719eaa3466d32ddb4",
+      "pending_sha256": "dbd2ecdf1b20d9415b1a173e79b86b8f3a86139c127b6d3022dee60044b8b40e"
+    },
+    {
+      "path": "src/kernel/process/process_signal.c",
+      "base_sha256": null,
+      "pending_sha256": "b5e53123540227dc32446c887eefe93d540386c72092e70ab3411f6e6e532bd8"
+    },
+    {
+      "path": "src/kernel/process/process_thread.c",
+      "base_sha256": "305d5eab304d4728779d6366dfb2b182ca215277fb90db54539f106258fa710d",
+      "pending_sha256": "9a95026cdbb3c5a0e2c65311ff1b791af17a853fb814fe20f1fe92d0d9a9bab5"
+    },
+    {
+      "path": "src/kernel/process/process_vm.c",
+      "base_sha256": "7c14134d8c98c29b3403a6753bc58647e347c39f0878c5395c71cf3bffc8ec4f",
+      "pending_sha256": "aad2dbec0dc5a7e50f155565bbd5ebae8b7ebdfd665c5a19c8c2ed83c2666494"
+    },
+    {
+      "path": "src/kernel/syscall.c",
+      "base_sha256": "de8f05896d959c68418686c7d001f853a0093673d10f5826a858d37b5128c280",
+      "pending_sha256": "aba580e0e56ed9d5a7349d6dce75ee0bd5572fd343e27f00d42a2a7b50f1b78b"
+    },
+    {
+      "path": "tests/cpp_runtime_qemu_test.py",
+      "base_sha256": "1c7b79e382543a17059bc62370558dc74cba69a86acea76346abbe8280d5ecaa",
+      "pending_sha256": "060ba49163c2ff14804aaf14e240aca7f0d59a64a7c188bc74b63491da742afe"
+    },
+    {
+      "path": "tests/futex_contract_test.py",
+      "base_sha256": "0626a999ed4776b3638879d730f595a985f98e6630ea2e037cb34082731752ca",
+      "pending_sha256": "91ae88ce7e69e5129d7d364039c4543e2584e035eba5623b02fed86dcd1d67ad"
+    },
+    {
+      "path": "tests/pthread_contract_test.py",
+      "base_sha256": "2ba81e0702dd39d80f1da15f0b336ff63dc5c28ca6de2302e1deba46093c3fdf",
+      "pending_sha256": "fb9bbaa87453e04ee2530da5dbedcd14f59f1dc594ad82cc6397c431a9178a88"
+    },
+    {
+      "path": "tests/signal_contract_test.py",
+      "base_sha256": "03c345b3151e9b55e10668298147e94568557426cec6e080887c5af7e4f1ca0a",
+      "pending_sha256": "4b7405ad28dff37d1db396d1fd9ef87115d28efd51b8b4e314bd5055ae6f7e5a"
+    },
+    {
+      "path": "user/lib/libc.c",
+      "base_sha256": "f01547fc6e9f23ad712174cbdda1ad43cbe7340cd31d4f9941b8e43d581d41f0",
+      "pending_sha256": "69b0752d99d0f72fe3a6f1245fadd9c29aecf4f497e4bb59f0f84c6462ce0ed7"
+    },
+    {
+      "path": "user/lib/pthread.c",
+      "base_sha256": "051160aa5dbeb769ca096dba54e3e2c62c87844afc2854fcee6294648bf3325d",
+      "pending_sha256": "e5baab44a55e5079fd7aaa55152709b11392bce1689262569b2e4a107de88d67"
+    },
+    {
+      "path": "user/lib/signal.c",
+      "base_sha256": "79e147f77a592f6c6c9d8693007dcbf0ded697cd7d658dec68191c7bc2ba4f9e",
+      "pending_sha256": "ceadf368ea36f1e657e2a173ecf509dff32cef538f1434c9c4d4e6467f2f9718"
+    },
+    {
+      "path": "user/lib/syscall.c",
+      "base_sha256": "8980370d25067899077ffa136ec69aaed684fa94bbc2ebaac563ce5bc0473748",
+      "pending_sha256": "ecb10ffcea6033437bb5636e4989fb19290ecef499cae73ed439a28762d83e60"
+    },
+    {
+      "path": "user/lib/usyscall.h",
+      "base_sha256": "7191101ca800f024729a812c53776924d86fea940f182c9f1c6c355035bb756d",
+      "pending_sha256": "b115c80e622e7c1eec64ad38fa37dd7f3b92078b7f398c0a9d8ac5b95adba2e4"
+    }
+  ],
+  "applied_date": "2026-10-31",
+  "native_acceptance": {
+    "normal": "pass",
+    "default": "pass",
+    "badframe": "pass",
+    "date": "2026-10-31",
+    "logs": "build/test-out/signal-kernel-{normal,default,badframe}-qemu.log"
+  }
+}

@@ -2,6 +2,21 @@
 #define MATH_H
 
 #include "types.h"
+#include <float.h>
+
+/* Match the compiler's actual expression-evaluation format. */
+#if FLT_EVAL_METHOD == 0
+typedef float float_t;
+typedef double double_t;
+#elif FLT_EVAL_METHOD == 1
+typedef double float_t;
+typedef double double_t;
+#elif FLT_EVAL_METHOD == 2
+typedef long double float_t;
+typedef long double double_t;
+#else
+#error "Unsupported floating-point evaluation format for Alix math.h"
+#endif
 
 #define FP_NAN 0
 #define FP_INFINITE 1
@@ -30,8 +45,22 @@
 extern "C" {
 #endif
 
-#define M_PI 3.14159265358979323846
-#define PI   3.14159265358979323846
+/* X/Open constants, rounded directly to binary64. In particular SQRT1_2
+ * is not computed from an already-rounded double-precision square root. */
+#define M_E        0x1.5bf0a8b145769p+1
+#define M_LOG2E    0x1.71547652b82fep+0
+#define M_LOG10E   0x1.bcb7b1526e50ep-2
+#define M_LN2      0x1.62e42fefa39efp-1
+#define M_LN10     0x1.26bb1bbb55516p+1
+#define M_PI       0x1.921fb54442d18p+1
+#define M_PI_2     0x1.921fb54442d18p+0
+#define M_PI_4     0x1.921fb54442d18p-1
+#define M_1_PI     0x1.45f306dc9c883p-2
+#define M_2_PI     0x1.45f306dc9c883p-1
+#define M_2_SQRTPI 0x1.20dd750429b6dp+0
+#define M_SQRT2    0x1.6a09e667f3bcdp+0
+#define M_SQRT1_2  0x1.6a09e667f3bcdp-1
+#define PI         0x1.921fb54442d18p+1
 
 double atan(double x);
 double atan2(double y, double x);
@@ -46,6 +75,13 @@ double floor(double x);
 double ceil(double x);
 double fabs(double x);
 double pow(double x, double y);
+float nearbyintf(float value);
+double nearbyint(double value);
+long double nearbyintl(long double value);
+float sqrtf(float value);
+float fabsf(float value);
+long double fabsl(long double value);
+float scalbnf(float value, int exponent);
 
 #ifdef __cplusplus
 }

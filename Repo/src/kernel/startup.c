@@ -126,6 +126,7 @@ static void startup_process_entry(void *arg)
         .wait_hook = NULL,
         .wait_context = NULL,
         .owner_process = process_current(),
+        .owner_pid = process_current_pid(),
         .cwd_changed_fn = NULL,
         .cwd_changed_context = NULL
     };

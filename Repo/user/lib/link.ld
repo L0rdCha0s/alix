@@ -1,3 +1,25 @@
+/* Native user VA contract; checked against include/memory_layout.h. */
+__alix_user_pointer_base = 0x0000000100000000;
+__alix_user_pointer_limit = 0x00003FFFFFFFFFFF;
+__alix_user_stack_top = 0x0000000140000000;
+__alix_user_stack_size = 0x00800000;
+__alix_user_stack_guard_size = 0x1000;
+__alix_user_image_end = __alix_user_stack_top - __alix_user_stack_size - __alix_user_stack_guard_size;
+__alix_user_heap_base = 0x0000000180000000;
+__alix_user_heap_size = 0x0000000400000000;
+__alix_user_vm_heap_gap = 0x01000000;
+__alix_user_thread_pool_size = 0x0000000200000000;
+__alix_user_stub_code_base = __alix_user_pointer_limit + 1 - 0x2000;
+__alix_user_vm_start = __alix_user_heap_base + __alix_user_heap_size + __alix_user_vm_heap_gap;
+__alix_user_vm_end = __alix_user_stub_code_base - __alix_user_thread_pool_size;
+ASSERT(__alix_user_pointer_base >= 0x100000000, "user range overlaps low kernel identity map")
+ASSERT(__alix_user_pointer_limit < 0x800000000000, "user range exceeds SpiderMonkey 47-bit pointers")
+ASSERT(__alix_user_pointer_base < __alix_user_image_end, "empty user ELF arena")
+ASSERT(__alix_user_stack_top <= __alix_user_heap_base, "user stack overlaps heap")
+ASSERT(__alix_user_vm_start < __alix_user_vm_end, "user heap overlaps VM or auxiliary pool")
+ASSERT((__alix_user_image_end & 0xFFF) == 0, "user image boundary is not page aligned")
+ASSERT((__alix_user_vm_start & 0xFFF) == 0 && (__alix_user_vm_end & 0xFFF) == 0, "VM boundary is not page aligned")
+
 ENTRY(_start)
 
 PHDRS
@@ -9,7 +31,7 @@ PHDRS
 
 SECTIONS
 {
-    . = 0x0000000100000000;
+    . = __alix_user_pointer_base;
 
     .text : ALIGN(16)
     {
@@ -79,4 +101,6 @@ SECTIONS
         *(COMMON)
         __bss_end = .;
     } :data
+    __alix_user_image_loaded_end = ALIGN(., 0x1000);
+    ASSERT(__alix_user_image_loaded_end <= __alix_user_image_end, "user ELF image overlaps reserved main stack guard")
 }

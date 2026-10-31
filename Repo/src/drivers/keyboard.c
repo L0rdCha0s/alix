@@ -1,3 +1,4 @@
+#include "build_features.h"
 #include "keyboard.h"
 #include "io.h"
 #include "interrupts.h"
@@ -114,7 +115,7 @@ static ssize_t keyboard_proc_value_read(vfs_node_t *node, size_t offset, void *b
 static ssize_t keyboard_proc_value_write(vfs_node_t *node, size_t offset, const void *buffer, size_t count, void *context);
 static bool pending_pop_char(char *ch);
 static void pending_push_sequence(const char *seq, size_t len);
-static void ps2_controller_init(void);
+static void __attribute__((unused)) ps2_controller_init(void);
 
 static bool ps2_wait_input_empty(void)
 {
@@ -689,7 +690,7 @@ static bool read_scancode(uint8_t *code)
     {
         return true;
     }
-    if (!ps2_enabled)
+    if (!keyboard_ps2_enabled())
     {
         return false;
     }
@@ -781,10 +782,11 @@ void keyboard_init(void)
     spinlock_init(&g_kbd_buffer_lock);
 #if ENABLE_USB
     /* Skip PS/2 init when USB is present to avoid contention on the controller. */
-    ps2_enabled = false;
+    __atomic_store_n(&ps2_enabled, false, __ATOMIC_RELEASE);
 #else
-    ps2_enabled = true;
+    __atomic_store_n(&ps2_enabled, true, __ATOMIC_RELEASE);
     ps2_controller_init();
+#endif /* ENABLE_USB: software state is shared by both input backends. */
     keyboard_reset_state();
     keyboard_update_repeat_ticks();
 
@@ -820,7 +822,6 @@ void keyboard_init(void)
     {
         serial_printf("%s", "[keyboard] failed to create /proc/keyboard/repeat/multi_mode\r\n");
     }
-#endif /* ENABLE_USB */
 }
 
 bool keyboard_try_read_event(keyboard_event_t *event)
@@ -999,12 +1000,12 @@ void keyboard_buffer_push(uint8_t scancode)
 
 void keyboard_disable_ps2(void)
 {
-    ps2_enabled = false;
+    __atomic_store_n(&ps2_enabled, false, __ATOMIC_RELEASE);
 }
 
 bool keyboard_ps2_enabled(void)
 {
-    return ps2_enabled;
+    return __atomic_load_n(&ps2_enabled, __ATOMIC_ACQUIRE);
 }
 
 static void ps2_controller_init(void)

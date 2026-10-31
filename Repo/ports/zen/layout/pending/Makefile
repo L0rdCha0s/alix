@@ -1,0 +1,1299 @@
+CC       := x86_64-elf-gcc
+CXX      := x86_64-elf-g++
+LD       := x86_64-elf-ld
+OBJCOPY  := x86_64-elf-objcopy
+OBJDUMP  := x86_64-elf-objdump
+STRIP    := x86_64-elf-strip
+NM       := x86_64-elf-nm
+QEMU     := qemu-system-x86_64  -display cocoa,zoom-to-fit=off
+HOST_CC  ?= cc
+
+SRC_DIR     := src
+ARCH_DIR    := $(SRC_DIR)/arch/x86
+KERNEL_DIR  := $(SRC_DIR)/kernel
+DRIVER_DIR  := $(SRC_DIR)/drivers
+ATK_DIR     := $(SRC_DIR)/atk
+NET_DIR     := $(SRC_DIR)/net
+SBIN_DIR    := $(SRC_DIR)/sbin
+CRYPTO_DIR  := $(SRC_DIR)/crypto
+INCLUDE_DIR := include
+USER_DIR    := user
+OBJDIR      := build
+GENERATED_DIR := $(OBJDIR)/generated
+DL_SCRIPT_SRC := $(GENERATED_DIR)/dl_script_data.c
+DL_SCRIPT_OBJ := $(GENERATED_DIR)/dl_script_data.o
+
+BASE_CFLAGS := -O4 -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
+               -m64 -mno-red-zone -Wall -Wextra -g -I$(INCLUDE_DIR) -I$(ATK_DIR) \
+               -fno-merge-constants -fno-asynchronous-unwind-tables -fno-unwind-tables \
+               -fshort-wchar -MMD -MP
+
+USB ?= 1
+
+KERNEL_CFLAGS := $(BASE_CFLAGS) -mgeneral-regs-only -mfpmath=387 -mno-sse \
+                  -DKERNEL_BUILD
+ifeq ($(USB),0)
+KERNEL_CFLAGS += -DENABLE_USB=0
+endif
+USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(USER_DIR)/lib -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
+               -msse2 -mfpmath=sse -mstackrealign -mcmodel=large -I$(USER_DIR)/apps/doom \
+               -DNORMALUNIX
+USER_CXXFLAGS := $(filter-out -std=c11,$(USER_CFLAGS)) -std=c++17 \
+                 -fno-exceptions -fno-rtti -fno-use-cxa-atexit -fno-threadsafe-statics
+
+KERNEL_LD   := $(ARCH_DIR)/uefi.ld
+LOADER_DIR  := src/loader
+
+ARCH_KERNEL_SOURCES := $(filter-out $(ARCH_DIR)/uefi_boot.c,$(wildcard $(ARCH_DIR)/*.c))
+
+C_SOURCES := \
+	$(wildcard $(KERNEL_DIR)/*.c) \
+	$(wildcard $(DRIVER_DIR)/*.c) \
+	$(wildcard $(ATK_DIR)/*.c) \
+	$(wildcard $(ATK_DIR)/util/*.c) \
+	$(wildcard $(NET_DIR)/*.c) \
+	$(wildcard $(CRYPTO_DIR)/*.c) \
+	$(ARCH_KERNEL_SOURCES) \
+	$(wildcard $(SBIN_DIR)/*.c)
+C_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(C_SOURCES))
+# Pull in process/* units directly rather than including from process.c.
+PROCESS_SOURCES := $(wildcard $(KERNEL_DIR)/process/*.c)
+C_SOURCES := $(filter-out $(KERNEL_DIR)/process.c,$(C_SOURCES))
+C_SOURCES += $(PROCESS_SOURCES)
+# Shared ownership primitives used by process-owned asynchronous I/O records.
+C_SOURCES += $(KERNEL_DIR)/fd/table.c $(KERNEL_DIR)/io/request.c
+
+C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
+C_OBJECTS += $(DL_SCRIPT_OBJ)
+
+ASM_SOURCES := $(filter-out $(ARCH_DIR)/ap_trampoline.S,$(wildcard $(ARCH_DIR)/*.S))
+ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
+
+USER_OBJDIR := $(OBJDIR)/user
+USER_COMMON_SOURCES := \
+	$(USER_DIR)/lib/crt0.c \
+	$(USER_DIR)/lib/syscall.c \
+	$(USER_DIR)/lib/libc.c \
+	$(USER_DIR)/lib/calendar.c \
+	$(USER_DIR)/lib/calendar_format.c \
+	$(USER_DIR)/lib/timezone.c \
+	$(USER_DIR)/lib/locale.c \
+	$(USER_DIR)/lib/locale_objects.c \
+	$(USER_DIR)/lib/printf_float.c \
+	$(USER_DIR)/lib/wchar.c \
+	$(USER_DIR)/lib/wide_stdio.c \
+	$(USER_DIR)/lib/inttypes.c \
+	$(USER_DIR)/lib/signal.c \
+	$(USER_DIR)/lib/mman.c \
+	$(USER_DIR)/lib/random.c \
+	$(USER_DIR)/lib/pthread.c \
+	$(USER_DIR)/lib/process_posix.c \
+	$(USER_DIR)/lib/math.c \
+	$(USER_DIR)/lib/setjmp.c \
+	$(USER_DIR)/lib/atk_user.c \
+	$(USER_DIR)/lib/video_surface.c \
+	$(USER_DIR)/lib/serial_stub.c \
+	$(USER_DIR)/lib/atk_user_host_stub.c
+USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
+USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o $(USER_OBJDIR)/kernel/ttf.o
+USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/utf8.o
+# The legacy web engine is an explicit browser dependency, not part of libc or
+# the window/pixel API. External browser engines must not link these objects.
+USER_WEB_SOURCES := \
+	$(USER_DIR)/lib/web/html.c \
+	$(USER_DIR)/lib/web/html/entities.c \
+	$(USER_DIR)/lib/web/html/dom.c \
+	$(USER_DIR)/lib/web/html/parse.c \
+	$(USER_DIR)/lib/web/css.c \
+	$(USER_DIR)/lib/web/css/core.c \
+	$(USER_DIR)/lib/web/css/match.c \
+	$(USER_DIR)/lib/web/css/properties.c \
+	$(USER_DIR)/lib/web/css/parse.c \
+	$(USER_DIR)/lib/web/js/internal.c \
+	$(USER_DIR)/lib/web/js/lexer.c \
+	$(USER_DIR)/lib/web/js/parser.c \
+	$(USER_DIR)/lib/web/js/runtime/value.c \
+	$(USER_DIR)/lib/web/js/runtime/array.c \
+	$(USER_DIR)/lib/web/js/runtime/object.c \
+	$(USER_DIR)/lib/web/js/runtime/env.c \
+	$(USER_DIR)/lib/web/js/runtime/function.c \
+	$(USER_DIR)/lib/web/js/runtime/core.c \
+	$(USER_DIR)/lib/web/js/runtime/builtins.c \
+	$(USER_DIR)/lib/web/js/runtime/eval.c \
+	$(USER_DIR)/lib/web/url.c
+USER_WEB_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_WEB_SOURCES))
+USER_LD_SCRIPT := $(USER_DIR)/lib/link.ld
+USER_ATK_SOURCES := $(filter-out $(ATK_DIR)/atk_shell.c $(ATK_DIR)/atk_task_manager.c $(ATK_DIR)/atk_terminal.c,$(wildcard $(ATK_DIR)/*.c))
+USER_ATK_SOURCES += $(wildcard $(ATK_DIR)/util/*.c)
+USER_ATK_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_SOURCES))
+USER_ATK_EXTRA_SOURCES := $(USER_DIR)/lib/atk/atk_terminal.c \
+                          $(USER_DIR)/lib/atk_app.c
+USER_ATK_EXTRA_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_EXTRA_SOURCES))
+USER_ATK_OBJECTS += $(USER_ATK_EXTRA_OBJECTS)
+USER_HTML_VIEW_SOURCES := $(USER_DIR)/lib/atk/atk_html_view.c \
+                          $(USER_DIR)/lib/atk/html_view/core.c \
+                          $(USER_DIR)/lib/atk/html_view/font.c \
+                          $(USER_DIR)/lib/atk/html_view/controls.c \
+                          $(USER_DIR)/lib/atk/html_view/script.c \
+                          $(USER_DIR)/lib/atk/html_view/style.c \
+                          $(USER_DIR)/lib/atk/html_view/measure_cache.c \
+                          $(USER_DIR)/lib/atk/html_view/layout.c \
+                          $(USER_DIR)/lib/atk/html_view/table.c \
+                          $(USER_DIR)/lib/atk/html_view/render/dispatch.c \
+                          $(USER_DIR)/lib/atk/html_view/render/flex.c \
+                          $(USER_DIR)/lib/atk/html_view/render/grid.c \
+                          $(USER_DIR)/lib/atk/html_view/render/forms.c \
+                          $(USER_DIR)/lib/atk/html_view/render/blocks.c \
+                          $(USER_DIR)/lib/atk/html_view/render/inline.c \
+                          $(USER_DIR)/lib/atk/html_view/widget.c
+USER_HTML_VIEW_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_HTML_VIEW_SOURCES))
+USER_DOOM_SOURCES := $(wildcard $(USER_DIR)/apps/doom/*.c)
+USER_DOOM_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_DOOM_SOURCES))
+USER_TLS_SOURCES := \
+	$(NET_DIR)/tls.c \
+	$(NET_DIR)/tls_asn1.c \
+	$(CRYPTO_DIR)/aes.c \
+	$(CRYPTO_DIR)/bignum.c \
+	$(CRYPTO_DIR)/hmac.c \
+	$(CRYPTO_DIR)/p256.c \
+	$(CRYPTO_DIR)/p384.c \
+	$(CRYPTO_DIR)/rsa.c \
+	$(CRYPTO_DIR)/sha1.c \
+	$(CRYPTO_DIR)/sha256.c
+USER_TLS_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_TLS_SOURCES))
+USER_ATK_BROWSER_SOURCES := $(wildcard $(USER_DIR)/apps/atk_browser/*.c)
+USER_ATK_BROWSER_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_ATK_BROWSER_SOURCES))
+USER_QUAKE_REF_DIR := $(USER_DIR)/quake
+QUAKE_CFLAGS := -I$(USER_QUAKE_REF_DIR) -DALIXOS=1 -fcommon -Dstrnicmp=strncasecmp -Dstricmp=strcasecmp
+USER_QUAKE_REF_SOURCES := $(wildcard $(USER_QUAKE_REF_DIR)/*.c)
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/gl_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/vid_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/sys_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/in_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/snd_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/cd_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/net_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/conproc.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/dos_%.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/mplib.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/mplpc.c,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_REF_SOURCES := $(filter-out $(USER_QUAKE_REF_DIR)/vregset.c,$(USER_QUAKE_REF_SOURCES))
+# Pull in loopback-only networking plus the Alix audio backend.
+USER_QUAKE_REF_SOURCES += $(USER_QUAKE_REF_DIR)/net_main.c \
+                          $(USER_QUAKE_REF_DIR)/net_loop.c \
+                          $(USER_QUAKE_REF_DIR)/net_none.c \
+                          $(USER_QUAKE_REF_DIR)/net_vcr.c \
+                          $(USER_QUAKE_REF_DIR)/snd_dma.c \
+                          $(USER_QUAKE_REF_DIR)/snd_mix.c \
+                          $(USER_QUAKE_REF_DIR)/snd_mem.c \
+                          $(USER_QUAKE_REF_DIR)/snd_alix.c \
+                          $(USER_QUAKE_REF_DIR)/cd_null.c
+USER_QUAKE_REF_OBJECTS := $(patsubst $(USER_QUAKE_REF_DIR)/%.c,$(USER_OBJDIR)/quake_ref/%.o,$(USER_QUAKE_REF_SOURCES))
+USER_QUAKE_APP_SOURCES := $(wildcard $(USER_DIR)/apps/quake/*.c)
+USER_QUAKE_APP_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_QUAKE_APP_SOURCES))
+USER_QUAKE_OBJECTS := $(USER_QUAKE_REF_OBJECTS) $(USER_QUAKE_APP_OBJECTS)
+USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
+             $(USER_OBJDIR)/ttf_demo.elf \
+             $(USER_OBJDIR)/wolf3d.elf \
+             $(USER_OBJDIR)/doom.elf \
+             $(USER_OBJDIR)/quake.elf \
+             $(USER_OBJDIR)/atk_shell.elf \
+             $(USER_OBJDIR)/atk_clock.elf \
+             $(USER_OBJDIR)/atk_browser.elf \
+             $(USER_OBJDIR)/atk_richtext.elf \
+             $(USER_OBJDIR)/atk_taskmgr.elf \
+             $(USER_OBJDIR)/atk_fileman.elf \
+             $(USER_OBJDIR)/atk_mp3.elf \
+             $(USER_OBJDIR)/atk_preview.elf \
+             $(USER_OBJDIR)/atk_threads.elf \
+             $(USER_OBJDIR)/control_panel.elf \
+             $(USER_OBJDIR)/loop.elf \
+             $(USER_OBJDIR)/playsound.elf \
+             $(USER_OBJDIR)/playmp3.elf \
+             $(USER_OBJDIR)/socket_demo.elf \
+             $(USER_OBJDIR)/unzip.elf
+USER_ELF_ARCHIVE := $(USER_OBJDIR)/user-elfs.zip
+USER_RUNTIME_DIR := $(USER_OBJDIR)/runtime
+USER_RUNTIME_ELFS := $(patsubst $(USER_OBJDIR)/%.elf,$(USER_RUNTIME_DIR)/%.elf,$(USER_ELFS))
+USER_BIN_DIR := build/bin
+USER_BINS := $(USER_BIN_DIR)/atk_demo \
+             $(USER_BIN_DIR)/ttf_demo \
+             $(USER_BIN_DIR)/wolf3d \
+             $(USER_BIN_DIR)/doom \
+             $(USER_BIN_DIR)/quake \
+             $(USER_BIN_DIR)/atk_shell \
+             $(USER_BIN_DIR)/atk_clock \
+             $(USER_BIN_DIR)/atk_browser \
+             $(USER_BIN_DIR)/atk_richtext \
+             $(USER_BIN_DIR)/atk_taskmgr \
+             $(USER_BIN_DIR)/atk_fileman \
+             $(USER_BIN_DIR)/atk_mp3 \
+             $(USER_BIN_DIR)/atk_preview \
+             $(USER_BIN_DIR)/atk_threads \
+             $(USER_BIN_DIR)/control_panel \
+             $(USER_BIN_DIR)/loop \
+             $(USER_BIN_DIR)/playsound \
+             $(USER_BIN_DIR)/playmp3 \
+             $(USER_BIN_DIR)/socket_demo \
+             $(USER_BIN_DIR)/unzip
+HOST_TEST_DIR := $(OBJDIR)/host-tests
+HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
+SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
+PNG_TEST_BIN := $(HOST_TEST_DIR)/png_host_test
+WEB_TEST_BIN := $(HOST_TEST_DIR)/web_host_test
+CSS_TEST_BIN := $(HOST_TEST_DIR)/css_test
+HTML_VIEW_TEST_BIN := $(HOST_TEST_DIR)/html_view_host_test
+HTML_VIEW_TEST_LIBC_BIN := $(HOST_TEST_DIR)/html_view_host_test_libc
+WEB_RENDER_HARNESS_BIN := $(HOST_TEST_DIR)/web_render_harness
+BROWSER_EVENT_TEST_BIN := $(HOST_TEST_DIR)/browser_event_host_test
+BROWSER_RESOURCE_TEST_BIN := $(HOST_TEST_DIR)/browser_resource_host_test
+HTML_JS_TEST_BIN := $(HOST_TEST_DIR)/html_js_host_test
+TLS_TEST_BIN := $(HOST_TEST_DIR)/tls_host_test
+JS_TEST_BIN := $(HOST_TEST_DIR)/js_host_test
+TEST262_TEST_BIN := $(HOST_TEST_DIR)/test262_host_test
+ELF_VALIDATION_TEST_BIN := $(HOST_TEST_DIR)/elf_validation_host_test
+QUAKE_LIVENESS_TEST_BIN := $(HOST_TEST_DIR)/quake_liveness_host_test
+HOST_TEST_CFLAGS := -std=c17 -Wall -Wextra -iquote $(INCLUDE_DIR) -DTTF_HOST_BUILD
+WEB_RENDER_HARNESS_CFLAGS ?= -O2
+WEB_RENDER_HARNESS_HEADERS := $(wildcard \
+	$(INCLUDE_DIR)/*.h \
+	$(INCLUDE_DIR)/atk/*.h \
+	$(ATK_DIR)/*.h \
+	$(ATK_DIR)/util/*.h \
+	$(USER_DIR)/lib/*.h \
+	$(USER_DIR)/lib/atk/html_view/*.h \
+	$(USER_DIR)/lib/atk/html_view/render/*.h \
+	$(USER_DIR)/lib/web/*.h \
+	$(USER_DIR)/lib/web/*/*.h)
+
+KERNEL_ELF := $(OBJDIR)/alix.elf
+EFI_DIR    := build/EFI/BOOT
+EFI_BIN    := $(EFI_DIR)/BOOTX64.EFI
+DATA_IMG   := data.img
+LOADER_SRC := $(LOADER_DIR)/uefi_loader.c
+LOADER_CC  ?= x86_64-w64-mingw32-gcc
+LOADER_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-builtin -fno-pic \
+                 -mno-red-zone -Wall -Wextra -I$(INCLUDE_DIR) -fshort-wchar
+LOADER_LDFLAGS := -nostdlib -Wl,--dll -Wl,--entry=efi_main -Wl,--subsystem,10 \
+                  -Wl,--image-base,0x4000000 -Wl,--file-alignment,0x200 -Wl,--section-alignment,0x1000 \
+                  -Wl,--major-subsystem-version,10 -Wl,--minor-subsystem-version,0
+
+CPU_TYPE ?= EPYC
+# RDRAND supplies the guest's native entropy service. QEMU's normal (non-seed,
+# non-replay) execution backs this instruction with its cryptographic RNG.
+TCG_CPU_TYPE ?= qemu64,+rdrand
+SMP_CORES ?= 8
+QEMU_SMP_OPTS := -smp $(SMP_CORES),sockets=1,cores=$(SMP_CORES),threads=1
+
+all: $(KERNEL_ELF) $(EFI_BIN) $(USER_ELFS) $(USER_BINS) $(HTML_VIEW_TEST_BIN)
+
+# Relink after dependency-list changes, including removal of a library.
+$(USER_ELFS): Makefile
+
+$(OBJDIR)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/%.o: $(SRC_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+NASM ?= nasm
+AP_TRAMP_BIN := $(OBJDIR)/arch/x86/ap_trampoline.bin
+AP_TRAMP_OBJ := $(OBJDIR)/arch/x86/ap_trampoline.o
+
+$(AP_TRAMP_BIN): src/arch/x86/ap_trampoline.asm
+	@mkdir -p $(dir $@)
+	$(NASM) -f bin -o $@ $<
+
+$(AP_TRAMP_OBJ): $(AP_TRAMP_BIN)
+	$(LD) -r -b binary -o $@ $<
+
+ASM_OBJECTS += $(AP_TRAMP_OBJ)
+
+$(OBJDIR)/generated/%.o: $(OBJDIR)/generated/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/%.o: $(USER_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+# The rounding probe in decimal/hex formatting must observe fesetround().
+$(USER_OBJDIR)/lib/printf_float.o: USER_CFLAGS += -frounding-math
+
+$(USER_OBJDIR)/apps/doom/%.o: USER_CFLAGS += -Wno-unused-const-variable
+$(USER_OBJDIR)/apps/quake/%.o: USER_CFLAGS += $(QUAKE_CFLAGS)
+
+$(USER_OBJDIR)/quake_ref/%.o: $(USER_QUAKE_REF_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) $(QUAKE_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/atk/%.o: $(ATK_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/atk/util/%.o: $(ATK_DIR)/util/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/kernel/%.o: $(KERNEL_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/net/%.o: $(NET_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/crypto/%.o: $(CRYPTO_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/crypto/rsa.o: USER_CFLAGS += -DRSA_DEBUG_LOG=0
+
+$(KERNEL_ELF): $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_LD)
+	$(LD) -nostdlib -z max-page-size=0x1000 -T $(KERNEL_LD) -o $@ $(C_OBJECTS) $(ASM_OBJECTS)
+
+$(USER_OBJDIR)/atk_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_demo/atk_demo.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_demo/atk_demo.o
+
+$(USER_OBJDIR)/ttf_demo.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/ttf_demo/ttf_demo.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/ttf_demo/ttf_demo.o
+
+$(USER_OBJDIR)/wolf3d.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/wolf3d/wolf3d.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/wolf3d/wolf3d.o
+
+$(USER_OBJDIR)/doom.elf: $(USER_COMMON_OBJECTS) $(USER_DOOM_OBJECTS) $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_DOOM_OBJECTS)
+
+$(USER_OBJDIR)/quake.elf: $(USER_COMMON_OBJECTS) $(USER_QUAKE_OBJECTS) $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_QUAKE_OBJECTS)
+
+$(USER_OBJDIR)/atk_shell.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_shell/atk_shell_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_shell/atk_shell_app.o
+
+$(USER_OBJDIR)/atk_clock.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_clock/atk_clock_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_clock/atk_clock_app.o
+
+$(USER_OBJDIR)/atk_browser.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_WEB_OBJECTS) $(USER_HTML_VIEW_OBJECTS) $(USER_TLS_OBJECTS) $(USER_ATK_BROWSER_OBJECTS) $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_WEB_OBJECTS) $(USER_HTML_VIEW_OBJECTS) $(USER_TLS_OBJECTS) $(USER_ATK_BROWSER_OBJECTS)
+
+$(USER_OBJDIR)/atk_richtext.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_richtext/atk_richtext_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_richtext/atk_richtext_app.o
+
+$(USER_OBJDIR)/atk_taskmgr.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_taskmgr/atk_taskmgr_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_taskmgr/atk_taskmgr_app.o
+
+$(USER_OBJDIR)/atk_fileman.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/crypto/sha1.o $(USER_OBJDIR)/apps/atk_fileman/atk_fileman_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/crypto/sha1.o $(USER_OBJDIR)/apps/atk_fileman/atk_fileman_app.o
+
+$(USER_OBJDIR)/atk_mp3.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_mp3/atk_mp3_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_mp3/atk_mp3_app.o
+
+$(USER_OBJDIR)/atk_preview.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_preview/atk_preview_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_preview/atk_preview_app.o
+
+$(USER_OBJDIR)/atk_threads.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_threads/atk_threads_app.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/atk_threads/atk_threads_app.o
+
+$(USER_OBJDIR)/control_panel.elf: $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/control_panel/control_panel.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_ATK_OBJECTS) $(USER_OBJDIR)/apps/control_panel/control_panel.o
+
+$(USER_OBJDIR)/loop.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/loop/loop.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/loop/loop.o
+
+$(USER_OBJDIR)/playsound.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/playsound/playsound.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/playsound/playsound.o
+
+$(USER_OBJDIR)/playmp3.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/playmp3/playmp3.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/playmp3/playmp3.o
+
+$(USER_OBJDIR)/socket_demo.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/socket_demo/socket_demo.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/socket_demo/socket_demo.o
+
+$(USER_OBJDIR)/unzip.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o $(USER_LD_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o
+
+$(USER_OBJDIR)/tests/cpp_runtime_test.o: tests/cpp_runtime_test.cpp Makefile
+	@mkdir -p $(dir $@)
+	$(CXX) $(USER_CXXFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/tests/cpp_runtime_abi.o: tests/cpp_runtime_abi.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/cpp_runtime_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/cpp_runtime_test.o $(USER_OBJDIR)/tests/cpp_runtime_abi.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/cpp_runtime_test.o $(USER_OBJDIR)/tests/cpp_runtime_abi.o
+
+$(USER_OBJDIR)/tests/thread_%_test.o: tests/thread_%_test.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/thread_%_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/thread_%_test.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/thread_$*_test.o
+
+$(USER_RUNTIME_DIR)/%.elf: $(USER_OBJDIR)/%.elf Makefile
+	@mkdir -p $(dir $@)
+	$(STRIP) --strip-debug -o $@.tmp $<
+	mv -f $@.tmp $@
+
+# Full ELF debug information remains in build/user for addr2line/GDB. Publish
+# only runtime copies, with identical load segments, and replace the ZIP only
+# after it is complete so a concurrent HTTP download cannot see a partial ZIP.
+$(USER_ELF_ARCHIVE): $(USER_RUNTIME_ELFS)
+	@mkdir -p $(dir $@)
+	zip -j -q -9 -FS $@.tmp.zip $(USER_RUNTIME_ELFS)
+	mv -f $@.tmp.zip $@
+
+$(DL_SCRIPT_SRC): $(USER_ELF_ARCHIVE) Makefile
+	@mkdir -p $(GENERATED_DIR)
+	@{ \
+		echo '#include "types.h"'; \
+		echo; \
+		echo 'const char g_dl_script_content[] ='; \
+		printf '    "%s\\n"\n' '#!/bin/sh'; \
+		printf '    "%s\\n"\n' '# Auto-generated user binary downloader'; \
+		printf '    "%s\\n"\n' 'cd /usr/bin'; \
+		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/runtime/unzip.elf /tmp/dl-unzip.elf'; \
+		printf '    "%s\\n"\n' 'wget gateway:8000/build/user/user-elfs.zip /tmp/user-elfs.zip'; \
+		printf '    "%s\\n"\n' '/tmp/dl-unzip.elf /tmp/user-elfs.zip /root/usr/bin'; \
+		printf '    "%s\\n"\n' 'rm /tmp/dl-unzip.elf'; \
+		printf '    "%s\\n"\n' 'rm /tmp/user-elfs.zip'; \
+		echo ';'; \
+		echo 'const size_t g_dl_script_content_len = sizeof(g_dl_script_content) - 1;'; \
+	} > $(DL_SCRIPT_SRC)
+
+$(USER_BIN_DIR)/atk_demo: $(USER_OBJDIR)/atk_demo.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/ttf_demo: $(USER_OBJDIR)/ttf_demo.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/wolf3d: $(USER_OBJDIR)/wolf3d.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/doom: $(USER_OBJDIR)/doom.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/quake: $(USER_OBJDIR)/quake.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_shell: $(USER_OBJDIR)/atk_shell.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_clock: $(USER_OBJDIR)/atk_clock.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_browser: $(USER_OBJDIR)/atk_browser.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_richtext: $(USER_OBJDIR)/atk_richtext.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_taskmgr: $(USER_OBJDIR)/atk_taskmgr.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_fileman: $(USER_OBJDIR)/atk_fileman.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_mp3: $(USER_OBJDIR)/atk_mp3.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_preview: $(USER_OBJDIR)/atk_preview.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/atk_threads: $(USER_OBJDIR)/atk_threads.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/control_panel: $(USER_OBJDIR)/control_panel.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/loop: $(USER_OBJDIR)/loop.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/playsound: $(USER_OBJDIR)/playsound.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/playmp3: $(USER_OBJDIR)/playmp3.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/socket_demo: $(USER_OBJDIR)/socket_demo.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/unzip: $(USER_OBJDIR)/unzip.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(HOST_TEST_BIN): tests/ttf_host_test.c src/kernel/ttf.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/ttf_host_test.c src/kernel/ttf.c -o $@
+
+$(SHA256_TEST_BIN): tests/sha256_host_test.c src/crypto/sha256.c include/crypto/sha256.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/sha256_host_test.c src/crypto/sha256.c -o $@
+
+$(ELF_VALIDATION_TEST_BIN): tests/elf_validation_host_test.c src/kernel/elf.c include/elf.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) tests/elf_validation_host_test.c src/kernel/elf.c -o $@
+
+$(QUAKE_LIVENESS_TEST_BIN): tests/quake_liveness_host_test.c \
+                            user/apps/quake/liveness.c user/apps/quake/liveness.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/apps/quake \
+	    tests/quake_liveness_host_test.c user/apps/quake/liveness.c -o $@
+
+$(PNG_TEST_BIN): tests/png_host_test.c src/atk/util/png.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD tests/png_host_test.c src/atk/util/png.c -o $@
+
+$(WEB_TEST_BIN): tests/web_host_test.c \
+                 user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                 src/kernel/utf8.c \
+                 user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+                 user/lib/web/url.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/web_host_test.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    user/lib/web/url.c -o $@
+
+$(CSS_TEST_BIN): tests/css_test.c \
+                 user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/css_test.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    -o $@
+
+$(HTML_VIEW_TEST_BIN): tests/html_view_host_test.c \
+                       user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                       src/kernel/utf8.c \
+                       src/kernel/ttf.c \
+                       user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+                       user/lib/web/url.c \
+                       src/atk/util/gif.c \
+                       src/atk/util/jpeg.c \
+                       src/atk/util/png.c \
+                       src/atk/util/svg.c \
+                       src/atk/atk_font.c \
+                       user/lib/atk/html_view/font.c \
+                       user/lib/atk/html_view/style.c \
+                       user/lib/atk/html_view/measure_cache.c \
+                       user/lib/atk/html_view/layout.c \
+                       user/lib/atk/html_view/table.c \
+                       user/lib/atk/html_view/render/dispatch.c \
+                       user/lib/atk/html_view/render/blocks.c \
+                       user/lib/atk/html_view/render/inline.c \
+                       user/lib/atk/html_view/render/flex.c \
+                       user/lib/atk/html_view/render/grid.c \
+                       user/lib/atk/html_view/render/forms.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -DPNG_HOST_BUILD -DGIF_HOST_BUILD -DSVG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	    tests/html_view_host_test.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
+	    src/kernel/ttf.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    user/lib/web/url.c \
+	    src/atk/util/gif.c \
+	    src/atk/util/jpeg.c \
+	    src/atk/util/png.c \
+	    src/atk/util/svg.c \
+	    src/atk/atk_font.c \
+	    user/lib/atk/html_view/font.c \
+	    user/lib/atk/html_view/style.c \
+	    user/lib/atk/html_view/measure_cache.c \
+	    user/lib/atk/html_view/layout.c \
+	    user/lib/atk/html_view/table.c \
+	    user/lib/atk/html_view/render/dispatch.c \
+	    user/lib/atk/html_view/render/blocks.c \
+	    user/lib/atk/html_view/render/inline.c \
+	    user/lib/atk/html_view/render/flex.c \
+	    user/lib/atk/html_view/render/grid.c \
+	    user/lib/atk/html_view/render/forms.c -o $@
+
+$(HTML_VIEW_TEST_LIBC_BIN): tests/html_view_host_test.c \
+                       user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                       src/kernel/utf8.c \
+                       src/kernel/ttf.c \
+                       user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+                       user/lib/web/url.c \
+                       src/atk/util/gif.c \
+                       src/atk/util/jpeg.c \
+                       src/atk/util/png.c \
+                       src/atk/util/svg.c \
+                       src/atk/atk_font.c \
+                       user/lib/atk/html_view/font.c \
+                       user/lib/atk/html_view/style.c \
+                       user/lib/atk/html_view/measure_cache.c \
+                       user/lib/atk/html_view/layout.c \
+                       user/lib/atk/html_view/table.c \
+                       user/lib/atk/html_view/render/dispatch.c \
+                       user/lib/atk/html_view/render/blocks.c \
+                       user/lib/atk/html_view/render/inline.c \
+                       user/lib/atk/html_view/render/flex.c \
+                       user/lib/atk/html_view/render/grid.c \
+                       user/lib/atk/html_view/render/forms.c \
+                       user/lib/libc.c \
+                       user/lib/syscall_host.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -fno-builtin -DPNG_HOST_BUILD -DGIF_HOST_BUILD -DSVG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	    tests/html_view_host_test.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
+	    src/kernel/ttf.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    user/lib/web/url.c \
+	    src/atk/util/gif.c \
+	    src/atk/util/jpeg.c \
+	    src/atk/util/png.c \
+	    src/atk/util/svg.c \
+	    src/atk/atk_font.c \
+	    user/lib/atk/html_view/font.c \
+	    user/lib/atk/html_view/style.c \
+	    user/lib/atk/html_view/measure_cache.c \
+	    user/lib/atk/html_view/layout.c \
+	    user/lib/atk/html_view/table.c \
+	    user/lib/atk/html_view/render/dispatch.c \
+	    user/lib/atk/html_view/render/blocks.c \
+	    user/lib/atk/html_view/render/inline.c \
+	    user/lib/atk/html_view/render/flex.c \
+	    user/lib/atk/html_view/render/grid.c \
+	    user/lib/atk/html_view/render/forms.c \
+	    user/lib/libc.c \
+	    user/lib/syscall_host.c -o $@
+
+$(WEB_RENDER_HARNESS_BIN): tests/web_render_harness.c tests/html_view_host_test.c $(WEB_RENDER_HARNESS_HEADERS) \
+                       user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                       src/kernel/utf8.c \
+                       src/kernel/ttf.c \
+                       user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+                       user/lib/web/url.c \
+                       src/atk/util/gif.c \
+                       src/atk/util/jpeg.c \
+                       src/atk/util/png.c \
+                       src/atk/util/svg.c \
+                       src/atk/atk_font.c \
+                       user/lib/atk/html_view/font.c \
+                       user/lib/atk/html_view/style.c \
+                       user/lib/atk/html_view/measure_cache.c \
+                       user/lib/atk/html_view/layout.c \
+                       user/lib/atk/html_view/table.c \
+                       user/lib/atk/html_view/render/dispatch.c \
+                       user/lib/atk/html_view/render/blocks.c \
+                       user/lib/atk/html_view/render/inline.c \
+                       user/lib/atk/html_view/render/flex.c \
+                       user/lib/atk/html_view/render/grid.c \
+                       user/lib/atk/html_view/render/forms.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) $(WEB_RENDER_HARNESS_CFLAGS) -DPNG_HOST_BUILD -DGIF_HOST_BUILD -DSVG_HOST_BUILD -DATK_NO_DESKTOP_APPS -DHTML_VIEW_HOST_TRACE -I$(USER_DIR)/lib -I$(ATK_DIR) \
+	    tests/web_render_harness.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
+	    src/kernel/ttf.c \
+	    user/lib/web/css.c user/lib/web/css/core.c user/lib/web/css/match.c user/lib/web/css/properties.c user/lib/web/css/parse.c \
+	    user/lib/web/url.c \
+	    src/atk/util/gif.c \
+	    src/atk/util/jpeg.c \
+	    src/atk/util/png.c \
+	    src/atk/util/svg.c \
+	    src/atk/atk_font.c \
+	    user/lib/atk/html_view/font.c \
+	    user/lib/atk/html_view/style.c \
+	    user/lib/atk/html_view/measure_cache.c \
+	    user/lib/atk/html_view/layout.c \
+	    user/lib/atk/html_view/table.c \
+	    user/lib/atk/html_view/render/dispatch.c \
+	    user/lib/atk/html_view/render/blocks.c \
+	    user/lib/atk/html_view/render/inline.c \
+	    user/lib/atk/html_view/render/flex.c \
+	    user/lib/atk/html_view/render/grid.c \
+	    user/lib/atk/html_view/render/forms.c -o $@
+
+$(BROWSER_EVENT_TEST_BIN): tests/browser_event_host_test.c \
+                           user/apps/atk_browser/browser_events.c \
+                           user/apps/atk_browser/browser_common.c \
+                           user/apps/atk_browser/browser_queue.c \
+                           user/lib/web/html/dom.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(USER_DIR)/apps/atk_browser -I$(ATK_DIR) \
+	    tests/browser_event_host_test.c \
+	    user/apps/atk_browser/browser_events.c \
+	    user/apps/atk_browser/browser_common.c \
+	    user/apps/atk_browser/browser_queue.c \
+	    user/lib/web/html/dom.c -o $@
+
+$(BROWSER_RESOURCE_TEST_BIN): tests/browser_resource_host_test.c \
+                              user/apps/atk_browser/browser_common.c \
+                              user/apps/atk_browser/browser_dom.c \
+                              user/apps/atk_browser/browser_resources.c \
+                              user/apps/atk_browser/browser_url.c \
+                              user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                              user/lib/web/url.c src/kernel/utf8.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib -I$(USER_DIR)/apps/atk_browser -I$(ATK_DIR) \
+	    tests/browser_resource_host_test.c \
+	    user/apps/atk_browser/browser_common.c \
+	    user/apps/atk_browser/browser_dom.c \
+	    user/apps/atk_browser/browser_resources.c \
+	    user/apps/atk_browser/browser_url.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    user/lib/web/url.c src/kernel/utf8.c -o $@
+
+$(HTML_JS_TEST_BIN): tests/html_js_host_test.c \
+                     user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+                     src/kernel/utf8.c \
+                     user/lib/web/js/internal.c user/lib/web/js/lexer.c user/lib/web/js/parser.c \
+                     user/lib/web/js/runtime/value.c user/lib/web/js/runtime/array.c user/lib/web/js/runtime/object.c \
+                     user/lib/web/js/runtime/env.c user/lib/web/js/runtime/function.c user/lib/web/js/runtime/core.c \
+                     user/lib/web/js/runtime/builtins.c user/lib/web/js/runtime/eval.c \
+                     user/lib/web/js/js.h user/lib/web/js/internal.h user/lib/web/js/lexer.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/html_js_host_test.c \
+	    user/lib/web/html.c user/lib/web/html/entities.c user/lib/web/html/dom.c user/lib/web/html/parse.c \
+	    src/kernel/utf8.c \
+	    user/lib/web/js/internal.c \
+	    user/lib/web/js/lexer.c \
+	    user/lib/web/js/parser.c \
+	    user/lib/web/js/runtime/value.c \
+	    user/lib/web/js/runtime/array.c \
+	    user/lib/web/js/runtime/object.c \
+	    user/lib/web/js/runtime/env.c \
+	    user/lib/web/js/runtime/function.c \
+	    user/lib/web/js/runtime/core.c \
+	    user/lib/web/js/runtime/builtins.c \
+	    user/lib/web/js/runtime/eval.c \
+	    -o $@
+
+$(TLS_TEST_BIN): tests/tls_host_test.c \
+                 src/net/tls.c src/net/tls_asn1.c \
+                 src/crypto/aes.c src/crypto/bignum.c src/crypto/hmac.c \
+                 src/crypto/p256.c src/crypto/p384.c src/crypto/rsa.c src/crypto/sha256.c
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -DTLS_DEBUG_SIG=0 -DRSA_DEBUG_LOG=0 \
+	    tests/tls_host_test.c \
+	    src/net/tls.c src/net/tls_asn1.c \
+	    src/crypto/aes.c src/crypto/bignum.c src/crypto/hmac.c \
+	    src/crypto/p256.c src/crypto/p384.c src/crypto/rsa.c src/crypto/sha256.c \
+	    -o $@
+
+$(JS_TEST_BIN): tests/js_host_test.c \
+                user/lib/web/js/internal.c user/lib/web/js/lexer.c user/lib/web/js/parser.c \
+                user/lib/web/js/runtime/value.c user/lib/web/js/runtime/array.c user/lib/web/js/runtime/object.c \
+                user/lib/web/js/runtime/env.c user/lib/web/js/runtime/function.c user/lib/web/js/runtime/core.c \
+                user/lib/web/js/runtime/builtins.c user/lib/web/js/runtime/eval.c \
+                user/lib/web/js/js.h user/lib/web/js/internal.h user/lib/web/js/lexer.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/js_host_test.c \
+	    user/lib/web/js/internal.c \
+	    user/lib/web/js/lexer.c \
+	    user/lib/web/js/parser.c \
+	    user/lib/web/js/runtime/value.c \
+	    user/lib/web/js/runtime/array.c \
+	    user/lib/web/js/runtime/object.c \
+	    user/lib/web/js/runtime/env.c \
+	    user/lib/web/js/runtime/function.c \
+	    user/lib/web/js/runtime/core.c \
+	    user/lib/web/js/runtime/builtins.c \
+	    user/lib/web/js/runtime/eval.c \
+	    -o $@
+
+$(TEST262_TEST_BIN): tests/test262_host_test.c \
+                     user/lib/web/js/internal.c user/lib/web/js/lexer.c user/lib/web/js/parser.c \
+                     user/lib/web/js/runtime/value.c user/lib/web/js/runtime/array.c user/lib/web/js/runtime/object.c \
+                     user/lib/web/js/runtime/env.c user/lib/web/js/runtime/function.c user/lib/web/js/runtime/core.c \
+                     user/lib/web/js/runtime/builtins.c user/lib/web/js/runtime/eval.c \
+                     user/lib/web/js/js.h user/lib/web/js/internal.h user/lib/web/js/lexer.h \
+                     user/lib/web/js/runtime/runtime_internal.h
+	@mkdir -p $(HOST_TEST_DIR)
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -I$(USER_DIR)/lib \
+	    tests/test262_host_test.c \
+	    user/lib/web/js/internal.c \
+	    user/lib/web/js/lexer.c \
+	    user/lib/web/js/parser.c \
+	    user/lib/web/js/runtime/value.c \
+	    user/lib/web/js/runtime/array.c \
+	    user/lib/web/js/runtime/object.c \
+	    user/lib/web/js/runtime/env.c \
+	    user/lib/web/js/runtime/function.c \
+	    user/lib/web/js/runtime/core.c \
+	    user/lib/web/js/runtime/builtins.c \
+	    user/lib/web/js/runtime/eval.c \
+	    -o $@
+
+LOADER_HEADERS := \
+	$(INCLUDE_DIR)/uefi.h \
+	$(INCLUDE_DIR)/bootinfo.h \
+	$(INCLUDE_DIR)/arch/x86/bootlayout.h
+
+$(EFI_BIN): $(LOADER_SRC) $(KERNEL_ELF) $(LOADER_HEADERS)
+	@mkdir -p $(EFI_DIR)
+	$(LOADER_CC) $(LOADER_CFLAGS) $(LOADER_LDFLAGS) -o $@ $<
+
+$(DATA_IMG):
+	truncate -s 4G $@
+
+RAM ?= 4G
+OVMF_CODE ?= vendor/OVMF_CODE.fd
+OVMF_VARS ?= vendor/OVMF_VARS-1024x768.fd
+QEMU_DEBUG_LOG   ?= qemu.log
+# Full interrupt/CPU/AHCI tracing can write gigabytes and severely distort TCG
+# performance. Opt in when diagnosing QEMU itself via QEMU_DEBUG_FLAGS='-d ...'.
+QEMU_DEBUG_FLAGS ?=
+QEMU_GDB_FLAGS   ?=
+QEMU_SERIAL      ?= stdio
+HOMEBREW_PREFIX  := $(shell brew --prefix)
+UNAME_S          := $(shell uname -s)
+
+ifndef QEMU_ACCEL
+  ifeq ($(UNAME_S),Linux)
+    QEMU_ACCEL := kvm:tcg
+  else ifeq ($(UNAME_S),Darwin)
+    QEMU_HAS_HVF := $(shell $(QEMU) -accel help 2>/dev/null | grep -w hvf)
+    ifneq ($(strip $(QEMU_HAS_HVF)),)
+      QEMU_ACCEL := hvf:tcg
+    else
+      QEMU_ACCEL := tcg
+    endif
+  else
+    QEMU_ACCEL := tcg
+  endif
+endif
+
+ACCEL_PRIMARY := $(firstword $(subst :, ,$(QEMU_ACCEL)))
+ifeq ($(ACCEL_PRIMARY),tcg)
+  QEMU_CPU_OPTS := -cpu $(TCG_CPU_TYPE)
+else
+  QEMU_CPU_OPTS := -cpu $(CPU_TYPE)
+endif
+QEMU_MACHINE_OPTS := -machine q35,accel=$(QEMU_ACCEL)
+# q35 creates an i8042/PS2 keyboard even with -nodefaults.  USB kernels disable
+# their PS/2 input path, so leave no unserviced keyboard for the display backend
+# to select.  The dedicated run-ps2-hdd target intentionally keeps i8042.
+QEMU_USB_MACHINE_OPTS := -machine q35,accel=$(QEMU_ACCEL),i8042=off
+
+# --- choose networking backend: user (slirp), vmnet-shared (NAT), vmnet-bridged (bridge en0)
+NET_BACKEND ?= vmnet-shared
+
+# Packet capture is opt-in: continuous filter-dump I/O distorts TCG workloads.
+# Example: NETDUMP='-object filter-dump,id=n0dump,netdev=n0,queue=all,file=qemu-net.pcap'
+NETDUMP ?=
+
+# Backend-specific NETDEV flags
+NETDEV_user := -netdev user,id=n0,net=10.0.2.0/24,dhcpstart=10.0.2.15
+
+# Defaults
+QEMU_NET_PREFIX :=
+NETDEV := $(NETDEV_user)
+
+# vmnet-shared via socket_vmnet (rootless): wrap QEMU and use fd=3
+ifeq ($(NET_BACKEND),vmnet-shared)
+  VMNET_SOCKET ?= $(HOMEBREW_PREFIX)/var/run/socket_vmnet
+  QEMU_NET_PREFIX := $(HOMEBREW_PREFIX)/opt/socket_vmnet/bin/socket_vmnet_client $(VMNET_SOCKET)
+  NETDEV := -netdev socket,id=n0,fd=3
+endif
+
+# vmnet-bridged via socket_vmnet (rootless): choose interface with VMNET_BRIDGE=en0/en1/...
+ifeq ($(NET_BACKEND),vmnet-bridged)
+  VMNET_BRIDGE ?= en0
+  VMNET_SOCKET ?= $(HOMEBREW_PREFIX)/var/run/socket_vmnet.bridged.$(VMNET_BRIDGE)
+  QEMU_NET_PREFIX := $(HOMEBREW_PREFIX)/opt/socket_vmnet/bin/socket_vmnet_client $(VMNET_SOCKET)
+NETDEV := -netdev socket,id=n0,fd=3
+endif
+
+# Device (default: Intel igb)
+NIC := -device igb,netdev=n0,mac=52:54:00:12:34:56
+NIC_RTL := -device rtl8139,netdev=n0,mac=52:54:00:12:34:57
+
+# Audio backend (default coreaudio on macOS; override with AUDIO_DEV=pa/alsa/none)
+AUDIO_DEV ?= coreaudio
+# Let the host audio callback pace DMA. QEMU's codec timer mode can discard
+# its entire private 8 KiB buffer on an overrun without a guest stream error.
+# Override HDA_MODEL=hda-output,use-timer=on to compare/debug that model.
+HDA_MODEL ?= hda-output,use-timer=off
+HDA_CONTROLLER ?= intel-hda
+HDA_AUDIO_ID ?= snd0
+QEMU_AUDIO := -audiodev $(AUDIO_DEV),id=$(HDA_AUDIO_ID)
+
+run: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+	$(QEMU_NET_PREFIX) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
+		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device ich9-usb-uhci1 \
+		-device ich9-usb-uhci2 \
+		-device ich9-usb-uhci3 \
+		-device $(HDA_CONTROLLER) \
+		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
+		-device usb-kbd \
+		-device usb-mouse \
+		-device ahci,id=ahci0 \
+		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
+		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
+		-device ide-hd,drive=data,bus=ahci0.1 \
+		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
+		$(QEMU_AUDIO) \
+		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
+
+run-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+	$(QEMU_NET_PREFIX) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
+		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device ich9-usb-uhci1 \
+		-device ich9-usb-uhci2 \
+		-device ich9-usb-uhci3 \
+		-device $(HDA_CONTROLLER) \
+		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
+		-device usb-kbd \
+		-device usb-mouse \
+		-device ahci,id=ahci0 \
+		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
+		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
+		-device ide-hd,drive=data,bus=ahci0.1 \
+		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
+		$(QEMU_AUDIO) \
+		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
+
+run-hdd-rtl: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+	$(QEMU_NET_PREFIX) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_USB_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
+		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device ich9-usb-uhci1 \
+		-device ich9-usb-uhci2 \
+		-device ich9-usb-uhci3 \
+		-device $(HDA_CONTROLLER) \
+		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
+		-device usb-kbd \
+		-device usb-mouse \
+		-device ahci,id=ahci0 \
+		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
+		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
+		-device ide-hd,drive=data,bus=ahci0.1 \
+		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
+		$(QEMU_AUDIO) \
+		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC_RTL)
+
+run-ps2-hdd: USB=0
+run-ps2-hdd: $(EFI_BIN) $(DATA_IMG) $(USER_ELFS) $(USER_BINS)
+	$(QEMU_NET_PREFIX) \
+	$(QEMU) -nodefaults -m $(RAM) $(QEMU_MACHINE_OPTS) $(QEMU_CPU_OPTS) $(QEMU_SMP_OPTS) $(QEMU_GDB_FLAGS) \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS) \
+		-drive if=none,id=fsdisk,file=fat:rw:build,format=raw \
+		-device $(HDA_CONTROLLER) \
+		-device $(HDA_MODEL),audiodev=$(HDA_AUDIO_ID) \
+		-device ahci,id=ahci0 \
+		-device ide-hd,drive=fsdisk,bus=ahci0.0 \
+		-drive if=none,id=data,file=$(DATA_IMG),format=raw,media=disk \
+		-device ide-hd,drive=data,bus=ahci0.1 \
+		-no-reboot -monitor vc:1920x1080 -serial $(QEMU_SERIAL) -vga std \
+		$(QEMU_AUDIO) \
+		$(QEMU_DEBUG_FLAGS) $(NETDEV) $(NETDUMP) $(NIC)
+
+run-hdd-gdb: QEMU_GDB_FLAGS = -s -S
+run-hdd-gdb: run-hdd
+
+clean:
+	rm -rf $(OBJDIR) $(USER_BIN_DIR)
+
+.PHONY: clean clean-all
+
+clean-all: clean
+	rm -f $(DATA_IMG)
+
+tests/dhcp_packet_test: tests/dhcp_packet_test.c
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -o $@ $<
+
+test-dhcp: tests/dhcp_packet_test
+	./tests/dhcp_packet_test
+
+TTF_TEST_FONT ?= PublicSans.ttf
+ttf-test: $(HOST_TEST_BIN)
+	$(HOST_TEST_BIN) $(TTF_TEST_FONT)
+
+sha256-test: $(SHA256_TEST_BIN)
+	$(SHA256_TEST_BIN)
+
+quake-liveness-test: $(QUAKE_LIVENESS_TEST_BIN)
+	$(QUAKE_LIVENESS_TEST_BIN)
+
+elf-validation-test: $(ELF_VALIDATION_TEST_BIN)
+	$(ELF_VALIDATION_TEST_BIN)
+
+process-smoke-test: all
+	./run-via-agent.sh
+	./tests/process_smoke_test.sh qemu-serial.log
+
+process-lock-contract-test:
+	python3 tests/process_locking_contract_test.py
+	python3 tests/scheduler_handoff_test.py
+
+atk-background-lock-contract-test:
+	python3 tests/atk_background_locking_contract_test.py
+
+audio-stream-contract-test:
+	python3 tests/audio_stream_contract_test.py
+
+audio-qemu-playback-test: all audio-stream-contract-test
+	python3 tests/audio_qemu_playback_test.py --no-build --expect-clean --exercise-controls
+
+.PHONY: audio-qemu-playback-test
+
+network-download-contract-test:
+	python3 tests/network_download_contract_test.py
+	python3 tests/network_receive_behavior_test.py
+	python3 tests/wget_transfer_test.py
+	python3 tests/kernel_memory_copy_test.py
+
+network-download-perf-test: all network-download-contract-test filesystem-writeback-test runtime-archive-test
+	python3 tests/network_download_perf_test.py --no-build --label fixed --files zip --repeat 1 --wget-profile --igb-stats --powercut-after-save
+
+.PHONY: network-download-perf-test
+
+runtime-archive-test: $(USER_ELF_ARCHIVE)
+	python3 tests/runtime_archive_test.py
+
+.PHONY: runtime-archive-test
+
+# Inspect the linked ELF files: shared runtime/toolkit code must not silently
+# pull in the old engine, while the existing browser retains its dependencies.
+user-engine-isolation-test: $(USER_ELFS)
+	$(NM) --defined-only $(filter-out $(USER_OBJDIR)/atk_browser.elf,$(USER_ELFS)) > $(USER_OBJDIR)/nonweb-symbols.txt
+	@awk '$$NF ~ /^(html_|css_|js_|atk_html_|web_url_)/ { print "Unexpected web engine symbol: " $$0; bad = 1 } END { exit bad }' $(USER_OBJDIR)/nonweb-symbols.txt
+	$(NM) --defined-only $(USER_OBJDIR)/atk_browser.elf > $(USER_OBJDIR)/browser-symbols.txt
+	@awk '$$NF == "html_parse" { html = 1 } $$NF == "css_parse" { css = 1 } $$NF == "js_runtime_create" { js = 1 } $$NF == "atk_html_view_set_html" { view = 1 } END { if (!(html && css && js && view)) { print "Existing browser is missing an engine dependency"; exit 1 } }' $(USER_OBJDIR)/browser-symbols.txt
+	@echo "User engine isolation: PASS"
+
+.PHONY: user-engine-isolation-test
+
+# This checks the native binary's link contracts. Running it inside Alix is a
+# separate check; its main/fini PASS messages must both appear on serial.
+cpp-runtime-test: $(USER_OBJDIR)/cpp_runtime_test.elf
+	$(NM) --undefined-only $< > $(USER_OBJDIR)/cpp-runtime-undefined.txt
+	@test ! -s $(USER_OBJDIR)/cpp-runtime-undefined.txt
+	$(NM) --defined-only $< > $(USER_OBJDIR)/cpp-runtime-symbols.txt
+	@awk '$$NF ~ /^(html_|css_|js_|atk_html_|web_url_)/ { print "Unexpected web engine symbol: " $$0; bad = 1 } END { exit bad }' $(USER_OBJDIR)/cpp-runtime-symbols.txt
+	$(OBJDUMP) -h $< > $(USER_OBJDIR)/cpp-runtime-sections.txt
+	@awk '$$2 == ".preinit_array" { preinit = 1 } $$2 == ".init_array" { init = 1 } $$2 == ".fini_array" { fini = 1 } END { if (!(preinit && init && fini)) { print "C++ startup sections missing"; exit 1 } }' $(USER_OBJDIR)/cpp-runtime-sections.txt
+	@echo "C++ runtime compile/link: PASS (execution in Alix still required)"
+
+.PHONY: cpp-runtime-test
+
+cpp-runtime-qemu-test: all cpp-runtime-test
+	python3 tests/cpp_runtime_qemu_test.py
+
+.PHONY: cpp-runtime-qemu-test
+
+thread-platform-test: $(USER_OBJDIR)/thread_tls_test.elf $(USER_OBJDIR)/thread_elf_tls_test.elf $(USER_OBJDIR)/thread_pool_reuse_test.elf $(USER_OBJDIR)/thread_libc_support_test.elf $(USER_OBJDIR)/thread_main_exit_test.elf $(USER_OBJDIR)/thread_pthread_test.elf $(USER_OBJDIR)/thread_sync_test.elf $(USER_OBJDIR)/thread_memory_test.elf
+	$(NM) --undefined-only $^ > $(USER_OBJDIR)/thread-platform-undefined.txt
+	@awk 'NF && $$NF !~ /:$$/ { print; bad = 1 } END { exit bad }' $(USER_OBJDIR)/thread-platform-undefined.txt
+
+thread-platform-qemu-test: all thread-platform-test
+	python3 tests/thread_platform_qemu_test.py
+
+.PHONY: thread-platform-test thread-platform-qemu-test
+
+futex-contract-test:
+	python3 tests/futex_contract_test.py
+
+.PHONY: futex-contract-test
+
+vm-reclamation-test:
+	python3 tests/vm_reclamation_test.py
+
+.PHONY: vm-reclamation-test
+
+user-copy-contract-test:
+	python3 tests/user_copy_contract_test.py
+
+native-vm-contract-test:
+	python3 tests/native_vm_contract_test.py
+
+auxiliary-pool-test:
+	python3 tests/auxiliary_pool_test.py
+
+entropy-contract-test:
+	python3 tests/entropy_contract_test.py
+
+pthread-contract-test:
+	python3 tests/pthread_contract_test.py
+
+process-pid-contract-test:
+	python3 tests/process_pid_test.py
+
+libcxx-threading-contract-test:
+	python3 tests/libcxx_threading_contract_test.py
+
+$(USER_OBJDIR)/tests/entropy_test.o: tests/entropy_test.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/entropy_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/entropy_test.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/entropy_test.o
+
+entropy-qemu-test: all $(USER_OBJDIR)/entropy_test.elf
+	python3 tests/entropy_qemu_test.py
+
+.PHONY: entropy-contract-test entropy-qemu-test libcxx-threading-contract-test pthread-contract-test process-pid-contract-test
+
+$(USER_OBJDIR)/tests/virtual_memory_test.o: tests/virtual_memory_test.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/tests/user_copy_test.o: tests/user_copy_test.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/virtual_memory_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/virtual_memory_test.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/virtual_memory_test.o
+
+$(USER_OBJDIR)/user_copy_test.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/user_copy_test.o $(USER_LD_SCRIPT) Makefile
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/tests/user_copy_test.o
+
+virtual-memory-test: $(USER_OBJDIR)/virtual_memory_test.elf $(USER_OBJDIR)/user_copy_test.elf
+
+virtual-memory-qemu-test: all virtual-memory-test
+	python3 tests/virtual_memory_qemu_test.py
+
+vm-advice-qemu-test: all $(USER_OBJDIR)/thread_vm_advice_test.elf
+	python3 tests/vm_advice_qemu_test.py
+
+.PHONY: user-copy-contract-test native-vm-contract-test auxiliary-pool-test virtual-memory-test virtual-memory-qemu-test vm-advice-qemu-test
+
+filesystem-writeback-test:
+	python3 tests/filesystem_writeback_test.py
+
+.PHONY: filesystem-writeback-test
+
+process-lock-stress-test: all process-lock-contract-test
+	python3 tests/process_lock_stress_test.py
+
+keyboard-boot-input-test: all process-lock-contract-test
+	python3 tests/keyboard_boot_input_test.py
+
+gui-wakeup-test: all process-lock-contract-test
+	python3 tests/gui_wakeup_test.py
+
+quake-gui-liveness-test: all process-lock-contract-test atk-background-lock-contract-test quake-liveness-test
+	python3 tests/quake_gui_liveness_test.py
+
+web-test: $(WEB_TEST_BIN)
+	$(WEB_TEST_BIN)
+
+css-test: $(CSS_TEST_BIN)
+	$(CSS_TEST_BIN)
+
+browser-event-test: $(BROWSER_EVENT_TEST_BIN)
+	$(BROWSER_EVENT_TEST_BIN)
+
+browser-resource-test: $(BROWSER_RESOURCE_TEST_BIN)
+	$(BROWSER_RESOURCE_TEST_BIN)
+
+PNG_TEST_IMAGE ?=
+png-test: $(PNG_TEST_BIN)
+	$(PNG_TEST_BIN) $(PNG_TEST_IMAGE)
+
+tls-test: $(TLS_TEST_BIN)
+	$(TLS_TEST_BIN)
+
+js-test: $(JS_TEST_BIN)
+	$(JS_TEST_BIN)
+
+html-js-test: $(HTML_JS_TEST_BIN)
+	$(HTML_JS_TEST_BIN)
+
+html-view-test: $(HTML_VIEW_TEST_BIN)
+	$(HTML_VIEW_TEST_BIN)
+
+web-render-harness: $(WEB_RENDER_HARNESS_BIN)
+
+web-render-stackoverflow: $(WEB_RENDER_HARNESS_BIN)
+	python3 tests/web_render_harness.py --no-build --expect-images 16
+
+test262-test: $(TEST262_TEST_BIN)
+	$(TEST262_TEST_BIN)
+
+test:
+	$(MAKE) test-dhcp
+	$(MAKE) sha256-test
+	$(MAKE) quake-liveness-test
+	$(MAKE) elf-validation-test
+	$(MAKE) process-lock-contract-test
+	$(MAKE) atk-background-lock-contract-test
+	$(MAKE) audio-stream-contract-test
+	$(MAKE) network-download-contract-test
+	$(MAKE) filesystem-writeback-test
+	$(MAKE) runtime-archive-test
+	$(MAKE) user-engine-isolation-test
+	$(MAKE) cpp-runtime-test
+	$(MAKE) web-test
+	$(MAKE) css-test
+	$(MAKE) browser-event-test
+	$(MAKE) browser-resource-test
+	$(MAKE) png-test
+	$(MAKE) ttf-test
+	$(MAKE) tls-test
+	$(MAKE) js-test
+	$(MAKE) html-js-test
+	$(MAKE) html-view-test
+
+.PHONY: all run run-hdd run-hdd-gdb clean test test-dhcp ttf-test sha256-test quake-liveness-test elf-validation-test process-smoke-test process-lock-contract-test atk-background-lock-contract-test audio-stream-contract-test network-download-contract-test process-lock-stress-test keyboard-boot-input-test gui-wakeup-test quake-gui-liveness-test web-test css-test browser-event-test browser-resource-test png-test tls-test js-test html-js-test html-view-test web-render-harness web-render-stackoverflow test262-test
+
+include ports/zen/port.mk
+
+USER_DEPFILES := $(shell find $(USER_OBJDIR) -type f -name '*.d' 2>/dev/null)
+
+-include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) $(USER_DEPFILES)
+
+# C constants and both static ELF scripts must describe one address contract.
+.PHONY: user-layout-contract-test
+user-layout-contract-test:
+	python3 tests/user_layout_contract_test.py

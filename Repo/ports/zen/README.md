@@ -54,6 +54,15 @@ modified engine tree.
   mappings. ICU still reads, validates, allocates and releases real file data;
   this does not select `MAP_NONE` or fabricate `MAP_SHARED` semantics. Gecko's
   remaining file-mapping requirements still need native implementation.
+- `0006-native-alix-wasm-context.patch` maps Wasm's x86-64 PC/SP/BP accesses
+  to Alix's native `ucontext_t` named fields. It follows native eight-CPU
+  signal-frame acceptance for register/FP preservation, nested alternate
+  stacks, edited stack pointers, masks and invalid-frame rejection; it does
+  not impersonate Linux's `gregs` ABI or disable Wasm trapping.
+- `0007-native-alix-process-uptime.patch` queries Alix's real process creation
+  timestamp through syscall 68, while retaining the existing POSIX monotonic
+  clocks. The native uptime fixture passes 1,024 samples across eight CPUs;
+  this branch neither reads Linux `/proc` nor returns a placeholder uptime.
 
 ## Native compiler and link driver
 
@@ -101,6 +110,10 @@ remaining cached as unavailable after it has been implemented.
 normal -j 2`. On hosts where a sandbox denies even `os.nice(0)`, this build
 requires a permitted host execution context: upstream mach always calls that
 API. No engine source patch or target-probe override bypasses the host failure.
+`make zen-js-build ZEN_JS_KEEP_GOING=1` passes upstream's supported
+`--keep-going` option to collect independent compiler failures in one run.
+The final nonzero result remains authoritative; it does not accept incomplete
+objects or override target probes.
 
 ## Current authoritative build result
 
@@ -114,22 +127,35 @@ completed build passes the `getpid`/`intptr_t`, native Rust entropy and ICU
 float/extended-math compilation gates. The real Rust stage completes LTO and
 produces `obj-js-alix/x86_64-unknown-alix/release/libjsrust.a` (52,486,052 bytes;
 all ten members verified as x86-64 ELF). ICU common and i18n now compile past
-the signal, stdio-loader and timezone gates. The latest C++ build reports:
-
-```text
-Mozilla Maybe.h:886: invalid std::ostream << "<Nothing>"
-```
+the signal, stdio-loader, timezone and narrow-stream gates. Correct native
+system-header ordering preserves Mozilla's visibility wrappers. The latest
+C++ keep-going build passes the wide libc++, pthread read/write lock, X/Open
+constant and nearbyint gates, and compiles the actual Alix Wasm context bridge.
+Its latest completed run configures successfully, then exits 2 after 5m57s.
+Independent compiler gaps now include `vprintf`/`perror`/`setvbuf`, standard
+file-mode bits, `readlink` and directory APIs, `strdup`, math evaluation types
+and `sqrtf`/`fabsf`/`fabsl`/`scalbnf`, `MADV_NORMAL`, descriptor flags/duplication,
+signal-aware jumps, and resource/timestamp platform interfaces. These require
+native implementations; the shell has not linked or executed yet.
+Since that full run, the math library, buffered stdio including exit flushing,
+signal-aware jumps, resource policy and process uptime have passed native
+fixtures. The actual timestamp translation unit now compiles through patch 7.
+The protected filesystem/descriptor integration remains pending; the next
+complete build must verify all corrections together.
 
 The full latest outputs are `build/ports/zen/spidermonkey-configure.log` and
 `build/ports/zen/spidermonkey-build.log`. These are actual compiler diagnostics;
-the bootstrap libc++ profile lacked localization/iostream implementation.
-The expanded native profile now builds with actual C/POSIX locale handles,
-stream I/O and numeric formatting and passes its eight-thread guest stream
-fixture, including 80-bit roundtrips. The next engine build verifies this
-correction against Mozilla's unchanged source. The real ICU
+the native inttypes and wide libc++ gates now pass in Alix. Native phase-fair
+pthread read/write locks pass both their eight-CPU fixture and the subsequent
+real engine compile. The pinned LLVM libc rounding adapter now supplies the
+nearbyint family and passes 32,742 native x87/SSE cases plus the subsequent
+real integer-GEMM compilation.
+The narrow C/POSIX stream profile already passes its eight-thread guest fixture,
+including 80-bit roundtrips. The real ICU
 `umapfile.o` now references fopen/fread/fseek/ftell and its allocation helpers,
-not mmap/stat. Kernel-generated fault signals and file-backed VM remain native
-platform work. The Alix pthread facade
+not mmap/stat. Kernel-generated fault signals now pass native preservation,
+nesting and rejection tests; the explicit Wasm context bridge is tracked above.
+File-backed VM remains native platform work. The Alix pthread facade
 implements the engine's creation, attributes, joining,
 detaching, mutex/condition and thread-ID interfaces; its exact supported scope
 and remaining limitations are documented in `docs/kernel/pthreads.md`.

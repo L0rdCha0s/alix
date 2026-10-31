@@ -38,6 +38,7 @@ static wint_t wide_get_unlocked(FILE *stream, bool *failed)
 wint_t fgetwc(FILE *stream)
 {
     if (!stream) { errno = EBADF; return WEOF; }
+    __alix_stdio_before_read(stream);
     alix_mutex_lock(&stream->mutex);
     bool failed = false;
     wint_t result = __alix_stdio_orient_unlocked(stream, 1) ? wide_get_unlocked(stream, &failed) : WEOF;
@@ -87,6 +88,7 @@ wint_t ungetwc(wint_t value, FILE *stream)
 wchar_t *fgetws(wchar_t *buffer, int count, FILE *stream)
 {
     if (!buffer || count <= 0 || !stream) { errno = !stream ? EBADF : EINVAL; return NULL; }
+    __alix_stdio_before_read(stream);
     alix_mutex_lock(&stream->mutex);
     if (!__alix_stdio_orient_unlocked(stream, 1)) { alix_mutex_unlock(&stream->mutex); return NULL; }
     if (count == 1) { buffer[0] = 0; alix_mutex_unlock(&stream->mutex); return buffer; }

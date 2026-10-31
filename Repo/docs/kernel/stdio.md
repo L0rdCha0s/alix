@@ -30,8 +30,8 @@ The specification leaves that particular position unspecified.
 Explicit `fflush(stream)` reconciles pending input to the logical stream
 position before discarding its pushback. If the descriptor cannot seek, the
 flush fails and preserves the byte. `fflush(NULL)` is an output-only operation
-and leaves input pushback alone. Output remains unbuffered, so no unwritten
-output data needs flushing. `setbuf` does not currently enable buffering.
+and leaves input pushback alone. Streams start unbuffered. `setvbuf` selects
+unbuffered, full or line buffering; `setbuf` selects full/unbuffered mode.
 The positioning behavior follows the
 [POSIX fseek specification](https://man7.org/linux/man-pages/man3/fseek.3p.html).
 
@@ -43,6 +43,35 @@ positioning and `clearerr` permit recovery; `rewind` also clears the error
 indicator. Append streams seek to the end before each stdio write while holding
 their own mutex. Atomic append across independent streams/processes still
 requires a kernel append operation.
+
+## Buffered streams
+
+Configured buffers are heap owned even when the caller supplies storage. The
+implementation does not retain that array, so later use from another thread
+cannot access a caller's expired stack. A null buffer and size zero select
+`BUFSIZ`; invalid modes, allocation failures and attempts to reconfigure after
+I/O report errors without replacing the existing configuration.
+
+Full output buffers flush at capacity; line buffers also flush through each
+newline. `fflush`, seeking, switching to input, `fclose` and normal `exit`
+flush pending output. Partial writes retain only previously accepted bytes and
+report newly delivered bytes correctly, allowing a retry without duplication.
+Read-ahead and pushback are reflected in logical positions. Explicit input
+flushing reconciles the descriptor before discarding unread data; failed
+nonseekable reconciliation preserves it. Unbuffered/line input requests flush
+other line-buffered output before acquiring the input stream's mutex.
+
+An allocation-free registry walk pins each stream while global flushing runs.
+The registry lock is released before stream locking or I/O. `fclose` removes
+the stream, completes its flush/close, then waits for outstanding registry pins
+before freeing it. This protects global flushing concurrent with close; callers
+still own the lifetime of their direct `FILE *` uses.
+
+Production host buffering tests pass plain, ASan/UBSan and TSan, including
+blocked writes racing global flush/close. Native `stdio-buffer-qemu.log` passed
+all three modes, wide I/O, positions and 128 close/flush races. The separate
+`stdio-buffer-exit-qemu.log` marker was queued in stdout and appeared only after
+normal exit performed the global flush.
 
 `tests/stdio_stream_contract_test.py` executes the production stream code with
 seekable/nonseekable mock descriptors, partial I/O and error injection. It tests

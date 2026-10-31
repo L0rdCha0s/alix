@@ -24,6 +24,15 @@ typedef struct FILE
     bool append;
     bool pushback_pending;
     unsigned char pushback;
+    /* Buffers are always heap owned; caller-provided setvbuf storage is not
+     * retained, since streams may be shared by threads on different CPUs. */
+    unsigned char *buffer;
+    size_t buffer_capacity, read_position, read_end, write_length;
+    int buffering;
+    bool io_started;
+    struct FILE *registry_next;
+    uint64_t registry_id;
+    uint32_t flush_pins;
 } FILE;
 typedef int64_t fpos_t;
 
@@ -34,8 +43,14 @@ extern FILE *stdin;
 #ifndef EOF
 #define EOF (-1)
 #endif
+#define _IONBF 0
+#define _IOFBF 1
+#define _IOLBF 2
+#define BUFSIZ 4096
 
 int printf(const char *format, ...);
+int vprintf(const char *format, va_list args);
+void perror(const char *prefix);
 int fprintf(FILE *stream, const char *format, ...);
 int vfprintf(FILE *stream, const char *format, va_list args);
 int sprintf(char *buf, const char *format, ...);
@@ -54,6 +69,7 @@ int ferror(FILE *stream);
 void clearerr(FILE *stream);
 int fileno(FILE *stream);
 void setbuf(FILE *stream, char *buf);
+int setvbuf(FILE *stream, char *buf, int mode, size_t size);
 int sscanf(const char *str, const char *format, ...);
 int fscanf(FILE *stream, const char *format, ...);
 

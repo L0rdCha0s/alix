@@ -30,6 +30,7 @@ struct shell_state
     process_wait_hook_t wait_hook;
     void *wait_context;
     process_t *owner_process;
+    uint64_t owner_pid; /* Stable identity for protected cwd resolution. */
     void (*cwd_changed_fn)(void *context, vfs_node_t *cwd);
     void *cwd_changed_context;
 };

@@ -1,0 +1,80 @@
+{
+  "applied": true,
+  "files": [
+    {
+      "path": "include/memory_layout.h",
+      "base_sha256": "a71ca3c445b379a81f0a529627fc94e2fc27806104af4cdc4168c8dc02e10f45",
+      "pending_sha256": "7e5665ea82265eda3031782659483816e861d057511cfb2a0b2825547db0812f"
+    },
+    {
+      "path": "user/lib/link.ld",
+      "base_sha256": "2bc8c8892073c5123491fe31e87d4652a563b87aba105c28f1d4d918fefd530e",
+      "pending_sha256": "f57eb3ef3b1a361630cc946a1c96140d31b8a14d4f6126344ba203335a79a6c0"
+    },
+    {
+      "path": "src/arch/x86/uefi.ld",
+      "base_sha256": "efb69d8c6a5b89831b8efda65b2a9b1f15d575597634a8c05e4c56e785fbd950",
+      "pending_sha256": "f77815398f89a7e0b338d416c57f6678e9eba6f456f93bba33b4cdd917d4d53e"
+    },
+    {
+      "path": "src/kernel/process/process_vm.c",
+      "base_sha256": "6072b13be62331fd45615871c49579126ab2aff7e8340003926b4819af5cc1f0",
+      "pending_sha256": "7c14134d8c98c29b3403a6753bc58647e347c39f0878c5395c71cf3bffc8ec4f"
+    },
+    {
+      "path": "src/kernel/process/process_memory.c",
+      "base_sha256": "a07eb9f5d2ccdf2b17ccdc0b20fb72ccfc1e92be1e06ef29b1e90eefe1d6a796",
+      "pending_sha256": "3ffae32090654c6d2e2736f378af4ab6463ac2b30c1207bf61cf41ecdbae57f8"
+    },
+    {
+      "path": "src/kernel/process/process_api.c",
+      "base_sha256": "aa30ee96e561688e89bebd97cc0722cf50ac49cc361e82757f4660b3a1cc1d2f",
+      "pending_sha256": "d13e4337df095663459003748e1cdb4d383a01c4327321adc2e212cca1ab65b1"
+    },
+    {
+      "path": "src/kernel/elf.c",
+      "base_sha256": "805164a35ba39084403f28e9eaa23a6b619af65b704711e1d51db7a1a2a5e8a1",
+      "pending_sha256": "6a05f7d29b1d768d6837ec22b955f9129418c32746f1304583ac918ca757ad33"
+    },
+    {
+      "path": "tests/elf_validation_host_test.c",
+      "base_sha256": "763c18fb1ebf2283e2efcbe2f5c433071a808ad3d50da85703888662d3b2d492",
+      "pending_sha256": "ccb93fddbd81758fda4a7035e6c62ab89052807ee5017a4c3e78b1a2edf36aa1"
+    },
+    {
+      "path": "tests/native_vm_contract_test.py",
+      "base_sha256": "396f12ac5763caf9c1c8f98331de70ef7bc0034b4bf078a8118905e2677bcc13",
+      "pending_sha256": "bd22e4c98d1f97055ed2b70cc4831641a1a4f05145662ee76111b6e30fb34379"
+    },
+    {
+      "path": "tests/auxiliary_pool_test.py",
+      "base_sha256": "89b254e067c2ac6485bf2360ddff9537f4947f5b051f6aac01ba8ab413157ed1",
+      "pending_sha256": "ae393dfe4fa019dae7a55ca74fd0c56f41bb6bf37253e910b83c65a088bc793f"
+    },
+    {
+      "path": "tests/vm_reclamation_test.py",
+      "base_sha256": "1d9e1059c4115af0a6530157c5578d6f0517232dc5dd52c33c0e1d16dd583bd4",
+      "pending_sha256": "d3b5085a22512712dd40d17ee3a9318b5a4c5b4b36e215ffe8823b6c5efe1459"
+    },
+    {
+      "path": "tests/cpp_runtime_qemu_test.py",
+      "base_sha256": "e9fbb8a62f97dba9b41d6c9c812816db1b0fef0e92b258cf42458c659e872db3",
+      "pending_sha256": "44d8223b95346e6ee0f26cb430a25aca6c873ff506e17b88840185221797f190"
+    },
+    {
+      "path": "docs/kernel/memory.md",
+      "base_sha256": "7c233609274da93bfb9835d2f4a15945ee6e6115ddfdbe13c4699ce1f980058d",
+      "pending_sha256": "e9e00d074b0f960e9e68c8ac95d8e959cbd4267cb27836c2f4884474837bd242"
+    },
+    {
+      "path": "tests/user_layout_contract_test.py",
+      "base_sha256": null,
+      "pending_sha256": "7a6e6331bc759f0a8d3e990dddc3a72b42b3f1d94c4ca40d9828e04534587601"
+    },
+    {
+      "path": "Makefile",
+      "base_sha256": "c0641e9162380ec57ce2ecc1ab6c306e59375501c6fb292a765c2c2f15a080dc",
+      "pending_sha256": "35e2d7c7592c5c02177877cd61d088b7298f65760cb043120eb4a88ebec35d94"
+    }
+  ]
+}

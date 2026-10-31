@@ -2757,6 +2757,7 @@ void idle_thread_entry(void *arg)
     while (1)
     {
         process_reap_retired_memory();
+        process_reap_deferred_threads();
         /* Match scheduler_main_loop's atomic idle protocol. */
         cpu_cli();
         scheduler_schedule(false);
@@ -3051,7 +3052,9 @@ bool process_handle_exception(interrupt_frame_t *frame,
                       (unsigned long long)frame->rip,
                       (unsigned long long)frame->cs,
                       (unsigned)smp_current_cpu_index());
-        process_exit(-1);
+        int status = thread->signal_fault_status ? thread->signal_fault_status : -1;
+        thread->signal_fault_status = 0;
+        process_exit(status);
     }
 
     process_trigger_fatal_fault(thread, frame, reason, error_code, has_address, address);

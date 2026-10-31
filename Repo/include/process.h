@@ -11,6 +11,8 @@
 #define PROCESS_UID_INVALID 0xFFFFFFFFu
 #define PROCESS_GID_INVALID 0xFFFFFFFFu
 
+typedef struct fd_description fd_description_t;
+typedef struct fd_retirement_queue fd_retirement_queue_t;
 typedef struct process process_t;
 typedef struct thread thread_t;
 typedef struct trap_frame trap_frame_t;
@@ -122,6 +124,13 @@ process_t *process_create_kernel_with_parent(const char *name,
                                              size_t stack_size,
                                              int stdout_fd,
                                              process_t *parent);
+/* Parentless, kill-protected service with one retained owner reference set
+ * before enqueue. Only the owner calls process_join_kernel_service; success
+ * consumes that reference after all worker threads are off CPUs/queues. */
+process_t *process_create_kernel_service(const char *name, thread_entry_t entry,
+                                         void *argument, size_t stack_size);
+int process_join_kernel_service(process_t *process, int *status_out);
+
 process_t *process_create_user_dummy(const char *name,
                                      int stdout_fd);
 process_t *process_create_user_dummy_with_parent(const char *name,
@@ -159,9 +168,28 @@ bool process_handle_user_page_fault(interrupt_frame_t *frame,
                                     uint64_t error_code,
                                     uint64_t address);
 uint64_t process_current_pid(void);
+uint64_t process_current_uptime_ns(void);
 uint32_t process_get_uid(const process_t *process);
 uint32_t process_get_gid(const process_t *process);
 void process_set_identity(process_t *process, uint32_t uid, uint32_t gid);
+/* System bootstrap before process publication, then one persistent controller
+ * starts the protected drainer after scheduler/VFS readiness. Queue and retained
+ * service owner have kernel lifetime; construction never starts it recursively. */
+void process_resource_system_init(void);
+bool process_resource_start_cleanup(void);
+fd_retirement_queue_t *process_fd_retirement_queue(void);
+/* Caller owns process and holds a bounded preparation guard through returned
+ * owner publication/rollback. Credentials and cwd are one context-lock snapshot.
+ * Deferred put safely unwinds OOM/admission failure; no raw VFS release needed. */
+fd_description_t *process_acquire_cwd_owner(process_t *process, uint32_t *uid_out, uint32_t *gid_out);
+/* Worker/guarded creator; owned node transfers on success only. */
+fd_description_t *process_cwd_description_create_owned(vfs_node_t *node);
+bool process_cwd_description_valid(fd_description_t *owner);
+/* Caller owns process and a cwd-description ref; requires prep/result guard.
+ * Consumes that ref only on success. Old cwd retirement never runs callbacks. */
+int process_set_cwd_description_owned(process_t *process, fd_description_t *owner);
+/* Legacy borrowed view/input. Keep an independent node owner across use. New
+ * worker paths must use the owned-description capture and transfer APIs. */
 vfs_node_t *process_current_cwd(void);
 void process_set_cwd(process_t *process, vfs_node_t *dir);
 int process_current_stdout_fd(void);

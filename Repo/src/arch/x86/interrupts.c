@@ -1,3 +1,4 @@
+#include "process_signal.h"
 #include "idt.h"
 #include "io.h"
 #include "timer.h"
@@ -529,7 +530,7 @@ __attribute__((interrupt)) static void irq12_handler(interrupt_frame_t *frame)
     irq12_log_count++;
 }
 
-__attribute__((interrupt)) static void divide_error_handler(interrupt_frame_t *frame)
+static void divide_error_handler(interrupt_frame_t *frame)
 {
     (void)frame;
     fault_report("divide_error", frame, 0, false, false, 0);
@@ -540,7 +541,7 @@ __attribute__((interrupt)) static void divide_error_handler(interrupt_frame_t *f
     halt_forever();
 }
 
-__attribute__((interrupt)) static void invalid_opcode_handler(interrupt_frame_t *frame)
+static void invalid_opcode_handler(interrupt_frame_t *frame)
 {
     fault_report("invalid_opcode", frame, 0, false, false, 0);
     log_kernel_stack_bounds("invalid_opcode", frame);
@@ -565,7 +566,7 @@ __attribute__((interrupt)) static void invalid_opcode_handler(interrupt_frame_t 
     halt_forever();
 }
 
-__attribute__((interrupt)) static void general_protection_handler(interrupt_frame_t *frame, uint64_t error_code)
+static void general_protection_handler(interrupt_frame_t *frame, uint64_t error_code)
 {
     fault_report("general_protection", frame, error_code, true, false, 0);
     dump_exception_stacktrace(frame);
@@ -576,7 +577,7 @@ __attribute__((interrupt)) static void general_protection_handler(interrupt_fram
     halt_forever();
 }
 
-__attribute__((interrupt)) static void stack_fault_handler(interrupt_frame_t *frame, uint64_t error_code)
+static void stack_fault_handler(interrupt_frame_t *frame, uint64_t error_code)
 {
     uint32_t cpu = smp_current_cpu_index();
     uint64_t rsp0 = arch_cpu_get_kernel_stack(cpu);
@@ -595,8 +596,10 @@ __attribute__((interrupt)) static void stack_fault_handler(interrupt_frame_t *fr
     halt_forever();
 }
 
-__attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *frame, uint64_t error_code)
+static void page_fault_handler(exception_frame_t *saved)
 {
+    interrupt_frame_t *frame = &saved->cpu;
+    uint64_t error_code = saved->error_code;
     uint64_t fault_address = read_cr2();
     if (process_handle_stack_watch_fault(fault_address, frame, error_code))
     {
@@ -606,6 +609,7 @@ __attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *fra
     {
         return;
     }
+    if (process_signal_fault(saved, fault_address)) return;
     fault_report("page_fault", frame, error_code, true, true, fault_address);
     if (frame && ((frame->cs & 0x3u) == 0))
     {
@@ -618,6 +622,31 @@ __attribute__((interrupt)) static void page_fault_handler(interrupt_frame_t *fra
     }
     halt_forever();
 }
+
+_Static_assert(__builtin_offsetof(exception_frame_t, vector) == 120, "exception GPR prefix");
+_Static_assert(__builtin_offsetof(exception_frame_t, cpu) == 136, "exception hardware frame");
+_Static_assert(sizeof(exception_frame_t) == 176, "exception entry ABI");
+
+void exception_dispatch(exception_frame_t *saved)
+{
+    interrupt_frame_t *frame = &saved->cpu;
+    if (saved->vector != 14 && process_signal_fault(saved, 0)) return;
+    switch (saved->vector)
+    {
+        case 0: divide_error_handler(frame); return;
+        case 6: invalid_opcode_handler(frame); return;
+        case 12: stack_fault_handler(frame, saved->error_code); return;
+        case 13: general_protection_handler(frame, saved->error_code); return;
+        case 14: page_fault_handler(saved); return;
+        default: halt_forever();
+    }
+}
+
+extern void exception_divide_entry(void);
+extern void exception_invalid_opcode_entry(void);
+extern void exception_stack_entry(void);
+extern void exception_protection_entry(void);
+extern void exception_page_entry(void);
 
 __attribute__((interrupt)) static void smp_schedule_ipi_handler(interrupt_frame_t *frame)
 {
@@ -637,11 +666,11 @@ void interrupts_init(void)
     idt_init();
     /* Route fault-like exceptions to an IST stack to avoid running on a corrupted thread stack. */
     const uint8_t fault_ist = 1;
-    idt_set_gate_ist(0, (void *)divide_error_handler, 0, fault_ist);
-    idt_set_gate_ist(6, (void *)invalid_opcode_handler, 0, fault_ist);
-    idt_set_gate_ist(12, (void *)stack_fault_handler, 0, fault_ist);
-    idt_set_gate_ist(13, (void *)general_protection_handler, 0, fault_ist);
-    idt_set_gate_ist(14, (void *)page_fault_handler, 0, fault_ist);
+    idt_set_gate_ist(0, (void *)exception_divide_entry, 0, fault_ist);
+    idt_set_gate_ist(6, (void *)exception_invalid_opcode_entry, 0, fault_ist);
+    idt_set_gate_ist(12, (void *)exception_stack_entry, 0, fault_ist);
+    idt_set_gate_ist(13, (void *)exception_protection_entry, 0, fault_ist);
+    idt_set_gate_ist(14, (void *)exception_page_entry, 0, fault_ist);
     idt_set_gate(32, (void *)irq0_handler);
     idt_set_gate(33, (void *)irq1_handler);
     idt_set_gate(34, (void *)irq2_handler);

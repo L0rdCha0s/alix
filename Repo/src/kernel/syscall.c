@@ -1,9 +1,11 @@
+#include "process_signal.h"
 #include "syscall.h"
 
 #include "syscall_defs.h"
 #include "process.h"
 #include "serial.h"
 #include "fd.h"
+#include "io_vfs_service.h"
 #include "heap.h"
 #include "vfs.h"
 #include "libc.h"
@@ -1095,10 +1097,35 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
     }
 
     uint64_t syscall_id = frame->rax;
+    uint64_t signal_preempt_resume = 0;
     int64_t result = -1;
 
     switch (syscall_id)
     {
+        case SYSCALL_SIGACTION:
+            result = process_signal_sigaction((int)frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
+        case SYSCALL_SIGPROCMASK:
+            result = process_signal_sigprocmask((int)frame->rdi, frame->rsi, frame->rdx); break;
+        case SYSCALL_SIGALTSTACK:
+            result = process_signal_sigaltstack(frame->rdi, frame->rsi, frame->rdx, frame->rsp); break;
+        case SYSCALL_SIGRETURN:
+            result = process_signal_return(frame, frame->rdi);
+            if (result == 0) { process_signal_syscall_return(frame, 0); return frame->rax; }
+            break;
+        case SYSCALL_SIGNAL_JUMP:
+        {
+            uint32_t operation = (uint32_t)frame->rdi;
+            result = process_signal_jump(frame, operation, frame->rsi, frame->rdx, frame->r10);
+            if (result == 0 && operation == ALIX_SIGJUMP_RESTORE)
+            { process_signal_syscall_return(frame, 0); return frame->rax; }
+            break;
+        }
+        case SYSCALL_RAISE:
+            result = process_signal_raise((int)frame->rdi, frame->rsi); break;
+        case SYSCALL_KILL:
+            result = process_signal_kill((int32_t)frame->rdi, (int)frame->rsi); break;
+        case SYSCALL_SLEEP_INTERRUPTIBLE:
+            result = process_signal_sleep((uint32_t)frame->rdi, frame->rsi); break;
         case SYSCALL_EXIT:
             process_exit((int)frame->rdi);
             return 0;
@@ -1117,6 +1144,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                                       (void *)frame->rsi,
                                       (size_t)frame->rdx,
                                       (size_t)frame->r10);
+            break;
+        case SYSCALL_READLINK:
+            result = io_vfs_readlink_user((const char *)frame->rdi, (void *)frame->rsi, (size_t)frame->rdx);
             break;
         case SYSCALL_OPEN:
             result = syscall_do_open((const char *)frame->rdi, frame->rsi);
@@ -1139,9 +1169,12 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
             result = syscall_do_mkdir((const char *)frame->rdi);
             break;
         case SYSCALL_YIELD:
-            process_preempt_hook();
             {
+                /* A kernel preemption inside the hook can reuse the TLS
+                 * resume slot. Consume the user destination before yielding. */
                 uint64_t resume = process_take_preempt_resume_rip();
+                signal_preempt_resume = resume;
+                process_preempt_hook();
                 if (resume)
                 {
                     /* Return the resume RIP to the user preempt stub so it can
@@ -1152,8 +1185,8 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
                     result = (int64_t)resume;
                     break;
                 }
+                result = 0;
             }
-            result = 0;
             break;
         case SYSCALL_SLEEP_MS:
         {
@@ -1513,6 +1546,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_THREAD_PREPARE_EXIT:
             result = process_user_thread_prepare_exit();
             break;
+        case SYSCALL_PROCESS_UPTIME_NS:
+            result = (int64_t)process_current_uptime_ns();
+            break;
         case SYSCALL_GETPID:
             spinlock_preempt_disable();
             result = (int64_t)process_current_pid();
@@ -1566,5 +1602,6 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
     }
 
     frame->rax = (uint64_t)result;
-    return (uint64_t)result;
+    process_signal_syscall_return(frame, signal_preempt_resume);
+    return frame->rax;
 }

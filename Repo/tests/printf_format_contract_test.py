@@ -14,8 +14,8 @@ from audio_stream_contract_test import ROOT, function_definition
 
 
 def renamed(text):
-    for name in ("printf", "fprintf", "vfprintf", "sprintf", "vsprintf", "snprintf", "vsnprintf", "asprintf", "vasprintf",
-                 "FILE", "fpos_t", "stdout", "frexpl", "strnlen", "wctob"):
+    for name in ("printf", "vprintf", "perror", "fprintf", "vfprintf", "sprintf", "vsprintf", "snprintf", "vsnprintf", "asprintf", "vasprintf",
+                 "FILE", "fpos_t", "stdout", "stderr", "frexpl", "strnlen", "wctob"):
         text = re.sub(r"\b" + name + r"\b", "native_" + name, text)
     for name in ("calloc", "realloc", "free"):
         text = re.sub(r"\b" + name + r"\b", "checked_" + name, text)
@@ -97,6 +97,8 @@ static void alix_mutex_unlock(alix_mutex_t *mutex) { CHECK(mutex->state==1); mut
     code += r'''
 static native_FILE captured_stdout;
 static native_FILE *native_stdout=&captured_stdout;
+static native_FILE captured_stderr;
+static native_FILE *native_stderr=&captured_stderr;
 static unsigned char captured[256];
 static size_t captured_size, capture_limit=sizeof(captured), stream_calls;
 static size_t file_write_bytes_unlocked(native_FILE *stream,const void *data,size_t count) {

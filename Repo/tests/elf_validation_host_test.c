@@ -51,6 +51,8 @@ void serial_printf(const char *format, ...)
 memory_layout_t g_mem_layout = {
     .user_pointer_base = USER_DEFAULT_POINTER_BASE,
     .user_pointer_limit = USER_DEFAULT_POINTER_LIMIT,
+    .user_stack_top = USER_DEFAULT_POINTER_BASE + USER_DEFAULT_STACK_TOP_OFFSET,
+    .user_stack_size = USER_DEFAULT_STACK_SIZE,
 };
 
 typedef struct
@@ -176,12 +178,24 @@ int main(void)
                        "program header range overflow");
 
     image = valid_image();
-    image.phdr.vaddr = USER_DEFAULT_POINTER_LIMIT - 0xFFF;
+    image.phdr.vaddr = USER_DEFAULT_IMAGE_END - 0x1000;
     image.phdr.memsz = 0x1000;
     image.phdr.filesz = sizeof(image.payload);
     image.ehdr.entry = image.phdr.vaddr;
     failures += expect(elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
-                       "segment may end one byte beyond inclusive limit");
+                       "segment may end exactly at the exclusive image limit");
+    image.phdr.memsz += 1;
+    failures += expect(!elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
+                       "segment cannot enter the main-stack guard");
+    image = valid_image();
+    image.phdr.vaddr = USER_DEFAULT_POINTER_LIMIT - 0xFFF;
+    image.ehdr.entry = image.phdr.vaddr;
+    failures += expect(!elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
+                       "ELF cannot occupy high auxiliary or stub addresses");
+    image = valid_image();
+    image.phdr.memsz = 32ULL * 1024 * 1024;
+    failures += expect(elf_validate_image((const uint8_t *)&image, sizeof(image), NULL),
+                       "large native image exceeds the old 15MiB ceiling");
 
     struct {
         test_ehdr_t ehdr;

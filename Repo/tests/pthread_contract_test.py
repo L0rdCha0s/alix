@@ -8,6 +8,7 @@ from audio_stream_contract_test import ROOT, compile_and_run
 
 def rename(text):
     text = re.sub(r"\bpthread_(\w+)", r"test_pthread_\1", text)
+    text = re.sub(r"\bsigset_t\b", "test_sigset_t", text)
     text = text.replace("clockid_t", "mock_clockid_t").replace("struct timespec", "struct mock_timespec")
     text = re.sub(r"\bclock_gettime\b", "mock_clock_gettime", text)
     return re.sub(r"\bexit\(", "mock_process_exit(", text)
@@ -32,6 +33,7 @@ def main():
 #include <stdarg.h>
 #define CHECK(c) do { if(!(c)) { fprintf(stderr,"pthread contract failed line %d: %s\n",__LINE__,#c); abort(); } } while(0)
 typedef int mock_clockid_t;
+typedef uint64_t test_sigset_t;
 struct mock_timespec { int64_t tv_sec; long tv_nsec; };
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1

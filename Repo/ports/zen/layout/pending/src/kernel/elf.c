@@ -1,0 +1,267 @@
+#include "elf.h"
+
+#include "libc.h"
+#include "serial.h"
+#include "memory_layout.h"
+
+#define ELF_MAGIC 0x464C457FU
+#define ELF_CLASS_64 2U
+#define ELF_DATA_LSB 1U
+#define ELF_TYPE_EXEC 2U
+#define ELF_MACHINE_X86_64 0x3E
+#define ELF_PH_TYPE_LOAD 1U
+#define ELF_PH_TYPE_TLS 7U
+#define ELF_FLAG_EXEC 0x1U
+#define ELF_FLAG_WRITE 0x2U
+
+#define ELF_PAGE_SIZE 4096ULL
+
+typedef struct
+{
+    uint32_t magic;
+    uint8_t class_id;
+    uint8_t data;
+    uint8_t version;
+    uint8_t os_abi;
+    uint8_t abi_version;
+    uint8_t pad[7];
+    uint16_t type;
+    uint16_t machine;
+    uint32_t version2;
+    uint64_t entry;
+    uint64_t phoff;
+    uint64_t shoff;
+    uint32_t flags;
+    uint16_t ehsize;
+    uint16_t phentsize;
+    uint16_t phnum;
+    uint16_t shentsize;
+    uint16_t shnum;
+    uint16_t shstrndx;
+} __attribute__((packed)) elf64_ehdr_t;
+
+typedef struct
+{
+    uint32_t type;
+    uint32_t flags;
+    uint64_t offset;
+    uint64_t vaddr;
+    uint64_t paddr;
+    uint64_t filesz;
+    uint64_t memsz;
+    uint64_t align;
+} __attribute__((packed)) elf64_phdr_t;
+
+static inline uintptr_t elf_align_down(uintptr_t value)
+{
+    return value & ~(ELF_PAGE_SIZE - 1ULL);
+}
+
+static inline size_t elf_align_up_size(size_t value)
+{
+    size_t mask = (size_t)(ELF_PAGE_SIZE - 1ULL);
+    return (value + mask) & ~mask;
+}
+
+bool elf_validate_image(const uint8_t *image, size_t size, uintptr_t *entry_out)
+{
+    if (!image || size < sizeof(elf64_ehdr_t))
+    {
+        return false;
+    }
+
+    if (g_mem_layout.user_stack_size > g_mem_layout.user_stack_top ||
+        g_mem_layout.user_stack_top - g_mem_layout.user_stack_size < USER_DEFAULT_STACK_GUARD_SIZE)
+        return false;
+    uintptr_t image_end = g_mem_layout.user_stack_top - g_mem_layout.user_stack_size - USER_DEFAULT_STACK_GUARD_SIZE;
+    if (image_end <= g_mem_layout.user_pointer_base) return false;
+
+    const elf64_ehdr_t *ehdr = (const elf64_ehdr_t *)image;
+    if (ehdr->magic != ELF_MAGIC ||
+        ehdr->class_id != ELF_CLASS_64 ||
+        ehdr->data != ELF_DATA_LSB ||
+        ehdr->type != ELF_TYPE_EXEC ||
+        ehdr->machine != ELF_MACHINE_X86_64)
+    {
+        return false;
+    }
+
+    if (ehdr->phoff == 0 || ehdr->phentsize != sizeof(elf64_phdr_t))
+    {
+        return false;
+    }
+
+    if (ehdr->phoff > (uint64_t)size ||
+        (size_t)ehdr->phnum > (size - (size_t)ehdr->phoff) / sizeof(elf64_phdr_t))
+    {
+        return false;
+    }
+
+    const elf64_phdr_t *phdr = (const elf64_phdr_t *)(image + ehdr->phoff);
+    bool entry_in_executable_segment = false;
+    bool has_tls = false;
+    for (uint16_t i = 0; i < ehdr->phnum; ++i)
+    {
+        const elf64_phdr_t *ph = &phdr[i];
+        if (ph->type == ELF_PH_TYPE_TLS)
+        {
+            if (has_tls || ph->filesz > ph->memsz || ph->offset > size ||
+                ph->filesz > size - ph->offset || ph->memsz > SIZE_MAX ||
+                (ph->align != 0 && (ph->align & (ph->align - 1)) != 0) ||
+                ph->align > g_mem_layout.user_pointer_limit - g_mem_layout.user_pointer_base)
+            {
+                return false;
+            }
+            has_tls = true;
+            if (ph->memsz &&
+                (ph->vaddr < g_mem_layout.user_pointer_base ||
+                 ph->vaddr > g_mem_layout.user_pointer_limit ||
+                 ph->memsz - 1 > g_mem_layout.user_pointer_limit - ph->vaddr))
+            {
+                return false;
+            }
+            /* Only initialized TLS bytes need a PT_LOAD file image: .tbss
+             * can extend past that segment because it is instantiated per
+             * thread rather than occupying the ordinary BSS address range. */
+            bool covered = ph->filesz == 0;
+            for (uint16_t j = 0; !covered && j < ehdr->phnum; ++j)
+            {
+                const elf64_phdr_t *load = &phdr[j];
+                if (load->type != ELF_PH_TYPE_LOAD || ph->vaddr < load->vaddr)
+                {
+                    continue;
+                }
+                uint64_t delta = ph->vaddr - load->vaddr;
+                if (delta <= load->filesz && ph->filesz <= load->filesz - delta &&
+                    load->offset <= UINT64_MAX - delta && ph->offset == load->offset + delta)
+                {
+                    covered = true;
+                }
+            }
+            if (!covered)
+            {
+                return false;
+            }
+            continue;
+        }
+        if (ph->type != ELF_PH_TYPE_LOAD || ph->memsz == 0)
+        {
+            continue;
+        }
+        if (ph->filesz > ph->memsz ||
+            ph->offset > (uint64_t)size ||
+            ph->filesz > (uint64_t)size - ph->offset ||
+            ph->vaddr > UINTPTR_MAX || ph->memsz > SIZE_MAX ||
+            ph->vaddr < g_mem_layout.user_pointer_base ||
+            ph->memsz > (uint64_t)(UINTPTR_MAX - (uintptr_t)ph->vaddr))
+        {
+            return false;
+        }
+
+        uintptr_t seg_start = (uintptr_t)ph->vaddr;
+        uintptr_t seg_end = seg_start + (uintptr_t)ph->memsz;
+        uintptr_t seg_base = elf_align_down(seg_start);
+        size_t seg_offset = (size_t)(seg_start - seg_base);
+        if (seg_end == 0 || seg_end > image_end || seg_end - 1 > g_mem_layout.user_pointer_limit ||
+            (size_t)ph->memsz > SIZE_MAX - seg_offset ||
+            (size_t)ph->memsz + seg_offset > SIZE_MAX - (ELF_PAGE_SIZE - 1ULL))
+        {
+            return false;
+        }
+        if ((ph->flags & ELF_FLAG_EXEC) != 0 &&
+            ehdr->entry >= ph->vaddr && ehdr->entry < ph->vaddr + ph->memsz)
+        {
+            entry_in_executable_segment = true;
+        }
+    }
+    if (!entry_in_executable_segment)
+    {
+        return false;
+    }
+
+    if (entry_out)
+    {
+        *entry_out = (uintptr_t)ehdr->entry;
+    }
+    return true;
+}
+
+bool elf_load_process(process_t *process, const uint8_t *image, size_t size, uintptr_t *entry_out)
+{
+    uintptr_t validated_entry = 0;
+    if (!process || !elf_validate_image(image, size, &validated_entry))
+    {
+        return false;
+    }
+
+    const elf64_ehdr_t *ehdr = (const elf64_ehdr_t *)image;
+    const elf64_phdr_t *phdr = (const elf64_phdr_t *)(image + ehdr->phoff);
+
+    for (uint16_t i = 0; i < ehdr->phnum; ++i)
+    {
+        const elf64_phdr_t *ph = &phdr[i];
+        if (ph->type != ELF_PH_TYPE_LOAD || ph->memsz == 0)
+        {
+            continue;
+        }
+
+        serial_printf("[elf] segment pid=0x%016llX type=0x%X flags=0x%X off=0x%016llX vaddr=0x%016llX filesz=0x%016llX memsz=0x%016llX\r\n",
+                      (unsigned long long)process_get_pid(process),
+                      (unsigned)ph->type,
+                      (unsigned)ph->flags,
+                      (unsigned long long)ph->offset,
+                      (unsigned long long)ph->vaddr,
+                      (unsigned long long)ph->filesz,
+                      (unsigned long long)ph->memsz);
+
+        uintptr_t seg_start = (uintptr_t)ph->vaddr;
+        uintptr_t seg_base = elf_align_down(seg_start);
+        size_t seg_offset = (size_t)(seg_start - seg_base);
+        size_t seg_size = elf_align_up_size((size_t)ph->memsz + seg_offset);
+
+        bool writable = (ph->flags & ELF_FLAG_WRITE) != 0;
+        bool executable = (ph->flags & ELF_FLAG_EXEC) != 0;
+
+        void *host_ptr = NULL;
+        if (!process_map_user_segment(process,
+                                      seg_base,
+                                      seg_size,
+                                      writable,
+                                      executable,
+                                      &host_ptr))
+        {
+            return false;
+        }
+
+        uint8_t *dest = (uint8_t *)host_ptr + seg_offset;
+        size_t file_bytes = (size_t)ph->filesz;
+        if (file_bytes > 0)
+        {
+            memcpy(dest, image + ph->offset, file_bytes);
+        }
+
+        size_t remaining = (size_t)ph->memsz;
+        if (file_bytes < remaining)
+        {
+            memset(dest + file_bytes, 0, remaining - file_bytes);
+        }
+    }
+
+    for (uint16_t i = 0; i < ehdr->phnum; ++i)
+    {
+        const elf64_phdr_t *ph = &phdr[i];
+        if (ph->type == ELF_PH_TYPE_TLS &&
+            !process_set_user_tls_template(process, image + ph->offset,
+                                            (size_t)ph->filesz, (size_t)ph->memsz,
+                                            (size_t)ph->align, (uintptr_t)ph->vaddr))
+        {
+            return false;
+        }
+    }
+
+    if (entry_out)
+    {
+        *entry_out = validated_entry;
+    }
+    return true;
+}

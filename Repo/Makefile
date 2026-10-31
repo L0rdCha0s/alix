@@ -61,10 +61,23 @@ PROCESS_SOURCES := $(wildcard $(KERNEL_DIR)/process/*.c)
 C_SOURCES := $(filter-out $(KERNEL_DIR)/process.c,$(C_SOURCES))
 C_SOURCES += $(PROCESS_SOURCES)
 # Shared ownership primitives used by process-owned asynchronous I/O records.
-C_SOURCES += $(KERNEL_DIR)/fd/table.c $(KERNEL_DIR)/io/request.c
+C_SOURCES += $(KERNEL_DIR)/fd/table.c $(KERNEL_DIR)/io/request.c $(KERNEL_DIR)/io/service.c
+C_SOURCES += $(KERNEL_DIR)/io/vfs.c $(KERNEL_DIR)/io/vfs_service.c
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
+
+# Optional boot-only acceptance object; ordinary kernels retain only a weak hook.
+IO_VFS_SELFTEST ?= 0
+ifeq ($(IO_VFS_SELFTEST),1)
+C_OBJECTS += $(OBJDIR)/tests/vfs_io_boot_test.o
+$(OBJDIR)/kernel/vfs.o $(OBJDIR)/kernel/io/vfs_service.o: KERNEL_CFLAGS += -DIO_VFS_SELFTEST=1
+endif
+
+IO_SERVICE_SELFTEST ?= 0
+ifeq ($(IO_SERVICE_SELFTEST),1)
+C_OBJECTS += $(OBJDIR)/tests/io_service_boot_test.o
+endif
 
 ASM_SOURCES := $(filter-out $(ARCH_DIR)/ap_trampoline.S,$(wildcard $(ARCH_DIR)/*.S))
 ASM_OBJECTS := $(patsubst $(SRC_DIR)/%.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
@@ -80,11 +93,16 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/locale.c \
 	$(USER_DIR)/lib/locale_objects.c \
 	$(USER_DIR)/lib/printf_float.c \
+	$(USER_DIR)/lib/wchar.c \
+	$(USER_DIR)/lib/wide_stdio.c \
+	$(USER_DIR)/lib/inttypes.c \
 	$(USER_DIR)/lib/signal.c \
 	$(USER_DIR)/lib/mman.c \
 	$(USER_DIR)/lib/random.c \
 	$(USER_DIR)/lib/pthread.c \
+	$(USER_DIR)/lib/pthread_rwlock.c \
 	$(USER_DIR)/lib/process_posix.c \
+	$(USER_DIR)/lib/filesystem_posix.c \
 	$(USER_DIR)/lib/math.c \
 	$(USER_DIR)/lib/setjmp.c \
 	$(USER_DIR)/lib/atk_user.c \
@@ -307,6 +325,14 @@ $(AP_TRAMP_OBJ): $(AP_TRAMP_BIN)
 	$(LD) -r -b binary -o $@ $<
 
 ASM_OBJECTS += $(AP_TRAMP_OBJ)
+
+$(OBJDIR)/tests/io_service_boot_test.o: tests/io_service_boot_test.c
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/vfs_io_boot_test.o: tests/vfs_io_boot_test.c
+	@mkdir -p $(dir $@)
+	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/generated/%.o: $(OBJDIR)/generated/%.c
 	@mkdir -p $(dir $@)
@@ -1289,3 +1315,8 @@ include ports/zen/port.mk
 USER_DEPFILES := $(shell find $(USER_OBJDIR) -type f -name '*.d' 2>/dev/null)
 
 -include $(C_OBJECTS:.o=.d) $(ASM_OBJECTS:.o=.d) $(USER_DEPFILES)
+
+# C constants and both static ELF scripts must describe one address contract.
+.PHONY: user-layout-contract-test
+user-layout-contract-test:
+	python3 tests/user_layout_contract_test.py

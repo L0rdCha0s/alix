@@ -53,6 +53,13 @@ int io_request_create(io_queue_t *queue, size_t buffer_size, uint32_t uid,
  * its resources so preparation rollback also uses the cleanup worker. */
 int io_request_bind(io_request_t *request, fd_description_t *description_owned,
                     void *cwd_owned, io_cwd_release_t release_cwd);
+/* Alternative bind for a deferred cwd-owner description. Both inputs transfer
+ * on success; if identical they require distinct owned references. cwd exposes
+ * the description's immutable context while the separate owner keeps it alive.
+ * Bind/register/submit still requires the caller's bounded preparation guard. */
+int io_request_bind_cwd_owner(io_request_t *request, fd_description_t *description_owned,
+                               fd_description_t *cwd_owner_owned);
+bool io_request_uses_queue(const io_request_t *request, const io_queue_t *queue);
 void *io_request_buffer(io_request_t *request);
 size_t io_request_buffer_size(const io_request_t *request);
 fd_description_t *io_request_description(const io_request_t *request);

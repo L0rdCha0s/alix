@@ -70,6 +70,12 @@ bool elf_validate_image(const uint8_t *image, size_t size, uintptr_t *entry_out)
         return false;
     }
 
+    if (g_mem_layout.user_stack_size > g_mem_layout.user_stack_top ||
+        g_mem_layout.user_stack_top - g_mem_layout.user_stack_size < USER_DEFAULT_STACK_GUARD_SIZE)
+        return false;
+    uintptr_t image_end = g_mem_layout.user_stack_top - g_mem_layout.user_stack_size - USER_DEFAULT_STACK_GUARD_SIZE;
+    if (image_end <= g_mem_layout.user_pointer_base) return false;
+
     const elf64_ehdr_t *ehdr = (const elf64_ehdr_t *)image;
     if (ehdr->magic != ELF_MAGIC ||
         ehdr->class_id != ELF_CLASS_64 ||
@@ -156,7 +162,7 @@ bool elf_validate_image(const uint8_t *image, size_t size, uintptr_t *entry_out)
         uintptr_t seg_end = seg_start + (uintptr_t)ph->memsz;
         uintptr_t seg_base = elf_align_down(seg_start);
         size_t seg_offset = (size_t)(seg_start - seg_base);
-        if (seg_end == 0 || seg_end - 1 > g_mem_layout.user_pointer_limit ||
+        if (seg_end == 0 || seg_end > image_end || seg_end - 1 > g_mem_layout.user_pointer_limit ||
             (size_t)ph->memsz > SIZE_MAX - seg_offset ||
             (size_t)ph->memsz + seg_offset > SIZE_MAX - (ELF_PAGE_SIZE - 1ULL))
         {

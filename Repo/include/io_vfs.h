@@ -1,0 +1,44 @@
+#ifndef IO_VFS_H
+#define IO_VFS_H
+
+#include "io_service.h"
+
+typedef enum
+{
+    IO_VFS_OPEN,
+    IO_VFS_READ,
+    IO_VFS_WRITE,
+    IO_VFS_PREAD,
+    IO_VFS_SEEK,
+    IO_VFS_STAT,
+    IO_VFS_SYNC,
+    IO_VFS_READLINK,
+    IO_VFS_RESOLVE_CWD
+} io_vfs_opcode_t;
+
+/* The complete object lives in io_request_buffer(). All data/path bytes are
+ * owned kernel storage; no process pointer or user address is retained.
+ * READLINK consumes a NUL-terminated path in data, then overwrites data with
+ * at most count non-NUL-terminated target bytes. No descriptor is required. */
+typedef struct
+{
+    uint32_t opcode, flags;
+    int32_t whence;
+    uint32_t reserved;
+    uint64_t count;
+    int64_t offset;
+    syscall_stat_t stat;
+    unsigned char data[];
+} io_vfs_operation_t;
+
+/* Protected storage worker only, no caller-held locks/preemption guard.
+ * retirement must remain owned for this call; OPEN constructs a deferred
+ * description in that queue. The persistent service/controller owns the queue
+ * reference, rather than storing its lifetime on a syscall caller's stack.
+ * Callback-backed files and non-VFS descriptions require other adapters.
+ * cwd is the retained request cwd and credentials are captured request values.
+ * File offset gates sleep; their wait predicates receive heap-owned handles. */
+void io_vfs_execute(io_request_t *request, io_service_result_t *result,
+                     fd_retirement_queue_t *retirement);
+
+#endif

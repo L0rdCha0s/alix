@@ -140,21 +140,13 @@ process_t *process_finalize_new_process(process_t *proc,
     spinlock_unlock(&g_process_lock);
     cpu_restore_flags(flags);
 
-    process_t *actual_parent = parent ? parent : current_process_local();
-    vfs_node_t *inherit_cwd = NULL;
+    process_t *actual_parent = proc->kernel_service ? NULL : (parent ? parent : current_process_local());
     if (actual_parent)
     {
-        proc->uid = actual_parent->uid;
-        proc->gid = actual_parent->gid;
         process_attach_child(actual_parent, proc);
-        inherit_cwd = actual_parent->cwd;
     }
-
-    if (!inherit_cwd)
-    {
-        inherit_cwd = vfs_root();
-    }
-    proc->cwd = inherit_cwd;
+    /* Owned cwd and identity were prepared before thread_create, so no
+     * fallible allocation remains after this process has been published. */
 
     enqueue_thread(thread);
     return proc;
@@ -413,6 +405,10 @@ thread_t *thread_create(process_t *process,
     thread->stack_guard_failed = false;
     thread->stack_guard_reason = NULL;
     thread->is_user = is_user_thread;
+    thread->signal_altstack.ss_flags = ALIX_SS_DISABLE;
+    thread_t *signal_creator = current_thread_local();
+    if (is_user_thread && signal_creator && signal_creator->process == process)
+        thread->signal_mask = signal_creator->signal_mask;
     thread->context_guard_enabled = !is_idle;
     thread->fault_reason = NULL;
     thread->fault_error_code = 0;

@@ -1,3 +1,4 @@
+#include "build_features.h"
 #include "mouse.h"
 #include "io.h"
 #include "serial.h"
@@ -9,6 +10,7 @@
 #define KBD_STATUS 0x64
 #define KBD_COMMAND 0x64
 #define KBD_DATA 0x60
+#define MOUSE_POLL_BYTE_BUDGET 32u
 
 static mouse_listener_t g_listener = 0;
 static uint8_t packet[3];
@@ -249,7 +251,7 @@ void mouse_register_listener(mouse_listener_t listener)
 void mouse_init(void)
 {
     mouse_queue_reset();
-    if (!g_mouse_ps2_enabled)
+    if (!mouse_ps2_active())
     {
         return;
     }
@@ -349,7 +351,7 @@ unlock:
 
 void mouse_on_irq(uint8_t byte)
 {
-    if (!g_mouse_ps2_enabled)
+    if (!mouse_ps2_active())
     {
         return;
     }
@@ -368,17 +370,20 @@ void mouse_on_irq(uint8_t byte)
 
 void mouse_poll(void)
 {
-    if (!g_mouse_ps2_enabled)
+    if (!mouse_ps2_active())
     {
         return;
     }
     /* Drain ONLY PS/2 aux (mouse) bytes so they don't clog the buffer.
        Leave keyboard bytes untouched for keyboard_try_read(). */
-    while (1)
+    /* A missing controller reads 0xff; a stuck or continuously producing
+     * device must also return control to serial/keyboard input and scheduling.
+     * USB binding on another CPU can disable this loop after it has entered. */
+    for (unsigned bytes = 0; bytes < MOUSE_POLL_BYTE_BUDGET && mouse_ps2_active(); ++bytes)
     {
         uint64_t irq_state = mouse_irq_save();
         uint8_t status = inb(KBD_STATUS);
-        if ((status & 0x01) == 0)
+        if (status == 0xff || (status & 0x01) == 0)
         {
             mouse_irq_restore(irq_state);
             break; /* no data pending */
@@ -406,7 +411,7 @@ static void mouse_daemon_entry(void *arg)
 
 void mouse_start_daemon(void)
 {
-    if (!g_mouse_ps2_enabled)
+    if (!mouse_ps2_active())
     {
         return;
     }
@@ -433,11 +438,11 @@ void mouse_start_daemon(void)
 
 void mouse_disable_ps2(void)
 {
-    g_mouse_ps2_enabled = false;
+    __atomic_store_n(&g_mouse_ps2_enabled, false, __ATOMIC_RELEASE);
     mouse_queue_reset();
 }
 
 bool mouse_ps2_active(void)
 {
-    return g_mouse_ps2_enabled;
+    return __atomic_load_n(&g_mouse_ps2_enabled, __ATOMIC_ACQUIRE);
 }

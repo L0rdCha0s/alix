@@ -1,0 +1,354 @@
+--- a/Repo/include/process_internal.h
++++ b/Repo/include/process_internal.h
+@@ -335,6 +335,7 @@
+     alix_stack_t signal_altstack;
+     struct process_signal_frame *signal_frames;
+     uint64_t signal_sequence;
++    uint64_t signal_jump_epoch;
+     uint32_t signal_depth;
+     int signal_fault_status;
+     bool signal_onstack,signal_sleeping,signal_sleep_interrupted;
+--- a/Repo/include/process_signal.h
++++ b/Repo/include/process_signal.h
+@@ -8,6 +8,7 @@
+ typedef struct process process_t;
+ bool process_signal_fault(exception_frame_t *, uintptr_t);
+ void process_signal_syscall_return(syscall_frame_t *, uint64_t);
++int process_signal_jump(syscall_frame_t *, uint32_t, uintptr_t, size_t, uint64_t);
+ int process_signal_return(syscall_frame_t *, uintptr_t);
+ int process_signal_sigaction(int, uintptr_t, uintptr_t, size_t);
+ int process_signal_sigprocmask(int, uintptr_t, uintptr_t);
+--- a/Repo/include/setjmp.h
++++ b/Repo/include/setjmp.h
+@@ -2,6 +2,7 @@
+ #define SETJMP_H
+ 
+ #include "types.h"
++#include "signal_abi.h"
+ 
+ typedef struct
+ {
+@@ -16,10 +17,14 @@
+ } alix_jmp_buf_t;
+ 
+ typedef alix_jmp_buf_t jmp_buf[1];
++typedef alix_sigjmp_state_t sigjmp_buf[1];
+ 
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++
++int sigsetjmp(sigjmp_buf env, int savemask) __attribute__((returns_twice));
++void siglongjmp(sigjmp_buf env, int value) __attribute__((noreturn));
+ 
+ int setjmp(jmp_buf env) __attribute__((returns_twice));
+ void longjmp(jmp_buf env, int value) __attribute__((noreturn));
+--- a/Repo/include/signal_abi.h
++++ b/Repo/include/signal_abi.h
+@@ -114,4 +114,20 @@
+     alix_siginfo_t info;
+     alix_ucontext_t context;
+ } alix_signal_frame_t;
++
++#define ALIX_SIGJUMP_VERSION 1u
++#define ALIX_SIGJUMP_CAPTURE 0u
++#define ALIX_SIGJUMP_RESTORE 1u
++#define ALIX_SIGJUMP_SAVE_MASK 1u
++#define ALIX_SIGJUMP_REGISTER_BYTES 64u
++
++typedef struct
++{
++    uint64_t rbx, rbp, r12, r13, r14, r15, rsp, rip;
++    uint32_t version, size;
++    uint64_t owner_tid, epoch, frame_sequence, saved_mask;
++    uint32_t flags, reserved;
++    uint64_t reserved_words[2];
++} alix_sigjmp_state_t;
++
+ #endif
+--- a/Repo/include/syscall_defs.h
++++ b/Repo/include/syscall_defs.h
+@@ -72,6 +72,7 @@
+     SYSCALL_RAISE = 63,
+     SYSCALL_KILL = 64,
+     SYSCALL_SLEEP_INTERRUPTIBLE = 65,
++    SYSCALL_SIGNAL_JUMP = 67,
+ } syscall_id_t;
+ 
+ #define SYSCALL_TIMEZONE_VERSION 1u
+--- a/Repo/ports/zen/signals/host_model.h
++++ b/Repo/ports/zen/signals/host_model.h
+@@ -43,6 +43,7 @@
+     alix_stack_t signal_altstack;
+     struct process_signal_frame *signal_frames;
+     uint64_t signal_sequence;
++    uint64_t signal_jump_epoch;
+     uint32_t signal_depth;
+     int signal_fault_status;
+     bool signal_onstack, signal_sleeping, signal_sleep_interrupted;
+--- a/Repo/src/kernel/process/process_signal.c
++++ b/Repo/src/kernel/process/process_signal.c
+@@ -796,3 +796,147 @@
+         record = previous;
+     }
+ }
++
++_Static_assert(sizeof(alix_sigjmp_state_t) == 128 && __builtin_offsetof(alix_sigjmp_state_t, version) == 64 &&
++               __builtin_offsetof(alix_sigjmp_state_t, reserved_words) == 112, "native signal checkpoint wire");
++/* Signal-aware checkpoints contain values only. No user-buffer address or
++ * per-checkpoint heap record is retained after CAPTURE returns. */
++static uint64_t g_signal_jump_next_epoch = 1;
++
++static uint64_t signal_jump_allocate_epoch(void)
++{
++    uint64_t next = __atomic_load_n(&g_signal_jump_next_epoch, __ATOMIC_RELAXED);
++    for (;;)
++    {
++        if (!next || next == UINT64_MAX)
++            return 0;
++        if (__atomic_compare_exchange_n(&g_signal_jump_next_epoch, &next, next + 1, false, __ATOMIC_RELAXED,
++                                        __ATOMIC_RELAXED))
++            return next;
++    }
++}
++
++static bool signal_jump_user_registers_valid(const alix_sigjmp_state_t *saved)
++{
++    return user_ptr_range_valid((const void *)(uintptr_t)saved->rip, 1) &&
++           saved->rsp >= USER_ADDRESS_SPACE_BASE && saved->rsp <= USER_ADDRESS_SPACE_LIMIT + 1;
++}
++
++int process_signal_jump(syscall_frame_t *frame, uint32_t operation, uintptr_t buffer, size_t size,
++                        uint64_t argument)
++{
++    thread_t *thread = current_thread_local();
++    if (!frame || (frame->cs & 3u) != 3u || !signal_user_thread(thread))
++        return -EPERM;
++    if (size != sizeof(alix_sigjmp_state_t) || operation > ALIX_SIGJUMP_RESTORE)
++        return -EINVAL;
++    if (!user_ptr_range_valid((void *)buffer, size))
++        return -EFAULT;
++    uint64_t irq = cpu_save_flags();
++    cpu_cli();
++    alix_sigjmp_state_t *saved = calloc(1, sizeof(*saved));
++    if (!saved)
++    {
++        cpu_restore_flags(irq);
++        return -ENOMEM;
++    }
++    size_t input_size = operation == ALIX_SIGJUMP_CAPTURE ? ALIX_SIGJUMP_REGISTER_BYTES : sizeof(*saved);
++    int result = user_copy_from_user(saved, (const void *)buffer, input_size) ? 0 : -EFAULT;
++    if (!result && !signal_jump_user_registers_valid(saved))
++        result = -EINVAL;
++    if (!result && operation == ALIX_SIGJUMP_CAPTURE)
++    {
++        uint64_t return_pc = 0;
++        if (frame->rsp > UINTPTR_MAX - 8 || saved->rsp != frame->rsp + 8)
++            result = -EINVAL;
++        else if (!user_copy_from_user(&return_pc, (const void *)(uintptr_t)frame->rsp, sizeof(return_pc)))
++            result = -EFAULT;
++        else if (saved->rip != return_pc)
++            result = -EINVAL;
++        if (!result && !thread->signal_jump_epoch)
++        {
++            thread->signal_jump_epoch = signal_jump_allocate_epoch();
++            if (!thread->signal_jump_epoch)
++                result = -EOVERFLOW;
++        }
++        if (!result)
++        {
++            uint64_t lock = scheduler_lock_acquire("signal_jump_capture");
++            saved->version = ALIX_SIGJUMP_VERSION;
++            saved->size = sizeof(*saved);
++            saved->owner_tid = thread->tid;
++            saved->epoch = thread->signal_jump_epoch;
++            saved->frame_sequence = thread->signal_frames ? thread->signal_frames->sequence : 0;
++            saved->flags = argument ? ALIX_SIGJUMP_SAVE_MASK : 0;
++            saved->saved_mask = argument ? thread->signal_mask : 0;
++            scheduler_lock_release(lock);
++            if (!user_copy_to_user((void *)buffer, saved, sizeof(*saved)))
++                result = -EFAULT;
++        }
++    }
++    else if (!result)
++    {
++        if (saved->version != ALIX_SIGJUMP_VERSION || saved->size != sizeof(*saved) ||
++            (saved->flags & ~ALIX_SIGJUMP_SAVE_MASK) || saved->reserved || saved->reserved_words[0] ||
++            saved->reserved_words[1] || (saved->saved_mask & ~ALIX_SIGNAL_MASK) ||
++            (saved->saved_mask & SIGNAL_UNBLOCKABLE) ||
++            (!(saved->flags & ALIX_SIGJUMP_SAVE_MASK) && saved->saved_mask))
++            result = -EINVAL;
++        else if (saved->owner_tid != thread->tid || !saved->epoch ||
++                 saved->epoch != thread->signal_jump_epoch)
++            result = -EPERM;
++        else if (thread->io_request)
++            result = -EBUSY;
++        if (!result)
++        {
++            uint64_t lock = scheduler_lock_acquire("signal_jump_restore");
++            process_signal_frame_t *target = thread->signal_frames;
++            unsigned drop = 0;
++            while (target && target->sequence != saved->frame_sequence)
++            {
++                target = target->previous;
++                ++drop;
++            }
++            if ((saved->frame_sequence && !target) || drop > thread->signal_depth)
++                result = -EINVAL;
++            if (!result)
++            {
++                process_signal_frame_t *retired = thread->signal_frames;
++                thread->signal_frames = target;
++                thread->signal_depth -= drop;
++                if (saved->flags & ALIX_SIGJUMP_SAVE_MASK)
++                    thread->signal_mask = saved->saved_mask;
++                thread->signal_onstack = signal_stack_pointer_on_stack(&thread->signal_altstack, saved->rsp);
++                scheduler_lock_release(lock);
++                while (retired != target)
++                {
++                    process_signal_frame_t *previous = retired->previous;
++                    free(retired);
++                    retired = previous;
++                }
++                frame->rbx = saved->rbx;
++                frame->rbp = saved->rbp;
++                frame->r12 = saved->r12;
++                frame->r13 = saved->r13;
++                frame->r14 = saved->r14;
++                frame->r15 = saved->r15;
++                frame->rsp = saved->rsp;
++                frame->rip = saved->rip;
++                int value = (int32_t)argument;
++                frame->rax = (uint64_t)(int64_t)(value ? value : 1);
++                frame->cs = SIGNAL_USER_CS;
++                frame->ss = SIGNAL_USER_SS;
++                frame->rflags = (frame->rflags & SIGNAL_RFLAGS_ALLOWED & ~(1ULL << 10)) | RFLAGS_DEFAULT;
++                free(saved);
++                /* Preserve the current FP environment; abandoned handler
++                 * snapshots are not ordinary sigreturn targets. Keep IRQs
++                 * disabled through the direct continuation/pending delivery. */
++                return 0;
++            }
++            scheduler_lock_release(lock);
++        }
++    }
++    free(saved);
++    cpu_restore_flags(irq);
++    return result;
++}
+--- a/Repo/src/kernel/syscall.c
++++ b/Repo/src/kernel/syscall.c
+@@ -1111,6 +1111,14 @@
+             result = process_signal_return(frame, frame->rdi);
+             if (result == 0) { process_signal_syscall_return(frame, 0); return frame->rax; }
+             break;
++        case SYSCALL_SIGNAL_JUMP:
++        {
++            uint32_t operation = (uint32_t)frame->rdi;
++            result = process_signal_jump(frame, operation, frame->rsi, frame->rdx, frame->r10);
++            if (result == 0 && operation == ALIX_SIGJUMP_RESTORE)
++            { process_signal_syscall_return(frame, 0); return frame->rax; }
++            break;
++        }
+         case SYSCALL_RAISE:
+             result = process_signal_raise((int)frame->rdi, frame->rsi); break;
+         case SYSCALL_KILL:
+--- a/Repo/user/lib/setjmp.c
++++ b/Repo/user/lib/setjmp.c
+@@ -1,7 +1,8 @@
+ #include "setjmp.h"
++#include "syscall_defs.h"
+ 
+ __attribute__((naked, returns_twice))
+-int setjmp(jmp_buf env)
++int setjmp(jmp_buf env __attribute__((unused)))
+ {
+     __asm__ volatile(
+         "movq %rbx, 0(%rdi)\n"
+@@ -19,7 +20,7 @@
+ }
+ 
+ __attribute__((naked, noreturn))
+-void longjmp(jmp_buf env, int value)
++void longjmp(jmp_buf env __attribute__((unused)), int value __attribute__((unused)))
+ {
+     __asm__ volatile(
+         "movl %esi, %eax\n"
+@@ -36,3 +37,58 @@
+         "movq 48(%rdi), %rsp\n"
+         "jmp *56(%rdi)\n");
+ }
++
++_Static_assert(sizeof(sigjmp_buf) == 128, "native signal checkpoint ABI");
++_Static_assert(__builtin_offsetof(alix_sigjmp_state_t, version) == 64, "existing register prefix");
++
++/* Save the caller's activation before entering any C helper. A successful
++ * kernel RESTORE returns directly to that activation, never to this wrapper. */
++__attribute__((naked, returns_twice))
++int sigsetjmp(sigjmp_buf env __attribute__((unused)), int savemask __attribute__((unused)))
++{
++    __asm__ volatile(
++        "movq %%rbx, 0(%%rdi)\n"
++        "movq %%rbp, 8(%%rdi)\n"
++        "movq %%r12, 16(%%rdi)\n"
++        "movq %%r13, 24(%%rdi)\n"
++        "movq %%r14, 32(%%rdi)\n"
++        "movq %%r15, 40(%%rdi)\n"
++        "leaq 8(%%rsp), %%rax\n"
++        "movq %%rax, 48(%%rdi)\n"
++        "movq (%%rsp), %%rax\n"
++        "movq %%rax, 56(%%rdi)\n"
++        "movl %%esi, %%r10d\n"
++        "movq %%rdi, %%rsi\n"
++        "xorl %%edi, %%edi\n"
++        "movl $128, %%edx\n"
++        "movl %[number], %%eax\n"
++        "int $0x80\n"
++        "testl %%eax, %%eax\n"
++        "js 1f\n"
++        "ret\n"
++        "1:\n"
++        "movl $127, %%edi\n"
++        "movl %[exit_number], %%eax\n"
++        "int $0x80\n"
++        "ud2\n"
++        : : [number] "i" (SYSCALL_SIGNAL_JUMP), [exit_number] "i" (SYSCALL_EXIT) : "memory", "cc");
++}
++
++__attribute__((naked, noreturn))
++void siglongjmp(sigjmp_buf env __attribute__((unused)), int value __attribute__((unused)))
++{
++    __asm__ volatile(
++        "movl %%esi, %%r10d\n"
++        "movq %%rdi, %%rsi\n"
++        "movl $1, %%edi\n"
++        "movl $128, %%edx\n"
++        "movl %[number], %%eax\n"
++        "int $0x80\n"
++        /* Only a failed restore returns here. No libc locks or exit callbacks
++         * are safe when abandoning a signal handler with invalid metadata. */
++        "movl $127, %%edi\n"
++        "movl %[exit_number], %%eax\n"
++        "int $0x80\n"
++        "ud2\n"
++        : : [number] "i" (SYSCALL_SIGNAL_JUMP), [exit_number] "i" (SYSCALL_EXIT) : "memory", "cc");
++}
+--- a/Repo/user/lib/syscall.c
++++ b/Repo/user/lib/syscall.c
+@@ -431,3 +431,6 @@
+ int sys_kill(int32_t pid,int number) { return (int)syscall2(SYSCALL_KILL,pid,number); }
+ int sys_sleep_interruptible(uint32_t milliseconds,uint32_t *remaining)
+ { return (int)syscall2(SYSCALL_SLEEP_INTERRUPTIBLE,milliseconds,(long)remaining); }
++
++int sys_signal_jump(uint32_t operation, alix_sigjmp_state_t *environment, size_t size, int argument)
++{ return (int)syscall4(SYSCALL_SIGNAL_JUMP, operation, (long)environment, (long)size, argument); }
+--- a/Repo/user/lib/usyscall.h
++++ b/Repo/user/lib/usyscall.h
+@@ -28,6 +28,7 @@
+ int sys_sigprocmask(int how, const alix_sigset_t *set, alix_sigset_t *old);
+ int sys_sigaltstack(const alix_stack_t *stack, alix_stack_t *old, size_t size);
+ int sys_sigreturn(uintptr_t frame);
++int sys_signal_jump(uint32_t operation, alix_sigjmp_state_t *environment, size_t size, int argument);
+ int sys_raise(int number, uint64_t thread);
+ int sys_kill(int32_t pid, int number);
+ int sys_sleep_interruptible(uint32_t milliseconds, uint32_t *remaining);

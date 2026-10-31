@@ -76,6 +76,28 @@
           "after": "6352b827ec05f6661d722aad1bd8b2cd7e581b432a0bdc3fa3f0963a6212bb53"
         }
       ]
+    },
+    {
+      "file": "0006-native-alix-wasm-context.patch",
+      "sha256": "3779b787d39d3396848914939b5a735ab2c35e7ee655e10bf1c99b3f11fa2356",
+      "files": [
+        {
+          "path": "js/src/wasm/WasmSignalHandlers.cpp",
+          "before": "73fbee07320bd57eaf937df97107551b6efec5b18b975530a3e404d3e8ff71bb",
+          "after": "7da9ff4d21a83926ce40fa8c5cb89837d646574a0c7723425c1b0144218726e8"
+        }
+      ]
+    },
+    {
+      "file": "0007-native-alix-process-uptime.patch",
+      "sha256": "a445f9576dc7a47b9bf73363ddde820be932e24d63b48f0666eb54a336a17e8e",
+      "files": [
+        {
+          "path": "mozglue/misc/TimeStamp_posix.cpp",
+          "before": "d45e599173f172f8f456e6f5a0f379290d4a03df8d1ba05e65342aee5673c8a7",
+          "after": "8f0eb8d7409b3fac2a4a3fb2e14bb0b9506fdd4778bec49f1a48880c2931fc0d"
+        }
+      ]
     }
   ]
 }

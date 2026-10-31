@@ -18,7 +18,7 @@ This is a path-oriented map of the kernel codebase. It’s not a substitute for 
 - `src/kernel/libc.c` — kernel-side libc subset (memcpy/memset/strlen/etc); kernel code uses this, not host libc.
 - `src/kernel/heap.c` — kernel heap allocator + tracing + procfs controls; used by `malloc/calloc/realloc/free`.
 - `src/kernel/user_memory.c` — allocator for *physical* pages intended for user-space mappings (backed by E820 “usable” RAM).
-- `src/kernel/user_copy.c` — user pointer validation + safe-ish copy helpers used by syscalls.
+- `src/kernel/user_copy.c` — permission-checked syscall copies through owned physical backing under the process memory lock.
 - `src/kernel/vfs.c` — in-memory VFS tree + path resolution + mount/writeback plumbing.
 - `src/kernel/vfs_internal.h` — internal node/mount structures for `vfs.c` + filesystem backends.
 - `src/kernel/alixfs.c` — on-disk filesystem backend (AlixFS2) used for VFS mounts on block devices.
@@ -27,6 +27,8 @@ This is a path-oriented map of the kernel codebase. It’s not a substitute for 
 - `src/kernel/procfs.c` — `/proc` creation + callback-backed files (control + stats endpoints).
 - `src/kernel/proc_devices.c` — `/proc/devices/*` information endpoints (CPU/mem/block/net/pci).
 - `src/kernel/fd.c` — small kernel file descriptor table (`fd_ops_t` + `ctx`), shared by files and sockets.
+- `src/kernel/fd/table.c` — refcounted descriptions and private descriptor-table foundation; user syscalls still use the legacy global table.
+- `src/kernel/io/request.c`, `src/kernel/io/service.c` — heap-owned requests, protected storage workers and independent cleanup; VFS/socket syscall migration is pending.
 - `src/kernel/syscall.c` — syscall dispatcher + syscall implementations (VFS files, sockets, shell service, UI, snapshots).
 - `src/kernel/shell_service.c` — long-lived shell sessions exposed to userland via syscalls.
 - `src/kernel/elf.c` — ELF parsing/loading used for user process creation.
@@ -34,16 +36,21 @@ This is a path-oriented map of the kernel codebase. It’s not a substitute for 
 - `src/kernel/font.c`, `src/kernel/ttf.c`, `src/kernel/font_cache.c` — font loading/raster + caching.
 - `src/kernel/user_atk.c` — “remote ATK window” host: userland UI surfaces presented into kernel UI.
 - `src/kernel/userbin.c` — optional injection/population of built-in user binaries.
-- `src/kernel/process.c` — aggregator TU that `#include`s `src/kernel/process/*.c` (the process subsystem).
+- `src/kernel/process.c` — historical compatibility stub, excluded from the build.
 
 ## Process Subsystem (`src/kernel/process/`)
 
-All compiled as one translation unit via `src/kernel/process.c`, so “static” helpers can still be shared across the split files.
+These are separate translation units. Shared internal contracts are declared in
+`include/process_internal.h`; static helpers are local to their source file.
 
 - `process_common.c` — shared helpers, global registries, low-level context switch (`context_switch`), user-mode stubs.
 - `process_thread.c` — thread creation, stack allocation/guards, per-thread metadata.
 - `process_scheduler.c` — run queues, dequeue/enqueue, priority + affinity, context switching, stack guard handling.
 - `process_memory.c` — user address space creation, mapping user segments (stack/heap/ELF), teardown.
+- `process_vm.c` — anonymous VM reservations, protection, discard and transactional mapping changes.
+- `process_tls.c` — ELF TLS and thread-control-block construction.
+- `process_futex.c` — process-private address waits with scheduler-serialized publication and wakeup.
+- `process_io.c` — thread request ownership, completion waits and cancellation/reclamation integration.
 - `process_init.c` — `process_system_init`, idle threads, scheduler start for BSP/APs.
 - `process_api.c` — public API in `include/process.h` (create/join/kill, sleep/yield, timer tick preempt hook, snapshots).
 
@@ -53,6 +60,7 @@ All compiled as one translation unit via `src/kernel/process.c`, so “static”
 - `paging.c` — page table management: kernel space init + per-process spaces + user mappings + TLB flushing (incl. remote).
 - `interrupts.c`, `idt.c` — IDT and interrupt handlers; timer IRQ drives preemption and broadcasts schedule IPIs.
 - `syscall_entry.S` — vector 0x80 entry stub: saves regs and calls `syscall_dispatch`.
+- `exception_entry.S` — normalized full-register entry for divide, invalid-opcode, stack, general-protection and page faults.
 - `process_preempt.S` — kernel-mode preempt trampoline used by timer/IPI to force a `process_yield`.
 - `lapic.c`, `cpu.c`, `segments.*` — CPU/LAPIC setup, per-CPU stack pointers, GDT selectors.
 - `ap_trampoline.asm` — AP bootstrap blob copied to low memory by `smp.c`.

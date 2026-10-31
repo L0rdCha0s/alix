@@ -18,7 +18,8 @@ static process_t *process_create_kernel_internal(const char *name,
                                                  void *arg,
                                                  size_t stack_size,
                                                  int stdout_fd,
-                                                 process_t *parent)
+                                                 process_t *parent,
+                                                 bool kernel_service)
 {
     process_create_log(name, "begin");
     if (!entry)
@@ -35,6 +36,19 @@ static process_t *process_create_kernel_internal(const char *name,
         return NULL;
     }
 
+    /* These fields must precede thread publication and process enqueue. An
+     * immediately exiting parentless worker still retains its factory owner. */
+    proc->kernel_service = kernel_service;
+    if (kernel_service) proc->join_waiters = 1;
+    if (!process_prepare_inherited_context(proc, parent, kernel_service))
+    {
+        paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
+        free(proc);
+        return NULL;
+    }
+
+
     process_create_log(name, "thread_create_start");
     if (string_name_equals(name, "usb_initd"))
     {
@@ -44,6 +58,7 @@ static process_t *process_create_kernel_internal(const char *name,
     if (!thread)
     {
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         process_create_log(name, "thread_create_fail");
         if (string_name_equals(name, "usb_initd"))
@@ -99,11 +114,20 @@ static process_t *process_create_user_dummy_internal(const char *name,
     {
         return NULL;
     }
+    if (!process_prepare_inherited_context(proc, parent, false))
+    {
+        paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
+        free(proc);
+        return NULL;
+    }
+
 
     if (!process_setup_dummy_user_space(proc))
     {
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -113,6 +137,7 @@ static process_t *process_create_user_dummy_internal(const char *name,
         process_clear_args(proc);
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -122,6 +147,7 @@ static process_t *process_create_user_dummy_internal(const char *name,
     {
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -136,6 +162,7 @@ static process_t *process_create_user_dummy_internal(const char *name,
         free(bootstrap);
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -152,6 +179,7 @@ static process_t *process_create_user_dummy_internal(const char *name,
         free(bootstrap);
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -180,11 +208,20 @@ static process_t *process_create_user_elf_internal(const char *name,
     {
         return NULL;
     }
+    if (!process_prepare_inherited_context(proc, parent, false))
+    {
+        paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
+        free(proc);
+        return NULL;
+    }
+
 
     if (!process_setup_basic_user_memory(proc))
     {
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -194,6 +231,7 @@ static process_t *process_create_user_elf_internal(const char *name,
         process_clear_args(proc);
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -203,6 +241,7 @@ static process_t *process_create_user_elf_internal(const char *name,
     {
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -211,6 +250,7 @@ static process_t *process_create_user_elf_internal(const char *name,
     {
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -222,6 +262,7 @@ static process_t *process_create_user_elf_internal(const char *name,
     {
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -236,6 +277,7 @@ static process_t *process_create_user_elf_internal(const char *name,
         free(bootstrap);
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -252,6 +294,7 @@ static process_t *process_create_user_elf_internal(const char *name,
         free(bootstrap);
         process_free_user_regions(proc);
         paging_destroy_space(&proc->address_space);
+        process_release_context(proc);
         free(proc);
         return NULL;
     }
@@ -268,7 +311,7 @@ process_t *process_create_kernel(const char *name,
                                  size_t stack_size,
                                  int stdout_fd)
 {
-    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, NULL);
+    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, NULL, false);
 }
 
 process_t *process_create_kernel_with_parent(const char *name,
@@ -278,7 +321,13 @@ process_t *process_create_kernel_with_parent(const char *name,
                                              int stdout_fd,
                                              process_t *parent)
 {
-    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, parent);
+    return process_create_kernel_internal(name, entry, arg, stack_size, stdout_fd, parent, false);
+}
+
+process_t *process_create_kernel_service(const char *name, thread_entry_t entry,
+                                         void *argument, size_t stack_size)
+{
+    return process_create_kernel_internal(name, entry, argument, stack_size, -1, NULL, true);
 }
 
 process_t *process_create_user_dummy(const char *name,
@@ -498,6 +547,7 @@ void process_destroy_marked(process_t *process)
     spinlock_unlock(&g_process_lock);
     cpu_restore_flags(flags);
 
+    process_release_context(process);
     process->magic = 0;
     process_free_user_regions(process);
     paging_destroy_space(&process->address_space);
@@ -710,6 +760,18 @@ int process_join(process_t *process, int *status_out)
     return process_join_with_hook(process, status_out, NULL, NULL);
 }
 
+int process_join_kernel_service(process_t *process, int *status_out)
+{
+    if (!process || !process->kernel_service || process == current_process_local()) return -22;
+    /* The factory reference remains owned through this temporary join ref. */
+    if (!process_join_begin(process)) return -3;
+    wait_queue_wait(&process->wait_queue, process_join_ready, process);
+    if (status_out) *status_out = process->exit_status;
+    process_join_end(process);
+    process_destroy_retained(process);
+    return 0;
+}
+
 bool process_kill(process_t *process, int status)
 {
     if (!process)
@@ -719,13 +781,14 @@ bool process_kill(process_t *process, int status)
 
     if (process == current_process_local())
     {
+        if (process->kernel_service) return false;
         process_exit(status);
     }
 
     uint64_t flags = cpu_save_flags();
     cpu_cli();
     spinlock_lock(&g_process_lock);
-    bool valid = process->magic == PROCESS_MAGIC &&
+    bool valid = process->magic == PROCESS_MAGIC && !process->kernel_service &&
                  __atomic_load_n(&process->lifetime_state, __ATOMIC_ACQUIRE) == PROCESS_LIFETIME_ALIVE;
     if (valid)
     {
@@ -746,7 +809,7 @@ bool process_kill(process_t *process, int status)
 
 void process_kill_tree(process_t *process)
 {
-    if (!process)
+    if (!process || process->kernel_service)
     {
         return;
     }
@@ -821,54 +884,15 @@ uint64_t process_current_pid(void)
     return proc ? proc->pid : 0;
 }
 
-uint32_t process_get_uid(const process_t *process)
-{
-    return process ? process->uid : VFS_UID_ROOT;
-}
 
-uint32_t process_get_gid(const process_t *process)
-{
-    return process ? process->gid : VFS_GID_ROOT;
-}
 
-void process_set_identity(process_t *process, uint32_t uid, uint32_t gid)
-{
-    if (!process)
-    {
-        return;
-    }
-    process->uid = uid;
-    process->gid = gid;
-}
 
-vfs_node_t *process_current_cwd(void)
-{
-    process_t *proc = process_current();
-    if (!proc || !proc->cwd)
-    {
-        return vfs_root();
-    }
-    return proc->cwd;
-}
 
-void process_set_cwd(process_t *process, vfs_node_t *dir)
-{
-    if (!process)
-    {
-        return;
-    }
 
-    vfs_node_t *target = dir;
-    if (target && !vfs_is_dir(target))
-    {
-        return;
-    }
-    if (!target)
-    {
-        target = vfs_root();
-    }
-    process->cwd = target;
-}
+
+
+
+
 
 static void wait_queue_enqueue_locked(wait_queue_t *queue, thread_t *thread)
 {
@@ -1291,9 +1315,7 @@ uint64_t process_take_preempt_resume_rip(void)
     {
         return 0;
     }
-    uint64_t rip = thread->tls.preempt_resume_rip;
-    thread->tls.preempt_resume_rip = 0;
-    return rip;
+    return __atomic_exchange_n(&thread->tls.preempt_resume_rip, 0, __ATOMIC_ACQ_REL);
 }
 
 uint64_t process_get_pid(const process_t *process)
@@ -1735,7 +1757,7 @@ int process_user_thread_info(uint64_t tid, syscall_thread_info_t *info)
         info->stack_base = main_thread ? proc->user_stack_top - proc->user_stack_size
                                        : target->user_stack_base;
         info->stack_size = main_thread ? proc->user_stack_size : target->user_stack_size;
-        info->guard_size = main_thread ? 0 : PAGE_SIZE_BYTES_LOCAL;
+        info->guard_size = main_thread ? USER_DEFAULT_STACK_GUARD_SIZE : PAGE_SIZE_BYTES_LOCAL;
         info->flags = (main_thread ? SYSCALL_THREAD_INFO_MAIN : 0) |
                       (target->detached ? SYSCALL_THREAD_INFO_DETACHED : 0);
         info->state = (uint32_t)target->state;
@@ -2310,16 +2332,23 @@ void process_on_timer_tick(interrupt_frame_t *frame)
         return;
     }
 
-    thread->preempt_pending = true;
-    thread->time_slice_remaining = scheduler_time_slice_ticks();
-
     bool user_mode = frame && ((frame->cs & 0x3u) == 0x3u);
     if (!frame)
     {
         return;
     }
+    /* The user helper already yields. Do not build another helper frame on
+     * top of its partially restored registers or replace its destination. */
+    if (user_mode && frame->rip >= USER_PREEMPT_STUB_BASE &&
+        frame->rip - USER_PREEMPT_STUB_BASE < USER_PREEMPT_STUB_SIZE)
+    {
+        return;
+    }
 
-    thread->tls.preempt_resume_rip = frame->rip;
+    thread->preempt_pending = true;
+    thread->time_slice_remaining = scheduler_time_slice_ticks();
+
+    __atomic_store_n(&thread->tls.preempt_resume_rip, frame->rip, __ATOMIC_RELEASE);
     if (user_mode)
     {
         frame->rip = USER_PREEMPT_STUB_BASE;

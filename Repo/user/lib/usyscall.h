@@ -2,6 +2,7 @@
 #define USER_USYSCALL_H
 
 #include "types.h"
+#include "signal_abi.h"
 #include "syscall_defs.h"
 #include "user_atk_defs.h"
 
@@ -23,6 +24,15 @@ int sys_ui_close(uint32_t handle);
 int sys_ui_capture(uint32_t handle, uint32_t flags);
 int sys_yield(void);
 int sys_sleep_ms(uint32_t ms);
+int sys_sigaction(int number, const alix_sigaction_t *action, alix_sigaction_t *old, size_t size);
+int sys_sigprocmask(int how, const alix_sigset_t *set, alix_sigset_t *old);
+int sys_sigaltstack(const alix_stack_t *stack, alix_stack_t *old, size_t size);
+int sys_sigreturn(uintptr_t frame);
+int sys_signal_jump(uint32_t operation, alix_sigjmp_state_t *environment, size_t size, int argument);
+int sys_raise(int number, uint64_t thread);
+int sys_kill(int32_t pid, int number);
+int sys_sleep_interruptible(uint32_t milliseconds, uint32_t *remaining);
+
 int sys_serial_write(const char *buffer, size_t length);
 int sys_shell_open(void);
 int sys_shell_exec(int handle,
@@ -42,12 +52,14 @@ ssize_t sys_net_snapshot(syscall_net_stats_t *buffer, size_t capacity);
 ssize_t sys_cpu_snapshot(syscall_cpu_stats_t *buffer, size_t capacity);
 uint64_t sys_time_millis(void);
 uint64_t sys_monotonic_millis(void);
+uint64_t sys_process_uptime_ns(void);
 int sys_time_info(syscall_time_info_t *info);
 int sys_timezone_info(syscall_timezone_info_t *info, size_t size);
 ssize_t sys_font_cache(void *buffer, size_t capacity);
 int64_t sys_lseek(int fd, int64_t offset, int whence);
 int sys_fstat(int fd, syscall_stat_t *st);
 ssize_t sys_pread(int fd, void *buffer, size_t count, size_t offset);
+ssize_t sys_readlink(const char *path, char *buffer, size_t capacity);
 int sys_socket_open(const char *iface_name);
 int sys_socket_connect(int fd, const char *ipv4_text, uint16_t port);
 ssize_t sys_socket_available(int fd);

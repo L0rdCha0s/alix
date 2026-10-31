@@ -89,7 +89,17 @@ Important characteristics:
   locks; `sys_thread_cpu` reports its current CPU index.
 - **Spinlock ownership**: generic kernel spinlocks maintain a per-thread nesting depth (with a per-CPU fallback before scheduler threads exist). Timer callbacks, timer/IPI scheduler housekeeping, and voluntary yields defer lock-taking or preemption while that depth is non-zero, ensuring an interrupted lock owner cannot invert the scheduler-to-subsidiary-lock order. Locks shared with an IRQ handler use the IRQ-save helpers; release publishes the unlocked word and restores the saved interrupt state while the nesting guard is still raised. The scheduler's cross-stack lock uses raw lock operations because assembly releases it only after moving to the incoming stack.
 
-The scheduler’s main loop (`scheduler_main_loop` in `process_init.c`) repeatedly calls `scheduler_schedule(false)` then halts.
+The scheduler’s main loop (`scheduler_main_loop` in `process_init.c`) and the
+idle-thread entry perform retired-memory and deferred-thread maintenance before
+calling `scheduler_schedule(false)` and halting. Deferred-reclamation ownership
+and its bounded idle sweep are detailed in the SMP notes below.
+
+Protected kernel services are parentless and retain an owner reference before
+their first thread is published. Public kill/kill-tree calls cannot interrupt
+them; normal return and `process_exit` still work. Their persistent controller
+uses `process_join_kernel_service` to consume the owner only after quiescence.
+This supports storage continuations that must release locks and DMA resources
+even after the original syscall caller has died.
 
 ## Preemption Path (Timer IRQ + IPI)
 
@@ -123,3 +133,14 @@ The timer tick counter advances even when the interrupted context has a generic 
 Thread stacks are per-thread and must never be shared across CPUs/threads. This repo includes explicit stack-owner diagnostics to catch cases where data from one thread’s stack is used for DMA or async work on another CPU.
 
 Process child links and the global process list are protected by `g_process_lock`. Per-process memory metadata is protected separately by `memory_lock`; user mappings reject overflow, out-of-range addresses, reserved-area collisions, and overlaps with existing regions. Secondary user-thread stacks are unmapped when their owning thread is finally reclaimed.
+
+Both idle loops also call `process_reap_deferred_threads()`: reclamation cannot
+depend on the former CPU completing another context switch. The idle hook
+visits one deferred queue per pass in round-robin order, under the scheduler
+lock, and skips calls before scheduler readiness or with interrupts/preemption
+disabled. Each reaper pass examines at most 32 candidates. Threads still in
+use retain all existing current-CPU, switch-out, stack, transition and queue
+checks and move behind the unexamined suffix, preventing an unsafe prefix from
+starving later safe threads. The production-extracted regression in
+`tests/idle_deferred_reaper_test.py` covers idle-CPU I/O ownership, these hazards,
+bounded progress and concurrent arrivals.

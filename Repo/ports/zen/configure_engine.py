@@ -21,6 +21,8 @@ def main():
     parser.add_argument("--engine-dir", type=Path, default=ROOT / "ports/zen/upstream/firefox-159.0")
     parser.add_argument("--build", action="store_true", help="run the actual upstream build after configuration")
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--keep-going", action="store_true",
+                        help="use upstream mach's supported mode to collect independent build failures")
     args = parser.parse_args()
     engine = args.engine_dir.resolve()
     apply_patches(engine)
@@ -116,6 +118,7 @@ def main():
         ROOT / "ports/zen/toolchain/alix-clang++", ROOT / "ports/zen/libcxx/__external_threading",
         ROOT / "ports/zen/libcxx/__alix_locale",
         runtime / "lib/libc++.a", runtime / "lib/libc++abi.a", runtime / "lib/libalix-cxx-support.a",
+        ROOT / "ports/zen/upstream/libm-alix-build/lib/libalix-math.a",
         ROOT / "build/user/lib/libalix-ssp.a", Path(__file__), Path(__file__).with_name("configure_cache.py"),
     ])
     refresh_compiler_cache(engine.parent / "obj-js-alix", state, compiler_inputs)
@@ -132,7 +135,7 @@ def main():
         print(f"Building real upstream SpiderMonkey; diagnostics: {log}", flush=True)
         with log.open("w") as stream:
             result = subprocess.run([python, str(engine / "mach"), "build", "--priority", "normal",
-                                     "-j", str(args.jobs)],
+                                     "-j", str(args.jobs)] + (["--keep-going"] if args.keep_going else []),
                                     cwd=engine, env=env, stdout=stream, stderr=subprocess.STDOUT)
         print("\n".join(log.read_text(errors="replace").splitlines()[-50:]))
         print(f"Upstream build exit status: {result.returncode}")

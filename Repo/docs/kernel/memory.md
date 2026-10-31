@@ -237,13 +237,29 @@ copies, POSIX content/errno preservation, and 64 discard/refill rounds on four
 CPUs. `tests/vm_advice_qemu_test.py` also verifies that post-discard write,
 `PROT_NONE`, and execute violations remain fatal.
 
-The initial VM arena starts 16 MiB above the existing sbrk heap limit and ends
-256 MiB below the top-of-user-space stubs. That leaves a separate descending
-thread/TLS pool, while the existing ELF origin, main stack and heap remain at
-their current addresses. Legacy segment allocation rejects this arena even
-where no VMA currently exists. The current 4–8 GiB user window provides roughly
-2.7 GiB of native VM space; larger browser reservations will require the planned
-address-layout expansion. Stack and TLS allocation now searches existing region
+The native user address window is 4 GiB through 64 TiB minus one, below
+SpiderMonkey's 47-bit pointer ceiling. Static ELF images start at 4 GiB and must
+end before the guard beneath the 8 MiB main stack, whose top is 5 GiB. The brk
+heap reserves 16 GiB starting at 6 GiB; its initial two-level directory costs
+64 KiB, and physical pages are committed as brk grows. Main-stack backing
+metadata costs 16 KiB and its pages are committed on stack growth.
+
+The anonymous VM arena starts 16 MiB above the heap limit and ends beneath an
+8 GiB descending thread/TLS pool. Two stub pages remain at the top of the user
+window. Legacy segment allocation rejects the whole anonymous arena, including
+uncommitted holes. Nonfixed mmap addresses are advisory: usable hints are
+page-rounded, while occupied/out-of-range hints fall back to free space. Fixed
+and NOREPLACE addresses retain strict bounds/alignment checks.
+
+`include/memory_layout.h`, `user/lib/link.ld` and `src/arch/x86/uefi.ld` expose
+the same checked contract. Both linker scripts publish absolute layout symbols
+and reject overlap; ELF validation independently enforces the image ceiling and
+main-stack guard. `make user-layout-contract-test` compares C values with both
+linked symbol sets and proves oversized images fail their linker assertions.
+The separate `ports/zen/layout/user_layout_test.c` fixture contains a real
+32 MiB constant payload and reserves 12 GiB across PML4 entries 63/64, committing
+only eight pages. It checks high syscall copies, eight-CPU protection/TLS and
+high generated code; compilation alone is not guest acceptance. Stack and TLS allocation now searches existing region
 gaps in the auxiliary pool, preserving a guard page below each allocation. It
 reuses freed holes instead of permanently consuming a descending cursor. A new
 stack/TLS mapping also completes a cross-CPU TLB barrier before the new thread

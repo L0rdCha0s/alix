@@ -113,7 +113,8 @@ static void serial_boundaries(void)
 }
 
 enum { PROCESS_STATE_READY = 1, PROCESS_LIFETIME_ALIVE = 2 };
-typedef struct { uint64_t pid; unsigned state, lifetime_state; } process_t;
+typedef struct { uint64_t pid, started_monotonic_ticks; unsigned state, lifetime_state; } process_t;
+static uint64_t timer_ticks(void) { return 123456; }
 static bool heap_failure, trace_enabled;
 static unsigned allocations, releases, trace_enables, trace_disables;
 static void *owned_process;
@@ -177,6 +178,7 @@ static void allocation_rejection(void)
     g_next_pid = PID_MAXIMUM;
     process_t *process = allocate_process("ordinary", true);
     CHECK(process && process->pid == PID_MAXIMUM);
+    CHECK(process->started_monotonic_ticks == 123456);
     CHECK(process->state == PROCESS_STATE_READY && process->lifetime_state == PROCESS_LIFETIME_ALIVE);
     CHECK(g_next_pid == PID_EXHAUSTED);
     tracked_free(process);

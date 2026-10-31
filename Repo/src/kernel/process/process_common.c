@@ -64,7 +64,14 @@ const uint8_t g_user_thread_exit_stub[10] = {
  *   stub, so we can restore the interrupted RAX before resuming.
  * - This stub must not rely on kernel-mapped memory; it runs in user mode.
  */
-const uint8_t g_user_preempt_stub[66] = {
+const uint8_t g_user_signal_restorer[ALIX_SIGNAL_RESTORER_SIZE] = {
+    0x48, 0x89, 0xE7,                       /* mov rdi,rsp: exact user-frame address */
+    0xB8, SYSCALL_SIGRETURN, 0, 0, 0,        /* mov eax,SIGRETURN */
+    0xCD, 0x80, 0x0F, 0x0B                 /* int80; ud2 if an invalid return fails */
+};
+
+const uint8_t g_user_preempt_stub[ALIX_PREEMPT_STUB_SIZE] = {
+    0x48, 0x8D, 0x64, 0x24, 0x80,          /* lea rsp,[rsp-128]: preserve red zone/flags */
     /* reserve 8 bytes on the user stack for the resume RIP */
     0x6A, 0x00,                         /* push 0 */
 
@@ -112,7 +119,7 @@ const uint8_t g_user_preempt_stub[66] = {
     0x58,                               /* pop rax */
 
     /* jump to resume RIP (popped from the reserved slot) */
-    0xC3                                /* ret */
+    0xC2, 0x80, 0x00                    /* ret 128: resume with original RSP */
 };
 
 
@@ -123,6 +130,9 @@ thread_t *g_switch_out_threads[SMP_MAX_CPUS] = { NULL };
 uint64_t g_switch_restore_rflags[SMP_MAX_CPUS] = { 0 };
 thread_t *g_idle_threads[SMP_MAX_CPUS] = { NULL };
 thread_t *g_deferred_thread_frees[SMP_MAX_CPUS] = { NULL };
+/* These queues are initialized once at scheduler startup. */
+static thread_t *g_deferred_thread_free_tails[SMP_MAX_CPUS] = { NULL };
+#define DEFERRED_THREAD_FREE_BUDGET 32u
 spinlock_t g_deferred_free_locks[SMP_MAX_CPUS];
 #if ENABLE_STACK_WRITE_DEBUG
 bool g_stack_write_debug_enabled = false;
@@ -1378,6 +1388,7 @@ static void thread_free_resources(thread_t *thread)
         return;
     }
 
+    process_signal_thread_cleanup(thread);
     process_t *owner_proc = thread->process;
     bool owner_valid = false;
     if (owner_proc)
@@ -1517,6 +1528,10 @@ void thread_enqueue_deferred_free(thread_t *thread)
     cpu_cli();
     spinlock_lock(&g_deferred_free_locks[owner]);
     thread->deferred_next = g_deferred_thread_frees[owner];
+    if (!thread->deferred_next)
+    {
+        g_deferred_thread_free_tails[owner] = thread;
+    }
     g_deferred_thread_frees[owner] = thread;
     spinlock_unlock(&g_deferred_free_locks[owner]);
     cpu_restore_flags(flags);
@@ -1543,10 +1558,25 @@ bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stat
     uint64_t flags = cpu_save_flags();
     cpu_cli();
 
-    /* Build a temporary list of items we can actually free this pass. */
+    /* Detach a bounded prefix. Both switch completion and idle maintenance
+     * hold the scheduler lock, so none of this ownership can be abandoned
+     * on a preempted stack. The untouched suffix keeps its existing tail. */
     spinlock_lock(&g_deferred_free_locks[cpu_index]);
     thread_t *list = g_deferred_thread_frees[cpu_index];
-    g_deferred_thread_frees[cpu_index] = NULL;
+    thread_t *batch_tail = list;
+    if (batch_tail)
+    {
+        for (uint32_t count = 1; count < DEFERRED_THREAD_FREE_BUDGET && batch_tail->deferred_next; ++count)
+        {
+            batch_tail = batch_tail->deferred_next;
+        }
+        g_deferred_thread_frees[cpu_index] = batch_tail->deferred_next;
+        batch_tail->deferred_next = NULL;
+        if (!g_deferred_thread_frees[cpu_index])
+        {
+            g_deferred_thread_free_tails[cpu_index] = NULL;
+        }
+    }
     spinlock_unlock(&g_deferred_free_locks[cpu_index]);
 
     thread_t *pending = NULL;
@@ -1630,8 +1660,17 @@ bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stat
     if (pending)
     {
         spinlock_lock(&g_deferred_free_locks[cpu_index]);
-        tail->deferred_next = g_deferred_thread_frees[cpu_index];
-        g_deferred_thread_frees[cpu_index] = pending;
+        /* Retry unsafe candidates after the untouched suffix and any new
+         * arrivals. An unsafe prefix must not starve later safe threads. */
+        if (g_deferred_thread_free_tails[cpu_index])
+        {
+            g_deferred_thread_free_tails[cpu_index]->deferred_next = pending;
+        }
+        else
+        {
+            g_deferred_thread_frees[cpu_index] = pending;
+        }
+        g_deferred_thread_free_tails[cpu_index] = tail;
         spinlock_unlock(&g_deferred_free_locks[cpu_index]);
     }
 
@@ -1660,6 +1699,23 @@ bool thread_process_deferred_frees_locked(uint32_t cpu_index, deferred_free_stat
     }
 
     return did_work;
+}
+
+/* Idle CPUs may never complete another context switch. Visit every deferred
+ * queue independently of its former owner's activity, retaining the same
+ * scheduler serialization and all-CPU stack hazard checks as switch finish. */
+void process_reap_deferred_threads(void)
+{
+    if (!__atomic_load_n(&g_scheduler_boot_ready, __ATOMIC_ACQUIRE) ||
+        (cpu_save_flags() & RFLAGS_IF_BIT) == 0 || spinlock_preempt_disabled())
+    {
+        return;
+    }
+    static uint32_t next_cpu = 0;
+    uint32_t cpu = __atomic_fetch_add(&next_cpu, 1u, __ATOMIC_RELAXED) % SMP_MAX_CPUS;
+    uint64_t flags = scheduler_lock_acquire("idle_deferred_free");
+    (void)thread_process_deferred_frees_locked(cpu, NULL);
+    scheduler_lock_release(flags);
 }
 
 bool thread_context_in_bounds(thread_t *thread,

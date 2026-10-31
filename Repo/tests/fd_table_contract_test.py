@@ -3,13 +3,18 @@
 import os
 import shlex
 import sys
+from pathlib import Path
 
 sys.dont_write_bytecode = True
 from audio_stream_contract_test import ROOT, compile_and_run
 
 
 def without_includes(path):
-    return "\n".join(line for line in (ROOT / path).read_text().splitlines()
+    tree = Path(os.environ.get("FD_TABLE_SOURCE_TREE", str(ROOT)))
+    source_path = tree / path
+    if not source_path.exists():
+        source_path = ROOT / path
+    return "\n".join(line for line in source_path.read_text().splitlines()
                      if not line.startswith("#include "))
 
 
@@ -29,6 +34,9 @@ def main():
 typedef struct syscall_stat syscall_stat_t;
 typedef struct { uint32_t value; } spinlock_t;
 static _Thread_local unsigned held_locks, fail_allocations;
+static _Thread_local unsigned preempt_depth;
+static void spinlock_preempt_disable(void) { ++preempt_depth; }
+static void spinlock_preempt_enable(void) { CHECK(preempt_depth); --preempt_depth; }
 static uint64_t live_allocations;
 static void spinlock_init(spinlock_t *lock) { lock->value = 0; }
 static void spinlock_lock(spinlock_t *lock)

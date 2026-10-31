@@ -7,8 +7,8 @@
  * array entries, even when their VMA remains accessible. Metadata and in-flight
  * transactions belong to the process, never to a caller's stack. */
 #define VM_PAGE_SIZE PAGE_SIZE_BYTES_LOCAL
-#define VM_THREAD_POOL_BYTES (256ULL * 1024ULL * 1024ULL)
-#define VM_HEAP_GAP_BYTES (16ULL * 1024ULL * 1024ULL)
+#define VM_THREAD_POOL_BYTES USER_DEFAULT_THREAD_POOL_SIZE
+#define VM_HEAP_GAP_BYTES USER_DEFAULT_VM_HEAP_GAP
 #define VM_NEW_PAGE ((paddr_t)1)
 #define VM_EINVAL (-22)
 #define VM_ENOMEM (-12)
@@ -201,6 +201,11 @@ static bool vm_commit_page_locked(process_t *process, process_vm_area_t *area,
     }
     area->pages[index] = page;
     return true;
+}
+
+bool process_vm_contains_locked(process_t *process, uintptr_t address)
+{
+    return process && vm_find_area(process->vm_areas, address) != NULL;
 }
 
 bool process_vm_fault_locked(process_t *process, uintptr_t address,
@@ -630,10 +635,17 @@ int64_t process_vm_map(process_t *process, uintptr_t address, size_t length,
     size_t rounded;
     if (!vm_call_valid(process) || !vm_length_valid(length, &rounded) ||
         !vm_protection_valid(protection) || (flags & required) != required || (flags & ~allowed) ||
-        (address && !vm_range_valid(address, rounded)) ||
+        ((flags & fixed) && !vm_range_valid(address, rounded)) ||
         ((flags & fixed) && !address) || (flags & fixed) == fixed)
     {
         return VM_EINVAL;
+    }
+    /* Nonfixed addresses are advisory. Ignore impossible hints and round
+     * usable hints down to a page; fixed mappings remain exact and strict. */
+    if (!(flags & fixed) && address)
+    {
+        address = align_down_uintptr(address, VM_PAGE_SIZE);
+        if (!vm_range_valid(address, rounded)) address = 0;
     }
     protection = vm_protection_normalize(protection);
     uint64_t irq_flags = vm_lock_ready(process);

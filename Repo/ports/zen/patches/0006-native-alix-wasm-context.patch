@@ -1,0 +1,23 @@
+diff --git a/js/src/wasm/WasmSignalHandlers.cpp b/js/src/wasm/WasmSignalHandlers.cpp
+--- a/js/src/wasm/WasmSignalHandlers.cpp
++++ b/js/src/wasm/WasmSignalHandlers.cpp
+@@ -48,7 +48,7 @@
+ // CONTEXT struct which is provided to the signal handler.
+ // =============================================================================
+ 
+-#  if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
++#  if defined(__ALIX__) || defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+ #    include <sys/ucontext.h>  // for ucontext_t, mcontext_t
+ #  endif
+ 
+@@ -76,6 +76,10 @@
+ #    define RFP_sig(p) ((p)->Fp)
+ #    define R31_sig(p) ((p)->Sp)
+ #    define RLR_sig(p) ((p)->Lr)
++#  elif defined(__ALIX__)
++#    define RIP_sig(p) ((p)->uc_mcontext.rip)
++#    define RSP_sig(p) ((p)->uc_mcontext.rsp)
++#    define RBP_sig(p) ((p)->uc_mcontext.rbp)
+ #  elif defined(__OpenBSD__)
+ #    define EIP_sig(p) ((p)->sc_eip)
+ #    define EBP_sig(p) ((p)->sc_ebp)

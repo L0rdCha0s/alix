@@ -24,6 +24,9 @@ typedef enum
     VFS_NODE_SYMLINK = 3
 } vfs_node_type_t;
 
+/* Maximum path/target storage including NUL. Existing oversized disk targets
+ * are preserved; snapshot/resolve rejects them instead of truncating success. */
+#define VFS_PATH_MAX 4096u
 #define VFS_UID_ROOT 0u
 #define VFS_GID_ROOT 0u
 
@@ -36,6 +39,24 @@ vfs_node_t *vfs_root(void);
 vfs_node_t *vfs_resolve(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_mkdir(vfs_node_t *cwd, const char *path);
 vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool truncate);
+/* Protected storage-worker APIs. cwd is explicitly retained by the caller;
+ * success returns one owned node reference acquired before tree unlock. New
+ * files use captured uid/gid. Existing subtree mutability rules still apply;
+ * this does not invent POSIX mode/ACL enforcement absent from the VFS.
+ * Callback-backed nodes return -ENOTSUP before truncate; their borrowed
+ * callback contexts/current-thread semantics need a separate adapter. */
+int vfs_open_data_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
+                        uint32_t uid, uint32_t gid, vfs_node_t **out);
+/* Resolve intermediate links, snapshot the final symlink without following it,
+ * and copy at most capacity raw bytes (no appended NUL). No target pointer
+ * escapes tree/data locks. Path and output may overlap after resolution.
+ * cwd is retained, credentials captured, caller is a protected storage worker. */
+ssize_t vfs_readlink_snapshot(vfs_node_t *cwd, const char *path, void *buffer,
+                              size_t capacity, uint32_t uid, uint32_t gid);
+/* Recheck callback exclusion under data_lock on every operation, so a later
+ * vfs_set_file_callbacks cannot execute a callback with service identity. */
+ssize_t vfs_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t count);
+ssize_t vfs_write_data_at(vfs_node_t *file, size_t offset, const void *data, size_t count);
 vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
 bool vfs_is_dir(const vfs_node_t *node);
 bool vfs_is_file(const vfs_node_t *node);
@@ -87,6 +108,10 @@ bool vfs_force_symlink(vfs_node_t *cwd, const char *target_path, const char *lin
 void vfs_set_subtree_mutable(vfs_node_t *node, bool allow);
 /* Acquire/release references; nodes live until the last ref (tree + FDs) is released. */
 void vfs_node_retain(vfs_node_t *node);
+/* Input must already have an owning reference or tree/owner lock protection. */
+bool vfs_node_try_retain(vfs_node_t *node);
+/* Protected worker only. Follows the final link; retains before tree unlock. */
+int vfs_resolve_owned(vfs_node_t *cwd, const char *path, vfs_node_t **out);
 void vfs_node_release(vfs_node_t *node);
 
 #endif

@@ -10,5 +10,7 @@ bool __alix_stdio_orient_unlocked(FILE *stream, int orientation);
 size_t __alix_stdio_read_unlocked(FILE *stream, void *buffer, size_t count, bool *failed);
 size_t __alix_stdio_write_unlocked(FILE *stream, const void *buffer, size_t count);
 int __alix_stdio_pushback_unlocked(FILE *stream, unsigned char byte);
+/* Public read entry points call this before acquiring stream->mutex. */
+void __alix_stdio_before_read(FILE *stream);
 
 #endif

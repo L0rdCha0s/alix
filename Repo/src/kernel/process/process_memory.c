@@ -207,6 +207,7 @@ process_t *allocate_process(const char *name, bool is_user)
         process_create_log(name, "pid_exhausted");
         return NULL;
     }
+    proc->started_monotonic_ticks = timer_ticks();
     proc->state = PROCESS_STATE_READY;
     proc->lifetime_state = PROCESS_LIFETIME_ALIVE;
     bool space_ready = false;
@@ -267,6 +268,7 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->current_thread = NULL;
     spinlock_init(&proc->threads_lock);
     spinlock_init(&proc->memory_lock);
+    spinlock_init(&proc->context_lock);
     proc->threads = NULL;
     proc->thread_count = 0;
     proc->running_thread_count = 0;
@@ -281,6 +283,7 @@ process_t *allocate_process(const char *name, bool is_user)
     proc->sibling_prev = NULL;
     proc->sibling_next = NULL;
     proc->cwd = NULL;
+    proc->cwd_owner = NULL;
     proc->user_regions = NULL;
     proc->user_entry_point = 0;
     proc->user_stack_top = 0;
@@ -883,12 +886,14 @@ bool process_map_user_segment_locked(process_t *process,
     if (!allow_reserved)
     {
         uintptr_t stack_bottom = process_stack_bottom(process);
+        uintptr_t guarded_stack_bottom = stack_bottom >= USER_DEFAULT_STACK_GUARD_SIZE
+                                           ? stack_bottom - USER_DEFAULT_STACK_GUARD_SIZE : stack_bottom;
         if ((process->user_heap_limit > process->user_heap_base &&
              process_ranges_overlap(aligned_base, aligned_end,
                                     process->user_heap_base, process->user_heap_limit)) ||
             (stack_bottom != 0 && process->user_stack_top > stack_bottom &&
              process_ranges_overlap(aligned_base, aligned_end,
-                                    stack_bottom, process->user_stack_top)) ||
+                                    guarded_stack_bottom, process->user_stack_top)) ||
             process_ranges_overlap(aligned_base, aligned_end,
                                    USER_STUB_CODE_BASE,
                                    USER_PREEMPT_STUB_BASE + PAGE_SIZE_BYTES_LOCAL))
@@ -1602,6 +1607,39 @@ static bool process_stack_ensure_range(process_t *process, uintptr_t addr, size_
     return process_stack_commit_range(process, desired, committed);
 }
 
+/* Bounded preparation for a signal frame. New main-stack pages use the
+ * same no-wait commit/retirement path as page-fault recovery. Other owned
+ * stack/heap/VM ranges are validated by the subsequent safe copy itself. */
+bool process_signal_prepare_user_frame(process_t *process, uintptr_t address, size_t bytes)
+{
+    if (!process || !bytes || address > UINTPTR_MAX - bytes) return false;
+    uintptr_t end = address + bytes;
+    uintptr_t bottom = process_stack_bottom(process);
+    uint64_t flags = process_memory_lock(process);
+    bool okay = true;
+    if (address < process->user_stack_top && end > bottom)
+        okay = address >= bottom && end <= process->user_stack_top &&
+               process_stack_ensure_range(process, address, bytes);
+    process_memory_unlock(process, flags);
+    return okay;
+}
+
+/* Permission faults can have a nonpresent PTE after MADV_DONTNEED.
+ * Classify by logical ownership, without populating or waiting on a mapping. */
+bool process_signal_address_mapped(process_t *process, uintptr_t address)
+{
+    if (!process) return false;
+    uint64_t flags = process_memory_lock(process);
+    uintptr_t stack_bottom = process_stack_bottom(process);
+    bool mapped = (address >= process->user_heap_base && address < process->user_heap_brk) ||
+                  (stack_bottom && address >= stack_bottom && address < process->user_stack_top) ||
+                  process_vm_contains_locked(process, address);
+    for (process_user_region_t *region = process->user_regions; !mapped && region; region = region->next)
+        mapped = address >= region->user_base && address - region->user_base < region->mapped_size;
+    process_memory_unlock(process, flags);
+    return mapped;
+}
+
 bool process_stack_handle_page_fault(process_t *process, uintptr_t fault_addr, uintptr_t rsp)
 {
     (void)rsp;
@@ -1871,6 +1909,7 @@ bool process_setup_basic_user_memory(process_t *process)
     }
     memset(stub_ptr, 0x90, PAGE_SIZE_BYTES_LOCAL);
     memcpy(stub_ptr, g_user_exit_stub, sizeof(g_user_exit_stub));
+    memcpy((uint8_t *)stub_ptr + ALIX_SIGNAL_RESTORER_OFFSET, g_user_signal_restorer, sizeof(g_user_signal_restorer));
     memcpy((uint8_t *)stub_ptr + USER_THREAD_EXIT_STUB_OFFSET,
            g_user_thread_exit_stub,
            sizeof(g_user_thread_exit_stub));

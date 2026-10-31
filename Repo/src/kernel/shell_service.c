@@ -183,6 +183,7 @@ int shell_service_open_session(void)
     session->state.stream_context = session;
     session->state.stdout_fd = fd;
     session->state.owner_process = owner;
+    session->state.owner_pid = process_current_pid();
     session->state.wait_hook = NULL;
 
     session->owner = owner;
