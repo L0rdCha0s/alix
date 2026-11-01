@@ -210,6 +210,11 @@ bool fd_description_get(fd_description_t *description)
     return description && fd_reference_get(&description->references);
 }
 
+bool fd_description_referenced(const fd_description_t *description)
+{
+    return description && __atomic_load_n(&description->references, __ATOMIC_ACQUIRE) != 0;
+}
+
 int fd_description_put(fd_description_t *description)
 {
     if (!description) return 0;

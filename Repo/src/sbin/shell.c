@@ -1024,6 +1024,7 @@ static const shell_command_t g_commands[] = {
     { "quake",       shell_cmd_quake },
     { "wolf3d",      shell_cmd_wolf3d },
     { "runelf",      shell_cmd_runelf },
+    { "js",          shell_cmd_js },
 };
 
 static void shell_command_runner(void *arg)

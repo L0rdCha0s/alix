@@ -42,6 +42,7 @@ bool shell_cmd_wolf3d(shell_state_t *shell, shell_output_t *out, const char *arg
 bool shell_cmd_doom(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_quake(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_runelf(shell_state_t *shell, shell_output_t *out, const char *args);
+bool shell_cmd_js(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_atkshell(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_atktaskmgr(shell_state_t *shell, shell_output_t *out, const char *args);
 bool shell_cmd_bgset(shell_state_t *shell, shell_output_t *out, const char *args);

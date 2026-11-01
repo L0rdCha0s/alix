@@ -184,8 +184,16 @@ AlixFS two-boot test now adds a file shrunk from six to three bytes, regrown to
 8192 bytes, synced and read back with its zero-fill intact after remount.
 The upstream Rust File/OwnedFd, directory/path and pipe backends now use the
 native libc boundary and pass `make zen-rust-runtime-qemu-test` in eight-CPU
-Alix. Unsupported locking, permission/time changes, copying, link creation and
+Alix. Unsupported byte-range fcntl locking, permission/time changes, copying, link creation and
 recursive removal still report errors explicitly.
+
+Owned-profile flock now supplies shared/exclusive whole-file advisory locks,
+nonblocking attempts and allocation-free unlock. Open-description ownership
+survives dup and inheritance; separate opens conflict across CPUs/processes.
+Pending event-driven acquisitions use cancellable reservations and live-caller
+commit. Native C and Rust tests cover close/reuse, rename, signal interruption
+and killed-owner cleanup. See [whole-file locks](flock.md) for conversion,
+retirement and the remaining process-owned byte-range-locking work.
 
 Owned-profile `mkdir` uses a registered heap-owned path/cwd/credential request
 and one VFS tree transaction. Existing files, directories and symlinks return

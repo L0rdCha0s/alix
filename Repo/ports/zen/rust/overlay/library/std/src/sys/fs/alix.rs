@@ -141,11 +141,16 @@ impl File {
         match self.file_attr() { Ok(a) if !a.file_type().is_file() => None, value => Some(value.map(|a| a.size())) }
     }
     pub fn duplicate(&self) -> io::Result<Self> { self.0.0.try_clone().map(|fd| Self(FileDesc(fd))) }
-    pub fn lock(&self) -> io::Result<()> { unsupported() }
-    pub fn lock_shared(&self) -> io::Result<()> { unsupported() }
-    pub fn try_lock(&self) -> Result<(), TryLockError> { Err(TryLockError::Error(io::Error::UNSUPPORTED_PLATFORM)) }
-    pub fn try_lock_shared(&self) -> Result<(), TryLockError> { self.try_lock() }
-    pub fn unlock(&self) -> io::Result<()> { unsupported() }
+    pub fn lock(&self) -> io::Result<()> { cvt(unsafe { ffi::flock(self.as_raw_fd(), 2) }).map(|_| ()) }
+    pub fn lock_shared(&self) -> io::Result<()> { cvt(unsafe { ffi::flock(self.as_raw_fd(), 1) }).map(|_| ()) }
+    fn try_flock(&self, operation: i32) -> Result<(), TryLockError> {
+        cvt(unsafe { ffi::flock(self.as_raw_fd(), operation | 4) }).map(|_| ()).map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock { TryLockError::WouldBlock } else { TryLockError::Error(error) }
+        })
+    }
+    pub fn try_lock(&self) -> Result<(), TryLockError> { self.try_flock(2) }
+    pub fn try_lock_shared(&self) -> Result<(), TryLockError> { self.try_flock(1) }
+    pub fn unlock(&self) -> io::Result<()> { cvt(unsafe { ffi::flock(self.as_raw_fd(), 8) }).map(|_| ()) }
     pub fn set_permissions(&self, _: FilePermissions) -> io::Result<()> { unsupported() }
     pub fn set_times(&self, _: FileTimes) -> io::Result<()> { unsupported() }
 }

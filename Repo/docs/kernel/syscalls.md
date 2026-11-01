@@ -35,6 +35,12 @@ creates the directory with those credentials or returns EEXIST for an existing
 leaf. This strict owned-profile operation preserves the kernel helper's older
 create-or-return behavior. Mode/ACL enforcement remains unimplemented.
 
+`SYSCALL_FILE_FLOCK` takes a private fd, shared/exclusive/nonblocking/unlock
+flags and two zero arguments. Acquisition uses registered heap-owned leases on
+the event executor and a live-caller reservation commit. Unlock is immediate
+without queue admission. See [whole-file locks](flock.md) for duplicate/close,
+conversion and cancellation semantics. Byte-range fcntl locks remain pending.
+
 Syscall 69 (`RESOURCE_USAGE`) returns a versioned 48-byte snapshot for the
 current process: clock frequency, sampled user/system ticks and minor/major
 fault counters. The kernel holds process ownership through a bounded guard,

@@ -2,6 +2,7 @@
 #define IO_VFS_H
 
 #include "io_service.h"
+#include "io_flock.h"
 
 typedef enum
 {
@@ -52,6 +53,8 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
                      fd_retirement_queue_t *retirement);
 /* Caller holds a description reference; regular-file backend identity only. */
 bool io_vfs_description_valid(const fd_description_t *description);
+/* Caller pins a regular-file description through use of this embedded state. */
+io_flock_state_t *io_vfs_flock_state(const fd_description_t *description);
 struct vfs_node;
 /* Protected worker, retained cwd; returns one owned deferred regular-file
  * description. No caller process, stack or user address is retained. */

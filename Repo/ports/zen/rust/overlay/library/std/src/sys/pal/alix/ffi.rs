@@ -53,6 +53,7 @@ unsafe extern "C" {
     pub fn open(path: *const c_char, flags: u64, ...) -> c_int;
     pub fn close(fd: c_int) -> c_int;
     pub fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
+    pub fn flock(fd: c_int, operation: c_int) -> c_int;
     pub fn read(fd: c_int, buffer: *mut u8, count: usize) -> isize;
     pub fn write(fd: c_int, buffer: *const u8, count: usize) -> isize;
     pub fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;

@@ -75,6 +75,10 @@ fd_table_t *fd_table_create_deferred(size_t capacity, fd_retirement_queue_t *que
  */
 fd_description_t *fd_description_create(const fd_ops_t *ops, void *context);
 bool fd_description_get(fd_description_t *description);
+/* Borrowed finalization query: own a reference, or hold an external registry
+ * lock whose unlink is performed by the close callback before freeing its
+ * context. This does not acquire ownership or permit resurrection. */
+bool fd_description_referenced(const fd_description_t *description);
 /* Returns the close callback's result only on the final release, else zero. */
 int fd_description_put(fd_description_t *description);
 const fd_ops_t *fd_description_ops(const fd_description_t *description);

@@ -45,7 +45,7 @@ source now compiles after ftruncate is added. Upstream Rust File/OwnedFd now
 uses these native services and passes eight-CPU guest tests for cloning/shared
 offsets, resizing, synchronization, metadata, paths, directory iteration,
 exclusive creation and ownership transfer. Native Rust pipes, cloned ends and
-Stdio-drop EOF also pass. File locking, permission/time changes, copying, link
+Stdio-drop EOF also pass. Byte-range fcntl locking, permission/time changes, copying, link
 creation and recursive removal remain unsupported; shared mappings remain
 unfinished.
 
@@ -72,6 +72,8 @@ fallback. The reentrant libc account parser passes 8,000 concurrent host
 lookups with ASan/UBSan and TSan. Gecko's actual dirs/dirs-sys crates then pass
 eight-CPU tests for default/overridden locations and real XDG user-directory
 files, including escaped and non-UTF-8 names.
+The default account config path also supports recursive profile-directory
+creation and preferences write/sync/readback without HOME/XDG overrides.
 
 The broader Rust root still exits 101 on mtu, socket2, ash, rustix and
 wr_glyph_rasterizer. Diagnostics are in
@@ -224,7 +226,9 @@ pass pointers to one thread's stack to another thread or asynchronous callback.
   and entropy-backed `HashMap` have guest evidence. The target uses static
   relocation, local-exec TLS and `panic=abort`; it does not pretend to be Linux
   or a built-in Rust target. Native file/descriptor, directory, path and pipe
-  APIs also have eight-CPU guest evidence. Filesystem locking, permission/time
+  APIs also have eight-CPU guest evidence. Whole-file advisory locks also pass
+  native C/Rust tests with duplicate/inherited ownership, cancellation, close
+  and process-exit cleanup. Byte-range fcntl locking, permission/time
   changes, copying, link creation and recursive deletion remain unsupported,
   as do network and process-creation backends. Native environment snapshots,
   cwd changes, executable discovery, HOME/account fallback and PATH handling
@@ -388,6 +392,7 @@ make zen-rust-runtime-qemu-test        # Actual upstream Rust std in Alix
 make zen-gecko-os-interfaces-qemu-test # fsync/remount, advice and memory counts
 make zen-select-qemu-test              # Owned selection, signals, TCP and cleanup
 make zen-filesystem-primitives-qemu-test # Resize, canonical paths and empty dirs
+make zen-flock-qemu-test            # Whole-file locks, aliases, cancellation and exit
 make zen-rust-file-urls-qemu-test # Actual Gecko URL crate and native file readback
 make zen-rust-os-consumers-qemu-test # Real Glean logging, errno and storage paths
 make zen-rust-directories-qemu-test # Actual dirs crates and native XDG/account paths
@@ -430,7 +435,8 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `rust-std-qemu.log` | Actual upstream std: native pthread identities/handles/TLS; File/OwnedFd ownership, offsets, resizing, paths, directories and pipes; 1,536 concurrent C/Rust environment updates, 512 snapshots, raw bytes, owned iterators, real cwd/executable paths and exact-uid account fallback; original allocation/time/synchronization/HashMap checks also pass. |
 | `rust-file-urls-qemu.log` | Actual Gecko URL crate: native absolute paths, percent escaping, Unicode and invalid UTF-8 byte roundtrips, local/remote-host handling, NUL rejection at file open and eight-CPU file readback through decoded URLs. |
 | `rust-os-consumers-qemu.log` | Actual Glean public FD logger delivers 256 JSON records from eight pinned CPUs; native errno crate/C errno isolation and strerror_r formatting, C/Rust errno/signal ABI, real storage-path module canonicalization/errors, and kill identity/error probes pass. XPCOM service startup and full browser linkage remain unverified. |
-| `rust-directories-qemu.log` | Actual dirs/dirs-sys crates: eight CPUs parse real XDG files with HOME expansion, disabled/relative paths, escaping, Unicode and invalid UTF-8; defaults, absolute overrides, account fallback and the C/Rust passwd ABI pass. |
+| `rust-directories-qemu.log` | Actual dirs/dirs-sys crates: eight CPUs parse real XDG files with HOME expansion, disabled/relative paths, escaping, Unicode and invalid UTF-8; defaults, overrides, account fallback and C/Rust passwd ABI; profile-directory creation and preferences write/sync/readback under the real default account config path. |
+| `flock-native-qemu.log` | Eight pinned CPUs preserve 256 file updates under real shared/exclusive locks; advisory behavior, dup/final-close, rename, native inheritance, descriptor reuse, EINTR, storage progress and killed-waiter sibling-lock release pass. Rust File lock APIs independently pass 256 pinned critical sections in rust-std-qemu.log. |
 | `thread-elf_tls-qemu.log` | Eight CPUs passed initialized TLS, zeroed TLS, 128-byte alignment, constructors and thread-local errno checks. |
 | `thread-libc-qemu.log` | Four-CPU allocator/once/TSD checks and exit ordering passed; required `main PASS` and `exit PASS` are present. |
 | `thread-main_exit-qemu.log` | `MAIN_THREAD_EXIT_TEST: PASS main_joined=1 tls=1 last=1`: workers survive initial-thread exit and the last participant performs final cleanup. |

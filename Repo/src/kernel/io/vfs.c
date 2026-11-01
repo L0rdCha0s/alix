@@ -17,6 +17,7 @@ typedef struct
     fd_description_t *description; /* self, used only during a pinned callback */
     bool offset_owned;
     wait_queue_t offset_waiters;
+    io_flock_state_t flock;
 } io_vfs_file_t;
 
 static bool io_vfs_offset_ready(void *context)
@@ -133,6 +134,7 @@ static int io_vfs_file_close(void *context)
     io_vfs_file_t *file = context;
     if (file)
     {
+        io_flock_state_close(&file->flock);
         if (file->node) vfs_node_release_owned(file->node);
         free(file);
     }
@@ -161,6 +163,12 @@ bool io_vfs_description_valid(const fd_description_t *description)
     return description && fd_description_ops(description)->close == io_vfs_file_close;
 }
 
+io_flock_state_t *io_vfs_flock_state(const fd_description_t *description)
+{
+    return io_vfs_description_valid(description) ?
+        &((io_vfs_file_t *)fd_description_context(description))->flock : NULL;
+}
+
 int io_vfs_open_owned(vfs_node_t *cwd, const char *path, uint32_t flags,
                        uint32_t uid, uint32_t gid, fd_retirement_queue_t *retirement,
                        fd_description_t **output)
@@ -185,7 +193,11 @@ int io_vfs_open_owned(vfs_node_t *cwd, const char *path, uint32_t flags,
                                            (flags & SYSCALL_OPEN_TRUNCATE) != 0,
                                            (flags & SYSCALL_OPEN_EXCLUSIVE) != 0, uid, gid, &file->node);
     if (result) fd_description_put(description);
-    else *output = description;
+    else
+    {
+        io_flock_state_init(&file->flock, file->node, description);
+        *output = description;
+    }
     return result;
 }
 

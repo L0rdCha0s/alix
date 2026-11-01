@@ -187,12 +187,12 @@
     },
     {
       "file": "0014-native-alix-nspr-platform.patch",
-      "sha256": "45b2fa903112442f6a6ea0cc3d271a97b14443c9e9b489743e54d47e2de9e2f7",
+      "sha256": "f18b435854b3cd1cf3ce8c07acba3c8e5beb04f5686b5f0d4727bb5cda8f5f06",
       "files": [
         {
           "path": "config/external/nspr/pr/moz.build",
           "before": "c2416bb049d92fd5c01157da0235fff3e47130f6f464499e0444fef5b8f2707b",
-          "after": "472d71ac1e21bb6893948786a145792e2c9c1dbd56a5ecb157245d5f4516396e"
+          "after": "eefe87b424715283d3585a13b794a6fc4b3dba147767c4f3ce05ba56987b414c"
         },
         {
           "path": "config/external/nspr/prcpucfg.h",
@@ -330,7 +330,7 @@
     },
     {
       "file": "0017-native-alix-rust-libc.patch",
-      "sha256": "19cd0a918dd192d9e77200ec8e1ecb940356e9e5b54f6c96f28d6700d77e4f00",
+      "sha256": "212ccaa43d82787fa849ede03c7acae028f57d39d7af72f9d85302ee71487289",
       "files": [
         {
           "path": "third_party/rust/libc/src/lib.rs",
@@ -340,12 +340,12 @@
         {
           "path": "third_party/rust/libc/src/alix/mod.rs",
           "before": null,
-          "after": "005fbd54318737cc748305c270d5ff9e81ea193514d06bb38e664c0764d371ec"
+          "after": "dab376d72ecf4723296ab05286f987f1d2fa88a678a250168098558f22cf14f8"
         },
         {
           "path": "third_party/rust/libc/.cargo-checksum.json",
           "before": "3ede211a3962476250d3e11d268aedd1bcfa53c6c1a1e701d04d2d4da6d20ccc",
-          "after": "74983a936954aa5ee7f035903c4b2d4054d84b939592eb365f5d926fa7f315da"
+          "after": "462670c61afda4467b544f27e1058fee192cdddcad9dcd4e4a1bec2b37439d14"
         }
       ]
     },

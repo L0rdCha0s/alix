@@ -26,6 +26,10 @@ the staged host files remain read-only. Main-volume writes persist in `data.img`
 `/usr`, `/etc` and `/home` point into the main volume. User binaries still
 build under `build/bin/` and `build/user/`; the existing `/usr/bin/dl.sh` workflow installs
 them to `/root/usr/bin`. They do not belong on the firmware boot volume.
+The bundle includes the native SpiderMonkey CLI as `js.elf`; after running
+`dl.sh`, use `js --help`, `js -e print(6*7)`, or `js path/to/script.js`.
+See [SpiderMonkey setup and CLI](../../ports/zen/README.md#installed-javascript-cli)
+for the upstream build prerequisite and package acceptance test.
 
 The full `build/` tree is never exported to QEMU. Its debug symbols, object
 files, ports and test output can grow beyond virtual FAT16's capacity without

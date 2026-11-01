@@ -2,12 +2,19 @@
 #include "unistd.h"
 #include "usyscall.h"
 #include "errno.h"
+#include "sys/file.h"
 #include <stdarg.h>
 
 static int fd_result(int64_t result)
 {
     if (result < 0) { errno = (int)-result; return -1; }
     return (int)result;
+}
+
+int flock(int fd, int operation)
+{
+    return fd_result(sys_file_io(SYSCALL_FILE_FLOCK, (uint64_t)(int64_t)fd,
+                                  (uint64_t)(int64_t)operation, 0, 0));
 }
 
 int fcntl(int fd, int command, ...)

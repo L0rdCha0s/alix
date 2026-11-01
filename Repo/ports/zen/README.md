@@ -34,6 +34,40 @@ The source and object directory remain under `ports/zen/upstream/`, outside the
 FAT-backed `build/` directory used by QEMU. Normal `make` does not fetch or build
 the upstream engine.
 
+## Installed JavaScript CLI
+
+Once `make zen-js-build` has produced the native shell, normal `make` imports it
+as `build/user/js.elf` and `build/bin/js`, and includes its stripped runtime copy
+in `build/user/user-elfs.zip`. Rebuilding the upstream shell refreshes these
+artifacts on the next `make`. A missing upstream shell stops packaging with setup
+instructions; it is never silently omitted. A fresh checkout needs the upstream
+runtime/setup commands above before `make` can package applications.
+
+Serve the repository with `./serve-dl.sh`, boot the updated Alix kernel, then run:
+
+```sh
+/usr/bin/dl.sh
+js -e print(6*7)
+js /home/root/example.js
+js --help
+```
+
+`js` without arguments shows upstream usage. `/usr/bin/js.elf` also launches
+the executable directly. `print`, `load`, and the
+upstream shell facilities are available; this is the standalone SpiderMonkey
+shell, with no Node.js or browser DOM APIs. The download installs it persistently
+at `/root/usr/bin/js.elf`, accessible through `/usr/bin`.
+The current Alix argument parser splits at whitespace without shell quoting;
+keep `-e` code in a single token and use script files for longer programs.
+The upstream descriptor runtime currently supplies EOF stdin, so an interactive
+REPL is not available yet, including with `-i`.
+
+`make spidermonkey-package-qemu-test` boots an isolated eight-CPU guest through
+`run-via-agent.sh`, runs the actual `dl.sh` against a local HTTP server on port
+8000, verifies the installed CLI hash, and exercises inline code, file loading,
+JavaScript error exit status, and JIT/GC/Wasm/workers. It clones `data.img` and
+keeps the original disk unchanged. Port 8000 must be available for this test.
+
 ## Tracked source changes
 
 `patches/series.json` identifies the exact Firefox revision, patch digests, and

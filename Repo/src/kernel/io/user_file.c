@@ -16,7 +16,7 @@ _Static_assert(FD_STATUS_READ == SYSCALL_OPEN_READ && FD_STATUS_WRITE == SYSCALL
                FD_STATUS_APPEND == SYSCALL_OPEN_APPEND && FD_STATUS_NONBLOCK == SYSCALL_OPEN_NONBLOCK,
                "private descriptor status wire flags");
 
-typedef enum { USER_STORAGE, USER_TCP, USER_DNS, USER_PIPE, USER_AUDIO, USER_POLL } user_file_service_t;
+typedef enum { USER_STORAGE, USER_TCP, USER_DNS, USER_PIPE, USER_AUDIO, USER_POLL, USER_FLOCK } user_file_service_t;
 typedef struct
 {
     uint32_t reply_mode, server_ip;
@@ -35,6 +35,8 @@ static uint32_t g_user_file_start;
 
 static bool user_tcp_handler(io_request_t *request, io_service_result_t *result)
 {
+    if (io_flock_description_valid(io_request_description(request)))
+        return io_flock_execute(request, result);
     if (io_poll_description_valid(io_request_description(request)))
         return io_poll_execute(request, result);
     if (io_pipe_description_valid(io_request_description(request)))
@@ -114,7 +116,7 @@ static int user_file_create_identity(user_file_service_t kind, size_t bytes, fd_
     *out = NULL;
     io_request_t *request = NULL;
     int result;
-    if (kind == USER_TCP || kind == USER_PIPE || kind == USER_AUDIO || kind == USER_POLL)
+    if (kind == USER_TCP || kind == USER_PIPE || kind == USER_AUDIO || kind == USER_POLL || kind == USER_FLOCK)
     {
         io_event_service_t *service = __atomic_load_n(&g_user_tcp_service, __ATOMIC_ACQUIRE);
         result = service ? io_event_service_request_create(service, bytes, uid, gid, &request) : -ENOSYS;
@@ -169,7 +171,7 @@ static void user_file_abort(io_request_t *request)
 
 static int user_file_submit(user_file_service_t kind, io_request_t *request)
 {
-    int result = kind == USER_TCP || kind == USER_PIPE || kind == USER_AUDIO || kind == USER_POLL ?
+    int result = kind == USER_TCP || kind == USER_PIPE || kind == USER_AUDIO || kind == USER_POLL || kind == USER_FLOCK ?
         io_event_service_submit(__atomic_load_n(&g_user_tcp_service, __ATOMIC_ACQUIRE), request) :
         io_service_submit(kind == USER_STORAGE ? io_vfs_service_current() :
                             __atomic_load_n(&g_user_dns_service, __ATOMIC_ACQUIRE), request);
@@ -190,13 +192,20 @@ static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
                                  void *output, size_t capacity, uint32_t slot_flags)
 {
     io_request_status_t status;
-    int result = kind == USER_POLL ? process_io_wait_current_interruptible(&status) :
+    int result = kind == USER_POLL || kind == USER_FLOCK ? process_io_wait_current_interruptible(&status) :
                                      process_io_wait_current(&status);
     spinlock_preempt_disable();
     io_request_t *request = NULL;
     if (!result) result = process_io_result_current(&request, &status);
     int64_t value = result ? result : status.result;
-    if (!result && value >= 0 && operation == SYSCALL_FILE_POLL)
+    if (!result && !value && operation == SYSCALL_FILE_FLOCK)
+    {
+        fd_description_t *lease = NULL;
+        result = io_request_take_result(request, &lease);
+        value = result ? result : io_flock_commit(lease);
+        fd_description_put(lease);
+    }
+    else if (!result && value >= 0 && operation == SYSCALL_FILE_POLL)
     {
         syscall_pollfd_t *entries = io_poll_entries(io_request_description(request));
         if (!entries) value = -EIO;
@@ -253,6 +262,8 @@ static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
         io_audio_operation_t *work = io_request_buffer(request);
         if (!user_copy_to_user(output, work->data, sizeof(syscall_audio_status_t))) value = -EFAULT;
     }
+    if (request && operation == SYSCALL_FILE_FLOCK && value < 0)
+        io_flock_abort(io_request_description(request));
     if (request && fd_table_reservation_valid(io_request_description(request)))
         (void)fd_table_reservation_cancel(io_request_description(request));
     bool broken_pipe = request && value == -EPIPE && operation == SYSCALL_FILE_WRITE &&
@@ -292,6 +303,43 @@ static int64_t user_file_open(const char *path, uint64_t flags)
     spinlock_preempt_enable();
     return result ? result : user_file_finish(USER_STORAGE, SYSCALL_FILE_OPEN, NULL, 0,
                                               flags & SYSCALL_OPEN_CLOEXEC ? FD_TABLE_CLOEXEC : 0);
+}
+
+static int64_t user_file_flock(uint64_t fd, uint32_t flags)
+{
+    if (!io_flock_flags_valid(flags)) return -EINVAL;
+    spinlock_preempt_disable();
+    fd_description_t *target = NULL;
+    int result = user_file_pin(fd, &target);
+    io_flock_state_t *state = !result ? io_vfs_flock_state(target) : NULL;
+    if (!result && !state) result = -EOPNOTSUPP;
+    if (!result && (flags & ~SYSCALL_FLOCK_NONBLOCK) == SYSCALL_FLOCK_UNLOCK)
+    {
+        result = io_flock_unlock(state);
+        fd_description_put(target);
+        spinlock_preempt_enable();
+        return result;
+    }
+    fd_description_t *lease = NULL;
+    if (!result) result = io_flock_create(process_fd_retirement_queue(), target, state, flags, &lease);
+    else fd_description_put(target);
+    io_request_t *request = NULL;
+    if (!result)
+    {
+        /* Retain one local lease owner only inside this bounded guard. The
+         * generic request helper consumes the other reference on every path;
+         * preparation failure must release the target pin before returning. */
+        if (!fd_description_get(lease)) result = -EOVERFLOW;
+        else
+        {
+            result = user_file_create(USER_FLOCK, 0, lease, NULL, &request);
+            if (!result) result = user_file_submit(USER_FLOCK, request);
+        }
+        if (result) io_flock_abort(lease);
+        fd_description_put(lease);
+    }
+    spinlock_preempt_enable();
+    return result ? result : user_file_finish(USER_FLOCK, SYSCALL_FILE_FLOCK, NULL, 0, 0);
 }
 
 static int64_t user_path_mutation(uint32_t operation, const char *path, const char *new_path, uint64_t flags)
@@ -898,6 +946,9 @@ int64_t io_user_file_dispatch(uint32_t operation, uint64_t first, uint64_t secon
         case SYSCALL_FILE_STAT_PATH: return user_path_operation(operation, (const char *)first, (void *)second, third);
         case SYSCALL_FILE_CHDIR: return user_path_operation(operation, (const char *)first, NULL, 0);
         case SYSCALL_FILE_GETCWD: return user_getcwd((void *)first, second);
+        case SYSCALL_FILE_FLOCK:
+            if (second > UINT32_MAX || third || fourth) return -EINVAL;
+            return user_file_flock(first, (uint32_t)second);
         case SYSCALL_FILE_REMOVE: case SYSCALL_FILE_RENAME:
             return user_path_mutation(operation, (const char *)first, (const char *)second, third);
         default: break;

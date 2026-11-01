@@ -1,12 +1,13 @@
 --- a/config/external/nspr/pr/moz.build
 +++ b/config/external/nspr/pr/moz.build
-@@ -20,7 +20,12 @@
+@@ -20,7 +20,13 @@
  OS_LIBS += CONFIG["SOCKET_LIBS"]
  
  DEFINES["_NSPR_BUILD_"] = True
 -if CONFIG["OS_ARCH"] == "Linux":
 +if CONFIG["OS_TARGET"] == "Alix":
 +    DEFINES["ALIX"] = True
++    DEFINES["HAVE_BSD_FLOCK"] = True
 +    DEFINES["HAVE_SOCKLEN_T"] = True
 +    DEFINES["HAVE_POINTER_LOCALTIME_R"] = True
 +    SOURCES += ["/nsprpub/pr/src/md/unix/alix.c"]
@@ -14,7 +15,7 @@
      OS_LIBS += CONFIG["REALTIME_LIBS"]
      DEFINES["LINUX"] = True
      DEFINES["HAVE_FCNTL_FILE_LOCKING"] = True
-@@ -256,6 +261,7 @@
+@@ -256,6 +262,7 @@
  ]
  
  EXPORTS.nspr.md += [

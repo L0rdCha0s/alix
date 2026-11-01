@@ -70,6 +70,7 @@ C_SOURCES += $(KERNEL_DIR)/io/tcp.c
 C_SOURCES += $(KERNEL_DIR)/io/pipe.c
 C_SOURCES += $(KERNEL_DIR)/io/audio.c
 C_SOURCES += $(KERNEL_DIR)/io/poll.c
+C_SOURCES += $(KERNEL_DIR)/io/flock.c
 C_SOURCES += $(KERNEL_DIR)/io/stream.c
 C_SOURCES += $(KERNEL_DIR)/io/user_file.c
 C_SOURCES += $(KERNEL_DIR)/io/process.c
@@ -269,7 +270,9 @@ USER_ELFS := $(USER_OBJDIR)/atk_demo.elf \
              $(USER_OBJDIR)/playsound.elf \
              $(USER_OBJDIR)/playmp3.elf \
              $(USER_OBJDIR)/socket_demo.elf \
-             $(USER_OBJDIR)/unzip.elf
+             $(USER_OBJDIR)/unzip.elf \
+             $(USER_OBJDIR)/js.elf
+SPIDERMONKEY_SHELL := ports/zen/upstream/obj-js-alix/dist/bin/js
 USER_ELF_ARCHIVE := $(USER_OBJDIR)/user-elfs.zip
 USER_RUNTIME_DIR := $(USER_OBJDIR)/runtime
 USER_RUNTIME_ELFS := $(patsubst $(USER_OBJDIR)/%.elf,$(USER_RUNTIME_DIR)/%.elf,$(USER_ELFS))
@@ -293,7 +296,8 @@ USER_BINS := $(USER_BIN_DIR)/atk_demo \
              $(USER_BIN_DIR)/playsound \
              $(USER_BIN_DIR)/playmp3 \
              $(USER_BIN_DIR)/socket_demo \
-             $(USER_BIN_DIR)/unzip
+             $(USER_BIN_DIR)/unzip \
+             $(USER_BIN_DIR)/js
 HOST_TEST_DIR := $(OBJDIR)/host-tests
 HOST_TEST_BIN := $(HOST_TEST_DIR)/ttf_host_test
 SHA256_TEST_BIN := $(HOST_TEST_DIR)/sha256_host_test
@@ -541,6 +545,19 @@ $(USER_OBJDIR)/unzip.elf: $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip
 	@mkdir -p $(dir $@)
 	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(USER_COMMON_OBJECTS) $(USER_OBJDIR)/apps/unzip/unzip.o
 
+# Import the native upstream shell, including its debugging information. The
+# regular runtime/archive rules below publish the smaller --strip-debug copy.
+# Upstream acquisition/build stays explicit; never substitute a host js binary.
+$(SPIDERMONKEY_SHELL):
+	@echo "Missing native SpiderMonkey shell: $@" >&2
+	@echo "Follow ports/zen/README.md source/runtime setup, then run 'make zen-js-build' and 'make'." >&2
+	@false
+
+$(USER_OBJDIR)/js.elf: $(SPIDERMONKEY_SHELL)
+	@mkdir -p $(dir $@)
+	cp $< $@.tmp
+	mv -f $@.tmp $@
+
 $(USER_OBJDIR)/tests/cpp_runtime_test.o: tests/cpp_runtime_test.cpp Makefile
 	@mkdir -p $(dir $@)
 	$(CXX) $(USER_CXXFLAGS) -c -o $@ $<
@@ -667,6 +684,10 @@ $(USER_BIN_DIR)/socket_demo: $(USER_OBJDIR)/socket_demo.elf
 	cp $< $@
 
 $(USER_BIN_DIR)/unzip: $(USER_OBJDIR)/unzip.elf
+	@mkdir -p $(USER_BIN_DIR)
+	cp $< $@
+
+$(USER_BIN_DIR)/js: $(USER_OBJDIR)/js.elf
 	@mkdir -p $(USER_BIN_DIR)
 	cp $< $@
 
@@ -1218,10 +1239,15 @@ runtime-archive-test: $(USER_ELF_ARCHIVE)
 
 .PHONY: runtime-archive-test
 
+.PHONY: spidermonkey-package-qemu-test
+spidermonkey-package-qemu-test: all runtime-archive-test
+	python3 tests/spidermonkey_package_qemu_test.py
+
 # Inspect the linked ELF files: shared runtime/toolkit code must not silently
 # pull in the old engine, while the existing browser retains its dependencies.
+# The upstream SpiderMonkey shell intentionally exports its own js_* symbols.
 user-engine-isolation-test: $(USER_ELFS)
-	$(NM) --defined-only $(filter-out $(USER_OBJDIR)/atk_browser.elf,$(USER_ELFS)) > $(USER_OBJDIR)/nonweb-symbols.txt
+	$(NM) --defined-only $(filter-out $(USER_OBJDIR)/atk_browser.elf $(USER_OBJDIR)/js.elf,$(USER_ELFS)) > $(USER_OBJDIR)/nonweb-symbols.txt
 	@awk '$$NF ~ /^(html_|css_|js_|atk_html_|web_url_)/ { print "Unexpected web engine symbol: " $$0; bad = 1 } END { exit bad }' $(USER_OBJDIR)/nonweb-symbols.txt
 	$(NM) --defined-only $(USER_OBJDIR)/atk_browser.elf > $(USER_OBJDIR)/browser-symbols.txt
 	@awk '$$NF == "html_parse" { html = 1 } $$NF == "css_parse" { css = 1 } $$NF == "js_runtime_create" { js = 1 } $$NF == "atk_html_view_set_html" { view = 1 } END { if (!(html && css && js && view)) { print "Existing browser is missing an engine dependency"; exit 1 } }' $(USER_OBJDIR)/browser-symbols.txt

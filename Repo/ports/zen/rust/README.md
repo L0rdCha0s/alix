@@ -66,6 +66,8 @@ Implemented native boundaries:
   same native mutex as C/Rust writers. Returned values and iterators own bytes.
 - Native cwd changes/queries, colon-separated PATH splitting/joining, TMPDIR,
   HOME/account fallback and executable-path discovery use real Alix services.
+- `File` shared/exclusive locks, try-locks and unlock call native flock. Aliases
+  share the open-description hold; separate opens conflict across CPUs/processes.
 
 The initial native acceptance marker is `RUST_STD_TEST: PASS`, and checks actual
 allocation/formatting, argument access, entropy-backed HashMap, time arithmetic,
@@ -83,7 +85,7 @@ Builds include a source-derived fingerprint because Cargo otherwise treats
 sysroot sources as immutable. Installation selects the exact artifacts emitted
 by the current Cargo build instead of mixing older libraries from its cache.
 
-This is still an incomplete platform port. Filesystem locking, permission/time
+This is still an incomplete platform port. Byte-range fcntl locking, permission/time
 changes, copy, link creation and recursive removal return Unsupported. The VFS
 does not yet enforce Unix mode permissions, and status-change time is not
 reported as a fabricated birth time. Network and process creation remain the
@@ -107,7 +109,7 @@ stack size and guard metadata, then join through Rust. Sixteen consuming C joins
 sixteen consuming C detaches and sixteen implicit detach operations check
 ownership, result destruction and 56 TLS destructor runs. The original eight
 threads, 1,024 updates, OnceLock, HashMap, time and TLS checks also still pass.
-`make zen-rust-runtime-qemu-test` requires all four native markers and exit status 0.
+`make zen-rust-runtime-qemu-test` requires all five native markers and exit status 0.
 
 `tests/rust_filesystem.rs` exercises the actual public upstream APIs in eight-CPU
 Alix. It checks shared clone offsets, CLOEXEC, shrink/grow zero-fill, 64-bit seeks,
@@ -139,6 +141,15 @@ home. Relative account homes resolve from the namespace root, matching login.
 ids, exact uid/name selection, caller storage, ERANGE without publication,
 read failures/EINTR, allocation failures and 8,000 concurrent lookups under
 ASan/UBSan and TSan. The real std guest checks C account lookup and fallback too.
+
+`tests/rust_file_locks.rs` adds `RUST_FILE_LOCKS_TEST: PASS`: eight pinned
+workers preserve all 256 file read/modify/write updates, including yields inside
+the held lock. It also tests shared owners, duplicate/final-close behavior,
+typed WouldBlock results, a blocked writer woken by shared unlock and an
+unsupported pipe-backed File. A failed acquisition releases its completed
+request pin before returning, so it cannot keep a later lock alive after the
+last File is dropped. The C/native and sanitizer suites exercise deeper
+inheritance, cancellation and retirement paths; see [whole-file locks](../../../docs/kernel/flock.md).
 
 The tracked Gecko style patch selects this Alix extension and its real C
 pthread_t representation. The actual Gecko Rust root build emits a fresh
@@ -196,6 +207,9 @@ account fallback, default config/cache/data/state/bin/font paths, absolute XDG
 overrides and rejection of relative overrides. The runtime-directory API
 returns the configured location without implicitly creating it. C/Rust checks
 also compare the passwd size/field offset and invoke both reentrant lookups.
+With HOME and XDG overrides cleared, the guest creates a profile-style directory
+under the actual account's default config path, writes/syncs preferences and
+reads them back before cleanup. This is same-boot file I/O evidence.
 `build/test-out/rust-directories-qemu.log` contains `RUST_DIRECTORIES_TEST: PASS`.
 The build receipt preserves the broader root's exit 101 and five failing
 packages; native directory execution is a separate, successful gate.

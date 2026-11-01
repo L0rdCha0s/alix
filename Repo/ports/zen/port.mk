@@ -167,6 +167,19 @@ $(USER_OBJDIR)/rust_libc_ffi_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR
 zen-rust-libc-ffi-qemu-test: all $(USER_OBJDIR)/rust_libc_ffi_test.elf
 	python3 tests/rust_libc_ffi_qemu_test.py
 
+$(USER_OBJDIR)/tests/flock_test.o: tests/flock_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/flock_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/flock_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/flock_test.o
+
+.PHONY: zen-flock-qemu-test flock-contract-test
+zen-flock-qemu-test: all $(USER_OBJDIR)/flock_test.elf
+	python3 tests/flock_qemu_test.py
+flock-contract-test:
+	python3 tests/flock_contract_test.py
+
 $(USER_OBJDIR)/tests/executable_path_test.o: tests/executable_path_test.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<

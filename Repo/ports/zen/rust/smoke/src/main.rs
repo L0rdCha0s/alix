@@ -11,6 +11,8 @@ mod native_handles;
 mod native_filesystem;
 #[path = "../../../../../tests/rust_environment.rs"]
 mod native_environment;
+#[path = "../../../../../tests/rust_file_locks.rs"]
+mod native_file_locks;
 
 unsafe extern "C" {
     fn sys_thread_set_affinity(cpu: u32) -> i32;
@@ -92,6 +94,7 @@ fn main() {
     native_handles::run();
     native_filesystem::run();
     native_environment::run();
+    native_file_locks::run();
     println!("RUST_STD_TEST: PASS workers=8 cpu_mask=0x{:X} count={} tls_dtors={} hashmap={}",
              cpu_mask, count, DTORS.load(Ordering::SeqCst), map.len());
 }
