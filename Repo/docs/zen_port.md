@@ -198,8 +198,9 @@ native eight-CPU acceptance: owned snapshots, refreshed rewind, long/UTF-8 names
 exactly-once shared cursor reads and bounded handle admission. The actual engine
 compile subsequently cleared directory and `getrusage` errors, then stopped
 after 6m01s on terminal control (`termios.h`), child-process control (`sys/wait.h`)
-and the known descriptor flags/duplication gap. Private descriptor
-flags/duplication remain in progress. Shell session cwd isolation now passes
+and descriptor flags/duplication. The subsequent 7m49s build clears the
+descriptor gap and produces the 437 MiB `libjs_static.a`, then stops on the two
+missing terminal/child-process headers. Shell session cwd isolation now passes
 native two-session tests, including relative paths after external owner cwd
 changes, session close and a subsequent eight-CPU TLS run. Registered actor
 owners and protected retirement keep session/capture state through actual CPU
@@ -208,11 +209,34 @@ separate constructor limitation. Real `getrusage` accounting
 now passes native tests for CPU time and 128 induced faults, and its upstream
 compile check has passed. Descriptor-table inheritance has passed
 production host/sanitizer tests with shared descriptions, independent flags,
-CLOEXEC filtering and concurrent close/snapshot; user FD routing remains to be
-connected. A complete SpiderMonkey executable is still pending. The earlier
+CLOEXEC filtering and concurrent close/snapshot. The upstream runtime now routes
+files, sockets and stdio through private syscall 71 descriptors. Native tests
+passed eight-CPU shared offsets, flags/duplication, full-table failed-truncate
+integrity, 16 KiB HTTP and isolated shell capture. Standard C stdio/descriptor
+calls and upstream C++ runtime/narrow/wide streams also passed with exactly-once
+stdout. Native user-parent exec inheritance remains unverified. A complete
+SpiderMonkey executable is still pending. The earlier
 `build/ports/zen/gecko-configure.log` triplet rejection is historical, not the
 current blocker. See [`ports/zen/README.md`](../ports/zen/README.md) for detailed
 patch/compiler contracts and the latest build diagnostics.
+
+The following native step adds process-owned byte pipes on the existing event
+executor: eight CPUs passed 512 atomic records, bounded backpressure, unrelated
+progress with three idle readers, final-writer EOF and real SIGPIPE handling
+and termination. Non-TTY termios queries also passed native descriptor/error
+checks. Native libc now supplies path-component helpers. The child-status
+header is present, while native spawn/wait/exec remain unimplemented and the
+shell still requires actual compile/link/run acceptance. See
+[`kernel/pipes.md`](kernel/pipes.md) and
+[`kernel/termios.md`](kernel/termios.md).
+
+The resulting 6m56s upstream build clears the missing termios/wait/libgen
+headers and rebuilds `libjs_static.a`. Its shell/editline compilation now
+reports path `stat`, `PATH_MAX`, `system`, `clock` and `putchar`. These are the
+next confirmed C library gaps; declaring child APIs does not implement them or
+establish that the shell links. Native pipe/terminal acceptance, the shared
+executor's TCP/capture regression, subsequent eight-CPU TLS and ordinary
+`make` all passed after the pipe integration.
 
 The remaining acceptance order is:
 
@@ -221,10 +245,12 @@ The remaining acceptance order is:
    Standalone `JS_WITHOUT_NSPR` avoids requiring NSPR first. Passing the existing
    Alix JS interpreter or a runtime fixture does not satisfy this engine gate.
 2. Complete the OS interfaces demanded by Gecko, NSPR/NSS and Rust dependencies.
-   User file descriptors currently share a global 32-slot table. Per-process
-   ownership, reference-counted open descriptions, dup/shared offsets, correct
-   stdio inheritance and cancellation-safe blocking-IO cleanup are required.
-   Then connect real Rust filesystem/descriptor backends. General userspace
+   The upstream runtime uses a private 256-slot table with owned descriptions,
+   dup/shared offsets, imported stdio and protected blocking-I/O cleanup;
+   installed legacy applications retain the original global table. Native
+   user-parent exec inheritance, file status flags, callback VFS nodes and
+   shell redirection remain acceptance gates. Connect real Rust
+   filesystem/descriptor backends. General userspace
    process creation, IPC, shared memory, poll/select, dynamic loading, and the
    required POSIX filesystem/network surface remain unfinished. Existing socket
    syscalls are custom TCP/IPv4 interfaces; native DNS/TLS code alone does not
@@ -331,10 +357,10 @@ The following actual Alix guest results are retained under `build/test-out/`:
 | `io-service-boot-qemu.log` | Protected workers passed three killed callers, independent cleanup while both storage workers blocked, two late-result releases, retained joins and shutdown waiting for a live caller. The following eight-CPU TLS test passed and the normal kernel was restored. |
 | `resource-usage-qemu.log` | Eight CPUs produced increasing sampled CPU time and 128 recoverable faults; invalid selectors/output and the current zero-major-fault policy passed. The fault-context regression passed afterward. |
 
-The Rust fixture contains one `println!`. Its marker appears twice because
-current global console routing taps output into shell capture as well as
-emitting it directly; later replay duplicates it. This is a pending per-process
-stdio-routing fix, not two independent Rust acceptance runs.
+The earlier Rust fixture contains one `println!`, whose marker appeared twice
+through legacy global console tapping and replay. The new private stdio profile
+bypasses that tap, and native C/C++ tests verify exactly-once output. The Rust
+fixture has not yet been rerun with the new owned descriptor runtime.
 
 The full Alix build and linked native fixtures passed after the current pthread,
 VM-advice, entropy, process-ID and math additions. Earlier engine-isolation and
@@ -364,21 +390,28 @@ passed. The subsequent calendar, four stack-protector modes, raw TLS and native
 toolchain guests all passed without unexpected faults.
 UTC calendar/locale and the new timezone snapshot syscall have passed their host
 contracts and native eight-CPU fixture. The refcounted FD table now owns native
-directory streams and has host concurrency/sanitizer checks. Public file/socket
-descriptor routing still uses the legacy global table.
+directory streams and has host concurrency/sanitizer checks. The upstream
+runtime's file/socket descriptors now use that same private table; the original
+syscall IDs retain legacy behavior for existing binaries.
 Owned TCP pool references now pass native eight-CPU lifetime tests and a real
 16 KiB HTTP transfer after releasing the original owner. The event-driven TCP
 executor also passes native pending-read multiplexing, three killed callers,
 untouched abandoned output, cleanup and shutdown, with five packet-checked
-FIN/ACK exchanges. Public descriptor routing remains to be connected. One later TLS
-stall has retained debugger/packet evidence; the expanded-diagnostic rerun
-passed, but the SMP stability concern is still unexplained.
+FIN/ACK exchanges. Public descriptor routing is now connected through syscall
+71. A later private-FD failure reproduced the earlier TLS stall's stranded
+RUNNING state. Analysis against the retained failing kernel identified a
+wake-before-park scheduler race: an early wake consumed before a stale park
+could let a runnable caller switch away without being requeued. The production
+regression failed before the fix and passed afterward; forced native stale
+parks, private-FD acceptance and the following eight-CPU TLS guest all passed.
+Earlier debugger/packet evidence remains preserved.
 The protected I/O executor passed native cancellation, cleanup and shutdown
 acceptance. The first run exposed deferred thread reclamation depending on a
 later context switch on the former CPU. Bounded idle maintenance fixed that
 progress gap; the same guest test then passed within its original deadline.
-Actual VFS/socket syscall migration and private descriptor inheritance remain
-separate work.
+The new native private-FD fixture covers VFS/socket routing, capacity and
+failed-truncate integrity, shared offsets, stdio and isolated capture. Native
+user-parent exec inheritance remains separate work.
 The original timezone fixture contains pinned 2026e regression data. The full
 2026f IANA package has now passed native staging and runtime acceptance.
 Atomic activation, ICU's native configured-zone identification and its separate

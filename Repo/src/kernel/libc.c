@@ -284,3 +284,10 @@ int abs(int value)
 {
     return (value < 0) ? -value : value;
 }
+
+size_t strnlen(const char *text, size_t maximum)
+{
+    size_t count = 0;
+    while (count < maximum && text[count]) ++count;
+    return count;
+}

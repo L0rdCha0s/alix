@@ -26,6 +26,7 @@ struct tm
 extern "C" {
 #endif
 int clock_gettime(clockid_t clock, struct timespec *value);
+clock_t clock(void);
 int timespec_get(struct timespec *value, int base);
 int nanosleep(const struct timespec *duration, struct timespec *remaining);
 time_t time(time_t *result);

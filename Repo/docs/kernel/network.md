@@ -91,8 +91,9 @@ connect, read, partial write and available-byte snapshots. Its continuation
 state, data and retained inputs live in registered request storage. It does not
 perform DNS or storage waits on the event worker. An atomic description read
 gate serializes shared readers without blocking another executor. Fine-grained
-socket errors, POSIX address/options APIs, DNS integration and the public
-per-process FD transition remain unfinished.
+socket errors and POSIX address/options APIs remain unfinished. Syscall 71 now
+routes process-owned descriptors through this executor, with DNS on a separate
+protected service; a descriptor pin survives the DNS-to-connect transition.
 
 `make io-event-service-test` executes active production sources with eight host
 callers, 1,024 jobs, pending/canceled requests, independent/reentrant cleanup,
@@ -117,11 +118,15 @@ kernel, and verifies that its optional boot hook is absent. Evidence is in
 confirmed handshake, contiguous response sequence ranges and FIN exchange.
 
 One captured run passed TCP acceptance and the legacy download but stalled in
-the subsequent TLS fixture. The expanded-diagnostic rerun passed all phases;
-the earlier scheduler/register/packet evidence remains in
-`build/test-out/tcp-owned-tls-capture-timeout.*`. That SMP stall has not been
-explained and remains a runtime stability concern. Unexpected native failures
-now retain their exact kernel ELF plus scheduler/run-queue and context data.
+the subsequent TLS fixture. A later private-FD run reproduced stranded RUNNING
+threads with no CPU owner or run-queue entry. Analysis against its retained
+kernel ELF identified a wake-before-park scheduler race, described in
+[process.md](process.md). The deterministic regression failed before the fix;
+the forced native wake test, private-FD transfer/capture and following eight-CPU
+TLS fixture passed afterward. Earlier scheduler/register/packet evidence remains
+in `build/test-out/tcp-owned-tls-capture-timeout.*` and
+`build/test-out/private-fd-pre-wakefix.*`. Unexpected native failures retain
+their exact kernel ELF plus scheduler/run-queue and context data.
 
 Polling:
 

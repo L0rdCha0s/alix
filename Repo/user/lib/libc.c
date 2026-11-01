@@ -1370,104 +1370,24 @@ int atoi(const char *str)
 
 double atof(const char *str)
 {
-    if (!str)
-    {
-        return 0.0;
-    }
-
-    const char *s = str;
-    while (isspace((unsigned char)*s))
-    {
-        ++s;
-    }
-
-    int sign = 1;
-    if (*s == '+' || *s == '-')
-    {
-        if (*s == '-')
-        {
-            sign = -1;
-        }
-        ++s;
-    }
-
-    double value = 0.0;
-    while (isdigit((unsigned char)*s))
-    {
-        value = value * 10.0 + (double)(*s - '0');
-        ++s;
-    }
-
-    if (*s == '.')
-    {
-        ++s;
-        double place = 0.1;
-        while (isdigit((unsigned char)*s))
-        {
-            value += (double)(*s - '0') * place;
-            place *= 0.1;
-            ++s;
-        }
-    }
-
-    if (*s == 'e' || *s == 'E')
-    {
-        ++s;
-        int exp_sign = 1;
-        if (*s == '+' || *s == '-')
-        {
-            if (*s == '-')
-            {
-                exp_sign = -1;
-            }
-            ++s;
-        }
-        int exp = 0;
-        while (isdigit((unsigned char)*s))
-        {
-            exp = exp * 10 + (*s - '0');
-            ++s;
-        }
-        exp *= exp_sign;
-
-        double pow10 = 1.0;
-        int e = exp < 0 ? -exp : exp;
-        double base = 10.0;
-        while (e)
-        {
-            if (e & 1)
-            {
-                pow10 *= base;
-            }
-            base *= base;
-            e >>= 1;
-        }
-
-        if (exp < 0)
-        {
-            value /= pow10;
-        }
-        else
-        {
-            value *= pow10;
-        }
-    }
-
-    return value * (double)sign;
+    return strtod(str, NULL);
 }
 
 static uint32_t g_rand_state = 1u;
 
 void srand(unsigned int seed)
 {
-    g_rand_state = seed ? (uint32_t)seed : 1u;
+    __atomic_store_n(&g_rand_state, seed ? (uint32_t)seed : 1u, __ATOMIC_RELAXED);
 }
 
 int rand(void)
 {
     /* ANSI C compatible LCG; returns 0..32767. */
-    g_rand_state = g_rand_state * 1103515245u + 12345u;
-    return (int)((g_rand_state >> 16) & 0x7FFFu);
+    uint32_t previous = __atomic_load_n(&g_rand_state, __ATOMIC_RELAXED), next;
+    do { next = previous * 1103515245u + 12345u; }
+    while (!__atomic_compare_exchange_n(&g_rand_state, &previous, next, false,
+                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    return (int)((next >> 16) & 0x7FFFu);
 }
 
 char *getenv(const char *name)
@@ -2863,7 +2783,7 @@ static uint64_t fopen_mode_to_flags(const char *mode, bool *append_out)
             return 0;
     }
 
-    bool binary = false;
+    bool binary = false, exclusive = false;
     for (const char *c = mode + 1; *c; ++c)
     {
         if (*c == '+')
@@ -2875,12 +2795,12 @@ static uint64_t fopen_mode_to_flags(const char *mode, bool *append_out)
         {
             binary = true;
         }
-        else
+        else if (*c == 'x' && !exclusive && mode[0] == 'w')
         {
-            /* Exclusive creation needs a native atomic open flag. */
-            errno = *c == 'x' ? ENOTSUP : EINVAL;
-            return 0;
+            exclusive = true;
+            flags |= SYSCALL_OPEN_EXCLUSIVE;
         }
+        else { errno = EINVAL; return 0; }
     }
     if (plus)
     {
@@ -2926,6 +2846,35 @@ FILE *fopen(const char *path, const char *mode)
         errno = saved_errno ? saved_errno : ENOMEM;
         return NULL;
     }
+    return stream;
+}
+
+FILE *freopen(const char *path, const char *mode, FILE *stream)
+{
+    if (!stream) { errno = EINVAL; return NULL; }
+    bool append = false;
+    uint64_t flags = fopen_mode_to_flags(mode, &append);
+    alix_mutex_lock(&stream->mutex);
+    (void)file_flush_output_unlocked(stream);
+    if (stream->fd >= 0) (void)close(stream->fd);
+    stream->fd = -1;
+    stream->access_flags = 0;
+    stream->pushback_pending = false;
+    stream->read_position = stream->read_end = stream->write_length = 0;
+    stream->error = stream->eof = stream->orientation = 0;
+    stream->io_started = false;
+    int fd = path && flags ? open(path, flags) : -EINVAL;
+    if (fd < 0)
+    {
+        file_io_errno(fd);
+        alix_mutex_unlock(&stream->mutex);
+        return NULL;
+    }
+    stream->fd = fd;
+    stream->access_flags = flags;
+    stream->append = append;
+    if (append) (void)lseek(fd, 0, SYSCALL_SEEK_END);
+    alix_mutex_unlock(&stream->mutex);
     return stream;
 }
 
@@ -3484,9 +3433,9 @@ int close(int fd)
 
 int unlink(const char *path)
 {
-    (void)path;
-    errno = ENOSYS;
-    return -1;
+    int64_t result = sys_file_io(SYSCALL_FILE_REMOVE, (uintptr_t)path, 0, 0, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
 }
 
 int puts(const char *text)
@@ -3519,7 +3468,9 @@ int puts(const char *text)
 
 int remove(const char *path)
 {
-    return unlink(path);
+    int64_t result = sys_file_io(SYSCALL_FILE_REMOVE, (uintptr_t)path, 0, 1, 0);
+    if (result < 0) { errno = (int)-result; return -1; }
+    return 0;
 }
 
 int64_t lseek(int fd, int64_t offset, int whence)
@@ -3527,20 +3478,11 @@ int64_t lseek(int fd, int64_t offset, int whence)
     return sys_lseek(fd, offset, whence);
 }
 
-int fstat(int fd, struct stat *st)
+int __alix_stat_decode(const syscall_stat_t *input, struct stat *st)
 {
-    if (!st)
-    {
-        return -1;
-    }
-    syscall_stat_t tmp;
-    int res = sys_fstat(fd, &tmp);
-    if (res != 0)
-    {
-        return res;
-    }
+    if (!st || !input) { errno = EFAULT; return -1; }
     uint32_t mode;
-    switch (tmp.type)
+    switch (input->type)
     {
         case SYSCALL_NODE_TYPE_DIR: mode = S_IFDIR; break;
         case SYSCALL_NODE_TYPE_FILE: mode = S_IFREG; break;
@@ -3548,16 +3490,28 @@ int fstat(int fd, struct stat *st)
         case SYSCALL_NODE_TYPE_SYMLINK: mode = S_IFLNK; break;
         case SYSCALL_NODE_TYPE_SOCKET: mode = S_IFSOCK; break;
         case SYSCALL_NODE_TYPE_CHARACTER: mode = S_IFCHR; break;
+        case SYSCALL_NODE_TYPE_FIFO: mode = S_IFIFO; break;
         default: errno = EIO; return -1;
     }
-    st->st_size = tmp.size_bytes;
+    st->st_size = input->size_bytes;
     st->st_mode = mode;
-    st->st_type = tmp.type;
-    st->st_atime = tmp.atime;
-    st->st_mtime = tmp.mtime;
-    st->st_ctime = tmp.ctime;
+    st->st_type = input->type;
+    st->st_atime = input->atime;
+    st->st_mtime = input->mtime;
+    st->st_ctime = input->ctime;
     return 0;
 }
+
+int fstat(int fd, struct stat *st)
+{
+    if (!st) { errno = EFAULT; return -1; }
+    syscall_stat_t value;
+    int result = sys_fstat(fd, &value);
+    return result ? result : __alix_stat_decode(&value, st);
+}
+
+int putc(int ch, FILE *stream) { return fputc(ch, stream); }
+int putchar(int ch) { return fputc(ch, stdout); }
 
 ssize_t pread(int fd, void *buffer, size_t count, size_t offset)
 {
@@ -3614,373 +3568,6 @@ int access(const char *path, int mode)
     return 0;
 }
 
-static bool parse_int(const char **cursor, int base, int *out)
-{
-    const char *s = *cursor;
-    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
-    {
-        ++s;
-    }
-    int sign = 1;
-    if (*s == '+' || *s == '-')
-    {
-        if (*s == '-')
-        {
-            sign = -1;
-        }
-        ++s;
-    }
-    if (base == 10 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
-    {
-        base = 16;
-        s += 2;
-    }
-    int value = 0;
-    bool any = false;
-    while (*s)
-    {
-        int digit;
-        if (*s >= '0' && *s <= '9')
-        {
-            digit = *s - '0';
-        }
-        else if (base == 16 && *s >= 'a' && *s <= 'f')
-        {
-            digit = 10 + (*s - 'a');
-        }
-        else if (base == 16 && *s >= 'A' && *s <= 'F')
-        {
-            digit = 10 + (*s - 'A');
-        }
-        else
-        {
-            break;
-        }
-        if (digit >= base)
-        {
-            break;
-        }
-        value = value * base + digit;
-        any = true;
-        ++s;
-    }
-    if (!any)
-    {
-        return false;
-    }
-    *cursor = s;
-    if (out)
-    {
-        *out = value * sign;
-    }
-    return true;
-}
-
-int sscanf(const char *str, const char *fmt, ...)
-{
-    if (!str || !fmt)
-    {
-        return 0;
-    }
-    va_list args;
-    va_start(args, fmt);
-    int assigned = 0;
-    const char *s = str;
-    const char *f = fmt;
-
-    while (*f)
-    {
-        if (*f == '%')
-        {
-            ++f;
-            if (*f == '\0')
-            {
-                break;
-            }
-            switch (*f)
-            {
-                case 'c':
-                {
-                    int *out = va_arg(args, int *);
-                    if (!out || *s == '\0')
-                    {
-                        goto done;
-                    }
-                    *out = (unsigned char)*s++;
-                    assigned++;
-                    ++f;
-                    break;
-                }
-                case 'd':
-                case 'i':
-                {
-                    int *out = va_arg(args, int *);
-                    if (!parse_int(&s, 10, out))
-                    {
-                        goto done;
-                    }
-                    assigned++;
-                    ++f;
-                    break;
-                }
-                case 'x':
-                {
-                    int *out = va_arg(args, int *);
-                    if (!parse_int(&s, 16, out))
-                    {
-                        goto done;
-                    }
-                    assigned++;
-                    ++f;
-                    break;
-                }
-                default:
-                    goto done;
-            }
-        }
-        else if (isspace((unsigned char)*f))
-        {
-            while (isspace((unsigned char)*f))
-            {
-                ++f;
-            }
-            while (isspace((unsigned char)*s))
-            {
-                ++s;
-            }
-        }
-        else
-        {
-            if (*f != *s)
-            {
-                goto done;
-            }
-            ++f;
-            ++s;
-        }
-    }
-
-done:
-    va_end(args);
-    return assigned;
-}
-
-static bool fscanf_read_token(FILE *stream, char *buf, size_t cap)
-{
-    if (!stream || !buf || cap == 0)
-    {
-        return false;
-    }
-
-    size_t out_len = 0;
-    buf[0] = '\0';
-
-    int ch = fgetc(stream);
-    while (ch != EOF && isspace((unsigned char)ch))
-    {
-        ch = fgetc(stream);
-    }
-    if (ch == EOF)
-    {
-        return false;
-    }
-
-    while (ch != EOF && !isspace((unsigned char)ch))
-    {
-        if (out_len + 1 < cap)
-        {
-            buf[out_len++] = (char)ch;
-        }
-        ch = fgetc(stream);
-    }
-
-    buf[out_len] = '\0';
-    return out_len > 0;
-}
-
-static double fscanf_parse_double(const char *text)
-{
-    if (!text)
-    {
-        return 0.0;
-    }
-
-    const char *s = text;
-    while (isspace((unsigned char)*s))
-    {
-        ++s;
-    }
-
-    int sign = 1;
-    if (*s == '+' || *s == '-')
-    {
-        if (*s == '-')
-        {
-            sign = -1;
-        }
-        ++s;
-    }
-
-    double value = 0.0;
-    while (isdigit((unsigned char)*s))
-    {
-        value = value * 10.0 + (double)(*s - '0');
-        ++s;
-    }
-
-    if (*s == '.')
-    {
-        ++s;
-        double place = 0.1;
-        while (isdigit((unsigned char)*s))
-        {
-            value += (double)(*s - '0') * place;
-            place *= 0.1;
-            ++s;
-        }
-    }
-
-    if (*s == 'e' || *s == 'E')
-    {
-        ++s;
-        int exp_sign = 1;
-        if (*s == '+' || *s == '-')
-        {
-            if (*s == '-')
-            {
-                exp_sign = -1;
-            }
-            ++s;
-        }
-        int exp = 0;
-        while (isdigit((unsigned char)*s))
-        {
-            exp = exp * 10 + (*s - '0');
-            ++s;
-        }
-        exp *= exp_sign;
-
-        double pow10 = 1.0;
-        int e = exp < 0 ? -exp : exp;
-        double base = 10.0;
-        while (e)
-        {
-            if (e & 1)
-            {
-                pow10 *= base;
-            }
-            base *= base;
-            e >>= 1;
-        }
-
-        if (exp < 0)
-        {
-            value /= pow10;
-        }
-        else
-        {
-            value *= pow10;
-        }
-    }
-
-    return value * (double)sign;
-}
-
-int fscanf(FILE *stream, const char *fmt, ...)
-{
-    if (!stream || !fmt)
-    {
-        return 0;
-    }
-
-    va_list args;
-    va_start(args, fmt);
-    int assigned = 0;
-
-    const char *f = fmt;
-    while (*f)
-    {
-        if (isspace((unsigned char)*f))
-        {
-            ++f;
-            continue;
-        }
-
-        if (*f != '%')
-        {
-            int ch = fgetc(stream);
-            if (ch == EOF)
-            {
-                break;
-            }
-            ++f;
-            continue;
-        }
-
-        ++f;
-        int width = 0;
-        while (isdigit((unsigned char)*f))
-        {
-            width = width * 10 + (*f - '0');
-            ++f;
-        }
-
-        char spec = *f ? *f : '\0';
-        if (!spec)
-        {
-            break;
-        }
-
-        if (spec == 'i' || spec == 'd')
-        {
-            int *out = va_arg(args, int *);
-            char tok[64];
-            if (!out || !fscanf_read_token(stream, tok, sizeof(tok)))
-            {
-                break;
-            }
-            *out = atoi(tok);
-            assigned++;
-        }
-        else if (spec == 'f')
-        {
-            float *out = va_arg(args, float *);
-            char tok[128];
-            if (!out || !fscanf_read_token(stream, tok, sizeof(tok)))
-            {
-                break;
-            }
-            *out = (float)fscanf_parse_double(tok);
-            assigned++;
-        }
-        else if (spec == 's')
-        {
-            char *out = va_arg(args, char *);
-            if (!out)
-            {
-                break;
-            }
-            if (width <= 0)
-            {
-                width = 63;
-            }
-            if (!fscanf_read_token(stream, out, (size_t)width + 1))
-            {
-                break;
-            }
-            assigned++;
-        }
-        else
-        {
-            break;
-        }
-
-        ++f;
-    }
-
-    va_end(args);
-    return assigned;
-}
 #endif /* TTF_HOST_BUILD */
 
 void exit(int status)

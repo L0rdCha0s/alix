@@ -47,6 +47,10 @@ extern FILE *stdin;
 #define _IOFBF 1
 #define _IOLBF 2
 #define BUFSIZ 4096
+#define FOPEN_MAX 16
+#define FILENAME_MAX 4096
+#define L_tmpnam 64
+#define TMP_MAX 2147483647
 
 int printf(const char *format, ...);
 int vprintf(const char *format, va_list args);
@@ -72,8 +76,16 @@ void setbuf(FILE *stream, char *buf);
 int setvbuf(FILE *stream, char *buf, int mode, size_t size);
 int sscanf(const char *str, const char *format, ...);
 int fscanf(FILE *stream, const char *format, ...);
+int scanf(const char *format, ...);
+int vfscanf(FILE *stream, const char *format, va_list arguments);
+int vscanf(const char *format, va_list arguments);
+int vsscanf(const char *text, const char *format, va_list arguments);
 
 FILE *fopen(const char *path, const char *mode);
+FILE *freopen(const char *path, const char *mode, FILE *stream);
+FILE *tmpfile(void);
+char *tmpnam(char *output);
+int rename(const char *old_path, const char *new_path);
 int fclose(FILE *stream);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
@@ -84,6 +96,8 @@ int fgetpos(FILE *stream, fpos_t *position);
 int fsetpos(FILE *stream, const fpos_t *position);
 void rewind(FILE *stream);
 int fputc(int ch, FILE *stream);
+int putc(int ch, FILE *stream);
+int putchar(int ch);
 int fputs(const char *s, FILE *stream);
 int puts(const char *s);
 int remove(const char *path);

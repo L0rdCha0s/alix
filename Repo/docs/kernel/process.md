@@ -18,6 +18,19 @@ space; the counter remains saturated. Allocation failures may leave gaps.
 `getpid()` returns the owning process ID, which is the same for all its threads.
 The scheduler's idle process retains its special internal ID zero.
 
+The native `sys/wait.h` header defines the child-status encoding, but public
+wait/spawn/exec implementations are still pending. They must preserve the
+termination cause: current kernel `exit_status` alone stores normal exit 141
+and SIGPIPE termination as the same value 141. Decoding all values above 128
+as signals would misreport normal exits. A waitable child needs retained
+ownership before publication, a separately recorded exit/signal reason, one
+successful reaper, and cleanup for killed waiters and orphaned children.
+Spawn file actions must see CLOEXEC source descriptors before final exec
+filtering; cloning with filtering before a requested dup2 action would discard
+its source too early. Heap-owned launch snapshots must capture cwd,
+credentials, arguments/environment and the descriptor table without retaining
+a caller stack or borrowed process pointer across worker waits.
+
 `getrusage(RUSAGE_SELF)` uses native syscall 69 to snapshot CPU and fault
 accounting. Timer samples classify the interrupted context as user/system and
 sum across every thread of the process. The current 100Hz clock gives 10ms
@@ -108,6 +121,18 @@ The scheduler’s main loop (`scheduler_main_loop` in `process_init.c`) and the
 idle-thread entry perform retired-memory and deferred-thread maintenance before
 calling `scheduler_schedule(false)` and halting. Deferred-reclamation ownership
 and its bounded idle sweep are detailed in the SMP notes below.
+
+A park request can become stale after the caller publishes BLOCKED and restores
+interrupts: an early wake and nested timer handoff can resume that caller as
+RUNNING before its original `scheduler_schedule(false)`. The scheduler therefore
+uses current state to preserve/requeue a runnable caller rather than trusting
+the earlier boolean. Otherwise switching to a peer can leave the caller with
+neither CPU ownership nor a run-queue entry. Captured native TLS/private-FD
+failures showed that stranded state; the retained failing kernel ELF was used
+to resolve its saved context. The deterministic regression failed before the
+fix and passes afterward, including ASan/UBSan. The optional native boot test
+forces 32 stale park calls with a ready same-CPU peer; both private-FD and
+subsequent eight-CPU TLS guests passed. Ordinary builds omit that boot hook.
 
 Protected kernel services are parentless and retain an owner reference before
 their first thread is published. Public kill/kill-tree calls cannot interrupt

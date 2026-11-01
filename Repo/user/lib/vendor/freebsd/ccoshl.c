@@ -1,0 +1,136 @@
+/* origin: FreeBSD /usr/src/lib/msun/src/s_ccosh.c */
+/*-
+ * Copyright (c) 2005 Bruce D. Evans and Steven G. Kargl
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice unmodified, this list of conditions, and the following
+ *    disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+/*
+ * Hyperbolic cosine of a complex argument z = x + i y.
+ *
+ * coshl(z) = coshl(x+iy)
+ *         = coshl(x) cosl(y) + i sinhl(x) sinl(y).
+ *
+ * Exceptional values are noted in the comments within the source code.
+ * These values and the return value were taken from n1124.pdf.
+ */
+
+#include "alix_freebsd.h"
+#include "k_expl.h"
+
+static const long double huge = 0x1p16383L;
+
+long double complex ccoshl(long double complex z)
+{
+	long double x, y, h;
+
+	x = creall(z);
+	y = cimagl(z);
+
+
+
+	/* Handle the nearly-non-exceptional cases where x and y are finite. */
+	if (isfinite(x) && isfinite(y)) {
+		if (y == 0)
+			return CMPLXL(coshl(x), x * y);
+		if (fabsl(x) < 25)    /* small x: normal case */
+			return CMPLXL(coshl(x) * cosl(y), sinhl(x) * sinl(y));
+
+		/* |x| >= 22, so coshl(x) ~= expl(|x|) */
+		if (fabsl(x) < 11356.0L) {
+			/* x < 710: expl(|x|) won't overflow */
+			h = expl(fabsl(x)) * 0.5;
+			return CMPLXL(h * cosl(y), copysignl(h, x) * sinl(y));
+		} else if (fabsl(x) < 22755.0L) {
+			/* x < 1455: scale to avoid overflow */
+			z = __ldexp_cexpl(CMPLXL(fabsl(x), y), -1);
+			return CMPLXL(creall(z), cimagl(z) * copysignl(1, x));
+		} else {
+			/* x >= 1455: the result always overflows */
+			h = huge * x;
+			return CMPLXL(h * h * cosl(y), h * sinl(y));
+		}
+	}
+
+	/*
+	 * coshl(+-0 +- I Inf) = dNaN + I sign(d(+-0, dNaN))0.
+	 * The sign of 0 in the result is unspecified.  Choice = normally
+	 * the same as dNaN.  Raise the invalid floating-point exception.
+	 *
+	 * coshl(+-0 +- I NaN) = d(NaN) + I sign(d(+-0, NaN))0.
+	 * The sign of 0 in the result is unspecified.  Choice = normally
+	 * the same as d(NaN).
+	 */
+	if (x == 0 && !isfinite(y))
+		return CMPLXL(y - y, copysignl(0, x * (y - y)));
+
+	/*
+	 * coshl(+-Inf +- I 0) = +Inf + I (+-)(+-)0.
+	 *
+	 * coshl(NaN +- I 0)   = d(NaN) + I sign(d(NaN, +-0))0.
+	 * The sign of 0 in the result is unspecified.
+	 */
+	if (y == 0 && !isfinite(x)) {
+		if (!isnan(x))
+			return CMPLXL(x * x, copysignl(0, x) * y);
+		return CMPLXL(x * x, copysignl(0, (x + x) * y));
+	}
+
+	/*
+	 * coshl(x +- I Inf) = dNaN + I dNaN.
+	 * Raise the invalid floating-point exception for finite nonzero x.
+	 *
+	 * coshl(x + I NaN) = d(NaN) + I d(NaN).
+	 * Optionally raises the invalid floating-point exception for finite
+	 * nonzero x.  Choice = don't raise (except for signaling NaNs).
+	 */
+	if (isfinite(x) && !isfinite(y))
+		return CMPLXL(y - y, x * (y - y));
+
+	/*
+	 * coshl(+-Inf + I NaN)  = +Inf + I d(NaN).
+	 *
+	 * coshl(+-Inf +- I Inf) = +Inf + I dNaN.
+	 * The sign of Inf in the result is unspecified.  Choice = always +.
+	 * Raise the invalid floating-point exception.
+	 *
+	 * coshl(+-Inf + I y)   = +Inf cosl(y) +- I Inf sinl(y)
+	 */
+	if (!isfinite(x) && !isnan(x)) {
+		if (!isfinite(y))
+			return CMPLXL(x * x, x * (y - y));
+		return CMPLXL((x * x) * cosl(y), x * sinl(y));
+	}
+
+	/*
+	 * coshl(NaN + I NaN)  = d(NaN) + I d(NaN).
+	 *
+	 * coshl(NaN +- I Inf) = d(NaN) + I d(NaN).
+	 * Optionally raises the invalid floating-point exception.
+	 * Choice = raise.
+	 *
+	 * coshl(NaN + I y)    = d(NaN) + I d(NaN).
+	 * Optionally raises the invalid floating-point exception for finite
+	 * nonzero y.  Choice = don't raise (except for signaling NaNs).
+	 */
+	return CMPLXL((x * x) * (y - y), (x + x) * (y - y));
+}

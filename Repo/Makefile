@@ -1,3 +1,4 @@
+.DEFAULT_GOAL := all
 CC       := x86_64-elf-gcc
 CXX      := x86_64-elf-g++
 LD       := x86_64-elf-ld
@@ -66,6 +67,7 @@ C_SOURCES += $(KERNEL_DIR)/io/vfs.c $(KERNEL_DIR)/io/vfs_service.c
 C_SOURCES += $(KERNEL_DIR)/io/directory_service.c
 C_SOURCES += $(KERNEL_DIR)/io/event_service.c
 C_SOURCES += $(KERNEL_DIR)/io/tcp.c
+C_SOURCES += $(KERNEL_DIR)/io/pipe.c
 C_SOURCES += $(KERNEL_DIR)/io/stream.c
 C_SOURCES += $(KERNEL_DIR)/io/user_file.c
 
@@ -124,8 +126,8 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/pthread_rwlock.c \
 	$(USER_DIR)/lib/process_posix.c \
 	$(USER_DIR)/lib/filesystem_posix.c \
+	$(USER_DIR)/lib/libgen.c \
 	$(USER_DIR)/lib/dirent.c \
-	$(USER_DIR)/lib/math.c \
 	$(USER_DIR)/lib/setjmp.c \
 	$(USER_DIR)/lib/atk_user.c \
 	$(USER_DIR)/lib/video_surface.c \
@@ -134,6 +136,7 @@ USER_COMMON_SOURCES := \
 USER_COMMON_OBJECTS := $(patsubst $(USER_DIR)/%.c,$(USER_OBJDIR)/%.o,$(USER_COMMON_SOURCES))
 USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/font.o $(USER_OBJDIR)/kernel/ttf.o
 USER_COMMON_OBJECTS += $(USER_OBJDIR)/kernel/utf8.o
+include user/lib/libc_runtime.mk
 # The legacy web engine is an explicit browser dependency, not part of libc or
 # the window/pixel API. External browser engines must not link these objects.
 USER_WEB_SOURCES := \

@@ -131,18 +131,36 @@ the signal, stdio-loader, timezone and narrow-stream gates. Correct native
 system-header ordering preserves Mozilla's visibility wrappers. The latest
 C++ keep-going build passes the wide libc++, pthread read/write lock, X/Open
 constant and nearbyint gates, and compiles the actual Alix Wasm context bridge.
-Its latest completed run configures successfully, then exits 2 after 6m01s.
+Its latest completed run configures successfully, then exits 2 after 6m56s.
 That run cleared the earlier stdio, file-mode, readlink, directory, math,
 signal-jump, resource-accounting and timestamp compilation errors. The current
-compiler gaps are terminal control (`termios.h`), child-process control
-(`sys/wait.h`) and descriptor flags/duplication (`F_GETFD`, `F_SETFD`,
-`FD_CLOEXEC`, `dup`). The shell has not linked or executed yet.
+compiler gaps are path `stat`, `PATH_MAX`, `system`, `clock` and `putchar`.
+That run clears descriptor flags/duplication and the missing termios/wait/libgen
+headers, and produces `js/src/build/libjs_static.a`; the shell has not linked or
+executed yet. Native spawn/wait/exec implementations remain a link/runtime gate.
 The math library, buffered stdio including exit flushing, signal-aware jumps,
 resource accounting/policy and process uptime have native fixture acceptance.
 Protected readlink and directory streams also pass in eight-CPU Alix guests;
 directory cursors and orphan-subtree retirement have host sanitizer coverage.
-Per-process public file/socket descriptors and their inheritance remain to be
-connected; directory streams currently use a separate opaque handle table.
+The upstream runtime now uses syscall 71's private 256-slot table for files,
+sockets and directory streams. Kernel-launched stdio uses owned imports;
+standard C descriptor/errno/stdio calls and upstream C++ runtime/narrow/wide
+streams passed native eight-CPU guests, with stdout emitted exactly once.
+Table cloning/CLOEXEC filtering passed host sanitizer tests; native
+user-parent exec inheritance remains unverified. Existing base Alix targets
+retain their original global-FD ABI. Callback-backed VFS nodes, status flags,
+private shell redirection and child-process interfaces remain unfinished.
+
+Native pipes now pass eight-CPU acceptance, including 512 atomic records,
+4096-byte backpressure, independent progress with idle readers, final-writer
+EOF and caught/ignored/default SIGPIPE. Terminal queries correctly classify
+the current streams as non-TTYs and distinguish closed slots. The native
+`termios` implementation and `dirname`/`basename` are connected to the runtime;
+`sys/wait.h` establishes the encoded-status interface, but spawn/wait/exec
+implementations are still pending. The subsequent real engine build clears
+those missing headers and identifies the C library gaps listed above. See
+[`pipes.md`](../../docs/kernel/pipes.md) and
+[`termios.md`](../../docs/kernel/termios.md).
 
 The full latest outputs are `build/ports/zen/spidermonkey-configure.log` and
 `build/ports/zen/spidermonkey-build.log`. These are actual compiler diagnostics;

@@ -16,11 +16,21 @@
 #define FE_TOWARDZERO 0xC00
 typedef uint16_t fexcept_t;
 typedef struct { uint8_t x87[28]; uint32_t mxcsr; } fenv_t;
+#define FE_DFL_ENV ((const fenv_t *)-1)
 #ifdef __cplusplus
 extern "C" {
 #endif
 int fegetround(void);
 int fesetround(int mode);
+int feclearexcept(int excepts);
+int fegetexceptflag(fexcept_t *flag, int excepts);
+int feraiseexcept(int excepts);
+int fesetexceptflag(const fexcept_t *flag, int excepts);
+int fetestexcept(int excepts);
+int fegetenv(fenv_t *environment);
+int feholdexcept(fenv_t *environment);
+int fesetenv(const fenv_t *environment);
+int feupdateenv(const fenv_t *environment);
 #ifdef __cplusplus
 }
 #endif

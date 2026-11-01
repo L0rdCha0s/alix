@@ -82,12 +82,14 @@ typedef int64_t suseconds_t_native;
 struct native_timeval {time_t_native tv_sec;suseconds_t_native tv_usec;};
 struct native_rusage {struct native_timeval ru_utime,ru_stime;long ru_minflt,ru_majflt;};
 static _Thread_local int test_errno;
+#undef CLOCKS_PER_SEC
+#define CLOCKS_PER_SEC 1000
 static syscall_resource_usage_t user_wire;static int user_error;
 static int sys_resource_usage(int which,syscall_resource_usage_t*out,size_t bytes){CHECK(bytes==sizeof(*out));if(which)return-EINVAL;if(user_error)return user_error;*out=user_wire;return 0;}
 '''
-for signature in ['static void resource_ticks_to_timeval(','int getrusage(']:
+for signature in ['static int resource_snapshot(', 'clock_t clock(', 'static void resource_ticks_to_timeval(','int getrusage(']:
     source=function_definition(lib,signature)
-    for old,new in [('struct timeval','struct native_timeval'),('struct rusage','struct native_rusage'),('time_t','time_t_native'),('suseconds_t','suseconds_t_native'),('getrusage','native_getrusage'),('errno','test_errno')]:
+    for old,new in [('struct timeval','struct native_timeval'),('struct rusage','struct native_rusage'),('time_t','time_t_native'),('suseconds_t','suseconds_t_native'),('getrusage','native_getrusage'),('clock_t','int64_t'),('clock','native_clock'),('errno','test_errno')]:
         import re
         source=re.sub(r'\b'+re.escape(old)+r'\b',new,source)
     code+=source+'\n'
@@ -103,6 +105,15 @@ static void conversion_contract(void){
     user_wire.tick_frequency=1;user_wire.user_ticks=UINT64_MAX;user_wire.minor_faults=UINT64_MAX;user_wire.major_faults=UINT64_MAX;
     CHECK(!native_getrusage(0,&out)&&out.ru_utime.tv_sec==INT64_MAX&&out.ru_utime.tv_usec==999999&&out.ru_minflt==LONG_MAX&&out.ru_majflt==LONG_MAX);
     for(uint32_t hz=1;hz<10000;hz+=37){user_wire.tick_frequency=hz;user_wire.user_ticks=(uint64_t)hz*7+hz/3;CHECK(!native_getrusage(0,&out)&&out.ru_utime.tv_sec==7&&out.ru_utime.tv_usec==(long)((uint64_t)(hz/3)*1000000/hz));}
+    user_wire=(syscall_resource_usage_t){.version=1,.size=48,.tick_frequency=100,.user_ticks=125,.system_ticks=257};
+    test_errno=EDOM;CHECK(native_clock()==3820&&test_errno==EDOM);
+    user_wire.tick_frequency=3;user_wire.user_ticks=2;user_wire.system_ticks=0;CHECK(native_clock()==666);
+    user_wire.tick_frequency=0;CHECK(native_clock()==-1&&test_errno==EIO);user_wire.tick_frequency=1;
+    user_wire.user_ticks=UINT64_MAX;user_wire.system_ticks=1;CHECK(native_clock()==-1&&test_errno==EOVERFLOW);
+    user_wire.system_ticks=0;CHECK(native_clock()==-1&&test_errno==EOVERFLOW);
+    user_wire.tick_frequency=1000;user_wire.user_ticks=INT64_MAX;CHECK(native_clock()==INT64_MAX);
+    ++user_wire.user_ticks;CHECK(native_clock()==-1&&test_errno==EOVERFLOW);
+    user_error=-EAGAIN;CHECK(native_clock()==-1&&test_errno==EAGAIN);user_error=0;
 }
 int main(void){kernel_contract();conversion_contract();puts("RESOURCE_USAGE: PASS cpu=1 faults=1 saturation=1 copy_errors=1 lifetime=1 workers=8 events=80000 conversion=1");return 0;}
 '''

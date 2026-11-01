@@ -3,7 +3,8 @@
 # for existing Alix C targets/binaries; never mix the two FD namespaces in one ELF.
 ZEN_OWNED_SYSCALL := $(USER_OBJDIR)/lib/syscall-owned.o
 ZEN_FCNTL_OBJECT := $(USER_OBJDIR)/lib/fcntl.o
-ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o,$(USER_COMMON_OBJECTS)) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT)
+ZEN_TERMIOS_OBJECT := $(USER_OBJDIR)/lib/termios.o
+ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o,$(USER_COMMON_OBJECTS)) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT)
 
 $(ZEN_OWNED_SYSCALL): user/lib/syscall.c
 	@mkdir -p $(@D)
@@ -13,7 +14,42 @@ $(ZEN_FCNTL_OBJECT): user/lib/fcntl.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
--include $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d)
+-include $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d) $(ZEN_TERMIOS_OBJECT:.o=.d)
+
+$(USER_OBJDIR)/tests/terminal_test.o: tests/terminal_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/terminal_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/terminal_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/terminal_test.o
+
+.PHONY: zen-terminal-qemu-test
+zen-terminal-qemu-test:
+	python3 tests/terminal_qemu_test.py
+
+$(USER_OBJDIR)/tests/pipe_test.o: tests/pipe_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/pipe_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/pipe_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/pipe_test.o
+
+.PHONY: pipe-contract-test zen-pipe-qemu-test
+pipe-contract-test:
+	python3 tests/pipe_contract_test.py
+zen-pipe-qemu-test:
+	python3 tests/pipe_qemu_test.py
+
+$(USER_OBJDIR)/tests/stat_clock_test.o: tests/stat_clock_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/stat_clock_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/stat_clock_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/stat_clock_test.o
+
+.PHONY: zen-stat-clock-qemu-test
+zen-stat-clock-qemu-test:
+	python3 tests/stat_clock_qemu_test.py
 # QEMU exposes build/ as a FAT disk; never put Mozilla/Zen source trees there.
 ZEN_SOURCE_DIR ?= $(abspath ports/zen/upstream/desktop)
 ZEN_ENGINE_DIR ?= $(abspath ports/zen/upstream/firefox-159.0)

@@ -84,6 +84,7 @@ bool vfs_io_boot_test(void)
     REQUIRE(vfs_mkdir(vfs_root(), "/tmp/vfs-owned-test/dir") != NULL, "fixture directory");
     REQUIRE(vfs_boot_link(state, "/tmp/vfs-owned-test/link", "../zones/Area/City"), "fixture link");
     REQUIRE(vfs_boot_link(state, "/tmp/vfs-owned-test/alias", "dir"), "fixture alias");
+    REQUIRE(vfs_boot_link(state, "/tmp/vfs-owned-test/loop", "loop"), "fixture loop");
     REQUIRE(vfs_boot_link(state, "/tmp/vfs-owned-test/dir/leaf", "../../zones/Area/City"), "fixture leaf");
     memset(state->output, 0x5a, VFS_PATH_MAX + 1u);
     REQUIRE(io_vfs_readlink_kernel("/tmp/vfs-owned-test/link", state->output, VFS_PATH_MAX) == 18 &&

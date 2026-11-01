@@ -10,7 +10,7 @@ from audio_stream_contract_test import ROOT, compile_and_run
 
 
 def rename(text):
-    names = ("FILE", "fpos_t", "stdout", "stderr", "stdin", "fopen", "fclose", "fread", "fwrite",
+    names = ("FILE", "fpos_t", "stdout", "stderr", "stdin", "fopen", "freopen", "fclose", "fread", "fwrite",
              "fflush", "fseek", "ftell", "fgetpos", "fsetpos", "rewind", "fputc", "fgetc", "getc",
              "ungetc", "fgets", "feof", "ferror", "clearerr", "fileno", "fputs", "setbuf", "setvbuf", "getchar")
     for name in names:
@@ -54,6 +54,7 @@ def build_program():
 #define SYSCALL_OPEN_WRITE 2u
 #define SYSCALL_OPEN_CREATE 4u
 #define SYSCALL_OPEN_TRUNCATE 8u
+#define SYSCALL_OPEN_EXCLUSIVE 16u
 #define SYSCALL_SEEK_SET 0
 #define SYSCALL_SEEK_CUR 1
 #define SYSCALL_SEEK_END 2
@@ -280,7 +281,11 @@ static void line_and_write_contracts(void) {
     CHECK(file->size==4 && !memcmp(file->data,"abcX",4)); CHECK(native_fclose(stream)==0);
     unsigned before=opens;
     CHECK(!native_fopen("x","invalid") && test_errno==EINVAL && opens==before);
-    CHECK(!native_fopen("x","wx") && test_errno==ENOTSUP && opens==before);
+    fail_open_error=EEXIST;
+    CHECK(!native_fopen("x","wx") && test_errno==EEXIST && opens==before);
+    native_FILE *exclusive=open_stream("wx","",true);
+    CHECK(model_file(exclusive->fd)->open_flags & SYSCALL_OPEN_EXCLUSIVE);
+    CHECK(native_fclose(exclusive)==0);
     fail_open_error=ENOENT; test_errno=91;
     CHECK(!native_fopen("missing","r") && test_errno==ENOENT);
     fail_file_allocation=true; before=closes;

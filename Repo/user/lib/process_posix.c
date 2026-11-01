@@ -10,6 +10,31 @@ pid_t getpid(void)
     return sys_getpid();
 }
 
+static int resource_snapshot(syscall_resource_usage_t *snapshot)
+{
+    int result = sys_resource_usage(RUSAGE_SELF, snapshot, sizeof(*snapshot));
+    if (result < 0) { errno = -result; return -1; }
+    if (snapshot->version != SYSCALL_USAGE_VERSION || snapshot->size != sizeof(*snapshot) ||
+        !snapshot->tick_frequency || snapshot->reserved)
+    { errno = EIO; return -1; }
+    return 0;
+}
+
+clock_t clock(void)
+{
+    syscall_resource_usage_t snapshot = {0};
+    if (resource_snapshot(&snapshot)) return (clock_t)-1;
+    if (UINT64_MAX - snapshot.user_ticks < snapshot.system_ticks)
+    { errno = EOVERFLOW; return (clock_t)-1; }
+    uint64_t ticks = snapshot.user_ticks + snapshot.system_ticks;
+    uint64_t seconds = ticks / snapshot.tick_frequency;
+    if (seconds > INT64_MAX / CLOCKS_PER_SEC) { errno = EOVERFLOW; return (clock_t)-1; }
+    uint64_t base = seconds * CLOCKS_PER_SEC;
+    uint64_t fraction = ((ticks % snapshot.tick_frequency) * CLOCKS_PER_SEC) / snapshot.tick_frequency;
+    if (fraction > INT64_MAX - base) { errno = EOVERFLOW; return (clock_t)-1; }
+    return (clock_t)(base + fraction);
+}
+
 int getrlimit(int resource, struct rlimit *limit)
 {
     if (!limit) { errno = EFAULT; return -1; }
@@ -37,12 +62,9 @@ static void resource_ticks_to_timeval(uint64_t ticks, uint32_t frequency, struct
 int getrusage(int who, struct rusage *usage)
 {
     if (!usage) { errno = EFAULT; return -1; }
+    if (who != RUSAGE_SELF) { errno = EINVAL; return -1; }
     syscall_resource_usage_t snapshot = {0};
-    int result = sys_resource_usage(who, &snapshot, sizeof(snapshot));
-    if (result < 0) { errno = -result; return -1; }
-    if (snapshot.version != SYSCALL_USAGE_VERSION || snapshot.size != sizeof(snapshot) ||
-        !snapshot.tick_frequency || snapshot.reserved)
-    { errno = EIO; return -1; }
+    if (resource_snapshot(&snapshot)) return -1;
     struct rusage value = {0};
     resource_ticks_to_timeval(snapshot.user_ticks, snapshot.tick_frequency, &value.ru_utime);
     resource_ticks_to_timeval(snapshot.system_ticks, snapshot.tick_frequency, &value.ru_stime);

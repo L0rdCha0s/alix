@@ -9,7 +9,7 @@ from audio_stream_contract_test import ROOT, compile_and_run, function_definitio
 
 
 def main():
-    source = (ROOT / "build/ports/zen/vfs-owned-io/src/kernel/vfs.c").read_text()
+    source = (ROOT / "src/kernel/vfs.c").read_text()
     code = r'''
 #include <stdbool.h>
 #include <stdint.h>
@@ -27,8 +27,9 @@ def main():
 typedef enum { VFS_NODE_DIR,VFS_NODE_FILE,VFS_NODE_BLOCK,VFS_NODE_SYMLINK } vfs_node_type_t;
 typedef struct vfs_node {
     struct vfs_node *parent,*child,*next; char *name,*data; size_t size,capacity;
-    vfs_node_type_t type; unsigned data_lock; uint32_t refcount;
+    vfs_node_type_t type; unsigned data_lock; uint32_t refcount;uint64_t atime,mtime,ctime;
 } vfs_node_t;
+typedef struct {uint64_t size_bytes;vfs_node_type_t type;uint64_t atime,mtime,ctime;} vfs_stat_snapshot_t;
 static vfs_node_t *root;
 static pthread_mutex_t tree_mutex=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local bool tree_locked;
@@ -59,6 +60,7 @@ static void vfs_mark_meta_dirty(vfs_node_t *n) { (void)n; }
                       "static bool is_dot_dot(", "static char *vfs_strdup(", "static bool next_component(",
                       "static const char *vfs_node_symlink_target(", "static bool vfs_assign_symlink_target(",
                       "static vfs_node_t *vfs_readlink_resolve_locked(", "ssize_t vfs_readlink_snapshot(",
+                      "bool vfs_stat(", "ssize_t vfs_path_snapshot(", "int vfs_path_stat_snapshot(",
                       "bool vfs_node_try_retain(", "int vfs_resolve_owned("):
         code += function_definition(source, signature) + "\n"
     code += r'''
@@ -87,6 +89,13 @@ static void *read_links(void *opaque) {
         CHECK(a->output[n]==0x55);
     } return NULL;
 }
+static void *read_stats(void *opaque) {
+    race_arg_t *a=opaque;vfs_stat_snapshot_t metadata;
+    for(unsigned i=0;i<a->loops;++i) {
+        CHECK(!vfs_path_stat_snapshot(root,"race",false,37,41,&metadata));
+        CHECK(metadata.type==VFS_NODE_SYMLINK&&(metadata.size_bytes==12||metadata.size_bytes==20));
+    } return NULL;
+}
 int main(void) {
     root=add(NULL,"",VFS_NODE_DIR,NULL); vfs_node_t *etc=add(root,"etc",VFS_NODE_DIR,NULL);
     vfs_node_t *zones=add(root,"zones",VFS_NODE_DIR,NULL), *area=add(zones,"Area",VFS_NODE_DIR,NULL);
@@ -97,6 +106,27 @@ int main(void) {
     expect(root,"etc/localtime","../zones/Area/City"); expect(etc,"localtime","../zones/Area/City");
     expect(root,"chain/localtime","../zones/Area/City"); expect(zones,"/absolute/localtime","../zones/Area/City");
     expect(root,"etc/link2","localtime"); expect(root,"conf","etc"); expect(root,"etc/../etc//localtime","../zones/Area/City");
+    vfs_stat_snapshot_t metadata;
+    CHECK(!vfs_path_stat_snapshot(root,"chain/localtime",true,37,41,&metadata)&&metadata.type==VFS_NODE_FILE);
+    CHECK(!vfs_path_stat_snapshot(root,"chain/localtime",false,37,41,&metadata)&&metadata.type==VFS_NODE_SYMLINK&&metadata.size_bytes==18);
+    CHECK(!vfs_path_stat_snapshot(root,"conf/",false,37,41,&metadata)&&metadata.type==VFS_NODE_DIR);
+    CHECK(!vfs_path_stat_snapshot(root,"loop",false,37,41,&metadata)&&metadata.type==VFS_NODE_SYMLINK);
+    CHECK(vfs_path_stat_snapshot(root,"loop",true,37,41,&metadata)==-ELOOP);
+    CHECK(vfs_path_stat_snapshot(root,"etc/file/",true,37,41,&metadata)==-ENOTDIR);
+    memset(&metadata,0xa5,sizeof(metadata));vfs_stat_snapshot_t unchanged=metadata;
+    CHECK(vfs_path_stat_snapshot(root,"missing",true,37,41,&metadata)==-ENOENT&&!memcmp(&metadata,&unchanged,sizeof(metadata)));
+    char *cwd_path=malloc(4096);CHECK(cwd_path);
+    CHECK(vfs_path_snapshot(root,cwd_path,2)==1&&!strcmp(cwd_path,"/"));
+    CHECK(vfs_path_snapshot(root,cwd_path,1)==-ERANGE);
+    CHECK(vfs_path_snapshot(etc,cwd_path,5)==4&&!strcmp(cwd_path,"/etc"));
+    CHECK(vfs_path_snapshot(etc,cwd_path,4)==-ERANGE);
+    vfs_node_t *deep=root;
+    for(unsigned i=0;i<100;++i)deep=add(deep,"d",VFS_NODE_DIR,NULL);
+    CHECK(vfs_path_snapshot(deep,cwd_path,201)==200&&strlen(cwd_path)==200);
+    for(unsigned i=0;i<200;++i)CHECK(cwd_path[i]==(i&1?'d':'/'));
+    CHECK(vfs_path_snapshot(deep,cwd_path,200)==-ERANGE);
+    vfs_node_t *detached=add(NULL,"detached",VFS_NODE_DIR,NULL);
+    CHECK(vfs_path_snapshot(detached,cwd_path,4096)==-ENOENT);free_tree(detached);free(cwd_path);
     vfs_node_t *resolved=NULL; owned_at_unlock=etc;
     CHECK(!vfs_resolve_owned(root,"conf",&resolved) && resolved==etc && etc->refcount==2); owned_at_unlock=NULL; --etc->refcount;
     CHECK(!vfs_resolve_owned(root,"chain/localtime",&resolved) && resolved->type==VFS_NODE_FILE && resolved->refcount==2); --resolved->refcount;
@@ -131,12 +161,19 @@ int main(void) {
         if(result>=0) { CHECK(result==18 && alloc_calls<i); break; }
         CHECK(result==-ENOMEM);
     }
+    for(unsigned i=1;i<30;++i) {
+        memset(&metadata,0xa5,sizeof(metadata));unchanged=metadata;
+        alloc_calls=0;fail_at=i;int result=vfs_path_stat_snapshot(root,"chain/localtime",true,37,41,&metadata);fail_at=0;
+        CHECK(live==baseline&&!tree_locked&&!node_locks);
+        if(!result) {CHECK(metadata.type==VFS_NODE_FILE&&alloc_calls<i);break;}
+        CHECK(result==-ENOMEM&&!memcmp(&metadata,&unchanged,sizeof(metadata)));
+    }
     vfs_node_t *race=add(root,"race",VFS_NODE_SYMLINK,"first/target");
-    enum { N=5, LOOPS=4000 }; pthread_t *threads=calloc(N,sizeof(*threads)); race_arg_t *args=calloc(N,sizeof(*args)); CHECK(threads && args);
-    for(unsigned i=0;i<N;++i) { args[i].node=race; args[i].loops=LOOPS; args[i].output=malloc(64); CHECK(args[i].output); CHECK(!pthread_create(&threads[i],NULL,i?read_links:replace_links,&args[i])); }
+    enum { N=9, LOOPS=4000 }; pthread_t *threads=calloc(N,sizeof(*threads)); race_arg_t *args=calloc(N,sizeof(*args)); CHECK(threads && args);
+    for(unsigned i=0;i<N;++i) { args[i].node=race; args[i].loops=LOOPS; args[i].output=malloc(64); CHECK(args[i].output); CHECK(!pthread_create(&threads[i],NULL,i?(i<5?read_links:read_stats):replace_links,&args[i])); }
     for(unsigned i=0;i<N;++i) { CHECK(!pthread_join(threads[i],NULL)); free(args[i].output); }
     free(threads); free(args); free(out); free_tree(root); CHECK(!live);
-    puts("readlink snapshot: PASS final nofollow, intermediate chains, bounds/OOM, 16000 concurrent snapshots"); return 0;
+    puts("readlink/stat snapshot: PASS final nofollow, intermediate chains, metadata, bounds/OOM, 32000 concurrent snapshots"); return 0;
 }
 '''
     code = code.replace("#define VFS_MAX_SYMLINK_DEPTH 16", f"#define VFS_MAX_SYMLINK_DEPTH {uint_macro(source, 'VFS_MAX_SYMLINK_DEPTH')}")

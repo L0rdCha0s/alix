@@ -18,6 +18,47 @@ The handle namespace is separate from legacy file/socket FDs. All path lookup
 and cursor work runs on protected workers with registered owned requests; only
 the live caller performs user copies. See [directory streams](vfs.md).
 
+Syscall 71 (`FILE_IO`) selects the process-owned descriptor namespace. Its
+operation and four arguments use RDI, RSI, RDX, R10 and R8. It implements open,
+read, write, close, pread, seek, stat, descriptor flags, duplication and the
+native TCP open/connect/available interfaces. The original syscall IDs retain
+their legacy global-FD ABI for installed applications. Neither namespace falls
+back to the other when an integer is absent.
+
+The upstream toolchain links `syscall-owned.o` and `fcntl.o`, while ordinary
+Alix targets retain `syscall.o`. The owned wrappers translate negative kernel
+errors to `-1` plus thread-local errno. `fcntl` supports F_GETFD, F_SETFD,
+F_DUPFD and F_DUPFD_CLOEXEC; dup/dup2/dup3 share open descriptions and offsets
+while retaining independent close-on-exec flags. `pipe`/`pipe2` atomically
+publish two private descriptors backed by an event-driven byte ring; see
+[pipes.md](pipes.md). File status flags and nonblocking I/O remain unfinished.
+
+User processes have 256 private slots shared by their threads and directory
+streams. Kernel-launched processes start with EOF stdin and owned stdout/stderr
+descriptions. Capture imports retain their ShellService session, and private
+console writes bypass the legacy global capture tap. A user-parent constructor
+clones the table with CLOEXEC filtering; native user-parent exec acceptance is
+still pending. Process teardown defers table retirement until quiescence.
+
+OPEN reserves a private slot before any creation or truncation. The registered
+request owns its reservation, captured cwd/credentials and copied path. Commit
+installs only into that reservation; failure cancels it before returning.
+Abandoned requests release their reservations through protected cleanup.
+Consequently a full table cannot truncate a file and then report EMFILE.
+Read/write buffers are request-owned, and only the live caller copies results
+to user memory. Regular files and streams use storage workers; TCP uses the
+event executor. A separate DNS service resolves hostnames while retaining the
+same socket description through DNS and connect, even if its integer FD is
+closed or reused concurrently.
+
+`tests/private_fd_qemu_test.py` passed shared offsets across eight CPUs,
+flags/duplication, capacity, failed-truncate preservation, 16 KiB HTTP and
+isolated ShellService capture. `tests/owned_runtime_qemu_test.py` passed the
+standard C descriptor/stdio API and upstream libc++/ABI plus narrow/wide
+streams in separate eight-CPU guests. Callback-backed VFS nodes, shell `>`
+redirection through private descriptors and general child-process APIs remain
+separate gates.
+
 ## ABI / Entry (`src/arch/x86/syscall_entry.S`)
 
 User code executes `int 0x80`. The IDT routes vector 0x80 to `syscall_entry`, which:
@@ -87,8 +128,9 @@ on the cleanup worker. Indefinite TCP waits are excluded from the finite pool.
 independent cleanup, late OPEN-result disposal, retained service join and live
 waiter shutdown cases, followed by an eight-CPU TLS fixture. It restores the
 ordinary kernel image after the optional boot test. This acceptance proves
-executor lifetime behavior; real VFS/AHCI adapters and private user descriptors
-remain a separate integration gate.
+executor lifetime behavior. The newer syscall 71 acceptance above covers
+regular VFS adapters and private user descriptors; cancellation during an actual
+blocked AHCI operation remains a separate integration gate.
 
 Important behavior:
 

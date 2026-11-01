@@ -391,6 +391,45 @@ int fd_table_install(fd_table_t *table, fd_description_t *description,
     return result;
 }
 
+int fd_table_install_pair(fd_table_t *table, fd_description_t *first,
+                           fd_description_t *second, uint32_t flags, int output[2])
+{
+    if (!table || !first || !second || !output || !fd_table_flags_valid(flags) ||
+        (table->retirement_queue && (table->retirement_queue != first->retirement_queue ||
+                                      table->retirement_queue != second->retirement_queue))) return -EINVAL;
+    int slots[2] = { -1, -1 };
+    int result = -EMFILE;
+    bool retained = false;
+    spinlock_preempt_disable();
+    spinlock_lock(&table->lock);
+    if (table->closed) result = -EBADF;
+    else
+    {
+        unsigned found = 0;
+        for (size_t index = 0; index < table->capacity && found < 2; ++index)
+            if (!table->entries[index].description && !table->entries[index].reservation)
+                slots[found++] = (int)index;
+        if (found == 2)
+        {
+            retained = fd_description_get(first);
+            if (!retained || !fd_description_get(second)) result = -EOVERFLOW;
+            else
+            {
+                table->entries[slots[0]].description = first;
+                table->entries[slots[1]].description = second;
+                table->entries[slots[0]].flags = flags;
+                table->entries[slots[1]].flags = flags;
+                output[0] = slots[0]; output[1] = slots[1];
+                result = 0;
+            }
+        }
+    }
+    spinlock_unlock(&table->lock);
+    if (result && retained) fd_description_put(first);
+    spinlock_preempt_enable();
+    return result;
+}
+
 int fd_table_install_at(fd_table_t *table, int fd,
                         fd_description_t *description, uint32_t flags)
 {

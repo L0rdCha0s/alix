@@ -1,0 +1,22 @@
+{
+  "project": "FreeBSD msun",
+  "reference": "releng/14.2",
+  "sources": {
+    "catrigl.c": {
+      "sha256": "56cb1cc99311f4caeec013b7c3bb61db5492f0d60fc430e7eaff30d479ea1b42"
+    },
+    "s_clogl.c": {
+      "sha256": "b9e4eaaf6dbe57d92a29be68b291827cb5236bcba75f8df06640576deeebdb33"
+    },
+    "s_cexpl.c": {
+      "sha256": "72dd2ad087fb5e790a0099e795acf79aac4c7ed807c37cefee68dc1c1b85fc69"
+    },
+    "k_expl.h": {
+      "sha256": "8752ade9ab774104f10f59f0ae8c6de06e50bc7e297097605e8db50579e323db"
+    },
+    "s_csqrtl.c": {
+      "sha256": "2d8478a795fc63ef251c6b5589fc1fd83b9d46f04aa5a37b3f942a85f260597d"
+    }
+  },
+  "adaptations": "Native Alix/musl types and ld80 helpers; hyperbolic long-double algorithms promoted from musl double versions with native classification."
+}

@@ -42,3 +42,12 @@ int dup3(int source, int destination, int flags)
     return fd_result(sys_file_io(SYSCALL_FILE_DUP3,(uint64_t)(int64_t)source,(uint64_t)(int64_t)destination,
                                   flags & O_CLOEXEC ? SYSCALL_FILE_CLOEXEC : 0,0));
 }
+
+int pipe2(int fds[2], int flags)
+{
+    if (flags & ~O_CLOEXEC) { errno = EINVAL; return -1; }
+    return fd_result(sys_file_io(SYSCALL_FILE_PIPE, (uintptr_t)fds,
+                                  flags & O_CLOEXEC ? SYSCALL_FILE_CLOEXEC : 0, 0, 0));
+}
+
+int pipe(int fds[2]) { return pipe2(fds, 0); }

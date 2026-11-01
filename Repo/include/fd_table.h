@@ -112,6 +112,10 @@ int fd_table_install(fd_table_t *table, fd_description_t *description,
                      int minimum, uint32_t flags);
 int fd_table_install_at(fd_table_t *table, int fd,
                         fd_description_t *description, uint32_t flags);
+/* Publish two distinct lowest free slots atomically, or change nothing. Both
+ * descriptions remain caller-owned; successful slots retain separate refs. */
+int fd_table_install_pair(fd_table_t *table, fd_description_t *first,
+                           fd_description_t *second, uint32_t flags, int output[2]);
 /* pin's output is owned until put. The caller must register that ownership in
  * a heap-owned cancellation record BEFORE invoking an operation that can
  * block. Neither the description nor a pointer into it may outlive the pin. */

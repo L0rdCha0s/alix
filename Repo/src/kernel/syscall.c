@@ -1033,7 +1033,9 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
                       (truncate && writable) ? 1 : 0);
     }
 
-    vfs_node_t *node = vfs_open_file(cwd, path_buf, create, truncate && writable);
+    vfs_node_t *node = NULL;
+    int open_error = vfs_open_legacy_handle(cwd, path_buf, create, truncate && writable,
+                                            (flags & SYSCALL_OPEN_EXCLUSIVE) != 0, &node);
     if (trace_doom_wad)
     {
         serial_printf("[sys_open] doom vfs_open_file node=0x%016llX",
@@ -1057,10 +1059,9 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     if (!node)
     {
         free(handle);
-        return -1;
+        return open_error;
     }
 
-    vfs_node_retain(node);
     handle->node = node;
     handle->offset = 0;
     handle->readable = readable;

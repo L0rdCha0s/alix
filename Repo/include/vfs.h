@@ -24,6 +24,13 @@ typedef enum
     VFS_NODE_SYMLINK = 3
 } vfs_node_type_t;
 
+typedef struct
+{
+    uint64_t size_bytes;
+    vfs_node_type_t type;
+    uint64_t atime, mtime, ctime;
+} vfs_stat_snapshot_t;
+
 /* Maximum path/target storage including NUL. Existing oversized disk targets
  * are preserved; snapshot/resolve rejects them instead of truncating success. */
 #define VFS_PATH_MAX 4096u
@@ -64,6 +71,12 @@ vfs_node_t *vfs_open_file(vfs_node_t *cwd, const char *path, bool create, bool t
  * callback contexts/current-thread semantics need a separate adapter. */
 int vfs_open_data_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
                         uint32_t uid, uint32_t gid, vfs_node_t **out);
+int vfs_open_data_flags_owned(vfs_node_t *cwd, const char *path, bool create, bool truncate,
+                              bool exclusive, uint32_t uid, uint32_t gid, vfs_node_t **out);
+int vfs_open_legacy_handle(vfs_node_t *cwd, const char *path, bool create, bool truncate,
+                            bool exclusive, vfs_node_t **out);
+int vfs_remove_path(vfs_node_t *cwd, const char *path, bool allow_directory);
+int vfs_rename_path(vfs_node_t *cwd, const char *old_path, const char *new_path);
 /* Resolve intermediate links, snapshot the final symlink without following it,
  * and copy at most capacity raw bytes (no appended NUL). No target pointer
  * escapes tree/data locks. Path and output may overlap after resolution.
@@ -129,6 +142,14 @@ void vfs_node_retain(vfs_node_t *node);
 bool vfs_node_try_retain(vfs_node_t *node);
 /* Protected worker only. Follows the final link; retains before tree unlock. */
 int vfs_resolve_owned(vfs_node_t *cwd, const char *path, vfs_node_t **out);
+/* Coherent path metadata under the tree/data locks, without opening a file.
+ * Explicit captured credentials preserve the caller/worker policy boundary. */
+int vfs_path_stat_snapshot(vfs_node_t *cwd, const char *path, bool follow_final,
+                            uint32_t uid, uint32_t gid, vfs_stat_snapshot_t *output);
+/* Owned directory, protected worker. Build one complete absolute path under
+ * the tree lock, or return negative errno without reporting truncated success.
+ * Success excludes NUL, which is also written into the supplied storage. */
+ssize_t vfs_path_snapshot(vfs_node_t *directory, char *buffer, size_t capacity);
 void vfs_node_release(vfs_node_t *node);
 /* Protected worker, without caller locks/preemption guard. Serializes final
  * orphan-directory subtree teardown with tree readers, and consumes one owner.

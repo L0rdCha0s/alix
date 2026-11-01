@@ -1,6 +1,9 @@
 #ifdef TTF_HOST_BUILD
 #include_next <assert.h>
 #else
+#if !defined(__cplusplus) && __STDC_VERSION__ >= 201112L
+#define static_assert _Static_assert
+#endif
 #ifndef ALIX_ASSERT_DECLARED
 #define ALIX_ASSERT_DECLARED
 #ifdef __cplusplus

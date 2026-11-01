@@ -53,10 +53,13 @@ void srand(unsigned int seed);
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
 char *getenv(const char *name);
+int system(const char *command);
 void exit(int status);
 void abort(void) __attribute__((noreturn));
 void _Exit(int status) __attribute__((noreturn));
 int atexit(void (*function)(void));
+int at_quick_exit(void (*function)(void));
+void quick_exit(int status) __attribute__((noreturn));
 void *bsearch(const void *key, const void *base, size_t count, size_t width,
               int (*compare)(const void *, const void *));
 void qsort(void *base, size_t count, size_t width,

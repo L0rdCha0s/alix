@@ -10,6 +10,8 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - VFS/filesystems/mounts: `docs/kernel/vfs.md`
 - AlixFS2 backend details: `docs/kernel/alixfs.md`
 - Syscalls, FDs, sockets: `docs/kernel/syscalls.md`
+- Process-owned byte pipes: `docs/kernel/pipes.md`
+- Terminal classification and current non-TTY streams: `docs/kernel/termios.md`
 - Networking (drivers + protocols): `docs/kernel/network.md`
 - Audio streaming, counters and playback diagnostics: `docs/kernel/audio.md`
 - Source tree map: `docs/kernel/source_map.md`

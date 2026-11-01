@@ -59,8 +59,11 @@ stored and report `ENAMETOOLONG` through the checked APIs.
 Regular-file worker adapters retain nodes before releasing the tree lock and
 serialize shared offsets with a sleeping gate. They reject callback-backed
 nodes, whose identity and context lifetimes require separate adapters. The
-existing user open/read/write calls still use the legacy global FD table;
-private descriptor routing has not been switched yet.
+original user open/read/write syscall IDs retain the legacy global FD table.
+The upstream runtime instead selects syscall 71 and private descriptors, with
+registered storage requests and independent event-driven TCP waits. Private
+OPEN reserves a slot before create/truncate, preserving files when admission
+fails. See [syscalls.md](syscalls.md).
 
 The native VFS fixture passed real symlink snapshots, owned cwd changes,
 4095/4096-byte boundaries, a caller killed while a worker waited on the real
@@ -71,10 +74,13 @@ runner removed its optional hooks and restored the ordinary kernel.
 ## Directory streams
 
 `opendir`, `readdir`, `rewinddir` and `closedir` use syscall 70 and protected
-VFS workers. Each user process owns a 256-slot opaque directory-handle table;
-these handles never index the legacy global file/socket FD table. New user
-processes are spawned with an empty table, shared by their threads. Quiescent
-process teardown transfers the table to the protected retirement worker.
+VFS workers. Each user process owns a 256-slot private table shared by directory
+streams, syscall 71 files/sockets and its threads. These integers never index
+the legacy global FD table. Kernel-launched processes begin with three owned
+stdio slots, leaving 253 slots for additional descriptions. User-parent
+construction clones completed entries with CLOEXEC filtering; in-flight OPEN
+reservations are omitted. Quiescent process teardown transfers the table to
+the protected retirement worker.
 
 An open stream retains its directory node and owns a compact immutable blob of
 names, types and runtime object identities, including `.` and `..`. Names are

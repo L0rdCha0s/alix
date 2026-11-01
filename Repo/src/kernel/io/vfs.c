@@ -6,6 +6,7 @@
 #include "libc.h"
 #include "io_stream.h"
 #include "io_tcp.h"
+#include "io_pipe.h"
 
 typedef struct
 {
@@ -293,6 +294,45 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         }
         return;
     }
+    if (operation->opcode == IO_VFS_GETCWD)
+    {
+        if (description || !io_request_cwd(request) || operation->flags ||
+            !operation->count || operation->count > available) return;
+        result->result = vfs_path_snapshot(io_request_cwd(request), (char *)operation->data, (size_t)operation->count);
+        return;
+    }
+    if (operation->opcode == IO_VFS_REMOVE || operation->opcode == IO_VFS_RENAME)
+    {
+        if (description || !io_request_cwd(request) || available < VFS_PATH_MAX || operation->flags > 1) return;
+        const char *path = (const char *)operation->data;
+        if (strnlen(path, VFS_PATH_MAX) == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
+        if (operation->opcode == IO_VFS_REMOVE)
+            result->result = vfs_remove_path(io_request_cwd(request), path, operation->flags != 0);
+        else
+        {
+            if (available < 2 * VFS_PATH_MAX) return;
+            const char *new_path = path + VFS_PATH_MAX;
+            if (strnlen(new_path, VFS_PATH_MAX) == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
+            result->result = vfs_rename_path(io_request_cwd(request), path, new_path);
+        }
+        return;
+    }
+    if (operation->opcode == IO_VFS_STAT_PATH)
+    {
+        if (description || !io_request_cwd(request) || operation->count ||
+            (operation->flags & ~SYSCALL_STAT_NOFOLLOW)) return;
+        size_t length = 0;
+        while (length < available && length < VFS_PATH_MAX && operation->data[length]) ++length;
+        if (length == available || length == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
+        vfs_stat_snapshot_t metadata;
+        result->result = vfs_path_stat_snapshot(io_request_cwd(request), (const char *)operation->data,
+                                                 !(operation->flags & SYSCALL_STAT_NOFOLLOW),
+                                                 io_request_uid(request), io_request_gid(request), &metadata);
+        if (!result->result)
+            operation->stat = (syscall_stat_t){ .size_bytes = metadata.size_bytes, .type = (uint32_t)metadata.type,
+                                               .atime = metadata.atime, .mtime = metadata.mtime, .ctime = metadata.ctime };
+        return;
+    }
     if (operation->opcode == IO_VFS_READLINK)
     {
         if (description || !io_request_cwd(request) || !operation->count || operation->count > available) return;
@@ -306,7 +346,7 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     }
     if (operation->opcode == IO_VFS_OPEN)
     {
-        uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE;
+        uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE;
         if (!retirement || (description && !fd_table_reservation_valid(description)) || !io_request_cwd(request) ||
             (operation->flags & ~known) || !(operation->flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
             ((operation->flags & SYSCALL_OPEN_TRUNCATE) && !(operation->flags & SYSCALL_OPEN_WRITE))) return;
@@ -321,9 +361,10 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         file->writable = (operation->flags & SYSCALL_OPEN_WRITE) != 0;
         description = fd_description_create_deferred(&io_vfs_ops, file, retirement);
         if (!description) { free(file); result->result = -ENOMEM; return; }
-        result->result = vfs_open_data_owned(io_request_cwd(request), (const char *)operation->data,
+        result->result = vfs_open_data_flags_owned(io_request_cwd(request), (const char *)operation->data,
                                             (operation->flags & SYSCALL_OPEN_CREATE) != 0,
                                             (operation->flags & SYSCALL_OPEN_TRUNCATE) != 0,
+                                            (operation->flags & SYSCALL_OPEN_EXCLUSIVE) != 0,
                                             io_request_uid(request), io_request_gid(request), &file->node);
         if (result->result) fd_description_put(description);
         else result->description_owned = description;
@@ -342,6 +383,11 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
             result->result = 0;
         }
         else result->result = -ESPIPE;
+        return;
+    }
+    if (io_pipe_description_valid(description))
+    {
+        result->result = operation->opcode == IO_VFS_STAT ? io_pipe_stat(description, &operation->stat) : -ESPIPE;
         return;
     }
     if (!io_vfs_description_valid(description))
