@@ -170,8 +170,8 @@ proof, not a claim that cancellation or in-flight I/O interruption is complete.
 ## ISO C11 threads
 
 `include/threads.h` and `user/lib/threads.c` expose all 25 C11 operations over
-this native pthread lifecycle. Thread callbacks and full signed integer returns
-are adapted through heap-owned start records. Once, TSS/destructors, condition
+this native pthread lifecycle. Thread callbacks, full signed integer returns and a copy of the creator's
+current floating-point environment are adapted through heap-owned start records. Once, TSS/destructors, condition
 variables and plain/recursive/timed mutexes use the same native ownership and
 blocking primitives. C11 status codes are mapped independently of errno.
 

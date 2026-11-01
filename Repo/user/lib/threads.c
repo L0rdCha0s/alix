@@ -2,6 +2,7 @@
 #include "stdlib.h"
 #include "errno.h"
 #include "usyscall.h"
+#include "fenv.h"
 
 static int thread_result(int error)
 {
@@ -11,7 +12,7 @@ static int thread_result(int error)
     return thrd_error;
 }
 
-typedef struct { thrd_start_t function; void *argument; } thread_start_t;
+typedef struct { thrd_start_t function; void *argument; fenv_t environment; } thread_start_t;
 
 static void *thread_start(void *opaque)
 {
@@ -20,6 +21,9 @@ static void *thread_start(void *opaque)
     thread_start_t *start = opaque;
     thrd_start_t function = start->function;
     void *argument = start->argument;
+    /* C11 7.6 requires a copy of the creator's current FP environment. The
+     * kernel's fresh FPU register image alone provides only the default. */
+    (void)fesetenv(&start->environment);
     free(start);
     return (void *)(intptr_t)function(argument);
 }
@@ -29,7 +33,9 @@ int thrd_create(thrd_t *thread, thrd_start_t function, void *argument)
     if (!thread || !function) return thrd_error;
     thread_start_t *start = malloc(sizeof(*start));
     if (!start) return thrd_nomem;
-    *start = (thread_start_t){function, argument};
+    start->function = function;
+    start->argument = argument;
+    if (fegetenv(&start->environment)) { free(start); return thrd_error; }
     int error = pthread_create(thread, NULL, thread_start, start);
     if (error) free(start);
     return error == ENOMEM || error == EAGAIN ? thrd_nomem : (error ? thrd_error : thrd_success);

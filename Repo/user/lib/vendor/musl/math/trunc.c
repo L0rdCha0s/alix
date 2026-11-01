@@ -2,6 +2,8 @@
 
 double trunc(double x)
 {
+	/* Alix preserves the native signaling-NaN/invalid contract. */
+	if (isnan(x)) return x + x;
 	union {double f; uint64_t i;} u = {x};
 	int e = (int)(u.i >> 52 & 0x7ff) - 0x3ff + 12;
 	uint64_t m;

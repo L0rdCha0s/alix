@@ -59,8 +59,11 @@ static ssize_t io_vfs_file_write(void *context, const void *buffer, size_t count
     ssize_t result = file->append ? vfs_write_append(file->node, buffer, count, false, &file->offset) :
         count > 0x7fffffffffffffffULL - file->offset ? -EFBIG :
         vfs_write_data_at(file->node, (size_t)file->offset, buffer, count);
-    if (result > 0 && (size_t)result <= count && !file->append) file->offset += (uint64_t)result;
-    else if (result > 0) result = -EIO;
+    if (result > 0)
+    {
+        if ((size_t)result > count) result = -EIO;
+        else if (!file->append) file->offset += (uint64_t)result;
+    }
     io_vfs_offset_unlock(file);
     return result == -1 ? -EIO : result;
 }

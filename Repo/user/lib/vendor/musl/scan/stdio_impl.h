@@ -17,6 +17,7 @@ typedef struct alix_scan_stream {
     unsigned flags;
     unsigned char storage[9];
     uint32_t units[9];
+    unsigned char scanset[257];
     FILE *stream;
     const char *text;
     const wchar_t *wide;

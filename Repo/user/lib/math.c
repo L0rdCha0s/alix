@@ -41,4 +41,3 @@ long double frexpl(long double value, int *exponent)
 #error Unsupported long-double representation
 #endif
 }
-

@@ -13,6 +13,8 @@ static const float_t toint = 1/EPS;
 
 float rintf(float x)
 {
+	/* Alix preserves the native signaling-NaN/invalid contract. */
+	if (isnan(x)) return x + x;
 	union {float f; uint32_t i;} u = {x};
 	int e = u.i>>23 & 0xff;
 	int s = u.i>>31;

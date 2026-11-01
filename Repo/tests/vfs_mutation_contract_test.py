@@ -68,8 +68,14 @@ static bool ensure_capacity_locked(vfs_node_t *n,size_t needed){
 }
 static void ensure_terminator_locked(vfs_node_t *n){CHECK(ensure_capacity_locked(n,n->size));n->data[n->size]=0;}
 '''
-for signature in ['static ssize_t vfs_write_at_internal(', 'ssize_t vfs_write_append(']:
+for signature in ['static ssize_t vfs_write_at_internal(', 'ssize_t vfs_write_append(', 'ssize_t vfs_write_data_at(']:
     code+=function_definition(source,signature)+'\n'
+code+=r'''
+typedef struct {vfs_node_t *node;size_t offset;bool writable,append;pthread_mutex_t gate;} io_vfs_file_t;
+static void io_vfs_offset_lock(io_vfs_file_t *f){CHECK(!pthread_mutex_lock(&f->gate));}
+static void io_vfs_offset_unlock(io_vfs_file_t *f){CHECK(!pthread_mutex_unlock(&f->gate));}
+'''
+code+=function_definition((ROOT/'src/kernel/io/vfs.c').read_text(),'static ssize_t io_vfs_file_write(')+'\n'
 code+=r'''
 static vfs_node_t *make_node(vfs_node_t *parent,const char *name,vfs_node_type_t type){
     vfs_node_t *n=calloc(1,sizeof(*n));CHECK(n);n->name=strdup(name);CHECK(n->name);n->type=type;n->refcount=1;n->allow_mutation=true;CHECK(!pthread_mutex_init(&n->data_lock,NULL));
@@ -105,20 +111,20 @@ static void *reader(void *unused){(void)unused;for(unsigned i=0;i<4000;i++){
     vfs_tree_lock_acquire();vfs_node_t *a=vfs_find_child(root,"left"),*b=vfs_find_child(root,"right");
     CHECK((a!=NULL)!=(b!=NULL));vfs_node_t *n=a?a:b;CHECK(n->uid==37 && n->gid==41 && n->parent==root);vfs_tree_lock_release();
 }return NULL;}
-typedef struct {vfs_node_t *node;size_t position;unsigned identity;} append_arg_t;
+typedef struct {io_vfs_file_t file;unsigned identity;} append_arg_t;
 static void *append_writer(void *opaque){
     append_arg_t *arg=opaque;char record[2]={(char)('0'+arg->identity),'\n'};
-    for(unsigned i=0;i<1000;++i)CHECK(vfs_write_append(arg->node,record,2,false,&arg->position)==2);
+    for(unsigned i=0;i<1000;++i)CHECK(io_vfs_file_write(&arg->file,record,2)==2);
     return NULL;
 }
 static void append_contract(void){
     vfs_tree_lock_acquire();vfs_node_t *n=make_node(root,"append",VFS_NODE_FILE);vfs_tree_lock_release();
     append_arg_t *args=calloc(8,sizeof(*args));CHECK(args);pthread_t threads[8];
-    for(unsigned i=0;i<8;++i){args[i]=(append_arg_t){.node=n,.identity=i};CHECK(!pthread_create(&threads[i],NULL,append_writer,&args[i]));}
+    for(unsigned i=0;i<8;++i){args[i]=(append_arg_t){.file={.node=n,.writable=true,.append=true},.identity=i};CHECK(!pthread_mutex_init(&args[i].file.gate,NULL));CHECK(!pthread_create(&threads[i],NULL,append_writer,&args[i]));}
     for(unsigned i=0;i<8;++i)CHECK(!pthread_join(threads[i],NULL));
     CHECK(n->size==16000);unsigned counts[8]={0};
     for(unsigned i=0;i<n->size;i+=2){CHECK(n->data[i]>='0' && n->data[i]<='7' && n->data[i+1]=='\n');++counts[n->data[i]-'0'];}
-    for(unsigned i=0;i<8;++i)CHECK(counts[i]==1000);
+    for(unsigned i=0;i<8;++i){CHECK(counts[i]==1000);CHECK(!pthread_mutex_destroy(&args[i].file.gate));}
     free(args);CHECK(!vfs_remove_path(root,"append",false));
 }
 int main(void){

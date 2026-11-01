@@ -72,6 +72,14 @@ static bool environment_tests(void)
     CHECK(feholdexcept(&held)==0 && fetestexcept(FE_ALL_EXCEPT)==0);
     CHECK(fesetexceptflag(&flags,FE_INVALID)==0 && fetestexcept(FE_INVALID));
     CHECK(feupdateenv(&held)==0 && fetestexcept(FE_DIVBYZERO));
+    static double (*const rounding[])(double)={ceil,floor,round,trunc,rint,nearbyint};
+    union {uint64_t bits;double value;} signaling={.bits=UINT64_C(0x7ff0000000000001)};
+    for(unsigned i=0;i<sizeof(rounding)/sizeof(*rounding);++i)
+    {
+        CHECK(feclearexcept(FE_ALL_EXCEPT)==0);
+        double quiet=rounding[i](signaling.value);
+        CHECK(fetestexcept(FE_ALL_EXCEPT)==FE_INVALID && isnan(quiet));
+    }
     int modes[]={FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO};
     for(unsigned i=0;i<4;++i)
     {
@@ -177,6 +185,7 @@ static int worker(void *argument)
     int identity=(int)(intptr_t)argument;
     if(sys_thread_set_affinity((unsigned)identity-1) || sys_thread_cpu()!=(unsigned)identity-1) return -108;
     atomic_fetch_or(&shared.cpu_mask,1u<<sys_thread_cpu());
+    if(fegetround()!=FE_TOWARDZERO || !fetestexcept(FE_DIVBYZERO)) return -113;
     if(tss_set(shared.key,argument)!=thrd_success) return -100;
     call_once(&shared.once,once_function);
     if(fesetround(identity%2?FE_UPWARD:FE_DOWNWARD)) return -101;
@@ -218,7 +227,10 @@ static bool thread_tests(void)
     CHECK(cnd_init(&shared.start_condition)==thrd_success);
     CHECK(cnd_init(&shared.condition)==thrd_success && tss_create(&shared.key,destructor)==thrd_success);
     thrd_t *threads=calloc(8,sizeof(*threads)); CHECK(threads);
+    fenv_t creator_environment;CHECK(fegetenv(&creator_environment)==0);
+    CHECK(fesetround(FE_TOWARDZERO)==0 && feclearexcept(FE_ALL_EXCEPT)==0 && feraiseexcept(FE_DIVBYZERO)==0);
     for(int i=0;i<8;++i) CHECK(thrd_create(&threads[i],worker,(void *)(intptr_t)(i+1))==thrd_success);
+    CHECK(fesetenv(&creator_environment)==0);
     CHECK(mtx_lock(&shared.mutex)==thrd_success);
     while(shared.arrived<8) CHECK(cnd_wait(&shared.condition,&shared.mutex)==thrd_success);
     shared.start=true;
@@ -282,7 +294,8 @@ int main(int argc, char **argv)
         quick_exit(23);
     }
     if(!math_tests() || !environment_tests() || !scan_tests() || !character_tests() || !thread_tests() || !file_tests()) return 1;
-    if(!system(NULL) || system("echo libc_system_test")!=0) return 1;
-    serial_printf("LIBC_COMPLETE_TEST: PASS math=1 complex80=1 fenv=1 scanf=1 uchar=1 threads=8 cpu_mask=0xFF atomic=1 files=1 append=320");
+    if(!system(NULL) || system("echo libc_system_test")!=0)
+    { serial_printf("LIBC_COMPLETE_TEST: FAIL native shell service errno=%d",errno); return 1; }
+    serial_printf("LIBC_COMPLETE_TEST: PASS math=1 complex80=1 fenv=1 scanf=1 uchar=1 threads=8 cpu_mask=0xFF fp_inherit=1 atomic=1 files=1 append=320");
     return 0;
 }

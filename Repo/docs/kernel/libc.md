@@ -32,7 +32,9 @@ The numeric library advertises `math_errhandling == MATH_ERREXCEPT`; native
 operations cover x87 and SSE state together, including exception flags, masks,
 rounding, save/restore and hold/update. Default native application flags preserve
 dynamic rounding and disable floating-point contraction. The scheduler's FXSAVE
-state keeps each thread's environment independent.
+state keeps each thread's environment independent. C11 thread startup copies
+the creator's current environment, including rounding and exception flags,
+before invoking the new callback.
 
 The compiler emits inline atomics for naturally aligned native 1/2/4/8-byte
 objects. Larger aggregate atomics and 16-byte operations use a process-local

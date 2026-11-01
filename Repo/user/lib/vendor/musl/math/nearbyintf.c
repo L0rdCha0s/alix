@@ -3,6 +3,8 @@
 
 float nearbyintf(float x)
 {
+	/* Alix preserves the native signaling-NaN/invalid contract. */
+	if (isnan(x)) return x + x;
 #ifdef FE_INEXACT
 	#pragma STDC FENV_ACCESS ON
 	int e;

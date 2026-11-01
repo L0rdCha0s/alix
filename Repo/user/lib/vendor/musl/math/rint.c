@@ -11,6 +11,8 @@ static const double_t toint = 1/EPS;
 
 double rint(double x)
 {
+	/* Alix preserves the native signaling-NaN/invalid contract. */
+	if (isnan(x)) return x + x;
 	union {double f; uint64_t i;} u = {x};
 	int e = u.i>>52 & 0x7ff;
 	int s = u.i>>63;

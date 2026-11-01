@@ -11,5 +11,12 @@
     "src/internal/complex_impl.h",
     "include/complex.h"
   ],
-  "notes": "Alix ABI, headers, FP environment, allocation and I/O remain native."
+  "notes": "Alix ABI, headers, FP environment, allocation and I/O remain native.",
+  "adaptations": [
+    "Alix native headers and ABI; generic FP/atomic support adapters",
+    "Native errno adapters for sqrtf/scalbnf; signaling-NaN handling in rounding functions",
+    "Thread-local gamma sign state",
+    "Private byte/wide scanning stream; heap-owned decimal workspace and scanset",
+    "FreeBSD replacements for incomplete extended complex routines"
+  ]
 }

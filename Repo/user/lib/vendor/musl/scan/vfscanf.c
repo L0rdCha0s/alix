@@ -70,7 +70,7 @@ int __alix_scan_bytes(alix_scan_stream *restrict f, const char *restrict fmt, va
 	unsigned long long x;
 	long double y;
 	off_t pos = 0;
-	unsigned char scanset[257];
+	unsigned char *scanset = f->scanset;
 	size_t i, k;
 	wchar_t wc;
 
@@ -195,7 +195,7 @@ int __alix_scan_bytes(alix_scan_stream *restrict f, const char *restrict fmt, va
 		case 'c':
 		case '[':
 			if (t == 'c' || t == 's') {
-				memset(scanset, -1, sizeof scanset);
+				memset(scanset, -1, sizeof f->scanset);
 				scanset[0] = 0;
 				if (t == 's') {
 					scanset[1+'\t'] = 0;
@@ -208,7 +208,7 @@ int __alix_scan_bytes(alix_scan_stream *restrict f, const char *restrict fmt, va
 			} else {
 				if (*++p == '^') p++, invert = 1;
 				else invert = 0;
-				memset(scanset, invert, sizeof scanset);
+				memset(scanset, invert, sizeof f->scanset);
 				scanset[0] = 0;
 				if (*p == '-') p++, scanset[1+'-'] = 1-invert;
 				else if (*p == ']') p++, scanset[1+']'] = 1-invert;
