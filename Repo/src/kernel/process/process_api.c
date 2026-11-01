@@ -1,4 +1,5 @@
 #include "process_internal.h"
+#include "errno.h"
 
 /*
  * src/kernel/process/process_api.c
@@ -59,6 +60,7 @@ static process_t *process_create_kernel_internal(const char *name,
         {
             proc->state = PROCESS_STATE_ZOMBIE;
             proc->exit_status = -1;
+            proc->wait_status = 255u << 8;
             __atomic_store_n(&watch->constructed, true, __ATOMIC_RELEASE);
             return NULL; /* Registered owner rolls back on the protected worker. */
         }
@@ -81,6 +83,7 @@ static process_t *process_create_kernel_internal(const char *name,
         {
             proc->state = PROCESS_STATE_ZOMBIE;
             proc->exit_status = -1;
+            proc->wait_status = 255u << 8;
             __atomic_store_n(&watch->constructed, true, __ATOMIC_RELEASE);
             return NULL;
         }
@@ -183,6 +186,7 @@ static process_t *process_create_user_dummy_internal(const char *name,
     bootstrap->stack_top = proc->user_initial_stack ? proc->user_initial_stack : proc->user_stack_top;
     bootstrap->rdi = proc->user_argc;
     bootstrap->rsi = proc->user_argv_ptr;
+    bootstrap->rdx = proc->user_envp_ptr;
 
     process_tls_allocation_t tls = {0};
     if (!process_allocate_user_tls(proc, &tls))
@@ -298,6 +302,7 @@ static process_t *process_create_user_elf_internal(const char *name,
     bootstrap->stack_top = proc->user_initial_stack ? proc->user_initial_stack : proc->user_stack_top;
     bootstrap->rdi = proc->user_argc;
     bootstrap->rsi = proc->user_argv_ptr;
+    bootstrap->rdx = proc->user_envp_ptr;
 
     process_tls_allocation_t tls = {0};
     if (!process_allocate_user_tls(proc, &tls))
@@ -520,10 +525,11 @@ void process_sleep_ms(uint32_t ms)
 
 void process_destroy_marked(process_t *process)
 {
-    serial_printf("[proc] destroy pid=0x%016llX name=%s main_thread=0x%016llX\r\n",
+    serial_printf("[proc] destroy pid=0x%016llX name=%s main_thread=0x%016llX wait_status=%u\r\n",
                   (unsigned long long)process->pid,
                   process->name,
-                  (unsigned long long)(uintptr_t)process->main_thread);
+                  (unsigned long long)(uintptr_t)process->main_thread,
+                  (unsigned)process->wait_status);
 
     user_atk_on_process_destroy(process);
     shell_service_cleanup_process(process);
@@ -644,7 +650,7 @@ static void process_destroy_retained(process_t *process)
     }
 }
 
-static void process_mark_terminated(process_t *process, int status)
+static void process_mark_terminated(process_t *process, int status, uint32_t wait_status)
 {
     if (!process)
     {
@@ -652,7 +658,13 @@ static void process_mark_terminated(process_t *process, int status)
     }
 
     uint64_t sched_flags = scheduler_lock_acquire("process_mark_terminated");
+    if (process->state == PROCESS_STATE_ZOMBIE)
+    {
+        scheduler_lock_release(sched_flags);
+        return;
+    }
     process->exit_status = status;
+    process->wait_status = wait_status;
     process->state = PROCESS_STATE_ZOMBIE;
 
     spinlock_lock(&process->threads_lock);
@@ -684,7 +696,8 @@ static void process_mark_terminated(process_t *process, int status)
     scheduler_lock_release(sched_flags);
 }
 
-void process_exit(int status)
+static void process_exit_with_status(int status, uint32_t wait_status) __attribute__((noreturn));
+static void process_exit_with_status(int status, uint32_t wait_status)
 {
     thread_t *current = current_thread_local();
     if (!current)
@@ -695,7 +708,7 @@ void process_exit(int status)
     process_t *proc = current->process;
     if (proc)
     {
-        process_mark_terminated(proc, status);
+        process_mark_terminated(proc, status, wait_status);
     }
     else
     {
@@ -710,6 +723,30 @@ void process_exit(int status)
 
     scheduler_schedule(false);
     fatal("process_exit returned");
+}
+
+void process_exit(int status)
+{
+    process_exit_with_status(status, (uint32_t)(status & 255) << 8);
+}
+
+void process_exit_signal(int number)
+{
+    if (number <= 0 || number >= (int)ALIX_SIGNAL_COUNT) fatal("invalid process exit signal");
+    process_exit_with_status(128 + number, (uint32_t)number);
+}
+
+int process_wait_status_snapshot(process_t *process, uint32_t *output)
+{
+    /* The caller owns a retained process, so no raw lookup or borrowed
+     * process pointer is carried across a wait. Terminal state and cause are
+     * published under this lock and never change after publication. */
+    if (!process || !output) return -EINVAL;
+    uint64_t flags = scheduler_lock_acquire("process_wait_status");
+    int result = process->state == PROCESS_STATE_ZOMBIE && process_threads_quiescent_locked(process) ? 0 : -EAGAIN;
+    if (!result) *output = process->wait_status;
+    scheduler_lock_release(flags);
+    return result;
 }
 
 static bool process_join_ready(void *context)
@@ -845,7 +882,7 @@ void process_creation_watch_release(process_creation_watch_t *watch)
 }
 
 
-bool process_kill(process_t *process, int status)
+static bool process_kill_with_status(process_t *process, int status, uint32_t wait_status)
 {
     if (!process)
     {
@@ -855,7 +892,7 @@ bool process_kill(process_t *process, int status)
     if (process == current_process_local())
     {
         if (process->kernel_service) return false;
-        process_exit(status);
+        process_exit_with_status(status, wait_status);
     }
 
     uint64_t flags = cpu_save_flags();
@@ -874,10 +911,21 @@ bool process_kill(process_t *process, int status)
         return false;
     }
 
-    process_mark_terminated(process, status);
+    process_mark_terminated(process, status, wait_status);
     smp_broadcast_schedule_ipi(false);
     process_join_end(process);
     return true;
+}
+
+bool process_kill(process_t *process, int status)
+{
+    return process_kill_with_status(process, status, (uint32_t)(status & 255) << 8);
+}
+
+bool process_kill_signal(process_t *process, int number)
+{
+    if (number <= 0 || number >= (int)ALIX_SIGNAL_COUNT) return false;
+    return process_kill_with_status(process, 128 + number, (uint32_t)number);
 }
 
 void process_kill_tree(process_t *process)
@@ -1680,6 +1728,7 @@ int64_t process_user_thread_create(const char *name,
     bootstrap->stack_top = initial_rsp;
     bootstrap->rdi = (uint64_t)arg;
     bootstrap->rsi = 0;
+    bootstrap->rdx = 0;
 
     process_tls_allocation_t tls = {0};
     if (!process_allocate_user_tls(proc, &tls))

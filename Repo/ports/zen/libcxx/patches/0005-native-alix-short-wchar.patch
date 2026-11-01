@@ -1,0 +1,30 @@
+diff --git a/libcxx/include/__config b/libcxx/include/__config
+--- a/libcxx/include/__config
++++ b/libcxx/include/__config
+@@ -101,8 +101,9 @@
+ #    define _LIBCPP_HAS_BITSCAN64 0
+ #  endif // defined(_WIN32)
+ 
+-#  if defined(_AIX) && !defined(__64BIT__)
+-// The size of wchar is 2 byte on 32-bit mode on AIX.
++#  if (defined(_AIX) && !defined(__64BIT__)) || \
++      (defined(__ALIX__) && __SIZEOF_WCHAR_T__ == 2)
++// Alix's native wide ABI and 32-bit AIX use 16-bit wchar_t.
+ #    define _LIBCPP_SHORT_WCHAR 1
+ #  endif
+ 
+diff --git a/libcxx/include/__cxx03/__config b/libcxx/include/__cxx03/__config
+--- a/libcxx/include/__cxx03/__config
++++ b/libcxx/include/__cxx03/__config
+@@ -239,8 +239,9 @@
+ #    define _LIBCPP_HAS_OPEN_WITH_WCHAR
+ #  endif // defined(_WIN32)
+ 
+-#  if defined(_AIX) && !defined(__64BIT__)
+-// The size of wchar is 2 byte on 32-bit mode on AIX.
++#  if (defined(_AIX) && !defined(__64BIT__)) || \
++      (defined(__ALIX__) && __SIZEOF_WCHAR_T__ == 2)
++// Alix's native wide ABI and 32-bit AIX use 16-bit wchar_t.
+ #    define _LIBCPP_SHORT_WCHAR 1
+ #  endif
+ 

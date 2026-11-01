@@ -3,6 +3,7 @@
 #include "libc.h"
 
 extern int main(int argc, char **argv);
+extern int __alix_environment_initialize(char **environment);
 extern char __bss_start[];
 extern char __bss_end[];
 /* This statically linked executable is its own C++ destructor registration
@@ -15,7 +16,7 @@ extern runtime_hook_t __preinit_array_end[];
 extern runtime_hook_t __init_array_start[];
 extern runtime_hook_t __init_array_end[];
 
-void _start(uint64_t argc, char **argv)
+void _start(uint64_t argc, char **argv, char **environment)
 {
     /* Zero BSS so globals start in a known state (Doom depends on this). */
     for (char *p = __bss_start; p < __bss_end; ++p)
@@ -23,6 +24,7 @@ void _start(uint64_t argc, char **argv)
         *p = 0;
     }
 
+    if (__alix_environment_initialize(environment) != 0) sys_exit(127);
     /* ELF constructors run only after BSS and libc globals are initialized. */
     for (runtime_hook_t *hook = __preinit_array_start; hook < __preinit_array_end; ++hook)
     {

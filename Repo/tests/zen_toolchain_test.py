@@ -57,10 +57,19 @@ def main():
 #include "serial.h"
 #include "stdio.h"
 #include "unistd.h"
+#include <cmath>
+#include <cstdlib>
 static __thread int value = 42;
-int main() {
+extern "C" void abort(void) {
+    serial_printf("ALIX_ABORT_OVERRIDE: PASS\n");
+    _Exit(77);
+}
+int main(int argc, char**) {
+    if (argc > 1) abort();
     std::vector<int> values{1, 2, 3};
     bool okay = values.at(0) + values.at(1) + values.at(2) == 6 && value == 42 && getpid() > 0;
+    volatile double number = 0.25;
+    okay = std::sin(number) > 0.24 && std::sin(number) < 0.25 && okay;
     okay = puts("ALIX_TOOLCHAIN_STDIO: line") >= 0 && okay;
     serial_printf("ALIX_TOOLCHAIN_TEST: %s\n", okay ? "PASS" : "FAIL");
     return okay ? 0 : 1;
@@ -68,7 +77,7 @@ int main() {
 '''
     with log.open("w") as stream:
         result = subprocess.run([str(compiler) + "++", "-std=c++20", "-x", "c++", "-",
-                                 "-o", str(output)], input=source, text=True, env=env,
+                                 "-pie", "-lm", "-o", str(output)], input=source, text=True, env=env,
                                 stdout=stream, stderr=subprocess.STDOUT)
     if result.returncode:
         raise RuntimeError("native driver failed to link:\n" + "\n".join(log.read_text().splitlines()[-40:]))
@@ -86,6 +95,9 @@ int main() {
     undefined = subprocess.check_output(["x86_64-elf-nm", "--undefined-only", str(output)], text=True)
     if undefined.strip():
         raise RuntimeError("unresolved native runtime symbols: " + undefined)
+    symbols = subprocess.check_output(["x86_64-elf-nm", "--defined-only", str(output)], text=True)
+    if not any(line.split()[-2:] == ["T", "abort"] for line in symbols.splitlines()):
+        raise RuntimeError("application abort hook did not override the upstream runtime's weak default")
     print(f"Native Alix compiler identity/link test: PASS ({output})")
     print("This proves compilation/linking only; the ELF must run in Alix before claiming execution.")
 

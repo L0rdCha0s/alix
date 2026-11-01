@@ -33,6 +33,10 @@ typedef struct FILE
     struct FILE *registry_next;
     uint64_t registry_id;
     uint32_t flush_pins;
+    /* Additional pushback is heap owned and protected by the stream mutex.
+     * The inline byte above guarantees the first push without allocation. */
+    unsigned char *pushback_buffer;
+    size_t pushback_length, pushback_capacity;
 } FILE;
 typedef int64_t fpos_t;
 

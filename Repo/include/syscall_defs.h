@@ -78,7 +78,36 @@ typedef enum
     SYSCALL_RESOURCE_USAGE = 69,
     SYSCALL_DIRECTORY = 70,
     SYSCALL_FILE_IO = 71,
+    SYSCALL_PROCESS = 72,
 } syscall_id_t;
+
+#define SYSCALL_PROCESS_SPAWN 0u
+#define SYSCALL_PROCESS_WAIT 1u
+#define SYSCALL_PROCESS_NOHANG 1u
+#define SYSCALL_PROCESS_SPAWN_EX 2u
+#define SYSCALL_SPAWN_VERSION 1u
+#define SYSCALL_SPAWN_SETSIGMASK 1u
+#define SYSCALL_SPAWN_SETSIGDEF 2u
+#define SYSCALL_SPAWN_RESETIDS 4u
+#define SYSCALL_SPAWN_SEARCH_PATH 0x10000u
+#define SYSCALL_SPAWN_CLOSE 0u
+#define SYSCALL_SPAWN_DUP2 1u
+#define SYSCALL_SPAWN_OPEN 2u
+typedef struct
+{
+    uint32_t operation;
+    int32_t fd, destination;
+    uint32_t flags;
+    uint64_t path;
+    uint32_t mode, reserved;
+} syscall_spawn_action_t;
+typedef struct
+{
+    uint32_t version, size;
+    uint64_t path, argv, environment, actions;
+    uint32_t action_count, flags;
+    uint64_t signal_mask, signal_default, search_path;
+} syscall_spawn_t;
 
 /* Owned per-process namespace. Old IDs retain their legacy namespace for
  * installed binaries. This API never falls back to a matching global FD. */

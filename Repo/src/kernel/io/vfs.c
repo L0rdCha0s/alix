@@ -150,6 +150,32 @@ bool io_vfs_description_valid(const fd_description_t *description)
     return description && fd_description_ops(description)->close == io_vfs_file_close;
 }
 
+int io_vfs_open_owned(vfs_node_t *cwd, const char *path, uint32_t flags,
+                       uint32_t uid, uint32_t gid, fd_retirement_queue_t *retirement,
+                       fd_description_t **output)
+{
+    if (!output) return -EINVAL;
+    *output = NULL;
+    uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE |
+                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND;
+    if (!retirement || !cwd || !path || (flags & ~known) || !(flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
+        ((flags & SYSCALL_OPEN_TRUNCATE) && !(flags & SYSCALL_OPEN_WRITE))) return -EINVAL;
+    io_vfs_file_t *file = calloc(1, sizeof(*file));
+    if (!file) return -ENOMEM;
+    wait_queue_init(&file->offset_waiters);
+    file->readable = (flags & SYSCALL_OPEN_READ) != 0;
+    file->writable = (flags & SYSCALL_OPEN_WRITE) != 0;
+    file->append = (flags & SYSCALL_OPEN_APPEND) != 0;
+    fd_description_t *description = fd_description_create_deferred(&io_vfs_ops, file, retirement);
+    if (!description) { free(file); return -ENOMEM; }
+    int result = vfs_open_data_flags_owned(cwd, path, (flags & SYSCALL_OPEN_CREATE) != 0,
+                                           (flags & SYSCALL_OPEN_TRUNCATE) != 0,
+                                           (flags & SYSCALL_OPEN_EXCLUSIVE) != 0, uid, gid, &file->node);
+    if (result) fd_description_put(description);
+    else *output = description;
+    return result;
+}
+
 typedef struct
 {
     vfs_node_t *node;
@@ -359,21 +385,9 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         while (length < available && length < 4096u && operation->data[length]) ++length;
         if (!length) return;
         if (length == available || length == 4096u) { result->result = -ENAMETOOLONG; return; }
-        io_vfs_file_t *file = calloc(1, sizeof(*file));
-        if (!file) { result->result = -ENOMEM; return; }
-        wait_queue_init(&file->offset_waiters);
-        file->readable = (operation->flags & SYSCALL_OPEN_READ) != 0;
-        file->writable = (operation->flags & SYSCALL_OPEN_WRITE) != 0;
-        file->append = (operation->flags & SYSCALL_OPEN_APPEND) != 0;
-        description = fd_description_create_deferred(&io_vfs_ops, file, retirement);
-        if (!description) { free(file); result->result = -ENOMEM; return; }
-        result->result = vfs_open_data_flags_owned(io_request_cwd(request), (const char *)operation->data,
-                                            (operation->flags & SYSCALL_OPEN_CREATE) != 0,
-                                            (operation->flags & SYSCALL_OPEN_TRUNCATE) != 0,
-                                            (operation->flags & SYSCALL_OPEN_EXCLUSIVE) != 0,
-                                            io_request_uid(request), io_request_gid(request), &file->node);
-        if (result->result) fd_description_put(description);
-        else result->description_owned = description;
+        result->result = io_vfs_open_owned(io_request_cwd(request), (const char *)operation->data,
+                                             operation->flags, io_request_uid(request), io_request_gid(request),
+                                             retirement, &result->description_owned);
         return;
     }
     if (io_stream_description_valid(description))

@@ -85,6 +85,11 @@ static inline long syscall6(long id, long a0, long a1, long a2, long a3, long a4
     return ret;
 }
 
+int64_t sys_process(uint32_t operation, uint64_t first, uint64_t second, uint64_t third)
+{
+    return syscall4(SYSCALL_PROCESS, operation, first, second, third);
+}
+
 ssize_t sys_write(int fd, const void *buffer, size_t count)
 {
 #ifdef ALIX_OWNED_FDS

@@ -8,8 +8,10 @@ window-system interfaces. The existing `user/lib/web` and `atk_html_view` engine
 is not part of the new port.
 
 **Zen does not build or run on Alix yet.** The pinned standalone SpiderMonkey
-configuration now succeeds for `x86_64-unknown-alix`, and the real upstream build
-has started compiling target dependencies. The shell has not yet linked or run.
+configuration and full build now succeed for `x86_64-unknown-alix`. The real
+static shell links without unresolved symbols, loads inside eight-CPU Alix and
+starts native helper threads. It currently exits with code 1 before executing
+the test script; startup diagnosis is in progress.
 Native Alix guests have executed upstream LLVM libc++/libc++abi and upstream
 Rust `std` using Alix's runtime. ELF TLS, thread lifecycle, anonymous virtual
 memory, permission-checked user copies and hardware-backed entropy have native
@@ -151,105 +153,50 @@ pass pointers to one thread's stack to another thread or asynchronous callback.
 
 ## Upstream build and remaining acceptance gates
 
-The tracked native toolchain uses Clang 22.1.8, Alix C headers, native libc++
-and GNU ELF linking with Alix's CRT/linker script. It rejects host libraries,
-dynamic interpreters and legacy Alix web-engine objects. The Rust configure
-patch validates the declared target JSON and actual compiler cfg, then retains
-Mozilla's genuine `std`/`println!` static-library probe and ELF-object checks.
-The native SpiderMonkey profile uses bundled zlib and leaves JIT/threading
-requirements enabled. Target-specific Rust dependencies still need their own
-Alix backends even though the standard-library probe succeeds.
+The native Clang driver uses Alix headers, CRT/linker script, LLVM
+libc++/libc++abi and a real native Rust standard library. The pinned upstream
+standalone SpiderMonkey build now passes its full default build and final link.
+The Alix static ELF check retains meaningful executable validation without
+requiring the dynamic table used on other platforms. There are no unresolved
+symbols or runtime interpreter. See [`ports/zen/README.md`](../ports/zen/README.md)
+for the patch manifest, build evidence and exact native execution boundary.
 
-The recorded `build/ports/zen/spidermonkey-configure.log` reaches
-`Configure complete!`. The latest completed build in
-`build/ports/zen/spidermonkey-build.log` passes the previous vendored getrandom
-and `atan2f`/`atan2l` gates: the native getrandom 0.3.3 backend and compatibility
-shim compile, and ICU progresses beyond libc++ complex. The real upstream
-Rust `libjsrust.a` now builds with LTO: its 52,486,052-byte archive contains ten
-native ELF64 x86-64 members. Rebuilding Alix's Rust standard library with embedded
-bitcode resolved the earlier `.llvmbc` error. Native `gettimeofday`, UTC calendar
-conversion, C/POSIX locale, timezone conversion/formatting, `strncat`, and C
-signal APIs are implemented. Native timezone and signal fixtures passed.
-The next actual build has compiled ICU's existing stdio data loader on Alix,
-preserving data-file access while file-backed VM remains unavailable. It has
-advanced beyond the previous missing time/signal headers and file-map compile
-errors. Locale/iostream, 16-bit wide strings and native `inttypes.h` now compile
-and have real guest acceptance. Native `pthread_rwlock_t` has also passed
-eight-CPU guest acceptance with recursive readers, queued writers and reader
-cohorts. The latest completed build clears that gate and the missing math
-constants, compiling JS builtins, Temporal, debugger and frontend sources. Its
-next reported error was `std::nearbyintf`; the pinned LLVM libc rounding helper
-now supplies the three native `nearbyint` entry points through Alix's hardware
-rounding-mode adapter. It passed 32,742 guest cases, including exception flags
-and x87 extended precision. The subsequent keep-going build cleared intgemm and
-compiled the explicit native Wasm signal-context bridge, then collected gaps
-in stdio, file/directory APIs, math, resource limits, signal-aware nonlocal jumps
-and process timing. Native `vprintf`, `perror`, `strdup`, file-type conversion
-and checked `MADV_NORMAL` now pass a guest fixture. A separate `libalix-math.a`
-reuses LLVM's sqrt/absolute-value/scaling code and passed another 39,861 native
-cases; C++ and Rust guests passed after the archive split. The subsequent
-8m46s keep-going build cleared those earlier errors and reached the remaining
-directory API, descriptor flag/duplication and `getrusage` compilation errors.
-Buffered streams/exit flushing, signal-aware
-jumps, real process uptime and the current `RLIMIT_AS` policy now have native
-guest acceptance. Native `readlink` now also passes protected-worker and user
-tests, and the upstream uptime branch compiles. Directory iteration now passes
-native eight-CPU acceptance: owned snapshots, refreshed rewind, long/UTF-8 names,
-exactly-once shared cursor reads and bounded handle admission. The actual engine
-compile subsequently cleared directory and `getrusage` errors, then stopped
-after 6m01s on terminal control (`termios.h`), child-process control (`sys/wait.h`)
-and descriptor flags/duplication. The subsequent 7m49s build clears the
-descriptor gap and produces the 437 MiB `libjs_static.a`, then stops on the two
-missing terminal/child-process headers. Shell session cwd isolation now passes
-native two-session tests, including relative paths after external owner cwd
-changes, session close and a subsequent eight-CPU TLS run. Registered actor
-owners and protected retirement keep session/capture state through actual CPU
-quiescence; partial unpublished thread/task allocation rollback remains a
-separate constructor limitation. Real `getrusage` accounting
-now passes native tests for CPU time and 128 induced faults, and its upstream
-compile check has passed. Descriptor-table inheritance has passed
-production host/sanitizer tests with shared descriptions, independent flags,
-CLOEXEC filtering and concurrent close/snapshot. The upstream runtime now routes
-files, sockets and stdio through private syscall 71 descriptors. Native tests
-passed eight-CPU shared offsets, flags/duplication, full-table failed-truncate
-integrity, 16 KiB HTTP and isolated shell capture. Standard C stdio/descriptor
-calls and upstream C++ runtime/narrow/wide streams also passed with exactly-once
-stdout. Native user-parent exec inheritance remains unverified. A complete
-SpiderMonkey executable is still pending. The earlier
-`build/ports/zen/gecko-configure.log` triplet rejection is historical, not the
-current blocker. See [`ports/zen/README.md`](../ports/zen/README.md) for detailed
-patch/compiler contracts and the latest build diagnostics.
+The complete C11 runtime includes the `nearbyint` family and full real/complex
+math implementation. These underlying C/math functions are dependencies of
+LLVM's C++ standard library, not supplied by adopting libc++ alone. The current
+runtime reuses pinned musl and FreeBSD sources. Native C++/math, abort-hook,
+streams, pthread/TLS, signal, VM and descriptor fixtures have separate acceptance.
 
-The following native step adds process-owned byte pipes on the existing event
-executor: eight CPUs passed 512 atomic records, bounded backpressure, unrelated
-progress with three idle readers, final-writer EOF and real SIGPIPE handling
-and termination. Non-TTY termios queries also passed native descriptor/error
-checks. Native libc now supplies path-component helpers. The child-status
-header is present, while native spawn/wait/exec remain unimplemented and the
-shell still requires actual compile/link/run acceptance. See
-[`kernel/pipes.md`](kernel/pipes.md) and
-[`kernel/termios.md`](kernel/termios.md).
+Native child launch and waiting now support `posix_spawn`/`posix_spawnp`, copied
+environment visible to constructors, ordered file actions, PATH search and
+signal attributes. Eight-CPU fixtures and host sanitizers pass. Upstream shell
+and Wasm-worker paths use these native interfaces instead of requiring fork/exec.
+A native `sh` command executable is still needed by `os.spawn`; `fork` and
+in-place `exec` remain unimplemented. See
+[`kernel/child_processes.md`](kernel/child_processes.md).
 
-The resulting 6m56s upstream build clears the missing termios/wait/libgen
-headers and rebuilds `libjs_static.a`. Its shell/editline compilation now
-reports path `stat`, `PATH_MAX`, `system`, `clock` and `putchar`. These are the
-next confirmed C library gaps; declaring child APIs does not implement them or
-establish that the shell links. Native pipe/terminal acceptance, the shared
-executor's TCP/capture regression, subsequent eight-CPU TLS and ordinary
-`make` all passed after the pipe integration.
+The initial real engine run loads and starts helper threads inside Alix, then
+exits with status 1 before its JS execution marker. The failure is module-loader
+path conversion: libc++ was selecting its 32-bit codecvt path despite the native
+16-bit wide ABI. The configuration correction passes the native conversion and
+C++ runtime tests; engine execution verification is pending. The test transfers a
+debug-stripped image whose load/TLS segments exactly match the upstream binary;
+its marker is encoded in the command and cannot pass through echo. The serial
+log is `build/test-out/spidermonkey-basic-qemu.log`. Build success is not engine
+execution acceptance, and neither establishes the full Zen browser.
 
 The remaining acceptance order is:
 
-1. Complete the actual standalone SpiderMonkey compile/link, then execute its
-   shell and upstream JS tests inside Alix, including GC/JIT and worker paths.
+1. Resolve standalone SpiderMonkey startup and execute its shell and upstream
+   JS tests inside Alix, including GC/JIT and worker paths.
    Standalone `JS_WITHOUT_NSPR` avoids requiring NSPR first. Passing the existing
    Alix JS interpreter or a runtime fixture does not satisfy this engine gate.
 2. Complete the OS interfaces demanded by Gecko, NSPR/NSS and Rust dependencies.
    The upstream runtime uses a private 256-slot table with owned descriptions,
    dup/shared offsets, imported stdio and protected blocking-I/O cleanup;
    installed legacy applications retain the original global table. Native
-   user-parent exec inheritance, file status flags, callback VFS nodes and
-   shell redirection remain acceptance gates. Connect real Rust
+   callback VFS nodes, file status flags and shell redirection remain acceptance
+   gates. Connect real Rust
    filesystem/descriptor backends. General userspace
    process creation, IPC, shared memory, poll/select, dynamic loading, and the
    required POSIX filesystem/network surface remain unfinished. Existing socket

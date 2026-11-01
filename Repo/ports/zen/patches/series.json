@@ -98,6 +98,44 @@
           "after": "8f0eb8d7409b3fac2a4a3fb2e14bb0b9506fdd4778bec49f1a48880c2931fc0d"
         }
       ]
+    },
+    {
+      "file": "0008-native-alix-spawn.patch",
+      "sha256": "f51ab8ada6e114b29ce847cd75bf7963adcaeff7419cf5715955d86caaf24ed3",
+      "files": [
+        {
+          "path": "js/src/shell/OSObject.cpp",
+          "before": "11a7ad998cf1a9d6d28d2c78bac158ae4b0fe745d47c43636ee83c1da709217f",
+          "after": "dff3e7e53ecdaa7527352b8bcdc6f76b284ed5fac5fea608f72b80995189336f"
+        },
+        {
+          "path": "js/src/shell/js.cpp",
+          "before": "0518e7849db0f91b52149589c612821928d18c49f936e8b0cc82f15dc9490edf",
+          "after": "17ed2aee689548ab9d0c0509074535ddc049425ba29280b353b7d8cc439eaf92"
+        }
+      ]
+    },
+    {
+      "file": "0009-validate-alix-static-elf.patch",
+      "sha256": "ce396be00361c4f7bc6dd273fbdb09e8722cdd2f4307bf409233d619f65afeb0",
+      "files": [
+        {
+          "path": "python/mozbuild/mozbuild/action/check_binary.py",
+          "before": "2bcb667c2652afe1e08d681d7a6acd75bb15889dc57ec3fd359e5ca8ef650983",
+          "after": "728219c5b44060d623ddd451ead9edd53042d9908859201339ff0b7352f49d73"
+        }
+      ]
+    },
+    {
+      "file": "0010-native-alix-mfbt-entropy.patch",
+      "sha256": "382dd1406759ce9680bc2a5042b302caedc5173c3395027b23514ccf7ab01759",
+      "files": [
+        {
+          "path": "mfbt/RandomNum.cpp",
+          "before": "6bd6ba572fb0f02ea77975d3e55cfedd4bbbd7e3b1271a1558388e83e72a9b6f",
+          "after": "64eeae895ba49a3b81f7429410d77af57901c97c7848279afc37e40e579800a9"
+        }
+      ]
     }
   ]
 }

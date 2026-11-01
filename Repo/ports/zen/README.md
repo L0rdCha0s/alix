@@ -64,6 +64,18 @@ modified engine tree.
   clocks. The native uptime fixture passes 1,024 samples across eight CPUs;
   this branch neither reads Linux `/proc` nor returns a placeholder uptime.
 
+- `0008-native-alix-spawn.patch` uses native POSIX spawn, copied environment
+  snapshots and ordered pipe descriptor actions for the shell and Wasm workers.
+  It preserves actual child PIDs, errors and waits. Alix-only failure diagnostics
+  identify silent shell startup failures without changing their decisions.
+- `0009-validate-alix-static-elf.patch` validates the native static executable
+  rather than requiring a dynamic table. It rejects dynamic loaders/tables,
+  allocated relocations, invalid or overlapping segments, writable executable
+  segments and an entry outside file-backed executable memory.
+- `0010-native-alix-mfbt-entropy.patch` fills mfbt random requests through native
+  `getentropy` in bounded chunks and propagates failure. It avoids assuming
+  Unix `/dev/urandom` exists and does not fabricate a random seed.
+
 ## Native compiler and link driver
 
 `toolchain/alix-clang` and `alix-clang++` use Clang with
@@ -117,67 +129,53 @@ objects or override target probes.
 
 ## Current authoritative build result
 
-The actual command passes target triplet recognition, native C/C++ compiler
-checks (Clang 22.1.8), target GNU BFD and host Apple linker checks, native atomic
-link checks, cross-binutils discovery, the real Alix Rust standard-library
-staticlib probe, pthread creation/name detection and cbindgen. Configuration
-completes successfully, with bundled target zlib. The actual build generates
-SpiderMonkey sources/headers and starts Rust Intl dependencies. Its latest
-completed build passes the `getpid`/`intptr_t`, native Rust entropy and ICU
-float/extended-math compilation gates. The real Rust stage completes LTO and
-produces `obj-js-alix/x86_64-unknown-alix/release/libjsrust.a` (52,486,052 bytes;
-all ten members verified as x86-64 ELF). ICU common and i18n now compile past
-the signal, stdio-loader, timezone and narrow-stream gates. Correct native
-system-header ordering preserves Mozilla's visibility wrappers. The latest
-C++ keep-going build passes the wide libc++, pthread read/write lock, X/Open
-constant and nearbyint gates, and compiles the actual Alix Wasm context bridge.
-Its latest completed run configures successfully, then exits 2 after 6m56s.
-That run cleared the earlier stdio, file-mode, readlink, directory, math,
-signal-jump, resource-accounting and timestamp compilation errors. The current
-compiler gaps are path `stat`, `PATH_MAX`, `system`, `clock` and `putchar`.
-That run clears descriptor flags/duplication and the missing termios/wait/libgen
-headers, and produces `js/src/build/libjs_static.a`; the shell has not linked or
-executed yet. Native spawn/wait/exec implementations remain a link/runtime gate.
-The math library, buffered stdio including exit flushing, signal-aware jumps,
-resource accounting/policy and process uptime have native fixture acceptance.
-Protected readlink and directory streams also pass in eight-CPU Alix guests;
-directory cursors and orphan-subtree retirement have host sanitizer coverage.
-The upstream runtime now uses syscall 71's private 256-slot table for files,
-sockets and directory streams. Kernel-launched stdio uses owned imports;
-standard C descriptor/errno/stdio calls and upstream C++ runtime/narrow/wide
-streams passed native eight-CPU guests, with stdout emitted exactly once.
-Table cloning/CLOEXEC filtering passed host sanitizer tests; native
-user-parent exec inheritance remains unverified. Existing base Alix targets
-retain their original global-FD ABI. Callback-backed VFS nodes, status flags,
-private shell redirection and child-process interfaces remain unfinished.
+The pinned upstream standalone SpiderMonkey shell now compiles and links
+successfully. Full `make -C ports/zen/upstream/obj-js-alix -j2` exits zero,
+including Rust, bundled ICU/zlib and the final native ELF validation. The actual
+`dist/bin/js` is a static x86-64 Alix executable with no unresolved symbols or
+runtime interpreter. `build/ports/zen/engine-native-entropy-build.log` records a
+completed full build. The math runtime includes `nearbyint`, `nearbyintf` and
+`nearbyintl`; these are no longer missing build functions. LLVM libc++ provides
+C++ headers and runtime facilities, while Alix's C/math library supplies the
+underlying C functions. The complete current math runtime uses pinned vendored
+musl and FreeBSD sources rather than the earlier small LLVM rounding adapter.
 
-Native pipes now pass eight-CPU acceptance, including 512 atomic records,
-4096-byte backpressure, independent progress with idle readers, final-writer
-EOF and caught/ignored/default SIGPIPE. Terminal queries correctly classify
-the current streams as non-TTYs and distinguish closed slots. The native
-`termios` implementation and `dirname`/`basename` are connected to the runtime;
-`sys/wait.h` establishes the encoded-status interface, but spawn/wait/exec
-implementations are still pending. The subsequent real engine build clears
-those missing headers and identifies the C library gaps listed above. See
-[`pipes.md`](../../docs/kernel/pipes.md) and
-[`termios.md`](../../docs/kernel/termios.md).
+`python3 tests/spidermonkey_qemu_test.py` builds the real shell and prepares a
+transfer artifact with debug data stripped. Every load/TLS segment and the
+entry point are verified identical to the original; hashes are recorded in
+`build/ports/zen/spidermonkey-native-image.json`. The guest test encodes its JS
+marker so command echo cannot satisfy acceptance and requires normal status 0.
+The initial eight-CPU run loaded the executable and started native helper threads,
+then exited with code 1 during module-loader path conversion. Native regression
+tests identified a libc++ configuration mismatch: the compiler used 16-bit
+`wchar_t` while codecvt selected its 32-bit implementation. The short-wchar patch
+now passes ASCII/Unicode conversion and the existing C++ runtime tests in Alix;
+the real engine is being rebuilt for execution verification. This is successful
+build/link acceptance, not JavaScript execution or Zen acceptance. Native serial evidence is
+`build/test-out/spidermonkey-basic-qemu.log`.
 
-The full latest outputs are `build/ports/zen/spidermonkey-configure.log` and
-`build/ports/zen/spidermonkey-build.log`. These are actual compiler diagnostics;
-the native inttypes and wide libc++ gates now pass in Alix. Native phase-fair
-pthread read/write locks pass both their eight-CPU fixture and the subsequent
-real engine compile. The pinned LLVM libc rounding adapter now supplies the
-nearbyint family and passes 32,742 native x87/SSE cases plus the subsequent
-real integer-GEMM compilation.
-The narrow C/POSIX stream profile already passes its eight-thread guest fixture,
-including 80-bit roundtrips. The real ICU
-`umapfile.o` now references fopen/fread/fseek/ftell and its allocation helpers,
-not mmap/stat. Kernel-generated fault signals now pass native preservation,
-nesting and rejection tests; the explicit Wasm context bridge is tracked above.
-File-backed VM remains native platform work. The Alix pthread facade
-implements the engine's creation, attributes, joining,
-detaching, mutex/condition and thread-ID interfaces; its exact supported scope
-and remaining limitations are documented in `docs/kernel/pthreads.md`.
+`--extended` additionally requires observed Ion JIT execution, rooted objects
+surviving eight GC cycles, a real Wasm memory-bounds trap and a worker exchanging
+data through shared Atomics. Those gates are separate from the basic script and
+must pass in the guest before claiming runtime acceptance.
+
+Native `posix_spawn`/`posix_spawnp` now pass environment visibility before main,
+ordered close/dup2/open actions, CLOEXEC ordering, self-dup, PATH lookup, signal
+attributes/inheritance and real error behavior in eight-CPU Alix. The existing
+child lifecycle fixture also passes user-parent inheritance, cwd/argv, pipe EOF
+before wait, status-copy rollback, eight competing waiters and parent-death
+cleanup. Environment snapshots and child stack encoding pass host sanitizers.
+See [`child_processes.md`](../../docs/kernel/child_processes.md).
+The upstream adaptation removes fork/exec from this static shell's link needs;
+`fork` and in-place `exec` have not been implemented. Its `os.spawn` command path
+still requires a native `sh` executable, which is not installed.
+
+Native math, C/C++ streams, signal-aware jumps, process uptime/accounting,
+protected readlink, directory streams, private descriptor inheritance, pipes,
+terminal classification, pthreads/TLS and anonymous VM have separate fixture
+acceptance. Existing base applications retain the legacy descriptor ABI. General
+file-backed/shared VM, callback VFS nodes, shell redirection, dynamic loading,
+POSIX network integration and Gecko's widget/compositor remain later gates.
 
 Nine offline tests exercise patch application, repeatability, new-file reversal,
 preservation of unrelated edits and rejection of unknown/partial/wrong-base
@@ -192,6 +190,6 @@ ET_EXEC, PT_TLS, no dynamic interpreter and no unresolved symbols. Its output is
 `build/user/alix_toolchain_test.elf`, with runtime marker
 `ALIX_TOOLCHAIN_TEST: PASS`; compilation/link checks do not execute it.
 
-The standalone shell has not yet linked or run. Gecko and the Zen UI are later
-native build/runtime gates, including the remaining libc, VM, filesystem,
-networking and graphics interfaces demanded by their real source.
+The standalone shell builds and starts but has not yet executed the test script.
+Gecko and the Zen UI are later native build/runtime gates, including the VM,
+filesystem, networking and graphics interfaces demanded by their real source.

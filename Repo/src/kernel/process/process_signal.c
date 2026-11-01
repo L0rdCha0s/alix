@@ -331,7 +331,7 @@ bool process_signal_fault(exception_frame_t *frame, uintptr_t fault)
     free(info);
     if (!caught)
     {
-        thread->signal_fault_status = 128 + number;
+        thread->signal_fault_number = number;
         signal_report_termination(thread, number, "fault", frame->vector, frame->cpu.rip);
     }
     cpu_restore_flags(flags);
@@ -365,7 +365,7 @@ void process_signal_syscall_return(syscall_frame_t *frame, uint64_t preempt_resu
         free(info);
         cpu_restore_flags(flags);
         /* An unmasked self-raise must not report success without delivery. */
-        process_exit(128 + ALIX_SIGSEGV);
+        process_exit_signal(ALIX_SIGSEGV);
     }
     lock = scheduler_lock_acquire("signal_pending_select");
     int number = signal_select_locked(thread, action, info);
@@ -384,7 +384,7 @@ void process_signal_syscall_return(syscall_frame_t *frame, uint64_t preempt_resu
     if (!okay)
     {
         cpu_restore_flags(flags);
-        process_exit(128 + (number ? number : ALIX_SIGSEGV));
+        process_exit_signal(number ? number : ALIX_SIGSEGV);
     }
     cpu_restore_flags(flags);
 }
@@ -639,7 +639,7 @@ int process_signal_raise(int number, uint64_t tid)
     if (terminate)
     {
         signal_report_termination(self, number, "raise", 0, 0);
-        process_exit(128 + number);
+        process_exit_signal(number);
     }
     if (!result && number)
         smp_broadcast_schedule_ipi(false);
@@ -724,11 +724,11 @@ int process_signal_kill(int32_t pid, int number)
     scheduler_lock_release(lock);
     bool self_target = process == self->process;
     if (terminate && !self_target)
-        (void)process_kill(process, 128 + number);
+        (void)process_kill_signal(process, number);
     process_release_reference(process);
     spinlock_preempt_enable();
     if (terminate && self_target)
-        process_exit(128 + number);
+        process_exit_signal(number);
     if (number)
         smp_broadcast_schedule_ipi(false);
     return 0;

@@ -19,8 +19,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Declarations establish the ABI; native spawn/wait implementation is pending.
- * Linking a caller still requires that implementation, never a success stub. */
+/* Native child registry: positive PID or -1, with optional WNOHANG. Process
+ * groups and stopped/continued-job reporting remain unsupported. */
 pid_t wait(int *status);
 pid_t waitpid(pid_t pid, int *status, int options);
 #ifdef __cplusplus

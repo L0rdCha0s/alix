@@ -65,6 +65,7 @@ typedef struct
 static libc_env_entry_t *g_env_entries = NULL;
 static size_t g_env_count = 0;
 static size_t g_env_capacity = 0;
+static alix_mutex_t g_env_mutex;
 
 static int libc_env_find(const char *name)
 {
@@ -1390,7 +1391,7 @@ int rand(void)
     return (int)((next >> 16) & 0x7FFFu);
 }
 
-char *getenv(const char *name)
+static char *libc_getenv_unlocked(const char *name)
 {
     if (!name || name[0] == '\0' || name[0] == '=')
     {
@@ -1402,6 +1403,14 @@ char *getenv(const char *name)
         return NULL;
     }
     return g_env_entries[index].value;
+}
+
+char *getenv(const char *name)
+{
+    alix_mutex_lock(&g_env_mutex);
+    char *value = libc_getenv_unlocked(name);
+    alix_mutex_unlock(&g_env_mutex);
+    return value;
 }
 
 uint32_t getuid(void)
@@ -1734,7 +1743,7 @@ bool alix_ensure_dir_path(const char *path)
     return true;
 }
 
-int setenv(const char *name, const char *value, int overwrite)
+static int libc_setenv_unlocked(const char *name, const char *value, int overwrite)
 {
     if (!name || name[0] == '\0' || strchr(name, '='))
     {
@@ -1811,7 +1820,15 @@ int mkdir(const char *path, uint32_t mode)
     return 0;
 }
 
-int unsetenv(const char *name)
+int setenv(const char *name, const char *value, int overwrite)
+{
+    alix_mutex_lock(&g_env_mutex);
+    int result = libc_setenv_unlocked(name, value, overwrite);
+    alix_mutex_unlock(&g_env_mutex);
+    return result;
+}
+
+static int libc_unsetenv_unlocked(const char *name)
 {
     if (!name || name[0] == '\0' || strchr(name, '='))
     {
@@ -1832,6 +1849,58 @@ int unsetenv(const char *name)
     if (g_env_count > 0)
     {
         g_env_count--;
+    }
+    return 0;
+}
+
+int unsetenv(const char *name)
+{
+    alix_mutex_lock(&g_env_mutex);
+    int result = libc_unsetenv_unlocked(name);
+    alix_mutex_unlock(&g_env_mutex);
+    return result;
+}
+
+void alix_environment_free(char **environment)
+{
+    if (!environment) return;
+    for (size_t index = 0; environment[index]; ++index) free(environment[index]);
+    free(environment);
+}
+
+char **alix_environment_copy(void)
+{
+    alix_mutex_lock(&g_env_mutex);
+    char **copy = calloc(g_env_count + 1, sizeof(*copy));
+    if (copy)
+        for (size_t index = 0; index < g_env_count; ++index)
+        {
+            size_t name = strlen(g_env_entries[index].name), value = strlen(g_env_entries[index].value);
+            if (name > SIZE_MAX - value - 2 || !(copy[index] = malloc(name + value + 2)))
+            { alix_environment_free(copy); copy = NULL; break; }
+            memcpy(copy[index], g_env_entries[index].name, name);
+            copy[index][name] = '=';
+            memcpy(copy[index] + name + 1, g_env_entries[index].value, value + 1);
+        }
+    alix_mutex_unlock(&g_env_mutex);
+    if (!copy) errno = ENOMEM;
+    return copy;
+}
+
+int __alix_environment_initialize(char **environment)
+{
+    if (!environment) return 0;
+    for (size_t index = 0; environment[index]; ++index)
+    {
+        const char *separator = strchr(environment[index], '=');
+        if (!separator || separator == environment[index]) continue;
+        size_t bytes = (size_t)(separator - environment[index]);
+        char *name = malloc(bytes + 1);
+        if (!name) return -1;
+        memcpy(name, environment[index], bytes); name[bytes] = 0;
+        int result = setenv(name, separator + 1, 0);
+        free(name);
+        if (result) return result;
     }
     return 0;
 }
@@ -2860,6 +2929,7 @@ FILE *freopen(const char *path, const char *mode, FILE *stream)
     stream->fd = -1;
     stream->access_flags = 0;
     stream->pushback_pending = false;
+    stream->pushback_length = 0;
     stream->read_position = stream->read_end = stream->write_length = 0;
     stream->error = stream->eof = stream->orientation = 0;
     stream->io_started = false;
@@ -2898,6 +2968,10 @@ int fclose(FILE *stream)
     stream->fd = -1;
     stream->access_flags = 0;
     stream->pushback_pending = false;
+    stream->pushback_length = 0;
+    if (stream->pushback_buffer) free(stream->pushback_buffer);
+    stream->pushback_buffer = NULL;
+    stream->pushback_capacity = 0;
     if (stream->buffer) free(stream->buffer);
     stream->buffer = NULL;
     stream->buffer_capacity = stream->read_position = stream->read_end = stream->write_length = 0;
@@ -2938,7 +3012,9 @@ static int64_t file_lseek_unlocked(FILE *stream, int64_t offset, int whence)
 static int file_sync_pushback_unlocked(FILE *stream)
 {
     size_t unread = stream->read_end - stream->read_position;
-    if (stream->pushback_pending && __builtin_add_overflow(unread, (size_t)1, &unread))
+    if (stream->pushback_pending &&
+        (__builtin_add_overflow(unread, stream->pushback_length, &unread) ||
+         __builtin_add_overflow(unread, (size_t)1, &unread)))
     { errno = EOVERFLOW; stream->error = 1; return EOF; }
     if (unread && (unread > INT64_MAX || file_lseek_unlocked(stream, -(int64_t)unread, SEEK_CUR) < 0))
     {
@@ -2948,6 +3024,7 @@ static int file_sync_pushback_unlocked(FILE *stream)
     }
     stream->read_position = stream->read_end = 0;
     stream->pushback_pending = false;
+    stream->pushback_length = 0;
     return 0;
 }
 
@@ -2975,10 +3052,12 @@ size_t __alix_stdio_read_unlocked(FILE *stream, void *ptr, size_t total, bool *f
     if (file_flush_output_unlocked(stream) != 0) { *failed = true; return 0; }
     size_t done = 0;
     unsigned char *destination = ptr;
-    if (stream->pushback_pending && total)
+    while (stream->pushback_pending && done < total)
     {
         destination[done++] = stream->pushback;
-        stream->pushback_pending = false;
+        if (stream->pushback_length)
+            stream->pushback = stream->pushback_buffer[--stream->pushback_length];
+        else stream->pushback_pending = false;
     }
     while (done < total)
     {
@@ -3065,6 +3144,7 @@ size_t __alix_stdio_write_unlocked(FILE *stream, const void *ptr, size_t total)
     {
         stream->read_position = stream->read_end = 0;
         stream->pushback_pending = false;
+        stream->pushback_length = 0;
     }
     else if (file_sync_pushback_unlocked(stream) != 0) return 0;
     if (stream->buffering == _IONBF) return file_write_raw_unlocked(stream, ptr, total);
@@ -3158,13 +3238,16 @@ static int file_seek_unlocked(FILE *stream, int64_t offset, int whence)
     if (whence == SEEK_CUR)
     {
         size_t unread = stream->read_end - stream->read_position;
-        if ((stream->pushback_pending && __builtin_add_overflow(unread, (size_t)1, &unread)) ||
+        if ((stream->pushback_pending &&
+             (__builtin_add_overflow(unread, stream->pushback_length, &unread) ||
+              __builtin_add_overflow(unread, (size_t)1, &unread))) ||
             unread > INT64_MAX || __builtin_sub_overflow(offset, (int64_t)unread, &offset))
         { errno = EOVERFLOW; return -1; }
     }
     if (file_lseek_unlocked(stream, offset, whence) < 0) return -1;
     stream->eof = 0;
     stream->pushback_pending = false;
+    stream->pushback_length = 0;
     stream->read_position = stream->read_end = 0;
     return 0;
 }
@@ -3175,7 +3258,9 @@ static int64_t file_tell_unlocked(FILE *stream)
     int64_t position = file_lseek_unlocked(stream, 0, stream->append && stream->write_length ? SEEK_END : SEEK_CUR);
     if (position < 0) return -1;
     size_t unread = stream->read_end - stream->read_position;
-    if ((stream->pushback_pending && __builtin_add_overflow(unread, (size_t)1, &unread)) || unread > INT64_MAX ||
+    if ((stream->pushback_pending &&
+         (__builtin_add_overflow(unread, stream->pushback_length, &unread) ||
+          __builtin_add_overflow(unread, (size_t)1, &unread))) || unread > INT64_MAX ||
         position < (int64_t)unread)
     { errno = EINVAL; return -1; }
     position -= (int64_t)unread;
@@ -3276,16 +3361,29 @@ int ungetc(int ch, FILE *stream)
 
 int __alix_stdio_pushback_unlocked(FILE *stream, unsigned char ch)
 {
-    int result = EOF;
-    if (stream->fd < 0 || !(stream->access_flags & SYSCALL_OPEN_READ)) errno = EBADF;
-    else if (!stream->pushback_pending)
+    if (stream->fd < 0 || !(stream->access_flags & SYSCALL_OPEN_READ))
+    { errno = EBADF; return EOF; }
+    if (stream->pushback_pending)
     {
-        stream->pushback = (unsigned char)ch;
-        stream->pushback_pending = true;
-        stream->eof = 0;
-        result = stream->pushback;
+        if (stream->pushback_length == stream->pushback_capacity)
+        {
+            if (stream->pushback_capacity > SIZE_MAX / 2)
+            { errno = ENOMEM; return EOF; }
+            size_t capacity = stream->pushback_capacity ? stream->pushback_capacity * 2 : 16;
+            unsigned char *buffer = malloc(capacity);
+            if (!buffer) { errno = ENOMEM; return EOF; }
+            if (stream->pushback_length)
+                memcpy(buffer, stream->pushback_buffer, stream->pushback_length);
+            if (stream->pushback_buffer) free(stream->pushback_buffer);
+            stream->pushback_buffer = buffer;
+            stream->pushback_capacity = capacity;
+        }
+        stream->pushback_buffer[stream->pushback_length++] = stream->pushback;
     }
-    return result;
+    stream->pushback = ch;
+    stream->pushback_pending = true;
+    stream->eof = 0;
+    return ch;
 }
 
 char *fgets(char *s, int size, FILE *stream)
@@ -4219,6 +4317,11 @@ void _Exit(int status)
     sys_exit(status);
 }
 
+/* Mozilla deliberately defines its own abort hook. Keep ordinary Alix libc's
+ * definition strong; only the upstream application profile permits that hook. */
+#ifdef ALIX_UPSTREAM_ABORT_HOOK
+__attribute__((weak))
+#endif
 void abort(void)
 {
     sigset_t set;

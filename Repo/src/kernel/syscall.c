@@ -7,6 +7,7 @@
 #include "fd.h"
 #include "io_vfs_service.h"
 #include "io_user_file.h"
+#include "io_process.h"
 #include "heap.h"
 #include "vfs.h"
 #include "libc.h"
@@ -1131,6 +1132,9 @@ uint64_t syscall_dispatch(syscall_frame_t *frame, uint64_t vector)
         case SYSCALL_EXIT:
             process_exit((int)frame->rdi);
             return 0;
+        case SYSCALL_PROCESS:
+            result = io_process_dispatch((uint32_t)frame->rdi, frame->rsi, frame->rdx, frame->r10);
+            break;
         case SYSCALL_WRITE:
             result = syscall_do_write(frame->rdi,
                                       (const void *)frame->rsi,

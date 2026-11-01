@@ -183,7 +183,8 @@ static void pushback_and_position(void) {
     native_FILE *stream=open_stream("r+","abc\ndef",true); model_file_t *file=model_file(stream->fd);
     CHECK(native_fgetc(stream)=='a' && native_ftell(stream)==1);
     CHECK(native_ungetc('X',stream)=='X' && native_ftell(stream)==0 && file->position==1);
-    CHECK(native_ungetc('Y',stream)==EOF && native_ungetc(EOF,stream)==EOF);
+    CHECK(native_ungetc('Y',stream)=='Y' && native_ungetc(EOF,stream)==EOF);
+    CHECK(native_fgetc(stream)=='Y');
     unsigned calls=file->read_calls;
     CHECK(native_fgetc(stream)=='X' && file->read_calls==calls && native_ftell(stream)==1);
     CHECK(native_ungetc(0x1ff,stream)==255 && native_fgetc(stream)==255);
@@ -203,6 +204,44 @@ static void pushback_and_position(void) {
     CHECK(native_fseek(stream,0,SEEK_SET)==0 && native_ungetc('Z',stream)=='Z');
     CHECK(native_ftell(stream)==-1 && test_errno==EINVAL && stream->pushback_pending);
     CHECK(native_fgetc(stream)=='Z' && native_fgetc(stream)=='Q');
+    CHECK(native_fclose(stream)==0);
+}
+static void multiple_pushback(void) {
+    native_FILE *stream=open_stream("r+","abcdef",true); model_file_t *file=model_file(stream->fd);
+    unsigned char bytes[16];
+    CHECK(native_fread(bytes,1,3,stream)==3 && !memcmp(bytes,"abc",3));
+    CHECK(native_ungetc('c',stream)=='c' && native_ungetc('b',stream)=='b' && native_ungetc('a',stream)=='a');
+    CHECK(native_ftell(stream)==0 && file->position==3);
+    unsigned calls=file->read_calls;
+    CHECK(native_fread(bytes,1,3,stream)==3 && !memcmp(bytes,"abc",3) && file->read_calls==calls);
+    CHECK(native_fgetc(stream)=='d');
+    CHECK(native_ungetc('d',stream)=='d' && native_ungetc('c',stream)=='c' && native_ungetc('b',stream)=='b');
+    file->seek_error=EIO;
+    CHECK(native_fseek(stream,0,SEEK_CUR)==-1 && stream->pushback_length==2);
+    file->seek_error=0;
+    CHECK(native_fseek(stream,1,SEEK_CUR)==0 && native_fgetc(stream)=='c');
+    CHECK(native_ungetc('c',stream)=='c' && native_ungetc('b',stream)=='b' && native_ungetc('a',stream)=='a');
+    CHECK(native_fflush(NULL)==0 && native_ftell(stream)==0);
+    CHECK(native_fflush(stream)==0 && !stream->pushback_pending && !stream->pushback_length && file->position==0);
+    for(unsigned i=0;i<1000;++i) CHECK(native_ungetc(i&255,stream)==(int)(i&255));
+    CHECK(native_fread(bytes,2,3,stream)==3);
+    for(unsigned i=0;i<6;++i) CHECK(bytes[i]==((999-i)&255));
+    for(unsigned i=994;i>0;--i) CHECK(native_fgetc(stream)==(int)((i-1)&255));
+    CHECK(!stream->pushback_pending && !stream->pushback_length && native_fgetc(stream)=='a');
+    CHECK(native_fclose(stream)==0);
+
+    stream=open_stream("r","x",false); file=model_file(stream->fd);
+    fail_file_allocation=true;
+    CHECK(native_ungetc('A',stream)=='A' && fail_file_allocation);
+    CHECK(native_ungetc('B',stream)==EOF && test_errno==ENOMEM && !native_ferror(stream));
+    CHECK(!stream->pushback_length && native_fgetc(stream)=='A');
+    for(unsigned i=0;i<17;++i) CHECK(native_ungetc(i,stream)==(int)i);
+    unsigned char *owned=stream->pushback_buffer;
+    fail_file_allocation=true;
+    CHECK(native_ungetc('Z',stream)==EOF && test_errno==ENOMEM && stream->pushback_buffer==owned &&
+          stream->pushback_length==16 && !native_ferror(stream));
+    for(unsigned i=17;i>0;--i) CHECK(native_fgetc(stream)==(int)i-1);
+    CHECK(!file->read_calls && native_fgetc(stream)=='x');
     CHECK(native_fclose(stream)==0);
 }
 static void nonseekable_and_recovery(void) {
@@ -336,7 +375,7 @@ static void concurrent_streams(void) {
     CHECK(native_fclose(stream)==0); free(workers); free(seen); free(content);
 }
 int main(void) {
-    pushback_and_position(); nonseekable_and_recovery(); reads_errors_and_overflow(); line_and_write_contracts(); concurrent_streams();
+    pushback_and_position(); multiple_pushback(); nonseekable_and_recovery(); reads_errors_and_overflow(); line_and_write_contracts(); concurrent_streams();
     CHECK(model_file_allocations==0 && !held_stream);
     for (unsigned i=0;i<64;++i) if (files[i]) { CHECK(!files[i]->opened); free(files[i]->data); free(files[i]); }
     puts("production stdio pushback, positioning, partial items, errors and concurrent call serialization passed");

@@ -1,9 +1,11 @@
+#include <codecvt>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <locale>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "wctype.h"
 #include "wchar.h"
@@ -33,6 +35,54 @@ static unsigned long character_mask(wint_t value)
 int main()
 {
     CHECK(sizeof(wchar_t) == 2, "native wchar ABI");
+    // codecvt's implementation must consume native 16-bit elements, including
+    // when two adjacent ASCII code units would form an invalid UTF-32 value.
+    std::codecvt_utf8<wchar_t> ucs2;
+    const std::wstring path = L"/home/root/Alix";
+    std::vector<char> encoded(path.size() * 3 + 2, '!');
+    const wchar_t *wide_next = nullptr;
+    char *narrow_next = nullptr;
+    std::mbstate_t conversion{};
+    auto converted = ucs2.out(conversion, path.data(), path.data() + path.size(), wide_next,
+                              encoded.data() + 1, encoded.data() + encoded.size() - 1, narrow_next);
+    CHECK(converted == std::codecvt_base::ok && wide_next == path.data() + path.size() &&
+          std::string(encoded.data() + 1, narrow_next) == "/home/root/Alix" &&
+          encoded.front() == '!' && encoded.back() == '!', "16-bit codecvt ASCII path");
+    const std::wstring unicode{L'A', static_cast<wchar_t>(0xe9), static_cast<wchar_t>(0x20ac)};
+    conversion = {};
+    converted = ucs2.out(conversion, unicode.data(), unicode.data() + unicode.size(), wide_next,
+                          encoded.data() + 1, encoded.data() + encoded.size() - 1, narrow_next);
+    const std::string utf8 = "A\xc3\xa9\xe2\x82\xac";
+    CHECK(converted == std::codecvt_base::ok && wide_next == unicode.data() + unicode.size() &&
+          std::string(encoded.data() + 1, narrow_next) == utf8, "16-bit codecvt UTF-8 encode");
+    std::vector<wchar_t> decoded(unicode.size() + 2, static_cast<wchar_t>(0x5555));
+    const char *input_next = nullptr;
+    wchar_t *output_next = nullptr;
+    conversion = {};
+    converted = ucs2.in(conversion, utf8.data(), utf8.data() + utf8.size(), input_next,
+                         decoded.data() + 1, decoded.data() + decoded.size() - 1, output_next);
+    CHECK(converted == std::codecvt_base::ok && input_next == utf8.data() + utf8.size() &&
+          output_next == decoded.data() + decoded.size() - 1 &&
+          std::wstring(decoded.data() + 1, output_next) == unicode &&
+          decoded.front() == 0x5555 && decoded.back() == 0x5555, "16-bit codecvt UTF-8 decode bounds");
+    conversion = {};
+    converted = ucs2.out(conversion, unicode.data() + 2, unicode.data() + 3, wide_next,
+                          encoded.data() + 1, encoded.data() + 3, narrow_next);
+    CHECK(converted == std::codecvt_base::partial && wide_next == unicode.data() + 2 &&
+          narrow_next == encoded.data() + 1, "16-bit codecvt partial output");
+    const std::wstring unpaired(1, static_cast<wchar_t>(0xd800));
+    conversion = {};
+    CHECK(ucs2.out(conversion, unpaired.data(), unpaired.data() + 1, wide_next,
+                    encoded.data() + 1, encoded.data() + encoded.size() - 1, narrow_next) ==
+          std::codecvt_base::error, "16-bit codecvt rejects surrogate");
+    std::codecvt_utf8_utf16<wchar_t> utf16_converter;
+    const std::wstring pair{static_cast<wchar_t>(0xd83d), static_cast<wchar_t>(0xde00)};
+    conversion = {};
+    converted = utf16_converter.out(conversion, pair.data(), pair.data() + pair.size(), wide_next,
+                                     encoded.data() + 1, encoded.data() + encoded.size() - 1, narrow_next);
+    CHECK(converted == std::codecvt_base::ok && wide_next == pair.data() + 2 &&
+          std::string(encoded.data() + 1, narrow_next) == "\xf0\x9f\x98\x80",
+          "16-bit codecvt UTF-16 surrogate pair");
     const std::locale classic = std::locale::classic();
     const std::locale named("POSIX");
     const auto& classic_type = std::use_facet<std::ctype<wchar_t>>(classic);
@@ -83,6 +133,6 @@ int main()
     CHECK(std::stold(extended.str()) == precise, "wide 80-bit roundtrip");
     std::wcout << L"CXX_WIDE_TEST: wcout PASS" << std::endl;
     CHECK(!std::wcout.fail(), "native wide standard output");
-    serial_printf("CXX_WIDE_TEST: PASS wchar_bits=16 masks=133120 extended80=1\n");
+    serial_printf("CXX_WIDE_TEST: PASS wchar_bits=16 masks=133120 extended80=1 codecvt16=1\n");
     return 0;
 }

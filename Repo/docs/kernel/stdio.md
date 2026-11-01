@@ -1,7 +1,7 @@
 # Native stdio streams
 
-Native `FILE` objects own an `alix_mutex_t`, access flags and one byte of
-pushback. The mutex uses the existing native blocking mutex/futex implementation.
+Native `FILE` objects own an `alix_mutex_t`, access flags and a pushback stack.
+The mutex uses the existing native blocking mutex/futex implementation.
 Each stream operation holds it for its complete state and I/O operation;
 `fgets` owns the stream for an entire line and `fwrite` for the whole requested
 record, including short underlying writes. Private unlocked helpers allow
@@ -12,24 +12,28 @@ The application must prevent concurrent use while it closes and destroys a
 its allocation. Sharing a live stream is supported; sharing another thread's
 stack storage as an asynchronous callback argument is not.
 
-`ungetc` provides one byte of pushback, converts it to `unsigned char` and clears
-EOF on success. A second push without consumption fails, as does pushing EOF;
-neither failure consumes the existing byte. `fread`, `fgetc`, `getc`, `fgets`
-and `getchar` consume the pushed byte before another descriptor read. `clearerr`
+`ungetc` converts input to `unsigned char`, pushes it in reverse consumption
+order and clears EOF on success. The first byte requires no allocation; further
+pushes grow a heap-owned buffer under the stream mutex. Allocation failure
+returns EOF with ENOMEM while preserving existing data and indicators. Pushing
+EOF also preserves state. This supports the upstream shell's three-byte UTF-8
+BOM lookahead without discarding the start of ordinary scripts.
+`fread`, `fgetc`, `getc`, `fgets` and `getchar` consume all pushed bytes before
+another descriptor read. `clearerr`
 clears indicators and preserves pushback. These rules follow the
 [POSIX ungetc specification](https://man7.org/linux/man-pages/man3/ungetc.3p.html).
 
-For seekable streams, `ftell` and `fgetpos` account for the pending byte without
+For seekable streams, `ftell` and `fgetpos` account for all pending bytes without
 moving the underlying descriptor. Relative seeks compensate for pushback;
 successful positioning clears EOF and pushback. A failed seek preserves them.
 `fsetpos` restores the byte position saved by `fgetpos`; wide-stream conversion
 state is not implemented. Pushback at offset zero remains readable, but position
-queries fail with `EINVAL` until the byte is consumed or positioning succeeds.
+queries fail with `EINVAL` until enough bytes are consumed or positioning succeeds.
 The specification leaves that particular position unspecified.
 
 Explicit `fflush(stream)` reconciles pending input to the logical stream
 position before discarding its pushback. If the descriptor cannot seek, the
-flush fails and preserves the byte. `fflush(NULL)` is an output-only operation
+flush fails and preserves the pending bytes. `fflush(NULL)` is an output-only operation
 and leaves input pushback alone. Streams start unbuffered. `setvbuf` selects
 unbuffered, full or line buffering; `setbuf` selects full/unbuffered mode.
 The positioning behavior follows the

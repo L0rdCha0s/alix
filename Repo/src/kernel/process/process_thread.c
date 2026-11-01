@@ -102,10 +102,10 @@ void scheduler_wait_for_boot_ready(void)
     }
 }
 
-process_t *process_finalize_new_process(process_t *proc,
+static process_t *process_finalize_internal(process_t *proc,
                                         thread_t *thread,
                                         int stdout_fd,
-                                        process_t *parent)
+                                        process_t *parent, uint64_t parent_pid, bool explicit_parent)
 {
     if (!proc || !thread)
     {
@@ -140,8 +140,9 @@ process_t *process_finalize_new_process(process_t *proc,
     spinlock_unlock(&g_process_lock);
     cpu_restore_flags(flags);
 
-    process_t *actual_parent = proc->kernel_service ? NULL : (parent ? parent : current_process_local());
-    if (actual_parent)
+    process_t *actual_parent = proc->kernel_service || explicit_parent ? NULL : (parent ? parent : current_process_local());
+    if (explicit_parent) process_attach_child_pid(parent_pid, proc);
+    else if (actual_parent)
     {
         process_attach_child(actual_parent, proc);
     }
@@ -150,6 +151,16 @@ process_t *process_finalize_new_process(process_t *proc,
 
     enqueue_thread(thread);
     return proc;
+}
+
+process_t *process_finalize_new_process(process_t *proc, thread_t *thread, int stdout_fd, process_t *parent)
+{
+    return process_finalize_internal(proc, thread, stdout_fd, parent, 0, false);
+}
+
+process_t *process_finalize_launched_process(process_t *proc, thread_t *thread, uint64_t parent_pid)
+{
+    return process_finalize_internal(proc, thread, -1, NULL, parent_pid, true);
 }
 
 /*

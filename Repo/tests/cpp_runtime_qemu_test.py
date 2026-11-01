@@ -116,7 +116,7 @@ def verify_signal_termination(phase, binary, expected):
             raise RuntimeError("expected invalid-opcode site is not UD2 in the actual ELF")
 
 
-def capture_guest_failure(qmp, staging, log_path):
+def capture_guest_failure(qmp, staging, log_path, user_binary=None):
     """Retain stopped-guest evidence before the disposable VM is destroyed."""
     if qmp is None:
         return
@@ -134,6 +134,18 @@ def capture_guest_failure(qmp, staging, log_path):
             port = reservation.getsockname()[1]
         qmp.execute("human-monitor-command", {"command-line": f"gdbserver tcp:127.0.0.1:{port}"})
         script = staging / "failure.gdb"
+        user_globals = ""
+        if user_binary is not None:
+            for symbol in ("g_heap_lock", "g_env_mutex", "g_file_registry_lock"):
+                try:
+                    address = native_elf_symbol(user_binary, symbol)
+                except RuntimeError:
+                    continue
+                user_globals += (
+                    f"   if $alix_r->user_base <= {address} && {address} - $alix_r->user_base < $alix_r->mapped_size\n"
+                    f'    printf "USER_GLOBAL {symbol} vaddr=0x%llX value=%u\\n", (unsigned long long){address}, '
+                    f"*(unsigned int *)(0xffff800000000000 + $alix_r->phys_base + {address} - $alix_r->user_base)\n"
+                    "   end\n")
         failure_elf = log_path.with_suffix(".kernel.elf")
         shutil.copyfile(ROOT / "build/alix.elf", failure_elf)
         script.write_text(f"""set pagination off
@@ -147,14 +159,39 @@ p g_switch_out_threads
 p g_run_queues
 p g_scheduler_lock
 p g_sleep_queue_lock
+if g_vfs_service != 0
+ p *g_vfs_service
+ p *g_vfs_service->queue
+ set $alix_worker = 0
+ while $alix_worker < g_vfs_service->worker_count
+  p g_vfs_service->workers[$alix_worker]
+  set $alix_worker = $alix_worker + 1
+ end
+end
 set $alix_t = g_thread_registry_head
 set $alix_count = 0
+set $alix_user_count = 0
 while $alix_t != 0 && $alix_count < 256
  printf "THREAD %s state=%d cpu=%u queue=%d rqcpu=%u sleep=%d until=%llu depth=%u wake=%d transition=%d exited=%d\\n", $alix_t->name, $alix_t->state, $alix_t->running_cpu, $alix_t->in_run_queue, $alix_t->run_queue_cpu, $alix_t->sleeping, $alix_t->sleep_until_tick, $alix_t->preempt_disable_depth, $alix_t->wake_pending, $alix_t->in_transition, $alix_t->exited
  printf "  context=%p preempt=%d affinity=%d:%u lastcpu=%u pending_destroy=%d\\n", $alix_t->context, $alix_t->preempt_pending, $alix_t->affinity_enabled, $alix_t->affinity_cpu, $alix_t->last_cpu_index, $alix_t->pending_destroy
  if $alix_t->state == 1 && $alix_t->running_cpu == 4294967295 && !$alix_t->is_idle && !$alix_t->in_transition && $alix_t->context != 0
   printf "UNASSIGNED_RUNNING_CONTEXT\\n"
   x/20gx $alix_t->context
+ end
+ if $alix_t->is_user && $alix_user_count < 8
+  printf "USER_SAVED pid=%llu tid=%llu resume=0x%llX context=%p\\n", $alix_t->owner_pid, $alix_t->tid, $alix_t->tls.preempt_resume_rip, $alix_t->context
+  if $alix_t->io_request != 0
+   p *$alix_t->io_request
+  end
+  if $alix_t->context != 0
+   x/192gx $alix_t->context
+  end
+  set $alix_r = $alix_t->process->user_regions
+  while $alix_r != 0
+   printf "USER_REGION vaddr=0x%llX phys=0x%llX size=0x%llX\\n", $alix_r->user_base, $alix_r->phys_base, $alix_r->mapped_size
+{user_globals}   set $alix_r = $alix_r->next
+  end
+  set $alix_user_count = $alix_user_count + 1
  end
  set $alix_t = $alix_t->registry_next
  set $alix_count = $alix_count + 1
@@ -172,7 +209,9 @@ quit
 def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                    arguments=(), expected_fault=None, tcg_cpu=None,
                    forbidden_markers=(), download_timeout_seconds=10, boot_markers=(),
-                   expected_exception=None, expected_signal_termination=None, pcap_path=None):
+                   expected_exception=None, expected_signal_termination=None, pcap_path=None,
+                   fail_on_missing_markers_at_exit=False, expected_wait_status=None,
+                   input_files=()):
     """Run a real target ELF, requiring its markers and successful shell return."""
     binary = ROOT / "build/user" / binary_name
     if not binary.is_file():
@@ -191,6 +230,10 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             served = staging / "http"
             served.mkdir()
             shutil.copyfile(binary, served / "test.elf")
+            for name, source in input_files:
+                if name == "test.elf" or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) is None:
+                    raise RuntimeError("invalid native fixture input name")
+                shutil.copyfile(source, served / name)
             # Serve only this target binary over loopback.
             server = ThreadingHTTPServer(("127.0.0.1", 0), partial(
                 QuietHandler, directory=str(served)))
@@ -270,6 +313,11 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             offset = len(harness.read_log())
             command(f"wget http://10.0.2.2:{port}/test.elf /tmp/test.elf")
             harness.wait_for(runner, "test download", lambda log: command_complete(log, offset), download_timeout_seconds)
+            for name, _ in input_files:
+                offset = len(harness.read_log())
+                command(f"wget http://10.0.2.2:{port}/{name} /tmp/{name}")
+                harness.wait_for(runner, "fixture input download",
+                    lambda log: command_complete(log, offset), download_timeout_seconds)
             offset = len(harness.read_log())
             launch = "runelf /tmp/test.elf"
             if arguments:
@@ -277,13 +325,19 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             command(launch)
             log = harness.wait_for(runner, label,
                 lambda log: (all(marker in log[offset:] for marker in markers) or
-                             ": FAIL" in log[offset:]) and command_complete(log, offset),
+                             ": FAIL" in log[offset:] or fail_on_missing_markers_at_exit)
+                            and command_complete(log, offset),
                 max(10, timeout_seconds - 20))
             phase = log[offset:]
             if not all(marker in phase for marker in markers) or ": FAIL" in phase:
                 raise RuntimeError(f"{label} reported failure")
             if any(marker in phase for marker in forbidden_markers):
                 raise RuntimeError(f"{label} continued past its expected termination point")
+            if expected_wait_status is not None:
+                statuses = re.findall(
+                    r"\[proc\] destroy[^\n]* name=/tmp/test\.elf [^\n]* wait_status=(\d+)", phase)
+                if statuses != [str(expected_wait_status)]:
+                    raise RuntimeError(f"{label} did not exit with wait status {expected_wait_status}: {statuses}")
             positions = [phase.index(marker) for marker in markers]
             if positions != sorted(positions):
                 raise RuntimeError(f"{label} markers are out of order")
@@ -342,7 +396,7 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             print(f"Serial evidence: {LOG}")
             return 0
         except Exception:
-            capture_guest_failure(qmp, staging, LOG)
+            capture_guest_failure(qmp, staging, LOG, binary)
             raise
         finally:
             if qmp is not None:

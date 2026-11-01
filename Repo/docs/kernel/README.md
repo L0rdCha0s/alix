@@ -7,6 +7,7 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 - Boot + early init: `docs/kernel/boot.md`
 - Native C11 libc, math and threads: `docs/kernel/libc.md`
 - Processes/threads + scheduler: `docs/kernel/process.md`
+- Native user child launch and waiting: `docs/kernel/child_processes.md`
 - Memory (heap, paging, user mappings): `docs/kernel/memory.md`
 - VFS/filesystems/mounts: `docs/kernel/vfs.md`
 - AlixFS2 backend details: `docs/kernel/alixfs.md`

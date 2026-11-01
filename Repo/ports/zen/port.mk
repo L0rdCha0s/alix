@@ -2,9 +2,14 @@
 # The upstream runtime uses owned descriptors. Keep the original syscall object
 # for existing Alix C targets/binaries; never mix the two FD namespaces in one ELF.
 ZEN_OWNED_SYSCALL := $(USER_OBJDIR)/lib/syscall-owned.o
+ZEN_UPSTREAM_LIBC := $(USER_OBJDIR)/lib/libc-upstream.o
 ZEN_FCNTL_OBJECT := $(USER_OBJDIR)/lib/fcntl.o
 ZEN_TERMIOS_OBJECT := $(USER_OBJDIR)/lib/termios.o
-ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o,$(USER_COMMON_OBJECTS)) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT)
+ZEN_USER_RUNTIME_OBJECTS := $(filter-out $(USER_OBJDIR)/lib/syscall.o $(USER_OBJDIR)/lib/libc.o,$(USER_COMMON_OBJECTS)) $(ZEN_UPSTREAM_LIBC) $(ZEN_OWNED_SYSCALL) $(ZEN_FCNTL_OBJECT) $(ZEN_TERMIOS_OBJECT)
+
+$(ZEN_UPSTREAM_LIBC): user/lib/libc.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -DALIX_UPSTREAM_ABORT_HOOK=1 -c -o $@ $<
 
 $(ZEN_OWNED_SYSCALL): user/lib/syscall.c
 	@mkdir -p $(@D)
@@ -14,7 +19,7 @@ $(ZEN_FCNTL_OBJECT): user/lib/fcntl.c
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 
--include $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d) $(ZEN_TERMIOS_OBJECT:.o=.d)
+-include $(ZEN_UPSTREAM_LIBC:.o=.d) $(ZEN_OWNED_SYSCALL:.o=.d) $(ZEN_FCNTL_OBJECT:.o=.d) $(ZEN_TERMIOS_OBJECT:.o=.d)
 
 $(USER_OBJDIR)/tests/terminal_test.o: tests/terminal_test.c
 	@mkdir -p $(@D)
@@ -50,6 +55,35 @@ $(USER_OBJDIR)/stat_clock_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/t
 .PHONY: zen-stat-clock-qemu-test
 zen-stat-clock-qemu-test:
 	python3 tests/stat_clock_qemu_test.py
+
+$(USER_OBJDIR)/tests/process_wait_status_test.o: tests/process_wait_status_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+
+$(USER_OBJDIR)/process_wait_status_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/process_wait_status_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/process_wait_status_test.o
+
+.PHONY: zen-wait-status-qemu-test
+zen-wait-status-qemu-test:
+	python3 tests/process_wait_status_qemu_test.py
+
+$(USER_OBJDIR)/tests/process_spawn_test.o: tests/process_spawn_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/process_spawn_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/process_spawn_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/process_spawn_test.o
+.PHONY: zen-process-spawn-qemu-test
+zen-process-spawn-qemu-test:
+	python3 tests/process_spawn_qemu_test.py
+
+$(USER_OBJDIR)/tests/posix_spawn_test.o: tests/posix_spawn_test.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c -o $@ $<
+$(USER_OBJDIR)/posix_spawn_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/posix_spawn_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/posix_spawn_test.o
+.PHONY: zen-posix-spawn-qemu-test
+zen-posix-spawn-qemu-test:
+	python3 tests/posix_spawn_qemu_test.py
 # QEMU exposes build/ as a FAT disk; never put Mozilla/Zen source trees there.
 ZEN_SOURCE_DIR ?= $(abspath ports/zen/upstream/desktop)
 ZEN_ENGINE_DIR ?= $(abspath ports/zen/upstream/firefox-159.0)
@@ -292,6 +326,10 @@ zen-patch-test:
 
 zen-toolchain-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 tests/zen_toolchain_test.py
+
+.PHONY: zen-toolchain-qemu-test
+zen-toolchain-qemu-test:
+	python3 tests/zen_toolchain_qemu_test.py
 
 zen-host-tools:
 	python3 ports/zen/build_host_tools.py

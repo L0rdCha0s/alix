@@ -59,6 +59,13 @@ streams in separate eight-CPU guests. Callback-backed VFS nodes, shell `>`
 redirection through private descriptors and general child-process APIs remain
 separate gates.
 
+Syscall 72 (`PROCESS`) adds argv launch and child waiting through protected
+loader/readiness services. Its child registry is separate from public FDs.
+`waitpid` supports positive PIDs, any-child selection and WNOHANG; owned claims
+allow retry after bad status copyout and prevent duplicate reaping. The current
+argv launcher uses an empty environment. See
+[child_processes.md](child_processes.md) for lifetime and native acceptance.
+
 ## ABI / Entry (`src/arch/x86/syscall_entry.S`)
 
 User code executes `int 0x80`. The IDT routes vector 0x80 to `syscall_entry`, which:

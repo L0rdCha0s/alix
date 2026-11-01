@@ -18,6 +18,7 @@
 #include "vfs.h"
 #include "io_vfs_service.h"
 #include "io_user_file.h"
+#include "io_process.h"
 #include "interrupts.h"
 #include "timer.h"
 #include "hwinfo.h"
@@ -668,6 +669,11 @@ static void warmup_run_sequence(void)
     if (!io_user_file_services_start())
     {
         serial_printf("owned user file services startup failed");
+        for (;;) process_sleep_ms(1000);
+    }
+    if (!io_process_services_start())
+    {
+        serial_printf("native process services startup failed");
         for (;;) process_sleep_ms(1000);
     }
 #if ENABLE_USB

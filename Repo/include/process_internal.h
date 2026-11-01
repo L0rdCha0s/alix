@@ -153,6 +153,7 @@ typedef struct user_thread_bootstrap
     uintptr_t stack_top;
     uint64_t rdi;
     uint64_t rsi;
+    uint64_t rdx;
 } user_thread_bootstrap_t;
 
 typedef enum
@@ -337,7 +338,7 @@ struct thread
     uint64_t signal_sequence;
     uint64_t signal_jump_epoch;
     uint32_t signal_depth;
-    int signal_fault_status;
+    int signal_fault_number;
     bool signal_onstack,signal_sleeping,signal_sleep_interrupted;
     wait_queue_t signal_wait_queue;
 };
@@ -365,6 +366,8 @@ struct process
     alix_sigset_t signal_pending;
     alix_siginfo_t signal_info[ALIX_SIGNAL_COUNT];
     int exit_status;
+    uint32_t wait_status; /* Immutable after first terminal transition; POSIX encoding. */
+    fd_table_t *child_processes; /* Private waitable-child descriptions; never user FDs. */
     struct process *next;
     int stdout_fd;
     uint32_t uid;
@@ -407,8 +410,12 @@ struct process
     char **arg_values;
     char *arg_storage;
     size_t arg_storage_size;
+    size_t env_count;
+    char **env_values;
+    char *env_storage;
     size_t user_argc;
     uintptr_t user_argv_ptr;
+    uintptr_t user_envp_ptr;
     wait_queue_t wait_queue;
     thread_priority_t default_priority;
     thread_priority_t default_priority_override;
@@ -729,6 +736,25 @@ process_t *process_finalize_new_process(process_t *proc,
                                         thread_t *thread,
                                         int stdout_fd,
                                         process_t *parent);
+process_t *process_finalize_launched_process(process_t *proc, thread_t *thread, uint64_t parent_pid);
+typedef struct
+{
+    fd_description_t *cwd;
+    fd_table_t *files;
+    uint32_t uid, gid;
+    uint64_t parent_pid;
+    const char *const *environment;
+    size_t environment_count;
+    uint64_t signal_mask, ignored_signals;
+} process_launch_context_t;
+/* Persistent protected constructor. Context refs transfer into the new child;
+ * remaining refs on failure still belong to the caller. The watch owns the
+ * child before publication, including an immediately exiting main thread. */
+process_t *process_create_user_elf_prepared(const char *name, const uint8_t *image, size_t size,
+                                            process_launch_context_t *context,
+                                            const char *const *argv, size_t argc,
+                                            process_creation_watch_t *watch);
+void process_attach_child_pid(uint64_t parent_pid, process_t *child);
 bool process_setup_dummy_user_space(process_t *process);
 bool process_setup_basic_user_memory(process_t *process);
 typedef struct process_tls_allocation
@@ -744,6 +770,8 @@ bool process_store_args(process_t *process,
                         size_t argc);
 bool process_prepare_stack_with_args(process_t *process);
 void process_clear_args(process_t *process);
+bool process_store_environment(process_t *process, const char *const *environment, size_t count);
+void process_clear_environment(process_t *process);
 void process_free_user_regions(process_t *process);
 bool process_heap_release_from(process_t *process, uintptr_t virt_start);
 void process_reap_retired_memory(void);
@@ -862,6 +890,11 @@ void thread_registry_add(thread_t *thread);
 void procfs_register_process_priority(process_t *process);
 void procfs_unregister_process(process_t *process);
 void process_destroy_marked(process_t *process);
+void process_exit_signal(int number) __attribute__((noreturn));
+bool process_kill_signal(process_t *process, int number);
+/* Caller owns a retained process; output is written only after terminal state
+ * and actual CPU/queue/transition quiescence are observed together. */
+int process_wait_status_snapshot(process_t *process, uint32_t *output);
 bool process_prepare_inherited_context(process_t *process, process_t *parent, bool parentless);
 bool process_prepare_user_fds(process_t *process, process_t *parent, int stdout_fd);
 void process_release_context(process_t *process);

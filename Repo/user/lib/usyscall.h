@@ -16,6 +16,7 @@ int sys_close(int fd);
 int sys_open(const char *path, uint64_t flags);
 int64_t sys_file_io(uint32_t operation, uint64_t first, uint64_t second, uint64_t third, uint64_t fourth);
 int64_t sys_directory(uint32_t operation, int handle, void *argument, size_t bytes);
+int64_t sys_process(uint32_t operation, uint64_t first, uint64_t second, uint64_t third);
 void *sys_sbrk(int64_t increment);
 void sys_exit(int status) __attribute__((__noreturn__));
 int sys_ui_create(const user_atk_window_desc_t *desc);

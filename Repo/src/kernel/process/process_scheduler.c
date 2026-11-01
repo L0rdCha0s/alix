@@ -2000,6 +2000,25 @@ void process_attach_child(process_t *parent, process_t *child)
     cpu_restore_flags(flags);
 }
 
+void process_attach_child_pid(uint64_t parent_pid, process_t *child)
+{
+    if (!child) return;
+    uint64_t flags = cpu_save_flags();
+    cpu_cli();
+    spinlock_lock(&g_process_lock);
+    process_t *parent = parent_pid ? g_process_list : NULL;
+    while (parent && parent->pid != parent_pid) parent = parent->next;
+    if (parent && (parent->state == PROCESS_STATE_ZOMBIE ||
+        __atomic_load_n(&parent->lifetime_state, __ATOMIC_ACQUIRE) != PROCESS_LIFETIME_ALIVE)) parent = NULL;
+    child->parent = parent;
+    child->sibling_prev = NULL;
+    child->sibling_next = parent ? parent->first_child : NULL;
+    if (child->sibling_next) child->sibling_next->sibling_prev = child;
+    if (parent) parent->first_child = child;
+    spinlock_unlock(&g_process_lock);
+    cpu_restore_flags(flags);
+}
+
 void process_detach_child(process_t *child)
 {
     if (!child)
@@ -2800,7 +2819,7 @@ void process_preempt_hook(void)
 static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
                                                            uintptr_t user_stack_top,
                                                            uint64_t rdi_value,
-                                                           uint64_t rsi_value)
+                                                           uint64_t rsi_value, uint64_t rdx_value)
 {
     uintptr_t stack_value = user_stack_top;
     uintptr_t entry_value = entry;
@@ -2813,7 +2832,6 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
         "mov %[ds], %%rax\n\t"
         "mov %%ax, %%ds\n\t"
         "mov %%ax, %%es\n\t"
-        "xor %%rdx, %%rdx\n\t"
         "xor %%rcx, %%rcx\n\t"
         "xor %%r8, %%r8\n\t"
         "xor %%r9, %%r9\n\t"
@@ -2829,8 +2847,6 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
         "push %%rax\n\t"
         "mov %[entry], %%rax\n\t"
         "push %%rax\n\t"
-        "mov %[arg0], %%rdi\n\t"
-        "mov %[arg1], %%rsi\n\t"
         "iretq\n\t"
         :
         : [ds]"r"(data_sel),
@@ -2839,9 +2855,9 @@ static __attribute__((noreturn)) void process_jump_to_user(uintptr_t entry,
           [rflags]"r"(rflags),
           [cs]"r"(cs),
           [entry]"m"(entry_value),
-          [arg0]"r"(rdi_value),
-          [arg1]"r"(rsi_value)
-        : "rax", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
+          [arg0]"D"(rdi_value),
+          [arg1]"S"(rsi_value), [arg2]"d"(rdx_value)
+        : "rax", "rcx", "r8", "r9", "r10", "r11", "memory");
     __builtin_unreachable();
 }
 
@@ -2863,7 +2879,7 @@ void user_thread_entry(void *arg)
     {
         fatal("user thread bootstrap missing entry/stack");
     }
-    process_jump_to_user(params.entry, params.stack_top, params.rdi, params.rsi);
+    process_jump_to_user(params.entry, params.stack_top, params.rdi, params.rsi, params.rdx);
 }
 
 /*
@@ -3062,9 +3078,10 @@ bool process_handle_exception(interrupt_frame_t *frame,
                       (unsigned long long)frame->rip,
                       (unsigned long long)frame->cs,
                       (unsigned)smp_current_cpu_index());
-        int status = thread->signal_fault_status ? thread->signal_fault_status : -1;
-        thread->signal_fault_status = 0;
-        process_exit(status);
+        int number = thread->signal_fault_number;
+        thread->signal_fault_number = 0;
+        if (number) process_exit_signal(number);
+        process_exit(-1);
     }
 
     process_trigger_fatal_fault(thread, frame, reason, error_code, has_address, address);

@@ -18,18 +18,30 @@ space; the counter remains saturated. Allocation failures may leave gaps.
 `getpid()` returns the owning process ID, which is the same for all its threads.
 The scheduler's idle process retains its special internal ID zero.
 
-The native `sys/wait.h` header defines the child-status encoding, but public
-wait/spawn/exec implementations are still pending. They must preserve the
-termination cause: current kernel `exit_status` alone stores normal exit 141
-and SIGPIPE termination as the same value 141. Decoding all values above 128
-as signals would misreport normal exits. A waitable child needs retained
-ownership before publication, a separately recorded exit/signal reason, one
-successful reaper, and cleanup for killed waiters and orphaned children.
+Native `alix_spawn_argv`, `wait` and `waitpid` now use an owned child registry;
+see [child_processes.md](child_processes.md). The argv interface launches an
+empty environment. POSIX environment/file-action/attribute integration and
+fork/exec adaptation remain pending. Processes record an
+immutable `wait_status` separately from the existing kernel join result:
+normal exit 141 is `141 << 8`, while SIGPIPE termination is 13. Default raises,
+self/remote signal kills and synchronous faults record their signal cause;
+later termination attempts cannot overwrite the first terminal transition.
+Existing kernel join callers retain their original numeric exit status.
+`process_wait_status_snapshot` requires retained process ownership and returns
+EAGAIN without changing output until the process is terminal and actually
+quiescent on CPUs/queues/transitions. Retained ownership before publication,
+one successful reaper, killed-waiter cleanup and live-orphan retirement now have
+native acceptance.
 Spawn file actions must see CLOEXEC source descriptors before final exec
 filtering; cloning with filtering before a requested dup2 action would discard
 its source too early. Heap-owned launch snapshots must capture cwd,
 credentials, arguments/environment and the descriptor table without retaining
 a caller stack or borrowed process pointer across worker waits.
+
+Production host/ASan/UBSan tests cover immutable status and quiescence gating
+alongside I/O cancellation. Separate eight-CPU guests verify normal exit 141,
+raised SIGPIPE, self-kill SIGTERM and an exact-symbol hardware UD2/SIGILL fault.
+The native records are in `build/test-out/wait-status-{normal,raise,kill,fault}-qemu.log`.
 
 `getrusage(RUSAGE_SELF)` uses native syscall 69 to snapshot CPU and fault
 accounting. Timer samples classify the interrupted context as user/system and

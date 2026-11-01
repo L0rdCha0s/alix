@@ -181,9 +181,9 @@ static void stream_contracts(void) {
     CHECK(native_fgetwc(stream)=='a' && native_fwide(stream,0)>0);
     CHECK(native_fwide(stream,-1)>0 && test_errno==77);
     CHECK(native_ungetwc('X',stream)=='X' && native_ftell(stream)==0);
-    CHECK(native_ungetwc('Y',stream)==NATIVE_WEOF);
+    CHECK(native_ungetwc('Y',stream)=='Y');
     CHECK(native_fgetc(stream)==EOF && test_errno==EINVAL && file->position==1);
-    native_clearerr(stream); CHECK(native_fgetwc(stream)=='X');
+    native_clearerr(stream); CHECK(native_fgetwc(stream)=='Y' && native_fgetwc(stream)=='X');
     native_wchar_t line[16]; CHECK(native_fgetws(line,16,stream)==line); expect_ascii(line,"b\n");
     CHECK(native_fgetwc(stream)==NATIVE_WEOF && test_errno==EILSEQ && native_ferror(stream) && !native_feof(stream));
     native_clearerr(stream); CHECK(native_fgetwc(stream)=='z' && native_fgetwc(stream)==NATIVE_WEOF && native_feof(stream));

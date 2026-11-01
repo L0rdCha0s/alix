@@ -1,0 +1,26 @@
+--- a/mfbt/RandomNum.cpp
++++ b/mfbt/RandomNum.cpp
+@@ -89,7 +89,22 @@
+   arc4random_buf(aBuffer, aLength);
+   return true;
+ 
+-#elif defined(XP_UNIX)  // defined(USE_ARC4RANDOM)
++#elif defined(__ALIX__)
++
++  // Native getentropy fills bounded requests from the kernel entropy API.
++  // Propagate hardware/permission failures rather than inventing a seed.
++  auto* bytes = static_cast<unsigned char*>(aBuffer);
++  while (aLength) {
++    size_t amount = aLength < 256 ? aLength : 256;
++    if (getentropy(bytes, amount) != 0) {
++      return false;
++    }
++    bytes += amount;
++    aLength -= amount;
++  }
++  return true;
++
++#elif defined(XP_UNIX)  // defined(__ALIX__)
+ 
+ #  if defined(__linux__)
+ 

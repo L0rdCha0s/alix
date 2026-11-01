@@ -264,6 +264,7 @@ process_t *allocate_process(const char *name, bool is_user)
         proc->name[0] = '\0';
     }
     proc->exit_status = 0;
+    proc->wait_status = 0;
     proc->main_thread = NULL;
     proc->current_thread = NULL;
     spinlock_init(&proc->threads_lock);
@@ -314,6 +315,8 @@ process_t *allocate_process(const char *name, bool is_user)
 
 void process_free_user_regions(process_t *process)
 {
+    process_clear_args(process);
+    process_clear_environment(process);
     if (process)
     {
         process_clear_user_tls_template(process);
@@ -1175,6 +1178,40 @@ void process_clear_args(process_t *process)
     process->arg_count = 0;
 }
 
+void process_clear_environment(process_t *process)
+{
+    if (!process) return;
+    free(process->env_values); free(process->env_storage);
+    process->env_values = NULL; process->env_storage = NULL; process->env_count = 0;
+}
+
+bool process_store_environment(process_t *process, const char *const *environment, size_t count)
+{
+    if (!process || (count && !environment) || count > SIZE_MAX / sizeof(char *)) return false;
+    process_clear_environment(process);
+    if (!count) return true;
+    size_t bytes = 0;
+    for (size_t index = 0; index < count; ++index)
+    {
+        if (!environment[index]) return false;
+        size_t length = strlen(environment[index]) + 1;
+        if (length > SIZE_MAX - bytes) return false;
+        bytes += length;
+    }
+    char **values = malloc(count * sizeof(*values));
+    char *storage = values ? malloc(bytes) : NULL;
+    if (!storage) { free(values); return false; }
+    size_t position = 0;
+    for (size_t index = 0; index < count; ++index)
+    {
+        size_t length = strlen(environment[index]) + 1;
+        values[index] = storage + position;
+        memcpy(values[index], environment[index], length); position += length;
+    }
+    process->env_values = values; process->env_storage = storage; process->env_count = count;
+    return true;
+}
+
 bool process_store_args(process_t *process,
                         const char *const *argv,
                         size_t argc)
@@ -1778,6 +1815,37 @@ void process_dump_user_stack(process_t *process,
     }
 }
 
+static bool process_prepare_environment_stack(process_t *process, uintptr_t *stack)
+{
+    process->user_envp_ptr = 0;
+    size_t count = process->env_count;
+    if (!count) return true;
+    if (count >= SIZE_MAX / sizeof(uintptr_t)) return false;
+    uintptr_t *pointers = calloc(count + 1, sizeof(*pointers));
+    if (!pointers) return false;
+    uintptr_t bottom = process->user_stack_top - process->user_stack_size;
+    bool ok = true;
+    for (size_t index = 0; index < count; ++index)
+    {
+        size_t length = strlen(process->env_values[index]) + 1;
+        if (*stack < bottom || length > *stack - bottom) { ok = false; break; }
+        *stack -= length; pointers[index] = *stack;
+        if (!process_stack_ensure_range(process, *stack, length) ||
+            !process_stack_copy_to(process, *stack, process->env_values[index], length)) { ok = false; break; }
+    }
+    size_t bytes = (count + 1) * sizeof(*pointers);
+    *stack = align_down_uintptr(*stack, 16ULL);
+    if (*stack < bottom || bytes > *stack - bottom) ok = false;
+    if (ok)
+    {
+        *stack -= bytes;
+        ok = process_stack_ensure_range(process, *stack, bytes) && process_stack_copy_to(process, *stack, pointers, bytes);
+        if (ok) process->user_envp_ptr = *stack;
+    }
+    free(pointers);
+    return ok;
+}
+
 bool process_prepare_stack_with_args(process_t *process)
 {
     if (!process || !process->user_stack_pages || process->user_stack_page_count == 0 ||
@@ -1793,6 +1861,7 @@ bool process_prepare_stack_with_args(process_t *process)
     char **argv = process->arg_values;
 
     uintptr_t sp = stack_top;
+    if (!process_prepare_environment_stack(process, &sp)) return false;
     uintptr_t *arg_ptrs = NULL;
 
     if (argc > 0)
@@ -1881,6 +1950,7 @@ bool process_prepare_stack_with_args(process_t *process)
         free(arg_ptrs);
     }
     process_clear_args(process);
+    process_clear_environment(process);
     return true;
 }
 

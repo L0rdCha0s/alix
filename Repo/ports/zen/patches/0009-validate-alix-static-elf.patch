@@ -1,0 +1,78 @@
+--- a/python/mozbuild/mozbuild/action/check_binary.py
++++ b/python/mozbuild/mozbuild/action/check_binary.py
+@@ -7,6 +7,7 @@
+ import os
+ import re
+ import subprocess
++import struct
+ import sys
+ 
+ import buildconfig
+@@ -144,9 +145,67 @@
+         raise RuntimeError("\n".join(error))
+ 
+ 
++def check_alix_static_elf(binary):
++    # Alix currently loads fixed-address ELF64 executables, without a dynamic
++    # linker. Accepting an absent dynamic table requires proving that format,
++    # rather than treating arbitrary missing readelf output as success.
++    with open(binary, "rb") as stream:
++        length = os.fstat(stream.fileno()).st_size
++
++        def read_at(offset, size):
++            if offset < 0 or offset > length or size > length - offset:
++                raise RuntimeError("Truncated native Alix ELF")
++            stream.seek(offset)
++            data = stream.read(size)
++            if len(data) != size:
++                raise RuntimeError("Truncated native Alix ELF")
++            return data
++
++        header = struct.unpack("<16sHHIQQQIHHHHHH", read_at(0, 64))
++        ident, kind, machine, version, entry, phoff, shoff = header[:7]
++        if ident[:7] != b"\x7fELF\x02\x01\x01" or kind != 2 or machine != 62 or version != 1:
++            raise RuntimeError("Expected native x86-64 static ET_EXEC")
++        if header[8] != 64 or header[9] != 56 or not 0 < header[10] <= 1024:
++            raise RuntimeError("Invalid native ELF program headers")
++        loads = []
++        executable_entry = False
++        for index in range(header[10]):
++            ph = struct.unpack("<IIQQQQQQ", read_at(phoff + index * 56, 56))
++            tag, flags, offset, address, physical, file_size, memory_size, alignment = ph
++            if tag in (2, 3):
++                raise RuntimeError("Alix has no dynamic loader or runtime relocations")
++            if tag != 1:
++                continue
++            if file_size > memory_size or memory_size > (1 << 64) - address:
++                raise RuntimeError("Invalid native ELF load size")
++            if offset > length or file_size > length - offset:
++                raise RuntimeError("Truncated native ELF load")
++            if flags & 3 == 3:
++                raise RuntimeError("Writable executable native ELF load")
++            if alignment and (alignment & (alignment - 1) or address % alignment != offset % alignment):
++                raise RuntimeError("Invalid native ELF load alignment")
++            end = address + memory_size
++            if any(address < other_end and other < end for other, other_end in loads):
++                raise RuntimeError("Overlapping native ELF loads")
++            loads.append((address, end))
++            executable_entry |= bool(flags & 1 and address <= entry < address + file_size)
++        if len(loads) < 2 or not executable_entry:
++            raise RuntimeError("Missing native ELF loads or executable entry")
++        if header[12]:
++            if header[11] != 64 or not shoff:
++                raise RuntimeError("Invalid native ELF section headers")
++            for index in range(header[12]):
++                section = struct.unpack("<IIQQQQIIQQ", read_at(shoff + index * 64, 64))
++                if section[1] == 6 or (section[1] in (4, 9) and section[2] & 2):
++                    raise RuntimeError("Native ELF contains dynamic/runtime relocations")
++
++
+ def check_textrel(binary):
+     if get_type(binary) != ELF:
+         raise Skip()
++    if PLATFORM == "Alix":
++        check_alix_static_elf(binary)
++        return
+     try:
+         for tag, value in at_least_one(iter_readelf_dynamic(binary)):
+             if tag == "TEXTREL" or (tag == "FLAGS" and "TEXTREL" in value):

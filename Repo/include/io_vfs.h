@@ -49,5 +49,11 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
                      fd_retirement_queue_t *retirement);
 /* Caller holds a description reference; regular-file backend identity only. */
 bool io_vfs_description_valid(const fd_description_t *description);
+struct vfs_node;
+/* Protected worker, retained cwd; returns one owned deferred regular-file
+ * description. No caller process, stack or user address is retained. */
+int io_vfs_open_owned(struct vfs_node *cwd, const char *path, uint32_t flags,
+                       uint32_t uid, uint32_t gid, fd_retirement_queue_t *retirement,
+                       fd_description_t **output);
 
 #endif

@@ -40,7 +40,7 @@ typedef struct thread {
 } thread_t;
 struct process {
     uint64_t pid,cr3; paging_space_t address_space; char name[32]; uint32_t magic,lifetime_state,join_waiters,uid,gid;
-    bool is_user,kernel_service,quiescent,context_ready; int state,exit_status,stdout_fd;
+    bool is_user,kernel_service,quiescent,context_ready; int state,exit_status,stdout_fd; uint32_t wait_status;
     thread_t *main_thread,*current_thread; process_t *parent,*next; vfs_node_t *cwd; wait_queue_t wait_queue;
 };
 static process_t creator,*current,*g_process_list,*g_idle_process;
@@ -77,6 +77,7 @@ static void procfs_register_process_priority(process_t *process) { CHECK(process
 static void process_attach_child(process_t *parent,process_t *process) {
     CHECK(parent && !process->kernel_service); process->parent=parent;
 }
+static void process_attach_child_pid(uint64_t pid,process_t *process) { (void)pid;(void)process;CHECK(!"unexpected explicit user parent"); }
 static void paging_destroy_space(paging_space_t *space) { CHECK(space->cr3==0x1000); ++page_destroys; }
 static process_t *allocate_process(const char *name,bool user) {
     if(fail_process) { fail_process=false; return NULL; }
@@ -126,8 +127,9 @@ static void enqueue_thread(thread_t *thread) {
         process_reap_orphans(); /* Must not destroy an exited service before factory returns. */
     }
 }
-static void process_mark_terminated(process_t *process,int status) {
+static void process_mark_terminated(process_t *process,int status,uint32_t wait_status) {
     ++marks; process->state=PROCESS_STATE_ZOMBIE; process->exit_status=status;
+    process->wait_status=wait_status;
     process->main_thread->state=THREAD_STATE_ZOMBIE; process->main_thread->exited=true;
 }
 static void smp_broadcast_schedule_ipi(bool exclude_self) { (void)exclude_self; }
@@ -141,7 +143,7 @@ static void wait_queue_wait(wait_queue_t *queue,wait_queue_predicate_t predicate
     uint64_t flags=scheduler_lock_acquire("host_join");
     bool ready=predicate(context); scheduler_lock_release(flags);
     if(!ready) {
-        process_mark_terminated(process,19); process->quiescent=true; process_reap_orphans();
+        process_mark_terminated(process,19,19u<<8); process->quiescent=true; process_reap_orphans();
         CHECK(process->join_waiters==2); flags=scheduler_lock_acquire("host_join_done");
         CHECK(predicate(context)); scheduler_lock_release(flags);
     }
@@ -151,7 +153,9 @@ static process_t *process_retain_first_child(process_t *process) { (void)process
 static int process_join(process_t *process,int *status) { (void)process; (void)status; CHECK(!"unexpected child join"); return -1; }
 process_t *process_finalize_new_process(process_t *,thread_t *,int,process_t *);
 void process_exit(int) __attribute__((noreturn));
+static void process_exit_with_status(int,uint32_t) __attribute__((noreturn));
 '''
+    code += function_definition(thread, "static process_t *process_finalize_internal(") + "\n"
     code += function_definition(thread, "process_t *process_finalize_new_process(") + "\n"
     for signature in ("static process_t *process_create_kernel_internal(", "process_t *process_create_kernel(",
                       "process_t *process_create_kernel_with_parent(", "process_t *process_create_kernel_service("):
@@ -159,7 +163,8 @@ void process_exit(int) __attribute__((noreturn));
     code += function_definition(scheduler, "void process_release_reference(") + "\n"
     for signature in ("static void process_destroy_retained(", "static bool process_join_ready(",
                       "static bool process_join_begin(", "static void process_join_end(",
-                      "int process_join_kernel_service(", "void process_exit(", "bool process_kill(", "bool process_is_zombie(", "void process_kill_tree("):
+                      "int process_join_kernel_service(", "static void process_exit_with_status(", "void process_exit(",
+                      "static bool process_kill_with_status(", "bool process_kill(", "bool process_is_zombie(", "void process_kill_tree("):
         code += function_definition(api, signature) + "\n"
     code += function_definition(scheduler, "static void process_reap_orphans(") + r'''
 static void body(void *argument) { CHECK(argument); ++*(unsigned *)argument; }

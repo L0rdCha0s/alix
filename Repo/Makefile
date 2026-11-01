@@ -70,6 +70,7 @@ C_SOURCES += $(KERNEL_DIR)/io/tcp.c
 C_SOURCES += $(KERNEL_DIR)/io/pipe.c
 C_SOURCES += $(KERNEL_DIR)/io/stream.c
 C_SOURCES += $(KERNEL_DIR)/io/user_file.c
+C_SOURCES += $(KERNEL_DIR)/io/process.c
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJDIR)/%.o,$(C_SOURCES))
 C_OBJECTS += $(DL_SCRIPT_OBJ)
@@ -125,6 +126,8 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/pthread.c \
 	$(USER_DIR)/lib/pthread_rwlock.c \
 	$(USER_DIR)/lib/process_posix.c \
+	$(USER_DIR)/lib/process_spawn.c \
+	$(USER_DIR)/lib/spawn.c \
 	$(USER_DIR)/lib/filesystem_posix.c \
 	$(USER_DIR)/lib/libgen.c \
 	$(USER_DIR)/lib/dirent.c \

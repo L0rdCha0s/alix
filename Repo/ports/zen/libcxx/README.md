@@ -77,7 +77,14 @@ output. That separate descriptor/output-routing issue remains under repair.
 The wide profile now compiles with the native 16-bit wchar ABI. Its C/POSIX
 multibyte conversion accepts the installed ASCII encoding; it does not pretend
 that a UTF-8 locale is installed. Wide strings can independently store UTF-16
-code units. The locale adapter translates libc++ class-mask bits through native
+code units. The Alix configuration selects libc++'s existing short-wchar
+conversion path in both modern and C++03 headers. Merely passing `-fshort-wchar`
+does not select that implementation: without this configuration, codecvt reads
+pairs of 16-bit elements as 32-bit characters and rejects ordinary ASCII paths.
+The native wide fixture reproduces that failure before the patch and passes
+afterward, covering ASCII paths, UTF-8/UCS-2 conversion, bounds, partial output,
+invalid surrogates and UTF-16 surrogate pairs (`codecvt16=1`).
+The locale adapter translates libc++ class-mask bits through native
 predicates instead of treating them as opaque `wctype_t` descriptors.
 `zen-cxx-wide-test` builds `build/user/cxx_wide_test.elf` to test all class-mask
 combinations, WEOF/non-ASCII cases, wide strings/streams and 80-bit roundtrips.

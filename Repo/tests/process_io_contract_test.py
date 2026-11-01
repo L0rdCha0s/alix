@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run staged process I/O glue with scheduler claim/cancel interleavings."""
+"""Run active process I/O glue with scheduler claim/cancel interleavings."""
 import sys
 
 sys.dont_write_bytecode = True
@@ -14,14 +14,8 @@ def without_includes(path):
 def main():
     api = (ROOT / "src/kernel/process/process_api.c").read_text()
     scheduler = (ROOT / "src/kernel/process/process_scheduler.c").read_text()
-    pending = ROOT / "src/kernel/process/process_io.c.pending"
-    glue = pending if pending.exists() else ROOT / "src/kernel/process/process_io.c"
+    glue = ROOT / "src/kernel/process/process_io.c"
     termination = function_definition(api, "static void process_mark_terminated(")
-    if "process_io_cancel_thread_locked(thread);" not in termination:
-        patch = (ROOT / "build/ports/zen/process-io-glue.pending.patch").read_text()
-        assert "+        process_io_cancel_thread_locked(thread);" in patch
-        termination = termination.replace("        if (thread_in_run_queue_load(thread))",
-            "        process_io_cancel_thread_locked(thread);\n        if (thread_in_run_queue_load(thread))", 1)
     code = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -54,11 +48,15 @@ struct thread {
     bool alive, pending_destroy, exited, in_transition, sleeping, in_run_queue, wake_pending, preempt_pending;
     uint32_t running_cpu, time_slice_remaining; int state, exit_status;
 };
-struct process { thread_t *threads; spinlock_t threads_lock; wait_queue_t wait_queue; int state, exit_status; };
+struct process { thread_t *threads; spinlock_t threads_lock; wait_queue_t wait_queue; int state, exit_status; uint32_t wait_status; };
 static thread_t *g_current_threads[SMP_MAX_CPUS], *g_switch_out_threads[SMP_MAX_CPUS], *model_thread;
 static wait_queue_t g_io_completion_queue;
 static bool scheduler_locked, prep_guard, cleanup_worker, publish_gap, deferred_notify;
 static unsigned lock_depth, schedules, closes;
+static unsigned preempt_depth;
+static void spinlock_preempt_disable(void) { ++preempt_depth; }
+static void spinlock_preempt_enable(void) { CHECK(preempt_depth); --preempt_depth; }
+static bool spinlock_preempt_disabled(void) { return prep_guard || preempt_depth; }
 static uint64_t irq_flags = 514;
 static io_request_t *executor_request;
 static void (*schedule_action)(void);
@@ -79,7 +77,6 @@ static void scheduler_lock_release(uint64_t flags) {
     CHECK(scheduler_locked && lock_depth==0); scheduler_locked=false; irq_flags=flags;
     finish_deferred_notifications();
 }
-static bool spinlock_preempt_disabled(void) { return prep_guard; }
 static thread_t *current_thread_local(void) { CHECK(prep_guard || scheduler_locked); return model_thread; }
 static bool thread_lifetime_active(const thread_t *thread) { return thread && thread->alive; }
 static bool thread_in_run_queue_load(const thread_t *thread) { return thread->in_run_queue; }
@@ -103,6 +100,12 @@ static void checked_free(void *ptr) { CHECK(!lock_depth && !scheduler_locked); f
     code += function_definition(scheduler, "void thread_remove_from_wait_queue(") + "\n"
     code += "\n".join(line for line in glue.read_text().splitlines() if not line.startswith("#include "))
     code += "\n" + termination + r'''
+static bool model_quiescent;
+static bool process_threads_quiescent_locked(process_t *process) {
+    CHECK(scheduler_locked&&process==model_thread->process);return model_quiescent;
+}
+'''
+    code += function_definition(api, "int process_wait_status_snapshot(") + r'''
 
 static void model_publish_gap(void) {
     CHECK(scheduler_locked && executor_request);
@@ -119,7 +122,7 @@ static void complete_action(void) {
     CHECK(executor_request && !scheduler_locked && !lock_depth);
     CHECK(process_io_complete_request(executor_request, 37, NULL)==0); executor_request=NULL;
 }
-static void kill_action(void) { process_mark_terminated(model_thread->process, -1); }
+static void kill_action(void) { process_mark_terminated(model_thread->process, -1, 255u << 8); }
 static void scheduler_schedule(bool requeue) {
     CHECK(!requeue && !scheduler_locked && !lock_depth && !prep_guard); ++schedules;
     if (schedule_action) { void (*action)(void)=schedule_action; schedule_action=NULL; action(); }
@@ -186,14 +189,14 @@ static void completed_and_gap(void) {
 static void kill_before_submit(void) {
     io_queue_t *queue=new_fixture(); io_request_t *request=prepare(queue);
     CHECK(process_io_register_current(request)==0);
-    process_mark_terminated(model_thread->process,-1);
+    process_mark_terminated(model_thread->process,-1,255u << 8);
     CHECK(model_thread->io_request==request && !closes);
     CHECK(io_request_submit(request)==-ECANCELED && !io_queue_take(queue));
     CHECK(process_io_finish_current(false)==0 && model_thread->state==THREAD_STATE_ZOMBIE);
     prep_guard=false; drain_fixture(queue); CHECK(closes==1);
 
     queue=new_fixture(); request=prepare(queue);
-    process_mark_terminated(model_thread->process,-1);
+    process_mark_terminated(model_thread->process,-1,255u << 8);
     CHECK(process_io_register_current(request)==-ECANCELED && !model_thread->io_request);
     CHECK(io_request_waiter_abandon(request)==0 && !closes); /* Failed registration leaves caller ownership. */
     prep_guard=false; drain_fixture(queue); CHECK(closes==1);
@@ -227,7 +230,7 @@ static void kill_during_result_copy(void) {
     executor_request=io_queue_take(queue); prep_guard=false; complete_action();
     prep_guard=true; io_request_t *borrow=NULL; io_request_status_t status;
     CHECK(process_io_result_current(&borrow,&status)==0 && borrow==request);
-    process_mark_terminated(model_thread->process,-1);
+    process_mark_terminated(model_thread->process,-1,255u << 8);
     uint64_t flags=scheduler_lock_acquire("test_copy_reap");
     CHECK(!process_io_abandon_thread_locked(model_thread)); scheduler_lock_release(flags);
     memset(io_request_buffer(borrow),0x7b,32); CHECK(!closes);
@@ -246,8 +249,25 @@ static void preparation_failure(void) {
     CHECK(process_io_finish_current(true)==0 && !closes);
     prep_guard=false; drain_fixture(queue); CHECK(closes==1);
 }
+static void termination_status(void) {
+    io_queue_t *queue=new_fixture();uint32_t output=12345;
+    model_quiescent=false;
+    CHECK(process_wait_status_snapshot(model_thread->process,&output)==-EAGAIN&&output==12345);
+    process_mark_terminated(model_thread->process,141,141u<<8);
+    CHECK(process_wait_status_snapshot(model_thread->process,&output)==-EAGAIN&&output==12345);
+    model_quiescent=true;
+    CHECK(!process_wait_status_snapshot(model_thread->process,&output)&&output==(141u<<8));
+    process_mark_terminated(model_thread->process,143,15);
+    CHECK(model_thread->process->exit_status==141&&!process_wait_status_snapshot(model_thread->process,&output)&&output==(141u<<8));
+    drain_fixture(queue);
+    queue=new_fixture();process_mark_terminated(model_thread->process,141,13);
+    CHECK(!process_wait_status_snapshot(model_thread->process,&output)&&output==13);
+    CHECK(process_wait_status_snapshot(NULL,&output)==-EINVAL&&process_wait_status_snapshot(model_thread->process,NULL)==-EINVAL);
+    drain_fixture(queue);
+}
 int main(void) {
     preparation_failure(); completed_and_gap(); kill_before_submit(); kill_wait_and_reap(); kill_during_result_copy();
+    termination_status();
     puts("process I/O registration, completion gap, terminal waiter and off-CPU cleanup contracts passed");
     return 0;
 }

@@ -42,7 +42,8 @@ def main(cxx=False):
         if not objects or not any(Path(obj).name == "crt0.o" for obj in objects):
             raise RuntimeError("native Alix startup objects are missing")
         names = [Path(obj).name for obj in objects]
-        if "syscall.o" in names or names.count("syscall-owned.o") != 1 or names.count("fcntl.o") != 1:
+        if ("syscall.o" in names or names.count("syscall-owned.o") != 1 or names.count("fcntl.o") != 1 or
+                "libc.o" in names or names.count("libc-upstream.o") != 1):
             raise RuntimeError("upstream links require the owned-FD runtime; use the current make zen-* target")
         for obj in objects:
             path = Path(obj)
@@ -61,6 +62,11 @@ def main(cxx=False):
         for library in libraries:
             if not library.is_file():
                 raise RuntimeError(f"native runtime archive is missing: {library}")
+        # Alix's complete math implementations are already in its runtime
+        # objects and grouped native math archive below. Resolve the customary
+        # -lm request there, after object inputs, instead of searching a host
+        # sysroot or pulling a second early copy of those same definitions.
+        arguments = [argument for argument in arguments if argument != "-lm"]
         arguments += ["-nostdlib", "-static",
                       "-Wl,-T," + str(ROOT / "user/lib/link.ld"), "-Wl,-z,max-page-size=0x1000",
                       "-Wl,--start-group", "-x", "none"] + objects + list(map(str, libraries)) + [libgcc, "-Wl,--end-group"]

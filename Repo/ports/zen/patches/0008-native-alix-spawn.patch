@@ -1,0 +1,233 @@
+--- a/js/src/shell/OSObject.cpp
++++ b/js/src/shell/OSObject.cpp
+@@ -28,6 +28,11 @@
+ #  include <sys/types.h>
+ #  include <sys/wait.h>
+ #  include <unistd.h>
++#endif
++
++#ifdef __ALIX__
++#  include <spawn.h>
++#  include <alix_process.h>
+ #endif
+ 
+ #include "jsapi.h"
+@@ -1117,6 +1122,26 @@
+     return false;
+   }
+ 
++#  ifdef __ALIX__
++  char** environment = alix_environment_copy();
++  if (!environment) {
++    errno = ENOMEM;
++    ReportSysError(cx, "spawn environment allocation failed");
++    return false;
++  }
++  char* cmd[] = {const_cast<char*>("sh"), const_cast<char*>("-c"),
++                 narrowCommand.get(), nullptr};
++  pid_t childPid;
++  int error = posix_spawnp(&childPid, "sh", nullptr, nullptr, cmd, environment);
++  alix_environment_free(environment);
++  if (error) {
++    errno = error;
++    ReportSysError(cx, "spawn failed");
++    return false;
++  }
++  args.rval().setInt32(childPid);
++  return true;
++#  else
+   int32_t childPid = fork();
+   if (childPid == -1) {
+     ReportSysError(cx, "fork failed");
+@@ -1135,6 +1160,7 @@
+ 
+   execvp("sh", (char* const*)cmd);
+   exit(1);
++#  endif
+ }
+ 
+ static bool os_kill(JSContext* cx, unsigned argc, Value* vp) {
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -161,6 +161,11 @@
+ #include "shell/jsoptparse.h"
+ #include "shell/jsshell.h"
+ #include "shell/OSObject.h"
++#ifdef __ALIX__
++#  include <spawn.h>
++#  include <alix_process.h>
++#  include "usyscall.h"
++#endif
+ #include "shell/ShellModuleObjectWrapper.h"
+ #include "shell/WasmTesting.h"
+ #include "threading/ConditionVariable.h"
+@@ -7220,6 +7225,42 @@
+ 
+   int childPid = _spawnv(P_NOWAIT, sArgv[0], argv.get());
+   if (childPid == -1) {
++    return false;
++  }
++#  elif defined(__ALIX__)
++  posix_spawn_file_actions_t actions;
++  int error = posix_spawn_file_actions_init(&actions);
++  if (error) {
++    errno = error;
++    return false;
++  }
++  auto releaseActions = mozilla::MakeScopeExit(
++      [&] { posix_spawn_file_actions_destroy(&actions); });
++  error = posix_spawn_file_actions_adddup2(&actions, stdIn.reader(),
++                                          STDIN_FILENO);
++  if (!error) {
++    error = posix_spawn_file_actions_adddup2(&actions, stdOut.writer(),
++                                            STDOUT_FILENO);
++  }
++  int pipeEnds[] = {stdIn.reader(), stdIn.writer(), stdOut.reader(),
++                    stdOut.writer()};
++  for (int fd : pipeEnds) {
++    if (!error && fd != STDIN_FILENO && fd != STDOUT_FILENO) {
++      error = posix_spawn_file_actions_addclose(&actions, fd);
++    }
++  }
++  char** environment = error ? nullptr : alix_environment_copy();
++  if (!error && !environment) {
++    error = ENOMEM;
++  }
++  pid_t childPid;
++  if (!error) {
++    error = posix_spawn(&childPid, sArgv[0], &actions, nullptr, argv.get(),
++                        environment);
++  }
++  alix_environment_free(environment);
++  if (error) {
++    errno = error;
+     return false;
+   }
+ #  else
+@@ -12620,6 +12661,9 @@
+         cx, NewGlobalObject(cx, options, nullptr, ShellGlobalKind::WindowProxy,
+                             /* immutablePrototype = */ true));
+     if (!glob) {
++#ifdef __ALIX__
++      sys_serial_write("Alix SpiderMonkey startup failed: NewGlobalObject\n", 50);
++#endif
+       return 1;
+     }
+ 
+@@ -12627,6 +12671,10 @@
+ 
+     ShellContext* sc = GetShellContext(cx);
+     if (!sc->moduleLoader && !InitModuleLoader(cx, *op)) {
++#ifdef __ALIX__
++      sys_serial_write("Alix SpiderMonkey startup failed: InitModuleLoader\n", 51);
++      AutoReportException are(cx);
++#endif
+       return EXIT_FAILURE;
+     }
+ 
+@@ -12951,10 +12999,16 @@
+   auto shutdownEngine = MakeScopeExit([] { JS_ShutDown(); });
+ 
+   if (!SetGlobalOptionsPostJSInit(op)) {
++#ifdef __ALIX__
++    sys_serial_write("Alix SpiderMonkey startup failed: SetGlobalOptionsPostJSInit\n", 61);
++#endif
+     return EXIT_FAILURE;
+   }
+ 
+   if (!InitSharedObjectMailbox()) {
++#ifdef __ALIX__
++    sys_serial_write("Alix SpiderMonkey startup failed: InitSharedObjectMailbox\n", 58);
++#endif
+     return EXIT_FAILURE;
+   }
+ 
+@@ -12963,6 +13017,9 @@
+   /* Use the same parameters as the browser in xpcjsruntime.cpp. */
+   JSContext* const cx = JS_NewContext(JS::DefaultHeapMaxBytes);
+   if (!cx) {
++#ifdef __ALIX__
++    sys_serial_write("Alix SpiderMonkey startup failed: JS_NewContext\n", 48);
++#endif
+     return 1;
+   }
+ 
+@@ -12975,14 +13032,23 @@
+   UniquePtr<ShellContext> sc =
+       MakeUnique<ShellContext>(cx, ShellContext::MainThread);
+   if (!sc || !sc->registerWithCx(cx)) {
++#ifdef __ALIX__
++    sys_serial_write("Alix SpiderMonkey startup failed: ShellContext\n", 47);
++#endif
+     return 1;
+   }
+ 
+   if (!SetContextOptions(cx, op)) {
++#ifdef __ALIX__
++    sys_serial_write("Alix SpiderMonkey startup failed: SetContextOptions\n", 52);
++#endif
+     return 1;
+   }
+ 
+   if (!ApplyBenchmarkMode(cx, op)) {
++#ifdef __ALIX__
++    sys_serial_write("Alix SpiderMonkey startup failed: ApplyBenchmarkMode\n", 53);
++#endif
+     return 1;
+   }
+ 
+@@ -12998,6 +13064,9 @@
+   bufferStreamState = js_new<ExclusiveWaitableData<BufferStreamState>>(
+       mutexid::BufferStreamState);
+   if (!bufferStreamState) {
++#ifdef __ALIX__
++    sys_serial_write("Alix SpiderMonkey startup failed: BufferStreamState\n", 52);
++#endif
+     return 1;
+   }
+   auto shutdownBufferStreams = MakeScopeExit([] {
+@@ -13040,6 +13109,9 @@
+   }
+ 
+   if (!JS::InitSelfHostedCode(cx, xdrSpan, xdrWriter)) {
++#ifdef __ALIX__
++    sys_serial_write("Alix SpiderMonkey startup failed: InitSelfHostedCode\n", 53);
++#endif
+     return 1;
+   }
+ 
+@@ -14882,11 +14954,17 @@
+   } else {
+     processWideModuleLoadPath = js::shell::GetCWD(cx);
+     if (!processWideModuleLoadPath) {
++#ifdef __ALIX__
++      sys_serial_write("Alix module loader: GetCWD failed\n", 34);
++#endif
+       return false;
+     }
+ 
+     moduleLoadPath = NewStringCopyUTF8(cx, processWideModuleLoadPath.get());
+     if (!moduleLoadPath) {
++#ifdef __ALIX__
++      sys_serial_write("Alix module loader: path string failed\n", 39);
++#endif
+       return false;
+     }
+   }
+@@ -14894,8 +14972,11 @@
+   ShellContext* sc = GetShellContext(cx);
+   sc->moduleLoader = js::MakeUnique<ModuleLoader>();
+   if (!sc->moduleLoader || !sc->moduleLoader->init(cx, moduleLoadPath)) {
+-    return false;
+-  }
+-
+-  return true;
+-}
++#ifdef __ALIX__
++    sys_serial_write("Alix module loader: object init failed\n", 39);
++#endif
++    return false;
++  }
++
++  return true;
++}

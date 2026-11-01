@@ -42,12 +42,16 @@ int main(void)
     CHECK(stream != NULL, "open");
     CHECK(fputs("abc\ndef", stream) == 0 && fseek(stream, 0, SEEK_SET) == 0, "seed");
     CHECK(fgetc(stream) == 'a' && ungetc('Z', stream) == 'Z' && ftell(stream) == 0, "pushback position");
-    CHECK(ungetc('Y', stream) == EOF && fflush(NULL) == 0 && fgetc(stream) == 'Z', "pushback capacity");
+    CHECK(ungetc('Y', stream) == 'Y' && fflush(NULL) == 0 &&
+          fgetc(stream) == 'Y' && fgetc(stream) == 'Z', "multiple pushback order");
     CHECK(fgetc(stream) == 'b' && ungetc('X', stream) == 'X' && fflush(stream) == 0, "input flush");
     CHECK(ftell(stream) == 1 && fgetc(stream) == 'b', "input offset");
     fpos_t position = 0;
     CHECK(fgetpos(stream, &position) == 0 && fgetc(stream) == 'c', "get position");
     CHECK(fsetpos(stream, &position) == 0 && fgetc(stream) == 'c', "set position");
+    CHECK(ungetc('c', stream) == 'c' && ungetc('b', stream) == 'b' &&
+          ungetc('a', stream) == 'a' && ftell(stream) == 0, "three-byte BOM lookahead position");
+    CHECK(fgetc(stream) == 'a' && fgetc(stream) == 'b' && fgetc(stream) == 'c', "three-byte BOM lookahead restore");
     while (fgetc(stream) != EOF) { }
     CHECK(feof(stream) && ungetc(255, stream) == 255 && !feof(stream) && fgetc(stream) == 255, "EOF recovery");
     rewind(stream);

@@ -110,12 +110,15 @@ bool process_prepare_inherited_context(process_t *process, process_t *parent, bo
         }
     }
     fd_table_t *directories = NULL;
+    fd_table_t *children = NULL;
     if (ok && process->is_user)
     {
         /* User process creation is spawn, not fork: directory streams are not
          * inherited. All threads of the new process share this owned table. */
         directories = fd_table_create_deferred(FD_TABLE_MAX_ENTRIES, g_process_retirement);
         if (!directories) ok = false;
+        if (ok) children = fd_table_create_deferred(FD_TABLE_MAX_ENTRIES, g_process_retirement);
+        if (!children) ok = false;
     }
     if (ok)
     {
@@ -124,8 +127,13 @@ bool process_prepare_inherited_context(process_t *process, process_t *parent, bo
         process->cwd_owner = owner;
         process->cwd = owner ? fd_description_context(owner) : NULL;
         process->directory_streams = directories;
+        process->child_processes = children;
     }
-    else (void)fd_description_put(owner);
+    else
+    {
+        (void)fd_description_put(owner);
+        fd_table_put(directories); fd_table_put(children);
+    }
     spinlock_preempt_enable();
     return ok;
 }
@@ -254,9 +262,12 @@ void process_release_context(process_t *process)
     process->cwd = NULL;
     fd_table_t *directories = process->directory_streams;
     process->directory_streams = NULL;
+    fd_table_t *children = process->child_processes;
+    process->child_processes = NULL;
     spinlock_unlock(&process->context_lock);
     (void)fd_description_put(owner);
     fd_table_put(directories);
+    fd_table_put(children);
     spinlock_preempt_enable();
 }
 
