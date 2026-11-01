@@ -112,6 +112,20 @@ static bool scan_tests(void)
     return true;
 }
 
+static const char *append_path;
+static int append_worker(void *opaque)
+{
+    unsigned index=(unsigned)(uintptr_t)opaque;
+    if(sys_thread_set_affinity(index)) return -1;
+    FILE *stream=fopen(append_path,"ab");
+    char *record=malloc(2);
+    if(!stream || !record) return -2;
+    record[0]=(char)('0'+index);record[1]='\n';
+    for(unsigned i=0;i<40;++i)
+        if(fwrite(record,1,2,stream)!=2) return -3;
+    free(record);
+    return fclose(stream);
+}
 static bool file_tests(void)
 {
     FILE *stream=tmpfile();
@@ -133,11 +147,24 @@ static bool file_tests(void)
     CHECK(fread(data,1,3,stream)==3 && !memcmp(data,"old",3));
     CHECK(freopen(first,"w+",stream)==stream);
     CHECK(fputs("new",stream)>=0 && fclose(stream)==0 && remove(first)==0);
+    append_path=first;
+    thrd_t *append_threads=calloc(8,sizeof(*append_threads));CHECK(append_threads);
+    for(unsigned i=0;i<8;++i) CHECK(thrd_create(&append_threads[i],append_worker,(void *)(uintptr_t)i)==thrd_success);
+    for(unsigned i=0;i<8;++i){int status;CHECK(thrd_join(append_threads[i],&status)==thrd_success && status==0);}
+    stream=fopen(first,"r");CHECK(stream);
+    unsigned counts[8]={0};
+    for(unsigned i=0;i<320;++i)
+    {
+        int id=fgetc(stream);CHECK(id>='0' && id<='7' && fgetc(stream)=='\n');++counts[id-'0'];
+    }
+    CHECK(fgetc(stream)==EOF && fclose(stream)==0 && remove(first)==0);
+    for(unsigned i=0;i<8;++i) CHECK(counts[i]==40);
+    free(append_threads);append_path=NULL;
     free(first);free(second);
     return true;
 }
 
-typedef struct { mtx_t mutex; cnd_t condition; once_flag once; tss_t key; unsigned count, once_count; atomic_uint destructors, ready, cpu_mask; } shared_t;
+typedef struct { mtx_t mutex; cnd_t condition, start_condition; once_flag once; tss_t key; unsigned count, once_count, arrived; bool start; atomic_uint destructors, ready, cpu_mask; } shared_t;
 static shared_t shared={.once=ONCE_FLAG_INIT};
 typedef struct { uint64_t count, inverse; } pair_t;
 typedef struct { uint64_t first, second, checksum; } blob_t;
@@ -153,6 +180,12 @@ static int worker(void *argument)
     if(tss_set(shared.key,argument)!=thrd_success) return -100;
     call_once(&shared.once,once_function);
     if(fesetround(identity%2?FE_UPWARD:FE_DOWNWARD)) return -101;
+    if(mtx_lock(&shared.mutex)!=thrd_success) return -109;
+    ++shared.arrived;
+    if(cnd_signal(&shared.condition)!=thrd_success) return -110;
+    while(!shared.start)
+        if(cnd_wait(&shared.start_condition,&shared.mutex)!=thrd_success) return -111;
+    if(mtx_unlock(&shared.mutex)!=thrd_success) return -112;
     for(unsigned i=0;i<300;++i)
     {
         pair_t previous=atomic_load(&atomic_pair), next;
@@ -173,14 +206,24 @@ static int worker(void *argument)
     if(identity==8) thrd_exit(-8);
     return -identity;
 }
+static int detached_worker(void *argument)
+{
+    return tss_set(shared.key,argument)==thrd_success ? 0 : -1;
+}
 static bool thread_tests(void)
 {
     atomic_store(&atomic_pair,((pair_t){0,~(uint64_t)0}));
     atomic_store(&atomic_blob,((blob_t){0,0,0}));
     CHECK(mtx_init(&shared.mutex,mtx_plain|mtx_timed)==thrd_success);
+    CHECK(cnd_init(&shared.start_condition)==thrd_success);
     CHECK(cnd_init(&shared.condition)==thrd_success && tss_create(&shared.key,destructor)==thrd_success);
     thrd_t *threads=calloc(8,sizeof(*threads)); CHECK(threads);
     for(int i=0;i<8;++i) CHECK(thrd_create(&threads[i],worker,(void *)(intptr_t)(i+1))==thrd_success);
+    CHECK(mtx_lock(&shared.mutex)==thrd_success);
+    while(shared.arrived<8) CHECK(cnd_wait(&shared.condition,&shared.mutex)==thrd_success);
+    shared.start=true;
+    CHECK(cnd_broadcast(&shared.start_condition)==thrd_success);
+    CHECK(mtx_unlock(&shared.mutex)==thrd_success);
     for(int i=0;i<8;++i) { int status=0;CHECK(thrd_join(threads[i],&status)==thrd_success && status==-i-1); }
     CHECK(shared.count==2400 && atomic_load(&shared.cpu_mask)==255 && shared.once_count==1 && atomic_load(&shared.destructors)==8);
     pair_t final_pair=atomic_load(&atomic_pair);
@@ -195,7 +238,18 @@ static bool thread_tests(void)
     mtx_t recursive; CHECK(mtx_init(&recursive,mtx_recursive|mtx_timed)==thrd_success);
     CHECK(mtx_lock(&recursive)==thrd_success && mtx_trylock(&recursive)==thrd_success);
     CHECK(mtx_unlock(&recursive)==thrd_success && mtx_unlock(&recursive)==thrd_success);
-    mtx_destroy(&recursive);tss_delete(shared.key);cnd_destroy(&shared.condition);mtx_destroy(&shared.mutex);
+    mtx_destroy(&recursive);
+    for(unsigned i=0;i<32;++i)
+    {
+        thrd_t detached;
+        CHECK(thrd_create(&detached,detached_worker,(void *)(intptr_t)1)==thrd_success);
+        CHECK(thrd_detach(detached)==thrd_success);
+    }
+    struct timespec pause={0,1000000};
+    for(unsigned tries=0;atomic_load(&shared.destructors)<40 && tries<5000;++tries) CHECK(thrd_sleep(&pause,NULL)==0);
+    CHECK(atomic_load(&shared.destructors)==40);
+    CHECK(fegetround()==FE_TONEAREST);
+    tss_delete(shared.key);cnd_destroy(&shared.condition);cnd_destroy(&shared.start_condition);mtx_destroy(&shared.mutex);
     free(threads);
     return true;
 }
@@ -211,9 +265,24 @@ static bool character_tests(void)
     CHECK(strspn("abba!","ab")==4 && strcspn("abc!","!")==3 && *strpbrk("ab!","!")=='!');
     return true;
 }
-int main(void)
+static unsigned quick_stage;
+static void forbidden_normal_exit(void) { serial_printf("LIBC_QUICK_EXIT: FAIL normal handler"); }
+static void quick_first(void)
 {
+    if(quick_stage!=2) { serial_printf("LIBC_QUICK_EXIT: FAIL order"); _Exit(1); }
+    serial_printf("LIBC_QUICK_EXIT: PASS lifo=1 normal_handlers=0 flush=0");
+}
+static void quick_second(void) { quick_stage=2; }
+int main(int argc, char **argv)
+{
+    if(argc>1 && !strcmp(argv[1],"quick"))
+    {
+        if(atexit(forbidden_normal_exit) || at_quick_exit(quick_first) || at_quick_exit(quick_second)) return 1;
+        if(setvbuf(stdout,NULL,_IOFBF,128) || fputs("FORBIDDEN_QUICK_FLUSH",stdout)<0) return 1;
+        quick_exit(23);
+    }
     if(!math_tests() || !environment_tests() || !scan_tests() || !character_tests() || !thread_tests() || !file_tests()) return 1;
-    serial_printf("LIBC_COMPLETE_TEST: PASS math=1 complex80=1 fenv=1 scanf=1 uchar=1 threads=8 cpu_mask=0xFF atomic=1 files=1");
+    if(!system(NULL) || system("echo libc_system_test")!=0) return 1;
+    serial_printf("LIBC_COMPLETE_TEST: PASS math=1 complex80=1 fenv=1 scanf=1 uchar=1 threads=8 cpu_mask=0xFF atomic=1 files=1 append=320");
     return 0;
 }

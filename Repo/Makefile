@@ -38,7 +38,7 @@ KERNEL_CFLAGS += -DENABLE_USB=0
 endif
 USER_CFLAGS := $(BASE_CFLAGS) -I$(USER_DIR) -I$(USER_DIR)/lib -I$(ATK_DIR) -DATK_NO_DESKTOP_APPS \
                -msse2 -mfpmath=sse -mstackrealign -mcmodel=large -I$(USER_DIR)/apps/doom \
-               -DNORMALUNIX
+               -DNORMALUNIX -frounding-math -ffp-contract=off
 USER_CXXFLAGS := $(filter-out -std=c11,$(USER_CFLAGS)) -std=c++17 \
                  -fno-exceptions -fno-rtti -fno-use-cxa-atexit -fno-threadsafe-statics
 
@@ -128,6 +128,7 @@ USER_COMMON_SOURCES := \
 	$(USER_DIR)/lib/filesystem_posix.c \
 	$(USER_DIR)/lib/libgen.c \
 	$(USER_DIR)/lib/dirent.c \
+	$(USER_DIR)/lib/math.c \
 	$(USER_DIR)/lib/setjmp.c \
 	$(USER_DIR)/lib/atk_user.c \
 	$(USER_DIR)/lib/video_surface.c \
@@ -382,7 +383,7 @@ $(OBJDIR)/generated/%.o: $(OBJDIR)/generated/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -c -o $@ $<
 
-$(USER_OBJDIR)/%.o: $(USER_DIR)/%.c
+$(USER_OBJDIR)/%.o: $(USER_DIR)/%.c Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c -o $@ $<
 

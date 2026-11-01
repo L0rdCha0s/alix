@@ -100,7 +100,7 @@ pthread_t pthread_self(void);
 int pthread_sigmask(int how, const sigset_t *set, sigset_t *old);
 int pthread_kill(pthread_t thread, int number);
 int pthread_equal(pthread_t left, pthread_t right);
-void pthread_exit(void *result) __attribute__((noreturn));
+void pthread_exit(void *result) __attribute__((__noreturn__));
 int pthread_setname_np(pthread_t thread, const char *name);
 int pthread_getname_np(pthread_t thread, char *name, size_t size);
 

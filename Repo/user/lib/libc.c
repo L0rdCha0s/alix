@@ -2775,7 +2775,7 @@ static uint64_t fopen_mode_to_flags(const char *mode, bool *append_out)
             flags = SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE;
             break;
         case 'a':
-            flags = SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE;
+            flags = SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_APPEND;
             append = true;
             break;
         default:

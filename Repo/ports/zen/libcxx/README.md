@@ -48,48 +48,13 @@ ELF TLS block. Keys support four destructor iterations, matching the usual
 POSIX/C11 destructor-repopulation contract. DSO lifetime handling currently
 assumes static ET_EXEC images; shared-library unloading still needs integration.
 
-The numeric support object `user/lib/strtofloat.cpp` uses the pinned LLVM libc
-freestanding parser for `strtof`, `strtod` and `strtold`, independently of the
-browser engine and libc++. It is part of `libalix-cxx-support.a`, alongside the
-external-threading adapter and C-compiled `wcstofloat.c` wrappers, and links
-against Alix libc. Wide floating conversion is kept out of USER_COMMON so C
-programs do not acquire an unresolved optional parser dependency. The general integer,
-allocation, clock, classification and exit APIs live in `user/lib/libc.c`.
-
-The separate [native libm archive](../libm/README.md) now supplies the math
-exports, instead of putting them in the C++ support archive. Its
-`user/lib/llvm_nearbyint.cpp` supplies native `nearbyint`, `nearbyintf` and
-`nearbyintl` from the same pinned LLVM libc support subtree. It reuses the
-upstream format-aware rounding algorithm and obtains the mode from native
-`fegetround`; the generic upstream arithmetic mode probe would itself set
-FE_INEXACT. Signaling NaNs take a real hardware invalid operation. LLVM's
-private full-build support types stay inside this object: no private fenv
-structure or exception encoding crosses the Alix ABI. Only `fegetround` is an
-external dependency. `tests/nearbyint_contract_test.py` compares 99,625 cases
-with host libm under all four modes (also ASan/UBSan); `make zen-nearbyint-test`
-links the separate native x87/SSE and 80-bit acceptance fixture. This fixture
-now passes inside Alix with 32,742 cases, four rounding modes, extended-precision
-values, signaling NaNs and preserved exception flags.
-
-The numeric exports are currently optional for ordinary Alix C applications:
-declaring them through `math.h`/`stdlib.h` does not add the archive to the normal
-USER_COMMON link. The native `ports/zen/toolchain/alix-clang` driver adds
-the math archive and `libalix-cxx-support.a` automatically, including for C sources. A normal
-Makefile C target can instead append
-`ports/zen/upstream/libm-alix-build/lib/libalix-math.a` for math or
-`ports/zen/upstream/libcxx-alix-build/lib/libalix-cxx-support.a` for numeric
-parsing after its own objects, within the existing libgcc link group. The
-nearbyint object pulls only native `fegetround`; it does not require libc++.
-`zen-nearbyint-test` shows the driver-based C link.
-
-Further libm work should reuse this LLVM libc subtree where supported. Its
-rounding, exponent/scaling, remainder, nextafter and square-root helpers are
-freestanding, including x87-80 support. Float/double transcendental functions
-add upstream range-reduction tables and multiword arithmetic, plus a deliberate
-native errno/fenv adapter; they do not need a Linux kernel ABI. The pinned
-generic tree does not provide `sinl`, `cosl`, `expl`, `logl` or `powl`, and its
-`atan2l.cpp` explicitly rejects extended precision. Source availability alone
-is therefore insufficient to claim a complete 80-bit libm replacement.
+The complete C11 numeric runtime now belongs to ordinary USER_COMMON links,
+including all real/complex math, floating-point parsing and the full FP
+environment. The prior LLVM numeric adapters remain in the support archive for
+compatibility, but fresh native links resolve these functions from the common
+runtime. `make zen-math-runtime` packages the same complete implementation for
+the Clang/Rust drivers. See [the native math notes](../libm/README.md) for pinned
+source provenance, extended precision and validation.
 
 The runtime now builds localization and iostream code through a native Alix
 locale adapter. It uses owned C/POSIX locale handles and upstream's C character
@@ -125,9 +90,9 @@ those writes twice.
 Threads, RTTI, localization and wide-character facilities are enabled.
 Exceptions, filesystem, Unicode formatting facilities, random-device and terminal integration remain disabled in this
 profile; implement and enable required facilities as the real Gecko build
-demands them. Existing `remove`/`unlink` remains unsupported by the native filesystem
-syscall surface; this runtime does not turn that into a successful operation.
-The C floating-point environment currently exposes rounding-mode access only.
+demands them. The native C runtime now supports removal, rename, exclusive
+creation, temporary files and all C11 floating-point environment operations;
+see [the libc notes](../../../docs/kernel/libc.md).
 
 The toolchain defaults to Homebrew LLVM at `/opt/homebrew/opt/llvm`. It uses
 Clang's target resource headers plus Alix headers, with host include searches

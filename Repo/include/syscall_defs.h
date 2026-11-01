@@ -166,6 +166,7 @@ typedef struct syscall_timezone_info
 #define SYSCALL_OPEN_CREATE   (1u << 2)
 #define SYSCALL_OPEN_TRUNCATE (1u << 3)
 #define SYSCALL_OPEN_EXCLUSIVE (1u << 4)
+#define SYSCALL_OPEN_APPEND (1u << 16)
 
 #define SYSCALL_SEEK_SET 0
 #define SYSCALL_SEEK_CUR 1

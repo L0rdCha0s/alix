@@ -18,7 +18,7 @@ def main(cxx=False):
         raise RuntimeError("x86_64-elf-gcc is required as Clang's native ELF link driver")
     resource = subprocess.check_output([str(compiler), "--no-default-config", "-print-resource-dir"], text=True).strip()
     flags = ["--no-default-config", "--target=x86_64-unknown-alix", "-ccc-gcc-name", Path(gcc).name, "-D__ALIX__",
-             "-fhosted", "-fno-builtin", "-fno-pic", "-fno-stack-protector",
+             "-fhosted", "-fno-builtin", "-frounding-math", "-ffp-contract=off", "-fno-pic", "-fno-stack-protector",
              "-mno-red-zone", "-mcmodel=large", "-fshort-wchar", "-ftls-model=local-exec",
              "-nostdinc"]
     if cxx:

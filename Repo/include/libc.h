@@ -114,7 +114,7 @@ int alix_thread_create(alix_thread_t *thread_out,
                        void *arg);
 int alix_thread_join(alix_thread_t thread, int *status_out);
 int alix_thread_detach(alix_thread_t thread);
-void alix_thread_exit(int status) __attribute__((noreturn));
+void alix_thread_exit(int status) __attribute__((__noreturn__));
 
 #ifdef __cplusplus
 }

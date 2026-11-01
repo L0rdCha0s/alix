@@ -198,7 +198,7 @@ static int64_t user_file_finish(user_file_service_t kind, uint32_t operation,
 static int64_t user_file_open(const char *path, uint64_t flags)
 {
     uint64_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE |
-                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_CLOEXEC;
+                     SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND | SYSCALL_OPEN_CLOEXEC;
     if (flags & ~known) return -EINVAL;
     spinlock_preempt_disable();
     uint32_t uid = 0, gid = 0;

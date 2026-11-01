@@ -24,10 +24,10 @@ extern "C" {
 #endif
 
 int sigsetjmp(sigjmp_buf env, int savemask) __attribute__((returns_twice));
-void siglongjmp(sigjmp_buf env, int value) __attribute__((noreturn));
+void siglongjmp(sigjmp_buf env, int value) __attribute__((__noreturn__));
 
 int setjmp(jmp_buf env) __attribute__((returns_twice));
-void longjmp(jmp_buf env, int value) __attribute__((noreturn));
+void longjmp(jmp_buf env, int value) __attribute__((__noreturn__));
 
 #ifdef __cplusplus
 }

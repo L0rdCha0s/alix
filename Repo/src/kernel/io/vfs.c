@@ -12,7 +12,7 @@ typedef struct
 {
     vfs_node_t *node;
     uint64_t offset;
-    bool readable, writable;
+    bool readable, writable, append;
     bool offset_owned;
     wait_queue_t offset_waiters;
 } io_vfs_file_t;
@@ -56,9 +56,10 @@ static ssize_t io_vfs_file_write(void *context, const void *buffer, size_t count
     if (!file || !file->writable) return -EBADF;
     if (!buffer && count) return -EINVAL;
     io_vfs_offset_lock(file);
-    ssize_t result = count > 0x7fffffffffffffffULL - file->offset ? -EFBIG :
+    ssize_t result = file->append ? vfs_write_append(file->node, buffer, count, false, &file->offset) :
+        count > 0x7fffffffffffffffULL - file->offset ? -EFBIG :
         vfs_write_data_at(file->node, (size_t)file->offset, buffer, count);
-    if (result > 0 && (size_t)result <= count) file->offset += (uint64_t)result;
+    if (result > 0 && (size_t)result <= count && !file->append) file->offset += (uint64_t)result;
     else if (result > 0) result = -EIO;
     io_vfs_offset_unlock(file);
     return result == -1 ? -EIO : result;
@@ -303,7 +304,8 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     }
     if (operation->opcode == IO_VFS_REMOVE || operation->opcode == IO_VFS_RENAME)
     {
-        if (description || !io_request_cwd(request) || available < VFS_PATH_MAX || operation->flags > 1) return;
+        if (description || !io_request_cwd(request) || available < VFS_PATH_MAX || operation->flags > 1 ||
+            (operation->opcode == IO_VFS_RENAME && operation->flags)) return;
         const char *path = (const char *)operation->data;
         if (strnlen(path, VFS_PATH_MAX) == VFS_PATH_MAX) { result->result = -ENAMETOOLONG; return; }
         if (operation->opcode == IO_VFS_REMOVE)
@@ -346,7 +348,7 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
     }
     if (operation->opcode == IO_VFS_OPEN)
     {
-        uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE;
+        uint32_t known = SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE | SYSCALL_OPEN_CREATE | SYSCALL_OPEN_TRUNCATE | SYSCALL_OPEN_EXCLUSIVE | SYSCALL_OPEN_APPEND;
         if (!retirement || (description && !fd_table_reservation_valid(description)) || !io_request_cwd(request) ||
             (operation->flags & ~known) || !(operation->flags & (SYSCALL_OPEN_READ | SYSCALL_OPEN_WRITE)) ||
             ((operation->flags & SYSCALL_OPEN_TRUNCATE) && !(operation->flags & SYSCALL_OPEN_WRITE))) return;
@@ -359,6 +361,7 @@ void io_vfs_execute(io_request_t *request, io_service_result_t *result,
         wait_queue_init(&file->offset_waiters);
         file->readable = (operation->flags & SYSCALL_OPEN_READ) != 0;
         file->writable = (operation->flags & SYSCALL_OPEN_WRITE) != 0;
+        file->append = (operation->flags & SYSCALL_OPEN_APPEND) != 0;
         description = fd_description_create_deferred(&io_vfs_ops, file, retirement);
         if (!description) { free(file); result->result = -ENOMEM; return; }
         result->result = vfs_open_data_flags_owned(io_request_cwd(request), (const char *)operation->data,

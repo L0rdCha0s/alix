@@ -5,6 +5,7 @@ This folder documents how the kernel boots, schedules work, manages memory, expo
 ## Start Here
 
 - Boot + early init: `docs/kernel/boot.md`
+- Native C11 libc, math and threads: `docs/kernel/libc.md`
 - Processes/threads + scheduler: `docs/kernel/process.md`
 - Memory (heap, paging, user mappings): `docs/kernel/memory.md`
 - VFS/filesystems/mounts: `docs/kernel/vfs.md`

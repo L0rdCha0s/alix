@@ -36,7 +36,7 @@ int thrd_create(thrd_t *, thrd_start_t, void *);
 thrd_t thrd_current(void);
 int thrd_detach(thrd_t);
 int thrd_equal(thrd_t, thrd_t);
-void thrd_exit(int) __attribute__((noreturn));
+void thrd_exit(int) __attribute__((__noreturn__));
 int thrd_join(thrd_t, int *);
 int thrd_sleep(const struct timespec *, struct timespec *);
 void thrd_yield(void);

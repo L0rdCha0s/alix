@@ -55,6 +55,7 @@ def build_program():
 #define SYSCALL_OPEN_CREATE 4u
 #define SYSCALL_OPEN_TRUNCATE 8u
 #define SYSCALL_OPEN_EXCLUSIVE 16u
+#define SYSCALL_OPEN_APPEND (1u << 16)
 #define SYSCALL_SEEK_SET 0
 #define SYSCALL_SEEK_CUR 1
 #define SYSCALL_SEEK_END 2

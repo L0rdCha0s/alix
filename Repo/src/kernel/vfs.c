@@ -2051,7 +2051,7 @@ ssize_t vfs_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t c
  * for procfs/devfs control files). Otherwise this writes into the heap-backed
  * `file->data` buffer and grows the file as needed.
  */
-static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void *data, size_t count, bool callbacks)
+static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void *data, size_t count, bool callbacks, bool append, size_t *position)
 {
     vfs_log("write file=", (uint64_t)(uintptr_t)file);
     vfs_log("write off=", offset);
@@ -2067,7 +2067,9 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
 
     if (callbacks && file->write_cb)
     {
-        return file->write_cb(file, offset, data, count, file->callback_context);
+        ssize_t result = file->write_cb(file, offset, data, count, file->callback_context);
+        if (result > 0 && position) *position = offset + (size_t)result;
+        return result;
     }
 
     if (count > 0 && !data)
@@ -2078,11 +2080,6 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
     {
         return 0;
     }
-    if (offset > (size_t)-1 - count)
-    {
-        return -1;
-    }
-    size_t end = offset + count;
     if (file->mount)
     {
         vfs_backpressure_wait(file->mount, count);
@@ -2098,6 +2095,13 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
         vfs_unlock_node_data(file);
         return -EROFS;
     }
+    if (append) offset = file->size;
+    if (count > (size_t)INT64_MAX || offset > (size_t)INT64_MAX - count)
+    {
+        vfs_unlock_node_data(file);
+        return -EFBIG;
+    }
+    size_t end = offset + count;
     if (!ensure_capacity_locked(file, end))
     {
         vfs_unlock_node_data(file);
@@ -2117,6 +2121,7 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
     }
     ensure_terminator_locked(file);
     bool size_changed = (file->size != previous_size);
+    if (position) *position = end;
     vfs_unlock_node_data(file);
     vfs_note_file_dirty(file, offset, count, size_changed);
     return (ssize_t)count;
@@ -2124,12 +2129,19 @@ static ssize_t vfs_write_at_internal(vfs_node_t *file, size_t offset, const void
 
 ssize_t vfs_write_at(vfs_node_t *file, size_t offset, const void *data, size_t count)
 {
-    return vfs_write_at_internal(file, offset, data, count, true);
+    return vfs_write_at_internal(file, offset, data, count, true, false, NULL);
 }
 
 ssize_t vfs_write_data_at(vfs_node_t *file, size_t offset, const void *data, size_t count)
 {
-    return vfs_write_at_internal(file, offset, data, count, false);
+    return vfs_write_at_internal(file, offset, data, count, false, false, NULL);
+}
+
+ssize_t vfs_write_append(vfs_node_t *file, const void *data, size_t count,
+                         bool callbacks, size_t *position)
+{
+    if (!position) return -EINVAL;
+    return vfs_write_at_internal(file, *position, data, count, callbacks, true, position);
 }
 
 

@@ -41,8 +41,10 @@ and error indicators remain separate. `fgets` leaves its destination unchanged
 when EOF precedes all input and returns null on a read error. Successful
 positioning and `clearerr` permit recovery; `rewind` also clears the error
 indicator. Append streams seek to the end before each stdio write while holding
-their own mutex. Atomic append across independent streams/processes still
-requires a kernel append operation.
+their own mutex. Native append descriptors now select EOF and commit each underlying write under
+the same VFS node data lock. Independent append streams therefore cannot race
+between selecting an offset and writing; the native libc fixture checks 320
+records from eight explicitly pinned CPUs.
 
 ## Buffered streams
 
@@ -107,7 +109,8 @@ storage by the prefix that can fit. Stream numeric formatting may fail with
 
 Narrow `%ls` and `%lc` use the same ASCII conversion policy. Precision zero
 does not inspect the wide string, and `wint_t` is validated before narrowing.
-Wide scanning functions are not implemented in this batch.
+All wide scanning functions are now implemented by the shared private scanner;
+see [libc.md](libc.md) for input formats, ownership and validation.
 
 `tests/wide_stdio_contract_test.py` uses actual production stream and numeric
 formatting code with 16-bit units, mock descriptors and host-thread contention.

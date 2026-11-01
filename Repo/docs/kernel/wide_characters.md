@@ -30,9 +30,8 @@ No output terminator is included in the returned count.
 Wide integer conversion uses the real native narrow integer parsers and maps
 the end pointer back to wide input. A non-ASCII unit terminates numeric grammar;
 it does not cause a multibyte conversion error. Floating wrappers live in
-`user/lib/wcstofloat.c` and link with the optional real LLVM narrow floating
-parser in `libalix-cxx-support.a`. They are not unresolved dependencies of the
-ordinary C runtime. Allocation failure is reported with `ENOMEM`.
+`user/lib/wcstofloat.c` and use the complete native narrow floating parser in
+the ordinary C runtime. They no longer require an optional numeric archive. Allocation failure is reported with `ENOMEM`.
 
 `wcsftime` preserves raw wide literal units and delegates formatting directives
 to the real C-locale calendar formatter. Non-ASCII bytes produced by a directive

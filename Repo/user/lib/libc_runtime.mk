@@ -15,7 +15,7 @@ USER_MUSL_MATH_NAMES := __cos.c __cosdf.c __cosl.c __expo2.c __expo2f.c __fpclas
 	fabs.c fabsf.c fabsl.c fdim.c fdimf.c fdiml.c floor.c \
 	floorf.c floorl.c fma.c fmaf.c fmal.c fmax.c fmaxf.c \
 	fmaxl.c fmin.c fminf.c fminl.c fmod.c fmodf.c fmodl.c \
-	frexp.c frexpf.c frexpl.c hypot.c hypotf.c hypotl.c ilogb.c \
+	frexp.c frexpf.c hypot.c hypotf.c hypotl.c ilogb.c \
 	ilogbf.c ilogbl.c ldexp.c ldexpf.c ldexpl.c lgamma.c lgamma_r.c \
 	lgammaf.c lgammaf_r.c lgammal.c llrint.c llrintf.c llrintl.c llround.c \
 	llroundf.c llroundl.c log.c log10.c log10f.c log10l.c log1p.c \
@@ -43,7 +43,7 @@ USER_C11_NAMES := fenv threads stdlib_extra uchar scanf wcstofloat stdio_files m
 USER_C11_OBJECTS := $(addprefix $(USER_OBJDIR)/lib/,$(addsuffix .o,$(USER_C11_NAMES)))
 USER_COMPILER_COMPLEX := $(USER_OBJDIR)/lib/compiler_complex.o
 USER_COMMON_OBJECTS += $(USER_MUSL_OBJECTS) $(USER_SCAN_OBJECTS) $(USER_FREEBSD_OBJECTS) $(USER_C11_OBJECTS) $(USER_COMPILER_COMPLEX)
-USER_NUMERIC_FLAGS := -O2 -frounding-math -ffp-contract=off -Wno-unused-but-set-variable -Wno-parentheses -Wno-unknown-pragmas
+USER_NUMERIC_FLAGS := -fno-strict-aliasing -O2 -frounding-math -ffp-contract=off -Wno-unused-but-set-variable -Wno-parentheses -Wno-unknown-pragmas
 
 $(USER_MUSL_OBJECTS) $(USER_SCAN_OBJECTS) $(USER_FREEBSD_OBJECTS): user/lib/libc_runtime.mk
 $(USER_OBJDIR)/lib/vendor/musl/%.o: user/lib/vendor/musl/%.c
@@ -71,3 +71,9 @@ libc-runtime-objects: $(USER_COMMON_OBJECTS)
 libc-runtime-manifest:
 	@python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' $(USER_COMMON_OBJECTS)
 libc-complete-test: $(USER_OBJDIR)/libc_complete_test.elf
+
+.PHONY: libc-api-test libc-complete-qemu-test
+libc-api-test: libc-runtime-objects
+	python3 tests/libc_c11_api_test.py
+libc-complete-qemu-test: all libc-complete-test $(USER_OBJDIR)/libc_complete_owned_test.elf
+	python3 tests/libc_complete_qemu_test.py

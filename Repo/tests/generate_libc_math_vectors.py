@@ -3,6 +3,7 @@
 from pathlib import Path
 import mpmath as mp
 
+assert mp.__version__ == "1.3.0", "Use pinned mpmath 1.3.0 for reproducible fixtures"
 mp.mp.dps = 100
 OUT = Path(__file__).resolve().parent / 'fixtures/libc_math_vectors.h'
 lines = ['/* Generated with mpmath 1.3.0 at 100 decimal digits. */',

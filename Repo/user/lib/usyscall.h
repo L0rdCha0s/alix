@@ -17,7 +17,7 @@ int sys_open(const char *path, uint64_t flags);
 int64_t sys_file_io(uint32_t operation, uint64_t first, uint64_t second, uint64_t third, uint64_t fourth);
 int64_t sys_directory(uint32_t operation, int handle, void *argument, size_t bytes);
 void *sys_sbrk(int64_t increment);
-void sys_exit(int status) __attribute__((noreturn));
+void sys_exit(int status) __attribute__((__noreturn__));
 int sys_ui_create(const user_atk_window_desc_t *desc);
 int sys_ui_present(uint32_t handle, const void *pixels, size_t byte_len);
 int sys_ui_poll_event(uint32_t handle, user_atk_event_t *event, uint32_t flags);
@@ -90,7 +90,7 @@ int64_t sys_thread_create(uintptr_t entry,
                           size_t stack_size,
                           const char *name);
 int sys_thread_join(uint64_t tid, int *status_out);
-void sys_thread_exit(int status) __attribute__((noreturn));
+void sys_thread_exit(int status) __attribute__((__noreturn__));
 ssize_t sys_list_dir(const char *path, syscall_dirent_t *entries, size_t capacity);
 uint32_t sys_getuid(void);
 int sys_mkdir(const char *path);

@@ -46,6 +46,7 @@ typedef struct
     size_t offset;
     bool readable;
     bool writable;
+    bool append;
 } file_handle_t;
 
 #define SYSCALL_MAX_PATH_LEN     4096u
@@ -587,11 +588,9 @@ static ssize_t syscall_file_write(void *ctx, const void *buffer, size_t count)
     {
         return 0;
     }
-    ssize_t bytes = vfs_write_at(handle->node, handle->offset, buffer, count);
-    if (bytes > 0)
-    {
-        handle->offset += (size_t)bytes;
-    }
+    ssize_t bytes = handle->append ? vfs_write_append(handle->node, buffer, count, true, &handle->offset) :
+                                       vfs_write_at(handle->node, handle->offset, buffer, count);
+    if (bytes > 0 && !handle->append) handle->offset += (size_t)bytes;
     return bytes;
 }
 
@@ -1066,6 +1065,7 @@ static int64_t syscall_do_open(const char *path, uint64_t flags)
     handle->offset = 0;
     handle->readable = readable;
     handle->writable = writable;
+    handle->append = (flags & SYSCALL_OPEN_APPEND) != 0;
 
     int fd = fd_allocate(&g_syscall_file_ops, handle);
     if (fd < 0)

@@ -295,3 +295,7 @@ zen-toolchain-test: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCH
 
 zen-host-tools:
 	python3 ports/zen/build_host_tools.py
+
+# Full C11 acceptance also exercises the process-owned descriptor namespace.
+$(USER_OBJDIR)/libc_complete_owned_test.elf: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/libc_complete_test.o $(USER_LD_SCRIPT)
+	$(LD) -nostdlib -T $(USER_LD_SCRIPT) -o $@ $(ZEN_USER_RUNTIME_OBJECTS) $(USER_OBJDIR)/tests/libc_complete_test.o

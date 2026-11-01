@@ -2,8 +2,7 @@
 #include "stdlib.h"
 #include "errno.h"
 
-/* Linked with the real narrow floating parser in libalix-cxx-support.a, not
- * the unconditional C runtime, because the parser is an optional dependency. */
+/* The complete native narrow floating parser is part of the ordinary C runtime. */
 extern char *__alix_wide_ascii_prefix(const wchar_t *text);
 
 #define WIDE_FLOAT(function,type,narrow) \

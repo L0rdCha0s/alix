@@ -87,6 +87,10 @@ ssize_t vfs_readlink_snapshot(vfs_node_t *cwd, const char *path, void *buffer,
  * vfs_set_file_callbacks cannot execute a callback with service identity. */
 ssize_t vfs_read_data_at(vfs_node_t *file, size_t offset, void *buffer, size_t count);
 ssize_t vfs_write_data_at(vfs_node_t *file, size_t offset, const void *data, size_t count);
+/* Select EOF and commit the complete write under the same node data lock.
+ * position is caller-owned synchronous state, never retained by the VFS. */
+ssize_t vfs_write_append(vfs_node_t *file, const void *data, size_t count,
+                         bool callbacks, size_t *position);
 vfs_node_t *vfs_symlink(vfs_node_t *cwd, const char *target_path, const char *link_path);
 bool vfs_is_dir(const vfs_node_t *node);
 bool vfs_is_file(const vfs_node_t *node);

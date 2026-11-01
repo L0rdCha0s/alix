@@ -165,3 +165,24 @@ alternate stacks, migration during an active handler, edited RSP, and interrupte
 `build/test-out/signal-kernel-{normal,default,badframe}-qemu.log`; see
 [signals.md](signals.md) for the exact checks. This is additional signal-path
 proof, not a claim that cancellation or in-flight I/O interruption is complete.
+
+
+## ISO C11 threads
+
+`include/threads.h` and `user/lib/threads.c` expose all 25 C11 operations over
+this native pthread lifecycle. Thread callbacks and full signed integer returns
+are adapted through heap-owned start records. Once, TSS/destructors, condition
+variables and plain/recursive/timed mutexes use the same native ownership and
+blocking primitives. C11 status codes are mapped independently of errno.
+
+Timed mutex acquisition retries the native try-lock after bounded sleeps and
+rechecks the TIME_UTC deadline after every wait or signal interruption. Condition
+variables use the existing realtime timed-wait path and always reacquire their
+mutex. `thrd_sleep` distinguishes interruption (-1) from other failure (-2).
+The last thread retains normal process-finalization semantics through pthread's
+existing native cleanup selection. C11 adds no cancellation requirement.
+
+The native libc acceptance fixture covers eight pinned CPUs, once, TSS
+isolation/destructors, signed returns and explicit exit, condition handoff,
+recursive/try/timed locks, detach, sleep and FP-state isolation. See
+[libc.md](libc.md) for the required runtime markers and test scope.
