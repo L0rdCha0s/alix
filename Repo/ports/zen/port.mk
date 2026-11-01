@@ -89,6 +89,7 @@ ZEN_SOURCE_DIR ?= $(abspath ports/zen/upstream/desktop)
 ZEN_ENGINE_DIR ?= $(abspath ports/zen/upstream/firefox-159.0)
 ZEN_ENGINE_ARCHIVE ?= $(abspath ports/zen/upstream/firefox-159.0.source.tar.xz)
 ZEN_JS_KEEP_GOING ?= 0
+ZEN_GECKO_KEEP_GOING ?= 0
 
 .PHONY: zen-fetch zen-fetch-engine zen-preflight zen-source-test
 zen-fetch:
@@ -107,7 +108,7 @@ include ports/zen/libcxx/runtime.mk
 include ports/zen/libm/runtime.mk
 include ports/zen/rust/runtime.mk
 
-.PHONY: zen-patch-engine zen-js-configure zen-js-build zen-patch-test zen-toolchain-test zen-host-tools zen-ssp-runtime zen-ssp-test zen-cxx-stream-test zen-cxx-wide-test zen-wchar-float-test
+.PHONY: zen-patch-engine zen-js-configure zen-js-build zen-gecko-configure zen-gecko-build zen-patch-test zen-toolchain-test zen-host-tools zen-ssp-runtime zen-ssp-test zen-cxx-stream-test zen-cxx-wide-test zen-wchar-float-test
 ZEN_SSP_ARCHIVE := $(USER_OBJDIR)/lib/libalix-ssp.a
 
 $(ZEN_SSP_ARCHIVE): $(USER_OBJDIR)/lib/stack_protector.o
@@ -320,6 +321,12 @@ zen-js-configure: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIV
 
 zen-js-build: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
 	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --build $(if $(filter 1,$(ZEN_JS_KEEP_GOING)),--keep-going,)
+
+zen-gecko-configure: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --project browser
+
+zen-gecko-build: $(ZEN_USER_RUNTIME_OBJECTS) $(USER_LD_SCRIPT) $(ZEN_SSP_ARCHIVE)
+	ALIX_RUNTIME_OBJECTS="$(ZEN_USER_RUNTIME_OBJECTS)" python3 ports/zen/configure_engine.py --engine-dir "$(ZEN_ENGINE_DIR)" --project browser --build $(if $(filter 1,$(ZEN_GECKO_KEEP_GOING)),--keep-going,)
 
 zen-patch-test:
 	python3 tests/zen_patch_test.py

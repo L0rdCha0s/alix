@@ -10,8 +10,12 @@ is not part of the new port.
 **Zen does not build or run on Alix yet.** The pinned standalone SpiderMonkey
 configuration and full build now succeed for `x86_64-unknown-alix`. The real
 static shell links without unresolved symbols, loads inside eight-CPU Alix and
-starts native helper threads. It currently exits with code 1 before executing
-the test script; startup diagnosis is in progress.
+executes JavaScript and exits successfully. Its complete native smoke run also
+passes observed Ion JIT execution, eight GC cycles with 10,000 rooted objects,
+WebAssembly execution/bounds trapping and worker shared Atomics. Gecko
+configuration has begun in a separate native build directory; its current gate
+is selecting/implementing Alix audio in place of the generic Unix PulseAudio
+dependency. The native window backend and Zen interface remain unfinished.
 Native Alix guests have executed upstream LLVM libc++/libc++abi and upstream
 Rust `std` using Alix's runtime. ELF TLS, thread lifecycle, anonymous virtual
 memory, permission-checked user copies and hardware-backed entropy have native
@@ -175,22 +179,34 @@ A native `sh` command executable is still needed by `os.spawn`; `fork` and
 in-place `exec` remain unimplemented. See
 [`kernel/child_processes.md`](kernel/child_processes.md).
 
-The initial real engine run loads and starts helper threads inside Alix, then
-exits with status 1 before its JS execution marker. The failure is module-loader
-path conversion: libc++ was selecting its 32-bit codecvt path despite the native
-16-bit wide ABI. The configuration correction passes the native conversion and
-C++ runtime tests; engine execution verification is pending. The test transfers a
-debug-stripped image whose load/TLS segments exactly match the upstream binary;
-its marker is encoded in the command and cannot pass through echo. The serial
-log is `build/test-out/spidermonkey-basic-qemu.log`. Build success is not engine
-execution acceptance, and neither establishes the full Zen browser.
+The native shell passes both its basic script and full runtime smoke run with
+normal exit status 0 in eight-CPU Alix. The latter observes Ion JIT execution,
+roots surviving eight GC cycles, a Wasm function returning 42, a real Wasm
+memory-bounds trap and a worker using shared Atomics. Fixes included libc++'s
+16-bit wchar configuration, heap-owned multi-byte stdio pushback for BOM
+lookahead, and a freeable zero-element `calloc` policy. The last fix supports
+empty Wasm metadata arrays; the earlier error was not physical-memory exhaustion.
+Native and host sanitizer regressions cover the changed libc behaviors. Temporary
+Wasm compiler diagnostics have been removed and the clean engine rerun passes.
+
+The test transfers a debug-stripped image whose load/TLS segments exactly match
+the upstream binary, requires encoded/independently loaded script markers and
+checks normal process status. Evidence is
+`build/test-out/spidermonkey-basic-qemu.log` and
+`build/test-out/spidermonkey-runtime-qemu.log`. This is standalone engine progress;
+`build/ports/zen/spidermonkey-native.acceptance.json` ties the verified smoke
+features to the executable hashes. This is not a complete upstream conformance
+suite; `os.spawn` still needs `sh`, and Wasm subprocess serialization has not been
+verified. Gecko and the full Zen browser remain unverified.
 
 The remaining acceptance order is:
 
-1. Resolve standalone SpiderMonkey startup and execute its shell and upstream
-   JS tests inside Alix, including GC/JIT and worker paths.
-   Standalone `JS_WITHOUT_NSPR` avoids requiring NSPR first. Passing the existing
-   Alix JS interpreter or a runtime fixture does not satisfy this engine gate.
+1. Build the full Gecko application and its NSPR/NSS/Rust dependencies with
+   `make zen-gecko-configure` and `make zen-gecko-build`. It uses native
+   `x86_64-unknown-alix`, `cairo-alix` and `obj-gecko-alix`; the standalone
+   SpiderMonkey build and compiler-cache state remain separate. The current
+   configure failure is an inherited Unix PulseAudio dependency. Alix requires
+   a native cubeb backend using its real audio API, plus a native widget backend.
 2. Complete the OS interfaces demanded by Gecko, NSPR/NSS and Rust dependencies.
    The upstream runtime uses a private 256-slot table with owned descriptions,
    dup/shared offsets, imported stdio and protected blocking-I/O cleanup;

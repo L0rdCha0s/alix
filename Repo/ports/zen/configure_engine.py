@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attempt the real upstream SpiderMonkey configure using Alix's native runtime."""
+"""Configure/build upstream SpiderMonkey or Gecko with Alix's native runtime."""
 import argparse
 import json
 import os
@@ -19,16 +19,20 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine-dir", type=Path, default=ROOT / "ports/zen/upstream/firefox-159.0")
+    parser.add_argument("--project", choices=("js", "browser"), default="js")
     parser.add_argument("--build", action="store_true", help="run the actual upstream build after configuration")
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--keep-going", action="store_true",
                         help="use upstream mach's supported mode to collect independent build failures")
     args = parser.parse_args()
+    label = "SpiderMonkey" if args.project == "js" else "Gecko"
+    log_prefix = "spidermonkey" if args.project == "js" else "gecko"
     engine = args.engine_dir.resolve()
+    object_dir = engine.parent / ("obj-js-alix" if args.project == "js" else "obj-gecko-alix")
     apply_patches(engine)
     objects = shlex.split(os.environ.get("ALIX_RUNTIME_OBJECTS", ""))
     if not objects:
-        raise RuntimeError("use make zen-js-configure to supply the current Alix runtime object list")
+        raise RuntimeError("use make zen-js-configure or zen-gecko-configure to supply Alix runtime objects")
     state = ROOT / "ports/zen/upstream/alix-toolchain"
     state.mkdir(parents=True, exist_ok=True)
     pkgconfig = state / "pkgconfig-alix"
@@ -37,14 +41,15 @@ def main():
     temporary_manifest = manifest.with_name(f".{manifest.name}.{os.getpid()}.tmp")
     temporary_manifest.write_text(json.dumps([str((ROOT / obj).resolve()) for obj in objects], indent=2) + "\n")
     temporary_manifest.replace(manifest)
-    config = state / "mozconfig-js-alix"
+    config = state / ("mozconfig-js-alix" if args.project == "js" else "mozconfig-gecko-alix")
     config.write_text("\n".join([
         "# Native Alix target; no host-browser or Linux ABI fallback.",
-        "mk_add_options MOZ_OBJDIR=" + shlex.quote(str(engine.parent / "obj-js-alix")),
+        "mk_add_options MOZ_OBJDIR=" + shlex.quote(str(object_dir)),
         "ac_add_options --target=x86_64-unknown-alix",
-        "ac_add_options --enable-project=js",
+        "ac_add_options --enable-project=" + args.project,
+        *(["ac_add_options --enable-default-toolkit=cairo-alix"] if args.project == "browser" else []),
         "ac_add_options --disable-bootstrap",
-        "ac_add_options --disable-shared-js",
+        *(["ac_add_options --disable-shared-js"] if args.project == "js" else []),
         "ac_add_options --disable-tests",
         "ac_add_options --disable-debug",
         "ac_add_options --enable-optimize",
@@ -103,7 +108,7 @@ def main():
         env[variable] = str(executable)
     output = ROOT / "build/ports/zen"
     output.mkdir(parents=True, exist_ok=True)
-    log = output / "spidermonkey-configure.log"
+    log = output / (log_prefix + "-configure.log")
     python = os.environ.get("MOZ_PYTHON", shutil.which("python3.13") or sys.executable)
     runtime = ROOT / "ports/zen/upstream/libcxx-alix-build"
     compiler_resource = Path(subprocess.check_output(
@@ -121,25 +126,25 @@ def main():
         ROOT / "ports/zen/upstream/libm-alix-build/lib/libalix-math.a",
         ROOT / "build/user/lib/libalix-ssp.a", Path(__file__), Path(__file__).with_name("configure_cache.py"),
     ])
-    refresh_compiler_cache(engine.parent / "obj-js-alix", state, compiler_inputs)
-    print(f"Configuring upstream SpiderMonkey for native Alix; diagnostics: {log}", flush=True)
+    refresh_compiler_cache(object_dir, state / ("configure-cache-" + args.project), compiler_inputs)
+    print(f"Configuring upstream {label} for native Alix; diagnostics: {log}", flush=True)
     with log.open("w") as stream:
         result = subprocess.run([python, str(engine / "mach"), "configure"], cwd=engine,
                                 env=env, stdout=stream, stderr=subprocess.STDOUT)
-    print("\n".join(log.read_text(errors="replace").splitlines()[-35:]))
+    print("\n".join(line[:1000] for line in log.read_text(errors="replace").splitlines()[-35:]))
     print(f"Upstream configure exit status: {result.returncode}")
     if result.returncode == 0 and args.build:
         if args.jobs < 1:
             raise RuntimeError("--jobs must be positive")
-        log = output / "spidermonkey-build.log"
-        print(f"Building real upstream SpiderMonkey; diagnostics: {log}", flush=True)
+        log = output / (log_prefix + "-build.log")
+        print(f"Building real upstream {label}; diagnostics: {log}", flush=True)
         with log.open("w") as stream:
             result = subprocess.run([python, str(engine / "mach"), "build", "--priority", "normal",
                                      "-j", str(args.jobs)] + (["--keep-going"] if args.keep_going else []),
                                     cwd=engine, env=env, stdout=stream, stderr=subprocess.STDOUT)
-        print("\n".join(log.read_text(errors="replace").splitlines()[-50:]))
+        print("\n".join(line[:1000] for line in log.read_text(errors="replace").splitlines()[-50:]))
         print(f"Upstream build exit status: {result.returncode}")
-    (output / "spidermonkey-command-status.txt").write_text(str(result.returncode) + "\n")
+    (output / (log_prefix + "-command-status.txt")).write_text(str(result.returncode) + "\n")
     return result.returncode
 
 

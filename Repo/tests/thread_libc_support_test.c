@@ -187,6 +187,23 @@ static bool bytes_equal(const unsigned char *bytes, size_t size, unsigned char v
 
 static bool allocation_tests(void)
 {
+    /* Empty arrays still need distinct, freeable ownership: upstream Wasm
+     * metadata treats a NULL allocation as failure even for zero elements. */
+    void **empty = malloc(5 * sizeof(*empty));
+    if (!empty) return false;
+    empty[0] = calloc(0, 0);
+    empty[1] = calloc(0, sizeof(uint64_t));
+    empty[2] = calloc(1, 0);
+    empty[3] = calloc(MAX_SIZE, 0);
+    empty[4] = calloc(0, MAX_SIZE);
+    for (unsigned index = 0; index < 5; ++index)
+    {
+        if (!empty[index] || ((uintptr_t)empty[index] & 15u)) return false;
+        for (unsigned prior = 0; prior < index; ++prior)
+            if (empty[index] == empty[prior]) return false;
+    }
+    for (unsigned index = 0; index < 5; ++index) free(empty[index]);
+    free(empty);
     unsigned char *preserved = malloc(96);
     if (!preserved) return false;
     memset(preserved, 0xA5, 96);

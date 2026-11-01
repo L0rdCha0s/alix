@@ -2,6 +2,8 @@
 """Execute the actual pinned upstream engine inside native Alix."""
 from pathlib import Path
 import argparse
+import hashlib
+import json
 import subprocess
 import sys
 sys.dont_write_bytecode=True
@@ -40,6 +42,17 @@ def main():
                        input_files=(("engine-runtime.js",ROOT/"tests/spidermonkey_runtime_test.js"),))
         if any(log.read_text(errors="replace").count(marker)!=1 for marker in markers):
             raise RuntimeError("runtime execution marker was duplicated")
+        receipt=json.loads((ROOT/"build/ports/zen/spidermonkey-native-image.json").read_text())
+        for key in ("source","target"):
+            with (ROOT/receipt[key]).open("rb") as stream:
+                if hashlib.file_digest(stream,"sha256").hexdigest()!=receipt[key+"_sha256"]:
+                    raise RuntimeError("upstream executable image changed during native acceptance")
+        receipt["scope"]="Upstream SpiderMonkey native runtime smoke; Gecko and Zen remain unverified"
+        receipt["native_acceptance"]={"cpus":8,"wait_status":0,
+            "features":["JavaScript","Ion JIT observed","GC roots across 8 cycles","Wasm execution and bounds trap","worker shared Atomics"],
+            "basic_log":"build/test-out/spidermonkey-basic-qemu.log",
+            "runtime_log":"build/test-out/spidermonkey-runtime-qemu.log"}
+        (ROOT/"build/ports/zen/spidermonkey-native.acceptance.json").write_text(json.dumps(receipt,indent=2)+"\n")
     return 0
 
 

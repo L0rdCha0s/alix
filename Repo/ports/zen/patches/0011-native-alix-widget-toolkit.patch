@@ -1,0 +1,11 @@
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -648,6 +648,8 @@
+         return ("cairo-uikit",)
+     elif target.os == "Android":
+         return ("cairo-android",)
++    elif target.os == "Alix":
++        return ("cairo-alix",)
+     else:
+         # cairo-gtk3 - X11 backend with optional Wayland backend (auto detected)
+         # cairo-gtk3-wayland - Wayland backend with optional X11 backend (auto detected)

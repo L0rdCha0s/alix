@@ -81,8 +81,12 @@ normal exit performed the global flush.
 
 `tests/stdio_stream_contract_test.py` executes the production stream code with
 seekable/nonseekable mock descriptors, partial I/O and error injection. It tests
-pushback, positions, EOF/error recovery, overflow and eight-thread line/record
+three-byte BOM restoration, 1,000-byte pushback, initial/growth allocation
+failures, positions, EOF/error recovery, overflow and eight-thread line/record
 serialization; it can run under ASan/UBSan or TSan through `HOST_CC`.
+The extended pushback, buffered and wide contracts pass sanitizers and separate
+eight-CPU Alix fixtures; evidence is `build/test-out/stdio-multi-pushback-qemu.log`,
+`stdio-multi-pushback-buffer-qemu.log` and `stdio-multi-pushback-wide-qemu.log`.
 `tests/stdio_stream_test.c` is the native fixture, with marker
 `STDIO_STREAM_TEST: PASS`. It also creates a per-process fixture file under
 `/tmp`; compilation alone does not establish guest execution.

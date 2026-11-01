@@ -2695,7 +2695,10 @@ void *calloc(size_t count, size_t size)
                       (unsigned long long)(uintptr_t)__builtin_return_address(0));
     }
     user_heap_lock_acquire();
-    void *ptr = malloc_locked(total);
+    /* A zero-element allocation still owns a distinct, freeable block. This
+     * C11-permitted policy also supports upstream users that treat NULL as an
+     * allocation failure even when their element count is zero. */
+    void *ptr = malloc_locked(total ? total : 1);
     user_heap_lock_release();
     if (!ptr)
     {

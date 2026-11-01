@@ -61,6 +61,55 @@ def native_elf_symbol(binary, name):
     return values[name]
 
 
+def start_user_breakpoint(qmp, staging, log_path, binary, definition):
+    """Capture the actual guest call stack at a native user symbol, then detach."""
+    symbol, symbols = definition
+    address = native_elf_symbol(binary, symbol)
+    if native_elf_symbol(symbols, symbol) != address:
+        raise RuntimeError("debug symbols do not match the native breakpoint address")
+    debugger = shutil.which("x86_64-elf-gdb")
+    if debugger is None:
+        raise RuntimeError("native user breakpoint requires x86_64-elf-gdb")
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    qmp.execute("stop")
+    qmp.execute("human-monitor-command", {"command-line": f"gdbserver tcp:127.0.0.1:{port}"})
+    script = staging / "user-breakpoint.gdb"
+    output = log_path.with_suffix(".breakpoint.txt")
+    script.write_text(f"""set pagination off
+set auto-load off
+set print elements 16
+target remote 127.0.0.1:{port}
+hbreak *{address}
+commands
+ silent
+ echo ALIX_USER_BREAKPOINT_HIT\\n
+ info registers rip rsp rbp rax rdi rsi rdx
+ bt 32
+ x/gx $rsp
+ detach
+ quit
+end
+echo ALIX_USER_BREAKPOINT_ARMED\\n
+continue
+""")
+    with output.open("wb") as stream:
+        process = subprocess.Popen([debugger, "-nx", "-q", "-batch", "-iex", "set auto-load off",
+                                    "-x", str(script), str(symbols)],
+                                   stdout=stream, stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if "ALIX_USER_BREAKPOINT_ARMED" in output.read_text(errors="replace"):
+            return process
+        if process.poll() is not None:
+            break
+        time.sleep(0.05)
+    process.terminate()
+    process.wait(timeout=3)
+    raise RuntimeError(f"could not arm native user breakpoint; see {output}")
+
+
 def verify_expected_user_exception(phase, binary, expected):
     reason, symbol = expected
     records = re.findall(
@@ -211,7 +260,7 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
                    forbidden_markers=(), download_timeout_seconds=10, boot_markers=(),
                    expected_exception=None, expected_signal_termination=None, pcap_path=None,
                    fail_on_missing_markers_at_exit=False, expected_wait_status=None,
-                   input_files=()):
+                   input_files=(), user_breakpoint=None):
     """Run a real target ELF, requiring its markers and successful shell return."""
     binary = ROOT / "build/user" / binary_name
     if not binary.is_file():
@@ -220,7 +269,7 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
     LOG.parent.mkdir(parents=True, exist_ok=True)
     LOG.write_text("")
     harness.LOG_PATH = LOG
-    runner = qmp = server = uart = uart_reader = None
+    runner = qmp = server = uart = uart_reader = debugger_process = None
     stop_uart = threading.Event()
     with tempfile.TemporaryDirectory(prefix="alix-native-test-") as staging:
         staging = Path(staging)
@@ -322,6 +371,8 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             launch = "runelf /tmp/test.elf"
             if arguments:
                 launch += " " + " ".join(arguments)
+            if user_breakpoint is not None:
+                debugger_process = start_user_breakpoint(qmp, staging, LOG, binary, user_breakpoint)
             command(launch)
             log = harness.wait_for(runner, label,
                 lambda log: (all(marker in log[offset:] for marker in markers) or
@@ -396,9 +447,15 @@ def run_native_elf(binary_name, markers, log_path, label, timeout_seconds=40,
             print(f"Serial evidence: {LOG}")
             return 0
         except Exception:
+            if debugger_process is not None and debugger_process.poll() is None:
+                debugger_process.terminate()
+                debugger_process.wait(timeout=3)
             capture_guest_failure(qmp, staging, LOG, binary)
             raise
         finally:
+            if debugger_process is not None and debugger_process.poll() is None:
+                debugger_process.terminate()
+                debugger_process.wait(timeout=3)
             if qmp is not None:
                 try:
                     qmp.quit()

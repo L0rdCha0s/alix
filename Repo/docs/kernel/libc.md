@@ -16,6 +16,13 @@ C11 threads and scanning. `user/lib/libc_runtime.mk` supplies the complete runti
 to ordinary applications and the upstream ports. The kernel remains a separate
 freestanding libc subset in `src/kernel/libc.c` and allocator in `heap.c`.
 
+Native user `calloc` allocates a minimal distinct, freeable block when either
+factor is zero, including `(0, SIZE_MAX)` and `(SIZE_MAX, 0)`. This is a
+C11-permitted allocation policy and supports upstream empty arrays whose callers
+treat NULL as allocation failure. Nonzero multiplication overflow still fails
+with ENOMEM. The native allocator/lifecycle fixture and host ASan/UBSan stress
+cover the empty allocations alongside coalescing, overflow and ownership.
+
 ## Numeric implementation
 
 The runtime vendors musl 1.2.5 portable real and complex math. FreeBSD msun code

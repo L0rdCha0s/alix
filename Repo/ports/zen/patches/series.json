@@ -136,6 +136,17 @@
           "after": "64eeae895ba49a3b81f7429410d77af57901c97c7848279afc37e40e579800a9"
         }
       ]
+    },
+    {
+      "file": "0011-native-alix-widget-toolkit.patch",
+      "sha256": "3a1ce8d5400bfae54b8da7c91aa80ff4ffc1e9eb5b5a6cad78be906a669dde26",
+      "files": [
+        {
+          "path": "toolkit/moz.configure",
+          "before": "32e5e3334abde7be8b62d946fc5f2cd16627dbd776c133dafad3c0e2eac65202",
+          "after": "d0f9228867effcc4920dabf98744498d41327859f2faab97917abc0e91fcb815"
+        }
+      ]
     }
   ]
 }

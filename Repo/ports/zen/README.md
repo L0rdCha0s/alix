@@ -1,7 +1,7 @@
 # Native upstream engine build
 
-The current gate is the pinned Firefox 159 standalone SpiderMonkey shell for
-**Alix**, followed by Gecko and Zen. The source is not configured as Linux and
+The pinned Firefox 159 standalone SpiderMonkey shell now passes native runtime
+smoke tests for **Alix**. The current phase is Gecko, followed by Zen. The source is not configured as Linux and
 does not use host C/C++ archives. Successful configuration or small runtime
 fixtures do not establish that SpiderMonkey or Zen runs.
 
@@ -15,6 +15,9 @@ make zen-patch-engine
 make zen-patch-test zen-toolchain-test
 make zen-ssp-test
 make zen-js-build
+python3 tests/spidermonkey_qemu_test.py --extended
+make zen-gecko-configure
+make zen-gecko-build
 ```
 
 The source-acquisition commands precede patching. Once the source contains Alix
@@ -76,6 +79,10 @@ modified engine tree.
   `getentropy` in bounded chunks and propagates failure. It avoids assuming
   Unix `/dev/urandom` exists and does not fabricate a random seed.
 
+- `0011-native-alix-widget-toolkit.patch` selects `cairo-alix` for the Alix
+  browser target. This selects the intended platform; it does not supply or
+  certify a completed window backend.
+
 ## Native compiler and link driver
 
 `toolchain/alix-clang` and `alix-clang++` use Clang with
@@ -114,7 +121,7 @@ to Cargo's input fingerprint, forcing target crates to rebuild after a sysroot
 update. It does not change an engine feature or fabricate a configure result.
 Native header, object, archive and driver contents also fingerprint Mozilla's
 compiler-probe cache. When those inputs change, the old `configure.cache` is
-archived under `upstream/alix-toolchain/configure-cache-history/` and configure
+archived under project-specific `upstream/alix-toolchain/configure-cache-{js,browser}/configure-cache-history/` and configure
 runs fresh real probes. This prevents an earlier missing libc function from
 remaining cached as unavailable after it has been implemented.
 
@@ -145,19 +152,39 @@ transfer artifact with debug data stripped. Every load/TLS segment and the
 entry point are verified identical to the original; hashes are recorded in
 `build/ports/zen/spidermonkey-native-image.json`. The guest test encodes its JS
 marker so command echo cannot satisfy acceptance and requires normal status 0.
-The initial eight-CPU run loaded the executable and started native helper threads,
-then exited with code 1 during module-loader path conversion. Native regression
-tests identified a libc++ configuration mismatch: the compiler used 16-bit
-`wchar_t` while codecvt selected its 32-bit implementation. The short-wchar patch
-now passes ASCII/Unicode conversion and the existing C++ runtime tests in Alix;
-the real engine is being rebuilt for execution verification. This is successful
-build/link acceptance, not JavaScript execution or Zen acceptance. Native serial evidence is
-`build/test-out/spidermonkey-basic-qemu.log`.
+The eight-CPU shell now executes the basic script and exits with status 0.
+Module-loader startup required selecting libc++'s 16-bit wchar conversion path.
+File-loaded scripts additionally required extending native stdio pushback for
+three-byte BOM lookahead. Native C++ conversion, stdio, buffered and wide-stream
+fixtures pass; host stream tests also pass sanitizers and allocation failures.
+Native serial evidence is `build/test-out/spidermonkey-basic-qemu.log`.
 
-`--extended` additionally requires observed Ion JIT execution, rooted objects
-surviving eight GC cycles, a real Wasm memory-bounds trap and a worker exchanging
-data through shared Atomics. Those gates are separate from the basic script and
-must pass in the guest before claiming runtime acceptance.
+`--extended` now passes observed Ion JIT execution, 10,000 rooted objects across
+eight GC cycles, a real Wasm execution/bounds trap and worker shared Atomics.
+Both test processes exit with wait status 0. Wasm compilation required a native
+`calloc(0, ...)` policy returning distinct freeable ownership: its zero-element
+metadata arrays interpret NULL as failure. The native allocator/lifecycle test
+and host ASan/UBSan stress pass this change. Temporary compiler diagnostics have
+been removed and the clean engine rerun passes. The serial log is
+`build/test-out/spidermonkey-runtime-qemu.log`, and
+`build/ports/zen/spidermonkey-native.acceptance.json` records the tested image
+hashes and smoke scope. This does not claim the complete upstream conformance
+suite, `os.spawn` command execution or Wasm subprocess serialization.
+
+## Full Gecko build
+
+`make zen-gecko-configure` and `make zen-gecko-build` use `--project browser`,
+`cairo-alix` and `obj-gecko-alix`. Mozconfigs, compiler-cache state and logs are
+separate from standalone SpiderMonkey; native headers/libraries and target
+identity remain the same. Browser configuration does not pass the JS-only
+`--disable-shared-js` option. `ZEN_GECKO_KEEP_GOING=1` selects the upstream
+keep-going build mode. Normal `make` remains independent of upstream builds.
+
+The first native browser configure now passes the toolkit-selection gate and
+reaches an inherited generic Unix requirement for `libpulse`. Alix needs a
+native cubeb audio backend using its actual audio API. The GUI/window backend
+is also unfinished; declaring a toolkit name does not implement it. The full
+browser configure has not completed, and Gecko/Zen have not run.
 
 Native `posix_spawn`/`posix_spawnp` now pass environment visibility before main,
 ordered close/dup2/open actions, CLOEXEC ordering, self-dup, PATH lookup, signal
@@ -190,6 +217,6 @@ ET_EXEC, PT_TLS, no dynamic interpreter and no unresolved symbols. Its output is
 `build/user/alix_toolchain_test.elf`, with runtime marker
 `ALIX_TOOLCHAIN_TEST: PASS`; compilation/link checks do not execute it.
 
-The standalone shell builds and starts but has not yet executed the test script.
+The standalone shell builds and executes JavaScript, with JIT and GC checks passing.
 Gecko and the Zen UI are later native build/runtime gates, including the VM,
 filesystem, networking and graphics interfaces demanded by their real source.
